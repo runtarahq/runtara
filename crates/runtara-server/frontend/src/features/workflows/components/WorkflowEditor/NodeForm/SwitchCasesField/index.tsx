@@ -305,10 +305,11 @@ export function SwitchCasesField(props: any) {
       if (casesIdx >= 0 && Array.isArray(newArray[casesIdx].value)) {
         newArray[casesIdx] = {
           ...newArray[casesIdx],
-
-          value: newArray[casesIdx].value.map(
-            ({ route, ...rest }: any) => rest
-          ),
+          value: newArray[casesIdx].value.map((caseItem: any) => {
+            const rest = { ...caseItem };
+            delete rest.route;
+            return rest;
+          }),
         };
       }
     }
@@ -733,6 +734,7 @@ export function SwitchCasesField(props: any) {
           </div>
         </div>
         <ToggleSwitch
+          data-testid="switch-routing-mode"
           checked={isRoutingMode}
           onCheckedChange={(checked) => {
             if (!checked && isRoutingMode) {
@@ -829,6 +831,7 @@ export function SwitchCasesField(props: any) {
                       ) : (
                         <div className="flex items-center gap-1">
                           <Input
+                            data-testid={`switch-case-match-${index}`}
                             defaultValue={formatMatchValue(
                               matchValue,
                               matchType
@@ -865,6 +868,7 @@ export function SwitchCasesField(props: any) {
                     <td className="p-2">
                       <div className="flex items-center gap-1">
                         <Input
+                          data-testid={`switch-case-output-${index}`}
                           value={
                             typeof outputValue === 'object'
                               ? JSON.stringify(outputValue)
@@ -903,6 +907,7 @@ export function SwitchCasesField(props: any) {
                     {isRoutingMode && (
                       <td className="p-2">
                         <Input
+                          data-testid={`switch-case-route-${index}`}
                           value={routeValue}
                           onChange={(e) =>
                             updateCaseRoute(index, e.target.value)
@@ -941,6 +946,7 @@ export function SwitchCasesField(props: any) {
         </div>
         <div className="mt-2">
           <Button
+            data-testid="switch-add-case"
             className="w-full flex gap-1 text-sm"
             type="button"
             size="sm"
@@ -959,6 +965,7 @@ export function SwitchCasesField(props: any) {
         </div>
         <div className="flex items-center gap-1 border rounded-lg p-2">
           <Input
+            data-testid="switch-default-output"
             value={
               typeof defaultOutput === 'object'
                 ? JSON.stringify(defaultOutput)

@@ -133,6 +133,112 @@ function generateUniqueStepName(
   return `${baseName} ${counter}`;
 }
 
+type WorkflowInputMappingItem = {
+  type?: string;
+  value?: unknown;
+  typeHint?: string;
+  valueType?: string;
+  [key: string]: unknown;
+};
+
+function generateUniqueAiToolName(result: StepPickerResult, nodes: Node[]) {
+  const allToolNames = new Set<string>();
+
+  for (const node of nodes) {
+    if (node.type !== NODE_TYPES.AiAgentNode) continue;
+    const inputMapping = (node.data?.inputMapping || []) as
+      | WorkflowInputMappingItem[]
+      | undefined;
+    const toolsField = inputMapping?.find((item) => item.type === 'tools');
+    if (Array.isArray(toolsField?.value)) {
+      for (const toolName of toolsField.value) {
+        if (typeof toolName === 'string') allToolNames.add(toolName);
+      }
+    }
+  }
+
+  const baseName = (result.name || 'tool')
+    .toLowerCase()
+    .replace(/[^a-z0-9_]/g, '_')
+    .replace(/_+/g, '_')
+    .replace(/^_|_$/g, '');
+  const normalizedBaseName = baseName || 'tool';
+  let toolName = normalizedBaseName;
+  let index = 1;
+
+  while (allToolNames.has(toolName)) {
+    toolName = `${normalizedBaseName}_${index++}`;
+  }
+
+  return toolName;
+}
+
+function appendToolToInputMapping(
+  inputMapping: WorkflowInputMappingItem[],
+  toolName: string
+) {
+  const updatedMapping = [...inputMapping];
+  const toolsIndex = updatedMapping.findIndex((item) => item.type === 'tools');
+
+  if (toolsIndex >= 0) {
+    const existingTools = Array.isArray(updatedMapping[toolsIndex].value)
+      ? (updatedMapping[toolsIndex].value as unknown[])
+      : [];
+    updatedMapping[toolsIndex] = {
+      ...updatedMapping[toolsIndex],
+      value: [...existingTools, toolName],
+    };
+    return updatedMapping;
+  }
+
+  return [
+    ...updatedMapping,
+    {
+      type: 'tools',
+      value: [toolName],
+      typeHint: 'json',
+      valueType: 'immediate',
+    },
+  ];
+}
+
+function setOrAddInputMappingValue(
+  inputMapping: WorkflowInputMappingItem[],
+  type: string,
+  value: unknown,
+  typeHint: string,
+  valueType = 'immediate'
+) {
+  const index = inputMapping.findIndex((item) => item.type === type);
+  if (index >= 0) {
+    inputMapping[index] = {
+      ...inputMapping[index],
+      value,
+      valueType,
+    };
+    return;
+  }
+
+  inputMapping.push({ type, value, typeHint, valueType });
+}
+
+function createMemoryProviderInputMapping(): WorkflowInputMappingItem[] {
+  return [
+    {
+      type: 'conversation_id',
+      value: '',
+      valueType: 'reference',
+      typeHint: 'string',
+    },
+    {
+      type: 'messages',
+      value: '',
+      valueType: 'reference',
+      typeHint: 'json',
+    },
+  ];
+}
+
 // Type for staged node changes
 type StagedNodeChanges = Record<string, form.SchemaType>;
 
@@ -789,7 +895,7 @@ function WorkflowEditorContent({
         addStoreEdge(
           connection.source!,
           connection.target!,
-          connection.sourceHandle || 'default'
+          connection.sourceHandle || undefined
         );
       }
     },
@@ -950,6 +1056,53 @@ function WorkflowEditorContent({
 
       let position = snapPositionToGrid({ x: 0, y: 0 });
 
+      if (request.directStep) {
+        const data = {
+          ...form.initialValues,
+          stepType: request.directStep.stepType,
+          name: generateUniqueStepName(request.directStep.name, nodes),
+          inputMapping: request.directStep.inputMapping || [],
+        } as form.SchemaType;
+        let finalPosition = position;
+        let parentId = request.parentId;
+
+        if (sourceNode) {
+          const sourcePosition = getAbsolutePosition(sourceNode);
+          const sourceSize = getNodeSize(sourceNode);
+          const absolutePosition = snapPositionToGrid({
+            x: sourcePosition.x + sourceSize.width + 180,
+            y: sourcePosition.y,
+          });
+
+          parentId = sourceNode.parentId || request.parentId;
+          finalPosition = absolutePosition;
+          if (sourceNode.parentId) {
+            const parentNode = nodes.find(
+              (node) => node.id === sourceNode.parentId
+            );
+            if (parentNode) {
+              const parentPosition = getAbsolutePosition(parentNode);
+              finalPosition = {
+                x: absolutePosition.x - parentPosition.x,
+                y: absolutePosition.y - parentPosition.y,
+              };
+            }
+          }
+        }
+
+        setPendingNewNode({
+          id: uuidv4(),
+          data: data as any,
+          position: finalPosition,
+          parentId,
+          sourceNodeId: request.sourceNodeId,
+          sourceHandle: request.sourceHandle,
+        });
+        setPendingNodeSurface('timeline');
+        setCreateStepContext(null);
+        return;
+      }
+
       if (sourceNode && targetNode) {
         const sourcePosition = getAbsolutePosition(sourceNode);
         const targetPosition = getAbsolutePosition(targetNode);
@@ -1042,6 +1195,171 @@ function WorkflowEditorContent({
           createStepSurface === 'timeline' ? 'timeline' : 'dialog'
         );
       };
+      const getPendingPositionFromSource = (sourceNode: Node) => {
+        const type = STEP_TYPES[data.stepType] || NODE_TYPES.BasicNode;
+        const newNodeSize =
+          NODE_TYPE_SIZES[type] || NODE_TYPE_SIZES[NODE_TYPES.BasicNode];
+
+        let finalPosition = createStepContext.position;
+        let parentId: string | undefined;
+
+        const getAbsolutePosition = (node: Node): { x: number; y: number } => {
+          if (!node.parentId) return node.position;
+          const parent = nodes.find((n) => n.id === node.parentId);
+          if (!parent) return node.position;
+          const parentAbsolute = getAbsolutePosition(parent);
+          return {
+            x: parentAbsolute.x + node.position.x,
+            y: parentAbsolute.y + node.position.y,
+          };
+        };
+
+        const sourceAbsolute = getAbsolutePosition(sourceNode);
+        const sourceHandleY = sourceAbsolute.y + (sourceNode.height || 48) / 2;
+        const newNodeHandleOffset = newNodeSize.height / 2;
+
+        const absolutePosition = {
+          x: createStepContext.position.x,
+          y: sourceHandleY - newNodeHandleOffset,
+        };
+
+        if (sourceNode.parentId) {
+          parentId = sourceNode.parentId;
+          const parentNode = nodes.find((n) => n.id === parentId);
+          if (parentNode) {
+            const parentAbsolute = getAbsolutePosition(parentNode);
+            finalPosition = {
+              x: absolutePosition.x - parentAbsolute.x,
+              y: absolutePosition.y - parentAbsolute.y,
+            };
+          }
+        } else {
+          finalPosition = absolutePosition;
+        }
+
+        return { finalPosition, parentId };
+      };
+
+      if (
+        createStepSurface === 'timeline' &&
+        timelineAddStepRequest?.aiAgentTool &&
+        timelineAddStepRequest.sourceNodeId
+      ) {
+        const sourceNode = nodes.find(
+          (node) => node.id === timelineAddStepRequest.sourceNodeId
+        );
+        if (!sourceNode) return;
+
+        const toolName = generateUniqueAiToolName(result, nodes);
+        const sourceInputMapping = [
+          ...((sourceNode.data?.inputMapping ||
+            []) as WorkflowInputMappingItem[]),
+        ];
+        updateNode(sourceNode.id, {
+          inputMapping: appendToolToInputMapping(sourceInputMapping, toolName),
+        } as any);
+
+        const { finalPosition, parentId } =
+          getPendingPositionFromSource(sourceNode);
+        setPendingNodeForCurrentSurface({
+          id: newNodeId,
+          data: data as any,
+          position: finalPosition,
+          parentId,
+          sourceNodeId: sourceNode.id,
+          sourceHandle: toolName,
+        });
+
+        setCreateStepContext(null);
+        setSelectedEdgeId(null);
+        setShowStepPicker(false);
+        return;
+      }
+
+      if (
+        createStepSurface === 'timeline' &&
+        timelineAddStepRequest?.aiAgentMemory &&
+        timelineAddStepRequest.sourceNodeId
+      ) {
+        const sourceNode = nodes.find(
+          (node) => node.id === timelineAddStepRequest.sourceNodeId
+        );
+        if (!sourceNode) return;
+
+        const memoryNodeId = newNodeId;
+        const memoryStepName = generateUniqueStepName(
+          `${result.name || 'Memory provider'} (memory)`,
+          nodes
+        );
+        const memoryNodeData = {
+          ...form.initialValues,
+          id: memoryNodeId,
+          stepType: result.stepType,
+          name: memoryStepName,
+          agentId: result.agentId || '',
+          capabilityId: result.capabilityId || '',
+          inputMapping: createMemoryProviderInputMapping(),
+        } as form.SchemaType;
+        const { finalPosition, parentId } =
+          getPendingPositionFromSource(sourceNode);
+        const createdNodeId = addNode(
+          memoryNodeData as any,
+          finalPosition,
+          parentId
+        );
+
+        if (createdNodeId) {
+          addStoreEdge(sourceNode.id, createdNodeId, 'memory');
+
+          const sourceInputMapping = [
+            ...((sourceNode.data?.inputMapping ||
+              []) as WorkflowInputMappingItem[]),
+          ];
+          setOrAddInputMappingValue(
+            sourceInputMapping,
+            'memoryEnabled',
+            true,
+            'boolean'
+          );
+          setOrAddInputMappingValue(
+            sourceInputMapping,
+            'memoryProviderStepId',
+            createdNodeId,
+            'string'
+          );
+          setOrAddInputMappingValue(
+            sourceInputMapping,
+            'memoryConversationId',
+            '',
+            'string',
+            'reference'
+          );
+          setOrAddInputMappingValue(
+            sourceInputMapping,
+            'memoryMaxMessages',
+            50,
+            'integer'
+          );
+          setOrAddInputMappingValue(
+            sourceInputMapping,
+            'memoryStrategy',
+            'summarize',
+            'string'
+          );
+          updateNode(sourceNode.id, {
+            inputMapping: sourceInputMapping,
+          } as any);
+          setPendingCenterNodeId(sourceNode.id);
+          setSelectedNodeId(sourceNode.id);
+        }
+
+        setCreateStepContext(null);
+        setSelectedEdgeId(null);
+        setShowStepPicker(false);
+        setTimelineAddStepRequest(null);
+        setCreateStepSurface(null);
+        return;
+      }
 
       // Check if we're inserting between nodes via edge click
       if (createStepContext.insertionEdge) {
@@ -1205,9 +1523,15 @@ function WorkflowEditorContent({
     [
       createStepContext,
       createStepSurface,
+      timelineAddStepRequest,
+      addNode,
+      addStoreEdge,
       getIntersectingNodes,
       nodes,
       setPendingNewNode,
+      setPendingCenterNodeId,
+      setSelectedNodeId,
+      updateNode,
     ]
   );
 
@@ -1396,6 +1720,7 @@ function WorkflowEditorContent({
           onSelect={handleStepPickerSelect}
           onCancel={handleCancelCreate}
           allowFinish={!createStepContext.insertionEdge}
+          mode={timelineAddStepRequest?.pickerMode || 'all'}
         />
       </NodeFormProvider>
     );
@@ -1407,6 +1732,7 @@ function WorkflowEditorContent({
     handlePendingNodeCancel,
     createStepSurface,
     createStepContext,
+    timelineAddStepRequest?.pickerMode,
     nodes.length,
     handleStepPickerSelect,
     handleCancelCreate,

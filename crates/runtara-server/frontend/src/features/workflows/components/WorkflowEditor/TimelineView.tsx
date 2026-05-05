@@ -24,6 +24,7 @@ import {
   GripVertical,
   ListTree,
   Loader2,
+  MemoryStick,
   Pause,
   PenLine,
   Plus,
@@ -32,6 +33,7 @@ import {
   Workflow,
   XCircle,
   Zap,
+  type LucideIcon,
 } from 'lucide-react';
 
 import { Button } from '@/shared/components/ui/button';
@@ -39,6 +41,10 @@ import { Badge } from '@/shared/components/ui/badge';
 import { cn } from '@/lib/utils.ts';
 import { NODE_TYPES } from '@/features/workflows/config/workflow.ts';
 import { useWorkflowStore } from '@/features/workflows/stores/workflowStore.ts';
+import { useCustomQuery } from '@/shared/hooks/api';
+import { queryKeys } from '@/shared/queries/query-keys';
+import { getAgents, type ExtendedAgent } from '@/features/workflows/queries';
+import { canStepHaveErrorHandler } from '@/features/workflows/utils/step-error-support';
 import {
   type NodeExecutionStatus,
   useExecutionStore,
@@ -62,6 +68,14 @@ export type TimelineAddStepRequest = {
   sourceHandle?: string;
   targetNodeId?: string;
   parentId?: string;
+  pickerMode?: 'all' | 'tool' | 'memory';
+  directStep?: {
+    stepType: string;
+    name: string;
+    inputMapping?: Record<string, unknown>[];
+  };
+  aiAgentTool?: boolean;
+  aiAgentMemory?: boolean;
 };
 
 type TimelineItem = {
@@ -139,7 +153,12 @@ function areTimelineAddRequestsEqual(
     first?.sourceNodeId === second?.sourceNodeId &&
     first?.sourceHandle === second?.sourceHandle &&
     first?.targetNodeId === second?.targetNodeId &&
-    first?.parentId === second?.parentId
+    first?.parentId === second?.parentId &&
+    first?.pickerMode === second?.pickerMode &&
+    first?.directStep?.stepType === second?.directStep?.stepType &&
+    first?.directStep?.name === second?.directStep?.name &&
+    first?.aiAgentTool === second?.aiAgentTool &&
+    first?.aiAgentMemory === second?.aiAgentMemory
   );
 }
 
@@ -367,8 +386,12 @@ function getEdgeLabel(edge: Edge): string {
 }
 
 function getSwitchCaseCount(node: Node): number {
+  return getSwitchCases(node).length;
+}
+
+function getSwitchCases(node: Node): unknown[] {
   const inputMapping = node.data?.inputMapping;
-  if (!Array.isArray(inputMapping)) return 0;
+  if (!Array.isArray(inputMapping)) return [];
 
   const casesField = inputMapping.find(
     (item) =>
@@ -378,7 +401,52 @@ function getSwitchCaseCount(node: Node): number {
   );
 
   const cases = (casesField as { value?: unknown } | undefined)?.value;
-  return Array.isArray(cases) ? cases.length : 0;
+  return Array.isArray(cases) ? cases : [];
+}
+
+function isSwitchRoutingMode(node: Node): boolean {
+  const inputMapping = node.data?.inputMapping;
+  if (!Array.isArray(inputMapping)) return false;
+
+  const routingModeField = inputMapping.find(
+    (item) =>
+      typeof item === 'object' &&
+      item !== null &&
+      (item as { type?: unknown }).type === 'routingMode'
+  );
+  if ((routingModeField as { value?: unknown } | undefined)?.value === true) {
+    return true;
+  }
+
+  return getSwitchCases(node).some(
+    (caseItem) =>
+      typeof caseItem === 'object' &&
+      caseItem !== null &&
+      Boolean((caseItem as { route?: unknown }).route)
+  );
+}
+
+function getInputMappingValue(node: Node, fieldType: string): unknown {
+  const inputMapping = node.data?.inputMapping;
+  if (!Array.isArray(inputMapping)) return undefined;
+
+  return (
+    inputMapping.find(
+      (item) =>
+        typeof item === 'object' &&
+        item !== null &&
+        (item as { type?: unknown }).type === fieldType
+    ) as { value?: unknown } | undefined
+  )?.value;
+}
+
+function isAiAgentStep(node: Node): boolean {
+  const stepType = getStepType(node);
+  return stepType === 'AiAgent' || stepType === 'AI Agent';
+}
+
+function hasAiAgentMemory(node: Node): boolean {
+  return getInputMappingValue(node, 'memoryEnabled') === true;
 }
 
 function getCaseIndex(label: string): number | null {
@@ -884,6 +952,228 @@ function createLaneListContext(
   };
 }
 
+const defaultTimelineErrorInputMapping: Record<string, unknown>[] = [
+  {
+    type: 'code',
+    value: 'HANDLED_ERROR',
+    typeHint: 'string',
+    valueType: 'immediate',
+  },
+  {
+    type: 'message',
+    value: 'Handled by workflow error route',
+    typeHint: 'string',
+    valueType: 'immediate',
+  },
+  {
+    type: 'category',
+    value: 'permanent',
+    typeHint: 'string',
+    valueType: 'immediate',
+  },
+  {
+    type: 'severity',
+    value: 'error',
+    typeHint: 'string',
+    valueType: 'immediate',
+  },
+];
+
+type TimelineRouteAddAction = {
+  key: string;
+  label: string;
+  ariaLabel: string;
+  sourceHandle?: string;
+  icon: LucideIcon;
+  request: TimelineAddStepRequest;
+};
+
+function getOutgoingSourceHandles(item: TimelineItem): Set<string> {
+  return new Set(item.outgoingEdges.map((edge) => getRouteSourceHandle(edge)));
+}
+
+function getTimelineRouteAddActions(
+  item: TimelineItem,
+  agents: ExtendedAgent[]
+): TimelineRouteAddAction[] {
+  const node = item.node;
+  const sourceNodeId = node.id;
+  const parentId = node.parentId;
+  const stepName = getStepName(node);
+  const stepType = getStepType(node);
+  const existingHandles = getOutgoingSourceHandles(item);
+  const actions: TimelineRouteAddAction[] = [];
+
+  if (stepType === 'Conditional') {
+    for (const sourceHandle of ['true', 'false']) {
+      if (existingHandles.has(sourceHandle)) continue;
+      actions.push({
+        key: `conditional-${sourceHandle}`,
+        label: sourceHandle,
+        ariaLabel: `Add ${sourceHandle} branch from ${stepName}`,
+        sourceHandle,
+        icon: GitBranch,
+        request: { sourceNodeId, sourceHandle, parentId },
+      });
+    }
+  }
+
+  if (stepType === 'Switch' && isSwitchRoutingMode(node)) {
+    getSwitchCases(node).forEach((_caseItem, index) => {
+      const sourceHandle = `case-${index}`;
+      if (existingHandles.has(sourceHandle)) return;
+      actions.push({
+        key: sourceHandle,
+        label: `case ${index + 1}`,
+        ariaLabel: `Add case ${index + 1} route from ${stepName}`,
+        sourceHandle,
+        icon: GitBranch,
+        request: { sourceNodeId, sourceHandle, parentId },
+      });
+    });
+
+    if (!existingHandles.has('default')) {
+      actions.push({
+        key: 'default',
+        label: 'default',
+        ariaLabel: `Add default route from ${stepName}`,
+        sourceHandle: 'default',
+        icon: GitBranch,
+        request: { sourceNodeId, sourceHandle: 'default', parentId },
+      });
+    }
+  }
+
+  if (
+    !isAiAgentStep(node) &&
+    !existingHandles.has('onError') &&
+    canStepHaveErrorHandler(
+      stepType,
+      typeof getStepData(node).agentId === 'string'
+        ? getStepData(node).agentId
+        : undefined,
+      typeof getStepData(node).capabilityId === 'string'
+        ? getStepData(node).capabilityId
+        : undefined,
+      agents
+    )
+  ) {
+    actions.push({
+      key: 'onError',
+      label: 'error',
+      ariaLabel: `Add error handler from ${stepName}`,
+      sourceHandle: 'onError',
+      icon: AlertCircle,
+      request: {
+        sourceNodeId,
+        sourceHandle: 'onError',
+        parentId,
+        directStep: {
+          stepType: 'Error',
+          name: 'Error handler',
+          inputMapping: defaultTimelineErrorInputMapping,
+        },
+      },
+    });
+  }
+
+  if (isAiAgentStep(node)) {
+    actions.push({
+      key: 'ai-tool',
+      label: 'tool',
+      ariaLabel: `Add tool to ${stepName}`,
+      icon: Zap,
+      request: {
+        sourceNodeId,
+        parentId,
+        pickerMode: 'tool',
+        aiAgentTool: true,
+      },
+    });
+
+    if (!hasAiAgentMemory(node)) {
+      actions.push({
+        key: 'ai-memory',
+        label: 'memory',
+        ariaLabel: `Add memory to ${stepName}`,
+        icon: MemoryStick,
+        request: {
+          sourceNodeId,
+          parentId,
+          pickerMode: 'memory',
+          aiAgentMemory: true,
+        },
+      });
+    }
+  }
+
+  return actions;
+}
+
+function TimelineRouteAddControls({
+  item,
+  depth,
+  readOnly,
+  debugInspectMode,
+  activeAddStepRequest,
+  renderInlineAddStep,
+  onAddStep,
+  agents,
+}: {
+  item: TimelineItem;
+  depth: number;
+  readOnly?: boolean;
+  debugInspectMode?: boolean;
+  activeAddStepRequest?: TimelineAddStepRequest | null;
+  renderInlineAddStep?: (request: TimelineAddStepRequest) => ReactNode;
+  onAddStep?: (request: TimelineAddStepRequest) => void;
+  agents: ExtendedAgent[];
+}) {
+  if (readOnly || debugInspectMode || !onAddStep) return null;
+
+  const actions = getTimelineRouteAddActions(item, agents);
+  if (actions.length === 0) return null;
+
+  const activeAction = actions.find((action) =>
+    areTimelineAddRequestsEqual(action.request, activeAddStepRequest)
+  );
+  const inlineAddStep = activeAction
+    ? renderInlineAddStep?.(activeAction.request)
+    : null;
+
+  return (
+    <div className="mt-2 space-y-2" style={{ marginLeft: depth * 24 + 40 }}>
+      <div className="flex min-w-0 flex-wrap items-center gap-1.5">
+        {actions.map((action) => {
+          const ActionIcon = action.icon;
+          return (
+            <Button
+              key={action.key}
+              type="button"
+              variant="outline"
+              size="sm"
+              className="h-7 gap-1.5 border-dashed px-2 text-xs text-muted-foreground shadow-none hover:text-foreground"
+              onClick={() => onAddStep(action.request)}
+              aria-label={action.ariaLabel}
+              data-testid="timeline-add-route"
+              data-source-node-id={item.node.id}
+              data-source-handle={action.sourceHandle}
+            >
+              <ActionIcon className="size-3.5" aria-hidden="true" />
+              Add {action.label}
+            </Button>
+          );
+        })}
+      </div>
+      {inlineAddStep && (
+        <div className="overflow-hidden rounded-md border border-dashed border-primary/50 bg-card shadow-sm">
+          {inlineAddStep}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function collectTimelineListContexts(
   items: TimelineItem[]
 ): Map<string, TimelineListContext> {
@@ -995,6 +1285,7 @@ function TimelineItemList({
   dragController,
   routeController,
   endTargetNode,
+  agents,
 }: {
   items: TimelineItem[];
   depth: number;
@@ -1012,6 +1303,7 @@ function TimelineItemList({
   dragController: TimelineDragController;
   routeController: TimelineRouteController;
   endTargetNode?: Node;
+  agents: ExtendedAgent[];
 }) {
   const canAdd = !readOnly && !debugInspectMode && Boolean(onAddStep);
 
@@ -1044,6 +1336,7 @@ function TimelineItemList({
             onAddStep={onAddStep}
             dragController={dragController}
             routeController={routeController}
+            agents={agents}
           />
           {canAdd && (
             <TimelineInsertionPoint
@@ -1082,6 +1375,7 @@ function BranchLaneGroups({
   onAddStep,
   dragController,
   routeController,
+  agents,
 }: {
   lanes: BranchLane[];
   sourceNode: Node;
@@ -1099,6 +1393,7 @@ function BranchLaneGroups({
   onAddStep?: (request: TimelineAddStepRequest) => void;
   dragController: TimelineDragController;
   routeController: TimelineRouteController;
+  agents: ExtendedAgent[];
 }) {
   if (lanes.length === 0) return null;
 
@@ -1240,6 +1535,7 @@ function BranchLaneGroups({
                 dragController={dragController}
                 routeController={routeController}
                 endTargetNode={lane.continuationNode}
+                agents={agents}
               />
               {lane.continuationNode && (
                 <LaneContinuationNode node={lane.continuationNode} />
@@ -1268,6 +1564,7 @@ function WorkflowTimelineItem({
   onAddStep,
   dragController,
   routeController,
+  agents,
 }: {
   item: TimelineItem;
   depth: number;
@@ -1284,6 +1581,7 @@ function WorkflowTimelineItem({
   onAddStep?: (request: TimelineAddStepRequest) => void;
   dragController: TimelineDragController;
   routeController: TimelineRouteController;
+  agents: ExtendedAgent[];
 }) {
   const selectedNodeId = useWorkflowStore((state) => state.selectedNodeId);
   const setSelectedNodeId = useWorkflowStore(
@@ -1498,6 +1796,17 @@ function WorkflowTimelineItem({
         )}
       </div>
 
+      <TimelineRouteAddControls
+        item={item}
+        depth={depth}
+        readOnly={readOnly}
+        debugInspectMode={debugInspectMode}
+        activeAddStepRequest={activeAddStepRequest}
+        renderInlineAddStep={renderInlineAddStep}
+        onAddStep={onAddStep}
+        agents={agents}
+      />
+
       <BranchLaneGroups
         lanes={item.lanes}
         sourceNode={node}
@@ -1515,6 +1824,7 @@ function WorkflowTimelineItem({
         onAddStep={onAddStep}
         dragController={dragController}
         routeController={routeController}
+        agents={agents}
       />
 
       {isContainer && isExpanded && (
@@ -1535,6 +1845,7 @@ function WorkflowTimelineItem({
             onAddStep={onAddStep}
             dragController={dragController}
             routeController={routeController}
+            agents={agents}
           />
         </div>
       )}
@@ -1565,6 +1876,14 @@ export function WorkflowTimelineView({
     (state) => state.flipConditionalBranches
   );
   const moveSwitchCase = useWorkflowStore((state) => state.moveSwitchCase);
+  const agentsQuery = useCustomQuery({
+    queryKey: queryKeys.agents.all,
+    queryFn: getAgents,
+    placeholderData: { agents: [] },
+  });
+  const agents =
+    (agentsQuery.data as { agents?: ExtendedAgent[] } | undefined)?.agents ??
+    [];
   const [expandedContainers, setExpandedContainers] = useState<
     Record<string, boolean>
   >({});
@@ -1909,6 +2228,7 @@ export function WorkflowTimelineView({
           onAddStep={onAddStep}
           dragController={dragController}
           routeController={routeController}
+          agents={agents}
         />
       </div>
     </div>

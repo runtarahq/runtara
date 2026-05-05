@@ -585,7 +585,7 @@ export const useWorkflowStore = create<WorkflowState>()(
       },
 
       // Edge Operations
-      addEdge: (from, to, label = 'default') =>
+      addEdge: (from, to, label) =>
         set((state) => {
           // Validate the connection before adding
           const validation = validateConnection(
@@ -601,8 +601,8 @@ export const useWorkflowStore = create<WorkflowState>()(
             return; // Don't add the edge if validation fails
           }
 
-          const edgeId = `${from}-${to}-${label}`;
-          const sourceHandle = label === 'default' ? 'source' : label;
+          const edgeId = `${from}-${to}-${label ?? 'default'}`;
+          const sourceHandle = label ?? 'source';
 
           const newEdge: Edge = {
             id: edgeId,
@@ -639,9 +639,9 @@ export const useWorkflowStore = create<WorkflowState>()(
           }
 
           for (const edge of edgesToAdd) {
-            const label = edge.label || 'default';
-            const edgeId = `${edge.from}-${edge.to}-${label}`;
-            const sourceHandle = label === 'default' ? 'source' : label;
+            const label = edge.label;
+            const edgeId = `${edge.from}-${edge.to}-${label ?? 'default'}`;
+            const sourceHandle = label ?? 'source';
 
             const newEdge: Edge = {
               id: edgeId,
@@ -659,9 +659,9 @@ export const useWorkflowStore = create<WorkflowState>()(
           state.saveToHistory();
         }),
 
-      removeEdge: (from, to, label = 'default') =>
+      removeEdge: (from, to, label) =>
         set((state) => {
-          const sourceHandle = label === 'default' ? 'source' : label;
+          const sourceHandle = label ?? 'source';
           state.edges = state.edges.filter(
             (e) =>
               !(
@@ -856,7 +856,7 @@ export const useWorkflowStore = create<WorkflowState>()(
             id: `${sourceNodeId}-${newNodeId}-${sourceHandle}`,
             source: sourceNodeId,
             target: newNodeId,
-            sourceHandle: sourceHandle === 'default' ? 'source' : sourceHandle,
+            sourceHandle: sourceHandle || 'source',
             targetHandle: 'target',
           };
           state.edges.push(firstEdge);

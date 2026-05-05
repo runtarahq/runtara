@@ -14,6 +14,12 @@ type StepCreateOptions = {
 };
 
 type TimelineDropPlacement = 'before' | 'after';
+type TimelineRouteHandle =
+  | 'true'
+  | 'false'
+  | 'default'
+  | 'onError'
+  | `case-${number}`;
 
 function attrValue(value: string): string {
   return value.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
@@ -158,6 +164,19 @@ export class WorkflowBuilderPage {
     expect(actualNames).toEqual(childStepNames);
   }
 
+  async expectStepInTimelineRoute(
+    childStepName: string,
+    sourceStepName: string,
+    sourceHandle: TimelineRouteHandle
+  ): Promise<void> {
+    await this.useTimelineOnly();
+    const sourceNodeId = await this.timelineNodeId(sourceStepName);
+    await expect(this.timelineStep(childStepName)).toHaveAttribute(
+      'data-timeline-context-key',
+      new RegExp(`^lane:[^:]+:${sourceNodeId}:${sourceHandle}$`)
+    );
+  }
+
   async timelineNodeId(name: string): Promise<string> {
     await this.expectStepVisible(name);
     const nodeId = await this.timelineStep(name).getAttribute(
@@ -219,6 +238,32 @@ export class WorkflowBuilderPage {
     await this.saveOpenTimelinePanel(options);
   }
 
+  async addTimelineRouteStep(
+    sourceStepName: string,
+    sourceHandle: TimelineRouteHandle,
+    kind: AddStepKind,
+    options: StepCreateOptions = {}
+  ) {
+    await this.beginTimelineRouteStep(sourceStepName, sourceHandle, kind);
+    await this.saveOpenTimelinePanel(options);
+  }
+
+  async addTimelineErrorHandler(
+    sourceStepName: string,
+    options: StepCreateOptions = {}
+  ) {
+    await this.useTimelineOnly();
+    await this.page
+      .getByRole('button', {
+        name: `Add error handler from ${sourceStepName}`,
+      })
+      .click();
+    await expect(
+      this.page.getByTestId('timeline-node-config-panel')
+    ).toBeVisible({ timeout: 10000 });
+    await this.saveOpenTimelinePanel(options);
+  }
+
   async beginFirstTimelineStep(kind: AddStepKind): Promise<void> {
     await this.useTimelineOnly();
     await this.page.getByTestId('timeline-add-step').first().click();
@@ -256,6 +301,23 @@ export class WorkflowBuilderPage {
         `[data-testid="timeline-add-step"][data-parent-node-id="${attrValue(parentNodeId)}"]`
       )
       .first()
+      .click();
+    await this.pickStep(kind);
+    await expect(
+      this.page.getByTestId('timeline-node-config-panel')
+    ).toBeVisible({ timeout: 10000 });
+  }
+
+  async beginTimelineRouteStep(
+    sourceStepName: string,
+    sourceHandle: TimelineRouteHandle,
+    kind: AddStepKind
+  ): Promise<void> {
+    await this.useTimelineOnly();
+    await this.page
+      .getByRole('button', {
+        name: this.timelineRouteButtonName(sourceStepName, sourceHandle),
+      })
       .click();
     await this.pickStep(kind);
     await expect(
@@ -382,6 +444,20 @@ export class WorkflowBuilderPage {
     const panel = this.page.getByTestId('timeline-node-config-panel');
     await panel.getByPlaceholder('Arg 1').fill(left);
     await panel.getByPlaceholder('Arg 2').fill(right);
+  }
+
+  async configureOpenSwitchRouting(
+    switchValue = 'status',
+    firstCaseMatch = 'approved'
+  ) {
+    const panel = this.page.getByTestId('timeline-node-config-panel');
+    await panel
+      .getByPlaceholder('Enter value or use reference mode...')
+      .fill(switchValue);
+    await panel.getByTestId('switch-routing-mode').click();
+    await panel.getByTestId('switch-add-case').click();
+    await panel.getByTestId('switch-case-match-0').fill(firstCaseMatch);
+    await panel.getByTestId('switch-case-match-0').blur();
   }
 
   async editTimelineStep(stepName: string): Promise<void> {
@@ -528,6 +604,40 @@ export class WorkflowBuilderPage {
     await expect(card).toHaveCount(0, { timeout: 15000 });
   }
 
+  async createOpenAiConnection(name: string): Promise<void> {
+    await this.page.goto('/connections');
+    await this.page.waitForLoadState('domcontentloaded');
+    await this.page.getByRole('button', { name: /new connection/i }).click();
+    const dialog = this.page.getByRole('dialog');
+    await expect(dialog).toBeVisible({ timeout: 15000 });
+    await dialog.getByText('OpenAI', { exact: true }).click();
+    await expect(this.page).toHaveURL(/\/connections\/openai_api_key\/create/);
+    await this.page.waitForLoadState('domcontentloaded');
+
+    await this.page.getByLabel('Title').fill(name);
+    await this.page
+      .getByPlaceholder('sk-xxxxxxxxxxxxx')
+      .fill('sk-test-workflow-builder');
+    const baseUrl = this.page.getByLabel('Base URL');
+    if (await baseUrl.isVisible().catch(() => false)) {
+      await baseUrl.fill('https://api.openai.com/v1');
+    }
+
+    await this.page.getByRole('button', { name: 'Create connection' }).click();
+    await expect(this.page).toHaveURL('/connections', { timeout: 15000 });
+    await expect(this.page.getByText(name)).toBeVisible({ timeout: 15000 });
+  }
+
+  async deleteConnectionFromList(name: string): Promise<void> {
+    await this.page.goto('/connections');
+    await this.page.waitForLoadState('domcontentloaded');
+    const card = this.page.locator('article').filter({ hasText: name });
+    await expect(card).toBeVisible({ timeout: 15000 });
+    await card.getByTitle('Delete connection').first().click();
+    await this.page.getByRole('button', { name: /delete connection/i }).click();
+    await expect(card).toHaveCount(0, { timeout: 15000 });
+  }
+
   async saveOpenTimelinePanel(options: StepCreateOptions = {}): Promise<void> {
     const panel = this.page.getByTestId('timeline-node-config-panel');
     await expect(panel).toBeVisible({ timeout: 10000 });
@@ -540,6 +650,73 @@ export class WorkflowBuilderPage {
 
     await panel.getByTestId('timeline-node-config-save').click();
     await expect(panel).toHaveCount(0);
+  }
+
+  async configureOpenAiAgent(connectionName: string): Promise<void> {
+    const panel = this.page.getByTestId('timeline-node-config-panel');
+    await panel.getByRole('combobox').first().click();
+    await this.page.getByRole('option', { name: 'OpenAI' }).click();
+
+    const connectionSelect = panel.getByRole('combobox').nth(1);
+    await expect(connectionSelect).toBeEnabled({ timeout: 15000 });
+    await connectionSelect.click();
+    await this.page.getByRole('option', { name: connectionName }).click();
+
+    await panel
+      .getByPlaceholder('You are a helpful assistant...')
+      .fill('Use the configured tools when helpful.');
+    await panel
+      .getByPlaceholder('Enter user prompt or select a reference...')
+      .fill('Summarize the workflow state.');
+
+    const modelSelect = panel.getByRole('combobox').nth(2);
+    await modelSelect.click();
+    await this.page.getByRole('option', { name: /GPT-4o Mini/ }).click();
+  }
+
+  async addTimelineAiTool(
+    sourceStepName: string,
+    kind: AddStepKind,
+    options: StepCreateOptions = {}
+  ): Promise<void> {
+    await this.useTimelineOnly();
+    await this.page
+      .getByRole('button', { name: `Add tool to ${sourceStepName}` })
+      .click();
+    await this.pickStep(kind);
+    await expect(
+      this.page.getByTestId('timeline-node-config-panel')
+    ).toBeVisible({ timeout: 10000 });
+    await this.saveOpenTimelinePanel(options);
+  }
+
+  async addTimelineAiMemory(sourceStepName: string): Promise<void> {
+    await this.useTimelineOnly();
+    await this.page
+      .getByRole('button', { name: `Add memory to ${sourceStepName}` })
+      .click();
+    const objectModelAgent = this.page.getByTestId(
+      'step-picker-agent-object-model'
+    );
+    await expect(objectModelAgent).toBeVisible({ timeout: 30000 });
+    await objectModelAgent.click();
+    await expect(
+      this.page.getByRole('button', { name: `Add memory to ${sourceStepName}` })
+    ).toHaveCount(0, { timeout: 10000 });
+  }
+
+  async expectOpenAiAgentToolAndMemory(
+    stepName: string,
+    toolName = 'random_double'
+  ): Promise<void> {
+    await this.editTimelineStep(stepName);
+    const panel = this.page.getByTestId('timeline-node-config-panel');
+    await expect(panel.getByText(toolName, { exact: true })).toBeVisible({
+      timeout: 15000,
+    });
+    await expect(panel.getByText('Conversation Memory')).toBeVisible({
+      timeout: 15000,
+    });
   }
 
   async saveOpenCanvasDialog(options: StepCreateOptions = {}): Promise<void> {
@@ -572,6 +749,28 @@ export class WorkflowBuilderPage {
     );
     await expect(result).toBeVisible({ timeout: 30000 });
     await result.click();
+  }
+
+  private timelineRouteButtonName(
+    sourceStepName: string,
+    sourceHandle: TimelineRouteHandle
+  ): string {
+    if (sourceHandle === 'true' || sourceHandle === 'false') {
+      return `Add ${sourceHandle} branch from ${sourceStepName}`;
+    }
+    if (sourceHandle === 'default') {
+      return `Add default route from ${sourceStepName}`;
+    }
+    if (sourceHandle === 'onError') {
+      return `Add error handler from ${sourceStepName}`;
+    }
+
+    const caseMatch = /^case-(\d+)$/.exec(sourceHandle);
+    if (caseMatch) {
+      return `Add case ${Number(caseMatch[1]) + 1} route from ${sourceStepName}`;
+    }
+
+    return `Add ${sourceHandle} route from ${sourceStepName}`;
   }
 }
 

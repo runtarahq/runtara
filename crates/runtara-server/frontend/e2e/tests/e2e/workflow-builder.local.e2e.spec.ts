@@ -14,6 +14,7 @@ const stepType = (stepTypeName: string) =>
 
 test.describe.serial('Workflow builder local UI', () => {
   let createdWorkflowNames: string[] = [];
+  let createdConnectionNames: string[] = [];
 
   const workflowName = (suffix: string) =>
     `E2E Workflow Builder ${suffix} ${runId}`;
@@ -38,6 +39,16 @@ test.describe.serial('Workflow builder local UI', () => {
     }
 
     createdWorkflowNames = [];
+
+    for (const connection of [...createdConnectionNames].reverse()) {
+      try {
+        await builder.deleteConnectionFromList(connection);
+      } catch {
+        // Best-effort cleanup, still through UI only.
+      }
+    }
+
+    createdConnectionNames = [];
   });
 
   test('timeline-only adds, persists, and removes linear steps', async ({
@@ -65,7 +76,7 @@ test.describe.serial('Workflow builder local UI', () => {
     await builder.expectStepHidden('Double again');
   });
 
-  test('adds and removes conditional branch steps through the UI', async ({
+  test('timeline-only adds and removes conditional branch steps', async ({
     page,
   }) => {
     const builder = new WorkflowBuilderPage(page);
@@ -74,10 +85,10 @@ test.describe.serial('Workflow builder local UI', () => {
     await builder.beginFirstTimelineStep(stepType('Conditional'));
     await builder.configureOpenCondition();
     await builder.saveOpenTimelinePanel({ name: 'Decision' });
-    await builder.addCanvasBranchStep('true', 'Decision', randomDoubleStep, {
+    await builder.addTimelineRouteStep('Decision', 'true', randomDoubleStep, {
       name: 'Approved branch',
     });
-    await builder.addCanvasBranchStep('false', 'Decision', randomDoubleStep, {
+    await builder.addTimelineRouteStep('Decision', 'false', randomDoubleStep, {
       name: 'Rejected branch',
     });
 
@@ -86,12 +97,117 @@ test.describe.serial('Workflow builder local UI', () => {
     await builder.expectStepVisible('Decision');
     await builder.expectStepVisible('Approved branch');
     await builder.expectStepVisible('Rejected branch');
+    await builder.expectStepInTimelineRoute(
+      'Approved branch',
+      'Decision',
+      'true'
+    );
+    await builder.expectStepInTimelineRoute(
+      'Rejected branch',
+      'Decision',
+      'false'
+    );
 
     await builder.deleteTimelineStep('Rejected branch');
     await builder.saveWorkflow();
     await builder.reloadAndWait();
     await builder.expectStepVisible('Approved branch');
     await builder.expectStepHidden('Rejected branch');
+  });
+
+  test('timeline-only adds switch case and default routes', async ({
+    page,
+  }) => {
+    const builder = new WorkflowBuilderPage(page);
+    await rememberWorkflow(builder, workflowName('switch-routes'));
+
+    await builder.beginFirstTimelineStep(stepType('Switch'));
+    await builder.configureOpenSwitchRouting('status', 'approved');
+    await builder.saveOpenTimelinePanel({ name: 'Route switch' });
+    await builder.addTimelineRouteStep(
+      'Route switch',
+      'case-0',
+      randomDoubleStep,
+      {
+        name: 'Approved route',
+      }
+    );
+    await builder.addTimelineRouteStep(
+      'Route switch',
+      'default',
+      randomDoubleStep,
+      {
+        name: 'Fallback route',
+      }
+    );
+
+    await builder.saveWorkflow();
+    await builder.reloadAndWait();
+    await builder.expectStepVisible('Route switch');
+    await builder.expectStepVisible('Approved route');
+    await builder.expectStepVisible('Fallback route');
+    await builder.expectStepInTimelineRoute(
+      'Approved route',
+      'Route switch',
+      'case-0'
+    );
+    await builder.expectStepInTimelineRoute(
+      'Fallback route',
+      'Route switch',
+      'default'
+    );
+  });
+
+  test('timeline-only adds a persisted error handler route', async ({
+    page,
+  }) => {
+    const builder = new WorkflowBuilderPage(page);
+    await rememberWorkflow(builder, workflowName('error-route'));
+
+    await builder.beginFirstTimelineStep(stepType('While'));
+    await builder.configureOpenCondition();
+    await builder.saveOpenTimelinePanel({ name: 'Risky loop' });
+    await builder.addNestedTimelineStep('Risky loop', randomDoubleStep, {
+      name: 'Loop work',
+    });
+    await builder.addTimelineErrorHandler('Risky loop', {
+      name: 'Loop error handler',
+    });
+
+    await builder.saveWorkflow();
+    await builder.reloadAndWait();
+    await builder.expectStepVisible('Risky loop');
+    await builder.expectStepVisible('Loop work');
+    await builder.expectStepVisible('Loop error handler');
+    await builder.expectStepNestedUnder('Loop work', 'Risky loop');
+    await builder.expectStepInTimelineRoute(
+      'Loop error handler',
+      'Risky loop',
+      'onError'
+    );
+  });
+
+  test('timeline-only wires AI Agent tool and memory controls', async ({
+    page,
+  }) => {
+    const builder = new WorkflowBuilderPage(page);
+    const connectionName = `E2E Workflow Builder OpenAI ${runId}`;
+    await builder.createOpenAiConnection(connectionName);
+    createdConnectionNames.push(connectionName);
+    await rememberWorkflow(builder, workflowName('ai-agent-routes'));
+
+    await builder.beginFirstTimelineStep(stepType('AiAgent'));
+    await builder.configureOpenAiAgent(connectionName);
+    await builder.saveOpenTimelinePanel({ name: 'AI coordinator' });
+    await builder.addTimelineAiTool('AI coordinator', randomDoubleStep, {
+      name: 'Tool random double',
+    });
+    await builder.addTimelineAiMemory('AI coordinator');
+
+    await builder.saveWorkflow();
+    await builder.reloadAndWait();
+    await builder.expectStepVisible('AI coordinator');
+    await builder.expectOpenAiAgentToolAndMemory('AI coordinator');
   });
 
   test('adds a split, nests a child step, and removes both through the UI', async ({
