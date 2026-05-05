@@ -11,6 +11,7 @@ use serde_json::{Value, json};
 use sqlx::PgPool;
 use std::sync::Arc;
 
+use crate::config::ConnectionsState;
 use crate::crypto::CredentialCipher;
 use crate::repository::connections::ConnectionRepository;
 use crate::service::rate_limits::{RateLimitService, ServiceError};
@@ -36,13 +37,19 @@ use crate::types::*;
 ))]
 pub async fn list_rate_limits_handler(
     crate::tenant::TenantId(tenant_id): crate::tenant::TenantId,
-    State(pool): State<PgPool>,
-    State(cipher): State<Arc<dyn CredentialCipher>>,
+    State(state): State<ConnectionsState>,
     Query(query): Query<ListRateLimitsQuery>,
 ) -> Result<Json<ListRateLimitsResponse>, (StatusCode, Json<Value>)> {
-    // Create service with db pool for period stats queries
-    let repository = Arc::new(ConnectionRepository::new(pool.clone(), cipher.clone()));
-    let service = RateLimitService::with_db_pool(repository, pool);
+    // Create service with Redis for live state and db pool for period stats queries
+    let repository = Arc::new(ConnectionRepository::new(
+        state.db_pool.clone(),
+        state.cipher.clone(),
+    ));
+    let service = RateLimitService::with_redis_url_and_db_pool(
+        repository,
+        state.redis_url.clone(),
+        state.db_pool,
+    );
 
     // Use interval from query, defaulting to 24h
     let interval = if query.interval.is_empty() {
@@ -123,13 +130,19 @@ pub async fn list_rate_limits_handler(
 ))]
 pub async fn get_connection_rate_limit_status_handler(
     crate::tenant::TenantId(tenant_id): crate::tenant::TenantId,
-    State(pool): State<PgPool>,
-    State(cipher): State<Arc<dyn CredentialCipher>>,
+    State(state): State<ConnectionsState>,
     Path(id): Path<String>,
 ) -> Result<Json<GetRateLimitStatusResponse>, (StatusCode, Json<Value>)> {
-    // Create service
-    let repository = Arc::new(ConnectionRepository::new(pool, cipher.clone()));
-    let service = RateLimitService::new(repository);
+    // Create service with Redis for live state
+    let repository = Arc::new(ConnectionRepository::new(
+        state.db_pool.clone(),
+        state.cipher.clone(),
+    ));
+    let service = RateLimitService::with_redis_url_and_db_pool(
+        repository,
+        state.redis_url.clone(),
+        state.db_pool,
+    );
 
     match service
         .get_connection_rate_limit_status(&id, &tenant_id)

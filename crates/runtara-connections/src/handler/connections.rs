@@ -12,6 +12,7 @@ use serde_json::{Value, json};
 use sqlx::PgPool;
 use std::sync::Arc;
 
+use crate::config::ConnectionsState;
 use crate::crypto::CredentialCipher;
 use crate::repository::connections::ConnectionRepository;
 use crate::service::connections::{ConnectionService, ServiceError};
@@ -560,8 +561,7 @@ pub async fn get_connection_type_handler(
 /// This matches the CONNECTION_SERVICE_URL format expected by runtara-workflows.
 // No OpenAPI annotation — this is an internal-only endpoint (not exposed via gateway)
 pub async fn get_connection_for_runtime_handler(
-    State(pool): State<PgPool>,
-    State(cipher): State<Arc<dyn CredentialCipher>>,
+    State(state): State<ConnectionsState>,
     Path((tenant_id, connection_id)): Path<(String, String)>,
     Query(query): Query<RuntimeConnectionQuery>,
 ) -> Result<Json<RuntimeConnectionResponse>, (StatusCode, Json<Value>)> {
@@ -587,9 +587,16 @@ pub async fn get_connection_for_runtime_handler(
         }
     };
 
-    // Create services with db pool for rate limit event tracking
-    let repository = Arc::new(ConnectionRepository::new(pool.clone(), cipher.clone()));
-    let rate_limit_service = Arc::new(RateLimitService::with_db_pool(repository.clone(), pool));
+    // Create services with Redis for live state and db pool for event tracking
+    let repository = Arc::new(ConnectionRepository::new(
+        state.db_pool.clone(),
+        state.cipher.clone(),
+    ));
+    let rate_limit_service = Arc::new(RateLimitService::with_redis_url_and_db_pool(
+        repository.clone(),
+        state.redis_url.clone(),
+        state.db_pool,
+    ));
     let service = ConnectionService::with_rate_limit_service(repository, rate_limit_service);
 
     match service
