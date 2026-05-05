@@ -167,7 +167,10 @@ test.describe.serial('Workflow builder local UI', () => {
     const builder = new WorkflowBuilderPage(page);
     await rememberWorkflow(builder, workflowName('while-descendant-remove'));
 
-    await builder.beginFirstTimelineStep(stepType('While'));
+    await builder.addFirstTimelineStep(randomDoubleStep, {
+      name: 'Stable root',
+    });
+    await builder.beginTimelineStepAfter('Stable root', stepType('While'));
     await builder.configureOpenCondition();
     await builder.saveOpenTimelinePanel({ name: 'Removable loop' });
     await builder.addNestedTimelineStep('Removable loop', randomDoubleStep, {
@@ -179,6 +182,7 @@ test.describe.serial('Workflow builder local UI', () => {
 
     await builder.saveWorkflow();
     await builder.reloadAndWait();
+    await builder.expectStepVisible('Stable root');
     await builder.expectStepVisible('Removable loop');
     await builder.expectStepVisible('Loop child');
     await builder.expectStepVisible('Loop descendant');
@@ -188,6 +192,7 @@ test.describe.serial('Workflow builder local UI', () => {
     await builder.deleteTimelineStep('Removable loop');
     await builder.saveWorkflow();
     await builder.reloadAndWait();
+    await builder.expectStepVisible('Stable root');
     await builder.expectStepHidden('Removable loop');
     await builder.expectStepHidden('Loop child');
     await builder.expectStepHidden('Loop descendant');
@@ -211,21 +216,27 @@ test.describe.serial('Workflow builder local UI', () => {
     await builder.addNestedTimelineStep('Inner split', randomDoubleStep, {
       name: 'Deep child',
     });
+    await builder.addTimelineStepAfter('Inner split', randomDoubleStep, {
+      name: 'Outer split survivor',
+    });
 
     await builder.saveWorkflow();
     await builder.reloadAndWait();
     await builder.expectStepNestedUnder('Outer split', 'Outer while');
     await builder.expectStepNestedUnder('Inner split', 'Outer split');
     await builder.expectStepNestedUnder('Deep child', 'Inner split');
+    await builder.expectStepNestedUnder('Outer split survivor', 'Outer split');
 
     await builder.deleteTimelineStep('Inner split');
     await builder.saveWorkflow();
     await builder.reloadAndWait();
     await builder.expectStepVisible('Outer while');
     await builder.expectStepVisible('Outer split');
+    await builder.expectStepVisible('Outer split survivor');
     await builder.expectStepHidden('Inner split');
     await builder.expectStepHidden('Deep child');
     await builder.expectStepNestedUnder('Outer split', 'Outer while');
+    await builder.expectStepNestedUnder('Outer split survivor', 'Outer split');
   });
 
   test('reorders timeline root and nested steps with drag handles', async ({

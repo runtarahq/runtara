@@ -293,6 +293,28 @@ export function validateWorkflowStructure(
     }
   }
 
+  // Container steps must own a non-empty nested subgraph. Catch this in the UI
+  // before save so invalid Split/While graphs do not depend on server feedback.
+  const directChildrenByParent = new Map<string, number>();
+  for (const node of workflowNodes) {
+    if (!node.parentId) continue;
+    directChildrenByParent.set(
+      node.parentId,
+      (directChildrenByParent.get(node.parentId) || 0) + 1
+    );
+  }
+
+  const containerSteps = workflowNodes.filter(
+    (n) => n.data?.stepType === 'Split' || n.data?.stepType === 'While'
+  );
+  for (const container of containerSteps) {
+    if ((directChildrenByParent.get(container.id) || 0) > 0) continue;
+
+    const stepName = container.data?.name || container.id;
+    const stepType = container.data?.stepType || 'Container';
+    errors.push(`${stepType} step "${stepName}" must contain nested steps`);
+  }
+
   // === WARNINGS ===
 
   // Check for steps without descriptions

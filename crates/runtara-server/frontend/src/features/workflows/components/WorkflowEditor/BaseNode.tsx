@@ -248,6 +248,9 @@ export const BaseNode = forwardRef<
         )}
         tabIndex={0}
         onClick={handleClick}
+        data-testid="workflow-canvas-node"
+        data-step-name={name}
+        data-step-type={stepType}
         {...props}
       >
         {/* Breakpoint indicator - red dot on left edge */}
