@@ -14,7 +14,9 @@ use tracing::{info, warn};
 use runtara_core::persistence::postgres::PostgresPersistence;
 use runtara_environment::config::Config;
 use runtara_environment::runner::Runner;
+use runtara_environment::runner::native::NativeRunner;
 use runtara_environment::runner::oci::OciRunner;
+use runtara_environment::runner::wasm::WasmRunner;
 use runtara_environment::runtime::EnvironmentRuntime;
 
 #[tokio::main]
@@ -59,11 +61,8 @@ async fn main() -> anyhow::Result<()> {
     let persistence: Arc<dyn runtara_core::persistence::Persistence> =
         Arc::new(PostgresPersistence::new(pool.clone()));
 
-    // Create OCI runner (uses persistence to read instance output)
-    let runner = Arc::new(OciRunner::new(
-        runtara_environment::runner::oci::OciRunnerConfig::from_env(),
-        persistence.clone(),
-    ));
+    // Create runner (uses persistence to read instance output)
+    let runner = build_runner(persistence.clone());
     info!(runner_type = runner.runner_type(), "Runner initialized");
 
     // Parse core bind address if provided
@@ -107,6 +106,27 @@ async fn main() -> anyhow::Result<()> {
     info!("Runtara Environment shut down");
 
     Ok(())
+}
+
+fn build_runner(persistence: Arc<dyn runtara_core::persistence::Persistence>) -> Arc<dyn Runner> {
+    match std::env::var("RUNTARA_RUNNER")
+        .unwrap_or_else(|_| "oci".to_string())
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "wasm" | "wasmtime" => Arc::new(WasmRunner::new(
+            runtara_environment::runner::wasm::WasmRunnerConfig::from_env(),
+            persistence,
+        )),
+        "native" => Arc::new(NativeRunner::new(
+            runtara_environment::runner::native::NativeRunnerConfig::from_env(),
+            persistence,
+        )),
+        _ => Arc::new(OciRunner::new(
+            runtara_environment::runner::oci::OciRunnerConfig::from_env(),
+            persistence,
+        )),
+    }
 }
 
 /// Wait for either SIGINT (Ctrl+C) or SIGTERM on Unix; on non-Unix fall back
