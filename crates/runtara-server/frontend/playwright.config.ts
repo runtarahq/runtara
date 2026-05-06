@@ -19,6 +19,12 @@ const mockedAuthFile = path.join(__dirname, 'e2e/.auth/mocked-user.json');
 // preview builds (npm run preview) also serve HTTP.
 const baseURL = process.env.PLAYWRIGHT_BASE_URL || 'http://localhost:8081';
 const isLocalUiRun = process.env.E2E_LOCAL_UI === 'true';
+const smokeAuthMode =
+  process.env.E2E_SMOKE_AUTH_MODE || process.env.VITE_RUNTARA_AUTH_MODE;
+const smokeUsesNonOidcAuth =
+  smokeAuthMode === 'local' ||
+  smokeAuthMode === 'trust_proxy' ||
+  smokeAuthMode === 'trust-proxy';
 const localUiDevServerCommand =
   'VITE_RUNTARA_AUTH_MODE=local VITE_RUNTARA_TENANT_ID=Organity VITE_STRIP_ORG_ID=true VITE_RUNTARA_API_BASE_URL=http://localhost:7001 npm run dev -- --host 127.0.0.1 --port 8081';
 
@@ -92,9 +98,9 @@ export default defineConfig({
       testMatch: /.*\.smoke\.spec\.ts/,
       use: {
         ...devices['Desktop Chrome'],
-        storageState: authFile,
+        ...(smokeUsesNonOidcAuth ? {} : { storageState: authFile }),
       },
-      dependencies: ['setup'],
+      ...(smokeUsesNonOidcAuth ? {} : { dependencies: ['setup'] }),
       timeout: 60000, // 60s for real API calls
     },
 

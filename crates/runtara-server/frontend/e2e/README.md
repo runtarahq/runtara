@@ -9,13 +9,13 @@ End-to-end tests live in this directory and run with Playwright.
 | Project    | Test files                                                     | Network                                                     | Use when                                                                                                                   |
 | ---------- | -------------------------------------------------------------- | ----------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
 | `mocked`   | `tests/mocked/**/*.mocked.spec.ts`                             | **None** — every API call is intercepted via `page.route()` | **PR gate.** Fast, deterministic, no secrets required. Fork PRs can run this.                                              |
-| `smoke`    | `tests/smoke/**/*.smoke.spec.ts`                               | Real API — prod or staging                                  | Daily monitoring of the deployed app. Needs Auth0 Client-Credentials secrets.                                              |
+| `smoke`    | `tests/smoke/**/*.smoke.spec.ts`                               | Real API — prod or staging                                  | Daily monitoring of the deployed app. CI runs in local auth mode, so no Auth0 secrets are required.                        |
 | `e2e`      | `tests/e2e/**/*.e2e.spec.ts`                                   | Real API + full local backend stack                         | Deep end-to-end flows that exercise the runtime (gateway + DB + scheduler). Requires the backend services running locally. |
 | Root tests | `tests/*.spec.ts` (auth, login, navigation, components, theme) | Real API (uses `user.json` state)                           | Browser-facing checks that don't fit neatly into smoke or e2e.                                                             |
 
 Each project has its own auth bootstrap:
 
-- `auth.setup.ts` — Auth0 Client-Credentials Grant; writes real token to `.auth/user.json`. Used by `setup`, `chromium`, `smoke`, `e2e`.
+- `auth.setup.ts` — Auth0 Client-Credentials Grant; writes real token to `.auth/user.json`. Used by `setup`, `chromium`, `e2e`, and `smoke` only when `E2E_SMOKE_AUTH_MODE` / `VITE_RUNTARA_AUTH_MODE` is not `local` or `trust_proxy`.
 - `auth.mocked.setup.ts` — synthesizes a structurally valid but unsigned JWT and writes it to `.auth/mocked-user.json`. No network calls. Used by `mocked`.
 
 ## Running
@@ -26,7 +26,7 @@ npm run test:e2e:mocked
 npm run test:e2e:mocked:headed       # watch in a browser
 npm run test:e2e:mocked:update       # regenerate visual snapshots
 
-# Real-API smoke (needs .env.local with Auth0 secrets)
+# Real-API smoke. Set E2E_SMOKE_AUTH_MODE=local when the target accepts local/trust-proxy auth.
 npm run test:e2e:smoke
 
 # Full-stack e2e (needs local gateway + backend stack)
@@ -117,7 +117,7 @@ The token is read from `.auth/user.json` (set by `auth.setup.ts`). Seeded entiti
 ## CI
 
 - `.github/workflows/pr-checks.yml` — runs `lint`, `typecheck`, `unit`, `build`, `e2e-mocked` on every PR against `main`. All five jobs must pass. **The user needs to mark these as required status checks in GitHub branch-protection settings** (UI action, not a repo file).
-- `.github/workflows/smoke-tests.yml` — scheduled daily + manual dispatch. Runs the `smoke` project against real production/staging auth. Not a PR gate.
+- `.github/workflows/smoke-tests.yml` — push to `main`, scheduled daily, and manual dispatch. Runs the `smoke` project against a real API in local auth mode. Not a PR gate.
 
 ## Directory layout
 

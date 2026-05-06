@@ -21,6 +21,10 @@ on:
 
 env:
   VITE_RUNTARA_API_BASE_URL: ${{ vars.VITE_RUNTARA_API_BASE_URL }}
+  VITE_RUNTARA_AUTH_MODE: local
+  VITE_RUNTARA_TENANT_ID: ${{ vars.VITE_RUNTARA_TENANT_ID || 'Organity' }}
+  VITE_STRIP_ORG_ID: "true"
+  E2E_SMOKE_AUTH_MODE: local
 
 jobs:
   smoke-tests:
@@ -51,27 +55,16 @@ jobs:
 
       - name: Build application
         run: npm run build
-        env:
-          VITE_RUNTARA_API_BASE_URL: ${{ env.VITE_RUNTARA_API_BASE_URL }}
-          VITE_OIDC_AUTHORITY: ${{ secrets.VITE_OIDC_AUTHORITY }}
-          VITE_OIDC_CLIENT_ID: ${{ secrets.VITE_OIDC_CLIENT_ID }}
-          VITE_OIDC_AUDIENCE: ${{ secrets.VITE_OIDC_AUDIENCE }}
 
       - name: Start preview server
         run: |
-          npm run preview -- --port 4173 &
-          npx wait-on http://localhost:4173 --timeout 60000
+          npm run preview -- --port 8081 &
+          npx wait-on http://localhost:8081 --timeout 60000
 
       - name: Run smoke tests
         run: npm run test:e2e:smoke
         env:
-          PLAYWRIGHT_BASE_URL: http://localhost:4173
-          VITE_OIDC_AUTHORITY: ${{ secrets.VITE_OIDC_AUTHORITY }}
-          VITE_OIDC_CLIENT_ID: ${{ secrets.VITE_OIDC_CLIENT_ID }}
-          VITE_OIDC_AUDIENCE: ${{ secrets.VITE_OIDC_AUDIENCE }}
-          TEST_APP_CLIENT_ID: ${{ secrets.TEST_APP_CLIENT_ID }}
-          TEST_APP_CLIENT_SECRET: ${{ secrets.TEST_APP_CLIENT_SECRET }}
-          TEST_ORG_ID: ${{ secrets.TEST_ORG_ID }}
+          PLAYWRIGHT_BASE_URL: http://localhost:8081
           CI: "true"
 
       - name: Upload test results
