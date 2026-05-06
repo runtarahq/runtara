@@ -134,7 +134,7 @@ impl SmoMcpServer {
     }
 
     #[tool(
-        description = "Deploy a workflow in one step: update graph → compile → set as current version. Automatically detects EmbedWorkflow steps and compiles child workflows first (cascading). Returns version, binary size, child compilation info, and any warnings."
+        description = "Deploy a workflow in one step: update graph → compile → set as current version. Validates EmbedWorkflow child references; children are embedded during parent compilation rather than compiled separately. Returns version, binary size, child dependency info, and any warnings."
     )]
     async fn deploy_workflow(
         &self,
@@ -144,7 +144,7 @@ impl SmoMcpServer {
     }
 
     #[tool(
-        description = "Compile and deploy the latest (or specified) version of a workflow. Validates graph and mappings, cascade-compiles child workflows, then compiles and sets as current. Use after building the graph with mutation tools (add_agent_step, set_mapping, etc.)."
+        description = "Compile and deploy the latest (or specified) version of a workflow. Validates graph, mappings, and EmbedWorkflow child references, then compiles and sets as current. Embedded children are compiled into the parent artifact, not compiled separately. Use after building the graph with mutation tools (add_agent_step, set_mapping, etc.)."
     )]
     async fn deploy_latest(
         &self,
