@@ -534,6 +534,78 @@ struct ChildWorkflowRef {
     child_version: String,
 }
 
+async fn validate_child_workflow_refs(
+    server: &SmoMcpServer,
+    child_refs: &[ChildWorkflowRef],
+) -> Result<Vec<serde_json::Value>, rmcp::ErrorData> {
+    let mut child_dependencies = Vec::new();
+    let mut seen_children = std::collections::BTreeMap::<(String, String), Vec<String>>::new();
+
+    for child_ref in child_refs {
+        seen_children
+            .entry((
+                child_ref.child_workflow_id.clone(),
+                child_ref.child_version.clone(),
+            ))
+            .or_default()
+            .push(child_ref.step_id.clone());
+    }
+
+    for ((child_workflow_id, child_version), step_ids) in seen_children {
+        validate_path_param("child_workflow_id", &child_workflow_id)?;
+
+        let child_result = api_get(
+            server,
+            &format!("/api/runtime/workflows/{}", child_workflow_id),
+        )
+        .await
+        .map_err(|_| {
+            err(format!(
+                "Child workflow '{}' (referenced by EmbedWorkflow step '{}') not found. \
+                 Deploy the child workflow first, then retry deploying the parent.",
+                child_workflow_id,
+                step_ids.first().map(String::as_str).unwrap_or("unknown")
+            ))
+        })?;
+
+        let resolved_version =
+            resolve_child_version(&child_version, &child_result).ok_or_else(|| {
+                err(format!(
+                    "Cannot resolve version '{}' for child workflow '{}'. \
+                 The child workflow may not have a '{}' version set.",
+                    child_version, child_workflow_id, child_version
+                ))
+            })?;
+
+        let _ = api_get(
+            server,
+            &format!(
+                "/api/runtime/workflows/{}?versionNumber={}",
+                child_workflow_id, resolved_version
+            ),
+        )
+        .await
+        .map_err(|_| {
+            err(format!(
+                "Child workflow '{}' version {} (requested as '{}') not found. \
+                 Fix the EmbedWorkflow reference, then retry deploying the parent.",
+                child_workflow_id, resolved_version, child_version
+            ))
+        })?;
+
+        child_dependencies.push(serde_json::json!({
+            "childWorkflowId": child_workflow_id,
+            "requestedVersion": child_version,
+            "resolvedVersion": resolved_version,
+            "stepIds": step_ids,
+            "mode": "embedded",
+            "compiledSeparately": false,
+        }));
+    }
+
+    Ok(child_dependencies)
+}
+
 /// Resolve a version string ("latest", "current", or numeric) against a workflow's metadata.
 fn resolve_child_version(version_str: &str, workflow_data: &serde_json::Value) -> Option<i32> {
     match version_str {
@@ -584,68 +656,11 @@ pub async fn deploy_workflow(
         }));
     }
 
-    // Step 0b: Detect and validate child workflow references (EmbedWorkflow steps)
+    // Step 0b: Detect and validate child workflow references (EmbedWorkflow steps).
+    // Children are embedded from their definitions during parent compilation, so
+    // they do not need standalone compilation before deploying the parent.
     let child_refs = extract_child_refs(&params.execution_graph);
-    let mut child_compilations = Vec::new();
-
-    if !child_refs.is_empty() {
-        // Deduplicate by child_workflow_id (multiple steps may reference the same child)
-        let mut seen_children = std::collections::HashSet::new();
-
-        for child_ref in &child_refs {
-            if !seen_children.insert(child_ref.child_workflow_id.clone()) {
-                continue; // Already handled this child
-            }
-
-            // Validate child workflow exists
-            let child_result = api_get(
-                server,
-                &format!("/api/runtime/workflows/{}", child_ref.child_workflow_id),
-            )
-            .await
-            .map_err(|_| {
-                err(format!(
-                    "Child workflow '{}' (referenced by EmbedWorkflow step '{}') not found. \
-                     Deploy the child workflow first, then retry deploying the parent.",
-                    child_ref.child_workflow_id, child_ref.step_id
-                ))
-            })?;
-
-            // Resolve version
-            let resolved_version = resolve_child_version(&child_ref.child_version, &child_result)
-                .ok_or_else(|| {
-                err(format!(
-                    "Cannot resolve version '{}' for child workflow '{}'. \
-                     The child workflow may not have a '{}' version set.",
-                    child_ref.child_version, child_ref.child_workflow_id, child_ref.child_version
-                ))
-            })?;
-
-            // Compile child workflow (skips if already compiled)
-            let child_compile = api_post(
-                server,
-                &format!(
-                    "/api/runtime/workflows/{}/versions/{}/compile?forceRecompile=true",
-                    child_ref.child_workflow_id, resolved_version
-                ),
-                None,
-            )
-            .await
-            .map_err(|e| {
-                err(format!(
-                    "Failed to compile child workflow '{}' version {}: {}. \
-                     Fix the child workflow first, then retry deploying the parent.",
-                    child_ref.child_workflow_id, resolved_version, e
-                ))
-            })?;
-
-            child_compilations.push(serde_json::json!({
-                "childWorkflowId": child_ref.child_workflow_id,
-                "version": resolved_version,
-                "status": if child_compile.get("imageId").is_some() { "compiled" } else { "unknown" },
-            }));
-        }
-    }
+    let child_dependencies = validate_child_workflow_refs(server, &child_refs).await?;
 
     // Step 1: Update parent workflow
     let update_body = serde_json::json!({
@@ -697,10 +712,11 @@ pub async fn deploy_workflow(
         "warnings": update_result.get("warnings"),
     });
 
-    if !child_compilations.is_empty() {
+    if !child_dependencies.is_empty() {
         response["childWorkflows"] = serde_json::json!({
-            "count": child_compilations.len(),
-            "compilations": child_compilations,
+            "count": child_dependencies.len(),
+            "dependencies": child_dependencies,
+            "compiledSeparately": false,
         });
     }
 
@@ -799,60 +815,11 @@ pub async fn deploy_latest(
         }));
     }
 
-    // Cascade-compile child workflows
+    // Validate embedded child workflow references. Parent compilation loads child
+    // definitions and emits them into the parent binary, so standalone child
+    // compilation is not required here.
     let child_refs = extract_child_refs(&graph);
-    let mut child_compilations = Vec::new();
-
-    if !child_refs.is_empty() {
-        let mut seen_children = std::collections::HashSet::new();
-        for child_ref in &child_refs {
-            if !seen_children.insert(child_ref.child_workflow_id.clone()) {
-                continue;
-            }
-
-            let child_result = api_get(
-                server,
-                &format!("/api/runtime/workflows/{}", child_ref.child_workflow_id),
-            )
-            .await
-            .map_err(|_| {
-                err(format!(
-                    "Child workflow '{}' (step '{}') not found. Deploy it first.",
-                    child_ref.child_workflow_id, child_ref.step_id
-                ))
-            })?;
-
-            let resolved_version = resolve_child_version(&child_ref.child_version, &child_result)
-                .ok_or_else(|| {
-                err(format!(
-                    "Cannot resolve version '{}' for child workflow '{}'",
-                    child_ref.child_version, child_ref.child_workflow_id
-                ))
-            })?;
-
-            let child_compile = api_post(
-                server,
-                &format!(
-                    "/api/runtime/workflows/{}/versions/{}/compile?forceRecompile=true",
-                    child_ref.child_workflow_id, resolved_version
-                ),
-                None,
-            )
-            .await
-            .map_err(|e| {
-                err(format!(
-                    "Failed to compile child workflow '{}' version {}: {}",
-                    child_ref.child_workflow_id, resolved_version, e
-                ))
-            })?;
-
-            child_compilations.push(serde_json::json!({
-                "childWorkflowId": child_ref.child_workflow_id,
-                "version": resolved_version,
-                "status": if child_compile.get("imageId").is_some() { "compiled" } else { "unknown" },
-            }));
-        }
-    }
+    let child_dependencies = validate_child_workflow_refs(server, &child_refs).await?;
 
     // Compile
     let compile_result = api_post(
@@ -891,10 +858,11 @@ pub async fn deploy_latest(
         },
     });
 
-    if !child_compilations.is_empty() {
+    if !child_dependencies.is_empty() {
         response["childWorkflows"] = serde_json::json!({
-            "count": child_compilations.len(),
-            "compilations": child_compilations,
+            "count": child_dependencies.len(),
+            "dependencies": child_dependencies,
+            "compiledSeparately": false,
         });
     }
 
