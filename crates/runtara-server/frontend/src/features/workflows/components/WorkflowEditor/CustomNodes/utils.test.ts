@@ -1,6 +1,15 @@
 import { describe, it, expect } from 'vitest';
-import { composeExecutionGraph, executionGraphToReactFlow } from './utils.tsx';
+import type { Edge, Node } from '@xyflow/react';
+import {
+  composeExecutionGraph,
+  executionGraphToReactFlow,
+  getLayoutedElements,
+} from './utils.tsx';
 import type { ExecutionGraphDto } from '@/features/workflows/types/execution-graph';
+import {
+  NODE_TYPE_SIZES,
+  NODE_TYPES,
+} from '@/features/workflows/config/workflow.ts';
 
 /**
  * Round-trip tests for the workflow editor's save/load conversion.
@@ -41,6 +50,95 @@ function roundTripStep(graph: ExecutionGraphDto & { entryPoint: string }) {
   expect(round).not.toBeNull();
   const stepId = graph.entryPoint;
   return (round!.steps as Record<string, any>)[stepId];
+}
+
+function makeLayoutNode(
+  id: string,
+  type = NODE_TYPES.BasicNode,
+  parentId?: string
+): Node {
+  const size = NODE_TYPE_SIZES[type] ?? NODE_TYPE_SIZES[NODE_TYPES.BasicNode];
+  const stepType =
+    type === NODE_TYPES.ConditionalNode
+      ? 'Conditional'
+      : type === NODE_TYPES.ContainerNode
+        ? 'Split'
+        : 'Agent';
+
+  return {
+    id,
+    type,
+    parentId,
+    position: { x: 0, y: 0 },
+    data: {
+      id,
+      name: id,
+      stepType,
+    },
+    width: size.width,
+    height: size.height,
+    style: {
+      width: size.width,
+      height: size.height,
+    },
+  } as Node;
+}
+
+function makeLayoutEdge(
+  id: string,
+  source: string,
+  target: string,
+  sourceHandle = 'source'
+): Edge {
+  return {
+    id,
+    source,
+    target,
+    sourceHandle,
+  } as Edge;
+}
+
+function getLayoutNode(nodes: Node[], id: string): Node {
+  const node = nodes.find((item) => item.id === id);
+  expect(node).toBeDefined();
+  return node!;
+}
+
+function getLayoutSize(node: Node): { width: number; height: number } {
+  return {
+    width:
+      (node.style?.width as number | undefined) ??
+      (node.width as number | undefined) ??
+      NODE_TYPE_SIZES[NODE_TYPES.BasicNode].width,
+    height:
+      (node.style?.height as number | undefined) ??
+      (node.height as number | undefined) ??
+      NODE_TYPE_SIZES[NODE_TYPES.BasicNode].height,
+  };
+}
+
+function nodesOverlap(a: Node, b: Node): boolean {
+  const aSize = getLayoutSize(a);
+  const bSize = getLayoutSize(b);
+
+  return (
+    a.position.x < b.position.x + bSize.width &&
+    a.position.x + aSize.width > b.position.x &&
+    a.position.y < b.position.y + bSize.height &&
+    a.position.y + aSize.height > b.position.y
+  );
+}
+
+function expectNoSiblingOverlaps(nodes: Node[]): void {
+  for (let i = 0; i < nodes.length; i++) {
+    for (let j = i + 1; j < nodes.length; j++) {
+      const a = nodes[i];
+      const b = nodes[j];
+      if ((a.parentId ?? 'root') !== (b.parentId ?? 'root')) continue;
+
+      expect(nodesOverlap(a, b), `${a.id} overlaps ${b.id}`).toBe(false);
+    }
+  }
 }
 
 describe('MappingValue round-trip', () => {
@@ -649,5 +747,245 @@ describe('Split variable round-trip', () => {
       value: 'data.items',
       type: 'json',
     });
+  });
+});
+
+describe('Workflow canvas auto-layout', () => {
+  it('keeps a branching graph topologically left-to-right without sibling overlaps', () => {
+    const nodes = [
+      makeLayoutNode('start'),
+      makeLayoutNode('check', NODE_TYPES.ConditionalNode),
+      makeLayoutNode('true-a'),
+      makeLayoutNode('false-a'),
+      makeLayoutNode('true-b'),
+      makeLayoutNode('false-b'),
+      makeLayoutNode('join'),
+      makeLayoutNode('finish'),
+    ];
+    const edges = [
+      makeLayoutEdge('start-check', 'start', 'check'),
+      makeLayoutEdge('check-true', 'check', 'true-a', 'true'),
+      makeLayoutEdge('check-false', 'check', 'false-a', 'false'),
+      makeLayoutEdge('true-a-true-b', 'true-a', 'true-b'),
+      makeLayoutEdge('false-a-false-b', 'false-a', 'false-b'),
+      makeLayoutEdge('true-b-join', 'true-b', 'join'),
+      makeLayoutEdge('false-b-join', 'false-b', 'join'),
+      makeLayoutEdge('join-finish', 'join', 'finish'),
+    ];
+
+    const { nodes: layoutedNodes } = getLayoutedElements(nodes, edges);
+
+    expectNoSiblingOverlaps(layoutedNodes);
+
+    const start = getLayoutNode(layoutedNodes, 'start');
+    const check = getLayoutNode(layoutedNodes, 'check');
+    const trueA = getLayoutNode(layoutedNodes, 'true-a');
+    const falseA = getLayoutNode(layoutedNodes, 'false-a');
+    const trueB = getLayoutNode(layoutedNodes, 'true-b');
+    const falseB = getLayoutNode(layoutedNodes, 'false-b');
+    const join = getLayoutNode(layoutedNodes, 'join');
+    const finish = getLayoutNode(layoutedNodes, 'finish');
+
+    expect(start.position.x).toBeLessThan(check.position.x);
+    expect(check.position.x).toBeLessThan(trueA.position.x);
+    expect(check.position.x).toBeLessThan(falseA.position.x);
+    expect(trueA.position.x).toBeLessThan(trueB.position.x);
+    expect(falseA.position.x).toBeLessThan(falseB.position.x);
+    expect(trueB.position.x).toBeLessThan(join.position.x);
+    expect(falseB.position.x).toBeLessThan(join.position.x);
+    expect(join.position.x).toBeLessThan(finish.position.x);
+
+    expect(trueA.position.y).toBeLessThan(falseA.position.y);
+    expect(trueB.position.y).toBeLessThan(falseB.position.y);
+  });
+
+  it('places exclusive true-path nodes above the branch source', () => {
+    const nodes = [
+      makeLayoutNode('start'),
+      makeLayoutNode('check', NODE_TYPES.ConditionalNode),
+      makeLayoutNode('review'),
+      makeLayoutNode('approved', NODE_TYPES.ConditionalNode),
+      makeLayoutNode('continue'),
+      makeLayoutNode('reject'),
+      makeLayoutNode('finish'),
+    ];
+    const edges = [
+      makeLayoutEdge('start-check', 'start', 'check'),
+      makeLayoutEdge('check-review', 'check', 'review', 'true'),
+      makeLayoutEdge('check-continue', 'check', 'continue', 'false'),
+      makeLayoutEdge('review-approved', 'review', 'approved'),
+      makeLayoutEdge('approved-continue', 'approved', 'continue', 'true'),
+      makeLayoutEdge('approved-reject', 'approved', 'reject', 'false'),
+      makeLayoutEdge('continue-finish', 'continue', 'finish'),
+    ];
+
+    const { nodes: layoutedNodes } = getLayoutedElements(nodes, edges);
+
+    expectNoSiblingOverlaps(layoutedNodes);
+    expect(getLayoutNode(layoutedNodes, 'review').position.y).toBeLessThan(
+      getLayoutNode(layoutedNodes, 'check').position.y
+    );
+    expect(getLayoutNode(layoutedNodes, 'approved').position.y).toBeLessThan(
+      getLayoutNode(layoutedNodes, 'check').position.y
+    );
+    expect(getLayoutNode(layoutedNodes, 'continue').position.y).toBeLessThan(
+      getLayoutNode(layoutedNodes, 'reject').position.y
+    );
+  });
+
+  it('keeps nested true branches above an already-biased branch source', () => {
+    const nodes = [
+      makeLayoutNode('start'),
+      makeLayoutNode('outer-check', NODE_TYPES.ConditionalNode),
+      makeLayoutNode('inner-check', NODE_TYPES.ConditionalNode),
+      makeLayoutNode('outer-false'),
+      makeLayoutNode('inner-true'),
+      makeLayoutNode('inner-false'),
+      makeLayoutNode('finish'),
+    ];
+    const edges = [
+      makeLayoutEdge('start-outer', 'start', 'outer-check'),
+      makeLayoutEdge('outer-inner', 'outer-check', 'inner-check', 'true'),
+      makeLayoutEdge('outer-false', 'outer-check', 'outer-false', 'false'),
+      makeLayoutEdge('inner-true', 'inner-check', 'inner-true', 'true'),
+      makeLayoutEdge('inner-false', 'inner-check', 'inner-false', 'false'),
+      makeLayoutEdge('inner-true-finish', 'inner-true', 'finish'),
+      makeLayoutEdge('inner-false-finish', 'inner-false', 'finish'),
+      makeLayoutEdge('outer-false-finish', 'outer-false', 'finish'),
+    ];
+
+    const { nodes: layoutedNodes } = getLayoutedElements(nodes, edges);
+
+    expectNoSiblingOverlaps(layoutedNodes);
+    expect(getLayoutNode(layoutedNodes, 'inner-check').position.y).toBeLessThan(
+      getLayoutNode(layoutedNodes, 'outer-check').position.y
+    );
+    expect(getLayoutNode(layoutedNodes, 'inner-true').position.y).toBeLessThan(
+      getLayoutNode(layoutedNodes, 'inner-check').position.y
+    );
+    expect(getLayoutNode(layoutedNodes, 'inner-true').position.y).toBeLessThan(
+      getLayoutNode(layoutedNodes, 'inner-false').position.y
+    );
+  });
+
+  it('left-aligns small siblings in a column with a wide container', () => {
+    const nodes = [
+      makeLayoutNode('start'),
+      makeLayoutNode('screen', NODE_TYPES.ConditionalNode),
+      makeLayoutNode('review'),
+      makeLayoutNode('approved', NODE_TYPES.ConditionalNode),
+      makeLayoutNode('split', NODE_TYPES.ContainerNode),
+      makeLayoutNode('reject'),
+      makeLayoutNode('finish'),
+      makeLayoutNode('child-1', NODE_TYPES.BasicNode, 'split'),
+      makeLayoutNode('child-2', NODE_TYPES.BasicNode, 'split'),
+      makeLayoutNode('child-3', NODE_TYPES.BasicNode, 'split'),
+      makeLayoutNode('child-4', NODE_TYPES.BasicNode, 'split'),
+      makeLayoutNode('child-5', NODE_TYPES.BasicNode, 'split'),
+    ];
+    const edges = [
+      makeLayoutEdge('start-screen', 'start', 'screen'),
+      makeLayoutEdge('screen-review', 'screen', 'review', 'true'),
+      makeLayoutEdge('screen-split', 'screen', 'split', 'false'),
+      makeLayoutEdge('review-approved', 'review', 'approved'),
+      makeLayoutEdge('approved-split', 'approved', 'split', 'true'),
+      makeLayoutEdge('approved-reject', 'approved', 'reject', 'false'),
+      makeLayoutEdge('split-finish', 'split', 'finish'),
+      makeLayoutEdge('child-1-child-2', 'child-1', 'child-2'),
+      makeLayoutEdge('child-2-child-3', 'child-2', 'child-3'),
+      makeLayoutEdge('child-3-child-4', 'child-3', 'child-4'),
+      makeLayoutEdge('child-4-child-5', 'child-4', 'child-5'),
+    ];
+
+    const { nodes: layoutedNodes } = getLayoutedElements(nodes, edges);
+    const split = getLayoutNode(layoutedNodes, 'split');
+    const reject = getLayoutNode(layoutedNodes, 'reject');
+
+    expectNoSiblingOverlaps(layoutedNodes);
+    expect(getLayoutSize(split).width).toBeGreaterThan(
+      getLayoutSize(reject).width * 2
+    );
+    expect(reject.position.x).toBe(split.position.x);
+  });
+
+  it('spreads multi-way switch routes into ordered vertical lanes', () => {
+    const nodes = [
+      makeLayoutNode('route', NODE_TYPES.SwitchNode),
+      makeLayoutNode('case-0-step'),
+      makeLayoutNode('case-1-step'),
+      makeLayoutNode('case-2-step'),
+      makeLayoutNode('default-step'),
+      makeLayoutNode('finish'),
+    ];
+    const edges = [
+      makeLayoutEdge('route-case-0', 'route', 'case-0-step', 'case-0'),
+      makeLayoutEdge('route-case-1', 'route', 'case-1-step', 'case-1'),
+      makeLayoutEdge('route-case-2', 'route', 'case-2-step', 'case-2'),
+      makeLayoutEdge('route-default', 'route', 'default-step', 'default'),
+      makeLayoutEdge('case-0-finish', 'case-0-step', 'finish'),
+      makeLayoutEdge('case-1-finish', 'case-1-step', 'finish'),
+      makeLayoutEdge('case-2-finish', 'case-2-step', 'finish'),
+      makeLayoutEdge('default-finish', 'default-step', 'finish'),
+    ];
+
+    const { nodes: layoutedNodes } = getLayoutedElements(nodes, edges);
+
+    expectNoSiblingOverlaps(layoutedNodes);
+    expect(getLayoutNode(layoutedNodes, 'case-0-step').position.y).toBeLessThan(
+      getLayoutNode(layoutedNodes, 'case-1-step').position.y
+    );
+    expect(getLayoutNode(layoutedNodes, 'case-1-step').position.y).toBeLessThan(
+      getLayoutNode(layoutedNodes, 'case-2-step').position.y
+    );
+    expect(getLayoutNode(layoutedNodes, 'case-2-step').position.y).toBeLessThan(
+      getLayoutNode(layoutedNodes, 'default-step').position.y
+    );
+    expect(
+      getLayoutNode(layoutedNodes, 'default-step').position.y -
+        getLayoutNode(layoutedNodes, 'case-0-step').position.y
+    ).toBeLessThan(300);
+  });
+
+  it('lays out container children without overlaps and expands the parent', () => {
+    const nodes = [
+      makeLayoutNode('split', NODE_TYPES.ContainerNode),
+      makeLayoutNode('inner-check', NODE_TYPES.ConditionalNode, 'split'),
+      makeLayoutNode('inner-true', NODE_TYPES.BasicNode, 'split'),
+      makeLayoutNode('inner-false', NODE_TYPES.BasicNode, 'split'),
+      makeLayoutNode('inner-join', NODE_TYPES.BasicNode, 'split'),
+      makeLayoutNode('finish'),
+    ];
+    const edges = [
+      makeLayoutEdge('split-finish', 'split', 'finish'),
+      makeLayoutEdge('inner-check-true', 'inner-check', 'inner-true', 'true'),
+      makeLayoutEdge(
+        'inner-check-false',
+        'inner-check',
+        'inner-false',
+        'false'
+      ),
+      makeLayoutEdge('inner-true-join', 'inner-true', 'inner-join'),
+      makeLayoutEdge('inner-false-join', 'inner-false', 'inner-join'),
+    ];
+
+    const { nodes: layoutedNodes } = getLayoutedElements(nodes, edges);
+    const children = layoutedNodes.filter((node) => node.parentId === 'split');
+
+    expectNoSiblingOverlaps(layoutedNodes);
+    expect(getLayoutNode(layoutedNodes, 'inner-true').position.y).toBeLessThan(
+      getLayoutNode(layoutedNodes, 'inner-false').position.y
+    );
+
+    const split = getLayoutNode(layoutedNodes, 'split');
+    const splitSize = getLayoutSize(split);
+    const childRight = Math.max(
+      ...children.map((node) => node.position.x + getLayoutSize(node).width)
+    );
+    const childBottom = Math.max(
+      ...children.map((node) => node.position.y + getLayoutSize(node).height)
+    );
+
+    expect(splitSize.width).toBeGreaterThan(childRight);
+    expect(splitSize.height).toBeGreaterThan(childBottom);
   });
 });

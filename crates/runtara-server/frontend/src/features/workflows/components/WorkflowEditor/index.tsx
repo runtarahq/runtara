@@ -597,17 +597,19 @@ function WorkflowEditorContent({
     [edges, hiddenEdgeIds]
   );
 
-  const layoutedCanvasNodes = useMemo(() => {
-    const { nodes: layoutedNodes } = getLayoutedElements(
-      visibleCanvasNodes,
-      visibleCanvasEdges
-    );
+  const layoutedCanvas = useMemo(() => {
+    const layout = getLayoutedElements(visibleCanvasNodes, visibleCanvasEdges);
 
-    return layoutedNodes.map((node) => ({
-      ...node,
-      draggable: false,
-    }));
+    return {
+      nodes: layout.nodes.map((node) => ({
+        ...node,
+        draggable: false,
+      })),
+      edgeRoutes: layout.edgeRoutes ?? {},
+    };
   }, [visibleCanvasEdges, visibleCanvasNodes]);
+  const layoutedCanvasNodes = layoutedCanvas.nodes;
+  const layoutedCanvasEdgeRoutes = layoutedCanvas.edgeRoutes;
 
   const entryPointNode = entryPointId
     ? layoutedCanvasNodes.find((n) => n.id === entryPointId)
@@ -1787,6 +1789,7 @@ function WorkflowEditorContent({
               <EdgeContextProvider
                 onInsertClick={handleEdgeInsertClick}
                 allEdges={edges}
+                edgeRoutes={layoutedCanvasEdgeRoutes}
               >
                 <ReactFlow
                   ref={ref}

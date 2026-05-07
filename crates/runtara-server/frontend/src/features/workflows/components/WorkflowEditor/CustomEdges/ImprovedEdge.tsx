@@ -11,9 +11,18 @@ import { Plus, Wrench, Brain } from 'lucide-react';
 import { Button } from '@/shared/components/ui/button';
 import { useExecutionStore } from '@/features/workflows/stores/executionStore';
 import { useEdgeContext } from './EdgeContext';
+import { shouldHideDuplicateEdgeLabel } from '../CustomNodes/layout';
 
 interface ImprovedEdgeProps extends EdgeProps {
   pathType?: 'bezier' | 'smoothstep' | 'straight';
+}
+
+function getOrthogonalPath(points: Array<{ x: number; y: number }>): string {
+  return points
+    .map((point, index) =>
+      index === 0 ? `M ${point.x},${point.y}` : `L ${point.x},${point.y}`
+    )
+    .join(' ');
 }
 
 export function ImprovedEdge({
@@ -31,7 +40,7 @@ export function ImprovedEdge({
   pathType = 'smoothstep',
   selected,
 }: ImprovedEdgeProps) {
-  const { onInsertClick, allEdges } = useEdgeContext();
+  const { onInsertClick, allEdges, edgeRoutes } = useEdgeContext();
   const [isHovered, setIsHovered] = useState(false);
 
   // Check if workflow is executing (read-only mode)
@@ -41,8 +50,17 @@ export function ImprovedEdge({
   let edgePath: string;
   let labelX: number;
   let labelY: number;
+  const routedEdge = edgeRoutes[id];
 
-  if (pathType === 'bezier') {
+  if (routedEdge?.points && routedEdge.points.length >= 2) {
+    edgePath = getOrthogonalPath(routedEdge.points);
+    labelX =
+      routedEdge.labelPoint?.x ??
+      routedEdge.points[Math.floor(routedEdge.points.length / 2)].x;
+    labelY =
+      routedEdge.labelPoint?.y ??
+      routedEdge.points[Math.floor(routedEdge.points.length / 2)].y;
+  } else if (pathType === 'bezier') {
     [edgePath, labelX, labelY] = getBezierPath({
       sourceX,
       sourceY,
@@ -112,22 +130,21 @@ export function ImprovedEdge({
     !sourceHandleId.startsWith('case-') &&
     sourceHandleId !== 'memory';
 
-  const label =
-    sourceHandleId === 'true'
+  const label = shouldHideDuplicateEdgeLabel({
+    sourceHandle: sourceHandleId,
+  })
+    ? ''
+    : sourceHandleId === 'true'
       ? 'True'
       : sourceHandleId === 'false'
         ? 'False'
         : sourceHandleId === 'onError'
           ? 'Error'
-          : sourceHandleId === 'default'
-            ? 'Default'
-            : sourceHandleId?.startsWith('case-')
-              ? `Case ${parseInt(sourceHandleId.split('-')[1], 10) + 1}`
-              : isMemoryEdge
-                ? 'memory'
-                : isToolEdge
-                  ? sourceHandleId
-                  : '';
+          : isMemoryEdge
+            ? 'memory'
+            : isToolEdge
+              ? sourceHandleId
+              : '';
 
   const isDark = document.documentElement.classList.contains('dark');
   const isSwitchCase = sourceHandleId?.startsWith('case-');
@@ -255,10 +272,10 @@ export function ImprovedEdge({
   // Use full opacity for better performance
   const opacity = 1;
 
-  // Position labels on the last segment of the edge (closest to target).
-  // The label's right edge sits at a fixed gap from the target node.
-  const LABEL_GAP_FROM_TARGET = 20;
-  const lastSegLabel = useMemo(() => {
+  // Position route labels near the source handle so they identify the branch
+  // without colliding with the target card or its left handle.
+  const LABEL_GAP_FROM_SOURCE = 24;
+  const sourceSegLabel = useMemo(() => {
     if (!label) return { x: labelX, y: labelY };
 
     try {
@@ -271,7 +288,7 @@ export function ImprovedEdge({
 
       if (totalLen < 40) return { x: labelX, y: labelY };
 
-      const at = Math.max(0, totalLen - LABEL_GAP_FROM_TARGET);
+      const at = Math.min(totalLen, LABEL_GAP_FROM_SOURCE);
       const pt = path.getPointAtLength(at);
       return { x: pt.x, y: pt.y };
     } catch {
@@ -330,7 +347,7 @@ export function ImprovedEdge({
           <div
             style={{
               position: 'absolute',
-              transform: `translate(-100%, -50%) translate(${lastSegLabel.x}px,${lastSegLabel.y + labelYOffset}px)`,
+              transform: `translate(0, -50%) translate(${sourceSegLabel.x}px,${sourceSegLabel.y + labelYOffset}px)`,
               pointerEvents: 'all',
               zIndex: 1002,
             }}

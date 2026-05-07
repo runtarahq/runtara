@@ -117,10 +117,9 @@ export default defineConfig({
           if (/node_modules\/@radix-ui\//.test(id)) return 'ui-vendor';
           if (/node_modules\/(react-hook-form|@hookform\/|zod)\//.test(id))
             return 'form-vendor';
-          // Workflow chunk: xyflow + dagre + their transitive deps (zustand/immer)
+          // Workflow chunk: xyflow and its transitive deps
           // to avoid circular chunks between workflow and state-vendor
-          if (/node_modules\/(@xyflow\/|@dagrejs\/dagre|dagre)\//.test(id))
-            return 'workflow';
+          if (/node_modules\/@xyflow\//.test(id)) return 'workflow';
           if (
             /node_modules\/(@tanstack\/react-query|@tanstack\/react-table|zustand|immer)\//.test(
               id
