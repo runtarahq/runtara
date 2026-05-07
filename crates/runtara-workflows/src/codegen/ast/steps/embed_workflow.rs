@@ -294,13 +294,16 @@ fn emit_with_embedded_child(
                 child_workflow_id: &str,
                 step_id: &str,
                 step_name: &str,
-                parent_scope_id: Option<String>,
-                parent_cache_prefix: Option<String>,
-                loop_indices_suffix: String,
-                parent_workflow_id: Option<String>,
-                parent_instance_id: Option<serde_json::Value>,
-                parent_tenant_id: Option<serde_json::Value>,
+                pec: __ParentEmbedContext,
             ) -> std::result::Result<serde_json::Value, String> {
+                let __ParentEmbedContext {
+                    parent_scope_id,
+                    parent_cache_prefix,
+                    loop_indices_suffix,
+                    parent_workflow_id,
+                    parent_instance_id,
+                    parent_tenant_id,
+                } = pec;
                 // Generate scope ID for this child workflow execution
                 let __child_scope_id = if let Some(ref parent) = parent_scope_id {
                     format!("{}_{}", parent, step_id)
@@ -372,19 +375,7 @@ fn emit_with_embedded_child(
 
                 // Check for interruption (cancel/pause) before executing child workflow
                 if runtara_sdk::is_cancelled() {
-                    let structured_error = serde_json::json!({
-                        "stepId": step_id,
-                        "stepName": step_name,
-                        "stepType": "EmbedWorkflow",
-                        "code": "STEP_INTERRUPTED",
-                        "message": format!("EmbedWorkflow step {} interrupted before execution", step_id),
-                        "category": "transient",
-                        "severity": "info",
-                        "childWorkflowId": child_workflow_id
-                    });
-                    return Err(serde_json::to_string(&structured_error).unwrap_or_else(|_| {
-                        format!("EmbedWorkflow step {} interrupted", step_id)
-                    }));
+                    return Err(__embed_step_interrupted_error(step_id, step_name, child_workflow_id, None));
                 }
 
                 // Create child workflow span for tracing
@@ -412,20 +403,7 @@ fn emit_with_embedded_child(
                         }
 
                         // For other errors (agent failures, etc.), wrap with CHILD_WORKFLOW_FAILED
-                        let structured_error = serde_json::json!({
-                            "stepId": step_id,
-                            "stepName": step_name,
-                            "stepType": "EmbedWorkflow",
-                            "code": "CHILD_WORKFLOW_FAILED",
-                            "message": format!("Child workflow {} failed", child_workflow_id),
-                            "category": child_error.get("category").and_then(|v| v.as_str()).unwrap_or("transient"),
-                            "severity": child_error.get("severity").and_then(|v| v.as_str()).unwrap_or("error"),
-                            "childWorkflowId": child_workflow_id,
-                            "childError": child_error
-                        });
-                        serde_json::to_string(&structured_error).unwrap_or_else(|_| {
-                            format!("Child workflow {} failed: {}", child_workflow_id, e)
-                        })
+                        __embed_child_failed_error(step_id, step_name, child_workflow_id, &child_error, &e)
                     })
                 })? ;
 
@@ -446,12 +424,7 @@ fn emit_with_embedded_child(
                 #child_workflow_id,
                 #step_id,
                 #step_name_display,
-                __parent_scope_id,
-                __parent_cache_prefix,
-                __loop_indices_suffix,
-                __parent_workflow_id,
-                __parent_instance_id,
-                __parent_tenant_id,
+                __pec,
             )
         }
     } else {
@@ -462,12 +435,7 @@ fn emit_with_embedded_child(
                 #child_workflow_id,
                 #step_id,
                 #step_name_display,
-                __parent_scope_id,
-                __parent_cache_prefix,
-                __loop_indices_suffix,
-                __parent_workflow_id,
-                __parent_instance_id,
-                __parent_tenant_id,
+                __pec,
             )
         }
     };
@@ -491,81 +459,14 @@ fn emit_with_embedded_child(
             #shared_runtime_validation_code
 
             // Build cache key dynamically, including prefix and loop indices
-        let __durable_cache_key = {
-            // Get prefix from parent context (set by parent EmbedWorkflow)
-            let prefix = (*#workflow_inputs_var.variables)
-                .as_object()
-                .and_then(|vars| vars.get("_cache_key_prefix"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-
-            let base = #cache_key_base;
-            let indices_suffix = (*#workflow_inputs_var.variables)
-                .as_object()
-                .and_then(|vars| vars.get("_loop_indices"))
-                .and_then(|v| v.as_array())
-                .filter(|arr| !arr.is_empty())
-                .map(|arr| {
-                    let indices: Vec<String> = arr.iter()
-                        .map(|v| v.to_string())
-                        .collect();
-                    format!("::[{}]", indices.join(","))
-                })
-                .unwrap_or_default();
-
-            if prefix.is_empty() {
-                format!("{}{}", base, indices_suffix)
-            } else {
-                format!("{}::{}{}", prefix, base, indices_suffix)
-            }
-        };
+        let __durable_cache_key =
+            __build_embed_cache_key(&*#workflow_inputs_var.variables, #cache_key_base);
 
         #durable_function_def
 
-        // Get parent_scope_id from parent workflow's variables
-        let __parent_scope_id = (*#workflow_inputs_var.variables)
-            .as_object()
-            .and_then(|vars| vars.get("_scope_id"))
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
-
-        // Get parent's cache key prefix from workflow variables
-        let __parent_cache_prefix = (*#workflow_inputs_var.variables)
-            .as_object()
-            .and_then(|vars| vars.get("_cache_key_prefix"))
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
-
-        // Get loop indices suffix for this EmbedWorkflow step
-        let __loop_indices_suffix = (*#workflow_inputs_var.variables)
-            .as_object()
-            .and_then(|vars| vars.get("_loop_indices"))
-            .and_then(|v| v.as_array())
-            .filter(|arr| !arr.is_empty())
-            .map(|arr| {
-                let indices: Vec<String> = arr.iter().map(|v| v.to_string()).collect();
-                format!("[{}]", indices.join(","))
-            })
-            .unwrap_or_default();
-
-        // Get parent's workflow ID for cache key uniqueness (prevents collision
-        // between independent top-level workflows with same step IDs)
-        let __parent_workflow_id = (*#workflow_inputs_var.variables)
-            .as_object()
-            .and_then(|vars| vars.get("_workflow_id"))
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
-
-        // Extract _instance_id and _tenant_id from parent variables so they can be
-        // passed as parameters to the durable fn (fn items cannot capture from outer scope)
-        let __parent_instance_id = (*#workflow_inputs_var.variables)
-            .as_object()
-            .and_then(|vars| vars.get("_instance_id"))
-            .cloned();
-        let __parent_tenant_id = (*#workflow_inputs_var.variables)
-            .as_object()
-            .and_then(|vars| vars.get("_tenant_id"))
-            .cloned();
+        // Hoisted: extract parent context (scope_id, cache_key_prefix, loop_indices,
+        // workflow_id, instance_id, tenant_id) from parent's variables in one pass.
+        let __pec = __extract_parent_embed_context(&*#workflow_inputs_var.variables);
 
         // Execute the durable child workflow function
         let #step_var = #execute_child_workflow? ;
@@ -578,20 +479,7 @@ fn emit_with_embedded_child(
             {
                 let mut __sdk = sdk().lock().unwrap();
                 if let Err(e) = __sdk.check_signals() {
-                    let structured_error = serde_json::json!({
-                        "stepId": #step_id,
-                        "stepName": #step_name_display,
-                        "stepType": "EmbedWorkflow",
-                        "code": "STEP_INTERRUPTED",
-                        "message": format!("EmbedWorkflow step {} interrupted: {}", #step_id, e),
-                        "category": "transient",
-                        "severity": "info",
-                        "childWorkflowId": #child_workflow_id,
-                        "reason": e.to_string()
-                    });
-                    return Err(serde_json::to_string(&structured_error).unwrap_or_else(|_| {
-                        format!("EmbedWorkflow step {}: {}", #step_id, e)
-                    }));
+                    return Err(__embed_step_interrupted_error(#step_id, #step_name_display, #child_workflow_id, Some(&e.to_string())));
                 }
             }
 
@@ -756,9 +644,9 @@ mod tests {
         // Child function name is now deterministic: child_{workflow_id}_{version}
         assert!(code.contains("child_child_workflow_id_1"));
 
-        // Should include cache key handling for loop indices
+        // Should include cache key handling for loop indices (via hoisted helper)
         assert!(code.contains("__durable_cache_key"));
-        assert!(code.contains("_loop_indices"));
+        assert!(code.contains("__build_embed_cache_key"));
     }
 
     #[test]
@@ -855,9 +743,9 @@ mod tests {
         assert!(code.contains("data"));
         assert!(code.contains("variables"));
 
-        // 4. Cache key with loop indices support
+        // 4. Cache key with loop indices support (via hoisted helper)
         assert!(code.contains("embed_workflow::"));
-        assert!(code.contains("_loop_indices"));
+        assert!(code.contains("__build_embed_cache_key"));
 
         // 5. Step result stored in context
         assert!(code.contains("steps_context"));
@@ -914,13 +802,13 @@ mod tests {
         let tokens = emit(&step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
-        // Result JSON should have expected structure
-        assert!(code.contains("stepId"));
-        assert!(code.contains("stepName"));
-        assert!(code.contains("stepType"));
-        assert!(code.contains("EmbedWorkflow"));
-        assert!(code.contains("childWorkflowId"));
-        assert!(code.contains("outputs"));
+        // Result JSON is built via the shared durable wrapper helper, which
+        // internally calls __embed_step_output_envelope (defined once globally
+        // and inserts stepId/stepName/stepType/childWorkflowId/outputs).
+        assert!(code.contains("__embed_workflow_durable_default"));
+        // The per-step emit still threads the child workflow id and step name through.
+        assert!(code.contains("child-workflow-id"));
+        assert!(code.contains("Test Step"));
     }
 
     #[test]
@@ -934,7 +822,7 @@ mod tests {
 
         // Should check for signals (cancel/pause) after child completes
         assert!(code.contains("check_signals"));
-        assert!(code.contains("STEP_INTERRUPTED"));
+        assert!(code.contains("__embed_step_interrupted_error"));
     }
 
     // =============================================================================
@@ -1104,11 +992,12 @@ mod tests {
         let tokens = emit(&step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
-        // Should handle loop indices in cache key
-        assert!(code.contains("_loop_indices"));
-        assert!(code.contains("indices_suffix"));
-        // The format! macro becomes code using std::format! or similar in TokenStream
-        assert!(code.contains("base") && code.contains("indices_suffix"));
+        // Should handle loop indices in cache key (via hoisted helper)
+        assert!(code.contains("__build_embed_cache_key"));
+        // Parent context extraction (including loop indices) is via hoisted helper
+        assert!(code.contains("__extract_parent_embed_context"));
+        // Loop indices propagation is via __pec into the helper
+        assert!(code.contains("__pec"));
     }
 
     // =============================================================================
@@ -1125,21 +1014,11 @@ mod tests {
         let tokens = emit(&step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
-        // Should emit structured error for child workflow failures
+        // Should emit structured error for child workflow failures via helper
         assert!(
-            code.contains("CHILD_WORKFLOW_FAILED"),
-            "Should include CHILD_WORKFLOW_FAILED error code"
+            code.contains("__embed_child_failed_error"),
+            "Should wrap child workflow failures via __embed_child_failed_error helper"
         );
-        assert!(
-            code.contains("structured_error"),
-            "Should build structured error"
-        );
-        assert!(
-            code.contains("childError"),
-            "Should include child error details"
-        );
-        assert!(code.contains("category"), "Should include error category");
-        assert!(code.contains("severity"), "Should include error severity");
     }
 
     #[test]
@@ -1191,15 +1070,10 @@ mod tests {
             code.contains("serde_json :: from_str"),
             "Should parse child error as JSON"
         );
-        // Should propagate child error category
+        // Should wrap via helper which performs category/severity extraction
         assert!(
-            code.contains("child_error . get (\"category\")"),
-            "Should extract child error category"
-        );
-        // Should propagate child error severity
-        assert!(
-            code.contains("child_error . get (\"severity\")"),
-            "Should extract child error severity"
+            code.contains("__embed_child_failed_error"),
+            "Should wrap child workflow failures via __embed_child_failed_error helper"
         );
     }
 
@@ -1287,10 +1161,11 @@ mod tests {
         let tokens = emit(&step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
-        // Verify parent prefix is read from variables
+        // Verify parent prefix is read from variables (via hoisted helper that
+        // returns a __ParentEmbedContext containing parent_cache_prefix).
         assert!(
-            code.contains("__parent_cache_prefix"),
-            "Generated code must extract __parent_cache_prefix from parent variables"
+            code.contains("__extract_parent_embed_context"),
+            "Generated code must extract parent context (including parent_cache_prefix) via hoisted helper"
         );
     }
 
@@ -1303,11 +1178,11 @@ mod tests {
         let tokens = emit(&step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
-        // Verify EmbedWorkflow's own cache key reads _cache_key_prefix
-        // The code should contain the prefix reading logic for the durable cache key
+        // Verify EmbedWorkflow's own cache key reads parent prefix via hoisted helper
+        // (the helper __build_embed_cache_key is defined once and reads _cache_key_prefix internally)
         assert!(
-            code.contains("_cache_key_prefix") && code.contains("__durable_cache_key"),
-            "EmbedWorkflow's own cache key must include parent prefix"
+            code.contains("__build_embed_cache_key") && code.contains("__durable_cache_key"),
+            "EmbedWorkflow's own cache key must be built via __build_embed_cache_key helper"
         );
     }
 
@@ -1326,10 +1201,11 @@ mod tests {
         let tokens = emit(&step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
-        // Should extract __parent_workflow_id from parent's variables
+        // Should extract parent workflow_id via hoisted helper
+        // (__extract_parent_embed_context returns parent_workflow_id field).
         assert!(
-            code.contains("__parent_workflow_id"),
-            "Should extract __parent_workflow_id from parent variables"
+            code.contains("__extract_parent_embed_context"),
+            "Should extract parent context (including parent_workflow_id) via hoisted helper"
         );
         assert!(
             code.contains("_workflow_id"),
@@ -1389,15 +1265,20 @@ mod tests {
         let tokens = emit(&step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
-        // Durable function should have parent_workflow_id parameter
+        // Durable function takes a __ParentEmbedContext that contains parent_workflow_id
         assert!(
-            code.contains("parent_workflow_id : Option < String >"),
-            "Durable function should have parent_workflow_id parameter"
+            code.contains("pec : __ParentEmbedContext"),
+            "Durable function should take a __ParentEmbedContext (with parent_workflow_id field)"
         );
-        // Should pass __parent_workflow_id when calling durable function
+        // Body destructures parent_workflow_id from the context struct
         assert!(
-            code.contains("__parent_workflow_id"),
-            "Should pass __parent_workflow_id to durable function"
+            code.contains("parent_workflow_id"),
+            "Body should reference parent_workflow_id (via destructured pec)"
+        );
+        // Call site passes the __pec context to the durable function
+        assert!(
+            code.contains("__pec"),
+            "Should pass __pec to durable function"
         );
     }
 
@@ -1462,10 +1343,10 @@ mod tests {
 
         // All required elements for collision prevention must be present:
 
-        // 1. Extract parent's workflow_id
+        // 1. Extract parent's workflow_id (via hoisted helper)
         assert!(
-            code.contains("vars . get (\"_workflow_id\")"),
-            "Must read _workflow_id from parent variables"
+            code.contains("__extract_parent_embed_context"),
+            "Must read parent context (incl. _workflow_id) via hoisted helper"
         );
 
         // 2. Propagate to child

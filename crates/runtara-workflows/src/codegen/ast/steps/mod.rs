@@ -1448,13 +1448,16 @@ mod tests {
             code.contains("__durable_cache_key"),
             "EmbedWorkflow should generate dynamic cache key"
         );
+        // Loop-indices and parent context are now extracted via hoisted helpers
+        // (__build_embed_cache_key reads _loop_indices internally; the call site
+        // contains only the helper invocation).
         assert!(
-            code.contains("_loop_indices"),
-            "EmbedWorkflow should check for _loop_indices in variables"
+            code.contains("__build_embed_cache_key"),
+            "EmbedWorkflow should build cache key via hoisted helper (which handles loop indices)"
         );
         assert!(
-            code.contains("indices_suffix"),
-            "EmbedWorkflow should build indices suffix for cache key"
+            code.contains("__extract_parent_embed_context"),
+            "EmbedWorkflow should extract parent context (including loop indices) via hoisted helper"
         );
     }
 

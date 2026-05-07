@@ -584,6 +584,146 @@ fn emit_input_structs() -> TokenStream {
         }
 
         #[allow(dead_code)]
+        fn __embed_step_interrupted_error(
+            step_id: &str,
+            step_name: &str,
+            child_workflow_id: &str,
+            reason: Option<&str>,
+        ) -> String {
+            let mut object = serde_json::Map::new();
+            object.insert("stepId".to_string(), serde_json::Value::String(step_id.to_string()));
+            object.insert("stepName".to_string(), serde_json::Value::String(step_name.to_string()));
+            object.insert("stepType".to_string(), serde_json::Value::String("EmbedWorkflow".to_string()));
+            object.insert("code".to_string(), serde_json::Value::String("STEP_INTERRUPTED".to_string()));
+            let message = match reason {
+                Some(r) => format!("EmbedWorkflow step {} interrupted: {}", step_id, r),
+                None => format!("EmbedWorkflow step {} interrupted before execution", step_id),
+            };
+            let fallback = match reason {
+                Some(r) => format!("EmbedWorkflow step {}: {}", step_id, r),
+                None => format!("EmbedWorkflow step {} interrupted", step_id),
+            };
+            object.insert("message".to_string(), serde_json::Value::String(message));
+            object.insert("category".to_string(), serde_json::Value::String("transient".to_string()));
+            object.insert("severity".to_string(), serde_json::Value::String("info".to_string()));
+            object.insert(
+                "childWorkflowId".to_string(),
+                serde_json::Value::String(child_workflow_id.to_string()),
+            );
+            if let Some(r) = reason {
+                object.insert("reason".to_string(), serde_json::Value::String(r.to_string()));
+            }
+            serde_json::to_string(&serde_json::Value::Object(object)).unwrap_or(fallback)
+        }
+
+        #[allow(dead_code)]
+        struct __ParentEmbedContext {
+            parent_scope_id: Option<String>,
+            parent_cache_prefix: Option<String>,
+            loop_indices_suffix: String,
+            parent_workflow_id: Option<String>,
+            parent_instance_id: Option<serde_json::Value>,
+            parent_tenant_id: Option<serde_json::Value>,
+        }
+
+        #[allow(dead_code)]
+        fn __extract_parent_embed_context(variables: &serde_json::Value) -> __ParentEmbedContext {
+            let vars = variables.as_object();
+            let parent_scope_id = vars
+                .and_then(|v| v.get("_scope_id"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            let parent_cache_prefix = vars
+                .and_then(|v| v.get("_cache_key_prefix"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            let loop_indices_suffix = vars
+                .and_then(|v| v.get("_loop_indices"))
+                .and_then(|v| v.as_array())
+                .filter(|arr| !arr.is_empty())
+                .map(|arr| {
+                    let indices: Vec<String> = arr.iter().map(|v| v.to_string()).collect();
+                    format!("[{}]", indices.join(","))
+                })
+                .unwrap_or_default();
+            let parent_workflow_id = vars
+                .and_then(|v| v.get("_workflow_id"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            let parent_instance_id = vars.and_then(|v| v.get("_instance_id")).cloned();
+            let parent_tenant_id = vars.and_then(|v| v.get("_tenant_id")).cloned();
+            __ParentEmbedContext {
+                parent_scope_id,
+                parent_cache_prefix,
+                loop_indices_suffix,
+                parent_workflow_id,
+                parent_instance_id,
+                parent_tenant_id,
+            }
+        }
+
+        #[allow(dead_code)]
+        fn __build_embed_cache_key(variables: &serde_json::Value, base: &str) -> String {
+            let vars = variables.as_object();
+            let prefix = vars
+                .and_then(|v| v.get("_cache_key_prefix"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let indices_suffix = vars
+                .and_then(|v| v.get("_loop_indices"))
+                .and_then(|v| v.as_array())
+                .filter(|arr| !arr.is_empty())
+                .map(|arr| {
+                    let indices: Vec<String> = arr.iter().map(|v| v.to_string()).collect();
+                    format!("::[{}]", indices.join(","))
+                })
+                .unwrap_or_default();
+            if prefix.is_empty() {
+                format!("{}{}", base, indices_suffix)
+            } else {
+                format!("{}::{}{}", prefix, base, indices_suffix)
+            }
+        }
+
+        #[allow(dead_code)]
+        fn __embed_child_failed_error(
+            step_id: &str,
+            step_name: &str,
+            child_workflow_id: &str,
+            child_error: &serde_json::Value,
+            raw_error: &str,
+        ) -> String {
+            let mut object = serde_json::Map::new();
+            object.insert("stepId".to_string(), serde_json::Value::String(step_id.to_string()));
+            object.insert("stepName".to_string(), serde_json::Value::String(step_name.to_string()));
+            object.insert("stepType".to_string(), serde_json::Value::String("EmbedWorkflow".to_string()));
+            object.insert("code".to_string(), serde_json::Value::String("CHILD_WORKFLOW_FAILED".to_string()));
+            object.insert(
+                "message".to_string(),
+                serde_json::Value::String(format!("Child workflow {} failed", child_workflow_id)),
+            );
+            let category = child_error
+                .get("category")
+                .and_then(|v| v.as_str())
+                .unwrap_or("transient")
+                .to_string();
+            let severity = child_error
+                .get("severity")
+                .and_then(|v| v.as_str())
+                .unwrap_or("error")
+                .to_string();
+            object.insert("category".to_string(), serde_json::Value::String(category));
+            object.insert("severity".to_string(), serde_json::Value::String(severity));
+            object.insert(
+                "childWorkflowId".to_string(),
+                serde_json::Value::String(child_workflow_id.to_string()),
+            );
+            object.insert("childError".to_string(), child_error.clone());
+            serde_json::to_string(&serde_json::Value::Object(object))
+                .unwrap_or_else(|_| format!("Child workflow {} failed: {}", child_workflow_id, raw_error))
+        }
+
+        #[allow(dead_code)]
         fn __agent_error_output(error: &str) -> serde_json::Value {
             let mut object = serde_json::Map::new();
             object.insert("_error".to_string(), serde_json::Value::Bool(true));
@@ -1094,13 +1234,16 @@ fn emit_input_structs() -> TokenStream {
             child_workflow_id: &str,
             step_id: &str,
             step_name: &str,
-            parent_scope_id: Option<String>,
-            parent_cache_prefix: Option<String>,
-            loop_indices_suffix: String,
-            parent_workflow_id: Option<String>,
-            parent_instance_id: Option<serde_json::Value>,
-            parent_tenant_id: Option<serde_json::Value>,
+            pec: __ParentEmbedContext,
         ) -> std::result::Result<serde_json::Value, String> {
+            let __ParentEmbedContext {
+                parent_scope_id,
+                parent_cache_prefix,
+                loop_indices_suffix,
+                parent_workflow_id,
+                parent_instance_id,
+                parent_tenant_id,
+            } = pec;
             let __child_scope_id = if let Some(ref parent) = parent_scope_id {
                 format!("{}_{}", parent, step_id)
             } else {
@@ -1149,19 +1292,7 @@ fn emit_input_structs() -> TokenStream {
             };
 
             if runtara_sdk::is_cancelled() {
-                let structured_error = serde_json::json!({
-                    "stepId": step_id,
-                    "stepName": step_name,
-                    "stepType": "EmbedWorkflow",
-                    "code": "STEP_INTERRUPTED",
-                    "message": format!("EmbedWorkflow step {} interrupted before execution", step_id),
-                    "category": "transient",
-                    "severity": "info",
-                    "childWorkflowId": child_workflow_id
-                });
-                return Err(serde_json::to_string(&structured_error).unwrap_or_else(|_| {
-                    format!("EmbedWorkflow step {} interrupted", step_id)
-                }));
+                return Err(__embed_step_interrupted_error(step_id, step_name, child_workflow_id, None));
             }
 
             let __child_span = __make_child_workflow_span(step_id, child_workflow_id);
@@ -1179,20 +1310,7 @@ fn emit_input_structs() -> TokenStream {
                         return e;
                     }
 
-                    let structured_error = serde_json::json!({
-                        "stepId": step_id,
-                        "stepName": step_name,
-                        "stepType": "EmbedWorkflow",
-                        "code": "CHILD_WORKFLOW_FAILED",
-                        "message": format!("Child workflow {} failed", child_workflow_id),
-                        "category": child_error.get("category").and_then(|v| v.as_str()).unwrap_or("transient"),
-                        "severity": child_error.get("severity").and_then(|v| v.as_str()).unwrap_or("error"),
-                        "childWorkflowId": child_workflow_id,
-                        "childError": child_error
-                    });
-                    serde_json::to_string(&structured_error).unwrap_or_else(|_| {
-                        format!("Child workflow {} failed: {}", child_workflow_id, e)
-                    })
+                    __embed_child_failed_error(step_id, step_name, child_workflow_id, &child_error, &e)
                 })
             })?;
 
