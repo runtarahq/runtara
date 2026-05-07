@@ -71,8 +71,18 @@ pub fn emit(step: &AgentStep, ctx: &mut EmitContext) -> Result<TokenStream, Code
     // Clone immutable references
     let steps_context = ctx.steps_context_var.clone();
 
-    // Build the source for input mapping
-    let build_source = mapping::emit_build_source(ctx);
+    let mapping_needs_source = step
+        .input_mapping
+        .as_ref()
+        .is_some_and(mapping::input_mapping_needs_source);
+    let source_init = if mapping_needs_source {
+        let build_source = mapping::emit_build_source(ctx);
+        quote! {
+            let #source_var = #build_source;
+        }
+    } else {
+        quote! {}
+    };
 
     // Serialize input mapping to JSON for debug events
     let input_mapping_json = step.input_mapping.as_ref().and_then(|m| {
@@ -176,11 +186,12 @@ pub fn emit(step: &AgentStep, ctx: &mut EmitContext) -> Result<TokenStream, Code
     };
 
     Ok(quote! {
-        let #source_var = #build_source;
+        #source_init
         let #step_inputs_var = ::runtara_workflow_stdlib::value_resolver::unwrap_top_level_immediate_envelopes(
-            ::runtara_workflow_stdlib::value_resolver::resolve_nested_references(
+            __resolve_nested_references_direct(
                 #base_inputs_code,
-                &#source_var,
+                #workflow_inputs_var.as_ref(),
+                &#steps_context,
             )
         );
 

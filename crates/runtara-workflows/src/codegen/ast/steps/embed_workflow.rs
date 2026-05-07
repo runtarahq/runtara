@@ -101,8 +101,18 @@ fn emit_with_embedded_child(
     // Clone immutable references
     let steps_context = ctx.steps_context_var.clone();
 
-    // Build the source for input mapping
-    let build_source = mapping::emit_build_source(ctx);
+    let mapping_needs_source = step
+        .input_mapping
+        .as_ref()
+        .is_some_and(mapping::input_mapping_needs_source);
+    let source_init = if mapping_needs_source {
+        let build_source = mapping::emit_build_source(ctx);
+        quote! {
+            let #source_var = #build_source;
+        }
+    } else {
+        quote! {}
+    };
 
     // Serialize input mapping to JSON for debug events
     let input_mapping_json = step.input_mapping.as_ref().and_then(|m| {
@@ -126,33 +136,34 @@ fn emit_with_embedded_child(
     };
 
     // Generate embedded schema for runtime validation (if child has required fields)
-    let runtime_validation_code = {
-        let required_fields: Vec<_> = child_graph
-            .input_schema
-            .iter()
-            .filter(|(_, field)| field.required)
-            .map(|(name, field)| {
-                let name_str = name.as_str();
-                let type_str = format!("{:?}", field.field_type);
-                let desc = field.description.as_deref();
-                let desc_token = if let Some(d) = desc {
-                    quote! { Some(#d) }
-                } else {
-                    quote! { None }
-                };
-                quote! {
-                    runtara_workflow_stdlib::RequiredField {
-                        name: #name_str,
-                        field_type: #type_str,
-                        description: #desc_token,
-                    }
+    let required_fields: Vec<_> = child_graph
+        .input_schema
+        .iter()
+        .filter(|(_, field)| field.required)
+        .map(|(name, field)| {
+            let name_str = name.as_str();
+            let type_str = format!("{:?}", field.field_type);
+            let desc = field.description.as_deref();
+            let desc_token = if let Some(d) = desc {
+                quote! { Some(#d) }
+            } else {
+                quote! { None }
+            };
+            quote! {
+                runtara_workflow_stdlib::RequiredField {
+                    name: #name_str,
+                    field_type: #type_str,
+                    description: #desc_token,
                 }
-            })
-            .collect();
+            }
+        })
+        .collect();
 
+    let runtime_validation_code_for = |child_inputs_expr: TokenStream| {
         if required_fields.is_empty() {
             quote! {}
         } else {
+            let required_fields = required_fields.clone();
             let step_id_str = step_id.as_str();
             let child_id_str = child_workflow_id.as_str();
             quote! {
@@ -165,7 +176,7 @@ fn emit_with_embedded_child(
                     runtara_workflow_stdlib::validate_child_inputs(
                         #step_id_str,
                         #child_id_str,
-                        &child_inputs,
+                        &#child_inputs_expr,
                         &CHILD_SCHEMA,
                     ).map_err(|e| e.to_string())?;
                 }
@@ -232,33 +243,240 @@ fn emit_with_embedded_child(
     let max_retries_lit = max_retries;
     let retry_delay_lit = retry_delay;
     let durable_lit = ctx.durable && step.durable.unwrap_or(true);
+    let use_shared_embed_wrapper = durable_lit && max_retries == 3 && retry_delay == 1000;
 
     // Generate code to inject child workflow's default variables into __child_vars.
     // Without this, child variables like "source", "fixed_fee" etc. defined in the
     // child workflow's ExecutionGraph would be lost when embedded via EmbedWorkflow.
-    let child_default_vars_code = {
-        let inserts: Vec<_> = child_graph
+    let child_default_vars = {
+        let mut defaults = serde_json::Map::new();
+        for (name, var) in child_graph
             .variables
             .iter()
             .filter(|(name, _)| !name.starts_with('_'))
-            .map(|(name, var)| {
-                let value_tokens = json_to_tokens(&var.value);
+        {
+            defaults.insert(name.clone(), var.value.clone());
+        }
+        serde_json::Value::Object(defaults)
+    };
+    let child_default_vars_tokens = json_to_tokens(&child_default_vars);
+    let child_default_vars_code = {
+        let inserts = child_default_vars
+            .as_object()
+            .into_iter()
+            .flat_map(|defaults| defaults.iter())
+            .map(|(name, value)| {
+                let value_tokens = json_to_tokens(value);
                 let name_str = name.as_str();
                 quote! {
                     __child_vars.entry(#name_str.to_string()).or_insert_with(|| {
                         #value_tokens
                     });
                 }
-            })
-            .collect();
+            });
         quote! { #(#inserts)* }
+    };
+    let shared_runtime_validation_code = if use_shared_embed_wrapper {
+        runtime_validation_code_for(quote! { #child_inputs_var })
+    } else {
+        quote! {}
+    };
+    let durable_runtime_validation_code = runtime_validation_code_for(quote! { child_inputs });
+    let durable_function_def = if use_shared_embed_wrapper {
+        quote! {}
+    } else {
+        quote! {
+            // Define the durable child workflow execution function
+            #[resilient(durable = #durable_lit, max_retries = #max_retries_lit, delay = #retry_delay_lit)]
+            fn #durable_fn_name(
+                cache_key: &str,
+                child_inputs: serde_json::Value,
+                child_workflow_id: &str,
+                step_id: &str,
+                step_name: &str,
+                parent_scope_id: Option<String>,
+                parent_cache_prefix: Option<String>,
+                loop_indices_suffix: String,
+                parent_workflow_id: Option<String>,
+                parent_instance_id: Option<serde_json::Value>,
+                parent_tenant_id: Option<serde_json::Value>,
+            ) -> std::result::Result<serde_json::Value, String> {
+                // Generate scope ID for this child workflow execution
+                let __child_scope_id = if let Some(ref parent) = parent_scope_id {
+                    format!("{}_{}", parent, step_id)
+                } else {
+                    format!("sc_{}", step_id)
+                };
+
+                // Prepare child workflow inputs
+                // All mapped inputs become child's data (myParam1 -> data.myParam1)
+                // Child variables are always isolated - never inherited from parent
+                // BUT we inject _scope_id, _cache_key_prefix, and _workflow_id so scope tracking and
+                // checkpoint cache keys work correctly within child
+                let mut __child_vars = serde_json::Map::new();
+                __child_vars.insert(
+                    "_scope_id".to_string(),
+                    serde_json::Value::String(__child_scope_id.clone()),
+                );
+
+                // Propagate built-in variables to child so they're available at all nesting levels.
+                // This ensures Agent steps in deeply nested workflows can access workflow identity.
+                if let Some(ref sid) = parent_workflow_id {
+                    __child_vars.insert("_workflow_id".to_string(), serde_json::Value::String(sid.clone()));
+                }
+                // Propagate _instance_id and _tenant_id from parent (passed as fn parameters
+                // because fn items cannot capture from their enclosing scope)
+                if let Some(iid) = parent_instance_id {
+                    __child_vars.insert("_instance_id".to_string(), iid);
+                }
+                if let Some(tid) = parent_tenant_id {
+                    __child_vars.insert("_tenant_id".to_string(), tid);
+                }
+
+                // Build cache key prefix for child workflow
+                // Inherits parent's prefix (if any) and appends this step's identity + loop indices.
+                // When there's no parent prefix (top-level workflow), we include the parent's
+                // _workflow_id to prevent cache collisions between independent workflows that
+                // happen to use the same step_id for their EmbedWorkflow steps.
+                let __child_cache_prefix = {
+                    match &parent_cache_prefix {
+                        Some(p) if !p.is_empty() => format!("{}__{}{}",  p, step_id, loop_indices_suffix),
+                        _ => {
+                            // No parent prefix - this is a top-level EmbedWorkflow.
+                            // Include the workflow's unique ID to prevent cache collisions.
+                            let workflow_id = parent_workflow_id.as_deref().unwrap_or("root");
+                            format!("{}::{}{}",  workflow_id, step_id, loop_indices_suffix)
+                        }
+                    }
+                };
+                __child_vars.insert(
+                    "_cache_key_prefix".to_string(),
+                    serde_json::Value::String(__child_cache_prefix),
+                );
+
+                // Inject child workflow's default variables (e.g. "source", "fixed_fee").
+                // Uses or_insert_with so system variables above take precedence.
+                #child_default_vars_code
+
+                // Runtime validation of child inputs against schema
+                #durable_runtime_validation_code
+
+                // Inner steps use the child workflow scope as their parent.
+                // This ensures `root_scopes_only` filter correctly excludes them
+                // (they have non-null parent_scope_id = the child workflow scope).
+                let child_workflow_inputs = WorkflowInputs {
+                    data: Arc::new(child_inputs),
+                    variables: Arc::new(serde_json::Value::Object(__child_vars)),
+                    parent_scope_id: Some(__child_scope_id.clone()),
+                };
+
+                // Check for interruption (cancel/pause) before executing child workflow
+                if runtara_sdk::is_cancelled() {
+                    let structured_error = serde_json::json!({
+                        "stepId": step_id,
+                        "stepName": step_name,
+                        "stepType": "EmbedWorkflow",
+                        "code": "STEP_INTERRUPTED",
+                        "message": format!("EmbedWorkflow step {} interrupted before execution", step_id),
+                        "category": "transient",
+                        "severity": "info",
+                        "childWorkflowId": child_workflow_id
+                    });
+                    return Err(serde_json::to_string(&structured_error).unwrap_or_else(|_| {
+                        format!("EmbedWorkflow step {} interrupted", step_id)
+                    }));
+                }
+
+                // Create child workflow span for tracing
+                #child_span_def
+
+                // Execute child workflow, instrumented with child span
+                let child_result = __child_span.in_scope(|| {
+                    #child_fn_name(Arc::new(child_workflow_inputs))
+                    .map_err(|e: String| {
+                        // Try to parse the child error as structured JSON
+                        let child_error: serde_json::Value = serde_json::from_str(&e)
+                            .unwrap_or_else(|_| serde_json::json!({
+                                "message": e,
+                                "code": null,
+                                "category": "unknown",
+                                "severity": "error"
+                            }));
+
+                        // Check if this is an Error step - if so, propagate it directly
+                        // Error steps have stepType: "Error" and represent explicit business errors
+                        // that should bubble up unchanged to the parent workflow
+                        if child_error.get("stepType").and_then(|v| v.as_str()) == Some("Error") {
+                            // Propagate the error as-is (it's already a valid JSON string)
+                            return e;
+                        }
+
+                        // For other errors (agent failures, etc.), wrap with CHILD_WORKFLOW_FAILED
+                        let structured_error = serde_json::json!({
+                            "stepId": step_id,
+                            "stepName": step_name,
+                            "stepType": "EmbedWorkflow",
+                            "code": "CHILD_WORKFLOW_FAILED",
+                            "message": format!("Child workflow {} failed", child_workflow_id),
+                            "category": child_error.get("category").and_then(|v| v.as_str()).unwrap_or("transient"),
+                            "severity": child_error.get("severity").and_then(|v| v.as_str()).unwrap_or("error"),
+                            "childWorkflowId": child_workflow_id,
+                            "childError": child_error
+                        });
+                        serde_json::to_string(&structured_error).unwrap_or_else(|_| {
+                            format!("Child workflow {} failed: {}", child_workflow_id, e)
+                        })
+                    })
+                })? ;
+
+                let result =
+                    __embed_step_output_envelope(step_id, step_name, child_workflow_id, &child_result);
+
+                Ok(result)
+            }
+        }
+    };
+    let execute_child_workflow = if use_shared_embed_wrapper {
+        quote! {
+            __embed_workflow_durable_default(
+                &__durable_cache_key,
+                #child_inputs_var.clone(),
+                #child_default_vars_tokens,
+                #child_fn_name,
+                #child_workflow_id,
+                #step_id,
+                #step_name_display,
+                __parent_scope_id,
+                __parent_cache_prefix,
+                __loop_indices_suffix,
+                __parent_workflow_id,
+                __parent_instance_id,
+                __parent_tenant_id,
+            )
+        }
+    } else {
+        quote! {
+            #durable_fn_name(
+                &__durable_cache_key,
+                #child_inputs_var.clone(),
+                #child_workflow_id,
+                #step_id,
+                #step_name_display,
+                __parent_scope_id,
+                __parent_cache_prefix,
+                __loop_indices_suffix,
+                __parent_workflow_id,
+                __parent_instance_id,
+                __parent_tenant_id,
+            )
+        }
     };
 
     Ok(quote! {
         // Define the embedded child workflow function
         #child_fn_code
 
-        let #source_var = #build_source;
+        #source_init
         let #child_inputs_var = #inputs_code;
 
         // Breakpoint (after input resolution, before execution)
@@ -270,6 +488,7 @@ fn emit_with_embedded_child(
         // Wrap step execution in span scope
         __step_span.in_scope(|| -> std::result::Result<(), String> {
             #debug_start
+            #shared_runtime_validation_code
 
             // Build cache key dynamically, including prefix and loop indices
         let __durable_cache_key = {
@@ -301,154 +520,7 @@ fn emit_with_embedded_child(
             }
         };
 
-        // Define the durable child workflow execution function
-        #[resilient(durable = #durable_lit, max_retries = #max_retries_lit, delay = #retry_delay_lit)]
-        fn #durable_fn_name(
-            cache_key: &str,
-            child_inputs: serde_json::Value,
-            child_workflow_id: &str,
-            step_id: &str,
-            step_name: &str,
-            parent_scope_id: Option<String>,
-            parent_cache_prefix: Option<String>,
-            loop_indices_suffix: String,
-            parent_workflow_id: Option<String>,
-            parent_instance_id: Option<serde_json::Value>,
-            parent_tenant_id: Option<serde_json::Value>,
-        ) -> std::result::Result<serde_json::Value, String> {
-            // Generate scope ID for this child workflow execution
-            let __child_scope_id = if let Some(ref parent) = parent_scope_id {
-                format!("{}_{}", parent, step_id)
-            } else {
-                format!("sc_{}", step_id)
-            };
-
-            // Prepare child workflow inputs
-            // All mapped inputs become child's data (myParam1 -> data.myParam1)
-            // Child variables are always isolated - never inherited from parent
-            // BUT we inject _scope_id, _cache_key_prefix, and _workflow_id so scope tracking and
-            // checkpoint cache keys work correctly within child
-            let mut __child_vars = serde_json::Map::new();
-            __child_vars.insert(
-                "_scope_id".to_string(),
-                serde_json::Value::String(__child_scope_id.clone()),
-            );
-
-            // Propagate built-in variables to child so they're available at all nesting levels.
-            // This ensures Agent steps in deeply nested workflows can access workflow identity.
-            if let Some(ref sid) = parent_workflow_id {
-                __child_vars.insert("_workflow_id".to_string(), serde_json::Value::String(sid.clone()));
-            }
-            // Propagate _instance_id and _tenant_id from parent (passed as fn parameters
-            // because fn items cannot capture from their enclosing scope)
-            if let Some(iid) = parent_instance_id {
-                __child_vars.insert("_instance_id".to_string(), iid);
-            }
-            if let Some(tid) = parent_tenant_id {
-                __child_vars.insert("_tenant_id".to_string(), tid);
-            }
-
-            // Build cache key prefix for child workflow
-            // Inherits parent's prefix (if any) and appends this step's identity + loop indices.
-            // When there's no parent prefix (top-level workflow), we include the parent's
-            // _workflow_id to prevent cache collisions between independent workflows that
-            // happen to use the same step_id for their EmbedWorkflow steps.
-            let __child_cache_prefix = {
-                match &parent_cache_prefix {
-                    Some(p) if !p.is_empty() => format!("{}__{}{}",  p, step_id, loop_indices_suffix),
-                    _ => {
-                        // No parent prefix - this is a top-level EmbedWorkflow.
-                        // Include the workflow's unique ID to prevent cache collisions.
-                        let workflow_id = parent_workflow_id.as_deref().unwrap_or("root");
-                        format!("{}::{}{}",  workflow_id, step_id, loop_indices_suffix)
-                    }
-                }
-            };
-            __child_vars.insert(
-                "_cache_key_prefix".to_string(),
-                serde_json::Value::String(__child_cache_prefix),
-            );
-
-            // Inject child workflow's default variables (e.g. "source", "fixed_fee").
-            // Uses or_insert_with so system variables above take precedence.
-            #child_default_vars_code
-
-            // Runtime validation of child inputs against schema
-            #runtime_validation_code
-
-            // Inner steps use the child workflow scope as their parent.
-            // This ensures `root_scopes_only` filter correctly excludes them
-            // (they have non-null parent_scope_id = the child workflow scope).
-            let child_workflow_inputs = WorkflowInputs {
-                data: Arc::new(child_inputs),
-                variables: Arc::new(serde_json::Value::Object(__child_vars)),
-                parent_scope_id: Some(__child_scope_id.clone()),
-            };
-
-            // Check for interruption (cancel/pause) before executing child workflow
-            if runtara_sdk::is_cancelled() {
-                let structured_error = serde_json::json!({
-                    "stepId": step_id,
-                    "stepName": step_name,
-                    "stepType": "EmbedWorkflow",
-                    "code": "STEP_INTERRUPTED",
-                    "message": format!("EmbedWorkflow step {} interrupted before execution", step_id),
-                    "category": "transient",
-                    "severity": "info",
-                    "childWorkflowId": child_workflow_id
-                });
-                return Err(serde_json::to_string(&structured_error).unwrap_or_else(|_| {
-                    format!("EmbedWorkflow step {} interrupted", step_id)
-                }));
-            }
-
-            // Create child workflow span for tracing
-            #child_span_def
-
-            // Execute child workflow, instrumented with child span
-            let child_result = __child_span.in_scope(|| {
-                #child_fn_name(Arc::new(child_workflow_inputs))
-                .map_err(|e: String| {
-                    // Try to parse the child error as structured JSON
-                    let child_error: serde_json::Value = serde_json::from_str(&e)
-                        .unwrap_or_else(|_| serde_json::json!({
-                            "message": e,
-                            "code": null,
-                            "category": "unknown",
-                            "severity": "error"
-                        }));
-
-                    // Check if this is an Error step - if so, propagate it directly
-                    // Error steps have stepType: "Error" and represent explicit business errors
-                    // that should bubble up unchanged to the parent workflow
-                    if child_error.get("stepType").and_then(|v| v.as_str()) == Some("Error") {
-                        // Propagate the error as-is (it's already a valid JSON string)
-                        return e;
-                    }
-
-                    // For other errors (agent failures, etc.), wrap with CHILD_WORKFLOW_FAILED
-                    let structured_error = serde_json::json!({
-                        "stepId": step_id,
-                        "stepName": step_name,
-                        "stepType": "EmbedWorkflow",
-                        "code": "CHILD_WORKFLOW_FAILED",
-                        "message": format!("Child workflow {} failed", child_workflow_id),
-                        "category": child_error.get("category").and_then(|v| v.as_str()).unwrap_or("transient"),
-                        "severity": child_error.get("severity").and_then(|v| v.as_str()).unwrap_or("error"),
-                        "childWorkflowId": child_workflow_id,
-                        "childError": child_error
-                    });
-                    serde_json::to_string(&structured_error).unwrap_or_else(|_| {
-                        format!("Child workflow {} failed: {}", child_workflow_id, e)
-                    })
-                })
-            })? ;
-
-            let result =
-                __embed_step_output_envelope(step_id, step_name, child_workflow_id, &child_result);
-
-            Ok(result)
-        }
+        #durable_function_def
 
         // Get parent_scope_id from parent workflow's variables
         let __parent_scope_id = (*#workflow_inputs_var.variables)
@@ -496,19 +568,7 @@ fn emit_with_embedded_child(
             .cloned();
 
         // Execute the durable child workflow function
-        let #step_var = #durable_fn_name(
-            &__durable_cache_key,
-            #child_inputs_var.clone(),
-            #child_workflow_id,
-            #step_id,
-            #step_name_display,
-            __parent_scope_id,
-            __parent_cache_prefix,
-            __loop_indices_suffix,
-            __parent_workflow_id,
-            __parent_instance_id,
-            __parent_tenant_id,
-        )? ;
+        let #step_var = #execute_child_workflow? ;
 
             #debug_end
 
@@ -691,11 +751,10 @@ mod tests {
         let tokens = emit(&step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
-        // Should emit embedded version with durable wrapper
-        assert!(code.contains("durable"));
+        // Default retry policy should call the shared durable wrapper.
+        assert!(code.contains("__embed_workflow_durable_default"));
         // Child function name is now deterministic: child_{workflow_id}_{version}
         assert!(code.contains("child_child_workflow_id_1"));
-        assert!(code.contains("child_workflow_inputs"));
 
         // Should include cache key handling for loop indices
         assert!(code.contains("__durable_cache_key"));
@@ -729,10 +788,10 @@ mod tests {
         let tokens = emit(&step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
-        // Default max_retries is 3
-        assert!(code.contains("max_retries = 3"));
-        // Default retry_delay is 1000
-        assert!(code.contains("delay = 1000"));
+        // Default max_retries=3/delay=1000 uses the shared wrapper instead of
+        // emitting a per-step #[resilient] function.
+        assert!(code.contains("__embed_workflow_durable_default"));
+        assert!(!code.contains("max_retries = 3"));
     }
 
     #[test]
@@ -775,7 +834,8 @@ mod tests {
 
     #[test]
     fn test_emit_with_embedded_child_structure() {
-        let step = create_named_step("start-child", "Execute Child", "child-workflow-id");
+        let mut step = create_named_step("start-child", "Execute Child", "child-workflow-id");
+        step.max_retries = Some(4);
         let child_graph = create_child_graph("Child Graph");
         let mut ctx = create_ctx_with_child("start-child", "child-workflow-id", child_graph, false);
 
@@ -1057,7 +1117,8 @@ mod tests {
 
     #[test]
     fn test_emit_with_embedded_child_structured_error() {
-        let step = create_named_step("start-child", "Execute Child", "child-workflow-id");
+        let mut step = create_named_step("start-child", "Execute Child", "child-workflow-id");
+        step.max_retries = Some(4);
         let child_graph = create_child_graph("Child Graph");
         let mut ctx = create_ctx_with_child("start-child", "child-workflow-id", child_graph, false);
 
@@ -1099,7 +1160,8 @@ mod tests {
 
     #[test]
     fn test_emit_child_error_propagation() {
-        let step = create_basic_step("start-child", "child-workflow-id");
+        let mut step = create_basic_step("start-child", "child-workflow-id");
+        step.max_retries = Some(4);
 
         let mut child_workflows = HashMap::new();
         child_workflows.insert(
@@ -1145,7 +1207,8 @@ mod tests {
     fn test_emit_error_step_propagation() {
         // Test that Error step errors from child workflows propagate directly
         // without being wrapped in CHILD_WORKFLOW_FAILED
-        let step = create_named_step("start-child", "Execute Child", "child-workflow-id");
+        let mut step = create_named_step("start-child", "Execute Child", "child-workflow-id");
+        step.max_retries = Some(4);
         let child_graph = create_child_graph("Child Graph");
         let mut ctx = create_ctx_with_child("start-child", "child-workflow-id", child_graph, false);
 
@@ -1173,7 +1236,8 @@ mod tests {
         // Regression test: ensure null::<Type> is not used inside serde_json::json! macro
         // The json! macro doesn't support turbofish syntax on null, causing:
         // "error: no rules expected `::` in macro call"
-        let step = create_named_step("start-child", "Execute Child", "child-workflow-id");
+        let mut step = create_named_step("start-child", "Execute Child", "child-workflow-id");
+        step.max_retries = Some(4);
         let child_graph = create_child_graph("Child Graph");
         let mut ctx = create_ctx_with_child("start-child", "child-workflow-id", child_graph, false);
 
@@ -1193,7 +1257,8 @@ mod tests {
 
     #[test]
     fn test_emit_with_embedded_child_sets_cache_key_prefix() {
-        let step = create_named_step("start-child", "Execute Child", "child-workflow-id");
+        let mut step = create_named_step("start-child", "Execute Child", "child-workflow-id");
+        step.max_retries = Some(4);
         let child_graph = create_child_graph("Child Graph");
         let mut ctx = create_ctx_with_child("start-child", "child-workflow-id", child_graph, false);
 
@@ -1253,7 +1318,8 @@ mod tests {
     #[test]
     fn test_emit_extracts_parent_workflow_id() {
         // Verifies that _workflow_id is extracted from parent's variables
-        let step = create_named_step("call-child", "Call Child", "child-workflow-id");
+        let mut step = create_named_step("call-child", "Call Child", "child-workflow-id");
+        step.max_retries = Some(4);
         let child_graph = create_child_graph("Child Graph");
         let mut ctx = create_ctx_with_child("call-child", "child-workflow-id", child_graph, false);
 
@@ -1274,7 +1340,8 @@ mod tests {
     #[test]
     fn test_emit_propagates_workflow_id_to_child() {
         // Verifies that _workflow_id is propagated to child's variables
-        let step = create_named_step("call-child", "Call Child", "child-workflow-id");
+        let mut step = create_named_step("call-child", "Call Child", "child-workflow-id");
+        step.max_retries = Some(4);
         let child_graph = create_child_graph("Child Graph");
         let mut ctx = create_ctx_with_child("call-child", "child-workflow-id", child_graph, false);
 
@@ -1291,7 +1358,8 @@ mod tests {
     #[test]
     fn test_emit_uses_workflow_id_in_fallback_prefix() {
         // Verifies that when there's no parent prefix, _workflow_id is used
-        let step = create_named_step("call-child", "Call Child", "child-workflow-id");
+        let mut step = create_named_step("call-child", "Call Child", "child-workflow-id");
+        step.max_retries = Some(4);
         let child_graph = create_child_graph("Child Graph");
         let mut ctx = create_ctx_with_child("call-child", "child-workflow-id", child_graph, false);
 
@@ -1313,7 +1381,8 @@ mod tests {
     #[test]
     fn test_emit_passes_workflow_id_to_durable_function() {
         // Verifies that parent_workflow_id is passed as a parameter to the durable function
-        let step = create_named_step("call-child", "Call Child", "child-workflow-id");
+        let mut step = create_named_step("call-child", "Call Child", "child-workflow-id");
+        step.max_retries = Some(4);
         let child_graph = create_child_graph("Child Graph");
         let mut ctx = create_ctx_with_child("call-child", "child-workflow-id", child_graph, false);
 
@@ -1335,7 +1404,8 @@ mod tests {
     #[test]
     fn test_cache_key_prefix_format_with_workflow_id() {
         // Verifies the cache prefix format includes workflow_id when no parent prefix
-        let step = create_named_step("process-files", "Process Files", "child-workflow-id");
+        let mut step = create_named_step("process-files", "Process Files", "child-workflow-id");
+        step.max_retries = Some(4);
         let child_graph = create_child_graph("Child Graph");
         let mut ctx =
             create_ctx_with_child("process-files", "child-workflow-id", child_graph, false);
@@ -1354,7 +1424,8 @@ mod tests {
     #[test]
     fn test_cache_key_prefix_format_with_parent_prefix() {
         // Verifies the cache prefix format when parent prefix exists
-        let step = create_named_step("nested-call", "Nested Call", "child-workflow-id");
+        let mut step = create_named_step("nested-call", "Nested Call", "child-workflow-id");
+        step.max_retries = Some(4);
         let child_graph = create_child_graph("Child Graph");
         let mut ctx = create_ctx_with_child("nested-call", "child-workflow-id", child_graph, false);
 
@@ -1380,7 +1451,8 @@ mod tests {
         //   Orchestrator -> A -> D (cache key includes "A's path")
         //   Orchestrator -> B -> D (cache key includes "B's path")
 
-        let step = create_named_step("call-shared-child", "Call Shared Child", "shared-child");
+        let mut step = create_named_step("call-shared-child", "Call Shared Child", "shared-child");
+        step.max_retries = Some(4);
         let child_graph = create_child_graph("Shared Child");
         let mut ctx =
             create_ctx_with_child("call-shared-child", "shared-child", child_graph, false);
@@ -1638,7 +1710,8 @@ mod tests {
     /// "error[E0277]: the size for values of type `str` cannot be known at compilation time"
     #[test]
     fn test_map_err_closure_has_explicit_type() {
-        let step = create_basic_step("start-child", "child-workflow-id");
+        let mut step = create_basic_step("start-child", "child-workflow-id");
+        step.max_retries = Some(4);
         let child_graph = create_child_graph("Child");
         let mut ctx = create_ctx_with_child("start-child", "child-workflow-id", child_graph, false);
 

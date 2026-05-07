@@ -34,8 +34,18 @@ pub fn emit(step: &FinishStep, ctx: &mut EmitContext) -> Result<TokenStream, Cod
     // Clone immutable references
     let steps_context = ctx.steps_context_var.clone();
 
-    // Build the source for input mapping
-    let build_source = mapping::emit_build_source(ctx);
+    let mapping_needs_source = step
+        .input_mapping
+        .as_ref()
+        .is_some_and(mapping::input_mapping_needs_source);
+    let source_init = if mapping_needs_source {
+        let build_source = mapping::emit_build_source(ctx);
+        quote! {
+            let #source_var = #build_source;
+        }
+    } else {
+        quote! {}
+    };
 
     // Serialize input mapping to JSON for debug events
     let input_mapping_json = step.input_mapping.as_ref().and_then(|m| {
@@ -95,7 +105,7 @@ pub fn emit(step: &FinishStep, ctx: &mut EmitContext) -> Result<TokenStream, Cod
     // The Finish step immediately returns from the workflow function.
     // This allows multiple Finish steps in different branches to work correctly.
     Ok(quote! {
-        let #source_var = #build_source;
+        #source_init
         let #finish_inputs_var =
             __single_field_object("finishing", serde_json::Value::Bool(true));
 

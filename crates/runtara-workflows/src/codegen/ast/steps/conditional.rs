@@ -9,7 +9,7 @@ use proc_macro2::TokenStream;
 use quote::quote;
 
 use super::super::CodegenError;
-use super::super::condition_emitters::emit_condition_expression;
+use super::super::condition_emitters::{condition_needs_source, emit_condition_expression};
 use super::super::context::EmitContext;
 use super::super::mapping;
 use super::super::steps;
@@ -39,8 +39,15 @@ pub fn emit(
     // Clone immutable references
     let steps_context = ctx.steps_context_var.clone();
 
-    // Build the source for input mapping
-    let build_source = mapping::emit_build_source(ctx);
+    let needs_source = condition_needs_source(&step.condition) || step.breakpoint.unwrap_or(false);
+    let source_init = if needs_source {
+        let build_source = mapping::emit_build_source(ctx);
+        quote! {
+            let #source_var = #build_source;
+        }
+    } else {
+        quote! {}
+    };
 
     // Generate condition evaluation from the structured condition
     let condition_eval = emit_condition_expression(&step.condition, ctx, &source_var);
@@ -124,7 +131,7 @@ pub fn emit(
     // We use sync span entry (.entered()) which properly propagates to child spans
     // created by branch steps via their .instrument() calls.
     Ok(quote! {
-        let #source_var = #build_source;
+        #source_init
         let #condition_inputs_var = __single_field_object(
             "condition",
             serde_json::Value::String("evaluating".to_string()),

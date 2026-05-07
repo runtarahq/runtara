@@ -176,18 +176,20 @@ pub fn emit_mapping_value(
 /// Emit code for a reference value (data lookup).
 fn emit_reference_value(
     ref_val: &ReferenceValue,
-    _ctx: &EmitContext,
-    source_var: &proc_macro2::Ident,
+    ctx: &EmitContext,
+    _source_var: &proc_macro2::Ident,
 ) -> TokenStream {
     let path = &ref_val.value;
     let json_pointer = path_to_json_pointer(path);
+    let inputs = &ctx.inputs_var;
+    let steps_context = &ctx.steps_context_var;
 
     // Generate the base lookup, using default value if provided
     let lookup = if let Some(default_val) = &ref_val.default {
         let default_tokens = super::json_to_tokens(default_val);
         quote! {
             {
-                let looked_up = #source_var.pointer(#json_pointer).cloned();
+                let looked_up = __lookup_source_pointer(#inputs.as_ref(), &#steps_context, #json_pointer);
                 match looked_up {
                     Some(serde_json::Value::Null) | None => #default_tokens,
                     Some(v) => v,
@@ -196,7 +198,8 @@ fn emit_reference_value(
         }
     } else {
         quote! {
-            #source_var.pointer(#json_pointer).cloned().unwrap_or(serde_json::Value::Null)
+            __lookup_source_pointer(#inputs.as_ref(), &#steps_context, #json_pointer)
+                .unwrap_or(serde_json::Value::Null)
         }
     };
 
@@ -426,6 +429,27 @@ pub fn emit_build_source(ctx: &EmitContext) -> TokenStream {
 
     quote! {
         __build_step_source(#inputs.as_ref(), &#steps_context)
+    }
+}
+
+/// Return true when a mapping needs the full source object.
+///
+/// Direct references and nested reference envelopes can be resolved against
+/// `WorkflowInputs` plus `steps_context`; templates still need the full source
+/// object because minijinja renders against that aggregate context.
+pub fn input_mapping_needs_source(mapping: &InputMapping) -> bool {
+    mapping.values().any(mapping_value_needs_source)
+}
+
+/// Return true when a mapping value needs the full source object.
+pub fn mapping_value_needs_source(value: &MappingValue) -> bool {
+    match value {
+        MappingValue::Template(_) => true,
+        MappingValue::Composite(comp) => match &comp.value {
+            CompositeInner::Object(map) => map.values().any(mapping_value_needs_source),
+            CompositeInner::Array(values) => values.iter().any(mapping_value_needs_source),
+        },
+        MappingValue::Reference(_) | MappingValue::Immediate(_) => false,
     }
 }
 
@@ -710,7 +734,9 @@ mod tests {
         let tokens = emit_mapping_value(&map_val, &mut ctx, &source_var);
         let code = tokens.to_string();
 
-        assert!(code.contains("src"));
+        assert!(code.contains("__lookup_source_pointer"));
+        assert!(code.contains("inputs"));
+        assert!(code.contains("steps_context"));
         assert!(code.contains("/data/field"));
     }
 
