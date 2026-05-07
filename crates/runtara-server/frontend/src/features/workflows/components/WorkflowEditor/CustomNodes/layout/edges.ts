@@ -31,6 +31,7 @@ const ROUTE_BACKTRACK_PENALTY = 400;
 const SOURCE_SIDE_VERTICAL_PENALTY = 900;
 const TARGET_SIDE_VERTICAL_PENALTY = 80;
 const LONG_EDGE_BYPASS_THRESHOLD = 520;
+const CONTAINER_EDGE_GUTTER = 36;
 
 function getNodeSize(node: Node): { width: number; height: number } {
   const width =
@@ -652,7 +653,7 @@ function getBypassSide(
     return 'bottom';
   }
 
-  return end.y < start.y ? 'top' : 'bottom';
+  return start.y <= end.y ? 'top' : 'bottom';
 }
 
 function getBypassY(
@@ -660,7 +661,8 @@ function getBypassY(
   end: LayoutPoint,
   obstacles: ObstacleBox[],
   side: 'top' | 'bottom',
-  laneIndex: number
+  laneIndex: number,
+  parentBox?: ObstacleBox
 ): number {
   const left = Math.min(start.x, end.x);
   const right = Math.max(start.x, end.x);
@@ -677,10 +679,20 @@ function getBypassY(
   }
 
   if (side === 'top') {
-    return Math.min(...corridorObstacles.map((box) => box.top)) - padding;
+    const topLane =
+      Math.min(start.y, end.y, ...corridorObstacles.map((box) => box.top)) -
+      padding;
+    return parentBox
+      ? Math.max(topLane, parentBox.top + CONTAINER_EDGE_GUTTER)
+      : topLane;
   }
 
-  return Math.max(...corridorObstacles.map((box) => box.bottom)) + padding;
+  const bottomLane =
+    Math.max(start.y, end.y, ...corridorObstacles.map((box) => box.bottom)) +
+    padding;
+  return parentBox
+    ? Math.min(bottomLane, parentBox.bottom - CONTAINER_EDGE_GUTTER)
+    : bottomLane;
 }
 
 function routeLongBypass(
@@ -688,7 +700,8 @@ function routeLongBypass(
   start: LayoutPoint,
   end: LayoutPoint,
   obstacles: ObstacleBox[],
-  laneIndex: number
+  laneIndex: number,
+  parentBox?: ObstacleBox
 ): LayoutPoint[] | null {
   const horizontalDistance = Math.abs(end.x - start.x);
   if (horizontalDistance < LONG_EDGE_BYPASS_THRESHOLD) return null;
@@ -697,7 +710,7 @@ function routeLongBypass(
   const side = getBypassSide(kind, start, end);
   const sourceX = start.x + direction * (EDGE_STUB + laneIndex * EDGE_LANE_GAP);
   const targetX = end.x - direction * (EDGE_STUB + laneIndex * EDGE_LANE_GAP);
-  const bypassY = getBypassY(start, end, obstacles, side, laneIndex);
+  const bypassY = getBypassY(start, end, obstacles, side, laneIndex, parentBox);
   const points = compactPoints([
     start,
     { x: sourceX, y: start.y },
@@ -708,6 +721,17 @@ function routeLongBypass(
   ]);
 
   return routeIntersectsObstacle(points, obstacles) ? null : points;
+}
+
+function getSharedParentBox(
+  source: Node,
+  target: Node,
+  nodeById: Map<string, Node>
+): ObstacleBox | undefined {
+  if (!source.parentId || source.parentId !== target.parentId) return undefined;
+
+  const parent = nodeById.get(source.parentId);
+  return parent ? getNodeBox(parent, nodeById) : undefined;
 }
 
 export function routeOrthogonalEdges(
@@ -748,12 +772,21 @@ export function routeOrthogonalEdges(
     const obstacles = getRoutableObstacles(edge, nodeById);
     const handle = (edge.sourceHandle ?? 'source').toLowerCase();
     const kind = getEdgeKind(handle);
+    const sharedParentBox = getSharedParentBox(source, target, nodeById);
+    const longBypassRoute = routeLongBypass(
+      kind,
+      start,
+      end,
+      obstacles,
+      sourceLaneIndex,
+      sharedParentBox
+    );
     const points =
       incomingCountByTarget.get(edge.target)! > 1
-        ? (routeViaMergeBus(start, end, obstacles) ??
+        ? (longBypassRoute ??
+          routeViaMergeBus(start, end, obstacles) ??
           routeOnGrid(start, end, obstacles, sourceLaneIndex))
-        : (routeLongBypass(kind, start, end, obstacles, sourceLaneIndex) ??
-          routeOnGrid(start, end, obstacles, sourceLaneIndex));
+        : (longBypassRoute ?? routeOnGrid(start, end, obstacles, sourceLaneIndex));
 
     routes[edge.id] = {
       points,

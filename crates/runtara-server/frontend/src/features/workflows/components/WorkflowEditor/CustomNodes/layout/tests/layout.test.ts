@@ -305,6 +305,77 @@ describe('workflow layout graph', () => {
     expect(bottomBusXs).toContain(284);
   });
 
+  it('gives long multi-incoming merge edges a bypass before the merge bus', () => {
+    const farSource = makeNode('far-source');
+    farSource.position = { x: 0, y: 0 };
+    farSource.style = { width: 96, height: 36 };
+    farSource.width = 96;
+    farSource.height = 36;
+
+    const nearSource = makeNode('near-source');
+    nearSource.position = { x: 560, y: 120 };
+    nearSource.style = { width: 96, height: 36 };
+    nearSource.width = 96;
+    nearSource.height = 36;
+
+    const target = makeNode('target');
+    target.position = { x: 760, y: 80 };
+    target.style = { width: 96, height: 36 };
+    target.width = 96;
+    target.height = 36;
+
+    const routes = routeOrthogonalEdges(
+      [farSource, nearSource, target],
+      [
+        makeEdge('far-target', 'far-source', 'target'),
+        makeEdge('near-target', 'near-source', 'target'),
+      ]
+    );
+
+    expect(
+      routes['far-target'].points.some(
+        (point) => point.y < routes['far-target'].points[0].y
+      )
+    ).toBe(true);
+    expect(getVerticalSegmentXs(routes['near-target'].points)).toContain(724);
+  });
+
+  it('keeps same-container long bypasses inside the container gutter', () => {
+    const container = makeNode('container', NODE_TYPES.ContainerNode);
+    container.position = { x: 100, y: 100 };
+    container.style = { width: 900, height: 300 };
+    container.width = 900;
+    container.height = 300;
+
+    const source = makeNode('source');
+    source.parentId = 'container';
+    source.position = { x: 40, y: 120 };
+    source.style = { width: 96, height: 36 };
+    source.width = 96;
+    source.height = 36;
+
+    const target = makeNode('target');
+    target.parentId = 'container';
+    target.position = { x: 760, y: 160 };
+    target.style = { width: 96, height: 36 };
+    target.width = 96;
+    target.height = 36;
+
+    const route = routeOrthogonalEdges(
+      [container, source, target],
+      [makeEdge('source-target', 'source', 'target')]
+    )['source-target'];
+
+    expect(route.points.every((point) => point.y >= container.position.y)).toBe(
+      true
+    );
+    expect(
+      route.points.every(
+        (point) => point.y <= container.position.y + (container.height ?? 0)
+      )
+    ).toBe(true);
+  });
+
   it('routes long same-row edges through a bypass lane', () => {
     const source = makeNode('source');
     source.position = { x: 0, y: 0 };
@@ -327,6 +398,48 @@ describe('workflow layout graph', () => {
     expect(route.points.some((point) => point.y !== route.points[0].y)).toBe(
       true
     );
+  });
+
+  it('routes long sequence bypasses away from their branch side', () => {
+    const upperSource = makeNode('upper-source');
+    upperSource.position = { x: 0, y: 0 };
+    upperSource.style = { width: 96, height: 36 };
+    upperSource.width = 96;
+    upperSource.height = 36;
+
+    const lowerSource = makeNode('lower-source');
+    lowerSource.position = { x: 0, y: 160 };
+    lowerSource.style = { width: 96, height: 36 };
+    lowerSource.width = 96;
+    lowerSource.height = 36;
+
+    const upperTarget = makeNode('upper-target-node');
+    upperTarget.position = { x: 760, y: 80 };
+    upperTarget.style = { width: 96, height: 36 };
+    upperTarget.width = 96;
+    upperTarget.height = 36;
+
+    const upperRoutes = routeOrthogonalEdges(
+      [upperSource, upperTarget],
+      [makeEdge('upper-target', 'upper-source', 'upper-target-node')]
+    );
+
+    expect(
+      upperRoutes['upper-target'].points.some(
+        (point) => point.y < upperRoutes['upper-target'].points[0].y
+      )
+    ).toBe(true);
+
+    const lowerRoutes = routeOrthogonalEdges(
+      [lowerSource, upperTarget],
+      [makeEdge('lower-target', 'lower-source', 'upper-target-node')]
+    );
+
+    expect(
+      lowerRoutes['lower-target'].points.some(
+        (point) => point.y > lowerRoutes['lower-target'].points[0].y
+      )
+    ).toBe(true);
   });
 
   it('keeps switch cases ordered and hides duplicate case edge labels', () => {
