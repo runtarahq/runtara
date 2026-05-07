@@ -4,6 +4,7 @@ import {
   buildLayoutGraph,
   layoutReactFlowElements,
   rankScope,
+  routeOrthogonalEdges,
   shouldHideDuplicateEdgeLabel,
 } from '..';
 import {
@@ -52,6 +53,41 @@ function getNode(nodes: Node[], id: string): Node {
   const node = nodes.find((item) => item.id === id);
   expect(node).toBeDefined();
   return node!;
+}
+
+function segmentIntersectsNode(
+  start: { x: number; y: number },
+  end: { x: number; y: number },
+  node: Node
+): boolean {
+  const left = node.position.x;
+  const top = node.position.y;
+  const right = left + ((node.style?.width as number) ?? node.width ?? 0);
+  const bottom = top + ((node.style?.height as number) ?? node.height ?? 0);
+
+  if (start.x === end.x) {
+    const segmentTop = Math.min(start.y, end.y);
+    const segmentBottom = Math.max(start.y, end.y);
+    return (
+      start.x > left &&
+      start.x < right &&
+      segmentBottom > top &&
+      segmentTop < bottom
+    );
+  }
+
+  if (start.y === end.y) {
+    const segmentLeft = Math.min(start.x, end.x);
+    const segmentRight = Math.max(start.x, end.x);
+    return (
+      start.y > top &&
+      start.y < bottom &&
+      segmentRight > left &&
+      segmentLeft < right
+    );
+  }
+
+  return false;
 }
 
 describe('workflow layout graph', () => {
@@ -112,9 +148,46 @@ describe('workflow layout graph', () => {
     const result = layoutReactFlowElements(nodes, edges);
     const route = result.edgeRoutes?.['a-b'];
 
-    expect(route?.points).toHaveLength(4);
-    expect(route!.points[0].x).toBeLessThan(route!.points[3].x);
+    expect(route?.points.length).toBeGreaterThanOrEqual(2);
+    expect(route!.points[0].x).toBeLessThan(
+      route!.points[route!.points.length - 1].x
+    );
     expect(route?.labelPoint).toBeDefined();
+  });
+
+  it('routes around occupied node boxes instead of through them', () => {
+    const source = makeNode('source');
+    source.position = { x: 0, y: 0 };
+    source.style = { width: 96, height: 36 };
+    source.width = 96;
+    source.height = 36;
+
+    const blocker = makeNode('blocker');
+    blocker.position = { x: 150, y: -24 };
+    blocker.style = { width: 84, height: 84 };
+    blocker.width = 84;
+    blocker.height = 84;
+
+    const target = makeNode('target');
+    target.position = { x: 320, y: 0 };
+    target.style = { width: 96, height: 36 };
+    target.width = 96;
+    target.height = 36;
+
+    const route = routeOrthogonalEdges(
+      [source, blocker, target],
+      [makeEdge('source-target', 'source', 'target')]
+    )['source-target'];
+
+    for (let index = 1; index < route.points.length; index++) {
+      expect(
+        segmentIntersectsNode(
+          route.points[index - 1],
+          route.points[index],
+          blocker
+        )
+      ).toBe(false);
+    }
   });
 
   it('keeps switch cases ordered and hides duplicate case edge labels', () => {
