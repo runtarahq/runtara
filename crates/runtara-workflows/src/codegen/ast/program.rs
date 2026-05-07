@@ -617,6 +617,7 @@ fn emit_input_structs() -> TokenStream {
         }
 
         #[allow(dead_code)]
+        #[derive(Clone)]
         struct __ParentEmbedContext {
             parent_scope_id: Option<String>,
             parent_cache_prefix: Option<String>,
