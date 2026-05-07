@@ -487,38 +487,751 @@ fn emit_input_structs() -> TokenStream {
             parent_scope_id: Option<String>,
             loop_indices: serde_json::Value,
             data: Option<serde_json::Value>,
-            input_mapping: Option<serde_json::Value>,
+            input_mapping_json: Option<&str>,
             duration_ms: Option<u64>,
         ) {
             let max_size: usize = 10 * 1024;
             let data_truncated = data.map(|v| __truncate_json_value(&v, max_size));
             let mut payload = serde_json::Map::new();
-            payload.insert("step_id".into(), serde_json::json!(step_id));
-            payload.insert("step_name".into(), serde_json::json!(step_name));
-            payload.insert("step_type".into(), serde_json::json!(step_type));
-            payload.insert("scope_id".into(), serde_json::json!(scope_id));
-            payload.insert("parent_scope_id".into(), serde_json::json!(parent_scope_id));
+            payload.insert("step_id".into(), serde_json::Value::String(step_id.to_string()));
+            payload.insert(
+                "step_name".into(),
+                step_name
+                    .map(|name| serde_json::Value::String(name.to_string()))
+                    .unwrap_or(serde_json::Value::Null),
+            );
+            payload.insert("step_type".into(), serde_json::Value::String(step_type.to_string()));
+            payload.insert(
+                "scope_id".into(),
+                scope_id.map(serde_json::Value::String).unwrap_or(serde_json::Value::Null),
+            );
+            payload.insert(
+                "parent_scope_id".into(),
+                parent_scope_id
+                    .map(serde_json::Value::String)
+                    .unwrap_or(serde_json::Value::Null),
+            );
             payload.insert("loop_indices".into(), loop_indices);
-            payload.insert("timestamp_ms".into(), serde_json::json!(
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_millis() as i64)
-                    .unwrap_or(0)
-            ));
+            payload.insert(
+                "timestamp_ms".into(),
+                serde_json::Value::Number(serde_json::Number::from(
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_millis() as i64)
+                        .unwrap_or(0),
+                )),
+            );
             if subtype == "step_debug_start" {
-                payload.insert("inputs".into(), serde_json::json!(data_truncated));
-                if let Some(mapping) = input_mapping {
+                payload.insert("inputs".into(), data_truncated.unwrap_or(serde_json::Value::Null));
+                if let Some(mapping_json) = input_mapping_json {
+                    let mapping = serde_json::from_str::<serde_json::Value>(mapping_json)
+                        .unwrap_or(serde_json::Value::Null);
                     payload.insert("input_mapping".into(), mapping);
                 }
             } else {
-                payload.insert("outputs".into(), serde_json::json!(data_truncated));
+                payload.insert("outputs".into(), data_truncated.unwrap_or(serde_json::Value::Null));
                 if let Some(dur) = duration_ms {
-                    payload.insert("duration_ms".into(), serde_json::json!(dur));
+                    payload.insert(
+                        "duration_ms".into(),
+                        serde_json::Value::Number(serde_json::Number::from(dur)),
+                    );
                 }
             }
             let __payload_bytes = serde_json::to_vec(&serde_json::Value::Object(payload)).unwrap_or_default();
             let __sdk_guard = sdk().lock().unwrap();
             let _ = __sdk_guard.custom_event(subtype, __payload_bytes);
+        }
+
+        #[allow(dead_code)]
+        fn __single_field_object(key: &str, value: serde_json::Value) -> serde_json::Value {
+            let mut object = serde_json::Map::new();
+            object.insert(key.to_string(), value);
+            serde_json::Value::Object(object)
+        }
+
+        #[allow(dead_code)]
+        fn __step_output_envelope(
+            step_id: &str,
+            step_name: &str,
+            step_type: &str,
+            outputs: &serde_json::Value,
+        ) -> serde_json::Value {
+            let mut object = serde_json::Map::new();
+            object.insert("stepId".to_string(), serde_json::Value::String(step_id.to_string()));
+            object.insert("stepName".to_string(), serde_json::Value::String(step_name.to_string()));
+            object.insert("stepType".to_string(), serde_json::Value::String(step_type.to_string()));
+            object.insert("outputs".to_string(), outputs.clone());
+            serde_json::Value::Object(object)
+        }
+
+        #[allow(dead_code)]
+        fn __embed_step_output_envelope(
+            step_id: &str,
+            step_name: &str,
+            child_workflow_id: &str,
+            outputs: &serde_json::Value,
+        ) -> serde_json::Value {
+            let mut object = serde_json::Map::new();
+            object.insert("stepId".to_string(), serde_json::Value::String(step_id.to_string()));
+            object.insert("stepName".to_string(), serde_json::Value::String(step_name.to_string()));
+            object.insert("stepType".to_string(), serde_json::Value::String("EmbedWorkflow".to_string()));
+            object.insert(
+                "childWorkflowId".to_string(),
+                serde_json::Value::String(child_workflow_id.to_string()),
+            );
+            object.insert("outputs".to_string(), outputs.clone());
+            serde_json::Value::Object(object)
+        }
+
+        #[allow(dead_code)]
+        fn __agent_error_output(error: &str) -> serde_json::Value {
+            let mut object = serde_json::Map::new();
+            object.insert("_error".to_string(), serde_json::Value::Bool(true));
+            object.insert("error".to_string(), serde_json::Value::String(error.to_string()));
+            serde_json::Value::Object(object)
+        }
+
+        #[allow(dead_code)]
+        fn __build_step_source(
+            inputs: &WorkflowInputs,
+            steps_context: &serde_json::Map<String, serde_json::Value>,
+        ) -> serde_json::Value {
+            let mut source_map = serde_json::Map::new();
+            source_map.insert("data".to_string(), (*inputs.data).clone());
+            source_map.insert("variables".to_string(), (*inputs.variables).clone());
+            source_map.insert("steps".to_string(), serde_json::Value::Object(steps_context.clone()));
+
+            let mut workflow_inputs = serde_json::Map::new();
+            workflow_inputs.insert("data".to_string(), (*inputs.data).clone());
+            workflow_inputs.insert("variables".to_string(), (*inputs.variables).clone());
+
+            let mut workflow = serde_json::Map::new();
+            workflow.insert("inputs".to_string(), serde_json::Value::Object(workflow_inputs));
+            source_map.insert("workflow".to_string(), serde_json::Value::Object(workflow));
+
+            if let Some(loop_ctx) = (*inputs.variables)
+                .as_object()
+                .and_then(|v| v.get("_loop"))
+            {
+                source_map.insert("loop".to_string(), loop_ctx.clone());
+            }
+
+            serde_json::Value::Object(source_map)
+        }
+
+        #[allow(dead_code)]
+        fn __debug_scope_id(inputs: &WorkflowInputs, override_scope_id: Option<&str>) -> Option<String> {
+            override_scope_id.map(str::to_string).or_else(|| {
+                (*inputs.variables)
+                    .as_object()
+                    .and_then(|vars| vars.get("_scope_id"))
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string)
+            })
+        }
+
+        #[allow(dead_code)]
+        fn __debug_loop_indices(inputs: &WorkflowInputs) -> serde_json::Value {
+            (*inputs.variables)
+                .as_object()
+                .and_then(|vars| vars.get("_loop_indices"))
+                .cloned()
+                .unwrap_or_else(|| serde_json::Value::Array(vec![]))
+        }
+
+        #[allow(dead_code)]
+        fn __make_generic_step_span(
+            step_id: &str,
+            step_name: &str,
+            step_type: &str,
+        ) -> tracing::Span {
+            tracing::info_span!(
+                "step",
+                step.id = step_id,
+                step.name = step_name,
+                step.type = step_type,
+                otel.kind = "INTERNAL"
+            )
+        }
+
+        #[allow(dead_code)]
+        fn __make_agent_span(
+            step_id: &str,
+            step_name: &str,
+            agent_id: &str,
+            capability_id: &str,
+        ) -> tracing::Span {
+            tracing::info_span!(
+                "step.agent",
+                step.id = step_id,
+                step.name = step_name,
+                step.type = "Agent",
+                agent.id = agent_id,
+                capability.id = capability_id,
+                otel.kind = "INTERNAL"
+            )
+        }
+
+        #[allow(dead_code)]
+        fn __make_ai_agent_step_span(step_id: &str, step_name: &str) -> tracing::Span {
+            tracing::info_span!(
+                "step.aiagent",
+                step.id = step_id,
+                step.name = step_name,
+                step.type = "AiAgent",
+                otel.kind = "INTERNAL"
+            )
+        }
+
+        #[allow(dead_code)]
+        fn __make_conditional_step_span(step_id: &str, step_name: &str) -> tracing::Span {
+            tracing::info_span!(
+                "step.conditional",
+                step.id = step_id,
+                step.name = step_name,
+                step.type = "Conditional",
+                otel.kind = "INTERNAL"
+            )
+        }
+
+        #[allow(dead_code)]
+        fn __make_delay_step_span(step_id: &str, step_name: &str) -> tracing::Span {
+            tracing::info_span!(
+                "step.delay",
+                step.id = step_id,
+                step.name = step_name,
+                step.type = "Delay",
+                otel.kind = "INTERNAL"
+            )
+        }
+
+        #[allow(dead_code)]
+        fn __make_embed_workflow_step_span(step_id: &str, step_name: &str) -> tracing::Span {
+            tracing::info_span!(
+                "step.embedworkflow",
+                step.id = step_id,
+                step.name = step_name,
+                step.type = "EmbedWorkflow",
+                otel.kind = "INTERNAL"
+            )
+        }
+
+        #[allow(dead_code)]
+        fn __make_error_step_span(step_id: &str, step_name: &str) -> tracing::Span {
+            tracing::info_span!(
+                "step.error",
+                step.id = step_id,
+                step.name = step_name,
+                step.type = "Error",
+                otel.kind = "INTERNAL"
+            )
+        }
+
+        #[allow(dead_code)]
+        fn __make_filter_step_span(step_id: &str, step_name: &str) -> tracing::Span {
+            tracing::info_span!(
+                "step.filter",
+                step.id = step_id,
+                step.name = step_name,
+                step.type = "Filter",
+                otel.kind = "INTERNAL"
+            )
+        }
+
+        #[allow(dead_code)]
+        fn __make_finish_step_span(step_id: &str, step_name: &str) -> tracing::Span {
+            tracing::info_span!(
+                "step.finish",
+                step.id = step_id,
+                step.name = step_name,
+                step.type = "Finish",
+                otel.kind = "INTERNAL"
+            )
+        }
+
+        #[allow(dead_code)]
+        fn __make_group_by_step_span(step_id: &str, step_name: &str) -> tracing::Span {
+            tracing::info_span!(
+                "step.groupby",
+                step.id = step_id,
+                step.name = step_name,
+                step.type = "GroupBy",
+                otel.kind = "INTERNAL"
+            )
+        }
+
+        #[allow(dead_code)]
+        fn __make_log_step_span(step_id: &str, step_name: &str) -> tracing::Span {
+            tracing::info_span!(
+                "step.log",
+                step.id = step_id,
+                step.name = step_name,
+                step.type = "Log",
+                otel.kind = "INTERNAL"
+            )
+        }
+
+        #[allow(dead_code)]
+        fn __make_split_step_span(step_id: &str, step_name: &str) -> tracing::Span {
+            tracing::info_span!(
+                "step.split",
+                step.id = step_id,
+                step.name = step_name,
+                step.type = "Split",
+                otel.kind = "INTERNAL"
+            )
+        }
+
+        #[allow(dead_code)]
+        fn __make_switch_step_span(step_id: &str, step_name: &str) -> tracing::Span {
+            tracing::info_span!(
+                "step.switch",
+                step.id = step_id,
+                step.name = step_name,
+                step.type = "Switch",
+                otel.kind = "INTERNAL"
+            )
+        }
+
+        #[allow(dead_code)]
+        fn __make_wait_for_signal_step_span(step_id: &str, step_name: &str) -> tracing::Span {
+            tracing::info_span!(
+                "step.waitforsignal",
+                step.id = step_id,
+                step.name = step_name,
+                step.type = "WaitForSignal",
+                otel.kind = "INTERNAL"
+            )
+        }
+
+        #[allow(dead_code)]
+        fn __make_while_step_span(step_id: &str, step_name: &str) -> tracing::Span {
+            tracing::info_span!(
+                "step.while",
+                step.id = step_id,
+                step.name = step_name,
+                step.type = "While",
+                otel.kind = "INTERNAL"
+            )
+        }
+
+        #[allow(dead_code)]
+        fn __make_split_iteration_span(step_id: &str, iteration_index: usize) -> tracing::Span {
+            tracing::info_span!(
+                "split.iteration",
+                step.id = step_id,
+                iteration.index = iteration_index,
+                otel.kind = "INTERNAL"
+            )
+        }
+
+        #[allow(dead_code)]
+        fn __make_while_iteration_span(step_id: &str, iteration_index: usize) -> tracing::Span {
+            tracing::info_span!(
+                "while.iteration",
+                step.id = step_id,
+                iteration.index = iteration_index,
+                otel.kind = "INTERNAL"
+            )
+        }
+
+        #[allow(dead_code)]
+        fn __make_child_workflow_span(parent_step_id: &str, child_workflow_id: &str) -> tracing::Span {
+            tracing::info_span!(
+                "workflow.child",
+                workflow.id = child_workflow_id,
+                parent_step.id = parent_step_id,
+                otel.kind = "INTERNAL"
+            )
+        }
+
+        #[allow(dead_code)]
+        fn __pointer_tail<'a>(pointer: &'a str, prefix: &str) -> Option<&'a str> {
+            if pointer == prefix {
+                Some("")
+            } else if pointer.starts_with(prefix)
+                && pointer.as_bytes().get(prefix.len()) == Some(&b'/')
+            {
+                Some(&pointer[prefix.len()..])
+            } else {
+                None
+            }
+        }
+
+        #[allow(dead_code)]
+        fn __lookup_value_pointer(value: &serde_json::Value, pointer: &str) -> Option<serde_json::Value> {
+            if pointer.is_empty() {
+                Some(value.clone())
+            } else {
+                value.pointer(pointer).cloned()
+            }
+        }
+
+        #[allow(dead_code)]
+        fn __unescape_pointer_segment(segment: &str) -> String {
+            segment.replace("~1", "/").replace("~0", "~")
+        }
+
+        #[allow(dead_code)]
+        fn __lookup_source_pointer(
+            inputs: &WorkflowInputs,
+            steps_context: &serde_json::Map<String, serde_json::Value>,
+            pointer: &str,
+        ) -> Option<serde_json::Value> {
+            if let Some(tail) = __pointer_tail(pointer, "/data") {
+                return __lookup_value_pointer(inputs.data.as_ref(), tail);
+            }
+            if let Some(tail) = __pointer_tail(pointer, "/variables") {
+                return __lookup_value_pointer(inputs.variables.as_ref(), tail);
+            }
+            if let Some(tail) = __pointer_tail(pointer, "/workflow/inputs/data") {
+                return __lookup_value_pointer(inputs.data.as_ref(), tail);
+            }
+            if let Some(tail) = __pointer_tail(pointer, "/workflow/inputs/variables") {
+                return __lookup_value_pointer(inputs.variables.as_ref(), tail);
+            }
+            if let Some(tail) = __pointer_tail(pointer, "/loop") {
+                return (*inputs.variables)
+                    .as_object()
+                    .and_then(|vars| vars.get("_loop"))
+                    .and_then(|loop_ctx| __lookup_value_pointer(loop_ctx, tail));
+            }
+            if pointer == "/steps" {
+                return Some(serde_json::Value::Object(steps_context.clone()));
+            }
+            if let Some(after_steps) = pointer.strip_prefix("/steps/") {
+                let (raw_step_id, tail) = match after_steps.split_once('/') {
+                    Some((step_id, rest)) => (step_id, format!("/{}", rest)),
+                    None => (after_steps, String::new()),
+                };
+                let step_id = __unescape_pointer_segment(raw_step_id);
+                return steps_context
+                    .get(&step_id)
+                    .and_then(|step_value| __lookup_value_pointer(step_value, &tail));
+            }
+            None
+        }
+
+        #[allow(dead_code)]
+        fn __path_to_json_pointer_runtime(path: &str) -> String {
+            let normalized = path
+                .replace("['", ".")
+                .replace("']", "")
+                .replace("[\"", ".")
+                .replace("\"]", "");
+
+            let mut dotted = String::new();
+            let mut chars = normalized.chars().peekable();
+            while let Some(ch) = chars.next() {
+                if ch == '[' {
+                    let mut index = String::new();
+                    while let Some(&next_ch) = chars.peek() {
+                        if next_ch == ']' {
+                            chars.next();
+                            break;
+                        }
+                        index.push(chars.next().unwrap());
+                    }
+                    if index.chars().all(|c| c.is_ascii_digit()) {
+                        dotted.push('.');
+                        dotted.push_str(&index);
+                    } else {
+                        dotted.push('[');
+                        dotted.push_str(&index);
+                        dotted.push(']');
+                    }
+                } else {
+                    dotted.push(ch);
+                }
+            }
+
+            let mut out = String::with_capacity(dotted.len() + 4);
+            for segment in dotted.split('.') {
+                out.push('/');
+                for ch in segment.chars() {
+                    match ch {
+                        '~' => out.push_str("~0"),
+                        '/' => out.push_str("~1"),
+                        _ => out.push(ch),
+                    }
+                }
+            }
+            out
+        }
+
+        #[allow(dead_code)]
+        fn __lookup_source_path(
+            inputs: &WorkflowInputs,
+            steps_context: &serde_json::Map<String, serde_json::Value>,
+            path: &str,
+        ) -> Option<serde_json::Value> {
+            let pointer = __path_to_json_pointer_runtime(path);
+            __lookup_source_pointer(inputs, steps_context, &pointer)
+        }
+
+        #[allow(dead_code)]
+        fn __is_reference_envelope(value: &serde_json::Value) -> bool {
+            matches!(
+                value.get("valueType"),
+                Some(serde_json::Value::String(s)) if s == "reference"
+            ) && matches!(value.get("value"), Some(serde_json::Value::String(_)))
+        }
+
+        #[allow(dead_code)]
+        fn __is_field_argument_operator(op: &str) -> bool {
+            matches!(
+                op.to_ascii_uppercase().as_str(),
+                "EQ" | "NE"
+                    | "GT"
+                    | "GTE"
+                    | "LT"
+                    | "LTE"
+                    | "STARTS_WITH"
+                    | "ENDS_WITH"
+                    | "CONTAINS"
+                    | "IN"
+                    | "NOT_IN"
+                    | "IS_DEFINED"
+                    | "IS_EMPTY"
+                    | "IS_NOT_EMPTY"
+                    | "SIMILARITY_GTE"
+                    | "MATCH"
+                    | "COSINE_DISTANCE_LTE"
+                    | "L2_DISTANCE_LTE"
+            )
+        }
+
+        #[allow(dead_code)]
+        fn __walk_nested_references_direct(
+            value: &mut serde_json::Value,
+            inputs: &WorkflowInputs,
+            steps_context: &serde_json::Map<String, serde_json::Value>,
+        ) {
+            match value {
+                serde_json::Value::Object(map) => {
+                    let is_ref_envelope = matches!(
+                        map.get("valueType"),
+                        Some(serde_json::Value::String(s)) if s == "reference"
+                    ) && matches!(map.get("value"), Some(serde_json::Value::String(_)));
+
+                    if is_ref_envelope {
+                        let path = match map.get("value") {
+                            Some(serde_json::Value::String(s)) => s.clone(),
+                            _ => return,
+                        };
+                        let default = map.get("default").cloned();
+                        let resolved = __lookup_source_path(inputs, steps_context, &path)
+                            .unwrap_or_else(|| default.unwrap_or(serde_json::Value::Null));
+                        let mut wrapped = serde_json::Map::with_capacity(2);
+                        wrapped.insert("valueType".to_string(), serde_json::Value::String("immediate".into()));
+                        wrapped.insert("value".to_string(), resolved);
+                        *value = serde_json::Value::Object(wrapped);
+                        if let serde_json::Value::Object(m) = value
+                            && let Some(inner) = m.get_mut("value")
+                        {
+                            __walk_nested_references_direct(inner, inputs, steps_context);
+                        }
+                        return;
+                    }
+
+                    let is_immediate_envelope = matches!(
+                        map.get("valueType"),
+                        Some(serde_json::Value::String(s)) if s == "immediate"
+                    );
+                    if is_immediate_envelope {
+                        if let Some(inner) = map.get_mut("value") {
+                            __walk_nested_references_direct(inner, inputs, steps_context);
+                        }
+                        return;
+                    }
+
+                    let condition_op = map.get("op").and_then(|v| v.as_str()).map(str::to_owned);
+                    if let Some(op) = condition_op.as_deref()
+                        && let Some(args) = map.get_mut("arguments").and_then(|v| v.as_array_mut())
+                    {
+                        for (index, arg) in args.iter_mut().enumerate() {
+                            if index == 0 && __is_field_argument_operator(op) && __is_reference_envelope(arg) {
+                                continue;
+                            }
+                            __walk_nested_references_direct(arg, inputs, steps_context);
+                        }
+                        return;
+                    }
+
+                    for child in map.values_mut() {
+                        __walk_nested_references_direct(child, inputs, steps_context);
+                    }
+                }
+                serde_json::Value::Array(items) => {
+                    for item in items.iter_mut() {
+                        __walk_nested_references_direct(item, inputs, steps_context);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        #[allow(dead_code)]
+        fn __resolve_nested_references_direct(
+            mut value: serde_json::Value,
+            inputs: &WorkflowInputs,
+            steps_context: &serde_json::Map<String, serde_json::Value>,
+        ) -> serde_json::Value {
+            __walk_nested_references_direct(&mut value, inputs, steps_context);
+            value
+        }
+
+        type __ChildWorkflowFn = fn(Arc<WorkflowInputs>) -> std::result::Result<serde_json::Value, String>;
+
+        /// Shared durable wrapper for the common embedded-workflow retry configuration.
+        #[allow(dead_code)]
+        #[resilient(durable = true, max_retries = 3, delay = 1000)]
+        fn __embed_workflow_durable_default(
+            cache_key: &str,
+            child_inputs: serde_json::Value,
+            child_default_vars: serde_json::Value,
+            child_fn: __ChildWorkflowFn,
+            child_workflow_id: &str,
+            step_id: &str,
+            step_name: &str,
+            parent_scope_id: Option<String>,
+            parent_cache_prefix: Option<String>,
+            loop_indices_suffix: String,
+            parent_workflow_id: Option<String>,
+            parent_instance_id: Option<serde_json::Value>,
+            parent_tenant_id: Option<serde_json::Value>,
+        ) -> std::result::Result<serde_json::Value, String> {
+            let __child_scope_id = if let Some(ref parent) = parent_scope_id {
+                format!("{}_{}", parent, step_id)
+            } else {
+                format!("sc_{}", step_id)
+            };
+
+            let mut __child_vars = serde_json::Map::new();
+            __child_vars.insert(
+                "_scope_id".to_string(),
+                serde_json::Value::String(__child_scope_id.clone()),
+            );
+            if let Some(ref sid) = parent_workflow_id {
+                __child_vars.insert("_workflow_id".to_string(), serde_json::Value::String(sid.clone()));
+            }
+            if let Some(iid) = parent_instance_id {
+                __child_vars.insert("_instance_id".to_string(), iid);
+            }
+            if let Some(tid) = parent_tenant_id {
+                __child_vars.insert("_tenant_id".to_string(), tid);
+            }
+
+            let __child_cache_prefix = match &parent_cache_prefix {
+                Some(p) if !p.is_empty() => format!("{}__{}{}", p, step_id, loop_indices_suffix),
+                _ => {
+                    let workflow_id = parent_workflow_id.as_deref().unwrap_or("root");
+                    format!("{}::{}{}", workflow_id, step_id, loop_indices_suffix)
+                }
+            };
+            __child_vars.insert(
+                "_cache_key_prefix".to_string(),
+                serde_json::Value::String(__child_cache_prefix),
+            );
+
+            if let Some(defaults) = child_default_vars.as_object() {
+                for (name, value) in defaults {
+                    __child_vars
+                        .entry(name.clone())
+                        .or_insert_with(|| value.clone());
+                }
+            }
+
+            let child_workflow_inputs = WorkflowInputs {
+                data: Arc::new(child_inputs),
+                variables: Arc::new(serde_json::Value::Object(__child_vars)),
+                parent_scope_id: Some(__child_scope_id.clone()),
+            };
+
+            if runtara_sdk::is_cancelled() {
+                let structured_error = serde_json::json!({
+                    "stepId": step_id,
+                    "stepName": step_name,
+                    "stepType": "EmbedWorkflow",
+                    "code": "STEP_INTERRUPTED",
+                    "message": format!("EmbedWorkflow step {} interrupted before execution", step_id),
+                    "category": "transient",
+                    "severity": "info",
+                    "childWorkflowId": child_workflow_id
+                });
+                return Err(serde_json::to_string(&structured_error).unwrap_or_else(|_| {
+                    format!("EmbedWorkflow step {} interrupted", step_id)
+                }));
+            }
+
+            let __child_span = __make_child_workflow_span(step_id, child_workflow_id);
+            let child_result = __child_span.in_scope(|| {
+                child_fn(Arc::new(child_workflow_inputs)).map_err(|e: String| {
+                    let child_error: serde_json::Value = serde_json::from_str(&e)
+                        .unwrap_or_else(|_| serde_json::json!({
+                            "message": e,
+                            "code": null,
+                            "category": "unknown",
+                            "severity": "error"
+                        }));
+
+                    if child_error.get("stepType").and_then(|v| v.as_str()) == Some("Error") {
+                        return e;
+                    }
+
+                    let structured_error = serde_json::json!({
+                        "stepId": step_id,
+                        "stepName": step_name,
+                        "stepType": "EmbedWorkflow",
+                        "code": "CHILD_WORKFLOW_FAILED",
+                        "message": format!("Child workflow {} failed", child_workflow_id),
+                        "category": child_error.get("category").and_then(|v| v.as_str()).unwrap_or("transient"),
+                        "severity": child_error.get("severity").and_then(|v| v.as_str()).unwrap_or("error"),
+                        "childWorkflowId": child_workflow_id,
+                        "childError": child_error
+                    });
+                    serde_json::to_string(&structured_error).unwrap_or_else(|_| {
+                        format!("Child workflow {} failed: {}", child_workflow_id, e)
+                    })
+                })
+            })?;
+
+            Ok(__embed_step_output_envelope(
+                step_id,
+                step_name,
+                child_workflow_id,
+                &child_result,
+            ))
+        }
+
+        /// Shared durable wrapper for the common agent retry configuration.
+        ///
+        /// Most generated Agent steps use the default retry policy. Emitting one
+        /// #[resilient] function per step makes large embedded workflows pay the
+        /// proc-macro/codegen cost hundreds of times for identical dispatch glue.
+        #[allow(dead_code)]
+        #[resilient(durable = true, max_retries = 3, delay = 1000, rate_limit_budget = 60000)]
+        fn __agent_durable_default(
+            cache_key: &str,
+            inputs: serde_json::Value,
+            agent_id: &str,
+            capability_id: &str,
+            _step_id: &str,
+        ) -> std::result::Result<serde_json::Value, String> {
+            __workflow_dispatch(agent_id, capability_id, inputs)
+        }
+
+        /// Shared durable wrapper for rate-limited capabilities with default retries.
+        #[allow(dead_code)]
+        #[resilient(durable = true, max_retries = 5, delay = 2000, rate_limit_budget = 60000)]
+        fn __agent_durable_rate_limited_default(
+            cache_key: &str,
+            inputs: serde_json::Value,
+            agent_id: &str,
+            capability_id: &str,
+            _step_id: &str,
+        ) -> std::result::Result<serde_json::Value, String> {
+            __workflow_dispatch(agent_id, capability_id, inputs)
         }
     }
 }
@@ -645,21 +1358,21 @@ fn emit_main(graph: &ExecutionGraph) -> TokenStream {
             // - _instance_id: execution instance UUID — useful for conversation memory keys,
             //   correlation, and debugging.
             // - _tenant_id: tenant identifier — useful for multi-tenant context in mappings.
-            if let Some(vars_obj) = variables.as_object_mut() {
-                vars_obj.insert(
-                    "_workflow_id".to_string(),
-                    serde_json::json!(format!("{}::{}", workflow_id, instance_id))
-                );
-                vars_obj.insert(
-                    "_instance_id".to_string(),
-                    serde_json::json!(&instance_id)
-                );
-                let tenant_id_val = std::env::var("TENANT_ID").unwrap_or_else(|_| "unknown".to_string());
-                vars_obj.insert(
-                    "_tenant_id".to_string(),
-                    serde_json::json!(tenant_id_val)
-                );
-            }
+                if let Some(vars_obj) = variables.as_object_mut() {
+                    vars_obj.insert(
+                        "_workflow_id".to_string(),
+                        serde_json::Value::String(format!("{}::{}", workflow_id, instance_id))
+                    );
+                    vars_obj.insert(
+                        "_instance_id".to_string(),
+                        serde_json::Value::String(instance_id.clone())
+                    );
+                    let tenant_id_val = std::env::var("TENANT_ID").unwrap_or_else(|_| "unknown".to_string());
+                    vars_obj.insert(
+                        "_tenant_id".to_string(),
+                        serde_json::Value::String(tenant_id_val)
+                    );
+                }
 
             let workflow_inputs = WorkflowInputs {
                 data: Arc::new(data),

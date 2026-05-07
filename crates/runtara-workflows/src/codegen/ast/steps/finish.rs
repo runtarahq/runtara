@@ -34,8 +34,18 @@ pub fn emit(step: &FinishStep, ctx: &mut EmitContext) -> Result<TokenStream, Cod
     // Clone immutable references
     let steps_context = ctx.steps_context_var.clone();
 
-    // Build the source for input mapping
-    let build_source = mapping::emit_build_source(ctx);
+    let mapping_needs_source = step
+        .input_mapping
+        .as_ref()
+        .is_some_and(mapping::input_mapping_needs_source);
+    let source_init = if mapping_needs_source {
+        let build_source = mapping::emit_build_source(ctx);
+        quote! {
+            let #source_var = #build_source;
+        }
+    } else {
+        quote! {}
+    };
 
     // Serialize input mapping to JSON for debug events
     let input_mapping_json = step.input_mapping.as_ref().and_then(|m| {
@@ -95,8 +105,9 @@ pub fn emit(step: &FinishStep, ctx: &mut EmitContext) -> Result<TokenStream, Cod
     // The Finish step immediately returns from the workflow function.
     // This allows multiple Finish steps in different branches to work correctly.
     Ok(quote! {
-        let #source_var = #build_source;
-        let #finish_inputs_var = serde_json::json!({"finishing": true});
+        #source_init
+        let #finish_inputs_var =
+            __single_field_object("finishing", serde_json::Value::Bool(true));
 
         // Define tracing span for this step
         #span_def
@@ -114,12 +125,8 @@ pub fn emit(step: &FinishStep, ctx: &mut EmitContext) -> Result<TokenStream, Cod
             // Extract just the "outputs" field if it exists, otherwise use the whole value
             let #outputs_var = #outputs_var.get("outputs").cloned().unwrap_or(#outputs_var);
 
-            let #step_var = serde_json::json!({
-                "stepId": #step_id,
-                "stepName": #step_name_display,
-                "stepType": "Finish",
-                "outputs": &#outputs_var
-            });
+            let #step_var =
+                __step_output_envelope(#step_id, #step_name_display, "Finish", &#outputs_var);
 
             #debug_end
 
@@ -164,7 +171,9 @@ mod tests {
             "Finish step should return from workflow"
         );
         assert!(
-            code.contains("\"finishing\" : true"),
+            code.contains("__single_field_object")
+                && code.contains("\"finishing\"")
+                && code.contains("serde_json :: Value :: Bool (true)"),
             "Should have finishing indicator in inputs"
         );
     }
@@ -259,12 +268,12 @@ mod tests {
         let tokens = emit(&step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
-        // Verify output JSON structure
-        assert!(code.contains("\"stepId\""), "Should include stepId");
-        assert!(code.contains("\"stepName\""), "Should include stepName");
-        assert!(code.contains("\"stepType\""), "Should include stepType");
+        // Verify output JSON structure is built via shared helper.
+        assert!(
+            code.contains("__step_output_envelope"),
+            "Should build output envelope"
+        );
         assert!(code.contains("\"Finish\""), "Should have stepType = Finish");
-        assert!(code.contains("\"outputs\""), "Should include outputs");
     }
 
     #[test]

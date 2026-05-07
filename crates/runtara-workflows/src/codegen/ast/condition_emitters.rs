@@ -10,7 +10,7 @@ use proc_macro2::TokenStream;
 use quote::quote;
 
 use super::context::EmitContext;
-use super::mapping::emit_mapping_value;
+use super::mapping::{emit_mapping_value, mapping_value_needs_source};
 use runtara_dsl::{ConditionArgument, ConditionExpression, ConditionOperation, ConditionOperator};
 
 /// Emit code that evaluates a `ConditionExpression` to a `bool`.
@@ -433,5 +433,23 @@ fn emit_length_as_value(
             };
             serde_json::Value::Number(serde_json::Number::from(len))
         }
+    }
+}
+
+/// Return true when a condition expression needs the full source object.
+///
+/// Direct references are resolved against `WorkflowInputs` plus
+/// `steps_context`; templates still need the aggregate source envelope.
+pub fn condition_needs_source(expr: &ConditionExpression) -> bool {
+    match expr {
+        ConditionExpression::Value(mapping_value) => mapping_value_needs_source(mapping_value),
+        ConditionExpression::Operation(op) => op.arguments.iter().any(argument_needs_source),
+    }
+}
+
+fn argument_needs_source(arg: &ConditionArgument) -> bool {
+    match arg {
+        ConditionArgument::Expression(expr) => condition_needs_source(expr),
+        ConditionArgument::Value(mapping_value) => mapping_value_needs_source(mapping_value),
     }
 }

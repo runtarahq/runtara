@@ -71,8 +71,18 @@ pub fn emit(step: &AgentStep, ctx: &mut EmitContext) -> Result<TokenStream, Code
     // Clone immutable references
     let steps_context = ctx.steps_context_var.clone();
 
-    // Build the source for input mapping
-    let build_source = mapping::emit_build_source(ctx);
+    let mapping_needs_source = step
+        .input_mapping
+        .as_ref()
+        .is_some_and(mapping::input_mapping_needs_source);
+    let source_init = if mapping_needs_source {
+        let build_source = mapping::emit_build_source(ctx);
+        quote! {
+            let #source_var = #build_source;
+        }
+    } else {
+        quote! {}
+    };
 
     // Serialize input mapping to JSON for debug events
     let input_mapping_json = step.input_mapping.as_ref().and_then(|m| {
@@ -176,11 +186,12 @@ pub fn emit(step: &AgentStep, ctx: &mut EmitContext) -> Result<TokenStream, Code
     };
 
     Ok(quote! {
-        let #source_var = #build_source;
+        #source_init
         let #step_inputs_var = ::runtara_workflow_stdlib::value_resolver::unwrap_top_level_immediate_envelopes(
-            ::runtara_workflow_stdlib::value_resolver::resolve_nested_references(
+            __resolve_nested_references_direct(
                 #base_inputs_code,
-                &#source_var,
+                #workflow_inputs_var.as_ref(),
+                &#steps_context,
             )
         );
 
@@ -202,12 +213,8 @@ pub fn emit(step: &AgentStep, ctx: &mut EmitContext) -> Result<TokenStream, Code
 
                     #debug_end
 
-                    let #step_var = serde_json::json!({
-                        "stepId": #step_id,
-                        "stepName": #step_name_display,
-                        "stepType": "Agent",
-                        "outputs": #result_var
-                    });
+                    let #step_var =
+                        __step_output_envelope(#step_id, #step_name_display, "Agent", &#result_var);
                     #steps_context.insert(#step_id.to_string(), #step_var.clone());
 
                     // Check for cancellation or pause via SDK signal polling
@@ -222,10 +229,7 @@ pub fn emit(step: &AgentStep, ctx: &mut EmitContext) -> Result<TokenStream, Code
                 }
                 Err(__cap_err) => {
                     // Emit debug end with error info so failures are visible in the UI
-                    let #error_output_var = serde_json::json!({
-                        "_error": true,
-                        "error": &__cap_err
-                    });
+                    let #error_output_var = __agent_error_output(&__cap_err);
                     #debug_end_error
                     Err(__cap_err)
                 }
@@ -275,6 +279,52 @@ fn emit_durable_call(
     let retry_delay_lit = retry_delay;
     let rate_limit_budget_lit = rate_limit_budget;
     let durable_lit = step_durable;
+    let use_shared_default_wrapper =
+        step_durable && max_retries == 3 && retry_delay == 1000 && rate_limit_budget == 60_000;
+
+    let durable_call = if use_shared_default_wrapper {
+        quote! {
+            // Call the shared default resilient function and wrap error with step context
+            // AFTER retry decisions have been made.
+            let __cap_result = __agent_durable_default(
+                &__durable_cache_key,
+                #final_inputs.clone(),
+                #agent_id,
+                #capability_id,
+                #step_id,
+            )
+                .map_err(|e| format!("Step {} failed: Agent {}::{}: {}",
+                    #step_id, #agent_id, #capability_id, e));
+        }
+    } else {
+        quote! {
+            // Define the resilient agent execution function with cancellation support.
+            // The raw capability error is passed through (not wrapped) so that the
+            // #[resilient] macro can parse JSON error category for retry decisions.
+            #[resilient(durable = #durable_lit, max_retries = #max_retries_lit, delay = #retry_delay_lit, rate_limit_budget = #rate_limit_budget_lit)]
+            fn #durable_fn_name(
+                cache_key: &str,
+                inputs: serde_json::Value,
+                agent_id: &str,
+                capability_id: &str,
+                step_id: &str,
+            ) -> std::result::Result<serde_json::Value, String> {
+                __workflow_dispatch(agent_id, capability_id, inputs)
+            }
+
+            // Call the resilient function and wrap error with step context AFTER retry
+            // decisions have been made (inside the resilient fn, errors are raw JSON)
+            let __cap_result = #durable_fn_name(
+                &__durable_cache_key,
+                #final_inputs.clone(),
+                #agent_id,
+                #capability_id,
+                #step_id,
+            )
+                .map_err(|e| format!("Step {} failed: Agent {}::{}: {}",
+                    #step_id, #agent_id, #capability_id, e));
+        }
+    };
 
     quote! {
         // Build cache key dynamically, including prefix and loop indices
@@ -314,33 +364,9 @@ fn emit_durable_call(
             }
         };
 
-        // Define the resilient agent execution function with cancellation support.
-        // The raw capability error is passed through (not wrapped) so that the
-        // #[resilient] macro can parse JSON error category for retry decisions.
-        #[resilient(durable = #durable_lit, max_retries = #max_retries_lit, delay = #retry_delay_lit, rate_limit_budget = #rate_limit_budget_lit)]
-        fn #durable_fn_name(
-            cache_key: &str,
-            inputs: serde_json::Value,
-            agent_id: &str,
-            capability_id: &str,
-            step_id: &str,
-        ) -> std::result::Result<serde_json::Value, String> {
-            __workflow_dispatch(agent_id, capability_id, inputs)
-        }
-
         #connection_fetch
 
-        // Call the resilient function and wrap error with step context AFTER retry
-        // decisions have been made (inside the resilient fn, errors are raw JSON)
-        let __cap_result = #durable_fn_name(
-            &__durable_cache_key,
-            #final_inputs.clone(),
-            #agent_id,
-            #capability_id,
-            #step_id,
-        )
-            .map_err(|e| format!("Step {} failed: Agent {}::{}: {}",
-                #step_id, #agent_id, #capability_id, e));
+        #durable_call
     }
 }
 
@@ -380,6 +406,52 @@ fn emit_durable_rate_limited_call(
     let retry_delay_lit = retry_delay;
     let rate_limit_budget_lit = rate_limit_budget;
     let durable_lit = step_durable;
+    let use_shared_default_wrapper =
+        step_durable && max_retries == 5 && retry_delay == 2000 && rate_limit_budget == 60_000;
+
+    let durable_call = if use_shared_default_wrapper {
+        quote! {
+            // Call the shared default rate-limited resilient function and wrap error
+            // with step context AFTER retry decisions have been made.
+            let __cap_result = __agent_durable_rate_limited_default(
+                &__durable_cache_key,
+                #final_inputs.clone(),
+                #agent_id,
+                #capability_id,
+                #step_id,
+            )
+                .map_err(|e| format!("Step {} failed: Agent {}::{}: {}",
+                    #step_id, #agent_id, #capability_id, e));
+        }
+    } else {
+        quote! {
+            // Define the resilient agent execution function (rate-limited) with cancellation support.
+            // The raw capability error is passed through (not wrapped) so that the
+            // #[resilient] macro can parse JSON error category for retry decisions.
+            #[resilient(durable = #durable_lit, max_retries = #max_retries_lit, delay = #retry_delay_lit, rate_limit_budget = #rate_limit_budget_lit)]
+            fn #durable_fn_name(
+                cache_key: &str,
+                inputs: serde_json::Value,
+                agent_id: &str,
+                capability_id: &str,
+                step_id: &str,
+            ) -> std::result::Result<serde_json::Value, String> {
+                __workflow_dispatch(agent_id, capability_id, inputs)
+            }
+
+            // Call the resilient function and wrap error with step context AFTER retry
+            // decisions have been made (inside the resilient fn, errors are raw JSON)
+            let __cap_result = #durable_fn_name(
+                &__durable_cache_key,
+                #final_inputs.clone(),
+                #agent_id,
+                #capability_id,
+                #step_id,
+            )
+                .map_err(|e| format!("Step {} failed: Agent {}::{}: {}",
+                    #step_id, #agent_id, #capability_id, e));
+        }
+    };
 
     quote! {
         // Build cache key dynamically, including prefix and loop indices
@@ -419,33 +491,9 @@ fn emit_durable_rate_limited_call(
             }
         };
 
-        // Define the resilient agent execution function (rate-limited) with cancellation support.
-        // The raw capability error is passed through (not wrapped) so that the
-        // #[resilient] macro can parse JSON error category for retry decisions.
-        #[resilient(durable = #durable_lit, max_retries = #max_retries_lit, delay = #retry_delay_lit, rate_limit_budget = #rate_limit_budget_lit)]
-        fn #durable_fn_name(
-            cache_key: &str,
-            inputs: serde_json::Value,
-            agent_id: &str,
-            capability_id: &str,
-            step_id: &str,
-        ) -> std::result::Result<serde_json::Value, String> {
-            __workflow_dispatch(agent_id, capability_id, inputs)
-        }
-
         #connection_fetch
 
-        // Call the resilient function and wrap error with step context AFTER retry
-        // decisions have been made (inside the resilient fn, errors are raw JSON)
-        let __cap_result = #durable_fn_name(
-            &__durable_cache_key,
-            #final_inputs.clone(),
-            #agent_id,
-            #capability_id,
-            #step_id,
-        )
-            .map_err(|e| format!("Step {} failed: Agent {}::{}: {}",
-                #step_id, #agent_id, #capability_id, e));
+        #durable_call
     }
 }
 
@@ -533,12 +581,12 @@ mod tests {
             "Should build durable cache key"
         );
         assert!(
-            code.contains("# [resilient") || code.contains("#[resilient"),
-            "Should use #[resilient] macro"
+            code.contains("__agent_durable_default"),
+            "Default retry config should call the shared durable agent wrapper"
         );
         assert!(
-            code.contains("__workflow_dispatch"),
-            "Should call __workflow_dispatch"
+            !code.contains("# [resilient") && !code.contains("#[resilient"),
+            "Default retry config should not emit a per-step resilient function"
         );
     }
 
@@ -548,8 +596,8 @@ mod tests {
         let step = create_agent_step("a", "utils", "random-double");
         let code = emit(&step, &mut ctx).unwrap().to_string();
         assert!(
-            code.contains("durable = true"),
-            "durable-by-default workflow with silent step should emit durable = true, got:\n{}",
+            code.contains("__agent_durable_default"),
+            "durable-by-default workflow with default retries should use shared durable wrapper, got:\n{}",
             code
         );
     }
@@ -606,12 +654,8 @@ mod tests {
 
         // Default values: max_retries = 3, retry_delay = 1000
         assert!(
-            code.contains("max_retries = 3u32"),
-            "Should use default max_retries = 3"
-        );
-        assert!(
-            code.contains("delay = 1000u64"),
-            "Should use default retry_delay = 1000"
+            code.contains("__agent_durable_default"),
+            "Default retry config should use shared durable wrapper"
         );
     }
 
@@ -810,12 +854,12 @@ mod tests {
         let tokens = emit(&step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
-        // Verify output JSON structure
-        assert!(code.contains("\"stepId\""), "Should include stepId");
-        assert!(code.contains("\"stepName\""), "Should include stepName");
-        assert!(code.contains("\"stepType\""), "Should include stepType");
+        // Verify output JSON structure is built via shared helper.
+        assert!(
+            code.contains("__step_output_envelope"),
+            "Should build output envelope"
+        );
         assert!(code.contains("\"Agent\""), "Should have stepType = Agent");
-        assert!(code.contains("\"outputs\""), "Should include outputs");
     }
 
     #[test]
@@ -881,8 +925,8 @@ mod tests {
 
         // Core agent logic should still be present
         assert!(
-            code.contains("__workflow_dispatch"),
-            "Should have capability execution"
+            code.contains("__agent_durable_default"),
+            "Should have capability execution via shared durable wrapper"
         );
         assert!(
             code.contains("__durable_cache_key"),
@@ -921,7 +965,8 @@ mod tests {
     #[test]
     fn test_emit_agent_durable_function_definition() {
         let mut ctx = EmitContext::new(false);
-        let step = create_agent_step("agent-durable", "utils", "concat");
+        let mut step = create_agent_step("agent-durable", "utils", "concat");
+        step.max_retries = Some(4);
 
         let tokens = emit(&step, &mut ctx).unwrap();
         let code = tokens.to_string();

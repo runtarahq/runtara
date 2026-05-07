@@ -419,36 +419,32 @@ pub fn emit_step_debug_start(
         .unwrap_or(quote! { None::<serde_json::Value> });
 
     let mapping_expr = input_mapping_json
-        .map(|json| quote! {
-            Some(serde_json::from_str::<serde_json::Value>(#json).unwrap_or(serde_json::Value::Null))
+        .map(|json| {
+            quote! {
+                Some(#json)
+            }
         })
-        .unwrap_or(quote! { None::<serde_json::Value> });
+        .unwrap_or(quote! { None::<&str> });
 
     // Extract loop_indices from workflow inputs if available
     let loop_indices_expr = workflow_inputs_var
         .map(|v| {
             quote! {
-                (*#v.variables)
-                    .as_object()
-                    .and_then(|vars| vars.get("_loop_indices"))
-                    .cloned()
-                    .unwrap_or(serde_json::Value::Array(vec![]))
+                __debug_loop_indices(#v.as_ref())
             }
         })
         .unwrap_or(quote! { serde_json::Value::Array(vec![]) });
 
     // Use override_scope_id if provided (for scope-creating steps), otherwise extract from variables
     let scope_id_expr = if let Some(scope_id) = override_scope_id {
-        quote! { Some(#scope_id.to_string()) }
+        workflow_inputs_var
+            .map(|v| quote! { __debug_scope_id(#v.as_ref(), Some(#scope_id)) })
+            .unwrap_or(quote! { Some(#scope_id.to_string()) })
     } else {
         workflow_inputs_var
             .map(|v| {
                 quote! {
-                    (*#v.variables)
-                        .as_object()
-                        .and_then(|vars| vars.get("_scope_id"))
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_string())
+                    __debug_scope_id(#v.as_ref(), None)
                 }
             })
             .unwrap_or(quote! { None::<String> })
@@ -520,27 +516,21 @@ pub fn emit_step_debug_end(
     let loop_indices_expr = workflow_inputs_var
         .map(|v| {
             quote! {
-                (*#v.variables)
-                    .as_object()
-                    .and_then(|vars| vars.get("_loop_indices"))
-                    .cloned()
-                    .unwrap_or(serde_json::Value::Array(vec![]))
+                __debug_loop_indices(#v.as_ref())
             }
         })
         .unwrap_or(quote! { serde_json::Value::Array(vec![]) });
 
     // Use override_scope_id if provided (for scope-creating steps), otherwise extract from variables
     let scope_id_expr = if let Some(scope_id) = override_scope_id {
-        quote! { Some(#scope_id.to_string()) }
+        workflow_inputs_var
+            .map(|v| quote! { __debug_scope_id(#v.as_ref(), Some(#scope_id)) })
+            .unwrap_or(quote! { Some(#scope_id.to_string()) })
     } else {
         workflow_inputs_var
             .map(|v| {
                 quote! {
-                    (*#v.variables)
-                        .as_object()
-                        .and_then(|vars| vars.get("_scope_id"))
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_string())
+                    __debug_scope_id(#v.as_ref(), None)
                 }
             })
             .unwrap_or(quote! { None::<String> })
@@ -624,17 +614,51 @@ pub fn emit_step_span_start(
     step_name: Option<&str>,
     step_type: &str,
 ) -> TokenStream {
-    let span_name = format!("step.{}", step_type.to_lowercase());
     let name_display = step_name.unwrap_or(step_id);
+    let helper = match step_type {
+        "AiAgent" => quote! { __make_ai_agent_step_span },
+        "Conditional" => quote! { __make_conditional_step_span },
+        "Delay" => quote! { __make_delay_step_span },
+        "EmbedWorkflow" => quote! { __make_embed_workflow_step_span },
+        "Error" => quote! { __make_error_step_span },
+        "Filter" => quote! { __make_filter_step_span },
+        "Finish" => quote! { __make_finish_step_span },
+        "GroupBy" => quote! { __make_group_by_step_span },
+        "Log" => quote! { __make_log_step_span },
+        "Split" => quote! { __make_split_step_span },
+        "Switch" => quote! { __make_switch_step_span },
+        "WaitForSignal" => quote! { __make_wait_for_signal_step_span },
+        "While" => quote! { __make_while_step_span },
+        _ => quote! { __make_generic_step_span },
+    };
 
-    quote! {
-        let __step_span = tracing::info_span!(
-            #span_name,
-            step.id = #step_id,
-            step.name = #name_display,
-            step.type = #step_type,
-            otel.kind = "INTERNAL"
-        );
+    if step_type == "Agent" {
+        quote! {
+            let __step_span = __make_generic_step_span(#step_id, #name_display, #step_type);
+        }
+    } else if matches!(
+        step_type,
+        "AiAgent"
+            | "Conditional"
+            | "Delay"
+            | "EmbedWorkflow"
+            | "Error"
+            | "Filter"
+            | "Finish"
+            | "GroupBy"
+            | "Log"
+            | "Split"
+            | "Switch"
+            | "WaitForSignal"
+            | "While"
+    ) {
+        quote! {
+            let __step_span = #helper(#step_id, #name_display);
+        }
+    } else {
+        quote! {
+            let __step_span = #helper(#step_id, #name_display, #step_type);
+        }
     }
 }
 
@@ -651,15 +675,7 @@ pub fn emit_agent_span_start(
     let name_display = step_name.unwrap_or(step_id);
 
     quote! {
-        let __step_span = tracing::info_span!(
-            "step.agent",
-            step.id = #step_id,
-            step.name = #name_display,
-            step.type = "Agent",
-            agent.id = #agent_id,
-            capability.id = #capability_id,
-            otel.kind = "INTERNAL"
-        );
+        let __step_span = __make_agent_span(#step_id, #name_display, #agent_id, #capability_id);
     }
 }
 
@@ -688,15 +704,14 @@ pub fn emit_iteration_span_start(
     step_type: &str,
     index_var: &proc_macro2::Ident,
 ) -> TokenStream {
-    let span_name = format!("{}.iteration", step_type.to_lowercase());
+    let helper = if step_type.eq_ignore_ascii_case("while") {
+        quote! { __make_while_iteration_span }
+    } else {
+        quote! { __make_split_iteration_span }
+    };
 
     quote! {
-        let __iter_span = tracing::info_span!(
-            #span_name,
-            step.id = #step_id,
-            iteration.index = #index_var,
-            otel.kind = "INTERNAL"
-        );
+        let __iter_span = #helper(#step_id, #index_var);
     }
 }
 
@@ -724,12 +739,7 @@ pub fn emit_child_workflow_span_start(
     child_workflow_id: &str,
 ) -> TokenStream {
     quote! {
-        let __child_span = tracing::info_span!(
-            "workflow.child",
-            workflow.id = #child_workflow_id,
-            parent_step.id = #parent_step_id,
-            otel.kind = "INTERNAL"
-        );
+        let __child_span = __make_child_workflow_span(#parent_step_id, #child_workflow_id);
     }
 }
 
@@ -995,8 +1005,8 @@ mod tests {
         let code = tokens.to_string();
 
         assert!(
-            code.contains("serde_json :: from_str"),
-            "Should parse mapping JSON"
+            code.contains("Some (\"{\\\"field\\\""),
+            "Should pass static mapping JSON to debug helper"
         );
         assert!(
             code.contains("data.x"),
@@ -1510,18 +1520,9 @@ mod tests {
             code.contains("my_workflow_inputs"),
             "Should reference the provided workflow inputs variable"
         );
-        // proc_macro2 tokenizes with spaces, so `.variables` becomes `. variables`
         assert!(
-            code.contains(". variables"),
-            "Should access variables from workflow inputs"
-        );
-        assert!(
-            code.contains("\"_loop_indices\""),
-            "Should look for _loop_indices key in variables"
-        );
-        assert!(
-            code.contains("as_object"),
-            "Should use as_object() to access variables map"
+            code.contains("__debug_loop_indices"),
+            "Should delegate loop index extraction to shared helper"
         );
     }
 
@@ -1565,10 +1566,9 @@ mod tests {
         );
         let code = tokens.to_string();
 
-        // Should have fallback to empty array if _loop_indices is not present
         assert!(
-            code.contains("unwrap_or (serde_json :: Value :: Array (vec ! []))"),
-            "Should fallback to empty array when _loop_indices is missing"
+            code.contains("__debug_loop_indices"),
+            "Should delegate missing-loop fallback to shared helper"
         );
     }
 
@@ -1862,11 +1862,9 @@ mod tests {
         );
         let code = tokens.to_string();
 
-        // Verify we use .cloned() to avoid ownership issues
-        // proc_macro2 tokenizes `.cloned()` as `. cloned ()`
         assert!(
-            code.contains(". cloned ()"),
-            "Should use .cloned() to extract loop_indices value"
+            code.contains("__debug_loop_indices"),
+            "Loop index extraction should be centralized in shared helper"
         );
     }
 
@@ -1877,25 +1875,10 @@ mod tests {
         let tokens = emit_step_span_start("step-1", Some("Test Step"), "Agent");
         let code = tokens.to_string();
 
-        assert!(
-            code.contains("tracing :: info_span !"),
-            "Should create info_span"
-        );
-        assert!(
-            code.contains("\"step.agent\""),
-            "Span name should be step.<type lowercase>"
-        );
-        assert!(code.contains("step . id"), "Should include step.id");
-        assert!(code.contains("step . name"), "Should include step.name");
-        assert!(code.contains("step . type"), "Should include step.type");
-        assert!(
-            code.contains("otel . kind"),
-            "Should include otel.kind attribute"
-        );
-        assert!(
-            code.contains("\"INTERNAL\""),
-            "otel.kind should be INTERNAL"
-        );
+        assert!(code.contains("__make_generic_step_span"));
+        assert!(code.contains("step-1"), "Should include step.id");
+        assert!(code.contains("Test Step"), "Should include step.name");
+        assert!(code.contains("Agent"), "Should include step.type");
         // Note: No guard is created - step body uses .instrument(__step_span).await
         assert!(
             !code.contains("__step_span_guard"),
@@ -1914,8 +1897,8 @@ mod tests {
             "Should use step_id as fallback name"
         );
         assert!(
-            code.contains("\"step.conditional\""),
-            "Span name should be lowercase step type"
+            code.contains("__make_conditional_step_span"),
+            "Should call shared Conditional span helper"
         );
     }
 
@@ -1940,15 +1923,7 @@ mod tests {
         );
         let code = tokens.to_string();
 
-        assert!(
-            code.contains("\"step.agent\""),
-            "Span name should be step.agent"
-        );
-        assert!(code.contains("agent . id"), "Should include agent.id");
-        assert!(
-            code.contains("capability . id"),
-            "Should include capability.id"
-        );
+        assert!(code.contains("__make_agent_span"));
         assert!(code.contains("http-agent"), "Should include agent_id value");
         assert!(
             code.contains("fetch-json"),
@@ -1962,14 +1937,7 @@ mod tests {
         let tokens = emit_iteration_span_start("split-1", "split", &idx_var);
         let code = tokens.to_string();
 
-        assert!(
-            code.contains("\"split.iteration\""),
-            "Span name should be <type>.iteration"
-        );
-        assert!(
-            code.contains("iteration . index"),
-            "Should include iteration.index"
-        );
+        assert!(code.contains("__make_split_iteration_span"));
         assert!(code.contains("idx"), "Should reference the index variable");
         assert!(code.contains("__iter_span"), "Should create iteration span");
         // Note: No guard is created - iteration body uses .instrument(__iter_span).await
@@ -1995,15 +1963,7 @@ mod tests {
         let tokens = emit_child_workflow_span_start("start-workflow-1", "child-workflow-abc");
         let code = tokens.to_string();
 
-        assert!(
-            code.contains("\"workflow.child\""),
-            "Span name should be workflow.child"
-        );
-        assert!(code.contains("workflow . id"), "Should include workflow.id");
-        assert!(
-            code.contains("parent_step . id"),
-            "Should include parent_step.id"
-        );
+        assert!(code.contains("__make_child_workflow_span"));
         assert!(
             code.contains("child-workflow-abc"),
             "Should include child workflow ID"
@@ -2028,26 +1988,26 @@ mod tests {
 
     #[test]
     fn test_span_step_type_lowercase() {
-        // Verify different step types produce correct lowercase span names
+        // Verify different step types call their shared helper.
         let types_and_expected = [
-            ("Agent", "step.agent"),
-            ("Conditional", "step.conditional"),
-            ("Switch", "step.switch"),
-            ("Filter", "step.filter"),
-            ("GroupBy", "step.groupby"),
-            ("Finish", "step.finish"),
-            ("Error", "step.error"),
-            ("Log", "step.log"),
+            ("Agent", "__make_generic_step_span"),
+            ("Conditional", "__make_conditional_step_span"),
+            ("Switch", "__make_switch_step_span"),
+            ("Filter", "__make_filter_step_span"),
+            ("GroupBy", "__make_group_by_step_span"),
+            ("Finish", "__make_finish_step_span"),
+            ("Error", "__make_error_step_span"),
+            ("Log", "__make_log_step_span"),
         ];
 
-        for (step_type, expected_name) in types_and_expected {
+        for (step_type, expected_helper) in types_and_expected {
             let tokens = emit_step_span_start("test", None, step_type);
             let code = tokens.to_string();
             assert!(
-                code.contains(&format!("\"{}\"", expected_name)),
-                "Step type {} should produce span name {}",
+                code.contains(expected_helper),
+                "Step type {} should call span helper {}",
                 step_type,
-                expected_name
+                expected_helper
             );
         }
     }
