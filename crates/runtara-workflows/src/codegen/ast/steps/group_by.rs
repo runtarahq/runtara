@@ -159,16 +159,16 @@ pub fn emit(step: &GroupByStep, ctx: &mut EmitContext) -> Result<TokenStream, Co
                 serde_json::Value::Object(map)
             };
 
-            let #step_var = serde_json::json!({
-                "stepId": #step_id,
-                "stepName": #step_name_display,
-                "stepType": "GroupBy",
-                "outputs": {
+            let #step_var = __step_output_envelope(
+                #step_id,
+                #step_name_display,
+                "GroupBy",
+                &serde_json::json!({
                     "groups": __groups_json,
                     "counts": __counts_json,
                     "total_groups": __total_groups
-                }
-            });
+                }),
+            );
 
             #debug_end
 
@@ -242,6 +242,15 @@ mod tests {
         let tokens = emit(&step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
+        // Verify output JSON structure is built via shared helper.
+        assert!(
+            code.contains("__step_output_envelope"),
+            "Should build output envelope"
+        );
+        assert!(
+            code.contains("\"GroupBy\""),
+            "Should have stepType = GroupBy"
+        );
         assert!(
             code.contains("\"groups\""),
             "Should include groups in outputs"

@@ -808,12 +808,7 @@ pub fn emit(step: &SplitStep, ctx: &mut EmitContext) -> Result<TokenStream, Code
                     "outputs": &results
                 })
             } else {
-                serde_json::json!({
-                    "stepId": step_id,
-                    "stepName": step_name,
-                    "stepType": "Split",
-                    "outputs": &results
-                })
+                __step_output_envelope(step_id, step_name, "Split", &results)
             };
 
             Ok(step_result)
@@ -1197,20 +1192,12 @@ mod tests {
         let tokens = emit(&split_step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
-        // Verify output structure
+        // Verify output JSON structure is built via shared helper.
         assert!(
-            code.contains("\"stepId\""),
-            "Should include stepId in output"
-        );
-        assert!(
-            code.contains("\"stepType\""),
-            "Should include stepType in output"
+            code.contains("__step_output_envelope"),
+            "Should build output envelope"
         );
         assert!(code.contains("\"Split\""), "Should have stepType = Split");
-        assert!(
-            code.contains("\"outputs\""),
-            "Should include outputs in result"
-        );
     }
 
     #[test]

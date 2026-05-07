@@ -93,15 +93,15 @@ pub fn emit(step: &LogStep, ctx: &mut EmitContext) -> Result<TokenStream, Codege
                 let _ = __sdk_guard.custom_event("workflow_log", __payload_bytes);
             }
 
-            let #step_var = serde_json::json!({
-                "stepId": #step_id,
-                "stepName": #step_name_display,
-                "stepType": "Log",
-                "outputs": {
+            let #step_var = __step_output_envelope(
+                #step_id,
+                #step_name_display,
+                "Log",
+                &serde_json::json!({
                     "level": #level_str,
                     "message": #message
-                }
-            });
+                }),
+            );
 
             #steps_context.insert(#step_id.to_string(), #step_var.clone());
         });
@@ -282,12 +282,12 @@ mod tests {
         let tokens = emit(&step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
-        // Verify output JSON structure
-        assert!(code.contains("\"stepId\""), "Should include stepId");
-        assert!(code.contains("\"stepName\""), "Should include stepName");
-        assert!(code.contains("\"stepType\""), "Should include stepType");
+        // Verify output JSON structure is built via shared helper.
+        assert!(
+            code.contains("__step_output_envelope"),
+            "Should build output envelope"
+        );
         assert!(code.contains("\"Log\""), "Should have stepType = Log");
-        assert!(code.contains("\"outputs\""), "Should include outputs");
     }
 
     #[test]

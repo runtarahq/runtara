@@ -190,12 +190,12 @@ fn emit_value_switch(
 
             let output = matched_output.unwrap_or_else(|| process_switch_output(&#default_tokens, &#source_var));
 
-            let #step_var = serde_json::json!({
-                "stepId": #step_id,
-                "stepName": #step_name_display,
-                "stepType": "Switch",
-                "outputs": output
-            });
+            let #step_var = __step_output_envelope(
+                #step_id,
+                #step_name_display,
+                "Switch",
+                &output,
+            );
 
             #debug_end
 
@@ -888,11 +888,12 @@ mod tests {
         let tokens = emit(&step, &mut ctx, &empty_graph()).unwrap();
         let code = tokens.to_string();
 
-        assert!(code.contains("\"stepId\""), "Should include stepId");
-        assert!(code.contains("\"stepName\""), "Should include stepName");
-        assert!(code.contains("\"stepType\""), "Should include stepType");
+        // Verify output JSON structure is built via shared helper.
+        assert!(
+            code.contains("__step_output_envelope"),
+            "Should build output envelope"
+        );
         assert!(code.contains("\"Switch\""), "Should have stepType = Switch");
-        assert!(code.contains("\"outputs\""), "Should include outputs");
     }
 
     #[test]

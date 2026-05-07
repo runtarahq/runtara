@@ -134,17 +134,17 @@ pub fn emit(step: &ErrorStep, ctx: &mut EmitContext) -> Result<TokenStream, Code
             }
 
             // Store step result in context (even though we'll fail after)
-            let #step_var = serde_json::json!({
-                "stepId": #step_id,
-                "stepName": #step_name_display,
-                "stepType": "Error",
-                "outputs": {
+            let #step_var = __step_output_envelope(
+                #step_id,
+                #step_name_display,
+                "Error",
+                &serde_json::json!({
                     "category": #category_str,
                     "code": #error_code,
                     "message": #error_message,
                     "severity": #severity_str
-                }
-            });
+                }),
+            );
 
             #steps_context.insert(#step_id.to_string(), #step_var.clone());
 

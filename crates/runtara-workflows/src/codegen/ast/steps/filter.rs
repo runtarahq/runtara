@@ -129,15 +129,15 @@ pub fn emit(step: &FilterStep, ctx: &mut EmitContext) -> Result<TokenStream, Cod
 
             let __filter_count = #filter_results_var.len();
 
-            let #step_var = serde_json::json!({
-                "stepId": #step_id,
-                "stepName": #step_name_display,
-                "stepType": "Filter",
-                "outputs": {
+            let #step_var = __step_output_envelope(
+                #step_id,
+                #step_name_display,
+                "Filter",
+                &serde_json::json!({
                     "items": #filter_results_var,
                     "count": __filter_count
-                }
-            });
+                }),
+            );
 
             #debug_end
 
@@ -256,11 +256,12 @@ mod tests {
         let tokens = emit(&step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
-        // Verify output JSON structure
-        assert!(code.contains("\"stepId\""), "Should include stepId");
-        assert!(code.contains("\"stepType\""), "Should include stepType");
+        // Verify output JSON structure is built via shared helper.
+        assert!(
+            code.contains("__step_output_envelope"),
+            "Should build output envelope"
+        );
         assert!(code.contains("\"Filter\""), "Should have stepType = Filter");
-        assert!(code.contains("\"outputs\""), "Should include outputs");
         assert!(
             code.contains("\"items\""),
             "Should include items in outputs"

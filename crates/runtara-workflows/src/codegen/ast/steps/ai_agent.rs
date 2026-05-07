@@ -741,19 +741,19 @@ pub fn emit(
 
                     // Emit step_debug_end for compaction
                     {
-                        let __compact_outputs = serde_json::json!({
-                            "stepId": &__compact_step_id,
-                            "stepName": &__compact_step_name,
-                            "stepType": "AiAgentMemoryCompaction",
-                            "outputs": {
+                        let __compact_outputs = __step_output_envelope(
+                            &__compact_step_id,
+                            &__compact_step_name,
+                            "AiAgentMemoryCompaction",
+                            &serde_json::json!({
                                 "strategy": "summarize",
                                 "success": __compact_success,
                                 "messages_before": __messages_before,
                                 "messages_after": __chat_history.len(),
                                 "messages_compacted": __excess,
                                 "summary": &__compact_summary_text,
-                            }
-                        });
+                            }),
+                        );
                         __emit_step_debug_event(
                             "step_debug_end",
                             &__compact_step_id,
@@ -819,18 +819,18 @@ pub fn emit(
 
                     // Emit step_debug_end
                     {
-                        let __compact_outputs = serde_json::json!({
-                            "stepId": &__compact_step_id,
-                            "stepName": &__compact_step_name,
-                            "stepType": "AiAgentMemoryCompaction",
-                            "outputs": {
+                        let __compact_outputs = __step_output_envelope(
+                            &__compact_step_id,
+                            &__compact_step_name,
+                            "AiAgentMemoryCompaction",
+                            &serde_json::json!({
                                 "strategy": "sliding_window",
                                 "success": true,
                                 "messages_before": __messages_before,
                                 "messages_after": __chat_history.len(),
                                 "messages_dropped": __excess,
-                            }
-                        });
+                            }),
+                        );
                         __emit_step_debug_event(
                             "step_debug_end",
                             &__compact_step_id,
@@ -1254,17 +1254,17 @@ pub fn emit(
                             {
                                 let __tool_step_id = format!("{}.tool.{}.{}", #step_id, __tool_name, __tool_call_counter);
                                 let __tool_step_name = format!("Tool: {}", __tool_name);
-                                let __tool_output_data = serde_json::json!({
-                                    "stepId": &__tool_step_id,
-                                    "stepName": &__tool_step_name,
-                                    "stepType": "AiAgentToolCall",
-                                    "outputs": {
+                                let __tool_output_data = __step_output_envelope(
+                                    &__tool_step_id,
+                                    &__tool_step_name,
+                                    "AiAgentToolCall",
+                                    &serde_json::json!({
                                         "tool_name": __tool_name,
                                         "result": &__tool_result,
                                         "iteration": __iterations,
                                         "call_number": __tool_call_counter
-                                    }
-                                });
+                                    }),
+                                );
                                 __emit_step_debug_event(
                                     "step_debug_end",
                                     &__tool_step_id,
@@ -1358,16 +1358,16 @@ pub fn emit(
             let __response_text = __final_response.unwrap_or_default();
             let __response_value: serde_json::Value = #response_parse_code;
 
-            let #step_var = serde_json::json!({
-                "stepId": #step_id,
-                "stepName": #step_name_display,
-                "stepType": "AiAgent",
-                "outputs": {
+            let #step_var = __step_output_envelope(
+                #step_id,
+                #step_name_display,
+                "AiAgent",
+                &serde_json::json!({
                     "response": __response_value,
                     "iterations": __iterations,
                     "toolCalls": __tool_call_log
-                }
-            });
+                }),
+            );
 
             #debug_end
 
