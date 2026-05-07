@@ -18,11 +18,56 @@ interface ImprovedEdgeProps extends EdgeProps {
 }
 
 function getOrthogonalPath(points: Array<{ x: number; y: number }>): string {
-  return points
-    .map((point, index) =>
-      index === 0 ? `M ${point.x},${point.y}` : `L ${point.x},${point.y}`
-    )
-    .join(' ');
+  if (points.length === 0) return '';
+  if (points.length === 1) return `M ${points[0].x},${points[0].y}`;
+
+  const cornerRadius = 8;
+  let path = `M ${points[0].x},${points[0].y}`;
+
+  for (let index = 1; index < points.length - 1; index++) {
+    const previous = points[index - 1];
+    const current = points[index];
+    const next = points[index + 1];
+    const incoming = {
+      x: Math.sign(current.x - previous.x),
+      y: Math.sign(current.y - previous.y),
+    };
+    const outgoing = {
+      x: Math.sign(next.x - current.x),
+      y: Math.sign(next.y - current.y),
+    };
+    const previousDistance =
+      Math.abs(current.x - previous.x) + Math.abs(current.y - previous.y);
+    const nextDistance =
+      Math.abs(next.x - current.x) + Math.abs(next.y - current.y);
+    const isCorner =
+      incoming.x !== outgoing.x || incoming.y !== outgoing.y;
+    const radius = Math.min(
+      cornerRadius,
+      previousDistance / 2,
+      nextDistance / 2
+    );
+
+    if (!isCorner || radius <= 0) {
+      path += ` L ${current.x},${current.y}`;
+      continue;
+    }
+
+    const cornerStart = {
+      x: current.x - incoming.x * radius,
+      y: current.y - incoming.y * radius,
+    };
+    const cornerEnd = {
+      x: current.x + outgoing.x * radius,
+      y: current.y + outgoing.y * radius,
+    };
+
+    path += ` L ${cornerStart.x},${cornerStart.y}`;
+    path += ` Q ${current.x},${current.y} ${cornerEnd.x},${cornerEnd.y}`;
+  }
+
+  const last = points[points.length - 1];
+  return `${path} L ${last.x},${last.y}`;
 }
 
 export function ImprovedEdge({

@@ -206,6 +206,41 @@ describe('workflow layout graph', () => {
     }
   });
 
+  it('routes conditional true and false edges from distinct handles', () => {
+    const source = makeNode('source', NODE_TYPES.ConditionalNode);
+    source.position = { x: 0, y: 0 };
+    source.style = { width: 132, height: 36 };
+    source.width = 132;
+    source.height = 36;
+
+    const trueTarget = makeNode('true-target');
+    trueTarget.position = { x: 300, y: -80 };
+    trueTarget.style = { width: 132, height: 36 };
+    trueTarget.width = 132;
+    trueTarget.height = 36;
+
+    const falseTarget = makeNode('false-target');
+    falseTarget.position = { x: 300, y: 80 };
+    falseTarget.style = { width: 132, height: 36 };
+    falseTarget.width = 132;
+    falseTarget.height = 36;
+
+    const routes = routeOrthogonalEdges(
+      [source, trueTarget, falseTarget],
+      [
+        makeEdge('source-true', 'source', 'true-target', 'true'),
+        makeEdge('source-false', 'source', 'false-target', 'false'),
+      ]
+    );
+
+    expect(routes['source-true'].points[0].y).toBeLessThan(
+      routes['source-false'].points[0].y
+    );
+    expect(
+      routes['source-false'].points[0].y - routes['source-true'].points[0].y
+    ).toBeGreaterThan(8);
+  });
+
   it('uses the middle corridor for branch-stack merge routes', () => {
     const source = makeNode('source');
     source.position = { x: 0, y: 0 };

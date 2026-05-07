@@ -107,6 +107,16 @@ function getSourceAnchorY(
   sourceHeight: number
 ): number {
   const handle = edge.sourceHandle ?? 'source';
+  const normalizedHandle = handle.toLowerCase();
+
+  if (normalizedHandle === 'true') {
+    return sourcePosition.y + sourceHeight * 0.3;
+  }
+
+  if (normalizedHandle === 'false') {
+    return sourcePosition.y + sourceHeight * 0.7;
+  }
+
   if (handle.startsWith('case-')) {
     const caseIndex = Number.parseInt(handle.split('-')[1], 10);
     if (Number.isFinite(caseIndex)) {
@@ -114,11 +124,11 @@ function getSourceAnchorY(
     }
   }
 
-  if (handle === 'default') {
+  if (normalizedHandle === 'default') {
     return sourcePosition.y + 24 + getSwitchCaseCount(source) * 18;
   }
 
-  if (handle === 'onError') {
+  if (normalizedHandle === 'onerror') {
     return sourcePosition.y + sourceHeight;
   }
 

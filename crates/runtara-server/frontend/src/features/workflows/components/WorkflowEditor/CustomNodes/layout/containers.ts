@@ -27,7 +27,7 @@ const LAYOUT_CONFIG = {
   marginX: 40,
   marginY: 40,
   containerPadding: 24,
-  containerNodeSep: 30,
+  containerNodeSep: 48,
   containerRankSep: 50,
 };
 
