@@ -231,7 +231,9 @@ describe('workflow layout graph', () => {
     )['source-target'];
 
     const verticalSegmentXs = getVerticalSegmentXs(route.points);
-    expect(verticalSegmentXs.some((x) => x > 180 && x < 260)).toBe(true);
+    expect(verticalSegmentXs.some((x) => x > 250 && x < target.position.x)).toBe(
+      true
+    );
   });
 
   it('keeps switch cases ordered and hides duplicate case edge labels', () => {

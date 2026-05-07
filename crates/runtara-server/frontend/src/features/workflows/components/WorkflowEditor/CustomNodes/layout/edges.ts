@@ -4,7 +4,6 @@ import {
   BASE_WIDTH,
   getEdgeKind,
   getEdgeOrder,
-  type LayoutEdgeKind,
   type LayoutPoint,
 } from './graph';
 
@@ -24,7 +23,10 @@ type ObstacleBox = {
 const NODE_AVOIDANCE_MARGIN = 18;
 const EDGE_STUB = 36;
 const EDGE_LANE_GAP = 14;
-const MAX_LANE_ADJUSTMENTS = 16;
+const ROUTE_BEND_PENALTY = 36;
+const ROUTE_BACKTRACK_PENALTY = 400;
+const SOURCE_SIDE_VERTICAL_PENALTY = 900;
+const TARGET_SIDE_VERTICAL_PENALTY = 80;
 
 function getNodeSize(node: Node): { width: number; height: number } {
   const width =
@@ -181,42 +183,6 @@ function segmentIntersectsBox(
   return false;
 }
 
-function verticalSegmentIntersectsBox(
-  x: number,
-  startY: number,
-  endY: number,
-  box: ObstacleBox
-): boolean {
-  const top = Math.min(startY, endY);
-  const bottom = Math.max(startY, endY);
-
-  return x > box.left && x < box.right && bottom > box.top && top < box.bottom;
-}
-
-function getClearVerticalLaneX(
-  initialX: number,
-  startY: number,
-  endY: number,
-  obstacles: ObstacleBox[],
-  direction: 1 | -1
-): number {
-  let laneX = initialX;
-
-  for (let attempt = 0; attempt < MAX_LANE_ADJUSTMENTS; attempt++) {
-    const blockers = obstacles.filter((box) =>
-      verticalSegmentIntersectsBox(laneX, startY, endY, box)
-    );
-    if (blockers.length === 0) return laneX;
-
-    laneX =
-      direction > 0
-        ? Math.max(...blockers.map((box) => box.right)) + EDGE_LANE_GAP
-        : Math.min(...blockers.map((box) => box.left)) - EDGE_LANE_GAP;
-  }
-
-  return laneX;
-}
-
 function routeIntersectsObstacle(
   points: LayoutPoint[],
   obstacles: ObstacleBox[]
@@ -230,12 +196,6 @@ function routeIntersectsObstacle(
   }
 
   return false;
-}
-
-function getUniqueNumbers(values: number[]): number[] {
-  return values.filter(
-    (value, index) => values.findIndex((item) => item === value) === index
-  );
 }
 
 function compactPoints(points: LayoutPoint[]): LayoutPoint[] {
@@ -285,145 +245,345 @@ function getRoutableObstacles(
     .map((node) => getNodeBox(node, nodeById, NODE_AVOIDANCE_MARGIN));
 }
 
-function isRouteClear(
-  points: LayoutPoint[],
-  obstacles: ObstacleBox[]
-): boolean {
-  return !routeIntersectsObstacle(points, obstacles);
+type RouteAxis = 'horizontal' | 'vertical' | 'none';
+
+type RouteCandidate = {
+  point: LayoutPoint;
+  axis: Exclude<RouteAxis, 'none'>;
+};
+
+type RouteQueueItem = {
+  key: string;
+  point: LayoutPoint;
+  axis: RouteAxis;
+  cost: number;
+  sequence: number;
+};
+
+class RoutePriorityQueue {
+  private items: RouteQueueItem[] = [];
+
+  push(item: RouteQueueItem): void {
+    this.items.push(item);
+    this.bubbleUp(this.items.length - 1);
+  }
+
+  pop(): RouteQueueItem | undefined {
+    const first = this.items[0];
+    const last = this.items.pop();
+    if (!first || !last) return first;
+
+    if (this.items.length > 0) {
+      this.items[0] = last;
+      this.sinkDown(0);
+    }
+
+    return first;
+  }
+
+  get length(): number {
+    return this.items.length;
+  }
+
+  private compare(a: RouteQueueItem, b: RouteQueueItem): number {
+    if (a.cost !== b.cost) return a.cost - b.cost;
+    return a.sequence - b.sequence;
+  }
+
+  private bubbleUp(index: number): void {
+    while (index > 0) {
+      const parentIndex = Math.floor((index - 1) / 2);
+      if (this.compare(this.items[index], this.items[parentIndex]) >= 0) break;
+      [this.items[index], this.items[parentIndex]] = [
+        this.items[parentIndex],
+        this.items[index],
+      ];
+      index = parentIndex;
+    }
+  }
+
+  private sinkDown(index: number): void {
+    while (true) {
+      const leftIndex = index * 2 + 1;
+      const rightIndex = leftIndex + 1;
+      let smallestIndex = index;
+
+      if (
+        leftIndex < this.items.length &&
+        this.compare(this.items[leftIndex], this.items[smallestIndex]) < 0
+      ) {
+        smallestIndex = leftIndex;
+      }
+      if (
+        rightIndex < this.items.length &&
+        this.compare(this.items[rightIndex], this.items[smallestIndex]) < 0
+      ) {
+        smallestIndex = rightIndex;
+      }
+      if (smallestIndex === index) break;
+
+      [this.items[index], this.items[smallestIndex]] = [
+        this.items[smallestIndex],
+        this.items[index],
+      ];
+      index = smallestIndex;
+    }
+  }
 }
 
-function getCorridorObstacles(
-  start: LayoutPoint,
-  end: LayoutPoint,
-  obstacles: ObstacleBox[]
-): ObstacleBox[] {
-  const left = Math.min(start.x, end.x);
-  const right = Math.max(start.x, end.x);
-
-  return obstacles.filter((box) => box.right > left && box.left < right);
+function coordinateKey(value: number): string {
+  return Number.isInteger(value) ? `${value}` : value.toFixed(3);
 }
 
-function getOuterLaneY(
+function pointKey(point: LayoutPoint): string {
+  return `${coordinateKey(point.x)},${coordinateKey(point.y)}`;
+}
+
+function stateKey(point: LayoutPoint, axis: RouteAxis): string {
+  return `${pointKey(point)}|${axis}`;
+}
+
+function uniqueSortedCoordinates(values: number[]): number[] {
+  return [...new Set(values.map((value) => Number(value.toFixed(3))))].sort(
+    (a, b) => a - b
+  );
+}
+
+function buildRoutingGrid(
   start: LayoutPoint,
   end: LayoutPoint,
   obstacles: ObstacleBox[],
-  side: 'top' | 'bottom',
   laneIndex: number
-): number {
-  const corridorObstacles = getCorridorObstacles(start, end, obstacles);
-  const lanePadding =
-    NODE_AVOIDANCE_MARGIN + Math.abs(laneIndex) * EDGE_LANE_GAP;
-
-  if (corridorObstacles.length === 0) {
-    const baseline =
-      side === 'top' ? Math.min(start.y, end.y) : Math.max(start.y, end.y);
-    return side === 'top' ? baseline - lanePadding : baseline + lanePadding;
-  }
-
-  if (side === 'top') {
-    return Math.min(...corridorObstacles.map((box) => box.top)) - lanePadding;
-  }
-
-  return Math.max(...corridorObstacles.map((box) => box.bottom)) + lanePadding;
-}
-
-function getPreferredOuterSides(
-  kind: LayoutEdgeKind,
-  start: LayoutPoint,
-  end: LayoutPoint
-): Array<'top' | 'bottom'> {
-  if (kind === 'conditional-true') return ['top', 'bottom'];
-  if (
-    kind === 'conditional-false' ||
-    kind === 'error' ||
-    kind === 'switch-default'
-  ) {
-    return ['bottom', 'top'];
-  }
-
-  return end.y < start.y ? ['top', 'bottom'] : ['bottom', 'top'];
-}
-
-function buildCandidateRoutes(
-  edge: Edge,
-  start: LayoutPoint,
-  end: LayoutPoint,
-  obstacles: ObstacleBox[],
-  laneIndex: number
-): LayoutPoint[][] {
+): { xs: number[]; ys: number[] } {
   const leftToRight = end.x >= start.x;
   const direction: 1 | -1 = leftToRight ? 1 : -1;
-  const reverseDirection: 1 | -1 = direction === 1 ? -1 : 1;
   const laneOffset = laneIndex * EDGE_LANE_GAP;
   const sourceLaneX = start.x + direction * (EDGE_STUB + laneOffset);
   const targetLaneX = end.x - direction * (EDGE_STUB + laneOffset);
   const midX = start.x + (end.x - start.x) / 2 + laneOffset;
-  const kind = getEdgeKind((edge.sourceHandle ?? 'source').toLowerCase());
-  const candidates: LayoutPoint[][] = [];
+  const xs = [start.x, sourceLaneX, midX, targetLaneX, end.x];
+  const ys = [start.y, end.y];
+  const outerPadding =
+    NODE_AVOIDANCE_MARGIN + EDGE_STUB + Math.abs(laneIndex) * EDGE_LANE_GAP;
 
-  if (start.y === end.y) {
-    candidates.push([start, end]);
+  if (obstacles.length > 0) {
+    xs.push(Math.min(start.x, end.x) - outerPadding);
+    xs.push(Math.max(start.x, end.x) + outerPadding);
+    ys.push(Math.min(start.y, end.y) - outerPadding);
+    ys.push(Math.max(start.y, end.y) + outerPadding);
   }
 
-  const verticalLaneXs = getUniqueNumbers([
-    getClearVerticalLaneX(midX, start.y, end.y, obstacles, direction),
-    getClearVerticalLaneX(
-      targetLaneX,
-      start.y,
-      end.y,
-      obstacles,
-      reverseDirection
-    ),
-    getClearVerticalLaneX(sourceLaneX, start.y, end.y, obstacles, direction),
-  ]);
-
-  for (const laneX of verticalLaneXs) {
-    candidates.push([
-      start,
-      { x: laneX, y: start.y },
-      { x: laneX, y: end.y },
-      end,
-    ]);
-  }
-
-  for (const side of getPreferredOuterSides(kind, start, end)) {
-    const outerY = getOuterLaneY(start, end, obstacles, side, laneIndex);
-    const outerSourceLaneX = getClearVerticalLaneX(
-      sourceLaneX,
-      start.y,
-      outerY,
-      obstacles,
-      direction
+  for (const box of obstacles) {
+    xs.push(
+      box.left - EDGE_LANE_GAP,
+      box.left,
+      box.right,
+      box.right + EDGE_LANE_GAP
     );
-    const outerTargetLaneX = getClearVerticalLaneX(
-      targetLaneX,
-      end.y,
-      outerY,
-      obstacles,
-      reverseDirection
+    ys.push(
+      box.top - EDGE_LANE_GAP,
+      box.top,
+      box.bottom,
+      box.bottom + EDGE_LANE_GAP
     );
-
-    candidates.push([
-      start,
-      { x: outerSourceLaneX, y: start.y },
-      { x: outerSourceLaneX, y: outerY },
-      { x: outerTargetLaneX, y: outerY },
-      { x: outerTargetLaneX, y: end.y },
-      end,
-    ]);
   }
 
-  return candidates.map(compactPoints);
+  return {
+    xs: uniqueSortedCoordinates(xs),
+    ys: uniqueSortedCoordinates(ys),
+  };
 }
 
-function selectRoute(
-  candidates: LayoutPoint[][],
-  obstacles: ObstacleBox[]
-): LayoutPoint[] {
-  return (
-    candidates.find((points) => isRouteClear(points, obstacles)) ??
-    candidates[candidates.length - 1]
+function routeSegmentCost(
+  from: LayoutPoint,
+  to: LayoutPoint,
+  axis: Exclude<RouteAxis, 'none'>,
+  previousAxis: RouteAxis,
+  start: LayoutPoint,
+  end: LayoutPoint,
+  direction: 1 | -1
+): number {
+  const distance = Math.abs(to.x - from.x) + Math.abs(to.y - from.y);
+  let cost = distance;
+
+  if (previousAxis !== 'none' && previousAxis !== axis) {
+    cost += ROUTE_BEND_PENALTY;
+  }
+
+  if (axis === 'horizontal') {
+    const delta = to.x - from.x;
+    if (delta !== 0 && Math.sign(delta) !== direction) {
+      cost += ROUTE_BACKTRACK_PENALTY + Math.abs(delta);
+    }
+  } else {
+    const sourceProgress =
+      direction === 1 ? from.x - start.x : start.x - from.x;
+    const targetGap = direction === 1 ? end.x - from.x : from.x - end.x;
+
+    if (sourceProgress < EDGE_STUB) {
+      cost += SOURCE_SIDE_VERTICAL_PENALTY;
+    }
+    if (targetGap < EDGE_STUB / 2) {
+      cost += TARGET_SIDE_VERTICAL_PENALTY;
+    }
+  }
+
+  return cost;
+}
+
+function getRouteCandidates(
+  point: LayoutPoint,
+  grid: { xs: number[]; ys: number[] },
+  direction: 1 | -1,
+  end: LayoutPoint
+): RouteCandidate[] {
+  const xIndex = grid.xs.indexOf(point.x);
+  const yIndex = grid.ys.indexOf(point.y);
+  const candidates: RouteCandidate[] = [];
+
+  const addHorizontal = (index: number) => {
+    if (index < 0 || index >= grid.xs.length) return;
+    candidates.push({
+      point: { x: grid.xs[index], y: point.y },
+      axis: 'horizontal',
+    });
+  };
+
+  const addVertical = (index: number) => {
+    if (index < 0 || index >= grid.ys.length) return;
+    candidates.push({
+      point: { x: point.x, y: grid.ys[index] },
+      axis: 'vertical',
+    });
+  };
+
+  if (direction === 1) {
+    addHorizontal(xIndex + 1);
+    addVertical(end.y >= point.y ? yIndex + 1 : yIndex - 1);
+    addVertical(end.y >= point.y ? yIndex - 1 : yIndex + 1);
+    addHorizontal(xIndex - 1);
+  } else {
+    addHorizontal(xIndex - 1);
+    addVertical(end.y >= point.y ? yIndex + 1 : yIndex - 1);
+    addVertical(end.y >= point.y ? yIndex - 1 : yIndex + 1);
+    addHorizontal(xIndex + 1);
+  }
+
+  return candidates.filter(
+    (candidate) => candidate.point.x !== point.x || candidate.point.y !== point.y
   );
+}
+
+function reconstructRoute(
+  endStateKey: string,
+  previousByState: Map<string, string | null>,
+  pointByState: Map<string, LayoutPoint>
+): LayoutPoint[] {
+  const points: LayoutPoint[] = [];
+  let currentKey: string | null | undefined = endStateKey;
+
+  while (currentKey) {
+    const point = pointByState.get(currentKey);
+    if (point) points.push(point);
+    currentKey = previousByState.get(currentKey);
+  }
+
+  return compactPoints(points.reverse());
+}
+
+function routeOnGrid(
+  start: LayoutPoint,
+  end: LayoutPoint,
+  obstacles: ObstacleBox[],
+  laneIndex: number
+): LayoutPoint[] {
+  if (start.y === end.y && !routeIntersectsObstacle([start, end], obstacles)) {
+    return [start, end];
+  }
+
+  const direction: 1 | -1 = end.x >= start.x ? 1 : -1;
+  const grid = buildRoutingGrid(start, end, obstacles, laneIndex);
+  const queue = new RoutePriorityQueue();
+  const bestCostByState = new Map<string, number>();
+  const previousByState = new Map<string, string | null>();
+  const pointByState = new Map<string, LayoutPoint>();
+  const startStateKey = stateKey(start, 'none');
+  const endPointKey = pointKey(end);
+  let sequence = 0;
+
+  bestCostByState.set(startStateKey, 0);
+  previousByState.set(startStateKey, null);
+  pointByState.set(startStateKey, start);
+  queue.push({
+    key: startStateKey,
+    point: start,
+    axis: 'none',
+    cost: 0,
+    sequence: sequence++,
+  });
+
+  while (queue.length > 0) {
+    const current = queue.pop();
+    if (!current) break;
+
+    if (current.cost > (bestCostByState.get(current.key) ?? Infinity)) {
+      continue;
+    }
+
+    if (pointKey(current.point) === endPointKey) {
+      return reconstructRoute(current.key, previousByState, pointByState);
+    }
+
+    for (const candidate of getRouteCandidates(
+      current.point,
+      grid,
+      direction,
+      end
+    )) {
+      if (routeIntersectsObstacle([current.point, candidate.point], obstacles)) {
+        continue;
+      }
+
+      const candidateCost =
+        current.cost +
+        routeSegmentCost(
+          current.point,
+          candidate.point,
+          candidate.axis,
+          current.axis,
+          start,
+          end,
+          direction
+        );
+      const candidateStateKey = stateKey(candidate.point, candidate.axis);
+
+      if (
+        candidateCost >= (bestCostByState.get(candidateStateKey) ?? Infinity)
+      ) {
+        continue;
+      }
+
+      bestCostByState.set(candidateStateKey, candidateCost);
+      previousByState.set(candidateStateKey, current.key);
+      pointByState.set(candidateStateKey, candidate.point);
+      queue.push({
+        key: candidateStateKey,
+        point: candidate.point,
+        axis: candidate.axis,
+        cost: candidateCost,
+        sequence: sequence++,
+      });
+    }
+  }
+
+  const fallbackX =
+    start.x + (end.x - start.x) / 2 + laneIndex * EDGE_LANE_GAP;
+  return compactPoints([
+    start,
+    { x: fallbackX, y: start.y },
+    { x: fallbackX, y: end.y },
+    end,
+  ]);
 }
 
 export function routeOrthogonalEdges(
@@ -461,10 +621,7 @@ export function routeOrthogonalEdges(
     };
     const sourceLaneIndex = sourceLaneIndexes.get(edge.id) ?? 0;
     const obstacles = getRoutableObstacles(edge, nodeById);
-    const points = selectRoute(
-      buildCandidateRoutes(edge, start, end, obstacles, sourceLaneIndex),
-      obstacles
-    );
+    const points = routeOnGrid(start, end, obstacles, sourceLaneIndex);
 
     routes[edge.id] = {
       points,
