@@ -271,6 +271,64 @@ describe('workflow layout graph', () => {
     );
   });
 
+  it('uses a shared target-side bus for multi-incoming merges', () => {
+    const topSource = makeNode('top-source');
+    topSource.position = { x: 0, y: -80 };
+    topSource.style = { width: 96, height: 36 };
+    topSource.width = 96;
+    topSource.height = 36;
+
+    const bottomSource = makeNode('bottom-source');
+    bottomSource.position = { x: 0, y: 80 };
+    bottomSource.style = { width: 96, height: 36 };
+    bottomSource.width = 96;
+    bottomSource.height = 36;
+
+    const target = makeNode('target');
+    target.position = { x: 320, y: 0 };
+    target.style = { width: 96, height: 36 };
+    target.width = 96;
+    target.height = 36;
+
+    const routes = routeOrthogonalEdges(
+      [topSource, bottomSource, target],
+      [
+        makeEdge('top-target', 'top-source', 'target'),
+        makeEdge('bottom-target', 'bottom-source', 'target'),
+      ]
+    );
+
+    const topBusXs = getVerticalSegmentXs(routes['top-target'].points);
+    const bottomBusXs = getVerticalSegmentXs(routes['bottom-target'].points);
+
+    expect(topBusXs).toContain(284);
+    expect(bottomBusXs).toContain(284);
+  });
+
+  it('routes long same-row edges through a bypass lane', () => {
+    const source = makeNode('source');
+    source.position = { x: 0, y: 0 };
+    source.style = { width: 96, height: 36 };
+    source.width = 96;
+    source.height = 36;
+
+    const target = makeNode('target');
+    target.position = { x: 760, y: 0 };
+    target.style = { width: 96, height: 36 };
+    target.width = 96;
+    target.height = 36;
+
+    const route = routeOrthogonalEdges(
+      [source, target],
+      [makeEdge('source-target', 'source', 'target')]
+    )['source-target'];
+
+    expect(route.points.length).toBeGreaterThan(2);
+    expect(route.points.some((point) => point.y !== route.points[0].y)).toBe(
+      true
+    );
+  });
+
   it('keeps switch cases ordered and hides duplicate case edge labels', () => {
     const switchNode = makeNode('route', NODE_TYPES.SwitchNode, {
       inputMapping: [
@@ -325,5 +383,40 @@ describe('workflow layout graph', () => {
     expect(shouldHideDuplicateEdgeLabel({ sourceHandle: 'default' })).toBe(
       true
     );
+  });
+
+  it('spaces switch case route anchors by the rendered handle rhythm', () => {
+    const switchNode = makeNode('route', NODE_TYPES.SwitchNode, {
+      inputMapping: [
+        {
+          type: 'cases',
+          value: [
+            { match: 'express', matchType: 'exact', output: {}, route: 'a' },
+            { match: 'economy', matchType: 'exact', output: {}, route: 'b' },
+          ],
+        },
+      ],
+    });
+    switchNode.position = { x: 0, y: 0 };
+    switchNode.style = { width: 132, height: 96 };
+    switchNode.width = 132;
+    switchNode.height = 96;
+
+    const firstTarget = makeNode('first');
+    firstTarget.position = { x: 300, y: -80 };
+    const secondTarget = makeNode('second');
+    secondTarget.position = { x: 300, y: 80 };
+
+    const routes = routeOrthogonalEdges(
+      [switchNode, firstTarget, secondTarget],
+      [
+        makeEdge('route-first', 'route', 'first', 'case-0'),
+        makeEdge('route-second', 'route', 'second', 'case-1'),
+      ]
+    );
+
+    expect(
+      routes['route-second'].points[0].y - routes['route-first'].points[0].y
+    ).toBe(24);
   });
 });

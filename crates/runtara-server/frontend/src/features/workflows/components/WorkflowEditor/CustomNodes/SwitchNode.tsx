@@ -18,6 +18,7 @@ import {
 } from '@/features/workflows/config/workflow-editor';
 import { NodeFormProvider } from '../NodeForm/NodeFormProvider';
 import { StepPickerModal, StepPickerResult } from '../NodeForm/StepPickerModal';
+import { SWITCH_FIRST_HANDLE_TOP, SWITCH_HANDLE_SPACING } from './layout';
 
 type SwitchNodeProps = Node<form.SchemaType>;
 
@@ -242,13 +243,15 @@ function SwitchNodeComponent({
       let verticalOffset = 0;
       if (activeSource && activeSource.startsWith('case-')) {
         const caseIndex = parseInt(activeSource.split('-')[1], 10);
-        // Offset based on case position (each handle is 24px apart, starting at 36px)
-        const handleTop = 24 + caseIndex * 18;
+        // Offset based on the rendered case handle position.
+        const handleTop =
+          SWITCH_FIRST_HANDLE_TOP + caseIndex * SWITCH_HANDLE_SPACING;
         const nodeCenter = 36;
         verticalOffset = snapToGrid(handleTop - nodeCenter);
       } else if (activeSource === 'default') {
         // Default handle is at the bottom
-        const handleTop = 24 + cases.length * 18;
+        const handleTop =
+          SWITCH_FIRST_HANDLE_TOP + cases.length * SWITCH_HANDLE_SPACING;
         const nodeCenter = 36;
         verticalOffset = snapToGrid(handleTop - nodeCenter);
       }
@@ -286,8 +289,8 @@ function SwitchNodeComponent({
   );
 
   // Calculate total node height based on number of cases
-  const handleSpacing = 18; // Space between handles
-  const firstHandleTop = 24; // Position of first handle
+  const handleSpacing = SWITCH_HANDLE_SPACING;
+  const firstHandleTop = SWITCH_FIRST_HANDLE_TOP;
 
   // In routing mode: dynamic height for case handles + default
   // In value mode: standard height (single output)

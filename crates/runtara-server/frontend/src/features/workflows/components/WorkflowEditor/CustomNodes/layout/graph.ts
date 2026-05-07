@@ -12,6 +12,8 @@ export const BASE_WIDTH = 132;
 export const BASE_HEIGHT = 36;
 export const BASE_GROUP_WIDTH = 168;
 export const BASE_GROUP_HEIGHT = 132;
+export const SWITCH_HANDLE_SPACING = 24;
+export const SWITCH_FIRST_HANDLE_TOP = 28;
 
 export type LayoutPoint = { x: number; y: number };
 export type LayoutSize = { width: number; height: number };
@@ -203,10 +205,9 @@ export function getReactFlowNodeSize(node: Node): LayoutSize {
   if (node.type === NODE_TYPES.SwitchNode) {
     const cases = getSwitchCases(node);
     if (isSwitchRoutingMode(node, cases)) {
-      const handleSpacing = 18;
-      const firstHandleTop = 24;
       const totalHandles = cases.length + 1;
-      const lastHandleTop = firstHandleTop + (totalHandles - 1) * handleSpacing;
+      const lastHandleTop =
+        SWITCH_FIRST_HANDLE_TOP + (totalHandles - 1) * SWITCH_HANDLE_SPACING;
       height = Math.max(height, snapToGrid(lastHandleTop + 24));
     }
   }

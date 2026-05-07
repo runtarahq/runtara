@@ -3,6 +3,8 @@ export {
   BASE_GROUP_WIDTH,
   BASE_HEIGHT,
   BASE_WIDTH,
+  SWITCH_FIRST_HANDLE_TOP,
+  SWITCH_HANDLE_SPACING,
   buildLayoutGraph,
   type LayoutEdge,
   type LayoutEdgeKind,

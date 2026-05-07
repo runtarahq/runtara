@@ -2,8 +2,11 @@ import type { Edge, Node } from '@xyflow/react';
 import {
   BASE_HEIGHT,
   BASE_WIDTH,
+  SWITCH_FIRST_HANDLE_TOP,
+  SWITCH_HANDLE_SPACING,
   getEdgeKind,
   getEdgeOrder,
+  type LayoutEdgeKind,
   type LayoutPoint,
 } from './graph';
 
@@ -27,6 +30,7 @@ const ROUTE_BEND_PENALTY = 36;
 const ROUTE_BACKTRACK_PENALTY = 400;
 const SOURCE_SIDE_VERTICAL_PENALTY = 900;
 const TARGET_SIDE_VERTICAL_PENALTY = 80;
+const LONG_EDGE_BYPASS_THRESHOLD = 520;
 
 function getNodeSize(node: Node): { width: number; height: number } {
   const width =
@@ -120,12 +124,20 @@ function getSourceAnchorY(
   if (handle.startsWith('case-')) {
     const caseIndex = Number.parseInt(handle.split('-')[1], 10);
     if (Number.isFinite(caseIndex)) {
-      return sourcePosition.y + 24 + caseIndex * 18;
+      return (
+        sourcePosition.y +
+        SWITCH_FIRST_HANDLE_TOP +
+        caseIndex * SWITCH_HANDLE_SPACING
+      );
     }
   }
 
   if (normalizedHandle === 'default') {
-    return sourcePosition.y + 24 + getSwitchCaseCount(source) * 18;
+    return (
+      sourcePosition.y +
+      SWITCH_FIRST_HANDLE_TOP +
+      getSwitchCaseCount(source) * SWITCH_HANDLE_SPACING
+    );
   }
 
   if (normalizedHandle === 'onerror') {
@@ -161,6 +173,19 @@ function buildSourceLaneIndexes(edges: Edge[]): Map<string, number> {
   }
 
   return indexes;
+}
+
+function buildIncomingCountByTarget(edges: Edge[]): Map<string, number> {
+  const incomingCountByTarget = new Map<string, number>();
+
+  for (const edge of edges) {
+    incomingCountByTarget.set(
+      edge.target,
+      (incomingCountByTarget.get(edge.target) ?? 0) + 1
+    );
+  }
+
+  return incomingCountByTarget;
 }
 
 function segmentIntersectsBox(
@@ -596,6 +621,95 @@ function routeOnGrid(
   ]);
 }
 
+function routeViaMergeBus(
+  start: LayoutPoint,
+  end: LayoutPoint,
+  obstacles: ObstacleBox[]
+): LayoutPoint[] | null {
+  const direction: 1 | -1 = end.x >= start.x ? 1 : -1;
+  const busX = end.x - direction * EDGE_STUB;
+  const points = compactPoints([
+    start,
+    { x: busX, y: start.y },
+    { x: busX, y: end.y },
+    end,
+  ]);
+
+  return routeIntersectsObstacle(points, obstacles) ? null : points;
+}
+
+function getBypassSide(
+  kind: LayoutEdgeKind,
+  start: LayoutPoint,
+  end: LayoutPoint
+): 'top' | 'bottom' {
+  if (kind === 'conditional-true' || kind === 'switch-case') return 'top';
+  if (
+    kind === 'conditional-false' ||
+    kind === 'switch-default' ||
+    kind === 'error'
+  ) {
+    return 'bottom';
+  }
+
+  return end.y < start.y ? 'top' : 'bottom';
+}
+
+function getBypassY(
+  start: LayoutPoint,
+  end: LayoutPoint,
+  obstacles: ObstacleBox[],
+  side: 'top' | 'bottom',
+  laneIndex: number
+): number {
+  const left = Math.min(start.x, end.x);
+  const right = Math.max(start.x, end.x);
+  const corridorObstacles = obstacles.filter(
+    (box) => box.right > left && box.left < right
+  );
+  const padding =
+    NODE_AVOIDANCE_MARGIN + EDGE_STUB + Math.abs(laneIndex) * EDGE_LANE_GAP;
+
+  if (corridorObstacles.length === 0) {
+    const baseline =
+      side === 'top' ? Math.min(start.y, end.y) : Math.max(start.y, end.y);
+    return side === 'top' ? baseline - padding : baseline + padding;
+  }
+
+  if (side === 'top') {
+    return Math.min(...corridorObstacles.map((box) => box.top)) - padding;
+  }
+
+  return Math.max(...corridorObstacles.map((box) => box.bottom)) + padding;
+}
+
+function routeLongBypass(
+  kind: LayoutEdgeKind,
+  start: LayoutPoint,
+  end: LayoutPoint,
+  obstacles: ObstacleBox[],
+  laneIndex: number
+): LayoutPoint[] | null {
+  const horizontalDistance = Math.abs(end.x - start.x);
+  if (horizontalDistance < LONG_EDGE_BYPASS_THRESHOLD) return null;
+
+  const direction: 1 | -1 = end.x >= start.x ? 1 : -1;
+  const side = getBypassSide(kind, start, end);
+  const sourceX = start.x + direction * (EDGE_STUB + laneIndex * EDGE_LANE_GAP);
+  const targetX = end.x - direction * (EDGE_STUB + laneIndex * EDGE_LANE_GAP);
+  const bypassY = getBypassY(start, end, obstacles, side, laneIndex);
+  const points = compactPoints([
+    start,
+    { x: sourceX, y: start.y },
+    { x: sourceX, y: bypassY },
+    { x: targetX, y: bypassY },
+    { x: targetX, y: end.y },
+    end,
+  ]);
+
+  return routeIntersectsObstacle(points, obstacles) ? null : points;
+}
+
 export function routeOrthogonalEdges(
   nodes: Node[],
   edges: Edge[]
@@ -603,6 +717,7 @@ export function routeOrthogonalEdges(
   const nodeById = new Map(nodes.map((node) => [node.id, node]));
   const routeCountsBySource = new Map<string, number>();
   const sourceLaneIndexes = buildSourceLaneIndexes(edges);
+  const incomingCountByTarget = buildIncomingCountByTarget(edges);
   const routes: Record<string, OrthogonalRoute> = {};
 
   for (const edge of edges) {
@@ -631,7 +746,14 @@ export function routeOrthogonalEdges(
     };
     const sourceLaneIndex = sourceLaneIndexes.get(edge.id) ?? 0;
     const obstacles = getRoutableObstacles(edge, nodeById);
-    const points = routeOnGrid(start, end, obstacles, sourceLaneIndex);
+    const handle = (edge.sourceHandle ?? 'source').toLowerCase();
+    const kind = getEdgeKind(handle);
+    const points =
+      incomingCountByTarget.get(edge.target)! > 1
+        ? (routeViaMergeBus(start, end, obstacles) ??
+          routeOnGrid(start, end, obstacles, sourceLaneIndex))
+        : (routeLongBypass(kind, start, end, obstacles, sourceLaneIndex) ??
+          routeOnGrid(start, end, obstacles, sourceLaneIndex));
 
     routes[edge.id] = {
       points,
