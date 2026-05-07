@@ -12,6 +12,7 @@ use quote::quote;
 
 use super::super::CodegenError;
 use super::super::context::EmitContext;
+use super::super::json_to_tokens;
 use super::super::mapping;
 use super::super::program;
 use super::{
@@ -241,12 +242,11 @@ fn emit_with_embedded_child(
             .iter()
             .filter(|(name, _)| !name.starts_with('_'))
             .map(|(name, var)| {
-                let value_json =
-                    serde_json::to_string(&var.value).unwrap_or_else(|_| "null".to_string());
+                let value_tokens = json_to_tokens(&var.value);
                 let name_str = name.as_str();
                 quote! {
                     __child_vars.entry(#name_str.to_string()).or_insert_with(|| {
-                        serde_json::from_str(#value_json).unwrap_or(serde_json::Value::Null)
+                        #value_tokens
                     });
                 }
             })
@@ -329,12 +329,15 @@ fn emit_with_embedded_child(
             // BUT we inject _scope_id, _cache_key_prefix, and _workflow_id so scope tracking and
             // checkpoint cache keys work correctly within child
             let mut __child_vars = serde_json::Map::new();
-            __child_vars.insert("_scope_id".to_string(), serde_json::json!(__child_scope_id.clone()));
+            __child_vars.insert(
+                "_scope_id".to_string(),
+                serde_json::Value::String(__child_scope_id.clone()),
+            );
 
             // Propagate built-in variables to child so they're available at all nesting levels.
             // This ensures Agent steps in deeply nested workflows can access workflow identity.
             if let Some(ref sid) = parent_workflow_id {
-                __child_vars.insert("_workflow_id".to_string(), serde_json::json!(sid));
+                __child_vars.insert("_workflow_id".to_string(), serde_json::Value::String(sid.clone()));
             }
             // Propagate _instance_id and _tenant_id from parent (passed as fn parameters
             // because fn items cannot capture from their enclosing scope)
@@ -361,7 +364,10 @@ fn emit_with_embedded_child(
                     }
                 }
             };
-            __child_vars.insert("_cache_key_prefix".to_string(), serde_json::json!(__child_cache_prefix));
+            __child_vars.insert(
+                "_cache_key_prefix".to_string(),
+                serde_json::Value::String(__child_cache_prefix),
+            );
 
             // Inject child workflow's default variables (e.g. "source", "fixed_fee").
             // Uses or_insert_with so system variables above take precedence.
@@ -438,13 +444,8 @@ fn emit_with_embedded_child(
                 })
             })? ;
 
-            let result = serde_json::json!({
-                "stepId": step_id,
-                "stepName": step_name,
-                "stepType": "EmbedWorkflow",
-                "childWorkflowId": child_workflow_id,
-                "outputs": child_result
-            });
+            let result =
+                __embed_step_output_envelope(step_id, step_name, child_workflow_id, &child_result);
 
             Ok(result)
         }

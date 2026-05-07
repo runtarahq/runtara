@@ -336,10 +336,12 @@ pub fn emit(
         };
         let mapping_expr = ai_input_mapping_json
             .as_deref()
-            .map(|json| quote! {
-                Some(serde_json::from_str::<serde_json::Value>(#json).unwrap_or(serde_json::Value::Null))
+            .map(|json| {
+                quote! {
+                    Some(#json)
+                }
             })
-            .unwrap_or(quote! { None::<serde_json::Value> });
+            .unwrap_or(quote! { None::<&str> });
         let model_str = model_id.unwrap_or("");
         let temp_val = temperature;
         let max_iter_val = max_iterations;
@@ -432,7 +434,7 @@ pub fn emit(
                         .cloned()
                         .unwrap_or(serde_json::Value::Array(vec![])),
                     Some(__mem_load_debug_inputs),
-                    None::<serde_json::Value>,
+                    None::<&str>,
                     None,
                 );
             }
@@ -634,7 +636,7 @@ pub fn emit(
                         .and_then(|vars| vars.get("_loop_indices"))
                         .cloned()
                         .unwrap_or(serde_json::Value::Array(vec![])),
-                    None::<serde_json::Value>,
+                    None::<&str>,
                     Some(__mem_load_debug_outputs),
                     Some(__mem_load_duration_ms),
                 );
@@ -678,7 +680,7 @@ pub fn emit(
                                 .cloned()
                                 .unwrap_or(serde_json::Value::Array(vec![])),
                             Some(__compact_inputs),
-                            None::<serde_json::Value>,
+                            None::<&str>,
                             None,
                         );
                     }
@@ -806,7 +808,7 @@ pub fn emit(
                                 .cloned()
                                 .unwrap_or(serde_json::Value::Array(vec![])),
                             Some(__compact_inputs),
-                            None::<serde_json::Value>,
+                            None::<&str>,
                             None,
                         );
                     }
@@ -882,7 +884,7 @@ pub fn emit(
                         .cloned()
                         .unwrap_or(serde_json::Value::Array(vec![])),
                     Some(__mem_save_debug_inputs),
-                    None::<serde_json::Value>,
+                    None::<&str>,
                     None,
                 );
             }
@@ -974,7 +976,7 @@ pub fn emit(
                         .and_then(|vars| vars.get("_loop_indices"))
                         .cloned()
                         .unwrap_or(serde_json::Value::Array(vec![])),
-                    None::<serde_json::Value>,
+                    None::<&str>,
                     Some(__mem_save_debug_outputs),
                     Some(__mem_save_duration_ms),
                 );
@@ -1236,7 +1238,7 @@ pub fn emit(
                                         .cloned()
                                         .unwrap_or(serde_json::Value::Array(vec![])),
                                     Some(__tool_inputs_data),
-                                    None::<serde_json::Value>,
+                                    None::<&str>,
                                     None,
                                 );
                             }

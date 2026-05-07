@@ -425,27 +425,7 @@ pub fn emit_build_source(ctx: &EmitContext) -> TokenStream {
     let steps_context = &ctx.steps_context_var;
 
     quote! {
-        {
-            let mut source_map = serde_json::Map::new();
-            source_map.insert("data".to_string(), (*#inputs.data).clone());
-            source_map.insert("variables".to_string(), (*#inputs.variables).clone());
-            source_map.insert("steps".to_string(), serde_json::Value::Object(#steps_context.clone()));
-            source_map.insert("workflow".to_string(), serde_json::json!({
-                "inputs": {
-                    "data": &*#inputs.data,
-                    "variables": &*#inputs.variables
-                }
-            }));
-            // Expose loop context (injected by While step) as top-level "loop" for
-            // subgraph steps to reference loop.index / loop.outputs
-            if let Some(loop_ctx) = (*#inputs.variables)
-                .as_object()
-                .and_then(|v| v.get("_loop"))
-            {
-                source_map.insert("loop".to_string(), loop_ctx.clone());
-            }
-            serde_json::Value::Object(source_map)
-        }
+        __build_step_source(#inputs.as_ref(), &#steps_context)
     }
 }
 
@@ -886,12 +866,10 @@ mod tests {
         let tokens = emit_build_source(&ctx);
         let code = tokens.to_string();
 
-        // Should build source with data, variables, steps, and workflow
-        assert!(code.contains("data"));
-        assert!(code.contains("variables"));
-        assert!(code.contains("steps"));
-        assert!(code.contains("workflow"));
-        assert!(code.contains("source_map"));
+        // Source construction is shared to keep generated workflows compact.
+        assert!(code.contains("__build_step_source"));
+        assert!(code.contains("inputs"));
+        assert!(code.contains("steps_context"));
     }
 
     #[test]
@@ -911,12 +889,9 @@ mod tests {
         let tokens = emit_build_source(&ctx);
         let code = tokens.to_string();
 
-        // Should include workflow.inputs structure
+        // workflow.inputs structure is built by the shared helper.
+        assert!(code.contains("__build_step_source"));
         assert!(code.contains("inputs"));
-        assert!(
-            code.contains("data") && code.contains("variables"),
-            "Should have both data and variables in workflow.inputs"
-        );
     }
 
     // ==========================================

@@ -419,10 +419,12 @@ pub fn emit_step_debug_start(
         .unwrap_or(quote! { None::<serde_json::Value> });
 
     let mapping_expr = input_mapping_json
-        .map(|json| quote! {
-            Some(serde_json::from_str::<serde_json::Value>(#json).unwrap_or(serde_json::Value::Null))
+        .map(|json| {
+            quote! {
+                Some(#json)
+            }
         })
-        .unwrap_or(quote! { None::<serde_json::Value> });
+        .unwrap_or(quote! { None::<&str> });
 
     // Extract loop_indices from workflow inputs if available
     let loop_indices_expr = workflow_inputs_var
@@ -995,8 +997,8 @@ mod tests {
         let code = tokens.to_string();
 
         assert!(
-            code.contains("serde_json :: from_str"),
-            "Should parse mapping JSON"
+            code.contains("Some (\"{\\\"field\\\""),
+            "Should pass static mapping JSON to debug helper"
         );
         assert!(
             code.contains("data.x"),

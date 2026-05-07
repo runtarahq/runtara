@@ -588,8 +588,10 @@ pub fn compile_workflow(input: CompilationInput) -> io::Result<NativeCompilation
         )
     })?;
     let codegen_duration = codegen_start.elapsed();
+    let rust_code_bytes = rust_code.len();
     tracing::debug!(
         codegen_duration_ms = codegen_duration.as_millis() as u64,
+        rust_code_bytes = rust_code_bytes,
         "Code generation completed"
     );
 
@@ -645,6 +647,12 @@ pub fn compile_workflow(input: CompilationInput) -> io::Result<NativeCompilation
         .arg("--crate-type=bin")
         .arg("--edition=2024")
         .arg("--error-format=json")
+        // Generated workflow sources intentionally contain machine-derived
+        // identifiers and may be a single large line. Warnings are not useful
+        // to workflow authors, and JSON diagnostics for warnings can become
+        // enormous because rustc includes the whole source line in each span.
+        .arg("-A")
+        .arg("warnings")
         .arg("-C")
         .arg(format!("opt-level={}", opt_level))
         .arg("-C")
@@ -653,10 +661,29 @@ pub fn compile_workflow(input: CompilationInput) -> io::Result<NativeCompilation
     // WASM: enable LTO for cross-crate dead code elimination.
     // The build script compiles rlibs with -C embed-bitcode=yes to support this.
     if is_wasm {
-        let lto_level = std::env::var("RUNTARA_LTO").unwrap_or_else(|_| "fat".to_string());
+        let large_source_threshold = std::env::var("RUNTARA_LTO_LARGE_SOURCE_THRESHOLD_BYTES")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(1_000_000);
+        let default_lto = if rust_code_bytes >= large_source_threshold {
+            // Fat LTO gives smaller artifacts, but on very large generated workflow
+            // sources it can push compilation past API/worker timeouts. Large sources
+            // are usually dominated by workflow glue, so compile latency is the safer
+            // default; callers that need size can still force RUNTARA_LTO=fat.
+            "off"
+        } else {
+            "fat"
+        };
+        let lto_level = std::env::var("RUNTARA_LTO").unwrap_or_else(|_| default_lto.to_string());
         if lto_level != "off" {
             cmd.arg("-C").arg(format!("lto={}", lto_level));
         }
+        tracing::info!(
+            rust_code_bytes = rust_code_bytes,
+            large_source_threshold = large_source_threshold,
+            lto = %lto_level,
+            "Selected workflow WASM LTO mode"
+        );
     }
 
     // Skip strip and crt-static for WASM targets

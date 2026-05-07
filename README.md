@@ -456,7 +456,9 @@ Note: environment runners already inject `RUNTARA_HTTP_URL` directly for instanc
 | `RUNTARA_STDLIB_NAME` | No | `runtara_workflow_stdlib` | Alternate stdlib crate name |
 | `RUNTARA_OPT_LEVEL` | No | target-dependent | rustc optimization level |
 | `RUNTARA_CODEGEN_UNITS` | No | `1` | rustc codegen units |
-| `RUNTARA_LTO` | No | `fat` for WASM | LTO mode for WASM builds |
+| `RUNTARA_LTO` | No | `fat` for small WASM sources, `off` for large generated WASM sources | LTO mode for WASM builds |
+| `RUNTARA_LTO_LARGE_SOURCE_THRESHOLD_BYTES` | No | `1000000` | Generated Rust source-size threshold where WASM LTO defaults to `off` unless `RUNTARA_LTO` is set |
+| `RUNTARA_MCP_COMPILE_WAIT_TIMEOUT_SECS` | No | `240` | MCP compile/deploy wait window before returning `status: compiling` while the background queue continues |
 | `DATA_DIR` | No | `.data` | Build artifact root |
 
 ## Development And Testing

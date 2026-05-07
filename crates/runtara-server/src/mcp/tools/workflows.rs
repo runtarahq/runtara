@@ -1,9 +1,12 @@
 use rmcp::model::{CallToolResult, Content};
 use schemars::JsonSchema;
 use serde::Deserialize;
+use sqlx::Row;
+use std::time::Duration;
 
 use super::super::server::SmoMcpServer;
 use super::internal_api::{api_get, api_post, validate_path_param};
+use crate::api::repositories::workflows::WorkflowRepository;
 
 fn json_result(value: serde_json::Value) -> Result<CallToolResult, rmcp::ErrorData> {
     Ok(CallToolResult::success(vec![Content::text(
@@ -13,6 +16,242 @@ fn json_result(value: serde_json::Value) -> Result<CallToolResult, rmcp::ErrorDa
 
 fn err(msg: impl Into<String>) -> rmcp::ErrorData {
     rmcp::ErrorData::internal_error(msg.into(), None)
+}
+
+struct McpCompileResult {
+    completed: bool,
+    value: serde_json::Value,
+}
+
+fn mcp_compile_wait_timeout() -> Duration {
+    const DEFAULT_SECS: u64 = 240;
+
+    let secs = std::env::var("RUNTARA_MCP_COMPILE_WAIT_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(DEFAULT_SECS);
+
+    Duration::from_secs(secs)
+}
+
+async fn compile_workflow_for_mcp(
+    server: &SmoMcpServer,
+    workflow_id: &str,
+    version: i32,
+) -> Result<McpCompileResult, rmcp::ErrorData> {
+    validate_path_param("workflow_id", workflow_id)?;
+
+    let repository = WorkflowRepository::new(server.pool.clone());
+
+    if let Some(image_id) = get_fresh_registered_image_id(server, workflow_id, version).await? {
+        return Ok(McpCompileResult {
+            completed: true,
+            value: serde_json::json!({
+                "success": true,
+                "status": "compiled",
+                "message": "Workflow already compiled",
+                "workflowId": workflow_id,
+                "version": version,
+                "imageId": image_id,
+                "registered": true,
+                "recompiled": false,
+            }),
+        });
+    }
+
+    let Some(valkey_config) = crate::valkey::ValkeyConfig::from_env() else {
+        let result = api_post(
+            server,
+            &format!(
+                "/api/runtime/workflows/{}/versions/{}/compile?forceRecompile=true",
+                workflow_id, version
+            ),
+            None,
+        )
+        .await?;
+        return Ok(McpCompileResult {
+            completed: true,
+            value: result,
+        });
+    };
+
+    let redis_url = valkey_config.connection_url();
+    let pending = crate::workers::compilation_worker::is_compilation_pending(
+        &redis_url,
+        &server.tenant_id,
+        workflow_id,
+        version,
+    )
+    .await
+    .map_err(|e| err(format!("Failed to check compilation queue status: {}", e)))?;
+
+    if !pending {
+        // A non-fresh success row would make the worker skip the request. Delete
+        // it once before queueing; retries after a successful compile will pass
+        // the freshness check above and will not rebuild.
+        repository
+            .invalidate_compilation(&server.tenant_id, workflow_id, version)
+            .await
+            .map_err(|e| err(format!("Failed to invalidate stale compilation: {}", e)))?;
+    }
+
+    let queued = crate::workers::compilation_worker::enqueue_compilation(
+        &redis_url,
+        &server.tenant_id,
+        workflow_id,
+        version,
+        false,
+    )
+    .await
+    .map_err(|e| err(format!("Failed to enqueue compilation: {}", e)))?;
+
+    let timeout = mcp_compile_wait_timeout();
+    let completed = crate::workers::compilation_worker::wait_for_compilation(
+        &redis_url,
+        &server.tenant_id,
+        workflow_id,
+        version,
+        timeout,
+    )
+    .await
+    .map_err(|e| err(format!("Failed while waiting for compilation: {}", e)))?;
+
+    if !completed {
+        return Ok(McpCompileResult {
+            completed: false,
+            value: serde_json::json!({
+                "success": false,
+                "status": "compiling",
+                "message": "Compilation is still running in the background. Retry deploy_latest or compile_workflow after it finishes; the retry will reuse the queued compilation instead of forcing a rebuild.",
+                "workflowId": workflow_id,
+                "version": version,
+                "queued": queued,
+                "waitTimeoutSeconds": timeout.as_secs(),
+            }),
+        });
+    }
+
+    query_mcp_compilation_result(server, workflow_id, version).await
+}
+
+async fn get_fresh_registered_image_id(
+    server: &SmoMcpServer,
+    workflow_id: &str,
+    version: i32,
+) -> Result<Option<String>, rmcp::ErrorData> {
+    let record = sqlx::query(
+        r#"
+        SELECT sc.registered_image_id
+        FROM workflow_compilations sc
+        JOIN workflow_definitions wd
+          ON wd.tenant_id = sc.tenant_id
+         AND wd.workflow_id = sc.workflow_id
+         AND wd.version = sc.version
+        WHERE sc.tenant_id = $1
+          AND sc.workflow_id = $2
+          AND sc.version = $3
+          AND sc.compilation_status = 'success'
+          AND sc.registered_image_id IS NOT NULL
+          AND sc.compiled_at >= wd.updated_at
+          AND wd.deleted_at IS NULL
+        "#,
+    )
+    .bind(&server.tenant_id)
+    .bind(workflow_id)
+    .bind(version)
+    .fetch_optional(&server.pool)
+    .await
+    .map_err(|e| err(format!("Failed to check compilation freshness: {}", e)))?;
+
+    record
+        .map(|row| {
+            row.try_get::<String, _>("registered_image_id")
+                .map_err(|e| err(format!("Failed to read registered image id: {}", e)))
+        })
+        .transpose()
+}
+
+async fn query_mcp_compilation_result(
+    server: &SmoMcpServer,
+    workflow_id: &str,
+    version: i32,
+) -> Result<McpCompileResult, rmcp::ErrorData> {
+    let record = sqlx::query(
+        r#"
+        SELECT compilation_status, registered_image_id, wasm_size, wasm_checksum, error_message
+        FROM workflow_compilations
+        WHERE tenant_id = $1 AND workflow_id = $2 AND version = $3
+        "#,
+    )
+    .bind(&server.tenant_id)
+    .bind(workflow_id)
+    .bind(version)
+    .fetch_optional(&server.pool)
+    .await
+    .map_err(|e| err(format!("Failed to query compilation result: {}", e)))?;
+
+    match record {
+        Some(record) => {
+            let status = record
+                .try_get::<String, _>("compilation_status")
+                .map_err(|e| err(format!("Failed to read compilation status: {}", e)))?;
+
+            match status.as_str() {
+                "success" => {
+                    let image_id = record
+                        .try_get::<Option<String>, _>("registered_image_id")
+                        .map_err(|e| err(format!("Failed to read compilation result: {}", e)))?;
+                    let Some(image_id) = image_id else {
+                        return Err(err(format!(
+                            "Compilation finished but workflow '{}' version {} is not registered (status: success)",
+                            workflow_id, version
+                        )));
+                    };
+                    let wasm_size = record
+                        .try_get::<Option<i32>, _>("wasm_size")
+                        .map_err(|e| err(format!("Failed to read compilation result: {}", e)))?;
+                    let wasm_checksum = record
+                        .try_get::<Option<String>, _>("wasm_checksum")
+                        .map_err(|e| err(format!("Failed to read compilation result: {}", e)))?;
+
+                    Ok(McpCompileResult {
+                        completed: true,
+                        value: serde_json::json!({
+                            "success": true,
+                            "status": "compiled",
+                            "message": "Workflow compiled successfully",
+                            "workflowId": workflow_id,
+                            "version": version,
+                            "imageId": image_id,
+                            "registered": true,
+                            "recompiled": true,
+                            "binarySize": wasm_size,
+                            "binaryChecksum": wasm_checksum,
+                        }),
+                    })
+                }
+                "failed" => {
+                    let error_message = record
+                        .try_get::<Option<String>, _>("error_message")
+                        .map_err(|e| err(format!("Failed to read compilation error: {}", e)))?
+                        .unwrap_or_else(|| "Unknown compilation error".to_string());
+                    Err(err(format!(
+                        "Compilation failed for workflow '{}' version {}: {}",
+                        workflow_id, version, error_message
+                    )))
+                }
+                _ => Err(err(format!(
+                    "Compilation finished but workflow '{}' version {} is not registered (status: {})",
+                    workflow_id, version, status
+                ))),
+            }
+        }
+        None => Err(err(format!(
+            "Compilation completed but no compilation record was found for workflow '{}' version {}",
+            workflow_id, version
+        ))),
+    }
 }
 
 // ===== Parameter Structs =====
@@ -423,17 +662,8 @@ pub async fn compile_workflow(
     server: &SmoMcpServer,
     params: CompileWorkflowParams,
 ) -> Result<CallToolResult, rmcp::ErrorData> {
-    validate_path_param("workflow_id", &params.workflow_id)?;
-    let result = api_post(
-        server,
-        &format!(
-            "/api/runtime/workflows/{}/versions/{}/compile",
-            params.workflow_id, params.version
-        ),
-        None,
-    )
-    .await?;
-    json_result(result)
+    let result = compile_workflow_for_mcp(server, &params.workflow_id, params.version).await?;
+    json_result(result.value)
 }
 
 pub async fn execute_workflow(
@@ -678,16 +908,37 @@ pub async fn deploy_workflow(
         .and_then(|v| v.as_str())
         .ok_or_else(|| err("Update succeeded but no version returned"))?;
 
-    // Step 2: Compile parent
-    let compile_result = api_post(
-        server,
-        &format!(
-            "/api/runtime/workflows/{}/versions/{}/compile?forceRecompile=true",
-            params.workflow_id, version
-        ),
-        None,
-    )
-    .await?;
+    let version_num = version
+        .parse::<i32>()
+        .map_err(|_| err(format!("Update returned invalid version '{}'", version)))?;
+
+    // Step 2: Compile parent. This goes through the queue with an MCP-safe wait
+    // window so large embedded parents can continue compiling after the tool
+    // call returns.
+    let compile_result = compile_workflow_for_mcp(server, &params.workflow_id, version_num).await?;
+    if !compile_result.completed {
+        let mut response = serde_json::json!({
+            "success": false,
+            "status": "compiling",
+            "message": format!("Workflow version {} is still compiling; current version was not changed yet.", version),
+            "workflowId": params.workflow_id,
+            "version": version,
+            "compilation": compile_result.value,
+            "warnings": update_result.get("warnings"),
+        });
+
+        if !child_dependencies.is_empty() {
+            response["childWorkflows"] = serde_json::json!({
+                "count": child_dependencies.len(),
+                "dependencies": child_dependencies,
+                "compiledSeparately": false,
+            });
+        }
+
+        return json_result(response);
+    }
+
+    let compile_result = compile_result.value;
 
     // Step 3: Set current version
     let _ = api_post(
@@ -821,16 +1072,32 @@ pub async fn deploy_latest(
     let child_refs = extract_child_refs(&graph);
     let child_dependencies = validate_child_workflow_refs(server, &child_refs).await?;
 
-    // Compile
-    let compile_result = api_post(
-        server,
-        &format!(
-            "/api/runtime/workflows/{}/versions/{}/compile?forceRecompile=true",
-            params.workflow_id, version
-        ),
-        None,
-    )
-    .await?;
+    // Compile through the queue without force-recompiling on retries. Graph
+    // mutations already invalidate the latest version, and avoiding force here
+    // prevents a retry from deleting a successful long-running parent compile.
+    let compile_result = compile_workflow_for_mcp(server, &params.workflow_id, version).await?;
+    if !compile_result.completed {
+        let mut response = serde_json::json!({
+            "success": false,
+            "status": "compiling",
+            "message": format!("Workflow version {} is still compiling; current version was not changed yet.", version),
+            "workflowId": params.workflow_id,
+            "version": version,
+            "compilation": compile_result.value,
+        });
+
+        if !child_dependencies.is_empty() {
+            response["childWorkflows"] = serde_json::json!({
+                "count": child_dependencies.len(),
+                "dependencies": child_dependencies,
+                "compiledSeparately": false,
+            });
+        }
+
+        return json_result(response);
+    }
+
+    let compile_result = compile_result.value;
 
     // Set current version
     let _ = api_post(

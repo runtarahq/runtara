@@ -156,7 +156,7 @@ pub fn emit(step: &WaitForSignalStep, ctx: &mut EmitContext) -> Result<TokenStre
                     #parent_scope_id_expr,
                     #loop_indices_expr,
                     Some(__wait_debug_inputs),
-                    None::<serde_json::Value>,
+                    None::<&str>,
                     None,
                 );
             }

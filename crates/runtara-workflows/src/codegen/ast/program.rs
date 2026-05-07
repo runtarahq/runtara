@@ -487,38 +487,166 @@ fn emit_input_structs() -> TokenStream {
             parent_scope_id: Option<String>,
             loop_indices: serde_json::Value,
             data: Option<serde_json::Value>,
-            input_mapping: Option<serde_json::Value>,
+            input_mapping_json: Option<&str>,
             duration_ms: Option<u64>,
         ) {
             let max_size: usize = 10 * 1024;
             let data_truncated = data.map(|v| __truncate_json_value(&v, max_size));
             let mut payload = serde_json::Map::new();
-            payload.insert("step_id".into(), serde_json::json!(step_id));
-            payload.insert("step_name".into(), serde_json::json!(step_name));
-            payload.insert("step_type".into(), serde_json::json!(step_type));
-            payload.insert("scope_id".into(), serde_json::json!(scope_id));
-            payload.insert("parent_scope_id".into(), serde_json::json!(parent_scope_id));
+            payload.insert("step_id".into(), serde_json::Value::String(step_id.to_string()));
+            payload.insert(
+                "step_name".into(),
+                step_name
+                    .map(|name| serde_json::Value::String(name.to_string()))
+                    .unwrap_or(serde_json::Value::Null),
+            );
+            payload.insert("step_type".into(), serde_json::Value::String(step_type.to_string()));
+            payload.insert(
+                "scope_id".into(),
+                scope_id.map(serde_json::Value::String).unwrap_or(serde_json::Value::Null),
+            );
+            payload.insert(
+                "parent_scope_id".into(),
+                parent_scope_id
+                    .map(serde_json::Value::String)
+                    .unwrap_or(serde_json::Value::Null),
+            );
             payload.insert("loop_indices".into(), loop_indices);
-            payload.insert("timestamp_ms".into(), serde_json::json!(
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_millis() as i64)
-                    .unwrap_or(0)
-            ));
+            payload.insert(
+                "timestamp_ms".into(),
+                serde_json::Value::Number(serde_json::Number::from(
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_millis() as i64)
+                        .unwrap_or(0),
+                )),
+            );
             if subtype == "step_debug_start" {
-                payload.insert("inputs".into(), serde_json::json!(data_truncated));
-                if let Some(mapping) = input_mapping {
+                payload.insert("inputs".into(), data_truncated.unwrap_or(serde_json::Value::Null));
+                if let Some(mapping_json) = input_mapping_json {
+                    let mapping = serde_json::from_str::<serde_json::Value>(mapping_json)
+                        .unwrap_or(serde_json::Value::Null);
                     payload.insert("input_mapping".into(), mapping);
                 }
             } else {
-                payload.insert("outputs".into(), serde_json::json!(data_truncated));
+                payload.insert("outputs".into(), data_truncated.unwrap_or(serde_json::Value::Null));
                 if let Some(dur) = duration_ms {
-                    payload.insert("duration_ms".into(), serde_json::json!(dur));
+                    payload.insert(
+                        "duration_ms".into(),
+                        serde_json::Value::Number(serde_json::Number::from(dur)),
+                    );
                 }
             }
             let __payload_bytes = serde_json::to_vec(&serde_json::Value::Object(payload)).unwrap_or_default();
             let __sdk_guard = sdk().lock().unwrap();
             let _ = __sdk_guard.custom_event(subtype, __payload_bytes);
+        }
+
+        #[allow(dead_code)]
+        fn __single_field_object(key: &str, value: serde_json::Value) -> serde_json::Value {
+            let mut object = serde_json::Map::new();
+            object.insert(key.to_string(), value);
+            serde_json::Value::Object(object)
+        }
+
+        #[allow(dead_code)]
+        fn __step_output_envelope(
+            step_id: &str,
+            step_name: &str,
+            step_type: &str,
+            outputs: &serde_json::Value,
+        ) -> serde_json::Value {
+            let mut object = serde_json::Map::new();
+            object.insert("stepId".to_string(), serde_json::Value::String(step_id.to_string()));
+            object.insert("stepName".to_string(), serde_json::Value::String(step_name.to_string()));
+            object.insert("stepType".to_string(), serde_json::Value::String(step_type.to_string()));
+            object.insert("outputs".to_string(), outputs.clone());
+            serde_json::Value::Object(object)
+        }
+
+        #[allow(dead_code)]
+        fn __embed_step_output_envelope(
+            step_id: &str,
+            step_name: &str,
+            child_workflow_id: &str,
+            outputs: &serde_json::Value,
+        ) -> serde_json::Value {
+            let mut object = serde_json::Map::new();
+            object.insert("stepId".to_string(), serde_json::Value::String(step_id.to_string()));
+            object.insert("stepName".to_string(), serde_json::Value::String(step_name.to_string()));
+            object.insert("stepType".to_string(), serde_json::Value::String("EmbedWorkflow".to_string()));
+            object.insert(
+                "childWorkflowId".to_string(),
+                serde_json::Value::String(child_workflow_id.to_string()),
+            );
+            object.insert("outputs".to_string(), outputs.clone());
+            serde_json::Value::Object(object)
+        }
+
+        #[allow(dead_code)]
+        fn __agent_error_output(error: &str) -> serde_json::Value {
+            let mut object = serde_json::Map::new();
+            object.insert("_error".to_string(), serde_json::Value::Bool(true));
+            object.insert("error".to_string(), serde_json::Value::String(error.to_string()));
+            serde_json::Value::Object(object)
+        }
+
+        #[allow(dead_code)]
+        fn __build_step_source(
+            inputs: &WorkflowInputs,
+            steps_context: &serde_json::Map<String, serde_json::Value>,
+        ) -> serde_json::Value {
+            let mut source_map = serde_json::Map::new();
+            source_map.insert("data".to_string(), (*inputs.data).clone());
+            source_map.insert("variables".to_string(), (*inputs.variables).clone());
+            source_map.insert("steps".to_string(), serde_json::Value::Object(steps_context.clone()));
+
+            let mut workflow_inputs = serde_json::Map::new();
+            workflow_inputs.insert("data".to_string(), (*inputs.data).clone());
+            workflow_inputs.insert("variables".to_string(), (*inputs.variables).clone());
+
+            let mut workflow = serde_json::Map::new();
+            workflow.insert("inputs".to_string(), serde_json::Value::Object(workflow_inputs));
+            source_map.insert("workflow".to_string(), serde_json::Value::Object(workflow));
+
+            if let Some(loop_ctx) = (*inputs.variables)
+                .as_object()
+                .and_then(|v| v.get("_loop"))
+            {
+                source_map.insert("loop".to_string(), loop_ctx.clone());
+            }
+
+            serde_json::Value::Object(source_map)
+        }
+
+        /// Shared durable wrapper for the common agent retry configuration.
+        ///
+        /// Most generated Agent steps use the default retry policy. Emitting one
+        /// #[resilient] function per step makes large embedded workflows pay the
+        /// proc-macro/codegen cost hundreds of times for identical dispatch glue.
+        #[allow(dead_code)]
+        #[resilient(durable = true, max_retries = 3, delay = 1000, rate_limit_budget = 60000)]
+        fn __agent_durable_default(
+            cache_key: &str,
+            inputs: serde_json::Value,
+            agent_id: &str,
+            capability_id: &str,
+            _step_id: &str,
+        ) -> std::result::Result<serde_json::Value, String> {
+            __workflow_dispatch(agent_id, capability_id, inputs)
+        }
+
+        /// Shared durable wrapper for rate-limited capabilities with default retries.
+        #[allow(dead_code)]
+        #[resilient(durable = true, max_retries = 5, delay = 2000, rate_limit_budget = 60000)]
+        fn __agent_durable_rate_limited_default(
+            cache_key: &str,
+            inputs: serde_json::Value,
+            agent_id: &str,
+            capability_id: &str,
+            _step_id: &str,
+        ) -> std::result::Result<serde_json::Value, String> {
+            __workflow_dispatch(agent_id, capability_id, inputs)
         }
     }
 }
@@ -645,21 +773,21 @@ fn emit_main(graph: &ExecutionGraph) -> TokenStream {
             // - _instance_id: execution instance UUID — useful for conversation memory keys,
             //   correlation, and debugging.
             // - _tenant_id: tenant identifier — useful for multi-tenant context in mappings.
-            if let Some(vars_obj) = variables.as_object_mut() {
-                vars_obj.insert(
-                    "_workflow_id".to_string(),
-                    serde_json::json!(format!("{}::{}", workflow_id, instance_id))
-                );
-                vars_obj.insert(
-                    "_instance_id".to_string(),
-                    serde_json::json!(&instance_id)
-                );
-                let tenant_id_val = std::env::var("TENANT_ID").unwrap_or_else(|_| "unknown".to_string());
-                vars_obj.insert(
-                    "_tenant_id".to_string(),
-                    serde_json::json!(tenant_id_val)
-                );
-            }
+                if let Some(vars_obj) = variables.as_object_mut() {
+                    vars_obj.insert(
+                        "_workflow_id".to_string(),
+                        serde_json::Value::String(format!("{}::{}", workflow_id, instance_id))
+                    );
+                    vars_obj.insert(
+                        "_instance_id".to_string(),
+                        serde_json::Value::String(instance_id.clone())
+                    );
+                    let tenant_id_val = std::env::var("TENANT_ID").unwrap_or_else(|_| "unknown".to_string());
+                    vars_obj.insert(
+                        "_tenant_id".to_string(),
+                        serde_json::Value::String(tenant_id_val)
+                    );
+                }
 
             let workflow_inputs = WorkflowInputs {
                 data: Arc::new(data),
