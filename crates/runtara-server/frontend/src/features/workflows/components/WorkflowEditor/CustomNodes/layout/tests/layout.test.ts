@@ -305,7 +305,7 @@ describe('workflow layout graph', () => {
     expect(bottomBusXs).toContain(284);
   });
 
-  it('gives long multi-incoming merge edges a bypass before the merge bus', () => {
+  it('routes long multi-incoming merge edges through the grouped merge bus', () => {
     const farSource = makeNode('far-source');
     farSource.position = { x: 0, y: 0 };
     farSource.style = { width: 96, height: 36 };
@@ -332,12 +332,214 @@ describe('workflow layout graph', () => {
       ]
     );
 
+    expect(getVerticalSegmentXs(routes['far-target'].points)).toContain(724);
+    expect(getVerticalSegmentXs(routes['near-target'].points)).toContain(724);
+  });
+
+  it('detours semantic grouped merge lanes around sibling branch nodes', () => {
+    const switchNode = makeNode('switch', NODE_TYPES.SwitchNode, {
+      inputMapping: [
+        {
+          type: 'cases',
+          value: [
+            { match: 'fragile', matchType: 'exact', output: {}, route: '' },
+            { match: 'priority', matchType: 'exact', output: {}, route: '' },
+          ],
+        },
+      ],
+    });
+    switchNode.position = { x: 0, y: 0 };
+    switchNode.style = { width: 132, height: 104 };
+    switchNode.width = 132;
+    switchNode.height = 104;
+
+    const branchNode = makeNode('branch');
+    branchNode.position = { x: 220, y: 48 };
+    branchNode.style = { width: 160, height: 56 };
+    branchNode.width = 160;
+    branchNode.height = 56;
+
+    const target = makeNode('target');
+    target.position = { x: 520, y: 70 };
+    target.style = { width: 132, height: 36 };
+    target.width = 132;
+    target.height = 36;
+
+    const routes = routeOrthogonalEdges(
+      [switchNode, branchNode, target],
+      [
+        makeEdge('branch-target', 'branch', 'target'),
+        makeEdge('default-target', 'switch', 'target', 'default'),
+      ]
+    );
+
+    expect(getVerticalSegmentXs(routes['default-target'].points)).toContain(484);
     expect(
-      routes['far-target'].points.some(
-        (point) => point.y < routes['far-target'].points[0].y
+      routes['default-target'].points.some(
+        (point) => point.y > branchNode.position.y + (branchNode.height ?? 0)
       )
     ).toBe(true);
-    expect(getVerticalSegmentXs(routes['near-target'].points)).toContain(724);
+
+    for (let index = 1; index < routes['default-target'].points.length; index++) {
+      expect(
+        segmentIntersectsNode(
+          routes['default-target'].points[index - 1],
+          routes['default-target'].points[index],
+          branchNode
+        )
+      ).toBe(false);
+    }
+  });
+
+  it('keeps semantic grouped merge lanes outside even when a direct route is clear', () => {
+    const switchNode = makeNode('switch', NODE_TYPES.SwitchNode, {
+      inputMapping: [
+        {
+          type: 'cases',
+          value: [
+            { match: 'fragile', matchType: 'exact', output: {}, route: '' },
+            { match: 'priority', matchType: 'exact', output: {}, route: '' },
+          ],
+        },
+      ],
+    });
+    switchNode.position = { x: 0, y: 0 };
+    switchNode.style = { width: 132, height: 104 };
+    switchNode.width = 132;
+    switchNode.height = 104;
+
+    const branchNode = makeNode('branch');
+    branchNode.position = { x: 220, y: 12 };
+    branchNode.style = { width: 160, height: 36 };
+    branchNode.width = 160;
+    branchNode.height = 36;
+
+    const target = makeNode('target');
+    target.position = { x: 520, y: 70 };
+    target.style = { width: 132, height: 36 };
+    target.width = 132;
+    target.height = 36;
+
+    const routes = routeOrthogonalEdges(
+      [switchNode, branchNode, target],
+      [
+        makeEdge('branch-target', 'branch', 'target'),
+        makeEdge('default-target', 'switch', 'target', 'default'),
+      ]
+    );
+
+    expect(routes['default-target'].points.length).toBeGreaterThan(4);
+    expect(
+      routes['default-target'].points.some(
+        (point) => point.y > target.position.y + (target.height ?? 0)
+      )
+    ).toBe(true);
+  });
+
+  it('routes switch default merge exits below branch siblings on the same row', () => {
+    const switchNode = makeNode('classify_order', NODE_TYPES.SwitchNode, {
+      inputMapping: [
+        {
+          type: 'cases',
+          value: [
+            { match: 'digital', matchType: 'exact', output: {}, route: '' },
+            { match: 'wholesale', matchType: 'exact', output: {}, route: '' },
+            { match: 'fragile', matchType: 'exact', output: {}, route: '' },
+          ],
+        },
+      ],
+    });
+    switchNode.position = { x: 1140, y: 216 };
+    switchNode.style = { width: 132, height: 120 };
+    switchNode.width = 132;
+    switchNode.height = 120;
+
+    const deliver = makeNode('deliver_digital');
+    deliver.position = { x: 1332, y: 132 };
+    deliver.style = { width: 132, height: 36 };
+    deliver.width = 132;
+    deliver.height = 36;
+
+    const wholesale = makeNode('wholesale_subflow');
+    wholesale.position = { x: 1332, y: 216 };
+    wholesale.style = { width: 132, height: 36 };
+    wholesale.width = 132;
+    wholesale.height = 36;
+
+    const apply = makeNode('apply_fragile_packaging');
+    apply.position = { x: 1332, y: 300 };
+    apply.style = { width: 132, height: 36 };
+    apply.width = 132;
+    apply.height = 36;
+
+    const lookup = makeNode('lookup_inventory');
+    lookup.position = { x: 1524, y: 300 };
+    lookup.style = { width: 132, height: 36 };
+    lookup.width = 132;
+    lookup.height = 36;
+
+    const routes = routeOrthogonalEdges(
+      [switchNode, deliver, wholesale, apply, lookup],
+      [
+        makeEdge(
+          'classify_order-deliver_digital-digital-0',
+          'classify_order',
+          'deliver_digital',
+          'case-0'
+        ),
+        makeEdge(
+          'classify_order-wholesale_subflow-wholesale-1',
+          'classify_order',
+          'wholesale_subflow',
+          'case-1'
+        ),
+        makeEdge(
+          'classify_order-apply_fragile_packaging-fragile-2',
+          'classify_order',
+          'apply_fragile_packaging',
+          'case-2'
+        ),
+        makeEdge(
+          'classify_order-lookup_inventory-default-3',
+          'classify_order',
+          'lookup_inventory',
+          'default'
+        ),
+        makeEdge(
+          'apply_fragile_packaging-lookup_inventory-next-4',
+          'apply_fragile_packaging',
+          'lookup_inventory'
+        ),
+        makeEdge(
+          'wholesale_subflow-lookup_inventory-next-5',
+          'wholesale_subflow',
+          'lookup_inventory'
+        ),
+      ]
+    );
+
+    const defaultRoute =
+      routes['classify_order-lookup_inventory-default-3'].points;
+
+    expect(defaultRoute[1].x).toBeLessThan(apply.position.x);
+    expect(Math.min(...defaultRoute.map((point) => point.y))).toBe(
+      defaultRoute[0].y
+    );
+    expect(
+      defaultRoute.some(
+        (point) => point.y > apply.position.y + (apply.height ?? 0)
+      )
+    ).toBe(true);
+
+    for (let index = 1; index < defaultRoute.length; index++) {
+      expect(
+        segmentIntersectsNode(
+          defaultRoute[index - 1],
+          defaultRoute[index],
+          apply
+        )
+      ).toBe(false);
+    }
   });
 
   it('keeps same-container long bypasses inside the container gutter', () => {

@@ -23,6 +23,24 @@ type ObstacleBox = {
   bottom: number;
 };
 
+type RouteContext = {
+  edge: Edge;
+  source: Node;
+  target: Node;
+  start: LayoutPoint;
+  end: LayoutPoint;
+  kind: LayoutEdgeKind;
+  sourceLaneIndex: number;
+  obstacles: ObstacleBox[];
+  sharedParentBox?: ObstacleBox;
+};
+
+type MergeGroup = {
+  targetId: string;
+  busX: number;
+  laneIndexByEdgeId: Map<string, number>;
+};
+
 const NODE_AVOIDANCE_MARGIN = 18;
 const EDGE_STUB = 36;
 const EDGE_LANE_GAP = 14;
@@ -187,6 +205,20 @@ function buildIncomingCountByTarget(edges: Edge[]): Map<string, number> {
   }
 
   return incomingCountByTarget;
+}
+
+function buildDuplicateLaneIndexes(edges: Edge[]): Map<string, number> {
+  const routeCountsBySource = new Map<string, number>();
+  const laneIndexes = new Map<string, number>();
+
+  for (const edge of edges) {
+    const sourceKey = `${edge.source}:${edge.sourceHandle ?? 'source'}`;
+    const duplicateLaneIndex = routeCountsBySource.get(sourceKey) ?? 0;
+    routeCountsBySource.set(sourceKey, duplicateLaneIndex + 1);
+    laneIndexes.set(edge.id, duplicateLaneIndex);
+  }
+
+  return laneIndexes;
 }
 
 function segmentIntersectsBox(
@@ -639,6 +671,10 @@ function routeViaMergeBus(
   return routeIntersectsObstacle(points, obstacles) ? null : points;
 }
 
+function getRouteDirection(start: LayoutPoint, end: LayoutPoint): 1 | -1 {
+  return end.x >= start.x ? 1 : -1;
+}
+
 function getBypassSide(
   kind: LayoutEdgeKind,
   start: LayoutPoint,
@@ -654,6 +690,16 @@ function getBypassSide(
   }
 
   return start.y <= end.y ? 'top' : 'bottom';
+}
+
+function getGroupedMergeSide(context: RouteContext): 'top' | 'bottom' {
+  if (context.kind !== 'sequence' && context.kind !== 'tool') {
+    return getBypassSide(context.kind, context.start, context.end);
+  }
+
+  if (context.start.y < context.end.y) return 'top';
+  if (context.start.y > context.end.y) return 'bottom';
+  return getBypassSide(context.kind, context.start, context.end);
 }
 
 function getBypassY(
@@ -695,6 +741,134 @@ function getBypassY(
     : bottomLane;
 }
 
+function clampLaneToParent(
+  laneY: number,
+  side: 'top' | 'bottom',
+  parentBox?: ObstacleBox
+): number {
+  if (!parentBox) return laneY;
+
+  return side === 'top'
+    ? Math.max(laneY, parentBox.top + CONTAINER_EDGE_GUTTER)
+    : Math.min(laneY, parentBox.bottom - CONTAINER_EDGE_GUTTER);
+}
+
+function getSourceExitX(
+  start: LayoutPoint,
+  busX: number,
+  laneIndex: number,
+  obstacles: ObstacleBox[]
+): number {
+  const direction: 1 | -1 = busX >= start.x ? 1 : -1;
+  const offset = EDGE_STUB + Math.abs(laneIndex) * EDGE_LANE_GAP;
+  const preferredX = start.x + direction * offset;
+  const clampedX =
+    direction === 1
+      ? Math.min(preferredX, busX - EDGE_LANE_GAP)
+      : Math.max(preferredX, busX + EDGE_LANE_GAP);
+  const blockers = obstacles
+    .filter((box) => start.y > box.top && start.y < box.bottom)
+    .filter((box) =>
+      direction === 1
+        ? box.left > start.x && box.left < clampedX
+        : box.right < start.x && box.right > clampedX
+    )
+    .sort((a, b) =>
+      direction === 1 ? a.left - b.left : b.right - a.right
+    );
+  const firstBlocker = blockers[0];
+
+  if (!firstBlocker) return clampedX;
+
+  return direction === 1
+    ? Math.max(start.x + EDGE_LANE_GAP, firstBlocker.left - EDGE_LANE_GAP)
+    : Math.min(start.x - EDGE_LANE_GAP, firstBlocker.right + EDGE_LANE_GAP);
+}
+
+function getGroupedMergeLaneY(
+  context: RouteContext,
+  group: MergeGroup,
+  sourceExitX: number,
+  side: 'top' | 'bottom'
+): number {
+  const left = Math.min(sourceExitX, group.busX);
+  const right = Math.max(sourceExitX, group.busX);
+  const corridorObstacles = context.obstacles.filter(
+    (box) => box.right > left && box.left < right
+  );
+  const laneIndex = group.laneIndexByEdgeId.get(context.edge.id) ?? 0;
+  const padding = NODE_AVOIDANCE_MARGIN + EDGE_STUB + laneIndex * EDGE_LANE_GAP;
+
+  if (side === 'top') {
+    const topLane =
+      Math.min(
+        context.start.y,
+        context.end.y,
+        ...corridorObstacles.map((box) => box.top)
+      ) - padding;
+    return clampLaneToParent(topLane, side, context.sharedParentBox);
+  }
+
+  const bottomLane =
+    Math.max(
+      context.start.y,
+      context.end.y,
+      ...corridorObstacles.map((box) => box.bottom)
+    ) + padding;
+  return clampLaneToParent(bottomLane, side, context.sharedParentBox);
+}
+
+function routeViaGroupedMerge(
+  context: RouteContext,
+  group: MergeGroup
+): LayoutPoint[] | null {
+  const isSemanticBranchExit =
+    context.kind !== 'sequence' && context.kind !== 'tool';
+  const directPoints = compactPoints([
+    context.start,
+    { x: group.busX, y: context.start.y },
+    { x: group.busX, y: context.end.y },
+    context.end,
+  ]);
+
+  if (
+    !isSemanticBranchExit &&
+    !routeIntersectsObstacle(directPoints, context.obstacles)
+  ) {
+    return directPoints;
+  }
+
+  const sourceExitX = getSourceExitX(
+    context.start,
+    group.busX,
+    context.sourceLaneIndex,
+    context.obstacles
+  );
+  const preferredSide = getGroupedMergeSide(context);
+  const sides: Array<'top' | 'bottom'> =
+    preferredSide === 'top' ? ['top', 'bottom'] : ['bottom', 'top'];
+
+  for (const side of sides) {
+    const laneY = getGroupedMergeLaneY(context, group, sourceExitX, side);
+    const detourPoints = compactPoints([
+      context.start,
+      { x: sourceExitX, y: context.start.y },
+      { x: sourceExitX, y: laneY },
+      { x: group.busX, y: laneY },
+      { x: group.busX, y: context.end.y },
+      context.end,
+    ]);
+
+    if (!routeIntersectsObstacle(detourPoints, context.obstacles)) {
+      return detourPoints;
+    }
+  }
+
+  return routeIntersectsObstacle(directPoints, context.obstacles)
+    ? null
+    : directPoints;
+}
+
 function routeLongBypass(
   kind: LayoutEdgeKind,
   start: LayoutPoint,
@@ -734,15 +908,14 @@ function getSharedParentBox(
   return parent ? getNodeBox(parent, nodeById) : undefined;
 }
 
-export function routeOrthogonalEdges(
+function buildRouteContexts(
   nodes: Node[],
   edges: Edge[]
-): Record<string, OrthogonalRoute> {
+): RouteContext[] {
   const nodeById = new Map(nodes.map((node) => [node.id, node]));
-  const routeCountsBySource = new Map<string, number>();
   const sourceLaneIndexes = buildSourceLaneIndexes(edges);
-  const incomingCountByTarget = buildIncomingCountByTarget(edges);
-  const routes: Record<string, OrthogonalRoute> = {};
+  const duplicateLaneIndexes = buildDuplicateLaneIndexes(edges);
+  const contexts: RouteContext[] = [];
 
   for (const edge of edges) {
     const source = nodeById.get(edge.source);
@@ -753,11 +926,7 @@ export function routeOrthogonalEdges(
     const targetBox = getNodeSize(target);
     const sourcePosition = getAbsolutePosition(source, nodeById);
     const targetPosition = getAbsolutePosition(target, nodeById);
-    const sourceKey = `${edge.source}:${edge.sourceHandle ?? 'source'}`;
-    const duplicateLaneIndex = routeCountsBySource.get(sourceKey) ?? 0;
-    routeCountsBySource.set(sourceKey, duplicateLaneIndex + 1);
-
-    const laneOffset = duplicateLaneIndex * 6;
+    const laneOffset = (duplicateLaneIndexes.get(edge.id) ?? 0) * 6;
     const start = {
       x: sourcePosition.x + sourceBox.width,
       y:
@@ -768,31 +937,142 @@ export function routeOrthogonalEdges(
       x: targetPosition.x,
       y: targetPosition.y + targetBox.height / 2 + laneOffset,
     };
-    const sourceLaneIndex = sourceLaneIndexes.get(edge.id) ?? 0;
-    const obstacles = getRoutableObstacles(edge, nodeById);
     const handle = (edge.sourceHandle ?? 'source').toLowerCase();
-    const kind = getEdgeKind(handle);
-    const sharedParentBox = getSharedParentBox(source, target, nodeById);
-    const longBypassRoute = routeLongBypass(
-      kind,
+
+    contexts.push({
+      edge,
+      source,
+      target,
       start,
       end,
-      obstacles,
-      sourceLaneIndex,
-      sharedParentBox
+      kind: getEdgeKind(handle),
+      sourceLaneIndex: sourceLaneIndexes.get(edge.id) ?? 0,
+      obstacles: getRoutableObstacles(edge, nodeById),
+      sharedParentBox: getSharedParentBox(source, target, nodeById),
+    });
+  }
+
+  return contexts;
+}
+
+function chooseMergeBusX(
+  contexts: RouteContext[],
+  nodeById: Map<string, Node>
+): number {
+  const direction = getRouteDirection(contexts[0].start, contexts[0].end);
+  const targetEntryX = contexts[0].end.x - direction * EDGE_STUB;
+  const sourceBoxes = contexts.map((context) =>
+    getNodeBox(context.source, nodeById)
+  );
+
+  if (direction === 1) {
+    const sourceRight = Math.max(...sourceBoxes.map((box) => box.right));
+    const clearSourceX = sourceRight + EDGE_LANE_GAP;
+    return clearSourceX <= targetEntryX
+      ? targetEntryX
+      : sourceRight + (contexts[0].end.x - sourceRight) / 2;
+  }
+
+  const sourceLeft = Math.min(...sourceBoxes.map((box) => box.left));
+  const clearSourceX = sourceLeft - EDGE_LANE_GAP;
+  return clearSourceX >= targetEntryX
+    ? targetEntryX
+    : sourceLeft - (sourceLeft - contexts[0].end.x) / 2;
+}
+
+function buildMergeGroups(
+  contexts: RouteContext[],
+  nodeById: Map<string, Node>
+): Map<string, MergeGroup> {
+  const contextsByTarget = new Map<string, RouteContext[]>();
+
+  for (const context of contexts) {
+    const targetContexts = contextsByTarget.get(context.edge.target) ?? [];
+    targetContexts.push(context);
+    contextsByTarget.set(context.edge.target, targetContexts);
+  }
+
+  const mergeGroups = new Map<string, MergeGroup>();
+  for (const [targetId, targetContexts] of contextsByTarget) {
+    if (targetContexts.length < 2) continue;
+
+    const direction = getRouteDirection(
+      targetContexts[0].start,
+      targetContexts[0].end
+    );
+    if (
+      targetContexts.some(
+        (context) => getRouteDirection(context.start, context.end) !== direction
+      )
+    ) {
+      continue;
+    }
+
+    const orderedContexts = [...targetContexts].sort((a, b) => {
+      if (a.start.y !== b.start.y) return a.start.y - b.start.y;
+      return compareEdgesForRouting(a.edge, b.edge);
+    });
+    const laneIndexByEdgeId = new Map<string, number>();
+    orderedContexts.forEach((context, index) => {
+      laneIndexByEdgeId.set(context.edge.id, index);
+    });
+
+    mergeGroups.set(targetId, {
+      targetId,
+      busX: chooseMergeBusX(targetContexts, nodeById),
+      laneIndexByEdgeId,
+    });
+  }
+
+  return mergeGroups;
+}
+
+export function routeOrthogonalEdges(
+  nodes: Node[],
+  edges: Edge[]
+): Record<string, OrthogonalRoute> {
+  const nodeById = new Map(nodes.map((node) => [node.id, node]));
+  const contexts = buildRouteContexts(nodes, edges);
+  const incomingCountByTarget = buildIncomingCountByTarget(edges);
+  const mergeGroups = buildMergeGroups(contexts, nodeById);
+  const routes: Record<string, OrthogonalRoute> = {};
+
+  for (const context of contexts) {
+    const mergeGroup = mergeGroups.get(context.edge.target);
+    const longBypassRoute = routeLongBypass(
+      context.kind,
+      context.start,
+      context.end,
+      context.obstacles,
+      context.sourceLaneIndex,
+      context.sharedParentBox
     );
     const points =
-      incomingCountByTarget.get(edge.target)! > 1
-        ? (longBypassRoute ??
-          routeViaMergeBus(start, end, obstacles) ??
-          routeOnGrid(start, end, obstacles, sourceLaneIndex))
-        : (longBypassRoute ?? routeOnGrid(start, end, obstacles, sourceLaneIndex));
+      incomingCountByTarget.get(context.edge.target)! > 1
+        ? ((mergeGroup ? routeViaGroupedMerge(context, mergeGroup) : null) ??
+          longBypassRoute ??
+          routeViaMergeBus(context.start, context.end, context.obstacles) ??
+          routeOnGrid(
+            context.start,
+            context.end,
+            context.obstacles,
+            context.sourceLaneIndex
+          ))
+        : (longBypassRoute ??
+          routeOnGrid(
+            context.start,
+            context.end,
+            context.obstacles,
+            context.sourceLaneIndex
+          ));
 
-    routes[edge.id] = {
+    routes[context.edge.id] = {
       points,
       labelPoint: {
-        x: start.x + Math.sign(end.x - start.x || 1) * 24,
-        y: start.y,
+        x:
+          context.start.x +
+          Math.sign(context.end.x - context.start.x || 1) * 24,
+        y: context.start.y,
       },
     };
   }
