@@ -90,6 +90,22 @@ function segmentIntersectsNode(
   return false;
 }
 
+function getVerticalSegmentXs(
+  points: Array<{ x: number; y: number }>
+): number[] {
+  const xs: number[] = [];
+
+  for (let index = 1; index < points.length; index++) {
+    const previous = points[index - 1];
+    const current = points[index];
+    if (previous.x === current.x && previous.y !== current.y) {
+      xs.push(previous.x);
+    }
+  }
+
+  return xs;
+}
+
 describe('workflow layout graph', () => {
   it('ranks a linear chain left-to-right from plain graph data', () => {
     const nodes = [makeNode('a'), makeNode('b'), makeNode('c')];
@@ -188,6 +204,34 @@ describe('workflow layout graph', () => {
         )
       ).toBe(false);
     }
+  });
+
+  it('uses the middle corridor for branch-stack merge routes', () => {
+    const source = makeNode('source');
+    source.position = { x: 0, y: 0 };
+    source.style = { width: 96, height: 36 };
+    source.width = 96;
+    source.height = 36;
+
+    const sibling = makeNode('sibling');
+    sibling.position = { x: 0, y: 80 };
+    sibling.style = { width: 96, height: 36 };
+    sibling.width = 96;
+    sibling.height = 36;
+
+    const target = makeNode('target');
+    target.position = { x: 320, y: 120 };
+    target.style = { width: 96, height: 36 };
+    target.width = 96;
+    target.height = 36;
+
+    const route = routeOrthogonalEdges(
+      [source, sibling, target],
+      [makeEdge('source-target', 'source', 'target')]
+    )['source-target'];
+
+    const verticalSegmentXs = getVerticalSegmentXs(route.points);
+    expect(verticalSegmentXs.some((x) => x > 180 && x < 260)).toBe(true);
   });
 
   it('keeps switch cases ordered and hides duplicate case edge labels', () => {

@@ -24,6 +24,7 @@ type ObstacleBox = {
 const NODE_AVOIDANCE_MARGIN = 18;
 const EDGE_STUB = 36;
 const EDGE_LANE_GAP = 14;
+const MAX_LANE_ADJUSTMENTS = 16;
 
 function getNodeSize(node: Node): { width: number; height: number } {
   const width =
@@ -180,6 +181,42 @@ function segmentIntersectsBox(
   return false;
 }
 
+function verticalSegmentIntersectsBox(
+  x: number,
+  startY: number,
+  endY: number,
+  box: ObstacleBox
+): boolean {
+  const top = Math.min(startY, endY);
+  const bottom = Math.max(startY, endY);
+
+  return x > box.left && x < box.right && bottom > box.top && top < box.bottom;
+}
+
+function getClearVerticalLaneX(
+  initialX: number,
+  startY: number,
+  endY: number,
+  obstacles: ObstacleBox[],
+  direction: 1 | -1
+): number {
+  let laneX = initialX;
+
+  for (let attempt = 0; attempt < MAX_LANE_ADJUSTMENTS; attempt++) {
+    const blockers = obstacles.filter((box) =>
+      verticalSegmentIntersectsBox(laneX, startY, endY, box)
+    );
+    if (blockers.length === 0) return laneX;
+
+    laneX =
+      direction > 0
+        ? Math.max(...blockers.map((box) => box.right)) + EDGE_LANE_GAP
+        : Math.min(...blockers.map((box) => box.left)) - EDGE_LANE_GAP;
+  }
+
+  return laneX;
+}
+
 function routeIntersectsObstacle(
   points: LayoutPoint[],
   obstacles: ObstacleBox[]
@@ -193,6 +230,12 @@ function routeIntersectsObstacle(
   }
 
   return false;
+}
+
+function getUniqueNumbers(values: number[]): number[] {
+  return values.filter(
+    (value, index) => values.findIndex((item) => item === value) === index
+  );
 }
 
 function compactPoints(points: LayoutPoint[]): LayoutPoint[] {
@@ -309,7 +352,8 @@ function buildCandidateRoutes(
   laneIndex: number
 ): LayoutPoint[][] {
   const leftToRight = end.x >= start.x;
-  const direction = leftToRight ? 1 : -1;
+  const direction: 1 | -1 = leftToRight ? 1 : -1;
+  const reverseDirection: 1 | -1 = direction === 1 ? -1 : 1;
   const laneOffset = laneIndex * EDGE_LANE_GAP;
   const sourceLaneX = start.x + direction * (EDGE_STUB + laneOffset);
   const targetLaneX = end.x - direction * (EDGE_STUB + laneOffset);
@@ -321,7 +365,19 @@ function buildCandidateRoutes(
     candidates.push([start, end]);
   }
 
-  for (const laneX of [sourceLaneX, targetLaneX, midX]) {
+  const verticalLaneXs = getUniqueNumbers([
+    getClearVerticalLaneX(midX, start.y, end.y, obstacles, direction),
+    getClearVerticalLaneX(
+      targetLaneX,
+      start.y,
+      end.y,
+      obstacles,
+      reverseDirection
+    ),
+    getClearVerticalLaneX(sourceLaneX, start.y, end.y, obstacles, direction),
+  ]);
+
+  for (const laneX of verticalLaneXs) {
     candidates.push([
       start,
       { x: laneX, y: start.y },
@@ -332,12 +388,27 @@ function buildCandidateRoutes(
 
   for (const side of getPreferredOuterSides(kind, start, end)) {
     const outerY = getOuterLaneY(start, end, obstacles, side, laneIndex);
+    const outerSourceLaneX = getClearVerticalLaneX(
+      sourceLaneX,
+      start.y,
+      outerY,
+      obstacles,
+      direction
+    );
+    const outerTargetLaneX = getClearVerticalLaneX(
+      targetLaneX,
+      end.y,
+      outerY,
+      obstacles,
+      reverseDirection
+    );
+
     candidates.push([
       start,
-      { x: sourceLaneX, y: start.y },
-      { x: sourceLaneX, y: outerY },
-      { x: targetLaneX, y: outerY },
-      { x: targetLaneX, y: end.y },
+      { x: outerSourceLaneX, y: start.y },
+      { x: outerSourceLaneX, y: outerY },
+      { x: outerTargetLaneX, y: outerY },
+      { x: outerTargetLaneX, y: end.y },
       end,
     ]);
   }
