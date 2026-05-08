@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
 # Release script: bump version, update Cargo.toml files and Cargo.lock, commit, tag, and push.
-# The tag push triggers the release CI workflow which publishes to crates.io.
+# The tag push triggers the release CI workflow which builds GitHub release artifacts.
 #
 # Usage: ./scripts/release.sh <patch|minor|major>
 # Example: ./scripts/release.sh patch   # 1.3.1 -> 1.3.2
@@ -81,7 +81,7 @@ echo ""
 read -rp "Push commit and tag to origin? [y/N] " CONFIRM
 if [[ "$CONFIRM" =~ ^[Yy]$ ]]; then
     git push origin HEAD "$TAG"
-    echo "Pushed. Release CI will publish to crates.io."
+    echo "Pushed. Release CI will build GitHub release artifacts."
 else
     echo "Skipped push. Run manually:"
     echo "  git push origin HEAD $TAG"
