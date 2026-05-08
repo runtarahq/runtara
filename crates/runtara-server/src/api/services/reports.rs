@@ -12,11 +12,19 @@ use crate::api::dto::object_model::{
     SortDirection,
 };
 use crate::api::dto::reports::*;
+use crate::api::dto::workflows::WorkflowInstanceDto;
 use crate::api::repositories::object_model::ObjectStoreManager;
 use crate::api::repositories::reports::ReportRepository;
 use crate::api::services::object_model::{
     InstanceService, SchemaService, ServiceError as ObjectModelServiceError,
 };
+use crate::api::services::workflow_runtime::{
+    WorkflowRuntimeAction, WorkflowRuntimeError, list_instance_actions, list_workflow_actions,
+    submit_workflow_action,
+};
+use crate::auth::{AuthContext, AuthMethod};
+use crate::runtime_client::RuntimeClient;
+use crate::workers::execution_engine::{ExecutionEngine, ExecutionError};
 
 mod query_plan;
 
@@ -51,6 +59,8 @@ pub struct ReportService {
     repo: ReportRepository,
     schema_service: SchemaService,
     instance_service: InstanceService,
+    engine: Option<Arc<ExecutionEngine>>,
+    runtime_client: Option<Arc<RuntimeClient>>,
 }
 
 #[derive(Clone, Copy)]
@@ -71,7 +81,19 @@ impl ReportService {
             repo: ReportRepository::new(pool),
             schema_service: SchemaService::new(manager.clone(), connections.clone()),
             instance_service: InstanceService::new(manager, connections),
+            engine: None,
+            runtime_client: None,
         }
+    }
+
+    pub fn with_runtime(
+        mut self,
+        engine: Arc<ExecutionEngine>,
+        runtime_client: Option<Arc<RuntimeClient>>,
+    ) -> Self {
+        self.engine = Some(engine);
+        self.runtime_client = runtime_client;
+        self
     }
 
     pub async fn list_reports(
@@ -477,6 +499,89 @@ impl ReportService {
         .await
     }
 
+    pub async fn submit_report_workflow_action(
+        &self,
+        tenant_id: &str,
+        id_or_slug: &str,
+        block_id: &str,
+        action_id: &str,
+        request: SubmitReportWorkflowActionRequest,
+        auth_context: &AuthContext,
+    ) -> Result<Value, ReportServiceError> {
+        let report = self.get_report(tenant_id, id_or_slug).await?;
+        let block = report
+            .definition
+            .blocks
+            .iter()
+            .find(|block| block.id == block_id)
+            .ok_or_else(|| {
+                ReportServiceError::Validation(format!("Unknown block '{}'", block_id))
+            })?;
+
+        if block.block_type != ReportBlockType::Actions {
+            return Err(ReportServiceError::Validation(format!(
+                "Block '{}' is not an actions block",
+                block.id
+            )));
+        }
+        let entity = workflow_runtime_entity(block)?;
+        if entity != ReportWorkflowRuntimeEntity::Actions {
+            return Err(ReportServiceError::Validation(format!(
+                "Block '{}' action submit requires workflow_runtime entity 'actions'",
+                block.id
+            )));
+        }
+
+        let resolved_filters = resolve_filters(&report.definition, &request.filters);
+        let block_request = ReportBlockDataRequest {
+            id: block_id.to_string(),
+            page: None,
+            sort: vec![],
+            search: None,
+            block_filters: request.block_filters,
+        };
+        let actions = self
+            .workflow_runtime_actions_for_block_context(
+                tenant_id,
+                &report.definition,
+                block,
+                &resolved_filters,
+                Some(&block_request),
+            )
+            .await?;
+        let action = actions
+            .into_iter()
+            .find(|action| action.action_id == action_id || action.signal_id == action_id)
+            .ok_or_else(|| {
+                ReportServiceError::Conflict(format!(
+                    "Action '{}' is no longer open for report block '{}'",
+                    action_id, block.id
+                ))
+            })?;
+
+        let payload = merge_report_action_payload(&request.payload, block, auth_context)?;
+        let submitted = submit_workflow_action(
+            self.require_execution_engine()?,
+            self.require_runtime_client()?,
+            tenant_id,
+            &action.workflow_id,
+            &action.instance_id,
+            &action.action_id,
+            &payload,
+        )
+        .await
+        .map_err(map_workflow_runtime_error_to_report)?;
+
+        Ok(json!({
+            "success": true,
+            "workflowId": submitted.workflow_id,
+            "instanceId": submitted.instance_id,
+            "actionId": submitted.action_id,
+            "signalId": submitted.signal_id,
+            "status": "submitted",
+        }))
+    }
+
     pub async fn get_filter_options(
         &self,
         tenant_id: &str,
@@ -835,6 +940,14 @@ impl ReportService {
                 )));
             }
             block_types.insert(block.id.clone(), block.block_type);
+            if block.block_type == ReportBlockType::Actions
+                && block.source.kind != ReportSourceKind::WorkflowRuntime
+            {
+                return Err(ReportServiceError::Validation(format!(
+                    "Block '{}' actions block requires a workflow_runtime source",
+                    block.id
+                )));
+            }
             if let Some(dataset_query) = &block.dataset {
                 if !block.source.is_empty() {
                     return Err(ReportServiceError::Validation(format!(
@@ -869,6 +982,10 @@ impl ReportService {
                 )?;
                 validate_dataset_block_output(block, &compiled.source)?;
                 validate_block_interactions(block, &filter_ids)?;
+                continue;
+            }
+            if block.source.kind == ReportSourceKind::WorkflowRuntime {
+                validate_workflow_runtime_block(block, &filter_ids)?;
                 continue;
             }
             if block.source.schema.trim().is_empty() {
@@ -1632,6 +1749,16 @@ impl ReportService {
                 self.render_metric_block(tenant_id, definition, block, resolved_filters)
                     .await?
             }
+            ReportBlockType::Actions => {
+                self.render_actions_block(
+                    tenant_id,
+                    definition,
+                    block,
+                    resolved_filters,
+                    block_request,
+                )
+                .await?
+            }
             ReportBlockType::Markdown => json!({}),
         };
 
@@ -1658,6 +1785,17 @@ impl ReportService {
         resolved_filters: &HashMap<String, Value>,
         block_request: Option<&ReportBlockDataRequest>,
     ) -> Result<Value, ReportServiceError> {
+        if block.source.kind == ReportSourceKind::WorkflowRuntime {
+            return self
+                .render_workflow_runtime_table_block(
+                    tenant_id,
+                    definition,
+                    block,
+                    resolved_filters,
+                    block_request,
+                )
+                .await;
+        }
         if block.source.mode == ReportSourceMode::Aggregate {
             return self
                 .render_aggregate_table_block(
@@ -1776,6 +1914,254 @@ impl ReportService {
                 "hasNextPage": offset + page_size < total_count
             }
         }))
+    }
+
+    async fn render_workflow_runtime_table_block(
+        &self,
+        tenant_id: &str,
+        definition: &ReportDefinition,
+        block: &ReportBlockDefinition,
+        resolved_filters: &HashMap<String, Value>,
+        block_request: Option<&ReportBlockDataRequest>,
+    ) -> Result<Value, ReportServiceError> {
+        let entity = workflow_runtime_entity(block)?;
+        let table = block.table.as_ref();
+        let page_size = clamp_page_size(
+            block_request
+                .and_then(|request| request.page.as_ref().map(|page| page.size))
+                .or_else(|| {
+                    table
+                        .and_then(|table| table.pagination.as_ref())
+                        .map(|p| p.default_page_size)
+                })
+                .unwrap_or(50),
+        );
+        let offset = block_request
+            .and_then(|request| request.page.as_ref().map(|page| page.offset))
+            .unwrap_or(0)
+            .max(0);
+        let sort = block_request
+            .map(|request| request.sort.clone())
+            .filter(|sort| !sort.is_empty())
+            .or_else(|| {
+                table
+                    .map(|table| table.default_sort.clone())
+                    .filter(|sort| !sort.is_empty())
+            })
+            .unwrap_or_else(|| block.source.order_by.clone());
+
+        match entity {
+            ReportWorkflowRuntimeEntity::Instances => {
+                let engine = self.require_execution_engine()?;
+                let runtime_client = self.require_runtime_client()?;
+                let workflow_id = workflow_runtime_workflow_id(block)?;
+                let page = (offset / page_size) as i32;
+                let result = engine
+                    .list_executions(tenant_id, workflow_id, Some(page), Some(page_size as i32))
+                    .await
+                    .map_err(map_execution_error_to_report)?;
+
+                let mut rows = Vec::with_capacity(result.content.len());
+                for instance in result.content {
+                    let actions = if should_check_instance_actions(&instance) {
+                        list_instance_actions(runtime_client, workflow_id, &instance.id)
+                            .await
+                            .map_err(map_workflow_runtime_error_to_report)?
+                    } else {
+                        Vec::new()
+                    };
+                    rows.push(workflow_instance_report_row(&instance, &actions));
+                }
+
+                rows = apply_workflow_runtime_row_filters(
+                    rows,
+                    definition,
+                    block,
+                    resolved_filters,
+                    block_request,
+                )?;
+                sort_rows(&mut rows, &sort);
+
+                Ok(json!({
+                    "columns": workflow_runtime_table_columns(table, entity),
+                    "rows": rows.into_iter().map(Value::Object).collect::<Vec<_>>(),
+                    "page": {
+                        "offset": offset,
+                        "size": page_size,
+                        "totalCount": result.total_elements,
+                        "hasNextPage": !result.last,
+                    }
+                }))
+            }
+            ReportWorkflowRuntimeEntity::Actions => {
+                let actions = self
+                    .workflow_runtime_actions_for_block_context(
+                        tenant_id,
+                        definition,
+                        block,
+                        resolved_filters,
+                        block_request,
+                    )
+                    .await?;
+                let mut rows = actions
+                    .into_iter()
+                    .map(|action| workflow_action_report_row(&action))
+                    .collect::<Vec<_>>();
+                sort_rows(&mut rows, &sort);
+                let total_count = rows.len() as i64;
+                let rows = rows
+                    .into_iter()
+                    .skip(offset as usize)
+                    .take(page_size as usize)
+                    .map(Value::Object)
+                    .collect::<Vec<_>>();
+
+                Ok(json!({
+                    "columns": workflow_runtime_table_columns(table, entity),
+                    "rows": rows,
+                    "page": {
+                        "offset": offset,
+                        "size": page_size,
+                        "totalCount": total_count,
+                        "hasNextPage": offset + page_size < total_count,
+                    }
+                }))
+            }
+        }
+    }
+
+    async fn render_actions_block(
+        &self,
+        tenant_id: &str,
+        definition: &ReportDefinition,
+        block: &ReportBlockDefinition,
+        resolved_filters: &HashMap<String, Value>,
+        block_request: Option<&ReportBlockDataRequest>,
+    ) -> Result<Value, ReportServiceError> {
+        let entity = workflow_runtime_entity(block)?;
+        if entity != ReportWorkflowRuntimeEntity::Actions {
+            return Err(ReportServiceError::Validation(format!(
+                "Block '{}' action renderer requires workflow_runtime entity 'actions'",
+                block.id
+            )));
+        }
+
+        let rows = self
+            .workflow_runtime_actions_for_block_context(
+                tenant_id,
+                definition,
+                block,
+                resolved_filters,
+                block_request,
+            )
+            .await?
+            .into_iter()
+            .map(|action| workflow_action_report_row(&action))
+            .collect::<Vec<_>>();
+
+        let actions = rows.iter().cloned().map(Value::Object).collect::<Vec<_>>();
+
+        Ok(json!({
+            "actions": actions,
+            "rows": actions,
+            "page": {
+                "offset": 0,
+                "size": rows.len() as i64,
+                "totalCount": rows.len() as i64,
+                "hasNextPage": false,
+            }
+        }))
+    }
+
+    async fn workflow_runtime_actions_for_block_context(
+        &self,
+        tenant_id: &str,
+        definition: &ReportDefinition,
+        block: &ReportBlockDefinition,
+        resolved_filters: &HashMap<String, Value>,
+        block_request: Option<&ReportBlockDataRequest>,
+    ) -> Result<Vec<WorkflowRuntimeAction>, ReportServiceError> {
+        let actions = self
+            .workflow_runtime_actions_for_source(tenant_id, block, 0, 100)
+            .await?;
+        let Some(condition) =
+            build_block_condition(definition, block, resolved_filters, block_request)?
+        else {
+            return Ok(actions);
+        };
+
+        actions
+            .into_iter()
+            .filter_map(|action| {
+                let row = workflow_action_report_row(&action);
+                match condition_matches_row(&condition, &row, &block.id) {
+                    Ok(true) => Some(Ok(action)),
+                    Ok(false) => None,
+                    Err(error) => Some(Err(error)),
+                }
+            })
+            .collect()
+    }
+
+    async fn workflow_runtime_actions_for_source(
+        &self,
+        tenant_id: &str,
+        block: &ReportBlockDefinition,
+        _offset: i64,
+        _page_size: i64,
+    ) -> Result<Vec<WorkflowRuntimeAction>, ReportServiceError> {
+        let workflow_id = workflow_runtime_workflow_id(block)?;
+        let engine = self.require_execution_engine()?;
+        let runtime_client = self.require_runtime_client()?;
+
+        if let Some(instance_id) = block
+            .source
+            .instance_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            let execution = engine
+                .get_execution_with_metadata(workflow_id, instance_id, tenant_id)
+                .await
+                .map_err(map_execution_error_to_report)?;
+            if !should_check_instance_actions(&execution.instance) {
+                return Ok(Vec::new());
+            }
+            return list_instance_actions(runtime_client, workflow_id, instance_id)
+                .await
+                .map_err(map_workflow_runtime_error_to_report);
+        }
+
+        let actions = list_workflow_actions(
+            engine,
+            runtime_client,
+            tenant_id,
+            workflow_id,
+            Some(0),
+            Some(100),
+        )
+        .await
+        .map_err(map_workflow_runtime_error_to_report)?
+        .actions;
+
+        Ok(actions)
+    }
+
+    fn require_execution_engine(&self) -> Result<&ExecutionEngine, ReportServiceError> {
+        self.engine.as_deref().ok_or_else(|| {
+            ReportServiceError::Validation(
+                "Workflow runtime report sources require the execution engine".to_string(),
+            )
+        })
+    }
+
+    fn require_runtime_client(&self) -> Result<&RuntimeClient, ReportServiceError> {
+        self.runtime_client.as_deref().ok_or_else(|| {
+            ReportServiceError::Validation(
+                "Workflow runtime report sources require a configured runtime client".to_string(),
+            )
+        })
     }
 
     async fn render_joined_filter_table_block(
@@ -2885,6 +3271,136 @@ fn validate_block_interactions(
     Ok(())
 }
 
+fn validate_workflow_runtime_block(
+    block: &ReportBlockDefinition,
+    filter_ids: &HashSet<String>,
+) -> Result<(), ReportServiceError> {
+    let entity = workflow_runtime_entity(block)?;
+    workflow_runtime_workflow_id(block)?;
+
+    if block.source.mode != ReportSourceMode::Filter {
+        return Err(ReportServiceError::Validation(format!(
+            "Block '{}' workflow_runtime source only supports filter mode",
+            block.id
+        )));
+    }
+    if !block.source.schema.trim().is_empty() {
+        return Err(ReportServiceError::Validation(format!(
+            "Block '{}' workflow_runtime source must not set schema",
+            block.id
+        )));
+    }
+    if block.source.connection_id.is_some() {
+        return Err(ReportServiceError::Validation(format!(
+            "Block '{}' workflow_runtime source must not set connectionId",
+            block.id
+        )));
+    }
+    if !block.source.join.is_empty()
+        || !block.source.group_by.is_empty()
+        || !block.source.aggregates.is_empty()
+    {
+        return Err(ReportServiceError::Validation(format!(
+            "Block '{}' workflow_runtime source does not support joins or aggregates",
+            block.id
+        )));
+    }
+
+    match block.block_type {
+        ReportBlockType::Table => {}
+        ReportBlockType::Actions if entity == ReportWorkflowRuntimeEntity::Actions => {}
+        ReportBlockType::Actions => {
+            return Err(ReportServiceError::Validation(format!(
+                "Block '{}' actions block requires workflow_runtime entity 'actions'",
+                block.id
+            )));
+        }
+        _ => {
+            return Err(ReportServiceError::Validation(format!(
+                "Block '{}' workflow_runtime source only supports table and actions blocks",
+                block.id
+            )));
+        }
+    }
+
+    let fields = workflow_runtime_fields(entity);
+    if let Some(table) = &block.table {
+        for column in &table.columns {
+            if column.is_chart() || column.is_value_lookup() {
+                return Err(ReportServiceError::Validation(format!(
+                    "Block '{}' workflow_runtime table columns cannot use nested sources",
+                    block.id
+                )));
+            }
+            if !fields.contains(column.field.as_str()) {
+                return Err(ReportServiceError::Validation(format!(
+                    "Block '{}' references unknown workflow_runtime field '{}'",
+                    block.id, column.field
+                )));
+            }
+        }
+        for sort in &table.default_sort {
+            if !fields.contains(sort.field.as_str()) {
+                return Err(ReportServiceError::Validation(format!(
+                    "Block '{}' references unknown workflow_runtime sort field '{}'",
+                    block.id, sort.field
+                )));
+            }
+        }
+    }
+    for sort in &block.source.order_by {
+        if !fields.contains(sort.field.as_str()) {
+            return Err(ReportServiceError::Validation(format!(
+                "Block '{}' references unknown workflow_runtime orderBy field '{}'",
+                block.id, sort.field
+            )));
+        }
+    }
+    validate_block_interactions(block, filter_ids)
+}
+
+fn workflow_runtime_fields(entity: ReportWorkflowRuntimeEntity) -> HashSet<&'static str> {
+    match entity {
+        ReportWorkflowRuntimeEntity::Instances => [
+            "id",
+            "instanceId",
+            "workflowId",
+            "workflowName",
+            "status",
+            "createdAt",
+            "updatedAt",
+            "usedVersion",
+            "durationSeconds",
+            "hasActions",
+            "actionCount",
+        ]
+        .into_iter()
+        .collect(),
+        ReportWorkflowRuntimeEntity::Actions => [
+            "id",
+            "actionId",
+            "actionKind",
+            "targetKind",
+            "targetId",
+            "workflowId",
+            "instanceId",
+            "signalId",
+            "actionKey",
+            "label",
+            "message",
+            "inputSchema",
+            "schemaFormat",
+            "status",
+            "requestedAt",
+            "correlation",
+            "context",
+            "runtime",
+        ]
+        .into_iter()
+        .collect(),
+    }
+}
+
 fn validate_layout_children(
     children: &Value,
     path: &str,
@@ -3943,6 +4459,314 @@ fn combine_conditions(conditions: Vec<Condition>) -> Option<Condition> {
     }
 }
 
+fn workflow_runtime_entity(
+    block: &ReportBlockDefinition,
+) -> Result<ReportWorkflowRuntimeEntity, ReportServiceError> {
+    block.source.entity.ok_or_else(|| {
+        ReportServiceError::Validation(format!(
+            "Block '{}' workflow_runtime source must specify entity",
+            block.id
+        ))
+    })
+}
+
+fn workflow_runtime_workflow_id(block: &ReportBlockDefinition) -> Result<&str, ReportServiceError> {
+    block
+        .source
+        .workflow_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|workflow_id| !workflow_id.is_empty())
+        .ok_or_else(|| {
+            ReportServiceError::Validation(format!(
+                "Block '{}' workflow_runtime source must specify workflowId",
+                block.id
+            ))
+        })
+}
+
+fn should_check_instance_actions(instance: &WorkflowInstanceDto) -> bool {
+    !instance.status.is_terminal() && instance.has_pending_input
+}
+
+fn workflow_instance_report_row(
+    instance: &WorkflowInstanceDto,
+    actions: &[WorkflowRuntimeAction],
+) -> serde_json::Map<String, Value> {
+    let mut row = serde_json::Map::new();
+    row.insert("id".to_string(), Value::String(instance.id.clone()));
+    row.insert("instanceId".to_string(), Value::String(instance.id.clone()));
+    row.insert(
+        "workflowId".to_string(),
+        Value::String(instance.workflow_id.clone()),
+    );
+    if let Some(workflow_name) = &instance.workflow_name {
+        row.insert(
+            "workflowName".to_string(),
+            Value::String(workflow_name.clone()),
+        );
+    }
+    row.insert("status".to_string(), json!(instance.status));
+    row.insert(
+        "createdAt".to_string(),
+        Value::String(instance.created.clone()),
+    );
+    row.insert(
+        "updatedAt".to_string(),
+        Value::String(instance.updated.clone()),
+    );
+    row.insert("usedVersion".to_string(), json!(instance.used_version));
+    row.insert(
+        "durationSeconds".to_string(),
+        instance
+            .execution_duration_seconds
+            .map(Value::from)
+            .unwrap_or(Value::Null),
+    );
+    row.insert("hasActions".to_string(), Value::Bool(!actions.is_empty()));
+    row.insert("actionCount".to_string(), json!(actions.len()));
+    row
+}
+
+fn workflow_action_report_row(action: &WorkflowRuntimeAction) -> serde_json::Map<String, Value> {
+    let mut row = serde_json::Map::new();
+    row.insert("id".to_string(), Value::String(action.id.clone()));
+    row.insert(
+        "actionId".to_string(),
+        Value::String(action.action_id.clone()),
+    );
+    row.insert(
+        "actionKind".to_string(),
+        Value::String(action.action_kind.clone()),
+    );
+    row.insert(
+        "targetKind".to_string(),
+        Value::String(action.target_kind.clone()),
+    );
+    row.insert(
+        "targetId".to_string(),
+        Value::String(action.target_id.clone()),
+    );
+    row.insert(
+        "workflowId".to_string(),
+        Value::String(action.workflow_id.clone()),
+    );
+    row.insert(
+        "instanceId".to_string(),
+        Value::String(action.instance_id.clone()),
+    );
+    row.insert(
+        "signalId".to_string(),
+        Value::String(action.signal_id.clone()),
+    );
+    row.insert(
+        "actionKey".to_string(),
+        action
+            .action_key
+            .as_ref()
+            .map(|value| Value::String(value.clone()))
+            .unwrap_or(Value::Null),
+    );
+    row.insert("label".to_string(), Value::String(action.label.clone()));
+    row.insert("message".to_string(), Value::String(action.message.clone()));
+    row.insert(
+        "inputSchema".to_string(),
+        action.input_schema.clone().unwrap_or(Value::Null),
+    );
+    row.insert(
+        "schemaFormat".to_string(),
+        Value::String(action.schema_format.clone()),
+    );
+    row.insert("status".to_string(), Value::String(action.status.clone()));
+    row.insert(
+        "requestedAt".to_string(),
+        action
+            .requested_at
+            .map(|value| Value::String(value.to_rfc3339()))
+            .unwrap_or(Value::Null),
+    );
+    row.insert("correlation".to_string(), action.correlation.clone());
+    row.insert("context".to_string(), action.context.clone());
+    row.insert("runtime".to_string(), action.runtime.clone());
+    row
+}
+
+fn workflow_runtime_table_columns(
+    table: Option<&ReportTableConfig>,
+    entity: ReportWorkflowRuntimeEntity,
+) -> Vec<Value> {
+    if let Some(table) = table
+        && !table.columns.is_empty()
+    {
+        return table
+            .columns
+            .iter()
+            .map(|column| {
+                json!({
+                    "key": column.field,
+                    "label": column.label.clone().unwrap_or_else(|| humanize_label(&column.field)),
+                    "format": column.format,
+                })
+            })
+            .collect();
+    }
+
+    let columns: &[(&str, &str, Option<&str>)] = match entity {
+        ReportWorkflowRuntimeEntity::Instances => &[
+            ("instanceId", "Instance ID", None),
+            ("status", "Status", None),
+            ("hasActions", "Has Actions", Some("boolean")),
+            ("actionCount", "Actions", Some("number")),
+            ("createdAt", "Created", Some("datetime")),
+            ("updatedAt", "Updated", Some("datetime")),
+            ("usedVersion", "Version", Some("number")),
+            ("durationSeconds", "Duration", Some("number")),
+        ],
+        ReportWorkflowRuntimeEntity::Actions => &[
+            ("actionId", "Action ID", None),
+            ("label", "Action", None),
+            ("status", "Status", None),
+            ("instanceId", "Instance ID", None),
+            ("requestedAt", "Requested", Some("datetime")),
+        ],
+    };
+
+    columns
+        .iter()
+        .map(|(key, label, format)| {
+            json!({
+                "key": key,
+                "label": label,
+                "format": format,
+            })
+        })
+        .collect()
+}
+
+fn merge_report_action_payload(
+    payload: &Value,
+    block: &ReportBlockDefinition,
+    auth_context: &AuthContext,
+) -> Result<Value, ReportServiceError> {
+    let mut payload = match payload {
+        Value::Null => serde_json::Map::new(),
+        Value::Object(map) => map.clone(),
+        _ => {
+            return Err(ReportServiceError::Validation(
+                "Report action payload must be a JSON object".to_string(),
+            ));
+        }
+    };
+
+    if let Some(submit) = block
+        .actions
+        .as_ref()
+        .and_then(|actions| actions.submit.as_ref())
+    {
+        for (key, value) in &submit.implicit_payload {
+            payload.insert(
+                key.clone(),
+                resolve_report_action_implicit_value(value, auth_context),
+            );
+        }
+    }
+
+    Ok(Value::Object(payload))
+}
+
+fn resolve_report_action_implicit_value(value: &Value, auth_context: &AuthContext) -> Value {
+    match value {
+        Value::String(template) => Value::String(render_viewer_template(template, auth_context)),
+        Value::Array(values) => Value::Array(
+            values
+                .iter()
+                .map(|value| resolve_report_action_implicit_value(value, auth_context))
+                .collect(),
+        ),
+        Value::Object(object) => Value::Object(
+            object
+                .iter()
+                .map(|(key, value)| {
+                    (
+                        key.clone(),
+                        resolve_report_action_implicit_value(value, auth_context),
+                    )
+                })
+                .collect(),
+        ),
+        _ => value.clone(),
+    }
+}
+
+fn render_viewer_template(template: &str, auth_context: &AuthContext) -> String {
+    template
+        .replace("{{viewer.user_id}}", &auth_context.user_id)
+        .replace("{{viewer.id}}", &auth_context.user_id)
+        .replace("{{viewer.org_id}}", &auth_context.org_id)
+        .replace("{{viewer.tenant_id}}", &auth_context.org_id)
+        .replace(
+            "{{viewer.auth_method}}",
+            auth_method_name(&auth_context.auth_method),
+        )
+}
+
+fn auth_method_name(method: &AuthMethod) -> &'static str {
+    match method {
+        AuthMethod::Jwt => "jwt",
+        AuthMethod::ApiKey => "api_key",
+        AuthMethod::Unauthenticated => "unauthenticated",
+    }
+}
+
+fn apply_workflow_runtime_row_filters(
+    rows: Vec<serde_json::Map<String, Value>>,
+    definition: &ReportDefinition,
+    block: &ReportBlockDefinition,
+    resolved_filters: &HashMap<String, Value>,
+    block_request: Option<&ReportBlockDataRequest>,
+) -> Result<Vec<serde_json::Map<String, Value>>, ReportServiceError> {
+    let Some(condition) =
+        build_block_condition(definition, block, resolved_filters, block_request)?
+    else {
+        return Ok(rows);
+    };
+
+    rows.into_iter()
+        .filter_map(
+            |row| match condition_matches_row(&condition, &row, &block.id) {
+                Ok(true) => Some(Ok(row)),
+                Ok(false) => None,
+                Err(error) => Some(Err(error)),
+            },
+        )
+        .collect()
+}
+
+fn map_workflow_runtime_error_to_report(error: WorkflowRuntimeError) -> ReportServiceError {
+    match error {
+        WorkflowRuntimeError::InvalidRequest(message) => ReportServiceError::Validation(message),
+        WorkflowRuntimeError::NotFound(message) => ReportServiceError::Validation(message),
+        WorkflowRuntimeError::Conflict(message) => ReportServiceError::Conflict(message),
+        WorkflowRuntimeError::RuntimeUnavailable => ReportServiceError::Validation(
+            "Workflow runtime report sources require a configured runtime client".to_string(),
+        ),
+        WorkflowRuntimeError::Runtime(message) => ReportServiceError::Database(message),
+    }
+}
+
+fn map_execution_error_to_report(error: ExecutionError) -> ReportServiceError {
+    match error {
+        ExecutionError::ValidationError(message) => ReportServiceError::Validation(message),
+        ExecutionError::NotFound(message) | ExecutionError::WorkflowNotFound(message) => {
+            ReportServiceError::Validation(message)
+        }
+        ExecutionError::NotConnected(_) => ReportServiceError::Validation(
+            "Workflow runtime report sources require a configured runtime client".to_string(),
+        ),
+        _ => ReportServiceError::Database(error.to_string()),
+    }
+}
+
 #[derive(Debug)]
 struct CompiledDatasetQuery {
     source: ReportSource,
@@ -4093,8 +4917,12 @@ fn compile_dataset_query(
 
     Ok(CompiledDatasetQuery {
         source: ReportSource {
+            kind: ReportSourceKind::ObjectModel,
             schema: dataset.source.schema.clone(),
             connection_id: dataset.source.connection_id.clone(),
+            entity: None,
+            workflow_id: None,
+            instance_id: None,
             mode: ReportSourceMode::Aggregate,
             condition: None,
             filter_mappings: vec![],
@@ -4744,6 +5572,10 @@ fn is_empty_data(data: &Value) -> bool {
     data.get("rows")
         .and_then(Value::as_array)
         .is_some_and(|rows| rows.is_empty())
+        || data
+            .get("actions")
+            .and_then(Value::as_array)
+            .is_some_and(|actions| actions.is_empty())
 }
 
 fn clamp_page_size(size: i64) -> i64 {
@@ -5072,8 +5904,12 @@ mod tests {
             lazy: false,
             dataset: None,
             source: ReportSource {
+                kind: ReportSourceKind::ObjectModel,
                 schema: "Order".to_string(),
                 connection_id: None,
+                entity: None,
+                workflow_id: None,
+                instance_id: None,
                 mode: ReportSourceMode::Filter,
                 condition: None,
                 filter_mappings: vec![],
@@ -5086,6 +5922,7 @@ mod tests {
             table: None,
             chart: None,
             metric: None,
+            actions: None,
             filters: vec![],
             interactions: vec![],
         }

@@ -190,6 +190,7 @@ export function ReportViewerPage() {
         filters={filters}
         onFilterChange={handleFilterChange}
         onFiltersChange={handleFilterChanges}
+        onRefresh={() => refetch()}
       />
       <div className="report-print-brand">
         <img src={RuntaraLogo} alt="" />

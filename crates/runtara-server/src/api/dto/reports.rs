@@ -28,10 +28,22 @@ fn default_block_status() -> ReportBlockStatus {
     ReportBlockStatus::Ready
 }
 
+fn default_report_source_kind() -> ReportSourceKind {
+    ReportSourceKind::ObjectModel
+}
+
+fn is_default_report_source_kind(kind: &ReportSourceKind) -> bool {
+    *kind == ReportSourceKind::ObjectModel
+}
+
 pub(crate) fn default_report_source() -> ReportSource {
     ReportSource {
+        kind: default_report_source_kind(),
         schema: String::new(),
         connection_id: None,
+        entity: None,
+        workflow_id: None,
+        instance_id: None,
         mode: default_source_mode(),
         condition: None,
         filter_mappings: vec![],
@@ -167,6 +179,21 @@ pub enum ReportDatasetValueFormat {
     Datetime,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, ToSchema, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ReportSourceKind {
+    #[default]
+    ObjectModel,
+    WorkflowRuntime,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ReportWorkflowRuntimeEntity {
+    Instances,
+    Actions,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct ReportFilterDefinition {
     pub id: String,
@@ -233,10 +260,30 @@ pub struct ReportBlockDefinition {
     pub chart: Option<ReportChartConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metric: Option<ReportMetricConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actions: Option<ReportActionsConfig>,
     #[serde(default)]
     pub filters: Vec<ReportFilterDefinition>,
     #[serde(default)]
     pub interactions: Vec<ReportInteractionDefinition>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct ReportActionsConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub submit: Option<ReportActionSubmitConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct ReportActionSubmitConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    #[serde(
+        default,
+        rename = "implicitPayload",
+        skip_serializing_if = "HashMap::is_empty"
+    )]
+    pub implicit_payload: HashMap<String, Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -264,11 +311,18 @@ pub enum ReportBlockType {
     Table,
     Chart,
     Metric,
+    Actions,
     Markdown,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct ReportSource {
+    #[serde(
+        default = "default_report_source_kind",
+        skip_serializing_if = "is_default_report_source_kind"
+    )]
+    pub kind: ReportSourceKind,
+    #[serde(default)]
     pub schema: String,
     #[serde(
         default,
@@ -276,6 +330,20 @@ pub struct ReportSource {
         skip_serializing_if = "Option::is_none"
     )]
     pub connection_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entity: Option<ReportWorkflowRuntimeEntity>,
+    #[serde(
+        default,
+        rename = "workflowId",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub workflow_id: Option<String>,
+    #[serde(
+        default,
+        rename = "instanceId",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub instance_id: Option<String>,
     #[serde(default = "default_source_mode")]
     pub mode: ReportSourceMode,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -301,8 +369,12 @@ pub struct ReportSource {
 
 impl ReportSource {
     pub fn is_empty(&self) -> bool {
-        self.schema.trim().is_empty()
+        self.kind == ReportSourceKind::ObjectModel
+            && self.schema.trim().is_empty()
             && self.connection_id.is_none()
+            && self.entity.is_none()
+            && self.workflow_id.is_none()
+            && self.instance_id.is_none()
             && self.mode == default_source_mode()
             && self.condition.is_none()
             && self.filter_mappings.is_empty()
@@ -826,6 +898,16 @@ pub struct ReportBlockOnlyDataRequest {
     pub block_filters: HashMap<String, Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timezone: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct SubmitReportWorkflowActionRequest {
+    #[serde(default)]
+    pub payload: Value,
+    #[serde(default)]
+    pub filters: HashMap<String, Value>,
+    #[serde(default, rename = "blockFilters")]
+    pub block_filters: HashMap<String, Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]

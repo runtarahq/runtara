@@ -426,9 +426,30 @@ fn unary_field(
 
 fn operand_value(argument: &Value, row: &serde_json::Map<String, Value>, field_ref: bool) -> Value {
     if field_ref && let Some(field) = argument.as_str() {
-        return row.get(field).cloned().unwrap_or(Value::Null);
+        return row_value(row, field).cloned().unwrap_or(Value::Null);
     }
     argument.clone()
+}
+
+fn row_value<'a>(row: &'a serde_json::Map<String, Value>, field: &str) -> Option<&'a Value> {
+    if let Some(value) = row.get(field) {
+        return Some(value);
+    }
+
+    let mut parts = field.split('.');
+    let first = parts.next()?;
+    let mut current = row.get(first)?;
+    for part in parts {
+        current = match current {
+            Value::Object(object) => object.get(part)?,
+            Value::Array(values) => {
+                let index = part.parse::<usize>().ok()?;
+                values.get(index)?
+            }
+            _ => return None,
+        };
+    }
+    Some(current)
 }
 
 pub(super) fn sort_rows(rows: &mut [serde_json::Map<String, Value>], sort: &[ReportOrderBy]) {
@@ -444,8 +465,8 @@ fn compare_rows(
     sort: &[ReportOrderBy],
 ) -> Ordering {
     for entry in sort {
-        let left_value = left.get(&entry.field).unwrap_or(&Value::Null);
-        let right_value = right.get(&entry.field).unwrap_or(&Value::Null);
+        let left_value = row_value(left, &entry.field).unwrap_or(&Value::Null);
+        let right_value = row_value(right, &entry.field).unwrap_or(&Value::Null);
         let ordering = compare_values(left_value, right_value).unwrap_or(Ordering::Equal);
         let ordering = if entry.direction.eq_ignore_ascii_case("desc") {
             ordering.reverse()
@@ -860,6 +881,36 @@ mod tests {
                     vec![serde_json::to_value(cond("LT", vec![json!("qty"), json!(1)])).unwrap()],
                 ))
                 .unwrap(),
+            ],
+        );
+
+        assert!(condition_matches_row(&condition, &row, "block").unwrap());
+    }
+
+    #[test]
+    fn condition_matches_row_resolves_nested_virtual_fields() {
+        let row = serde_json::Map::from_iter([
+            ("actionKey".to_string(), json!("case_review_decision")),
+            (
+                "correlation".to_string(),
+                json!({"case_id": "case-76", "attempts": [1, 2]}),
+            ),
+        ]);
+        let condition = cond(
+            "AND",
+            vec![
+                serde_json::to_value(cond(
+                    "EQ",
+                    vec![json!("actionKey"), json!("case_review_decision")],
+                ))
+                .unwrap(),
+                serde_json::to_value(cond(
+                    "EQ",
+                    vec![json!("correlation.case_id"), json!("case-76")],
+                ))
+                .unwrap(),
+                serde_json::to_value(cond("EQ", vec![json!("correlation.attempts.1"), json!(2)]))
+                    .unwrap(),
             ],
         );
 

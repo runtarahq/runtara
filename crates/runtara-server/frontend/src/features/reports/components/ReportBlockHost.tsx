@@ -12,6 +12,7 @@ import { getFilterDefaultValue } from '../utils';
 import { ChartBlock } from './blocks/ChartBlock';
 import { MetricBlock } from './blocks/MetricBlock';
 import { TableBlock } from './blocks/TableBlock';
+import { ActionsBlock } from './blocks/ActionsBlock';
 import { ReportFilterBar } from './ReportFilterBar';
 import { encodeFilterValue } from '../utils';
 
@@ -23,6 +24,7 @@ type ReportBlockHostProps = {
   className?: string;
   onFilterChange?: (filterId: string, value: unknown) => void;
   onFiltersChange?: (updates: Record<string, unknown>) => void;
+  onReportRefresh?: () => void | Promise<unknown>;
 };
 
 export function ReportBlockHost({
@@ -33,6 +35,7 @@ export function ReportBlockHost({
   className = 'my-5',
   onFilterChange,
   onFiltersChange,
+  onReportRefresh,
 }: ReportBlockHostProps) {
   const rootRef = useRef<HTMLDivElement | null>(null);
   const [isVisible, setIsVisible] = useState(!block.lazy);
@@ -108,7 +111,8 @@ export function ReportBlockHost({
       !areSortsEqual(sort, defaultSort));
   const needsBlockFetch =
     isVisible &&
-    (block.lazy ||
+    (block.type === 'actions' ||
+      block.lazy ||
       hasBlockFilters ||
       hasInteractiveTableState);
 
@@ -148,6 +152,15 @@ export function ReportBlockHost({
   const result = needsBlockFetch
     ? (fetchedResult ?? initialResult)
     : initialResult;
+  const refreshAfterActionSubmit = () => {
+    void refetch();
+    void onReportRefresh?.();
+
+    window.setTimeout(() => {
+      void refetch();
+      void onReportRefresh?.();
+    }, 1250);
+  };
   const runInteraction = (
     event: string,
     datum: Record<string, unknown>
@@ -247,10 +260,13 @@ export function ReportBlockHost({
         <BlockError result={result} onRetry={() => refetch()} />
       ) : (
         <RenderedBlock
+          reportId={reportId}
           block={block}
           result={result}
           search={search}
           sort={sort}
+          filters={filters}
+          blockFilters={blockFilters}
           onPageChange={(offset, size) => setPage({ offset, size })}
           onSearchChange={(nextSearch) => {
             setSearch(nextSearch);
@@ -261,6 +277,7 @@ export function ReportBlockHost({
             setPage((current) => ({ ...current, offset: 0 }));
           }}
           onBlockInteraction={runInteraction}
+          onRefresh={refreshAfterActionSubmit}
         />
       )}
     </div>
@@ -268,19 +285,26 @@ export function ReportBlockHost({
 }
 
 function RenderedBlock({
+  reportId,
   block,
   result,
   search,
   sort,
+  filters,
+  blockFilters,
   onPageChange,
   onSearchChange,
   onSortChange,
   onBlockInteraction,
+  onRefresh,
 }: {
+  reportId: string;
   block: ReportBlockDefinition;
   result: ReportBlockResult;
   search: string;
   sort: ReportOrderBy[];
+  filters: Record<string, unknown>;
+  blockFilters: Record<string, unknown>;
   onPageChange: (offset: number, size: number) => void;
   onSearchChange: (search: string) => void;
   onSortChange: (sort: ReportOrderBy[]) => void;
@@ -288,6 +312,7 @@ function RenderedBlock({
     event: string,
     datum: Record<string, unknown>
   ) => boolean;
+  onRefresh: () => void | Promise<void>;
 }) {
   if (block.type === 'table') {
     return (
@@ -329,6 +354,19 @@ function RenderedBlock({
 
   if (block.type === 'metric') {
     return <MetricBlock block={block} result={result} />;
+  }
+
+  if (block.type === 'actions') {
+    return (
+      <ActionsBlock
+        reportId={reportId}
+        block={block}
+        result={result}
+        filters={filters}
+        blockFilters={blockFilters}
+        onSubmitted={onRefresh}
+      />
+    );
   }
 
   return null;

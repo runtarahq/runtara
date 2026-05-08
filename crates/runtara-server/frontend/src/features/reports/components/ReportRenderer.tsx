@@ -16,6 +16,7 @@ type ReportRendererProps = {
   filters: Record<string, unknown>;
   onFilterChange?: (filterId: string, value: unknown) => void;
   onFiltersChange?: (updates: Record<string, unknown>) => void;
+  onRefresh?: () => void | Promise<unknown>;
 };
 
 type MarkdownSegment =
@@ -31,6 +32,7 @@ export function ReportRenderer({
   filters,
   onFilterChange,
   onFiltersChange,
+  onRefresh,
 }: ReportRendererProps) {
   const hasStructuredLayout = (definition.layout?.length ?? 0) > 0;
   const segments = useMemo(
@@ -49,6 +51,7 @@ export function ReportRenderer({
           filters={filters}
           onFilterChange={onFilterChange}
           onFiltersChange={onFiltersChange}
+          onRefresh={onRefresh}
         />
       ) : (
         segments.map((segment, index) => {
@@ -66,6 +69,7 @@ export function ReportRenderer({
               filters={filters}
               onFilterChange={onFilterChange}
               onFiltersChange={onFiltersChange}
+              onRefresh={onRefresh}
             />
           );
         })
@@ -81,6 +85,7 @@ export function ReportRenderer({
               filters={filters}
               onFilterChange={onFilterChange}
               onFiltersChange={onFiltersChange}
+              onReportRefresh={onRefresh}
             />
           </Fragment>
         ))}
@@ -96,6 +101,7 @@ function LayoutNodes({
   filters,
   onFilterChange,
   onFiltersChange,
+  onRefresh,
 }: {
   nodes: ReportLayoutNode[];
   reportId: string;
@@ -104,6 +110,7 @@ function LayoutNodes({
   filters: Record<string, unknown>;
   onFilterChange?: (filterId: string, value: unknown) => void;
   onFiltersChange?: (updates: Record<string, unknown>) => void;
+  onRefresh?: () => void | Promise<unknown>;
 }) {
   return (
     <>
@@ -117,6 +124,7 @@ function LayoutNodes({
           filters={filters}
           onFilterChange={onFilterChange}
           onFiltersChange={onFiltersChange}
+          onRefresh={onRefresh}
         />
       ))}
     </>
@@ -131,6 +139,7 @@ function LayoutNode({
   filters,
   onFilterChange,
   onFiltersChange,
+  onRefresh,
 }: {
   node: ReportLayoutNode;
   reportId: string;
@@ -139,6 +148,7 @@ function LayoutNode({
   filters: Record<string, unknown>;
   onFilterChange?: (filterId: string, value: unknown) => void;
   onFiltersChange?: (updates: Record<string, unknown>) => void;
+  onRefresh?: () => void | Promise<unknown>;
 }) {
   if (node.type === 'markdown') {
     return <MarkdownContent content={node.content} />;
@@ -154,6 +164,7 @@ function LayoutNode({
         filters={filters}
         onFilterChange={onFilterChange}
         onFiltersChange={onFiltersChange}
+        onRefresh={onRefresh}
       />
     );
   }
@@ -177,6 +188,7 @@ function LayoutNode({
               filters={filters}
               onFilterChange={onFilterChange}
               onFiltersChange={onFiltersChange}
+              onRefresh={onRefresh}
               className="my-0"
             />
           ))}
@@ -210,6 +222,7 @@ function LayoutNode({
           filters={filters}
           onFilterChange={onFilterChange}
           onFiltersChange={onFiltersChange}
+          onRefresh={onRefresh}
         />
       </section>
     );
@@ -234,6 +247,7 @@ function LayoutNode({
               filters={filters}
               onFilterChange={onFilterChange}
               onFiltersChange={onFiltersChange}
+              onRefresh={onRefresh}
             />
           </div>
         ))}
@@ -283,6 +297,7 @@ function LayoutNode({
                 filters={filters}
                 onFilterChange={onFilterChange}
                 onFiltersChange={onFiltersChange}
+                onRefresh={onRefresh}
                 className="my-0"
               />
             </div>
@@ -312,6 +327,7 @@ function ReportBlockById({
   className,
   onFilterChange,
   onFiltersChange,
+  onRefresh,
 }: {
   blockId: string;
   reportId: string;
@@ -321,6 +337,7 @@ function ReportBlockById({
   className?: string;
   onFilterChange?: (filterId: string, value: unknown) => void;
   onFiltersChange?: (updates: Record<string, unknown>) => void;
+  onRefresh?: () => void | Promise<unknown>;
 }) {
   const block = getBlockById(definition, blockId);
   if (!block) {
@@ -340,6 +357,7 @@ function ReportBlockById({
       className={className}
       onFilterChange={onFilterChange}
       onFiltersChange={onFiltersChange}
+      onReportRefresh={onRefresh}
     />
   );
 }

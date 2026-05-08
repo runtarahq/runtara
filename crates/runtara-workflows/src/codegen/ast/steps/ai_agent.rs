@@ -1569,7 +1569,7 @@ fn build_tool_dispatch(
     step: &AiAgentStep,
     tool_edges: &[(&str, &str)],
     graph: &ExecutionGraph,
-    _ctx: &mut EmitContext,
+    ctx: &mut EmitContext,
     child_fn_names: &HashMap<String, proc_macro2::Ident>,
     workflow_inputs_var: &proc_macro2::Ident,
 ) -> Result<TokenStream, CodegenError> {
@@ -1610,6 +1610,7 @@ fn build_tool_dispatch(
                     emit_wait_for_signal_tool_arm(
                         label_str,
                         wait_step,
+                        ctx,
                         workflow_inputs_var,
                         step_id,
                     )
@@ -1772,11 +1773,32 @@ fn emit_embed_workflow_tool_arm(
 fn emit_wait_for_signal_tool_arm(
     label_str: &str,
     wait_step: &runtara_dsl::WaitForSignalStep,
+    ctx: &mut EmitContext,
     workflow_inputs_var: &proc_macro2::Ident,
     step_id: &str,
 ) -> TokenStream {
     let wait_step_id = &wait_step.id;
     let poll_interval = wait_step.poll_interval_ms.unwrap_or(1000);
+    let source_var = ctx.temp_var("wait_tool_source");
+    let build_source = mapping::emit_build_source(ctx);
+    let action_key = wait_step
+        .action
+        .as_ref()
+        .and_then(|action| action.key.as_deref())
+        .filter(|key| !key.trim().is_empty());
+    let action_key_tokens = action_key
+        .map(|key| quote! { serde_json::Value::String(#key.to_string()) })
+        .unwrap_or_else(|| quote! { serde_json::Value::Null });
+    let action_correlation_tokens = wait_step
+        .action
+        .as_ref()
+        .map(|action| mapping::emit_input_mapping(&action.correlation, ctx, &source_var))
+        .unwrap_or_else(|| quote! { serde_json::Value::Object(serde_json::Map::new()) });
+    let action_context_tokens = wait_step
+        .action
+        .as_ref()
+        .map(|action| mapping::emit_input_mapping(&action.context, ctx, &source_var))
+        .unwrap_or_else(|| quote! { serde_json::Value::Object(serde_json::Map::new()) });
 
     // Serialize response_schema to JSON string at codegen time for embedding in debug events
     let response_schema_json = wait_step
@@ -1832,6 +1854,10 @@ fn emit_wait_for_signal_tool_arm(
 
             // Emit a custom event so the frontend knows to show a human input form
             {
+                let #source_var = #build_source;
+                let __action_key = #action_key_tokens;
+                let __action_correlation = #action_correlation_tokens;
+                let __action_context = #action_context_tokens;
                 let __signal_event_data = serde_json::json!({
                     "type": "external_input_requested",
                     "signal_id": &__wait_signal_id,
@@ -1840,6 +1866,9 @@ fn emit_wait_for_signal_tool_arm(
                     "message": &__wait_message,
                     "response_schema": serde_json::from_str::<serde_json::Value>(#response_schema_json)
                         .unwrap_or(serde_json::Value::Null),
+                    "action_key": __action_key,
+                    "correlation": __action_correlation,
+                    "context": __action_context,
                     "ai_agent_step_id": #step_id,
                     "iteration": __iterations,
                     "call_number": __tool_call_counter
@@ -1908,6 +1937,10 @@ fn emit_wait_for_signal_tool_arm(
                     Ok(None) => {
                         // No signal yet — sleep and retry
                         __poll_errors = 0;
+                        {
+                            let __sdk = sdk().lock().unwrap();
+                            let _ = __sdk.heartbeat();
+                        }
                         std::thread::sleep(__poll_interval);
                     }
                     Err(e) => {

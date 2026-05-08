@@ -1121,6 +1121,19 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
             "/api/runtime/workflows/{workflowId}/instances/{instanceId}/pending-input",
             get(api::handlers::step_events::get_pending_input),
         )
+        // Workflow runtime actions (generic action surface; currently backed by signals)
+        .route(
+            "/api/runtime/workflows/{workflowId}/actions",
+            get(api::handlers::step_events::list_workflow_open_actions),
+        )
+        .route(
+            "/api/runtime/workflows/{workflowId}/instances/{instanceId}/actions",
+            get(api::handlers::step_events::list_workflow_instance_open_actions),
+        )
+        .route(
+            "/api/runtime/workflows/{workflowId}/instances/{instanceId}/actions/{actionId}/submit",
+            post(api::handlers::step_events::submit_workflow_action),
+        )
         // Signal delivery endpoint (submit human input to waiting AI Agent)
         .route(
             "/api/runtime/signals/{instanceId}",
@@ -1195,6 +1208,10 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         .route(
             "/api/runtime/reports/{report_id}/blocks/{block_id}/data",
             post(api::handlers::reports::get_report_block_data),
+        )
+        .route(
+            "/api/runtime/reports/{report_id}/blocks/{block_id}/actions/{action_id}/submit",
+            post(api::handlers::reports::submit_report_workflow_action),
         )
         .route(
             "/api/runtime/reports/{report_id}/filters/{filter_id}/options",
