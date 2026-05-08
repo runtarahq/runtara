@@ -22,6 +22,8 @@ If you cannot guarantee all four points, use `AUTH_PROVIDER=oidc` instead.
 
 Both configs are starting points — they show the header-strip pattern, the JWT-validation hook, and the upstream proxy. Fill in your IdP's JWKS URI, issuer, and audience before deploying.
 
+Because MCP validates the HTTP `Host` header before auth, set `RUNTARA_MCP_ALLOWED_HOSTS` on `runtara-server` to the public hostname(s) your proxy preserves, such as `runtara.example.com`.
+
 ## oauth2-proxy
 
 If you want a plug-and-play SSO layer without writing proxy config, run [oauth2-proxy](https://oauth2-proxy.github.io/oauth2-proxy/) in front of RUNTARA and point it at your IdP. A systemd unit template will land in a follow-up change.

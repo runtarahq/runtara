@@ -1,5 +1,8 @@
 use std::sync::OnceLock;
 
+const DEFAULT_MCP_ALLOWED_HOSTS: [&str; 3] = ["localhost", "127.0.0.1", "::1"];
+const RUNTARA_MCP_ALLOWED_HOSTS_ENV: &str = "RUNTARA_MCP_ALLOWED_HOSTS";
+
 /// Global application configuration.
 ///
 /// Loaded once at startup via [`Config::from_env`], then stored in a `OnceLock`.
@@ -38,6 +41,8 @@ pub struct Config {
     pub object_model_url: String,
     /// Agent service URL forwarded to workflow processes for native-only capabilities.
     pub agent_service_url: String,
+    /// Host or host:port authorities accepted by the MCP Streamable HTTP transport.
+    pub mcp_allowed_hosts: Vec<String>,
     /// Skip the graceful drain on Ctrl+C / SIGTERM. Defaults to true in debug
     /// builds so `cargo run` exits promptly; production release builds keep
     /// the full drain unless `RUNTARA_DEV_MODE=true` is set explicitly.
@@ -98,6 +103,10 @@ impl Config {
         let agent_service_url = std::env::var("RUNTARA_AGENT_SERVICE_URL")
             .unwrap_or_else(|_| format!("http://127.0.0.1:{}/api/internal/agents", internal_port));
 
+        let mcp_allowed_hosts = mcp_allowed_hosts_from_raw(
+            std::env::var(RUNTARA_MCP_ALLOWED_HOSTS_ENV).ok().as_deref(),
+        );
+
         let dev_mode: bool = parse_bool_or("RUNTARA_DEV_MODE", cfg!(debug_assertions))?;
 
         Ok(Self {
@@ -117,6 +126,7 @@ impl Config {
             http_proxy_url,
             object_model_url,
             agent_service_url,
+            mcp_allowed_hosts,
             dev_mode,
         })
     }
@@ -176,6 +186,31 @@ fn parse_usize_or(name: &'static str, default: usize) -> Result<usize, ConfigErr
             .parse()
             .map_err(|_| ConfigError::Invalid(name, "must be a non-negative integer")),
         Err(_) => Ok(default),
+    }
+}
+
+fn mcp_allowed_hosts_from_raw(raw: Option<&str>) -> Vec<String> {
+    let mut hosts: Vec<String> = DEFAULT_MCP_ALLOWED_HOSTS
+        .iter()
+        .map(|host| (*host).to_string())
+        .collect();
+
+    if let Some(raw) = raw {
+        for host in raw
+            .split(',')
+            .map(str::trim)
+            .filter(|host| !host.is_empty())
+        {
+            push_unique(&mut hosts, host.to_string());
+        }
+    }
+
+    hosts
+}
+
+fn push_unique(values: &mut Vec<String>, value: String) {
+    if !values.iter().any(|existing| existing == &value) {
+        values.push(value);
     }
 }
 
@@ -261,6 +296,11 @@ pub fn object_model_bulk_request_limit() -> usize {
     get().object_model_bulk_request_limit
 }
 
+/// Host or host:port authorities accepted by the MCP Streamable HTTP transport.
+pub fn mcp_allowed_hosts() -> &'static [String] {
+    &get().mcp_allowed_hosts
+}
+
 /// Whether the server is running in development mode. When true, shutdown
 /// skips the graceful execution/instance drain so Ctrl+C exits promptly.
 pub fn dev_mode() -> bool {
@@ -296,5 +336,29 @@ mod tests {
         }
         assert_eq!(parse_bool_or(name, true).ok(), Some(true));
         assert_eq!(parse_bool_or(name, false).ok(), Some(false));
+    }
+
+    #[test]
+    fn mcp_allowed_hosts_default_to_loopback() {
+        assert_eq!(
+            mcp_allowed_hosts_from_raw(None),
+            vec!["localhost", "127.0.0.1", "::1"]
+        );
+    }
+
+    #[test]
+    fn mcp_allowed_hosts_extend_loopback_from_csv() {
+        assert_eq!(
+            mcp_allowed_hosts_from_raw(Some(
+                " runtara.example.com, staging.example.com:8443 ,, 127.0.0.1 "
+            )),
+            vec![
+                "localhost",
+                "127.0.0.1",
+                "::1",
+                "runtara.example.com",
+                "staging.example.com:8443"
+            ]
+        );
     }
 }

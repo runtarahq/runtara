@@ -1701,6 +1701,7 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         runtime_client.clone(),
         tenant_id.clone(),
         internal_router,
+        config::mcp_allowed_hosts().to_vec(),
     )
     .layer(from_fn_with_state(
         mcp_auth_state,

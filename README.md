@@ -437,6 +437,7 @@ The application-server layer embeds `runtara-environment` + `runtara-core` and a
 | `AUTO_RETRY_ON_429` | No | `true` | Automatic durable-sleep retry on 429 responses |
 | `MAX_429_RETRIES` | No | `3` | Cap on automatic 429 retries |
 | `MAX_RETRY_DELAY_MS` | No | `60000` | Cap on auto-retry delay (ms) |
+| `RUNTARA_MCP_ALLOWED_HOSTS` | No | `localhost,127.0.0.1,::1` | Extra comma-separated `Host` authorities accepted by the MCP Streamable HTTP endpoint, e.g. `runtara.example.com,runtara.example.com:7001`. Loopback defaults are always included. |
 
 The default public HTTP API port for `runtara-server` itself is `7001` (see `runtara-server/src/server.rs`).
 

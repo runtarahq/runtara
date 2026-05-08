@@ -14,6 +14,8 @@ RUNTARA ships three deploy-time authentication modes. Pick one with the `AUTH_PR
 
 RUNTARA-issued API keys (`rt_*` / `smo_*` prefixes) continue to work in every mode. They are validated against the local database independently of the provider, so operators always have a direct-access path that does not depend on the perimeter.
 
+The MCP Streamable HTTP endpoint validates the inbound `Host` header before MCP auth and tool dispatch. Local loopback hosts are allowed by default. Public or proxied deployments must set `RUNTARA_MCP_ALLOWED_HOSTS` to the comma-separated public host authorities clients use, for example `runtara.example.com,runtara.example.com:7001`.
+
 ## `AUTH_PROVIDER=oidc`
 
 Backwards-compatible with the previous RUNTARA behaviour.

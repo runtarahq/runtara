@@ -6,8 +6,8 @@ use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{
     CallToolResult, Implementation, ProtocolVersion, ServerCapabilities, ServerInfo,
 };
-use rmcp::transport::streamable_http_server::StreamableHttpService;
 use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
+use rmcp::transport::streamable_http_server::{StreamableHttpServerConfig, StreamableHttpService};
 use rmcp::{ServerHandler, tool, tool_handler, tool_router};
 use sqlx::PgPool;
 
@@ -974,7 +974,14 @@ pub fn create_mcp_router(
     runtime_client: Option<Arc<RuntimeClient>>,
     tenant_id: String,
     internal_router: axum::Router,
+    mcp_allowed_hosts: Vec<String>,
 ) -> Router {
+    let config = if mcp_allowed_hosts.is_empty() {
+        StreamableHttpServerConfig::default()
+    } else {
+        StreamableHttpServerConfig::default().with_allowed_hosts(mcp_allowed_hosts)
+    };
+
     let service = StreamableHttpService::new(
         move || {
             Ok(SmoMcpServer::new(
@@ -986,7 +993,7 @@ pub fn create_mcp_router(
             ))
         },
         LocalSessionManager::default().into(),
-        Default::default(),
+        config,
     );
 
     Router::new().fallback_service(service)
