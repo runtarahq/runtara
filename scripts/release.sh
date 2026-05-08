@@ -2,7 +2,7 @@
 # Copyright (C) 2025 SyncMyOrders Sp. z o.o.
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# Release script: bump version, update Cargo.toml files, commit, tag, and push.
+# Release script: bump version, update Cargo.toml files and Cargo.lock, commit, tag, and push.
 # The tag push triggers the release CI workflow which publishes to crates.io.
 #
 # Usage: ./scripts/release.sh <patch|minor|major>
@@ -62,6 +62,13 @@ fi
 
 # --- Update versions in Cargo.toml files ---
 "$SCRIPT_DIR/update-version.sh" "$NEW_VERSION"
+
+# --- Update and verify Cargo.lock ---
+echo "Updating Cargo.lock workspace package versions..."
+cargo update --workspace
+
+echo "Verifying Cargo.lock is current..."
+cargo metadata --locked --format-version 1 >/dev/null
 
 # --- Commit and tag ---
 git add -A
