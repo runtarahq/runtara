@@ -233,6 +233,14 @@ export interface ReportTableColumnSource extends Omit<ReportSource, 'join'> {
   }>;
 }
 
+export type ReportPillVariant =
+  | 'success'
+  | 'info'
+  | 'warning'
+  | 'danger'
+  | 'muted'
+  | 'default';
+
 export interface ReportTableColumn {
   field: string;
   label?: string;
@@ -247,6 +255,18 @@ export interface ReportTableColumn {
     }>;
   };
   source?: ReportTableColumnSource;
+  /** Row field rendered as a subdued line beneath the primary value. */
+  secondaryField?: string;
+  /** Row field whose value is treated as a URL and rendered as an external-link icon. */
+  linkField?: string;
+  /** Row field whose value is shown in a tooltip (e.g. full email behind an avatar). */
+  tooltipField?: string;
+  /** Mapping from cell value to pill variant for `format: "pill"` columns. */
+  pillVariants?: Record<string, ReportPillVariant | string>;
+  /** Ordered levels for `format: "bar_indicator"` columns. */
+  levels?: string[];
+  /** Cell alignment hint. */
+  align?: 'left' | 'right' | 'center';
 }
 
 export interface ReportBlockDefinition {

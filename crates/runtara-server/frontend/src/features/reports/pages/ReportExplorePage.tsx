@@ -629,15 +629,7 @@ export function ReportExplorePage() {
                 block={blockPreview}
                 vizType={state.vizType}
                 data={query.data}
-                search={state.search}
                 sort={state.sort}
-                onSearchChange={(search) =>
-                  updateState((current) => ({
-                    ...current,
-                    search,
-                    page: { ...current.page, offset: 0 },
-                  }))
-                }
                 onSortChange={(sort) =>
                   updateState((current) => ({
                     ...current,
@@ -968,9 +960,7 @@ function ExplorePreview({
   block,
   vizType,
   data,
-  search,
   sort,
-  onSearchChange,
   onSortChange,
   onPageChange,
   onDrillFilter,
@@ -978,9 +968,7 @@ function ExplorePreview({
   block: ReportBlockDefinition;
   vizType: ExploreVizType;
   data?: ReportDatasetQueryResponse | null;
-  search: string;
   sort: ReportOrderBy[];
-  onSearchChange: (search: string) => void;
   onSortChange: (sort: ReportOrderBy[]) => void;
   onPageChange: (offset: number, size: number) => void;
   onDrillFilter: (datum: Record<string, unknown>, field?: string) => boolean;
@@ -1008,9 +996,7 @@ function ExplorePreview({
       <TableBlock
         block={tableBlock}
         result={result}
-        search={search}
         sort={sort}
-        onSearchChange={onSearchChange}
         onSortChange={onSortChange}
         onPageChange={onPageChange}
         onRowClick={onDrillFilter}
@@ -1038,9 +1024,7 @@ function ExplorePreview({
         <TableBlock
           block={tableBlock}
           result={result}
-          search={search}
           sort={sort}
-          onSearchChange={onSearchChange}
           onSortChange={onSortChange}
           onPageChange={onPageChange}
           onRowClick={onDrillFilter}

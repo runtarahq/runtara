@@ -291,7 +291,6 @@ export function ReportBlockHost({
               }));
               setPage((current) => ({ ...current, offset: 0 }));
             }}
-            showChips={false}
           />
         </div>
       )}
@@ -306,15 +305,10 @@ export function ReportBlockHost({
           reportId={reportId}
           block={block}
           result={result}
-          search={search}
           sort={sort}
           filters={filters}
           blockFilters={blockFilters}
           onPageChange={(offset, size) => setPage({ offset, size })}
-          onSearchChange={(nextSearch) => {
-            setSearch(nextSearch);
-            setPage((current) => ({ ...current, offset: 0 }));
-          }}
           onSortChange={(nextSort) => {
             setSort(nextSort);
             setPage((current) => ({ ...current, offset: 0 }));
@@ -331,12 +325,10 @@ function RenderedBlock({
   reportId,
   block,
   result,
-  search,
   sort,
   filters,
   blockFilters,
   onPageChange,
-  onSearchChange,
   onSortChange,
   onBlockInteraction,
   onRefresh,
@@ -344,12 +336,10 @@ function RenderedBlock({
   reportId: string;
   block: ReportBlockDefinition;
   result: ReportBlockResult;
-  search: string;
   sort: ReportOrderBy[];
   filters: Record<string, unknown>;
   blockFilters: Record<string, unknown>;
   onPageChange: (offset: number, size: number) => void;
-  onSearchChange: (search: string) => void;
   onSortChange: (sort: ReportOrderBy[]) => void;
   onBlockInteraction: (
     event: string,
@@ -362,10 +352,8 @@ function RenderedBlock({
       <TableBlock
         block={block}
         result={result}
-        search={search}
         sort={sort}
         onPageChange={onPageChange}
-        onSearchChange={onSearchChange}
         onSortChange={onSortChange}
         onRowClick={
           hasBlockInteraction(block, 'row_click')

@@ -1,16 +1,21 @@
-import { useMemo } from 'react';
-import { X } from 'lucide-react';
+import { useMemo, useState } from 'react';
+import { Check, ChevronDown, Plus, Search, X } from 'lucide-react';
 import { Button } from '@/shared/components/ui/button';
 import { Input } from '@/shared/components/ui/input';
-import { Label } from '@/shared/components/ui/label';
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/shared/components/ui/select';
 import { Checkbox } from '@/shared/components/ui/checkbox';
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from '@/shared/components/ui/popover';
+import {
+  Command,
+  CommandEmpty,
+  CommandGroup,
+  CommandInput,
+  CommandItem,
+  CommandList,
+} from '@/shared/components/ui/command';
 import { ReportDefinition, ReportFilterDefinition } from '../types';
 import { useReportFilterOptions } from '../hooks/useReports';
 import { getFilterDefaultValue, TIME_RANGE_PRESETS } from '../utils';
@@ -20,75 +25,108 @@ type ReportFilterBarProps = {
   definition: ReportDefinition;
   values: Record<string, unknown>;
   onChange: (filterId: string, value: unknown) => void;
-  showChips?: boolean;
 };
+
+type FilterOption = { value: unknown; label: string; count?: number };
 
 export function ReportFilterBar({
   reportId,
   definition,
   values,
   onChange,
-  showChips = true,
 }: ReportFilterBarProps) {
-  if (definition.filters.length === 0) {
-    return null;
-  }
+  const [activatedIds, setActivatedIds] = useState<Set<string>>(new Set());
 
-  const activeFilters = definition.filters.filter(
-    (filter) => !isFilterDefault(filter, values[filter.id])
+  if (definition.filters.length === 0) return null;
+
+  const searchFilter = definition.filters.find(
+    (filter) => filter.type === 'search'
   );
-  const chipFilters = activeFilters.filter(
-    (filter) => filter.type !== 'multi_select' && filter.type !== 'checkbox'
+  const nonSearchFilters = definition.filters.filter(
+    (filter) => filter.type !== 'search'
   );
+
+  const isFilterActive = (filter: ReportFilterDefinition) => {
+    if (filter.type === 'search') return false;
+    if (activatedIds.has(filter.id)) return true;
+    const value = values[filter.id];
+    if (isEmptyValue(value)) return false;
+    const defaultValue = getFilterDefaultValue(filter);
+    if (isSameValue(value, defaultValue)) return false;
+    return true;
+  };
+
+  const activeFilters = nonSearchFilters.filter(isFilterActive);
+  const inactiveFilters = nonSearchFilters.filter(
+    (filter) => !isFilterActive(filter)
+  );
+
+  const handleRemove = (filter: ReportFilterDefinition) => {
+    setActivatedIds((prev) => {
+      const next = new Set(prev);
+      next.delete(filter.id);
+      return next;
+    });
+    onChange(filter.id, getFilterDefaultValue(filter));
+  };
+
+  const handleActivate = (filter: ReportFilterDefinition) => {
+    setActivatedIds((prev) => {
+      const next = new Set(prev);
+      next.add(filter.id);
+      return next;
+    });
+  };
 
   return (
-    <div className="flex flex-col gap-3">
-      <div className="flex flex-wrap items-end gap-3">
-        {definition.filters.map((filter) => (
-          <FilterControl
-            key={filter.id}
-            reportId={reportId}
-            filter={filter}
-            value={values[filter.id]}
-            allValues={values}
-            onChange={(value) => onChange(filter.id, value)}
+    <div className="flex flex-wrap items-center gap-2">
+      {activeFilters.map((filter) => (
+        <FilterChip
+          key={filter.id}
+          reportId={reportId}
+          filter={filter}
+          value={values[filter.id]}
+          allValues={values}
+          onChange={(value) => onChange(filter.id, value)}
+          onRemove={() => handleRemove(filter)}
+        />
+      ))}
+      {inactiveFilters.length > 0 && (
+        <AddFilterMenu
+          filters={inactiveFilters}
+          onSelect={handleActivate}
+          hasActive={activeFilters.length > 0}
+        />
+      )}
+      {searchFilter && (
+        <div className="ml-auto">
+          <SearchFilter
+            filter={searchFilter}
+            value={values[searchFilter.id]}
+            onChange={(value) => onChange(searchFilter.id, value)}
           />
-        ))}
-      </div>
-      {showChips && chipFilters.length > 0 && (
-        <div className="report-print-hidden flex flex-wrap items-center gap-2">
-          {chipFilters.map((filter) => (
-            <Button
-              key={filter.id}
-              type="button"
-              variant="outline"
-              size="sm"
-              className="h-7 rounded-full px-3 text-xs"
-              onClick={() => onChange(filter.id, getFilterDefaultValue(filter))}
-            >
-              {filter.label}: {formatFilterChipValue(values[filter.id])}
-              <X className="ml-2 h-3 w-3" />
-            </Button>
-          ))}
         </div>
       )}
     </div>
   );
 }
 
-function FilterControl({
+function FilterChip({
   reportId,
   filter,
   value,
   allValues,
   onChange,
+  onRemove,
 }: {
   reportId?: string;
   filter: ReportFilterDefinition;
   value: unknown;
   allValues: Record<string, unknown>;
   onChange: (value: unknown) => void;
+  onRemove: () => void;
 }) {
+  const [open, setOpen] = useState(false);
   const usesDynamicOptions = filter.options?.source === 'object_model';
   const optionRequest = useMemo(
     () => ({
@@ -103,29 +141,154 @@ function FilterControl({
       reportId,
       filter.id,
       optionRequest,
-      Boolean(reportId && usesDynamicOptions)
+      Boolean(reportId && usesDynamicOptions && open)
     );
-  const options = dynamicOptions?.options ?? filter.options?.values ?? [];
+  const options: FilterOption[] =
+    dynamicOptions?.options ?? filter.options?.values ?? [];
+  const summary = describeFilterValue(filter, value, options);
 
+  return (
+    <div className="inline-flex h-8 items-center overflow-hidden rounded-full border bg-background text-sm shadow-sm">
+      <Popover open={open} onOpenChange={setOpen}>
+        <PopoverTrigger asChild>
+          <button
+            type="button"
+            className="flex h-full items-center gap-1.5 px-3 hover:bg-muted/40"
+          >
+            <span className="text-muted-foreground">{filter.label}:</span>
+            <span className="font-medium">{summary}</span>
+            <ChevronDown className="h-3.5 w-3.5 opacity-50" />
+          </button>
+        </PopoverTrigger>
+        <PopoverContent className="w-72 p-0" align="start">
+          <FilterEditor
+            filter={filter}
+            value={value}
+            options={options}
+            isLoadingOptions={isLoadingOptions}
+            onChange={onChange}
+          />
+        </PopoverContent>
+      </Popover>
+      <button
+        type="button"
+        onClick={onRemove}
+        aria-label={`Remove ${filter.label} filter`}
+        className="flex h-full items-center border-l px-2 text-muted-foreground hover:bg-muted/40 hover:text-foreground"
+      >
+        <X className="h-3.5 w-3.5" />
+      </button>
+    </div>
+  );
+}
+
+function AddFilterMenu({
+  filters,
+  onSelect,
+  hasActive,
+}: {
+  filters: ReportFilterDefinition[];
+  onSelect: (filter: ReportFilterDefinition) => void;
+  hasActive: boolean;
+}) {
+  const [open, setOpen] = useState(false);
+  return (
+    <Popover open={open} onOpenChange={setOpen}>
+      <PopoverTrigger asChild>
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          className="h-8 gap-1.5 rounded-full px-3 text-sm font-normal text-muted-foreground"
+        >
+          <Plus className="h-3.5 w-3.5" />
+          {hasActive ? 'Add filter' : 'Filter'}
+        </Button>
+      </PopoverTrigger>
+      <PopoverContent className="w-60 p-0" align="start">
+        <Command>
+          <CommandInput placeholder="Search filters..." />
+          <CommandList>
+            <CommandEmpty>No filters.</CommandEmpty>
+            <CommandGroup>
+              {filters.map((filter) => (
+                <CommandItem
+                  key={filter.id}
+                  value={filter.label}
+                  onSelect={() => {
+                    onSelect(filter);
+                    setOpen(false);
+                  }}
+                >
+                  {filter.label}
+                </CommandItem>
+              ))}
+            </CommandGroup>
+          </CommandList>
+        </Command>
+      </PopoverContent>
+    </Popover>
+  );
+}
+
+function SearchFilter({
+  filter,
+  value,
+  onChange,
+}: {
+  filter: ReportFilterDefinition;
+  value: unknown;
+  onChange: (value: unknown) => void;
+}) {
+  return (
+    <div className="relative w-72">
+      <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+      <Input
+        type="search"
+        className="h-9 rounded-full pl-9"
+        value={String(value ?? '')}
+        onChange={(event) => onChange(event.target.value)}
+        placeholder={filter.label || 'Search'}
+      />
+    </div>
+  );
+}
+
+function FilterEditor({
+  filter,
+  value,
+  options,
+  isLoadingOptions,
+  onChange,
+}: {
+  filter: ReportFilterDefinition;
+  value: unknown;
+  options: FilterOption[];
+  isLoadingOptions: boolean;
+  onChange: (value: unknown) => void;
+}) {
   if (filter.type === 'time_range') {
     return (
-      <div className="min-w-44 space-y-1">
-        <Label className="text-xs font-medium">{filter.label}</Label>
-        <Select
-          value={String(value ?? 'last_30_days')}
-          onValueChange={onChange}
-        >
-          <SelectTrigger className="h-9">
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            {TIME_RANGE_PRESETS.map((option) => (
-              <SelectItem key={option.value} value={option.value}>
-                {option.label}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
+      <div className="p-2">
+        <Command>
+          <CommandList>
+            <CommandGroup>
+              {TIME_RANGE_PRESETS.map((option) => {
+                const selected = String(value ?? 'last_30_days') === option.value;
+                return (
+                  <CommandItem
+                    key={option.value}
+                    value={option.label}
+                    onSelect={() => onChange(option.value)}
+                  >
+                    <span className="flex-1">{option.label}</span>
+                    {selected && <Check className="h-4 w-4 opacity-70" />}
+                  </CommandItem>
+                );
+              })}
+            </CommandGroup>
+          </CommandList>
+        </Command>
       </div>
     );
   }
@@ -133,95 +296,142 @@ function FilterControl({
   if (filter.type === 'select' || filter.type === 'radio') {
     const selectedKey = optionKey(value);
     return (
-      <div className="min-w-44 space-y-1">
-        <Label className="text-xs font-medium">{filter.label}</Label>
-        <Select
-          value={selectedKey}
-          onValueChange={(nextKey) => {
-            const option = options.find(
-              (option) => optionKey(option.value) === nextKey
-            );
-            onChange(option?.value ?? nextKey);
-          }}
-        >
-          <SelectTrigger className="h-9">
-            <SelectValue
-              placeholder={isLoadingOptions ? 'Loading...' : 'Any'}
-            />
-          </SelectTrigger>
-          <SelectContent>
-            {options.map((option) => (
-              <SelectItem
-                key={optionKey(option.value)}
-                value={optionKey(option.value)}
-              >
-                {formatOptionLabel(option.label, option.count)}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
-      </div>
+      <Command
+        filter={(itemValue, search) => {
+          if (!search) return 1;
+          return itemValue.toLowerCase().includes(search.toLowerCase()) ? 1 : 0;
+        }}
+      >
+        <CommandInput placeholder={`Search ${filter.label.toLowerCase()}...`} />
+        <CommandList>
+          <CommandEmpty>
+            {isLoadingOptions ? 'Loading...' : 'No options.'}
+          </CommandEmpty>
+          <CommandGroup>
+            {options.map((option) => {
+              const key = optionKey(option.value);
+              const checked = key === selectedKey;
+              return (
+                <CommandItem
+                  key={key}
+                  value={`${option.label} ${key}`}
+                  onSelect={() => onChange(option.value)}
+                >
+                  <span className="flex-1 truncate">
+                    {formatOptionLabel(option.label, option.count)}
+                  </span>
+                  {checked && <Check className="h-4 w-4 opacity-70" />}
+                </CommandItem>
+              );
+            })}
+          </CommandGroup>
+        </CommandList>
+      </Command>
     );
   }
 
   if (filter.type === 'multi_select') {
-    const selected = Array.isArray(value) ? value.map(optionKey) : [];
-
+    const selectedValues = Array.isArray(value) ? value : [];
+    const selectedKeys = new Set(selectedValues.map(optionKey));
+    const toggle = (option: FilterOption) => {
+      const key = optionKey(option.value);
+      const next = selectedKeys.has(key)
+        ? selectedValues.filter((item) => optionKey(item) !== key)
+        : [...selectedValues, option.value];
+      onChange(next);
+    };
     return (
-      <div className="min-w-56 space-y-1">
-        <Label className="text-xs font-medium">{filter.label}</Label>
-        <div className="flex min-h-9 flex-wrap items-center gap-2 rounded-md border border-input bg-background px-3 py-2">
-          {options.map((option) => {
-            const optionValueKey = optionKey(option.value);
-            const checked = selected.includes(optionValueKey);
-            return (
-              <label
-                key={optionValueKey}
-                className="flex items-center gap-2 text-sm text-muted-foreground"
-              >
-                <Checkbox
-                  checked={checked}
-                  onCheckedChange={(next) => {
-                    const currentValues = Array.isArray(value) ? value : [];
-                    const nextSelected = next
-                      ? [...currentValues, option.value]
-                      : currentValues.filter(
-                          (item) => optionKey(item) !== optionValueKey
-                        );
-                    onChange(nextSelected);
-                  }}
-                />
-                {formatOptionLabel(option.label, option.count)}
-              </label>
-            );
-          })}
-        </div>
-      </div>
+      <Command
+        filter={(itemValue, search) => {
+          if (!search) return 1;
+          return itemValue.toLowerCase().includes(search.toLowerCase()) ? 1 : 0;
+        }}
+      >
+        <CommandInput placeholder={`Search ${filter.label.toLowerCase()}...`} />
+        <CommandList>
+          <CommandEmpty>
+            {isLoadingOptions ? 'Loading...' : 'No options.'}
+          </CommandEmpty>
+          <CommandGroup>
+            {options.map((option) => {
+              const key = optionKey(option.value);
+              const checked = selectedKeys.has(key);
+              return (
+                <CommandItem
+                  key={key}
+                  value={`${option.label} ${key}`}
+                  onSelect={() => toggle(option)}
+                >
+                  <Checkbox
+                    checked={checked}
+                    className="pointer-events-none"
+                  />
+                  <span className="flex-1 truncate">
+                    {formatOptionLabel(option.label, option.count)}
+                  </span>
+                </CommandItem>
+              );
+            })}
+          </CommandGroup>
+        </CommandList>
+      </Command>
     );
   }
 
   if (filter.type === 'checkbox') {
     return (
-      <label className="flex h-9 items-center gap-2 rounded-md border border-input bg-background px-3 text-sm">
-        <Checkbox
-          checked={Boolean(value)}
-          onCheckedChange={(next) => onChange(Boolean(next))}
-        />
-        {filter.label}
-      </label>
+      <div className="p-3">
+        <label className="flex items-center gap-2 text-sm">
+          <Checkbox
+            checked={Boolean(value)}
+            onCheckedChange={(next) => onChange(Boolean(next))}
+          />
+          {filter.label}
+        </label>
+      </div>
     );
   }
 
   return (
-    <div className="min-w-56 space-y-1">
-      <Label className="text-xs font-medium">{filter.label}</Label>
+    <div className="p-2">
       <Input
-        className="h-9"
+        autoFocus
         value={String(value ?? '')}
         onChange={(event) => onChange(event.target.value)}
+        className="h-9"
+        placeholder={filter.label}
       />
     </div>
   );
+}
+
+function describeFilterValue(
+  filter: ReportFilterDefinition,
+  value: unknown,
+  options: FilterOption[]
+): string {
+  if (filter.type === 'multi_select' && Array.isArray(value)) {
+    if (value.length === 0) return 'Any';
+    if (value.length === 1) return labelForValue(value[0], options);
+    return `${value.length} selected`;
+  }
+  if (filter.type === 'time_range') {
+    const preset = TIME_RANGE_PRESETS.find(
+      (option) => option.value === String(value ?? '')
+    );
+    return preset?.label ?? 'Custom';
+  }
+  if (filter.type === 'checkbox') {
+    return value ? 'Yes' : 'No';
+  }
+  if (isEmptyValue(value)) return 'Any';
+  return labelForValue(value, options);
+}
+
+function labelForValue(value: unknown, options: FilterOption[]): string {
+  const key = optionKey(value);
+  const match = options.find((option) => optionKey(option.value) === key);
+  return match?.label ?? String(value);
 }
 
 function optionKey(value: unknown): string {
@@ -235,19 +445,13 @@ function formatOptionLabel(label: string, count?: number): string {
   return `${label} (${new Intl.NumberFormat().format(count)})`;
 }
 
-function isFilterDefault(
-  filter: ReportFilterDefinition,
-  value: unknown
-): boolean {
-  return (
-    JSON.stringify(value ?? getFilterDefaultValue(filter)) ===
-    JSON.stringify(getFilterDefaultValue(filter))
-  );
+function isEmptyValue(value: unknown): boolean {
+  if (value === null || value === undefined) return true;
+  if (typeof value === 'string') return value.trim().length === 0;
+  if (Array.isArray(value)) return value.length === 0;
+  return false;
 }
 
-function formatFilterChipValue(value: unknown): string {
-  if (Array.isArray(value)) return value.map(String).join(', ');
-  if (typeof value === 'boolean') return value ? 'Yes' : 'No';
-  if (value === null || value === undefined || value === '') return 'Any';
-  return String(value);
+function isSameValue(a: unknown, b: unknown): boolean {
+  return JSON.stringify(a) === JSON.stringify(b);
 }

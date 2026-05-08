@@ -1,6 +1,6 @@
 import { useMemo } from 'react';
 import { Link, useParams, useSearchParams } from 'react-router';
-import { Compass, Edit, Printer, RefreshCw } from 'lucide-react';
+import { Compass, Edit, Info, Printer, RefreshCw } from 'lucide-react';
 import { Button } from '@/shared/components/ui/button';
 import { TileList, TilesPage } from '@/shared/components/tiles-page';
 import { usePageTitle } from '@/shared/hooks/usePageTitle';
@@ -164,10 +164,27 @@ export function ReportViewerPage() {
     exploreSearch ? `?${exploreSearch}` : ''
   }`;
 
+  const primaryRecordCount = getPrimaryRecordCount(
+    renderResponse?.blocks ?? {},
+    eagerBlocks
+  );
+
+  const titleNode = (
+    <span className="flex items-baseline gap-3">
+      <span>{report.name}</span>
+      {typeof primaryRecordCount === 'number' && (
+        <span className="text-sm font-normal text-muted-foreground">
+          {new Intl.NumberFormat().format(primaryRecordCount)}{' '}
+          {primaryRecordCount === 1 ? 'record' : 'records'}
+        </span>
+      )}
+    </span>
+  );
+
   return (
     <TilesPage
       kicker="Reports"
-      title={report.name}
+      title={titleNode}
       toolbar={
         <ReportFilterBar
           reportId={report.id}
@@ -177,45 +194,59 @@ export function ReportViewerPage() {
         />
       }
       action={
-        <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row">
-          <Link to={explorePath} className="w-full sm:w-auto">
+        <div className="flex w-full flex-col items-stretch gap-3 sm:w-auto sm:items-end">
+          {report.description && (
+            <p className="flex items-center gap-1.5 text-sm text-muted-foreground sm:max-w-md sm:justify-end sm:text-right">
+              <Info className="h-4 w-4 shrink-0 opacity-70" />
+              <span>{report.description}</span>
+            </p>
+          )}
+          <div className="flex flex-col gap-2 sm:flex-row">
+            <Link to={explorePath} className="w-full sm:w-auto">
+              <Button
+                variant="outline"
+                size="sm"
+                className="h-9 w-full rounded-full sm:w-auto sm:px-4"
+              >
+                <Compass className="mr-2 h-4 w-4" />
+                Explore
+              </Button>
+            </Link>
             <Button
               variant="outline"
-              className="h-11 w-full rounded-full sm:w-auto sm:px-5"
+              size="sm"
+              className="h-9 rounded-full sm:px-4"
+              onClick={handlePrint}
+              disabled={isRendering}
             >
-              <Compass className="mr-2 h-4 w-4" />
-              Explore
+              <Printer className="mr-2 h-4 w-4" />
+              Print
             </Button>
-          </Link>
-          <Button
-            variant="outline"
-            className="h-11 rounded-full sm:px-5"
-            onClick={handlePrint}
-            disabled={isRendering}
-          >
-            <Printer className="mr-2 h-4 w-4" />
-            Print / PDF
-          </Button>
-          <Button
-            variant="outline"
-            className="h-11 rounded-full sm:px-5"
-            onClick={() => refetch()}
-            disabled={isRendering}
-          >
-            <RefreshCw className="mr-2 h-4 w-4" />
-            Refresh
-          </Button>
-          <ReportDeleteButton
-            reportId={report.id}
-            reportName={report.name}
-            className="h-11 rounded-full sm:px-5"
-          />
-          <Link to={`/reports/${report.id}/edit`} className="w-full sm:w-auto">
-            <Button className="h-11 w-full rounded-full sm:w-auto sm:px-5">
-              <Edit className="mr-2 h-4 w-4" />
-              Edit
+            <Button
+              variant="outline"
+              size="sm"
+              className="h-9 rounded-full sm:px-4"
+              onClick={() => refetch()}
+              disabled={isRendering}
+            >
+              <RefreshCw className="mr-2 h-4 w-4" />
+              Refresh
             </Button>
-          </Link>
+            <ReportDeleteButton
+              reportId={report.id}
+              reportName={report.name}
+              className="h-9 rounded-full sm:px-4"
+            />
+            <Link to={`/reports/${report.id}/edit`} className="w-full sm:w-auto">
+              <Button
+                size="sm"
+                className="h-9 w-full rounded-full sm:w-auto sm:px-4"
+              >
+                <Edit className="mr-2 h-4 w-4" />
+                Edit
+              </Button>
+            </Link>
+          </div>
         </div>
       }
       className="report-print-root"
@@ -238,6 +269,17 @@ export function ReportViewerPage() {
       </div>
     </TilesPage>
   );
+}
+
+function getPrimaryRecordCount(
+  blocks: Record<string, { type?: string; data?: unknown }>,
+  eagerBlocks: Array<{ id: string; type: string }>
+): number | undefined {
+  const tableBlock = eagerBlocks.find((block) => block.type === 'table');
+  if (!tableBlock) return undefined;
+  const result = blocks[tableBlock.id];
+  const data = result?.data as { page?: { totalCount?: number } } | undefined;
+  return data?.page?.totalCount;
 }
 
 function isEmptyFilterValue(value: unknown): boolean {

@@ -541,6 +541,38 @@ pub struct ReportTableColumn {
     pub chart: Option<ReportChartConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<ReportTableColumnSource>,
+    /// Optional row field rendered as a subdued line below the primary value.
+    #[serde(
+        default,
+        rename = "secondaryField",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub secondary_field: Option<String>,
+    /// Optional row field whose value is treated as a URL and rendered as an external-link icon.
+    #[serde(default, rename = "linkField", skip_serializing_if = "Option::is_none")]
+    pub link_field: Option<String>,
+    /// Optional row field whose value is shown in a tooltip on hover (e.g. full email behind an avatar).
+    #[serde(
+        default,
+        rename = "tooltipField",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub tooltip_field: Option<String>,
+    /// Mapping from cell value to pill variant for `format: "pill"` columns
+    /// (e.g. `{ "active_customer": "success", "churned": "muted" }`).
+    #[serde(
+        default,
+        rename = "pillVariants",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub pill_variants: Option<std::collections::BTreeMap<String, String>>,
+    /// Ordered level list for `format: "bar_indicator"` columns; the value's
+    /// position determines how many bars are filled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub levels: Option<Vec<String>>,
+    /// Optional cell alignment hint: "left", "right", or "center".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub align: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, ToSchema, PartialEq, Eq)]

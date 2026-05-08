@@ -271,6 +271,15 @@ export function formatCellValue(value: unknown, format?: string): string {
     }).format(value);
   }
 
+  if (format === 'currency_compact' && typeof value === 'number') {
+    return new Intl.NumberFormat(undefined, {
+      style: 'currency',
+      currency: 'USD',
+      notation: 'compact',
+      maximumFractionDigits: value < 1_000_000 ? 1 : 0,
+    }).format(value);
+  }
+
   if (format === 'number' && typeof value === 'number') {
     return new Intl.NumberFormat(undefined, {
       maximumFractionDigits: 0,

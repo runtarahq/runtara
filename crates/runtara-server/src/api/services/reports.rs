@@ -6114,6 +6114,12 @@ mod tests {
             column_type: None,
             chart: None,
             source: None,
+            secondary_field: None,
+            link_field: None,
+            tooltip_field: None,
+            pill_variants: None,
+            levels: None,
+            align: None,
         }
     }
 
