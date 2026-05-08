@@ -9,7 +9,7 @@ End-to-end tests live in this directory and run with Playwright.
 | Project    | Test files                                                     | Network                                                     | Use when                                                                                                                   |
 | ---------- | -------------------------------------------------------------- | ----------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
 | `mocked`   | `tests/mocked/**/*.mocked.spec.ts`                             | **None** — every API call is intercepted via `page.route()` | **PR gate.** Fast, deterministic, no secrets required. Fork PRs can run this.                                              |
-| `smoke`    | `tests/smoke/**/*.smoke.spec.ts`                               | Real API — prod or staging                                  | Daily monitoring of the deployed app. CI runs in local auth mode, so no Auth0 secrets are required.                        |
+| `smoke`    | `tests/smoke/**/*.smoke.spec.ts`                               | Real API — isolated local backend in CI                     | Daily app smoke coverage. CI runs in local auth mode, so no Auth0 secrets are required.                                    |
 | `e2e`      | `tests/e2e/**/*.e2e.spec.ts`                                   | Real API + full local backend stack                         | Deep end-to-end flows that exercise the runtime (gateway + DB + scheduler). Requires the backend services running locally. |
 | Root tests | `tests/*.spec.ts` (auth, login, navigation, components, theme) | Real API (uses `user.json` state)                           | Browser-facing checks that don't fit neatly into smoke or e2e.                                                             |
 
@@ -117,7 +117,7 @@ The token is read from `.auth/user.json` (set by `auth.setup.ts`). Seeded entiti
 ## CI
 
 - `.github/workflows/pr-checks.yml` — runs `lint`, `typecheck`, `unit`, `build`, `e2e-mocked` on every PR against `main`. All five jobs must pass. **The user needs to mark these as required status checks in GitHub branch-protection settings** (UI action, not a repo file).
-- `.github/workflows/smoke-tests.yml` — push to `main`, scheduled daily, and manual dispatch. Runs the `smoke` project against a real API in local auth mode. Not a PR gate.
+- `.github/workflows/smoke-tests.yml` — push to `main`, scheduled daily, and manual dispatch. Starts an isolated local Postgres/Valkey/backend stack, then runs the `smoke` project in local auth mode. Not a PR gate.
 
 ## Directory layout
 

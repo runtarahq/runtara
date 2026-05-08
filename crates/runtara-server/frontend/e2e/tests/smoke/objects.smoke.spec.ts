@@ -12,7 +12,7 @@ test.describe('Objects Smoke Tests', () => {
 
     // Page header should be visible (kicker is in <p>, title in <h1>)
     await expect(
-      page.getByRole('paragraph').filter({ hasText: 'Database' })
+      page.getByRole('main').getByText('Database', { exact: true })
     ).toBeVisible();
     await expect(
       page.getByRole('heading', { name: /object types/i })

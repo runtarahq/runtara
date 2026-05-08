@@ -12,7 +12,7 @@ test.describe('Workflows Smoke Tests', () => {
 
     // Page header should be visible (kicker is in <p>, title in <h1>)
     await expect(
-      page.getByRole('paragraph').filter({ hasText: 'Workflows' })
+      page.getByRole('main').getByText('Workflows', { exact: true })
     ).toBeVisible();
     await expect(
       page.getByRole('heading', { name: /build and iterate automation flows/i })

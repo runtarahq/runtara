@@ -12,7 +12,7 @@ test.describe('Triggers Smoke Tests', () => {
 
     // Page header should be visible (kicker is in <p>, title in <h1>)
     await expect(
-      page.getByRole('paragraph').filter({ hasText: 'Invocation triggers' })
+      page.getByRole('main').getByText('Invocation triggers', { exact: true })
     ).toBeVisible();
     await expect(
       page.getByRole('heading', { name: /manage event sources/i })

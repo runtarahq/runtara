@@ -20,7 +20,7 @@ export interface FolderInfo {
 /**
  * Parse folder paths into structured folder info
  */
-function parseFolderPaths(paths: string[]): FolderInfo[] {
+function parseFolderPaths(paths: readonly string[]): FolderInfo[] {
   return paths
     .filter((path) => path && path !== '/')
     .map((path) => {
@@ -47,6 +47,17 @@ function getRootFolders(folders: FolderInfo[]): FolderInfo[] {
   return folders.filter((f) => f.depth === 1);
 }
 
+function getFolderPaths(data: unknown): string[] {
+  if (!data || typeof data !== 'object') return [];
+
+  const folders = (data as { folders?: unknown }).folders;
+  if (!Array.isArray(folders)) return [];
+
+  return folders.filter(
+    (folder): folder is string => typeof folder === 'string'
+  );
+}
+
 /**
  * Get child folders of a given path
  */
@@ -68,15 +79,16 @@ export function useFolders() {
     refetchOnMount: true, // Refetch when component mounts
   });
 
-  // Transform the data after fetching
-  const data = result.data as { folders: string[] } | undefined;
-  const transformedData = data
-    ? {
-        raw: data.folders,
-        parsed: parseFolderPaths(data.folders),
-        root: getRootFolders(parseFolderPaths(data.folders)),
-      }
-    : undefined;
+  const folderPaths = getFolderPaths(result.data);
+  const parsedFolders = parseFolderPaths(folderPaths);
+  const transformedData =
+    result.data !== undefined
+      ? {
+          raw: folderPaths,
+          parsed: parsedFolders,
+          root: getRootFolders(parsedFolders),
+        }
+      : undefined;
 
   return {
     ...result,
