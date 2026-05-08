@@ -1,4 +1,10 @@
 import { expect, Locator, Page } from '@playwright/test';
+import {
+  appPath,
+  appPathExactPattern,
+  appPathPattern,
+  appRoutePattern,
+} from '../utils/app-path';
 
 type AddStepKind =
   | { type: 'step'; stepType: string }
@@ -33,13 +39,16 @@ export class WorkflowBuilderPage {
   }
 
   async createWorkflow(name: string): Promise<string> {
-    await this.page.goto('/workflows/create');
+    await this.page.goto(appPath('/workflows/create'));
     await this.page.waitForLoadState('domcontentloaded');
     await this.page.getByLabel('Name').fill(name);
     await this.page.getByRole('button', { name: 'Save' }).click();
 
     await this.page.waitForURL(
-      (url) => /\/workflows\/(?!create\b)[a-zA-Z0-9_-]+$/.test(url.pathname),
+      (url) =>
+        appRoutePattern('/workflows/(?!create\\b)[a-zA-Z0-9_-]+$').test(
+          url.pathname
+        ),
       { timeout: 15000 }
     );
     await this.waitForEditor();
@@ -48,7 +57,7 @@ export class WorkflowBuilderPage {
   }
 
   async gotoWorkflow(workflowId: string): Promise<void> {
-    await this.page.goto(`/workflows/${workflowId}`);
+    await this.page.goto(appPath(`/workflows/${workflowId}`));
     await this.waitForEditor();
   }
 
@@ -592,7 +601,7 @@ export class WorkflowBuilderPage {
   }
 
   async deleteWorkflowFromList(name: string): Promise<void> {
-    await this.page.goto('/workflows');
+    await this.page.goto(appPath('/workflows'));
     await this.page.waitForLoadState('domcontentloaded');
     await this.page.getByPlaceholder('Search workflows...').fill(name);
 
@@ -605,13 +614,15 @@ export class WorkflowBuilderPage {
   }
 
   async createOpenAiConnection(name: string): Promise<void> {
-    await this.page.goto('/connections');
+    await this.page.goto(appPath('/connections'));
     await this.page.waitForLoadState('domcontentloaded');
     await this.page.getByRole('button', { name: /new connection/i }).click();
     const dialog = this.page.getByRole('dialog');
     await expect(dialog).toBeVisible({ timeout: 15000 });
     await dialog.getByText('OpenAI', { exact: true }).click();
-    await expect(this.page).toHaveURL(/\/connections\/openai_api_key\/create/);
+    await expect(this.page).toHaveURL(
+      appPathPattern('/connections/openai_api_key/create')
+    );
     await this.page.waitForLoadState('domcontentloaded');
 
     await this.page.getByLabel('Title').fill(name);
@@ -624,12 +635,14 @@ export class WorkflowBuilderPage {
     }
 
     await this.page.getByRole('button', { name: 'Create connection' }).click();
-    await expect(this.page).toHaveURL('/connections', { timeout: 15000 });
+    await expect(this.page).toHaveURL(appPathExactPattern('/connections'), {
+      timeout: 15000,
+    });
     await expect(this.page.getByText(name)).toBeVisible({ timeout: 15000 });
   }
 
   async deleteConnectionFromList(name: string): Promise<void> {
-    await this.page.goto('/connections');
+    await this.page.goto(appPath('/connections'));
     await this.page.waitForLoadState('domcontentloaded');
     const card = this.page.locator('article').filter({ hasText: name });
     await expect(card).toBeVisible({ timeout: 15000 });

@@ -1,4 +1,5 @@
 import { test, expect } from '@playwright/test';
+import { appPath, appPathPattern } from '../../utils/app-path';
 
 /**
  * Triggers Smoke Tests
@@ -7,7 +8,7 @@ import { test, expect } from '@playwright/test';
 
 test.describe('Triggers Smoke Tests', () => {
   test('triggers page loads with content', async ({ page }) => {
-    await page.goto('/invocation-triggers');
+    await page.goto(appPath('/invocation-triggers'));
     await page.waitForLoadState('networkidle');
 
     // Page header should be visible (kicker is in <p>, title in <h1>)
@@ -20,7 +21,7 @@ test.describe('Triggers Smoke Tests', () => {
   });
 
   test('new trigger button is present', async ({ page }) => {
-    await page.goto('/invocation-triggers');
+    await page.goto(appPath('/invocation-triggers'));
     await page.waitForLoadState('networkidle');
 
     // New trigger button should be present
@@ -30,18 +31,18 @@ test.describe('Triggers Smoke Tests', () => {
   });
 
   test('can navigate to create trigger page', async ({ page }) => {
-    await page.goto('/invocation-triggers');
+    await page.goto(appPath('/invocation-triggers'));
     await page.waitForLoadState('networkidle');
 
     // Click create button
     await page.getByRole('link', { name: /new trigger/i }).click();
 
     // Should navigate to create page
-    await expect(page).toHaveURL(/\/invocation-triggers\/create/);
+    await expect(page).toHaveURL(appPathPattern('/invocation-triggers/create'));
   });
 
   test('page renders without crash', async ({ page }) => {
-    await page.goto('/invocation-triggers');
+    await page.goto(appPath('/invocation-triggers'));
     await page.waitForLoadState('networkidle');
 
     // Page should be functional

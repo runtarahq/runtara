@@ -1,4 +1,5 @@
 import { test, expect } from '@playwright/test';
+import { appPath } from '../../utils/app-path';
 
 /**
  * Objects (Database) Smoke Tests
@@ -7,7 +8,7 @@ import { test, expect } from '@playwright/test';
 
 test.describe('Objects Smoke Tests', () => {
   test('object types page loads with content', async ({ page }) => {
-    await page.goto('/objects/types');
+    await page.goto(appPath('/objects/types'));
     await page.waitForLoadState('networkidle');
 
     // Page header should be visible (kicker is in <p>, title in <h1>)
@@ -20,7 +21,7 @@ test.describe('Objects Smoke Tests', () => {
   });
 
   test('create object type button is present', async ({ page }) => {
-    await page.goto('/objects/types');
+    await page.goto(appPath('/objects/types'));
     await page.waitForLoadState('networkidle');
 
     // Create button should be present (it's a button with onClick, not a link)
@@ -30,7 +31,7 @@ test.describe('Objects Smoke Tests', () => {
   });
 
   test('page renders without crash', async ({ page }) => {
-    await page.goto('/objects/types');
+    await page.goto(appPath('/objects/types'));
     await page.waitForLoadState('networkidle');
 
     // Page should be functional

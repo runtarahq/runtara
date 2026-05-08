@@ -1,135 +1,310 @@
 name: Release
 
 on:
-    push:
-        tags:
-            - "v[0-9]+.[0-9]+.[0-9]+"
-            - "v[0-9]+.[0-9]+.[0-9]+-*"
-        branches:
-            - main
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+      - "v[0-9]+.[0-9]+.[0-9]+-*"
+    branches:
+      - main
 
 permissions:
-    contents: write
+  contents: write
 
 env:
-    CARGO_TERM_COLOR: always
-    RUST_BACKTRACE: 1
-    SQLX_OFFLINE: true
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  SQLX_OFFLINE: true
 
 jobs:
-    bundle:
-        name: Build Bundle (${{ matrix.os }}-${{ matrix.arch }})
-        runs-on: ${{ matrix.runner }}
-        strategy:
-            fail-fast: false
-            matrix:
-                include:
-                    - { target: x86_64-unknown-linux-gnu, runner: ubuntu-22.04, os: linux, arch: x86_64 }
-                    - { target: aarch64-unknown-linux-gnu, runner: ubuntu-22.04-arm, os: linux, arch: aarch64 }
-                    - { target: aarch64-apple-darwin, runner: macos-14, os: darwin, arch: aarch64 }
+  bundle:
+    name: Build Bundle (${{ matrix.os }}-${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {
+              target: x86_64-unknown-linux-gnu,
+              runner: ubuntu-22.04,
+              os: linux,
+              arch: x86_64,
+            }
+          - {
+              target: aarch64-unknown-linux-gnu,
+              runner: ubuntu-22.04-arm,
+              os: linux,
+              arch: aarch64,
+            }
+          - {
+              target: aarch64-apple-darwin,
+              runner: macos-14,
+              os: darwin,
+              arch: aarch64,
+            }
 
-        steps:
-            - name: Checkout code
-              uses: actions/checkout@v4
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-            - name: Determine version
-              id: get_version
-              run: |
-                  if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
-                      echo "version=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
-                  else
-                      echo "version=dev" >> $GITHUB_OUTPUT
+      - name: Determine version
+        id: get_version
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+              echo "version=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_OUTPUT"
+          else
+              echo "version=dev" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Setup Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+
+      - name: Build bundle
+        run: ./scripts/build-bundle.sh --output-dir target/bundle --version "${{ steps.get_version.outputs.version }}"
+
+      - name: Upload bundle artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: bundle-${{ matrix.os }}-${{ matrix.arch }}
+          path: |
+            target/bundle/runtara-*.tar.gz
+            target/bundle/runtara-*.tar.gz.sha256
+
+  smoke:
+    name: Smoke Bundle
+    runs-on: ubuntu-latest
+    needs: bundle
+    timeout-minutes: 20
+    env:
+      SMOKE_API_BASE_URL: http://127.0.0.1:7001
+      PLAYWRIGHT_BASE_URL: http://127.0.0.1:7001
+      E2E_UI_BASE_PATH: /ui
+      E2E_SMOKE_AUTH_MODE: local
+      DATABASE_URL: postgresql://smo_worker:GueUkDKea0CjKP4Rn5Bk0FDV@127.0.0.1:5432/smo_object_model
+      OBJECT_MODEL_DATABASE_URL: postgresql://smo_worker:GueUkDKea0CjKP4Rn5Bk0FDV@127.0.0.1:5432/smo_object_model
+      RUNTARA_DATABASE_URL: postgresql://smo_worker:GueUkDKea0CjKP4Rn5Bk0FDV@127.0.0.1:5432/runtara
+      AUTH_PROVIDER: local
+      TENANT_ID: Organity
+      SERVER_HOST: 127.0.0.1
+      SERVER_PORT: "7001"
+      INTERNAL_PORT: "7002"
+      VALKEY_HOST: 127.0.0.1
+      VALKEY_PORT: "6379"
+      DATA_DIR: ${{ github.workspace }}/.data/smoke
+      RUNTARA_DEV_MODE: "true"
+      RUNTARA_SDK_BACKEND: http
+      RUNTARA_COMPILE_TARGET: wasm32-wasip2
+      RUNTARA_UI_STRIP_ORG_ID: "true"
+      RUST_LOG: info
+      OTEL_SDK_DISABLED: "true"
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: crates/runtara-server/frontend/.node-version
+          cache: npm
+          cache-dependency-path: crates/runtara-server/frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        working-directory: crates/runtara-server/frontend
+        run: npm ci --no-audit --no-fund
+
+      - name: Install Playwright browsers
+        working-directory: crates/runtara-server/frontend
+        run: npx playwright install chromium --with-deps
+
+      - name: Download linux bundle
+        uses: actions/download-artifact@v4
+        with:
+          name: bundle-linux-x86_64
+          path: target/smoke-bundle
+
+      - name: Extract linux bundle
+        run: |
+          mkdir -p target/smoke-bundle/extracted
+          tarball="$(find target/smoke-bundle -maxdepth 1 -name 'runtara-*-x86_64-linux.tar.gz' | head -n 1)"
+          if [ -z "$tarball" ]; then
+              echo "::error::Linux x86_64 bundle artifact not found"
+              exit 1
+          fi
+
+          tar -xzf "$tarball" -C target/smoke-bundle/extracted
+          bundle_dir="$(find target/smoke-bundle/extracted -maxdepth 1 -type d -name 'runtara-*' | head -n 1)"
+          if [ -z "$bundle_dir" ]; then
+              echo "::error::Extracted bundle directory not found"
+              exit 1
+          fi
+
+          echo "RUNTARA_BUNDLE_DIR=${bundle_dir}" >> "$GITHUB_ENV"
+          echo "RUNTARA_SERVER_BIN=${bundle_dir}/bin/runtara-server" >> "$GITHUB_ENV"
+
+      - name: Start local dependencies
+        run: |
+          docker compose -f dev/docker-compose.yml up -d postgres valkey
+
+          for _ in {1..60}; do
+              postgres_status="$(docker inspect --format='{{.State.Health.Status}}' runtara-dev-postgres 2>/dev/null || true)"
+              valkey_status="$(docker inspect --format='{{.State.Health.Status}}' runtara-dev-valkey 2>/dev/null || true)"
+
+              if [ "$postgres_status" = "healthy" ] && [ "$valkey_status" = "healthy" ]; then
+                  exit 0
+              fi
+
+              sleep 2
+          done
+
+          docker compose -f dev/docker-compose.yml ps
+          docker compose -f dev/docker-compose.yml logs postgres valkey
+          exit 1
+
+      - name: Start release backend
+        run: |
+          mkdir -p "$DATA_DIR"
+          export PATH="${RUNTARA_BUNDLE_DIR}/toolchain/bin:${RUNTARA_BUNDLE_DIR}/bin:${PATH}"
+          export LD_LIBRARY_PATH="${RUNTARA_BUNDLE_DIR}/toolchain/lib:${LD_LIBRARY_PATH:-}"
+          export RUNTARA_WASM_LIBRARY_DIR="${RUNTARA_BUNDLE_DIR}/stdlib"
+          export WASMTIME_PATH="${RUNTARA_BUNDLE_DIR}/bin/wasmtime"
+
+          "$RUNTARA_SERVER_BIN" > "$DATA_DIR/runtara-server.log" 2>&1 &
+          echo "$!" > "$DATA_DIR/runtara-server.pid"
+
+          for _ in {1..90}; do
+              if curl -fsS "${SMOKE_API_BASE_URL}/health" >/dev/null; then
+                  exit 0
+              fi
+              sleep 2
+          done
+
+          tail -200 "$DATA_DIR/runtara-server.log"
+          exit 1
+
+      - name: Run smoke tests
+        working-directory: crates/runtara-server/frontend
+        run: npm run test:e2e:smoke -- --max-failures=5
+        env:
+          CI: "true"
+
+      - name: Stop local stack
+        if: always()
+        run: |
+          if [ -f "$DATA_DIR/runtara-server.pid" ]; then
+              pid="$(cat "$DATA_DIR/runtara-server.pid")"
+              kill "$pid" 2>/dev/null || true
+
+              for _ in {1..15}; do
+                  if ! kill -0 "$pid" 2>/dev/null; then
+                      break
                   fi
+                  sleep 1
+              done
 
-            - name: Setup Rust toolchain
-              uses: actions-rust-lang/setup-rust-toolchain@v1
+              kill -9 "$pid" 2>/dev/null || true
+          fi
+          docker compose -f dev/docker-compose.yml down -v
 
-            - name: Build bundle
-              run: ./scripts/build-bundle.sh --output-dir target/bundle --version "${{ steps.get_version.outputs.version }}"
+      - name: Upload smoke test results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: smoke-test-results
+          path: |
+            crates/runtara-server/frontend/e2e-results/
+            crates/runtara-server/frontend/e2e-report/
+            .data/smoke/runtara-server.log
+          retention-days: 7
 
-            - name: Upload bundle artifact
-              uses: actions/upload-artifact@v4
-              with:
-                  name: bundle-${{ matrix.os }}-${{ matrix.arch }}
-                  path: |
-                      target/bundle/runtara-*.tar.gz
-                      target/bundle/runtara-*.tar.gz.sha256
+  release:
+    name: Create Release
+    runs-on: ubuntu-latest
+    needs: smoke
 
-    release:
-        name: Create Release
-        runs-on: ubuntu-latest
-        needs: bundle
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-        steps:
-            - name: Checkout code
-              uses: actions/checkout@v4
+      - name: Determine version and tag
+        id: get_version
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+              {
+                  echo "version=${GITHUB_REF#refs/tags/v}"
+                  echo "tag=${GITHUB_REF_NAME}"
+                  echo "is_dev=false"
+              } >> "$GITHUB_OUTPUT"
+          else
+              {
+                  echo "version=dev"
+                  echo "tag=dev"
+                  echo "is_dev=true"
+              } >> "$GITHUB_OUTPUT"
+          fi
 
-            - name: Determine version and tag
-              id: get_version
-              run: |
-                  if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
-                      echo "version=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
-                      echo "tag=${GITHUB_REF_NAME}" >> $GITHUB_OUTPUT
-                      echo "is_dev=false" >> $GITHUB_OUTPUT
-                  else
-                      echo "version=dev" >> $GITHUB_OUTPUT
-                      echo "tag=dev" >> $GITHUB_OUTPUT
-                      echo "is_dev=true" >> $GITHUB_OUTPUT
-                  fi
+      - name: Download all bundle artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
 
-            - name: Download all bundle artifacts
-              uses: actions/download-artifact@v4
-              with:
-                  path: artifacts
-                  merge-multiple: true
+      - name: List artifacts
+        run: ls -lh artifacts/
 
-            - name: List artifacts
-              run: ls -lh artifacts/
+      - name: Generate SHA256SUMS
+        working-directory: artifacts
+        run: |
+          sha256sum runtara-*.tar.gz > SHA256SUMS
+          cat SHA256SUMS
 
-            - name: Generate SHA256SUMS
-              working-directory: artifacts
-              run: |
-                  sha256sum runtara-*.tar.gz > SHA256SUMS
-                  cat SHA256SUMS
+      - name: Delete existing dev release
+        if: steps.get_version.outputs.is_dev == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete dev --yes --cleanup-tag 2>/dev/null || true
 
-            - name: Delete existing dev release
-              if: steps.get_version.outputs.is_dev == 'true'
-              env:
-                  GH_TOKEN: ${{ github.token }}
-              run: |
-                  gh release delete dev --yes --cleanup-tag 2>/dev/null || true
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.get_version.outputs.version }}
+          TAG: ${{ steps.get_version.outputs.tag }}
+          IS_DEV: ${{ steps.get_version.outputs.is_dev }}
+          COMMIT_SHA: ${{ github.sha }}
+        run: |
+          FLAGS=()
+          NOTES_ARGS=()
+          if [[ "$IS_DEV" == "true" ]]; then
+              FLAGS=(--prerelease --target "$COMMIT_SHA")
+              TITLE="Development Snapshot (${VERSION})"
+              NOTES="Automated development build from main at ${COMMIT_SHA}.
 
-            - name: Create GitHub Release
-              env:
-                  GH_TOKEN: ${{ github.token }}
-                  VERSION: ${{ steps.get_version.outputs.version }}
-                  TAG: ${{ steps.get_version.outputs.tag }}
-                  IS_DEV: ${{ steps.get_version.outputs.is_dev }}
-                  COMMIT_SHA: ${{ github.sha }}
-              run: |
-                  FLAGS=""
-                  if [[ "$IS_DEV" == "true" ]]; then
-                      FLAGS="--prerelease --target $COMMIT_SHA"
-                      TITLE="Development Snapshot (${VERSION})"
-                      NOTES="Automated development build from main at ${COMMIT_SHA}.
+          > **This is a rolling release** — it is replaced on every push to main.
+          > For stable releases, use a tagged version.
 
-                  > **This is a rolling release** — it is replaced on every push to main.
-                  > For stable releases, use a tagged version.
+          Install: \`curl -fsSL https://install.runtara.com | sh -s -- --version ${VERSION}\`"
+          else
+              TITLE="Release ${VERSION}"
+              NOTES=""
+              if [[ "$TAG" == *-* ]]; then
+                  FLAGS=(--prerelease)
+              fi
+          fi
 
-                  Install: \`curl -fsSL https://install.runtara.com | sh -s -- --version ${VERSION}\`"
-                  else
-                      TITLE="Release ${VERSION}"
-                      NOTES=""
-                      if [[ "$TAG" == *-* ]]; then
-                          FLAGS="--prerelease"
-                      fi
-                  fi
+          if [[ -n "$NOTES" ]]; then
+              NOTES_ARGS=(--notes "$NOTES")
+          fi
 
-                  gh release create "$TAG" \
-                      --title "$TITLE" \
-                      $FLAGS \
-                      ${NOTES:+--notes "$NOTES"} \
-                      artifacts/runtara-*.tar.gz \
-                      artifacts/runtara-*.tar.gz.sha256 \
-                      artifacts/SHA256SUMS \
-                      scripts/install.sh
+          ASSETS=(
+              artifacts/runtara-*.tar.gz
+              artifacts/runtara-*.tar.gz.sha256
+              artifacts/SHA256SUMS
+              scripts/install.sh
+          )
+
+          gh release create "$TAG" \
+              --title "$TITLE" \
+              "${FLAGS[@]}" \
+              "${NOTES_ARGS[@]}" \
+              "${ASSETS[@]}"

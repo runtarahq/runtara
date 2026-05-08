@@ -1,4 +1,5 @@
 import { test, expect } from '@playwright/test';
+import { appPath } from '../../utils/app-path';
 
 /**
  * Tests that the versions dropdown is scrollable when there are many versions
@@ -9,7 +10,7 @@ test.describe('Versions dropdown scroll', () => {
     page,
   }) => {
     // Go to workflows list page
-    await page.goto('/workflows');
+    await page.goto(appPath('/workflows'));
     await page.waitForLoadState('networkidle');
 
     // Wait for loading skeletons to disappear and content to load
@@ -99,7 +100,7 @@ test.describe('Versions dropdown scroll', () => {
     page,
   }) => {
     // Go to workflows list
-    await page.goto('/workflows');
+    await page.goto(appPath('/workflows'));
     await page.waitForLoadState('networkidle');
 
     // Wait for loading skeletons to disappear

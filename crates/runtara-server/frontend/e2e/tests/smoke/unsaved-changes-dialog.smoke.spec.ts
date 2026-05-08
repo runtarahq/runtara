@@ -1,4 +1,5 @@
 import { test, expect } from '@playwright/test';
+import { appPath, appPathPattern } from '../../utils/app-path';
 
 /**
  * Tests that the unsaved changes dialog stays visible and interactive
@@ -9,7 +10,7 @@ test.describe('Unsaved changes dialog', () => {
     page,
   }) => {
     // Go to workflows list page
-    await page.goto('/workflows');
+    await page.goto(appPath('/workflows'));
     await page.waitForLoadState('networkidle');
 
     // Wait for loading to complete
@@ -89,7 +90,7 @@ test.describe('Unsaved changes dialog', () => {
       await expect(dialog).not.toBeVisible();
 
       // Should still be on the workflow page
-      await expect(page).toHaveURL(/\/workflows\//);
+      await expect(page).toHaveURL(appPathPattern('/workflows/'));
     } else {
       // If no dialog appeared, the workflow might not have had unsaved changes
       // This is acceptable - the test verifies the happy path
@@ -102,7 +103,7 @@ test.describe('Unsaved changes dialog', () => {
   test('unsaved changes dialog cancel button keeps user on page', async ({
     page,
   }) => {
-    await page.goto('/workflows');
+    await page.goto(appPath('/workflows'));
     await page.waitForLoadState('networkidle');
     await page
       .waitForSelector('.animate-pulse', { state: 'hidden', timeout: 15000 })
@@ -136,7 +137,7 @@ test.describe('Unsaved changes dialog', () => {
       await expect(dialog).not.toBeVisible();
 
       // Should still be on workflow page
-      expect(page.url()).toContain('/workflows/');
+      expect(page.url()).toContain(appPath('/workflows/'));
     }
   });
 });

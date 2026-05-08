@@ -1,4 +1,5 @@
 import { test, expect } from '@playwright/test';
+import { appPath } from '../../utils/app-path';
 
 /**
  * Workflow Note Regression Test
@@ -24,7 +25,7 @@ test.describe('Workflow Note Regression Tests', () => {
     page,
   }) => {
     // Step 1: Navigate to workflows list and pick the first existing workflow
-    await page.goto('/workflows');
+    await page.goto(appPath('/workflows'));
     await page.waitForLoadState('networkidle');
 
     // Wait for workflows to load
@@ -38,8 +39,7 @@ test.describe('Workflow Note Regression Tests', () => {
 
     // Wait for at least one workflow link to appear (not just the "New workflow" button)
     // Workflows are displayed as cards/rows with links to /workflows/{id}
-    const workflowCardSelector =
-      'a[href^="/workflows/"]:not([href="/workflows/create"])';
+    const workflowCardSelector = `a[href^="${appPath('/workflows/')}"]:not([href="${appPath('/workflows/create')}"])`;
 
     // Wait for either workflows to load OR network error to appear
     const workflowOrError = await Promise.race([
@@ -370,7 +370,7 @@ test.describe('Workflow Note Regression Tests', () => {
     // This test captures detailed graph structure for debugging
 
     // Navigate to workflows list and pick the first existing workflow
-    await page.goto('/workflows');
+    await page.goto(appPath('/workflows'));
     await page.waitForLoadState('networkidle');
 
     await expect(
@@ -378,8 +378,7 @@ test.describe('Workflow Note Regression Tests', () => {
     ).toBeVisible({ timeout: 30000 });
     await page.waitForLoadState('networkidle');
 
-    const workflowCardSelector =
-      'a[href^="/workflows/"]:not([href="/workflows/create"])';
+    const workflowCardSelector = `a[href^="${appPath('/workflows/')}"]:not([href="${appPath('/workflows/create')}"])`;
 
     // Wait for either workflows to load OR network error to appear
     const workflowOrError = await Promise.race([

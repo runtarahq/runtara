@@ -1,4 +1,5 @@
 import { test, expect } from '@playwright/test';
+import { appPath } from '../../utils/app-path';
 
 /**
  * Analytics Smoke Tests
@@ -7,7 +8,7 @@ import { test, expect } from '@playwright/test';
 
 test.describe('Analytics Smoke Tests', () => {
   test('analytics dashboard loads with content', async ({ page }) => {
-    await page.goto('/analytics');
+    await page.goto(appPath('/analytics'));
     await page.waitForLoadState('networkidle');
 
     // Page header should be visible (kicker "Analytics" is in <p>, title "Usage" in <h1>)
@@ -18,7 +19,7 @@ test.describe('Analytics Smoke Tests', () => {
   });
 
   test('refresh button is present', async ({ page }) => {
-    await page.goto('/analytics');
+    await page.goto(appPath('/analytics'));
     await page.waitForLoadState('networkidle');
 
     // Refresh button should be present
@@ -26,7 +27,7 @@ test.describe('Analytics Smoke Tests', () => {
   });
 
   test('page renders without crash', async ({ page }) => {
-    await page.goto('/analytics');
+    await page.goto(appPath('/analytics'));
     await page.waitForLoadState('networkidle');
 
     // Page should be functional

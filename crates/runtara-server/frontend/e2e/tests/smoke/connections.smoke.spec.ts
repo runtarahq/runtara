@@ -1,4 +1,5 @@
 import { test, expect } from '@playwright/test';
+import { appPath } from '../../utils/app-path';
 
 /**
  * Connections Smoke Tests
@@ -7,7 +8,7 @@ import { test, expect } from '@playwright/test';
 
 test.describe('Connections Smoke Tests', () => {
   test('connections page loads with content', async ({ page }) => {
-    await page.goto('/connections');
+    await page.goto(appPath('/connections'));
     await page.waitForLoadState('networkidle');
 
     // Page header should be visible (kicker is in <p>, title in <h1>)
@@ -20,7 +21,7 @@ test.describe('Connections Smoke Tests', () => {
   });
 
   test('new connection button is present', async ({ page }) => {
-    await page.goto('/connections');
+    await page.goto(appPath('/connections'));
     await page.waitForLoadState('networkidle');
 
     // New connection button should be present (may show "Loading..." initially)
@@ -31,7 +32,7 @@ test.describe('Connections Smoke Tests', () => {
   });
 
   test('page renders without crash', async ({ page }) => {
-    await page.goto('/connections');
+    await page.goto(appPath('/connections'));
     await page.waitForLoadState('networkidle');
 
     // Page should be functional

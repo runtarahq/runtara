@@ -1,4 +1,5 @@
 import { expect, Locator, Page } from '@playwright/test';
+import { appPath } from '../utils/app-path';
 
 export abstract class BasePage {
   protected readonly page: Page;
@@ -18,7 +19,7 @@ export abstract class BasePage {
           console.log(`[browser-error] ${this.path}:`, msg.text());
       });
     }
-    await this.page.goto(this.path);
+    await this.page.goto(appPath(this.path));
     await this.waitForReady();
   }
 
