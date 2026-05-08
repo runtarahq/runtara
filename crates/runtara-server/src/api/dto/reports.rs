@@ -329,6 +329,21 @@ pub struct ReportBlockDefinition {
     pub interactions: Vec<ReportInteractionDefinition>,
     #[serde(default, rename = "showWhen", skip_serializing_if = "Option::is_none")]
     pub show_when: Option<Value>,
+    /// When true, the renderer drops the entire block (title bar included) if
+    /// its data is empty (e.g. zero table rows or zero open actions). Useful
+    /// for action lists or "open issues" tables that should disappear once
+    /// there's nothing to show, rather than rendering a stub "No items"
+    /// state.
+    #[serde(
+        default,
+        rename = "hideWhenEmpty",
+        skip_serializing_if = "is_false_block"
+    )]
+    pub hide_when_empty: bool,
+}
+
+fn is_false_block(value: &bool) -> bool {
+    !value
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -444,6 +459,17 @@ pub struct ReportCardField {
     /// must be a JSON array of objects.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subtable: Option<ReportSubtableConfig>,
+    /// Opt-in writeback for this field. Only honored when the rendered row
+    /// carries `id` and `schemaId` (filter-mode object-model sources). The
+    /// renderer doesn't enforce this on the server — the FE shows an editor
+    /// that calls the object-model PUT endpoint directly, which performs its
+    /// own auth + type validation.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub editable: bool,
+    /// Optional explicit editor configuration. When set, takes precedence
+    /// over the default control inferred from `format` / `pillVariants`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub editor: Option<ReportEditorConfig>,
 }
 
 fn default_card_field_kind() -> ReportCardFieldKind {
@@ -734,6 +760,64 @@ pub struct ReportTableColumn {
     /// table is meaningful; the first encountered wins if multiple are flagged.
     #[serde(default, skip_serializing_if = "is_false")]
     pub descriptive: bool,
+    /// Opt-in writeback for this column. Only honored when the rendered row
+    /// carries `id` and `schemaId` (filter-mode object-model sources without
+    /// joins or aggregates). The renderer doesn't enforce this on the server —
+    /// the FE shows an editor that calls the object-model PUT endpoint
+    /// directly, which performs its own auth + type validation.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub editable: bool,
+    /// Optional explicit editor configuration. When set, takes precedence
+    /// over the default control inferred from `format` / `pillVariants`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub editor: Option<ReportEditorConfig>,
+}
+
+/// Explicit editor configuration for an editable column or card field.
+///
+/// When omitted, the FE infers a control from the column's `format` /
+/// `pillVariants` (number for currency/decimal/percent, date for date,
+/// select for pill with variants, toggle for booleans, text otherwise).
+/// When set, the explicit `kind` wins.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct ReportEditorConfig {
+    pub kind: ReportEditorKind,
+    /// Static option list for `kind=select`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub options: Vec<ReportEditorOption>,
+    /// Min value for `kind=number`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min: Option<f64>,
+    /// Max value for `kind=number`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max: Option<f64>,
+    /// Step / precision for `kind=number`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step: Option<f64>,
+    /// Validation regex for `kind=text` / `kind=textarea`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub regex: Option<String>,
+    /// Placeholder shown in empty inputs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placeholder: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct ReportEditorOption {
+    pub label: String,
+    pub value: Value,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ReportEditorKind {
+    Text,
+    Textarea,
+    Number,
+    Select,
+    Toggle,
+    Date,
+    Datetime,
 }
 
 fn is_false(value: &bool) -> bool {

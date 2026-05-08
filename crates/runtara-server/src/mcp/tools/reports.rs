@@ -1245,7 +1245,12 @@ fn report_authoring_schema() -> Value {
                 "columns": [{"field": "sku", "label": "SKU", "format": "optional formatter"}, {"field": "stock_trend", "label": "Trend", "type": "chart", "chart": {"kind": "line", "x": "snapshot_date", "series": [{"field": "qty", "label": "Qty"}]}, "source": {"schema": "StockSnapshot", "mode": "aggregate", "groupBy": ["snapshot_date"], "aggregates": [{"alias": "qty", "op": "sum", "field": "qty"}], "join": [{"parentField": "sku", "field": "sku"}]}}],
                 "defaultSort": [{"field": "sku", "direction": "asc"}],
                 "pagination": {"defaultPageSize": 50, "allowedPageSizes": [25, 50, 100]},
-                "note": "Tables support source.mode='filter' for row data and source.mode='aggregate' for grouped aggregate result sets. Configure visible/searchable/sortable fields in table.columns. A table column may use type='chart' for inline aggregate charts or type='value' with source.select for scalar joined lookups."
+                "writeback": {
+                    "editable": "Optional boolean. When true, the table renders an inline editor on the cell and writes the new value back to the underlying Object Model record via PUT /api/runtime/object-model/instances/{schemaId}/{instanceId}. Only honored when source.kind='object_model', source.mode='filter', and source.join is empty/absent (rows must carry a stable id+schemaId). Type='chart' columns and joined lookup columns are never editable.",
+                    "editor": "Optional explicit editor config: {kind, options?, min?, max?, step?, regex?, placeholder?}. kind is one of text | textarea | number | select | toggle | date | datetime. When omitted, the FE infers a control: format=currency/decimal/percent/number → number; format=date/datetime → date/datetime picker; format=pill + pillVariants set → select with pillVariants keys as options; boolean values → toggle; otherwise text. Use editor.options for static select choices unrelated to pillVariants.",
+                    "note": "Writeback is opt-in per column. Auth + type validation happens on the object-model endpoint, not in the report layer — viewers need write permission on the underlying schema. The 'editable' flag here is a UI hint; it does not relax server-side authorization."
+                },
+                "note": "Tables support source.mode='filter' for row data and source.mode='aggregate' for grouped aggregate result sets. Configure visible/searchable/sortable fields in table.columns. A table column may use type='chart' for inline aggregate charts or type='value' with source.select for scalar joined lookups. To enable inline writeback on a column, see writeback.editable."
             },
             "chart": {
                 "type": "chart",
@@ -1290,7 +1295,9 @@ fn report_authoring_schema() -> Value {
                     "collapsed": "Optional. For json/markdown/subcard/subtable: start collapsed behind a Show/Hide toggle.",
                     "colSpan": "Optional 1–4 grid column span within the parent group.",
                     "subcard": "Required when kind=subcard. Recursive card config {groups: […]} applied to the nested object value at row[field].",
-                    "subtable": "Required when kind=subtable. {columns: [{field, label?, format?, pillVariants?, align?}], emptyLabel?} applied to the array value at row[field]."
+                    "subtable": "Required when kind=subtable. {columns: [{field, label?, format?, pillVariants?, align?}], emptyLabel?} applied to the array value at row[field].",
+                    "editable": "Optional boolean. Only honored on kind=value fields when the rendered card row carries id+schemaId (filter-mode object_model card). Renders an inline editor that writes back via PUT /api/runtime/object-model/instances/{schemaId}/{instanceId}.",
+                    "editor": "Optional explicit editor config: {kind, options?, min?, max?, step?, regex?, placeholder?}. kind is one of text | textarea | number | select | toggle | date | datetime. When omitted, the FE infers a control from format/pillVariants/value type. Use editor.options for static select choices."
                 },
                 "note": "Cards are the right primitive for single-row dossier-style presentation: case headers, AI/Human decision recaps, raw L1 source rows. Use kind=subtable for arrays-of-objects (timelines, line items) and kind=subcard for nested object summaries (applicant_summary, financial_summary). Pair format=pill + pillVariants on enum fields to color-code status, severity, decision, etc."
             }
@@ -3033,7 +3040,9 @@ fn collect_table_issues(path: &str, table: &Value, issues: &mut Vec<AuthoringIss
             collect_unknown_keys(
                 &format!("{path}.columns[{index}]"),
                 column,
-                &["field", "label", "format", "type", "chart", "source"],
+                &[
+                    "field", "label", "format", "type", "chart", "source", "editable", "editor",
+                ],
                 issues,
             );
             if column.get("field").and_then(Value::as_str).is_none() {

@@ -1,9 +1,11 @@
+import { useState } from 'react';
 import {
   ArrowDown,
   ArrowUp,
   ChevronLeft,
   ChevronRight,
   ExternalLink,
+  Pencil,
 } from 'lucide-react';
 import {
   Area,
@@ -36,10 +38,13 @@ import { cn } from '@/lib/utils';
 import {
   ReportBlockDefinition,
   ReportBlockResult,
+  ReportEditorConfig,
   ReportOrderBy,
   ReportTableColumn,
 } from '../../types';
 import { formatCellValue, humanizeFieldName } from '../../utils';
+import { FieldEditor } from './editable/FieldEditor';
+import { useReportWriteback } from './editable/useReportWriteback';
 
 type TableColumn = {
   key: string;
@@ -53,6 +58,8 @@ type TableColumn = {
   pillVariants?: ReportTableColumn['pillVariants'];
   levels?: string[];
   align?: 'left' | 'right' | 'center';
+  editable?: boolean;
+  editor?: ReportEditorConfig;
 };
 
 type TableData = {
@@ -75,6 +82,7 @@ type TableData = {
 };
 
 type TableBlockProps = {
+  reportId: string;
   block: ReportBlockDefinition;
   result: ReportBlockResult;
   sort: ReportOrderBy[];
@@ -85,6 +93,7 @@ type TableBlockProps = {
 };
 
 export function TableBlock({
+  reportId,
   block,
   result,
   sort,
@@ -93,6 +102,11 @@ export function TableBlock({
   onRowClick,
   onCellClick,
 }: TableBlockProps) {
+  const writeback = useReportWriteback(reportId);
+  const [editingCell, setEditingCell] = useState<{
+    rowKey: string;
+    field: string;
+  } | null>(null);
   const data = (result.data ?? {}) as TableData;
   const rows = data.rows ?? [];
   const configuredColumns = block.table?.columns ?? [];
@@ -196,15 +210,28 @@ export function TableBlock({
                 >
                   {columns.map((column, columnIndex) => {
                     const value = getCellValue(row, column, columnIndex);
+                    const rowKey = getRowKey(row, rowIndex);
+                    const writebackContext = getWritebackContext(
+                      column,
+                      rowObject
+                    );
+                    const isEditing =
+                      editingCell?.rowKey === rowKey &&
+                      editingCell.field === column.key;
                     return (
                       <TableCell
                         key={column.key}
                         className={cn(
-                          'py-3 align-top',
+                          'group/cell relative py-3 align-top',
                           column.align === 'right' &&
-                            'text-right tabular-nums'
+                            'text-right tabular-nums',
+                          writebackContext && !isEditing && 'pr-8'
                         )}
                         onClick={(event) => {
+                          if (isEditing) {
+                            event.stopPropagation();
+                            return;
+                          }
                           if (!onCellClick) return;
                           const handled = onCellClick({
                             ...rowObject,
@@ -216,11 +243,53 @@ export function TableBlock({
                           }
                         }}
                       >
-                        <TableCellValue
-                          column={column}
-                          value={value}
-                          row={rowObject}
-                        />
+                        {isEditing ? (
+                          <div onClick={(e) => e.stopPropagation()}>
+                            <FieldEditor
+                              value={value}
+                              format={column.format}
+                              pillVariants={column.pillVariants}
+                              editor={column.editor}
+                              busy={writeback.isPending}
+                              onCommit={(next) => {
+                                if (writebackContext) {
+                                  writeback.mutate({
+                                    schemaId: writebackContext.schemaId,
+                                    instanceId: writebackContext.instanceId,
+                                    field: column.key,
+                                    value: next,
+                                  });
+                                }
+                                setEditingCell(null);
+                              }}
+                              onCancel={() => setEditingCell(null)}
+                            />
+                          </div>
+                        ) : (
+                          <>
+                            <TableCellValue
+                              column={column}
+                              value={value}
+                              row={rowObject}
+                            />
+                            {writebackContext && (
+                              <button
+                                type="button"
+                                aria-label="Edit cell"
+                                className="absolute right-2 top-1/2 -translate-y-1/2 rounded p-1 text-muted-foreground opacity-0 transition-opacity hover:bg-muted hover:text-foreground group-hover/cell:opacity-100"
+                                onClick={(event) => {
+                                  event.stopPropagation();
+                                  setEditingCell({
+                                    rowKey,
+                                    field: column.key,
+                                  });
+                                }}
+                              >
+                                <Pencil className="h-3 w-3" />
+                              </button>
+                            )}
+                          </>
+                        )}
                       </TableCell>
                     );
                   })}
@@ -332,6 +401,8 @@ function normalizeColumns(
       pillVariants: configured?.pillVariants ?? merged.pillVariants,
       levels: configured?.levels ?? merged.levels,
       align: configured?.align ?? merged.align ?? defaultAlign(merged.format),
+      editable: configured?.editable ?? merged.editable,
+      editor: configured?.editor ?? merged.editor,
     };
   });
 }
@@ -359,6 +430,18 @@ function getCellValue(
     return row[columnIndex];
   }
   return row[column.key];
+}
+
+function getWritebackContext(
+  column: TableColumn,
+  rowObject: Record<string, unknown>
+): { schemaId: string; instanceId: string } | null {
+  if (!column.editable) return null;
+  if (column.type === 'chart') return null;
+  const id = rowObject.id;
+  const schemaId = rowObject.schemaId;
+  if (typeof id !== 'string' || typeof schemaId !== 'string') return null;
+  return { schemaId, instanceId: id };
 }
 
 function getRowObject(

@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { ChevronDown, ChevronRight } from 'lucide-react';
+import { ChevronDown, ChevronRight, Pencil } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 
@@ -15,6 +15,8 @@ import {
   ReportSubtableConfig,
 } from '../../types';
 import { formatCellValue, humanizeFieldName } from '../../utils';
+import { FieldEditor } from './editable/FieldEditor';
+import { useReportWriteback } from './editable/useReportWriteback';
 
 type BadgeVariant =
   | 'default'
@@ -49,14 +51,18 @@ type CardData = {
 };
 
 export function CardBlock({
+  reportId,
   block,
   result,
 }: {
+  reportId: string;
   block: ReportBlockDefinition;
   result: ReportBlockResult;
 }) {
   const data = (result.data ?? {}) as CardData;
   const groups = block.card?.groups ?? [];
+  const writeback = useReportWriteback(reportId);
+  const [editingField, setEditingField] = useState<string | null>(null);
 
   if (data.missing || !data.row) {
     const fallback = data.unsatisfiedFilter
@@ -77,20 +83,81 @@ export function CardBlock({
     );
   }
 
-  return <CardGroups groups={groups} row={data.row} />;
+  return (
+    <CardGroups
+      groups={groups}
+      row={data.row}
+      editingField={editingField}
+      onEditField={setEditingField}
+      onCommitField={(field, value) => {
+        const ctx = getCardWritebackContext(data.row);
+        if (ctx) {
+          writeback.mutate({
+            schemaId: ctx.schemaId,
+            instanceId: ctx.instanceId,
+            field,
+            value,
+          });
+        }
+        setEditingField(null);
+      }}
+      onCancelField={() => setEditingField(null)}
+      busy={writeback.isPending}
+    />
+  );
 }
+
+function getCardWritebackContext(
+  row: Record<string, unknown> | null | undefined
+): { schemaId: string; instanceId: string } | null {
+  if (!row) return null;
+  const id = row.id;
+  const schemaId = row.schemaId;
+  if (typeof id !== 'string' || typeof schemaId !== 'string') return null;
+  return { schemaId, instanceId: id };
+}
+
+type FieldEditingProps = {
+  editingField?: string | null;
+  onEditField?: (field: string | null) => void;
+  onCommitField?: (field: string, value: unknown) => void;
+  onCancelField?: () => void;
+  busy?: boolean;
+  /** True when the rendered row carries the id+schemaId needed for writeback. */
+  rowEditable?: boolean;
+};
 
 function CardGroups({
   groups,
   row,
+  editingField,
+  onEditField,
+  onCommitField,
+  onCancelField,
+  busy,
 }: {
   groups: ReportCardGroup[];
   row: Record<string, unknown>;
-}) {
+} & FieldEditingProps) {
+  const rowEditable = (() => {
+    const id = row.id;
+    const schemaId = row.schemaId;
+    return typeof id === 'string' && typeof schemaId === 'string';
+  })();
   return (
     <div className="space-y-4">
       {groups.map((group) => (
-        <CardGroup key={group.id} group={group} row={row} />
+        <CardGroup
+          key={group.id}
+          group={group}
+          row={row}
+          editingField={editingField}
+          onEditField={onEditField}
+          onCommitField={onCommitField}
+          onCancelField={onCancelField}
+          busy={busy}
+          rowEditable={rowEditable}
+        />
       ))}
     </div>
   );
@@ -99,10 +166,16 @@ function CardGroups({
 function CardGroup({
   group,
   row,
+  editingField,
+  onEditField,
+  onCommitField,
+  onCancelField,
+  busy,
+  rowEditable,
 }: {
   group: ReportCardGroup;
   row: Record<string, unknown>;
-}) {
+} & FieldEditingProps) {
   const columns = clampColumns(group.columns ?? 2);
   return (
     <section className="rounded-lg border bg-background">
@@ -130,6 +203,12 @@ function CardGroup({
             field={field}
             row={row}
             maxColumns={columns}
+            editingField={editingField}
+            onEditField={onEditField}
+            onCommitField={onCommitField}
+            onCancelField={onCancelField}
+            busy={busy}
+            rowEditable={rowEditable}
           />
         ))}
       </div>
@@ -141,26 +220,56 @@ function CardField({
   field,
   row,
   maxColumns,
+  editingField,
+  onEditField,
+  onCommitField,
+  onCancelField,
+  busy,
+  rowEditable,
 }: {
   field: ReportCardField;
   row: Record<string, unknown>;
   maxColumns: number;
-}) {
+} & FieldEditingProps) {
   const span = Math.min(Math.max(field.colSpan ?? 1, 1), maxColumns);
   const label = field.label ?? humanizeFieldName(field.field);
   const value = row[field.field];
   const kind = field.kind ?? 'value';
+  const canEdit = Boolean(field.editable && rowEditable && kind === 'value');
+  const isEditing = canEdit && editingField === field.field;
 
   return (
     <div
-      className="min-w-0"
+      className="group/field min-w-0"
       style={{ gridColumn: `span ${span} / span ${span}` }}
     >
-      <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-        {label}
-      </p>
+      <div className="flex items-center gap-1">
+        <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+          {label}
+        </p>
+        {canEdit && !isEditing && (
+          <button
+            type="button"
+            aria-label="Edit field"
+            className="rounded p-0.5 text-muted-foreground opacity-0 transition-opacity hover:bg-muted hover:text-foreground group-hover/field:opacity-100"
+            onClick={() => onEditField?.(field.field)}
+          >
+            <Pencil className="h-3 w-3" />
+          </button>
+        )}
+      </div>
       <div className="mt-1 text-sm text-foreground">
-        {kind === 'json' ? (
+        {isEditing ? (
+          <FieldEditor
+            value={value}
+            format={field.format}
+            pillVariants={field.pillVariants}
+            editor={field.editor}
+            busy={busy}
+            onCommit={(next) => onCommitField?.(field.field, next)}
+            onCancel={() => onCancelField?.()}
+          />
+        ) : kind === 'json' ? (
           <JsonField value={value} collapsed={field.collapsed ?? true} />
         ) : kind === 'markdown' ? (
           <MarkdownField value={value} collapsed={field.collapsed ?? false} />

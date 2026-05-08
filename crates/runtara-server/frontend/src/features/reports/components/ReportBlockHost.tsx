@@ -245,6 +245,10 @@ export function ReportBlockHost({
     return handled;
   };
 
+  if (block.hideWhenEmpty && result?.status === 'empty') {
+    return null;
+  }
+
   return (
     <div ref={rootRef} className={className}>
       {(block.title || block.dataset) && (
@@ -351,6 +355,7 @@ function RenderedBlock({
   if (block.type === 'table') {
     return (
       <TableBlock
+        reportId={reportId}
         block={block}
         result={result}
         sort={sort}
@@ -389,7 +394,7 @@ function RenderedBlock({
   }
 
   if (block.type === 'card') {
-    return <CardBlock block={block} result={result} />;
+    return <CardBlock reportId={reportId} block={block} result={result} />;
   }
 
   if (block.type === 'actions') {

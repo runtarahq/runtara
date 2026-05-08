@@ -45,6 +45,34 @@ export interface ReportCardField {
   subcard?: ReportCardConfig;
   /** Inline-table config used when `kind=subtable`. */
   subtable?: ReportSubtableConfig;
+  /** Opt-in writeback. Honored only when the rendered row carries `id`+`schemaId`. */
+  editable?: boolean;
+  /** Explicit editor; overrides format-based inference. */
+  editor?: ReportEditorConfig;
+}
+
+export type ReportEditorKind =
+  | 'text'
+  | 'textarea'
+  | 'number'
+  | 'select'
+  | 'toggle'
+  | 'date'
+  | 'datetime';
+
+export interface ReportEditorOption {
+  label: string;
+  value: unknown;
+}
+
+export interface ReportEditorConfig {
+  kind: ReportEditorKind;
+  options?: ReportEditorOption[];
+  min?: number;
+  max?: number;
+  step?: number;
+  regex?: string;
+  placeholder?: string;
 }
 
 export interface ReportCardGroup {
@@ -327,6 +355,10 @@ export interface ReportTableColumn {
   align?: 'left' | 'right' | 'center';
   /** Marks this column as the row's human-readable label for entity-title lookups. */
   descriptive?: boolean;
+  /** Opt-in writeback. Honored only when the rendered row carries `id`+`schemaId`. */
+  editable?: boolean;
+  /** Explicit editor; overrides format-based inference. */
+  editor?: ReportEditorConfig;
 }
 
 export interface ReportBlockDefinition {
@@ -367,6 +399,10 @@ export interface ReportBlockDefinition {
   filters?: ReportFilterDefinition[];
   interactions?: ReportInteractionDefinition[];
   showWhen?: ReportVisibilityCondition;
+  /** When true, the renderer drops the block entirely (title bar included)
+   *  if its data is empty. Used for action / pending-work blocks that should
+   *  disappear once there's nothing to do. */
+  hideWhenEmpty?: boolean;
 }
 
 export interface ReportInteractionDefinition {

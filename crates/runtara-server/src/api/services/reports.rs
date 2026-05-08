@@ -6265,6 +6265,7 @@ mod tests {
             filters: vec![],
             interactions: vec![],
             show_when: None,
+            hide_when_empty: false,
         }
     }
 
@@ -6304,6 +6305,8 @@ mod tests {
             levels: None,
             align: None,
             descriptive: false,
+            editable: false,
+            editor: None,
         }
     }
 

@@ -626,6 +626,7 @@ export function ReportExplorePage() {
               </div>
             ) : (
               <ExplorePreview
+                reportId={reportId ?? ''}
                 block={blockPreview}
                 vizType={state.vizType}
                 data={query.data}
@@ -957,6 +958,7 @@ export function ReportExplorePage() {
 }
 
 function ExplorePreview({
+  reportId,
   block,
   vizType,
   data,
@@ -965,6 +967,7 @@ function ExplorePreview({
   onPageChange,
   onDrillFilter,
 }: {
+  reportId: string;
   block: ReportBlockDefinition;
   vizType: ExploreVizType;
   data?: ReportDatasetQueryResponse | null;
@@ -994,6 +997,7 @@ function ExplorePreview({
   if (vizType === 'table') {
     return (
       <TableBlock
+        reportId={reportId}
         block={tableBlock}
         result={result}
         sort={sort}
@@ -1022,6 +1026,7 @@ function ExplorePreview({
           Result table
         </h3>
         <TableBlock
+          reportId={reportId}
           block={tableBlock}
           result={result}
           sort={sort}
