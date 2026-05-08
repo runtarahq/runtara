@@ -538,7 +538,8 @@ function getRouteCandidates(
   }
 
   return candidates.filter(
-    (candidate) => candidate.point.x !== point.x || candidate.point.y !== point.y
+    (candidate) =>
+      candidate.point.x !== point.x || candidate.point.y !== point.y
   );
 }
 
@@ -608,7 +609,9 @@ function routeOnGrid(
       direction,
       end
     )) {
-      if (routeIntersectsObstacle([current.point, candidate.point], obstacles)) {
+      if (
+        routeIntersectsObstacle([current.point, candidate.point], obstacles)
+      ) {
         continue;
       }
 
@@ -644,8 +647,7 @@ function routeOnGrid(
     }
   }
 
-  const fallbackX =
-    start.x + (end.x - start.x) / 2 + laneIndex * EDGE_LANE_GAP;
+  const fallbackX = start.x + (end.x - start.x) / 2 + laneIndex * EDGE_LANE_GAP;
   return compactPoints([
     start,
     { x: fallbackX, y: start.y },
@@ -773,9 +775,7 @@ function getSourceExitX(
         ? box.left > start.x && box.left < clampedX
         : box.right < start.x && box.right > clampedX
     )
-    .sort((a, b) =>
-      direction === 1 ? a.left - b.left : b.right - a.right
-    );
+    .sort((a, b) => (direction === 1 ? a.left - b.left : b.right - a.right));
   const firstBlocker = blockers[0];
 
   if (!firstBlocker) return clampedX;
@@ -908,10 +908,7 @@ function getSharedParentBox(
   return parent ? getNodeBox(parent, nodeById) : undefined;
 }
 
-function buildRouteContexts(
-  nodes: Node[],
-  edges: Edge[]
-): RouteContext[] {
+function buildRouteContexts(nodes: Node[], edges: Edge[]): RouteContext[] {
   const nodeById = new Map(nodes.map((node) => [node.id, node]));
   const sourceLaneIndexes = buildSourceLaneIndexes(edges);
   const duplicateLaneIndexes = buildDuplicateLaneIndexes(edges);

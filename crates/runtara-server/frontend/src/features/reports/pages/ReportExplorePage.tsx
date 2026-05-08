@@ -220,7 +220,9 @@ export function ReportExplorePage() {
   };
 
   const handleDatasetChange = (datasetId: string) => {
-    const nextDataset = datasets.find((candidate) => candidate.id === datasetId);
+    const nextDataset = datasets.find(
+      (candidate) => candidate.id === datasetId
+    );
     if (!report || !nextDataset) return;
     setState(defaultExploreState(nextDataset, report.definition.blocks));
     setDraftFilterField('');
@@ -235,7 +237,12 @@ export function ReportExplorePage() {
       return {
         ...current,
         dimensions,
-        vizType: preserveVizType(dataset, current, dimensions, current.measures),
+        vizType: preserveVizType(
+          dataset,
+          current,
+          dimensions,
+          current.measures
+        ),
         page: { ...current.page, offset: 0 },
       };
     });
@@ -249,7 +256,12 @@ export function ReportExplorePage() {
       return {
         ...current,
         measures,
-        vizType: preserveVizType(dataset, current, current.dimensions, measures),
+        vizType: preserveVizType(
+          dataset,
+          current,
+          current.dimensions,
+          measures
+        ),
         page: { ...current.page, offset: 0 },
       };
     });
@@ -262,7 +274,12 @@ export function ReportExplorePage() {
         ...current,
         dimensions,
         sort: current.sort.filter((sort) => sort.field !== field),
-        vizType: preserveVizType(dataset, current, dimensions, current.measures),
+        vizType: preserveVizType(
+          dataset,
+          current,
+          dimensions,
+          current.measures
+        ),
         page: { ...current.page, offset: 0 },
       };
     });
@@ -275,7 +292,12 @@ export function ReportExplorePage() {
         ...current,
         measures,
         sort: current.sort.filter((sort) => sort.field !== id),
-        vizType: preserveVizType(dataset, current, current.dimensions, measures),
+        vizType: preserveVizType(
+          dataset,
+          current,
+          current.dimensions,
+          measures
+        ),
         page: { ...current.page, offset: 0 },
       };
     });
@@ -468,7 +490,9 @@ export function ReportExplorePage() {
           <Button
             className="h-11 rounded-full sm:px-5"
             disabled={!canSaveBlock || updateReport.isPending}
-            onClick={() => handleSaveBlock(canReplaceBlock ? 'replace' : 'append')}
+            onClick={() =>
+              handleSaveBlock(canReplaceBlock ? 'replace' : 'append')
+            }
           >
             <Save className="mr-2 h-4 w-4" />
             {canReplaceBlock ? 'Update block' : 'Save as block'}
@@ -660,7 +684,9 @@ export function ReportExplorePage() {
                     disabled={!option.validity.valid}
                   >
                     {option.label}
-                    {!option.validity.valid ? ` - ${option.validity.reason}` : ''}
+                    {!option.validity.valid
+                      ? ` - ${option.validity.reason}`
+                      : ''}
                   </SelectItem>
                 ))}
               </SelectContent>
@@ -826,7 +852,9 @@ export function ReportExplorePage() {
                 type="button"
                 variant="outline"
                 size="icon"
-                disabled={!draftFilterField || draftFilterValue.trim().length === 0}
+                disabled={
+                  !draftFilterField || draftFilterValue.trim().length === 0
+                }
                 onClick={addExploreFilter}
               >
                 <Plus className="h-4 w-4" />
@@ -895,7 +923,9 @@ export function ReportExplorePage() {
             <Button
               className="w-full"
               disabled={!canSaveBlock || updateReport.isPending}
-              onClick={() => handleSaveBlock(canReplaceBlock ? 'replace' : 'append')}
+              onClick={() =>
+                handleSaveBlock(canReplaceBlock ? 'replace' : 'append')
+              }
             >
               <Save className="mr-2 h-4 w-4" />
               {canReplaceBlock ? 'Update report block' : 'Save as report block'}
@@ -953,10 +983,7 @@ function ExplorePreview({
   onSearchChange: (search: string) => void;
   onSortChange: (sort: ReportOrderBy[]) => void;
   onPageChange: (offset: number, size: number) => void;
-  onDrillFilter: (
-    datum: Record<string, unknown>,
-    field?: string
-  ) => boolean;
+  onDrillFilter: (datum: Record<string, unknown>, field?: string) => boolean;
 }) {
   const result = datasetResultToBlockResult(block, data);
   const tableBlock = {
@@ -1170,7 +1197,8 @@ function initialExploreState(
         sort: block.dataset.orderBy ?? [],
         vizType:
           block.type === 'chart'
-            ? block.chart?.kind ?? recommendVizType(dataset, dimensions, measures)
+            ? (block.chart?.kind ??
+              recommendVizType(dataset, dimensions, measures))
             : block.type === 'metric'
               ? 'metric'
               : block.type === 'table'
@@ -1178,7 +1206,8 @@ function initialExploreState(
                 : recommendVizType(dataset, dimensions, measures),
         preferredVizType:
           block.type === 'chart'
-            ? block.chart?.kind ?? recommendVizType(dataset, dimensions, measures)
+            ? (block.chart?.kind ??
+              recommendVizType(dataset, dimensions, measures))
             : block.type === 'metric'
               ? 'metric'
               : block.type === 'table'
@@ -1316,7 +1345,10 @@ function chartRecommendation(
   dataset: ReportDatasetDefinition,
   state: ExploreState
 ): string {
-  if (state.vizType === recommendVizType(dataset, state.dimensions, state.measures)) {
+  if (
+    state.vizType ===
+    recommendVizType(dataset, state.dimensions, state.measures)
+  ) {
     return 'Recommended for the selected dataset fields.';
   }
   return 'Manual visualization override for this query.';
@@ -1327,7 +1359,9 @@ function defaultBlockTitle(
   dimensions: string[],
   measures: string[]
 ): string {
-  const measure = measures[0] ? measureLabel(dataset, measures[0]) : dataset.label;
+  const measure = measures[0]
+    ? measureLabel(dataset, measures[0])
+    : dataset.label;
   const dimension = dimensions[0] ? fieldLabel(dataset, dimensions[0]) : '';
   return dimension ? `${measure} by ${dimension}` : measure;
 }
@@ -1443,7 +1477,10 @@ function buildSavedBlock(
   state: ExploreState
 ): ReportBlockDefinition | null {
   if (state.measures.length === 0) return null;
-  const id = uniqueBlockId(definition.blocks, slugify(state.blockTitle || 'explore-block'));
+  const id = uniqueBlockId(
+    definition.blocks,
+    slugify(state.blockTitle || 'explore-block')
+  );
   const block = buildPreviewBlock(dataset, state, [
     ...state.dimensions.map((field) => ({
       key: field,
@@ -1589,7 +1626,10 @@ function outputFieldLabel(dataset: ReportDatasetDefinition, field: string) {
   );
 }
 
-function dimensionType(dataset: ReportDatasetDefinition, field: string): string {
+function dimensionType(
+  dataset: ReportDatasetDefinition,
+  field: string
+): string {
   return (
     dataset.dimensions.find((dimension) => dimension.field === field)?.type ??
     'string'
@@ -1603,7 +1643,12 @@ function defaultFilterOp(
   const type = dataset?.dimensions.find(
     (dimension) => dimension.field === field
   )?.type;
-  if (type === 'date' || type === 'datetime' || type === 'number' || type === 'decimal') {
+  if (
+    type === 'date' ||
+    type === 'datetime' ||
+    type === 'number' ||
+    type === 'decimal'
+  ) {
     return 'gte';
   }
   return 'eq';
@@ -1616,7 +1661,12 @@ function filterOpsForField(
   const type = dataset?.dimensions.find(
     (dimension) => dimension.field === field
   )?.type;
-  if (type === 'date' || type === 'datetime' || type === 'number' || type === 'decimal') {
+  if (
+    type === 'date' ||
+    type === 'datetime' ||
+    type === 'number' ||
+    type === 'decimal'
+  ) {
     return [
       { value: 'eq', label: 'Equals' },
       { value: 'gte', label: 'At least' },
@@ -1659,7 +1709,10 @@ function formatFilterValue(value: unknown): string {
   return String(value);
 }
 
-function uniqueBlockId(blocks: ReportBlockDefinition[], baseId: string): string {
+function uniqueBlockId(
+  blocks: ReportBlockDefinition[],
+  baseId: string
+): string {
   const fallback = baseId || 'explore_block';
   const existing = new Set(blocks.map((block) => block.id));
   if (!existing.has(fallback)) return fallback;
@@ -1670,7 +1723,10 @@ function uniqueBlockId(blocks: ReportBlockDefinition[], baseId: string): string 
   return `${fallback}_${index}`;
 }
 
-function uniqueBlockTitle(blocks: ReportBlockDefinition[], title: string): string {
+function uniqueBlockTitle(
+  blocks: ReportBlockDefinition[],
+  title: string
+): string {
   const existing = new Set(blocks.map((block) => block.title ?? block.id));
   if (!existing.has(title)) return title;
   let index = 2;

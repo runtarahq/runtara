@@ -183,10 +183,7 @@ export function BulkInsertDialog({
               </Label>
               <div className="grid grid-cols-2 gap-2 max-h-40 overflow-y-auto rounded border p-2">
                 {columnNames.map((name) => (
-                  <label
-                    key={name}
-                    className="flex items-center gap-2 text-sm"
-                  >
+                  <label key={name} className="flex items-center gap-2 text-sm">
                     <Checkbox
                       checked={conflictCols.has(name)}
                       onCheckedChange={(state) =>

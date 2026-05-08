@@ -108,7 +108,9 @@ test.describe('Auto-layout + save preserves step data (mocked)', () => {
             renderingParameters: { x: 400, y: 100, width: 320, height: 180 },
           },
         },
-        executionPlan: [{ fromStep: 'agent', toStep: 'splitter', label: 'next' }],
+        executionPlan: [
+          { fromStep: 'agent', toStep: 'splitter', label: 'next' },
+        ],
       },
     });
 
@@ -162,7 +164,11 @@ test.describe('Auto-layout + save preserves step data (mocked)', () => {
           status: 200,
           contentType: 'application/json',
           body: JSON.stringify({
-            data: { ...workflow, currentVersionNumber: 2, lastVersionNumber: 2 },
+            data: {
+              ...workflow,
+              currentVersionNumber: 2,
+              lastVersionNumber: 2,
+            },
             message: 'ok',
             success: true,
             version: '2',
@@ -176,9 +182,9 @@ test.describe('Auto-layout + save preserves step data (mocked)', () => {
     await expect(page.locator('main')).toBeVisible();
 
     // Wait for React Flow to mount a node so we know the editor finished loading.
-    await expect(
-      page.locator('.react-flow__node').first()
-    ).toBeVisible({ timeout: 10_000 });
+    await expect(page.locator('.react-flow__node').first()).toBeVisible({
+      timeout: 10_000,
+    });
 
     // Click Auto-layout (icon button with title="Auto-layout").
     await page.getByTitle('Auto-layout').click();
@@ -229,15 +235,13 @@ test.describe('Auto-layout + save preserves step data (mocked)', () => {
       value: 5, // NUMBER, not string "5"
       type: 'integer',
     });
-    expect(
-      savedGraph.steps.splitter.config.variables.payload.valueType
-    ).toBe('composite');
+    expect(savedGraph.steps.splitter.config.variables.payload.valueType).toBe(
+      'composite'
+    );
     expect(
       Array.isArray(savedGraph.steps.splitter.config.variables.payload.value)
     ).toBe(true);
-    expect(
-      savedGraph.steps.splitter.config.variables.payload.value
-    ).toEqual([
+    expect(savedGraph.steps.splitter.config.variables.payload.value).toEqual([
       { valueType: 'immediate', value: 'a' },
       { valueType: 'immediate', value: 'b' },
     ]);

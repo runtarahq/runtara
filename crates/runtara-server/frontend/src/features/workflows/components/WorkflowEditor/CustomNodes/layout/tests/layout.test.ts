@@ -266,9 +266,9 @@ describe('workflow layout graph', () => {
     )['source-target'];
 
     const verticalSegmentXs = getVerticalSegmentXs(route.points);
-    expect(verticalSegmentXs.some((x) => x > 250 && x < target.position.x)).toBe(
-      true
-    );
+    expect(
+      verticalSegmentXs.some((x) => x > 250 && x < target.position.x)
+    ).toBe(true);
   });
 
   it('uses a shared target-side bus for multi-incoming merges', () => {
@@ -373,14 +373,20 @@ describe('workflow layout graph', () => {
       ]
     );
 
-    expect(getVerticalSegmentXs(routes['default-target'].points)).toContain(484);
+    expect(getVerticalSegmentXs(routes['default-target'].points)).toContain(
+      484
+    );
     expect(
       routes['default-target'].points.some(
         (point) => point.y > branchNode.position.y + (branchNode.height ?? 0)
       )
     ).toBe(true);
 
-    for (let index = 1; index < routes['default-target'].points.length; index++) {
+    for (
+      let index = 1;
+      index < routes['default-target'].points.length;
+      index++
+    ) {
       expect(
         segmentIntersectsNode(
           routes['default-target'].points[index - 1],

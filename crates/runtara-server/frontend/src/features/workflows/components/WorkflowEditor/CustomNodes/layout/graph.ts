@@ -199,7 +199,7 @@ export function getReactFlowNodeSize(node: Node): LayoutSize {
   const nodeWidth = typeof node.width === 'number' ? node.width : undefined;
   const nodeHeight = typeof node.height === 'number' ? node.height : undefined;
 
-  let width = styleWidth ?? nodeWidth ?? configuredSize.width;
+  const width = styleWidth ?? nodeWidth ?? configuredSize.width;
   let height = styleHeight ?? nodeHeight ?? configuredSize.height;
 
   if (node.type === NODE_TYPES.SwitchNode) {

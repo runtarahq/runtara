@@ -702,8 +702,7 @@ function DatasetEditorCard({
             onValueChange={(field) =>
               onChange({
                 ...dataset,
-                timeDimension:
-                  field === NONE_SELECT_VALUE ? undefined : field,
+                timeDimension: field === NONE_SELECT_VALUE ? undefined : field,
               })
             }
           >
@@ -759,7 +758,11 @@ function DatasetEditorCard({
                   key={dimension.field}
                   className="grid gap-2 rounded-md border bg-background p-3 md:grid-cols-[1fr_1fr_8rem_8rem_auto]"
                 >
-                  <Input value={dimension.field} readOnly className="bg-muted/40" />
+                  <Input
+                    value={dimension.field}
+                    readOnly
+                    className="bg-muted/40"
+                  />
                   <Input
                     value={dimension.label}
                     onChange={(event) =>
@@ -802,7 +805,9 @@ function DatasetEditorCard({
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
-                      <SelectItem value={NONE_SELECT_VALUE}>No format</SelectItem>
+                      <SelectItem value={NONE_SELECT_VALUE}>
+                        No format
+                      </SelectItem>
                       {DATASET_FORMATS.map((format) => (
                         <SelectItem key={format} value={format}>
                           {format}
@@ -903,8 +908,7 @@ function DatasetEditorCard({
                     value={measure.field ?? NONE_SELECT_VALUE}
                     onValueChange={(field) =>
                       updateMeasure(measure.id, {
-                        field:
-                          field === NONE_SELECT_VALUE ? undefined : field,
+                        field: field === NONE_SELECT_VALUE ? undefined : field,
                       })
                     }
                   >
@@ -912,7 +916,9 @@ function DatasetEditorCard({
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
-                      <SelectItem value={NONE_SELECT_VALUE}>No field</SelectItem>
+                      <SelectItem value={NONE_SELECT_VALUE}>
+                        No field
+                      </SelectItem>
                       {schemaFields.map((field) => (
                         <SelectItem key={field} value={field}>
                           {field}
@@ -982,8 +988,7 @@ function createDefaultDataset(
   const preferredTimeField =
     fields.find((field) =>
       /date|day|month|year|time|created|updated/i.test(field)
-    ) ??
-    undefined;
+    ) ?? undefined;
   const dimensions = fields.slice(0, 4).map((field) => ({
     field,
     label: humanizeFieldName(field),
@@ -1024,9 +1029,8 @@ function removeLayoutBlockReferences(
   if (!layout) return layout;
   return layout
     .map((node) => removeLayoutBlockReference(node, removedBlockIds))
-    .filter(
-      (node): node is NonNullable<ReportDefinition['layout']>[number] =>
-        Boolean(node)
+    .filter((node): node is NonNullable<ReportDefinition['layout']>[number] =>
+      Boolean(node)
     );
 }
 
@@ -1039,17 +1043,16 @@ function removeLayoutBlockReference(
   }
 
   if (node.type === 'metric_row') {
-    const blocks = node.blocks.filter((blockId) => !removedBlockIds.has(blockId));
+    const blocks = node.blocks.filter(
+      (blockId) => !removedBlockIds.has(blockId)
+    );
     return blocks.length === 0 ? null : { ...node, blocks };
   }
 
   if (node.type === 'section') {
     return {
       ...node,
-      children: removeLayoutBlockReferences(
-        node.children,
-        removedBlockIds
-      ),
+      children: removeLayoutBlockReferences(node.children, removedBlockIds),
     };
   }
 
@@ -1058,10 +1061,7 @@ function removeLayoutBlockReference(
       ...node,
       columns: node.columns.map((column) => ({
         ...column,
-        children: removeLayoutBlockReferences(
-          column.children,
-          removedBlockIds
-        ),
+        children: removeLayoutBlockReferences(column.children, removedBlockIds),
       })),
     };
   }

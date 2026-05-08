@@ -1,7 +1,4 @@
-import {
-  ErrorCategory,
-  ErrorSeverity,
-} from '@/generated/RuntaraRuntimeApi';
+import { ErrorCategory, ErrorSeverity } from '@/generated/RuntaraRuntimeApi';
 import type {
   StructuredError,
   ErrorType,

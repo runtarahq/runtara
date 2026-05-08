@@ -40,10 +40,7 @@ import {
   type SchemaField as EditorSchemaField,
 } from '../EditorSidebar/SchemaFieldsEditor';
 
-const LLM_INTEGRATION_IDS = new Set([
-  'openai_api_key',
-  'aws_credentials',
-]);
+const LLM_INTEGRATION_IDS = new Set(['openai_api_key', 'aws_credentials']);
 
 type AiProvider = 'openai' | 'bedrock';
 
@@ -596,7 +593,9 @@ export function AiAgentStepField({ name }: AiAgentStepFieldProps) {
       {/* Provider Selector */}
       <FormItem>
         <FormLabel>Provider *</FormLabel>
-        <FormDescription>Select the LLM provider for this agent</FormDescription>
+        <FormDescription>
+          Select the LLM provider for this agent
+        </FormDescription>
         <Select
           value={selectedProvider}
           onValueChange={(value) => {

@@ -131,7 +131,9 @@ export function BulkEditDialog({
 
   const handleConfirm = async () => {
     const columnTypeMap = new Map<string, ColumnDataType>();
-    columns.forEach((c) => columnTypeMap.set(c.name, mapPostgresTypeToDataType(c.type)));
+    columns.forEach((c) =>
+      columnTypeMap.set(c.name, mapPostgresTypeToDataType(c.type))
+    );
 
     const properties: Record<string, unknown> = {};
     for (const name of pickedFields) {
@@ -270,7 +272,9 @@ function renderValueInput(
   }
   return (
     <Input
-      type={dataType === 'integer' || dataType === 'decimal' ? 'number' : 'text'}
+      type={
+        dataType === 'integer' || dataType === 'decimal' ? 'number' : 'text'
+      }
       step={dataType === 'decimal' ? 'any' : undefined}
       value={value === undefined || value === null ? '' : String(value)}
       onChange={(e) => onChange(e.target.value)}

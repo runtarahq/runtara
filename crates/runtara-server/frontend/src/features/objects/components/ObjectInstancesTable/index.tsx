@@ -16,11 +16,7 @@ import {
   CollapsibleTrigger,
 } from '@/shared/components/ui/collapsible';
 import { DataTable } from '@/shared/components/table';
-import {
-  Instance,
-  Schema,
-  Condition,
-} from '@/generated/RuntaraRuntimeApi';
+import { Instance, Schema, Condition } from '@/generated/RuntaraRuntimeApi';
 import {
   useBulkCreateObjectInstances,
   useBulkDeleteObjectInstances,
@@ -509,9 +505,7 @@ export function ObjectInstanceDtosTable({
           instanceIds: selectedIds,
           properties,
         });
-        toast.success(
-          `Updated ${updated} record${updated === 1 ? '' : 's'}`
-        );
+        toast.success(`Updated ${updated} record${updated === 1 ? '' : 's'}`);
         setRowSelection({});
         setShowBulkEditDialog(false);
       } catch (error) {

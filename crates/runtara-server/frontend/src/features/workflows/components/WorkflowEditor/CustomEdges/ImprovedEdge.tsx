@@ -40,8 +40,7 @@ function getOrthogonalPath(points: Array<{ x: number; y: number }>): string {
       Math.abs(current.x - previous.x) + Math.abs(current.y - previous.y);
     const nextDistance =
       Math.abs(next.x - current.x) + Math.abs(next.y - current.y);
-    const isCorner =
-      incoming.x !== outgoing.x || incoming.y !== outgoing.y;
+    const isCorner = incoming.x !== outgoing.x || incoming.y !== outgoing.y;
     const radius = Math.min(
       cornerRadius,
       previousDistance / 2,

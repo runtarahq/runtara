@@ -1,7 +1,4 @@
-import {
-  ErrorCategory,
-  ErrorSeverity,
-} from '@/generated/RuntaraRuntimeApi';
+import { ErrorCategory, ErrorSeverity } from '@/generated/RuntaraRuntimeApi';
 
 /**
  * Structured error format returned by the backend.

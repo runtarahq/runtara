@@ -90,18 +90,6 @@ export function getLayoutedElements(nodes: Node[], edges: Edge[]) {
   return layoutReactFlowElements(nodes, edges);
 }
 
-// we have to make sure that parent nodes are rendered before their children
-export const sortNodes = (a: Node, b: Node): number => {
-  if (a.type === b.type) {
-    return 0;
-  }
-
-  return a.type === NODE_TYPES.ContainerNode &&
-    b.type !== NODE_TYPES.ContainerNode
-    ? -1
-    : 1;
-};
-
 export const getNodePositionInsideParent = (
   node: Partial<Node>,
   groupNode: Node

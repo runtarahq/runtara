@@ -1,4 +1,3 @@
-/* eslint-disable react-refresh/only-export-components */
 /**
  * Dialog for adding a new custom field to the input mapping.
  */

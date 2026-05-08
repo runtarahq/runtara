@@ -25,51 +25,6 @@ interface NodeLike {
 }
 
 /**
- * Finds all downstream nodes from a given node (nodes reachable by following edges forward).
- * Uses forward-only traversal (source -> target direction).
- *
- * @param edges - Current edges in the graph (supports both domain and React Flow types)
- * @param startNodeId - ID of the starting node
- * @returns Set of downstream node IDs (excluding the start node)
- */
-export function getDownstreamNodes(
-  edges: EdgeLike[],
-  startNodeId: string
-): Set<string> {
-  const downstreamNodes = new Set<string>();
-  const visited = new Set<string>();
-
-  // Build forward-only adjacency list (source -> targets)
-  const adjacencyList = new Map<string, Set<string>>();
-
-  for (const edge of edges) {
-    if (!adjacencyList.has(edge.source)) {
-      adjacencyList.set(edge.source, new Set());
-    }
-    adjacencyList.get(edge.source)!.add(edge.target);
-  }
-
-  // BFS to find all downstream nodes
-  const queue = [startNodeId];
-  visited.add(startNodeId);
-
-  while (queue.length > 0) {
-    const currentId = queue.shift()!;
-    const targets = adjacencyList.get(currentId) || new Set();
-
-    for (const targetId of targets) {
-      if (!visited.has(targetId)) {
-        visited.add(targetId);
-        downstreamNodes.add(targetId);
-        queue.push(targetId);
-      }
-    }
-  }
-
-  return downstreamNodes;
-}
-
-/**
  * Checks if connecting from source to target would be a self-connection
  */
 export function isSelfConnection(source: string, target: string): boolean {
