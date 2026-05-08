@@ -9,12 +9,21 @@ import { ReportDeleteButton } from '../components/ReportDeleteButton';
 import { ReportFilterBar } from '../components/ReportFilterBar';
 import { ReportRenderer } from '../components/ReportRenderer';
 import { useReport, useReportRender } from '../hooks/useReports';
+import type { ReportDefinition } from '../types';
 import {
   decodeFilterValue,
   encodeFilterValue,
+  getActiveReportView,
+  getDefaultReportViewId,
   getEagerBlocks,
   getFilterDefaultValue,
 } from '../utils';
+
+type ReportFilterChangeOptions = {
+  replace?: boolean;
+  viewId?: string | null;
+  clearFilters?: string[];
+};
 
 export function ReportViewerPage() {
   const { reportId } = useParams();
@@ -32,10 +41,20 @@ export function ReportViewerPage() {
       ])
     );
   }, [report, searchParams]);
+  const requestedViewId = searchParams.get('view');
+  const activeView = useMemo(
+    () =>
+      report
+        ? getActiveReportView(report.definition, requestedViewId)
+        : undefined,
+    [report, requestedViewId]
+  );
+  const activeViewId = activeView?.id ?? null;
 
   const eagerBlocks = useMemo(
-    () => (report ? getEagerBlocks(report.definition) : []),
-    [report]
+    () =>
+      report ? getEagerBlocks(report.definition, filters, activeViewId) : [],
+    [activeViewId, filters, report]
   );
   const renderRequest = useMemo(
     () =>
@@ -65,10 +84,16 @@ export function ReportViewerPage() {
     refetch,
   } = useReportRender(reportId, renderRequest, Boolean(report));
 
-  const handleFilterChanges = (updates: Record<string, unknown>) => {
+  const handleFilterChanges = (
+    updates: Record<string, unknown>,
+    options: ReportFilterChangeOptions = {}
+  ) => {
     setSearchParams(
       (currentParams) => {
         const nextParams = new URLSearchParams(currentParams);
+        for (const filterId of options.clearFilters ?? []) {
+          nextParams.delete(filterId);
+        }
         for (const [filterId, value] of Object.entries(updates)) {
           const filter = report?.definition.filters.find(
             (filter) => filter.id === filterId
@@ -85,14 +110,27 @@ export function ReportViewerPage() {
             nextParams.set(filterId, encodeFilterValue(value));
           }
         }
+        if (options.viewId !== undefined) {
+          applyViewParam(nextParams, report?.definition, options.viewId);
+        }
         return nextParams;
       },
-      { replace: true }
+      { replace: options.replace ?? true }
     );
   };
 
   const handleFilterChange = (filterId: string, value: unknown) => {
     handleFilterChanges({ [filterId]: value });
+  };
+
+  const handleNavigateView = (
+    viewId: string | null,
+    options: Omit<ReportFilterChangeOptions, 'viewId'> = {}
+  ) => {
+    handleFilterChanges(
+      {},
+      { ...options, viewId, replace: options.replace ?? false }
+    );
   };
 
   const handlePrint = () => {
@@ -188,8 +226,10 @@ export function ReportViewerPage() {
         definition={report.definition}
         renderResponse={renderResponse}
         filters={filters}
+        activeViewId={activeViewId}
         onFilterChange={handleFilterChange}
         onFiltersChange={handleFilterChanges}
+        onNavigateView={handleNavigateView}
         onRefresh={() => refetch()}
       />
       <div className="report-print-brand">
@@ -209,4 +249,23 @@ function isEmptyFilterValue(value: unknown): boolean {
 
 function isSameFilterValue(left: unknown, right: unknown): boolean {
   return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function applyViewParam(
+  params: URLSearchParams,
+  definition: ReportDefinition | undefined,
+  viewId: string | null
+) {
+  if (!definition || !viewId) {
+    params.delete('view');
+    return;
+  }
+
+  const defaultViewId = getDefaultReportViewId(definition);
+  if (!defaultViewId || viewId === defaultViewId) {
+    params.delete('view');
+    return;
+  }
+
+  params.set('view', viewId);
 }

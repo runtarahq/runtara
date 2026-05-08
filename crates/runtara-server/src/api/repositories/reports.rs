@@ -158,6 +158,7 @@ fn row_to_report(row: PgRow) -> Result<ReportDto, sqlx::Error> {
             definition_version: row.try_get("definition_version").unwrap_or(1),
             markdown: String::new(),
             layout: vec![],
+            views: vec![],
             filters: vec![],
             datasets: vec![],
             blocks: vec![],

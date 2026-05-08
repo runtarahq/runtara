@@ -285,6 +285,7 @@ export interface ReportBlockDefinition {
   };
   filters?: ReportFilterDefinition[];
   interactions?: ReportInteractionDefinition[];
+  showWhen?: ReportVisibilityCondition;
 }
 
 export interface ReportInteractionDefinition {
@@ -299,35 +300,55 @@ export interface ReportInteractionDefinition {
 export interface ReportInteractionAction {
   type: 'set_filter' | string;
   filterId?: string;
+  filterIds?: string[];
+  viewId?: string;
   valueFrom?: string;
   value?: unknown;
 }
 
+export interface ReportInteractionOptions {
+  replace?: boolean;
+  viewId?: string | null;
+  clearFilters?: string[];
+}
+
+export interface ReportVisibilityCondition {
+  filter: string;
+  exists?: boolean;
+  equals?: unknown;
+  notEquals?: unknown;
+}
+
+type ReportLayoutNodeBase = {
+  id: string;
+  showWhen?: ReportVisibilityCondition;
+};
+
 export type ReportLayoutNode =
-  | {
+  | ({
       id: string;
       type: 'markdown';
       content: string;
-    }
-  | {
+    } & ReportLayoutNodeBase)
+  | ({
       id: string;
       type: 'block';
       blockId: string;
-    }
-  | {
+    } & ReportLayoutNodeBase)
+  | ({
       id: string;
       type: 'metric_row';
       title?: string;
       blocks: string[];
-    }
-  | {
+    } & ReportLayoutNodeBase)
+  | ({
       id: string;
       type: 'section';
       title?: string;
       description?: string;
       children?: ReportLayoutNode[];
-    }
-  | {
+    } & ReportLayoutNodeBase)
+  | ({
       id: string;
       type: 'columns';
       columns: Array<{
@@ -335,8 +356,8 @@ export type ReportLayoutNode =
         width?: number;
         children?: ReportLayoutNode[];
       }>;
-    }
-  | {
+    } & ReportLayoutNodeBase)
+  | ({
       id: string;
       type: 'grid';
       columns?: number;
@@ -346,12 +367,27 @@ export type ReportLayoutNode =
         colSpan?: number;
         rowSpan?: number;
       }>;
-    };
+    } & ReportLayoutNodeBase);
+
+export interface ReportViewBreadcrumb {
+  label: string;
+  viewId?: string;
+  clearFilters?: string[];
+}
+
+export interface ReportViewDefinition {
+  id: string;
+  title?: string;
+  titleFrom?: string;
+  breadcrumb?: ReportViewBreadcrumb[];
+  layout?: ReportLayoutNode[];
+}
 
 export interface ReportDefinition {
   definitionVersion: number;
   markdown: string;
   layout?: ReportLayoutNode[];
+  views?: ReportViewDefinition[];
   datasets?: ReportDatasetDefinition[];
   filters: ReportFilterDefinition[];
   blocks: ReportBlockDefinition[];

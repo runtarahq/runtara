@@ -1150,6 +1150,7 @@ fn report_authoring_schema() -> Value {
             "definitionVersion": 1,
             "markdown": "Backward-compatible narrative Markdown. Render data blocks with standalone placeholders like {{ block.daily_qty }} only when definition.layout is absent. Do not put block placeholders inside Markdown tables for alignment/layout.",
             "layout": "Optional structured layout tree. Prefer this over Markdown placeholders for dashboards and report layout. Every layout node must include a stable id and type.",
+            "views": "Optional named report views for master/detail navigation. Each view has an id, optional title/titleFrom, breadcrumb, and its own layout.",
             "filters": "Optional global filter presets. Each filter can apply to one or more block/source fields.",
             "datasets": "Optional semantic BI datasets. Prefer defining datasets for aggregate BI reports so blocks reference named dimensions/measures instead of raw aggregate specs.",
             "blocks": "Array of typed block definitions. Every block must have a stable id for MCP block mutations."
@@ -1162,6 +1163,8 @@ fn report_authoring_schema() -> Value {
                 "Use filter.options.source='object_model' with schema, field, optional labelField, search=true, and dependsOn for cascading filter option lists.",
                 "Use block.interactions for drill/cross-filter behavior. Supported UI events are point_click on charts and row_click/cell_click on tables.",
                 "Use set_filter actions to update global filters from clicked chart/table data, e.g. valueFrom='datum.category'.",
+                "Use navigate_view with set_filter for master/detail navigation, e.g. row click sets case_id and opens the detail view. Omit navigate_view for inline dependent content.",
+                "Use showWhen on layout nodes or blocks to show dependent content only after a filter is selected.",
                 "Keep exploration governed: only expose dimensions and measures declared in datasets and report blocks/filters/interactions that the report author intentionally configured."
             ],
             "datasetExample": {
@@ -1195,6 +1198,14 @@ fn report_authoring_schema() -> Value {
                         "actions": [{"type": "set_filter", "filterId": "category", "valueFrom": "datum.category"}]
                     }
                 ]
+            },
+            "masterDetailNavigationExample": {
+                "filters": [{"id": "case_id", "label": "Case", "type": "text"}],
+                "views": [
+                    {"id": "list", "title": "Review cases", "layout": [{"id": "cases_node", "type": "block", "blockId": "cases"}]},
+                    {"id": "detail", "titleFrom": "filters.case_id", "breadcrumb": [{"label": "Review cases", "viewId": "list", "clearFilters": ["case_id"]}], "layout": [{"id": "case_summary_node", "type": "block", "blockId": "case_summary"}]}
+                ],
+                "interaction": {"id": "open_case", "trigger": {"event": "row_click"}, "actions": [{"type": "set_filter", "filterId": "case_id", "valueFrom": "datum.case_id"}, {"type": "navigate_view", "viewId": "detail"}]}
             }
         },
         "layoutGuidance": {
@@ -1220,10 +1231,11 @@ fn report_authoring_schema() -> Value {
                 "type": "table | chart | metric | actions | markdown",
                 "title": "Optional UI title.",
                 "lazy": "Optional boolean. Lazy blocks fetch only when requested.",
+                "showWhen": "Optional visibility condition such as {filter:'case_id', exists:true}. Use this for inline dependent content.",
                 "dataset": "Preferred BI query shape: {id, dimensions, measures, orderBy?, limit?}. The id must match definition.datasets[].id.",
                 "source": "Object Model data source and query plan. Required only when block.dataset is absent.",
                 "filters": "Optional per-block filter presets.",
-                "interactions": "Optional drill/cross-filter actions. Use point_click, row_click, or cell_click triggers with set_filter actions."
+                "interactions": "Optional drill/cross-filter/navigation actions. Use point_click, row_click, or cell_click triggers with set_filter, clear_filter, clear_filters, and navigate_view actions."
             },
             "table": {
                 "type": "table",
@@ -1598,6 +1610,7 @@ fn collect_report_definition_authoring_issues(definition: &Value) -> Vec<Authori
             "definitionVersion",
             "markdown",
             "layout",
+            "views",
             "filters",
             "datasets",
             "blocks",
@@ -1606,6 +1619,7 @@ fn collect_report_definition_authoring_issues(definition: &Value) -> Vec<Authori
     );
     collect_markdown_layout_issues(definition, &mut issues);
     collect_layout_authoring_issues(definition, &mut issues);
+    collect_report_view_authoring_issues(definition, &mut issues);
 
     if let Some(datasets) = definition.get("datasets") {
         match datasets.as_array() {
@@ -1886,6 +1900,111 @@ fn collect_layout_authoring_issues(definition: &Value, issues: &mut Vec<Authorin
     }
 }
 
+fn collect_report_view_authoring_issues(definition: &Value, issues: &mut Vec<AuthoringIssue>) {
+    let Some(views) = definition.get("views") else {
+        return;
+    };
+    let Some(views) = views.as_array() else {
+        issues.push(error(
+            "$.views",
+            "INVALID_REPORT_VIEWS",
+            "Report definition.views must be an array of named report views.",
+        ));
+        return;
+    };
+
+    let block_types = definition
+        .get("blocks")
+        .and_then(Value::as_array)
+        .map(|blocks| {
+            blocks
+                .iter()
+                .filter_map(|block| {
+                    Some((
+                        block.get("id")?.as_str()?.to_string(),
+                        block.get("type")?.as_str()?.to_string(),
+                    ))
+                })
+                .collect::<HashMap<_, _>>()
+        })
+        .unwrap_or_default();
+    let block_ids = block_types.keys().cloned().collect::<HashSet<_>>();
+    let mut view_ids = HashSet::new();
+
+    for (view_index, view) in views.iter().enumerate() {
+        let path = format!("$.views[{view_index}]");
+        collect_unknown_keys(
+            &path,
+            view,
+            &["id", "title", "titleFrom", "breadcrumb", "layout"],
+            issues,
+        );
+        let Some(view_id) = view.get("id").and_then(Value::as_str) else {
+            issues.push(error(
+                format!("{path}.id"),
+                "MISSING_REPORT_VIEW_ID",
+                "Report views must include a stable id.",
+            ));
+            continue;
+        };
+        if view_id.trim().is_empty() {
+            issues.push(error(
+                format!("{path}.id"),
+                "MISSING_REPORT_VIEW_ID",
+                "Report view id cannot be empty.",
+            ));
+        } else if !view_ids.insert(view_id.to_string()) {
+            issues.push(error(
+                format!("{path}.id"),
+                "DUPLICATE_REPORT_VIEW_ID",
+                format!("Duplicate report view id '{view_id}'."),
+            ));
+        }
+
+        if let Some(breadcrumbs) = view.get("breadcrumb") {
+            match breadcrumbs.as_array() {
+                Some(breadcrumbs) => {
+                    for (breadcrumb_index, breadcrumb) in breadcrumbs.iter().enumerate() {
+                        collect_unknown_keys(
+                            &format!("{path}.breadcrumb[{breadcrumb_index}]"),
+                            breadcrumb,
+                            &["label", "viewId", "clearFilters"],
+                            issues,
+                        );
+                    }
+                }
+                None => issues.push(error(
+                    format!("{path}.breadcrumb"),
+                    "INVALID_REPORT_VIEW_BREADCRUMB",
+                    "Report view breadcrumb must be an array.",
+                )),
+            }
+        }
+
+        if let Some(layout) = view.get("layout") {
+            let Some(layout) = layout.as_array() else {
+                issues.push(error(
+                    format!("{path}.layout"),
+                    "INVALID_REPORT_VIEW_LAYOUT",
+                    "Report view layout must be an array of layout nodes.",
+                ));
+                continue;
+            };
+            let mut layout_node_ids = HashSet::new();
+            for (node_index, node) in layout.iter().enumerate() {
+                collect_layout_node_authoring_issues(
+                    &format!("{path}.layout[{node_index}]"),
+                    node,
+                    &block_ids,
+                    &block_types,
+                    &mut layout_node_ids,
+                    issues,
+                );
+            }
+        }
+    }
+}
+
 fn collect_layout_node_authoring_issues(
     path: &str,
     node: &Value,
@@ -1934,7 +2053,7 @@ fn collect_layout_node_authoring_issues(
 
     match node_type {
         "markdown" => {
-            collect_unknown_keys(path, node, &["id", "type", "content"], issues);
+            collect_unknown_keys(path, node, &["id", "type", "content", "showWhen"], issues);
             if object.get("content").and_then(Value::as_str).is_none() {
                 issues.push(error(
                     format!("{path}.content"),
@@ -1944,7 +2063,7 @@ fn collect_layout_node_authoring_issues(
             }
         }
         "block" => {
-            collect_unknown_keys(path, node, &["id", "type", "blockId"], issues);
+            collect_unknown_keys(path, node, &["id", "type", "blockId", "showWhen"], issues);
             collect_layout_block_reference_issue(
                 &format!("{path}.blockId"),
                 object.get("blockId"),
@@ -1953,7 +2072,12 @@ fn collect_layout_node_authoring_issues(
             );
         }
         "metric_row" => {
-            collect_unknown_keys(path, node, &["id", "type", "title", "blocks"], issues);
+            collect_unknown_keys(
+                path,
+                node,
+                &["id", "type", "title", "blocks", "showWhen"],
+                issues,
+            );
             let Some(blocks) = object.get("blocks").and_then(Value::as_array) else {
                 issues.push(error(
                     format!("{path}.blocks"),
@@ -1991,7 +2115,7 @@ fn collect_layout_node_authoring_issues(
             collect_unknown_keys(
                 path,
                 node,
-                &["id", "type", "title", "description", "children"],
+                &["id", "type", "title", "description", "children", "showWhen"],
                 issues,
             );
             if let Some(children) = object.get("children") {
@@ -2006,7 +2130,7 @@ fn collect_layout_node_authoring_issues(
             }
         }
         "columns" => {
-            collect_unknown_keys(path, node, &["id", "type", "columns"], issues);
+            collect_unknown_keys(path, node, &["id", "type", "columns", "showWhen"], issues);
             let Some(columns) = object.get("columns").and_then(Value::as_array) else {
                 issues.push(error(
                     format!("{path}.columns"),
@@ -2038,7 +2162,12 @@ fn collect_layout_node_authoring_issues(
             }
         }
         "grid" => {
-            collect_unknown_keys(path, node, &["id", "type", "columns", "items"], issues);
+            collect_unknown_keys(
+                path,
+                node,
+                &["id", "type", "columns", "items", "showWhen"],
+                issues,
+            );
             let Some(items) = object.get("items").and_then(Value::as_array) else {
                 issues.push(error(
                     format!("{path}.items"),
@@ -2150,6 +2279,7 @@ fn collect_report_block_authoring_issues(
         "actions",
         "filters",
         "interactions",
+        "showWhen",
     ];
     for key in block_object.keys() {
         if allowed_block_keys.contains(&key.as_str()) {
@@ -3180,7 +3310,14 @@ fn collect_interaction_issues(path: &str, interaction: &Value, issues: &mut Vec<
                     collect_unknown_keys(
                         &format!("{path}.actions[{index}]"),
                         action,
-                        &["type", "filterId", "valueFrom", "value"],
+                        &[
+                            "type",
+                            "filterId",
+                            "filterIds",
+                            "viewId",
+                            "valueFrom",
+                            "value",
+                        ],
                         issues,
                     );
                 }

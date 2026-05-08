@@ -3,10 +3,18 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import {
   ReportDefinition,
+  ReportInteractionOptions,
   ReportLayoutNode,
   ReportRenderResponse,
+  ReportViewBreadcrumb,
+  ReportViewDefinition,
 } from '../types';
-import { getBlockById } from '../utils';
+import {
+  getActiveReportLayout,
+  getActiveReportView,
+  getBlockById,
+  isVisibleByShowWhen,
+} from '../utils';
 import { ReportBlockHost } from './ReportBlockHost';
 
 type ReportRendererProps = {
@@ -14,8 +22,16 @@ type ReportRendererProps = {
   definition: ReportDefinition;
   renderResponse?: ReportRenderResponse | null;
   filters: Record<string, unknown>;
+  activeViewId?: string | null;
   onFilterChange?: (filterId: string, value: unknown) => void;
-  onFiltersChange?: (updates: Record<string, unknown>) => void;
+  onFiltersChange?: (
+    updates: Record<string, unknown>,
+    options?: ReportInteractionOptions
+  ) => void;
+  onNavigateView?: (
+    viewId: string | null,
+    options?: Omit<ReportInteractionOptions, 'viewId'>
+  ) => void;
   onRefresh?: () => void | Promise<unknown>;
 };
 
@@ -30,11 +46,21 @@ export function ReportRenderer({
   definition,
   renderResponse,
   filters,
+  activeViewId,
   onFilterChange,
   onFiltersChange,
+  onNavigateView,
   onRefresh,
 }: ReportRendererProps) {
-  const hasStructuredLayout = (definition.layout?.length ?? 0) > 0;
+  const activeView = useMemo(
+    () => getActiveReportView(definition, activeViewId),
+    [activeViewId, definition]
+  );
+  const layout = useMemo(
+    () => getActiveReportLayout(definition, activeViewId),
+    [activeViewId, definition]
+  );
+  const hasStructuredLayout = layout.length > 0;
   const segments = useMemo(
     () => splitMarkdown(definition.markdown),
     [definition.markdown]
@@ -42,15 +68,23 @@ export function ReportRenderer({
 
   return (
     <div className="w-full">
+      {activeView && (
+        <ReportViewHeader
+          view={activeView}
+          filters={filters}
+          onNavigateView={onNavigateView}
+        />
+      )}
       {hasStructuredLayout ? (
         <LayoutNodes
-          nodes={definition.layout ?? []}
+          nodes={layout}
           reportId={reportId}
           definition={definition}
           renderResponse={renderResponse}
           filters={filters}
           onFilterChange={onFilterChange}
           onFiltersChange={onFiltersChange}
+          onNavigateView={onNavigateView}
           onRefresh={onRefresh}
         />
       ) : (
@@ -69,6 +103,7 @@ export function ReportRenderer({
               filters={filters}
               onFilterChange={onFilterChange}
               onFiltersChange={onFiltersChange}
+              onNavigateView={onNavigateView}
               onRefresh={onRefresh}
             />
           );
@@ -76,19 +111,22 @@ export function ReportRenderer({
       )}
       {!hasStructuredLayout &&
         segments.length === 0 &&
-        definition.blocks.map((block) => (
-          <Fragment key={block.id}>
-            <ReportBlockHost
-              reportId={reportId}
-              block={block}
-              initialResult={renderResponse?.blocks[block.id]}
-              filters={filters}
-              onFilterChange={onFilterChange}
-              onFiltersChange={onFiltersChange}
-              onReportRefresh={onRefresh}
-            />
-          </Fragment>
-        ))}
+        definition.blocks
+          .filter((block) => isVisibleByShowWhen(block.showWhen, filters))
+          .map((block) => (
+            <Fragment key={block.id}>
+              <ReportBlockHost
+                reportId={reportId}
+                block={block}
+                initialResult={renderResponse?.blocks[block.id]}
+                filters={filters}
+                onFilterChange={onFilterChange}
+                onFiltersChange={onFiltersChange}
+                onNavigateView={onNavigateView}
+                onReportRefresh={onRefresh}
+              />
+            </Fragment>
+          ))}
     </div>
   );
 }
@@ -101,6 +139,7 @@ function LayoutNodes({
   filters,
   onFilterChange,
   onFiltersChange,
+  onNavigateView,
   onRefresh,
 }: {
   nodes: ReportLayoutNode[];
@@ -109,24 +148,34 @@ function LayoutNodes({
   renderResponse?: ReportRenderResponse | null;
   filters: Record<string, unknown>;
   onFilterChange?: (filterId: string, value: unknown) => void;
-  onFiltersChange?: (updates: Record<string, unknown>) => void;
+  onFiltersChange?: (
+    updates: Record<string, unknown>,
+    options?: ReportInteractionOptions
+  ) => void;
+  onNavigateView?: (
+    viewId: string | null,
+    options?: Omit<ReportInteractionOptions, 'viewId'>
+  ) => void;
   onRefresh?: () => void | Promise<unknown>;
 }) {
   return (
     <>
-      {nodes.map((node) => (
-        <LayoutNode
-          key={node.id}
-          node={node}
-          reportId={reportId}
-          definition={definition}
-          renderResponse={renderResponse}
-          filters={filters}
-          onFilterChange={onFilterChange}
-          onFiltersChange={onFiltersChange}
-          onRefresh={onRefresh}
-        />
-      ))}
+      {nodes.map((node) =>
+        isVisibleByShowWhen(node.showWhen, filters) ? (
+          <LayoutNode
+            key={node.id}
+            node={node}
+            reportId={reportId}
+            definition={definition}
+            renderResponse={renderResponse}
+            filters={filters}
+            onFilterChange={onFilterChange}
+            onFiltersChange={onFiltersChange}
+            onNavigateView={onNavigateView}
+            onRefresh={onRefresh}
+          />
+        ) : null
+      )}
     </>
   );
 }
@@ -139,6 +188,7 @@ function LayoutNode({
   filters,
   onFilterChange,
   onFiltersChange,
+  onNavigateView,
   onRefresh,
 }: {
   node: ReportLayoutNode;
@@ -147,7 +197,14 @@ function LayoutNode({
   renderResponse?: ReportRenderResponse | null;
   filters: Record<string, unknown>;
   onFilterChange?: (filterId: string, value: unknown) => void;
-  onFiltersChange?: (updates: Record<string, unknown>) => void;
+  onFiltersChange?: (
+    updates: Record<string, unknown>,
+    options?: ReportInteractionOptions
+  ) => void;
+  onNavigateView?: (
+    viewId: string | null,
+    options?: Omit<ReportInteractionOptions, 'viewId'>
+  ) => void;
   onRefresh?: () => void | Promise<unknown>;
 }) {
   if (node.type === 'markdown') {
@@ -164,6 +221,7 @@ function LayoutNode({
         filters={filters}
         onFilterChange={onFilterChange}
         onFiltersChange={onFiltersChange}
+        onNavigateView={onNavigateView}
         onRefresh={onRefresh}
       />
     );
@@ -188,6 +246,7 @@ function LayoutNode({
               filters={filters}
               onFilterChange={onFilterChange}
               onFiltersChange={onFiltersChange}
+              onNavigateView={onNavigateView}
               onRefresh={onRefresh}
               className="my-0"
             />
@@ -222,6 +281,7 @@ function LayoutNode({
           filters={filters}
           onFilterChange={onFilterChange}
           onFiltersChange={onFiltersChange}
+          onNavigateView={onNavigateView}
           onRefresh={onRefresh}
         />
       </section>
@@ -247,6 +307,7 @@ function LayoutNode({
               filters={filters}
               onFilterChange={onFilterChange}
               onFiltersChange={onFiltersChange}
+              onNavigateView={onNavigateView}
               onRefresh={onRefresh}
             />
           </div>
@@ -297,6 +358,7 @@ function LayoutNode({
                 filters={filters}
                 onFilterChange={onFilterChange}
                 onFiltersChange={onFiltersChange}
+                onNavigateView={onNavigateView}
                 onRefresh={onRefresh}
                 className="my-0"
               />
@@ -327,6 +389,7 @@ function ReportBlockById({
   className,
   onFilterChange,
   onFiltersChange,
+  onNavigateView,
   onRefresh,
 }: {
   blockId: string;
@@ -336,7 +399,14 @@ function ReportBlockById({
   filters: Record<string, unknown>;
   className?: string;
   onFilterChange?: (filterId: string, value: unknown) => void;
-  onFiltersChange?: (updates: Record<string, unknown>) => void;
+  onFiltersChange?: (
+    updates: Record<string, unknown>,
+    options?: ReportInteractionOptions
+  ) => void;
+  onNavigateView?: (
+    viewId: string | null,
+    options?: Omit<ReportInteractionOptions, 'viewId'>
+  ) => void;
   onRefresh?: () => void | Promise<unknown>;
 }) {
   const block = getBlockById(definition, blockId);
@@ -348,6 +418,10 @@ function ReportBlockById({
     );
   }
 
+  if (!isVisibleByShowWhen(block.showWhen, filters)) {
+    return null;
+  }
+
   return (
     <ReportBlockHost
       reportId={reportId}
@@ -357,9 +431,114 @@ function ReportBlockById({
       className={className}
       onFilterChange={onFilterChange}
       onFiltersChange={onFiltersChange}
+      onNavigateView={onNavigateView}
       onReportRefresh={onRefresh}
     />
   );
+}
+
+function ReportViewHeader({
+  view,
+  filters,
+  onNavigateView,
+}: {
+  view: ReportViewDefinition;
+  filters: Record<string, unknown>;
+  onNavigateView?: (
+    viewId: string | null,
+    options?: Omit<ReportInteractionOptions, 'viewId'>
+  ) => void;
+}) {
+  const title = resolveViewTitle(view, filters);
+  const breadcrumbs = view.breadcrumb ?? [];
+  if (!title && breadcrumbs.length === 0) return null;
+
+  return (
+    <div className="report-print-hidden mb-5 flex flex-col gap-2">
+      {breadcrumbs.length > 0 && (
+        <nav
+          aria-label="Report view breadcrumb"
+          className="text-sm text-muted-foreground"
+        >
+          <ol className="flex flex-wrap items-center gap-2">
+            {breadcrumbs.map((breadcrumb, index) => (
+              <Fragment key={`${breadcrumb.label}-${index}`}>
+                <li>
+                  <BreadcrumbButton
+                    breadcrumb={breadcrumb}
+                    onNavigateView={onNavigateView}
+                  />
+                </li>
+                {(index < breadcrumbs.length - 1 || title) && (
+                  <li aria-hidden="true">/</li>
+                )}
+              </Fragment>
+            ))}
+            {title && <li className="font-medium text-foreground">{title}</li>}
+          </ol>
+        </nav>
+      )}
+      {title && (
+        <h1 className="text-xl font-semibold tracking-normal text-foreground">
+          {title}
+        </h1>
+      )}
+    </div>
+  );
+}
+
+function BreadcrumbButton({
+  breadcrumb,
+  onNavigateView,
+}: {
+  breadcrumb: ReportViewBreadcrumb;
+  onNavigateView?: (
+    viewId: string | null,
+    options?: Omit<ReportInteractionOptions, 'viewId'>
+  ) => void;
+}) {
+  if (!breadcrumb.viewId) {
+    return <span>{breadcrumb.label}</span>;
+  }
+
+  return (
+    <button
+      type="button"
+      className="font-medium text-primary underline-offset-4 hover:underline"
+      onClick={() =>
+        onNavigateView?.(breadcrumb.viewId ?? null, {
+          clearFilters: breadcrumb.clearFilters ?? [],
+        })
+      }
+    >
+      {breadcrumb.label}
+    </button>
+  );
+}
+
+function resolveViewTitle(
+  view: ReportViewDefinition,
+  filters: Record<string, unknown>
+): string | null {
+  if (view.titleFrom) {
+    const value = resolveTitlePath(view.titleFrom, filters);
+    if (value !== undefined && value !== null && value !== '') {
+      return String(value);
+    }
+  }
+  return view.title ?? null;
+}
+
+function resolveTitlePath(path: string, filters: Record<string, unknown>) {
+  const normalizedPath = path.startsWith('filters.')
+    ? path.slice('filters.'.length)
+    : path;
+  return normalizedPath.split('.').reduce<unknown>((current, part) => {
+    if (current && typeof current === 'object' && part in current) {
+      return (current as Record<string, unknown>)[part];
+    }
+    return undefined;
+  }, filters);
 }
 
 function splitMarkdown(markdown: string): MarkdownSegment[] {

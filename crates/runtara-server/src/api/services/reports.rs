@@ -909,6 +909,21 @@ impl ReportService {
             validate_filter_option_condition_filter_refs(filter, &report_condition_filter_defs)?;
         }
 
+        let mut view_ids = HashSet::new();
+        for view in &definition.views {
+            if view.id.trim().is_empty() {
+                return Err(ReportServiceError::Validation(
+                    "Report view IDs cannot be empty".to_string(),
+                ));
+            }
+            if !view_ids.insert(view.id.clone()) {
+                return Err(ReportServiceError::Validation(format!(
+                    "Duplicate report view ID '{}'",
+                    view.id
+                )));
+            }
+        }
+
         let mut dataset_ids = HashSet::new();
         for dataset in &definition.datasets {
             if dataset.id.trim().is_empty() {
@@ -939,6 +954,11 @@ impl ReportService {
                     block.id
                 )));
             }
+            validate_show_when_value(
+                block.show_when.as_ref(),
+                &format!("block '{}'", block.id),
+                &filter_ids,
+            )?;
             block_types.insert(block.id.clone(), block.block_type);
             if block.block_type == ReportBlockType::Actions
                 && block.source.kind != ReportSourceKind::WorkflowRuntime
@@ -981,11 +1001,11 @@ impl ReportService {
                     None,
                 )?;
                 validate_dataset_block_output(block, &compiled.source)?;
-                validate_block_interactions(block, &filter_ids)?;
+                validate_block_interactions(block, &filter_ids, &view_ids)?;
                 continue;
             }
             if block.source.kind == ReportSourceKind::WorkflowRuntime {
-                validate_workflow_runtime_block(block, &filter_ids)?;
+                validate_workflow_runtime_block(block, &filter_ids, &view_ids)?;
                 continue;
             }
             if block.source.schema.trim().is_empty() {
@@ -1174,7 +1194,7 @@ impl ReportService {
                 }
             }
 
-            validate_block_interactions(block, &filter_ids)?;
+            validate_block_interactions(block, &filter_ids, &view_ids)?;
         }
 
         let mut layout_node_ids = HashSet::new();
@@ -1184,8 +1204,48 @@ impl ReportService {
                 &format!("$.layout[{index}]"),
                 &block_ids,
                 &block_types,
+                &filter_ids,
                 &mut layout_node_ids,
             )?;
+        }
+
+        for (view_index, view) in definition.views.iter().enumerate() {
+            for (breadcrumb_index, breadcrumb) in view.breadcrumb.iter().enumerate() {
+                if breadcrumb.label.trim().is_empty() {
+                    return Err(ReportServiceError::Validation(format!(
+                        "Report view '{}' breadcrumb {} must include a label",
+                        view.id, breadcrumb_index
+                    )));
+                }
+                if let Some(view_id) = breadcrumb.view_id.as_deref()
+                    && !view_ids.contains(view_id)
+                {
+                    return Err(ReportServiceError::Validation(format!(
+                        "Report view '{}' breadcrumb {} references unknown view '{}'",
+                        view.id, breadcrumb_index, view_id
+                    )));
+                }
+                for filter_id in &breadcrumb.clear_filters {
+                    if !filter_ids.contains(filter_id) {
+                        return Err(ReportServiceError::Validation(format!(
+                            "Report view '{}' breadcrumb {} references unknown filter '{}'",
+                            view.id, breadcrumb_index, filter_id
+                        )));
+                    }
+                }
+            }
+
+            let mut view_layout_node_ids = HashSet::new();
+            for (node_index, node) in view.layout.iter().enumerate() {
+                validate_layout_node(
+                    node,
+                    &format!("$.views[{view_index}].layout[{node_index}]"),
+                    &block_ids,
+                    &block_types,
+                    &filter_ids,
+                    &mut view_layout_node_ids,
+                )?;
+            }
         }
 
         let placeholder_ids = extract_markdown_block_placeholders(&definition.markdown);
@@ -3033,6 +3093,7 @@ fn validate_layout_node(
     path: &str,
     block_ids: &HashSet<String>,
     block_types: &HashMap<String, ReportBlockType>,
+    filter_ids: &HashSet<String>,
     layout_node_ids: &mut HashSet<String>,
 ) -> Result<(), ReportServiceError> {
     let Some(object) = node.as_object() else {
@@ -3057,6 +3118,7 @@ fn validate_layout_node(
             node_id
         )));
     }
+    validate_layout_visibility(object, path, filter_ids)?;
 
     match node_type {
         "markdown" => {
@@ -3118,6 +3180,7 @@ fn validate_layout_node(
                     &format!("{path}.children"),
                     block_ids,
                     block_types,
+                    filter_ids,
                     layout_node_ids,
                 )?;
             }
@@ -3157,6 +3220,7 @@ fn validate_layout_node(
                         &format!("{path}.columns[{column_index}].children"),
                         block_ids,
                         block_types,
+                        filter_ids,
                         layout_node_ids,
                     )?;
                 }
@@ -3223,6 +3287,7 @@ fn validate_layout_node(
 fn validate_block_interactions(
     block: &ReportBlockDefinition,
     filter_ids: &HashSet<String>,
+    view_ids: &HashSet<String>,
 ) -> Result<(), ReportServiceError> {
     let mut interaction_ids = HashSet::new();
     for interaction in &block.interactions {
@@ -3245,25 +3310,66 @@ fn validate_block_interactions(
             )));
         }
         for action in &interaction.actions {
-            if action.action_type == "set_filter" {
-                let Some(filter_id) = action.filter_id.as_deref() else {
-                    return Err(ReportServiceError::Validation(format!(
-                        "Block '{}' interaction '{}' set_filter action must include filterId",
-                        block.id, interaction.id
-                    )));
-                };
-                if !filter_ids.contains(filter_id) {
-                    return Err(ReportServiceError::Validation(format!(
-                        "Block '{}' interaction '{}' references unknown filter '{}'",
-                        block.id, interaction.id, filter_id
-                    )));
+            match action.action_type.as_str() {
+                "set_filter" => {
+                    let Some(filter_id) = action.filter_id.as_deref() else {
+                        return Err(ReportServiceError::Validation(format!(
+                            "Block '{}' interaction '{}' set_filter action must include filterId",
+                            block.id, interaction.id
+                        )));
+                    };
+                    if !filter_ids.contains(filter_id) {
+                        return Err(ReportServiceError::Validation(format!(
+                            "Block '{}' interaction '{}' references unknown filter '{}'",
+                            block.id, interaction.id, filter_id
+                        )));
+                    }
+                    if action.value_from.is_none() && action.value.is_none() {
+                        return Err(ReportServiceError::Validation(format!(
+                            "Block '{}' interaction '{}' set_filter action must include value or valueFrom",
+                            block.id, interaction.id
+                        )));
+                    }
                 }
-                if action.value_from.is_none() && action.value.is_none() {
-                    return Err(ReportServiceError::Validation(format!(
-                        "Block '{}' interaction '{}' set_filter action must include value or valueFrom",
-                        block.id, interaction.id
-                    )));
+                "clear_filter" => {
+                    let Some(filter_id) = action.filter_id.as_deref() else {
+                        return Err(ReportServiceError::Validation(format!(
+                            "Block '{}' interaction '{}' clear_filter action must include filterId",
+                            block.id, interaction.id
+                        )));
+                    };
+                    if !filter_ids.contains(filter_id) {
+                        return Err(ReportServiceError::Validation(format!(
+                            "Block '{}' interaction '{}' references unknown filter '{}'",
+                            block.id, interaction.id, filter_id
+                        )));
+                    }
                 }
+                "clear_filters" => {
+                    for filter_id in &action.filter_ids {
+                        if !filter_ids.contains(filter_id) {
+                            return Err(ReportServiceError::Validation(format!(
+                                "Block '{}' interaction '{}' references unknown filter '{}'",
+                                block.id, interaction.id, filter_id
+                            )));
+                        }
+                    }
+                }
+                "navigate_view" => {
+                    let Some(view_id) = action.view_id.as_deref() else {
+                        return Err(ReportServiceError::Validation(format!(
+                            "Block '{}' interaction '{}' navigate_view action must include viewId",
+                            block.id, interaction.id
+                        )));
+                    };
+                    if !view_ids.contains(view_id) {
+                        return Err(ReportServiceError::Validation(format!(
+                            "Block '{}' interaction '{}' references unknown view '{}'",
+                            block.id, interaction.id, view_id
+                        )));
+                    }
+                }
+                _ => {}
             }
         }
     }
@@ -3274,6 +3380,7 @@ fn validate_block_interactions(
 fn validate_workflow_runtime_block(
     block: &ReportBlockDefinition,
     filter_ids: &HashSet<String>,
+    view_ids: &HashSet<String>,
 ) -> Result<(), ReportServiceError> {
     let entity = workflow_runtime_entity(block)?;
     workflow_runtime_workflow_id(block)?;
@@ -3356,7 +3463,54 @@ fn validate_workflow_runtime_block(
             )));
         }
     }
-    validate_block_interactions(block, filter_ids)
+    validate_block_interactions(block, filter_ids, view_ids)
+}
+
+fn validate_layout_visibility(
+    object: &serde_json::Map<String, Value>,
+    path: &str,
+    filter_ids: &HashSet<String>,
+) -> Result<(), ReportServiceError> {
+    validate_show_when_value(
+        object.get("showWhen"),
+        &format!("layout node at {path}"),
+        filter_ids,
+    )
+}
+
+fn validate_show_when_value(
+    show_when: Option<&Value>,
+    context: &str,
+    filter_ids: &HashSet<String>,
+) -> Result<(), ReportServiceError> {
+    let Some(show_when) = show_when else {
+        return Ok(());
+    };
+    let Some(show_when) = show_when.as_object() else {
+        return Err(ReportServiceError::Validation(format!(
+            "Report {context} showWhen must be an object"
+        )));
+    };
+    let filter_id = show_when
+        .get("filter")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            ReportServiceError::Validation(format!("Report {context} showWhen must include filter"))
+        })?;
+    if !filter_ids.contains(filter_id) {
+        return Err(ReportServiceError::Validation(format!(
+            "Report {context} showWhen references unknown filter '{}'",
+            filter_id
+        )));
+    }
+    if let Some(exists) = show_when.get("exists")
+        && !exists.is_boolean()
+    {
+        return Err(ReportServiceError::Validation(format!(
+            "Report {context} showWhen.exists must be boolean"
+        )));
+    }
+    Ok(())
 }
 
 fn workflow_runtime_fields(entity: ReportWorkflowRuntimeEntity) -> HashSet<&'static str> {
@@ -3406,6 +3560,7 @@ fn validate_layout_children(
     path: &str,
     block_ids: &HashSet<String>,
     block_types: &HashMap<String, ReportBlockType>,
+    filter_ids: &HashSet<String>,
     layout_node_ids: &mut HashSet<String>,
 ) -> Result<(), ReportServiceError> {
     let Some(children) = children.as_array() else {
@@ -3419,6 +3574,7 @@ fn validate_layout_children(
             &format!("{path}[{index}]"),
             block_ids,
             block_types,
+            filter_ids,
             layout_node_ids,
         )?;
     }
@@ -5925,6 +6081,7 @@ mod tests {
             actions: None,
             filters: vec![],
             interactions: vec![],
+            show_when: None,
         }
     }
 
@@ -6311,6 +6468,7 @@ mod tests {
             definition_version: 1,
             markdown: String::new(),
             layout: vec![],
+            views: vec![],
             filters: vec![ReportFilterDefinition {
                 id: "vendor".to_string(),
                 label: "Vendor".to_string(),
@@ -6364,6 +6522,7 @@ mod tests {
                 definition_version: 1,
                 markdown: String::new(),
                 layout: vec![],
+                views: vec![],
                 filters: vec![],
                 datasets: vec![dataset.clone()],
                 blocks: vec![],
@@ -6408,6 +6567,7 @@ mod tests {
             definition_version: 1,
             markdown: String::new(),
             layout: vec![],
+            views: vec![],
             filters: vec![],
             datasets: vec![dataset],
             blocks: vec![block.clone()],
@@ -6520,6 +6680,7 @@ mod tests {
             .iter()
             .map(|block| (block.id.clone(), block.block_type))
             .collect::<HashMap<_, _>>();
+        let filter_ids = HashSet::new();
         let mut layout_node_ids = HashSet::new();
 
         validate_layout_node(
@@ -6535,6 +6696,7 @@ mod tests {
             "$.layout[0]",
             &block_ids,
             &block_types,
+            &filter_ids,
             &mut layout_node_ids,
         )
         .unwrap();
@@ -6545,6 +6707,7 @@ mod tests {
         let block = test_metric_block("snapshots");
         let block_ids = HashSet::from([block.id.clone()]);
         let block_types = HashMap::from([(block.id.clone(), block.block_type)]);
+        let filter_ids = HashSet::new();
         let mut layout_node_ids = HashSet::new();
 
         let error = validate_layout_node(
@@ -6556,11 +6719,73 @@ mod tests {
             "$.layout[0]",
             &block_ids,
             &block_types,
+            &filter_ids,
             &mut layout_node_ids,
         )
         .unwrap_err();
 
         assert!(error.to_string().contains("unknown block 'not_here'"));
+    }
+
+    #[test]
+    fn layout_validation_accepts_show_when_filter_refs() {
+        let block = test_block("case_summary");
+        let block_ids = HashSet::from([block.id.clone()]);
+        let block_types = HashMap::from([(block.id.clone(), block.block_type)]);
+        let filter_ids = HashSet::from(["case_id".to_string()]);
+        let mut layout_node_ids = HashSet::new();
+
+        validate_layout_node(
+            &json!({
+                "id": "case_summary_node",
+                "type": "block",
+                "blockId": "case_summary",
+                "showWhen": {"filter": "case_id", "exists": true}
+            }),
+            "$.layout[0]",
+            &block_ids,
+            &block_types,
+            &filter_ids,
+            &mut layout_node_ids,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn block_interactions_accept_filter_and_view_navigation_actions() {
+        let mut block = test_block("cases");
+        block.interactions = vec![ReportInteractionDefinition {
+            id: "open_case".to_string(),
+            trigger: ReportInteractionTrigger {
+                event: "row_click".to_string(),
+                field: None,
+            },
+            actions: vec![
+                ReportInteractionAction {
+                    action_type: "set_filter".to_string(),
+                    filter_id: Some("case_id".to_string()),
+                    filter_ids: vec![],
+                    view_id: None,
+                    value_from: Some("datum.case_id".to_string()),
+                    value: None,
+                },
+                ReportInteractionAction {
+                    action_type: "navigate_view".to_string(),
+                    filter_id: None,
+                    filter_ids: vec![],
+                    view_id: Some("detail".to_string()),
+                    value_from: None,
+                    value: None,
+                },
+            ],
+        }];
+
+        validate_block_interactions(
+            &block,
+            &HashSet::from(["case_id".to_string()]),
+            &HashSet::from(["detail".to_string()]),
+        )
+        .unwrap();
     }
 
     #[test]

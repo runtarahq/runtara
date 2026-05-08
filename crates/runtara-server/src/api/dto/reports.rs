@@ -89,12 +89,40 @@ pub struct ReportDefinition {
     pub markdown: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub layout: Vec<Value>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub views: Vec<ReportViewDefinition>,
     #[serde(default)]
     pub filters: Vec<ReportFilterDefinition>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub datasets: Vec<ReportDatasetDefinition>,
     #[serde(default)]
     pub blocks: Vec<ReportBlockDefinition>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct ReportViewDefinition {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, rename = "titleFrom", skip_serializing_if = "Option::is_none")]
+    pub title_from: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub breadcrumb: Vec<ReportViewBreadcrumb>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub layout: Vec<Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct ReportViewBreadcrumb {
+    pub label: String,
+    #[serde(default, rename = "viewId", skip_serializing_if = "Option::is_none")]
+    pub view_id: Option<String>,
+    #[serde(
+        default,
+        rename = "clearFilters",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub clear_filters: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -266,6 +294,8 @@ pub struct ReportBlockDefinition {
     pub filters: Vec<ReportFilterDefinition>,
     #[serde(default)]
     pub interactions: Vec<ReportInteractionDefinition>,
+    #[serde(default, rename = "showWhen", skip_serializing_if = "Option::is_none")]
+    pub show_when: Option<Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -642,6 +672,10 @@ pub struct ReportInteractionAction {
     pub action_type: String,
     #[serde(default, rename = "filterId", skip_serializing_if = "Option::is_none")]
     pub filter_id: Option<String>,
+    #[serde(default, rename = "filterIds", skip_serializing_if = "Vec::is_empty")]
+    pub filter_ids: Vec<String>,
+    #[serde(default, rename = "viewId", skip_serializing_if = "Option::is_none")]
+    pub view_id: Option<String>,
     #[serde(default, rename = "valueFrom", skip_serializing_if = "Option::is_none")]
     pub value_from: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

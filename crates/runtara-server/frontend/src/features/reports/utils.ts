@@ -3,6 +3,8 @@ import {
   ReportDefinition,
   ReportFilterDefinition,
   ReportLayoutNode,
+  ReportViewDefinition,
+  ReportVisibilityCondition,
 } from './types';
 
 export const TIME_RANGE_PRESETS = [
@@ -123,8 +125,54 @@ function collectLayoutBlockReferences(node: ReportLayoutNode, ids: string[]) {
   }
 }
 
-export function getEagerBlocks(definition: ReportDefinition) {
-  return definition.blocks.filter((block) => !block.lazy);
+export function getActiveReportView(
+  definition: ReportDefinition,
+  viewId?: string | null
+): ReportViewDefinition | undefined {
+  const views = definition.views ?? [];
+  if (views.length === 0) return undefined;
+  if (viewId) {
+    const selected = views.find((view) => view.id === viewId);
+    if (selected) return selected;
+  }
+  return views.find((view) => view.id === 'list') ?? views[0];
+}
+
+export function getActiveReportLayout(
+  definition: ReportDefinition,
+  viewId?: string | null
+): ReportLayoutNode[] {
+  return (
+    getActiveReportView(definition, viewId)?.layout ?? definition.layout ?? []
+  );
+}
+
+export function getDefaultReportViewId(
+  definition: ReportDefinition
+): string | null {
+  return getActiveReportView(definition)?.id ?? null;
+}
+
+export function getEagerBlocks(
+  definition: ReportDefinition,
+  filters: Record<string, unknown> = {},
+  viewId?: string | null
+) {
+  const layout = getActiveReportLayout(definition, viewId);
+  const visibleBlockIds = new Set(
+    layout.length > 0
+      ? extractVisibleLayoutBlockReferences(layout, filters)
+      : definition.blocks
+          .filter((block) => isVisibleByShowWhen(block.showWhen, filters))
+          .map((block) => block.id)
+  );
+
+  return definition.blocks.filter((block) => {
+    if (block.lazy || !isVisibleByShowWhen(block.showWhen, filters)) {
+      return false;
+    }
+    return layout.length === 0 || visibleBlockIds.has(block.id);
+  });
 }
 
 export function getBlockById(
@@ -132,6 +180,84 @@ export function getBlockById(
   blockId: string
 ): ReportBlockDefinition | undefined {
   return definition.blocks.find((block) => block.id === blockId);
+}
+
+export function isVisibleByShowWhen(
+  showWhen: ReportVisibilityCondition | undefined,
+  filters: Record<string, unknown>
+): boolean {
+  if (!showWhen) return true;
+
+  const value = filters[showWhen.filter];
+  const hasValue = !isEmptyVisibilityValue(value);
+
+  if (showWhen.exists !== undefined && hasValue !== showWhen.exists) {
+    return false;
+  }
+  if (
+    showWhen.equals !== undefined &&
+    JSON.stringify(value) !== JSON.stringify(showWhen.equals)
+  ) {
+    return false;
+  }
+  if (
+    showWhen.notEquals !== undefined &&
+    JSON.stringify(value) === JSON.stringify(showWhen.notEquals)
+  ) {
+    return false;
+  }
+  return true;
+}
+
+function extractVisibleLayoutBlockReferences(
+  layout: ReportLayoutNode[],
+  filters: Record<string, unknown>
+) {
+  const ids: string[] = [];
+  for (const node of layout) {
+    collectVisibleLayoutBlockReferences(node, filters, ids);
+  }
+  return ids;
+}
+
+function collectVisibleLayoutBlockReferences(
+  node: ReportLayoutNode,
+  filters: Record<string, unknown>,
+  ids: string[]
+) {
+  if (!isVisibleByShowWhen(node.showWhen, filters)) return;
+  if (node.type === 'block') {
+    ids.push(node.blockId);
+    return;
+  }
+  if (node.type === 'metric_row') {
+    ids.push(...node.blocks);
+    return;
+  }
+  if (node.type === 'section') {
+    for (const child of node.children ?? []) {
+      collectVisibleLayoutBlockReferences(child, filters, ids);
+    }
+    return;
+  }
+  if (node.type === 'columns') {
+    for (const column of node.columns) {
+      for (const child of column.children ?? []) {
+        collectVisibleLayoutBlockReferences(child, filters, ids);
+      }
+    }
+    return;
+  }
+  if (node.type === 'grid') {
+    ids.push(...node.items.map((item) => item.blockId));
+  }
+}
+
+function isEmptyVisibilityValue(value: unknown): boolean {
+  if (value === null || value === undefined) return true;
+  if (typeof value === 'string') return value.trim().length === 0;
+  if (Array.isArray(value)) return value.length === 0;
+  return false;
 }
 
 export function formatCellValue(value: unknown, format?: string): string {

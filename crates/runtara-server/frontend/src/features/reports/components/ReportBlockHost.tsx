@@ -5,6 +5,7 @@ import { Button } from '@/shared/components/ui/button';
 import {
   ReportBlockDefinition,
   ReportBlockResult,
+  ReportInteractionOptions,
   ReportOrderBy,
 } from '../types';
 import { useReportBlockData } from '../hooks/useReports';
@@ -23,7 +24,14 @@ type ReportBlockHostProps = {
   filters: Record<string, unknown>;
   className?: string;
   onFilterChange?: (filterId: string, value: unknown) => void;
-  onFiltersChange?: (updates: Record<string, unknown>) => void;
+  onFiltersChange?: (
+    updates: Record<string, unknown>,
+    options?: ReportInteractionOptions
+  ) => void;
+  onNavigateView?: (
+    viewId: string | null,
+    options?: Omit<ReportInteractionOptions, 'viewId'>
+  ) => void;
   onReportRefresh?: () => void | Promise<unknown>;
 };
 
@@ -35,6 +43,7 @@ export function ReportBlockHost({
   className = 'my-5',
   onFilterChange,
   onFiltersChange,
+  onNavigateView,
   onReportRefresh,
 }: ReportBlockHostProps) {
   const rootRef = useRef<HTMLDivElement | null>(null);
@@ -167,6 +176,8 @@ export function ReportBlockHost({
   ): boolean => {
     let handled = false;
     const updates: Record<string, unknown> = {};
+    const clearFilters = new Set<string>();
+    let nextViewId: string | null | undefined;
     for (const interaction of block.interactions ?? []) {
       if (interaction.trigger.event !== event) continue;
       const triggerField = interaction.trigger.field;
@@ -178,23 +189,55 @@ export function ReportBlockHost({
         }
       }
       for (const action of interaction.actions) {
-        if (action.type !== 'set_filter' || !action.filterId) continue;
-        const value =
-          action.valueFrom !== undefined
-            ? resolveInteractionValue(action.valueFrom, datum)
-            : action.value;
-        if (value !== undefined) {
-          updates[action.filterId] = value;
+        if (action.type === 'set_filter' && action.filterId) {
+          const value =
+            action.valueFrom !== undefined
+              ? resolveInteractionValue(action.valueFrom, datum)
+              : action.value;
+          if (value !== undefined) {
+            updates[action.filterId] = value;
+            handled = true;
+          }
+          continue;
+        }
+
+        if (action.type === 'clear_filter' && action.filterId) {
+          clearFilters.add(action.filterId);
+          handled = true;
+          continue;
+        }
+
+        if (action.type === 'clear_filters') {
+          for (const filterId of action.filterIds ?? []) {
+            clearFilters.add(filterId);
+          }
+          handled = true;
+          continue;
+        }
+
+        if (action.type === 'navigate_view' && action.viewId) {
+          nextViewId = action.viewId;
           handled = true;
         }
       }
     }
     if (handled) {
+      const options: ReportInteractionOptions = {
+        clearFilters: Array.from(clearFilters),
+        viewId: nextViewId,
+        replace: nextViewId ? false : undefined,
+      };
       if (onFiltersChange) {
-        onFiltersChange(updates);
+        onFiltersChange(updates, options);
       } else {
         for (const [filterId, value] of Object.entries(updates)) {
           onFilterChange?.(filterId, value);
+        }
+        if (nextViewId) {
+          onNavigateView?.(nextViewId, {
+            clearFilters: Array.from(clearFilters),
+            replace: false,
+          });
         }
       }
     }
@@ -452,7 +495,9 @@ function resolveInteractionValue(
   source: string,
   datum: Record<string, unknown>
 ): unknown {
-  const path = source.startsWith('datum.') ? source.slice('datum.'.length) : source;
+  const path = source.startsWith('datum.')
+    ? source.slice('datum.'.length)
+    : source;
   return path.split('.').reduce<unknown>((current, part) => {
     if (current && typeof current === 'object' && part in current) {
       return (current as Record<string, unknown>)[part];
