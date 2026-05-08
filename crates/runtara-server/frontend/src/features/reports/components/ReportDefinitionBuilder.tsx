@@ -325,7 +325,10 @@ export function ReportDefinitionBuilder({
             <Label className="text-xs text-muted-foreground">
               Schema for new raw blocks
             </Label>
-            <Select value={selectedSchema} onValueChange={onSelectedSchemaChange}>
+            <Select
+              value={selectedSchema}
+              onValueChange={onSelectedSchemaChange}
+            >
               <SelectTrigger className="h-9">
                 <SelectValue placeholder="Choose Object Model schema" />
               </SelectTrigger>
@@ -674,9 +677,7 @@ function ReportBlockEditor({
     ? datasets.find((candidate) => candidate.id === block.dataset?.id)
     : undefined;
   const schemaName = source.schema || dataset?.source.schema || '';
-  const schema = schemas.find(
-    (candidate) => candidate.name === schemaName
-  );
+  const schema = schemas.find((candidate) => candidate.name === schemaName);
   const fields = getSchemaFields(schema);
   const isDatasetBlock = Boolean(block.dataset);
   const isWorkflowRuntimeBlock = source.kind === 'workflow_runtime';
@@ -690,7 +691,9 @@ function ReportBlockEditor({
   };
 
   const updateDataset = (datasetId: string) => {
-    const nextDataset = datasets.find((candidate) => candidate.id === datasetId);
+    const nextDataset = datasets.find(
+      (candidate) => candidate.id === datasetId
+    );
     if (!nextDataset) return;
     onChange(
       reconcileDatasetBlock(
@@ -719,9 +722,9 @@ function ReportBlockEditor({
               <Badge variant="secondary">{blockMeta.label}</Badge>
               <Badge variant="outline">
                 {isDatasetBlock
-                  ? dataset?.label ?? block.dataset?.id ?? 'Dataset'
+                  ? (dataset?.label ?? block.dataset?.id ?? 'Dataset')
                   : isWorkflowRuntimeBlock
-                    ? source.entity ?? 'Workflow runtime'
+                    ? (source.entity ?? 'Workflow runtime')
                     : source.schema || 'No schema'}
               </Badge>
               {isDatasetBlock && schemaName && (
@@ -985,80 +988,80 @@ function DatasetBlockSettings({
   return (
     <div className="flex flex-col gap-4">
       <div className="grid gap-3 md:grid-cols-2">
-      <Field label="Dataset ID">
-        <Input value={query.id} readOnly className="bg-muted/40" />
-      </Field>
-      <Field label="Source schema">
-        <Input
-          value={dataset.source.schema}
-          readOnly
-          className="bg-muted/40"
-        />
-      </Field>
-      <Field label="Sort">
-        <Select
-          value={sort?.field ?? NONE_VALUE}
-          onValueChange={(field) =>
-            updateQuery({
-              ...query,
-              orderBy:
-                field === NONE_VALUE
-                  ? []
-                  : [
-                      {
-                        field,
-                        direction: sort?.direction ?? 'desc',
-                      },
-                    ],
-            })
-          }
-        >
-          <SelectTrigger>
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value={NONE_VALUE}>No explicit sort</SelectItem>
-            {outputFields.map((field) => (
-              <SelectItem key={field} value={field}>
-                {datasetFieldLabel(dataset, field)}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
-      </Field>
-      <Field label="Sort direction">
-        <Select
-          value={sort?.direction ?? 'desc'}
-          disabled={!sort}
-          onValueChange={(direction) =>
-            updateQuery({
-              ...query,
-              orderBy: sort ? [{ ...sort, direction }] : [],
-            })
-          }
-        >
-          <SelectTrigger>
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value="desc">Descending</SelectItem>
-            <SelectItem value="asc">Ascending</SelectItem>
-          </SelectContent>
-        </Select>
-      </Field>
-      <Field label="Limit">
-        <Input
-          type="number"
-          min={1}
-          value={String(query.limit ?? 100)}
-          onChange={(event) =>
-            updateQuery({
-              ...query,
-              limit: Math.max(1, Number(event.target.value) || 100),
-            })
-          }
-        />
-      </Field>
+        <Field label="Dataset ID">
+          <Input value={query.id} readOnly className="bg-muted/40" />
+        </Field>
+        <Field label="Source schema">
+          <Input
+            value={dataset.source.schema}
+            readOnly
+            className="bg-muted/40"
+          />
+        </Field>
+        <Field label="Sort">
+          <Select
+            value={sort?.field ?? NONE_VALUE}
+            onValueChange={(field) =>
+              updateQuery({
+                ...query,
+                orderBy:
+                  field === NONE_VALUE
+                    ? []
+                    : [
+                        {
+                          field,
+                          direction: sort?.direction ?? 'desc',
+                        },
+                      ],
+              })
+            }
+          >
+            <SelectTrigger>
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value={NONE_VALUE}>No explicit sort</SelectItem>
+              {outputFields.map((field) => (
+                <SelectItem key={field} value={field}>
+                  {datasetFieldLabel(dataset, field)}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </Field>
+        <Field label="Sort direction">
+          <Select
+            value={sort?.direction ?? 'desc'}
+            disabled={!sort}
+            onValueChange={(direction) =>
+              updateQuery({
+                ...query,
+                orderBy: sort ? [{ ...sort, direction }] : [],
+              })
+            }
+          >
+            <SelectTrigger>
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="desc">Descending</SelectItem>
+              <SelectItem value="asc">Ascending</SelectItem>
+            </SelectContent>
+          </Select>
+        </Field>
+        <Field label="Limit">
+          <Input
+            type="number"
+            min={1}
+            value={String(query.limit ?? 100)}
+            onChange={(event) =>
+              updateQuery({
+                ...query,
+                limit: Math.max(1, Number(event.target.value) || 100),
+              })
+            }
+          />
+        </Field>
       </div>
 
       <div className="grid gap-4 xl:grid-cols-2">

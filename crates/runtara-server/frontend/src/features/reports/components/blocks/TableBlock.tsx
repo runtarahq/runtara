@@ -433,7 +433,9 @@ function getInlineChartSeries(column: TableColumn, columns: string[]) {
     return configuredSeries;
   }
 
-  const fallbackField = columns.find((candidate) => candidate !== column.chart?.x);
+  const fallbackField = columns.find(
+    (candidate) => candidate !== column.chart?.x
+  );
   return fallbackField ? [{ field: fallbackField, label: fallbackField }] : [];
 }
 

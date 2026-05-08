@@ -145,7 +145,9 @@ function FilterControl({
           }}
         >
           <SelectTrigger className="h-9">
-            <SelectValue placeholder={isLoadingOptions ? 'Loading...' : 'Any'} />
+            <SelectValue
+              placeholder={isLoadingOptions ? 'Loading...' : 'Any'}
+            />
           </SelectTrigger>
           <SelectContent>
             {options.map((option) => (
@@ -237,8 +239,10 @@ function isFilterDefault(
   filter: ReportFilterDefinition,
   value: unknown
 ): boolean {
-  return JSON.stringify(value ?? getFilterDefaultValue(filter)) ===
-    JSON.stringify(getFilterDefaultValue(filter));
+  return (
+    JSON.stringify(value ?? getFilterDefaultValue(filter)) ===
+    JSON.stringify(getFilterDefaultValue(filter))
+  );
 }
 
 function formatFilterChipValue(value: unknown): string {

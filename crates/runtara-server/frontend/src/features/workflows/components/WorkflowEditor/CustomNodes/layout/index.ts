@@ -25,7 +25,6 @@ export { orderRanks, type OrderedRanks } from './order';
 export { layoutScope } from './place';
 export { routeOrthogonalEdges, type OrthogonalRoute } from './edges';
 export {
-  getCaseEdgeLabel,
   hasVisiblePortLabel,
   isSwitchCaseHandle,
   shouldHideDuplicateEdgeLabel,

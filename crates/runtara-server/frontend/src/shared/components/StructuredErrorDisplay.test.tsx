@@ -1,10 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/react';
 import { StructuredErrorDisplay } from './StructuredErrorDisplay';
-import {
-  ErrorCategory,
-  ErrorSeverity,
-} from '@/generated/RuntaraRuntimeApi';
+import { ErrorCategory, ErrorSeverity } from '@/generated/RuntaraRuntimeApi';
 
 describe('StructuredErrorDisplay', () => {
   describe('with structured errors', () => {

@@ -68,8 +68,13 @@ export function reconcileDatasetBlock(
       dataset: nextQuery,
       table: {
         ...block.table,
-        columns: outputFields.map((field) => datasetTableColumn(dataset, field)),
-        defaultSort: sanitizeOrderBy(block.table?.defaultSort, new Set(outputFields)),
+        columns: outputFields.map((field) =>
+          datasetTableColumn(dataset, field)
+        ),
+        defaultSort: sanitizeOrderBy(
+          block.table?.defaultSort,
+          new Set(outputFields)
+        ),
         pagination: block.table?.pagination ?? {
           defaultPageSize: 50,
           allowedPageSizes: DEFAULT_TABLE_PAGE_SIZES,
@@ -79,10 +84,9 @@ export function reconcileDatasetBlock(
   }
 
   if (block.type === 'chart') {
-    const x =
-      outputFields.includes(block.chart?.x ?? '')
-        ? block.chart?.x ?? ''
-        : nextQuery.dimensions?.[0] ?? outputFields[0] ?? '';
+    const x = outputFields.includes(block.chart?.x ?? '')
+      ? (block.chart?.x ?? '')
+      : (nextQuery.dimensions?.[0] ?? outputFields[0] ?? '');
     return {
       ...block,
       source,
@@ -100,7 +104,10 @@ export function reconcileDatasetBlock(
 
   if (block.type === 'metric') {
     const valueField =
-      nextQuery.measures?.[0] ?? nextQuery.dimensions?.[0] ?? outputFields[0] ?? '';
+      nextQuery.measures?.[0] ??
+      nextQuery.dimensions?.[0] ??
+      outputFields[0] ??
+      '';
     return {
       ...block,
       source,

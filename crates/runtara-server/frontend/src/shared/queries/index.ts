@@ -52,11 +52,7 @@ const maintenanceInterceptor = (error: any) => {
 // error — propagate it to the caller instead of triggering a redirect loop.
 let isRedirectingToLogin = false;
 const unauthorizedInterceptor = (error: any) => {
-  if (
-    isOidcAuth &&
-    error?.response?.status === 401 &&
-    !isRedirectingToLogin
-  ) {
+  if (isOidcAuth && error?.response?.status === 401 && !isRedirectingToLogin) {
     isRedirectingToLogin = true;
     useAuthStore.getState().clearOrgId();
     useAuthStore.getState().clearUserGroups();

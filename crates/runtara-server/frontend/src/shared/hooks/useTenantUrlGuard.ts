@@ -1,9 +1,6 @@
 import { useEffect } from 'react';
 import { useAuth } from 'react-oidc-context';
-import {
-  mountReturnPath,
-  tenantIdFromUrl,
-} from '@/shared/config/oidcConfig';
+import { mountReturnPath, tenantIdFromUrl } from '@/shared/config/oidcConfig';
 import { isOidcAuth } from '@/shared/config/runtimeConfig';
 
 /**

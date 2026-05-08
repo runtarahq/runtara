@@ -40,7 +40,9 @@ export function ActionForm({
   };
 
   const isValid = schemaFields
-    .filter((field) => field.required !== false && isFieldVisible(field, formValues))
+    .filter(
+      (field) => field.required !== false && isFieldVisible(field, formValues)
+    )
     .every((field) => {
       const value = formValues[field.name];
       if (field.type === 'boolean') return true;

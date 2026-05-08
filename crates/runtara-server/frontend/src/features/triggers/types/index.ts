@@ -1,8 +1,5 @@
 // Triggers types - uses generated API types with UI enrichment
-import {
-  InvocationTrigger,
-  TriggerType,
-} from '@/generated/RuntaraRuntimeApi';
+import { InvocationTrigger, TriggerType } from '@/generated/RuntaraRuntimeApi';
 
 // Re-export generated types for convenience
 export type { InvocationTrigger, TriggerType };

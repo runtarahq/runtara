@@ -1,8 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import {
-  ErrorCategory,
-  ErrorSeverity,
-} from '@/generated/RuntaraRuntimeApi';
+import { ErrorCategory, ErrorSeverity } from '@/generated/RuntaraRuntimeApi';
 import type { StructuredError } from '@/shared/types/structured-error';
 import {
   parseStructuredError,

@@ -1,6 +1,9 @@
 import { config } from '@/shared/config/runtimeConfig';
 
-type PlausibleFn = ((event: string, options?: { props?: Record<string, unknown> }) => void) & {
+type PlausibleFn = ((
+  event: string,
+  options?: { props?: Record<string, unknown> }
+) => void) & {
   q?: unknown[];
 };
 
@@ -38,7 +41,10 @@ export function initAnalytics(): void {
 
   const wrap = (name: 'pushState' | 'replaceState') => {
     const original = history[name];
-    history[name] = function (this: History, ...args: Parameters<History[typeof name]>) {
+    history[name] = function (
+      this: History,
+      ...args: Parameters<History[typeof name]>
+    ) {
       const result = original.apply(this, args);
       firePageview();
       return result;

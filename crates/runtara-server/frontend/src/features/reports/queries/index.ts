@@ -172,22 +172,6 @@ export async function queryReportDataset(
   return result.data;
 }
 
-export async function submitWorkflowAction(
-  token: string,
-  request: {
-    workflowId: string;
-    instanceId: string;
-    actionId: string;
-    payload: Record<string, unknown>;
-  }
-): Promise<void> {
-  await RuntimeREST.instance.post(
-    `/api/runtime/workflows/${encodeURIComponent(request.workflowId)}/instances/${encodeURIComponent(request.instanceId)}/actions/${encodeURIComponent(request.actionId)}/submit`,
-    { payload: request.payload },
-    createAuthHeaders(token)
-  );
-}
-
 export async function submitReportWorkflowAction(
   token: string,
   request: {
