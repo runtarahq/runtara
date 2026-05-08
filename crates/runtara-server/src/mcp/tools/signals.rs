@@ -3,7 +3,9 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 
 use super::super::server::SmoMcpServer;
-use super::internal_api::{api_get, api_post, validate_path_param};
+use super::internal_api::{
+    api_get, api_post, encode_path_param, validate_identifier_param, validate_path_param,
+};
 
 fn json_result(value: serde_json::Value) -> Result<CallToolResult, rmcp::ErrorData> {
     Ok(CallToolResult::success(vec![Content::text(
@@ -48,6 +50,41 @@ pub struct SubmitSignalResponseParams {
     pub payload: serde_json::Value,
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SubmitActionResponseParams {
+    #[schemars(
+        description = "Action ID from a workflow_runtime action row. Canonical IDs may contain '/', '::', and step suffixes."
+    )]
+    pub action_id: String,
+    #[schemars(
+        description = "Response payload as JSON. Validated against the action input schema."
+    )]
+    pub payload: serde_json::Value,
+    #[schemars(
+        description = "Workflow ID for direct workflow action submission. Provide with instance_id, or omit when using report_id + block_id."
+    )]
+    pub workflow_id: Option<String>,
+    #[schemars(
+        description = "Execution instance UUID for direct workflow action submission. Provide with workflow_id, or omit when using report_id + block_id."
+    )]
+    pub instance_id: Option<String>,
+    #[schemars(
+        description = "Report id or slug for report-scoped action submission. Provide with block_id to re-fetch the filtered action row and apply report implicitPayload."
+    )]
+    pub report_id: Option<String>,
+    #[schemars(
+        description = "Report actions block id for report-scoped action submission. Provide with report_id."
+    )]
+    pub block_id: Option<String>,
+    #[schemars(
+        description = "Global report filter values keyed by filter id. Report context only."
+    )]
+    pub filters: Option<serde_json::Value>,
+    #[schemars(description = "Per-block filter values keyed by filter id. Report context only.")]
+    pub block_filters: Option<serde_json::Value>,
+}
+
 // ===== Tool Implementations =====
 
 /// List pending signals (WaitForSignal / human-in-the-loop requests) for a running execution.
@@ -75,7 +112,7 @@ pub async fn get_signal_schema(
 ) -> Result<CallToolResult, rmcp::ErrorData> {
     validate_path_param("workflow_id", &params.workflow_id)?;
     validate_path_param("instance_id", &params.instance_id)?;
-    validate_path_param("signal_id", &params.signal_id)?;
+    validate_identifier_param("signal_id", &params.signal_id)?;
     let result = api_get(
         server,
         &format!(
@@ -119,7 +156,7 @@ pub async fn submit_signal_response(
     params: SubmitSignalResponseParams,
 ) -> Result<CallToolResult, rmcp::ErrorData> {
     validate_path_param("instance_id", &params.instance_id)?;
-    validate_path_param("signal_id", &params.signal_id)?;
+    validate_identifier_param("signal_id", &params.signal_id)?;
     let body = serde_json::json!({
         "signalId": params.signal_id,
         "payload": params.payload,
@@ -131,4 +168,70 @@ pub async fn submit_signal_response(
     )
     .await?;
     json_result(result)
+}
+
+/// Submit a response to an open workflow action.
+pub async fn submit_action_response(
+    server: &SmoMcpServer,
+    params: SubmitActionResponseParams,
+) -> Result<CallToolResult, rmcp::ErrorData> {
+    validate_identifier_param("action_id", &params.action_id)?;
+
+    match (
+        params.workflow_id,
+        params.instance_id,
+        params.report_id,
+        params.block_id,
+    ) {
+        (Some(workflow_id), Some(instance_id), None, None) => {
+            validate_path_param("workflow_id", &workflow_id)?;
+            validate_path_param("instance_id", &instance_id)?;
+            if params.filters.is_some() || params.block_filters.is_some() {
+                return Err(rmcp::ErrorData::invalid_params(
+                    "filters and block_filters are only supported with report_id + block_id.",
+                    None,
+                ));
+            }
+
+            let result = api_post(
+                server,
+                &format!(
+                    "/api/runtime/workflows/{}/instances/{}/actions/{}/submit",
+                    workflow_id,
+                    instance_id,
+                    encode_path_param(&params.action_id)
+                ),
+                Some(serde_json::json!({ "payload": params.payload })),
+            )
+            .await?;
+            json_result(result)
+        }
+        (None, None, Some(report_id), Some(block_id)) => {
+            validate_path_param("report_id", &report_id)?;
+            validate_path_param("block_id", &block_id)?;
+
+            let result = api_post(
+                server,
+                &format!(
+                    "/api/runtime/reports/{}/blocks/{}/actions/{}/submit",
+                    report_id,
+                    block_id,
+                    encode_path_param(&params.action_id)
+                ),
+                Some(serde_json::json!({
+                    "payload": params.payload,
+                    "filters": params.filters.unwrap_or_else(|| serde_json::json!({})),
+                    "blockFilters": params
+                        .block_filters
+                        .unwrap_or_else(|| serde_json::json!({})),
+                })),
+            )
+            .await?;
+            json_result(result)
+        }
+        _ => Err(rmcp::ErrorData::invalid_params(
+            "Provide exactly one action context: workflow_id + instance_id, or report_id + block_id.",
+            None,
+        )),
+    }
 }

@@ -1498,7 +1498,7 @@ fn workflow_runtime_authoring_schema() -> Value {
             "Use source.kind='workflow_runtime' with source.entity='actions' to list/render open workflow actions backed by WaitForSignal/human input requests.",
             "Use type='actions' only with source.kind='workflow_runtime' and source.entity='actions'. The UI renders action forms from each action.inputSchema using the same SchemaField/JSON Schema form renderer as WaitForSignal.",
             "WaitForSignal steps may expose generic action metadata. Use source.condition with actionKey, correlation.<key>, or context.<key> to bind a report to the relevant open action without project-owned Object Model index schemas.",
-            "Actions blocks submit through the report runtime. The server re-fetches the filtered virtual action row before sending the signal response.",
+            "Actions blocks submit through the report runtime. The server re-fetches the filtered virtual action row before sending the signal response. For MCP submission, call submit_action_response with report_id + block_id + action_id.",
             "For actions scoped to one execution, set source.instanceId to the workflow instance UUID. Without instanceId, workflow-wide action listing is bounded by the paged instance list and intended for dashboard display.",
             "Workflow runtime sources require source.workflowId. Do not set source.schema, connectionId, join, groupBy, or aggregates on workflow_runtime sources."
         ],

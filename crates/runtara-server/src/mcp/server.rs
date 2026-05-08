@@ -849,6 +849,16 @@ impl SmoMcpServer {
         tools::signals::submit_signal_response(self, params.0).await
     }
 
+    #[tool(
+        description = "Submit a response to an open workflow action. Use workflow_id + instance_id for direct workflow actions, or report_id + block_id to submit through a report actions block. Accepts canonical action IDs containing '/', '::', and step suffixes."
+    )]
+    async fn submit_action_response(
+        &self,
+        params: Parameters<tools::signals::SubmitActionResponseParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        tools::signals::submit_action_response(self, params.0).await
+    }
+
     // ===== Reference Tools =====
 
     #[tool(
@@ -951,7 +961,7 @@ impl ServerHandler for SmoMcpServer {
                 **Reports**: get_report_authoring_schema, list_reports, get_report, create_report, update_report, delete_report, validate_report, render_report, get_report_block_data, add_report_block, replace_report_block, patch_report_block, move_report_block, remove_report_block, add_report_layout_node, replace_report_layout_node, patch_report_layout_node, move_report_layout_node, remove_report_layout_node — call get_report_authoring_schema before authoring; report blocks and layout nodes have stable ids; use layout nodes (metric_row, columns, grid, section) instead of Markdown tables for alignment; reports can use Object Model sources or virtual workflow_runtime sources for workflow instance status/actions\n\
                 **Agents & DSL**: list_agents, get_agent, get_capability, test_capability, list_step_types, get_step_type_schema\n\
                 **Graph Mutations**: set_workflow_metadata (name/description), add_agent_step (high-level: validates capability, creates step, connects edges), add_step, remove_step, update_step, connect_steps, disconnect_steps, set_entry_point, set_mapping, remove_mapping, set_input_schema, set_output_schema, set_variable, remove_variable, list_references (returns copy-paste-ready mapping objects) — first call creates a new version, subsequent calls update it in-place. All support nested subgraphs via optional path parameter. Prefer mutation tools over raw graph JSON. Use deploy_latest after mutations to compile and deploy.\n\
-                **Signals**: list_pending_signals, get_signal_schema, submit_signal_response — interact with WaitForSignal / human-in-the-loop steps in running executions\n\
+                **Signals & Actions**: list_pending_signals, get_signal_schema, submit_signal_response, submit_action_response — interact with WaitForSignal / human-in-the-loop steps and open workflow actions in running executions\n\
                 **Connections**: list_connections (supports integration_id filter)\n\n\
                 ## DSL Reference Quick Guide\n\n\
                 **References**: Use `steps.<stepId>.outputs.<field>` to reference step outputs (PLURAL `outputs`, not `output`). Use `data.<field>` for workflow inputs. Use `variables.<name>` for variables.\n\

@@ -40,6 +40,30 @@ pub fn validate_path_param(name: &str, value: &str) -> Result<(), rmcp::ErrorDat
     Ok(())
 }
 
+/// Validate an identifier that is sent in a JSON body or compared in-memory,
+/// not interpolated as a raw URL path segment. Runtime signal/action IDs can
+/// contain path separators because they are deterministic checkpoint IDs.
+pub fn validate_identifier_param(name: &str, value: &str) -> Result<(), rmcp::ErrorData> {
+    if value.trim().is_empty() {
+        return Err(rmcp::ErrorData::invalid_params(
+            format!("{} must not be empty", name),
+            None,
+        ));
+    }
+    if value.contains(|c: char| c.is_control()) {
+        return Err(rmcp::ErrorData::invalid_params(
+            format!("{} contains invalid control characters", name),
+            None,
+        ));
+    }
+    Ok(())
+}
+
+/// Percent-encode a single URL path segment.
+pub fn encode_path_param(value: &str) -> String {
+    urlencoding::encode(value).into_owned()
+}
+
 /// Build a request with AuthContext pre-injected.
 fn build_request(
     method: Method,
@@ -314,4 +338,38 @@ pub async fn api_delete_with_body(
     }
 
     Ok(body)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{encode_path_param, validate_identifier_param, validate_path_param};
+
+    #[test]
+    fn identifier_param_allows_canonical_runtime_signal_ids() {
+        let id = "00000000-0000-0000-0000-000000000001/00000000-0000-0000-0000-000000000002::00000000-0000-0000-0000-000000000003/review_step";
+
+        assert!(validate_identifier_param("signal_id", id).is_ok());
+    }
+
+    #[test]
+    fn path_param_still_rejects_unencoded_slashes() {
+        let id = "00000000-0000-0000-0000-000000000001/root/review_step";
+
+        assert!(validate_path_param("signal_id", id).is_err());
+    }
+
+    #[test]
+    fn identifier_param_rejects_empty_or_control_values() {
+        assert!(validate_identifier_param("signal_id", "").is_err());
+        assert!(validate_identifier_param("signal_id", " \t ").is_err());
+        assert!(validate_identifier_param("signal_id", "review\nstep").is_err());
+    }
+
+    #[test]
+    fn encode_path_param_escapes_canonical_action_ids() {
+        assert_eq!(
+            encode_path_param("instance/workflow::version/review_step"),
+            "instance%2Fworkflow%3A%3Aversion%2Freview_step"
+        );
+    }
 }
