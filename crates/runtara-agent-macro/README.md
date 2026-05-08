@@ -16,8 +16,8 @@ The macros generate paths like `runtara_dsl::agent_meta::CapabilityMeta` and `in
 
 ```toml
 [dependencies]
-runtara-agent-macro = "1.8"
-runtara-dsl         = "1.8"
+runtara-agent-macro = "4.0"
+runtara-dsl         = "4.0"
 inventory           = "0.3"
 serde               = { version = "1", features = ["derive"] }
 serde_json          = "1"

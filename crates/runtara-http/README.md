@@ -13,7 +13,7 @@ A thin HTTP client abstraction with a single `HttpClient` / `RequestBuilder` / `
 
 ```toml
 [dependencies]
-runtara-http = "1.8"
+runtara-http = "4.0"
 ```
 
 ```rust
@@ -34,7 +34,7 @@ Same code compiles for `cargo build` and `cargo build --target wasm32-wasip2`.
 
 ## Inside Runtara
 
-- Declared as a `[workspace.dependencies]` entry (`runtara-http = { path = "crates/runtara-http", version = "1.8" }`) and consumed directly by `runtara-sdk`, `runtara-agents`, `runtara-ai`, and `runtara-workflow-stdlib`.
+- Declared as a `[workspace.dependencies]` entry (`runtara-http = { path = "crates/runtara-http", version = "4.0" }`) and consumed directly by `runtara-sdk`, `runtara-agents`, `runtara-ai`, and `runtara-workflow-stdlib`.
 - `runtara-sdk` wraps it in `backend::http` as the transport for all SDK-side calls into the Runtara control plane; agent crates use `call_agent()` so credentialed outbound HTTP flows through the capability proxy.
 - Depends only on `ureq` (native, TLS+JSON features) and a pinned `wasi = "=0.14.2"` (WASI 0.2.4 / wasip2 1.0.1, matching the Rust std ABI) plus `serde`, `serde_json`, `base64`, and `thiserror`.
 - Runs in every process shape Runtara targets: the server/SDK on native x86_64 and aarch64 Linux, agent WASM components executed inside the Wasmtime-backed runtime on `wasm32-wasip2`, and browser-side wasm consumers that reuse the same API.

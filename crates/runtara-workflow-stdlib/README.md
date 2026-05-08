@@ -16,7 +16,7 @@ Not really intended for hand-written code — the API surface is shaped by what 
 
 ```toml
 [dependencies]
-runtara-workflow-stdlib = { version = "1.8", default-features = false, features = ["wasi"] }
+runtara-workflow-stdlib = { version = "4.0", default-features = false, features = ["wasi"] }
 ```
 
 ```rust

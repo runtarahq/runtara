@@ -14,7 +14,7 @@ A library of reusable "agent" capabilities that back the steps in a runtara work
 
 ```toml
 [dependencies]
-runtara-agents = { version = "1.8", default-features = false, features = ["integrations"] }
+runtara-agents = { version = "4.0", default-features = false, features = ["integrations"] }
 ```
 
 ```rust

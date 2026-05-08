@@ -62,9 +62,6 @@ src/
 └── test/       # vitest setup & utilities
 ```
 
-See [`CLAUDE.md`](CLAUDE.md) and [`AGENTS.md`](AGENTS.md) for deeper
-architectural notes and coding conventions.
-
 ## License
 
 AGPL-3.0-or-later. See [`LICENSING.md`](LICENSING.md).

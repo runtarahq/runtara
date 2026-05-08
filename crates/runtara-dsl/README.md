@@ -15,7 +15,7 @@ Add it to a crate that needs to read, validate, or emit workflow JSON:
 
 ```toml
 [dependencies]
-runtara-dsl = "1.8"
+runtara-dsl = "4.0"
 serde_json = "1"
 ```
 

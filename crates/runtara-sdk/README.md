@@ -14,7 +14,7 @@ High-level client library for building durable workflow instances that talk to `
 
 ```toml
 [dependencies]
-runtara-sdk = "1.8"
+runtara-sdk = "4.0"
 ```
 
 ```rust

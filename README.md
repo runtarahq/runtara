@@ -31,9 +31,10 @@ Runtara is a Rust workspace for building and running durable workflows. It inclu
 │   ├── runtara-text-parser/
 │   ├── runtara-workflow-stdlib/
 │   └── runtara-workflows/
+├── dev/
 ├── docs/
 ├── e2e/
-├── packaging/
+├── prototypes/
 ├── scripts/
 ├── Cargo.toml
 └── start.sh
@@ -42,9 +43,10 @@ Runtara is a Rust workspace for building and running durable workflows. It inclu
 Important top-level directories:
 
 - `crates/`: all workspace members
-- `docs/`: architecture notes, transition plans, embedding guide, DSL spec
+- `dev/`: local Docker Compose stack (Postgres + Valkey) for development and e2e
+- `docs/`: architecture notes, DSL spec, deployment notes
 - `e2e/`: shell-based end-to-end tests and sample workflows
-- `packaging/`: packaging assets for core/environment
+- `prototypes/`: standalone UI prototypes, not part of the workspace build
 - `start.sh`: local development launcher for `runtara-environment` with embedded `runtara-core`
 
 ## Runtime Model
@@ -169,7 +171,7 @@ Runner backends:
 | **Native** | Development — direct child process execution, no container runtime needed |
 | **Mock** | Testing — simulates execution without running real processes |
 
-**Use this layer when** you need to run compiled workflows as isolated units but want to manage workflows, auth, and application logic in your own code. Embed `runtara-environment` as a library (see `docs/embedding-runtara.md`) and interact with it through `runtara-management-sdk`.
+**Use this layer when** you need to run compiled workflows as isolated units but want to manage workflows, auth, and application logic in your own code. Embed `runtara-environment` as a library and interact with it through `runtara-management-sdk` — see `EnvironmentRuntime` in [`crates/runtara-environment/src/runtime.rs`](crates/runtara-environment/src/runtime.rs).
 
 ```rust
 // Embed environment with OCI runner and embedded core
@@ -189,7 +191,7 @@ let runtime = EnvironmentRuntime::builder()
 
 A complete, batteries-included server that embeds both Layer 1 and Layer 2 and adds everything needed to run Runtara as a product.
 
-`runtara-server` is a library crate (no binary — you host it in your own `main`). It provides:
+`runtara-server` ships as both a binary and a library. Run it directly with `cargo run -p runtara-server`, or embed `runtara_server::start(pool)` in your own `main` if you need to wrap it. It provides:
 
 - **Workflow management** — CRUD, compilation, execution, scheduling, and replay of workflows
 - **Authentication** — JWT (with JWKS) and API key auth with tenant isolation
@@ -203,10 +205,20 @@ A complete, batteries-included server that embeds both Layer 1 and Layer 2 and a
 
 **Use this layer when** you want the full Runtara platform. It is the highest-level entry point and handles everything from auth to execution to monitoring.
 
+Run the bundled binary:
+
+```bash
+export DATABASE_URL=postgres://localhost/runtara
+export OBJECT_MODEL_DATABASE_URL=postgres://localhost/runtara_object_model
+export VALKEY_HOST=localhost
+cargo run -p runtara-server --release
+```
+
+Or embed it in your own host:
+
 ```rust
-// Start the full platform
 let pool = PgPoolOptions::new()
-    .connect(&std::env::var("DATABASE_URL")?)
+    .connect(&std::env::var("OBJECT_MODEL_DATABASE_URL")?)
     .await?;
 runtara_server::start(pool).await?;
 ```
@@ -218,7 +230,7 @@ runtara_server::start(pool).await?;
 | Add durable checkpointing to your own long-running tasks | Layer 1 (`runtara-core` + `runtara-sdk`) |
 | Run compiled workflows in containers with lifecycle management | Layer 2 (`runtara-environment`) |
 | Deploy the full Runtara platform with auth, workflows, MCP, and channels | Layer 3 (`runtara-server`) |
-| Embed workflow execution inside an existing Rust service | Layer 2 as a library (see `docs/embedding-runtara.md`) |
+| Embed workflow execution inside an existing Rust service | Layer 2 as a library (`EnvironmentRuntime::builder()`) |
 
 Each higher layer embeds the layers below it. You never need to run them as separate processes unless you want to scale them independently.
 
@@ -273,7 +285,7 @@ CLI:
 cargo run -p runtara-workflows --bin runtara-compile -- \
   --workflow e2e/workflows/simple_passthrough.json \
   --tenant demo \
-  --workflow simple-passthrough
+  --workflow-id simple-passthrough
 ```
 
 Library:
@@ -419,7 +431,7 @@ The application-server layer embeds `runtara-environment` + `runtara-core` and a
 | `VALKEY_PORT` | No | `6379` | Valkey/Redis port |
 | `INTERNAL_PORT` | No | `7002` | Internal HTTP port used for service-to-service communication |
 | `CHECKPOINT_TTL_HOURS` | No | `48` | How long checkpoints are retained in Valkey |
-| `OBJECT_MODEL_MAX_CONNECTIONS` | No | `5` | Connection pool size for the object model DB |
+| `OBJECT_MODEL_MAX_CONNECTIONS` | No | `10` | Connection pool size for the object model DB |
 | `OBJECT_MODEL_SOFT_DELETE` | No | `true` | When `true`, object-model tables are created with a `deleted` column + partial index; set at DDL time. |
 | `ADAPTIVE_RATE_LIMITING` | No | `true` | Enable adaptive rate limiting on integration calls |
 | `AUTO_RETRY_ON_429` | No | `true` | Automatic durable-sleep retry on 429 responses |

@@ -70,7 +70,7 @@ impl Config {
 
         let object_model_database_url = std::env::var("OBJECT_MODEL_DATABASE_URL")
             .map_err(|_| ConfigError::Missing("OBJECT_MODEL_DATABASE_URL"))?;
-        let object_model_max_connections: u32 = parse_u32_or("OBJECT_MODEL_MAX_CONNECTIONS", 5)?;
+        let object_model_max_connections: u32 = parse_u32_or("OBJECT_MODEL_MAX_CONNECTIONS", 10)?;
         let object_model_soft_delete: bool = parse_bool_or("OBJECT_MODEL_SOFT_DELETE", true)?;
         let object_model_bulk_request_limit: usize = parse_usize_or(
             "OBJECT_MODEL_BULK_REQUEST_LIMIT",

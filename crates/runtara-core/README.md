@@ -14,7 +14,7 @@ Durable execution engine for Runtara: checkpoints, signals, durable sleep, and i
 
 ```toml
 [dependencies]
-runtara-core = "1.8"
+runtara-core = "4.0"
 sqlx = { version = "0.8", features = ["runtime-tokio", "postgres"] }
 tokio = { version = "1", features = ["full"] }
 ```
@@ -32,7 +32,18 @@ async fn main() -> anyhow::Result<()> {
     let pool = PgPoolOptions::new().connect(&config.database_url).await?;
     runtara_core::migrations::run_postgres(&pool).await?;
     let persistence: Arc<dyn Persistence> = Arc::new(PostgresPersistence::new(pool));
-    CoreRuntime::new(config, persistence).run().await
+
+    let runtime = CoreRuntime::builder()
+        .persistence(persistence)
+        .bind_addr(config.http_addr)
+        .max_concurrent_instances(config.max_concurrent_instances)
+        .build()?
+        .start()
+        .await?;
+
+    tokio::signal::ctrl_c().await?;
+    runtime.shutdown().await?;
+    Ok(())
 }
 ```
 
