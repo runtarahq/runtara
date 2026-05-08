@@ -186,6 +186,47 @@ impl<'a> DdlGenerator<'a> {
         )
     }
 
+    /// Generate DROP INDEX statement for a user-defined schema index.
+    pub fn generate_drop_index(&self, table_name: &str, index: &IndexDefinition) -> String {
+        let quoted_index_name = quote_identifier(&format!("{}_{}", table_name, index.name));
+        format!("DROP INDEX IF EXISTS {}", quoted_index_name)
+    }
+
+    /// Generate statements to reconcile a full replacement index list.
+    ///
+    /// Index identity is the user-provided index name. If an index with the
+    /// same name changes columns or uniqueness, it is dropped and recreated.
+    pub fn generate_alter_indexes(
+        &self,
+        table_name: &str,
+        old_indexes: &[IndexDefinition],
+        new_indexes: &[IndexDefinition],
+    ) -> Vec<String> {
+        let mut statements = Vec::new();
+
+        for old_index in old_indexes {
+            match new_indexes
+                .iter()
+                .find(|new_index| new_index.name == old_index.name)
+            {
+                Some(new_index) if new_index == old_index => {}
+                _ => statements.push(self.generate_drop_index(table_name, old_index)),
+            }
+        }
+
+        for new_index in new_indexes {
+            match old_indexes
+                .iter()
+                .find(|old_index| old_index.name == new_index.name)
+            {
+                Some(old_index) if old_index == new_index => {}
+                _ => statements.push(self.generate_create_index(table_name, new_index)),
+            }
+        }
+
+        statements
+    }
+
     /// Generate default index for efficient querying
     ///
     /// Partial index on created_at that excludes tombstoned rows — since reads
@@ -644,6 +685,98 @@ mod tests {
 
         assert!(ddl.contains("CREATE INDEX"));
         assert!(ddl.contains("\"tenant\", \"status\", \"created_at\""));
+    }
+
+    #[test]
+    fn test_generate_drop_index() {
+        let config = default_config();
+        let generator = DdlGenerator::new(&config);
+
+        let index = IndexDefinition::new("status_idx", vec!["status".to_string()]);
+        let ddl = generator.generate_drop_index("orders", &index);
+
+        assert_eq!(ddl, "DROP INDEX IF EXISTS \"orders_status_idx\"");
+    }
+
+    #[test]
+    fn test_generate_alter_indexes_adds_new_indexes() {
+        let config = default_config();
+        let generator = DdlGenerator::new(&config);
+
+        let statements = generator.generate_alter_indexes(
+            "orders",
+            &[],
+            &[IndexDefinition::new(
+                "status_idx",
+                vec!["status".to_string()],
+            )],
+        );
+
+        assert_eq!(statements.len(), 1);
+        assert_eq!(
+            statements[0],
+            "CREATE INDEX \"orders_status_idx\" ON \"orders\"(\"status\")"
+        );
+    }
+
+    #[test]
+    fn test_generate_alter_indexes_drops_removed_indexes() {
+        let config = default_config();
+        let generator = DdlGenerator::new(&config);
+
+        let statements = generator.generate_alter_indexes(
+            "orders",
+            &[IndexDefinition::new(
+                "status_idx",
+                vec!["status".to_string()],
+            )],
+            &[],
+        );
+
+        assert_eq!(
+            statements,
+            vec!["DROP INDEX IF EXISTS \"orders_status_idx\""]
+        );
+    }
+
+    #[test]
+    fn test_generate_alter_indexes_recreates_changed_indexes() {
+        let config = default_config();
+        let generator = DdlGenerator::new(&config);
+
+        let statements = generator.generate_alter_indexes(
+            "orders",
+            &[IndexDefinition::new(
+                "status_idx",
+                vec!["status".to_string()],
+            )],
+            &[
+                IndexDefinition::new("status_idx", vec!["status".to_string(), "sku".to_string()])
+                    .unique(),
+            ],
+        );
+
+        assert_eq!(statements.len(), 2);
+        assert_eq!(statements[0], "DROP INDEX IF EXISTS \"orders_status_idx\"");
+        assert_eq!(
+            statements[1],
+            "CREATE UNIQUE INDEX \"orders_status_idx\" ON \"orders\"(\"status\", \"sku\")"
+        );
+    }
+
+    #[test]
+    fn test_generate_alter_indexes_keeps_unchanged_indexes() {
+        let config = default_config();
+        let generator = DdlGenerator::new(&config);
+        let index = IndexDefinition::new("status_idx", vec!["status".to_string()]);
+
+        let statements = generator.generate_alter_indexes(
+            "orders",
+            std::slice::from_ref(&index),
+            std::slice::from_ref(&index),
+        );
+
+        assert!(statements.is_empty());
     }
 
     #[test]

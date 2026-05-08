@@ -211,28 +211,6 @@ impl SchemaService {
         request: UpdateSchemaRequest,
         connection_id: Option<&str>,
     ) -> Result<(), ServiceError> {
-        // Validation: if columns are provided, validate them
-        if let Some(ref columns) = request.columns {
-            use std::collections::HashSet;
-            let mut seen_names = HashSet::new();
-            for col in columns {
-                if !seen_names.insert(&col.name) {
-                    return Err(ServiceError::ValidationError(format!(
-                        "Duplicate column name: {}",
-                        col.name
-                    )));
-                }
-                // Validate enum values if applicable
-                if let crate::api::dto::object_model::ColumnType::Enum { values } = &col.column_type
-                    && values.is_empty()
-                {
-                    return Err(ServiceError::ValidationError(
-                        "Enum type must have at least one value".to_string(),
-                    ));
-                }
-            }
-        }
-
         let store = get_store(&self.manager, Some(&self.facade), connection_id, tenant_id).await?;
 
         // First get the schema to find its name (ObjectStore.update_schema uses name)
@@ -241,6 +219,31 @@ impl SchemaService {
             .await
             .map_err(|e| ServiceError::DatabaseError(e.to_string()))?
             .ok_or_else(|| ServiceError::NotFound("Schema not found".to_string()))?;
+
+        let effective_columns: Vec<ColumnDefinition> =
+            request.columns.clone().unwrap_or_else(|| {
+                existing
+                    .columns
+                    .iter()
+                    .cloned()
+                    .map(ColumnDefinition::from)
+                    .collect()
+            });
+        let effective_indexes: Option<Vec<IndexDefinition>> =
+            request.indexes.clone().or_else(|| {
+                existing
+                    .indexes
+                    .as_ref()
+                    .map(|indexes| indexes.iter().cloned().map(IndexDefinition::from).collect())
+            });
+
+        use crate::api::services::schema_validator::SchemaValidator;
+        SchemaValidator::validate_schema(
+            &existing.table_name,
+            &effective_columns,
+            &effective_indexes,
+        )
+        .map_err(|e| ServiceError::ValidationError(e.to_string()))?;
 
         let store_request = runtara_object_store::UpdateSchemaRequest {
             name: request.name.clone(),

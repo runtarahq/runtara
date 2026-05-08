@@ -22,7 +22,7 @@ use crate::sql::condition::{
 use crate::sql::ddl::DdlGenerator;
 use crate::sql::expr::{ExprNode, render_row_expression, validate_row_expression};
 use crate::sql::sanitize::quote_identifier;
-use crate::types::{ColumnDefinition, ColumnType};
+use crate::types::{ColumnDefinition, ColumnType, IndexDefinition};
 
 /// A validated row destined for bulk insert: (generated id, payload map).
 type ValidatedRow = (String, serde_json::Map<String, serde_json::Value>);
@@ -387,13 +387,25 @@ impl ObjectStore {
 
         let mut tx = self.pool.begin().await?;
 
+        let ddl = DdlGenerator::new(&self.config);
+
         // Alter table if columns changed
         if let Some(new_columns) = &request.columns {
-            let ddl = DdlGenerator::new(&self.config);
             let alter_statements =
                 ddl.generate_alter_table(&existing.table_name, &existing.columns, new_columns);
 
             for statement in alter_statements {
+                sqlx::query(&statement).execute(&mut *tx).await?;
+            }
+        }
+
+        // Reconcile explicit schema indexes when the update provides a full
+        // replacement list. Omitted indexes mean "leave unchanged".
+        if let Some(new_indexes) = &request.indexes {
+            let old_indexes: &[IndexDefinition] = existing.indexes.as_deref().unwrap_or(&[]);
+            for statement in
+                ddl.generate_alter_indexes(&existing.table_name, old_indexes, new_indexes)
+            {
                 sqlx::query(&statement).execute(&mut *tx).await?;
             }
         }

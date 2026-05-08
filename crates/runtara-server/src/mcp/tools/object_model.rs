@@ -262,9 +262,9 @@ pub struct CreateObjectSchemaParams {
     #[schemars(description = "Database table name (auto-derived from name if omitted)")]
     pub table_name: Option<String>,
     #[schemars(description = "Column definitions as JSON array")]
-    pub columns: serde_json::Value,
+    pub columns: Vec<Value>,
     #[schemars(description = "Index definitions as JSON array (optional)")]
-    pub indexes: Option<serde_json::Value>,
+    pub indexes: Option<Vec<Value>>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -283,12 +283,12 @@ pub struct UpdateObjectSchemaParams {
                        schema with get_object_schema, append your new columns, and pass \
                        the merged array. Omit to leave columns unchanged."
     )]
-    pub columns: Option<serde_json::Value>,
+    pub columns: Option<Vec<Value>>,
     #[schemars(
         description = "FULL replacement index list (same diff semantics as columns). \
                        Omit to leave indexes unchanged."
     )]
-    pub indexes: Option<serde_json::Value>,
+    pub indexes: Option<Vec<Value>>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -535,7 +535,7 @@ pub async fn create_object_schema(
         body["description"] = serde_json::Value::String(desc);
     }
     if let Some(indexes) = params.indexes {
-        body["indexes"] = indexes;
+        body["indexes"] = Value::Array(indexes);
     }
     ensure_request_payload_reasonable("create_object_schema", &body)?;
     let result = with_payload_too_large_guidance(
@@ -597,10 +597,10 @@ pub async fn update_object_schema(
         body["description"] = serde_json::Value::String(d);
     }
     if let Some(c) = params.columns {
-        body["columns"] = c;
+        body["columns"] = Value::Array(c);
     }
     if let Some(i) = params.indexes {
-        body["indexes"] = i;
+        body["indexes"] = Value::Array(i);
     }
     ensure_request_payload_reasonable("update_object_schema", &body)?;
     let result = with_payload_too_large_guidance(
@@ -912,6 +912,59 @@ pub async fn bulk_delete_instances(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    fn generated_property_schema<T: JsonSchema>(property: &str) -> Value {
+        let schema = serde_json::to_value(schemars::schema_for!(T)).unwrap();
+        schema
+            .get("properties")
+            .and_then(Value::as_object)
+            .and_then(|properties| properties.get(property))
+            .cloned()
+            .unwrap_or_else(|| panic!("missing property schema for {property}: {schema:#}"))
+    }
+
+    fn schema_allows_array(schema: &Value) -> bool {
+        let has_array_type = match schema.get("type") {
+            Some(Value::String(schema_type)) => schema_type == "array",
+            Some(Value::Array(schema_types)) => schema_types.iter().any(|t| t == "array"),
+            _ => false,
+        };
+        if has_array_type {
+            return true;
+        }
+
+        ["anyOf", "oneOf", "allOf"].iter().any(|keyword| {
+            schema
+                .get(*keyword)
+                .and_then(Value::as_array)
+                .is_some_and(|variants| variants.iter().any(schema_allows_array))
+        })
+    }
+
+    #[test]
+    fn object_schema_tool_params_generate_array_schemas_for_lists() {
+        let create_columns = generated_property_schema::<CreateObjectSchemaParams>("columns");
+        let create_indexes = generated_property_schema::<CreateObjectSchemaParams>("indexes");
+        let update_columns = generated_property_schema::<UpdateObjectSchemaParams>("columns");
+        let update_indexes = generated_property_schema::<UpdateObjectSchemaParams>("indexes");
+
+        assert!(
+            schema_allows_array(&create_columns),
+            "create columns schema should allow arrays: {create_columns:#}"
+        );
+        assert!(
+            schema_allows_array(&create_indexes),
+            "create indexes schema should allow arrays: {create_indexes:#}"
+        );
+        assert!(
+            schema_allows_array(&update_columns),
+            "update columns schema should allow arrays: {update_columns:#}"
+        );
+        assert!(
+            schema_allows_array(&update_indexes),
+            "update indexes schema should allow arrays: {update_indexes:#}"
+        );
+    }
 
     #[test]
     fn normalize_condition_preserves_canonical_condition() {

@@ -12,7 +12,7 @@ use runtara_object_store::instance::{BulkCreateOptions, Condition, ConflictMode,
 use runtara_object_store::types::{ColumnDefinition, ColumnType, IndexDefinition};
 use runtara_object_store::{
     AggregateFn, AggregateOrderBy, AggregateRequest, AggregateSpec, CreateSchemaRequest,
-    FilterRequest, ObjectStore, SimpleFilter, SortDirection, StoreConfig,
+    FilterRequest, ObjectStore, SimpleFilter, SortDirection, StoreConfig, UpdateSchemaRequest,
 };
 
 /// Get a unique test prefix for this test run
@@ -56,6 +56,19 @@ async fn cleanup_test(store: &ObjectStore, prefix: &str) {
     // Drop metadata table
     let drop_metadata = format!("DROP TABLE IF EXISTS \"{}__schema\" CASCADE", prefix);
     let _ = sqlx::query(&drop_metadata).execute(store.pool()).await;
+}
+
+async fn index_definition(
+    store: &ObjectStore,
+    table_name: &str,
+    index_name: &str,
+) -> Option<String> {
+    let physical_index_name = format!("{}_{}", table_name, index_name);
+    sqlx::query_scalar::<_, String>("SELECT indexdef FROM pg_indexes WHERE indexname = $1 LIMIT 1")
+        .bind(physical_index_name)
+        .fetch_optional(store.pool())
+        .await
+        .expect("Should query pg_indexes")
 }
 
 // ==================== Schema Tests ====================
@@ -136,6 +149,96 @@ async fn test_get_schema_by_name() {
         .expect("Should not error");
 
     assert!(not_found.is_none());
+
+    cleanup_test(&store, &prefix).await;
+}
+
+#[tokio::test]
+async fn test_update_schema_reconciles_physical_indexes() {
+    let Some((store, prefix)) = create_test_store().await else {
+        eprintln!("Skipping test: TEST_DATABASE_URL not set");
+        return;
+    };
+
+    let table_name = format!("{}_index_updates", prefix);
+    let request = CreateSchemaRequest {
+        name: "index_updates".to_string(),
+        description: None,
+        table_name: table_name.clone(),
+        columns: vec![
+            ColumnDefinition::new("status", ColumnType::String),
+            ColumnDefinition::new("sku", ColumnType::String),
+            ColumnDefinition::new("priority", ColumnType::Integer),
+        ],
+        indexes: Some(vec![IndexDefinition::new(
+            "status_idx",
+            vec!["status".to_string()],
+        )]),
+    };
+
+    store
+        .create_schema(request)
+        .await
+        .expect("Should create schema");
+
+    assert!(
+        index_definition(&store, &table_name, "status_idx")
+            .await
+            .is_some()
+    );
+
+    store
+        .update_schema(
+            "index_updates",
+            UpdateSchemaRequest {
+                indexes: Some(vec![
+                    IndexDefinition::new("status_idx", vec!["sku".to_string()]).unique(),
+                    IndexDefinition::new("priority_idx", vec!["priority".to_string()]),
+                ]),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("Should update indexes");
+
+    let status_def = index_definition(&store, &table_name, "status_idx")
+        .await
+        .expect("status_idx should be recreated");
+    assert!(status_def.contains("UNIQUE INDEX"), "{status_def}");
+    assert!(
+        status_def.contains("(sku)") || status_def.contains("(\"sku\")"),
+        "{status_def}"
+    );
+    assert!(
+        index_definition(&store, &table_name, "priority_idx")
+            .await
+            .is_some()
+    );
+
+    store
+        .update_schema(
+            "index_updates",
+            UpdateSchemaRequest {
+                indexes: Some(vec![IndexDefinition::new(
+                    "priority_idx",
+                    vec!["priority".to_string()],
+                )]),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("Should drop removed indexes");
+
+    assert!(
+        index_definition(&store, &table_name, "status_idx")
+            .await
+            .is_none()
+    );
+    assert!(
+        index_definition(&store, &table_name, "priority_idx")
+            .await
+            .is_some()
+    );
 
     cleanup_test(&store, &prefix).await;
 }

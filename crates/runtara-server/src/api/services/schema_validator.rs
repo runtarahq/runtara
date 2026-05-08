@@ -74,7 +74,14 @@ impl SchemaValidator {
 
         // Validate indexes
         if let Some(idx_list) = indexes {
+            let mut index_names = HashSet::new();
             for idx in idx_list {
+                if !index_names.insert(idx.name.as_str()) {
+                    return Err(ValidationError::InvalidIndex(format!(
+                        "Duplicate index name: {}",
+                        idx.name
+                    )));
+                }
                 Self::validate_index(idx, columns)?;
             }
         }
@@ -381,6 +388,36 @@ mod tests {
         assert!(matches!(
             SchemaValidator::validate_schema("products", &columns, &indexes),
             Err(ValidationError::IndexColumnNotFound(_))
+        ));
+    }
+
+    #[test]
+    fn test_validate_duplicate_index_name() {
+        let columns = vec![ColumnDefinition {
+            name: "sku".to_string(),
+            column_type: ColumnType::String,
+            unique: false,
+            nullable: true,
+            default_value: None,
+            text_index: crate::api::dto::object_model::TextIndexKind::None,
+        }];
+
+        let indexes = Some(vec![
+            IndexDefinition {
+                name: "idx_sku".to_string(),
+                columns: vec!["sku".to_string()],
+                unique: false,
+            },
+            IndexDefinition {
+                name: "idx_sku".to_string(),
+                columns: vec!["sku".to_string()],
+                unique: true,
+            },
+        ]);
+
+        assert!(matches!(
+            SchemaValidator::validate_schema("products", &columns, &indexes),
+            Err(ValidationError::InvalidIndex(_))
         ));
     }
 
