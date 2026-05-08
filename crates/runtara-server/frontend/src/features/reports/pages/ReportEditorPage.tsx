@@ -1204,8 +1204,21 @@ function validateReportDefinition(definition: ReportDefinition): string[] {
       errors.push(`Duplicate report block ID: ${block.id}`);
     }
     blockIds.add(block.id);
-    if (!block.dataset && !block.source.schema.trim()) {
+    const sourceKind = block.source.kind ?? 'object_model';
+    if (
+      !block.dataset &&
+      sourceKind === 'object_model' &&
+      !block.source.schema.trim()
+    ) {
       errors.push(`Block "${block.id}" needs a schema.`);
+    }
+    if (!block.dataset && sourceKind === 'workflow_runtime') {
+      if (!block.source.workflowId?.trim()) {
+        errors.push(`Block "${block.id}" needs a workflow ID.`);
+      }
+      if (!block.source.entity) {
+        errors.push(`Block "${block.id}" needs a workflow runtime entity.`);
+      }
     }
     if (block.dataset && !datasetIds.has(block.dataset.id)) {
       errors.push(

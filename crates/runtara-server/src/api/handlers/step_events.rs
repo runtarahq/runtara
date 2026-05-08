@@ -11,7 +11,12 @@ use std::sync::Arc;
 use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
 
+use crate::api::services::workflow_runtime::{
+    SubmitWorkflowActionRequest, WorkflowRuntimeError, list_instance_actions,
+    list_workflow_actions, submit_workflow_action as submit_runtime_workflow_action,
+};
 use crate::runtime_client::RuntimeClient;
+use crate::workers::execution_engine::ExecutionEngine;
 
 /// Query parameters for step events endpoint
 #[derive(Debug, Deserialize, IntoParams)]
@@ -427,6 +432,13 @@ pub struct PendingInputResponse {
     pub requested_at: Option<DateTime<Utc>>,
 }
 
+#[derive(Debug, Deserialize, IntoParams)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkflowActionsQuery {
+    pub page: Option<i32>,
+    pub size: Option<i32>,
+}
+
 /// Get pending human input requests for a running execution.
 ///
 /// Returns any active `external_input_requested` events that haven't been
@@ -605,6 +617,187 @@ pub async fn get_pending_input(
     )
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/runtime/workflows/{workflowId}/actions",
+    params(
+        ("workflowId" = String, Path, description = "Workflow ID"),
+        WorkflowActionsQuery,
+    ),
+    responses(
+        (status = 200, description = "Open workflow actions"),
+        (status = 503, description = "Runtime client not configured"),
+    ),
+    tag = "actions"
+)]
+pub async fn list_workflow_open_actions(
+    crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
+    State(engine): State<Arc<ExecutionEngine>>,
+    State(runtime_client): State<Option<Arc<RuntimeClient>>>,
+    Path(workflow_id): Path<String>,
+    Query(query): Query<WorkflowActionsQuery>,
+) -> (StatusCode, Json<Value>) {
+    let Some(client) = runtime_client else {
+        return workflow_runtime_error_response(WorkflowRuntimeError::RuntimeUnavailable);
+    };
+
+    match list_workflow_actions(
+        &engine,
+        &client,
+        &tenant_id,
+        &workflow_id,
+        query.page,
+        query.size,
+    )
+    .await
+    {
+        Ok(page) => (
+            StatusCode::OK,
+            Json(json!({
+                "success": true,
+                "message": "Workflow actions retrieved",
+                "data": page,
+            })),
+        ),
+        Err(error) => workflow_runtime_error_response(error),
+    }
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/runtime/workflows/{workflowId}/instances/{instanceId}/actions",
+    params(
+        ("workflowId" = String, Path, description = "Workflow ID"),
+        ("instanceId" = String, Path, description = "Instance/execution ID"),
+    ),
+    responses(
+        (status = 200, description = "Open workflow instance actions"),
+        (status = 404, description = "Instance not found"),
+        (status = 503, description = "Runtime client not configured"),
+    ),
+    tag = "actions"
+)]
+pub async fn list_workflow_instance_open_actions(
+    crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
+    State(engine): State<Arc<ExecutionEngine>>,
+    State(runtime_client): State<Option<Arc<RuntimeClient>>>,
+    Path((workflow_id, instance_id)): Path<(String, String)>,
+) -> (StatusCode, Json<Value>) {
+    let Some(client) = runtime_client else {
+        return workflow_runtime_error_response(WorkflowRuntimeError::RuntimeUnavailable);
+    };
+
+    let execution = match engine
+        .get_execution_with_metadata(&workflow_id, &instance_id, &tenant_id)
+        .await
+    {
+        Ok(execution) => execution,
+        Err(error) => {
+            return (
+                error.http_status(),
+                Json(json!({
+                    "success": false,
+                    "message": error.to_string(),
+                    "data": Value::Null,
+                })),
+            );
+        }
+    };
+
+    if execution.instance.status.is_terminal() || !execution.instance.has_pending_input {
+        return (
+            StatusCode::OK,
+            Json(json!({
+                "success": true,
+                "message": "Workflow instance actions retrieved",
+                "data": {
+                    "workflowId": workflow_id,
+                    "instanceId": instance_id,
+                    "actions": [],
+                    "count": 0,
+                },
+            })),
+        );
+    }
+
+    match list_instance_actions(&client, &workflow_id, &instance_id).await {
+        Ok(actions) => {
+            let count = actions.len();
+            (
+                StatusCode::OK,
+                Json(json!({
+                    "success": true,
+                    "message": "Workflow instance actions retrieved",
+                    "data": {
+                        "workflowId": workflow_id,
+                        "instanceId": instance_id,
+                        "actions": actions,
+                        "count": count,
+                    },
+                })),
+            )
+        }
+        Err(error) => workflow_runtime_error_response(error),
+    }
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/runtime/workflows/{workflowId}/instances/{instanceId}/actions/{actionId}/submit",
+    params(
+        ("workflowId" = String, Path, description = "Workflow ID"),
+        ("instanceId" = String, Path, description = "Instance/execution ID"),
+        ("actionId" = String, Path, description = "Action ID"),
+    ),
+    request_body = SubmitWorkflowActionRequest,
+    responses(
+        (status = 200, description = "Action submitted successfully"),
+        (status = 400, description = "Invalid action payload"),
+        (status = 404, description = "Instance not found"),
+        (status = 409, description = "Action is no longer open"),
+        (status = 503, description = "Runtime client not configured"),
+    ),
+    tag = "actions"
+)]
+pub async fn submit_workflow_action(
+    crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
+    State(engine): State<Arc<ExecutionEngine>>,
+    State(runtime_client): State<Option<Arc<RuntimeClient>>>,
+    Path((workflow_id, instance_id, action_id)): Path<(String, String, String)>,
+    Json(body): Json<SubmitWorkflowActionRequest>,
+) -> (StatusCode, Json<Value>) {
+    let Some(client) = runtime_client else {
+        return workflow_runtime_error_response(WorkflowRuntimeError::RuntimeUnavailable);
+    };
+
+    match submit_runtime_workflow_action(
+        &engine,
+        &client,
+        &tenant_id,
+        &workflow_id,
+        &instance_id,
+        &action_id,
+        &body.payload,
+    )
+    .await
+    {
+        Ok(action) => (
+            StatusCode::OK,
+            Json(json!({
+                "success": true,
+                "message": "Workflow action submitted successfully",
+                "data": {
+                    "workflowId": workflow_id,
+                    "instanceId": instance_id,
+                    "actionId": action.action_id,
+                    "signalId": action.signal_id,
+                },
+            })),
+        ),
+        Err(error) => workflow_runtime_error_response(error),
+    }
+}
+
 /// Request body for submitting human input to a waiting AI Agent.
 #[derive(Debug, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
@@ -614,6 +807,51 @@ pub struct SubmitSignalRequest {
     /// The response payload to deliver to the waiting step.
     /// Should conform to the response_schema from the pending input request.
     pub payload: Value,
+}
+
+fn workflow_runtime_error_response(error: WorkflowRuntimeError) -> (StatusCode, Json<Value>) {
+    match error {
+        WorkflowRuntimeError::InvalidRequest(message) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "success": false,
+                "message": message,
+                "data": Value::Null,
+            })),
+        ),
+        WorkflowRuntimeError::NotFound(message) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({
+                "success": false,
+                "message": message,
+                "data": Value::Null,
+            })),
+        ),
+        WorkflowRuntimeError::Conflict(message) => (
+            StatusCode::CONFLICT,
+            Json(json!({
+                "success": false,
+                "message": message,
+                "data": Value::Null,
+            })),
+        ),
+        WorkflowRuntimeError::RuntimeUnavailable => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({
+                "success": false,
+                "message": "Runtime client not configured",
+                "data": Value::Null,
+            })),
+        ),
+        WorkflowRuntimeError::Runtime(message) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({
+                "success": false,
+                "message": message,
+                "data": Value::Null,
+            })),
+        ),
+    }
 }
 
 /// Submit a human response to a waiting AI Agent step.

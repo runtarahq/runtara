@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use axum::{
+    Extension,
     extract::{Path, State},
     http::StatusCode,
     response::Json,
@@ -11,6 +12,9 @@ use sqlx::PgPool;
 use crate::api::dto::reports::*;
 use crate::api::repositories::object_model::ObjectStoreManager;
 use crate::api::services::reports::{ReportService, ReportServiceError};
+use crate::auth::AuthContext;
+use crate::runtime_client::RuntimeClient;
+use crate::workers::execution_engine::ExecutionEngine;
 
 pub async fn list_reports(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
@@ -132,15 +136,19 @@ pub async fn validate_report(
     Ok((StatusCode::OK, Json(response)))
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn render_report(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
     State(pool): State<PgPool>,
     State(manager): State<Arc<ObjectStoreManager>>,
     State(connections): State<Arc<runtara_connections::ConnectionsFacade>>,
+    State(engine): State<Arc<ExecutionEngine>>,
+    State(runtime_client): State<Option<Arc<RuntimeClient>>>,
     Path(report_id): Path<String>,
     Json(request): Json<ReportRenderRequest>,
 ) -> Result<(StatusCode, Json<ReportRenderResponse>), (StatusCode, Json<Value>)> {
-    let service = ReportService::new(pool, manager, connections);
+    let service =
+        ReportService::new(pool, manager, connections).with_runtime(engine, runtime_client);
 
     match service.render_report(&tenant_id, &report_id, request).await {
         Ok(response) => Ok((StatusCode::OK, Json(response))),
@@ -148,21 +156,56 @@ pub async fn render_report(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn get_report_block_data(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
     State(pool): State<PgPool>,
     State(manager): State<Arc<ObjectStoreManager>>,
     State(connections): State<Arc<runtara_connections::ConnectionsFacade>>,
+    State(engine): State<Arc<ExecutionEngine>>,
+    State(runtime_client): State<Option<Arc<RuntimeClient>>>,
     Path((report_id, block_id)): Path<(String, String)>,
     Json(request): Json<ReportBlockOnlyDataRequest>,
 ) -> Result<(StatusCode, Json<ReportBlockRenderResult>), (StatusCode, Json<Value>)> {
-    let service = ReportService::new(pool, manager, connections);
+    let service =
+        ReportService::new(pool, manager, connections).with_runtime(engine, runtime_client);
 
     match service
         .render_report_block(&tenant_id, &report_id, &block_id, request)
         .await
     {
         Ok(response) => Ok((StatusCode::OK, Json(response))),
+        Err(error) => Err(error_response(error)),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn submit_report_workflow_action(
+    crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
+    Extension(auth_context): Extension<AuthContext>,
+    State(pool): State<PgPool>,
+    State(manager): State<Arc<ObjectStoreManager>>,
+    State(connections): State<Arc<runtara_connections::ConnectionsFacade>>,
+    State(engine): State<Arc<ExecutionEngine>>,
+    State(runtime_client): State<Option<Arc<RuntimeClient>>>,
+    Path((report_id, block_id, action_id)): Path<(String, String, String)>,
+    Json(request): Json<SubmitReportWorkflowActionRequest>,
+) -> Result<(StatusCode, Json<Value>), (StatusCode, Json<Value>)> {
+    let service =
+        ReportService::new(pool, manager, connections).with_runtime(engine, runtime_client);
+
+    match service
+        .submit_report_workflow_action(
+            &tenant_id,
+            &report_id,
+            &block_id,
+            &action_id,
+            request,
+            &auth_context,
+        )
+        .await
+    {
+        Ok(response) => Ok((StatusCode::ACCEPTED, Json(response))),
         Err(error) => Err(error_response(error)),
     }
 }

@@ -8,6 +8,7 @@ import {
   Sigma,
   Text,
   Trash2,
+  Wrench,
 } from 'lucide-react';
 import { Schema } from '@/generated/RuntaraRuntimeApi';
 import { cn } from '@/lib/utils';
@@ -106,6 +107,7 @@ const BLOCK_TYPE_META: Record<
   table: { label: 'Table', icon: Rows3 },
   metric: { label: 'Metric', icon: Sigma },
   chart: { label: 'Chart', icon: LineChart },
+  actions: { label: 'Actions', icon: Wrench },
 };
 
 const AGGREGATE_OPTIONS: Array<{
@@ -677,6 +679,7 @@ function ReportBlockEditor({
   );
   const fields = getSchemaFields(schema);
   const isDatasetBlock = Boolean(block.dataset);
+  const isWorkflowRuntimeBlock = source.kind === 'workflow_runtime';
 
   const update = (patch: Partial<ReportBlockDefinition>) => {
     onChange({ ...block, ...patch });
@@ -717,7 +720,9 @@ function ReportBlockEditor({
               <Badge variant="outline">
                 {isDatasetBlock
                   ? dataset?.label ?? block.dataset?.id ?? 'Dataset'
-                  : source.schema || 'No schema'}
+                  : isWorkflowRuntimeBlock
+                    ? source.entity ?? 'Workflow runtime'
+                    : source.schema || 'No schema'}
               </Badge>
               {isDatasetBlock && schemaName && (
                 <Badge variant="outline">Source: {schemaName}</Badge>
@@ -731,6 +736,10 @@ function ReportBlockEditor({
             <Badge variant="outline" className="h-9 px-3">
               Dataset block
             </Badge>
+          ) : isWorkflowRuntimeBlock ? (
+            <Badge variant="outline" className="h-9 px-3">
+              Workflow runtime
+            </Badge>
           ) : (
             <Select
               value={blockType}
@@ -742,11 +751,13 @@ function ReportBlockEditor({
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                {Object.entries(BLOCK_TYPE_META).map(([type, meta]) => (
-                  <SelectItem key={type} value={type}>
-                    {meta.label}
-                  </SelectItem>
-                ))}
+                {Object.entries(BLOCK_TYPE_META)
+                  .filter(([type]) => type !== 'actions')
+                  .map(([type, meta]) => (
+                    <SelectItem key={type} value={type}>
+                      {meta.label}
+                    </SelectItem>
+                  ))}
               </SelectContent>
             </Select>
           )}
@@ -806,6 +817,56 @@ function ReportBlockEditor({
               </SelectContent>
             </Select>
           </Field>
+        ) : isWorkflowRuntimeBlock ? (
+          <>
+            <Field label="Workflow ID">
+              <Input
+                value={source.workflowId ?? ''}
+                onChange={(event) =>
+                  update({
+                    source: {
+                      ...source,
+                      workflowId: event.target.value,
+                    },
+                  })
+                }
+              />
+            </Field>
+            <Field label="Entity">
+              <Select
+                value={source.entity ?? 'instances'}
+                onValueChange={(entity) =>
+                  update({
+                    source: {
+                      ...source,
+                      entity: entity as 'instances' | 'actions',
+                    },
+                  })
+                }
+              >
+                <SelectTrigger>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="instances">Instances</SelectItem>
+                  <SelectItem value="actions">Actions</SelectItem>
+                </SelectContent>
+              </Select>
+            </Field>
+            <Field label="Instance ID">
+              <Input
+                value={source.instanceId ?? ''}
+                onChange={(event) =>
+                  update({
+                    source: {
+                      ...source,
+                      instanceId: event.target.value || undefined,
+                    },
+                  })
+                }
+              />
+            </Field>
+          </>
         ) : (
           <Field label="Schema">
             <Select

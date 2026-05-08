@@ -1051,9 +1051,33 @@ pub struct WaitForSignalStep {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub response_schema: Option<HashMap<String, SchemaField>>,
 
+    /// Optional platform action metadata exposed to reports and other runtime
+    /// action consumers. Correlation and context values are evaluated when the
+    /// workflow reaches the wait step.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action: Option<WaitForSignalActionConfig>,
+
     /// When true, execution pauses before this step in debug mode
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub breakpoint: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WaitForSignalActionConfig {
+    /// Stable action key for report filtering, e.g. case_review_decision.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
+
+    /// Platform-level correlation fields used by virtual workflow_runtime
+    /// report sources, e.g. {"case_id": {"valueType": "reference", "value": "data.case_id"}}.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub correlation: HashMap<String, MappingValue>,
+
+    /// Optional non-authoritative display/query context.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub context: HashMap<String, MappingValue>,
 }
 
 /// LLM-driven agent that selects and calls tools in a loop.

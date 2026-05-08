@@ -77,6 +77,24 @@ pub fn emit(step: &WaitForSignalStep, ctx: &mut EmitContext) -> Result<TokenStre
         .as_ref()
         .and_then(|s| serde_json::to_string(s).ok())
         .unwrap_or_else(|| "null".to_string());
+    let action_key = step
+        .action
+        .as_ref()
+        .and_then(|action| action.key.as_deref())
+        .filter(|key| !key.trim().is_empty());
+    let action_key_tokens = action_key
+        .map(|key| quote! { serde_json::Value::String(#key.to_string()) })
+        .unwrap_or_else(|| quote! { serde_json::Value::Null });
+    let action_correlation_tokens = step
+        .action
+        .as_ref()
+        .map(|action| mapping::emit_input_mapping(&action.correlation, ctx, &source_var))
+        .unwrap_or_else(|| quote! { serde_json::Value::Object(serde_json::Map::new()) });
+    let action_context_tokens = step
+        .action
+        .as_ref()
+        .map(|action| mapping::emit_input_mapping(&action.context, ctx, &source_var))
+        .unwrap_or_else(|| quote! { serde_json::Value::Object(serde_json::Map::new()) });
 
     // Generate on_wait subgraph if present
     let on_wait_code = if let Some(ref on_wait) = step.on_wait {
@@ -243,6 +261,9 @@ pub fn emit(step: &WaitForSignalStep, ctx: &mut EmitContext) -> Result<TokenStre
 
             // Emit custom event so frontend/external systems know input is needed
             {
+                let __action_key = #action_key_tokens;
+                let __action_correlation = #action_correlation_tokens;
+                let __action_context = #action_context_tokens;
                 let __event_data = serde_json::json!({
                     "type": "external_input_requested",
                     "signal_id": &__signal_id,
@@ -250,6 +271,9 @@ pub fn emit(step: &WaitForSignalStep, ctx: &mut EmitContext) -> Result<TokenStre
                     "step_name": #step_name_display,
                     "response_schema": serde_json::from_str::<serde_json::Value>(#response_schema_json)
                         .unwrap_or(serde_json::Value::Null),
+                    "action_key": __action_key,
+                    "correlation": __action_correlation,
+                    "context": __action_context,
                 });
                 {
                     let __payload_bytes = serde_json::to_vec(&__event_data).unwrap_or_default();
@@ -333,6 +357,11 @@ pub fn emit(step: &WaitForSignalStep, ctx: &mut EmitContext) -> Result<TokenStre
                     break;
                 }
 
+                {
+                    let __sdk = sdk().lock().unwrap();
+                    let _ = __sdk.heartbeat();
+                }
+
                 // Check timeout
                 if let Some(timeout) = __timeout_ms {
                     if __start_time.elapsed().as_millis() as u64 >= timeout {
@@ -380,6 +409,7 @@ mod tests {
             timeout_ms: None,
             poll_interval_ms: None,
             response_schema: None,
+            action: None,
             breakpoint: None,
         }
     }
@@ -394,6 +424,7 @@ mod tests {
             })),
             poll_interval_ms: None,
             response_schema: None,
+            action: None,
             breakpoint: None,
         }
     }
@@ -446,6 +477,7 @@ mod tests {
             timeout_ms: None,
             poll_interval_ms: Some(500),
             response_schema: None,
+            action: None,
             breakpoint: None,
         };
         let mut ctx = EmitContext::new(false);

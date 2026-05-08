@@ -1,6 +1,11 @@
 export type ReportStatus = 'draft' | 'published' | 'archived';
 
-export type ReportBlockType = 'table' | 'chart' | 'metric' | 'markdown';
+export type ReportBlockType =
+  | 'table'
+  | 'chart'
+  | 'metric'
+  | 'actions'
+  | 'markdown';
 
 export type ReportFilterType =
   | 'select'
@@ -180,8 +185,12 @@ export interface ReportTableSearchRequest {
 }
 
 export interface ReportSource {
+  kind?: 'object_model' | 'workflow_runtime';
   schema: string;
   connectionId?: string;
+  entity?: 'instances' | 'actions';
+  workflowId?: string;
+  instanceId?: string;
   mode?: 'filter' | 'aggregate';
   condition?: unknown;
   filterMappings?: Array<{
@@ -267,6 +276,12 @@ export interface ReportBlockDefinition {
     valueField: string;
     label?: string;
     format?: string;
+  };
+  actions?: {
+    submit?: {
+      label?: string;
+      implicitPayload?: Record<string, unknown>;
+    };
   };
   filters?: ReportFilterDefinition[];
   interactions?: ReportInteractionDefinition[];
@@ -368,6 +383,27 @@ export interface ReportBlockResult {
     message: string;
     blockId?: string;
   };
+}
+
+export interface ReportWorkflowAction {
+  id: string;
+  actionId: string;
+  actionKind: string;
+  targetKind: string;
+  targetId: string;
+  workflowId: string;
+  instanceId: string;
+  signalId: string;
+  actionKey?: string | null;
+  label: string;
+  message: string;
+  inputSchema?: Record<string, unknown> | null;
+  schemaFormat: string;
+  status: string;
+  requestedAt?: string | null;
+  correlation?: Record<string, unknown>;
+  context?: Record<string, unknown>;
+  runtime?: Record<string, unknown>;
 }
 
 export interface ReportRenderResponse {

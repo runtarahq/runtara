@@ -1127,10 +1127,13 @@ fn position_body(
 }
 
 fn report_authoring_schema() -> Value {
-    json!({
+    let mut result: Value = serde_json::from_str(r###"{
         "definitionVersion": 1,
         "purpose": "Canonical MCP contract for authoring Runtara reports. Call this before create_report, update_report, add_report_block, replace_report_block, patch_report_block, or report layout mutations.",
         "relatedTools": [
+            "list_workflows",
+            "list_executions",
+            "get_execution",
             "list_object_schemas",
             "get_object_schema",
             "query_aggregate",
@@ -1214,7 +1217,7 @@ fn report_authoring_schema() -> Value {
         "blockShape": {
             "common": {
                 "id": "Stable id, unique within the report. Referenced as {{ block.<id> }} in markdown.",
-                "type": "table | chart | metric | markdown",
+                "type": "table | chart | metric | actions | markdown",
                 "title": "Optional UI title.",
                 "lazy": "Optional boolean. Lazy blocks fetch only when requested.",
                 "dataset": "Preferred BI query shape: {id, dimensions, measures, orderBy?, limit?}. The id must match definition.datasets[].id.",
@@ -1246,14 +1249,28 @@ fn report_authoring_schema() -> Value {
                 "required": {
                     "metric.valueField": "Output field to display, usually an aggregate alias."
                 }
+            },
+            "actions": {
+                "type": "actions",
+                "required": {
+                    "source.kind": "workflow_runtime",
+                    "source.entity": "actions",
+                    "source.workflowId": "Workflow id. Add source.instanceId to scope forms to one workflow instance."
+                },
+                "actions.submit": "Optional submit configuration. Use actions.submit.label to override the button label and actions.submit.implicitPayload for server-side viewer fields such as {{viewer.user_id}}.",
+                "note": "Actions blocks render executable forms from workflow action inputSchema. Do not add table/chart/metric config to actions blocks."
             }
         },
         "sourceShape": {
+            "kind": "object_model | workflow_runtime. Omit for Object Model back compatibility.",
             "schema": "Object Model schema name. Use get_object_schema to inspect valid fields.",
+            "entity": "Workflow runtime only: instances | actions.",
+            "workflowId": "Workflow runtime only: workflow id whose instances/actions should be shown.",
+            "instanceId": "Workflow runtime actions only: optional workflow instance UUID to scope open actions.",
             "select": "Table value-column source only: scalar field to copy from the joined schema.",
             "connectionId": "Optional connection id for connection-scoped schemas.",
             "mode": "filter | aggregate",
-            "condition": "Optional Object Model condition DSL. IN/NOT_IN may use same-store subquery operands: {\"subquery\":{\"schema\":\"TDProduct\",\"select\":\"sku\",\"condition\":{...}}}.",
+            "condition": "Optional condition DSL. Object Model sources can use schema fields and same-store subquery operands. workflow_runtime actions can filter virtual action fields including actionKey, correlation.<key>, and context.<key>.",
             "filterMappings": "Optional mappings from global filter ids to source fields.",
             "groupBy": "Aggregate output grouping fields.",
             "aggregates": "Aggregate specs. Report aggregate specs use {alias, op, field?, distinct?, orderBy?, expression?}. Use op/field here, not fn/column.",
@@ -1303,7 +1320,10 @@ fn report_authoring_schema() -> Value {
             "For chart.series[].field and metric.valueField, use aggregate aliases from source.aggregates.",
             "For source.orderBy and table.defaultSort, use field, not column.",
             "For large category/product filters, prefer IN with a same-store subquery instead of materializing large value arrays.",
-            "For dataset-backed blocks, table columns/chart fields/metric valueField use selected block.dataset dimensions and measures."
+            "For dataset-backed blocks, table columns/chart fields/metric valueField use selected block.dataset dimensions and measures.",
+            "For workflow_runtime entity='instances', table.columns and orderBy use instance fields such as instanceId, status, hasActions, actionCount, createdAt.",
+            "For workflow_runtime entity='actions', table.columns and orderBy use action fields such as actionId, actionKey, label, status, instanceId, requestedAt. Conditions can additionally use nested metadata fields such as correlation.case_id or context.purpose.",
+            "For type='actions', do not configure table columns; the block renders forms from each action.inputSchema and submits through the report-scoped workflow action endpoint."
         ],
         "commonMistakes": [
             "For BI reports, do not hand-author repeated raw aggregate block.source specs when the same semantic fields can live in definition.datasets.",
@@ -1316,6 +1336,9 @@ fn report_authoring_schema() -> Value {
             "Do not use Markdown tables to align report block placeholders. Use definition.layout with metric_row, columns, or grid.",
             "Do not omit layout node ids. MCP layout mutation tools address layout nodes by id.",
             "Do not hardcode large select option lists when the values live in Object Model data. Use filter.options.source='object_model'.",
+            "Do not call workflow signals 'pendingInput' in report definitions. Use the generic actions abstraction: type='actions' and source.entity='actions'.",
+            "Do not put schema, connectionId, joins, groupBy, or aggregates on workflow_runtime sources.",
+            "Do not use type='actions' with Object Model sources; actions blocks currently require source.kind='workflow_runtime' and entity='actions'.",
             "Always run validate_report before saving or mutating report blocks."
         ],
         "examples": {
@@ -1424,6 +1447,27 @@ fn report_authoring_schema() -> Value {
                 },
                 "metric": {"valueField": "n", "label": "Stock snapshots", "format": "number"}
             },
+            "workflowInstances": {
+                "id": "workflow_runs",
+                "type": "table",
+                "title": "Workflow runs",
+                "source": {"kind": "workflow_runtime", "entity": "instances", "workflowId": "inventory_sync", "mode": "filter"},
+                "table": {
+                    "columns": [
+                        {"field": "instanceId", "label": "Instance"},
+                        {"field": "status", "label": "Status"},
+                        {"field": "hasActions", "label": "Has actions", "format": "boolean"},
+                        {"field": "actionCount", "label": "Actions", "format": "number"},
+                        {"field": "createdAt", "label": "Created", "format": "datetime"}
+                    ]
+                }
+            },
+            "workflowActions": {
+                "id": "workflow_actions",
+                "type": "actions",
+                "title": "Workflow actions",
+                "source": {"kind": "workflow_runtime", "entity": "actions", "workflowId": "inventory_sync", "mode": "filter"}
+            },
             "exprAggregate": {
                 "source": {
                     "schema": "StockSnapshot",
@@ -1438,6 +1482,108 @@ fn report_authoring_schema() -> Value {
                     "orderBy": [{"field": "delta_abs", "direction": "desc"}],
                     "limit": 100
                 }
+            }
+        }
+    }"###)
+    .expect("report authoring schema JSON must be valid");
+    result["workflowRuntimeGuidance"] = workflow_runtime_authoring_schema();
+    result
+}
+
+fn workflow_runtime_authoring_schema() -> Value {
+    json!({
+        "currentContract": [
+            "Reports can use virtual workflow runtime sources in addition to Object Model sources.",
+            "Use source.kind='workflow_runtime' with source.entity='instances' to list workflow instances and status/action summaries.",
+            "Use source.kind='workflow_runtime' with source.entity='actions' to list/render open workflow actions backed by WaitForSignal/human input requests.",
+            "Use type='actions' only with source.kind='workflow_runtime' and source.entity='actions'. The UI renders action forms from each action.inputSchema using the same SchemaField/JSON Schema form renderer as WaitForSignal.",
+            "WaitForSignal steps may expose generic action metadata. Use source.condition with actionKey, correlation.<key>, or context.<key> to bind a report to the relevant open action without project-owned Object Model index schemas.",
+            "Actions blocks submit through the report runtime. The server re-fetches the filtered virtual action row before sending the signal response.",
+            "For actions scoped to one execution, set source.instanceId to the workflow instance UUID. Without instanceId, workflow-wide action listing is bounded by the paged instance list and intended for dashboard display.",
+            "Workflow runtime sources require source.workflowId. Do not set source.schema, connectionId, join, groupBy, or aggregates on workflow_runtime sources."
+        ],
+        "instanceFields": [
+            "instanceId",
+            "workflowId",
+            "workflowName",
+            "status",
+            "createdAt",
+            "updatedAt",
+            "usedVersion",
+            "durationSeconds",
+            "hasActions",
+            "actionCount"
+        ],
+        "actionFields": [
+            "actionId",
+            "actionKind",
+            "targetKind",
+            "targetId",
+            "workflowId",
+            "instanceId",
+            "signalId",
+            "actionKey",
+            "label",
+            "message",
+            "inputSchema",
+            "schemaFormat",
+            "status",
+            "requestedAt",
+            "correlation",
+            "context",
+            "runtime"
+        ],
+        "instancesTableExample": {
+            "id": "workflow_runs",
+            "type": "table",
+            "title": "Workflow runs",
+            "source": {"kind": "workflow_runtime", "entity": "instances", "workflowId": "inventory_sync", "mode": "filter", "orderBy": [{"field": "createdAt", "direction": "desc"}]},
+            "table": {
+                "columns": [
+                    {"field": "instanceId", "label": "Instance"},
+                    {"field": "status", "label": "Status"},
+                    {"field": "hasActions", "label": "Has actions", "format": "boolean"},
+                    {"field": "actionCount", "label": "Actions", "format": "number"},
+                    {"field": "createdAt", "label": "Created", "format": "datetime"}
+                ],
+                "pagination": {"defaultPageSize": 25, "allowedPageSizes": [25, 50, 100]}
+            }
+        },
+        "actionsBlockExample": {
+            "id": "workflow_actions",
+            "type": "actions",
+            "title": "Workflow actions",
+            "source": {"kind": "workflow_runtime", "entity": "actions", "workflowId": "inventory_sync", "instanceId": "00000000-0000-0000-0000-000000000000", "mode": "filter"},
+            "actions": {"submit": {"label": "Submit", "implicitPayload": {"reviewer_id": "{{viewer.user_id}}"}}}
+        },
+        "correlatedActionsBlockExample": {
+            "id": "case_action",
+            "type": "actions",
+            "title": "Case action",
+            "source": {
+                "kind": "workflow_runtime",
+                "entity": "actions",
+                "workflowId": "loan_review",
+                "mode": "filter",
+                "condition": {"op": "AND", "arguments": [
+                    {"op": "EQ", "arguments": ["actionKey", "case_review_decision"]},
+                    {"op": "EQ", "arguments": ["correlation.case_id", {"filter": "case_id", "path": "value"}]}
+                ]}
+            },
+            "actions": {"submit": {"label": "Submit decision", "implicitPayload": {"reviewer_id": "{{viewer.user_id}}"}}}
+        },
+        "actionsTableExample": {
+            "id": "workflow_actions_table",
+            "type": "table",
+            "title": "Open actions",
+            "source": {"kind": "workflow_runtime", "entity": "actions", "workflowId": "inventory_sync", "mode": "filter", "orderBy": [{"field": "requestedAt", "direction": "desc"}]},
+            "table": {
+                "columns": [
+                    {"field": "label", "label": "Action"},
+                    {"field": "status", "label": "Status"},
+                    {"field": "instanceId", "label": "Instance"},
+                    {"field": "requestedAt", "label": "Requested", "format": "datetime"}
+                ]
             }
         }
     })
@@ -2001,6 +2147,7 @@ fn collect_report_block_authoring_issues(
         "table",
         "chart",
         "metric",
+        "actions",
         "filters",
         "interactions",
     ];
@@ -2055,29 +2202,54 @@ fn collect_report_block_authoring_issues(
             issues.push(error(
                 path,
                 "MISSING_BLOCK_TYPE",
-                "Report block must include type: table, chart, metric, or markdown.",
+                "Report block must include type: table, chart, metric, actions, or markdown.",
             ));
         }
         let has_dataset = block.get("dataset").is_some();
         match block.get("source") {
             Some(source) if source.is_object() => {
-                if source
-                    .get("schema")
-                    .and_then(Value::as_str)
-                    .is_none_or(str::is_empty)
-                    && !has_dataset
-                {
-                    issues.push(error(
-                        format!("{path}.source.schema"),
-                        "MISSING_SOURCE_SCHEMA",
-                        "Report block source must include an Object Model schema name.",
-                    ));
+                if !has_dataset {
+                    match source_kind(source) {
+                        "workflow_runtime" => {
+                            if source
+                                .get("workflowId")
+                                .and_then(Value::as_str)
+                                .is_none_or(str::is_empty)
+                            {
+                                issues.push(error(
+                                    format!("{path}.source.workflowId"),
+                                    "MISSING_WORKFLOW_RUNTIME_WORKFLOW_ID",
+                                    "Workflow runtime report source must include workflowId.",
+                                ));
+                            }
+                            if source.get("entity").and_then(Value::as_str).is_none() {
+                                issues.push(error(
+                                    format!("{path}.source.entity"),
+                                    "MISSING_WORKFLOW_RUNTIME_ENTITY",
+                                    "Workflow runtime report source must include entity: instances or actions.",
+                                ));
+                            }
+                        }
+                        _ => {
+                            if source
+                                .get("schema")
+                                .and_then(Value::as_str)
+                                .is_none_or(str::is_empty)
+                            {
+                                issues.push(error(
+                                    format!("{path}.source.schema"),
+                                    "MISSING_SOURCE_SCHEMA",
+                                    "Report block source must include an Object Model schema name.",
+                                ));
+                            }
+                        }
+                    }
                 }
             }
             _ if !has_dataset => issues.push(error(
                 format!("{path}.source"),
                 "MISSING_BLOCK_SOURCE",
-                "Report block must include either dataset or source with at least {schema}.",
+                "Report block must include either dataset or source. Object Model sources need schema; workflow_runtime sources need kind, entity, and workflowId.",
             )),
             _ => {}
         }
@@ -2097,6 +2269,9 @@ fn collect_report_block_authoring_issues(
     }
     if let Some(metric) = block.get("metric") {
         collect_metric_issues(&format!("{path}.metric"), metric, issues);
+    }
+    if let Some(actions) = block.get("actions") {
+        collect_block_actions_issues(&format!("{path}.actions"), actions, issues);
     }
     if let Some(filters) = block.get("filters") {
         match filters.as_array() {
@@ -2221,7 +2396,71 @@ fn collect_report_block_authoring_issues(
                 ));
             }
         }
+        Some("actions") => {
+            let Some(source) = block.get("source").filter(|source| source.is_object()) else {
+                issues.push(error(
+                    format!("{path}.source"),
+                    "MISSING_ACTIONS_SOURCE",
+                    "Actions blocks must include source.kind='workflow_runtime' and entity='actions'.",
+                ));
+                return;
+            };
+            if source_kind(source) != "workflow_runtime" {
+                issues.push(error(
+                    format!("{path}.source.kind"),
+                    "INVALID_ACTIONS_SOURCE_KIND",
+                    "Actions blocks require source.kind='workflow_runtime'.",
+                ));
+            }
+            if source.get("entity").and_then(Value::as_str) != Some("actions") {
+                issues.push(error(
+                    format!("{path}.source.entity"),
+                    "INVALID_ACTIONS_SOURCE_ENTITY",
+                    "Actions blocks require source.entity='actions'.",
+                ));
+            }
+        }
         _ => {}
+    }
+}
+
+fn collect_block_actions_issues(path: &str, actions: &Value, issues: &mut Vec<AuthoringIssue>) {
+    let Some(actions_object) = actions.as_object() else {
+        issues.push(error(
+            path,
+            "INVALID_ACTIONS_CONFIG",
+            "Report block actions config must be an object.",
+        ));
+        return;
+    };
+
+    collect_unknown_keys(path, actions, &["submit"], issues);
+    if let Some(submit) = actions_object.get("submit") {
+        let Some(submit_object) = submit.as_object() else {
+            issues.push(error(
+                format!("{path}.submit"),
+                "INVALID_ACTIONS_SUBMIT_CONFIG",
+                "Report block actions.submit config must be an object.",
+            ));
+            return;
+        };
+
+        collect_unknown_keys(
+            &format!("{path}.submit"),
+            submit,
+            &["label", "implicitPayload"],
+            issues,
+        );
+        if submit_object
+            .get("implicitPayload")
+            .is_some_and(|implicit_payload| !implicit_payload.is_object())
+        {
+            issues.push(error(
+                format!("{path}.submit.implicitPayload"),
+                "INVALID_ACTIONS_IMPLICIT_PAYLOAD",
+                "Report block actions.submit.implicitPayload must be an object keyed by payload field name.",
+            ));
+        }
     }
 }
 
@@ -2294,8 +2533,12 @@ fn collect_source_issues(path: &str, source: &Value, issues: &mut Vec<AuthoringI
         path,
         source,
         &[
+            "kind",
             "schema",
             "connectionId",
+            "entity",
+            "workflowId",
+            "instanceId",
             "mode",
             "condition",
             "filterMappings",
@@ -2316,6 +2559,20 @@ fn collect_source_issues(path: &str, source: &Value, issues: &mut Vec<AuthoringI
         },
         issues,
     );
+
+    let kind = source_kind(source);
+    if !matches!(kind, "object_model" | "workflow_runtime") {
+        issues.push(error(
+            format!("{path}.kind"),
+            "INVALID_SOURCE_KIND",
+            "Report source kind must be object_model or workflow_runtime.",
+        ));
+    }
+
+    if kind == "workflow_runtime" {
+        collect_workflow_runtime_source_issues(path, source, issues);
+        return;
+    }
 
     if let Some(condition) = source.get("condition") {
         collect_condition_issues(&format!("{path}.condition"), condition, issues);
@@ -2386,6 +2643,103 @@ fn collect_source_issues(path: &str, source: &Value, issues: &mut Vec<AuthoringI
                      dimension).",
                 ));
             }
+        }
+    }
+}
+
+fn source_kind(source: &Value) -> &str {
+    source
+        .get("kind")
+        .and_then(Value::as_str)
+        .unwrap_or("object_model")
+}
+
+fn collect_workflow_runtime_source_issues(
+    path: &str,
+    source: &Value,
+    issues: &mut Vec<AuthoringIssue>,
+) {
+    if source
+        .get("workflowId")
+        .and_then(Value::as_str)
+        .is_none_or(str::is_empty)
+    {
+        issues.push(error(
+            format!("{path}.workflowId"),
+            "MISSING_WORKFLOW_RUNTIME_WORKFLOW_ID",
+            "Workflow runtime report source must include workflowId.",
+        ));
+    }
+
+    match source.get("entity").and_then(Value::as_str) {
+        Some("instances" | "actions") => {}
+        Some(_) => issues.push(error(
+            format!("{path}.entity"),
+            "INVALID_WORKFLOW_RUNTIME_ENTITY",
+            "Workflow runtime source entity must be instances or actions.",
+        )),
+        None => issues.push(error(
+            format!("{path}.entity"),
+            "MISSING_WORKFLOW_RUNTIME_ENTITY",
+            "Workflow runtime source must include entity: instances or actions.",
+        )),
+    }
+
+    if source
+        .get("schema")
+        .and_then(Value::as_str)
+        .is_some_and(|value| !value.trim().is_empty())
+    {
+        issues.push(error(
+            format!("{path}.schema"),
+            "WORKFLOW_RUNTIME_SCHEMA_NOT_ALLOWED",
+            "Workflow runtime sources must not set schema.",
+        ));
+    }
+    if source.get("connectionId").is_some() {
+        issues.push(error(
+            format!("{path}.connectionId"),
+            "WORKFLOW_RUNTIME_CONNECTION_NOT_ALLOWED",
+            "Workflow runtime sources must not set connectionId.",
+        ));
+    }
+    if source
+        .get("mode")
+        .and_then(Value::as_str)
+        .is_some_and(|mode| mode != "filter")
+    {
+        issues.push(error(
+            format!("{path}.mode"),
+            "INVALID_WORKFLOW_RUNTIME_MODE",
+            "Workflow runtime sources only support mode='filter'.",
+        ));
+    }
+
+    for key in ["groupBy", "aggregates", "join"] {
+        if source.get(key).is_some() {
+            issues.push(error(
+                format!("{path}.{key}"),
+                "WORKFLOW_RUNTIME_QUERY_FIELD_NOT_ALLOWED",
+                "Workflow runtime sources do not support groupBy, aggregates, or join.",
+            ));
+        }
+    }
+
+    if let Some(condition) = source.get("condition") {
+        collect_condition_issues(&format!("{path}.condition"), condition, issues);
+    }
+    if let Some(filter_mappings) = source.get("filterMappings").and_then(Value::as_array) {
+        for (index, mapping) in filter_mappings.iter().enumerate() {
+            collect_filter_target_issues(
+                &format!("{path}.filterMappings[{index}]"),
+                mapping,
+                issues,
+            );
+        }
+    }
+    if let Some(order_by) = source.get("orderBy").and_then(Value::as_array) {
+        for (index, order) in order_by.iter().enumerate() {
+            collect_order_by_issues(&format!("{path}.orderBy[{index}]"), order, issues);
         }
     }
 }
@@ -3954,6 +4308,144 @@ mod tests {
 
         assert!(!codes.contains(&"MISSING_TABLE_VALUE_SELECT"));
         assert!(!codes.contains(&"UNKNOWN_KEY"));
+    }
+
+    #[test]
+    fn report_authoring_accepts_workflow_runtime_instances_table() {
+        let definition = json!({
+            "definitionVersion": 1,
+            "markdown": "{{ block.workflow_runs }}",
+            "blocks": [{
+                "id": "workflow_runs",
+                "type": "table",
+                "source": {
+                    "kind": "workflow_runtime",
+                    "entity": "instances",
+                    "workflowId": "inventory_sync",
+                    "mode": "filter",
+                    "orderBy": [{"field": "createdAt", "direction": "desc"}]
+                },
+                "table": {
+                    "columns": [
+                        {"field": "instanceId"},
+                        {"field": "status"},
+                        {"field": "hasActions"}
+                    ]
+                }
+            }]
+        });
+
+        let issues = collect_report_definition_authoring_issues(&definition);
+        let codes = issue_codes(&issues);
+
+        assert!(!codes.contains(&"MISSING_SOURCE_SCHEMA"));
+        assert!(!codes.contains(&"UNKNOWN_REPORT_FIELD"));
+        assert!(!codes.contains(&"INVALID_SOURCE_KIND"));
+    }
+
+    #[test]
+    fn report_authoring_accepts_workflow_runtime_actions_block() {
+        let definition = json!({
+            "definitionVersion": 1,
+            "markdown": "{{ block.workflow_actions }}",
+            "blocks": [{
+                "id": "workflow_actions",
+                "type": "actions",
+                "source": {
+                    "kind": "workflow_runtime",
+                    "entity": "actions",
+                    "workflowId": "inventory_sync",
+                    "instanceId": "00000000-0000-0000-0000-000000000000"
+                }
+            }]
+        });
+
+        let issues = collect_report_definition_authoring_issues(&definition);
+        let codes = issue_codes(&issues);
+
+        assert!(!codes.contains(&"MISSING_SOURCE_SCHEMA"));
+        assert!(!codes.contains(&"INVALID_ACTIONS_SOURCE_KIND"));
+        assert!(!codes.contains(&"INVALID_ACTIONS_SOURCE_ENTITY"));
+    }
+
+    #[test]
+    fn report_authoring_accepts_workflow_runtime_actions_correlation_binding() {
+        let definition = json!({
+            "definitionVersion": 1,
+            "markdown": "{{ block.case_action }}",
+            "filters": [{
+                "id": "case_id",
+                "label": "Case",
+                "type": "text",
+                "required": true
+            }],
+            "blocks": [{
+                "id": "case_action",
+                "type": "actions",
+                "source": {
+                    "kind": "workflow_runtime",
+                    "entity": "actions",
+                    "workflowId": "loan_review",
+                    "condition": {"op": "AND", "arguments": [
+                        {"op": "EQ", "arguments": ["actionKey", "case_review_decision"]},
+                        {"op": "EQ", "arguments": ["correlation.case_id", {"filter": "case_id", "path": "value"}]}
+                    ]}
+                },
+                "actions": {
+                    "submit": {
+                        "label": "Submit decision",
+                        "implicitPayload": {"reviewer_id": "{{viewer.user_id}}"}
+                    }
+                }
+            }]
+        });
+
+        let issues = collect_report_definition_authoring_issues(&definition);
+        let codes = issue_codes(&issues);
+
+        assert!(!codes.contains(&"UNKNOWN_REPORT_BLOCK_FIELD"));
+        assert!(!codes.contains(&"UNKNOWN_REPORT_FIELD"));
+        assert!(!codes.contains(&"INVALID_ACTIONS_SOURCE_KIND"));
+        assert!(!codes.contains(&"INVALID_ACTIONS_SOURCE_ENTITY"));
+        assert!(!codes.contains(&"UNKNOWN_CONDITION_FILTER_REF"));
+    }
+
+    #[test]
+    fn report_authoring_rejects_actions_block_without_workflow_runtime_source() {
+        let definition = json!({
+            "definitionVersion": 1,
+            "markdown": "{{ block.workflow_actions }}",
+            "blocks": [{
+                "id": "workflow_actions",
+                "type": "actions",
+                "source": {"schema": "StockSnapshot"}
+            }]
+        });
+
+        let issues = collect_report_definition_authoring_issues(&definition);
+        let codes = issue_codes(&issues);
+
+        assert!(codes.contains(&"INVALID_ACTIONS_SOURCE_KIND"));
+    }
+
+    #[test]
+    fn report_authoring_schema_includes_workflow_runtime_contract() {
+        let schema = report_authoring_schema();
+
+        assert_eq!(schema["definitionVersion"], json!(1));
+        assert_eq!(
+            schema["workflowRuntimeGuidance"]["actionsBlockExample"]["type"],
+            json!("actions")
+        );
+        assert_eq!(
+            schema["workflowRuntimeGuidance"]["correlatedActionsBlockExample"]["source"]["condition"]
+                ["arguments"][1]["arguments"][0],
+            json!("correlation.case_id")
+        );
+        assert_eq!(
+            schema["blockShape"]["actions"]["required"]["source.kind"],
+            json!("workflow_runtime")
+        );
     }
 
     #[test]
