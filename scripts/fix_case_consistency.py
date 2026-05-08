@@ -89,7 +89,43 @@ req(
 print(f"~ AIRecommendation {ai['id']}: loan_case_id -> {CASE}")
 
 
-# 4. Reconcile ScoringResult totals with the actual RuleOutcome trace.
+# 4a. Make sure the trace contains a real hard-fail breach so the audit page
+# demonstrates the severity + outcome distinction. Flip one specific
+# affordability hard-fail rule from pass→fail and let the rest of the script
+# pick it up via aggregation.
+HARD_FAIL_DEMO_RULE = "RG209-AFF-002"
+ro_target = req(
+    "POST",
+    "/api/runtime/object-model/instances/schema/RuleOutcome/filter",
+    {"condition": {"op": "AND", "arguments": [
+        {"op": "EQ", "arguments": ["dossier_id", DOSSIER_VALUE]},
+        {"op": "EQ", "arguments": ["rule_id", HARD_FAIL_DEMO_RULE]},
+    ]}, "limit": 1},
+)["instances"]
+if ro_target:
+    target_row = ro_target[0]
+    if target_row["properties"].get("outcome") != "fail":
+        req(
+            "PUT",
+            f"/api/runtime/object-model/instances/{sm['RuleOutcome']}/{target_row['id']}",
+            {"properties": {
+                "outcome": "fail",
+                "applied": True,
+                "contribution": -40.0,
+                "message": (
+                    f"{HARD_FAIL_DEMO_RULE} hard-fail: stressed monthly surplus "
+                    f"falls below required affordability buffer at the requested "
+                    f"loan size."
+                ),
+            }},
+        )
+        print(f"~ RuleOutcome {target_row['id']}: {HARD_FAIL_DEMO_RULE} flipped to fail")
+    else:
+        print(f"= RuleOutcome {HARD_FAIL_DEMO_RULE}: already failing")
+else:
+    print(f"! Could not find {HARD_FAIL_DEMO_RULE} in trace; skipping demo flip")
+
+# 4b. Reconcile ScoringResult totals with the actual RuleOutcome trace.
 ro_rows = req(
     "POST",
     "/api/runtime/object-model/instances/schema/RuleOutcome/filter",
@@ -170,47 +206,71 @@ print(
 
 # 5. Re-narrate the AI recommendation around the same numbers.
 flag_rule_ids = [b["rule_id"] for b in flag_breaches]
-ai_reasons = [
-    {
+hard_fail_rule_ids = [b["rule_id"] for b in hard_fail_breaches]
+
+ai_decision = "DECLINED" if hard_fail_breaches else (
+    "CONSIDER" if flag_breaches else "APPROVED"
+)
+ai_confidence = 0.82 if hard_fail_breaches else (0.78 if flag_breaches else 0.9)
+
+ai_reasons = []
+if hard_fail_breaches:
+    ai_reasons.append({
+        "label": f"Hard-fail breach on {hard_fail_rule_ids[0]}",
+        "supports": "decline",
+        "citations": [{"rule_id": rid} for rid in hard_fail_rule_ids],
+        "summary": hard_fail_breaches[0]["message"],
+    })
+else:
+    ai_reasons.append({
         "label": "All hard-fail rules cleared",
         "supports": "consider",
         "citations": [{"rule_id": rid} for rid in active_rule_ids[:3]],
-        "summary": f"{len(active_rule_ids)} rules ran; 0 hard-fail breaches, "
-                   f"{len(flag_breaches)} flag breach(es).",
-    },
-    {
-        "label": "Borderline flag breach",
+        "summary": f"{len(active_rule_ids)} rules ran; 0 hard-fail breaches.",
+    })
+if flag_breaches:
+    ai_reasons.append({
+        "label": "Flag breach",
         "supports": "consider",
         "citations": [{"rule_id": rid} for rid in flag_rule_ids],
-        "summary": (
-            f"{flag_breaches[0]['message']}"
-            if flag_breaches else "No flag breaches."
-        ),
-    },
-    {
-        "label": "Serviceability passes with stress buffer",
-        "supports": "consider",
-        "citations": [{"dossier_field": "financial_summary.monthly_surplus_aud"}],
-        "summary": "Stressed surplus stays positive at 20% rate buffer; HEM coverage partial.",
-    },
-]
+        "summary": flag_breaches[0]["message"],
+    })
+ai_reasons.append({
+    "label": "Serviceability stress buffer",
+    "supports": "consider",
+    "citations": [{"dossier_field": "financial_summary.monthly_surplus_aud"}],
+    "summary": (
+        "Stressed surplus is positive at the standard 20% buffer but the "
+        "affordability rule applies a tighter threshold; manual review needed "
+        "to confirm headroom."
+    ),
+})
+
 ai_risk_flags = [
     {"rule_id": b["rule_id"], "category": b["category"], "severity": b["severity"]}
-    for b in flag_breaches
+    for b in (hard_fail_breaches + flag_breaches)
 ]
-ai_actions = [
-    {"action": "verify_essential_outgoings", "owner": "credit_officer"},
-    {"action": "request_3mo_bank_statement", "owner": "applicant"},
-] if flag_breaches else []
+ai_actions = []
+if hard_fail_breaches:
+    ai_actions.append({"action": "decline_or_escalate_to_senior_credit", "owner": "credit_officer"})
+    ai_actions.append({"action": "verify_essential_outgoings_evidence", "owner": "credit_officer"})
+if flag_breaches:
+    ai_actions.append({"action": "request_3mo_bank_statement", "owner": "applicant"})
+
+primary_concern = (
+    hard_fail_rule_ids[0] if hard_fail_rule_ids
+    else (flag_rule_ids[0] if flag_rule_ids else "n/a")
+)
 ai_draft_email = (
     "Hi Avery,\n\n"
-    "Thanks for your application. We've completed the initial assessment and "
-    f"identified one borderline indicator ({flag_rule_ids[0] if flag_rule_ids else 'n/a'}) "
-    "around essential outgoings vs repayment capacity. To finalise the decision "
-    "we'd like to confirm a few items:\n\n"
+    "Thanks for your application. Our automated assessment identified an "
+    f"affordability concern under {primary_concern} (stressed monthly surplus "
+    "vs requested repayment). Before we can proceed we'll need to verify a "
+    "few items in writing:\n\n"
     "  • Most recent 3-month bank statement\n"
+    "  • Evidence of any liquid assets you'd draw on if income paused\n"
     "  • Confirmation of any upcoming changes in regular outgoings\n\n"
-    "We'll respond within 2 business days of receiving these.\n\n"
+    "We'll get back to you within 2 business days of receiving these.\n\n"
     "Regards,\nBlockEarner Credit Team\n"
 )
 
@@ -218,8 +278,8 @@ req(
     "PUT",
     f"/api/runtime/object-model/instances/{sm['AIRecommendation']}/{ai['id']}",
     {"properties": {
-        "decision": "CONSIDER",
-        "confidence_score": 0.78,
+        "decision": ai_decision,
+        "confidence_score": ai_confidence,
         "citation_check_passed": True,
         "reasons": ai_reasons,
         "risk_flags": ai_risk_flags,
@@ -229,34 +289,73 @@ req(
         "dossier_id": DOSSIER_VALUE,
     }},
 )
-print(f"~ AIRecommendation {ai['id']}: decision=CONSIDER, "
-      f"reasons=3, risk_flags={len(ai_risk_flags)}")
+print(f"~ AIRecommendation {ai['id']}: decision={ai_decision}, "
+      f"reasons={len(ai_reasons)}, risk_flags={len(ai_risk_flags)}")
 
 
-# 6. Tighten the human override reasoning to reference the actual flag rule.
+# 6. Tighten the human override reasoning to reference the actual breaches.
 hd = filter_one("HumanDecision", "loan_case_id", CASE)
 hd_id = hd["id"]
-flag_rule_ref = flag_rule_ids[0] if flag_rule_ids else "n/a"
-override_reasoning = (
-    f"AI returned CONSIDER on a single flag breach ({flag_rule_ref}) "
-    f"around essential outgoings vs repayment capacity. Verified payslip + "
-    f"3-month bank statement; applicant has 36mo employment tenure, ~AUD 20k "
-    f"liquid buffer (>3mo expenses) and stable income reliability. All hard-fail "
-    f"rules cleared. Approving at requested limit; pin file for 6-month review."
-)
+
+if hard_fail_breaches:
+    primary_rule = hard_fail_rule_ids[0]
+    override_reasoning = (
+        f"Scoring returned DECLINED on {primary_rule} hard-fail (stressed "
+        f"surplus vs requested repayment). AI also recommended DECLINED "
+        f"({ai_decision}, conf {ai_confidence:.2f}). Manual verification: "
+        f"applicant produced a 3-month bank statement showing AUD 20k+ "
+        f"liquid buffer, employer letter confirming 36mo tenure and base "
+        f"salary, plus written confirmation that the upcoming end-of-year "
+        f"bonus is unrelated to the repayment plan. Recomputed stressed "
+        f"surplus including liquid buffer and conservative bonus exclusion "
+        f"clears the affordability threshold. Approving at the requested "
+        f"limit with mandatory 6-month file review and pinned LVR check."
+    )
+    overrode_ai = True
+    overrode_scoring = True
+elif flag_breaches:
+    primary_rule = flag_rule_ids[0]
+    override_reasoning = (
+        f"AI returned CONSIDER on a single flag breach ({primary_rule}) "
+        f"around essential outgoings vs repayment capacity. Verified payslip "
+        f"+ 3-month bank statement; applicant has 36mo employment tenure, "
+        f"~AUD 20k liquid buffer (>3mo expenses) and stable income "
+        f"reliability. All hard-fail rules cleared. Approving at requested "
+        f"limit; pin file for 6-month review."
+    )
+    overrode_ai = True
+    overrode_scoring = False
+else:
+    override_reasoning = (
+        "Scoring and AI both APPROVED. Standard credit-officer sign-off."
+    )
+    overrode_ai = False
+    overrode_scoring = False
+
 req(
     "PUT",
     f"/api/runtime/object-model/instances/{sm['HumanDecision']}/{hd_id}",
     {"properties": {
+        "decision": "APPROVED",
+        "overrode_ai": overrode_ai,
+        "overrode_scoring": overrode_scoring,
         "override_reasoning": override_reasoning,
         "ai_recommendation_id": ai["id"],
         "scoring_result_id": sr["id"],
     }},
 )
-print(f"~ HumanDecision {hd_id}: override_reasoning re-narrated, links pinned")
+print(
+    f"~ HumanDecision {hd_id}: override APPROVED "
+    f"(overrode_scoring={overrode_scoring}, overrode_ai={overrode_ai})"
+)
 
 
 # 7. Re-write LoanCase.decision_events with totals that match ScoringResult.
+human_summary = "Credit officer approves"
+if overrode_scoring and overrode_ai:
+    human_summary += ", overriding scoring DECLINED + AI DECLINED on verified buffer evidence"
+elif overrode_ai:
+    human_summary += f", overriding AI {ai_decision}"
 decision_events = [
     {"seq": 1, "timestamp": "2026-05-04T09:45:00+00:00", "layer": "L1",
      "actor": "system", "event_type": "dossier_assembled",
@@ -270,10 +369,13 @@ decision_events = [
      )},
     {"seq": 3, "timestamp": "2026-05-05T20:30:00+00:00", "layer": "L3",
      "actor": "agent:layer3-ai-reviewer", "event_type": "ai_review_complete",
-     "summary": "AI recommends CONSIDER at confidence 0.78, citations OK"},
+     "summary": (
+         f"AI recommends {ai_decision} at confidence {ai_confidence:.2f}, "
+         f"citations OK"
+     )},
     {"seq": 4, "timestamp": "2026-05-05T22:15:00+00:00", "layer": "L4",
      "actor": "volodymyr@agilevision.io", "event_type": "human_decision",
-     "summary": "Credit officer approves, overriding AI CONSIDER"},
+     "summary": human_summary},
 ]
 req(
     "PUT",
