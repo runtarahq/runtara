@@ -1790,6 +1790,24 @@ impl ReportService {
             block
         };
 
+        if let Some(missing) = block_unsatisfied_strict_filter(definition, block, resolved_filters)
+        {
+            return Ok(ReportBlockRenderResult {
+                block_type: block.block_type,
+                status: ReportBlockStatus::Empty,
+                title: block.title.clone(),
+                data: Some(json!({
+                    "missing": true,
+                    "unsatisfiedFilter": missing,
+                    "message": format!(
+                        "Required filter '{}' is not set. Open this view through the list/master interaction so the filter is populated.",
+                        missing
+                    ),
+                })),
+                error: None,
+            });
+        }
+
         let data = match block.block_type {
             ReportBlockType::Table => {
                 self.render_table_block(
@@ -1820,6 +1838,10 @@ impl ReportService {
                 .await?
             }
             ReportBlockType::Markdown => json!({}),
+            ReportBlockType::Card => {
+                self.render_card_block(tenant_id, definition, block, resolved_filters)
+                    .await?
+            }
         };
 
         let status = if is_empty_data(&data) {
@@ -3084,6 +3106,81 @@ impl ReportService {
             "format": metric.and_then(|m| m.format.clone()),
             "columns": columns,
             "rows": rows,
+        }))
+    }
+
+    /// Card blocks render the first row of a single-row filter source as a
+    /// vertical key→value layout. The shape returned mirrors a one-row table
+    /// (`columns` + first-row `row`), with `missing: true` when the filter
+    /// matches no rows so the frontend can show an empty-card placeholder.
+    async fn render_card_block(
+        &self,
+        tenant_id: &str,
+        definition: &ReportDefinition,
+        block: &ReportBlockDefinition,
+        resolved_filters: &HashMap<String, Value>,
+    ) -> Result<Value, ReportServiceError> {
+        if block.source.kind != ReportSourceKind::ObjectModel {
+            return Err(ReportServiceError::Validation(format!(
+                "Block '{}' card blocks only support object_model sources",
+                block.id
+            )));
+        }
+        if block.source.mode != ReportSourceMode::Filter {
+            return Err(ReportServiceError::Validation(format!(
+                "Block '{}' card blocks only support filter-mode sources",
+                block.id
+            )));
+        }
+
+        let filter_request = FilterRequest {
+            offset: 0,
+            limit: 1,
+            condition: build_block_condition(definition, block, resolved_filters, None)?,
+            sort_by: if block.source.order_by.is_empty() {
+                None
+            } else {
+                Some(
+                    block
+                        .source
+                        .order_by
+                        .iter()
+                        .map(|entry| entry.field.clone())
+                        .collect(),
+                )
+            },
+            sort_order: if block.source.order_by.is_empty() {
+                None
+            } else {
+                Some(
+                    block
+                        .source
+                        .order_by
+                        .iter()
+                        .map(|entry| normalize_sort_direction(&entry.direction))
+                        .collect(),
+                )
+            },
+            score_expression: None,
+            order_by: None,
+        };
+
+        let (instances, _total_count) = self
+            .instance_service
+            .filter_instances_by_schema(
+                tenant_id,
+                &block.source.schema,
+                filter_request,
+                block.source.connection_id.as_deref(),
+            )
+            .await
+            .map_err(map_object_model_error)?;
+
+        let row = instances.into_iter().next().map(flatten_instance);
+        let missing = row.is_none();
+        Ok(json!({
+            "row": row.unwrap_or(Value::Null),
+            "missing": missing,
         }))
     }
 }
@@ -4351,6 +4448,87 @@ fn append_option_context_conditions(
     {
         append_source_mapping_conditions(conditions, &mappings, resolved_filters);
     }
+}
+
+/// Returns the id of the first filter that
+///   (a) is referenced by the block's source `condition` (or any column-level
+///       lookup source), and
+///   (b) has `strict_when_referenced: true`, and
+///   (c) has no value in `resolved_filters` (and no default that would supply
+///       one).
+/// `None` means the block can be rendered normally.
+fn block_unsatisfied_strict_filter(
+    definition: &ReportDefinition,
+    block: &ReportBlockDefinition,
+    resolved_filters: &HashMap<String, Value>,
+) -> Option<String> {
+    let strict_filters: HashMap<&str, &ReportFilterDefinition> = definition
+        .filters
+        .iter()
+        .filter(|filter| filter.strict_when_referenced)
+        .map(|filter| (filter.id.as_str(), filter))
+        .collect();
+    if strict_filters.is_empty() {
+        return None;
+    }
+
+    let mut conditions: Vec<&Condition> = Vec::new();
+    if let Some(condition) = block.source.condition.as_ref() {
+        conditions.push(condition);
+    }
+    if let Some(table) = block.table.as_ref() {
+        for column in &table.columns {
+            if let Some(source) = column.source.as_ref()
+                && let Some(condition) = source.condition.as_ref()
+            {
+                conditions.push(condition);
+            }
+        }
+    }
+
+    for condition in conditions {
+        if let Some(unset) =
+            condition_unsatisfied_strict_filter(condition, &strict_filters, resolved_filters)
+        {
+            return Some(unset);
+        }
+    }
+    None
+}
+
+fn condition_unsatisfied_strict_filter(
+    condition: &Condition,
+    strict_filters: &HashMap<&str, &ReportFilterDefinition>,
+    resolved_filters: &HashMap<String, Value>,
+) -> Option<String> {
+    let arguments = condition.arguments.as_ref()?;
+    for argument in arguments {
+        if let Ok(Some(reference)) = parse_report_condition_filter_ref(argument)
+            && let Some(filter) = strict_filters.get(reference.filter_id.as_str())
+        {
+            let raw = resolved_filters
+                .get(&reference.filter_id)
+                .cloned()
+                .or_else(|| {
+                    filter
+                        .default
+                        .clone()
+                        .map(|default| resolve_filter_value(filter, default))
+                })
+                .unwrap_or(Value::Null);
+            let value = extract_condition_filter_ref_value(&raw, &reference.path);
+            if value_is_empty(&value) {
+                return Some(reference.filter_id);
+            }
+        }
+        if let Some(child) = condition_from_value(argument)
+            && let Some(unset) =
+                condition_unsatisfied_strict_filter(&child, strict_filters, resolved_filters)
+        {
+            return Some(unset);
+        }
+    }
+    None
 }
 
 fn build_block_condition(
@@ -5732,6 +5910,10 @@ fn is_empty_data(data: &Value) -> bool {
             .get("actions")
             .and_then(Value::as_array)
             .is_some_and(|actions| actions.is_empty())
+        || data
+            .get("missing")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
 }
 
 fn clamp_page_size(size: i64) -> i64 {
@@ -6079,6 +6261,7 @@ mod tests {
             chart: None,
             metric: None,
             actions: None,
+            card: None,
             filters: vec![],
             interactions: vec![],
             show_when: None,
@@ -6120,6 +6303,7 @@ mod tests {
             pill_variants: None,
             levels: None,
             align: None,
+            descriptive: false,
         }
     }
 
@@ -6481,6 +6665,7 @@ mod tests {
                 filter_type: ReportFilterType::Select,
                 default: None,
                 required: false,
+                strict_when_referenced: false,
                 options: None,
                 applies_to: vec![ReportFilterTarget {
                     filter_id: None,
@@ -6833,6 +7018,7 @@ mod tests {
             filter_type,
             default: None,
             required,
+            strict_when_referenced: false,
             options: None,
             applies_to: vec![],
         }

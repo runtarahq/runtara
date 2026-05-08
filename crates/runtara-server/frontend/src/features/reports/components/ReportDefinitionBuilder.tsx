@@ -1,6 +1,7 @@
 import { DragEvent, ReactNode, useMemo, useState } from 'react';
 import {
   Copy,
+  CreditCard,
   GripVertical,
   LineChart,
   Plus,
@@ -108,6 +109,7 @@ const BLOCK_TYPE_META: Record<
   metric: { label: 'Metric', icon: Sigma },
   chart: { label: 'Chart', icon: LineChart },
   actions: { label: 'Actions', icon: Wrench },
+  card: { label: 'Card', icon: CreditCard },
 };
 
 const AGGREGATE_OPTIONS: Array<{

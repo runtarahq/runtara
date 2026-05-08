@@ -106,10 +106,26 @@ pub struct ReportViewDefinition {
     pub title: Option<String>,
     #[serde(default, rename = "titleFrom", skip_serializing_if = "Option::is_none")]
     pub title_from: Option<String>,
+    /// Resolves the view title from a rendered block's row. The first row of
+    /// the referenced block is used; the value comes from `field` if given,
+    /// otherwise from the block column flagged `descriptive: true`.
+    #[serde(
+        default,
+        rename = "titleFromBlock",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub title_from_block: Option<ReportTitleFromBlock>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub breadcrumb: Vec<ReportViewBreadcrumb>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub layout: Vec<Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct ReportTitleFromBlock {
+    pub block: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub field: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -232,10 +248,25 @@ pub struct ReportFilterDefinition {
     pub default: Option<Value>,
     #[serde(default)]
     pub required: bool,
+    /// When true, any block whose source `condition` references this filter
+    /// will short-circuit to an empty result if the filter has no value at
+    /// render time. Use this for navigation-driven filters (e.g. populated by
+    /// row-click + navigate_view) so the block never silently falls back to an
+    /// unfiltered query when the filter is missing from the URL/state.
+    #[serde(
+        default,
+        rename = "strictWhenReferenced",
+        skip_serializing_if = "is_false_filter"
+    )]
+    pub strict_when_referenced: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub options: Option<Value>,
     #[serde(default, rename = "appliesTo")]
     pub applies_to: Vec<ReportFilterTarget>,
+}
+
+fn is_false_filter(value: &bool) -> bool {
+    !value
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
@@ -290,6 +321,8 @@ pub struct ReportBlockDefinition {
     pub metric: Option<ReportMetricConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub actions: Option<ReportActionsConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub card: Option<ReportCardConfig>,
     #[serde(default)]
     pub filters: Vec<ReportFilterDefinition>,
     #[serde(default)]
@@ -335,7 +368,7 @@ pub struct ReportBlockDatasetQuery {
     pub limit: Option<i64>,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, ToSchema, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum ReportBlockType {
     Table,
@@ -343,6 +376,128 @@ pub enum ReportBlockType {
     Metric,
     Actions,
     Markdown,
+    Card,
+}
+
+/// Card block configuration. A card renders a single record (the first row of
+/// a filter-mode source) as a vertical key→value layout, optionally split into
+/// titled groups with multi-column inner grids and per-field formatting.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct ReportCardConfig {
+    #[serde(default)]
+    pub groups: Vec<ReportCardGroup>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct ReportCardGroup {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// Number of columns to lay fields out in within this group (1–4).
+    #[serde(default = "default_card_group_columns")]
+    pub columns: u8,
+    pub fields: Vec<ReportCardField>,
+}
+
+fn default_card_group_columns() -> u8 {
+    2
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct ReportCardField {
+    pub field: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    /// How to render this field. `value` runs through the standard cell
+    /// formatter (date/currency/pill/etc); `json` shows a collapsible JSON
+    /// tree; `markdown` renders the value as markdown; `subcard` renders a
+    /// nested object as a card with its own `groups`; `subtable` renders an
+    /// array of objects as a small inline table with its own `columns`.
+    #[serde(default = "default_card_field_kind")]
+    pub kind: ReportCardFieldKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub format: Option<String>,
+    /// Pill variants for `kind=value` + `format=pill`. Maps the cell value to
+    /// a badge variant (`success`, `warning`, `destructive`, `default`, …) so
+    /// enum/status fields can be color-coded.
+    #[serde(
+        default,
+        rename = "pillVariants",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub pill_variants: Option<std::collections::BTreeMap<String, String>>,
+    /// Whether the field starts collapsed. Only meaningful for `kind=json` /
+    /// `kind=markdown` / `kind=subcard` / `kind=subtable`.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub collapsed: bool,
+    /// Span in inner-grid columns. Default 1; use 2+ for fields that should
+    /// occupy a wider slot than their siblings (e.g. long descriptions).
+    #[serde(default = "default_card_field_col_span", rename = "colSpan")]
+    pub col_span: u8,
+    /// Recursive card config used when `kind=subcard`. The value at `field`
+    /// must be a JSON object; the inner groups read keys off that object.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subcard: Option<Box<ReportCardConfig>>,
+    /// Inline-table config used when `kind=subtable`. The value at `field`
+    /// must be a JSON array of objects.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subtable: Option<ReportSubtableConfig>,
+}
+
+fn default_card_field_kind() -> ReportCardFieldKind {
+    ReportCardFieldKind::Value
+}
+
+fn default_card_field_col_span() -> u8 {
+    1
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ReportCardFieldKind {
+    Value,
+    Json,
+    Markdown,
+    Subcard,
+    Subtable,
+}
+
+/// Inline-table rendering for an array-of-objects card field.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct ReportSubtableConfig {
+    #[serde(default)]
+    pub columns: Vec<ReportSubtableColumn>,
+    /// Optional message shown when the array is empty (defaults to "No items").
+    #[serde(
+        default,
+        rename = "emptyLabel",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub empty_label: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct ReportSubtableColumn {
+    /// Property name on each array element to read for this cell.
+    pub field: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    /// Cell format hint. Same vocabulary as table columns
+    /// (`currency`, `datetime`, `pill`, `decimal`, …).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub format: Option<String>,
+    /// Pill variant map for `format=pill`.
+    #[serde(
+        default,
+        rename = "pillVariants",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub pill_variants: Option<std::collections::BTreeMap<String, String>>,
+    /// Cell alignment hint: `left`, `right`, `center`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub align: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -573,6 +728,16 @@ pub struct ReportTableColumn {
     /// Optional cell alignment hint: "left", "right", or "center".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub align: Option<String>,
+    /// Marks this column as the human-readable label for the row's entity
+    /// within this report. Consumed by view `titleFrom: { block }` resolution
+    /// and similar entity-label lookups. At most one descriptive column per
+    /// table is meaningful; the first encountered wins if multiple are flagged.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub descriptive: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !value
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, ToSchema, PartialEq, Eq)]

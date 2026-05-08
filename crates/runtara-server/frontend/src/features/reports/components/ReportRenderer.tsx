@@ -71,6 +71,8 @@ export function ReportRenderer({
       {activeView && (
         <ReportViewHeader
           view={activeView}
+          definition={definition}
+          renderResponse={renderResponse}
           filters={filters}
           onNavigateView={onNavigateView}
         />
@@ -439,17 +441,21 @@ function ReportBlockById({
 
 function ReportViewHeader({
   view,
+  definition,
+  renderResponse,
   filters,
   onNavigateView,
 }: {
   view: ReportViewDefinition;
+  definition: ReportDefinition;
+  renderResponse?: ReportRenderResponse | null;
   filters: Record<string, unknown>;
   onNavigateView?: (
     viewId: string | null,
     options?: Omit<ReportInteractionOptions, 'viewId'>
   ) => void;
 }) {
-  const title = resolveViewTitle(view, filters);
+  const title = resolveViewTitle(view, definition, renderResponse, filters);
   const breadcrumbs = view.breadcrumb ?? [];
   if (!title && breadcrumbs.length === 0) return null;
 
@@ -478,7 +484,7 @@ function ReportViewHeader({
           </ol>
         </nav>
       )}
-      {title && (
+      {title && breadcrumbs.length === 0 && (
         <h1 className="text-xl font-semibold tracking-normal text-foreground">
           {title}
         </h1>
@@ -518,8 +524,20 @@ function BreadcrumbButton({
 
 function resolveViewTitle(
   view: ReportViewDefinition,
+  definition: ReportDefinition,
+  renderResponse: ReportRenderResponse | null | undefined,
   filters: Record<string, unknown>
 ): string | null {
+  if (view.titleFromBlock) {
+    const value = resolveTitleFromBlock(
+      view.titleFromBlock,
+      definition,
+      renderResponse
+    );
+    if (value !== undefined && value !== null && value !== '') {
+      return String(value);
+    }
+  }
   if (view.titleFrom) {
     const value = resolveTitlePath(view.titleFrom, filters);
     if (value !== undefined && value !== null && value !== '') {
@@ -527,6 +545,34 @@ function resolveViewTitle(
     }
   }
   return view.title ?? null;
+}
+
+function resolveTitleFromBlock(
+  ref: NonNullable<ReportViewDefinition['titleFromBlock']>,
+  definition: ReportDefinition,
+  renderResponse: ReportRenderResponse | null | undefined
+): unknown {
+  const block = definition.blocks.find((candidate) => candidate.id === ref.block);
+  const result = renderResponse?.blocks?.[ref.block];
+  const data = result?.data as
+    | { rows?: Array<Record<string, unknown> | unknown[]>; columns?: Array<string | { key: string }> }
+    | undefined;
+  const firstRow = data?.rows?.[0];
+  if (!firstRow) return undefined;
+
+  const field =
+    ref.field ??
+    block?.table?.columns?.find((column) => column.descriptive)?.field;
+  if (!field) return undefined;
+
+  if (Array.isArray(firstRow)) {
+    const dataColumns = data?.columns ?? [];
+    const idx = dataColumns.findIndex((column) =>
+      typeof column === 'string' ? column === field : column.key === field
+    );
+    return idx >= 0 ? firstRow[idx] : undefined;
+  }
+  return firstRow[field];
 }
 
 function resolveTitlePath(path: string, filters: Record<string, unknown>) {

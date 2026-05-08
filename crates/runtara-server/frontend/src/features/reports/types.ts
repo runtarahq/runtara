@@ -5,7 +5,60 @@ export type ReportBlockType =
   | 'chart'
   | 'metric'
   | 'actions'
-  | 'markdown';
+  | 'markdown'
+  | 'card';
+
+export type ReportCardFieldKind =
+  | 'value'
+  | 'json'
+  | 'markdown'
+  | 'subcard'
+  | 'subtable';
+
+export interface ReportSubtableColumn {
+  field: string;
+  label?: string;
+  format?: string;
+  pillVariants?: Record<string, string>;
+  align?: 'left' | 'right' | 'center';
+}
+
+export interface ReportSubtableConfig {
+  columns: ReportSubtableColumn[];
+  emptyLabel?: string;
+}
+
+export interface ReportCardField {
+  field: string;
+  label?: string;
+  /** Renderer for this field. Defaults to `value`. */
+  kind?: ReportCardFieldKind;
+  /** Format hint for `kind=value` (currency, datetime, pill, etc). */
+  format?: string;
+  /** Pill variant map for color-coding `format=pill` value cells. */
+  pillVariants?: Record<string, string>;
+  /** Start collapsed (json/markdown/subcard/subtable). */
+  collapsed?: boolean;
+  /** Inner-grid column span. Default 1. */
+  colSpan?: number;
+  /** Recursive card config used when `kind=subcard`. */
+  subcard?: ReportCardConfig;
+  /** Inline-table config used when `kind=subtable`. */
+  subtable?: ReportSubtableConfig;
+}
+
+export interface ReportCardGroup {
+  id: string;
+  title?: string;
+  description?: string;
+  /** Number of columns in this group's inner grid (1–4). Default 2. */
+  columns?: number;
+  fields: ReportCardField[];
+}
+
+export interface ReportCardConfig {
+  groups: ReportCardGroup[];
+}
 
 export type ReportFilterType =
   | 'select'
@@ -58,6 +111,11 @@ export interface ReportFilterOptionsConfig {
 }
 
 export interface ReportFilterDefinition {
+  /** When true, blocks whose source condition references this filter render an
+   * empty "filter not set" state if the filter has no value, instead of
+   * silently falling back to an unfiltered query. Use for navigation-driven
+   * filters set by row-click + navigate_view. */
+  strictWhenReferenced?: boolean;
   id: string;
   label: string;
   type: ReportFilterType;
@@ -267,6 +325,8 @@ export interface ReportTableColumn {
   levels?: string[];
   /** Cell alignment hint. */
   align?: 'left' | 'right' | 'center';
+  /** Marks this column as the row's human-readable label for entity-title lookups. */
+  descriptive?: boolean;
 }
 
 export interface ReportBlockDefinition {
@@ -303,6 +363,7 @@ export interface ReportBlockDefinition {
       implicitPayload?: Record<string, unknown>;
     };
   };
+  card?: ReportCardConfig;
   filters?: ReportFilterDefinition[];
   interactions?: ReportInteractionDefinition[];
   showWhen?: ReportVisibilityCondition;
@@ -395,10 +456,16 @@ export interface ReportViewBreadcrumb {
   clearFilters?: string[];
 }
 
+export interface ReportTitleFromBlock {
+  block: string;
+  field?: string;
+}
+
 export interface ReportViewDefinition {
   id: string;
   title?: string;
   titleFrom?: string;
+  titleFromBlock?: ReportTitleFromBlock;
   breadcrumb?: ReportViewBreadcrumb[];
   layout?: ReportLayoutNode[];
 }

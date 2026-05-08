@@ -25,6 +25,12 @@ type ReportFilterBarProps = {
   definition: ReportDefinition;
   values: Record<string, unknown>;
   onChange: (filterId: string, value: unknown) => void;
+  /**
+   * Block ids visible in the current view. When provided, filters whose
+   * `appliesTo` does not reference any visible block are hidden from the bar.
+   * Pass `null` to disable the heuristic (legacy behavior).
+   */
+  visibleBlockIds?: Set<string> | null;
 };
 
 type FilterOption = { value: unknown; label: string; count?: number };
@@ -34,15 +40,21 @@ export function ReportFilterBar({
   definition,
   values,
   onChange,
+  visibleBlockIds = null,
 }: ReportFilterBarProps) {
   const [activatedIds, setActivatedIds] = useState<Set<string>>(new Set());
 
   if (definition.filters.length === 0) return null;
 
-  const searchFilter = definition.filters.find(
+  const visibleFilters = definition.filters.filter((filter) =>
+    isFilterVisible(filter, visibleBlockIds)
+  );
+  if (visibleFilters.length === 0) return null;
+
+  const searchFilter = visibleFilters.find(
     (filter) => filter.type === 'search'
   );
-  const nonSearchFilters = definition.filters.filter(
+  const nonSearchFilters = visibleFilters.filter(
     (filter) => filter.type !== 'search'
   );
 
@@ -402,6 +414,18 @@ function FilterEditor({
         placeholder={filter.label}
       />
     </div>
+  );
+}
+
+function isFilterVisible(
+  filter: ReportFilterDefinition,
+  visibleBlockIds: Set<string> | null
+): boolean {
+  if (visibleBlockIds === null) return true;
+  const appliesTo = filter.appliesTo ?? [];
+  if (appliesTo.length === 0) return false;
+  return appliesTo.some(
+    (target) => target.blockId && visibleBlockIds.has(target.blockId)
   );
 }
 

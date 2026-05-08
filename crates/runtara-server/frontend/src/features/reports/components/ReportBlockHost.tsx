@@ -14,6 +14,7 @@ import { ChartBlock } from './blocks/ChartBlock';
 import { MetricBlock } from './blocks/MetricBlock';
 import { TableBlock } from './blocks/TableBlock';
 import { ActionsBlock } from './blocks/ActionsBlock';
+import { CardBlock } from './blocks/CardBlock';
 import { ReportFilterBar } from './ReportFilterBar';
 import { encodeFilterValue } from '../utils';
 
@@ -385,6 +386,10 @@ function RenderedBlock({
 
   if (block.type === 'metric') {
     return <MetricBlock block={block} result={result} />;
+  }
+
+  if (block.type === 'card') {
+    return <CardBlock block={block} result={result} />;
   }
 
   if (block.type === 'actions') {

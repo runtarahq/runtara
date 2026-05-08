@@ -164,10 +164,10 @@ export function ReportViewerPage() {
     exploreSearch ? `?${exploreSearch}` : ''
   }`;
 
-  const primaryRecordCount = getPrimaryRecordCount(
-    renderResponse?.blocks ?? {},
-    eagerBlocks
-  );
+  const isSubView = (activeView?.breadcrumb?.length ?? 0) > 0;
+  const primaryRecordCount = isSubView
+    ? undefined
+    : getPrimaryRecordCount(renderResponse?.blocks ?? {}, eagerBlocks);
 
   const titleNode = (
     <span className="flex items-baseline gap-3">
@@ -191,6 +191,9 @@ export function ReportViewerPage() {
           definition={report.definition}
           values={filters}
           onChange={handleFilterChange}
+          visibleBlockIds={
+            new Set(eagerBlocks.map((block) => block.id))
+          }
         />
       }
       action={

@@ -1164,6 +1164,7 @@ fn report_authoring_schema() -> Value {
                 "Use block.interactions for drill/cross-filter behavior. Supported UI events are point_click on charts and row_click/cell_click on tables.",
                 "Use set_filter actions to update global filters from clicked chart/table data, e.g. valueFrom='datum.category'.",
                 "Use navigate_view with set_filter for master/detail navigation, e.g. row click sets case_id and opens the detail view. Omit navigate_view for inline dependent content.",
+                "For navigation-driven filters (set by row-click), mark them strictWhenReferenced=true so detail-view blocks render an explicit 'filter not set' empty state instead of silently falling back to an unfiltered query when someone hits the detail URL without the filter populated.",
                 "Use showWhen on layout nodes or blocks to show dependent content only after a filter is selected.",
                 "Keep exploration governed: only expose dimensions and measures declared in datasets and report blocks/filters/interactions that the report author intentionally configured."
             ],
@@ -1200,7 +1201,7 @@ fn report_authoring_schema() -> Value {
                 ]
             },
             "masterDetailNavigationExample": {
-                "filters": [{"id": "case_id", "label": "Case", "type": "text"}],
+                "filters": [{"id": "case_id", "label": "Case", "type": "text", "strictWhenReferenced": true}],
                 "views": [
                     {"id": "list", "title": "Review cases", "layout": [{"id": "cases_node", "type": "block", "blockId": "cases"}]},
                     {"id": "detail", "titleFrom": "filters.case_id", "breadcrumb": [{"label": "Review cases", "viewId": "list", "clearFilters": ["case_id"]}], "layout": [{"id": "case_summary_node", "type": "block", "blockId": "case_summary"}]}
@@ -1228,7 +1229,7 @@ fn report_authoring_schema() -> Value {
         "blockShape": {
             "common": {
                 "id": "Stable id, unique within the report. Referenced as {{ block.<id> }} in markdown.",
-                "type": "table | chart | metric | actions | markdown",
+                "type": "table | chart | metric | actions | markdown | card",
                 "title": "Optional UI title.",
                 "lazy": "Optional boolean. Lazy blocks fetch only when requested.",
                 "showWhen": "Optional visibility condition such as {filter:'case_id', exists:true}. Use this for inline dependent content.",
@@ -1271,6 +1272,27 @@ fn report_authoring_schema() -> Value {
                 },
                 "actions.submit": "Optional submit configuration. Use actions.submit.label to override the button label and actions.submit.implicitPayload for server-side viewer fields such as {{viewer.user_id}}.",
                 "note": "Actions blocks render executable forms from workflow action inputSchema. Do not add table/chart/metric config to actions blocks."
+            },
+            "card": {
+                "type": "card",
+                "configKey": "card",
+                "required": {
+                    "source.kind": "object_model (only object_model sources are supported for cards)",
+                    "source.mode": "filter (cards render the first matching row)",
+                    "card.groups": "Array of {id, title?, description?, columns?, fields[]}. Cards stack groups vertically; each group lays its fields in an inner grid (1–4 columns)."
+                },
+                "fieldShape": {
+                    "field": "Property name on the row to read.",
+                    "label": "Optional override for the field label (defaults to humanized field name).",
+                    "kind": "value (default) | json | markdown | subcard | subtable",
+                    "format": "Format hint for kind=value: currency, currency_compact, decimal, percent, datetime, date, number, pill.",
+                    "pillVariants": "{value: variant} map for color-coding enum/status fields. variant is one of default, secondary, destructive, outline, muted, success, warning. Use this on enum columns like status/severity/decision.",
+                    "collapsed": "Optional. For json/markdown/subcard/subtable: start collapsed behind a Show/Hide toggle.",
+                    "colSpan": "Optional 1–4 grid column span within the parent group.",
+                    "subcard": "Required when kind=subcard. Recursive card config {groups: […]} applied to the nested object value at row[field].",
+                    "subtable": "Required when kind=subtable. {columns: [{field, label?, format?, pillVariants?, align?}], emptyLabel?} applied to the array value at row[field]."
+                },
+                "note": "Cards are the right primitive for single-row dossier-style presentation: case headers, AI/Human decision recaps, raw L1 source rows. Use kind=subtable for arrays-of-objects (timelines, line items) and kind=subcard for nested object summaries (applicant_summary, financial_summary). Pair format=pill + pillVariants on enum fields to color-code status, severity, decision, etc."
             }
         },
         "sourceShape": {
@@ -1311,6 +1333,7 @@ fn report_authoring_schema() -> Value {
         },
         "filterShape": {
             "types": ["select", "multi_select", "radio", "checkbox", "time_range", "number_range", "text", "search"],
+            "strictWhenReferenced": "Optional boolean. When true, any block whose source `condition` references this filter will short-circuit to an empty 'filter not set' result if the filter has no value. Use this on navigation-driven filters (set by row-click + navigate_view) so detail-view blocks never silently fall back to an unfiltered query when the filter is missing from the URL/state.",
             "example": {
                 "id": "vendor",
                 "label": "Vendor",
@@ -1335,7 +1358,8 @@ fn report_authoring_schema() -> Value {
             "For dataset-backed blocks, table columns/chart fields/metric valueField use selected block.dataset dimensions and measures.",
             "For workflow_runtime entity='instances', table.columns and orderBy use instance fields such as instanceId, status, hasActions, actionCount, createdAt.",
             "For workflow_runtime entity='actions', table.columns and orderBy use action fields such as actionId, actionKey, label, status, instanceId, requestedAt. Conditions can additionally use nested metadata fields such as correlation.case_id or context.purpose.",
-            "For type='actions', do not configure table columns; the block renders forms from each action.inputSchema and submits through the report-scoped workflow action endpoint."
+            "For type='actions', do not configure table columns; the block renders forms from each action.inputSchema and submits through the report-scoped workflow action endpoint.",
+            "For type='card', use card.groups[].fields. Each field references a row property by name. Use kind='subtable' (with subtable.columns) for arrays-of-objects and kind='subcard' (with subcard.groups) for nested objects. Use format='pill' + pillVariants to color-code enum/status fields."
         ],
         "commonMistakes": [
             "For BI reports, do not hand-author repeated raw aggregate block.source specs when the same semantic fields can live in definition.datasets.",
@@ -1351,7 +1375,10 @@ fn report_authoring_schema() -> Value {
             "Do not call workflow signals 'pendingInput' in report definitions. Use the generic actions abstraction: type='actions' and source.entity='actions'.",
             "Do not put schema, connectionId, joins, groupBy, or aggregates on workflow_runtime sources.",
             "Do not use type='actions' with Object Model sources; actions blocks currently require source.kind='workflow_runtime' and entity='actions'.",
-            "Always run validate_report before saving or mutating report blocks."
+            "Always run validate_report before saving or mutating report blocks.",
+            "Do not use type='card' with source.mode='aggregate' or workflow_runtime sources. Cards only support object_model + filter mode and render the first matching row.",
+            "Do not put card fields at block.fields or block.card.fields. Use block.card.groups[].fields.",
+            "Do not stuff arrays into kind='subcard' or objects into kind='subtable'. Subcard expects an object value, subtable expects an array of objects."
         ],
         "examples": {
             "datasetBackedTable": {
@@ -1479,6 +1506,84 @@ fn report_authoring_schema() -> Value {
                 "type": "actions",
                 "title": "Workflow actions",
                 "source": {"kind": "workflow_runtime", "entity": "actions", "workflowId": "inventory_sync", "mode": "filter"}
+            },
+            "card": {
+                "id": "case_header",
+                "type": "card",
+                "title": "Case header",
+                "source": {"schema": "LoanCase", "mode": "filter", "condition": {"op": "EQ", "arguments": ["id", {"filter": "case_id", "path": "value"}]}},
+                "card": {
+                    "groups": [
+                        {
+                            "id": "identity",
+                            "title": "Identity",
+                            "columns": 3,
+                            "fields": [
+                                {"field": "case_id", "label": "Case", "colSpan": 2},
+                                {"field": "loan_application_id", "label": "Application"},
+                                {"field": "current_owner", "label": "Owner"}
+                            ]
+                        },
+                        {
+                            "id": "lifecycle",
+                            "title": "Lifecycle",
+                            "columns": 3,
+                            "fields": [
+                                {"field": "opened_at", "label": "Opened", "format": "datetime"},
+                                {"field": "closed_at", "label": "Closed", "format": "datetime"},
+                                {"field": "current_status", "label": "Status", "format": "pill", "pillVariants": {"decided": "success", "withdrawn": "muted"}},
+                                {"field": "final_decision", "label": "Final decision", "format": "pill", "pillVariants": {"APPROVED": "success", "DECLINED": "destructive", "PENDING": "muted"}}
+                            ]
+                        },
+                        {
+                            "id": "events",
+                            "title": "Decision events",
+                            "columns": 1,
+                            "fields": [
+                                {
+                                    "field": "decision_events",
+                                    "label": "Events",
+                                    "kind": "subtable",
+                                    "subtable": {
+                                        "columns": [
+                                            {"field": "seq", "label": "#", "align": "right"},
+                                            {"field": "timestamp", "label": "When", "format": "datetime"},
+                                            {"field": "layer", "label": "Layer", "format": "pill", "pillVariants": {"L1": "default", "L2": "default", "L3": "warning", "L4": "success"}},
+                                            {"field": "actor", "label": "Actor"},
+                                            {"field": "summary", "label": "Summary"}
+                                        ],
+                                        "emptyLabel": "No events recorded yet."
+                                    }
+                                }
+                            ]
+                        },
+                        {
+                            "id": "applicant",
+                            "title": "Applicant snapshot",
+                            "columns": 1,
+                            "fields": [
+                                {
+                                    "field": "applicant_summary",
+                                    "label": "Applicant",
+                                    "kind": "subcard",
+                                    "subcard": {
+                                        "groups": [
+                                            {
+                                                "id": "identity",
+                                                "columns": 3,
+                                                "fields": [
+                                                    {"field": "full_name", "label": "Name"},
+                                                    {"field": "dob", "label": "DOB", "format": "date"},
+                                                    {"field": "residency_status", "label": "Residency", "format": "pill", "pillVariants": {"citizen": "success", "permanent_resident": "default", "temporary": "warning"}}
+                                                ]
+                                            }
+                                        ]
+                                    }
+                                }
+                            ]
+                        }
+                    ]
+                }
             },
             "exprAggregate": {
                 "source": {
@@ -2277,6 +2382,7 @@ fn collect_report_block_authoring_issues(
         "chart",
         "metric",
         "actions",
+        "card",
         "filters",
         "interactions",
         "showWhen",
@@ -2332,7 +2438,7 @@ fn collect_report_block_authoring_issues(
             issues.push(error(
                 path,
                 "MISSING_BLOCK_TYPE",
-                "Report block must include type: table, chart, metric, actions, or markdown.",
+                "Report block must include type: table, chart, metric, actions, markdown, or card.",
             ));
         }
         let has_dataset = block.get("dataset").is_some();
@@ -4583,6 +4689,35 @@ mod tests {
             schema["blockShape"]["actions"]["required"]["source.kind"],
             json!("workflow_runtime")
         );
+    }
+
+    #[test]
+    fn report_authoring_schema_documents_strict_when_referenced() {
+        let schema = report_authoring_schema();
+        let docs = schema["filterShape"]["strictWhenReferenced"]
+            .as_str()
+            .expect("filterShape.strictWhenReferenced is documented");
+        assert!(docs.contains("filter not set"));
+        assert_eq!(
+            schema["biGuidance"]["masterDetailNavigationExample"]["filters"][0]["strictWhenReferenced"],
+            json!(true)
+        );
+    }
+
+    #[test]
+    fn report_authoring_schema_documents_card_block() {
+        let schema = report_authoring_schema();
+
+        assert_eq!(schema["blockShape"]["card"]["type"], json!("card"));
+        assert_eq!(
+            schema["blockShape"]["card"]["required"]["source.mode"],
+            json!("filter (cards render the first matching row)")
+        );
+        let kinds = schema["blockShape"]["card"]["fieldShape"]["kind"]
+            .as_str()
+            .expect("card.fieldShape.kind is a string");
+        assert!(kinds.contains("subcard") && kinds.contains("subtable"));
+        assert_eq!(schema["examples"]["card"]["type"], json!("card"));
     }
 
     #[test]

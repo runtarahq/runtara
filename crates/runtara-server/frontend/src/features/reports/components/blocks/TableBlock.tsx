@@ -69,6 +69,9 @@ type TableData = {
     code?: string;
     message: string;
   }>;
+  missing?: boolean;
+  unsatisfiedFilter?: string;
+  message?: string;
 };
 
 type TableBlockProps = {
@@ -102,6 +105,15 @@ export function TableBlock({
     page.hasNextPage ||
     page.offset > 0 ||
     (typeof page.totalCount === 'number' && page.totalCount > page.size);
+
+  if (data.missing && data.unsatisfiedFilter) {
+    return (
+      <div className="rounded-lg border border-dashed bg-muted/20 p-6 text-sm text-muted-foreground">
+        {data.message ??
+          `Required filter '${data.unsatisfiedFilter}' is not set.`}
+      </div>
+    );
+  }
 
   if (columns.length === 0) {
     return (
