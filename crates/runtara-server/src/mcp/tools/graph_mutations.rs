@@ -1521,6 +1521,84 @@ pub async fn add_agent_step(
         ))
     })?;
 
+    // If a connection is provided, verify the agent supports connections and
+    // the connection's integrationId is one the agent accepts. Catches the
+    // common "wrong connection for this agent" mistake at create time instead
+    // of letting it slip through to compile/deploy.
+    if let Some(ref conn_id) = params.connection_id
+        && !conn_id.is_empty()
+    {
+        validate_path_param("connection_id", conn_id)?;
+
+        let agent_info = api_get(server, &format!("/api/runtime/agents/{}", params.agent_id))
+            .await
+            .map_err(|_| {
+                err(format!(
+                    "Agent '{}' not found. Use list_agents to discover valid agent IDs.",
+                    params.agent_id
+                ))
+            })?;
+
+        let supports = agent_info
+            .get("supportsConnections")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let agent_int_ids: Vec<String> = agent_info
+            .get("integrationIds")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        if !supports {
+            return Err(err(format!(
+                "Agent '{}' does not accept a connection (supportsConnections=false). \
+                 Drop connection_id.",
+                params.agent_id
+            )));
+        }
+
+        let conn_resp = api_get(server, &format!("/api/runtime/connections/{}", conn_id))
+            .await
+            .map_err(|_| {
+                err(format!(
+                    "Connection '{}' not found. The connection_id must be the UUID `id` field \
+                 from list_connections — not a title or integrationId.",
+                    conn_id
+                ))
+            })?;
+
+        let conn_int_id = conn_resp
+            .pointer("/connection/integrationId")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+
+        match &conn_int_id {
+            Some(int_id) if agent_int_ids.iter().any(|aid| aid == int_id) => {}
+            Some(int_id) => {
+                return Err(err(format!(
+                    "Connection '{}' has integrationId '{}', but agent '{}' accepts [{}]. \
+                     Call list_connections(integration_id=...) with one of these to find a \
+                     compatible connection.",
+                    conn_id,
+                    int_id,
+                    params.agent_id,
+                    agent_int_ids.join(", ")
+                )));
+            }
+            None => {
+                return Err(err(format!(
+                    "Connection '{}' has no integrationId set; cannot validate compatibility \
+                     with agent '{}'.",
+                    conn_id, params.agent_id
+                )));
+            }
+        }
+    }
+
     // Build step definition
     let mut step = serde_json::json!({
         "id": params.step_id,

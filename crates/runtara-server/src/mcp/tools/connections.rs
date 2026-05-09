@@ -38,6 +38,24 @@ pub struct ListConnectionsParams {
     pub integration_id: Option<String>,
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ListIntegrationsParams {
+    #[schemars(
+        description = "When true, omit per-field schema and return only {integrationId, displayName, description, category} for each integration. Default false."
+    )]
+    pub summary: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct GetIntegrationParams {
+    #[schemars(
+        description = "The integration id (e.g. 'shopify_access_token', 'openai_api_key'). Discover valid values from list_integrations or each agent's `integrationIds` returned by list_agents."
+    )]
+    pub integration_id: String,
+}
+
 // ===== Tool Implementations =====
 
 pub async fn list_connections(
@@ -49,6 +67,45 @@ pub async fn list_connections(
         None => String::new(),
     };
     let result = api_get(server, &format!("/api/runtime/connections{}", qs)).await?;
+    json_result(result)
+}
+
+pub async fn list_integrations(
+    server: &SmoMcpServer,
+    params: ListIntegrationsParams,
+) -> Result<CallToolResult, rmcp::ErrorData> {
+    let mut result = api_get(server, "/api/runtime/connections/types").await?;
+
+    // In summary mode, drop the heavy per-field schemas. Useful when the LLM
+    // is just discovering available integration_ids, not building a connection
+    // form.
+    if params.summary.unwrap_or(false)
+        && let Some(types) = result
+            .pointer_mut("/connectionTypes")
+            .and_then(|v| v.as_array_mut())
+    {
+        for t in types {
+            if let Some(obj) = t.as_object_mut() {
+                obj.remove("fields");
+                obj.remove("defaultRateLimitConfig");
+                obj.remove("oauthConfig");
+            }
+        }
+    }
+
+    json_result(result)
+}
+
+pub async fn get_integration(
+    server: &SmoMcpServer,
+    params: GetIntegrationParams,
+) -> Result<CallToolResult, rmcp::ErrorData> {
+    validate_path_param("integration_id", &params.integration_id)?;
+    let result = api_get(
+        server,
+        &format!("/api/runtime/connections/types/{}", params.integration_id),
+    )
+    .await?;
     json_result(result)
 }
 
