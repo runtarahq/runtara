@@ -188,6 +188,19 @@ export const queryKeys = {
         filterId,
         request,
       ] as const,
+    lookupOptions: (
+      id: string,
+      blockId: string,
+      field: string,
+      request: unknown
+    ) =>
+      [
+        ...queryKeys.reports.byId(id),
+        'lookupOptions',
+        blockId,
+        field,
+        request,
+      ] as const,
     dataset: (id: string, datasetId: string, request: unknown) =>
       [...queryKeys.reports.byId(id), 'dataset', datasetId, request] as const,
   },

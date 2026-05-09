@@ -9,6 +9,8 @@ import {
   ReportDto,
   ReportFilterOptionsRequest,
   ReportFilterOptionsResponse,
+  ReportLookupOptionsRequest,
+  ReportLookupOptionsResponse,
   ReportRenderRequest,
   ReportRenderResponse,
   ReportSummary,
@@ -141,6 +143,34 @@ export async function getReportFilterOptions(
 
   const result = await RuntimeREST.instance.post(
     `/api/runtime/reports/${encodeURIComponent(reportId)}/filters/${encodeURIComponent(filterId)}/options`,
+    request ?? { filters: {} },
+    createAuthHeaders(token)
+  );
+  return result.data;
+}
+
+export async function getReportLookupOptions(
+  token: string,
+  context: { queryKey: readonly unknown[] }
+): Promise<ReportLookupOptionsResponse | null> {
+  const reportId = context.queryKey[2];
+  const blockId = context.queryKey[4];
+  const field = context.queryKey[5];
+  const request = context.queryKey[6] as ReportLookupOptionsRequest | undefined;
+
+  if (
+    typeof reportId !== 'string' ||
+    reportId.length === 0 ||
+    typeof blockId !== 'string' ||
+    blockId.length === 0 ||
+    typeof field !== 'string' ||
+    field.length === 0
+  ) {
+    return null;
+  }
+
+  const result = await RuntimeREST.instance.post(
+    `/api/runtime/reports/${encodeURIComponent(reportId)}/blocks/${encodeURIComponent(blockId)}/fields/${encodeURIComponent(field)}/lookup-options`,
     request ?? { filters: {} },
     createAuthHeaders(token)
   );

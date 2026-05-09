@@ -110,7 +110,10 @@ export function ReportBlockHost({
 
   const hasBlockFilters = (block.filters?.length ?? 0) > 0;
   const searchableFields = useMemo(
-    () => (block.table?.columns ?? []).map((column) => column.field),
+    () =>
+      (block.table?.columns ?? []).flatMap((column) =>
+        column.displayField ? [column.field, column.displayField] : [column.field]
+      ),
     [block.table?.columns]
   );
   const hasInteractiveTableState =
@@ -359,6 +362,8 @@ function RenderedBlock({
         block={block}
         result={result}
         sort={sort}
+        filters={filters}
+        blockFilters={blockFilters}
         onPageChange={onPageChange}
         onSortChange={onSortChange}
         onRowClick={
@@ -394,7 +399,15 @@ function RenderedBlock({
   }
 
   if (block.type === 'card') {
-    return <CardBlock reportId={reportId} block={block} result={result} />;
+    return (
+      <CardBlock
+        reportId={reportId}
+        block={block}
+        result={result}
+        filters={filters}
+        blockFilters={blockFilters}
+      />
+    );
   }
 
   if (block.type === 'actions') {

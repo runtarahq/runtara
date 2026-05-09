@@ -425,6 +425,15 @@ pub struct ReportCardField {
     pub field: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
+    /// Optional row property to display instead of `field` while preserving
+    /// `field` as the writeback target. Useful for lookup/reference fields
+    /// where the row stores an id but a joined label should be shown.
+    #[serde(
+        default,
+        rename = "displayField",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub display_field: Option<String>,
     /// How to render this field. `value` runs through the standard cell
     /// formatter (date/currency/pill/etc); `json` shows a collapsible JSON
     /// tree; `markdown` renders the value as markdown; `subcard` renders a
@@ -714,6 +723,15 @@ pub struct ReportTableColumn {
     pub field: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
+    /// Optional row property to display instead of `field` while preserving
+    /// `field` as the sort/writeback key. For example, a Product row can store
+    /// `category_id` while displaying a joined `category.name`.
+    #[serde(
+        default,
+        rename = "displayField",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub display_field: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub format: Option<String>,
     #[serde(default, rename = "type", skip_serializing_if = "Option::is_none")]
@@ -782,6 +800,11 @@ pub struct ReportTableColumn {
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct ReportEditorConfig {
     pub kind: ReportEditorKind,
+    /// Dynamic object-model lookup configuration for `kind=lookup`.
+    /// The editor displays labels from the lookup schema but commits the
+    /// selected value back to the edited row field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lookup: Option<ReportLookupConfig>,
     /// Static option list for `kind=select`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub options: Vec<ReportEditorOption>,
@@ -808,6 +831,36 @@ pub struct ReportEditorOption {
     pub value: Value,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct ReportLookupConfig {
+    /// Object Model schema to search for options.
+    pub schema: String,
+    /// Optional connection ID for connection-scoped lookup schemas.
+    #[serde(
+        default,
+        rename = "connectionId",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub connection_id: Option<String>,
+    /// Field whose value is written to the edited row. `field` is accepted as
+    /// a compatibility alias.
+    #[serde(rename = "valueField", alias = "field")]
+    pub value_field: String,
+    /// Field shown to users in the searchable option list.
+    #[serde(rename = "labelField")]
+    pub label_field: String,
+    /// Fields searched with CONTAINS when the user types. Defaults to
+    /// `labelField` when omitted.
+    #[serde(default, rename = "searchFields")]
+    pub search_fields: Vec<String>,
+    /// Optional Object Model condition applied to the lookup option query.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub condition: Option<Condition>,
+    /// Optional mappings from report/block filters into lookup schema fields.
+    #[serde(default, rename = "filterMappings")]
+    pub filter_mappings: Vec<ReportFilterTarget>,
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ReportEditorKind {
@@ -818,6 +871,7 @@ pub enum ReportEditorKind {
     Toggle,
     Date,
     Datetime,
+    Lookup,
 }
 
 fn is_false(value: &bool) -> bool {
@@ -1101,11 +1155,41 @@ pub struct ReportFilterOptionsRequest {
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct ReportLookupOptionsRequest {
+    #[serde(default)]
+    pub filters: HashMap<String, Value>,
+    #[serde(default, rename = "blockFilters")]
+    pub block_filters: HashMap<String, Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub query: Option<String>,
+    #[serde(default)]
+    pub offset: i64,
+    #[serde(default = "default_filter_options_limit")]
+    pub limit: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timezone: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct ReportFilterOptionsResponse {
     pub success: bool,
     pub filter: ReportFilterOptionsMetadata,
     pub options: Vec<ReportFilterOption>,
     pub page: ReportFilterOptionsPage,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct ReportLookupOptionsResponse {
+    pub success: bool,
+    pub block: ReportLookupBlockMetadata,
+    pub field: String,
+    pub options: Vec<ReportFilterOption>,
+    pub page: ReportFilterOptionsPage,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct ReportLookupBlockMetadata {
+    pub id: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]

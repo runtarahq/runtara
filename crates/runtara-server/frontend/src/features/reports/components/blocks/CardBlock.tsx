@@ -54,10 +54,14 @@ export function CardBlock({
   reportId,
   block,
   result,
+  filters,
+  blockFilters,
 }: {
   reportId: string;
   block: ReportBlockDefinition;
   result: ReportBlockResult;
+  filters: Record<string, unknown>;
+  blockFilters: Record<string, unknown>;
 }) {
   const data = (result.data ?? {}) as CardData;
   const groups = block.card?.groups ?? [];
@@ -103,6 +107,10 @@ export function CardBlock({
       }}
       onCancelField={() => setEditingField(null)}
       busy={writeback.isPending}
+      reportId={reportId}
+      blockId={block.id}
+      filters={filters}
+      blockFilters={blockFilters}
     />
   );
 }
@@ -123,6 +131,10 @@ type FieldEditingProps = {
   onCommitField?: (field: string, value: unknown) => void;
   onCancelField?: () => void;
   busy?: boolean;
+  reportId?: string;
+  blockId?: string;
+  filters?: Record<string, unknown>;
+  blockFilters?: Record<string, unknown>;
   /** True when the rendered row carries the id+schemaId needed for writeback. */
   rowEditable?: boolean;
 };
@@ -135,6 +147,10 @@ function CardGroups({
   onCommitField,
   onCancelField,
   busy,
+  reportId,
+  blockId,
+  filters,
+  blockFilters,
 }: {
   groups: ReportCardGroup[];
   row: Record<string, unknown>;
@@ -156,6 +172,10 @@ function CardGroups({
           onCommitField={onCommitField}
           onCancelField={onCancelField}
           busy={busy}
+          reportId={reportId}
+          blockId={blockId}
+          filters={filters}
+          blockFilters={blockFilters}
           rowEditable={rowEditable}
         />
       ))}
@@ -172,6 +192,10 @@ function CardGroup({
   onCancelField,
   busy,
   rowEditable,
+  reportId,
+  blockId,
+  filters,
+  blockFilters,
 }: {
   group: ReportCardGroup;
   row: Record<string, unknown>;
@@ -208,6 +232,10 @@ function CardGroup({
             onCommitField={onCommitField}
             onCancelField={onCancelField}
             busy={busy}
+            reportId={reportId}
+            blockId={blockId}
+            filters={filters}
+            blockFilters={blockFilters}
             rowEditable={rowEditable}
           />
         ))}
@@ -226,6 +254,10 @@ function CardField({
   onCancelField,
   busy,
   rowEditable,
+  reportId,
+  blockId,
+  filters,
+  blockFilters,
 }: {
   field: ReportCardField;
   row: Record<string, unknown>;
@@ -234,6 +266,7 @@ function CardField({
   const span = Math.min(Math.max(field.colSpan ?? 1, 1), maxColumns);
   const label = field.label ?? humanizeFieldName(field.field);
   const value = row[field.field];
+  const displayValue = getDisplayValue(row, field.displayField, value);
   const kind = field.kind ?? 'value';
   const canEdit = Boolean(field.editable && rowEditable && kind === 'value');
   const isEditing = canEdit && editingField === field.field;
@@ -262,9 +295,21 @@ function CardField({
         {isEditing ? (
           <FieldEditor
             value={value}
+            displayValue={displayValue}
             format={field.format}
             pillVariants={field.pillVariants}
             editor={field.editor}
+            lookupContext={
+              reportId && blockId
+                ? {
+                    reportId,
+                    blockId,
+                    field: field.field,
+                    filters: filters ?? {},
+                    blockFilters: blockFilters ?? {},
+                  }
+                : undefined
+            }
             busy={busy}
             onCommit={(next) => onCommitField?.(field.field, next)}
             onCancel={() => onCancelField?.()}
@@ -286,11 +331,25 @@ function CardField({
             collapsed={field.collapsed ?? false}
           />
         ) : (
-          <ValueField field={field} value={value} />
+          <ValueField field={field} value={displayValue} />
         )}
       </div>
     </div>
   );
+}
+
+function getDisplayValue(
+  row: Record<string, unknown>,
+  displayField: string | undefined,
+  value: unknown
+) {
+  if (!displayField) return value;
+  const displayValue = row[displayField];
+  if (displayValue === null || displayValue === undefined) return value;
+  if (typeof displayValue === 'string' && displayValue.trim().length === 0) {
+    return value;
+  }
+  return displayValue;
 }
 
 function SubcardField({

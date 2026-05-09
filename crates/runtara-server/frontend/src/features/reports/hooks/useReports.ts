@@ -7,6 +7,7 @@ import {
   getReport,
   getReportBlockData,
   getReportFilterOptions,
+  getReportLookupOptions,
   listReports,
   queryReportDataset,
   renderReport,
@@ -21,6 +22,8 @@ import {
   ReportDto,
   ReportFilterOptionsRequest,
   ReportFilterOptionsResponse,
+  ReportLookupOptionsRequest,
+  ReportLookupOptionsResponse,
   ReportRenderRequest,
   ReportRenderResponse,
   ReportSummary,
@@ -90,6 +93,25 @@ export function useReportFilterOptions(
     ),
     queryFn: (token, context) => getReportFilterOptions(token, context),
     enabled: Boolean(reportId && filterId && request && enabled),
+  });
+}
+
+export function useReportLookupOptions(
+  reportId: string | undefined,
+  blockId: string | undefined,
+  field: string | undefined,
+  request: ReportLookupOptionsRequest | undefined,
+  enabled: boolean
+) {
+  return useCustomQuery<ReportLookupOptionsResponse | null>({
+    queryKey: queryKeys.reports.lookupOptions(
+      reportId ?? '',
+      blockId ?? '',
+      field ?? '',
+      request ?? {}
+    ),
+    queryFn: (token, context) => getReportLookupOptions(token, context),
+    enabled: Boolean(reportId && blockId && field && request && enabled),
   });
 }
 

@@ -1001,6 +1001,8 @@ function ExplorePreview({
         block={tableBlock}
         result={result}
         sort={sort}
+        filters={{}}
+        blockFilters={{}}
         onSortChange={onSortChange}
         onPageChange={onPageChange}
         onRowClick={onDrillFilter}
@@ -1030,6 +1032,8 @@ function ExplorePreview({
           block={tableBlock}
           result={result}
           sort={sort}
+          filters={{}}
+          blockFilters={{}}
           onSortChange={onSortChange}
           onPageChange={onPageChange}
           onRowClick={onDrillFilter}

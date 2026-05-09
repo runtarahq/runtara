@@ -1247,7 +1247,8 @@ fn report_authoring_schema() -> Value {
                 "pagination": {"defaultPageSize": 50, "allowedPageSizes": [25, 50, 100]},
                 "writeback": {
                     "editable": "Optional boolean. When true, the table renders an inline editor on the cell and writes the new value back to the underlying Object Model record via PUT /api/runtime/object-model/instances/{schemaId}/{instanceId}. Only honored when source.kind='object_model', source.mode='filter', and source.join is empty/absent (rows must carry a stable id+schemaId). Type='chart' columns and joined lookup columns are never editable.",
-                    "editor": "Optional explicit editor config: {kind, options?, min?, max?, step?, regex?, placeholder?}. kind is one of text | textarea | number | select | toggle | date | datetime. When omitted, the FE infers a control: format=currency/decimal/percent/number → number; format=date/datetime → date/datetime picker; format=pill + pillVariants set → select with pillVariants keys as options; boolean values → toggle; otherwise text. Use editor.options for static select choices unrelated to pillVariants.",
+                    "displayField": "Optional row field to render while writes still target field. Use this with joined labels, e.g. field='category_id', displayField='category.name'.",
+                    "editor": "Optional explicit editor config: {kind, lookup?, options?, min?, max?, step?, regex?, placeholder?}. kind is one of text | textarea | number | select | toggle | date | datetime | lookup. For lookup, set editor.lookup={schema, valueField, labelField, searchFields?, connectionId?, condition?, filterMappings?}. The editor searches the lookup schema, displays labelField, and writes valueField into the edited row field.",
                     "note": "Writeback is opt-in per column. Auth + type validation happens on the object-model endpoint, not in the report layer — viewers need write permission on the underlying schema. The 'editable' flag here is a UI hint; it does not relax server-side authorization."
                 },
                 "note": "Tables support source.mode='filter' for row data and source.mode='aggregate' for grouped aggregate result sets. Configure visible/searchable/sortable fields in table.columns. A table column may use type='chart' for inline aggregate charts or type='value' with source.select for scalar joined lookups. To enable inline writeback on a column, see writeback.editable."
@@ -1289,6 +1290,7 @@ fn report_authoring_schema() -> Value {
                 "fieldShape": {
                     "field": "Property name on the row to read.",
                     "label": "Optional override for the field label (defaults to humanized field name).",
+                    "displayField": "Optional row field to render while writes still target field. Use this with joined labels, e.g. field='category_id', displayField='category.name'.",
                     "kind": "value (default) | json | markdown | subcard | subtable",
                     "format": "Format hint for kind=value: currency, currency_compact, decimal, percent, datetime, date, number, pill.",
                     "pillVariants": "{value: variant} map for color-coding enum/status fields. variant is one of default, secondary, destructive, outline, muted, success, warning. Use this on enum columns like status/severity/decision.",
@@ -1297,7 +1299,7 @@ fn report_authoring_schema() -> Value {
                     "subcard": "Required when kind=subcard. Recursive card config {groups: […]} applied to the nested object value at row[field].",
                     "subtable": "Required when kind=subtable. {columns: [{field, label?, format?, pillVariants?, align?}], emptyLabel?} applied to the array value at row[field].",
                     "editable": "Optional boolean. Only honored on kind=value fields when the rendered card row carries id+schemaId (filter-mode object_model card). Renders an inline editor that writes back via PUT /api/runtime/object-model/instances/{schemaId}/{instanceId}.",
-                    "editor": "Optional explicit editor config: {kind, options?, min?, max?, step?, regex?, placeholder?}. kind is one of text | textarea | number | select | toggle | date | datetime. When omitted, the FE infers a control from format/pillVariants/value type. Use editor.options for static select choices."
+                    "editor": "Optional explicit editor config: {kind, lookup?, options?, min?, max?, step?, regex?, placeholder?}. kind is one of text | textarea | number | select | toggle | date | datetime | lookup. For lookup, set editor.lookup={schema, valueField, labelField, searchFields?, connectionId?, condition?, filterMappings?}. The editor searches the lookup schema, displays labelField, and writes valueField into the edited row field."
                 },
                 "note": "Cards are the right primitive for single-row dossier-style presentation: case headers, AI/Human decision recaps, raw L1 source rows. Use kind=subtable for arrays-of-objects (timelines, line items) and kind=subcard for nested object summaries (applicant_summary, financial_summary). Pair format=pill + pillVariants on enum fields to color-code status, severity, decision, etc."
             }
@@ -1366,7 +1368,8 @@ fn report_authoring_schema() -> Value {
             "For workflow_runtime entity='instances', table.columns and orderBy use instance fields such as instanceId, status, hasActions, actionCount, createdAt.",
             "For workflow_runtime entity='actions', table.columns and orderBy use action fields such as actionId, actionKey, label, status, instanceId, requestedAt. Conditions can additionally use nested metadata fields such as correlation.case_id or context.purpose.",
             "For type='actions', do not configure table columns; the block renders forms from each action.inputSchema and submits through the report-scoped workflow action endpoint.",
-            "For type='card', use card.groups[].fields. Each field references a row property by name. Use kind='subtable' (with subtable.columns) for arrays-of-objects and kind='subcard' (with subcard.groups) for nested objects. Use format='pill' + pillVariants to color-code enum/status fields."
+            "For type='card', use card.groups[].fields. Each field references a row property by name. Use kind='subtable' (with subtable.columns) for arrays-of-objects and kind='subcard' (with subcard.groups) for nested objects. Use format='pill' + pillVariants to color-code enum/status fields.",
+            "For editable lookup/reference fields, keep the stored id in field, optionally render a joined label with displayField, and set editor.kind='lookup' with editor.lookup={schema, valueField, labelField, searchFields?}."
         ],
         "commonMistakes": [
             "For BI reports, do not hand-author repeated raw aggregate block.source specs when the same semantic fields can live in definition.datasets.",
@@ -1379,6 +1382,7 @@ fn report_authoring_schema() -> Value {
             "Do not use Markdown tables to align report block placeholders. Use definition.layout with metric_row, columns, or grid.",
             "Do not omit layout node ids. MCP layout mutation tools address layout nodes by id.",
             "Do not hardcode large select option lists when the values live in Object Model data. Use filter.options.source='object_model'.",
+            "Do not hardcode lookup editor option lists when the values live in another Object Model. Use editor.kind='lookup' and editor.lookup instead.",
             "Do not call workflow signals 'pendingInput' in report definitions. Use the generic actions abstraction: type='actions' and source.entity='actions'.",
             "Do not put schema, connectionId, joins, groupBy, or aggregates on workflow_runtime sources.",
             "Do not use type='actions' with Object Model sources; actions blocks currently require source.kind='workflow_runtime' and entity='actions'.",
@@ -1432,6 +1436,36 @@ fn report_authoring_schema() -> Value {
                     ],
                     "defaultSort": [{"field": "sku", "direction": "asc"}],
                     "pagination": {"defaultPageSize": 50, "allowedPageSizes": [25, 50, 100]}
+                }
+            },
+            "editableLookupTable": {
+                "id": "products",
+                "type": "table",
+                "title": "Products",
+                "source": {
+                    "schema": "Product",
+                    "mode": "filter",
+                    "join": [{"schema": "Category", "alias": "category", "parentField": "category_id", "field": "id", "kind": "left"}]
+                },
+                "table": {
+                    "columns": [
+                        {"field": "name", "label": "Product"},
+                        {
+                            "field": "category_id",
+                            "label": "Category",
+                            "displayField": "category.name",
+                            "editable": true,
+                            "editor": {
+                                "kind": "lookup",
+                                "lookup": {
+                                    "schema": "Category",
+                                    "valueField": "id",
+                                    "labelField": "name",
+                                    "searchFields": ["name"]
+                                }
+                            }
+                        }
+                    ]
                 }
             },
             "joinedTable": {
@@ -2516,6 +2550,9 @@ fn collect_report_block_authoring_issues(
     if let Some(actions) = block.get("actions") {
         collect_block_actions_issues(&format!("{path}.actions"), actions, issues);
     }
+    if let Some(card) = block.get("card") {
+        collect_card_issues(&format!("{path}.card"), card, issues);
+    }
     if let Some(filters) = block.get("filters") {
         match filters.as_array() {
             Some(filters) => {
@@ -3041,7 +3078,15 @@ fn collect_table_issues(path: &str, table: &Value, issues: &mut Vec<AuthoringIss
                 &format!("{path}.columns[{index}]"),
                 column,
                 &[
-                    "field", "label", "format", "type", "chart", "source", "editable", "editor",
+                    "field",
+                    "label",
+                    "displayField",
+                    "format",
+                    "type",
+                    "chart",
+                    "source",
+                    "editable",
+                    "editor",
                 ],
                 issues,
             );
@@ -3086,6 +3131,9 @@ fn collect_table_issues(path: &str, table: &Value, issues: &mut Vec<AuthoringIss
                     "value",
                     issues,
                 );
+            }
+            if let Some(editor) = column.get("editor") {
+                collect_editor_issues(&format!("{path}.columns[{index}].editor"), editor, issues);
             }
         }
     }
@@ -3204,6 +3252,255 @@ fn collect_table_column_source_issues(
                 &["parentField", "field", "op", "kind"],
                 issues,
             );
+        }
+    }
+}
+
+fn collect_card_issues(path: &str, card: &Value, issues: &mut Vec<AuthoringIssue>) {
+    collect_unknown_keys(path, card, &["groups"], issues);
+    let Some(groups) = card.get("groups").and_then(Value::as_array) else {
+        issues.push(error(
+            format!("{path}.groups"),
+            "MISSING_CARD_GROUPS",
+            "Card blocks must include card.groups.",
+        ));
+        return;
+    };
+
+    for (group_index, group) in groups.iter().enumerate() {
+        let group_path = format!("{path}.groups[{group_index}]");
+        collect_unknown_keys(
+            &group_path,
+            group,
+            &["id", "title", "description", "columns", "fields"],
+            issues,
+        );
+        if group
+            .get("id")
+            .and_then(Value::as_str)
+            .is_none_or(str::is_empty)
+        {
+            issues.push(error(
+                format!("{group_path}.id"),
+                "MISSING_CARD_GROUP_ID",
+                "Card groups must include a stable id.",
+            ));
+        }
+        let Some(fields) = group.get("fields").and_then(Value::as_array) else {
+            issues.push(error(
+                format!("{group_path}.fields"),
+                "MISSING_CARD_GROUP_FIELDS",
+                "Card groups must include fields.",
+            ));
+            continue;
+        };
+        for (field_index, field) in fields.iter().enumerate() {
+            let field_path = format!("{group_path}.fields[{field_index}]");
+            collect_card_field_issues(&field_path, field, issues);
+        }
+    }
+}
+
+fn collect_card_field_issues(path: &str, field: &Value, issues: &mut Vec<AuthoringIssue>) {
+    collect_unknown_keys(
+        path,
+        field,
+        &[
+            "field",
+            "label",
+            "displayField",
+            "kind",
+            "format",
+            "pillVariants",
+            "collapsed",
+            "colSpan",
+            "subcard",
+            "subtable",
+            "editable",
+            "editor",
+        ],
+        issues,
+    );
+    if field.get("field").and_then(Value::as_str).is_none() {
+        issues.push(error(
+            format!("{path}.field"),
+            "MISSING_CARD_FIELD",
+            "Card fields must include field.",
+        ));
+    }
+    if let Some(editor) = field.get("editor") {
+        collect_editor_issues(&format!("{path}.editor"), editor, issues);
+    }
+    if let Some(subtable) = field.get("subtable") {
+        collect_unknown_keys(
+            &format!("{path}.subtable"),
+            subtable,
+            &["columns", "emptyLabel"],
+            issues,
+        );
+    }
+    if let Some(subcard) = field.get("subcard") {
+        collect_card_issues(&format!("{path}.subcard"), subcard, issues);
+    }
+}
+
+fn collect_editor_issues(path: &str, editor: &Value, issues: &mut Vec<AuthoringIssue>) {
+    let Some(object) = editor.as_object() else {
+        issues.push(error(
+            path,
+            "INVALID_EDITOR_CONFIG",
+            "Report editor config must be an object.",
+        ));
+        return;
+    };
+    collect_unknown_keys(
+        path,
+        editor,
+        &[
+            "kind",
+            "lookup",
+            "options",
+            "min",
+            "max",
+            "step",
+            "regex",
+            "placeholder",
+        ],
+        issues,
+    );
+
+    let kind = object.get("kind").and_then(Value::as_str);
+    match kind {
+        Some(
+            "text" | "textarea" | "number" | "select" | "toggle" | "date" | "datetime"
+            | "lookup",
+        ) => {}
+        Some(_) => issues.push(error(
+            format!("{path}.kind"),
+            "INVALID_EDITOR_KIND",
+            "Editor kind must be text, textarea, number, select, toggle, date, datetime, or lookup.",
+        )),
+        None => issues.push(error(
+            format!("{path}.kind"),
+            "MISSING_EDITOR_KIND",
+            "Editor config must include kind.",
+        )),
+    }
+
+    if kind == Some("lookup") {
+        match object.get("lookup") {
+            Some(lookup) => collect_lookup_issues(&format!("{path}.lookup"), lookup, issues),
+            None => issues.push(error(
+                format!("{path}.lookup"),
+                "MISSING_LOOKUP_CONFIG",
+                "Lookup editors must include lookup: {schema, valueField, labelField, searchFields?}.",
+            )),
+        }
+    } else if object.get("lookup").is_some() {
+        issues.push(error(
+            format!("{path}.lookup"),
+            "LOOKUP_CONFIG_WITH_NON_LOOKUP_EDITOR",
+            "editor.lookup is only valid when editor.kind is lookup.",
+        ));
+    }
+
+    if let Some(options) = object.get("options")
+        && !options.is_array()
+    {
+        issues.push(error(
+            format!("{path}.options"),
+            "INVALID_EDITOR_OPTIONS",
+            "Editor options must be an array of {label, value}.",
+        ));
+    }
+}
+
+fn collect_lookup_issues(path: &str, lookup: &Value, issues: &mut Vec<AuthoringIssue>) {
+    let Some(object) = lookup.as_object() else {
+        issues.push(error(
+            path,
+            "INVALID_LOOKUP_CONFIG",
+            "Lookup config must be an object.",
+        ));
+        return;
+    };
+    collect_unknown_keys(
+        path,
+        lookup,
+        &[
+            "schema",
+            "connectionId",
+            "field",
+            "valueField",
+            "labelField",
+            "searchFields",
+            "condition",
+            "filterMappings",
+        ],
+        issues,
+    );
+    if object
+        .get("schema")
+        .and_then(Value::as_str)
+        .is_none_or(str::is_empty)
+    {
+        issues.push(error(
+            format!("{path}.schema"),
+            "MISSING_LOOKUP_SCHEMA",
+            "Lookup config must include schema.",
+        ));
+    }
+    if object
+        .get("valueField")
+        .or_else(|| object.get("field"))
+        .and_then(Value::as_str)
+        .is_none_or(str::is_empty)
+    {
+        issues.push(error(
+            format!("{path}.valueField"),
+            "MISSING_LOOKUP_VALUE_FIELD",
+            "Lookup config must include valueField (field is accepted as an alias).",
+        ));
+    }
+    if object
+        .get("labelField")
+        .and_then(Value::as_str)
+        .is_none_or(str::is_empty)
+    {
+        issues.push(error(
+            format!("{path}.labelField"),
+            "MISSING_LOOKUP_LABEL_FIELD",
+            "Lookup config must include labelField.",
+        ));
+    }
+    if let Some(search_fields) = object.get("searchFields")
+        && !search_fields.is_array()
+    {
+        issues.push(error(
+            format!("{path}.searchFields"),
+            "INVALID_LOOKUP_SEARCH_FIELDS",
+            "Lookup searchFields must be an array of field names.",
+        ));
+    }
+    if let Some(condition) = object.get("condition") {
+        collect_condition_issues(&format!("{path}.condition"), condition, issues);
+    }
+    if let Some(filter_mappings) = object.get("filterMappings") {
+        match filter_mappings.as_array() {
+            Some(mappings) => {
+                for (index, mapping) in mappings.iter().enumerate() {
+                    collect_filter_target_issues(
+                        &format!("{path}.filterMappings[{index}]"),
+                        mapping,
+                        issues,
+                    );
+                }
+            }
+            None => issues.push(error(
+                format!("{path}.filterMappings"),
+                "INVALID_LOOKUP_FILTER_MAPPINGS",
+                "Lookup filterMappings must be an array.",
+            )),
         }
     }
 }
@@ -3499,28 +3796,74 @@ fn collect_dynamic_condition_filter_ref_authoring_issues(
             );
         }
 
-        let Some(columns) = block
+        if let Some(columns) = block
             .get("table")
             .and_then(Value::as_object)
             .and_then(|table| table.get("columns"))
             .and_then(Value::as_array)
-        else {
-            continue;
-        };
-        for (column_index, column) in columns.iter().enumerate() {
-            if let Some(condition) = column
-                .get("source")
-                .and_then(Value::as_object)
-                .and_then(|source| source.get("condition"))
-            {
-                collect_condition_filter_ref_issues(
-                    &format!(
-                        "$.blocks[{block_index}].table.columns[{column_index}].source.condition"
-                    ),
-                    condition,
-                    &block_filters,
-                    issues,
-                );
+        {
+            for (column_index, column) in columns.iter().enumerate() {
+                if let Some(condition) = column
+                    .get("source")
+                    .and_then(Value::as_object)
+                    .and_then(|source| source.get("condition"))
+                {
+                    collect_condition_filter_ref_issues(
+                        &format!(
+                            "$.blocks[{block_index}].table.columns[{column_index}].source.condition"
+                        ),
+                        condition,
+                        &block_filters,
+                        issues,
+                    );
+                }
+                if let Some(condition) = column
+                    .get("editor")
+                    .and_then(Value::as_object)
+                    .and_then(|editor| editor.get("lookup"))
+                    .and_then(Value::as_object)
+                    .and_then(|lookup| lookup.get("condition"))
+                {
+                    collect_condition_filter_ref_issues(
+                        &format!(
+                            "$.blocks[{block_index}].table.columns[{column_index}].editor.lookup.condition"
+                        ),
+                        condition,
+                        &block_filters,
+                        issues,
+                    );
+                }
+            }
+        }
+
+        if let Some(groups) = block
+            .get("card")
+            .and_then(Value::as_object)
+            .and_then(|card| card.get("groups"))
+            .and_then(Value::as_array)
+        {
+            for (group_index, group) in groups.iter().enumerate() {
+                let Some(fields) = group.get("fields").and_then(Value::as_array) else {
+                    continue;
+                };
+                for (field_index, field) in fields.iter().enumerate() {
+                    if let Some(condition) = field
+                        .get("editor")
+                        .and_then(Value::as_object)
+                        .and_then(|editor| editor.get("lookup"))
+                        .and_then(Value::as_object)
+                        .and_then(|lookup| lookup.get("condition"))
+                    {
+                        collect_condition_filter_ref_issues(
+                            &format!(
+                                "$.blocks[{block_index}].card.groups[{group_index}].fields[{field_index}].editor.lookup.condition"
+                            ),
+                            condition,
+                            &block_filters,
+                            issues,
+                        );
+                    }
+                }
             }
         }
     }
@@ -4560,6 +4903,87 @@ mod tests {
 
         assert!(!codes.contains(&"MISSING_TABLE_VALUE_SELECT"));
         assert!(!codes.contains(&"UNKNOWN_KEY"));
+    }
+
+    #[test]
+    fn report_authoring_accepts_lookup_editor_column_shape() {
+        let definition = json!({
+            "definitionVersion": 1,
+            "markdown": "{{ block.products }}",
+            "filters": [{
+                "id": "vendor",
+                "label": "Vendor",
+                "type": "select"
+            }],
+            "blocks": [{
+                "id": "products",
+                "type": "table",
+                "source": {
+                    "schema": "Product",
+                    "mode": "filter",
+                    "join": [{
+                        "schema": "Category",
+                        "alias": "category",
+                        "parentField": "category_id",
+                        "field": "id",
+                        "kind": "left"
+                    }]
+                },
+                "table": {
+                    "columns": [{
+                        "field": "category_id",
+                        "displayField": "category.name",
+                        "editable": true,
+                        "editor": {
+                            "kind": "lookup",
+                            "lookup": {
+                                "schema": "Category",
+                                "valueField": "id",
+                                "labelField": "name",
+                                "searchFields": ["name"],
+                                "condition": {
+                                    "op": "EQ",
+                                    "arguments": ["vendor", {"filter": "vendor", "path": "value"}]
+                                }
+                            }
+                        }
+                    }]
+                }
+            }]
+        });
+
+        let issues = collect_report_definition_authoring_issues(&definition);
+        let codes = issue_codes(&issues);
+
+        assert!(!codes.contains(&"UNKNOWN_KEY"));
+        assert!(!codes.contains(&"MISSING_LOOKUP_CONFIG"));
+        assert!(!codes.contains(&"UNKNOWN_CONDITION_FILTER_REF"));
+        assert!(authoring_errors(&issues).next().is_none());
+    }
+
+    #[test]
+    fn report_authoring_rejects_lookup_editor_without_lookup_config() {
+        let definition = json!({
+            "definitionVersion": 1,
+            "markdown": "{{ block.products }}",
+            "blocks": [{
+                "id": "products",
+                "type": "table",
+                "source": {"schema": "Product", "mode": "filter"},
+                "table": {
+                    "columns": [{
+                        "field": "category_id",
+                        "editable": true,
+                        "editor": {"kind": "lookup"}
+                    }]
+                }
+            }]
+        });
+
+        let issues = collect_report_definition_authoring_issues(&definition);
+        let codes = issue_codes(&issues);
+
+        assert!(codes.contains(&"MISSING_LOOKUP_CONFIG"));
     }
 
     #[test]

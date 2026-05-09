@@ -229,6 +229,25 @@ pub async fn get_report_filter_options(
     }
 }
 
+pub async fn get_report_lookup_options(
+    crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
+    State(pool): State<PgPool>,
+    State(manager): State<Arc<ObjectStoreManager>>,
+    State(connections): State<Arc<runtara_connections::ConnectionsFacade>>,
+    Path((report_id, block_id, field)): Path<(String, String, String)>,
+    Json(request): Json<ReportLookupOptionsRequest>,
+) -> Result<(StatusCode, Json<ReportLookupOptionsResponse>), (StatusCode, Json<Value>)> {
+    let service = ReportService::new(pool, manager, connections);
+
+    match service
+        .get_lookup_options(&tenant_id, &report_id, &block_id, &field, request)
+        .await
+    {
+        Ok(response) => Ok((StatusCode::OK, Json(response))),
+        Err(error) => Err(error_response(error)),
+    }
+}
+
 pub async fn query_report_dataset(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
     State(pool): State<PgPool>,

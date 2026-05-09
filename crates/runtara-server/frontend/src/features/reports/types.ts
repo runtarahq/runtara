@@ -31,6 +31,8 @@ export interface ReportSubtableConfig {
 export interface ReportCardField {
   field: string;
   label?: string;
+  /** Row field rendered instead of `field` while writeback still targets `field`. */
+  displayField?: string;
   /** Renderer for this field. Defaults to `value`. */
   kind?: ReportCardFieldKind;
   /** Format hint for `kind=value` (currency, datetime, pill, etc). */
@@ -58,7 +60,8 @@ export type ReportEditorKind =
   | 'select'
   | 'toggle'
   | 'date'
-  | 'datetime';
+  | 'datetime'
+  | 'lookup';
 
 export interface ReportEditorOption {
   label: string;
@@ -67,12 +70,27 @@ export interface ReportEditorOption {
 
 export interface ReportEditorConfig {
   kind: ReportEditorKind;
+  lookup?: ReportLookupConfig;
   options?: ReportEditorOption[];
   min?: number;
   max?: number;
   step?: number;
   regex?: string;
   placeholder?: string;
+}
+
+export interface ReportLookupConfig {
+  schema: string;
+  connectionId?: string | null;
+  valueField: string;
+  labelField: string;
+  searchFields?: string[];
+  condition?: unknown;
+  filterMappings?: Array<{
+    filterId: string;
+    field: string;
+    op?: string;
+  }>;
 }
 
 export interface ReportCardGroup {
@@ -330,6 +348,8 @@ export type ReportPillVariant =
 export interface ReportTableColumn {
   field: string;
   label?: string;
+  /** Row field rendered instead of `field` while sort/writeback still target `field`. */
+  displayField?: string;
   format?: string;
   type?: 'value' | 'chart';
   chart?: {
@@ -604,6 +624,30 @@ export interface ReportFilterOptionsResponse {
   filter: {
     id: string;
   };
+  options: ReportFilterOption[];
+  page: {
+    offset: number;
+    size: number;
+    totalCount: number;
+    hasNextPage: boolean;
+  };
+}
+
+export interface ReportLookupOptionsRequest {
+  filters: Record<string, unknown>;
+  blockFilters?: Record<string, unknown>;
+  query?: string;
+  offset?: number;
+  limit?: number;
+  timezone?: string;
+}
+
+export interface ReportLookupOptionsResponse {
+  success: boolean;
+  block: {
+    id: string;
+  };
+  field: string;
   options: ReportFilterOption[];
   page: {
     offset: number;

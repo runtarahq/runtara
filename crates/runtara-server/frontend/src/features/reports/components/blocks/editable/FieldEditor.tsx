@@ -1,4 +1,5 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { Check, ChevronDown } from 'lucide-react';
 import {
   Select,
   SelectContent,
@@ -9,23 +10,49 @@ import {
 import { Switch } from '@/shared/components/ui/switch';
 import { Input } from '@/shared/components/ui/input';
 import { Textarea } from '@/shared/components/ui/textarea';
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from '@/shared/components/ui/popover';
+import {
+  Command,
+  CommandEmpty,
+  CommandGroup,
+  CommandInput,
+  CommandItem,
+  CommandList,
+} from '@/shared/components/ui/command';
 import { ReportEditorConfig, ReportEditorKind } from '../../../types';
+import { useReportLookupOptions } from '../../../hooks/useReports';
 
 type FieldEditorProps = {
   value: unknown;
+  displayValue?: unknown;
   format?: string | null;
   pillVariants?: Record<string, string> | null;
   editor?: ReportEditorConfig;
+  lookupContext?: LookupContext;
   busy?: boolean;
   onCommit: (next: unknown) => void;
   onCancel: () => void;
 };
 
+type LookupContext = {
+  reportId: string;
+  blockId: string;
+  field: string;
+  filters: Record<string, unknown>;
+  blockFilters?: Record<string, unknown>;
+};
+
 export function FieldEditor({
   value,
+  displayValue,
   format,
   pillVariants,
   editor,
+  lookupContext,
   busy,
   onCommit,
   onCancel,
@@ -113,6 +140,20 @@ export function FieldEditor({
     );
   }
 
+  if (inferred.kind === 'lookup') {
+    return (
+      <LookupEditor
+        value={value}
+        displayValue={displayValue}
+        editor={editor}
+        lookupContext={lookupContext}
+        busy={busy}
+        onCommit={onCommit}
+        onCancel={onCancel}
+      />
+    );
+  }
+
   if (inferred.kind === 'textarea') {
     return (
       <Textarea
@@ -165,12 +206,136 @@ export function FieldEditor({
   );
 }
 
+function LookupEditor({
+  value,
+  displayValue,
+  editor,
+  lookupContext,
+  busy,
+  onCommit,
+  onCancel,
+}: {
+  value: unknown;
+  displayValue?: unknown;
+  editor?: ReportEditorConfig;
+  lookupContext?: LookupContext;
+  busy?: boolean;
+  onCommit: (next: unknown) => void;
+  onCancel: () => void;
+}) {
+  const [open, setOpen] = useState(true);
+  const [query, setQuery] = useState('');
+  const [debouncedQuery, setDebouncedQuery] = useState('');
+  const committedRef = useRef(false);
+
+  useEffect(() => {
+    const timeout = window.setTimeout(() => setDebouncedQuery(query), 200);
+    return () => window.clearTimeout(timeout);
+  }, [query]);
+
+  const request = useMemo(
+    () => ({
+      filters: lookupContext?.filters ?? {},
+      blockFilters: lookupContext?.blockFilters ?? {},
+      query: debouncedQuery,
+      limit: 50,
+      timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+    }),
+    [debouncedQuery, lookupContext?.blockFilters, lookupContext?.filters]
+  );
+  const canLoad = Boolean(lookupContext && editor?.lookup);
+  const { data, isFetching } = useReportLookupOptions(
+    lookupContext?.reportId,
+    lookupContext?.blockId,
+    lookupContext?.field,
+    request,
+    open && canLoad
+  );
+  const options = data?.options ?? [];
+  const selectedKey = optionKey(value);
+  const label = lookupDisplayLabel(value, displayValue);
+
+  if (!canLoad) {
+    return (
+      <Input
+        value={String(value ?? '')}
+        disabled
+        className="h-8 text-sm"
+        aria-label="Lookup editor unavailable"
+      />
+    );
+  }
+
+  const commit = (next: unknown) => {
+    committedRef.current = true;
+    onCommit(next);
+  };
+
+  return (
+    <Popover
+      open={open}
+      onOpenChange={(next) => {
+        setOpen(next);
+        if (!next && !committedRef.current) {
+          onCancel();
+        }
+      }}
+    >
+      <PopoverTrigger asChild>
+        <button
+          type="button"
+          disabled={busy}
+          className="flex h-8 w-full min-w-40 items-center justify-between gap-2 rounded-md border bg-background px-3 text-left text-sm"
+        >
+          <span className="truncate">{label}</span>
+          <ChevronDown className="h-3.5 w-3.5 shrink-0 opacity-50" />
+        </button>
+      </PopoverTrigger>
+      <PopoverContent className="w-80 p-0" align="start">
+        <Command shouldFilter={false}>
+          <CommandInput
+            value={query}
+            onValueChange={setQuery}
+            placeholder={`Search ${editor?.lookup?.schema ?? 'records'}...`}
+          />
+          <CommandList>
+            <CommandEmpty>
+              {isFetching ? 'Loading...' : 'No matching records.'}
+            </CommandEmpty>
+            <CommandGroup>
+              {!isEmptyLookupValue(value) && (
+                <CommandItem value="__clear__" onSelect={() => commit(null)}>
+                  <span className="flex-1 text-muted-foreground">Clear</span>
+                </CommandItem>
+              )}
+              {options.map((option) => {
+                const key = optionKey(option.value);
+                const selected = key === selectedKey;
+                return (
+                  <CommandItem
+                    key={key}
+                    value={`${option.label} ${key}`}
+                    onSelect={() => commit(option.value)}
+                  >
+                    <span className="flex-1 truncate">{option.label}</span>
+                    {selected && <Check className="h-4 w-4 opacity-70" />}
+                  </CommandItem>
+                );
+              })}
+            </CommandGroup>
+          </CommandList>
+        </Command>
+      </PopoverContent>
+    </Popover>
+  );
+}
+
 type InferredEditor = {
   kind: ReportEditorKind;
   options?: Array<{ label: string; value: unknown }>;
 };
 
-export function inferEditorKind(
+function inferEditorKind(
   value: unknown,
   format: string | null | undefined,
   pillVariants: Record<string, string> | null | undefined,
@@ -209,6 +374,24 @@ function variantsToOptions(
     label: key,
     value: key,
   }));
+}
+
+function lookupDisplayLabel(value: unknown, displayValue: unknown): string {
+  if (!isEmptyLookupValue(displayValue)) return String(displayValue);
+  if (!isEmptyLookupValue(value)) return String(value);
+  return 'Select...';
+}
+
+function isEmptyLookupValue(value: unknown): boolean {
+  if (value === null || value === undefined) return true;
+  if (typeof value === 'string') return value.trim().length === 0;
+  return false;
+}
+
+function optionKey(value: unknown): string {
+  if (value === null || value === undefined) return '__empty__';
+  if (typeof value === 'string') return value;
+  return JSON.stringify(value);
 }
 
 function stringifyForInput(value: unknown, kind: ReportEditorKind): string {

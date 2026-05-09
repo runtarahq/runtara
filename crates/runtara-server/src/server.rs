@@ -1218,6 +1218,10 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
             post(api::handlers::reports::get_report_filter_options),
         )
         .route(
+            "/api/runtime/reports/{report_id}/blocks/{block_id}/fields/{field}/lookup-options",
+            post(api::handlers::reports::get_report_lookup_options),
+        )
+        .route(
             "/api/runtime/reports/{report_id}/datasets/{dataset_id}/query",
             post(api::handlers::reports::query_report_dataset),
         )

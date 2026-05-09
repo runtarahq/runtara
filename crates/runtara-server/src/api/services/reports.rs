@@ -71,6 +71,17 @@ struct ReportConditionRuntimeContext<'a> {
     block_request: Option<&'a ReportBlockDataRequest>,
 }
 
+struct ObjectModelOptionQuery<'a> {
+    context: String,
+    schema: String,
+    connection_id: Option<&'a str>,
+    value_field: String,
+    label_field: String,
+    conditions: Vec<Condition>,
+    search_fields: Vec<String>,
+    search_query: String,
+}
+
 impl ReportService {
     pub fn new(
         pool: PgPool,
@@ -675,19 +686,159 @@ impl ReportService {
         );
 
         let search_query = request.query.as_deref().map(str::trim).unwrap_or("");
-        if option_bool(options_config, "search").unwrap_or(false) && !search_query.is_empty() {
-            conditions.push(binary_condition(
-                "CONTAINS",
-                Value::String(label_field.clone()),
-                Value::String(search_query.to_string()),
-            ));
+        let search_fields = if option_bool(options_config, "search").unwrap_or(false) {
+            vec![label_field.clone()]
+        } else {
+            Vec::new()
+        };
+        let option_query = ObjectModelOptionQuery {
+            context: format!("filter '{}'", filter.id),
+            schema,
+            connection_id,
+            value_field: field,
+            label_field,
+            conditions,
+            search_fields,
+            search_query: search_query.to_string(),
+        };
+        let (options, page) = self
+            .query_object_model_options(tenant_id, option_query, offset, limit)
+            .await?;
+
+        Ok(ReportFilterOptionsResponse {
+            success: true,
+            filter: ReportFilterOptionsMetadata {
+                id: filter.id.clone(),
+            },
+            options,
+            page,
+        })
+    }
+
+    pub async fn get_lookup_options(
+        &self,
+        tenant_id: &str,
+        id_or_slug: &str,
+        block_id: &str,
+        field: &str,
+        request: ReportLookupOptionsRequest,
+    ) -> Result<ReportLookupOptionsResponse, ReportServiceError> {
+        let report = self.get_report(tenant_id, id_or_slug).await?;
+        let block = report
+            .definition
+            .blocks
+            .iter()
+            .find(|block| block.id == block_id)
+            .ok_or_else(|| {
+                ReportServiceError::Validation(format!("Unknown block '{}'", block_id))
+            })?;
+        let lookup = lookup_editor_for_field(block, field).ok_or_else(|| {
+            ReportServiceError::Validation(format!(
+                "Block '{}' field '{}' is not configured with editor.kind='lookup'",
+                block_id, field
+            ))
+        })?;
+        let offset = request.offset.max(0);
+        let limit = request.limit.clamp(1, MAX_TABLE_PAGE_SIZE);
+        let resolved_filters = resolve_filters(&report.definition, &request.filters);
+        let block_request = ReportBlockDataRequest {
+            id: block.id.clone(),
+            page: None,
+            sort: vec![],
+            search: None,
+            block_filters: request.block_filters,
+        };
+        let condition_filter_defs = block_condition_filter_definitions(&report.definition, block);
+        let condition_filter_values =
+            block_condition_filter_values(block, &resolved_filters, Some(&block_request));
+        let mut conditions = Vec::new();
+
+        if let Some(condition) = &lookup.condition
+            && let Some(condition) = resolve_report_condition_values(
+                condition,
+                &condition_filter_defs,
+                &condition_filter_values,
+                &format!("block '{}' field '{}' lookup", block_id, field),
+            )?
+        {
+            conditions.push(condition);
+        }
+        append_source_mapping_conditions(
+            &mut conditions,
+            &lookup.filter_mappings,
+            &condition_filter_values,
+        );
+
+        let mut search_fields = lookup.search_fields.clone();
+        if search_fields.is_empty() {
+            search_fields.push(lookup.label_field.clone());
+        }
+        let option_query = ObjectModelOptionQuery {
+            context: format!("block '{}' field '{}' lookup", block_id, field),
+            schema: lookup.schema.clone(),
+            connection_id: lookup.connection_id.as_deref(),
+            value_field: lookup.value_field.clone(),
+            label_field: lookup.label_field.clone(),
+            conditions,
+            search_fields,
+            search_query: request.query.as_deref().unwrap_or("").trim().to_string(),
+        };
+        let (options, page) = self
+            .query_object_model_options(tenant_id, option_query, offset, limit)
+            .await?;
+
+        Ok(ReportLookupOptionsResponse {
+            success: true,
+            block: ReportLookupBlockMetadata {
+                id: block.id.clone(),
+            },
+            field: field.to_string(),
+            options,
+            page,
+        })
+    }
+
+    async fn query_object_model_options(
+        &self,
+        tenant_id: &str,
+        mut query: ObjectModelOptionQuery<'_>,
+        offset: i64,
+        limit: i64,
+    ) -> Result<(Vec<ReportFilterOption>, ReportFilterOptionsPage), ReportServiceError> {
+        let search_query = query.search_query.trim();
+        if !search_query.is_empty() && !query.search_fields.is_empty() {
+            let mut search_conditions = query
+                .search_fields
+                .iter()
+                .map(|field| {
+                    binary_condition(
+                        "CONTAINS",
+                        Value::String(field.clone()),
+                        Value::String(search_query.to_string()),
+                    )
+                })
+                .collect::<Vec<_>>();
+            match search_conditions.len() {
+                0 => {}
+                1 => query.conditions.push(search_conditions.remove(0)),
+                _ => query.conditions.push(Condition {
+                    op: "OR".to_string(),
+                    arguments: Some(
+                        search_conditions
+                            .into_iter()
+                            .filter_map(|condition| serde_json::to_value(condition).ok())
+                            .collect(),
+                    ),
+                }),
+            }
         }
 
-        let mut group_by = vec![field.clone()];
-        if label_field != field {
-            group_by.push(label_field.clone());
+        let mut group_by = vec![query.value_field.clone()];
+        if query.label_field != query.value_field {
+            group_by.push(query.label_field.clone());
         }
 
+        let conditions = std::mem::take(&mut query.conditions);
         let aggregate_request = AggregateRequest {
             condition: combine_conditions(conditions),
             group_by,
@@ -701,7 +852,7 @@ impl ReportService {
                 percentile: None,
             }],
             order_by: vec![AggregateOrderBy {
-                column: label_field.clone(),
+                column: query.label_field.clone(),
                 direction: SortDirection::Asc,
             }],
             limit: Some(limit),
@@ -710,18 +861,31 @@ impl ReportService {
 
         let result = self
             .instance_service
-            .aggregate_instances_by_schema(tenant_id, &schema, aggregate_request, connection_id)
+            .aggregate_instances_by_schema(
+                tenant_id,
+                &query.schema,
+                aggregate_request,
+                query.connection_id,
+            )
             .await
-            .map_err(map_object_model_error)?;
+            .map_err(|error| {
+                let mapped = map_object_model_error(error);
+                match mapped {
+                    ReportServiceError::Validation(message) => ReportServiceError::Validation(
+                        format!("{} options query is invalid: {}", query.context, message),
+                    ),
+                    other => other,
+                }
+            })?;
         let value_index = result
             .columns
             .iter()
-            .position(|column| column == &field)
+            .position(|column| column == &query.value_field)
             .unwrap_or(0);
         let label_index = result
             .columns
             .iter()
-            .position(|column| column == &label_field)
+            .position(|column| column == &query.label_field)
             .unwrap_or(value_index);
         let count_index = result.columns.iter().position(|column| column == "__count");
         let options = result
@@ -740,20 +904,14 @@ impl ReportService {
                 })
             })
             .collect::<Vec<_>>();
+        let page = ReportFilterOptionsPage {
+            offset,
+            size: limit,
+            total_count: result.group_count,
+            has_next_page: offset + limit < result.group_count,
+        };
 
-        Ok(ReportFilterOptionsResponse {
-            success: true,
-            filter: ReportFilterOptionsMetadata {
-                id: filter.id.clone(),
-            },
-            options,
-            page: ReportFilterOptionsPage {
-                offset,
-                size: limit,
-                total_count: result.group_count,
-                has_next_page: offset + limit < result.group_count,
-            },
-        })
+        Ok((options, page))
     }
 
     pub async fn query_dataset(
@@ -1108,6 +1266,23 @@ impl ReportService {
                             block.id, column.field
                         )));
                     }
+                    if let Some(display_field) = &column.display_field
+                        && !is_table_value_field(display_field)
+                    {
+                        return Err(ReportServiceError::Validation(format!(
+                            "Block '{}' references unknown table displayField '{}'",
+                            block.id, display_field
+                        )));
+                    }
+                    if let Some(editor) = &column.editor {
+                        self.validate_editor_config(
+                            tenant_id,
+                            editor,
+                            &block_condition_filter_defs,
+                            &format!("block '{}' table column '{}'", block.id, column.field),
+                        )
+                        .await?;
+                    }
                 }
 
                 for sort in &table.default_sort {
@@ -1116,6 +1291,36 @@ impl ReportService {
                             "Block '{}' references unknown table sort field '{}'",
                             block.id, sort.field
                         )));
+                    }
+                }
+            }
+
+            if let Some(card) = &block.card {
+                for group in &card.groups {
+                    for field in &group.fields {
+                        if !is_known_field(&field.field) {
+                            return Err(ReportServiceError::Validation(format!(
+                                "Block '{}' references unknown card field '{}'",
+                                block.id, field.field
+                            )));
+                        }
+                        if let Some(display_field) = &field.display_field
+                            && !is_known_field(display_field)
+                        {
+                            return Err(ReportServiceError::Validation(format!(
+                                "Block '{}' references unknown card displayField '{}'",
+                                block.id, display_field
+                            )));
+                        }
+                        if let Some(editor) = &field.editor {
+                            self.validate_editor_config(
+                                tenant_id,
+                                editor,
+                                &block_condition_filter_defs,
+                                &format!("block '{}' card field '{}'", block.id, field.field),
+                            )
+                            .await?;
+                        }
                     }
                 }
             }
@@ -1464,6 +1669,119 @@ impl ReportService {
                 &format!("filter '{}'", filter.id),
             )
             .await?;
+        }
+
+        Ok(())
+    }
+
+    async fn validate_editor_config(
+        &self,
+        tenant_id: &str,
+        editor: &ReportEditorConfig,
+        filter_defs: &HashMap<String, &ReportFilterDefinition>,
+        context: &str,
+    ) -> Result<(), ReportServiceError> {
+        if editor.kind != ReportEditorKind::Lookup {
+            if editor.lookup.is_some() {
+                return Err(ReportServiceError::Validation(format!(
+                    "{} editor.lookup is only valid when editor.kind is 'lookup'",
+                    context
+                )));
+            }
+            return Ok(());
+        }
+
+        let lookup = editor.lookup.as_ref().ok_or_else(|| {
+            ReportServiceError::Validation(format!(
+                "{} editor.kind='lookup' requires editor.lookup",
+                context
+            ))
+        })?;
+        self.validate_lookup_config(tenant_id, lookup, filter_defs, context)
+            .await
+    }
+
+    async fn validate_lookup_config(
+        &self,
+        tenant_id: &str,
+        lookup: &ReportLookupConfig,
+        filter_defs: &HashMap<String, &ReportFilterDefinition>,
+        context: &str,
+    ) -> Result<(), ReportServiceError> {
+        if lookup.schema.trim().is_empty() {
+            return Err(ReportServiceError::Validation(format!(
+                "{} lookup.schema is required",
+                context
+            )));
+        }
+        if lookup.value_field.trim().is_empty() {
+            return Err(ReportServiceError::Validation(format!(
+                "{} lookup.valueField is required",
+                context
+            )));
+        }
+        if lookup.label_field.trim().is_empty() {
+            return Err(ReportServiceError::Validation(format!(
+                "{} lookup.labelField is required",
+                context
+            )));
+        }
+
+        let schema = self
+            .schema_service
+            .get_schema_by_name(&lookup.schema, tenant_id, lookup.connection_id.as_deref())
+            .await
+            .map_err(map_object_model_error)?;
+        let schema_fields: HashSet<_> = schema
+            .columns
+            .iter()
+            .map(|column| column.name.clone())
+            .collect();
+
+        for field in std::iter::once(&lookup.value_field)
+            .chain(std::iter::once(&lookup.label_field))
+            .chain(lookup.search_fields.iter())
+        {
+            if !is_schema_field(&schema_fields, field) {
+                return Err(ReportServiceError::Validation(format!(
+                    "{} lookup references unknown field '{}' on '{}'",
+                    context, field, lookup.schema
+                )));
+            }
+        }
+
+        validate_report_condition_filter_refs(
+            lookup.condition.as_ref(),
+            filter_defs,
+            &format!("{} lookup", context),
+        )?;
+        self.validate_report_condition_subqueries(
+            tenant_id,
+            lookup.condition.as_ref(),
+            lookup.connection_id.as_deref(),
+            &format!("{} lookup", context),
+        )
+        .await?;
+
+        for mapping in &lookup.filter_mappings {
+            let filter_id = mapping.filter_id.as_deref().ok_or_else(|| {
+                ReportServiceError::Validation(format!(
+                    "{} lookup filterMappings entries must include filterId",
+                    context
+                ))
+            })?;
+            if !filter_defs.contains_key(filter_id) {
+                return Err(ReportServiceError::Validation(format!(
+                    "{} lookup filterMappings references unknown filter '{}'",
+                    context, filter_id
+                )));
+            }
+            if !is_schema_field(&schema_fields, &mapping.field) {
+                return Err(ReportServiceError::Validation(format!(
+                    "{} lookup filterMappings references unknown field '{}' on '{}'",
+                    context, mapping.field, lookup.schema
+                )));
+            }
         }
 
         Ok(())
@@ -4654,12 +4972,13 @@ fn searchable_table_fields(
         .columns
         .iter()
         .filter(|column| !column.is_chart())
-        .filter(|column| {
-            requested_fields.is_empty() || requested_fields.contains(column.field.as_str())
+        .flat_map(|column| {
+            std::iter::once(column.field.as_str()).chain(column.display_field.as_deref())
         })
-        .filter_map(|column| {
-            if seen.insert(column.field.clone()) {
-                Some(column.field.clone())
+        .filter(|field| requested_fields.is_empty() || requested_fields.contains(*field))
+        .filter_map(|field| {
+            if seen.insert(field.to_string()) {
+                Some(field.to_string())
             } else {
                 None
             }
@@ -5759,6 +6078,48 @@ fn is_schema_field(schema_fields: &HashSet<String>, field: &str) -> bool {
         )
 }
 
+fn lookup_editor_for_field<'a>(
+    block: &'a ReportBlockDefinition,
+    field: &str,
+) -> Option<&'a ReportLookupConfig> {
+    if let Some(table) = block.table.as_ref() {
+        for column in &table.columns {
+            if column.field == field
+                && column
+                    .editor
+                    .as_ref()
+                    .is_some_and(|editor| editor.kind == ReportEditorKind::Lookup)
+            {
+                return column
+                    .editor
+                    .as_ref()
+                    .and_then(|editor| editor.lookup.as_ref());
+            }
+        }
+    }
+
+    if let Some(card) = block.card.as_ref() {
+        for group in &card.groups {
+            for card_field in &group.fields {
+                if card_field.field == field
+                    && card_field.kind == ReportCardFieldKind::Value
+                    && card_field
+                        .editor
+                        .as_ref()
+                        .is_some_and(|editor| editor.kind == ReportEditorKind::Lookup)
+                {
+                    return card_field
+                        .editor
+                        .as_ref()
+                        .and_then(|editor| editor.lookup.as_ref());
+                }
+            }
+        }
+    }
+
+    None
+}
+
 fn normalize_report_aggregate_expression(expression: &Value) -> Value {
     let Value::Object(object) = expression else {
         return expression.clone();
@@ -6294,6 +6655,7 @@ mod tests {
         ReportTableColumn {
             field: field.to_string(),
             label: None,
+            display_field: None,
             format: None,
             column_type: None,
             chart: None,

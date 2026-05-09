@@ -49,6 +49,7 @@ import { useReportWriteback } from './editable/useReportWriteback';
 type TableColumn = {
   key: string;
   label?: string;
+  displayField?: string;
   format?: string | null;
   type?: 'value' | 'chart';
   chart?: ReportTableColumn['chart'];
@@ -86,6 +87,8 @@ type TableBlockProps = {
   block: ReportBlockDefinition;
   result: ReportBlockResult;
   sort: ReportOrderBy[];
+  filters: Record<string, unknown>;
+  blockFilters: Record<string, unknown>;
   onPageChange: (offset: number, size: number) => void;
   onSortChange: (sort: ReportOrderBy[]) => void;
   onRowClick?: (row: Record<string, unknown>) => void;
@@ -97,6 +100,8 @@ export function TableBlock({
   block,
   result,
   sort,
+  filters,
+  blockFilters,
   onPageChange,
   onSortChange,
   onRowClick,
@@ -210,6 +215,11 @@ export function TableBlock({
                 >
                   {columns.map((column, columnIndex) => {
                     const value = getCellValue(row, column, columnIndex);
+                    const displayValue = getCellDisplayValue(
+                      rowObject,
+                      column,
+                      value
+                    );
                     const rowKey = getRowKey(row, rowIndex);
                     const writebackContext = getWritebackContext(
                       column,
@@ -247,9 +257,17 @@ export function TableBlock({
                           <div onClick={(e) => e.stopPropagation()}>
                             <FieldEditor
                               value={value}
+                              displayValue={displayValue}
                               format={column.format}
                               pillVariants={column.pillVariants}
                               editor={column.editor}
+                              lookupContext={{
+                                reportId,
+                                blockId: block.id,
+                                field: column.key,
+                                filters,
+                                blockFilters,
+                              }}
                               busy={writeback.isPending}
                               onCommit={(next) => {
                                 if (writebackContext) {
@@ -270,6 +288,7 @@ export function TableBlock({
                             <TableCellValue
                               column={column}
                               value={value}
+                              displayValue={displayValue}
                               row={rowObject}
                             />
                             {writebackContext && (
@@ -395,6 +414,7 @@ function normalizeColumns(
 
     return {
       ...merged,
+      displayField: configured?.displayField ?? merged.displayField,
       secondaryField: configured?.secondaryField ?? merged.secondaryField,
       linkField: configured?.linkField ?? merged.linkField,
       tooltipField: configured?.tooltipField ?? merged.tooltipField,
@@ -432,6 +452,20 @@ function getCellValue(
   return row[column.key];
 }
 
+function getCellDisplayValue(
+  row: Record<string, unknown>,
+  column: TableColumn,
+  value: unknown
+) {
+  if (!column.displayField) return value;
+  const displayValue = row[column.displayField];
+  if (displayValue === null || displayValue === undefined) return value;
+  if (typeof displayValue === 'string' && displayValue.trim().length === 0) {
+    return value;
+  }
+  return displayValue;
+}
+
 function getWritebackContext(
   column: TableColumn,
   rowObject: Record<string, unknown>
@@ -465,10 +499,12 @@ function getRowKey(row: Record<string, unknown> | unknown[], rowIndex: number) {
 function TableCellValue({
   column,
   value,
+  displayValue,
   row,
 }: {
   column: TableColumn;
   value: unknown;
+  displayValue?: unknown;
   row: Record<string, unknown>;
 }) {
   if (column.type === 'chart') {
@@ -476,22 +512,28 @@ function TableCellValue({
   }
 
   if (column.format === 'pill') {
-    return <PillCell column={column} value={value} />;
+    return <PillCell column={column} value={displayValue ?? value} />;
   }
 
   if (column.format === 'avatar_label') {
-    return <AvatarLabelCell column={column} value={value} row={row} />;
+    return <AvatarLabelCell column={column} value={displayValue ?? value} row={row} />;
   }
 
   if (column.format === 'bar_indicator') {
-    return <BarIndicatorCell column={column} value={value} />;
+    return <BarIndicatorCell column={column} value={displayValue ?? value} />;
   }
 
   if (column.secondaryField || column.linkField) {
-    return <PrimaryWithSecondaryCell column={column} value={value} row={row} />;
+    return (
+      <PrimaryWithSecondaryCell
+        column={column}
+        value={displayValue ?? value}
+        row={row}
+      />
+    );
   }
 
-  return <>{formatCellValue(value, column.format ?? undefined)}</>;
+  return <>{formatCellValue(displayValue ?? value, column.format ?? undefined)}</>;
 }
 
 function PillCell({ column, value }: { column: TableColumn; value: unknown }) {
