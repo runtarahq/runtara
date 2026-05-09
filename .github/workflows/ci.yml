@@ -11,6 +11,33 @@ env:
   SQLX_OFFLINE: "true"
 
 jobs:
+  notify-start:
+    # Only fire on push-to-main or PRs from this repo (not forks).
+    # Forks can't read SLACK_WEBHOOK_URL anyway; this gate is belt-and-braces.
+    if: |
+      (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)
+      || (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Notify Slack — build started
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          REPO: ${{ github.repository }}
+          REF: ${{ github.ref_name }}
+          ACTOR: ${{ github.actor }}
+          RUN_NUM: ${{ github.run_number }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          payload=$(jq -nc \
+            --arg repo "$REPO" \
+            --arg ref "$REF" \
+            --arg actor "$ACTOR" \
+            --arg run_num "$RUN_NUM" \
+            --arg run_url "$RUN_URL" \
+            '{text: ":hourglass_flowing_sand: CI started — \($repo) on `\($ref)` by \($actor) (<\($run_url)|run #\($run_num)>)"}')
+          curl -sS --fail-with-body -X POST -H 'Content-Type: application/json' \
+            --data "$payload" "$SLACK_WEBHOOK_URL"
+
   lint:
     runs-on: ubuntu-latest
 
@@ -311,3 +338,53 @@ jobs:
         env:
           TEST_RUNTARA_DATABASE_URL: postgres://postgres:postgres@localhost:5432/runtara_test
         run: cargo test -p runtara-environment -- --test-threads=1
+
+  notify-result:
+    # Posts success or failure once all build/test jobs finish.
+    # Skipped on cancellation (avoids spurious "failure" pings when a run is
+    # superseded by a new push).
+    needs:
+      - lint
+      - build
+      - test-sdk
+      - test-workflows
+      - test-workflows-smoke-compile
+      - test-core
+      - test-server
+      - test-environment
+    if: |
+      !cancelled() && (
+        (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)
+        || (github.event_name == 'push' && github.ref == 'refs/heads/main')
+      )
+    runs-on: ubuntu-latest
+    steps:
+      - name: Notify Slack — build result
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          REPO: ${{ github.repository }}
+          REF: ${{ github.ref_name }}
+          ACTOR: ${{ github.actor }}
+          RUN_NUM: ${{ github.run_number }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: |
+          failed=$(echo "$NEEDS_JSON" | jq -r 'to_entries | map(select(.value.result == "failure")) | map(.key) | join(", ")')
+          if [ -z "$failed" ]; then
+            emoji=":white_check_mark:"
+            msg="CI passed"
+          else
+            emoji=":x:"
+            msg="CI failed: $failed"
+          fi
+          payload=$(jq -nc \
+            --arg emoji "$emoji" \
+            --arg msg "$msg" \
+            --arg repo "$REPO" \
+            --arg ref "$REF" \
+            --arg actor "$ACTOR" \
+            --arg run_num "$RUN_NUM" \
+            --arg run_url "$RUN_URL" \
+            '{text: "\($emoji) \($msg) — \($repo) on `\($ref)` by \($actor) (<\($run_url)|run #\($run_num)>)"}')
+          curl -sS --fail-with-body -X POST -H 'Content-Type: application/json' \
+            --data "$payload" "$SLACK_WEBHOOK_URL"
