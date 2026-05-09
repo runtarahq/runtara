@@ -159,6 +159,63 @@ fn smoke_split() {
     );
 }
 
+/// Split with populated `config.variables` containing a reference to a
+/// data field. Triggers the codegen path where `mapping::emit_input_mapping`
+/// is interpolated *inside* a block that locally rebinds `inputs` to a
+/// `serde_json::Value` — which collides with the helper's emission of
+/// `inputs.as_ref()` against the (no-longer) `Arc<WorkflowInputs>`. Without
+/// the rename fix, this fixture fails compile with E0599 on `as_ref` for
+/// `serde_json::Value`.
+#[test]
+fn smoke_split_with_variables() {
+    compile(
+        "split_with_variables",
+        r#"{
+            "name": "split_with_variables",
+            "steps": {
+                "s": {
+                    "stepType": "Split",
+                    "id": "s",
+                    "config": {
+                        "value": {"valueType": "immediate", "value": [1]},
+                        "variables": {
+                            "tag": {"valueType": "reference", "value": "data.label"}
+                        }
+                    },
+                    "subgraph": {
+                        "name": "row",
+                        "steps": {
+                            "rf": {
+                                "stepType": "Finish",
+                                "id": "rf",
+                                "inputMapping": {
+                                    "x": {"valueType": "immediate", "value": "ok"}
+                                }
+                            }
+                        },
+                        "entryPoint": "rf",
+                        "executionPlan": []
+                    }
+                },
+                "f": {
+                    "stepType": "Finish",
+                    "id": "f",
+                    "inputMapping": {
+                        "rows": {"valueType": "reference", "value": "steps.s.outputs"}
+                    }
+                }
+            },
+            "entryPoint": "s",
+            "executionPlan": [{"fromStep": "s", "toStep": "f"}],
+            "variables": {},
+            "inputSchema": {
+                "label": {"type": "string"}
+            },
+            "outputSchema": {}
+        }"#,
+    );
+}
+
 #[test]
 fn smoke_split_dont_stop_on_failed() {
     compile(

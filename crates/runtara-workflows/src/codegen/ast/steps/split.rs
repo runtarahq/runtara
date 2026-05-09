@@ -65,11 +65,20 @@ pub fn emit(step: &SplitStep, ctx: &mut EmitContext) -> Result<TokenStream, Code
 
         let mapping_code = mapping::emit_input_mapping(&value_mapping, ctx, &source_var);
 
-        // Generate code to resolve variables mapping if present
+        // Generate code to resolve variables mapping if present.
+        //
+        // CRITICAL: this references `__split_inputs` (the local Value being
+        // built), not `inputs`. The interpolated `#vars_mapping_code` itself
+        // emits `inputs.as_ref()` against `ctx.inputs_var` ("inputs") to
+        // resolve `data.*` / `steps.*` references — that resolves to the
+        // OUTER workflow `inputs: Arc<WorkflowInputs>` parameter. If we'd
+        // shadowed the outer `inputs` with the local Value, the mapping
+        // codegen would call `.as_ref()` on the wrong type and rustc fails
+        // with E0599 (caught by smoke_split_with_variables).
         let variables_code = if let Some(ref vars) = config.variables {
             let vars_mapping_code = mapping::emit_input_mapping(vars, ctx, &source_var);
             quote! {
-                if let serde_json::Value::Object(ref mut map) = inputs {
+                if let serde_json::Value::Object(ref mut map) = __split_inputs {
                     map.insert("variables".to_string(), #vars_mapping_code);
                 }
             }
@@ -87,8 +96,8 @@ pub fn emit(step: &SplitStep, ctx: &mut EmitContext) -> Result<TokenStream, Code
 
         quote! {
             {
-                let mut inputs = #mapping_code;
-                if let serde_json::Value::Object(ref mut map) = inputs {
+                let mut __split_inputs = #mapping_code;
+                if let serde_json::Value::Object(ref mut map) = __split_inputs {
                     map.insert("parallelism".to_string(), serde_json::json!(#parallelism));
                     map.insert("sequential".to_string(), serde_json::json!(#sequential));
                     map.insert("dontStopOnFailed".to_string(), serde_json::json!(#dont_stop_on_failed));
@@ -97,7 +106,7 @@ pub fn emit(step: &SplitStep, ctx: &mut EmitContext) -> Result<TokenStream, Code
                     map.insert("batchSize".to_string(), serde_json::json!(#batch_size));
                 }
                 #variables_code
-                inputs
+                __split_inputs
             }
         }
     } else {
