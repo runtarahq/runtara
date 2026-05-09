@@ -1260,6 +1260,34 @@ impl ReportService {
                             column,
                         )
                         .await?;
+                    } else if column.is_workflow_button() {
+                        let action = column.workflow_action.as_ref().ok_or_else(|| {
+                            ReportServiceError::Validation(format!(
+                                "Block '{}' workflow button column '{}' must define workflowAction",
+                                block.id, column.field
+                            ))
+                        })?;
+                        validate_report_workflow_action_config(
+                            action,
+                            &format!("block '{}' table column '{}'", block.id, column.field),
+                        )?;
+                        validate_report_workflow_action_context_field(
+                            action,
+                            column.field.as_str(),
+                            is_table_value_field,
+                            &format!(
+                                "Block '{}' workflow button column '{}'",
+                                block.id, column.field
+                            ),
+                        )?;
+                        validate_report_workflow_action_row_conditions(
+                            action,
+                            is_table_value_field,
+                            &format!(
+                                "Block '{}' workflow button column '{}'",
+                                block.id, column.field
+                            ),
+                        )?;
                     } else if !is_table_value_field(&column.field) {
                         return Err(ReportServiceError::Validation(format!(
                             "Block '{}' references unknown table field '{}'",
@@ -1298,7 +1326,37 @@ impl ReportService {
             if let Some(card) = &block.card {
                 for group in &card.groups {
                     for field in &group.fields {
-                        if !is_known_field(&field.field) {
+                        let is_workflow_button = field.kind == ReportCardFieldKind::WorkflowButton
+                            || field.workflow_action.is_some();
+                        if is_workflow_button {
+                            let action = field.workflow_action.as_ref().ok_or_else(|| {
+                                ReportServiceError::Validation(format!(
+                                    "Block '{}' workflow button card field '{}' must define workflowAction",
+                                    block.id, field.field
+                                ))
+                            })?;
+                            validate_report_workflow_action_config(
+                                action,
+                                &format!("block '{}' card field '{}'", block.id, field.field),
+                            )?;
+                            validate_report_workflow_action_context_field(
+                                action,
+                                field.field.as_str(),
+                                is_known_field,
+                                &format!(
+                                    "Block '{}' workflow button card field '{}'",
+                                    block.id, field.field
+                                ),
+                            )?;
+                            validate_report_workflow_action_row_conditions(
+                                action,
+                                is_known_field,
+                                &format!(
+                                    "Block '{}' workflow button card field '{}'",
+                                    block.id, field.field
+                                ),
+                            )?;
+                        } else if !is_known_field(&field.field) {
                             return Err(ReportServiceError::Validation(format!(
                                 "Block '{}' references unknown card field '{}'",
                                 block.id, field.field
@@ -3848,6 +3906,36 @@ fn validate_workflow_runtime_block(
     let fields = workflow_runtime_fields(entity);
     if let Some(table) = &block.table {
         for column in &table.columns {
+            if column.is_workflow_button() {
+                let action = column.workflow_action.as_ref().ok_or_else(|| {
+                    ReportServiceError::Validation(format!(
+                        "Block '{}' workflow button column '{}' must define workflowAction",
+                        block.id, column.field
+                    ))
+                })?;
+                validate_report_workflow_action_config(
+                    action,
+                    &format!("block '{}' table column '{}'", block.id, column.field),
+                )?;
+                validate_report_workflow_action_context_field(
+                    action,
+                    column.field.as_str(),
+                    |field| fields.contains(field),
+                    &format!(
+                        "Block '{}' workflow button column '{}'",
+                        block.id, column.field
+                    ),
+                )?;
+                validate_report_workflow_action_row_conditions(
+                    action,
+                    |field| workflow_runtime_row_field_known(&fields, field),
+                    &format!(
+                        "Block '{}' workflow button column '{}'",
+                        block.id, column.field
+                    ),
+                )?;
+                continue;
+            }
             if column.is_chart() || column.is_value_lookup() {
                 return Err(ReportServiceError::Validation(format!(
                     "Block '{}' workflow_runtime table columns cannot use nested sources",
@@ -3879,6 +3967,250 @@ fn validate_workflow_runtime_block(
         }
     }
     validate_block_interactions(block, filter_ids, view_ids)
+}
+
+fn validate_report_workflow_action_config(
+    action: &ReportWorkflowActionConfig,
+    context: &str,
+) -> Result<(), ReportServiceError> {
+    if action.workflow_id.trim().is_empty() {
+        return Err(ReportServiceError::Validation(format!(
+            "{context} workflowAction.workflowId must not be empty"
+        )));
+    }
+    if let Some(input_key) = &action.context.input_key
+        && input_key.trim().is_empty()
+    {
+        return Err(ReportServiceError::Validation(format!(
+            "{context} workflowAction.context.inputKey must not be empty"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_report_workflow_action_context_field(
+    action: &ReportWorkflowActionConfig,
+    fallback_field: &str,
+    is_known_field: impl Fn(&str) -> bool,
+    context: &str,
+) -> Result<(), ReportServiceError> {
+    let field = match action.context.mode {
+        ReportWorkflowActionContextMode::Row => return Ok(()),
+        ReportWorkflowActionContextMode::Field => action
+            .context
+            .field
+            .as_deref()
+            .unwrap_or(fallback_field)
+            .trim(),
+        ReportWorkflowActionContextMode::Value => fallback_field.trim(),
+    };
+
+    if field.is_empty() {
+        return Err(ReportServiceError::Validation(format!(
+            "{context} workflowAction context field must not be empty"
+        )));
+    }
+    if !is_known_field(field) {
+        return Err(ReportServiceError::Validation(format!(
+            "{context} references unknown workflowAction context field '{}'",
+            field
+        )));
+    }
+    Ok(())
+}
+
+fn validate_report_workflow_action_row_conditions(
+    action: &ReportWorkflowActionConfig,
+    is_known_field: impl Fn(&str) -> bool,
+    context: &str,
+) -> Result<(), ReportServiceError> {
+    let is_known_field = |field: &str| {
+        is_known_field(field)
+            || is_report_row_metadata_field(field)
+            || field
+                .split_once('.')
+                .is_some_and(|(base, _)| is_known_field(base) || is_report_row_metadata_field(base))
+    };
+
+    if let Some(condition) = &action.visible_when {
+        validate_report_workflow_action_row_condition(
+            condition,
+            &is_known_field,
+            context,
+            "workflowAction.visibleWhen",
+        )?;
+    }
+    if let Some(condition) = &action.hidden_when {
+        validate_report_workflow_action_row_condition(
+            condition,
+            &is_known_field,
+            context,
+            "workflowAction.hiddenWhen",
+        )?;
+    }
+    if let Some(condition) = &action.disabled_when {
+        validate_report_workflow_action_row_condition(
+            condition,
+            &is_known_field,
+            context,
+            "workflowAction.disabledWhen",
+        )?;
+    }
+
+    Ok(())
+}
+
+fn validate_report_workflow_action_row_condition(
+    condition: &Condition,
+    is_known_field: &dyn Fn(&str) -> bool,
+    context: &str,
+    condition_path: &str,
+) -> Result<(), ReportServiceError> {
+    let op = condition.op.trim().to_ascii_uppercase();
+    if op.is_empty() {
+        return Err(ReportServiceError::Validation(format!(
+            "{context} {condition_path}.op must not be empty"
+        )));
+    }
+
+    let args = condition.arguments.as_deref().unwrap_or(&[]);
+    match op.as_str() {
+        "AND" | "OR" => {
+            for (index, argument) in args.iter().enumerate() {
+                let child = workflow_action_row_condition_child(
+                    argument,
+                    context,
+                    &format!("{condition_path}.arguments[{index}]"),
+                )?;
+                validate_report_workflow_action_row_condition(
+                    &child,
+                    is_known_field,
+                    context,
+                    &format!("{condition_path}.arguments[{index}]"),
+                )?;
+            }
+        }
+        "NOT" => {
+            if args.len() != 1 {
+                return Err(ReportServiceError::Validation(format!(
+                    "{context} {condition_path} NOT condition requires one argument"
+                )));
+            }
+            let child = workflow_action_row_condition_child(
+                &args[0],
+                context,
+                &format!("{condition_path}.arguments[0]"),
+            )?;
+            validate_report_workflow_action_row_condition(
+                &child,
+                is_known_field,
+                context,
+                &format!("{condition_path}.arguments[0]"),
+            )?;
+        }
+        "EQ" | "NE" | "GT" | "GTE" | "LT" | "LTE" | "CONTAINS" => {
+            if args.len() != 2 {
+                return Err(ReportServiceError::Validation(format!(
+                    "{context} {condition_path} {op} condition requires two arguments"
+                )));
+            }
+            validate_report_workflow_action_condition_field(
+                &args[0],
+                is_known_field,
+                context,
+                &format!("{condition_path}.arguments[0]"),
+            )?;
+        }
+        "IN" | "NOT_IN" => {
+            if args.len() != 2 {
+                return Err(ReportServiceError::Validation(format!(
+                    "{context} {condition_path} {op} condition requires two arguments"
+                )));
+            }
+            validate_report_workflow_action_condition_field(
+                &args[0],
+                is_known_field,
+                context,
+                &format!("{condition_path}.arguments[0]"),
+            )?;
+            if !args[1].is_array() {
+                return Err(ReportServiceError::Validation(format!(
+                    "{context} {condition_path}.arguments[1] must be an array for {op}"
+                )));
+            }
+        }
+        "IS_DEFINED" | "IS_EMPTY" | "IS_NOT_EMPTY" => {
+            if args.len() != 1 {
+                return Err(ReportServiceError::Validation(format!(
+                    "{context} {condition_path} {op} condition requires one argument"
+                )));
+            }
+            validate_report_workflow_action_condition_field(
+                &args[0],
+                is_known_field,
+                context,
+                &format!("{condition_path}.arguments[0]"),
+            )?;
+        }
+        _ => {
+            return Err(ReportServiceError::Validation(format!(
+                "{context} {condition_path} uses unsupported row condition op '{}'",
+                condition.op
+            )));
+        }
+    }
+
+    Ok(())
+}
+
+fn workflow_action_row_condition_child(
+    argument: &Value,
+    context: &str,
+    path: &str,
+) -> Result<Condition, ReportServiceError> {
+    serde_json::from_value::<Condition>(argument.clone()).map_err(|err| {
+        ReportServiceError::Validation(format!(
+            "{context} {path} must be a condition object: {err}"
+        ))
+    })
+}
+
+fn validate_report_workflow_action_condition_field(
+    argument: &Value,
+    is_known_field: &dyn Fn(&str) -> bool,
+    context: &str,
+    path: &str,
+) -> Result<(), ReportServiceError> {
+    let Some(field) = argument
+        .as_str()
+        .map(str::trim)
+        .filter(|field| !field.is_empty())
+    else {
+        return Err(ReportServiceError::Validation(format!(
+            "{context} {path} must be a non-empty row field name"
+        )));
+    };
+    if !is_known_field(field) {
+        return Err(ReportServiceError::Validation(format!(
+            "{context} references unknown workflowAction row condition field '{}'",
+            field
+        )));
+    }
+    Ok(())
+}
+
+fn is_report_row_metadata_field(field: &str) -> bool {
+    matches!(
+        field,
+        "id" | "schemaId" | "schemaName" | "tenantId" | "createdAt" | "updatedAt"
+    )
+}
+
+fn workflow_runtime_row_field_known(fields: &HashSet<&'static str>, field: &str) -> bool {
+    fields.contains(field)
+        || field
+            .split_once('.')
+            .is_some_and(|(base, _)| fields.contains(base))
 }
 
 fn validate_layout_visibility(
@@ -6669,6 +7001,7 @@ mod tests {
             descriptive: false,
             editable: false,
             editor: None,
+            workflow_action: None,
         }
     }
 

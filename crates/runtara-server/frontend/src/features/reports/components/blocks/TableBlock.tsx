@@ -5,7 +5,9 @@ import {
   ChevronLeft,
   ChevronRight,
   ExternalLink,
+  Loader2,
   Pencil,
+  Play,
 } from 'lucide-react';
 import {
   Area,
@@ -41,17 +43,24 @@ import {
   ReportEditorConfig,
   ReportOrderBy,
   ReportTableColumn,
+  ReportWorkflowActionConfig,
 } from '../../types';
-import { formatCellValue, humanizeFieldName } from '../../utils';
+import {
+  formatCellValue,
+  humanizeFieldName,
+  isWorkflowActionDisabled,
+  isWorkflowActionVisible,
+} from '../../utils';
 import { FieldEditor } from './editable/FieldEditor';
 import { useReportWriteback } from './editable/useReportWriteback';
+import { useReportWorkflowAction } from './useReportWorkflowAction';
 
 type TableColumn = {
   key: string;
   label?: string;
   displayField?: string;
   format?: string | null;
-  type?: 'value' | 'chart';
+  type?: 'value' | 'chart' | 'workflow_button';
   chart?: ReportTableColumn['chart'];
   secondaryField?: string;
   linkField?: string;
@@ -61,6 +70,7 @@ type TableColumn = {
   align?: 'left' | 'right' | 'center';
   editable?: boolean;
   editor?: ReportEditorConfig;
+  workflowAction?: ReportWorkflowActionConfig;
 };
 
 type TableData = {
@@ -93,6 +103,7 @@ type TableBlockProps = {
   onSortChange: (sort: ReportOrderBy[]) => void;
   onRowClick?: (row: Record<string, unknown>) => void;
   onCellClick?: (cell: Record<string, unknown>) => boolean;
+  onRefresh?: () => void | Promise<void>;
 };
 
 export function TableBlock({
@@ -106,8 +117,10 @@ export function TableBlock({
   onSortChange,
   onRowClick,
   onCellClick,
+  onRefresh,
 }: TableBlockProps) {
   const writeback = useReportWriteback(reportId);
+  const workflowAction = useReportWorkflowAction({ onCompleted: onRefresh });
   const [editingCell, setEditingCell] = useState<{
     rowKey: string;
     field: string;
@@ -149,7 +162,7 @@ export function TableBlock({
           <TableRow className="group/header bg-muted/30 hover:bg-muted/30">
             {columns.map((column) => {
               const sortDirection = getColumnSortDirection(column.key, sort);
-              const isSortable = column.type !== 'chart';
+              const isSortable = !isNonSortableColumn(column);
               return (
                 <TableHead
                   key={column.key}
@@ -225,6 +238,19 @@ export function TableBlock({
                       column,
                       rowObject
                     );
+                    const workflowActionKey = `${block.id}:${rowKey}:${column.key}`;
+                    const isWorkflowRunning =
+                      column.workflowAction !== undefined &&
+                      workflowAction.isRunning(workflowActionKey);
+                    const shouldRenderWorkflowAction =
+                      column.workflowAction !== undefined &&
+                      isWorkflowActionVisible(column.workflowAction, rowObject);
+                    const isWorkflowDisabled =
+                      column.workflowAction !== undefined &&
+                      isWorkflowActionDisabled(
+                        column.workflowAction,
+                        rowObject
+                      );
                     const isEditing =
                       editingCell?.rowKey === rowKey &&
                       editingCell.field === column.key;
@@ -233,8 +259,7 @@ export function TableBlock({
                         key={column.key}
                         className={cn(
                           'group/cell relative py-3 align-top',
-                          column.align === 'right' &&
-                            'text-right tabular-nums',
+                          column.align === 'right' && 'text-right tabular-nums',
                           writebackContext && !isEditing && 'pr-8'
                         )}
                         onClick={(event) => {
@@ -285,12 +310,27 @@ export function TableBlock({
                           </div>
                         ) : (
                           <>
-                            <TableCellValue
-                              column={column}
-                              value={value}
-                              displayValue={displayValue}
-                              row={rowObject}
-                            />
+                            {column.workflowAction &&
+                            shouldRenderWorkflowAction ? (
+                              <WorkflowActionButton
+                                action={column.workflowAction}
+                                labelFallback="Run"
+                                running={isWorkflowRunning}
+                                disabled={isWorkflowDisabled}
+                                value={value}
+                                row={rowObject}
+                                fallbackField={column.key}
+                                actionKey={workflowActionKey}
+                                onRun={workflowAction.run}
+                              />
+                            ) : column.workflowAction ? null : (
+                              <TableCellValue
+                                column={column}
+                                value={value}
+                                displayValue={displayValue}
+                                row={rowObject}
+                              />
+                            )}
                             {writebackContext && (
                               <button
                                 type="button"
@@ -423,8 +463,19 @@ function normalizeColumns(
       align: configured?.align ?? merged.align ?? defaultAlign(merged.format),
       editable: configured?.editable ?? merged.editable,
       editor: configured?.editor ?? merged.editor,
+      workflowAction: configured?.workflowAction ?? merged.workflowAction,
     };
   });
+}
+
+function isNonSortableColumn(column: TableColumn): boolean {
+  return column.type === 'chart' || isWorkflowButtonColumn(column);
+}
+
+function isWorkflowButtonColumn(column: TableColumn): boolean {
+  return (
+    column.type === 'workflow_button' || column.workflowAction !== undefined
+  );
 }
 
 function defaultAlign(format?: string | null): TableColumn['align'] {
@@ -471,11 +522,71 @@ function getWritebackContext(
   rowObject: Record<string, unknown>
 ): { schemaId: string; instanceId: string } | null {
   if (!column.editable) return null;
-  if (column.type === 'chart') return null;
+  if (column.type === 'chart' || isWorkflowButtonColumn(column)) return null;
   const id = rowObject.id;
   const schemaId = rowObject.schemaId;
   if (typeof id !== 'string' || typeof schemaId !== 'string') return null;
   return { schemaId, instanceId: id };
+}
+
+function WorkflowActionButton({
+  action,
+  labelFallback,
+  running,
+  disabled,
+  value,
+  row,
+  fallbackField,
+  actionKey,
+  onRun,
+}: {
+  action: ReportWorkflowActionConfig;
+  labelFallback: string;
+  running: boolean;
+  disabled: boolean;
+  value: unknown;
+  row: Record<string, unknown>;
+  fallbackField: string;
+  actionKey: string;
+  onRun: (args: {
+    key: string;
+    action: ReportWorkflowActionConfig;
+    row: Record<string, unknown>;
+    value: unknown;
+    fallbackField: string;
+  }) => void | Promise<void>;
+}) {
+  return (
+    <Button
+      type="button"
+      variant="outline"
+      size="sm"
+      className="h-8 max-w-full gap-1.5"
+      disabled={running || disabled}
+      onClick={(event) => {
+        event.stopPropagation();
+        if (disabled) return;
+        void onRun({
+          key: actionKey,
+          action,
+          row,
+          value,
+          fallbackField,
+        });
+      }}
+    >
+      {running ? (
+        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+      ) : (
+        <Play className="h-3.5 w-3.5" />
+      )}
+      <span className="truncate">
+        {running
+          ? (action.runningLabel ?? 'Running...')
+          : (action.label ?? labelFallback)}
+      </span>
+    </Button>
+  );
 }
 
 function getRowObject(
@@ -516,7 +627,13 @@ function TableCellValue({
   }
 
   if (column.format === 'avatar_label') {
-    return <AvatarLabelCell column={column} value={displayValue ?? value} row={row} />;
+    return (
+      <AvatarLabelCell
+        column={column}
+        value={displayValue ?? value}
+        row={row}
+      />
+    );
   }
 
   if (column.format === 'bar_indicator') {
@@ -533,7 +650,9 @@ function TableCellValue({
     );
   }
 
-  return <>{formatCellValue(displayValue ?? value, column.format ?? undefined)}</>;
+  return (
+    <>{formatCellValue(displayValue ?? value, column.format ?? undefined)}</>
+  );
 }
 
 function PillCell({ column, value }: { column: TableColumn; value: unknown }) {

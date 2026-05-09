@@ -13,6 +13,9 @@ import {
   ReportLookupOptionsResponse,
   ReportRenderRequest,
   ReportRenderResponse,
+  ReportWorkflowInstanceStatus,
+  RunReportWorkflowRequest,
+  RunReportWorkflowResponse,
   ReportSummary,
   UpdateReportRequest,
 } from '../types';
@@ -222,4 +225,73 @@ export async function submitReportWorkflowAction(
     },
     createAuthHeaders(token)
   );
+}
+
+export async function runReportWorkflow(
+  token: string,
+  request: RunReportWorkflowRequest
+): Promise<RunReportWorkflowResponse> {
+  const result = await RuntimeREST.api.executeWorkflowHandler(
+    request.workflowId,
+    {
+      inputs: {
+        data: request.context,
+        variables: {},
+      },
+    },
+    request.version !== undefined ? { version: request.version } : undefined,
+    createAuthHeaders(token)
+  );
+
+  const wrapped = result.data as unknown as {
+    data?: RunReportWorkflowResponse;
+    instanceId?: string;
+    status?: string;
+  };
+  const response = wrapped.data ?? {
+    instanceId: wrapped.instanceId,
+    status: wrapped.status,
+  };
+
+  if (!response.instanceId || !response.status) {
+    throw new Error('Workflow execution response is missing instance status.');
+  }
+
+  return {
+    instanceId: response.instanceId,
+    status: response.status,
+  };
+}
+
+export async function getReportWorkflowInstanceStatus(
+  token: string,
+  workflowId: string,
+  instanceId: string
+): Promise<ReportWorkflowInstanceStatus> {
+  const result = await RuntimeREST.api.getInstanceHandler(
+    workflowId,
+    instanceId,
+    createAuthHeaders(token)
+  );
+
+  const wrapped = result.data as unknown as {
+    data?: {
+      instance?: ReportWorkflowInstanceStatus;
+    };
+    id?: string;
+    status?: string;
+  };
+  const instance = wrapped.data?.instance ?? {
+    id: wrapped.id,
+    status: wrapped.status,
+  };
+
+  if (!instance.id || !instance.status) {
+    throw new Error('Workflow instance response is missing status.');
+  }
+
+  return {
+    id: instance.id,
+    status: instance.status,
+  };
 }

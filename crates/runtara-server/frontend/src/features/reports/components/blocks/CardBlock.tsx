@@ -1,9 +1,10 @@
 import { useState } from 'react';
-import { ChevronDown, ChevronRight, Pencil } from 'lucide-react';
+import { ChevronDown, ChevronRight, Loader2, Pencil, Play } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 
 import { Badge } from '@/shared/components/ui/badge';
+import { Button } from '@/shared/components/ui/button';
 
 import {
   ReportBlockDefinition,
@@ -13,10 +14,17 @@ import {
   ReportCardGroup,
   ReportSubtableColumn,
   ReportSubtableConfig,
+  ReportWorkflowActionConfig,
 } from '../../types';
-import { formatCellValue, humanizeFieldName } from '../../utils';
+import {
+  formatCellValue,
+  humanizeFieldName,
+  isWorkflowActionDisabled,
+  isWorkflowActionVisible,
+} from '../../utils';
 import { FieldEditor } from './editable/FieldEditor';
 import { useReportWriteback } from './editable/useReportWriteback';
+import { useReportWorkflowAction } from './useReportWorkflowAction';
 
 type BadgeVariant =
   | 'default'
@@ -56,16 +64,19 @@ export function CardBlock({
   result,
   filters,
   blockFilters,
+  onRefresh,
 }: {
   reportId: string;
   block: ReportBlockDefinition;
   result: ReportBlockResult;
   filters: Record<string, unknown>;
   blockFilters: Record<string, unknown>;
+  onRefresh?: () => void | Promise<void>;
 }) {
   const data = (result.data ?? {}) as CardData;
   const groups = block.card?.groups ?? [];
   const writeback = useReportWriteback(reportId);
+  const workflowAction = useReportWorkflowAction({ onCompleted: onRefresh });
   const [editingField, setEditingField] = useState<string | null>(null);
 
   if (data.missing || !data.row) {
@@ -111,6 +122,8 @@ export function CardBlock({
       blockId={block.id}
       filters={filters}
       blockFilters={blockFilters}
+      onRunWorkflow={workflowAction.run}
+      isWorkflowRunning={workflowAction.isRunning}
     />
   );
 }
@@ -135,6 +148,14 @@ type FieldEditingProps = {
   blockId?: string;
   filters?: Record<string, unknown>;
   blockFilters?: Record<string, unknown>;
+  onRunWorkflow?: (args: {
+    key: string;
+    action: ReportWorkflowActionConfig;
+    row: Record<string, unknown>;
+    value: unknown;
+    fallbackField: string;
+  }) => void | Promise<void>;
+  isWorkflowRunning?: (key: string) => boolean;
   /** True when the rendered row carries the id+schemaId needed for writeback. */
   rowEditable?: boolean;
 };
@@ -151,6 +172,8 @@ function CardGroups({
   blockId,
   filters,
   blockFilters,
+  onRunWorkflow,
+  isWorkflowRunning,
 }: {
   groups: ReportCardGroup[];
   row: Record<string, unknown>;
@@ -176,6 +199,8 @@ function CardGroups({
           blockId={blockId}
           filters={filters}
           blockFilters={blockFilters}
+          onRunWorkflow={onRunWorkflow}
+          isWorkflowRunning={isWorkflowRunning}
           rowEditable={rowEditable}
         />
       ))}
@@ -196,6 +221,8 @@ function CardGroup({
   blockId,
   filters,
   blockFilters,
+  onRunWorkflow,
+  isWorkflowRunning,
 }: {
   group: ReportCardGroup;
   row: Record<string, unknown>;
@@ -236,6 +263,8 @@ function CardGroup({
             blockId={blockId}
             filters={filters}
             blockFilters={blockFilters}
+            onRunWorkflow={onRunWorkflow}
+            isWorkflowRunning={isWorkflowRunning}
             rowEditable={rowEditable}
           />
         ))}
@@ -258,6 +287,8 @@ function CardField({
   blockId,
   filters,
   blockFilters,
+  onRunWorkflow,
+  isWorkflowRunning,
 }: {
   field: ReportCardField;
   row: Record<string, unknown>;
@@ -268,6 +299,16 @@ function CardField({
   const value = row[field.field];
   const displayValue = getDisplayValue(row, field.displayField, value);
   const kind = field.kind ?? 'value';
+  const actionKey = `${blockId ?? 'card'}:${String(row.id ?? '')}:${field.field}`;
+  const hasWorkflowAction =
+    kind === 'workflow_button' || field.workflowAction !== undefined;
+  if (
+    hasWorkflowAction &&
+    field.workflowAction &&
+    !isWorkflowActionVisible(field.workflowAction, row)
+  ) {
+    return null;
+  }
   const canEdit = Boolean(field.editable && rowEditable && kind === 'value');
   const isEditing = canEdit && editingField === field.field;
 
@@ -330,6 +371,18 @@ function CardField({
             config={field.subtable}
             collapsed={field.collapsed ?? false}
           />
+        ) : hasWorkflowAction && field.workflowAction ? (
+          <WorkflowActionButton
+            action={field.workflowAction}
+            labelFallback={field.label ?? 'Run'}
+            running={isWorkflowRunning?.(actionKey) ?? false}
+            disabled={isWorkflowActionDisabled(field.workflowAction, row)}
+            value={value}
+            row={row}
+            fallbackField={field.field}
+            actionKey={actionKey}
+            onRun={onRunWorkflow}
+          />
         ) : (
           <ValueField field={field} value={displayValue} />
         )}
@@ -352,6 +405,65 @@ function getDisplayValue(
   return displayValue;
 }
 
+function WorkflowActionButton({
+  action,
+  labelFallback,
+  running,
+  disabled,
+  value,
+  row,
+  fallbackField,
+  actionKey,
+  onRun,
+}: {
+  action: ReportWorkflowActionConfig;
+  labelFallback: string;
+  running: boolean;
+  disabled: boolean;
+  value: unknown;
+  row: Record<string, unknown>;
+  fallbackField: string;
+  actionKey: string;
+  onRun?: (args: {
+    key: string;
+    action: ReportWorkflowActionConfig;
+    row: Record<string, unknown>;
+    value: unknown;
+    fallbackField: string;
+  }) => void | Promise<void>;
+}) {
+  return (
+    <Button
+      type="button"
+      variant="outline"
+      size="sm"
+      className="h-8 max-w-full gap-1.5"
+      disabled={running || disabled || !onRun}
+      onClick={() => {
+        if (disabled) return;
+        void onRun?.({
+          key: actionKey,
+          action,
+          row,
+          value,
+          fallbackField,
+        });
+      }}
+    >
+      {running ? (
+        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+      ) : (
+        <Play className="h-3.5 w-3.5" />
+      )}
+      <span className="truncate">
+        {running
+          ? (action.runningLabel ?? 'Running...')
+          : (action.label ?? labelFallback)}
+      </span>
+    </Button>
+  );
+}
+
 function SubcardField({
   value,
   config,
@@ -365,9 +477,7 @@ function SubcardField({
 
   if (!config || config.groups.length === 0) {
     return (
-      <span className="text-xs text-destructive">
-        Missing subcard config.
-      </span>
+      <span className="text-xs text-destructive">Missing subcard config.</span>
     );
   }
 
@@ -377,7 +487,8 @@ function SubcardField({
   if (typeof value !== 'object' || Array.isArray(value)) {
     return (
       <span className="text-xs text-destructive">
-        Subcard expects an object value, got {Array.isArray(value) ? 'array' : typeof value}.
+        Subcard expects an object value, got{' '}
+        {Array.isArray(value) ? 'array' : typeof value}.
       </span>
     );
   }
@@ -407,9 +518,7 @@ function SubtableField({
 
   if (!config || config.columns.length === 0) {
     return (
-      <span className="text-xs text-destructive">
-        Missing subtable config.
-      </span>
+      <span className="text-xs text-destructive">Missing subtable config.</span>
     );
   }
 

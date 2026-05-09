@@ -13,7 +13,34 @@ export type ReportCardFieldKind =
   | 'json'
   | 'markdown'
   | 'subcard'
-  | 'subtable';
+  | 'subtable'
+  | 'workflow_button';
+
+export type ReportWorkflowActionContextMode = 'row' | 'field' | 'value';
+
+export interface ReportWorkflowActionContext {
+  mode?: ReportWorkflowActionContextMode;
+  field?: string;
+  inputKey?: string;
+}
+
+export interface ReportRowCondition {
+  op: string;
+  arguments?: unknown[];
+}
+
+export interface ReportWorkflowActionConfig {
+  workflowId: string;
+  version?: number;
+  label?: string;
+  runningLabel?: string;
+  successMessage?: string;
+  reloadBlock?: boolean;
+  visibleWhen?: ReportRowCondition;
+  hiddenWhen?: ReportRowCondition;
+  disabledWhen?: ReportRowCondition;
+  context?: ReportWorkflowActionContext;
+}
 
 export interface ReportSubtableColumn {
   field: string;
@@ -51,6 +78,8 @@ export interface ReportCardField {
   editable?: boolean;
   /** Explicit editor; overrides format-based inference. */
   editor?: ReportEditorConfig;
+  /** Workflow launcher rendered as a button for this field. */
+  workflowAction?: ReportWorkflowActionConfig;
 }
 
 export type ReportEditorKind =
@@ -351,7 +380,7 @@ export interface ReportTableColumn {
   /** Row field rendered instead of `field` while sort/writeback still target `field`. */
   displayField?: string;
   format?: string;
-  type?: 'value' | 'chart';
+  type?: 'value' | 'chart' | 'workflow_button';
   chart?: {
     kind: ReportChartKind;
     x: string;
@@ -379,6 +408,8 @@ export interface ReportTableColumn {
   editable?: boolean;
   /** Explicit editor; overrides format-based inference. */
   editor?: ReportEditorConfig;
+  /** Workflow launcher rendered as a button in this column. */
+  workflowAction?: ReportWorkflowActionConfig;
 }
 
 export interface ReportBlockDefinition {
@@ -598,6 +629,22 @@ export interface ReportRenderResponse {
     message: string;
     blockId?: string;
   }>;
+}
+
+export interface RunReportWorkflowRequest {
+  workflowId: string;
+  version?: number;
+  context: unknown;
+}
+
+export interface RunReportWorkflowResponse {
+  instanceId: string;
+  status: string;
+}
+
+export interface ReportWorkflowInstanceStatus {
+  id: string;
+  status: string;
 }
 
 export interface ReportBlockDataRequest {

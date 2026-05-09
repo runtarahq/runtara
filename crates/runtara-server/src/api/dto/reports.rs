@@ -365,6 +365,85 @@ pub struct ReportActionSubmitConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct ReportWorkflowActionConfig {
+    #[serde(rename = "workflowId")]
+    pub workflow_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    #[serde(
+        default,
+        rename = "runningLabel",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub running_label: Option<String>,
+    #[serde(
+        default,
+        rename = "successMessage",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub success_message: Option<String>,
+    #[serde(default, rename = "reloadBlock", skip_serializing_if = "is_false")]
+    pub reload_block: bool,
+    /// Optional row-level condition. When set, the frontend renders the button
+    /// only for rows that match this condition.
+    #[serde(
+        default,
+        rename = "visibleWhen",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub visible_when: Option<Condition>,
+    /// Optional row-level condition. When set, the frontend hides the button
+    /// for rows that match this condition.
+    #[serde(
+        default,
+        rename = "hiddenWhen",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub hidden_when: Option<Condition>,
+    /// Optional row-level condition. When set, the frontend renders the button
+    /// disabled for rows that match this condition.
+    #[serde(
+        default,
+        rename = "disabledWhen",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub disabled_when: Option<Condition>,
+    #[serde(default)]
+    pub context: ReportWorkflowActionContext,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct ReportWorkflowActionContext {
+    #[serde(default)]
+    pub mode: ReportWorkflowActionContextMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub field: Option<String>,
+    #[serde(default, rename = "inputKey", skip_serializing_if = "Option::is_none")]
+    pub input_key: Option<String>,
+}
+
+impl Default for ReportWorkflowActionContext {
+    fn default() -> Self {
+        Self {
+            mode: ReportWorkflowActionContextMode::Row,
+            field: None,
+            input_key: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, ToSchema, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ReportWorkflowActionContextMode {
+    #[default]
+    Row,
+    Field,
+    Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct ReportBlockDatasetQuery {
     pub id: String,
     #[serde(default)]
@@ -479,6 +558,15 @@ pub struct ReportCardField {
     /// over the default control inferred from `format` / `pillVariants`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub editor: Option<ReportEditorConfig>,
+    /// Optional workflow launcher rendered as a button for this card field.
+    /// The frontend executes the referenced workflow with either the whole row,
+    /// this field value, or a configured row field as the workflow input context.
+    #[serde(
+        default,
+        rename = "workflowAction",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub workflow_action: Option<ReportWorkflowActionConfig>,
 }
 
 fn default_card_field_kind() -> ReportCardFieldKind {
@@ -497,6 +585,7 @@ pub enum ReportCardFieldKind {
     Markdown,
     Subcard,
     Subtable,
+    WorkflowButton,
 }
 
 /// Inline-table rendering for an array-of-objects card field.
@@ -789,6 +878,15 @@ pub struct ReportTableColumn {
     /// over the default control inferred from `format` / `pillVariants`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub editor: Option<ReportEditorConfig>,
+    /// Optional workflow launcher rendered as a button in this table column.
+    /// The frontend executes the referenced workflow with either the whole row,
+    /// this cell value, or a configured row field as the workflow input context.
+    #[serde(
+        default,
+        rename = "workflowAction",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub workflow_action: Option<ReportWorkflowActionConfig>,
 }
 
 /// Explicit editor configuration for an editable column or card field.
@@ -883,6 +981,7 @@ fn is_false(value: &bool) -> bool {
 pub enum ReportTableColumnType {
     Value,
     Chart,
+    WorkflowButton,
 }
 
 impl ReportTableColumn {
@@ -892,6 +991,13 @@ impl ReportTableColumn {
 
     pub fn is_value_lookup(&self) -> bool {
         matches!(self.column_type, Some(ReportTableColumnType::Value)) && self.source.is_some()
+    }
+
+    pub fn is_workflow_button(&self) -> bool {
+        matches!(
+            self.column_type,
+            Some(ReportTableColumnType::WorkflowButton)
+        ) || self.workflow_action.is_some()
     }
 }
 
