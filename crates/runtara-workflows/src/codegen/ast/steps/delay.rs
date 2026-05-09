@@ -7,7 +7,7 @@
 //! during the delay, it resumes from where it left off.
 //!
 //! Platform-specific behavior:
-//! - Native: Uses `sdk.durable_sleep()` which stores wake time in database
+//! - Native: Uses `sdk.sleep()` which stores wake time in database
 //! - WASI/Embedded: Uses blocking sleep (for now)
 
 use proc_macro2::TokenStream;
@@ -24,7 +24,7 @@ use super::{emit_breakpoint_check, emit_step_span_start};
 /// Generates code that:
 /// 1. Creates a tracing span for the delay
 /// 2. Evaluates the duration_ms mapping
-/// 3. Calls `sdk.durable_sleep()` for durable delay
+/// 3. Calls `sdk.sleep()` for durable delay (forwards to backend `durable_sleep`)
 /// 4. Produces a step result with the delay info
 pub fn emit(step: &DelayStep, ctx: &mut EmitContext) -> Result<TokenStream, CodegenError> {
     let step_id = &step.id;
@@ -57,7 +57,7 @@ pub fn emit(step: &DelayStep, ctx: &mut EmitContext) -> Result<TokenStream, Code
         quote! {
             let __sdk = sdk().lock().unwrap();
             let __duration = std::time::Duration::from_millis(__duration_ms);
-            __sdk.durable_sleep(__duration)
+            __sdk.sleep(__duration, #step_id, &[])
                 .map_err(|e| format!("Delay step '{}' failed: {}", #step_id, e))?;
         }
     } else {
@@ -143,8 +143,23 @@ mod tests {
 
         assert!(result.is_ok());
         let code = result.unwrap().to_string();
-        assert!(code.contains("durable_sleep"));
+        // Durable path must call the public RuntaraSdk::sleep API
+        // (which forwards to backend.durable_sleep). It must pass
+        // a checkpoint_id (the step id) and a state slice.
+        assert!(
+            code.contains("__sdk . sleep (__duration"),
+            "expected __sdk.sleep call, got: {}",
+            code
+        );
+        assert!(
+            code.contains("\"delay-1\""),
+            "expected step_id as checkpoint_id"
+        );
         assert!(code.contains("duration_ms"));
+        assert!(
+            !code.contains("durable_sleep"),
+            "codegen must not call backend method directly"
+        );
     }
 
     #[test]
@@ -162,7 +177,15 @@ mod tests {
 
         assert!(result.is_ok());
         let code = result.unwrap().to_string();
-        assert!(code.contains("durable_sleep"));
+        assert!(
+            code.contains("__sdk . sleep (__duration"),
+            "expected __sdk.sleep call, got: {}",
+            code
+        );
+        assert!(
+            !code.contains("durable_sleep"),
+            "codegen must not call backend method directly"
+        );
     }
 
     #[test]
@@ -180,6 +203,10 @@ mod tests {
         assert!(
             code.contains("std :: thread :: sleep"),
             "non-durable workflow must use std::thread::sleep"
+        );
+        assert!(
+            !code.contains("__sdk . sleep"),
+            "non-durable workflow must NOT call sdk.sleep"
         );
         assert!(
             !code.contains("durable_sleep"),
@@ -202,6 +229,10 @@ mod tests {
         assert!(
             code.contains("std :: thread :: sleep"),
             "step-level durable=false must use std::thread::sleep"
+        );
+        assert!(
+            !code.contains("__sdk . sleep"),
+            "step-level durable=false must NOT call sdk.sleep"
         );
         assert!(
             !code.contains("durable_sleep"),

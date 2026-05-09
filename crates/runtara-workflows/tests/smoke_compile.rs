@@ -426,12 +426,7 @@ fn smoke_log() {
     );
 }
 
-// TODO: durable Delay codegen calls `__sdk.durable_sleep(__duration)` (1 arg),
-// but `RuntaraSdk::sleep` is `(duration, checkpoint_id, state)` and
-// `durable_sleep` is a backend-trait method, not on RuntaraSdk. Broken since
-// the sync-SDK migration (d875d70). Re-enable once the codegen is fixed.
 #[test]
-#[ignore = "Delay codegen calls non-existent SDK method (see TODO above)"]
 fn smoke_delay() {
     compile(
         "delay",

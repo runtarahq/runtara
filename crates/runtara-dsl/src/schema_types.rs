@@ -38,7 +38,7 @@ pub struct Workflow {
     pub track_events: Option<bool>,
 
     /// Disable durability for this workflow when `false`. Compiled code contains
-    /// no checkpoint reads/writes, no `sdk.durable_sleep`, and no breakpoint
+    /// no checkpoint reads/writes, no `sdk.sleep`, and no breakpoint
     /// checkpoints. When this field is `Some(false)`, the setting propagates
     /// into `ExecutionGraph.durable` (via `parse_workflow`) and then to every
     /// nested subgraph and embedded child workflow at codegen time. Default: durable.
@@ -916,8 +916,9 @@ pub struct GroupByConfig {
 /// This is a **durable** delay: if the workflow crashes during the delay,
 /// it will resume from where it left off rather than restarting the delay.
 ///
-/// For native platforms, this uses `sdk.durable_sleep()` which stores
-/// the wake time in the database. For WASI/embedded, it uses blocking sleep.
+/// For native platforms, this uses `sdk.sleep()` (which forwards to
+/// `backend.durable_sleep()`) and stores the wake time in the database.
+/// For WASI/embedded, it uses blocking sleep.
 ///
 /// Example:
 /// ```json
@@ -958,7 +959,7 @@ pub struct DelayStep {
     pub breakpoint: Option<bool>,
 
     /// Disable durability for this step when `Some(false)`. Uses
-    /// `std::thread::sleep` instead of `sdk.durable_sleep` — the delay is
+    /// `std::thread::sleep` instead of `sdk.sleep` — the delay is
     /// not suspendable or resumable across crashes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub durable: Option<bool>,
