@@ -862,7 +862,7 @@ impl SmoMcpServer {
     // ===== Reference Tools =====
 
     #[tool(
-        description = "List all configured connections/integrations. Credentials are never exposed. Optionally filter by integration type."
+        description = "List configured connections for the tenant. Credentials are never exposed. Filter with `integration_id` to find connections compatible with a given agent — valid values come from each agent's `integrationIds` field (see list_agents). Use the returned `id` (UUID) as a step's `connectionId`; do NOT use `title` (human label) or `integrationId` (type)."
     )]
     async fn list_connections(
         &self,
@@ -962,7 +962,11 @@ impl ServerHandler for SmoMcpServer {
                 **Agents & DSL**: list_agents, get_agent, get_capability, test_capability, list_step_types, get_step_type_schema\n\
                 **Graph Mutations**: set_workflow_metadata (name/description), add_agent_step (high-level: validates capability, creates step, connects edges), add_step, remove_step, update_step, connect_steps, disconnect_steps, set_entry_point, set_mapping, remove_mapping, set_input_schema, set_output_schema, set_variable, remove_variable, list_references (returns copy-paste-ready mapping objects) — first call creates a new version, subsequent calls update it in-place. All support nested subgraphs via optional path parameter. Prefer mutation tools over raw graph JSON. Use deploy_latest after mutations to compile and deploy.\n\
                 **Signals & Actions**: list_pending_signals, get_signal_schema, submit_signal_response, submit_action_response — interact with WaitForSignal / human-in-the-loop steps and open workflow actions in running executions\n\
-                **Connections**: list_connections (supports integration_id filter)\n\n\
+                **Connections**: list_connections (supports integration_id filter). To wire a connection into an Agent step:\n\
+                  1. `list_agents` — each entry now carries `supportsConnections` and `integrationIds`. Skip agents where `supportsConnections=false`.\n\
+                  2. For an agent that needs credentials, call `list_connections(integration_id=<one of the agent's integrationIds>)` to find tenant connections of the right type.\n\
+                  3. Use the returned connection's **`id` (UUID)** — NOT its `title` or `integrationId` — as the `connection_id` argument to `add_agent_step`, or as the `connectionId` field on a raw Agent step.\n\
+                  4. If `list_connections` returns nothing for any of the agent's `integrationIds`, no compatible connection is configured for this tenant — surface that to the user instead of guessing.\n\n\
                 ## DSL Reference Quick Guide\n\n\
                 **References**: Use `steps.<stepId>.outputs.<field>` to reference step outputs (PLURAL `outputs`, not `output`). Use `data.<field>` for workflow inputs. Use `variables.<name>` for variables.\n\
                 **inputMapping** (SINGULAR, not inputMappings): `{\"fieldName\": {\"valueType\": \"reference\", \"value\": \"steps.myStep.outputs.items\"}}` or `{\"fieldName\": {\"valueType\": \"immediate\", \"value\": \"literal\"}}`.\n\

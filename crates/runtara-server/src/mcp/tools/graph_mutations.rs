@@ -592,6 +592,13 @@ pub struct AddAgentStepParams {
     )]
     pub on_error_step: Option<String>,
     #[schemars(
+        description = "Connection UUID for agents that need credentials (shopify, openai, sftp, …). \
+                       This is the `id` field from list_connections — NOT the connection title or \
+                       integrationId. Discover candidates with list_agents (see `integrationIds`) \
+                       then list_connections(integration_id=<one of those>)."
+    )]
+    pub connection_id: Option<String>,
+    #[schemars(
         description = "Path to nested subgraph — array of step IDs to traverse. Omit for root graph."
     )]
     pub path: Option<Vec<String>>,
@@ -1515,13 +1522,18 @@ pub async fn add_agent_step(
     })?;
 
     // Build step definition
-    let step = serde_json::json!({
+    let mut step = serde_json::json!({
         "id": params.step_id,
         "stepType": "Agent",
         "name": params.step_name,
         "agentId": params.agent_id,
         "capabilityId": params.capability_id,
     });
+    if let Some(ref conn_id) = params.connection_id
+        && !conn_id.is_empty()
+    {
+        step["connectionId"] = serde_json::Value::String(conn_id.clone());
+    }
 
     // Add the step
     let (mut graph, latest, current) = fetch_latest_graph(server, &params.workflow_id).await?;
@@ -1589,6 +1601,7 @@ pub async fn add_agent_step(
         "setAsEntryPoint": set_entry,
         "connectedAfter": params.connect_after,
         "onErrorStep": params.on_error_step,
+        "connectionId": params.connection_id,
         "expectedInputs": expected_inputs,
         "hint": "Use set_mapping to map each expected input to a reference or value",
     }))

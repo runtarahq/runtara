@@ -443,19 +443,33 @@ impl WorkflowService {
             crate::api::utils::connection_validation::extract_connection_ids(&workflow);
 
         if !referenced_conn_ids.is_empty() {
-            let conn_ids_vec: Vec<String> = referenced_conn_ids.iter().cloned().collect();
-            let existing_conns = self
+            // Fetch tenant connections so candidate suggestions can be appended
+            // to "not found" errors when the LLM picked the wrong id.
+            let tenant_conns = self
                 .connections
-                .get_existing_ids(tenant_id, &conn_ids_vec)
+                .list_connections(tenant_id, None, None)
                 .await
                 .map_err(|e| {
                     ServiceError::DatabaseError(format!("Failed to validate connections: {}", e))
                 })?;
 
-            let connection_issues = crate::api::utils::connection_validation::validate_connections(
-                &workflow,
-                &existing_conns,
-            );
+            let tenant_refs: Vec<crate::api::utils::connection_validation::ConnectionRef> =
+                tenant_conns
+                    .iter()
+                    .map(
+                        |c| crate::api::utils::connection_validation::ConnectionRef {
+                            id: c.id.clone(),
+                            integration_id: c.integration_id.clone(),
+                            title: c.title.clone(),
+                        },
+                    )
+                    .collect();
+
+            let connection_issues =
+                crate::api::utils::connection_validation::validate_connections_with_candidates(
+                    &workflow,
+                    &tenant_refs,
+                );
 
             let conn_errors: Vec<String> = connection_issues
                 .iter()
@@ -846,19 +860,33 @@ impl WorkflowService {
             crate::api::utils::connection_validation::extract_connection_ids(&workflow);
 
         if !referenced_conn_ids.is_empty() {
-            let conn_ids_vec: Vec<String> = referenced_conn_ids.iter().cloned().collect();
-            let existing_conns = self
+            // Pull the tenant's connections so the validator can suggest
+            // candidates when a referenced connection is missing.
+            let tenant_conns = self
                 .connections
-                .get_existing_ids(tenant_id, &conn_ids_vec)
+                .list_connections(tenant_id, None, None)
                 .await
                 .map_err(|e| {
                     ServiceError::DatabaseError(format!("Failed to validate connections: {}", e))
                 })?;
 
-            let connection_issues = crate::api::utils::connection_validation::validate_connections(
-                &workflow,
-                &existing_conns,
-            );
+            let tenant_refs: Vec<crate::api::utils::connection_validation::ConnectionRef> =
+                tenant_conns
+                    .iter()
+                    .map(
+                        |c| crate::api::utils::connection_validation::ConnectionRef {
+                            id: c.id.clone(),
+                            integration_id: c.integration_id.clone(),
+                            title: c.title.clone(),
+                        },
+                    )
+                    .collect();
+
+            let connection_issues =
+                crate::api::utils::connection_validation::validate_connections_with_candidates(
+                    &workflow,
+                    &tenant_refs,
+                );
 
             // Convert connection issues to the same format
             for issue in connection_issues {

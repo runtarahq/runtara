@@ -40,6 +40,8 @@ impl AgentsService {
                 id: agent.id,
                 name: agent.name,
                 description: agent.description,
+                supports_connections: agent.supports_connections,
+                integration_ids: agent.integration_ids,
             })
             .collect()
     }
