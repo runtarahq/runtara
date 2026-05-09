@@ -808,7 +808,12 @@ pub fn emit(step: &SplitStep, ctx: &mut EmitContext) -> Result<TokenStream, Code
                     "outputs": &results
                 })
             } else {
-                __step_output_envelope(step_id, step_name, "Split", &results)
+                __step_output_envelope(
+                    step_id,
+                    step_name,
+                    "Split",
+                    &serde_json::Value::Array(results.clone()),
+                )
             };
 
             Ok(step_result)

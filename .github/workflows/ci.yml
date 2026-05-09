@@ -131,6 +131,59 @@ jobs:
       - name: Run runtara-workflows tests
         run: cargo test -p runtara-workflows
 
+  # Per-construct compile smoke tests. Builds the WASM stdlib once, stages it,
+  # then runs tests/smoke_compile.rs — each test takes a minimal workflow
+  # exercising one DSL construct all the way through codegen + rustc to a
+  # binary. Catches regressions where generated code is syntactically valid
+  # but rustc rejects it (e.g. type mismatches).
+  test-workflows-smoke-compile:
+    runs-on: ubuntu-latest
+    needs: build
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Setup Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          target: wasm32-wasip2
+
+      - name: Restore build cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ github.sha }}
+
+      - name: Build WASM stdlib
+        run: |
+          RUSTFLAGS="-C embed-bitcode=yes" \
+            cargo build -p runtara-workflow-stdlib --release \
+              --target wasm32-wasip2 --no-default-features
+          cargo build -p runtara-workflow-stdlib --release
+
+      - name: Stage native_cache_wasm
+        run: |
+          rm -rf target/native_cache_wasm
+          mkdir -p target/native_cache_wasm/deps
+          cp target/wasm32-wasip2/release/libruntara_workflow_stdlib.rlib \
+             target/native_cache_wasm/
+          cp target/wasm32-wasip2/release/deps/*.rlib target/native_cache_wasm/deps/
+          find target/wasm32-wasip2/release/build -name "*.a" \
+               -exec cp {} target/native_cache_wasm/deps/ \; 2>/dev/null || true
+          cp target/release/deps/*.so target/native_cache_wasm/deps/ 2>/dev/null || true
+
+      - name: Run per-construct smoke compile tests
+        env:
+          RUNTARA_RUN_SMOKE_COMPILE: "1"
+          RUNTARA_LTO: "off"
+          RUNTARA_WASM_LIBRARY_DIR: ${{ github.workspace }}/target/native_cache_wasm
+        run: cargo test -p runtara-workflows --test smoke_compile --release -- --test-threads=1
+
   test-core:
     runs-on: ubuntu-latest
     needs: build
