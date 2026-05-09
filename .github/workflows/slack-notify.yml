@@ -1,0 +1,64 @@
+name: Slack Notify
+
+# Out-of-band Slack notifications for events that aren't tied to a CI run:
+#   - PR opened / reopened / marked ready for review (same-repo only, no forks)
+#   - GitHub release published (assets attached and visible)
+#
+# Build start / success / failure pings live in ci.yml directly.
+#
+# All event fields are read from $GITHUB_EVENT_PATH via jq — never
+# interpolated into shell, so PR titles / branch names with quotes,
+# backticks, or $ are handled safely.
+
+on:
+  pull_request:
+    types: [opened, reopened, ready_for_review]
+  release:
+    types: [published]
+
+jobs:
+  pr-opened:
+    if: |
+      github.event_name == 'pull_request'
+      && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - name: Notify Slack — PR opened
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: |
+          payload=$(jq -c '{
+            text: (":git: PR " + .action + " by " + .pull_request.user.login
+                   + ": <" + .pull_request.html_url + "|#"
+                   + (.pull_request.number | tostring) + " "
+                   + .pull_request.title + "> (`"
+                   + .pull_request.head.ref + "` → `"
+                   + .pull_request.base.ref + "`)")
+          }' "$GITHUB_EVENT_PATH")
+          curl -sS --fail-with-body -X POST -H 'Content-Type: application/json' \
+            --data "$payload" "$SLACK_WEBHOOK_URL"
+
+  release-published:
+    if: github.event_name == 'release'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Notify Slack — release published
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          REPO_FULL: ${{ github.repository }}
+        run: |
+          payload=$(jq -c --arg repo "$REPO_FULL" '
+            (if .release.prerelease then
+               {emoji: ":package:", kind: "Pre-release"}
+             else
+               {emoji: ":rocket:", kind: "Release"}
+             end) as $k
+            | {
+                text: ($k.emoji + " " + $k.kind + " <"
+                       + .release.html_url + "|" + .release.tag_name
+                       + "> published for " + $repo + " by "
+                       + .release.author.login + ": " + (.release.name // .release.tag_name))
+              }
+          ' "$GITHUB_EVENT_PATH")
+          curl -sS --fail-with-body -X POST -H 'Content-Type: application/json' \
+            --data "$payload" "$SLACK_WEBHOOK_URL"
