@@ -16,6 +16,69 @@ fn err(msg: impl Into<String>) -> rmcp::ErrorData {
     rmcp::ErrorData::internal_error(msg.into(), None)
 }
 
+/// JSON Schema for arbitrary object-shaped MCP arguments that are stored as
+/// `serde_json::Value` at runtime so stringified client payloads can be recovered.
+pub fn json_object_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    schemars::json_schema!({
+        "type": "object",
+        "additionalProperties": true
+    })
+}
+
+/// JSON Schema for canonical workflow execution inputs.
+pub fn workflow_inputs_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    schemars::json_schema!({
+        "type": "object",
+        "properties": {
+            "data": {
+                "description": "Workflow input payload. May be any JSON value."
+            },
+            "variables": {
+                "type": "object",
+                "additionalProperties": true,
+                "description": "Workflow variables keyed by variable name."
+            }
+        },
+        "required": ["data"],
+        "additionalProperties": true
+    })
+}
+
+/// JSON Schema for raw sync execution request bodies.
+pub fn any_json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    schemars::json_schema!({
+        "oneOf": [
+            {"type": "object", "additionalProperties": true},
+            {"type": "array"},
+            {"type": "string"},
+            {"type": "number"},
+            {"type": "boolean"},
+            {"type": "null"}
+        ]
+    })
+}
+
+/// Some MCP clients/LLMs serialize large object arguments as JSON-encoded strings
+/// instead of nested objects. Accept both shapes so callers can still complete
+/// deploy -> execute -> inspect loops through the same MCP server.
+pub fn normalize_json_arg(
+    value: serde_json::Value,
+    field: &str,
+) -> Result<serde_json::Value, rmcp::ErrorData> {
+    match value {
+        serde_json::Value::String(s) => serde_json::from_str(&s).map_err(|e| {
+            rmcp::ErrorData::invalid_params(
+                format!(
+                    "{} was passed as a JSON-encoded string but is not valid JSON: {}. Some MCP clients stringify object arguments; pass {} as a JSON object when possible.",
+                    field, e, field
+                ),
+                None,
+            )
+        }),
+        other => Ok(other),
+    }
+}
+
 /// Validate that an ID is safe to interpolate into a URL path segment.
 /// Rejects values containing `/`, `..`, `?`, `#`, or whitespace to prevent
 /// path traversal and query injection via MCP tool parameters.
@@ -342,7 +405,9 @@ pub async fn api_delete_with_body(
 
 #[cfg(test)]
 mod tests {
-    use super::{encode_path_param, validate_identifier_param, validate_path_param};
+    use super::{
+        encode_path_param, normalize_json_arg, validate_identifier_param, validate_path_param,
+    };
 
     #[test]
     fn identifier_param_allows_canonical_runtime_signal_ids() {
@@ -370,6 +435,34 @@ mod tests {
         assert_eq!(
             encode_path_param("instance/workflow::version/review_step"),
             "instance%2Fworkflow%3A%3Aversion%2Freview_step"
+        );
+    }
+
+    #[test]
+    fn normalize_json_arg_passes_object_through() {
+        let v = serde_json::json!({"name": "foo", "steps": {}});
+        let normalized = normalize_json_arg(v.clone(), "execution_graph").unwrap();
+        assert_eq!(normalized, v);
+    }
+
+    #[test]
+    fn normalize_json_arg_parses_stringified_object() {
+        let original = serde_json::json!({"name": "foo", "n": 42});
+        let stringified = serde_json::Value::String(original.to_string());
+        let normalized = normalize_json_arg(stringified, "execution_graph").unwrap();
+        assert_eq!(normalized, original);
+    }
+
+    #[test]
+    fn normalize_json_arg_rejects_invalid_json_string_with_hint() {
+        let bad = serde_json::Value::String("{not valid json".to_string());
+        let err = normalize_json_arg(bad, "inputs").unwrap_err();
+        let msg = err.message.to_string();
+        assert!(
+            msg.contains("inputs")
+                && msg.contains("not valid JSON")
+                && msg.contains("Some MCP clients stringify object arguments"),
+            "got: {msg}"
         );
     }
 }

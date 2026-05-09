@@ -4,7 +4,7 @@ use serde::Deserialize;
 use serde_json::json;
 
 use super::super::server::SmoMcpServer;
-use super::internal_api::{api_get, api_post, validate_path_param};
+use super::internal_api::{api_get, api_post, normalize_json_arg, validate_path_param};
 
 const DEBUG_STRING_TRUNCATE_THRESHOLD_BYTES: usize = 4000;
 const DEBUG_STRING_PREVIEW_BYTES: usize = 2000;
@@ -98,6 +98,7 @@ pub struct ExecuteWorkflowWaitParams {
     #[schemars(
         description = "Input data as JSON (format: {\"data\": {...}, \"variables\": {...}})"
     )]
+    #[schemars(schema_with = "crate::mcp::tools::internal_api::workflow_inputs_schema")]
     pub inputs: Option<serde_json::Value>,
     #[schemars(description = "Specific version to execute (default: current)")]
     pub version: Option<i32>,
@@ -389,8 +390,12 @@ pub async fn execute_workflow_wait(
         Some(v) => format!("?version={}", v),
         None => String::new(),
     };
+    let inputs = match params.inputs {
+        Some(inputs) => normalize_json_arg(inputs, "inputs")?,
+        None => serde_json::json!({"data": {}, "variables": {}}),
+    };
     let body = serde_json::json!({
-        "inputs": params.inputs.unwrap_or(serde_json::json!({"data": {}, "variables": {}})),
+        "inputs": inputs,
     });
     let exec_result = api_post(
         server,
@@ -1169,7 +1174,17 @@ pub async fn why_execution_failed(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use schemars::JsonSchema;
     use serde_json::json;
+
+    fn generated_property_schema<T: JsonSchema>(property: &str) -> serde_json::Value {
+        let schema = serde_json::to_value(schemars::schema_for!(T)).unwrap();
+        schema
+            .get("properties")
+            .and_then(|properties| properties.get(property))
+            .cloned()
+            .unwrap_or_else(|| panic!("missing property schema for {property}: {schema:#}"))
+    }
 
     fn summaries() -> serde_json::Value {
         json!({
@@ -1202,6 +1217,14 @@ mod tests {
                 }
             }
         })
+    }
+
+    #[test]
+    fn execute_workflow_wait_inputs_schema_declares_object() {
+        let inputs = generated_property_schema::<ExecuteWorkflowWaitParams>("inputs");
+        assert_eq!(inputs["type"], "object");
+        assert_eq!(inputs["required"], serde_json::json!(["data"]));
+        assert_eq!(inputs["properties"]["variables"]["type"], "object");
     }
 
     #[test]

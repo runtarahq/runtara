@@ -5,7 +5,7 @@ use sqlx::Row;
 use std::time::Duration;
 
 use super::super::server::SmoMcpServer;
-use super::internal_api::{api_get, api_post, validate_path_param};
+use super::internal_api::{api_get, api_post, normalize_json_arg, validate_path_param};
 use crate::api::repositories::workflows::WorkflowRepository;
 
 fn json_result(value: serde_json::Value) -> Result<CallToolResult, rmcp::ErrorData> {
@@ -308,6 +308,7 @@ pub struct UpdateWorkflowParams {
     #[schemars(description = "Workflow ID")]
     pub workflow_id: String,
     #[schemars(description = "Complete execution graph JSON definition")]
+    #[schemars(schema_with = "crate::mcp::tools::internal_api::json_object_schema")]
     pub execution_graph: serde_json::Value,
 }
 
@@ -328,6 +329,7 @@ pub struct ExecuteWorkflowParams {
     #[schemars(
         description = "Input data as JSON: {\"data\": {...}, \"variables\": {...}}. Omit for workflows with no inputs — defaults to empty data/variables."
     )]
+    #[schemars(schema_with = "crate::mcp::tools::internal_api::workflow_inputs_schema")]
     pub inputs: Option<serde_json::Value>,
     #[schemars(description = "Specific version to execute (default: current)")]
     pub version: Option<i32>,
@@ -339,6 +341,7 @@ pub struct ExecuteWorkflowSyncParams {
     #[schemars(description = "Workflow ID")]
     pub workflow_id: String,
     #[schemars(description = "Request body forwarded to workflow as inputs")]
+    #[schemars(schema_with = "crate::mcp::tools::internal_api::any_json_schema")]
     pub body: Option<serde_json::Value>,
 }
 
@@ -357,6 +360,7 @@ pub struct DeployWorkflowParams {
     #[schemars(description = "Workflow ID")]
     pub workflow_id: String,
     #[schemars(description = "Complete execution graph JSON definition")]
+    #[schemars(schema_with = "crate::mcp::tools::internal_api::json_object_schema")]
     pub execution_graph: serde_json::Value,
 }
 
@@ -640,24 +644,6 @@ pub async fn update_workflow(
     json_result(result)
 }
 
-/// Some MCP clients/LLMs serialize large object arguments as JSON-encoded strings
-/// instead of nested objects. Accept both shapes so the rest of the pipeline always
-/// sees an object.
-fn normalize_json_arg(
-    value: serde_json::Value,
-    field: &str,
-) -> Result<serde_json::Value, rmcp::ErrorData> {
-    match value {
-        serde_json::Value::String(s) => serde_json::from_str(&s).map_err(|e| {
-            err(format!(
-                "{} was passed as a JSON-encoded string but is not valid JSON: {}",
-                field, e
-            ))
-        }),
-        other => Ok(other),
-    }
-}
-
 pub async fn compile_workflow(
     server: &SmoMcpServer,
     params: CompileWorkflowParams,
@@ -675,8 +661,12 @@ pub async fn execute_workflow(
         Some(v) => format!("?version={}", v),
         None => String::new(),
     };
+    let inputs = match params.inputs {
+        Some(inputs) => normalize_json_arg(inputs, "inputs")?,
+        None => serde_json::json!({"data": {}, "variables": {}}),
+    };
     let body = serde_json::json!({
-        "inputs": params.inputs.unwrap_or(serde_json::json!({"data": {}, "variables": {}})),
+        "inputs": inputs,
     });
     let result = api_post(
         server,
@@ -695,10 +685,14 @@ pub async fn execute_workflow_sync(
     params: ExecuteWorkflowSyncParams,
 ) -> Result<CallToolResult, rmcp::ErrorData> {
     validate_path_param("workflow_id", &params.workflow_id)?;
+    let body = params
+        .body
+        .map(|body| normalize_json_arg(body, "body"))
+        .transpose()?;
     let result = api_post(
         server,
         &format!("/api/runtime/events/http-sync/{}", params.workflow_id),
-        params.body,
+        body,
     )
     .await?;
     json_result(result)
@@ -858,12 +852,13 @@ pub async fn deploy_workflow(
     params: DeployWorkflowParams,
 ) -> Result<CallToolResult, rmcp::ErrorData> {
     validate_path_param("workflow_id", &params.workflow_id)?;
+    let execution_graph = normalize_json_arg(params.execution_graph, "execution_graph")?;
 
     // Step 0a: Validate graph structure before doing anything
     let graph_validation = api_post(
         server,
         "/api/runtime/workflows/graph/validate",
-        Some(params.execution_graph.clone()),
+        Some(execution_graph.clone()),
     )
     .await
     .ok();
@@ -889,12 +884,12 @@ pub async fn deploy_workflow(
     // Step 0b: Detect and validate child workflow references (EmbedWorkflow steps).
     // Children are embedded from their definitions during parent compilation, so
     // they do not need standalone compilation before deploying the parent.
-    let child_refs = extract_child_refs(&params.execution_graph);
+    let child_refs = extract_child_refs(&execution_graph);
     let child_dependencies = validate_child_workflow_refs(server, &child_refs).await?;
 
     // Step 1: Update parent workflow
     let update_body = serde_json::json!({
-        "executionGraph": params.execution_graph,
+        "executionGraph": execution_graph,
     });
     let update_result = api_post(
         server,
@@ -1423,6 +1418,16 @@ fn diff_step(a: &serde_json::Value, b: &serde_json::Value) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use schemars::JsonSchema;
+
+    fn generated_property_schema<T: JsonSchema>(property: &str) -> serde_json::Value {
+        let schema = serde_json::to_value(schemars::schema_for!(T)).unwrap();
+        schema
+            .get("properties")
+            .and_then(|properties| properties.get(property))
+            .cloned()
+            .unwrap_or_else(|| panic!("missing property schema for {property}: {schema:#}"))
+    }
 
     #[test]
     fn test_extract_child_refs_flat() {
@@ -1610,5 +1615,33 @@ mod tests {
         let v = serde_json::json!([1, 2, 3]);
         let normalized = normalize_json_arg(v.clone(), "execution_graph").unwrap();
         assert_eq!(normalized, v);
+    }
+
+    #[test]
+    fn execute_workflow_inputs_schema_declares_object() {
+        let inputs = generated_property_schema::<ExecuteWorkflowParams>("inputs");
+        assert_eq!(inputs["type"], "object");
+        assert_eq!(inputs["required"], serde_json::json!(["data"]));
+        assert_eq!(inputs["properties"]["variables"]["type"], "object");
+    }
+
+    #[test]
+    fn execute_workflow_sync_body_schema_is_explicit_json() {
+        let body = generated_property_schema::<ExecuteWorkflowSyncParams>("body");
+        assert!(
+            body.get("oneOf")
+                .and_then(|one_of| one_of.as_array())
+                .is_some(),
+            "body schema should enumerate accepted JSON types: {body:#}"
+        );
+    }
+
+    #[test]
+    fn workflow_graph_params_schema_declares_object() {
+        let update_graph = generated_property_schema::<UpdateWorkflowParams>("execution_graph");
+        let deploy_graph = generated_property_schema::<DeployWorkflowParams>("execution_graph");
+
+        assert_eq!(update_graph["type"], "object");
+        assert_eq!(deploy_graph["type"], "object");
     }
 }
