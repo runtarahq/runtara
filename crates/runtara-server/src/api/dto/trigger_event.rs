@@ -246,6 +246,33 @@ impl TriggerEvent {
             debug: false,
         }
     }
+
+    /// Create a replay trigger event.
+    #[allow(clippy::too_many_arguments)]
+    pub fn replay(
+        instance_id: String,
+        tenant_id: String,
+        workflow_id: String,
+        version: Option<i32>,
+        inputs: Value,
+        track_events: bool,
+        original_instance_id: String,
+        debug: bool,
+    ) -> Self {
+        Self {
+            instance_id,
+            tenant_id,
+            workflow_id,
+            version,
+            inputs,
+            trigger: TriggerSource::Replay {
+                original_instance_id,
+            },
+            requested_at: chrono::Utc::now().timestamp_millis(),
+            track_events,
+            debug,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -287,5 +314,33 @@ mod tests {
 
         let parsed: TriggerSource = serde_json::from_str(&json).unwrap();
         assert!(matches!(parsed, TriggerSource::Cron { .. }));
+    }
+
+    #[test]
+    fn test_replay_event_serialization() {
+        let event = TriggerEvent::replay(
+            "new-instance-id".to_string(),
+            "test-tenant".to_string(),
+            "test-workflow".to_string(),
+            Some(3),
+            json!({"data": {"key": "value"}, "variables": {}}),
+            true,
+            "original-instance-id".to_string(),
+            false,
+        );
+
+        let json = serde_json::to_string(&event).unwrap();
+        let parsed: TriggerEvent = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(parsed.instance_id, "new-instance-id");
+        assert_eq!(parsed.workflow_id, "test-workflow");
+        assert_eq!(parsed.version, Some(3));
+        assert_eq!(parsed.trigger_type(), "replay");
+        assert!(matches!(
+            parsed.trigger,
+            TriggerSource::Replay {
+                original_instance_id
+            } if original_instance_id == "original-instance-id"
+        ));
     }
 }

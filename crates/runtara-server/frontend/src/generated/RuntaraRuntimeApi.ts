@@ -6232,8 +6232,6 @@ export class Api<
       }),
 
     /**
-     * @description Note: This endpoint is currently not implemented as execution data is stored in runtara-environment and replay requires fetching instance inputs from there.
-     *
      * @tags workflow-controller
      * @name ReplayInstanceHandler
      * @summary Replay a workflow instance with the same inputs

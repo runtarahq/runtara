@@ -28,6 +28,7 @@ use crate::api::dto::executions::ExecutionFilters;
 use crate::api::dto::trigger_event::TriggerEvent;
 use crate::api::dto::workflows::{
     PageWorkflowInstanceHistoryDto, ValidationErrorDto, WorkflowInstanceDto,
+    validate_workflow_inputs,
 };
 use crate::api::repositories::trigger_stream::TriggerStreamPublisher;
 use crate::api::repositories::workflows::{CompilationStatus, WorkflowRepository};
@@ -36,8 +37,9 @@ use crate::metrics::MetricsService;
 use crate::runtime_client::RuntimeClient;
 use crate::workers::CancellationHandle;
 use crate::workers::runtara_dto::{
-    ExecutionWithMetadata, enrich_pending_input, execution_status_to_runtara, runtara_info_to_dto,
-    runtara_info_to_execution_with_metadata, runtara_instance_to_dto_with_info,
+    ExecutionWithMetadata, enrich_pending_input, execution_status_to_runtara, parse_image_id,
+    runtara_info_to_dto, runtara_info_to_execution_with_metadata,
+    runtara_instance_to_dto_with_info,
 };
 
 /// Result of workflow execution (native path; currently unused by the server).
@@ -151,6 +153,7 @@ pub enum TriggerSource {
     Chat,
     Webhook,
     Cron,
+    Replay { original_instance_id: String },
 }
 
 /// Request to queue an async workflow execution onto the trigger stream.
@@ -169,6 +172,8 @@ pub struct QueueRequest<'a> {
 pub struct QueuedExecution {
     pub instance_id: Uuid,
     pub status: String,
+    pub workflow_id: String,
+    pub version: i32,
 }
 
 /// Request for synchronous execution via `ExecutionEngine::run_sync`.
@@ -284,6 +289,54 @@ impl ExecutionEngine {
         self.runtime_client.is_some()
     }
 
+    async fn workflow_id_for_instance_image(
+        &self,
+        tenant_id: &str,
+        image_name: &str,
+        image_id: &str,
+    ) -> Result<String, ExecutionError> {
+        let parsed_workflow_id = if image_name.trim().is_empty() {
+            None
+        } else {
+            let (workflow_id, _) = parse_image_id(image_name);
+            (!workflow_id.trim().is_empty()).then_some(workflow_id)
+        };
+
+        if image_name.contains(':')
+            && let Some(workflow_id) = parsed_workflow_id.clone()
+        {
+            return Ok(workflow_id);
+        }
+
+        if !image_id.trim().is_empty() {
+            let image_ids = vec![image_id.to_string()];
+            let workflow_info = self
+                .workflow_repo
+                .get_workflow_info_by_image_ids(tenant_id, &image_ids)
+                .await
+                .map_err(|e| {
+                    ExecutionError::DatabaseError(format!(
+                        "Failed to look up workflow for original instance image: {}",
+                        e
+                    ))
+                })?;
+
+            if let Some((workflow_id, _, _)) = workflow_info.get(image_id)
+                && !workflow_id.trim().is_empty()
+            {
+                return Ok(workflow_id.clone());
+            }
+        }
+
+        if let Some(workflow_id) = parsed_workflow_id {
+            return Ok(workflow_id);
+        }
+
+        Err(ExecutionError::NotFound(
+            "Workflow for original instance image not found".to_string(),
+        ))
+    }
+
     // =========================================================================
     // Async queuing
     // =========================================================================
@@ -339,11 +392,9 @@ impl ExecutionEngine {
 
         // 7. Build TriggerEvent appropriate to the source.
         //
-        // Only HttpApi-flavoured events are produced today — sessions, chat,
-        // webhooks, and cron-originated requests that go through the engine
-        // share the `http_api` factory. Specialised factories
-        // (`http_event`, `cron`) remain available for callers that already
-        // have structured trigger metadata; see `TriggerEvent::*`.
+        // Sessions, chat, webhooks, and cron-originated requests that go
+        // through the engine share the `http_api` factory. Replay keeps its
+        // own source metadata so runtime history can distinguish it.
         let event = match req.trigger_source {
             TriggerSource::HttpApi
             | TriggerSource::Session
@@ -357,6 +408,18 @@ impl ExecutionEngine {
                 req.inputs,
                 track_events,
                 req.correlation_id,
+                req.debug,
+            ),
+            TriggerSource::Replay {
+                original_instance_id,
+            } => TriggerEvent::replay(
+                instance_id.to_string(),
+                req.tenant_id.to_string(),
+                req.workflow_id.to_string(),
+                Some(version),
+                req.inputs,
+                track_events,
+                original_instance_id,
                 req.debug,
             ),
         };
@@ -379,6 +442,8 @@ impl ExecutionEngine {
         Ok(QueuedExecution {
             instance_id,
             status: "queued".to_string(),
+            workflow_id: req.workflow_id.to_string(),
+            version,
         })
     }
 
@@ -775,6 +840,104 @@ impl ExecutionEngine {
         })?;
 
         Ok(runtara_info_to_dto(info))
+    }
+
+    /// Replay a previous instance by queuing the latest version of the same
+    /// workflow with the original instance inputs.
+    pub async fn replay(
+        &self,
+        tenant_id: &str,
+        original_instance_id: &str,
+    ) -> Result<QueuedExecution, ExecutionError> {
+        let _ = Uuid::parse_str(original_instance_id).map_err(|_| {
+            ExecutionError::ValidationError(
+                "Invalid instance ID format. Instance ID must be a valid UUID".to_string(),
+            )
+        })?;
+
+        let client = self.require_runtime_client()?;
+        let info = client
+            .get_instance_info(original_instance_id)
+            .await
+            .map_err(|e| {
+                let error_str = e.to_string();
+                warn!(
+                    instance_id = %original_instance_id,
+                    tenant_id = %tenant_id,
+                    error = %error_str,
+                    "Failed to get original instance info for replay"
+                );
+                if error_str.contains("not found") || error_str.contains("InstanceNotFound") {
+                    ExecutionError::NotFound(format!(
+                        "Instance '{}' not found",
+                        original_instance_id
+                    ))
+                } else {
+                    ExecutionError::DatabaseError(format!(
+                        "Failed to get instance from Runtara: {}",
+                        e
+                    ))
+                }
+            })?;
+
+        if info.tenant_id != tenant_id {
+            warn!(
+                instance_id = %original_instance_id,
+                requested_tenant_id = %tenant_id,
+                instance_tenant_id = %info.tenant_id,
+                "Replay denied because instance tenant does not match request tenant"
+            );
+            return Err(ExecutionError::NotFound(format!(
+                "Instance '{}' not found",
+                original_instance_id
+            )));
+        }
+
+        let workflow_id = self
+            .workflow_id_for_instance_image(tenant_id, &info.image_name, &info.image_id)
+            .await?;
+        let latest_version = self
+            .workflow_repo
+            .get_latest_version(tenant_id, &workflow_id)
+            .await
+            .map_err(|e| {
+                ExecutionError::DatabaseError(format!(
+                    "Failed to get latest workflow version for replay: {}",
+                    e
+                ))
+            })?
+            .ok_or_else(|| {
+                ExecutionError::NotFound(format!("Workflow '{}' not found", workflow_id))
+            })?;
+
+        if latest_version <= 0 {
+            return Err(ExecutionError::NotFound(format!(
+                "Workflow '{}' has no versions",
+                workflow_id
+            )));
+        }
+
+        let original_inputs = info.input.ok_or_else(|| {
+            ExecutionError::ValidationError(format!(
+                "Original instance '{}' does not have stored inputs and cannot be replayed",
+                original_instance_id
+            ))
+        })?;
+        let validated_inputs = validate_workflow_inputs(original_inputs)
+            .map_err(|e| ExecutionError::ValidationError(e.message))?;
+
+        self.queue(QueueRequest {
+            tenant_id,
+            workflow_id: &workflow_id,
+            version: Some(latest_version),
+            inputs: validated_inputs,
+            debug: false,
+            correlation_id: None,
+            trigger_source: TriggerSource::Replay {
+                original_instance_id: original_instance_id.to_string(),
+            },
+        })
+        .await
     }
 
     /// Get an execution enriched with workflow metadata.

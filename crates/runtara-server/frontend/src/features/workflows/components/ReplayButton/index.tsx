@@ -1,9 +1,12 @@
 import { useState } from 'react';
+import { useQueryClient } from '@tanstack/react-query';
 import { CirclePlay, RotateCcw } from 'lucide-react';
 import { Button } from '@/shared/components/ui/button.tsx';
 import { replayWorkflow } from '@/features/workflows/queries';
 import { useToast } from '@/shared/hooks/useToast';
 import { useToken } from '@/shared/hooks';
+import { queryKeys } from '@/shared/queries/query-keys';
+import { isOidcAuth } from '@/shared/config/runtimeConfig';
 import {
   shouldShowRetryButton,
   getRetryDelay,
@@ -35,6 +38,7 @@ export function ReplayButton(props: Props) {
   } = props;
   const token = useToken();
   const { toast } = useToast();
+  const queryClient = useQueryClient();
   const [isLoading, setIsLoading] = useState(false);
 
   // Check if error is transient for smart retry logic
@@ -43,11 +47,26 @@ export function ReplayButton(props: Props) {
   const retryDelay = getRetryDelay(error || '');
 
   const handleClick = async () => {
-    if (!token) return;
+    if (isOidcAuth && !token) return;
 
     setIsLoading(true);
     try {
-      await replayWorkflow(token, instanceId);
+      const result = await replayWorkflow(token, instanceId);
+      const replayedWorkflowId = result?.data?.workflowId;
+
+      await Promise.all([
+        queryClient.invalidateQueries({
+          queryKey: queryKeys.executions.lists(),
+        }),
+        replayedWorkflowId
+          ? queryClient.invalidateQueries({
+              queryKey: queryKeys.workflows.instances(replayedWorkflowId),
+            })
+          : queryClient.invalidateQueries({
+              queryKey: queryKeys.workflows.details(),
+            }),
+      ]);
+
       toast({
         title: 'Success',
         description: isTransient

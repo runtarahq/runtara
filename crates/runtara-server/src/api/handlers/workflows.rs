@@ -1352,9 +1352,6 @@ pub async fn list_instance_checkpoints_handler(
 }
 
 /// Replay a workflow instance with the same inputs
-///
-/// Note: This endpoint is currently not implemented as execution data is stored
-/// in runtara-environment and replay requires fetching instance inputs from there.
 #[utoipa::path(
     post,
     path = "/api/runtime/workflows/instances/{instance_id}/replay",
@@ -1362,28 +1359,38 @@ pub async fn list_instance_checkpoints_handler(
         ("instance_id" = String, Path, description = "Instance identifier (UUID)")
     ),
     responses(
-        (status = 501, description = "Not implemented", body = Value),
+        (status = 200, description = "Workflow replay scheduled successfully", body = ExecuteWorkflowResponse),
         (status = 400, description = "Invalid instance ID", body = ErrorResponse),
         (status = 404, description = "Instance not found", body = ErrorResponse),
         (status = 500, description = "Internal server error", body = ErrorResponse)
     ),
     tag = "workflow-controller"
 )]
-#[instrument(skip(_pool), fields(instance_id = %instance_id))]
+#[instrument(skip(engine), fields(instance_id = %instance_id))]
 pub async fn replay_instance_handler(
-    crate::middleware::tenant_auth::OrgId(_tenant_id): crate::middleware::tenant_auth::OrgId,
-    State(_pool): State<PgPool>,
+    crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
+    State(engine): State<Arc<ExecutionEngine>>,
     Path(instance_id): Path<String>,
 ) -> (StatusCode, Json<Value>) {
-    // Replay is not currently supported - instance data is in runtara-environment
-    // and we need to implement fetching the original inputs from there
-    let response = json!({
-        "success": false,
-        "error": "Not implemented",
-        "message": "Replay functionality requires fetching instance inputs from runtara-environment. This feature is pending implementation.",
-        "instanceId": instance_id
-    });
-    (StatusCode::NOT_IMPLEMENTED, Json(response))
+    match engine.replay(&tenant_id, &instance_id).await {
+        Ok(result) => {
+            let response_data = json!({
+                "instanceId": result.instance_id.to_string(),
+                "status": result.status,
+                "workflowId": result.workflow_id,
+                "version": result.version,
+            });
+            let response = ApiResponse::success_with_message(
+                "Workflow replay queued successfully",
+                response_data,
+            );
+            (
+                StatusCode::OK,
+                Json(serde_json::to_value(response).unwrap()),
+            )
+        }
+        Err(e) => execution_error_response_with(&e, json!({ "instanceId": instance_id })),
+    }
 }
 
 // ============================================================================
