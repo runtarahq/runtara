@@ -327,7 +327,7 @@ function CardField({
 
   return (
     <div
-      className="group/field min-w-0"
+      className={`group/field min-w-0 ${hasWorkflowAction ? 'report-print-hidden' : ''}`}
       style={{ gridColumn: `span ${span} / span ${span}` }}
     >
       <div className="flex items-center gap-1">
@@ -338,7 +338,7 @@ function CardField({
           <button
             type="button"
             aria-label="Edit field"
-            className="rounded p-0.5 text-muted-foreground opacity-0 transition-opacity hover:bg-muted hover:text-foreground group-hover/field:opacity-100"
+            className="report-print-hidden rounded p-0.5 text-muted-foreground opacity-0 transition-opacity hover:bg-muted hover:text-foreground group-hover/field:opacity-100"
             onClick={() => onEditField?.(field.field)}
           >
             <Pencil className="h-3 w-3" />
@@ -460,7 +460,7 @@ function WorkflowActionButton({
       type="button"
       variant="outline"
       size="sm"
-      className="h-8 max-w-full gap-1.5"
+      className="report-print-hidden h-8 max-w-full gap-1.5"
       disabled={running || disabled || !onRun}
       onClick={() => {
         if (disabled) return;

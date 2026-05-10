@@ -262,6 +262,10 @@
     display: none !important;
   }
 
+  .report-print-root button svg {
+    display: none !important;
+  }
+
   .report-print-content > div {
     max-width: none !important;
   }

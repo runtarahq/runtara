@@ -293,7 +293,7 @@ export function TableBlock({
         <TableHeader>
           <TableRow className="group/header bg-muted/30 hover:bg-muted/30">
             {selectable && (
-              <TableHead className="h-10 w-10">
+              <TableHead className="report-print-hidden h-10 w-10">
                 <Checkbox
                   aria-label="Select all rows"
                   checked={
@@ -317,6 +317,7 @@ export function TableBlock({
                   aria-sort={getAriaSort(sortDirection)}
                   className={cn(
                     'h-10 whitespace-nowrap',
+                    isWorkflowButtonColumn(column) && 'report-print-hidden',
                     column.align === 'right' && 'text-right'
                   )}
                 >
@@ -528,7 +529,7 @@ function TableBodyRow({
       onClick={() => onRowClick?.(rowObject)}
     >
       {selectable && (
-        <TableCell className="w-10 py-3 align-top">
+        <TableCell className="report-print-hidden w-10 py-3 align-top">
           <Checkbox
             aria-label="Select row"
             checked={selected}
@@ -559,6 +560,7 @@ function TableBodyRow({
             className={cn(
               'group/cell relative py-3 align-top',
               column.align === 'right' && 'text-right tabular-nums',
+              isWorkflowButtonColumn(column) && 'report-print-hidden',
               writebackContext && !isEditing && 'pr-8'
             )}
             onClick={(event) => {
@@ -630,7 +632,7 @@ function TableBodyRow({
                   <button
                     type="button"
                     aria-label="Edit cell"
-                    className="absolute right-2 top-1/2 -translate-y-1/2 rounded p-1 text-muted-foreground opacity-0 transition-opacity hover:bg-muted hover:text-foreground group-hover/cell:opacity-100"
+                    className="report-print-hidden absolute right-2 top-1/2 -translate-y-1/2 rounded p-1 text-muted-foreground opacity-0 transition-opacity hover:bg-muted hover:text-foreground group-hover/cell:opacity-100"
                     onClick={(event) => {
                       event.stopPropagation();
                       onEditCell(rowKey, column.key);
@@ -867,7 +869,7 @@ function WorkflowActionButton({
       type="button"
       variant="outline"
       size="sm"
-      className="h-8 max-w-full gap-1.5"
+      className="report-print-hidden h-8 max-w-full gap-1.5"
       disabled={running || disabled}
       onClick={(event) => {
         event.stopPropagation();

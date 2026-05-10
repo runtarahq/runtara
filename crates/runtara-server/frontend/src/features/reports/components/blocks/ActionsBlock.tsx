@@ -120,19 +120,21 @@ export function ActionsBlock({
                 </Badge>
               </div>
             </div>
-            <ActionForm
-              key={action.actionId}
-              inputSchema={action.inputSchema}
-              disabled={isSubmitting}
-              submitLabel={block.actions?.submit?.label ?? 'Submit Action'}
-              onSubmit={(payload) => {
-                setSubmittingActionId(action.actionId);
-                mutation.mutate({
-                  actionId: action.actionId,
-                  payload,
-                });
-              }}
-            />
+            <div className="report-print-hidden">
+              <ActionForm
+                key={action.actionId}
+                inputSchema={action.inputSchema}
+                disabled={isSubmitting}
+                submitLabel={block.actions?.submit?.label ?? 'Submit Action'}
+                onSubmit={(payload) => {
+                  setSubmittingActionId(action.actionId);
+                  mutation.mutate({
+                    actionId: action.actionId,
+                    payload,
+                  });
+                }}
+              />
+            </div>
           </div>
         );
       })}

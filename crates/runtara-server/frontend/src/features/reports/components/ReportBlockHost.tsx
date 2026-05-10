@@ -272,7 +272,7 @@ export function ReportBlockHost({
           ) : (
             <span />
           )}
-          <div className="flex items-center gap-2">
+          <div className="report-print-hidden flex items-center gap-2">
             {block.dataset && (
               <Link to={explorePath}>
                 <Button variant="outline" size="sm">
@@ -291,7 +291,7 @@ export function ReportBlockHost({
         </div>
       )}
       {(block.filters?.length ?? 0) > 0 && (
-        <div className="mb-3 rounded-lg border bg-muted/20 p-3">
+        <div className="report-print-hidden mb-3 rounded-lg border bg-muted/20 p-3">
           <ReportFilterBar
             reportId={reportId}
             definition={{
@@ -565,7 +565,12 @@ function BlockError({
       <p className="text-sm font-semibold text-destructive">
         {result.error?.message ?? 'This report block could not be rendered.'}
       </p>
-      <Button className="mt-3" variant="outline" size="sm" onClick={onRetry}>
+      <Button
+        className="report-print-hidden mt-3"
+        variant="outline"
+        size="sm"
+        onClick={onRetry}
+      >
         <RefreshCw className="mr-2 h-4 w-4" />
         Retry
       </Button>
