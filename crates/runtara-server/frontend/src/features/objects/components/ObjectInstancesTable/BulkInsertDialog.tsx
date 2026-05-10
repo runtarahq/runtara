@@ -24,6 +24,7 @@ import {
   BulkValidationMode,
   BulkCreateResult,
 } from '../../queries';
+import { getWritableObjectColumns } from '@/features/objects/utils/columns';
 
 interface BulkInsertDialogProps {
   open: boolean;
@@ -58,8 +59,8 @@ export function BulkInsertDialog({
   const [result, setResult] = useState<BulkCreateResult | null>(null);
 
   const columnNames = useMemo(
-    () => (schema.columns ?? []).map((c) => c.name),
-    [schema]
+    () => getWritableObjectColumns(schema.columns).map((c) => c.name),
+    [schema.columns]
   );
 
   const needsConflictColumns = onConflict !== 'error';

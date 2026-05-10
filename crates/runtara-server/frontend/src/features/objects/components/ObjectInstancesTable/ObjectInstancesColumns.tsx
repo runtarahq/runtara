@@ -4,44 +4,10 @@ import { Instance, Schema } from '@/generated/RuntaraRuntimeApi';
 import { EditableCell } from './EditableCell';
 import { formatDate } from '@/lib/utils';
 import { IdColumnCell } from '@/shared/components/table/IdColumnCell';
-
-// Helper type matching the new spec
-type ColumnDataType =
-  | 'string'
-  | 'integer'
-  | 'boolean'
-  | 'decimal'
-  | 'timestamp'
-  | 'json'
-  | 'enum';
-
-// Helper function to map PostgreSQL types to UI data types
-const mapPostgresTypeToDataType = (pgType: string): ColumnDataType => {
-  const baseType = pgType.replace(/\[\]$/, ''); // Remove array notation
-
-  if (baseType.startsWith('VARCHAR') || baseType === 'TEXT') {
-    return 'string';
-  } else if (
-    baseType === 'INTEGER' ||
-    baseType === 'BIGINT' ||
-    baseType === 'SMALLINT'
-  ) {
-    return 'integer';
-  } else if (baseType.startsWith('DECIMAL') || baseType.startsWith('NUMERIC')) {
-    return 'decimal';
-  } else if (baseType === 'BOOLEAN') {
-    return 'boolean';
-  } else if (
-    baseType === 'DATE' ||
-    baseType === 'TIMESTAMP' ||
-    baseType === 'TIMESTAMPTZ'
-  ) {
-    return 'timestamp';
-  } else if (baseType === 'JSONB' || baseType === 'JSON') {
-    return 'json';
-  }
-  return 'string';
-};
+import {
+  getWritableObjectColumns,
+  mapColumnTypeToDataType,
+} from '@/features/objects/utils/columns';
 
 interface ObjectInstancesColumnsProps {
   objectSchemaDto: Schema;
@@ -139,8 +105,8 @@ export const objectInstancesColumns = ({
 
   // Add columns for each property in the schema
   if (objectSchemaDto.columns) {
-    objectSchemaDto.columns.forEach((column) => {
-      const dataType = mapPostgresTypeToDataType(column.type);
+    getWritableObjectColumns(objectSchemaDto.columns).forEach((column) => {
+      const dataType = mapColumnTypeToDataType(column.type);
       // Extract enum values if applicable
       // The API definition says: values: string[] for enum type
       const enumValues = (column as any).values as string[] | undefined;

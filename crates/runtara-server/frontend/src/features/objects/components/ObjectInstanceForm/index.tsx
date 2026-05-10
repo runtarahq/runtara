@@ -21,44 +21,11 @@ import {
   useCreateObjectInstanceDto,
   useUpdateObjectInstanceDto,
 } from '@/features/objects/hooks/useObjectRecords.ts';
-
-// Helper type for column data types matching the new spec
-type ColumnDataType =
-  | 'string'
-  | 'integer'
-  | 'boolean'
-  | 'decimal'
-  | 'timestamp'
-  | 'json'
-  | 'enum';
-
-// Helper function to map PostgreSQL types to UI data types
-const mapPostgresTypeToDataType = (pgType: string): ColumnDataType => {
-  const baseType = pgType.replace(/\[\]$/, ''); // Remove array notation
-
-  if (baseType.startsWith('VARCHAR') || baseType === 'TEXT') {
-    return 'string';
-  } else if (
-    baseType === 'INTEGER' ||
-    baseType === 'BIGINT' ||
-    baseType === 'SMALLINT'
-  ) {
-    return 'integer';
-  } else if (baseType.startsWith('DECIMAL') || baseType.startsWith('NUMERIC')) {
-    return 'decimal';
-  } else if (baseType === 'BOOLEAN') {
-    return 'boolean';
-  } else if (
-    baseType === 'DATE' ||
-    baseType === 'TIMESTAMP' ||
-    baseType === 'TIMESTAMPTZ'
-  ) {
-    return 'timestamp';
-  } else if (baseType === 'JSONB' || baseType === 'JSON') {
-    return 'json';
-  }
-  return 'string';
-};
+import {
+  ColumnDataType,
+  getWritableObjectColumns,
+  mapColumnTypeToDataType,
+} from '@/features/objects/utils/columns';
 
 interface ObjectInstanceDtoFormProps {
   objectSchemaDto: Schema;
@@ -83,8 +50,8 @@ export function ObjectInstanceDtoForm({
 
     if (!objectSchemaDto.columns) return;
 
-    objectSchemaDto.columns.forEach((column) => {
-      const dataType = mapPostgresTypeToDataType(column.type);
+    getWritableObjectColumns(objectSchemaDto.columns).forEach((column) => {
+      const dataType = mapColumnTypeToDataType(column.type);
 
       if (isEditing && record && record.properties) {
         // Get the value for this property from the record
@@ -160,8 +127,8 @@ export function ObjectInstanceDtoForm({
 
     // Create a map of column names to data types for quick lookup
     const columnTypeMap = new Map<string, ColumnDataType>();
-    objectSchemaDto.columns.forEach((column) => {
-      columnTypeMap.set(column.name, mapPostgresTypeToDataType(column.type));
+    getWritableObjectColumns(objectSchemaDto.columns).forEach((column) => {
+      columnTypeMap.set(column.name, mapColumnTypeToDataType(column.type));
     });
 
     // Process each form value and add it to the properties object
@@ -257,8 +224,8 @@ export function ObjectInstanceDtoForm({
       className="space-y-6 rounded-2xl bg-card px-4 py-5 sm:px-6"
     >
       {objectSchemaDto.columns &&
-        objectSchemaDto.columns.map((column) => {
-          const dataType = mapPostgresTypeToDataType(column.type);
+        getWritableObjectColumns(objectSchemaDto.columns).map((column) => {
+          const dataType = mapColumnTypeToDataType(column.type);
           const isRequired = column.nullable === false;
 
           return (

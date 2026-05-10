@@ -21,38 +21,11 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from '@/shared/components/ui/alert-dialog';
-
-type ColumnDataType =
-  | 'string'
-  | 'integer'
-  | 'boolean'
-  | 'decimal'
-  | 'timestamp'
-  | 'json'
-  | 'enum';
-
-// Mirrors mapping used in ObjectInstanceForm.
-function mapPostgresTypeToDataType(pgType: string): ColumnDataType {
-  const baseType = pgType.replace(/\[\]$/, '');
-  if (baseType.startsWith('VARCHAR') || baseType === 'TEXT') return 'string';
-  if (
-    baseType === 'INTEGER' ||
-    baseType === 'BIGINT' ||
-    baseType === 'SMALLINT'
-  )
-    return 'integer';
-  if (baseType.startsWith('DECIMAL') || baseType.startsWith('NUMERIC'))
-    return 'decimal';
-  if (baseType === 'BOOLEAN') return 'boolean';
-  if (
-    baseType === 'DATE' ||
-    baseType === 'TIMESTAMP' ||
-    baseType === 'TIMESTAMPTZ'
-  )
-    return 'timestamp';
-  if (baseType === 'JSONB' || baseType === 'JSON') return 'json';
-  return 'string';
-}
+import {
+  ColumnDataType,
+  getWritableObjectColumns,
+  mapColumnTypeToDataType,
+} from '@/features/objects/utils/columns';
 
 function coerceValue(raw: unknown, dataType: ColumnDataType): unknown {
   switch (dataType) {
@@ -98,7 +71,10 @@ export function BulkEditDialog({
   onSubmit,
   isSubmitting,
 }: BulkEditDialogProps) {
-  const columns = useMemo(() => schema.columns ?? [], [schema]);
+  const columns = useMemo(
+    () => getWritableObjectColumns(schema.columns),
+    [schema.columns]
+  );
   const [pickedFields, setPickedFields] = useState<Set<string>>(new Set());
   const [values, setValues] = useState<Record<string, unknown>>({});
 
@@ -132,7 +108,7 @@ export function BulkEditDialog({
   const handleConfirm = async () => {
     const columnTypeMap = new Map<string, ColumnDataType>();
     columns.forEach((c) =>
-      columnTypeMap.set(c.name, mapPostgresTypeToDataType(c.type))
+      columnTypeMap.set(c.name, mapColumnTypeToDataType(c.type))
     );
 
     const properties: Record<string, unknown> = {};
@@ -164,7 +140,7 @@ export function BulkEditDialog({
             </p>
           )}
           {columns.map((col) => {
-            const dt = mapPostgresTypeToDataType(col.type);
+            const dt = mapColumnTypeToDataType(col.type);
             const picked = pickedFields.has(col.name);
             const currentValue = values[col.name];
             return (

@@ -1,4 +1,4 @@
-import { test, buildSchema, buildInstance } from '../../../fixtures';
+import { test, expect, buildSchema, buildInstance } from '../../../fixtures';
 import { ManageInstancesPage } from '../../../pages/ObjectSchemasPage';
 
 test.describe('Object instances list (mocked)', () => {
@@ -7,7 +7,19 @@ test.describe('Object instances list (mocked)', () => {
     mockApi,
     runA11y,
   }) => {
-    const schema = buildSchema({ id: 'sch_1', name: 'Customers' });
+    const schema = buildSchema({
+      id: 'sch_1',
+      name: 'Customers',
+      columns: [
+        { name: 'id', type: 'string' },
+        {
+          name: 'search_tsv',
+          type: 'tsvector',
+          sourceColumn: 'id',
+          language: 'english',
+        },
+      ],
+    });
     const instances = [
       buildInstance(schema.id, {
         id: 'inst_1',
@@ -34,6 +46,7 @@ test.describe('Object instances list (mocked)', () => {
     const view = new ManageInstancesPage(page, 'Customers');
     await view.goto();
 
+    await expect(page.getByRole('columnheader', { name: 'search_tsv' })).toHaveCount(0);
     await runA11y(page, { exclude: ['[data-sonner-toaster]'] });
     await view.expectMatchesSnapshot('objects-instances-list');
   });
