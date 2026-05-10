@@ -1,7 +1,6 @@
 import {
   BarChart3,
   Database,
-  FolderOpen,
   History,
   Link,
   LineChart,
@@ -36,13 +35,6 @@ export const menu = [
     title: 'Reports',
     to: '/reports',
     icon: <LineChart size={16} />,
-    allowedGroups: [],
-  },
-  {
-    key: 'files',
-    title: 'Files',
-    to: '/files',
-    icon: <FolderOpen size={16} />,
     allowedGroups: [],
   },
   {
