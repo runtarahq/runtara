@@ -1,121 +1,76 @@
 # Runtara
 
-> Beta software. APIs, crate boundaries, and runtime behavior are still evolving.
+> Beta software. Product behavior, APIs, crate boundaries, and runtime behavior are still evolving.
 
-Runtara is a Rust workspace for building and running durable workflows. It includes:
+**Secure AI automation from workflow design to live operations.**
 
-- A workflow compiler for the Runtara JSON DSL
-- A runtime persistence layer for checkpoints, signals, events, and durable sleep
-- A management plane for registering workflow images and starting instances
-- SDKs, macros, agents, and stdlib crates used by compiled workflows
+Runtara is an end-to-end platform for building, running, and operating AI workflows. It brings workflow design, triggers, connections, operational data, files, reports, analytics, and durable execution into one workspace so teams can ship automations as production systems instead of loose prompt chains.
 
-## Current Repo Layout
+[Website](https://runtara.com) | [Product docs](https://runtara.com/docs/runtara-platform) | [Runtara Cloud](https://tally.so/r/81qE5o)
 
-```text
-.
-├── crates/
-│   ├── runtara-agent-macro/
-│   ├── runtara-agents/
-│   ├── runtara-ai/
-│   ├── runtara-connections/
-│   ├── runtara-core/
-│   ├── runtara-dsl/
-│   ├── runtara-environment/
-│   ├── runtara-http/
-│   ├── runtara-management-sdk/
-│   ├── runtara-object-store/
-│   ├── runtara-sdk/
-│   ├── runtara-sdk-macros/
-│   ├── runtara-server/
-│   ├── runtara-test-harness/
-│   ├── runtara-text-parser/
-│   ├── runtara-workflow-stdlib/
-│   └── runtara-workflows/
-├── dev/
-├── docs/
-├── e2e/
-├── prototypes/
-├── scripts/
-├── Cargo.toml
-└── start.sh
-```
+![Runtara workflow builder](docs/assets/readme/hero-workflow-builder-crop.png)
 
-Important top-level directories:
+## What Runtara Does
 
-- `crates/`: all workspace members
-- `dev/`: local Docker Compose stack (Postgres + Valkey) for development and e2e
-- `docs/`: architecture notes, DSL spec, deployment notes
-- `e2e/`: shell-based end-to-end tests and sample workflows
-- `prototypes/`: standalone UI prototypes, not part of the workspace build
-- `start.sh`: local development launcher for `runtara-environment` with embedded `runtara-core`
+Runtara gives builders and operators one product surface for AI automation:
 
-## Runtime Model
+- **Workflows**: design agent steps, transformations, waits, child workflows, and completion paths in timeline and canvas views.
+- **Triggers**: start workflows from manual runs, chat, schedules, HTTP calls, and event-driven entry points.
+- **Connections**: manage provider credentials, storage targets, and shared integrations outside workflow definitions.
+- **Database**: model operational records such as catalogs, inventory, suppliers, support knowledge, and workflow-owned data.
+- **Files**: store files created or consumed by workflow runs.
+- **Reports**: publish narrative text, metrics, charts, tables, and reusable report definitions backed by Runtara data.
+- **Invocation history**: inspect executions across workflows and triggers.
+- **Analytics**: monitor usage, system health, rate limits, and execution trends.
 
-The practical entrypoint is `runtara-server`. It embeds `runtara-environment` and `runtara-core` in a single process and adds workflow management, auth, connections, channels, MCP, and background workers.
+## Product Tour
 
-- `runtara-server` exposes the application HTTP API on port `7001` by default
-- `runtara-environment` runs embedded, handling image registry, instance lifecycle, and runners
-- `runtara-core` runs embedded, handling checkpoints, signals, events, and durable sleep
-- Workflow instances communicate with `runtara-core` over HTTP for registration, checkpoints, signals, heartbeats, and completion
+### Build Workflows As Operational Systems
 
-At a high level:
+Runtara organizes workflows by operational area and keeps builders focused on the process they own. Workflow definitions include structure, versions, validation, history, and run context.
 
-```text
-UI / API clients / MCP agents
-                |
-                v
-      runtara-server (HTTP + MCP API, default :7001)
-                |
-                +--> workflow management, auth, connections, channels
-                +--> background workers (triggers, compilation, cron)
-                |
-                v
-      runtara-environment (embedded, default :8002)
-                |
-                +--> image registry
-                +--> instance lifecycle
-                +--> runner backend (Wasm by default)
-                |
-                v
-         runtara-core (embedded, default :8001)
-                |
-                v
-        PostgreSQL (server, environment, core)
-        + separate PostgreSQL for object model
-```
+| Workflow workspace | Timeline builder |
+| --- | --- |
+| ![Runtara workflow workspace organized by business area](docs/assets/readme/01-workflows-organized-operations.png) | ![Runtara workflow timeline builder](docs/assets/readme/02-workflow-timeline-builder.png) |
 
-Runner implementations currently present in the repo:
+### Start Workflows From Real Events
 
-- `Wasm`: default production runner — executes WASM modules via `wasmtime` with WASI support
-- `OCI`: container-based runner using `crun` with cgroup isolation and metrics
-- `Native`: direct process execution, useful for development
-- `Mock`: test runner
+Triggers let teams start automations from schedules, HTTP calls, and channel or event-driven entry points without duplicating workflow logic.
 
-## Workspace Crates
+![Runtara trigger automation catalog](docs/assets/readme/03-trigger-automation-catalog.png)
 
-| Crate | Purpose |
-|------|---------|
-| `runtara-core` | Core runtime: checkpoints, signals, events, durable sleep, instance HTTP API |
-| `runtara-environment` | Management plane: image registry, instance lifecycle, runners, wake scheduling |
-| `runtara-server` | Complete HTTP API server: workflows, connections, channels, workers, MCP integration |
-| `runtara-management-sdk` | SDK and CLI-facing client for `runtara-environment` |
-| `runtara-sdk` | Instance-side SDK used by compiled workflows |
-| `runtara-sdk-macros` | Proc macros for `runtara-sdk` |
-| `runtara-dsl` | Workflow and agent metadata types, schema support |
-| `runtara-workflows` | Workflow compiler and validation pipeline |
-| `runtara-workflow-stdlib` | Runtime/stdlib linked into compiled workflows |
-| `runtara-agents` | Built-in agent implementations |
-| `runtara-agent-macro` | Proc macros for defining custom agents/capabilities |
-| `runtara-connections` | Connection management: CRUD, OAuth2, rate limiting |
-| `runtara-object-store` | Schema-driven dynamic PostgreSQL object store |
-| `runtara-http` | Shared HTTP client abstraction used across the workspace |
-| `runtara-ai` | AI/LLM-related integration helpers for workflows |
-| `runtara-text-parser` | Text parsing utilities for DSL schema fields |
-| `runtara-test-harness` | Internal binary for isolated agent capability execution |
+### Connect Agents To Data And Systems
 
-## Component Architecture
+Connections stay server-side. Workflow logic can use approved integrations and storage targets without embedding credentials in workflow definitions.
 
-Runtara is organized into three independent layers. Each layer builds on the one below it, but can also be used on its own.
+| Connections | Operational records |
+| --- | --- |
+| ![Runtara integration connections catalog](docs/assets/readme/04-integration-connections.png) | ![Runtara object model records](docs/assets/readme/05-object-model-records.png) |
+
+### Publish Automation Outputs
+
+Runtara reports turn workflow outputs and object data into pages people can use: narrative summaries, metrics, charts, tables, and reusable report definitions.
+
+![Runtara category performance dashboard](docs/assets/readme/07-category-performance-dashboard.png)
+
+### Operate With Visibility
+
+Invocation history and analytics give operators a live view of workflow health, usage, rate limits, and execution trends.
+
+| Invocation history | Usage analytics |
+| --- | --- |
+| ![Runtara invocation history](docs/assets/readme/09-invocation-history.png) | ![Runtara usage analytics](docs/assets/readme/10-usage-analytics.png) |
+
+## Runtime Design
+
+Runtara combines the product surface above with runtime primitives for secure, durable AI automation:
+
+- **Sandboxed agent runs**: workflow logic executes inside WebAssembly isolation by default with no raw filesystem, network, or credential access.
+- **Credential mediation**: provider credentials remain server-side and are injected at the host boundary instead of being exposed to agents.
+- **Durable checkpoints**: long-running agent loops checkpoint after tool calls, resume after crashes, and avoid replaying completed work.
+- **Operational visibility**: reports, invocation history, analytics, files, and object data give teams a live surface for production automation.
+
+At a high level, the Rust workspace is organized into three layers:
 
 ```text
 ┌──────────────────────────────────────────────────────────────────┐
@@ -125,222 +80,96 @@ Runtara is organized into three independent layers. Each layer builds on the one
 │  ┌────────────────────────────────────────────────────────────┐  │
 │  │  runtara-environment                                       │  │
 │  │  Management plane: image registry, instance lifecycle,     │  │
-│  │  runners (OCI/Native/Wasm), wake scheduling                │  │
+│  │  runners (Wasm/OCI/Native/Mock), wake scheduling           │  │
 │  │  ┌──────────────────────────────────────────────────────┐  │  │
 │  │  │  runtara-core + runtara-sdk                          │  │  │
 │  │  │  Durable execution: checkpoints, signals, events,    │  │  │
-│  │  │  durable sleep, compensation (saga rollback)          │  │  │
+│  │  │  durable sleep, compensation                          │  │  │
 │  │  └──────────────────────────────────────────────────────┘  │  │
 │  └────────────────────────────────────────────────────────────┘  │
 └──────────────────────────────────────────────────────────────────┘
 ```
 
-### Layer 1: Durable Execution Framework (`runtara-core` + `runtara-sdk`)
+## Repository Contents
 
-The foundation layer. Provides checkpoint-based durability for long-running processes.
+This repository contains the Rust implementation of the Runtara platform:
 
-**`runtara-core`** is the persistence engine. It exposes an HTTP API (default port 8001) that workflow instances call to save checkpoints, record events, report completion, and poll for signals. All state is stored in PostgreSQL or SQLite. If an instance crashes, it can resume from its last checkpoint with full context intact.
-
-**`runtara-sdk`** is the client library linked into compiled workflows. It wraps the core protocol behind a Rust API — `checkpoint()`, `sleep()`, `completed()`, `poll_signal()`, etc. The `#[durable]` proc macro adds transparent checkpoint-and-resume to any function. The SDK has two backends: HTTP (for containerized/remote instances) and embedded (for in-process use with no network overhead).
-
-**Use this layer alone when** you want durable execution without container orchestration. Embed `runtara-core` into your Rust application, use the SDK to checkpoint your own long-running tasks, and manage process lifecycle yourself.
-
-```rust
-// Embed core for direct persistence access
-let persistence = Arc::new(PostgresPersistence::new(pool));
-let runtime = CoreRuntime::builder()
-    .persistence(persistence)
-    .bind_addr("127.0.0.1:8001".parse()?)
-    .build()?
-    .start()
-    .await?;
-```
-
-### Layer 2: Management Plane (`runtara-environment`)
-
-Adds container orchestration and instance lifecycle management on top of Layer 1.
-
-`runtara-environment` is a management plane that registers workflow images (compiled binaries), launches instances in isolated runners, monitors heartbeats, handles durable sleep wake-up, and proxies signals. It exposes an HTTP API (default port 8002) for image and instance operations, and can optionally embed `runtara-core` in the same process.
-
-Runner backends:
-
-| Runner | Use case |
-|--------|----------|
-| **Wasm** | Default — runs WASM modules via `wasmtime` with WASI sandboxing |
-| **OCI** | Container-based — runs instances in `crun` containers with cgroup isolation and metrics |
-| **Native** | Development — direct child process execution, no container runtime needed |
-| **Mock** | Testing — simulates execution without running real processes |
-
-**Use this layer when** you need to run compiled workflows as isolated units but want to manage workflows, auth, and application logic in your own code. Embed `runtara-environment` as a library and interact with it through `runtara-management-sdk` — see `EnvironmentRuntime` in [`crates/runtara-environment/src/runtime.rs`](crates/runtara-environment/src/runtime.rs).
-
-```rust
-// Embed environment with OCI runner and embedded core
-let runtime = EnvironmentRuntime::builder()
-    .pool(pool)
-    .runner(Arc::new(OciRunner::from_env()))
-    .core_persistence(persistence)
-    .core_addr("127.0.0.1:8001")
-    .bind_addr("0.0.0.0:8002".parse()?)
-    .data_dir("/var/lib/runtara")
-    .build()?
-    .start()
-    .await?;
-```
-
-### Layer 3: Application Server (`runtara-server`)
-
-A complete, batteries-included server that embeds both Layer 1 and Layer 2 and adds everything needed to run Runtara as a product.
-
-`runtara-server` ships as both a binary and a library. Run it directly with `cargo run -p runtara-server`, or embed `runtara_server::start(pool)` in your own `main` if you need to wrap it. It provides:
-
-- **Workflow management** — CRUD, compilation, execution, scheduling, and replay of workflows
-- **Authentication** — JWT (with JWKS) and API key auth with tenant isolation
-- **Connections** — third-party credential storage with OAuth2 flows and rate limiting
-- **Object model** — user-defined schemas and instance CRUD backed by a separate PostgreSQL database
-- **File storage** — S3-compatible bucket and file management for workflows
-- **Channels** — webhook integrations (Slack, Teams, Telegram, Mailgun) for conversational triggers
-- **MCP server** — Model Context Protocol interface so AI agents can manage workflows, executions, and connections through tools
-- **Background workers** — trigger execution, compilation queues, cron scheduling, cleanup
-- **Observability** — OpenTelemetry with Datadog, HTTP metrics middleware, system analytics
-
-**Use this layer when** you want the full Runtara platform. It is the highest-level entry point and handles everything from auth to execution to monitoring.
-
-Run the bundled binary:
-
-```bash
-export DATABASE_URL=postgres://localhost/runtara
-export OBJECT_MODEL_DATABASE_URL=postgres://localhost/runtara_object_model
-export VALKEY_HOST=localhost
-cargo run -p runtara-server --release
-```
-
-Or embed it in your own host:
-
-```rust
-let pool = PgPoolOptions::new()
-    .connect(&std::env::var("OBJECT_MODEL_DATABASE_URL")?)
-    .await?;
-runtara_server::start(pool).await?;
-```
-
-### Choosing a Layer
-
-| You want to... | Use |
-|-----------------|-----|
-| Add durable checkpointing to your own long-running tasks | Layer 1 (`runtara-core` + `runtara-sdk`) |
-| Run compiled workflows in containers with lifecycle management | Layer 2 (`runtara-environment`) |
-| Deploy the full Runtara platform with auth, workflows, MCP, and channels | Layer 3 (`runtara-server`) |
-| Embed workflow execution inside an existing Rust service | Layer 2 as a library (`EnvironmentRuntime::builder()`) |
-
-Each higher layer embeds the layers below it. You never need to run them as separate processes unless you want to scale them independently.
+- `crates/runtara-server`: application HTTP API, auth, workflows, connections, channels, MCP integration, file storage, object model, and background workers.
+- `crates/runtara-environment`: image registry, instance lifecycle, runners, and wake scheduling.
+- `crates/runtara-core`: durable runtime persistence for checkpoints, signals, events, and sleep.
+- `crates/runtara-sdk`: instance-side SDK used by compiled workflows.
+- `crates/runtara-workflows`: workflow compiler and validation pipeline.
+- `crates/runtara-dsl`: workflow and agent metadata types.
+- `crates/runtara-connections`: connection management, OAuth2, and rate limiting.
+- `crates/runtara-object-store`: schema-driven dynamic PostgreSQL object store.
+- `crates/runtara-agents`, `crates/runtara-ai`, and `crates/runtara-workflow-stdlib`: built-in agents, AI helpers, and workflow runtime support.
+- `docs`: architecture notes, DSL spec, deployment notes, and reference material.
+- `e2e`: shell-based end-to-end tests and sample workflows.
+- `dev`: local Docker Compose stack for development dependencies.
 
 ## Quick Start
 
 ### Prerequisites
 
-- Rust toolchain (stable, Edition 2024)
-- `wasm32-wasip2` target: `rustup target add wasm32-wasip2` (workflows compile to WASM by default)
-- PostgreSQL — one database for `runtara-environment`/`runtara-core` state, and (if running `runtara-server`) a separate database for the object model
-- Valkey or Redis — required by `runtara-server` for checkpoint storage during workflow execution
-- `crun` and Linux container support if you enable the OCI runner
-
-If you're only using Layer 1 (`runtara-core` + `runtara-sdk`) or Layer 2 (`runtara-environment`), you do not need Valkey or the object-model database.
-
-### Start The Full Runtime
-
-Run the management plane with embedded core:
+- Rust toolchain, stable, Edition 2024.
+- `wasm32-wasip2` target for default workflow compilation:
 
 ```bash
-export RUNTARA_DATABASE_URL=postgres://localhost/runtara
-cargo run -p runtara-environment
+rustup target add wasm32-wasip2
 ```
 
-Default bind addresses:
+- PostgreSQL for platform, environment, and core state.
+- A separate PostgreSQL database for the object model when running `runtara-server`.
+- Valkey or Redis for `runtara-server` checkpoint storage during workflow execution.
+- `crun` and Linux container support only if you enable the OCI runner.
 
-- Environment API: `0.0.0.0:8002`
-- Core instance API: `0.0.0.0:8001`
+### Start The Local Runtime
 
-For local development, you can also use:
+For local development, use the included launcher:
 
 ```bash
 ./start.sh
 ```
 
-`start.sh` is a convenience wrapper around `runtara-environment` (with embedded core). See `./start.sh help` for the supported environment variables.
+`start.sh` runs `runtara-environment` with embedded `runtara-core`. See `./start.sh help` for supported environment variables.
 
-### Run Core Only
-
-If you want the core runtime without environment management:
+To run the full application server directly:
 
 ```bash
 export RUNTARA_DATABASE_URL=postgres://localhost/runtara
-cargo run -p runtara-core
+export OBJECT_MODEL_DATABASE_URL=postgres://localhost/runtara_object_model
+export VALKEY_HOST=localhost
+cargo run -p runtara-server --release
 ```
 
-### Compile A Workflow
+Default local ports:
 
-CLI:
+| Component | Default port |
+| --- | --- |
+| `runtara-server` public API | `7001` |
+| `runtara-server` internal API | `7002` |
+| `runtara-environment` API | `8002` |
+| `runtara-core` instance API | `8001` |
+
+### Build And Test
 
 ```bash
-cargo run -p runtara-workflows --bin runtara-compile -- \
-  --workflow e2e/workflows/simple_passthrough.json \
-  --tenant demo \
-  --workflow-id simple-passthrough
+cargo build
+cargo test
 ```
 
-Library:
-
-```rust
-use runtara_workflows::{compile_workflow, CompilationInput, Workflow};
-
-let workflow: Workflow = serde_json::from_str(&std::fs::read_to_string("workflow.json")?)?;
-
-let result = compile_workflow(CompilationInput {
-    tenant_id: "demo".to_string(),
-    workflow_id: "simple-passthrough".to_string(),
-    version: 1,
-    execution_graph: workflow.into(),
-    track_events: false,
-    child_workflows: vec![],
-    connection_service_url: None,
-})?;
-
-println!("Compiled artifact: {}", result.binary_path.display());
-println!("Checksum: {}", result.binary_checksum);
-```
-
-The compiler currently resolves its target from `RUNTARA_COMPILE_TARGET` and defaults to `wasm32-wasip2`. The output path can therefore be either a native executable or a `.wasm` artifact depending on target selection.
-
-### Register And Start An Instance
-
-Using the management SDK:
-
-```rust
-use runtara_management_sdk::{ManagementSdk, RegisterImageOptions, StartInstanceOptions};
-
-let sdk = ManagementSdk::localhost()?;
-sdk.connect().await?;
-
-let binary = std::fs::read("./workflow")?;
-let image = sdk
-    .register_image(RegisterImageOptions::new("tenant-1", "demo-workflow", binary))
-    .await?;
-
-let instance = sdk
-    .start_instance(
-        StartInstanceOptions::new(&image.image_id, "tenant-1")
-            .with_input(serde_json::json!({ "hello": "world" })),
-    )
-    .await?;
-
-println!("Instance started: {}", instance.instance_id);
-```
-
-Using the CLI:
+Target specific crates when iterating:
 
 ```bash
-cargo run -p runtara-management-sdk --bin runtara-ctl -- health
-cargo run -p runtara-management-sdk --bin runtara-ctl -- list-images
+cargo test -p runtara-core
+cargo test -p runtara-environment
+cargo test -p runtara-workflows
+```
+
+Run shell-based end-to-end checks:
+
+```bash
+./e2e/run_all.sh
 ```
 
 ## Workflow DSL
@@ -371,142 +200,20 @@ Runtara workflows are described as JSON execution graphs. A minimal workflow:
 }
 ```
 
-An agent step uses `agentId` and `capabilityId`:
-
-```json
-{
-  "stepType": "Agent",
-  "id": "delay",
-  "agentId": "utils",
-  "capabilityId": "delay-in-ms",
-  "inputMapping": {
-    "delay_value": {
-      "valueType": "reference",
-      "value": "data.input.delay_ms"
-    }
-  }
-}
-```
-
 Useful references:
 
 - `docs/dsl_spec.json`
 - `crates/runtara-dsl/README.md`
 - `crates/runtara-workflows/README.md`
 
-## Configuration
+## Development References
 
-The tables below reflect the current code paths in the workspace, not older transport naming from helper scripts.
-
-### `runtara-core`
-
-| Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
-| `RUNTARA_DATABASE_URL` | Yes | - | PostgreSQL or SQLite connection string |
-| `RUNTARA_HTTP_PORT` | No | `8001` | Instance HTTP API port |
-| `RUNTARA_MAX_CONCURRENT_INSTANCES` | No | `32` | Max concurrent instances. Enforced at `register_instance`; fresh registrations past the cap receive `429 Too Many Requests` with `Retry-After: 30`. Resumes of existing instances are not counted. |
-| `RUNTARA_SHUTDOWN_GRACE_MS` | No | `60000` | On SIGTERM/SIGINT, how long to wait for running instances to reach a checkpoint and suspend before force-stopping. Stragglers persist as `status=suspended, termination_reason=shutdown_requested` and are resumed after restart. |
-| `RUNTARA_SHUTDOWN_INTAKE_GRACE_MS` | No | `5000` | On SIGTERM/SIGINT, how long to wait for intake workers (trigger/compilation/cron/cleanup) to finish their current unit of work before being aborted. |
-
-### `runtara-environment`
-
-| Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
-| `RUNTARA_DATABASE_URL` | Yes | - | PostgreSQL connection string |
-| `RUNTARA_ENV_HTTP_PORT` | No | `8002` | Environment HTTP API port |
-| `RUNTARA_CORE_ADDR` | No | `127.0.0.1:8001` | Address passed to instances for core communication |
-| `DATA_DIR` | No | `.data` | Data directory for images, bundles, and run state |
-| `RUNTARA_SKIP_CERT_VERIFICATION` | No | `false` | Forwarded to runners where applicable |
-| `RUNTARA_DB_POOL_SIZE` | No | `100` | Environment DB pool size |
-| `RUNTARA_DB_REQUEST_TIMEOUT_MS` | No | `30000` | Environment DB request timeout |
-
-### `runtara-server`
-
-The application-server layer embeds `runtara-environment` + `runtara-core` and adds workflow management, auth, connections, and channels. It reads all of the `runtara-environment` variables plus these:
-
-| Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
-| `OBJECT_MODEL_DATABASE_URL` | Yes | - | Separate PostgreSQL connection string for the user-defined object model. `DATABASE_URL` is accepted by some startup paths as a legacy alias, but set `OBJECT_MODEL_DATABASE_URL` to avoid surprises. |
-| `VALKEY_HOST` | Yes | - | Valkey/Redis host for checkpoint storage during workflow execution. Startup aborts if unset. |
-| `VALKEY_PORT` | No | `6379` | Valkey/Redis port |
-| `INTERNAL_PORT` | No | `7002` | Internal HTTP port used for service-to-service communication |
-| `CHECKPOINT_TTL_HOURS` | No | `48` | How long checkpoints are retained in Valkey |
-| `OBJECT_MODEL_MAX_CONNECTIONS` | No | `10` | Connection pool size for the object model DB |
-| `OBJECT_MODEL_SOFT_DELETE` | No | `true` | When `true`, object-model tables are created with a `deleted` column + partial index; set at DDL time. |
-| `ADAPTIVE_RATE_LIMITING` | No | `true` | Enable adaptive rate limiting on integration calls |
-| `AUTO_RETRY_ON_429` | No | `true` | Automatic durable-sleep retry on 429 responses |
-| `MAX_429_RETRIES` | No | `3` | Cap on automatic 429 retries |
-| `MAX_RETRY_DELAY_MS` | No | `60000` | Cap on auto-retry delay (ms) |
-| `RUNTARA_MCP_ALLOWED_HOSTS` | No | `localhost,127.0.0.1,::1` | Extra comma-separated `Host` authorities accepted by the MCP Streamable HTTP endpoint, e.g. `runtara.example.com,runtara.example.com:7001`. Loopback defaults are always included. |
-
-The default public HTTP API port for `runtara-server` itself is `7001` (see `runtara-server/src/server.rs`).
-
-### Instance-Side SDK Environment
-
-These are the variables compiled workflows consume at runtime.
-
-| Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
-| `RUNTARA_INSTANCE_ID` | Yes | - | Instance identifier |
-| `RUNTARA_TENANT_ID` | Yes | - | Tenant identifier |
-| `RUNTARA_HTTP_URL` | No | `http://127.0.0.1:8003` fallback in SDK | Base URL for the core HTTP API |
-| `RUNTARA_SERVER_ADDR` | No | compatibility fallback | Legacy host:port input still accepted by the SDK |
-| `RUNTARA_CORE_HTTP_PORT` | No | derived | Override used when deriving HTTP URL from `RUNTARA_SERVER_ADDR` |
-| `RUNTARA_REQUEST_TIMEOUT_MS` | No | `30000` | HTTP request timeout |
-| `RUNTARA_SIGNAL_POLL_INTERVAL_MS` | No | `1000` | Signal polling interval |
-| `RUNTARA_HEARTBEAT_INTERVAL_MS` | No | `30000` | Heartbeat interval |
-| `RUNTARA_CHECKPOINT_ID` | No | - | Resume/checkpoint bootstrap |
-
-Note: environment runners already inject `RUNTARA_HTTP_URL` directly for instances. `RUNTARA_SERVER_ADDR` is kept mainly for backward compatibility.
-
-### Workflow Compilation
-
-| Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
-| `RUNTARA_COMPILE_TARGET` | No | `wasm32-wasip2` | Compilation target triple |
-| `RUNTARA_NATIVE_LIBRARY_DIR` | No | auto-detected | Precompiled stdlib/dependency cache |
-| `RUNTARA_WASM_LIBRARY_DIR` | No | auto-detected | Precompiled WASM stdlib/dependency cache |
-| `RUNTARA_STDLIB_NAME` | No | `runtara_workflow_stdlib` | Alternate stdlib crate name |
-| `RUNTARA_OPT_LEVEL` | No | target-dependent | rustc optimization level |
-| `RUNTARA_CODEGEN_UNITS` | No | `1` | rustc codegen units |
-| `RUNTARA_LTO` | No | `fat` for small WASM sources, `off` for large generated WASM sources | LTO mode for WASM builds |
-| `RUNTARA_LTO_LARGE_SOURCE_THRESHOLD_BYTES` | No | `1000000` | Generated Rust source-size threshold where WASM LTO defaults to `off` unless `RUNTARA_LTO` is set |
-| `RUNTARA_MCP_COMPILE_WAIT_TIMEOUT_SECS` | No | `240` | MCP compile/deploy wait window before returning `status: compiling` while the background queue continues |
-| `DATA_DIR` | No | `.data` | Build artifact root |
-
-## Development And Testing
-
-Build everything:
-
-```bash
-cargo build
-```
-
-Run the full workspace tests:
-
-```bash
-cargo test
-```
-
-Target a specific crate:
-
-```bash
-cargo test -p runtara-core
-cargo test -p runtara-environment
-cargo test -p runtara-workflows
-```
-
-Run the shell-based end-to-end checks:
-
-```bash
-./e2e/run_all.sh
-```
-
-Examples in `e2e/workflows/`:
-
-- `simple_passthrough.json`
-- `delay_workflow.json`
-
+- Full platform entry point: `crates/runtara-server`
+- Durable runtime: `crates/runtara-core`
+- Management plane: `crates/runtara-environment`
+- Workflow compiler: `crates/runtara-workflows`
+- Local development stack: `dev/README.md`
+- Proxy and deployment notes: `docs/reference/proxy/README.md`
 
 ## License
 
