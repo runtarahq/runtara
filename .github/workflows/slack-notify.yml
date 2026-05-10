@@ -2,9 +2,11 @@ name: Slack Notify
 
 # Out-of-band Slack notifications for events that aren't tied to a CI run:
 #   - PR opened / reopened / marked ready for review (same-repo only, no forks)
-#   - GitHub release published (assets attached and visible)
+#   - GitHub release published outside the automated Release workflow
 #
-# Build start / success / failure pings live in ci.yml directly.
+# Build start / success / failure pings live in ci.yml directly. Automated
+# release pings live in release.yml because releases created with GITHUB_TOKEN
+# do not fan out into a separate release event workflow run.
 #
 # All event fields are read from $GITHUB_EVENT_PATH via jq — never
 # interpolated into shell, so PR titles / branch names with quotes,

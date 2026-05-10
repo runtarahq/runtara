@@ -312,3 +312,35 @@ jobs:
               "${FLAGS[@]}" \
               "${NOTES_ARGS[@]}" \
               "${ASSETS[@]}"
+
+      - name: Notify Slack — release published
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          REPO: ${{ github.repository }}
+          TAG: ${{ steps.get_version.outputs.tag }}
+          IS_DEV: ${{ steps.get_version.outputs.is_dev }}
+          ACTOR: ${{ github.actor }}
+          RELEASE_URL: ${{ github.server_url }}/${{ github.repository }}/releases/tag/${{ steps.get_version.outputs.tag }}
+          RUN_NUM: ${{ github.run_number }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          if [[ "$IS_DEV" == "true" || "$TAG" == *-* ]]; then
+              emoji=":package:"
+              kind="Pre-release"
+          else
+              emoji=":rocket:"
+              kind="Release"
+          fi
+
+          payload=$(jq -nc \
+            --arg emoji "$emoji" \
+            --arg kind "$kind" \
+            --arg repo "$REPO" \
+            --arg tag "$TAG" \
+            --arg actor "$ACTOR" \
+            --arg release_url "$RELEASE_URL" \
+            --arg run_num "$RUN_NUM" \
+            --arg run_url "$RUN_URL" \
+            '{text: "\($emoji) \($kind) <\($release_url)|\($tag)> published for \($repo) by \($actor) (<\($run_url)|run #\($run_num)>)"}')
+          curl -sS --fail-with-body -X POST -H 'Content-Type: application/json' \
+            --data "$payload" "$SLACK_WEBHOOK_URL"
