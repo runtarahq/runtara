@@ -1,5 +1,7 @@
 use chrono::{DateTime, Utc};
 use serde_json::Value;
+#[cfg(test)]
+use serde_json::json;
 use sqlx::{PgPool, Row, postgres::PgRow};
 
 use crate::api::dto::reports::{ReportDefinition, ReportDto, ReportStatus};
@@ -153,15 +155,23 @@ fn row_to_report(row: PgRow) -> Result<ReportDto, sqlx::Error> {
     let tags = serde_json::from_value(tags_value).unwrap_or_default();
 
     let definition_value: Value = row.try_get("definition")?;
+    let definition_version = row.try_get("definition_version").unwrap_or(1);
     let definition: ReportDefinition =
-        serde_json::from_value(definition_value).unwrap_or(ReportDefinition {
-            definition_version: row.try_get("definition_version").unwrap_or(1),
-            layout: vec![],
-            views: vec![],
-            filters: vec![],
-            datasets: vec![],
-            blocks: vec![],
-        });
+        serde_json::from_value(sanitize_unsupported_report_definition(definition_value))
+            .unwrap_or_else(|error| {
+                tracing::warn!(
+                    error = %error,
+                    "Stored report definition could not be read after compatibility sanitization"
+                );
+                ReportDefinition {
+                    definition_version,
+                    layout: vec![],
+                    views: vec![],
+                    filters: vec![],
+                    datasets: vec![],
+                    blocks: vec![],
+                }
+            });
 
     let status: String = row.try_get("status")?;
 
@@ -177,4 +187,108 @@ fn row_to_report(row: PgRow) -> Result<ReportDto, sqlx::Error> {
         created_at: row.try_get::<DateTime<Utc>, _>("created_at")?,
         updated_at: row.try_get::<DateTime<Utc>, _>("updated_at")?,
     })
+}
+
+fn sanitize_unsupported_report_definition(mut value: Value) -> Value {
+    let Value::Object(object) = &mut value else {
+        return value;
+    };
+
+    object.remove("markdown");
+
+    if let Some(layout) = object.get_mut("layout") {
+        sanitize_unsupported_layout_nodes(layout);
+    }
+
+    if let Some(Value::Array(views)) = object.get_mut("views") {
+        for view in views {
+            if let Some(layout) = view.get_mut("layout") {
+                sanitize_unsupported_layout_nodes(layout);
+            }
+        }
+    }
+
+    value
+}
+
+fn sanitize_unsupported_layout_nodes(node: &mut Value) {
+    match node {
+        Value::Array(nodes) => {
+            nodes.retain(is_supported_layout_node);
+            for child in nodes {
+                sanitize_unsupported_layout_nodes(child);
+            }
+        }
+        Value::Object(object) => {
+            if let Some(children) = object.get_mut("children") {
+                sanitize_unsupported_layout_nodes(children);
+            }
+
+            if let Some(Value::Array(columns)) = object.get_mut("columns") {
+                for column in columns {
+                    if let Some(children) = column.get_mut("children") {
+                        sanitize_unsupported_layout_nodes(children);
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn is_supported_layout_node(node: &Value) -> bool {
+    matches!(
+        node.get("type").and_then(Value::as_str),
+        Some("block" | "metric_row" | "section" | "columns" | "grid")
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::api::dto::reports::ReportLayoutNode;
+
+    #[test]
+    fn sanitizes_legacy_layout_markdown_nodes_without_converting_them() {
+        let value = json!({
+            "definitionVersion": 1,
+            "markdown": "# Legacy wrapper",
+            "layout": [
+                {
+                    "id": "intro",
+                    "type": "markdown",
+                    "content": "# Intro"
+                },
+                {
+                    "id": "items_node",
+                    "type": "block",
+                    "blockId": "items"
+                }
+            ],
+            "filters": [],
+            "blocks": [
+                {
+                    "id": "items",
+                    "type": "table",
+                    "source": {"schema": "Item", "mode": "filter"},
+                    "table": {"columns": [{"field": "name"}]}
+                }
+            ]
+        });
+
+        let sanitized = sanitize_unsupported_report_definition(value);
+        assert!(sanitized.get("markdown").is_none());
+
+        let definition: ReportDefinition = serde_json::from_value(sanitized).unwrap();
+        assert_eq!(definition.blocks.len(), 1);
+        assert_eq!(definition.blocks[0].id, "items");
+        assert_eq!(definition.layout.len(), 1);
+
+        match &definition.layout[0] {
+            ReportLayoutNode::Block(node) => {
+                assert_eq!(node.block_id, "items");
+            }
+            other => panic!("expected block layout node, got {other:?}"),
+        }
+    }
 }
