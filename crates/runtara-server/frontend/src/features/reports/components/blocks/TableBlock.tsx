@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { memo, useCallback, useMemo, useState } from 'react';
 import {
   ArrowDown,
   ArrowUp,
@@ -94,6 +94,14 @@ type TableData = {
   message?: string;
 };
 
+type WritebackContext = { schemaId: string; instanceId: string };
+
+type TableRowEntry = {
+  row: Record<string, unknown> | unknown[];
+  rowKey: string;
+  rowObject: Record<string, unknown>;
+};
+
 type TableBlockProps = {
   reportId: string;
   block: ReportBlockDefinition;
@@ -107,6 +115,11 @@ type TableBlockProps = {
   onCellClick?: (cell: Record<string, unknown>) => boolean;
   onRefresh?: () => void | Promise<void>;
 };
+
+const EMPTY_ROWS: NonNullable<TableData['rows']> = [];
+const EMPTY_CONFIGURED_COLUMNS: ReportTableColumn[] = [];
+const EMPTY_TABLE_ACTIONS: ReportTableActionConfig[] = [];
+const EMPTY_DIAGNOSTICS: NonNullable<TableData['diagnostics']> = [];
 
 export function TableBlock({
   reportId,
@@ -136,30 +149,113 @@ export function TableBlock({
     field: string;
   } | null>(null);
   const data = (result.data ?? {}) as TableData;
-  const rows = data.rows ?? [];
-  const configuredColumns = block.table?.columns ?? [];
-  const columns = normalizeColumns(data.columns, configuredColumns);
+  const rows = data.rows ?? EMPTY_ROWS;
+  const configuredColumns = block.table?.columns ?? EMPTY_CONFIGURED_COLUMNS;
+  const columns = useMemo(
+    () => normalizeColumns(data.columns, configuredColumns),
+    [data.columns, configuredColumns]
+  );
   const page = data.page ?? { offset: 0, size: 50, hasNextPage: false };
-  const rowEntries = rows.map((row, rowIndex) => ({
-    row,
-    rowKey: getRowKey(row, page.offset + rowIndex),
-    rowObject: getRowObject(row, columns),
-  }));
-  const tableActions = block.table?.actions ?? [];
+  const rowEntries = useMemo<TableRowEntry[]>(
+    () =>
+      rows.map((row, rowIndex) => ({
+        row,
+        rowKey: getRowKey(row, page.offset + rowIndex),
+        rowObject: getRowObject(row, columns),
+      })),
+    [columns, page.offset, rows]
+  );
+  const tableActions = block.table?.actions ?? EMPTY_TABLE_ACTIONS;
   const selectable = Boolean(
     block.table?.selectable || tableActions.length > 0
   );
-  const selectedRows = rowEntries
-    .filter((entry) => selectedRowKeys.has(entry.rowKey))
-    .map((entry) => entry.rowObject);
+  const selectedRows = useMemo(
+    () =>
+      rowEntries
+        .filter((entry) => selectedRowKeys.has(entry.rowKey))
+        .map((entry) => entry.rowObject),
+    [rowEntries, selectedRowKeys]
+  );
   const allRowsSelected =
     rowEntries.length > 0 &&
     rowEntries.every((entry) => selectedRowKeys.has(entry.rowKey));
   const someRowsSelected =
     rowEntries.some((entry) => selectedRowKeys.has(entry.rowKey)) &&
     !allRowsSelected;
-  const pageSizeOptions = getPageSizeOptions(block, page.size);
-  const diagnostics = data.diagnostics ?? [];
+  const pageSizeOptions = useMemo(
+    () => getPageSizeOptions(block, page.size),
+    [block, page.size]
+  );
+  const diagnostics = data.diagnostics ?? EMPTY_DIAGNOSTICS;
+  const writebackMutate = writeback.mutate;
+  const writebackPending = writeback.isPending;
+
+  const toggleAllRows = useCallback(
+    (checked: boolean | 'indeterminate') => {
+      setSelectedRowKeys((current) => {
+        const next = new Set(current);
+        for (const entry of rowEntries) {
+          if (checked === true) {
+            next.add(entry.rowKey);
+          } else {
+            next.delete(entry.rowKey);
+          }
+        }
+        return next;
+      });
+    },
+    [rowEntries]
+  );
+
+  const toggleRowSelected = useCallback(
+    (rowKey: string, checked: boolean | 'indeterminate') => {
+      setSelectedRowKeys((current) => {
+        const next = new Set(current);
+        if (checked === true) {
+          next.add(rowKey);
+        } else {
+          next.delete(rowKey);
+        }
+        return next;
+      });
+    },
+    []
+  );
+
+  const editCell = useCallback((rowKey: string, field: string) => {
+    setEditingCell({ rowKey, field });
+  }, []);
+
+  const commitCell = useCallback(
+    (
+      writebackContext: WritebackContext | null,
+      field: string,
+      value: unknown,
+      refreshAfterCommit: boolean
+    ) => {
+      if (writebackContext) {
+        writebackMutate(
+          {
+            schemaId: writebackContext.schemaId,
+            instanceId: writebackContext.instanceId,
+            field,
+            value,
+          },
+          {
+            onSuccess: () => {
+              if (refreshAfterCommit) {
+                void onRefresh?.();
+              }
+            },
+          }
+        );
+      }
+      setEditingCell(null);
+    },
+    [onRefresh, writebackMutate]
+  );
+
+  const cancelCell = useCallback(() => setEditingCell(null), []);
 
   const showPagination =
     page.hasNextPage ||
@@ -208,19 +304,7 @@ export function TableBlock({
                         : false
                   }
                   disabled={rowEntries.length === 0}
-                  onCheckedChange={(checked) => {
-                    setSelectedRowKeys((current) => {
-                      const next = new Set(current);
-                      for (const entry of rowEntries) {
-                        if (checked === true) {
-                          next.add(entry.rowKey);
-                        } else {
-                          next.delete(entry.rowKey);
-                        }
-                      }
-                      return next;
-                    });
-                  }}
+                  onCheckedChange={toggleAllRows}
                 />
               </TableHead>
             )}
@@ -280,161 +364,31 @@ export function TableBlock({
           ) : (
             rowEntries.map(({ row, rowKey, rowObject }) => {
               return (
-                <TableRow
+                <MemoizedTableBodyRow
                   key={rowKey}
-                  className={
-                    onRowClick
-                      ? 'cursor-pointer transition-colors hover:bg-muted/40'
-                      : undefined
+                  reportId={reportId}
+                  blockId={block.id}
+                  row={row}
+                  rowKey={rowKey}
+                  rowObject={rowObject}
+                  columns={columns}
+                  selectable={selectable}
+                  selected={selectedRowKeys.has(rowKey)}
+                  editingField={
+                    editingCell?.rowKey === rowKey ? editingCell.field : null
                   }
-                  onClick={() => onRowClick?.(rowObject)}
-                >
-                  {selectable && (
-                    <TableCell className="w-10 py-3 align-top">
-                      <Checkbox
-                        aria-label="Select row"
-                        checked={selectedRowKeys.has(rowKey)}
-                        onClick={(event) => event.stopPropagation()}
-                        onCheckedChange={(checked) => {
-                          setSelectedRowKeys((current) => {
-                            const next = new Set(current);
-                            if (checked === true) {
-                              next.add(rowKey);
-                            } else {
-                              next.delete(rowKey);
-                            }
-                            return next;
-                          });
-                        }}
-                      />
-                    </TableCell>
-                  )}
-                  {columns.map((column, columnIndex) => {
-                    const value = getCellValue(row, column, columnIndex);
-                    const displayValue = getCellDisplayValue(
-                      rowObject,
-                      column,
-                      value
-                    );
-                    const writebackContext = getWritebackContext(
-                      column,
-                      rowObject
-                    );
-                    const workflowActionKey = `${block.id}:${rowKey}:${column.key}`;
-                    const isWorkflowRunning =
-                      column.workflowAction !== undefined &&
-                      workflowAction.isRunning(workflowActionKey);
-                    const shouldRenderWorkflowAction =
-                      column.workflowAction !== undefined &&
-                      isWorkflowActionVisible(column.workflowAction, rowObject);
-                    const isWorkflowDisabled =
-                      column.workflowAction !== undefined &&
-                      isWorkflowActionDisabled(
-                        column.workflowAction,
-                        rowObject
-                      );
-                    const isEditing =
-                      editingCell?.rowKey === rowKey &&
-                      editingCell.field === column.key;
-                    return (
-                      <TableCell
-                        key={column.key}
-                        className={cn(
-                          'group/cell relative py-3 align-top',
-                          column.align === 'right' && 'text-right tabular-nums',
-                          writebackContext && !isEditing && 'pr-8'
-                        )}
-                        onClick={(event) => {
-                          if (isEditing) {
-                            event.stopPropagation();
-                            return;
-                          }
-                          if (!onCellClick) return;
-                          const handled = onCellClick({
-                            ...rowObject,
-                            field: column.key,
-                            value,
-                          });
-                          if (handled) {
-                            event.stopPropagation();
-                          }
-                        }}
-                      >
-                        {isEditing ? (
-                          <div onClick={(e) => e.stopPropagation()}>
-                            <FieldEditor
-                              value={value}
-                              displayValue={displayValue}
-                              format={column.format}
-                              pillVariants={column.pillVariants}
-                              editor={column.editor}
-                              lookupContext={{
-                                reportId,
-                                blockId: block.id,
-                                field: column.key,
-                                filters,
-                                blockFilters,
-                              }}
-                              busy={writeback.isPending}
-                              onCommit={(next) => {
-                                if (writebackContext) {
-                                  writeback.mutate({
-                                    schemaId: writebackContext.schemaId,
-                                    instanceId: writebackContext.instanceId,
-                                    field: column.key,
-                                    value: next,
-                                  });
-                                }
-                                setEditingCell(null);
-                              }}
-                              onCancel={() => setEditingCell(null)}
-                            />
-                          </div>
-                        ) : (
-                          <>
-                            {column.workflowAction &&
-                            shouldRenderWorkflowAction ? (
-                              <WorkflowActionButton
-                                action={column.workflowAction}
-                                labelFallback="Run"
-                                running={isWorkflowRunning}
-                                disabled={isWorkflowDisabled}
-                                value={value}
-                                row={rowObject}
-                                fallbackField={column.key}
-                                actionKey={workflowActionKey}
-                                onRun={workflowAction.run}
-                              />
-                            ) : column.workflowAction ? null : (
-                              <TableCellValue
-                                column={column}
-                                value={value}
-                                displayValue={displayValue}
-                                row={rowObject}
-                              />
-                            )}
-                            {writebackContext && (
-                              <button
-                                type="button"
-                                aria-label="Edit cell"
-                                className="absolute right-2 top-1/2 -translate-y-1/2 rounded p-1 text-muted-foreground opacity-0 transition-opacity hover:bg-muted hover:text-foreground group-hover/cell:opacity-100"
-                                onClick={(event) => {
-                                  event.stopPropagation();
-                                  setEditingCell({
-                                    rowKey,
-                                    field: column.key,
-                                  });
-                                }}
-                              >
-                                <Pencil className="h-3 w-3" />
-                              </button>
-                            )}
-                          </>
-                        )}
-                      </TableCell>
-                    );
-                  })}
-                </TableRow>
+                  filters={filters}
+                  blockFilters={blockFilters}
+                  writebackPending={writebackPending}
+                  onToggleSelected={toggleRowSelected}
+                  onEditCell={editCell}
+                  onCommitCell={commitCell}
+                  onCancelCell={cancelCell}
+                  onRowClick={onRowClick}
+                  onCellClick={onCellClick}
+                  onRunWorkflow={workflowAction.run}
+                  isWorkflowRunning={workflowAction.isRunning}
+                />
               );
             })
           )}
@@ -499,6 +453,224 @@ export function TableBlock({
         </div>
       )}
     </div>
+  );
+}
+
+type TableBodyRowProps = {
+  reportId: string;
+  blockId: string;
+  row: Record<string, unknown> | unknown[];
+  rowKey: string;
+  rowObject: Record<string, unknown>;
+  columns: TableColumn[];
+  selectable: boolean;
+  selected: boolean;
+  editingField: string | null;
+  filters: Record<string, unknown>;
+  blockFilters: Record<string, unknown>;
+  writebackPending: boolean;
+  onToggleSelected: (
+    rowKey: string,
+    checked: boolean | 'indeterminate'
+  ) => void;
+  onEditCell: (rowKey: string, field: string) => void;
+  onCommitCell: (
+    writebackContext: WritebackContext | null,
+    field: string,
+    value: unknown,
+    refreshAfterCommit: boolean
+  ) => void;
+  onCancelCell: () => void;
+  onRowClick?: (row: Record<string, unknown>) => void;
+  onCellClick?: (cell: Record<string, unknown>) => boolean;
+  onRunWorkflow: (args: {
+    key: string;
+    action: ReportWorkflowActionConfig;
+    row?: Record<string, unknown>;
+    value?: unknown;
+    fallbackField?: string;
+    selectedRows?: Record<string, unknown>[];
+  }) => void | Promise<void>;
+  isWorkflowRunning: (key: string) => boolean;
+};
+
+const MemoizedTableBodyRow = memo(TableBodyRow, areTableBodyRowPropsEqual);
+
+function TableBodyRow({
+  reportId,
+  blockId,
+  row,
+  rowKey,
+  rowObject,
+  columns,
+  selectable,
+  selected,
+  editingField,
+  filters,
+  blockFilters,
+  writebackPending,
+  onToggleSelected,
+  onEditCell,
+  onCommitCell,
+  onCancelCell,
+  onRowClick,
+  onCellClick,
+  onRunWorkflow,
+  isWorkflowRunning,
+}: TableBodyRowProps) {
+  return (
+    <TableRow
+      className={
+        onRowClick
+          ? 'cursor-pointer transition-colors hover:bg-muted/40'
+          : undefined
+      }
+      onClick={() => onRowClick?.(rowObject)}
+    >
+      {selectable && (
+        <TableCell className="w-10 py-3 align-top">
+          <Checkbox
+            aria-label="Select row"
+            checked={selected}
+            onClick={(event) => event.stopPropagation()}
+            onCheckedChange={(checked) => onToggleSelected(rowKey, checked)}
+          />
+        </TableCell>
+      )}
+      {columns.map((column, columnIndex) => {
+        const value = getCellValue(row, column, columnIndex);
+        const displayValue = getCellDisplayValue(rowObject, column, value);
+        const writebackContext = getWritebackContext(column, rowObject);
+        const workflowActionKey = `${blockId}:${rowKey}:${column.key}`;
+        const isWorkflowActionRunning =
+          column.workflowAction !== undefined &&
+          isWorkflowRunning(workflowActionKey);
+        const shouldRenderWorkflowAction =
+          column.workflowAction !== undefined &&
+          isWorkflowActionVisible(column.workflowAction, rowObject);
+        const isWorkflowDisabled =
+          column.workflowAction !== undefined &&
+          isWorkflowActionDisabled(column.workflowAction, rowObject);
+        const isEditing = editingField === column.key;
+
+        return (
+          <TableCell
+            key={column.key}
+            className={cn(
+              'group/cell relative py-3 align-top',
+              column.align === 'right' && 'text-right tabular-nums',
+              writebackContext && !isEditing && 'pr-8'
+            )}
+            onClick={(event) => {
+              if (isEditing) {
+                event.stopPropagation();
+                return;
+              }
+              if (!onCellClick) return;
+              const handled = onCellClick({
+                ...rowObject,
+                field: column.key,
+                value,
+              });
+              if (handled) {
+                event.stopPropagation();
+              }
+            }}
+          >
+            {isEditing ? (
+              <div onClick={(event) => event.stopPropagation()}>
+                <FieldEditor
+                  value={value}
+                  displayValue={displayValue}
+                  format={column.format}
+                  pillVariants={column.pillVariants}
+                  editor={column.editor}
+                  lookupContext={{
+                    reportId,
+                    blockId,
+                    field: column.key,
+                    filters,
+                    blockFilters,
+                  }}
+                  busy={writebackPending}
+                  onCommit={(next) =>
+                    onCommitCell(
+                      writebackContext,
+                      column.key,
+                      next,
+                      shouldRefreshAfterWriteback(column)
+                    )
+                  }
+                  onCancel={onCancelCell}
+                />
+              </div>
+            ) : (
+              <>
+                {column.workflowAction && shouldRenderWorkflowAction ? (
+                  <WorkflowActionButton
+                    action={column.workflowAction}
+                    labelFallback="Run"
+                    running={isWorkflowActionRunning}
+                    disabled={isWorkflowDisabled}
+                    value={value}
+                    row={rowObject}
+                    fallbackField={column.key}
+                    actionKey={workflowActionKey}
+                    onRun={onRunWorkflow}
+                  />
+                ) : column.workflowAction ? null : (
+                  <TableCellValue
+                    column={column}
+                    value={value}
+                    displayValue={displayValue}
+                    row={rowObject}
+                  />
+                )}
+                {writebackContext && (
+                  <button
+                    type="button"
+                    aria-label="Edit cell"
+                    className="absolute right-2 top-1/2 -translate-y-1/2 rounded p-1 text-muted-foreground opacity-0 transition-opacity hover:bg-muted hover:text-foreground group-hover/cell:opacity-100"
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      onEditCell(rowKey, column.key);
+                    }}
+                  >
+                    <Pencil className="h-3 w-3" />
+                  </button>
+                )}
+              </>
+            )}
+          </TableCell>
+        );
+      })}
+    </TableRow>
+  );
+}
+
+function areTableBodyRowPropsEqual(
+  previous: TableBodyRowProps,
+  next: TableBodyRowProps
+): boolean {
+  const editingStateEqual =
+    previous.editingField === next.editingField &&
+    (previous.editingField === null ||
+      (previous.writebackPending === next.writebackPending &&
+        previous.filters === next.filters &&
+        previous.blockFilters === next.blockFilters));
+
+  return (
+    previous.reportId === next.reportId &&
+    previous.blockId === next.blockId &&
+    previous.row === next.row &&
+    previous.rowObject === next.rowObject &&
+    previous.columns === next.columns &&
+    previous.selectable === next.selectable &&
+    previous.selected === next.selected &&
+    editingStateEqual &&
+    Boolean(previous.onRowClick) === Boolean(next.onRowClick) &&
+    Boolean(previous.onCellClick) === Boolean(next.onCellClick) &&
+    previous.isWorkflowRunning === next.isWorkflowRunning
   );
 }
 
@@ -602,13 +774,17 @@ function getCellDisplayValue(
 function getWritebackContext(
   column: TableColumn,
   rowObject: Record<string, unknown>
-): { schemaId: string; instanceId: string } | null {
+): WritebackContext | null {
   if (!column.editable) return null;
   if (column.type === 'chart' || isWorkflowButtonColumn(column)) return null;
   const id = rowObject.id;
   const schemaId = rowObject.schemaId;
   if (typeof id !== 'string' || typeof schemaId !== 'string') return null;
   return { schemaId, instanceId: id };
+}
+
+function shouldRefreshAfterWriteback(column: TableColumn): boolean {
+  return Boolean(column.displayField || column.editor?.kind === 'lookup');
 }
 
 function TableActionsToolbar({

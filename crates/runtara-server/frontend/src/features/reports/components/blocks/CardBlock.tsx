@@ -104,15 +104,24 @@ export function CardBlock({
       row={data.row}
       editingField={editingField}
       onEditField={setEditingField}
-      onCommitField={(field, value) => {
+      onCommitField={(field, value, refreshAfterCommit) => {
         const ctx = getCardWritebackContext(data.row);
         if (ctx) {
-          writeback.mutate({
-            schemaId: ctx.schemaId,
-            instanceId: ctx.instanceId,
-            field,
-            value,
-          });
+          writeback.mutate(
+            {
+              schemaId: ctx.schemaId,
+              instanceId: ctx.instanceId,
+              field,
+              value,
+            },
+            {
+              onSuccess: () => {
+                if (refreshAfterCommit) {
+                  void onRefresh?.();
+                }
+              },
+            }
+          );
         }
         setEditingField(null);
       }}
@@ -141,7 +150,11 @@ function getCardWritebackContext(
 type FieldEditingProps = {
   editingField?: string | null;
   onEditField?: (field: string | null) => void;
-  onCommitField?: (field: string, value: unknown) => void;
+  onCommitField?: (
+    field: string,
+    value: unknown,
+    refreshAfterCommit: boolean
+  ) => void;
   onCancelField?: () => void;
   busy?: boolean;
   reportId?: string;
@@ -352,7 +365,13 @@ function CardField({
                 : undefined
             }
             busy={busy}
-            onCommit={(next) => onCommitField?.(field.field, next)}
+            onCommit={(next) =>
+              onCommitField?.(
+                field.field,
+                next,
+                shouldRefreshAfterWriteback(field)
+              )
+            }
             onCancel={() => onCancelField?.()}
           />
         ) : kind === 'json' ? (
@@ -403,6 +422,10 @@ function getDisplayValue(
     return value;
   }
   return displayValue;
+}
+
+function shouldRefreshAfterWriteback(field: ReportCardField): boolean {
+  return Boolean(field.displayField || field.editor?.kind === 'lookup');
 }
 
 function WorkflowActionButton({

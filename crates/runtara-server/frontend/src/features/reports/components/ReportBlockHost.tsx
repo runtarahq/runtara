@@ -310,7 +310,7 @@ export function ReportBlockHost({
           />
         </div>
       )}
-      {!isVisible || isFetching ? (
+      {!isVisible || (!result && isFetching) ? (
         <BlockSkeleton block={block} />
       ) : !result ? (
         <BlockSkeleton block={block} />
@@ -454,7 +454,7 @@ function MarkdownBlock({
   const content =
     typeof data.content === 'string'
       ? data.content
-      : block.markdown?.content ?? '';
+      : (block.markdown?.content ?? '');
   const source =
     data.source && typeof data.source === 'object'
       ? (data.source as Record<string, unknown>)
