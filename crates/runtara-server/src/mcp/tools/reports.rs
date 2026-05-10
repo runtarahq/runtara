@@ -1245,13 +1245,16 @@ fn report_authoring_schema() -> Value {
                 "columns": [{"field": "sku", "label": "SKU", "format": "optional formatter"}, {"field": "stock_trend", "label": "Trend", "type": "chart", "chart": {"kind": "line", "x": "snapshot_date", "series": [{"field": "qty", "label": "Qty"}]}, "source": {"schema": "StockSnapshot", "mode": "aggregate", "groupBy": ["snapshot_date"], "aggregates": [{"alias": "qty", "op": "sum", "field": "qty"}], "join": [{"parentField": "sku", "field": "sku"}]}}],
                 "defaultSort": [{"field": "sku", "direction": "asc"}],
                 "pagination": {"defaultPageSize": 50, "allowedPageSizes": [25, 50, 100]},
+                "selectable": "Optional boolean. Shows a per-row checkbox selection column. table.actions also enables selection automatically.",
+                "actions": [{"id": "bulk_process", "label": "Process selected", "workflowAction": {"workflowId": "process_items", "label": "Process selected", "runningLabel": "Processing...", "successMessage": "Selected rows processed.", "reloadBlock": true, "context": {"mode": "selection", "inputKey": "items"}}}],
                 "writeback": {
                     "editable": "Optional boolean. When true, the table renders an inline editor on the cell and writes the new value back to the underlying Object Model record via PUT /api/runtime/object-model/instances/{schemaId}/{instanceId}. Only honored when source.kind='object_model', source.mode='filter', and source.join is empty/absent (rows must carry a stable id+schemaId). Type='chart' columns and joined lookup columns are never editable.",
                     "displayField": "Optional row field to render while writes still target field. Use this with joined labels, e.g. field='category_id', displayField='category.name'.",
                     "editor": "Optional explicit editor config: {kind, lookup?, options?, min?, max?, step?, regex?, placeholder?}. kind is one of text | textarea | number | select | toggle | date | datetime | lookup. For lookup, set editor.lookup={schema, valueField, labelField, searchFields?, connectionId?, condition?, filterMappings?}. The editor searches the lookup schema, displays labelField, and writes valueField into the edited row field.",
                     "note": "Writeback is opt-in per column. Auth + type validation happens on the object-model endpoint, not in the report layer — viewers need write permission on the underlying schema. The 'editable' flag here is a UI hint; it does not relax server-side authorization."
                 },
-                "note": "Tables support source.mode='filter' for row data and source.mode='aggregate' for grouped aggregate result sets. Configure visible/searchable/sortable fields in table.columns. A table column may use type='chart' for inline aggregate charts or type='value' with source.select for scalar joined lookups. To enable inline writeback on a column, see writeback.editable."
+                "workflowAction": "Optional table column button: set type='workflow_button' and workflowAction={workflowId, version?, label?, runningLabel?, successMessage?, reloadBlock?, visibleWhen?, hiddenWhen?, disabledWhen?, context?}. context.mode is row | field | value. mode=row passes the whole row as workflow data; mode=field passes context.field or column.field; mode=value passes the cell value. context.inputKey wraps the context as {inputKey: context}. visibleWhen/hiddenWhen/disabledWhen are row-level condition DSL objects evaluated against the rendered row, e.g. disabledWhen={op:'EQ', arguments:['status','processed']}.",
+                "note": "Tables support source.mode='filter' for row data and source.mode='aggregate' for grouped aggregate result sets. Configure visible/searchable/sortable fields in table.columns. A table column may use type='chart' for inline aggregate charts, type='value' with source.select for scalar joined lookups, type='workflow_button' with workflowAction for a row-scoped workflow launcher, or table.actions[] for table-wide selected-row workflow launchers. To enable inline writeback on a column, see writeback.editable."
             },
             "chart": {
                 "type": "chart",
@@ -1291,8 +1294,9 @@ fn report_authoring_schema() -> Value {
                     "field": "Property name on the row to read.",
                     "label": "Optional override for the field label (defaults to humanized field name).",
                     "displayField": "Optional row field to render while writes still target field. Use this with joined labels, e.g. field='category_id', displayField='category.name'.",
-                    "kind": "value (default) | json | markdown | subcard | subtable",
+                    "kind": "value (default) | json | markdown | subcard | subtable | workflow_button",
                     "format": "Format hint for kind=value: currency, currency_compact, decimal, percent, datetime, date, number, pill.",
+                    "workflowAction": "Optional card field button: set kind='workflow_button' and workflowAction={workflowId, version?, label?, runningLabel?, successMessage?, reloadBlock?, visibleWhen?, hiddenWhen?, disabledWhen?, context?}. context.mode is row | field | value, and context.inputKey can wrap the selected context into an object. visibleWhen/hiddenWhen/disabledWhen are row-level condition DSL objects evaluated against the rendered row.",
                     "pillVariants": "{value: variant} map for color-coding enum/status fields. variant is one of default, secondary, destructive, outline, muted, success, warning. Use this on enum columns like status/severity/decision.",
                     "collapsed": "Optional. For json/markdown/subcard/subtable: start collapsed behind a Show/Hide toggle.",
                     "colSpan": "Optional 1–4 grid column span within the parent group.",
@@ -1369,6 +1373,7 @@ fn report_authoring_schema() -> Value {
             "For workflow_runtime entity='actions', table.columns and orderBy use action fields such as actionId, actionKey, label, status, instanceId, requestedAt. Conditions can additionally use nested metadata fields such as correlation.case_id or context.purpose.",
             "For type='actions', do not configure table columns; the block renders forms from each action.inputSchema and submits through the report-scoped workflow action endpoint.",
             "For type='card', use card.groups[].fields. Each field references a row property by name. Use kind='subtable' (with subtable.columns) for arrays-of-objects and kind='subcard' (with subcard.groups) for nested objects. Use format='pill' + pillVariants to color-code enum/status fields.",
+            "For workflow launch buttons, use table.columns[].type='workflow_button' or card.groups[].fields[].kind='workflow_button' with workflowAction.workflowId. Set workflowAction.context.mode='row' to pass the whole row, 'field' to pass a row field, or 'value' to pass the cell/field value. Use workflowAction.visibleWhen or hiddenWhen for row-level visibility, and disabledWhen for visible-but-disabled buttons, e.g. disabledWhen={op:'EQ', arguments:['status','processed']}. For table-wide bulk workflow buttons, use table.actions[] with workflowAction.context.mode='selection'; buttons remain visible but disabled until one or more current table rows are selected.",
             "For editable lookup/reference fields, keep the stored id in field, optionally render a joined label with displayField, and set editor.kind='lookup' with editor.lookup={schema, valueField, labelField, searchFields?}."
         ],
         "commonMistakes": [
@@ -3060,7 +3065,13 @@ fn collect_table_issues(path: &str, table: &Value, issues: &mut Vec<AuthoringIss
     collect_unknown_keys_with_messages(
         path,
         table,
-        &["columns", "defaultSort", "pagination"],
+        &[
+            "columns",
+            "defaultSort",
+            "pagination",
+            "selectable",
+            "actions",
+        ],
         |key| match key {
             "fields" => Some((
                 "MISNAMED_TABLE_COLUMNS",
@@ -3087,6 +3098,7 @@ fn collect_table_issues(path: &str, table: &Value, issues: &mut Vec<AuthoringIss
                     "source",
                     "editable",
                     "editor",
+                    "workflowAction",
                 ],
                 issues,
             );
@@ -3135,6 +3147,33 @@ fn collect_table_issues(path: &str, table: &Value, issues: &mut Vec<AuthoringIss
             if let Some(editor) = column.get("editor") {
                 collect_editor_issues(&format!("{path}.columns[{index}].editor"), editor, issues);
             }
+            if let Some(action) = column.get("workflowAction") {
+                collect_workflow_action_issues(
+                    &format!("{path}.columns[{index}].workflowAction"),
+                    action,
+                    WorkflowActionScope::RowScoped,
+                    issues,
+                );
+            }
+        }
+    }
+
+    if let Some(actions) = table.get("actions") {
+        match actions.as_array() {
+            Some(actions) => {
+                for (index, action) in actions.iter().enumerate() {
+                    collect_table_action_issues(
+                        &format!("{path}.actions[{index}]"),
+                        action,
+                        issues,
+                    );
+                }
+            }
+            None => issues.push(error(
+                format!("{path}.actions"),
+                "INVALID_TABLE_ACTIONS",
+                "table.actions must be an array.",
+            )),
         }
     }
 
@@ -3151,6 +3190,65 @@ fn collect_table_issues(path: &str, table: &Value, issues: &mut Vec<AuthoringIss
             &["defaultPageSize", "allowedPageSizes"],
             issues,
         );
+    }
+}
+
+fn collect_table_action_issues(path: &str, action: &Value, issues: &mut Vec<AuthoringIssue>) {
+    let Some(action_object) = action.as_object() else {
+        issues.push(error(
+            path,
+            "INVALID_TABLE_ACTION_CONFIG",
+            "table.actions entries must be objects.",
+        ));
+        return;
+    };
+
+    collect_unknown_keys(path, action, &["id", "label", "workflowAction"], issues);
+
+    if action_object
+        .get("id")
+        .and_then(Value::as_str)
+        .is_none_or(str::is_empty)
+    {
+        issues.push(error(
+            format!("{path}.id"),
+            "MISSING_TABLE_ACTION_ID",
+            "Table actions must include a stable id.",
+        ));
+    }
+
+    let Some(workflow_action) = action_object.get("workflowAction") else {
+        issues.push(error(
+            format!("{path}.workflowAction"),
+            "MISSING_TABLE_ACTION_WORKFLOW_ACTION",
+            "Table actions must define workflowAction.",
+        ));
+        return;
+    };
+
+    collect_workflow_action_issues(
+        &format!("{path}.workflowAction"),
+        workflow_action,
+        WorkflowActionScope::TableSelection,
+        issues,
+    );
+
+    let Some(workflow_action_object) = workflow_action.as_object() else {
+        return;
+    };
+    let context = workflow_action_object.get("context");
+    if context.is_none() || context.and_then(Value::as_object).is_some() {
+        let mode = context
+            .and_then(Value::as_object)
+            .and_then(|context| context.get("mode"))
+            .and_then(Value::as_str);
+        if mode.is_none_or(|mode| matches!(mode, "row" | "field" | "value")) {
+            issues.push(error(
+                format!("{path}.workflowAction.context.mode"),
+                "INVALID_TABLE_ACTION_CONTEXT_MODE",
+                "Table actions must set workflowAction.context.mode to selection so selected rows are passed to the workflow.",
+            ));
+        }
     }
 }
 
@@ -3318,6 +3416,7 @@ fn collect_card_field_issues(path: &str, field: &Value, issues: &mut Vec<Authori
             "subtable",
             "editable",
             "editor",
+            "workflowAction",
         ],
         issues,
     );
@@ -3331,6 +3430,14 @@ fn collect_card_field_issues(path: &str, field: &Value, issues: &mut Vec<Authori
     if let Some(editor) = field.get("editor") {
         collect_editor_issues(&format!("{path}.editor"), editor, issues);
     }
+    if let Some(action) = field.get("workflowAction") {
+        collect_workflow_action_issues(
+            &format!("{path}.workflowAction"),
+            action,
+            WorkflowActionScope::RowScoped,
+            issues,
+        );
+    }
     if let Some(subtable) = field.get("subtable") {
         collect_unknown_keys(
             &format!("{path}.subtable"),
@@ -3341,6 +3448,121 @@ fn collect_card_field_issues(path: &str, field: &Value, issues: &mut Vec<Authori
     }
     if let Some(subcard) = field.get("subcard") {
         collect_card_issues(&format!("{path}.subcard"), subcard, issues);
+    }
+}
+
+#[derive(Clone, Copy)]
+enum WorkflowActionScope {
+    RowScoped,
+    TableSelection,
+}
+
+fn collect_workflow_action_issues(
+    path: &str,
+    action: &Value,
+    scope: WorkflowActionScope,
+    issues: &mut Vec<AuthoringIssue>,
+) {
+    let Some(action_object) = action.as_object() else {
+        issues.push(error(
+            path,
+            "INVALID_WORKFLOW_ACTION_CONFIG",
+            "workflowAction must be an object.",
+        ));
+        return;
+    };
+
+    collect_unknown_keys(
+        path,
+        action,
+        &[
+            "workflowId",
+            "version",
+            "label",
+            "runningLabel",
+            "successMessage",
+            "reloadBlock",
+            "visibleWhen",
+            "hiddenWhen",
+            "disabledWhen",
+            "context",
+        ],
+        issues,
+    );
+
+    if action_object
+        .get("workflowId")
+        .and_then(Value::as_str)
+        .is_none_or(str::is_empty)
+    {
+        issues.push(error(
+            format!("{path}.workflowId"),
+            "MISSING_WORKFLOW_ACTION_WORKFLOW_ID",
+            "workflowAction.workflowId must reference the workflow to execute.",
+        ));
+    }
+
+    if let Some(context) = action_object.get("context") {
+        let Some(context_object) = context.as_object() else {
+            issues.push(error(
+                format!("{path}.context"),
+                "INVALID_WORKFLOW_ACTION_CONTEXT",
+                "workflowAction.context must be an object.",
+            ));
+            return;
+        };
+
+        collect_unknown_keys(
+            &format!("{path}.context"),
+            context,
+            &["mode", "field", "inputKey"],
+            issues,
+        );
+        if let Some(mode) = context_object.get("mode").and_then(Value::as_str) {
+            if !matches!(mode, "row" | "field" | "value" | "selection") {
+                issues.push(error(
+                    format!("{path}.context.mode"),
+                    "INVALID_WORKFLOW_ACTION_CONTEXT_MODE",
+                    "workflowAction.context.mode must be row, field, value, or selection.",
+                ));
+            } else if matches!(scope, WorkflowActionScope::RowScoped) && mode == "selection" {
+                issues.push(error(
+                    format!("{path}.context.mode"),
+                    "INVALID_WORKFLOW_ACTION_CONTEXT_MODE",
+                    "workflowAction.context.mode='selection' is only supported for table.actions.",
+                ));
+            }
+        }
+        if context_object
+            .get("field")
+            .is_some_and(|field| field.as_str().is_none_or(str::is_empty))
+        {
+            issues.push(error(
+                format!("{path}.context.field"),
+                "INVALID_WORKFLOW_ACTION_CONTEXT_FIELD",
+                "workflowAction.context.field must be a non-empty row field name.",
+            ));
+        }
+        if context_object
+            .get("inputKey")
+            .is_some_and(|input_key| input_key.as_str().is_none_or(str::is_empty))
+        {
+            issues.push(error(
+                format!("{path}.context.inputKey"),
+                "INVALID_WORKFLOW_ACTION_INPUT_KEY",
+                "workflowAction.context.inputKey must be a non-empty object key.",
+            ));
+        }
+    }
+
+    if let Some(condition) = action_object.get("visibleWhen") {
+        collect_condition_issues(&format!("{path}.visibleWhen"), condition, issues);
+    }
+    if let Some(condition) = action_object.get("hiddenWhen") {
+        collect_condition_issues(&format!("{path}.hiddenWhen"), condition, issues);
+    }
+    if let Some(condition) = action_object.get("disabledWhen") {
+        collect_condition_issues(&format!("{path}.disabledWhen"), condition, issues);
     }
 }
 
@@ -5017,6 +5239,56 @@ mod tests {
         assert!(!codes.contains(&"MISSING_SOURCE_SCHEMA"));
         assert!(!codes.contains(&"UNKNOWN_REPORT_FIELD"));
         assert!(!codes.contains(&"INVALID_SOURCE_KIND"));
+    }
+
+    #[test]
+    fn report_authoring_accepts_workflow_button_visibility_conditions() {
+        let definition = json!({
+            "definitionVersion": 1,
+            "markdown": "{{ block.items }}",
+            "blocks": [{
+                "id": "items",
+                "type": "table",
+                "source": {"schema": "Item", "mode": "filter"},
+                "table": {
+                    "selectable": true,
+                    "actions": [{
+                        "id": "bulk_process",
+                        "label": "Process selected",
+                        "workflowAction": {
+                            "workflowId": "process_items",
+                            "label": "Process selected",
+                            "runningLabel": "Processing selected",
+                            "successMessage": "Selected rows processed.",
+                            "reloadBlock": true,
+                            "context": {"mode": "selection", "inputKey": "items"}
+                        }
+                    }],
+                    "columns": [
+                        {"field": "status"},
+                        {
+                            "field": "process",
+                            "type": "workflow_button",
+                            "workflowAction": {
+                                "workflowId": "process_item",
+                                "label": "Process",
+                                "visibleWhen": {"op": "EQ", "arguments": ["status", "ready"]},
+                                "hiddenWhen": {"op": "IN", "arguments": ["status", ["processed", "cancelled"]]},
+                                "disabledWhen": {"op": "EQ", "arguments": ["status", "blocked"]},
+                                "context": {"mode": "row", "inputKey": "context"}
+                            }
+                        }
+                    ]
+                }
+            }]
+        });
+
+        let issues = collect_report_definition_authoring_issues(&definition);
+        let codes = issue_codes(&issues);
+
+        assert!(!codes.contains(&"UNKNOWN_KEY"));
+        assert!(!codes.contains(&"MISSING_WORKFLOW_ACTION_WORKFLOW_ID"));
+        assert!(authoring_errors(&issues).next().is_none());
     }
 
     #[test]

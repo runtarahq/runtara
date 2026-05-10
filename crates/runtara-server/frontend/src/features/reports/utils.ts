@@ -3,8 +3,10 @@ import {
   ReportDefinition,
   ReportFilterDefinition,
   ReportLayoutNode,
+  ReportRowCondition,
   ReportViewDefinition,
   ReportVisibilityCondition,
+  ReportWorkflowActionConfig,
 } from './types';
 
 export const TIME_RANGE_PRESETS = [
@@ -207,6 +209,223 @@ export function isVisibleByShowWhen(
     return false;
   }
   return true;
+}
+
+export function isWorkflowActionVisible(
+  action: ReportWorkflowActionConfig,
+  row: Record<string, unknown>
+): boolean {
+  if (
+    action.visibleWhen &&
+    !matchesReportRowCondition(action.visibleWhen, row)
+  ) {
+    return false;
+  }
+  if (action.hiddenWhen && matchesReportRowCondition(action.hiddenWhen, row)) {
+    return false;
+  }
+  return true;
+}
+
+export function isWorkflowActionDisabled(
+  action: ReportWorkflowActionConfig,
+  row: Record<string, unknown>
+): boolean {
+  return action.disabledWhen
+    ? matchesReportRowCondition(action.disabledWhen, row)
+    : false;
+}
+
+export function matchesReportRowCondition(
+  condition: ReportRowCondition,
+  row: Record<string, unknown>
+): boolean {
+  const op = condition.op.toUpperCase();
+  const args = condition.arguments ?? [];
+
+  switch (op) {
+    case 'AND':
+      return args.every((argument) =>
+        isReportRowCondition(argument)
+          ? matchesReportRowCondition(argument, row)
+          : false
+      );
+    case 'OR':
+      return args.some((argument) =>
+        isReportRowCondition(argument)
+          ? matchesReportRowCondition(argument, row)
+          : false
+      );
+    case 'NOT':
+      return isReportRowCondition(args[0])
+        ? !matchesReportRowCondition(args[0], row)
+        : false;
+    case 'EQ':
+      return compareConditionValues(
+        rowConditionOperand(args[0], row, true),
+        rowConditionOperand(args[1], row, false)
+      ).equal;
+    case 'NE':
+      return !compareConditionValues(
+        rowConditionOperand(args[0], row, true),
+        rowConditionOperand(args[1], row, false)
+      ).equal;
+    case 'GT':
+      return (
+        compareConditionValues(
+          rowConditionOperand(args[0], row, true),
+          rowConditionOperand(args[1], row, false)
+        ).ordering === 1
+      );
+    case 'GTE': {
+      const comparison = compareConditionValues(
+        rowConditionOperand(args[0], row, true),
+        rowConditionOperand(args[1], row, false)
+      );
+      return comparison.equal || comparison.ordering === 1;
+    }
+    case 'LT':
+      return (
+        compareConditionValues(
+          rowConditionOperand(args[0], row, true),
+          rowConditionOperand(args[1], row, false)
+        ).ordering === -1
+      );
+    case 'LTE': {
+      const comparison = compareConditionValues(
+        rowConditionOperand(args[0], row, true),
+        rowConditionOperand(args[1], row, false)
+      );
+      return comparison.equal || comparison.ordering === -1;
+    }
+    case 'IN': {
+      const value = rowConditionOperand(args[0], row, true);
+      return Array.isArray(args[1])
+        ? args[1].some((candidate) => conditionValuesEqual(value, candidate))
+        : false;
+    }
+    case 'NOT_IN': {
+      const value = rowConditionOperand(args[0], row, true);
+      return Array.isArray(args[1])
+        ? !args[1].some((candidate) => conditionValuesEqual(value, candidate))
+        : false;
+    }
+    case 'CONTAINS': {
+      const value = rowConditionOperand(args[0], row, true);
+      return typeof value === 'string' && typeof args[1] === 'string'
+        ? value.includes(args[1])
+        : false;
+    }
+    case 'IS_DEFINED':
+      return rowConditionOperand(args[0], row, true) !== null;
+    case 'IS_EMPTY':
+      return isEmptyConditionValue(rowConditionOperand(args[0], row, true));
+    case 'IS_NOT_EMPTY':
+      return !isEmptyConditionValue(rowConditionOperand(args[0], row, true));
+    default:
+      return false;
+  }
+}
+
+function isReportRowCondition(value: unknown): value is ReportRowCondition {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    'op' in value &&
+    typeof (value as { op?: unknown }).op === 'string'
+  );
+}
+
+function rowConditionOperand(
+  argument: unknown,
+  row: Record<string, unknown>,
+  fieldRef: boolean
+) {
+  if (fieldRef && typeof argument === 'string') {
+    return rowValue(row, argument) ?? null;
+  }
+  return argument ?? null;
+}
+
+function rowValue(row: Record<string, unknown>, field: string): unknown {
+  if (Object.prototype.hasOwnProperty.call(row, field)) {
+    return row[field];
+  }
+
+  let current: unknown = row;
+  for (const part of field.split('.')) {
+    if (current === null || current === undefined) return undefined;
+    if (Array.isArray(current)) {
+      const index = Number(part);
+      if (!Number.isInteger(index)) return undefined;
+      current = current[index];
+      continue;
+    }
+    if (typeof current !== 'object') return undefined;
+    current = (current as Record<string, unknown>)[part];
+  }
+  return current;
+}
+
+function compareConditionValues(left: unknown, right: unknown) {
+  return {
+    equal: conditionValuesEqual(left, right),
+    ordering: conditionValueOrdering(left, right),
+  };
+}
+
+function conditionValuesEqual(left: unknown, right: unknown): boolean {
+  if (typeof left === 'number' && typeof right === 'number') {
+    return left === right;
+  }
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function conditionValueOrdering(
+  left: unknown,
+  right: unknown
+): -1 | 0 | 1 | null {
+  if (left === null && right === null) return 0;
+  if (left === null) return 1;
+  if (right === null) return -1;
+  if (typeof left === 'number' && typeof right === 'number') {
+    if (left === right) return 0;
+    return left > right ? 1 : -1;
+  }
+  if (typeof left === 'string' && typeof right === 'string') {
+    return compareStrings(left, right);
+  }
+  if (typeof left === 'boolean' && typeof right === 'boolean') {
+    if (left === right) return 0;
+    return left ? 1 : -1;
+  }
+  return compareStrings(
+    conditionValueSortKey(left),
+    conditionValueSortKey(right)
+  );
+}
+
+function compareStrings(left: string, right: string): -1 | 0 | 1 {
+  const result = left.localeCompare(right);
+  if (result === 0) return 0;
+  return result > 0 ? 1 : -1;
+}
+
+function conditionValueSortKey(value: unknown): string {
+  if (value === null || value === undefined) return '';
+  if (typeof value === 'string') return value;
+  if (typeof value === 'number' || typeof value === 'boolean') {
+    return String(value);
+  }
+  return JSON.stringify(value);
+}
+
+function isEmptyConditionValue(value: unknown): boolean {
+  if (value === null || value === undefined) return true;
+  if (typeof value === 'string') return value.trim().length === 0;
+  if (Array.isArray(value)) return value.length === 0;
+  if (typeof value === 'object') return Object.keys(value).length === 0;
+  return false;
 }
 
 function extractVisibleLayoutBlockReferences(

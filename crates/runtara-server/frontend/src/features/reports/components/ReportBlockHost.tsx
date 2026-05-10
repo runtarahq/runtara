@@ -111,9 +111,16 @@ export function ReportBlockHost({
   const hasBlockFilters = (block.filters?.length ?? 0) > 0;
   const searchableFields = useMemo(
     () =>
-      (block.table?.columns ?? []).flatMap((column) =>
-        column.displayField ? [column.field, column.displayField] : [column.field]
-      ),
+      (block.table?.columns ?? [])
+        .filter(
+          (column) =>
+            column.type !== 'workflow_button' && !column.workflowAction
+        )
+        .flatMap((column) =>
+          column.displayField
+            ? [column.field, column.displayField]
+            : [column.field]
+        ),
     [block.table?.columns]
   );
   const hasInteractiveTableState =
@@ -376,6 +383,7 @@ function RenderedBlock({
             ? (cell) => onBlockInteraction('cell_click', cell)
             : undefined
         }
+        onRefresh={onRefresh}
       />
     );
   }
@@ -406,6 +414,7 @@ function RenderedBlock({
         result={result}
         filters={filters}
         blockFilters={blockFilters}
+        onRefresh={onRefresh}
       />
     );
   }

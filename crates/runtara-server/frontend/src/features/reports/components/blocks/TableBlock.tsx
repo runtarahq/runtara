@@ -5,7 +5,9 @@ import {
   ChevronLeft,
   ChevronRight,
   ExternalLink,
+  Loader2,
   Pencil,
+  Play,
 } from 'lucide-react';
 import {
   Area,
@@ -18,6 +20,7 @@ import {
   Tooltip,
 } from 'recharts';
 import { Button } from '@/shared/components/ui/button';
+import { Checkbox } from '@/shared/components/ui/checkbox';
 import {
   Select,
   SelectContent,
@@ -40,18 +43,26 @@ import {
   ReportBlockResult,
   ReportEditorConfig,
   ReportOrderBy,
+  ReportTableActionConfig,
   ReportTableColumn,
+  ReportWorkflowActionConfig,
 } from '../../types';
-import { formatCellValue, humanizeFieldName } from '../../utils';
+import {
+  formatCellValue,
+  humanizeFieldName,
+  isWorkflowActionDisabled,
+  isWorkflowActionVisible,
+} from '../../utils';
 import { FieldEditor } from './editable/FieldEditor';
 import { useReportWriteback } from './editable/useReportWriteback';
+import { useReportWorkflowAction } from './useReportWorkflowAction';
 
 type TableColumn = {
   key: string;
   label?: string;
   displayField?: string;
   format?: string | null;
-  type?: 'value' | 'chart';
+  type?: 'value' | 'chart' | 'workflow_button';
   chart?: ReportTableColumn['chart'];
   secondaryField?: string;
   linkField?: string;
@@ -61,6 +72,7 @@ type TableColumn = {
   align?: 'left' | 'right' | 'center';
   editable?: boolean;
   editor?: ReportEditorConfig;
+  workflowAction?: ReportWorkflowActionConfig;
 };
 
 type TableData = {
@@ -93,6 +105,7 @@ type TableBlockProps = {
   onSortChange: (sort: ReportOrderBy[]) => void;
   onRowClick?: (row: Record<string, unknown>) => void;
   onCellClick?: (cell: Record<string, unknown>) => boolean;
+  onRefresh?: () => void | Promise<void>;
 };
 
 export function TableBlock({
@@ -106,8 +119,18 @@ export function TableBlock({
   onSortChange,
   onRowClick,
   onCellClick,
+  onRefresh,
 }: TableBlockProps) {
   const writeback = useReportWriteback(reportId);
+  const [selectedRowKeys, setSelectedRowKeys] = useState<Set<string>>(
+    () => new Set()
+  );
+  const workflowAction = useReportWorkflowAction({
+    onCompleted: async () => {
+      setSelectedRowKeys(new Set());
+      await onRefresh?.();
+    },
+  });
   const [editingCell, setEditingCell] = useState<{
     rowKey: string;
     field: string;
@@ -117,6 +140,24 @@ export function TableBlock({
   const configuredColumns = block.table?.columns ?? [];
   const columns = normalizeColumns(data.columns, configuredColumns);
   const page = data.page ?? { offset: 0, size: 50, hasNextPage: false };
+  const rowEntries = rows.map((row, rowIndex) => ({
+    row,
+    rowKey: getRowKey(row, page.offset + rowIndex),
+    rowObject: getRowObject(row, columns),
+  }));
+  const tableActions = block.table?.actions ?? [];
+  const selectable = Boolean(
+    block.table?.selectable || tableActions.length > 0
+  );
+  const selectedRows = rowEntries
+    .filter((entry) => selectedRowKeys.has(entry.rowKey))
+    .map((entry) => entry.rowObject);
+  const allRowsSelected =
+    rowEntries.length > 0 &&
+    rowEntries.every((entry) => selectedRowKeys.has(entry.rowKey));
+  const someRowsSelected =
+    rowEntries.some((entry) => selectedRowKeys.has(entry.rowKey)) &&
+    !allRowsSelected;
   const pageSizeOptions = getPageSizeOptions(block, page.size);
   const diagnostics = data.diagnostics ?? [];
 
@@ -144,12 +185,48 @@ export function TableBlock({
 
   return (
     <div className="overflow-hidden rounded-lg border bg-background">
+      {tableActions.length > 0 && (
+        <TableActionsToolbar
+          blockId={block.id}
+          actions={tableActions}
+          selectedRows={selectedRows}
+          workflowAction={workflowAction}
+        />
+      )}
       <Table>
         <TableHeader>
           <TableRow className="group/header bg-muted/30 hover:bg-muted/30">
+            {selectable && (
+              <TableHead className="h-10 w-10">
+                <Checkbox
+                  aria-label="Select all rows"
+                  checked={
+                    allRowsSelected
+                      ? true
+                      : someRowsSelected
+                        ? 'indeterminate'
+                        : false
+                  }
+                  disabled={rowEntries.length === 0}
+                  onCheckedChange={(checked) => {
+                    setSelectedRowKeys((current) => {
+                      const next = new Set(current);
+                      for (const entry of rowEntries) {
+                        if (checked === true) {
+                          next.add(entry.rowKey);
+                        } else {
+                          next.delete(entry.rowKey);
+                        }
+                      }
+                      return next;
+                    });
+                  }}
+                />
+              </TableHead>
+            )}
             {columns.map((column) => {
               const sortDirection = getColumnSortDirection(column.key, sort);
-              const isSortable = column.type !== 'chart';
+              const isSortable = !isNonSortableColumn(column);
               return (
                 <TableHead
                   key={column.key}
@@ -194,18 +271,17 @@ export function TableBlock({
           {rows.length === 0 ? (
             <TableRow>
               <TableCell
-                colSpan={columns.length}
+                colSpan={columns.length + (selectable ? 1 : 0)}
                 className="py-12 text-center text-sm text-muted-foreground"
               >
                 No rows match the current filters.
               </TableCell>
             </TableRow>
           ) : (
-            rows.map((row, rowIndex) => {
-              const rowObject = getRowObject(row, columns);
+            rowEntries.map(({ row, rowKey, rowObject }) => {
               return (
                 <TableRow
-                  key={getRowKey(row, rowIndex)}
+                  key={rowKey}
                   className={
                     onRowClick
                       ? 'cursor-pointer transition-colors hover:bg-muted/40'
@@ -213,6 +289,26 @@ export function TableBlock({
                   }
                   onClick={() => onRowClick?.(rowObject)}
                 >
+                  {selectable && (
+                    <TableCell className="w-10 py-3 align-top">
+                      <Checkbox
+                        aria-label="Select row"
+                        checked={selectedRowKeys.has(rowKey)}
+                        onClick={(event) => event.stopPropagation()}
+                        onCheckedChange={(checked) => {
+                          setSelectedRowKeys((current) => {
+                            const next = new Set(current);
+                            if (checked === true) {
+                              next.add(rowKey);
+                            } else {
+                              next.delete(rowKey);
+                            }
+                            return next;
+                          });
+                        }}
+                      />
+                    </TableCell>
+                  )}
                   {columns.map((column, columnIndex) => {
                     const value = getCellValue(row, column, columnIndex);
                     const displayValue = getCellDisplayValue(
@@ -220,11 +316,23 @@ export function TableBlock({
                       column,
                       value
                     );
-                    const rowKey = getRowKey(row, rowIndex);
                     const writebackContext = getWritebackContext(
                       column,
                       rowObject
                     );
+                    const workflowActionKey = `${block.id}:${rowKey}:${column.key}`;
+                    const isWorkflowRunning =
+                      column.workflowAction !== undefined &&
+                      workflowAction.isRunning(workflowActionKey);
+                    const shouldRenderWorkflowAction =
+                      column.workflowAction !== undefined &&
+                      isWorkflowActionVisible(column.workflowAction, rowObject);
+                    const isWorkflowDisabled =
+                      column.workflowAction !== undefined &&
+                      isWorkflowActionDisabled(
+                        column.workflowAction,
+                        rowObject
+                      );
                     const isEditing =
                       editingCell?.rowKey === rowKey &&
                       editingCell.field === column.key;
@@ -233,8 +341,7 @@ export function TableBlock({
                         key={column.key}
                         className={cn(
                           'group/cell relative py-3 align-top',
-                          column.align === 'right' &&
-                            'text-right tabular-nums',
+                          column.align === 'right' && 'text-right tabular-nums',
                           writebackContext && !isEditing && 'pr-8'
                         )}
                         onClick={(event) => {
@@ -285,12 +392,27 @@ export function TableBlock({
                           </div>
                         ) : (
                           <>
-                            <TableCellValue
-                              column={column}
-                              value={value}
-                              displayValue={displayValue}
-                              row={rowObject}
-                            />
+                            {column.workflowAction &&
+                            shouldRenderWorkflowAction ? (
+                              <WorkflowActionButton
+                                action={column.workflowAction}
+                                labelFallback="Run"
+                                running={isWorkflowRunning}
+                                disabled={isWorkflowDisabled}
+                                value={value}
+                                row={rowObject}
+                                fallbackField={column.key}
+                                actionKey={workflowActionKey}
+                                onRun={workflowAction.run}
+                              />
+                            ) : column.workflowAction ? null : (
+                              <TableCellValue
+                                column={column}
+                                value={value}
+                                displayValue={displayValue}
+                                row={rowObject}
+                              />
+                            )}
                             {writebackContext && (
                               <button
                                 type="button"
@@ -423,8 +545,19 @@ function normalizeColumns(
       align: configured?.align ?? merged.align ?? defaultAlign(merged.format),
       editable: configured?.editable ?? merged.editable,
       editor: configured?.editor ?? merged.editor,
+      workflowAction: configured?.workflowAction ?? merged.workflowAction,
     };
   });
+}
+
+function isNonSortableColumn(column: TableColumn): boolean {
+  return column.type === 'chart' || isWorkflowButtonColumn(column);
+}
+
+function isWorkflowButtonColumn(column: TableColumn): boolean {
+  return (
+    column.type === 'workflow_button' || column.workflowAction !== undefined
+  );
 }
 
 function defaultAlign(format?: string | null): TableColumn['align'] {
@@ -471,11 +604,120 @@ function getWritebackContext(
   rowObject: Record<string, unknown>
 ): { schemaId: string; instanceId: string } | null {
   if (!column.editable) return null;
-  if (column.type === 'chart') return null;
+  if (column.type === 'chart' || isWorkflowButtonColumn(column)) return null;
   const id = rowObject.id;
   const schemaId = rowObject.schemaId;
   if (typeof id !== 'string' || typeof schemaId !== 'string') return null;
   return { schemaId, instanceId: id };
+}
+
+function TableActionsToolbar({
+  blockId,
+  actions,
+  selectedRows,
+  workflowAction,
+}: {
+  blockId: string;
+  actions: ReportTableActionConfig[];
+  selectedRows: Record<string, unknown>[];
+  workflowAction: ReturnType<typeof useReportWorkflowAction>;
+}) {
+  const selectedCount = selectedRows.length;
+
+  return (
+    <div className="report-print-hidden flex flex-col gap-3 border-b bg-muted/20 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
+      <span className="text-sm text-muted-foreground">
+        {selectedCount === 1
+          ? '1 row selected'
+          : `${selectedCount} rows selected`}
+      </span>
+      <div className="flex flex-wrap gap-2">
+        {actions.map((action) => {
+          const actionKey = `${blockId}:table-action:${action.id}`;
+          const running = workflowAction.isRunning(actionKey);
+          return (
+            <WorkflowActionButton
+              key={action.id}
+              action={action.workflowAction}
+              labelFallback={action.label ?? 'Run'}
+              running={running}
+              disabled={selectedCount === 0}
+              value={selectedRows}
+              row={{}}
+              selectedRows={selectedRows}
+              fallbackField={action.id}
+              actionKey={actionKey}
+              onRun={workflowAction.run}
+            />
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function WorkflowActionButton({
+  action,
+  labelFallback,
+  running,
+  disabled,
+  value,
+  row,
+  selectedRows,
+  fallbackField,
+  actionKey,
+  onRun,
+}: {
+  action: ReportWorkflowActionConfig;
+  labelFallback: string;
+  running: boolean;
+  disabled: boolean;
+  value: unknown;
+  row: Record<string, unknown>;
+  selectedRows?: Record<string, unknown>[];
+  fallbackField: string;
+  actionKey: string;
+  onRun: (args: {
+    key: string;
+    action: ReportWorkflowActionConfig;
+    row?: Record<string, unknown>;
+    value?: unknown;
+    fallbackField?: string;
+    selectedRows?: Record<string, unknown>[];
+  }) => void | Promise<void>;
+}) {
+  return (
+    <Button
+      type="button"
+      variant="outline"
+      size="sm"
+      className="h-8 max-w-full gap-1.5"
+      disabled={running || disabled}
+      onClick={(event) => {
+        event.stopPropagation();
+        if (disabled) return;
+        void onRun({
+          key: actionKey,
+          action,
+          row,
+          value,
+          fallbackField,
+          selectedRows,
+        });
+      }}
+    >
+      {running ? (
+        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+      ) : (
+        <Play className="h-3.5 w-3.5" />
+      )}
+      <span className="truncate">
+        {running
+          ? (action.runningLabel ?? 'Running...')
+          : (action.label ?? labelFallback)}
+      </span>
+    </Button>
+  );
 }
 
 function getRowObject(
@@ -516,7 +758,13 @@ function TableCellValue({
   }
 
   if (column.format === 'avatar_label') {
-    return <AvatarLabelCell column={column} value={displayValue ?? value} row={row} />;
+    return (
+      <AvatarLabelCell
+        column={column}
+        value={displayValue ?? value}
+        row={row}
+      />
+    );
   }
 
   if (column.format === 'bar_indicator') {
@@ -533,7 +781,9 @@ function TableCellValue({
     );
   }
 
-  return <>{formatCellValue(displayValue ?? value, column.format ?? undefined)}</>;
+  return (
+    <>{formatCellValue(displayValue ?? value, column.format ?? undefined)}</>
+  );
 }
 
 function PillCell({ column, value }: { column: TableColumn; value: unknown }) {
