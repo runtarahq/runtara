@@ -441,6 +441,7 @@ pub enum ReportWorkflowActionContextMode {
     Row,
     Field,
     Value,
+    Selection,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -801,10 +802,25 @@ fn default_sort_direction() -> String {
 pub struct ReportTableConfig {
     #[serde(default)]
     pub columns: Vec<ReportTableColumn>,
+    /// Enables row selection controls even when no table-wide actions are configured.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub selectable: bool,
+    /// Optional table-wide workflow actions executed with selected rows.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub actions: Vec<ReportTableActionConfig>,
     #[serde(default, rename = "defaultSort")]
     pub default_sort: Vec<ReportOrderBy>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pagination: Option<ReportPaginationConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct ReportTableActionConfig {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    #[serde(rename = "workflowAction")]
+    pub workflow_action: ReportWorkflowActionConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]

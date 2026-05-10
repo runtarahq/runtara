@@ -19,9 +19,10 @@ const TERMINAL_STATUSES = new Set([
 type RunWorkflowActionArgs = {
   key: string;
   action: ReportWorkflowActionConfig;
-  row: Record<string, unknown>;
-  value: unknown;
-  fallbackField: string;
+  row?: Record<string, unknown>;
+  value?: unknown;
+  fallbackField?: string;
+  selectedRows?: Record<string, unknown>[];
 };
 
 export function useReportWorkflowAction({
@@ -34,7 +35,14 @@ export function useReportWorkflowAction({
   const [runningKeys, setRunningKeys] = useState<Set<string>>(() => new Set());
 
   const run = useCallback(
-    async ({ key, action, row, value, fallbackField }: RunWorkflowActionArgs) => {
+    async ({
+      key,
+      action,
+      row = {},
+      value,
+      fallbackField = '',
+      selectedRows,
+    }: RunWorkflowActionArgs) => {
       setRunningKeys((current) => {
         const next = new Set(current);
         next.add(key);
@@ -46,7 +54,8 @@ export function useReportWorkflowAction({
           action,
           row,
           value,
-          fallbackField
+          fallbackField,
+          selectedRows
         );
         const scheduled = await runReportWorkflow(token ?? '', {
           workflowId: action.workflowId,
@@ -95,16 +104,19 @@ export function resolveWorkflowActionContext(
   action: ReportWorkflowActionConfig,
   row: Record<string, unknown>,
   value: unknown,
-  fallbackField: string
+  fallbackField: string,
+  selectedRows: Record<string, unknown>[] = []
 ): unknown {
   const contextConfig = action.context ?? {};
   const mode = contextConfig.mode ?? 'row';
   const rawContext =
-    mode === 'value'
-      ? value
-      : mode === 'field'
-        ? row[contextConfig.field ?? fallbackField]
-        : row;
+    mode === 'selection'
+      ? selectedRows
+      : mode === 'value'
+        ? value
+        : mode === 'field'
+          ? row[contextConfig.field ?? fallbackField]
+          : row;
   const context = rawContext === undefined ? null : rawContext;
 
   if (!contextConfig.inputKey) {
@@ -140,7 +152,9 @@ async function waitForTerminalStatus(
     }
   }
 
-  throw new Error('Workflow did not finish before the report action timed out.');
+  throw new Error(
+    'Workflow did not finish before the report action timed out.'
+  );
 }
 
 function delay(ms: number): Promise<void> {

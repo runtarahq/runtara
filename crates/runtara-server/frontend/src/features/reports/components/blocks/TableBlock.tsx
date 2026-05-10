@@ -20,6 +20,7 @@ import {
   Tooltip,
 } from 'recharts';
 import { Button } from '@/shared/components/ui/button';
+import { Checkbox } from '@/shared/components/ui/checkbox';
 import {
   Select,
   SelectContent,
@@ -42,6 +43,7 @@ import {
   ReportBlockResult,
   ReportEditorConfig,
   ReportOrderBy,
+  ReportTableActionConfig,
   ReportTableColumn,
   ReportWorkflowActionConfig,
 } from '../../types';
@@ -120,7 +122,15 @@ export function TableBlock({
   onRefresh,
 }: TableBlockProps) {
   const writeback = useReportWriteback(reportId);
-  const workflowAction = useReportWorkflowAction({ onCompleted: onRefresh });
+  const [selectedRowKeys, setSelectedRowKeys] = useState<Set<string>>(
+    () => new Set()
+  );
+  const workflowAction = useReportWorkflowAction({
+    onCompleted: async () => {
+      setSelectedRowKeys(new Set());
+      await onRefresh?.();
+    },
+  });
   const [editingCell, setEditingCell] = useState<{
     rowKey: string;
     field: string;
@@ -130,6 +140,24 @@ export function TableBlock({
   const configuredColumns = block.table?.columns ?? [];
   const columns = normalizeColumns(data.columns, configuredColumns);
   const page = data.page ?? { offset: 0, size: 50, hasNextPage: false };
+  const rowEntries = rows.map((row, rowIndex) => ({
+    row,
+    rowKey: getRowKey(row, page.offset + rowIndex),
+    rowObject: getRowObject(row, columns),
+  }));
+  const tableActions = block.table?.actions ?? [];
+  const selectable = Boolean(
+    block.table?.selectable || tableActions.length > 0
+  );
+  const selectedRows = rowEntries
+    .filter((entry) => selectedRowKeys.has(entry.rowKey))
+    .map((entry) => entry.rowObject);
+  const allRowsSelected =
+    rowEntries.length > 0 &&
+    rowEntries.every((entry) => selectedRowKeys.has(entry.rowKey));
+  const someRowsSelected =
+    rowEntries.some((entry) => selectedRowKeys.has(entry.rowKey)) &&
+    !allRowsSelected;
   const pageSizeOptions = getPageSizeOptions(block, page.size);
   const diagnostics = data.diagnostics ?? [];
 
@@ -157,9 +185,45 @@ export function TableBlock({
 
   return (
     <div className="overflow-hidden rounded-lg border bg-background">
+      {tableActions.length > 0 && (
+        <TableActionsToolbar
+          blockId={block.id}
+          actions={tableActions}
+          selectedRows={selectedRows}
+          workflowAction={workflowAction}
+        />
+      )}
       <Table>
         <TableHeader>
           <TableRow className="group/header bg-muted/30 hover:bg-muted/30">
+            {selectable && (
+              <TableHead className="h-10 w-10">
+                <Checkbox
+                  aria-label="Select all rows"
+                  checked={
+                    allRowsSelected
+                      ? true
+                      : someRowsSelected
+                        ? 'indeterminate'
+                        : false
+                  }
+                  disabled={rowEntries.length === 0}
+                  onCheckedChange={(checked) => {
+                    setSelectedRowKeys((current) => {
+                      const next = new Set(current);
+                      for (const entry of rowEntries) {
+                        if (checked === true) {
+                          next.add(entry.rowKey);
+                        } else {
+                          next.delete(entry.rowKey);
+                        }
+                      }
+                      return next;
+                    });
+                  }}
+                />
+              </TableHead>
+            )}
             {columns.map((column) => {
               const sortDirection = getColumnSortDirection(column.key, sort);
               const isSortable = !isNonSortableColumn(column);
@@ -207,18 +271,17 @@ export function TableBlock({
           {rows.length === 0 ? (
             <TableRow>
               <TableCell
-                colSpan={columns.length}
+                colSpan={columns.length + (selectable ? 1 : 0)}
                 className="py-12 text-center text-sm text-muted-foreground"
               >
                 No rows match the current filters.
               </TableCell>
             </TableRow>
           ) : (
-            rows.map((row, rowIndex) => {
-              const rowObject = getRowObject(row, columns);
+            rowEntries.map(({ row, rowKey, rowObject }) => {
               return (
                 <TableRow
-                  key={getRowKey(row, rowIndex)}
+                  key={rowKey}
                   className={
                     onRowClick
                       ? 'cursor-pointer transition-colors hover:bg-muted/40'
@@ -226,6 +289,26 @@ export function TableBlock({
                   }
                   onClick={() => onRowClick?.(rowObject)}
                 >
+                  {selectable && (
+                    <TableCell className="w-10 py-3 align-top">
+                      <Checkbox
+                        aria-label="Select row"
+                        checked={selectedRowKeys.has(rowKey)}
+                        onClick={(event) => event.stopPropagation()}
+                        onCheckedChange={(checked) => {
+                          setSelectedRowKeys((current) => {
+                            const next = new Set(current);
+                            if (checked === true) {
+                              next.add(rowKey);
+                            } else {
+                              next.delete(rowKey);
+                            }
+                            return next;
+                          });
+                        }}
+                      />
+                    </TableCell>
+                  )}
                   {columns.map((column, columnIndex) => {
                     const value = getCellValue(row, column, columnIndex);
                     const displayValue = getCellDisplayValue(
@@ -233,7 +316,6 @@ export function TableBlock({
                       column,
                       value
                     );
-                    const rowKey = getRowKey(row, rowIndex);
                     const writebackContext = getWritebackContext(
                       column,
                       rowObject
@@ -529,6 +611,51 @@ function getWritebackContext(
   return { schemaId, instanceId: id };
 }
 
+function TableActionsToolbar({
+  blockId,
+  actions,
+  selectedRows,
+  workflowAction,
+}: {
+  blockId: string;
+  actions: ReportTableActionConfig[];
+  selectedRows: Record<string, unknown>[];
+  workflowAction: ReturnType<typeof useReportWorkflowAction>;
+}) {
+  const selectedCount = selectedRows.length;
+
+  return (
+    <div className="report-print-hidden flex flex-col gap-3 border-b bg-muted/20 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
+      <span className="text-sm text-muted-foreground">
+        {selectedCount === 1
+          ? '1 row selected'
+          : `${selectedCount} rows selected`}
+      </span>
+      <div className="flex flex-wrap gap-2">
+        {actions.map((action) => {
+          const actionKey = `${blockId}:table-action:${action.id}`;
+          const running = workflowAction.isRunning(actionKey);
+          return (
+            <WorkflowActionButton
+              key={action.id}
+              action={action.workflowAction}
+              labelFallback={action.label ?? 'Run'}
+              running={running}
+              disabled={selectedCount === 0}
+              value={selectedRows}
+              row={{}}
+              selectedRows={selectedRows}
+              fallbackField={action.id}
+              actionKey={actionKey}
+              onRun={workflowAction.run}
+            />
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 function WorkflowActionButton({
   action,
   labelFallback,
@@ -536,6 +663,7 @@ function WorkflowActionButton({
   disabled,
   value,
   row,
+  selectedRows,
   fallbackField,
   actionKey,
   onRun,
@@ -546,14 +674,16 @@ function WorkflowActionButton({
   disabled: boolean;
   value: unknown;
   row: Record<string, unknown>;
+  selectedRows?: Record<string, unknown>[];
   fallbackField: string;
   actionKey: string;
   onRun: (args: {
     key: string;
     action: ReportWorkflowActionConfig;
-    row: Record<string, unknown>;
-    value: unknown;
-    fallbackField: string;
+    row?: Record<string, unknown>;
+    value?: unknown;
+    fallbackField?: string;
+    selectedRows?: Record<string, unknown>[];
   }) => void | Promise<void>;
 }) {
   return (
@@ -572,6 +702,7 @@ function WorkflowActionButton({
           row,
           value,
           fallbackField,
+          selectedRows,
         });
       }}
     >

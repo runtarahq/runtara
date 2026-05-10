@@ -1321,6 +1321,12 @@ impl ReportService {
                         )));
                     }
                 }
+                for action in &table.actions {
+                    validate_report_table_action_config(
+                        action,
+                        &format!("block '{}' table action '{}'", block.id, action.id),
+                    )?;
+                }
             }
 
             if let Some(card) = &block.card {
@@ -3957,6 +3963,12 @@ fn validate_workflow_runtime_block(
                 )));
             }
         }
+        for action in &table.actions {
+            validate_report_table_action_config(
+                action,
+                &format!("block '{}' table action '{}'", block.id, action.id),
+            )?;
+        }
     }
     for sort in &block.source.order_by {
         if !fields.contains(sort.field.as_str()) {
@@ -3988,6 +4000,24 @@ fn validate_report_workflow_action_config(
     Ok(())
 }
 
+fn validate_report_table_action_config(
+    action: &ReportTableActionConfig,
+    context: &str,
+) -> Result<(), ReportServiceError> {
+    if action.id.trim().is_empty() {
+        return Err(ReportServiceError::Validation(format!(
+            "{context} id must not be empty"
+        )));
+    }
+    validate_report_workflow_action_config(&action.workflow_action, context)?;
+    if action.workflow_action.context.mode != ReportWorkflowActionContextMode::Selection {
+        return Err(ReportServiceError::Validation(format!(
+            "{context} workflowAction.context.mode must be 'selection'"
+        )));
+    }
+    Ok(())
+}
+
 fn validate_report_workflow_action_context_field(
     action: &ReportWorkflowActionConfig,
     fallback_field: &str,
@@ -3996,6 +4026,11 @@ fn validate_report_workflow_action_context_field(
 ) -> Result<(), ReportServiceError> {
     let field = match action.context.mode {
         ReportWorkflowActionContextMode::Row => return Ok(()),
+        ReportWorkflowActionContextMode::Selection => {
+            return Err(ReportServiceError::Validation(format!(
+                "{context} workflowAction.context.mode 'selection' is only supported by table actions"
+            )));
+        }
         ReportWorkflowActionContextMode::Field => action
             .context
             .field
@@ -7120,6 +7155,8 @@ mod tests {
         let mut block = test_block("orders");
         block.table = Some(ReportTableConfig {
             columns: vec![table_column("customer_name"), table_column("status")],
+            selectable: false,
+            actions: vec![],
             default_sort: vec![],
             pagination: None,
         });
@@ -7151,6 +7188,8 @@ mod tests {
         let mut block = test_block("orders");
         block.table = Some(ReportTableConfig {
             columns: vec![table_column("customer_name")],
+            selectable: false,
+            actions: vec![],
             default_sort: vec![],
             pagination: None,
         });
@@ -7192,6 +7231,8 @@ mod tests {
         }];
         block.table = Some(ReportTableConfig {
             columns: vec![table_column("sku"), table_column("qty_total")],
+            selectable: false,
+            actions: vec![],
             default_sort: vec![],
             pagination: None,
         });
@@ -7221,6 +7262,8 @@ mod tests {
     fn aggregate_table_rows_project_to_configured_column_order() {
         let table = ReportTableConfig {
             columns: vec![table_column("sku"), table_column("delta")],
+            selectable: false,
+            actions: vec![],
             default_sort: vec![],
             pagination: None,
         };
@@ -7449,6 +7492,8 @@ mod tests {
         });
         block.table = Some(ReportTableConfig {
             columns: vec![table_column("vendor"), table_column("qty_total")],
+            selectable: false,
+            actions: vec![],
             default_sort: vec![],
             pagination: None,
         });
@@ -7531,6 +7576,8 @@ mod tests {
         block.source = default_report_source();
         block.table = Some(ReportTableConfig {
             columns: vec![table_column("vendor"), table_column("qty_total")],
+            selectable: false,
+            actions: vec![],
             default_sort: vec![],
             pagination: None,
         });
@@ -7548,6 +7595,8 @@ mod tests {
 
         block.table = Some(ReportTableConfig {
             columns: vec![table_column("category")],
+            selectable: false,
+            actions: vec![],
             default_sort: vec![],
             pagination: None,
         });

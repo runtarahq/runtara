@@ -16,7 +16,11 @@ export type ReportCardFieldKind =
   | 'subtable'
   | 'workflow_button';
 
-export type ReportWorkflowActionContextMode = 'row' | 'field' | 'value';
+export type ReportWorkflowActionContextMode =
+  | 'row'
+  | 'field'
+  | 'value'
+  | 'selection';
 
 export interface ReportWorkflowActionContext {
   mode?: ReportWorkflowActionContextMode;
@@ -412,6 +416,12 @@ export interface ReportTableColumn {
   workflowAction?: ReportWorkflowActionConfig;
 }
 
+export interface ReportTableActionConfig {
+  id: string;
+  label?: string;
+  workflowAction: ReportWorkflowActionConfig;
+}
+
 export interface ReportBlockDefinition {
   id: string;
   type: ReportBlockType;
@@ -421,6 +431,8 @@ export interface ReportBlockDefinition {
   source: ReportSource;
   table?: {
     columns?: ReportTableColumn[];
+    selectable?: boolean;
+    actions?: ReportTableActionConfig[];
     defaultSort?: ReportOrderBy[];
     pagination?: {
       defaultPageSize?: number;
