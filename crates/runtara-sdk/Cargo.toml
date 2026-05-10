@@ -29,14 +29,14 @@ wasm-js = []
 
 [dependencies]
 # Core (optional, for embedded mode)
-runtara-core = { path = "../runtara-core", version = "4.5", optional = true }
+runtara-core = { path = "../runtara-core", version = "4.6", optional = true }
 
 # HTTP client (optional, for http mode)
 runtara-http = { workspace = true, optional = true }
 percent-encoding = { version = "2", optional = true }
 
 # Macros
-runtara-sdk-macros = { path = "../runtara-sdk-macros", version = "4.5" }
+runtara-sdk-macros = { path = "../runtara-sdk-macros", version = "4.6" }
 
 # Async runtime (optional, for embedded mode - bridge to async Persistence trait)
 tokio = { version = "1", features = ["rt", "time"], optional = true }
@@ -65,5 +65,5 @@ futures = "0.3"
 async-trait = "0.1"
 
 # For embedded heartbeat tests
-runtara-core = { path = "../runtara-core", version = "4.5" }
+runtara-core = { path = "../runtara-core", version = "4.6" }
 sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite"] }
