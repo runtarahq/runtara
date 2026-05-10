@@ -10,8 +10,8 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use crate::api::dto::object_model::{
-    AggregateFn, AggregateOrderBy, AggregateRequest, AggregateSpec, Condition, FilterRequest,
-    SortDirection,
+    AggregateFn, AggregateOrderBy, AggregateRequest, AggregateSpec, ColumnType as ObjectColumnType,
+    Condition, FilterRequest, Schema as ObjectSchema, SortDirection,
 };
 use crate::api::dto::reports::*;
 use crate::api::dto::workflows::WorkflowInstanceDto;
@@ -884,29 +884,15 @@ impl ReportService {
     ) -> Result<(Vec<ReportFilterOption>, ReportFilterOptionsPage), ReportServiceError> {
         let search_query = query.search_query.trim();
         if !search_query.is_empty() && !query.search_fields.is_empty() {
-            let mut search_conditions = query
-                .search_fields
-                .iter()
-                .map(|field| {
-                    binary_condition(
-                        "CONTAINS",
-                        Value::String(field.clone()),
-                        Value::String(search_query.to_string()),
-                    )
-                })
-                .collect::<Vec<_>>();
-            match search_conditions.len() {
-                0 => {}
-                1 => query.conditions.push(search_conditions.remove(0)),
-                _ => query.conditions.push(Condition {
-                    op: "OR".to_string(),
-                    arguments: Some(
-                        search_conditions
-                            .into_iter()
-                            .filter_map(|condition| serde_json::to_value(condition).ok())
-                            .collect(),
-                    ),
-                }),
+            let schema = self
+                .schema_service
+                .get_schema_by_name(&query.schema, tenant_id, query.connection_id)
+                .await
+                .map_err(map_object_model_error)?;
+            if let Some(search_condition) =
+                option_search_condition(&schema, &query.search_fields, search_query)
+            {
+                query.conditions.push(search_condition);
             }
         }
 
@@ -7135,6 +7121,59 @@ fn binary_condition(op: &str, field: Value, value: Value) -> Condition {
     }
 }
 
+fn option_search_condition(
+    schema: &ObjectSchema,
+    fallback_fields: &[String],
+    search_query: &str,
+) -> Option<Condition> {
+    let search_query = search_query.trim();
+    if search_query.is_empty() || fallback_fields.is_empty() {
+        return None;
+    }
+
+    let tsvector_fields = schema
+        .columns
+        .iter()
+        .filter_map(|column| match &column.column_type {
+            ObjectColumnType::Tsvector { .. } => Some(column.name.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+
+    let (op, fields) = if tsvector_fields.is_empty() {
+        ("CONTAINS", fallback_fields.to_vec())
+    } else {
+        ("MATCH", tsvector_fields)
+    };
+
+    let mut seen = HashSet::new();
+    let mut search_conditions = fields
+        .into_iter()
+        .filter(|field| seen.insert(field.clone()))
+        .map(|field| {
+            binary_condition(
+                op,
+                Value::String(field),
+                Value::String(search_query.to_string()),
+            )
+        })
+        .collect::<Vec<_>>();
+
+    match search_conditions.len() {
+        0 => None,
+        1 => Some(search_conditions.remove(0)),
+        _ => Some(Condition {
+            op: "OR".to_string(),
+            arguments: Some(
+                search_conditions
+                    .into_iter()
+                    .filter_map(|condition| serde_json::to_value(condition).ok())
+                    .collect(),
+            ),
+        }),
+    }
+}
+
 fn between_condition(field: &str, value: &Value) -> Option<Condition> {
     let (from, to) = if let Some(object) = value.as_object() {
         (
@@ -10101,6 +10140,36 @@ fn seal_json_schema_objects(schema: &mut Value) {
 mod tests {
     use super::*;
 
+    fn object_column(
+        name: &str,
+        column_type: crate::api::dto::object_model::ColumnType,
+    ) -> crate::api::dto::object_model::ColumnDefinition {
+        crate::api::dto::object_model::ColumnDefinition {
+            name: name.to_string(),
+            column_type,
+            nullable: true,
+            unique: false,
+            default_value: None,
+            text_index: crate::api::dto::object_model::TextIndexKind::None,
+        }
+    }
+
+    fn object_schema(
+        columns: Vec<crate::api::dto::object_model::ColumnDefinition>,
+    ) -> crate::api::dto::object_model::Schema {
+        crate::api::dto::object_model::Schema {
+            id: "schema-1".to_string(),
+            tenant_id: "tenant-1".to_string(),
+            created_at: "2026-05-10T00:00:00Z".to_string(),
+            updated_at: "2026-05-10T00:00:00Z".to_string(),
+            name: "CategoryTreeNode".to_string(),
+            description: None,
+            table_name: "category_tree_node".to_string(),
+            columns,
+            indexes: None,
+        }
+    }
+
     fn test_block(id: &str) -> ReportBlockDefinition {
         ReportBlockDefinition {
             id: id.to_string(),
@@ -10180,6 +10249,64 @@ mod tests {
             editor: None,
             workflow_action: None,
         }
+    }
+
+    #[test]
+    fn option_search_condition_prefers_generated_tsvector_columns() {
+        let schema = object_schema(vec![
+            object_column("name", crate::api::dto::object_model::ColumnType::String),
+            object_column(
+                "search_blob",
+                crate::api::dto::object_model::ColumnType::String,
+            ),
+            object_column(
+                "search_tsv",
+                crate::api::dto::object_model::ColumnType::Tsvector {
+                    source_column: "search_blob".to_string(),
+                    language: "english".to_string(),
+                },
+            ),
+        ]);
+
+        let condition =
+            option_search_condition(&schema, &["name".to_string()], "animal health").unwrap();
+
+        assert_eq!(condition.op, "MATCH");
+        assert_eq!(
+            condition.arguments,
+            Some(vec![json!("search_tsv"), json!("animal health")])
+        );
+    }
+
+    #[test]
+    fn option_search_condition_falls_back_to_contains_without_tsvector() {
+        let schema = object_schema(vec![
+            object_column("name", crate::api::dto::object_model::ColumnType::String),
+            object_column("code", crate::api::dto::object_model::ColumnType::String),
+        ]);
+
+        let condition =
+            option_search_condition(&schema, &["name".to_string(), "code".to_string()], "bolt")
+                .unwrap();
+
+        assert_eq!(condition.op, "OR");
+        let nested = condition
+            .arguments
+            .unwrap()
+            .into_iter()
+            .map(serde_json::from_value::<Condition>)
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(nested[0].op, "CONTAINS");
+        assert_eq!(
+            nested[0].arguments,
+            Some(vec![json!("name"), json!("bolt")])
+        );
+        assert_eq!(nested[1].op, "CONTAINS");
+        assert_eq!(
+            nested[1].arguments,
+            Some(vec![json!("code"), json!("bolt")])
+        );
     }
 
     #[test]

@@ -1095,7 +1095,9 @@ pub struct ReportLookupConfig {
     /// Field shown to users in the searchable option list.
     #[serde(rename = "labelField")]
     pub label_field: String,
-    /// Fields searched with CONTAINS when the user types. Defaults to
+    /// Fields searched when the user types. If the lookup schema has generated
+    /// `tsvector` columns, the backend uses MATCH against those columns;
+    /// otherwise it falls back to CONTAINS on these fields. Defaults to
     /// `labelField` when omitted.
     #[serde(default, rename = "searchFields")]
     pub search_fields: Vec<String>,

@@ -97,7 +97,7 @@ pub(crate) fn resolve_tsvector_language(field: &str, schema: &Schema) -> String 
 /// # Supported Operations
 /// - Logical: AND, OR, NOT
 /// - Comparison: EQ, NE, GT, LT, GTE, LTE
-/// - String: CONTAINS (LIKE with wildcards)
+/// - String: CONTAINS (ILIKE with wildcards)
 /// - Array: IN, NOT_IN
 /// - Nullability: IS_EMPTY, IS_NOT_EMPTY, IS_DEFINED
 pub fn build_condition_clause(
@@ -621,7 +621,7 @@ fn build_condition_clause_at(
 
                 params.push(serde_json::Value::String(format!("%{}%", value)));
 
-                let clause = format!("\"{}\"::text LIKE ${}::text", field, param_offset);
+                let clause = format!("\"{}\"::text ILIKE ${}::text", field, param_offset);
                 *param_offset += 1;
 
                 Ok((clause, params))
@@ -1387,7 +1387,7 @@ mod tests {
         let mut offset = 1;
         let (clause, params) = build_condition_clause(&condition, &mut offset, &schema).unwrap();
 
-        assert_eq!(clause, "\"name\"::text LIKE $1::text");
+        assert_eq!(clause, "\"name\"::text ILIKE $1::text");
         assert_eq!(params[0], serde_json::json!("%test%"));
     }
 
