@@ -55,6 +55,7 @@
 //! | E056 | CircularDependency | Circular dependency between workflows |
 //! | E060 | StepNotYetExecuted | Reference to step that hasn't executed |
 //! | E070 | UnknownVariable | Variable doesn't exist |
+//! | E072 | InvalidConditionalEdge | Conditional outgoing edge is not a true/false branch |
 //! | E080 | TypeMismatch | Value type doesn't match expected |
 //! | E081 | InvalidEnumValue | Enum value not in allowed set |
 //! | E090 | DuplicateStepName | Multiple steps with same name |
@@ -268,6 +269,13 @@ pub enum ValidationError {
         from_step: String,
         label: Option<String>,
         targets: Vec<String>,
+    },
+    /// Conditional outgoing edge is not a true/false branch.
+    InvalidConditionalEdge {
+        from_step: String,
+        to_step: String,
+        label: Option<String>,
+        reason: String,
     },
 
     // === AI Agent Errors ===
@@ -671,6 +679,19 @@ impl std::fmt::Display for ValidationError {
                     from_step,
                     label_str,
                     targets.join(", ")
+                )
+            }
+            ValidationError::InvalidConditionalEdge {
+                from_step,
+                to_step,
+                label,
+                reason,
+            } => {
+                let label_str = label.as_deref().unwrap_or("(default)");
+                write!(
+                    f,
+                    "[E072] Conditional step '{}' has invalid edge to '{}' with label '{}': {}",
+                    from_step, to_step, label_str, reason
                 )
             }
             ValidationError::AiAgentDuplicateToolLabel { step_id, label } => {
@@ -2531,12 +2552,14 @@ fn validate_compensation_recursive(graph: &ExecutionGraph, result: &mut Validati
 /// - Conditional edges from the same step (with the same label) must have unique priorities
 /// - At most one edge without a condition is allowed per (from_step, label) pair
 /// - Edges without conditions and without labels work in parallel (no validation needed)
-/// - Exception: Conditional step uses true/false labels which are mutually exclusive
+/// - Conditional step outgoing edges must be unconditioned `true`/`false` branches
 fn validate_edge_conditions(graph: &ExecutionGraph, result: &mut ValidationResult) {
     validate_edge_conditions_recursive(graph, result);
 }
 
 fn validate_edge_conditions_recursive(graph: &ExecutionGraph, result: &mut ValidationResult) {
+    validate_conditional_branch_edges(graph, result);
+
     // Group edges by (from_step, label)
     let mut edges_by_from_label: HashMap<
         (String, Option<String>),
@@ -2566,8 +2589,15 @@ fn validate_edge_conditions_recursive(graph: &ExecutionGraph, result: &mut Valid
         if let Some(step) = graph.steps.get(&from_step)
             && matches!(step, Step::Conditional(_))
         {
-            // For Conditional steps, true/false edges are expected to be exclusive
-            // Skip validation for these
+            // Conditional branch labels are exclusive and codegen follows a single
+            // target for each label.
+            if matches!(label.as_deref(), Some("true") | Some("false")) {
+                result.errors.push(ValidationError::MultipleDefaultEdges {
+                    from_step: from_step.clone(),
+                    label: label.clone(),
+                    targets: edges.iter().map(|e| e.to_step.clone()).collect(),
+                });
+            }
             continue;
         }
 
@@ -2620,6 +2650,43 @@ fn validate_edge_conditions_recursive(graph: &ExecutionGraph, result: &mut Valid
                 validate_edge_conditions_recursive(&while_step.subgraph, result);
             }
             _ => {}
+        }
+    }
+}
+
+fn validate_conditional_branch_edges(graph: &ExecutionGraph, result: &mut ValidationResult) {
+    for edge in &graph.execution_plan {
+        let Some(step) = graph.steps.get(&edge.from_step) else {
+            continue;
+        };
+        if !matches!(step, Step::Conditional(_)) {
+            continue;
+        }
+
+        let label = edge.label.as_deref();
+        let reason = if !matches!(label, Some("true") | Some("false")) {
+            Some(
+                "Conditional steps route only through edges labeled 'true' or 'false'; put the predicate in the step.condition, not in edge.condition.".to_string(),
+            )
+        } else if edge.condition.is_some() {
+            Some(
+                "Conditional true/false branch edges must not define edge.condition; the step.condition chooses the branch.".to_string(),
+            )
+        } else if edge.priority.is_some() {
+            Some(
+                "Conditional true/false branch edges must not define priority; branch labels are mutually exclusive.".to_string(),
+            )
+        } else {
+            None
+        };
+
+        if let Some(reason) = reason {
+            result.errors.push(ValidationError::InvalidConditionalEdge {
+                from_step: edge.from_step.clone(),
+                to_step: edge.to_step.clone(),
+                label: edge.label.clone(),
+                reason,
+            });
         }
     }
 }
@@ -6509,6 +6576,27 @@ mod tests {
         })
     }
 
+    fn create_conditional_step(id: &str) -> Step {
+        Step::Conditional(runtara_dsl::ConditionalStep {
+            id: id.to_string(),
+            name: None,
+            condition: runtara_dsl::ConditionExpression::Value(MappingValue::Immediate(
+                runtara_dsl::ImmediateValue {
+                    value: serde_json::json!(true),
+                },
+            )),
+            breakpoint: None,
+        })
+    }
+
+    fn create_true_condition() -> runtara_dsl::ConditionExpression {
+        runtara_dsl::ConditionExpression::Value(MappingValue::Immediate(
+            runtara_dsl::ImmediateValue {
+                value: serde_json::json!(true),
+            },
+        ))
+    }
+
     #[test]
     fn test_edge_condition_unique_priorities_pass() {
         // Two onError edges with different priorities should pass
@@ -6765,6 +6853,91 @@ mod tests {
     }
 
     #[test]
+    fn test_conditional_true_false_edges_pass() {
+        let mut steps = HashMap::new();
+        steps.insert("check".to_string(), create_conditional_step("check"));
+        steps.insert("yes".to_string(), create_finish_step("yes", None));
+        steps.insert("no".to_string(), create_finish_step("no", None));
+
+        let mut graph = create_basic_graph(steps, "check");
+        graph.execution_plan = vec![
+            runtara_dsl::ExecutionPlanEdge {
+                from_step: "check".to_string(),
+                to_step: "yes".to_string(),
+                label: Some("true".to_string()),
+                condition: None,
+                priority: None,
+            },
+            runtara_dsl::ExecutionPlanEdge {
+                from_step: "check".to_string(),
+                to_step: "no".to_string(),
+                label: Some("false".to_string()),
+                condition: None,
+                priority: None,
+            },
+        ];
+
+        let result = validate_workflow(&graph);
+        assert!(
+            !result.has_errors(),
+            "Should pass: Conditional branches use true/false labels. Errors: {:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn test_conditional_unlabeled_condition_edge_fails() {
+        let mut steps = HashMap::new();
+        steps.insert("check".to_string(), create_conditional_step("check"));
+        steps.insert("yes".to_string(), create_finish_step("yes", None));
+
+        let mut graph = create_basic_graph(steps, "check");
+        graph.execution_plan = vec![runtara_dsl::ExecutionPlanEdge {
+            from_step: "check".to_string(),
+            to_step: "yes".to_string(),
+            label: None,
+            condition: Some(create_true_condition()),
+            priority: None,
+        }];
+
+        let result = validate_workflow(&graph);
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::InvalidConditionalEdge { .. })),
+            "Should fail: Conditional branch edges must be labeled true/false. Errors: {:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn test_conditional_labeled_condition_edge_fails() {
+        let mut steps = HashMap::new();
+        steps.insert("check".to_string(), create_conditional_step("check"));
+        steps.insert("yes".to_string(), create_finish_step("yes", None));
+
+        let mut graph = create_basic_graph(steps, "check");
+        graph.execution_plan = vec![runtara_dsl::ExecutionPlanEdge {
+            from_step: "check".to_string(),
+            to_step: "yes".to_string(),
+            label: Some("true".to_string()),
+            condition: Some(create_true_condition()),
+            priority: None,
+        }];
+
+        let result = validate_workflow(&graph);
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::InvalidConditionalEdge { .. })),
+            "Should fail: Conditional true/false edges must not define edge.condition. Errors: {:?}",
+            result.errors
+        );
+    }
+
+    #[test]
     fn test_edge_condition_error_display() {
         let err = ValidationError::DuplicateEdgePriority {
             from_step: "agent1".to_string(),
@@ -6788,6 +6961,21 @@ mod tests {
         assert!(
             display2.contains("At most one"),
             "Should mention single default"
+        );
+
+        let err3 = ValidationError::InvalidConditionalEdge {
+            from_step: "check".to_string(),
+            to_step: "finish".to_string(),
+            label: None,
+            reason: "Conditional steps route only through edges labeled 'true' or 'false'"
+                .to_string(),
+        };
+        let display3 = format!("{}", err3);
+        assert!(display3.contains("[E072]"), "Should have error code E072");
+        assert!(display3.contains("check"), "Should include from_step");
+        assert!(
+            display3.contains("(default)"),
+            "Should include default label"
         );
     }
 

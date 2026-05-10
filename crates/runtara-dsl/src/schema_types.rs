@@ -177,13 +177,15 @@ impl Default for ExecutionGraph {
 /// 3. **Parallel edges** (without conditions OR labels): Multiple unlabeled, condition-less
 ///    edges can exist - they execute in parallel (e.g., fan-out patterns).
 ///
-/// 4. **Conditional step exception**: `true`/`false` labeled edges from a Conditional step
-///    are mutually exclusive based on the condition result, not evaluated via edge conditions.
+/// 4. **Conditional step exception**: Outgoing edges from a Conditional step must use
+///    `true`/`false` labels. The step's own `condition` chooses the branch; edge-level
+///    `condition` and `priority` fields are not evaluated for Conditional branches.
 ///
 /// # Validation Rules
 ///
 /// - Multiple conditional edges from the same step with the same label must have unique priorities
 /// - At most one default (condition-less) edge per (from_step, label) pair
+/// - Conditional step outgoing edges must be unconditioned `true`/`false` branches
 /// - If no condition matches and no default exists, the workflow fails (for onError) or continues normally
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
@@ -206,6 +208,8 @@ pub struct ExecutionPlanEdge {
     ///
     /// Uses the same format as `Conditional` step conditions, supporting
     /// operators like EQ, AND, OR, STARTS_WITH, CONTAINS, etc.
+    /// Do not set this on outgoing edges from a `Conditional` step; use the
+    /// `Conditional.condition` field plus `true`/`false` edge labels instead.
     ///
     /// Available context for conditions:
     /// - `data.*` - Input data
@@ -439,7 +443,12 @@ pub struct AgentStep {
     pub durable: Option<bool>,
 }
 
-/// Evaluates conditions and branches execution
+/// Evaluates a condition and branches execution.
+///
+/// Runtime stores the evaluated boolean as `steps.<id>.outputs.result` for
+/// inspection and later mappings. Branch routing still uses executionPlan edges
+/// labeled `"true"` and `"false"`; do not route Conditional branches with
+/// edge-level conditions.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]

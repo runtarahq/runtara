@@ -279,6 +279,21 @@ impl ValidationErrorDto {
                 None,
                 Some(targets.clone()),
             ),
+            ValidationError::InvalidConditionalEdge {
+                from_step,
+                to_step,
+                reason,
+                ..
+            } => (
+                "E072".to_string(),
+                format!(
+                    "Conditional step '{}' has invalid edge to '{}': {}",
+                    from_step, to_step, reason
+                ),
+                Some(from_step.clone()),
+                Some("executionPlan".to_string()),
+                Some(vec![to_step.clone()]),
+            ),
             ValidationError::UndefinedDataReference {
                 step_id,
                 reference,

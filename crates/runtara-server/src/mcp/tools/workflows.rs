@@ -426,9 +426,18 @@ pub async fn get_workflow_authoring_schema(
                         "inputMapping": {}
                     }
                 },
-                "executionPlan": [{"fromStep": "stepId", "toStep": "nextStepId"}]
+                "executionPlan": [{"fromStep": "stepId", "toStep": "nextStepId"}],
+                "conditionalBranches": [
+                    {"fromStep": "conditionalStepId", "toStep": "whenTrueStepId", "label": "true"},
+                    {"fromStep": "conditionalStepId", "toStep": "whenFalseStepId", "label": "false"}
+                ]
             },
-            "notes": ["steps is a map keyed by step ID, not an array", "use inputMapping, not inputMappings", "executionPlan edges use fromStep/toStep"]
+            "notes": [
+                "steps is a map keyed by step ID, not an array",
+                "use inputMapping, not inputMappings",
+                "executionPlan edges use fromStep/toStep",
+                "Conditional outgoing edges must use label 'true' or 'false'; do not put condition on those edges"
+            ]
         },
         "mappingValue": {
             "reference": {"valueType": "reference", "value": "data.foo"},
@@ -436,7 +445,12 @@ pub async fn get_workflow_authoring_schema(
             "template": {"valueType": "template", "value": "Hello {{data.name}}"},
             "compositeObject": {"valueType": "composite", "value": {"field": {"valueType": "reference", "value": "data.foo"}}},
             "compositeArray": {"valueType": "composite", "value": [{"valueType": "reference", "value": "data.foo"}]},
-            "referencePrefixes": ["data.<workflowInput>", "variables.<name>", "steps.<stepId>.outputs.<field>", "__error.<field> on onError edges"]
+            "referencePrefixes": ["data.<workflowInput>", "variables.<name>", "steps.<stepId>.outputs.<field>", "__error.<field> on onError edges"],
+            "conditionalOutput": {
+                "reference": "steps.<conditionalStepId>.outputs.result",
+                "type": "boolean",
+                "note": "Available after a Conditional step for inspection and later mappings only. Do not use it to route that Conditional's outgoing edges; use true/false labels."
+            }
         },
         "conditions": {
             "conditionExpressionShape": {
@@ -451,7 +465,8 @@ pub async fn get_workflow_authoring_schema(
                 "Top-level ConditionExpression must include type: operation.",
                 "Operation arguments are bare MappingValue objects.",
                 "Do not wrap operation arguments in composite.",
-                "Do not encode a field reference as an immediate whose value is another MappingValue."
+                "Do not encode a field reference as an immediate whose value is another MappingValue.",
+                "For Conditional steps, put the predicate in the step.condition field and route with executionPlan labels 'true' and 'false'."
             ],
             "objectModelBulkUpdateCanonicalArgs": {
                 "field": {"valueType": "reference", "value": "category_leaf_id"},
@@ -474,9 +489,60 @@ pub async fn get_workflow_authoring_schema(
                 "name": "composite-wrapped condition args",
                 "bad": {"type": "operation", "op": "EQ", "arguments": [{"valueType": "composite", "value": {"field": {"valueType": "reference", "value": "category_leaf_id"}}}]},
                 "good": {"type": "operation", "op": "EQ", "arguments": [{"valueType": "reference", "value": "category_leaf_id"}, {"valueType": "immediate", "value": "expected"}]}
+            },
+            {
+                "name": "Conditional branches via edge conditions",
+                "bad": {
+                    "executionPlan": [
+                        {"fromStep": "check_empty", "toStep": "empty_finish", "condition": {"type": "value", "valueType": "reference", "value": "steps.check_empty.outputs.result"}}
+                    ]
+                },
+                "good": {
+                    "steps": {
+                        "check_empty": {
+                            "id": "check_empty",
+                            "stepType": "Conditional",
+                            "condition": {"type": "operation", "op": "IS_EMPTY", "arguments": [{"valueType": "reference", "value": "data.items"}]}
+                        }
+                    },
+                    "executionPlan": [
+                        {"fromStep": "check_empty", "toStep": "empty_finish", "label": "true"},
+                        {"fromStep": "check_empty", "toStep": "non_empty_step", "label": "false"}
+                    ]
+                }
             }
         ],
         "completeExamples": {
+            "conditionalBranching": {
+                "name": "Route empty input",
+                "entryPoint": "check_empty",
+                "steps": {
+                    "check_empty": {
+                        "id": "check_empty",
+                        "stepType": "Conditional",
+                        "name": "Check empty input",
+                        "condition": {
+                            "type": "operation",
+                            "op": "IS_EMPTY",
+                            "arguments": [{"valueType": "reference", "value": "data.items"}]
+                        }
+                    },
+                    "empty_finish": {
+                        "id": "empty_finish",
+                        "stepType": "Finish",
+                        "inputMapping": {"result": {"valueType": "immediate", "value": "empty"}}
+                    },
+                    "non_empty_finish": {
+                        "id": "non_empty_finish",
+                        "stepType": "Finish",
+                        "inputMapping": {"result": {"valueType": "immediate", "value": "not_empty"}}
+                    }
+                },
+                "executionPlan": [
+                    {"fromStep": "check_empty", "toStep": "empty_finish", "label": "true"},
+                    {"fromStep": "check_empty", "toStep": "non_empty_finish", "label": "false"}
+                ]
+            },
             "objectModelBulkUpdateAgentStepInWorkflow": {
                 "name": "Bulk assign selected category",
                 "entryPoint": "bulk_update_category",

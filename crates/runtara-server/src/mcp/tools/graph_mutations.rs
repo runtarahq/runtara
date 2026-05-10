@@ -392,9 +392,13 @@ pub struct ConnectStepsParams {
     pub from_step: String,
     #[schemars(description = "Target step ID")]
     pub to_step: String,
-    #[schemars(description = "Edge label (e.g., 'true', 'false' for conditionals)")]
+    #[schemars(
+        description = "Edge label. Required as 'true' or 'false' for outgoing Conditional branches; use 'onError' for error handling."
+    )]
     pub label: Option<String>,
-    #[schemars(description = "Condition expression JSON for the edge")]
+    #[schemars(
+        description = "Condition expression JSON for the edge. Do not set this on edges from a Conditional step; put the predicate in the Conditional step's condition field."
+    )]
     pub condition: Option<serde_json::Value>,
     #[schemars(description = "Edge priority (lower = evaluated first)")]
     pub priority: Option<i64>,
@@ -584,7 +588,7 @@ pub struct AddAgentStepParams {
     )]
     pub capability_id: String,
     #[schemars(
-        description = "Step ID to connect after (creates a normal edge from that step to this one)"
+        description = "Step ID to connect after (creates a normal edge from that step to this one). Do not use with a Conditional source; add the step first and call connect_steps with label 'true' or 'false'."
     )]
     pub connect_after: Option<String>,
     #[schemars(
@@ -949,12 +953,59 @@ pub async fn connect_steps(
         return Err(err(format!("Step '{}' not found in graph", params.to_step)));
     }
 
+    let from_step_type = steps
+        .get(&params.from_step)
+        .and_then(|step| step.get("stepType"))
+        .and_then(|step_type| step_type.as_str())
+        .unwrap_or("")
+        .to_string();
+    if from_step_type == "Conditional" {
+        match params.label.as_deref() {
+            Some("true") | Some("false") => {}
+            _ => {
+                return Err(err(format!(
+                    "Conditional step '{}' must connect outgoing branches with label 'true' or 'false'. Put the predicate in the step.condition field; do not route Conditional edges with edge.condition or steps.{}.outputs.result.",
+                    params.from_step, params.from_step
+                )));
+            }
+        }
+        if params.condition.is_some() {
+            return Err(err(format!(
+                "Conditional step '{}' already owns the branch predicate in step.condition. Remove edge.condition and use label 'true' or 'false' on the edge.",
+                params.from_step
+            )));
+        }
+        if params.priority.is_some() {
+            return Err(err(format!(
+                "Conditional step '{}' true/false branches are mutually exclusive; remove edge priority.",
+                params.from_step
+            )));
+        }
+    }
+
     if target.get("executionPlan").is_none() || !target["executionPlan"].is_array() {
         target["executionPlan"] = serde_json::json!([]);
     }
 
     // Check for duplicate edge
     let plan = target["executionPlan"].as_array().unwrap();
+    if from_step_type == "Conditional"
+        && let Some(existing) = plan.iter().find(|edge| {
+            edge.get("fromStep").and_then(|v| v.as_str()) == Some(params.from_step.as_str())
+                && edge.get("label").and_then(|v| v.as_str()) == params.label.as_deref()
+        })
+    {
+        let existing_target = existing
+            .get("toStep")
+            .and_then(|v| v.as_str())
+            .unwrap_or("(unknown)");
+        return Err(err(format!(
+            "Conditional step '{}' already has a '{}' branch to '{}'. Each Conditional branch label can target only one step.",
+            params.from_step,
+            params.label.as_deref().unwrap_or("(default)"),
+            existing_target
+        )));
+    }
     let duplicate = plan.iter().any(|edge| {
         let from = edge.get("fromStep").and_then(|v| v.as_str()).unwrap_or("");
         let to = edge.get("toStep").and_then(|v| v.as_str()).unwrap_or("");
@@ -1443,8 +1494,20 @@ pub async fn list_references(
                         }
                     }
                 }
-            } else if step_type == "Conditional" || step_type == "Finish" {
-                // These step types don't produce outputs
+            } else if step_type == "Conditional" {
+                let ref_path = format!("steps.{}.outputs.result", step_id);
+                references.push(serde_json::json!({
+                    "reference": &ref_path,
+                    "source": "step",
+                    "stepId": step_id,
+                    "stepType": step_type,
+                    "field": "result",
+                    "type": "boolean",
+                    "mapping": { "valueType": "reference", "value": &ref_path },
+                    "note": "Conditional evaluation result. Use for inspection or later mappings only; outgoing Conditional branches must use executionPlan labels 'true' and 'false', not edge conditions."
+                }));
+            } else if step_type == "Finish" {
+                // Finish returns workflow output and has no downstream mapping surface.
             } else {
                 // For other step types (Split, While, Log, etc.), note the step exists
                 // but output fields depend on subgraph configuration
@@ -1644,6 +1707,22 @@ pub async fn add_agent_step(
     if target.get("executionPlan").is_none() || !target["executionPlan"].is_array() {
         target["executionPlan"] = serde_json::json!([]);
     }
+
+    if let Some(ref after) = params.connect_after {
+        let after_step_type = target
+            .get("steps")
+            .and_then(|steps| steps.get(after))
+            .and_then(|step| step.get("stepType"))
+            .and_then(|step_type| step_type.as_str())
+            .unwrap_or("");
+        if after_step_type == "Conditional" {
+            return Err(err(format!(
+                "connect_after cannot create a valid edge from Conditional step '{}'. Add the agent step without connect_after, then call connect_steps with label 'true' or 'false'.",
+                after
+            )));
+        }
+    }
+
     let plan = target["executionPlan"].as_array_mut().unwrap();
 
     if let Some(ref after) = params.connect_after {
