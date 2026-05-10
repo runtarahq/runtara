@@ -4,6 +4,7 @@ import {
   ReportFilterDefinition,
   ReportLayoutNode,
   ReportRowCondition,
+  ReportViewBreadcrumb,
   ReportViewDefinition,
   ReportVisibilityCondition,
   ReportWorkflowActionConfig,
@@ -153,6 +154,46 @@ export function getDefaultReportViewId(
   definition: ReportDefinition
 ): string | null {
   return getActiveReportView(definition)?.id ?? null;
+}
+
+export function getReportViewBreadcrumbs(
+  definition: ReportDefinition,
+  view: ReportViewDefinition,
+  resolveLabel: (view: ReportViewDefinition) => string | null | undefined
+): ReportViewBreadcrumb[] {
+  if ((view.breadcrumb?.length ?? 0) > 0) {
+    return view.breadcrumb ?? [];
+  }
+
+  const viewById = new Map(
+    (definition.views ?? []).map((candidate) => [candidate.id, candidate])
+  );
+  const ancestors: ReportViewDefinition[] = [];
+  const seen = new Set([view.id]);
+  let current = view;
+
+  while (current.parentViewId) {
+    const parent = viewById.get(current.parentViewId);
+    if (!parent || seen.has(parent.id)) break;
+    ancestors.unshift(parent);
+    seen.add(parent.id);
+    current = parent;
+  }
+
+  return ancestors.map((ancestor, index) => {
+    const clearFilters = new Set<string>();
+    for (const descendant of [...ancestors.slice(index + 1), view]) {
+      for (const filterId of descendant.clearFiltersOnBack ?? []) {
+        clearFilters.add(filterId);
+      }
+    }
+
+    return {
+      label: resolveLabel(ancestor) ?? humanizeFieldName(ancestor.id),
+      viewId: ancestor.id,
+      clearFilters: Array.from(clearFilters),
+    };
+  });
 }
 
 export function getEagerBlocks(

@@ -13,6 +13,7 @@ import {
   getActiveReportLayout,
   getActiveReportView,
   getBlockById,
+  getReportViewBreadcrumbs,
   isVisibleByShowWhen,
 } from '../utils';
 import { ReportBlockHost } from './ReportBlockHost';
@@ -456,7 +457,9 @@ function ReportViewHeader({
   ) => void;
 }) {
   const title = resolveViewTitle(view, definition, renderResponse, filters);
-  const breadcrumbs = view.breadcrumb ?? [];
+  const breadcrumbs = getReportViewBreadcrumbs(definition, view, (candidate) =>
+    resolveViewTitle(candidate, definition, renderResponse, filters)
+  );
   if (!title && breadcrumbs.length === 0) return null;
 
   return (
@@ -552,10 +555,15 @@ function resolveTitleFromBlock(
   definition: ReportDefinition,
   renderResponse: ReportRenderResponse | null | undefined
 ): unknown {
-  const block = definition.blocks.find((candidate) => candidate.id === ref.block);
+  const block = definition.blocks.find(
+    (candidate) => candidate.id === ref.block
+  );
   const result = renderResponse?.blocks?.[ref.block];
   const data = result?.data as
-    | { rows?: Array<Record<string, unknown> | unknown[]>; columns?: Array<string | { key: string }> }
+    | {
+        rows?: Array<Record<string, unknown> | unknown[]>;
+        columns?: Array<string | { key: string }>;
+      }
     | undefined;
   const firstRow = data?.rows?.[0];
   if (!firstRow) return undefined;

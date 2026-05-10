@@ -322,10 +322,17 @@ export interface ReportTableSearchRequest {
 }
 
 export interface ReportSource {
-  kind?: 'object_model' | 'workflow_runtime';
+  kind?: 'object_model' | 'workflow_runtime' | 'system';
   schema: string;
   connectionId?: string;
-  entity?: 'instances' | 'actions';
+  entity?:
+    | 'instances'
+    | 'actions'
+    | 'runtime_execution_metric_buckets'
+    | 'runtime_system_snapshot'
+    | 'connection_rate_limit_status'
+    | 'connection_rate_limit_events'
+    | 'connection_rate_limit_timeline';
   workflowId?: string;
   instanceId?: string;
   mode?: 'filter' | 'aggregate';
@@ -347,6 +354,8 @@ export interface ReportSource {
   }>;
   orderBy?: ReportOrderBy[];
   limit?: number;
+  granularity?: string;
+  interval?: string;
   join?: ReportSourceJoin[];
 }
 
@@ -565,6 +574,8 @@ export interface ReportViewDefinition {
   title?: string;
   titleFrom?: string;
   titleFromBlock?: ReportTitleFromBlock;
+  parentViewId?: string;
+  clearFiltersOnBack?: string[];
   breadcrumb?: ReportViewBreadcrumb[];
   layout?: ReportLayoutNode[];
 }

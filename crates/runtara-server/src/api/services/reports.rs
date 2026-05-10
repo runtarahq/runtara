@@ -2,7 +2,9 @@ use chrono::{DateTime, Datelike, Duration, NaiveTime, Utc};
 use regex::Regex;
 use serde_json::{Value, json};
 use sqlx::PgPool;
+use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::sync::Arc;
 use thiserror::Error;
 use uuid::Uuid;
@@ -23,7 +25,7 @@ use crate::api::services::workflow_runtime::{
     submit_workflow_action,
 };
 use crate::auth::{AuthContext, AuthMethod};
-use crate::runtime_client::RuntimeClient;
+use crate::runtime_client::{GetTenantMetricsOptions, MetricsGranularity, RuntimeClient};
 use crate::workers::execution_engine::{ExecutionEngine, ExecutionError};
 
 mod query_plan;
@@ -59,6 +61,7 @@ pub struct ReportService {
     repo: ReportRepository,
     schema_service: SchemaService,
     instance_service: InstanceService,
+    connections: Arc<runtara_connections::ConnectionsFacade>,
     engine: Option<Arc<ExecutionEngine>>,
     runtime_client: Option<Arc<RuntimeClient>>,
 }
@@ -91,7 +94,8 @@ impl ReportService {
         Self {
             repo: ReportRepository::new(pool),
             schema_service: SchemaService::new(manager.clone(), connections.clone()),
-            instance_service: InstanceService::new(manager, connections),
+            instance_service: InstanceService::new(manager, connections.clone()),
+            connections,
             engine: None,
             runtime_client: None,
         }
@@ -1081,6 +1085,7 @@ impl ReportService {
                 )));
             }
         }
+        validate_report_view_navigation(&definition.views, &view_ids, &filter_ids)?;
 
         let mut dataset_ids = HashSet::new();
         for dataset in &definition.datasets {
@@ -1164,6 +1169,10 @@ impl ReportService {
             }
             if block.source.kind == ReportSourceKind::WorkflowRuntime {
                 validate_workflow_runtime_block(block, &filter_ids, &view_ids)?;
+                continue;
+            }
+            if block.source.kind == ReportSourceKind::System {
+                validate_system_block(block, &filter_ids, &view_ids)?;
                 continue;
             }
             if block.source.schema.trim().is_empty() {
@@ -2249,6 +2258,17 @@ impl ReportService {
         resolved_filters: &HashMap<String, Value>,
         block_request: Option<&ReportBlockDataRequest>,
     ) -> Result<Value, ReportServiceError> {
+        if block.source.kind == ReportSourceKind::System {
+            return self
+                .render_system_table_block(
+                    tenant_id,
+                    definition,
+                    block,
+                    resolved_filters,
+                    block_request,
+                )
+                .await;
+        }
         if block.source.kind == ReportSourceKind::WorkflowRuntime {
             return self
                 .render_workflow_runtime_table_block(
@@ -2349,21 +2369,7 @@ impl ReportService {
             resolved_filters,
             block_request,
         };
-        let columns = table
-            .map(|table| {
-                table
-                    .columns
-                    .iter()
-                    .map(|column| {
-                        json!({
-                            "key": column.field,
-                            "label": column.label.clone().unwrap_or_else(|| humanize_label(&column.field)),
-                            "format": column.format,
-                        })
-                    })
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
+        let columns = table_response_columns(table);
         let rows = self
             .hydrate_table_chart_columns(tenant_id, condition_context, table, rows)
             .await?;
@@ -2491,7 +2497,473 @@ impl ReportService {
                     }
                 }))
             }
+            _ => Err(ReportServiceError::Validation(format!(
+                "Block '{}' workflow_runtime source does not support system entity {:?}",
+                block.id, entity
+            ))),
         }
+    }
+
+    async fn render_system_table_block(
+        &self,
+        tenant_id: &str,
+        definition: &ReportDefinition,
+        block: &ReportBlockDefinition,
+        resolved_filters: &HashMap<String, Value>,
+        block_request: Option<&ReportBlockDataRequest>,
+    ) -> Result<Value, ReportServiceError> {
+        if block.source.mode == ReportSourceMode::Aggregate {
+            return self
+                .render_system_aggregate_table_block(
+                    tenant_id,
+                    definition,
+                    block,
+                    resolved_filters,
+                    block_request,
+                )
+                .await;
+        }
+
+        let entity = system_entity(block)?;
+        let table = block.table.as_ref();
+        let page_size = clamp_page_size(
+            block_request
+                .and_then(|request| request.page.as_ref().map(|page| page.size))
+                .or_else(|| {
+                    table
+                        .and_then(|table| table.pagination.as_ref())
+                        .map(|p| p.default_page_size)
+                })
+                .unwrap_or(50),
+        );
+        let offset = block_request
+            .and_then(|request| request.page.as_ref().map(|page| page.offset))
+            .unwrap_or(0)
+            .max(0);
+        let sort = block_request
+            .map(|request| request.sort.clone())
+            .filter(|sort| !sort.is_empty())
+            .or_else(|| {
+                table
+                    .map(|table| table.default_sort.clone())
+                    .filter(|sort| !sort.is_empty())
+            })
+            .unwrap_or_else(|| block.source.order_by.clone());
+
+        let mut rows = self
+            .system_rows_for_block(
+                tenant_id,
+                definition,
+                block,
+                resolved_filters,
+                block_request,
+            )
+            .await?;
+        sort_rows(&mut rows, &sort);
+        let total_count = rows.len() as i64;
+        let rows = rows
+            .into_iter()
+            .skip(offset as usize)
+            .take(page_size as usize)
+            .map(Value::Object)
+            .collect::<Vec<_>>();
+
+        Ok(json!({
+            "columns": system_table_columns(table, entity),
+            "rows": rows,
+            "page": {
+                "offset": offset,
+                "size": page_size,
+                "totalCount": total_count,
+                "hasNextPage": offset + page_size < total_count,
+            }
+        }))
+    }
+
+    async fn render_system_aggregate_table_block(
+        &self,
+        tenant_id: &str,
+        definition: &ReportDefinition,
+        block: &ReportBlockDefinition,
+        resolved_filters: &HashMap<String, Value>,
+        block_request: Option<&ReportBlockDataRequest>,
+    ) -> Result<Value, ReportServiceError> {
+        let table = block.table.as_ref();
+        let page_size = clamp_page_size(
+            block_request
+                .and_then(|request| request.page.as_ref().map(|page| page.size))
+                .or_else(|| {
+                    table
+                        .and_then(|table| table.pagination.as_ref())
+                        .map(|p| p.default_page_size)
+                })
+                .unwrap_or(50),
+        );
+        let offset = block_request
+            .and_then(|request| request.page.as_ref().map(|page| page.offset))
+            .unwrap_or(0)
+            .max(0);
+        let sort = block_request
+            .map(|request| request.sort.clone())
+            .filter(|sort| !sort.is_empty())
+            .or_else(|| {
+                table
+                    .map(|table| table.default_sort.clone())
+                    .filter(|sort| !sort.is_empty())
+            })
+            .unwrap_or_else(|| block.source.order_by.clone());
+
+        let request = build_table_aggregate_request(
+            definition,
+            block,
+            resolved_filters,
+            block_request,
+            &sort,
+            page_size,
+            offset,
+        )?;
+        let rows = self
+            .system_rows_for_block(
+                tenant_id,
+                definition,
+                block,
+                resolved_filters,
+                block_request,
+            )
+            .await?;
+        let result = aggregate_virtual_rows(&block.id, &rows, request)?;
+        let source_columns = result.columns.clone();
+        let columns = table_output_columns(table, &source_columns);
+        let rows = project_aggregate_table_rows(table, &source_columns, result.rows)?;
+
+        Ok(json!({
+            "columns": columns,
+            "rows": rows,
+            "page": {
+                "offset": offset,
+                "size": page_size,
+                "totalCount": result.group_count,
+                "hasNextPage": offset + page_size < result.group_count,
+            }
+        }))
+    }
+
+    async fn render_system_aggregate_block(
+        &self,
+        tenant_id: &str,
+        definition: &ReportDefinition,
+        block: &ReportBlockDefinition,
+        resolved_filters: &HashMap<String, Value>,
+    ) -> Result<Value, ReportServiceError> {
+        let request = build_aggregate_request(definition, block, resolved_filters)?;
+        let rows = self
+            .system_rows_for_block(tenant_id, definition, block, resolved_filters, None)
+            .await?;
+        let result = aggregate_virtual_rows(&block.id, &rows, request)?;
+
+        Ok(json!({
+            "columns": result.columns,
+            "rows": result.rows,
+            "groupCount": result.group_count,
+        }))
+    }
+
+    async fn system_rows_for_block(
+        &self,
+        tenant_id: &str,
+        definition: &ReportDefinition,
+        block: &ReportBlockDefinition,
+        resolved_filters: &HashMap<String, Value>,
+        block_request: Option<&ReportBlockDataRequest>,
+    ) -> Result<Vec<serde_json::Map<String, Value>>, ReportServiceError> {
+        let condition = build_block_condition(definition, block, resolved_filters, block_request)?;
+        let mut rows = self
+            .fetch_system_rows(tenant_id, block, condition.as_ref())
+            .await?;
+
+        if let Some(condition) = &condition {
+            rows = rows
+                .into_iter()
+                .filter_map(
+                    |row| match condition_matches_row(condition, &row, &block.id) {
+                        Ok(true) => Some(Ok(row)),
+                        Ok(false) => None,
+                        Err(error) => Some(Err(error)),
+                    },
+                )
+                .collect::<Result<Vec<_>, _>>()?;
+        }
+
+        Ok(rows)
+    }
+
+    async fn fetch_system_rows(
+        &self,
+        tenant_id: &str,
+        block: &ReportBlockDefinition,
+        condition: Option<&Condition>,
+    ) -> Result<Vec<serde_json::Map<String, Value>>, ReportServiceError> {
+        match system_entity(block)? {
+            ReportWorkflowRuntimeEntity::RuntimeExecutionMetricBuckets => {
+                self.runtime_execution_metric_rows(tenant_id, block, condition)
+                    .await
+            }
+            ReportWorkflowRuntimeEntity::RuntimeSystemSnapshot => {
+                Ok(vec![runtime_system_snapshot_row()])
+            }
+            ReportWorkflowRuntimeEntity::ConnectionRateLimitStatus => {
+                self.connection_rate_limit_status_rows(tenant_id, block)
+                    .await
+            }
+            ReportWorkflowRuntimeEntity::ConnectionRateLimitEvents => {
+                self.connection_rate_limit_event_rows(tenant_id, block, condition)
+                    .await
+            }
+            ReportWorkflowRuntimeEntity::ConnectionRateLimitTimeline => {
+                self.connection_rate_limit_timeline_rows(tenant_id, block, condition)
+                    .await
+            }
+            ReportWorkflowRuntimeEntity::Instances | ReportWorkflowRuntimeEntity::Actions => {
+                Err(ReportServiceError::Validation(format!(
+                    "Block '{}' system source does not support workflow_runtime entity {:?}",
+                    block.id, block.source.entity
+                )))
+            }
+        }
+    }
+
+    async fn runtime_execution_metric_rows(
+        &self,
+        tenant_id: &str,
+        block: &ReportBlockDefinition,
+        condition: Option<&Condition>,
+    ) -> Result<Vec<serde_json::Map<String, Value>>, ReportServiceError> {
+        let runtime_client = self.require_runtime_client()?;
+        let now = Utc::now();
+        let (start_time, end_time) = extract_time_bounds(condition, &["bucketTime"]);
+        let end_time = end_time.unwrap_or(now);
+        let start_time = start_time.unwrap_or(end_time - Duration::days(30));
+        let granularity = parse_metrics_granularity(block.source.granularity.as_deref())?;
+
+        let result = runtime_client
+            .get_tenant_metrics(
+                GetTenantMetricsOptions::new(tenant_id)
+                    .with_start_time(start_time)
+                    .with_end_time(end_time)
+                    .with_granularity(granularity),
+            )
+            .await
+            .map_err(|err| {
+                ReportServiceError::Database(format!(
+                    "Failed to fetch runtime execution metrics: {}",
+                    err
+                ))
+            })?;
+
+        let result_tenant_id = result.tenant_id.clone();
+        let result_granularity = format!("{:?}", result.granularity).to_lowercase();
+
+        Ok(result
+            .buckets
+            .into_iter()
+            .map(|bucket| {
+                serde_json::Map::from_iter([
+                    (
+                        "tenantId".to_string(),
+                        Value::String(result_tenant_id.clone()),
+                    ),
+                    (
+                        "bucketTime".to_string(),
+                        Value::String(bucket.bucket_time.to_rfc3339()),
+                    ),
+                    (
+                        "granularity".to_string(),
+                        Value::String(result_granularity.clone()),
+                    ),
+                    (
+                        "invocationCount".to_string(),
+                        json!(bucket.invocation_count),
+                    ),
+                    ("successCount".to_string(), json!(bucket.success_count)),
+                    ("failureCount".to_string(), json!(bucket.failure_count)),
+                    ("cancelledCount".to_string(), json!(bucket.cancelled_count)),
+                    (
+                        "avgDurationSeconds".to_string(),
+                        option_f64_value(bucket.avg_duration_seconds),
+                    ),
+                    (
+                        "minDurationSeconds".to_string(),
+                        option_f64_value(bucket.min_duration_seconds),
+                    ),
+                    (
+                        "maxDurationSeconds".to_string(),
+                        option_f64_value(bucket.max_duration_seconds),
+                    ),
+                    (
+                        "avgMemoryBytes".to_string(),
+                        bucket
+                            .avg_memory_bytes
+                            .map(Value::from)
+                            .unwrap_or(Value::Null),
+                    ),
+                    (
+                        "maxMemoryBytes".to_string(),
+                        bucket
+                            .max_memory_bytes
+                            .map(Value::from)
+                            .unwrap_or(Value::Null),
+                    ),
+                    (
+                        "successRatePercent".to_string(),
+                        option_f64_value(bucket.success_rate_percent),
+                    ),
+                ])
+            })
+            .collect())
+    }
+
+    async fn connection_rate_limit_status_rows(
+        &self,
+        tenant_id: &str,
+        block: &ReportBlockDefinition,
+    ) -> Result<Vec<serde_json::Map<String, Value>>, ReportServiceError> {
+        let interval = block.source.interval.as_deref().unwrap_or("24h");
+        let service = self.connections.rate_limit_service();
+        let statuses = service
+            .list_all_rate_limits(tenant_id, Some(interval))
+            .await
+            .map_err(map_rate_limit_error)?;
+
+        Ok(statuses.into_iter().map(rate_limit_status_row).collect())
+    }
+
+    async fn connection_rate_limit_event_rows(
+        &self,
+        tenant_id: &str,
+        block: &ReportBlockDefinition,
+        condition: Option<&Condition>,
+    ) -> Result<Vec<serde_json::Map<String, Value>>, ReportServiceError> {
+        let service = self.connections.rate_limit_service();
+        let connection_id = system_connection_id(block, condition);
+        let (from, to) = extract_time_bounds(condition, &["createdAt"]);
+        let from = from.or_else(|| Some(Utc::now() - Duration::days(30)));
+        let event_type = extract_eq_string_condition(condition, "eventType");
+        let limit = block.source.limit.unwrap_or(1000).clamp(1, 1000);
+
+        let mut events = Vec::new();
+        if let Some(connection_id) = connection_id {
+            let response = service
+                .get_rate_limit_history(
+                    &connection_id,
+                    tenant_id,
+                    &runtara_connections::types::RateLimitHistoryQuery {
+                        limit,
+                        offset: 0,
+                        event_type,
+                        from,
+                        to,
+                    },
+                )
+                .await
+                .map_err(map_rate_limit_error)?;
+            events.extend(response.data);
+        } else {
+            let statuses = service
+                .list_all_rate_limits(tenant_id, Some("24h"))
+                .await
+                .map_err(map_rate_limit_error)?;
+            for status in statuses {
+                let response = service
+                    .get_rate_limit_history(
+                        &status.connection_id,
+                        tenant_id,
+                        &runtara_connections::types::RateLimitHistoryQuery {
+                            limit,
+                            offset: 0,
+                            event_type: event_type.clone(),
+                            from,
+                            to,
+                        },
+                    )
+                    .await
+                    .map_err(map_rate_limit_error)?;
+                events.extend(response.data);
+            }
+        }
+
+        events.sort_by(|left, right| right.created_at.cmp(&left.created_at));
+        events.truncate(limit as usize);
+        Ok(events.into_iter().map(rate_limit_event_row).collect())
+    }
+
+    async fn connection_rate_limit_timeline_rows(
+        &self,
+        tenant_id: &str,
+        block: &ReportBlockDefinition,
+        condition: Option<&Condition>,
+    ) -> Result<Vec<serde_json::Map<String, Value>>, ReportServiceError> {
+        let Some(connection_id) = system_connection_id(block, condition) else {
+            return Ok(Vec::new());
+        };
+
+        let now = Utc::now();
+        let (start_time, end_time) =
+            extract_time_bounds(condition, &["bucket", "bucketTime", "createdAt"]);
+        let end_time = end_time.unwrap_or(now);
+        let start_time = start_time.unwrap_or(end_time - Duration::hours(24));
+        let granularity = block
+            .source
+            .granularity
+            .clone()
+            .unwrap_or_else(|| infer_rate_limit_timeline_granularity(start_time, end_time));
+        let tag = extract_eq_string_condition(condition, "tag");
+
+        let service = self.connections.rate_limit_service();
+        let response = service
+            .get_rate_limit_timeline(
+                &connection_id,
+                tenant_id,
+                &runtara_connections::types::RateLimitTimelineQuery {
+                    start_time: Some(start_time),
+                    end_time: Some(end_time),
+                    granularity: granularity.clone(),
+                    tag,
+                },
+            )
+            .await
+            .map_err(map_rate_limit_error)?;
+
+        Ok(response
+            .data
+            .buckets
+            .into_iter()
+            .map(|bucket| {
+                serde_json::Map::from_iter([
+                    (
+                        "connectionId".to_string(),
+                        Value::String(connection_id.clone()),
+                    ),
+                    (
+                        "bucket".to_string(),
+                        Value::String(bucket.bucket.to_rfc3339()),
+                    ),
+                    (
+                        "bucketTime".to_string(),
+                        Value::String(bucket.bucket.to_rfc3339()),
+                    ),
+                    (
+                        "granularity".to_string(),
+                        Value::String(granularity.clone()),
+                    ),
+                    ("requestCount".to_string(), json!(bucket.request_count)),
+                    (
+                        "rateLimitedCount".to_string(),
+                        json!(bucket.rate_limited_count),
+                    ),
+                    ("retryCount".to_string(), json!(bucket.retry_count)),
+                ])
+            })
+            .collect())
     }
 
     async fn render_actions_block(
@@ -2738,21 +3210,7 @@ impl ReportService {
             .hydrate_table_chart_columns(tenant_id, condition_context, table, rows)
             .await?;
 
-        let columns = table
-            .map(|table| {
-                table
-                    .columns
-                    .iter()
-                    .map(|column| {
-                        json!({
-                            "key": column.field,
-                            "label": column.label.clone().unwrap_or_else(|| humanize_label(&column.field)),
-                            "format": column.format,
-                        })
-                    })
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
+        let columns = table_response_columns(table);
 
         Ok(json!({
             "columns": columns,
@@ -2890,7 +3348,13 @@ impl ReportService {
             .iter()
             .filter(|column| column.is_value_lookup())
             .collect();
-        if chart_columns.is_empty() && value_columns.is_empty() {
+        let lookup_display_columns: Vec<_> = table
+            .columns
+            .iter()
+            .filter(|column| auto_lookup_display_field(column).is_some())
+            .collect();
+        if chart_columns.is_empty() && value_columns.is_empty() && lookup_display_columns.is_empty()
+        {
             return Ok(rows);
         }
 
@@ -2911,6 +3375,15 @@ impl ReportService {
             )
             .await?;
         }
+        if !lookup_display_columns.is_empty() {
+            self.hydrate_table_lookup_display_columns(
+                tenant_id,
+                condition_context,
+                &lookup_display_columns,
+                &mut hydrated_rows,
+            )
+            .await?;
+        }
 
         let mut output_rows = Vec::with_capacity(hydrated_rows.len());
         for mut object in hydrated_rows {
@@ -2926,6 +3399,8 @@ impl ReportService {
         Ok(output_rows)
     }
 
+    // This hydrator can remove rows for inner joins, so it needs Vec::retain.
+    #[allow(clippy::ptr_arg)]
     async fn hydrate_table_value_columns(
         &self,
         tenant_id: &str,
@@ -3015,6 +3490,118 @@ impl ReportService {
             index += 1;
             keep
         });
+        Ok(())
+    }
+
+    async fn hydrate_table_lookup_display_columns(
+        &self,
+        tenant_id: &str,
+        condition_context: ReportConditionRuntimeContext<'_>,
+        lookup_columns: &[&ReportTableColumn],
+        rows: &mut [serde_json::Map<String, Value>],
+    ) -> Result<(), ReportServiceError> {
+        let condition_filter_defs = block_condition_filter_definitions(
+            condition_context.definition,
+            condition_context.block,
+        );
+        let condition_filter_values = block_condition_filter_values(
+            condition_context.block,
+            condition_context.resolved_filters,
+            condition_context.block_request,
+        );
+
+        for column in lookup_columns {
+            let Some(lookup) = lookup_editor_for_table_column(column) else {
+                continue;
+            };
+            let Some(display_field) = auto_lookup_display_field(column) else {
+                continue;
+            };
+            let mut seen_keys = HashSet::new();
+            let mut parent_keys = Vec::new();
+            for row in rows.iter() {
+                let Some(value) = row.get(&column.field) else {
+                    continue;
+                };
+                if value_is_empty(value) {
+                    continue;
+                }
+                if seen_keys.insert(value_to_lookup_key(value)) {
+                    parent_keys.push(value.clone());
+                }
+            }
+            if parent_keys.is_empty() {
+                continue;
+            }
+
+            let mut conditions = Vec::new();
+            if let Some(condition) = resolve_optional_report_condition(
+                lookup.condition.as_ref(),
+                &condition_filter_defs,
+                &condition_filter_values,
+                &format!(
+                    "block '{}' table column '{}' lookup",
+                    condition_context.block.id, column.field
+                ),
+            )? {
+                conditions.push(condition);
+            }
+            append_source_mapping_conditions(
+                &mut conditions,
+                &lookup.filter_mappings,
+                &condition_filter_values,
+            );
+            conditions.push(Condition {
+                op: "IN".to_string(),
+                arguments: Some(vec![
+                    Value::String(lookup.value_field.clone()),
+                    Value::Array(parent_keys),
+                ]),
+            });
+
+            let query = ObjectModelOptionQuery {
+                context: format!(
+                    "block '{}' table column '{}' lookup",
+                    condition_context.block.id, column.field
+                ),
+                schema: lookup.schema.clone(),
+                connection_id: lookup.connection_id.as_deref(),
+                value_field: lookup.value_field.clone(),
+                label_field: lookup.label_field.clone(),
+                conditions,
+                search_fields: vec![],
+                search_query: String::new(),
+            };
+            let (options, page) = self
+                .query_object_model_options(tenant_id, query, 0, MAX_BROADCAST_JOIN_DIM_ROWS)
+                .await?;
+            if page.total_count > MAX_BROADCAST_JOIN_DIM_ROWS {
+                return Err(ReportServiceError::Validation(format!(
+                    "Lookup display for table column '{}' on '{}' would broadcast {} rows; cap is {}. Add a more selective lookup.condition.",
+                    column.field, lookup.schema, page.total_count, MAX_BROADCAST_JOIN_DIM_ROWS
+                )));
+            }
+
+            let labels_by_key = options
+                .into_iter()
+                .map(|option| {
+                    (
+                        value_to_lookup_key(&option.value),
+                        Value::String(option.label),
+                    )
+                })
+                .collect::<HashMap<_, _>>();
+
+            for row in rows.iter_mut() {
+                let Some(value) = row.get(&column.field) else {
+                    continue;
+                };
+                if let Some(label) = labels_by_key.get(&value_to_lookup_key(value)) {
+                    row.insert(display_field.clone(), label.clone());
+                }
+            }
+        }
+
         Ok(())
     }
 
@@ -3147,6 +3734,11 @@ impl ReportService {
         block: &ReportBlockDefinition,
         resolved_filters: &HashMap<String, Value>,
     ) -> Result<Value, ReportServiceError> {
+        if block.source.kind == ReportSourceKind::System {
+            return self
+                .render_system_aggregate_block(tenant_id, definition, block, resolved_filters)
+                .await;
+        }
         let request = build_aggregate_request(definition, block, resolved_filters)?;
         let result = self
             .aggregate_with_optional_joins(tenant_id, block, request)
@@ -3763,6 +4355,68 @@ fn validate_layout_node(
     Ok(())
 }
 
+fn validate_report_view_navigation(
+    views: &[ReportViewDefinition],
+    view_ids: &HashSet<String>,
+    filter_ids: &HashSet<String>,
+) -> Result<(), ReportServiceError> {
+    let views_by_id = views
+        .iter()
+        .map(|view| (view.id.as_str(), view))
+        .collect::<HashMap<_, _>>();
+
+    for view in views {
+        if let Some(parent_view_id) = view.parent_view_id.as_deref() {
+            if parent_view_id.trim().is_empty() {
+                return Err(ReportServiceError::Validation(format!(
+                    "Report view '{}' parentViewId cannot be empty",
+                    view.id
+                )));
+            }
+            if parent_view_id == view.id {
+                return Err(ReportServiceError::Validation(format!(
+                    "Report view '{}' cannot use itself as parentViewId",
+                    view.id
+                )));
+            }
+            if !view_ids.contains(parent_view_id) {
+                return Err(ReportServiceError::Validation(format!(
+                    "Report view '{}' references unknown parentViewId '{}'",
+                    view.id, parent_view_id
+                )));
+            }
+        }
+
+        for filter_id in &view.clear_filters_on_back {
+            if !filter_ids.contains(filter_id) {
+                return Err(ReportServiceError::Validation(format!(
+                    "Report view '{}' clearFiltersOnBack references unknown filter '{}'",
+                    view.id, filter_id
+                )));
+            }
+        }
+    }
+
+    for view in views {
+        let mut seen = HashSet::from([view.id.as_str()]);
+        let mut current = view;
+        while let Some(parent_view_id) = current.parent_view_id.as_deref() {
+            let Some(parent) = views_by_id.get(parent_view_id).copied() else {
+                break;
+            };
+            if !seen.insert(parent.id.as_str()) {
+                return Err(ReportServiceError::Validation(format!(
+                    "Report view '{}' parentViewId chain contains a cycle",
+                    view.id
+                )));
+            }
+            current = parent;
+        }
+    }
+
+    Ok(())
+}
+
 fn validate_block_interactions(
     block: &ReportBlockDefinition,
     filter_ids: &HashSet<String>,
@@ -3978,6 +4632,154 @@ fn validate_workflow_runtime_block(
             )));
         }
     }
+    validate_block_interactions(block, filter_ids, view_ids)
+}
+
+fn validate_system_block(
+    block: &ReportBlockDefinition,
+    filter_ids: &HashSet<String>,
+    view_ids: &HashSet<String>,
+) -> Result<(), ReportServiceError> {
+    let entity = system_entity(block)?;
+    if !block.source.schema.trim().is_empty() {
+        return Err(ReportServiceError::Validation(format!(
+            "Block '{}' system source must not set schema",
+            block.id
+        )));
+    }
+    if block.source.workflow_id.is_some() || block.source.instance_id.is_some() {
+        return Err(ReportServiceError::Validation(format!(
+            "Block '{}' system source must not set workflowId or instanceId",
+            block.id
+        )));
+    }
+    if !block.source.join.is_empty() {
+        return Err(ReportServiceError::Validation(format!(
+            "Block '{}' system source does not support joins",
+            block.id
+        )));
+    }
+    if matches!(
+        block.block_type,
+        ReportBlockType::Actions | ReportBlockType::Card
+    ) {
+        return Err(ReportServiceError::Validation(format!(
+            "Block '{}' system source only supports table, chart, and metric blocks",
+            block.id
+        )));
+    }
+
+    let fields = system_fields(entity);
+    let aggregate_output_fields = aggregate_output_fields(block);
+    let is_table_value_field = |field: &str| -> bool {
+        match block.source.mode {
+            ReportSourceMode::Filter => system_row_field_known(&fields, field),
+            ReportSourceMode::Aggregate => aggregate_output_fields.contains(field),
+        }
+    };
+
+    if let Some(table) = &block.table {
+        for column in &table.columns {
+            if column.is_chart() || column.is_value_lookup() || column.is_workflow_button() {
+                return Err(ReportServiceError::Validation(format!(
+                    "Block '{}' system table columns cannot use nested sources or workflow buttons",
+                    block.id
+                )));
+            }
+            if !is_table_value_field(&column.field) {
+                return Err(ReportServiceError::Validation(format!(
+                    "Block '{}' references unknown system table field '{}'",
+                    block.id, column.field
+                )));
+            }
+            if let Some(display_field) = &column.display_field
+                && !is_table_value_field(display_field)
+            {
+                return Err(ReportServiceError::Validation(format!(
+                    "Block '{}' references unknown system table displayField '{}'",
+                    block.id, display_field
+                )));
+            }
+        }
+        for sort in &table.default_sort {
+            if !is_table_value_field(&sort.field) {
+                return Err(ReportServiceError::Validation(format!(
+                    "Block '{}' references unknown system table sort field '{}'",
+                    block.id, sort.field
+                )));
+            }
+        }
+        for action in &table.actions {
+            validate_report_table_action_config(
+                action,
+                &format!("block '{}' table action '{}'", block.id, action.id),
+            )?;
+        }
+    }
+
+    for group_field in &block.source.group_by {
+        if !system_row_field_known(&fields, group_field) {
+            return Err(ReportServiceError::Validation(format!(
+                "Block '{}' references unknown system groupBy field '{}'",
+                block.id, group_field
+            )));
+        }
+    }
+    for aggregate in &block.source.aggregates {
+        if let Some(field) = &aggregate.field
+            && !system_row_field_known(&fields, field)
+        {
+            return Err(ReportServiceError::Validation(format!(
+                "Block '{}' references unknown system aggregate field '{}'",
+                block.id, field
+            )));
+        }
+        for order_by in &aggregate.order_by {
+            if !system_row_field_known(&fields, &order_by.field) {
+                return Err(ReportServiceError::Validation(format!(
+                    "Block '{}' aggregate '{}' references unknown system orderBy field '{}'",
+                    block.id, aggregate.alias, order_by.field
+                )));
+            }
+        }
+    }
+    for order_by in &block.source.order_by {
+        let known = match block.source.mode {
+            ReportSourceMode::Filter => system_row_field_known(&fields, &order_by.field),
+            ReportSourceMode::Aggregate => aggregate_output_fields.contains(&order_by.field),
+        };
+        if !known {
+            return Err(ReportServiceError::Validation(format!(
+                "Block '{}' references unknown system orderBy field '{}'",
+                block.id, order_by.field
+            )));
+        }
+    }
+    if let Some(chart) = &block.chart {
+        if !aggregate_output_fields.contains(&chart.x) {
+            return Err(ReportServiceError::Validation(format!(
+                "Block '{}' references unknown system chart x field '{}'",
+                block.id, chart.x
+            )));
+        }
+        for series in &chart.series {
+            if !aggregate_output_fields.contains(&series.field) {
+                return Err(ReportServiceError::Validation(format!(
+                    "Block '{}' references unknown system chart series field '{}'",
+                    block.id, series.field
+                )));
+            }
+        }
+    }
+    if let Some(metric) = &block.metric
+        && !aggregate_output_fields.contains(&metric.value_field)
+    {
+        return Err(ReportServiceError::Validation(format!(
+            "Block '{}' references unknown system metric valueField '{}'",
+            block.id, metric.value_field
+        )));
+    }
+
     validate_block_interactions(block, filter_ids, view_ids)
 }
 
@@ -4334,6 +5136,11 @@ fn workflow_runtime_fields(entity: ReportWorkflowRuntimeEntity) -> HashSet<&'sta
         ]
         .into_iter()
         .collect(),
+        ReportWorkflowRuntimeEntity::RuntimeExecutionMetricBuckets
+        | ReportWorkflowRuntimeEntity::RuntimeSystemSnapshot
+        | ReportWorkflowRuntimeEntity::ConnectionRateLimitStatus
+        | ReportWorkflowRuntimeEntity::ConnectionRateLimitEvents
+        | ReportWorkflowRuntimeEntity::ConnectionRateLimitTimeline => HashSet::new(),
     }
 }
 
@@ -5482,12 +6289,43 @@ fn combine_conditions(conditions: Vec<Condition>) -> Option<Condition> {
 fn workflow_runtime_entity(
     block: &ReportBlockDefinition,
 ) -> Result<ReportWorkflowRuntimeEntity, ReportServiceError> {
-    block.source.entity.ok_or_else(|| {
+    let entity = block.source.entity.ok_or_else(|| {
         ReportServiceError::Validation(format!(
             "Block '{}' workflow_runtime source must specify entity",
             block.id
         ))
-    })
+    })?;
+    match entity {
+        ReportWorkflowRuntimeEntity::Instances | ReportWorkflowRuntimeEntity::Actions => Ok(entity),
+        _ => Err(ReportServiceError::Validation(format!(
+            "Block '{}' workflow_runtime source does not support system entity {:?}",
+            block.id, entity
+        ))),
+    }
+}
+
+fn system_entity(
+    block: &ReportBlockDefinition,
+) -> Result<ReportWorkflowRuntimeEntity, ReportServiceError> {
+    let entity = block.source.entity.ok_or_else(|| {
+        ReportServiceError::Validation(format!(
+            "Block '{}' system source must specify entity",
+            block.id
+        ))
+    })?;
+    match entity {
+        ReportWorkflowRuntimeEntity::RuntimeExecutionMetricBuckets
+        | ReportWorkflowRuntimeEntity::RuntimeSystemSnapshot
+        | ReportWorkflowRuntimeEntity::ConnectionRateLimitStatus
+        | ReportWorkflowRuntimeEntity::ConnectionRateLimitEvents
+        | ReportWorkflowRuntimeEntity::ConnectionRateLimitTimeline => Ok(entity),
+        ReportWorkflowRuntimeEntity::Instances | ReportWorkflowRuntimeEntity::Actions => {
+            Err(ReportServiceError::Validation(format!(
+                "Block '{}' system source does not support workflow_runtime entity {:?}",
+                block.id, entity
+            )))
+        }
+    }
 }
 
 fn workflow_runtime_workflow_id(block: &ReportBlockDefinition) -> Result<&str, ReportServiceError> {
@@ -5649,6 +6487,7 @@ fn workflow_runtime_table_columns(
             ("instanceId", "Instance ID", None),
             ("requestedAt", "Requested", Some("datetime")),
         ],
+        _ => &[],
     };
 
     columns
@@ -5661,6 +6500,1257 @@ fn workflow_runtime_table_columns(
             })
         })
         .collect()
+}
+
+fn system_fields(entity: ReportWorkflowRuntimeEntity) -> HashSet<&'static str> {
+    match entity {
+        ReportWorkflowRuntimeEntity::RuntimeExecutionMetricBuckets => [
+            "tenantId",
+            "bucketTime",
+            "granularity",
+            "invocationCount",
+            "successCount",
+            "failureCount",
+            "cancelledCount",
+            "avgDurationSeconds",
+            "minDurationSeconds",
+            "maxDurationSeconds",
+            "avgMemoryBytes",
+            "maxMemoryBytes",
+            "successRatePercent",
+        ]
+        .into_iter()
+        .collect(),
+        ReportWorkflowRuntimeEntity::RuntimeSystemSnapshot => [
+            "capturedAt",
+            "cpuArchitecture",
+            "cpuPhysicalCores",
+            "cpuLogicalCores",
+            "memoryTotalBytes",
+            "memoryAvailableBytes",
+            "memoryAvailableForWorkflowsBytes",
+            "memoryUsedBytes",
+            "memoryUsedPercent",
+            "diskPath",
+            "diskTotalBytes",
+            "diskAvailableBytes",
+            "diskUsedBytes",
+            "diskUsedPercent",
+        ]
+        .into_iter()
+        .collect(),
+        ReportWorkflowRuntimeEntity::ConnectionRateLimitStatus => [
+            "connectionId",
+            "connectionTitle",
+            "integrationId",
+            "config",
+            "state",
+            "metrics",
+            "periodStats",
+            "configRequestsPerSecond",
+            "configBurstSize",
+            "configRetryOnLimit",
+            "configMaxRetries",
+            "configMaxWaitMs",
+            "stateAvailable",
+            "stateCurrentTokens",
+            "stateLastRefillMs",
+            "stateLearnedLimit",
+            "stateCallsInWindow",
+            "stateTotalCalls",
+            "stateWindowStartMs",
+            "capacityPercent",
+            "utilizationPercent",
+            "isRateLimited",
+            "retryAfterMs",
+            "periodInterval",
+            "periodTotalRequests",
+            "periodRateLimitedCount",
+            "periodRetryCount",
+            "periodRateLimitedPercent",
+        ]
+        .into_iter()
+        .collect(),
+        ReportWorkflowRuntimeEntity::ConnectionRateLimitEvents => [
+            "id",
+            "connectionId",
+            "eventType",
+            "createdAt",
+            "metadata",
+            "tag",
+        ]
+        .into_iter()
+        .collect(),
+        ReportWorkflowRuntimeEntity::ConnectionRateLimitTimeline => [
+            "connectionId",
+            "bucket",
+            "bucketTime",
+            "granularity",
+            "requestCount",
+            "rateLimitedCount",
+            "retryCount",
+        ]
+        .into_iter()
+        .collect(),
+        ReportWorkflowRuntimeEntity::Instances | ReportWorkflowRuntimeEntity::Actions => {
+            HashSet::new()
+        }
+    }
+}
+
+fn system_row_field_known(fields: &HashSet<&'static str>, field: &str) -> bool {
+    fields.contains(field)
+        || field
+            .split_once('.')
+            .is_some_and(|(root, _)| fields.contains(root))
+}
+
+fn system_table_columns(
+    table: Option<&ReportTableConfig>,
+    entity: ReportWorkflowRuntimeEntity,
+) -> Vec<Value> {
+    if let Some(table) = table
+        && !table.columns.is_empty()
+    {
+        return table
+            .columns
+            .iter()
+            .map(|column| {
+                json!({
+                    "key": column.field,
+                    "label": column.label.clone().unwrap_or_else(|| humanize_label(&column.field)),
+                    "format": column.format,
+                })
+            })
+            .collect();
+    }
+
+    let columns: &[(&str, &str, Option<&str>)] = match entity {
+        ReportWorkflowRuntimeEntity::RuntimeExecutionMetricBuckets => &[
+            ("bucketTime", "Bucket", Some("datetime")),
+            ("invocationCount", "Invocations", Some("number")),
+            ("successCount", "Successes", Some("number")),
+            ("failureCount", "Failures", Some("number")),
+            ("cancelledCount", "Cancelled", Some("number")),
+            ("successRatePercent", "Success Rate", Some("percent")),
+            ("avgDurationSeconds", "Avg Duration", Some("number")),
+            ("maxMemoryBytes", "Max Memory", Some("bytes")),
+        ],
+        ReportWorkflowRuntimeEntity::RuntimeSystemSnapshot => &[
+            ("capturedAt", "Captured", Some("datetime")),
+            ("cpuArchitecture", "CPU Architecture", None),
+            ("cpuPhysicalCores", "Physical Cores", Some("number")),
+            ("cpuLogicalCores", "Logical Cores", Some("number")),
+            ("memoryUsedPercent", "Memory Used", Some("percent")),
+            ("diskUsedPercent", "Disk Used", Some("percent")),
+        ],
+        ReportWorkflowRuntimeEntity::ConnectionRateLimitStatus => &[
+            ("connectionTitle", "Connection", None),
+            ("integrationId", "Integration", None),
+            ("isRateLimited", "Rate Limited", Some("boolean")),
+            ("capacityPercent", "Capacity", Some("percent")),
+            ("utilizationPercent", "Utilization", Some("percent")),
+            ("periodTotalRequests", "Requests", Some("number")),
+            ("periodRateLimitedCount", "Limited", Some("number")),
+            ("periodRetryCount", "Retries", Some("number")),
+        ],
+        ReportWorkflowRuntimeEntity::ConnectionRateLimitEvents => &[
+            ("createdAt", "Created", Some("datetime")),
+            ("connectionId", "Connection", None),
+            ("eventType", "Event", None),
+            ("tag", "Tag", None),
+        ],
+        ReportWorkflowRuntimeEntity::ConnectionRateLimitTimeline => &[
+            ("bucketTime", "Bucket", Some("datetime")),
+            ("requestCount", "Requests", Some("number")),
+            ("rateLimitedCount", "Limited", Some("number")),
+            ("retryCount", "Retries", Some("number")),
+        ],
+        ReportWorkflowRuntimeEntity::Instances | ReportWorkflowRuntimeEntity::Actions => &[],
+    };
+
+    columns
+        .iter()
+        .map(|(key, label, format)| {
+            json!({
+                "key": key,
+                "label": label,
+                "format": format,
+            })
+        })
+        .collect()
+}
+
+fn option_f64_value(value: Option<f64>) -> Value {
+    value
+        .and_then(serde_json::Number::from_f64)
+        .map(Value::Number)
+        .unwrap_or(Value::Null)
+}
+
+fn f64_value(value: f64) -> Value {
+    serde_json::Number::from_f64(value)
+        .map(Value::Number)
+        .unwrap_or(Value::Null)
+}
+
+fn runtime_system_snapshot_row() -> serde_json::Map<String, Value> {
+    let mut sys = sysinfo::System::new();
+    sys.refresh_memory();
+
+    let total_memory = sys.total_memory();
+    let available_memory = sys.available_memory();
+    let available_for_workflows = (available_memory as f64 * 0.8) as u64;
+    let used_memory = total_memory.saturating_sub(available_memory);
+    let memory_used_percent = percent(used_memory as f64, total_memory as f64);
+
+    let data_dir = std::env::var("DATA_DIR").unwrap_or_else(|_| ".data".to_string());
+    let data_path = PathBuf::from(&data_dir);
+    let canonical_path = data_path.canonicalize().unwrap_or(data_path);
+    let disks = sysinfo::Disks::new_with_refreshed_list();
+    let disk_info = disks
+        .iter()
+        .filter(|disk| canonical_path.starts_with(disk.mount_point()))
+        .max_by_key(|disk| disk.mount_point().as_os_str().len())
+        .map(|disk| {
+            (
+                disk.total_space(),
+                disk.available_space(),
+                canonical_path.display().to_string(),
+            )
+        })
+        .or_else(|| {
+            disks
+                .iter()
+                .next()
+                .map(|disk| (disk.total_space(), disk.available_space(), data_dir.clone()))
+        })
+        .unwrap_or((0, 0, data_dir));
+    let disk_used = disk_info.0.saturating_sub(disk_info.1);
+    let disk_used_percent = percent(disk_used as f64, disk_info.0 as f64);
+
+    serde_json::Map::from_iter([
+        (
+            "capturedAt".to_string(),
+            Value::String(Utc::now().to_rfc3339()),
+        ),
+        (
+            "cpuArchitecture".to_string(),
+            Value::String(std::env::consts::ARCH.to_string()),
+        ),
+        (
+            "cpuPhysicalCores".to_string(),
+            json!(num_cpus::get_physical()),
+        ),
+        ("cpuLogicalCores".to_string(), json!(num_cpus::get())),
+        ("memoryTotalBytes".to_string(), json!(total_memory)),
+        ("memoryAvailableBytes".to_string(), json!(available_memory)),
+        (
+            "memoryAvailableForWorkflowsBytes".to_string(),
+            json!(available_for_workflows),
+        ),
+        ("memoryUsedBytes".to_string(), json!(used_memory)),
+        (
+            "memoryUsedPercent".to_string(),
+            f64_value(memory_used_percent),
+        ),
+        ("diskPath".to_string(), Value::String(disk_info.2)),
+        ("diskTotalBytes".to_string(), json!(disk_info.0)),
+        ("diskAvailableBytes".to_string(), json!(disk_info.1)),
+        ("diskUsedBytes".to_string(), json!(disk_used)),
+        ("diskUsedPercent".to_string(), f64_value(disk_used_percent)),
+    ])
+}
+
+fn percent(numerator: f64, denominator: f64) -> f64 {
+    if denominator <= 0.0 {
+        0.0
+    } else {
+        (numerator / denominator) * 100.0
+    }
+}
+
+fn rate_limit_status_row(
+    status: runtara_connections::types::RateLimitStatusDto,
+) -> serde_json::Map<String, Value> {
+    let config_value = status
+        .config
+        .as_ref()
+        .and_then(|config| serde_json::to_value(config).ok())
+        .unwrap_or(Value::Null);
+    let state_value = serde_json::to_value(&status.state).unwrap_or(Value::Null);
+    let metrics_value = serde_json::to_value(&status.metrics).unwrap_or(Value::Null);
+    let period_value = status
+        .period_stats
+        .as_ref()
+        .and_then(|stats| serde_json::to_value(stats).ok())
+        .unwrap_or(Value::Null);
+
+    let mut row = serde_json::Map::new();
+    row.insert(
+        "connectionId".to_string(),
+        Value::String(status.connection_id),
+    );
+    row.insert(
+        "connectionTitle".to_string(),
+        Value::String(status.connection_title),
+    );
+    row.insert(
+        "integrationId".to_string(),
+        status
+            .integration_id
+            .map(Value::String)
+            .unwrap_or(Value::Null),
+    );
+    row.insert("config".to_string(), config_value);
+    row.insert("state".to_string(), state_value);
+    row.insert("metrics".to_string(), metrics_value);
+    row.insert("periodStats".to_string(), period_value);
+
+    if let Some(config) = status.config {
+        row.insert(
+            "configRequestsPerSecond".to_string(),
+            json!(config.requests_per_second),
+        );
+        row.insert("configBurstSize".to_string(), json!(config.burst_size));
+        row.insert(
+            "configRetryOnLimit".to_string(),
+            Value::Bool(config.retry_on_limit),
+        );
+        row.insert("configMaxRetries".to_string(), json!(config.max_retries));
+        row.insert("configMaxWaitMs".to_string(), json!(config.max_wait_ms));
+    } else {
+        row.insert("configRequestsPerSecond".to_string(), Value::Null);
+        row.insert("configBurstSize".to_string(), Value::Null);
+        row.insert("configRetryOnLimit".to_string(), Value::Null);
+        row.insert("configMaxRetries".to_string(), Value::Null);
+        row.insert("configMaxWaitMs".to_string(), Value::Null);
+    }
+
+    row.insert(
+        "stateAvailable".to_string(),
+        Value::Bool(status.state.available),
+    );
+    row.insert(
+        "stateCurrentTokens".to_string(),
+        option_f64_value(status.state.current_tokens),
+    );
+    row.insert(
+        "stateLastRefillMs".to_string(),
+        status
+            .state
+            .last_refill_ms
+            .map(Value::from)
+            .unwrap_or(Value::Null),
+    );
+    row.insert(
+        "stateLearnedLimit".to_string(),
+        status
+            .state
+            .learned_limit
+            .map(Value::from)
+            .unwrap_or(Value::Null),
+    );
+    row.insert(
+        "stateCallsInWindow".to_string(),
+        status
+            .state
+            .calls_in_window
+            .map(Value::from)
+            .unwrap_or(Value::Null),
+    );
+    row.insert(
+        "stateTotalCalls".to_string(),
+        status
+            .state
+            .total_calls
+            .map(Value::from)
+            .unwrap_or(Value::Null),
+    );
+    row.insert(
+        "stateWindowStartMs".to_string(),
+        status
+            .state
+            .window_start_ms
+            .map(Value::from)
+            .unwrap_or(Value::Null),
+    );
+    row.insert(
+        "capacityPercent".to_string(),
+        option_f64_value(status.metrics.capacity_percent),
+    );
+    row.insert(
+        "utilizationPercent".to_string(),
+        option_f64_value(status.metrics.utilization_percent),
+    );
+    row.insert(
+        "isRateLimited".to_string(),
+        Value::Bool(status.metrics.is_rate_limited),
+    );
+    row.insert(
+        "retryAfterMs".to_string(),
+        status
+            .metrics
+            .retry_after_ms
+            .map(Value::from)
+            .unwrap_or(Value::Null),
+    );
+
+    if let Some(period) = status.period_stats {
+        row.insert("periodInterval".to_string(), Value::String(period.interval));
+        row.insert(
+            "periodTotalRequests".to_string(),
+            json!(period.total_requests),
+        );
+        row.insert(
+            "periodRateLimitedCount".to_string(),
+            json!(period.rate_limited_count),
+        );
+        row.insert("periodRetryCount".to_string(), json!(period.retry_count));
+        row.insert(
+            "periodRateLimitedPercent".to_string(),
+            f64_value(period.rate_limited_percent),
+        );
+    } else {
+        row.insert("periodInterval".to_string(), Value::Null);
+        row.insert("periodTotalRequests".to_string(), Value::Null);
+        row.insert("periodRateLimitedCount".to_string(), Value::Null);
+        row.insert("periodRetryCount".to_string(), Value::Null);
+        row.insert("periodRateLimitedPercent".to_string(), Value::Null);
+    }
+
+    row
+}
+
+fn rate_limit_event_row(
+    event: runtara_connections::types::RateLimitEventDto,
+) -> serde_json::Map<String, Value> {
+    let tag = event
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.get("tag"))
+        .cloned()
+        .unwrap_or(Value::Null);
+    serde_json::Map::from_iter([
+        ("id".to_string(), json!(event.id)),
+        (
+            "connectionId".to_string(),
+            Value::String(event.connection_id),
+        ),
+        ("eventType".to_string(), Value::String(event.event_type)),
+        (
+            "createdAt".to_string(),
+            Value::String(event.created_at.to_rfc3339()),
+        ),
+        (
+            "metadata".to_string(),
+            event.metadata.unwrap_or(Value::Null),
+        ),
+        ("tag".to_string(), tag),
+    ])
+}
+
+fn parse_metrics_granularity(
+    granularity: Option<&str>,
+) -> Result<MetricsGranularity, ReportServiceError> {
+    match granularity
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("hourly")
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "hour" | "hourly" => Ok(MetricsGranularity::Hourly),
+        "day" | "daily" => Ok(MetricsGranularity::Daily),
+        other => Err(ReportServiceError::Validation(format!(
+            "Unsupported system metrics granularity '{}'. Use hourly or daily.",
+            other
+        ))),
+    }
+}
+
+fn infer_rate_limit_timeline_granularity(
+    start_time: DateTime<Utc>,
+    end_time: DateTime<Utc>,
+) -> String {
+    let duration = end_time - start_time;
+    if duration <= Duration::hours(2) {
+        "minute".to_string()
+    } else if duration <= Duration::days(7) {
+        "hourly".to_string()
+    } else {
+        "daily".to_string()
+    }
+}
+
+fn map_rate_limit_error(
+    error: runtara_connections::service::rate_limits::ServiceError,
+) -> ReportServiceError {
+    match error {
+        runtara_connections::service::rate_limits::ServiceError::NotFound(message) => {
+            ReportServiceError::Validation(message)
+        }
+        runtara_connections::service::rate_limits::ServiceError::DatabaseError(message)
+        | runtara_connections::service::rate_limits::ServiceError::RedisError(message) => {
+            ReportServiceError::Database(message)
+        }
+    }
+}
+
+fn system_connection_id(
+    block: &ReportBlockDefinition,
+    condition: Option<&Condition>,
+) -> Option<String> {
+    block
+        .source
+        .connection_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+        .or_else(|| extract_eq_string_condition(condition, "connectionId"))
+}
+
+fn extract_eq_string_condition(condition: Option<&Condition>, field: &str) -> Option<String> {
+    let condition = condition?;
+    let op = condition.op.to_ascii_uppercase();
+    let args = condition.arguments.as_deref().unwrap_or(&[]);
+    if matches!(op.as_str(), "AND" | "OR") {
+        return args.iter().find_map(|argument| {
+            condition_from_value(argument)
+                .as_ref()
+                .and_then(|child| extract_eq_string_condition(Some(child), field))
+        });
+    }
+    if op == "EQ" && args.len() == 2 && args.first().and_then(Value::as_str) == Some(field) {
+        return args.get(1).and_then(condition_scalar_to_string);
+    }
+    if op == "IN" && args.len() == 2 && args.first().and_then(Value::as_str) == Some(field) {
+        return args
+            .get(1)
+            .and_then(Value::as_array)
+            .and_then(|values| values.iter().find_map(condition_scalar_to_string));
+    }
+    None
+}
+
+fn condition_scalar_to_string(value: &Value) -> Option<String> {
+    match value {
+        Value::String(value) => Some(value.clone()),
+        Value::Number(value) => Some(value.to_string()),
+        Value::Bool(value) => Some(value.to_string()),
+        _ => None,
+    }
+}
+
+fn extract_time_bounds(
+    condition: Option<&Condition>,
+    fields: &[&str],
+) -> (Option<DateTime<Utc>>, Option<DateTime<Utc>>) {
+    let mut lower: Option<DateTime<Utc>> = None;
+    let mut upper: Option<DateTime<Utc>> = None;
+    if let Some(condition) = condition {
+        collect_time_bounds(condition, fields, &mut lower, &mut upper);
+    }
+    (lower, upper)
+}
+
+fn collect_time_bounds(
+    condition: &Condition,
+    fields: &[&str],
+    lower: &mut Option<DateTime<Utc>>,
+    upper: &mut Option<DateTime<Utc>>,
+) {
+    let op = condition.op.to_ascii_uppercase();
+    let args = condition.arguments.as_deref().unwrap_or(&[]);
+
+    for argument in args {
+        if let Some(child) = condition_from_value(argument) {
+            collect_time_bounds(&child, fields, lower, upper);
+        }
+    }
+
+    if args.len() != 2 {
+        return;
+    }
+    let Some(field) = args.first().and_then(Value::as_str) else {
+        return;
+    };
+    if !fields.contains(&field) {
+        return;
+    }
+    let Some(bound) = args.get(1).and_then(parse_datetime_value) else {
+        return;
+    };
+    match op.as_str() {
+        "GT" | "GTE" => {
+            if lower.is_none_or(|current| bound > current) {
+                *lower = Some(bound);
+            }
+        }
+        "LT" | "LTE" => {
+            if upper.is_none_or(|current| bound < current) {
+                *upper = Some(bound);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn parse_datetime_value(value: &Value) -> Option<DateTime<Utc>> {
+    match value {
+        Value::String(value) => DateTime::parse_from_rfc3339(value)
+            .ok()
+            .map(|value| value.with_timezone(&Utc)),
+        Value::Number(value) => value
+            .as_i64()
+            .and_then(DateTime::<Utc>::from_timestamp_millis),
+        _ => None,
+    }
+}
+
+fn aggregate_virtual_rows(
+    block_id: &str,
+    rows: &[serde_json::Map<String, Value>],
+    request: AggregateRequest,
+) -> Result<runtara_object_store::AggregateResult, ReportServiceError> {
+    if request.aggregates.is_empty() {
+        return Err(ReportServiceError::Validation(format!(
+            "Block '{}' must define at least one aggregate",
+            block_id
+        )));
+    }
+
+    let row_refs = rows
+        .iter()
+        .filter_map(|row| match request.condition.as_ref() {
+            Some(condition) => match condition_matches_row(condition, row, block_id) {
+                Ok(true) => Some(Ok(row)),
+                Ok(false) => None,
+                Err(error) => Some(Err(error)),
+            },
+            None => Some(Ok(row)),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let mut groups: Vec<VirtualAggregateGroup<'_>> = Vec::new();
+    if request.group_by.is_empty() {
+        groups.push(VirtualAggregateGroup {
+            values: Vec::new(),
+            rows: row_refs,
+        });
+    } else {
+        let mut group_index_by_key = HashMap::new();
+        for row in row_refs {
+            let values = request
+                .group_by
+                .iter()
+                .map(|field| {
+                    virtual_row_value(row, field)
+                        .cloned()
+                        .unwrap_or(Value::Null)
+                })
+                .collect::<Vec<_>>();
+            let key = value_to_lookup_key(&Value::Array(values.clone()));
+            let index = if let Some(index) = group_index_by_key.get(&key) {
+                *index
+            } else {
+                let index = groups.len();
+                group_index_by_key.insert(key, index);
+                groups.push(VirtualAggregateGroup {
+                    values,
+                    rows: Vec::new(),
+                });
+                index
+            };
+            groups[index].rows.push(row);
+        }
+    }
+
+    let mut columns = request.group_by.clone();
+    columns.extend(
+        request
+            .aggregates
+            .iter()
+            .map(|aggregate| aggregate.alias.clone()),
+    );
+
+    let mut output_rows = Vec::with_capacity(groups.len());
+    for group in groups {
+        let mut row = group.values.clone();
+        let mut aliases = HashMap::new();
+        for aggregate in &request.aggregates {
+            let value = virtual_aggregate_value(block_id, aggregate, &group.rows, &aliases)?;
+            aliases.insert(aggregate.alias.clone(), value.clone());
+            row.push(value);
+        }
+        output_rows.push(row);
+    }
+
+    let group_count = output_rows.len() as i64;
+    sort_virtual_aggregate_rows(&mut output_rows, &columns, &request)?;
+    let offset = request.offset.unwrap_or(0).max(0) as usize;
+    let rows = output_rows
+        .into_iter()
+        .skip(offset)
+        .take(
+            request
+                .limit
+                .map(|limit| limit.clamp(1, MAX_AGGREGATE_ROWS) as usize)
+                .unwrap_or(usize::MAX),
+        )
+        .collect();
+
+    Ok(runtara_object_store::AggregateResult {
+        columns,
+        rows,
+        group_count,
+    })
+}
+
+struct VirtualAggregateGroup<'a> {
+    values: Vec<Value>,
+    rows: Vec<&'a serde_json::Map<String, Value>>,
+}
+
+fn virtual_aggregate_value(
+    block_id: &str,
+    aggregate: &AggregateSpec,
+    rows: &[&serde_json::Map<String, Value>],
+    aliases: &HashMap<String, Value>,
+) -> Result<Value, ReportServiceError> {
+    match aggregate.fn_ {
+        AggregateFn::Count => virtual_count_value(block_id, aggregate, rows),
+        AggregateFn::Sum => {
+            let values = virtual_numeric_values(block_id, aggregate, rows)?;
+            if values.is_empty() {
+                Ok(Value::Null)
+            } else {
+                Ok(f64_value(values.iter().sum()))
+            }
+        }
+        AggregateFn::Avg => {
+            let values = virtual_numeric_values(block_id, aggregate, rows)?;
+            if values.is_empty() {
+                Ok(Value::Null)
+            } else {
+                Ok(f64_value(values.iter().sum::<f64>() / values.len() as f64))
+            }
+        }
+        AggregateFn::Min | AggregateFn::Max => virtual_min_max_value(block_id, aggregate, rows),
+        AggregateFn::FirstValue | AggregateFn::LastValue => {
+            virtual_first_last_value(block_id, aggregate, rows)
+        }
+        AggregateFn::PercentileCont | AggregateFn::PercentileDisc => {
+            virtual_percentile_value(block_id, aggregate, rows)
+        }
+        AggregateFn::StddevSamp | AggregateFn::VarSamp => {
+            virtual_sample_stat_value(block_id, aggregate, rows)
+        }
+        AggregateFn::Expr => {
+            let expression = aggregate.expression.as_ref().ok_or_else(|| {
+                ReportServiceError::Validation(format!(
+                    "Block '{}' aggregate '{}' expression is required for expr",
+                    block_id, aggregate.alias
+                ))
+            })?;
+            evaluate_virtual_expression(block_id, expression, aliases)
+        }
+    }
+}
+
+fn virtual_count_value(
+    block_id: &str,
+    aggregate: &AggregateSpec,
+    rows: &[&serde_json::Map<String, Value>],
+) -> Result<Value, ReportServiceError> {
+    if aggregate.distinct {
+        let column = aggregate.column.as_deref().ok_or_else(|| {
+            ReportServiceError::Validation(format!(
+                "Block '{}' aggregate '{}' distinct count requires field",
+                block_id, aggregate.alias
+            ))
+        })?;
+        let mut values = HashSet::new();
+        for row in rows {
+            let value = virtual_row_value(row, column).unwrap_or(&Value::Null);
+            if !value.is_null() {
+                values.insert(value_to_lookup_key(value));
+            }
+        }
+        return Ok(json!(values.len()));
+    }
+
+    if let Some(column) = aggregate.column.as_deref() {
+        Ok(json!(
+            rows.iter()
+                .filter(|row| {
+                    virtual_row_value(row, column).is_some_and(|value| !value.is_null())
+                })
+                .count()
+        ))
+    } else {
+        Ok(json!(rows.len()))
+    }
+}
+
+fn virtual_numeric_values(
+    block_id: &str,
+    aggregate: &AggregateSpec,
+    rows: &[&serde_json::Map<String, Value>],
+) -> Result<Vec<f64>, ReportServiceError> {
+    let column = required_aggregate_column(block_id, aggregate)?;
+    Ok(rows
+        .iter()
+        .filter_map(|row| virtual_row_value(row, column).and_then(Value::as_f64))
+        .collect())
+}
+
+fn virtual_min_max_value(
+    block_id: &str,
+    aggregate: &AggregateSpec,
+    rows: &[&serde_json::Map<String, Value>],
+) -> Result<Value, ReportServiceError> {
+    let column = required_aggregate_column(block_id, aggregate)?;
+    let mut values = rows
+        .iter()
+        .filter_map(|row| virtual_row_value(row, column))
+        .filter(|value| !value.is_null());
+    let Some(first) = values.next() else {
+        return Ok(Value::Null);
+    };
+    let mut selected = first.clone();
+    for value in values {
+        let ordering = virtual_compare_values(value, &selected).unwrap_or(Ordering::Equal);
+        let should_replace = match aggregate.fn_ {
+            AggregateFn::Min => ordering == Ordering::Less,
+            AggregateFn::Max => ordering == Ordering::Greater,
+            _ => false,
+        };
+        if should_replace {
+            selected = value.clone();
+        }
+    }
+    Ok(selected)
+}
+
+fn virtual_first_last_value(
+    block_id: &str,
+    aggregate: &AggregateSpec,
+    rows: &[&serde_json::Map<String, Value>],
+) -> Result<Value, ReportServiceError> {
+    let column = required_aggregate_column(block_id, aggregate)?;
+    if aggregate.order_by.is_empty() {
+        return Err(ReportServiceError::Validation(format!(
+            "Block '{}' aggregate '{}' first_value/last_value requires orderBy",
+            block_id, aggregate.alias
+        )));
+    }
+    let mut sorted = rows.to_vec();
+    let flip = matches!(aggregate.fn_, AggregateFn::LastValue);
+    sorted.sort_by(|left, right| {
+        compare_virtual_rows_by_order(left, right, &aggregate.order_by, flip)
+    });
+    Ok(sorted
+        .first()
+        .and_then(|row| virtual_row_value(row, column))
+        .cloned()
+        .unwrap_or(Value::Null))
+}
+
+fn virtual_percentile_value(
+    block_id: &str,
+    aggregate: &AggregateSpec,
+    rows: &[&serde_json::Map<String, Value>],
+) -> Result<Value, ReportServiceError> {
+    required_aggregate_column(block_id, aggregate)?;
+    let percentile = aggregate.percentile.ok_or_else(|| {
+        ReportServiceError::Validation(format!(
+            "Block '{}' aggregate '{}' percentile is required",
+            block_id, aggregate.alias
+        ))
+    })?;
+    if !(0.0..=1.0).contains(&percentile) {
+        return Err(ReportServiceError::Validation(format!(
+            "Block '{}' aggregate '{}' percentile must be between 0 and 1",
+            block_id, aggregate.alias
+        )));
+    }
+    let order_by = aggregate.order_by.first().ok_or_else(|| {
+        ReportServiceError::Validation(format!(
+            "Block '{}' aggregate '{}' percentile requires orderBy",
+            block_id, aggregate.alias
+        ))
+    })?;
+    let mut values = rows
+        .iter()
+        .filter_map(|row| virtual_row_value(row, &order_by.column).and_then(Value::as_f64))
+        .collect::<Vec<_>>();
+    values.sort_by(|left, right| left.partial_cmp(right).unwrap_or(Ordering::Equal));
+    if order_by.direction == SortDirection::Desc {
+        values.reverse();
+    }
+    if values.is_empty() {
+        return Ok(Value::Null);
+    }
+    if matches!(aggregate.fn_, AggregateFn::PercentileDisc) {
+        let index = ((percentile * values.len() as f64).ceil() as usize)
+            .saturating_sub(1)
+            .min(values.len() - 1);
+        return Ok(f64_value(values[index]));
+    }
+    if values.len() == 1 {
+        return Ok(f64_value(values[0]));
+    }
+    let rank = percentile * (values.len() - 1) as f64;
+    let lower_index = rank.floor() as usize;
+    let upper_index = rank.ceil() as usize;
+    if lower_index == upper_index {
+        return Ok(f64_value(values[lower_index]));
+    }
+    let fraction = rank - lower_index as f64;
+    Ok(f64_value(
+        values[lower_index] + ((values[upper_index] - values[lower_index]) * fraction),
+    ))
+}
+
+fn virtual_sample_stat_value(
+    block_id: &str,
+    aggregate: &AggregateSpec,
+    rows: &[&serde_json::Map<String, Value>],
+) -> Result<Value, ReportServiceError> {
+    let values = virtual_numeric_values(block_id, aggregate, rows)?;
+    if values.len() < 2 {
+        return Ok(Value::Null);
+    }
+    let mean = values.iter().sum::<f64>() / values.len() as f64;
+    let variance = values
+        .iter()
+        .map(|value| (value - mean).powi(2))
+        .sum::<f64>()
+        / (values.len() - 1) as f64;
+    if matches!(aggregate.fn_, AggregateFn::StddevSamp) {
+        Ok(f64_value(variance.sqrt()))
+    } else {
+        Ok(f64_value(variance))
+    }
+}
+
+fn required_aggregate_column<'a>(
+    block_id: &str,
+    aggregate: &'a AggregateSpec,
+) -> Result<&'a str, ReportServiceError> {
+    aggregate.column.as_deref().ok_or_else(|| {
+        ReportServiceError::Validation(format!(
+            "Block '{}' aggregate '{}' requires field",
+            block_id, aggregate.alias
+        ))
+    })
+}
+
+fn sort_virtual_aggregate_rows(
+    rows: &mut [Vec<Value>],
+    columns: &[String],
+    request: &AggregateRequest,
+) -> Result<(), ReportServiceError> {
+    let column_index = columns
+        .iter()
+        .enumerate()
+        .map(|(index, column)| (column.as_str(), index))
+        .collect::<HashMap<_, _>>();
+
+    if request.order_by.is_empty() {
+        rows.sort_by(|left, right| {
+            for index in 0..request.group_by.len() {
+                let ordering = virtual_compare_values(
+                    left.get(index).unwrap_or(&Value::Null),
+                    right.get(index).unwrap_or(&Value::Null),
+                )
+                .unwrap_or(Ordering::Equal);
+                if ordering != Ordering::Equal {
+                    return ordering;
+                }
+            }
+            Ordering::Equal
+        });
+        return Ok(());
+    }
+
+    for order_by in &request.order_by {
+        if !column_index.contains_key(order_by.column.as_str()) {
+            return Err(ReportServiceError::Validation(format!(
+                "Aggregate orderBy references unavailable field '{}'",
+                order_by.column
+            )));
+        }
+    }
+
+    rows.sort_by(|left, right| {
+        for order_by in &request.order_by {
+            let index = column_index[order_by.column.as_str()];
+            let ordering = virtual_compare_values(
+                left.get(index).unwrap_or(&Value::Null),
+                right.get(index).unwrap_or(&Value::Null),
+            )
+            .unwrap_or(Ordering::Equal);
+            let ordering = if order_by.direction == SortDirection::Desc {
+                ordering.reverse()
+            } else {
+                ordering
+            };
+            if ordering != Ordering::Equal {
+                return ordering;
+            }
+        }
+        Ordering::Equal
+    });
+    Ok(())
+}
+
+fn compare_virtual_rows_by_order(
+    left: &serde_json::Map<String, Value>,
+    right: &serde_json::Map<String, Value>,
+    order_by: &[AggregateOrderBy],
+    flip_direction: bool,
+) -> Ordering {
+    for order in order_by {
+        let left_value = virtual_row_value(left, &order.column).unwrap_or(&Value::Null);
+        let right_value = virtual_row_value(right, &order.column).unwrap_or(&Value::Null);
+        let ordering = virtual_compare_values(left_value, right_value).unwrap_or(Ordering::Equal);
+        let descending = if flip_direction {
+            order.direction == SortDirection::Asc
+        } else {
+            order.direction == SortDirection::Desc
+        };
+        let ordering = if descending {
+            ordering.reverse()
+        } else {
+            ordering
+        };
+        if ordering != Ordering::Equal {
+            return ordering;
+        }
+    }
+    Ordering::Equal
+}
+
+fn virtual_row_value<'a>(
+    row: &'a serde_json::Map<String, Value>,
+    field: &str,
+) -> Option<&'a Value> {
+    if let Some(value) = row.get(field) {
+        return Some(value);
+    }
+
+    let mut parts = field.split('.');
+    let first = parts.next()?;
+    let mut current = row.get(first)?;
+    for part in parts {
+        current = match current {
+            Value::Object(object) => object.get(part)?,
+            Value::Array(values) => {
+                let index = part.parse::<usize>().ok()?;
+                values.get(index)?
+            }
+            _ => return None,
+        };
+    }
+    Some(current)
+}
+
+fn virtual_compare_values(left: &Value, right: &Value) -> Option<Ordering> {
+    match (left, right) {
+        (Value::Null, Value::Null) => Some(Ordering::Equal),
+        (Value::Null, _) => Some(Ordering::Greater),
+        (_, Value::Null) => Some(Ordering::Less),
+        (Value::Number(left), Value::Number(right)) => left.as_f64()?.partial_cmp(&right.as_f64()?),
+        (Value::String(left), Value::String(right)) => Some(left.cmp(right)),
+        (Value::Bool(left), Value::Bool(right)) => Some(left.cmp(right)),
+        _ => Some(virtual_value_sort_key(left).cmp(&virtual_value_sort_key(right))),
+    }
+}
+
+fn virtual_value_sort_key(value: &Value) -> String {
+    match value {
+        Value::String(value) => value.clone(),
+        Value::Bool(value) => value.to_string(),
+        Value::Number(value) => value.to_string(),
+        Value::Null => String::new(),
+        other => other.to_string(),
+    }
+}
+
+fn evaluate_virtual_expression(
+    block_id: &str,
+    expression: &Value,
+    aliases: &HashMap<String, Value>,
+) -> Result<Value, ReportServiceError> {
+    let normalized = normalize_report_aggregate_expression(expression);
+    evaluate_virtual_expression_inner(block_id, &normalized, aliases, 0)
+}
+
+fn evaluate_virtual_expression_inner(
+    block_id: &str,
+    expression: &Value,
+    aliases: &HashMap<String, Value>,
+    depth: u8,
+) -> Result<Value, ReportServiceError> {
+    if depth > 8 {
+        return Err(ReportServiceError::Validation(format!(
+            "Block '{}' aggregate expression is too deeply nested",
+            block_id
+        )));
+    }
+    let Some(object) = expression.as_object() else {
+        return Ok(expression.clone());
+    };
+
+    if let Some(value_type) = object.get("valueType").and_then(Value::as_str) {
+        let value = object.get("value").cloned().unwrap_or(Value::Null);
+        return match value_type.to_ascii_lowercase().as_str() {
+            "alias" => {
+                let alias = value.as_str().ok_or_else(|| {
+                    ReportServiceError::Validation(format!(
+                        "Block '{}' aggregate expression alias value must be a string",
+                        block_id
+                    ))
+                })?;
+                Ok(aliases.get(alias).cloned().unwrap_or(Value::Null))
+            }
+            "immediate" => Ok(value),
+            "reference" => Err(ReportServiceError::Validation(format!(
+                "Block '{}' aggregate expressions cannot reference row fields",
+                block_id
+            ))),
+            other => Err(ReportServiceError::Validation(format!(
+                "Block '{}' aggregate expression uses unsupported valueType '{}'",
+                block_id, other
+            ))),
+        };
+    }
+
+    let op = object
+        .get("op")
+        .and_then(Value::as_str)
+        .map(normalize_expression_token)
+        .ok_or_else(|| {
+            ReportServiceError::Validation(format!(
+                "Block '{}' aggregate expression operation must include op",
+                block_id
+            ))
+        })?;
+    let arguments = object
+        .get("arguments")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|argument| evaluate_virtual_expression_inner(block_id, &argument, aliases, depth + 1))
+        .collect::<Result<Vec<_>, _>>()?;
+
+    evaluate_virtual_expression_op(&op, &arguments)
+}
+
+fn evaluate_virtual_expression_op(
+    op: &str,
+    arguments: &[Value],
+) -> Result<Value, ReportServiceError> {
+    match op {
+        "ADD" => Ok(option_f64_value(Some(
+            arguments.iter().filter_map(Value::as_f64).sum(),
+        ))),
+        "SUB" => {
+            let Some(first) = arguments.first().and_then(Value::as_f64) else {
+                return Ok(Value::Null);
+            };
+            Ok(f64_value(
+                arguments
+                    .iter()
+                    .skip(1)
+                    .filter_map(Value::as_f64)
+                    .fold(first, |acc, value| acc - value),
+            ))
+        }
+        "MUL" => Ok(f64_value(
+            arguments
+                .iter()
+                .filter_map(Value::as_f64)
+                .fold(1.0, |acc, value| acc * value),
+        )),
+        "DIV" => {
+            let (Some(left), Some(right)) = (
+                arguments.first().and_then(Value::as_f64),
+                arguments.get(1).and_then(Value::as_f64),
+            ) else {
+                return Ok(Value::Null);
+            };
+            if right == 0.0 {
+                Ok(Value::Null)
+            } else {
+                Ok(f64_value(left / right))
+            }
+        }
+        "NEG" => Ok(arguments
+            .first()
+            .and_then(Value::as_f64)
+            .map(|value| f64_value(-value))
+            .unwrap_or(Value::Null)),
+        "ABS" => Ok(arguments
+            .first()
+            .and_then(Value::as_f64)
+            .map(|value| f64_value(value.abs()))
+            .unwrap_or(Value::Null)),
+        "COALESCE" => Ok(arguments
+            .iter()
+            .find(|value| !value_is_empty(value))
+            .cloned()
+            .unwrap_or(Value::Null)),
+        "EQ" | "NE" | "GT" | "GTE" | "LT" | "LTE" => {
+            let left = arguments.first().unwrap_or(&Value::Null);
+            let right = arguments.get(1).unwrap_or(&Value::Null);
+            let ordering = virtual_compare_values(left, right);
+            let equal = left == right || ordering == Some(Ordering::Equal);
+            let result = match op {
+                "EQ" => equal,
+                "NE" => !equal,
+                "GT" => ordering == Some(Ordering::Greater),
+                "GTE" => equal || matches!(ordering, Some(Ordering::Greater | Ordering::Equal)),
+                "LT" => ordering == Some(Ordering::Less),
+                "LTE" => equal || matches!(ordering, Some(Ordering::Less | Ordering::Equal)),
+                _ => false,
+            };
+            Ok(Value::Bool(result))
+        }
+        "AND" => Ok(Value::Bool(arguments.iter().all(expression_truthy))),
+        "OR" => Ok(Value::Bool(arguments.iter().any(expression_truthy))),
+        "NOT" => Ok(Value::Bool(
+            !arguments.first().is_some_and(expression_truthy),
+        )),
+        "IS_DEFINED" => Ok(Value::Bool(
+            arguments.first().is_some_and(|value| !value.is_null()),
+        )),
+        "IS_EMPTY" => Ok(Value::Bool(arguments.first().is_none_or(value_is_empty))),
+        "IS_NOT_EMPTY" => Ok(Value::Bool(
+            arguments
+                .first()
+                .is_some_and(|value| !value_is_empty(value)),
+        )),
+        other => Err(ReportServiceError::Validation(format!(
+            "Aggregate expression uses unsupported op '{}'",
+            other
+        ))),
+    }
+}
+
+fn expression_truthy(value: &Value) -> bool {
+    match value {
+        Value::Bool(value) => *value,
+        Value::Number(value) => value.as_f64().is_some_and(|value| value != 0.0),
+        Value::String(value) => !value.trim().is_empty(),
+        Value::Array(values) => !values.is_empty(),
+        Value::Object(values) => !values.is_empty(),
+        Value::Null => false,
+    }
 }
 
 fn merge_report_action_payload(
@@ -5950,6 +8040,8 @@ fn compile_dataset_query(
             aggregates,
             order_by: order_by.to_vec(),
             limit: limit.map(|value| value.clamp(1, MAX_AGGREGATE_ROWS)),
+            granularity: None,
+            interval: None,
             join: vec![],
         },
         columns,
@@ -6276,6 +8368,61 @@ fn table_output_columns(
         .unwrap_or_else(|| source_columns.to_vec())
 }
 
+fn table_response_columns(table: Option<&ReportTableConfig>) -> Vec<Value> {
+    table
+        .map(|table| {
+            table
+                .columns
+                .iter()
+                .map(table_response_column)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default()
+}
+
+fn table_response_column(column: &ReportTableColumn) -> Value {
+    let mut output = serde_json::Map::new();
+    output.insert("key".to_string(), Value::String(column.field.clone()));
+    output.insert(
+        "label".to_string(),
+        Value::String(
+            column
+                .label
+                .clone()
+                .unwrap_or_else(|| humanize_label(&column.field)),
+        ),
+    );
+    output.insert(
+        "format".to_string(),
+        column
+            .format
+            .as_ref()
+            .map(|format| Value::String(format.clone()))
+            .unwrap_or(Value::Null),
+    );
+    if let Some(display_field) = column
+        .display_field
+        .clone()
+        .or_else(|| auto_lookup_display_field(column))
+    {
+        output.insert("displayField".to_string(), Value::String(display_field));
+    }
+
+    Value::Object(output)
+}
+
+fn auto_lookup_display_field(column: &ReportTableColumn) -> Option<String> {
+    if column.display_field.is_some()
+        || column.is_chart()
+        || column.is_value_lookup()
+        || column.is_workflow_button()
+    {
+        return None;
+    }
+    lookup_editor_for_table_column(column)?;
+    Some(format!("__lookupDisplay.{}", column.field))
+}
+
 fn project_aggregate_table_rows(
     table: Option<&ReportTableConfig>,
     source_columns: &[String],
@@ -6452,15 +8599,9 @@ fn lookup_editor_for_field<'a>(
     if let Some(table) = block.table.as_ref() {
         for column in &table.columns {
             if column.field == field
-                && column
-                    .editor
-                    .as_ref()
-                    .is_some_and(|editor| editor.kind == ReportEditorKind::Lookup)
+                && let Some(lookup) = lookup_editor_for_table_column(column)
             {
-                return column
-                    .editor
-                    .as_ref()
-                    .and_then(|editor| editor.lookup.as_ref());
+                return Some(lookup);
             }
         }
     }
@@ -6485,6 +8626,14 @@ fn lookup_editor_for_field<'a>(
     }
 
     None
+}
+
+fn lookup_editor_for_table_column(column: &ReportTableColumn) -> Option<&ReportLookupConfig> {
+    column
+        .editor
+        .as_ref()
+        .filter(|editor| editor.kind == ReportEditorKind::Lookup)
+        .and_then(|editor| editor.lookup.as_ref())
 }
 
 fn normalize_report_aggregate_expression(expression: &Value) -> Value {
@@ -6983,6 +9132,8 @@ mod tests {
                 aggregates: vec![],
                 order_by: vec![],
                 limit: None,
+                granularity: None,
+                interval: None,
                 join: vec![],
             },
             table: None,
@@ -7040,6 +9191,96 @@ mod tests {
         }
     }
 
+    #[test]
+    fn table_response_columns_auto_display_lookup_editor_labels() {
+        let mut column = table_column("suggested_category_id");
+        column.label = Some("Suggested Category".to_string());
+        column.editable = true;
+        column.editor = Some(ReportEditorConfig {
+            kind: ReportEditorKind::Lookup,
+            lookup: Some(ReportLookupConfig {
+                schema: "Category".to_string(),
+                connection_id: None,
+                value_field: "id".to_string(),
+                label_field: "name".to_string(),
+                search_fields: vec!["name".to_string()],
+                condition: None,
+                filter_mappings: vec![],
+            }),
+            options: vec![],
+            min: None,
+            max: None,
+            step: None,
+            regex: None,
+            placeholder: None,
+        });
+        let table = ReportTableConfig {
+            columns: vec![column],
+            selectable: false,
+            actions: vec![],
+            default_sort: vec![],
+            pagination: None,
+        };
+
+        let columns = table_response_columns(Some(&table));
+
+        assert_eq!(
+            columns[0].get("displayField"),
+            Some(&json!("__lookupDisplay.suggested_category_id"))
+        );
+    }
+
+    #[test]
+    fn table_response_columns_preserve_explicit_display_field() {
+        let mut column = table_column("category_id");
+        column.display_field = Some("category.name".to_string());
+        column.editor = Some(ReportEditorConfig {
+            kind: ReportEditorKind::Lookup,
+            lookup: Some(ReportLookupConfig {
+                schema: "Category".to_string(),
+                connection_id: None,
+                value_field: "id".to_string(),
+                label_field: "name".to_string(),
+                search_fields: vec![],
+                condition: None,
+                filter_mappings: vec![],
+            }),
+            options: vec![],
+            min: None,
+            max: None,
+            step: None,
+            regex: None,
+            placeholder: None,
+        });
+        let table = ReportTableConfig {
+            columns: vec![column],
+            selectable: false,
+            actions: vec![],
+            default_sort: vec![],
+            pagination: None,
+        };
+
+        let columns = table_response_columns(Some(&table));
+
+        assert_eq!(
+            columns[0].get("displayField"),
+            Some(&json!("category.name"))
+        );
+    }
+
+    fn test_view(id: &str, parent_view_id: Option<&str>) -> ReportViewDefinition {
+        ReportViewDefinition {
+            id: id.to_string(),
+            title: None,
+            title_from: None,
+            title_from_block: None,
+            parent_view_id: parent_view_id.map(str::to_string),
+            clear_filters_on_back: vec![],
+            breadcrumb: vec![],
+            layout: vec![],
+        }
+    }
+
     fn test_dataset() -> ReportDatasetDefinition {
         ReportDatasetDefinition {
             id: "stock_snapshots".to_string(),
@@ -7088,6 +9329,33 @@ mod tests {
                 },
             ],
         }
+    }
+
+    #[test]
+    fn report_view_navigation_accepts_parent_chain_and_back_filters() {
+        let mut views = vec![
+            test_view("a", None),
+            test_view("b", Some("a")),
+            test_view("c", Some("b")),
+        ];
+        views[1].clear_filters_on_back = vec!["b_id".to_string()];
+        views[2].clear_filters_on_back = vec!["c_id".to_string()];
+
+        let view_ids = HashSet::from(["a".to_string(), "b".to_string(), "c".to_string()]);
+        let filter_ids = HashSet::from(["b_id".to_string(), "c_id".to_string()]);
+
+        validate_report_view_navigation(&views, &view_ids, &filter_ids).unwrap();
+    }
+
+    #[test]
+    fn report_view_navigation_rejects_cycles() {
+        let views = vec![test_view("a", Some("b")), test_view("b", Some("a"))];
+        let view_ids = HashSet::from(["a".to_string(), "b".to_string()]);
+        let filter_ids = HashSet::new();
+
+        let err = validate_report_view_navigation(&views, &view_ids, &filter_ids).unwrap_err();
+
+        assert!(err.to_string().contains("cycle"));
     }
 
     #[test]
@@ -7957,6 +10225,135 @@ mod tests {
         .unwrap();
 
         assert!(resolved.is_none());
+    }
+
+    #[test]
+    fn virtual_system_aggregate_groups_sorts_and_evaluates_exprs() {
+        let rows = vec![
+            serde_json::Map::from_iter([
+                ("bucketTime".to_string(), json!("2026-05-10T00:00:00Z")),
+                ("invocationCount".to_string(), json!(10)),
+                ("failureCount".to_string(), json!(1)),
+            ]),
+            serde_json::Map::from_iter([
+                ("bucketTime".to_string(), json!("2026-05-10T00:00:00Z")),
+                ("invocationCount".to_string(), json!(5)),
+                ("failureCount".to_string(), json!(2)),
+            ]),
+            serde_json::Map::from_iter([
+                ("bucketTime".to_string(), json!("2026-05-11T00:00:00Z")),
+                ("invocationCount".to_string(), json!(20)),
+                ("failureCount".to_string(), json!(0)),
+            ]),
+        ];
+        let result = aggregate_virtual_rows(
+            "usage",
+            &rows,
+            AggregateRequest {
+                condition: None,
+                group_by: vec!["bucketTime".to_string()],
+                aggregates: vec![
+                    AggregateSpec {
+                        alias: "invocations".to_string(),
+                        fn_: AggregateFn::Sum,
+                        column: Some("invocationCount".to_string()),
+                        distinct: false,
+                        order_by: vec![],
+                        expression: None,
+                        percentile: None,
+                    },
+                    AggregateSpec {
+                        alias: "failures".to_string(),
+                        fn_: AggregateFn::Sum,
+                        column: Some("failureCount".to_string()),
+                        distinct: false,
+                        order_by: vec![],
+                        expression: None,
+                        percentile: None,
+                    },
+                    AggregateSpec {
+                        alias: "failureRate".to_string(),
+                        fn_: AggregateFn::Expr,
+                        column: None,
+                        distinct: false,
+                        order_by: vec![],
+                        expression: Some(json!({
+                            "op": "DIV",
+                            "arguments": [
+                                {"valueType": "alias", "value": "failures"},
+                                {"valueType": "alias", "value": "invocations"}
+                            ]
+                        })),
+                        percentile: None,
+                    },
+                ],
+                order_by: vec![AggregateOrderBy {
+                    column: "bucketTime".to_string(),
+                    direction: SortDirection::Asc,
+                }],
+                limit: None,
+                offset: None,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            result.columns,
+            vec!["bucketTime", "invocations", "failures", "failureRate"]
+        );
+        assert_eq!(result.group_count, 2);
+        assert_eq!(result.rows[0][0], json!("2026-05-10T00:00:00Z"));
+        assert_eq!(result.rows[0][1].as_f64(), Some(15.0));
+        assert_eq!(result.rows[0][2].as_f64(), Some(3.0));
+        assert_eq!(result.rows[0][3].as_f64(), Some(0.2));
+        assert_eq!(result.rows[1][0], json!("2026-05-11T00:00:00Z"));
+    }
+
+    #[test]
+    fn virtual_system_aggregate_applies_conditions_and_pagination() {
+        let rows = vec![
+            serde_json::Map::from_iter([
+                ("connectionId".to_string(), json!("c1")),
+                ("eventType".to_string(), json!("request")),
+            ]),
+            serde_json::Map::from_iter([
+                ("connectionId".to_string(), json!("c1")),
+                ("eventType".to_string(), json!("rate_limited")),
+            ]),
+            serde_json::Map::from_iter([
+                ("connectionId".to_string(), json!("c2")),
+                ("eventType".to_string(), json!("request")),
+            ]),
+        ];
+        let result = aggregate_virtual_rows(
+            "events",
+            &rows,
+            AggregateRequest {
+                condition: Some(cond("EQ", vec![json!("connectionId"), json!("c1")])),
+                group_by: vec!["eventType".to_string()],
+                aggregates: vec![AggregateSpec {
+                    alias: "count".to_string(),
+                    fn_: AggregateFn::Count,
+                    column: None,
+                    distinct: false,
+                    order_by: vec![],
+                    expression: None,
+                    percentile: None,
+                }],
+                order_by: vec![AggregateOrderBy {
+                    column: "eventType".to_string(),
+                    direction: SortDirection::Asc,
+                }],
+                limit: Some(1),
+                offset: Some(1),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(result.group_count, 2);
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0][0], json!("request"));
+        assert_eq!(result.rows[0][1], json!(1));
     }
 
     #[test]

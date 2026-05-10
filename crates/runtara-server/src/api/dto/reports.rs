@@ -51,6 +51,8 @@ pub(crate) fn default_report_source() -> ReportSource {
         aggregates: vec![],
         order_by: vec![],
         limit: None,
+        granularity: None,
+        interval: None,
         join: vec![],
     }
 }
@@ -115,6 +117,18 @@ pub struct ReportViewDefinition {
         skip_serializing_if = "Option::is_none"
     )]
     pub title_from_block: Option<ReportTitleFromBlock>,
+    #[serde(
+        default,
+        rename = "parentViewId",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub parent_view_id: Option<String>,
+    #[serde(
+        default,
+        rename = "clearFiltersOnBack",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub clear_filters_on_back: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub breadcrumb: Vec<ReportViewBreadcrumb>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -229,6 +243,7 @@ pub enum ReportSourceKind {
     #[default]
     ObjectModel,
     WorkflowRuntime,
+    System,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
@@ -236,6 +251,11 @@ pub enum ReportSourceKind {
 pub enum ReportWorkflowRuntimeEntity {
     Instances,
     Actions,
+    RuntimeExecutionMetricBuckets,
+    RuntimeSystemSnapshot,
+    ConnectionRateLimitStatus,
+    ConnectionRateLimitEvents,
+    ConnectionRateLimitTimeline,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -668,6 +688,15 @@ pub struct ReportSource {
     pub order_by: Vec<ReportOrderBy>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit: Option<i64>,
+    /// Optional virtual-source granularity. Used by system sources such as
+    /// execution metric buckets (`hourly`/`daily`) and rate-limit timelines
+    /// (`minute`/`hourly`/`daily`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub granularity: Option<String>,
+    /// Optional virtual-source period. Used by rate-limit status period stats
+    /// (`1h`/`24h`/`7d`/`30d`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interval: Option<String>,
     /// Cross-schema joins. When non-empty, fields prefixed with `<alias>.`
     /// resolve against the joined dimension schema. Currently supported on
     /// aggregate-mode blocks; v1 implementation uses broadcast-hash join
@@ -692,6 +721,8 @@ impl ReportSource {
             && self.aggregates.is_empty()
             && self.order_by.is_empty()
             && self.limit.is_none()
+            && self.granularity.is_none()
+            && self.interval.is_none()
             && self.join.is_empty()
     }
 }

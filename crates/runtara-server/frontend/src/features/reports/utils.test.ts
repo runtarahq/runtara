@@ -1,10 +1,12 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  getReportViewBreadcrumbs,
   isWorkflowActionDisabled,
   isWorkflowActionVisible,
   matchesReportRowCondition,
 } from './utils';
+import type { ReportDefinition, ReportViewDefinition } from './types';
 
 describe('report row conditions', () => {
   const row = {
@@ -96,5 +98,74 @@ describe('report row conditions', () => {
 
     expect(isWorkflowActionVisible(action, row)).toBe(true);
     expect(isWorkflowActionDisabled(action, row)).toBe(true);
+  });
+});
+
+describe('report view navigation', () => {
+  const reportDefinition: ReportDefinition = {
+    definitionVersion: 1,
+    markdown: '',
+    filters: [],
+    blocks: [],
+    views: [
+      { id: 'a', title: 'Accounts' },
+      {
+        id: 'b',
+        title: 'Branches',
+        parentViewId: 'a',
+        clearFiltersOnBack: ['b_id'],
+      },
+      {
+        id: 'c',
+        title: 'Cases',
+        parentViewId: 'b',
+        clearFiltersOnBack: ['c_id'],
+      },
+    ],
+  };
+
+  const labelForView = (view: ReportViewDefinition) => view.title ?? view.id;
+
+  it('builds breadcrumbs from parent views and accumulated back filters', () => {
+    const view = reportDefinition.views?.find((view) => view.id === 'c');
+    expect(view).toBeDefined();
+
+    expect(
+      getReportViewBreadcrumbs(
+        reportDefinition,
+        view as ReportViewDefinition,
+        labelForView
+      )
+    ).toEqual([
+      {
+        label: 'Accounts',
+        viewId: 'a',
+        clearFilters: ['b_id', 'c_id'],
+      },
+      {
+        label: 'Branches',
+        viewId: 'b',
+        clearFilters: ['c_id'],
+      },
+    ]);
+  });
+
+  it('keeps manual breadcrumbs as an explicit override', () => {
+    const view: ReportViewDefinition = {
+      id: 'c',
+      parentViewId: 'b',
+      clearFiltersOnBack: ['c_id'],
+      breadcrumb: [
+        {
+          label: 'Custom',
+          viewId: 'a',
+          clearFilters: ['custom_id'],
+        },
+      ],
+    };
+
+    expect(
+      getReportViewBreadcrumbs(reportDefinition, view, labelForView)
+    ).toEqual(view.breadcrumb);
   });
 });

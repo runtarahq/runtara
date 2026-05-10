@@ -36,7 +36,9 @@ impl ConnectionsFacade {
         ConnectionRepository::new(self.state.db_pool.clone(), self.state.cipher.clone())
     }
 
-    fn rate_limit_service(&self) -> RateLimitService {
+    /// Build a rate-limit analytics service using the facade's configured
+    /// PostgreSQL pool and Redis URL.
+    pub fn rate_limit_service(&self) -> RateLimitService {
         let repo = Arc::new(self.repo());
         RateLimitService::with_redis_url_and_db_pool(
             repo,

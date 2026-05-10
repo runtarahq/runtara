@@ -1150,7 +1150,7 @@ fn report_authoring_schema() -> Value {
             "definitionVersion": 1,
             "markdown": "Backward-compatible narrative Markdown. Render data blocks with standalone placeholders like {{ block.daily_qty }} only when definition.layout is absent. Do not put block placeholders inside Markdown tables for alignment/layout.",
             "layout": "Optional structured layout tree. Prefer this over Markdown placeholders for dashboards and report layout. Every layout node must include a stable id and type.",
-            "views": "Optional named report views for master/detail navigation. Each view has an id, optional title/titleFrom, breadcrumb, and its own layout.",
+            "views": "Optional named report views for master/detail navigation. Each view has an id, optional title/titleFrom/titleFromBlock, parentViewId + clearFiltersOnBack for generated breadcrumbs, optional manual breadcrumb override, and its own layout.",
             "filters": "Optional global filter presets. Each filter can apply to one or more block/source fields.",
             "datasets": "Optional semantic BI datasets. Prefer defining datasets for aggregate BI reports so blocks reference named dimensions/measures instead of raw aggregate specs.",
             "blocks": "Array of typed block definitions. Every block must have a stable id for MCP block mutations."
@@ -1164,6 +1164,7 @@ fn report_authoring_schema() -> Value {
                 "Use block.interactions for drill/cross-filter behavior. Supported UI events are point_click on charts and row_click/cell_click on tables.",
                 "Use set_filter actions to update global filters from clicked chart/table data, e.g. valueFrom='datum.category'.",
                 "Use navigate_view with set_filter for master/detail navigation, e.g. row click sets case_id and opens the detail view. Omit navigate_view for inline dependent content.",
+                "For nested detail navigation, set parentViewId on each child view and clearFiltersOnBack to the filters that should be cleared when returning to the parent; breadcrumb can still be supplied manually as an override.",
                 "For navigation-driven filters (set by row-click), mark them strictWhenReferenced=true so detail-view blocks render an explicit 'filter not set' empty state instead of silently falling back to an unfiltered query when someone hits the detail URL without the filter populated.",
                 "Use showWhen on layout nodes or blocks to show dependent content only after a filter is selected.",
                 "Keep exploration governed: only expose dimensions and measures declared in datasets and report blocks/filters/interactions that the report author intentionally configured."
@@ -1204,7 +1205,7 @@ fn report_authoring_schema() -> Value {
                 "filters": [{"id": "case_id", "label": "Case", "type": "text", "strictWhenReferenced": true}],
                 "views": [
                     {"id": "list", "title": "Review cases", "layout": [{"id": "cases_node", "type": "block", "blockId": "cases"}]},
-                    {"id": "detail", "titleFrom": "filters.case_id", "breadcrumb": [{"label": "Review cases", "viewId": "list", "clearFilters": ["case_id"]}], "layout": [{"id": "case_summary_node", "type": "block", "blockId": "case_summary"}]}
+                    {"id": "detail", "titleFrom": "filters.case_id", "parentViewId": "list", "clearFiltersOnBack": ["case_id"], "layout": [{"id": "case_summary_node", "type": "block", "blockId": "case_summary"}]}
                 ],
                 "interaction": {"id": "open_case", "trigger": {"event": "row_click"}, "actions": [{"type": "set_filter", "filterId": "case_id", "valueFrom": "datum.case_id"}, {"type": "navigate_view", "viewId": "detail"}]}
             }
@@ -1249,8 +1250,8 @@ fn report_authoring_schema() -> Value {
                 "actions": [{"id": "bulk_process", "label": "Process selected", "workflowAction": {"workflowId": "process_items", "label": "Process selected", "runningLabel": "Processing...", "successMessage": "Selected rows processed.", "reloadBlock": true, "context": {"mode": "selection", "inputKey": "items"}}}],
                 "writeback": {
                     "editable": "Optional boolean. When true, the table renders an inline editor on the cell and writes the new value back to the underlying Object Model record via PUT /api/runtime/object-model/instances/{schemaId}/{instanceId}. Only honored when source.kind='object_model', source.mode='filter', and source.join is empty/absent (rows must carry a stable id+schemaId). Type='chart' columns and joined lookup columns are never editable.",
-                    "displayField": "Optional row field to render while writes still target field. Use this with joined labels, e.g. field='category_id', displayField='category.name'.",
-                    "editor": "Optional explicit editor config: {kind, lookup?, options?, min?, max?, step?, regex?, placeholder?}. kind is one of text | textarea | number | select | toggle | date | datetime | lookup. For lookup, set editor.lookup={schema, valueField, labelField, searchFields?, connectionId?, condition?, filterMappings?}. The editor searches the lookup schema, displays labelField, and writes valueField into the edited row field.",
+                    "displayField": "Optional row field to render while writes still target field. Use this with joined labels, e.g. field='category_id', displayField='category.name'. Lookup-editor columns without an explicit displayField automatically render editor.lookup.labelField for the current value.",
+                    "editor": "Optional explicit editor config: {kind, lookup?, options?, min?, max?, step?, regex?, placeholder?}. kind is one of text | textarea | number | select | toggle | date | datetime | lookup. For lookup, set editor.lookup={schema, valueField, labelField, searchFields?, connectionId?, condition?, filterMappings?}. The editor searches the lookup schema, displays labelField, and writes valueField into the edited row field. Add an explicit source.join/displayField only when the related label must also participate in table search/sort/filtering.",
                     "note": "Writeback is opt-in per column. Auth + type validation happens on the object-model endpoint, not in the report layer — viewers need write permission on the underlying schema. The 'editable' flag here is a UI hint; it does not relax server-side authorization."
                 },
                 "workflowAction": "Optional table column button: set type='workflow_button' and workflowAction={workflowId, version?, label?, runningLabel?, successMessage?, reloadBlock?, visibleWhen?, hiddenWhen?, disabledWhen?, context?}. context.mode is row | field | value. mode=row passes the whole row as workflow data; mode=field passes context.field or column.field; mode=value passes the cell value. context.inputKey wraps the context as {inputKey: context}. visibleWhen/hiddenWhen/disabledWhen are row-level condition DSL objects evaluated against the rendered row, e.g. disabledWhen={op:'EQ', arguments:['status','processed']}.",
@@ -1309,20 +1310,22 @@ fn report_authoring_schema() -> Value {
             }
         },
         "sourceShape": {
-            "kind": "object_model | workflow_runtime. Omit for Object Model back compatibility.",
+            "kind": "object_model | workflow_runtime | system. Omit for Object Model back compatibility.",
             "schema": "Object Model schema name. Use get_object_schema to inspect valid fields.",
-            "entity": "Workflow runtime only: instances | actions.",
+            "entity": "workflow_runtime: instances | actions. system: runtime_execution_metric_buckets | runtime_system_snapshot | connection_rate_limit_status | connection_rate_limit_events | connection_rate_limit_timeline.",
             "workflowId": "Workflow runtime only: workflow id whose instances/actions should be shown.",
             "instanceId": "Workflow runtime actions only: optional workflow instance UUID to scope open actions.",
             "select": "Table value-column source only: scalar field to copy from the joined schema.",
             "connectionId": "Optional connection id for connection-scoped schemas.",
             "mode": "filter | aggregate",
-            "condition": "Optional condition DSL. Object Model sources can use schema fields and same-store subquery operands. workflow_runtime actions can filter virtual action fields including actionKey, correlation.<key>, and context.<key>.",
+            "condition": "Optional condition DSL. Object Model sources can use schema fields and same-store subquery operands. workflow_runtime actions can filter virtual action fields including actionKey, correlation.<key>, and context.<key>. system sources can filter their exposed virtual fields, especially bucketTime/createdAt/connectionId/eventType/tag.",
             "filterMappings": "Optional mappings from global filter ids to source fields.",
             "groupBy": "Aggregate output grouping fields.",
             "aggregates": "Aggregate specs. Report aggregate specs use {alias, op, field?, distinct?, orderBy?, expression?}. Use op/field here, not fn/column.",
             "orderBy": "Sort array using {field, direction}. Field must be a row field, groupBy field, or aggregate alias depending on source mode.",
             "limit": "Optional row/group cap.",
+            "granularity": "System only: runtime metrics support hourly/daily; rate-limit timeline supports minute/hourly/daily.",
+            "interval": "System rate-limit status only: period stats interval such as 1h, 24h, 7d, or 30d.",
             "join": "Optional single-hop Object Model joins. Use [{schema, alias?, connectionId?, parentField, field, op?, kind?}] and qualify joined fields as <alias>.<field>."
         },
         "datasetShape": {
@@ -1650,6 +1653,7 @@ fn report_authoring_schema() -> Value {
     }"###)
     .expect("report authoring schema JSON must be valid");
     result["workflowRuntimeGuidance"] = workflow_runtime_authoring_schema();
+    result["systemSourceGuidance"] = system_authoring_schema();
     result
 }
 
@@ -1747,6 +1751,87 @@ fn workflow_runtime_authoring_schema() -> Value {
                     {"field": "instanceId", "label": "Instance"},
                     {"field": "requestedAt", "label": "Requested", "format": "datetime"}
                 ]
+            }
+        }
+    })
+}
+
+fn system_authoring_schema() -> Value {
+    json!({
+        "currentContract": [
+            "Reports can use virtual system sources for the existing Analytics pages without creating Object Model mirror tables.",
+            "Use source.kind='system' and leave source.schema, workflowId, instanceId, and join unset.",
+            "System sources support table blocks in filter mode and chart/metric/table blocks in aggregate mode.",
+            "Date-range filters should target bucketTime for runtime_execution_metric_buckets and connection_rate_limit_timeline, and createdAt for connection_rate_limit_events.",
+            "Rate-limit timeline requires a connectionId, supplied by source.connectionId or an EQ condition/filter mapping on connectionId."
+        ],
+        "entities": {
+            "runtime_execution_metric_buckets": {
+                "fields": ["tenantId", "bucketTime", "granularity", "invocationCount", "successCount", "failureCount", "cancelledCount", "avgDurationSeconds", "minDurationSeconds", "maxDurationSeconds", "avgMemoryBytes", "maxMemoryBytes", "successRatePercent"],
+                "granularity": ["hourly", "daily"]
+            },
+            "runtime_system_snapshot": {
+                "fields": ["capturedAt", "cpuArchitecture", "cpuPhysicalCores", "cpuLogicalCores", "memoryTotalBytes", "memoryAvailableBytes", "memoryAvailableForWorkflowsBytes", "memoryUsedBytes", "memoryUsedPercent", "diskPath", "diskTotalBytes", "diskAvailableBytes", "diskUsedBytes", "diskUsedPercent"]
+            },
+            "connection_rate_limit_status": {
+                "fields": ["connectionId", "connectionTitle", "integrationId", "configRequestsPerSecond", "configBurstSize", "configRetryOnLimit", "configMaxRetries", "configMaxWaitMs", "stateAvailable", "stateCurrentTokens", "stateLastRefillMs", "stateLearnedLimit", "stateCallsInWindow", "stateTotalCalls", "stateWindowStartMs", "capacityPercent", "utilizationPercent", "isRateLimited", "retryAfterMs", "periodInterval", "periodTotalRequests", "periodRateLimitedCount", "periodRetryCount", "periodRateLimitedPercent"],
+                "interval": ["1h", "24h", "7d", "30d"]
+            },
+            "connection_rate_limit_events": {
+                "fields": ["id", "connectionId", "eventType", "createdAt", "metadata", "tag"]
+            },
+            "connection_rate_limit_timeline": {
+                "fields": ["connectionId", "bucket", "bucketTime", "granularity", "requestCount", "rateLimitedCount", "retryCount"],
+                "granularity": ["minute", "hourly", "daily"]
+            }
+        },
+        "usageChartExample": {
+            "id": "execution_trend",
+            "type": "chart",
+            "source": {
+                "kind": "system",
+                "entity": "runtime_execution_metric_buckets",
+                "mode": "aggregate",
+                "granularity": "hourly",
+                "condition": {"op": "AND", "arguments": [
+                    {"op": "GTE", "arguments": ["bucketTime", {"filter": "date_range", "path": "from"}]},
+                    {"op": "LT", "arguments": ["bucketTime", {"filter": "date_range", "path": "to"}]}
+                ]},
+                "groupBy": ["bucketTime"],
+                "aggregates": [
+                    {"alias": "invocations", "op": "sum", "field": "invocationCount"},
+                    {"alias": "failures", "op": "sum", "field": "failureCount"}
+                ],
+                "orderBy": [{"field": "bucketTime", "direction": "asc"}]
+            },
+            "chart": {"kind": "line", "x": "bucketTime", "series": [{"field": "invocations"}, {"field": "failures"}]}
+        },
+        "rateLimitMasterDetailExample": {
+            "master": {
+                "id": "rate_limit_connections",
+                "type": "table",
+                "source": {"kind": "system", "entity": "connection_rate_limit_status", "mode": "filter", "interval": "24h"},
+                "table": {"columns": [{"field": "connectionTitle"}, {"field": "capacityPercent", "format": "percent"}, {"field": "periodRateLimitedCount", "format": "number"}]},
+                "interactions": [{"id": "open_connection", "trigger": {"event": "row_click"}, "actions": [{"type": "set_filter", "filterId": "connection_id", "field": "connectionId"}, {"type": "navigate_view", "viewId": "rate_limit_detail"}]}]
+            },
+            "detailTimeline": {
+                "id": "rate_limit_timeline",
+                "type": "chart",
+                "source": {
+                    "kind": "system",
+                    "entity": "connection_rate_limit_timeline",
+                    "mode": "aggregate",
+                    "granularity": "hourly",
+                    "condition": {"op": "EQ", "arguments": ["connectionId", {"filter": "connection_id", "path": "value"}]},
+                    "groupBy": ["bucketTime"],
+                    "aggregates": [
+                        {"alias": "requests", "op": "sum", "field": "requestCount"},
+                        {"alias": "limited", "op": "sum", "field": "rateLimitedCount"},
+                        {"alias": "retries", "op": "sum", "field": "retryCount"}
+                    ],
+                    "orderBy": [{"field": "bucketTime", "direction": "asc"}]
+                },
+                "chart": {"kind": "bar", "x": "bucketTime", "series": [{"field": "requests"}, {"field": "limited"}, {"field": "retries"}]}
             }
         }
     })
@@ -2080,14 +2165,34 @@ fn collect_report_view_authoring_issues(definition: &Value, issues: &mut Vec<Aut
         })
         .unwrap_or_default();
     let block_ids = block_types.keys().cloned().collect::<HashSet<_>>();
+    let filter_ids = definition
+        .get("filters")
+        .and_then(Value::as_array)
+        .map(|filters| {
+            filters
+                .iter()
+                .filter_map(|filter| filter.get("id")?.as_str().map(str::to_string))
+                .collect::<HashSet<_>>()
+        })
+        .unwrap_or_default();
     let mut view_ids = HashSet::new();
+    let mut parent_by_view = HashMap::new();
 
     for (view_index, view) in views.iter().enumerate() {
         let path = format!("$.views[{view_index}]");
         collect_unknown_keys(
             &path,
             view,
-            &["id", "title", "titleFrom", "breadcrumb", "layout"],
+            &[
+                "id",
+                "title",
+                "titleFrom",
+                "titleFromBlock",
+                "parentViewId",
+                "clearFiltersOnBack",
+                "breadcrumb",
+                "layout",
+            ],
             issues,
         );
         let Some(view_id) = view.get("id").and_then(Value::as_str) else {
@@ -2110,6 +2215,53 @@ fn collect_report_view_authoring_issues(definition: &Value, issues: &mut Vec<Aut
                 "DUPLICATE_REPORT_VIEW_ID",
                 format!("Duplicate report view id '{view_id}'."),
             ));
+        }
+
+        if let Some(parent_view_id) = view.get("parentViewId") {
+            match parent_view_id.as_str() {
+                Some(parent_view_id) if parent_view_id.trim().is_empty() => issues.push(error(
+                    format!("{path}.parentViewId"),
+                    "INVALID_REPORT_VIEW_PARENT",
+                    "Report view parentViewId cannot be empty.",
+                )),
+                Some(parent_view_id) => {
+                    parent_by_view.insert(view_id.to_string(), parent_view_id.to_string());
+                }
+                None => issues.push(error(
+                    format!("{path}.parentViewId"),
+                    "INVALID_REPORT_VIEW_PARENT",
+                    "Report view parentViewId must be a string view id.",
+                )),
+            }
+        }
+
+        if let Some(clear_filters) = view.get("clearFiltersOnBack") {
+            match clear_filters.as_array() {
+                Some(clear_filters) => {
+                    for (filter_index, filter_id) in clear_filters.iter().enumerate() {
+                        match filter_id.as_str() {
+                            Some(filter_id) if filter_ids.contains(filter_id) => {}
+                            Some(filter_id) => issues.push(error(
+                                format!("{path}.clearFiltersOnBack[{filter_index}]"),
+                                "UNKNOWN_REPORT_VIEW_BACK_FILTER",
+                                format!(
+                                    "Report view clearFiltersOnBack references unknown filter '{filter_id}'."
+                                ),
+                            )),
+                            None => issues.push(error(
+                                format!("{path}.clearFiltersOnBack[{filter_index}]"),
+                                "INVALID_REPORT_VIEW_BACK_FILTER",
+                                "Report view clearFiltersOnBack entries must be filter id strings.",
+                            )),
+                        }
+                    }
+                }
+                None => issues.push(error(
+                    format!("{path}.clearFiltersOnBack"),
+                    "INVALID_REPORT_VIEW_BACK_FILTERS",
+                    "Report view clearFiltersOnBack must be an array of filter ids.",
+                )),
+            }
         }
 
         if let Some(breadcrumbs) = view.get("breadcrumb") {
@@ -2152,6 +2304,41 @@ fn collect_report_view_authoring_issues(definition: &Value, issues: &mut Vec<Aut
                     issues,
                 );
             }
+        }
+    }
+
+    for (view_id, parent_view_id) in &parent_by_view {
+        if parent_view_id == view_id {
+            issues.push(error(
+                "$.views",
+                "INVALID_REPORT_VIEW_PARENT",
+                format!("Report view '{view_id}' cannot use itself as parentViewId."),
+            ));
+            continue;
+        }
+        if !view_ids.contains(parent_view_id) {
+            issues.push(error(
+                "$.views",
+                "UNKNOWN_REPORT_VIEW_PARENT",
+                format!(
+                    "Report view '{view_id}' references unknown parentViewId '{parent_view_id}'."
+                ),
+            ));
+            continue;
+        }
+
+        let mut seen = HashSet::from([view_id.as_str()]);
+        let mut current_parent = parent_view_id.as_str();
+        while let Some(next_parent) = parent_by_view.get(current_parent) {
+            if !seen.insert(current_parent) {
+                issues.push(error(
+                    "$.views",
+                    "CYCLIC_REPORT_VIEW_PARENT",
+                    format!("Report view '{view_id}' parentViewId chain contains a cycle."),
+                ));
+                break;
+            }
+            current_parent = next_parent;
         }
     }
 }
@@ -3795,6 +3982,7 @@ fn collect_report_filter_authoring_issues(
             "type",
             "default",
             "required",
+            "strictWhenReferenced",
             "options",
             "appliesTo",
         ],
@@ -4790,6 +4978,55 @@ mod tests {
         let issues = collect_report_definition_authoring_issues(&definition);
 
         assert!(authoring_errors(&issues).next().is_none());
+    }
+
+    #[test]
+    fn report_authoring_accepts_auto_view_navigation() {
+        let definition = json!({
+            "definitionVersion": 1,
+            "markdown": "# Report",
+            "filters": [
+                {"id": "case_id", "label": "Case", "type": "text", "strictWhenReferenced": true},
+                {"id": "task_id", "label": "Task", "type": "text", "strictWhenReferenced": true}
+            ],
+            "views": [
+                {"id": "list", "title": "Cases", "layout": [{"id": "cases_node", "type": "block", "blockId": "cases"}]},
+                {"id": "case", "titleFrom": "filters.case_id", "parentViewId": "list", "clearFiltersOnBack": ["case_id"], "layout": [{"id": "case_node", "type": "block", "blockId": "case_summary"}]},
+                {"id": "task", "titleFrom": "filters.task_id", "parentViewId": "case", "clearFiltersOnBack": ["task_id"], "layout": [{"id": "task_node", "type": "block", "blockId": "task_summary"}]}
+            ],
+            "blocks": [
+                {"id": "cases", "type": "table", "source": {"schema": "LoanCase"}, "table": {"columns": [{"field": "id"}]}},
+                {"id": "case_summary", "type": "table", "source": {"schema": "LoanCase"}, "table": {"columns": [{"field": "id"}]}},
+                {"id": "task_summary", "type": "table", "source": {"schema": "Task"}, "table": {"columns": [{"field": "id"}]}}
+            ]
+        });
+
+        let issues = collect_report_definition_authoring_issues(&definition);
+
+        let response = authoring_validation_response(issues.clone());
+        assert!(
+            authoring_errors(&issues).next().is_none(),
+            "{}",
+            serde_json::to_string_pretty(&response).unwrap()
+        );
+    }
+
+    #[test]
+    fn report_authoring_rejects_cyclic_view_navigation() {
+        let definition = json!({
+            "definitionVersion": 1,
+            "markdown": "# Report",
+            "views": [
+                {"id": "a", "parentViewId": "b"},
+                {"id": "b", "parentViewId": "a"}
+            ],
+            "blocks": []
+        });
+
+        let issues = collect_report_definition_authoring_issues(&definition);
+        let codes = issue_codes(&issues);
+
+        assert!(codes.contains(&"CYCLIC_REPORT_VIEW_PARENT"));
     }
 
     #[test]
