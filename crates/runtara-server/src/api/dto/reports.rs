@@ -5,9 +5,11 @@
 //! queries through Object Model services.
 
 use chrono::{DateTime, Utc};
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
+use std::fmt;
 use utoipa::ToSchema;
 
 use crate::api::dto::object_model::Condition;
@@ -57,7 +59,7 @@ pub(crate) fn default_report_source() -> ReportSource {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, ToSchema, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ReportStatus {
     Draft,
@@ -83,14 +85,12 @@ impl ReportStatus {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, JsonSchema)]
 pub struct ReportDefinition {
     #[serde(default = "default_definition_version", rename = "definitionVersion")]
     pub definition_version: i32,
-    #[serde(default)]
-    pub markdown: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub layout: Vec<Value>,
+    pub layout: Vec<ReportLayoutNode>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub views: Vec<ReportViewDefinition>,
     #[serde(default)]
@@ -101,7 +101,7 @@ pub struct ReportDefinition {
     pub blocks: Vec<ReportBlockDefinition>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, JsonSchema)]
 pub struct ReportViewDefinition {
     pub id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -132,17 +132,17 @@ pub struct ReportViewDefinition {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub breadcrumb: Vec<ReportViewBreadcrumb>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub layout: Vec<Value>,
+    pub layout: Vec<ReportLayoutNode>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, JsonSchema)]
 pub struct ReportTitleFromBlock {
     pub block: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub field: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, JsonSchema)]
 pub struct ReportViewBreadcrumb {
     pub label: String,
     #[serde(default, rename = "viewId", skip_serializing_if = "Option::is_none")]
@@ -155,7 +155,95 @@ pub struct ReportViewBreadcrumb {
     pub clear_filters: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, JsonSchema)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ReportLayoutNode {
+    Block(ReportBlockLayoutNode),
+    MetricRow(ReportMetricRowLayoutNode),
+    Section(ReportSectionLayoutNode),
+    Columns(ReportColumnsLayoutNode),
+    Grid(ReportGridLayoutNode),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ReportBlockLayoutNode {
+    pub id: String,
+    #[serde(rename = "blockId")]
+    pub block_id: String,
+    #[serde(default, rename = "showWhen", skip_serializing_if = "Option::is_none")]
+    pub show_when: Option<Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ReportMetricRowLayoutNode {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    pub blocks: Vec<String>,
+    #[serde(default, rename = "showWhen", skip_serializing_if = "Option::is_none")]
+    pub show_when: Option<Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ReportSectionLayoutNode {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub children: Vec<ReportLayoutNode>,
+    #[serde(default, rename = "showWhen", skip_serializing_if = "Option::is_none")]
+    pub show_when: Option<Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ReportColumnsLayoutNode {
+    pub id: String,
+    pub columns: Vec<ReportLayoutColumn>,
+    #[serde(default, rename = "showWhen", skip_serializing_if = "Option::is_none")]
+    pub show_when: Option<Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ReportLayoutColumn {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub width: Option<f64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub children: Vec<ReportLayoutNode>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ReportGridLayoutNode {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub columns: Option<i64>,
+    pub items: Vec<ReportGridLayoutItem>,
+    #[serde(default, rename = "showWhen", skip_serializing_if = "Option::is_none")]
+    pub show_when: Option<Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ReportGridLayoutItem {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    #[serde(rename = "blockId")]
+    pub block_id: String,
+    #[serde(default, rename = "colSpan", skip_serializing_if = "Option::is_none")]
+    pub col_span: Option<i64>,
+    #[serde(default, rename = "rowSpan", skip_serializing_if = "Option::is_none")]
+    pub row_span: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, JsonSchema)]
 pub struct ReportDatasetDefinition {
     pub id: String,
     pub label: String,
@@ -172,7 +260,7 @@ pub struct ReportDatasetDefinition {
     pub measures: Vec<ReportDatasetMeasure>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, JsonSchema)]
 pub struct ReportDatasetSource {
     pub schema: String,
     #[serde(
@@ -183,7 +271,7 @@ pub struct ReportDatasetSource {
     pub connection_id: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, JsonSchema)]
 pub struct ReportDatasetDimension {
     pub field: String,
     pub label: String,
@@ -193,7 +281,7 @@ pub struct ReportDatasetDimension {
     pub format: Option<ReportDatasetValueFormat>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, JsonSchema)]
 pub struct ReportDatasetMeasure {
     pub id: String,
     pub label: String,
@@ -212,7 +300,7 @@ pub struct ReportDatasetMeasure {
     pub format: ReportDatasetValueFormat,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, ToSchema, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ReportDatasetFieldType {
     String,
@@ -224,7 +312,7 @@ pub enum ReportDatasetFieldType {
     Json,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, ToSchema, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ReportDatasetValueFormat {
     String,
@@ -237,7 +325,9 @@ pub enum ReportDatasetValueFormat {
     Datetime,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, ToSchema, PartialEq, Eq, Default)]
+#[derive(
+    Debug, Clone, Copy, Serialize, Deserialize, ToSchema, JsonSchema, PartialEq, Eq, Default,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum ReportSourceKind {
     #[default]
@@ -246,7 +336,7 @@ pub enum ReportSourceKind {
     System,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, ToSchema, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ReportWorkflowRuntimeEntity {
     Instances,
@@ -258,7 +348,7 @@ pub enum ReportWorkflowRuntimeEntity {
     ConnectionRateLimitTimeline,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, JsonSchema)]
 pub struct ReportFilterDefinition {
     pub id: String,
     pub label: String,
@@ -289,7 +379,7 @@ fn is_false_filter(value: &bool) -> bool {
     !value
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ReportFilterType {
     Select,
@@ -302,7 +392,7 @@ pub enum ReportFilterType {
     Search,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, JsonSchema)]
 pub struct ReportFilterTarget {
     #[serde(default, rename = "filterId", skip_serializing_if = "Option::is_none")]
     pub filter_id: Option<String>,
@@ -317,7 +407,7 @@ fn default_filter_op() -> String {
     "eq".to_string()
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, JsonSchema)]
 pub struct ReportBlockDefinition {
     pub id: String,
     #[serde(rename = "type")]
@@ -343,6 +433,8 @@ pub struct ReportBlockDefinition {
     pub actions: Option<ReportActionsConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub card: Option<ReportCardConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub markdown: Option<ReportMarkdownConfig>,
     #[serde(default)]
     pub filters: Vec<ReportFilterDefinition>,
     #[serde(default)]
@@ -366,13 +458,18 @@ fn is_false_block(value: &bool) -> bool {
     !value
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, JsonSchema)]
+pub struct ReportMarkdownConfig {
+    pub content: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, JsonSchema)]
 pub struct ReportActionsConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub submit: Option<ReportActionSubmitConfig>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, JsonSchema)]
 pub struct ReportActionSubmitConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
@@ -384,7 +481,7 @@ pub struct ReportActionSubmitConfig {
     pub implicit_payload: HashMap<String, Value>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, JsonSchema)]
 pub struct ReportWorkflowActionConfig {
     #[serde(rename = "workflowId")]
     pub workflow_id: String,
@@ -434,7 +531,7 @@ pub struct ReportWorkflowActionConfig {
     pub context: ReportWorkflowActionContext,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, JsonSchema)]
 pub struct ReportWorkflowActionContext {
     #[serde(default)]
     pub mode: ReportWorkflowActionContextMode,
@@ -454,7 +551,9 @@ impl Default for ReportWorkflowActionContext {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, ToSchema, PartialEq, Eq, Default)]
+#[derive(
+    Debug, Clone, Copy, Serialize, Deserialize, ToSchema, JsonSchema, PartialEq, Eq, Default,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum ReportWorkflowActionContextMode {
     #[default]
@@ -464,7 +563,7 @@ pub enum ReportWorkflowActionContextMode {
     Selection,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, JsonSchema)]
 pub struct ReportBlockDatasetQuery {
     pub id: String,
     #[serde(default)]
@@ -483,7 +582,7 @@ pub struct ReportBlockDatasetQuery {
     pub limit: Option<i64>,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, ToSchema, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, ToSchema, JsonSchema, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum ReportBlockType {
     Table,
@@ -497,13 +596,13 @@ pub enum ReportBlockType {
 /// Card block configuration. A card renders a single record (the first row of
 /// a filter-mode source) as a vertical key→value layout, optionally split into
 /// titled groups with multi-column inner grids and per-field formatting.
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, JsonSchema)]
 pub struct ReportCardConfig {
     #[serde(default)]
     pub groups: Vec<ReportCardGroup>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, JsonSchema)]
 pub struct ReportCardGroup {
     pub id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -520,7 +619,7 @@ fn default_card_group_columns() -> u8 {
     2
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, JsonSchema)]
 pub struct ReportCardField {
     pub field: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -598,7 +697,7 @@ fn default_card_field_col_span() -> u8 {
     1
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, ToSchema, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ReportCardFieldKind {
     Value,
@@ -610,7 +709,7 @@ pub enum ReportCardFieldKind {
 }
 
 /// Inline-table rendering for an array-of-objects card field.
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, JsonSchema)]
 pub struct ReportSubtableConfig {
     #[serde(default)]
     pub columns: Vec<ReportSubtableColumn>,
@@ -623,7 +722,7 @@ pub struct ReportSubtableConfig {
     pub empty_label: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, JsonSchema)]
 pub struct ReportSubtableColumn {
     /// Property name on each array element to read for this cell.
     pub field: String,
@@ -645,7 +744,7 @@ pub struct ReportSubtableColumn {
     pub align: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, JsonSchema)]
 pub struct ReportSource {
     #[serde(
         default = "default_report_source_kind",
@@ -730,7 +829,7 @@ impl ReportSource {
 /// Cross-schema join declared on a block-level source. Mirrors the per-cell
 /// `ReportTableColumnJoin` but adds `schema`, `alias`, and `kind` since the
 /// primary schema is the block's source rather than the column's.
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, JsonSchema)]
 pub struct ReportSourceJoin {
     /// Joined (dimension) schema name.
     pub schema: String,
@@ -767,7 +866,9 @@ impl ReportSourceJoin {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, ToSchema, PartialEq, Eq, Default)]
+#[derive(
+    Debug, Clone, Copy, Serialize, Deserialize, ToSchema, JsonSchema, PartialEq, Eq, Default,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum ReportJoinKind {
     #[default]
@@ -775,14 +876,14 @@ pub enum ReportJoinKind {
     Left,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, ToSchema, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ReportSourceMode {
     Filter,
     Aggregate,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, JsonSchema)]
 pub struct ReportAggregateSpec {
     pub alias: String,
     #[serde(rename = "op")]
@@ -801,7 +902,7 @@ pub struct ReportAggregateSpec {
     pub percentile: Option<f64>,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, ToSchema, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ReportAggregateFn {
     Count,
@@ -818,7 +919,7 @@ pub enum ReportAggregateFn {
     Expr,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, JsonSchema)]
 pub struct ReportOrderBy {
     pub field: String,
     #[serde(default = "default_sort_direction")]
@@ -829,7 +930,7 @@ fn default_sort_direction() -> String {
     "asc".to_string()
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, JsonSchema)]
 pub struct ReportTableConfig {
     #[serde(default)]
     pub columns: Vec<ReportTableColumn>,
@@ -845,7 +946,7 @@ pub struct ReportTableConfig {
     pub pagination: Option<ReportPaginationConfig>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, JsonSchema)]
 pub struct ReportTableActionConfig {
     pub id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -854,7 +955,7 @@ pub struct ReportTableActionConfig {
     pub workflow_action: ReportWorkflowActionConfig,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, JsonSchema)]
 pub struct ReportTableColumn {
     pub field: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -942,7 +1043,7 @@ pub struct ReportTableColumn {
 /// `pillVariants` (number for currency/decimal/percent, date for date,
 /// select for pill with variants, toggle for booleans, text otherwise).
 /// When set, the explicit `kind` wins.
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, JsonSchema)]
 pub struct ReportEditorConfig {
     pub kind: ReportEditorKind,
     /// Dynamic object-model lookup configuration for `kind=lookup`.
@@ -970,13 +1071,13 @@ pub struct ReportEditorConfig {
     pub placeholder: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, JsonSchema)]
 pub struct ReportEditorOption {
     pub label: String,
     pub value: Value,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, JsonSchema)]
 pub struct ReportLookupConfig {
     /// Object Model schema to search for options.
     pub schema: String,
@@ -1006,7 +1107,7 @@ pub struct ReportLookupConfig {
     pub filter_mappings: Vec<ReportFilterTarget>,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, ToSchema, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ReportEditorKind {
     Text,
@@ -1023,7 +1124,7 @@ fn is_false(value: &bool) -> bool {
     !value
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, ToSchema, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ReportTableColumnType {
     Value,
@@ -1048,7 +1149,7 @@ impl ReportTableColumn {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, JsonSchema)]
 pub struct ReportTableColumnSource {
     pub schema: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1077,7 +1178,7 @@ pub struct ReportTableColumnSource {
     pub join: Vec<ReportTableColumnJoin>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, JsonSchema)]
 pub struct ReportTableColumnJoin {
     #[serde(rename = "parentField")]
     pub parent_field: String,
@@ -1092,7 +1193,7 @@ fn default_column_join_kind() -> ReportJoinKind {
     ReportJoinKind::Left
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, JsonSchema)]
 pub struct ReportPaginationConfig {
     #[serde(default = "default_page_size", rename = "defaultPageSize")]
     pub default_page_size: i64,
@@ -1104,7 +1205,7 @@ fn default_page_size() -> i64 {
     50
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, JsonSchema)]
 pub struct ReportChartConfig {
     pub kind: ReportChartKind,
     pub x: String,
@@ -1112,7 +1213,7 @@ pub struct ReportChartConfig {
     pub series: Vec<ReportChartSeries>,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, ToSchema, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ReportChartKind {
     Line,
@@ -1122,14 +1223,14 @@ pub enum ReportChartKind {
     Donut,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, JsonSchema)]
 pub struct ReportChartSeries {
     pub field: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, JsonSchema)]
 pub struct ReportMetricConfig {
     #[serde(rename = "valueField")]
     pub value_field: String,
@@ -1139,7 +1240,7 @@ pub struct ReportMetricConfig {
     pub format: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, JsonSchema)]
 pub struct ReportInteractionDefinition {
     pub id: String,
     pub trigger: ReportInteractionTrigger,
@@ -1147,14 +1248,14 @@ pub struct ReportInteractionDefinition {
     pub actions: Vec<ReportInteractionAction>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, JsonSchema)]
 pub struct ReportInteractionTrigger {
     pub event: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub field: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, JsonSchema)]
 pub struct ReportInteractionAction {
     #[serde(rename = "type")]
     pub action_type: String,
@@ -1281,6 +1382,22 @@ pub struct ReportValidationIssue {
     pub path: String,
     pub code: String,
     pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hint: Option<String>,
+}
+
+impl fmt::Display for ReportValidationIssue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if let Some(hint) = &self.hint {
+            write!(
+                f,
+                "{} at {}: {} ({})",
+                self.code, self.path, self.message, hint
+            )
+        } else {
+            write!(f, "{} at {}: {}", self.code, self.path, self.message)
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
@@ -1367,7 +1484,7 @@ pub struct ReportDatasetQueryRequest {
     pub timezone: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, JsonSchema)]
 pub struct ReportDatasetFilter {
     pub field: String,
     #[serde(default = "default_filter_op")]
@@ -1568,8 +1685,6 @@ pub struct AddReportBlockRequest {
     pub block: ReportBlockDefinition,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub position: Option<ReportBlockPosition>,
-    #[serde(default = "default_true", rename = "insertMarkdownPlaceholder")]
-    pub insert_markdown_placeholder: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
@@ -1587,15 +1702,10 @@ pub struct PatchReportBlockRequest {
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct MoveReportBlockRequest {
     pub position: ReportBlockPosition,
-    #[serde(default = "default_true", rename = "moveMarkdownPlaceholder")]
-    pub move_markdown_placeholder: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
-pub struct RemoveReportBlockRequest {
-    #[serde(default = "default_true", rename = "removeMarkdownPlaceholder")]
-    pub remove_markdown_placeholder: bool,
-}
+pub struct RemoveReportBlockRequest {}
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct ReportBlockMutationResponse {
@@ -1604,8 +1714,4 @@ pub struct ReportBlockMutationResponse {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub block: Option<ReportBlockDefinition>,
     pub message: String,
-}
-
-fn default_true() -> bool {
-    true
 }

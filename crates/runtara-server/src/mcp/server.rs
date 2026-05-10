@@ -485,6 +485,16 @@ impl SmoMcpServer {
         tools::reports::get_report_authoring_schema(self, params.0).await
     }
 
+    #[tool(
+        description = "Get the machine-readable JSON Schema for report.definition. This is different from get_report_authoring_schema, which is AI authoring guidance with examples."
+    )]
+    async fn get_report_definition_schema(
+        &self,
+        params: Parameters<tools::reports::GetReportDefinitionSchemaParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        tools::reports::get_report_definition_schema(self, params.0).await
+    }
+
     #[tool(description = "List reports available to the tenant.")]
     async fn list_reports(
         &self,
@@ -493,7 +503,9 @@ impl SmoMcpServer {
         tools::reports::list_reports(self, params.0).await
     }
 
-    #[tool(description = "Get a report by id or slug, including markdown, filters, and blocks.")]
+    #[tool(
+        description = "Get a report by id or slug, including layout, filters, datasets, and blocks."
+    )]
     async fn get_report(
         &self,
         params: Parameters<tools::reports::GetReportParams>,
@@ -502,7 +514,7 @@ impl SmoMcpServer {
     }
 
     #[tool(
-        description = "Create a report from a full definition: markdown, filters, and blocks. Call get_report_authoring_schema first; every block must include a stable id for later MCP mutations."
+        description = "Create a report from a full definition: layout, filters, datasets, and blocks. Call get_report_authoring_schema first; every block must include a stable id for later MCP mutations."
     )]
     async fn create_report(
         &self,
@@ -530,7 +542,7 @@ impl SmoMcpServer {
     }
 
     #[tool(
-        description = "Validate a report definition without saving it. Includes MCP authoring-shape checks for misplaced table/chart/metric fields before calling the report API."
+        description = "Validate a report definition without saving it. mode='syntax' runs JSON Schema only, mode='semantic' runs backend tenant-reference checks, and mode='all' also includes MCP authoring-shape checks for misplaced table/chart/metric fields."
     )]
     async fn validate_report(
         &self,
@@ -560,7 +572,7 @@ impl SmoMcpServer {
     }
 
     #[tool(
-        description = "Atomically add one report block by stable id. Position with index, before_block_id, or after_block_id. Optionally inserts the markdown placeholder."
+        description = "Atomically add one report block by stable id. Position with index, before_block_id, or after_block_id."
     )]
     async fn add_report_block(
         &self,
@@ -590,7 +602,7 @@ impl SmoMcpServer {
     }
 
     #[tool(
-        description = "Atomically move one report block by stable id. Position with index, before_block_id, or after_block_id. Optionally moves the markdown placeholder."
+        description = "Atomically move one report block by stable id. Position with index, before_block_id, or after_block_id."
     )]
     async fn move_report_block(
         &self,
@@ -599,9 +611,7 @@ impl SmoMcpServer {
         tools::reports::move_report_block(self, params.0).await
     }
 
-    #[tool(
-        description = "Atomically remove one report block by stable id. Optionally removes the markdown placeholder."
-    )]
+    #[tool(description = "Atomically remove one report block by stable id.")]
     async fn remove_report_block(
         &self,
         params: Parameters<tools::reports::RemoveReportBlockParams>,
@@ -978,7 +988,7 @@ impl ServerHandler for SmoMcpServer {
                 **Execution**: execute_workflow, execute_workflow_sync, execute_workflow_wait, list_executions, get_execution, get_step_summaries (supports compact mode), get_step_events, stop_execution, pause_execution, resume_execution\n\
                 **Debugging**: inspect_step (one-call step debugger), trace_reference (resolve a reference path at runtime), why_execution_failed (one-call failure diagnosis)\n\
                 **Object Model**: list_object_schemas, get_object_schema, create_object_schema, update_object_schema, delete_object_schema, list_object_instances, query_object_instances, create_object_instance, update_object_instance\n\
-                **Reports**: get_report_authoring_schema, list_reports, get_report, create_report, update_report, delete_report, validate_report, render_report, get_report_block_data, add_report_block, replace_report_block, patch_report_block, move_report_block, remove_report_block, add_report_layout_node, replace_report_layout_node, patch_report_layout_node, move_report_layout_node, remove_report_layout_node — call get_report_authoring_schema before authoring; report blocks and layout nodes have stable ids; use layout nodes (metric_row, columns, grid, section) instead of Markdown tables for alignment; reports can use Object Model sources, lookup editors for reference fields, or virtual workflow_runtime sources for workflow instance status/actions\n\
+                **Reports**: get_report_authoring_schema, get_report_definition_schema, list_reports, get_report, create_report, update_report, delete_report, validate_report, render_report, get_report_block_data, add_report_block, replace_report_block, patch_report_block, move_report_block, remove_report_block, add_report_layout_node, replace_report_layout_node, patch_report_layout_node, move_report_layout_node, remove_report_layout_node — call get_report_authoring_schema before authoring; use get_report_definition_schema for the generated JSON Schema; report blocks and layout nodes have stable ids; use layout nodes (metric_row, columns, grid, section) instead of Markdown tables for alignment; reports can use Object Model sources, lookup editors for reference fields, or virtual workflow_runtime sources for workflow instance status/actions\n\
                 **Agents & DSL**: list_agents, get_agent, get_capability, test_capability, list_step_types, get_step_type_schema\n\
                 **Graph Mutations**: set_workflow_metadata (name/description), add_agent_step (high-level: validates capability, creates step, connects edges), add_step, remove_step, update_step, connect_steps, disconnect_steps, set_entry_point, set_mapping, remove_mapping, set_input_schema, set_output_schema, set_variable, remove_variable, list_references (returns copy-paste-ready mapping objects) — first call creates a new version, subsequent calls update it in-place. All support nested subgraphs via optional path parameter. Prefer mutation tools over raw graph JSON. Use deploy_latest after mutations to compile and deploy.\n\
                 **Signals & Actions**: list_pending_signals, get_signal_schema, submit_signal_response, submit_action_response — interact with WaitForSignal / human-in-the-loop steps and open workflow actions in running executions\n\

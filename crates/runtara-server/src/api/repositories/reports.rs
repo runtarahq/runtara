@@ -156,7 +156,6 @@ fn row_to_report(row: PgRow) -> Result<ReportDto, sqlx::Error> {
     let definition: ReportDefinition =
         serde_json::from_value(definition_value).unwrap_or(ReportDefinition {
             definition_version: row.try_get("definition_version").unwrap_or(1),
-            markdown: String::new(),
             layout: vec![],
             views: vec![],
             filters: vec![],

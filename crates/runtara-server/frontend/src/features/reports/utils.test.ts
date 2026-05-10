@@ -104,7 +104,6 @@ describe('report row conditions', () => {
 describe('report view navigation', () => {
   const reportDefinition: ReportDefinition = {
     definitionVersion: 1,
-    markdown: '',
     filters: [],
     blocks: [],
     views: [

@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link } from 'react-router';
 import { Compass, RefreshCw } from 'lucide-react';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import { Button } from '@/shared/components/ui/button';
 import {
   ReportBlockDefinition,
@@ -294,7 +296,6 @@ export function ReportBlockHost({
             reportId={reportId}
             definition={{
               definitionVersion: 1,
-              markdown: '',
               filters: block.filters ?? [],
               blocks: [block],
             }}
@@ -406,6 +407,10 @@ function RenderedBlock({
     return <MetricBlock block={block} result={result} />;
   }
 
+  if (block.type === 'markdown') {
+    return <MarkdownBlock block={block} result={result} />;
+  }
+
   if (block.type === 'card') {
     return (
       <CardBlock
@@ -433,6 +438,109 @@ function RenderedBlock({
   }
 
   return null;
+}
+
+function MarkdownBlock({
+  block,
+  result,
+}: {
+  block: ReportBlockDefinition;
+  result: ReportBlockResult;
+}) {
+  const data =
+    result.data && typeof result.data === 'object'
+      ? (result.data as Record<string, unknown>)
+      : {};
+  const content =
+    typeof data.content === 'string'
+      ? data.content
+      : block.markdown?.content ?? '';
+  const source =
+    data.source && typeof data.source === 'object'
+      ? (data.source as Record<string, unknown>)
+      : undefined;
+  const rendered = interpolateMarkdownSource(content, source);
+
+  return (
+    <div className="prose prose-slate max-w-none dark:prose-invert">
+      <ReactMarkdown remarkPlugins={[remarkGfm]}>{rendered}</ReactMarkdown>
+    </div>
+  );
+}
+
+const MARKDOWN_INTERPOLATION_RE = /\{\{\s*([^{}]+?)\s*\}\}/g;
+const SOURCE_INTERPOLATION_RE = /^source(?:\[(\d+)])?\.([A-Za-z0-9_.-]+)$/;
+
+function interpolateMarkdownSource(
+  content: string,
+  source: Record<string, unknown> | undefined
+) {
+  return content.replace(MARKDOWN_INTERPOLATION_RE, (token, expression) => {
+    const match = SOURCE_INTERPOLATION_RE.exec(String(expression).trim());
+    if (!match) return token;
+    const rowIndex = match[1] ? Number.parseInt(match[1], 10) : 0;
+    const fieldPath = match[2];
+    const value = resolveMarkdownSourceValue(source, rowIndex, fieldPath);
+    return escapeMarkdownValue(value);
+  });
+}
+
+function resolveMarkdownSourceValue(
+  source: Record<string, unknown> | undefined,
+  rowIndex: number,
+  fieldPath: string
+) {
+  const rows = Array.isArray(source?.rows) ? source.rows : [];
+  const row = rows[rowIndex];
+  if (row == null) return undefined;
+
+  if (Array.isArray(row)) {
+    const columnKeys = markdownSourceColumnKeys(source?.columns);
+    const index = columnKeys.indexOf(fieldPath);
+    return index >= 0 ? row[index] : undefined;
+  }
+
+  if (typeof row !== 'object') return undefined;
+  return resolveObjectPath(row as Record<string, unknown>, fieldPath);
+}
+
+function markdownSourceColumnKeys(columns: unknown): string[] {
+  if (!Array.isArray(columns)) return [];
+  return columns.flatMap((column) => {
+    if (typeof column === 'string') return [column];
+    if (column && typeof column === 'object') {
+      const key = (column as Record<string, unknown>).key;
+      return typeof key === 'string' ? [key] : [];
+    }
+    return [];
+  });
+}
+
+function resolveObjectPath(row: Record<string, unknown>, fieldPath: string) {
+  if (Object.prototype.hasOwnProperty.call(row, fieldPath)) {
+    return row[fieldPath];
+  }
+  return fieldPath.split('.').reduce<unknown>((current, part) => {
+    if (current && typeof current === 'object') {
+      const object = current as Record<string, unknown>;
+      if (Object.prototype.hasOwnProperty.call(object, part)) {
+        return object[part];
+      }
+    }
+    return undefined;
+  }, row);
+}
+
+function escapeMarkdownValue(value: unknown) {
+  if (value == null) return '';
+  if (typeof value === 'object') {
+    return escapeMarkdownText(JSON.stringify(value));
+  }
+  return escapeMarkdownText(String(value));
+}
+
+function escapeMarkdownText(value: string) {
+  return value.replace(/([\\`*_{}[\]()#+\-.!|>])/g, '\\$1');
 }
 
 function BlockSkeleton({ block }: { block: ReportBlockDefinition }) {

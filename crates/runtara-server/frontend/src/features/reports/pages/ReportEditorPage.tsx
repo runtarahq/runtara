@@ -33,7 +33,6 @@ import {
   ReportStatus,
 } from '../types';
 import {
-  extractBlockPlaceholders,
   extractLayoutBlockReferences,
   humanizeFieldName,
   slugify,
@@ -42,10 +41,17 @@ import { reconcileDatasetBlock } from '../datasetBlocks';
 
 const EMPTY_DEFINITION: ReportDefinition = {
   definitionVersion: 1,
-  markdown: '# Report',
-  layout: [{ id: 'intro', type: 'markdown', content: '# Report' }],
+  layout: [{ id: 'intro_node', type: 'block', blockId: 'intro' }],
   filters: [],
-  blocks: [],
+  blocks: [
+    {
+      id: 'intro',
+      type: 'markdown',
+      source: { schema: '', mode: 'filter' },
+      markdown: { content: '# Report' },
+      filters: [],
+    },
+  ],
 };
 
 const NONE_SELECT_VALUE = '__none__';
@@ -152,12 +158,11 @@ export function ReportEditorPage() {
 
     const starter: ReportDefinition = {
       definitionVersion: 1,
-      markdown: `# ${name || schema.name}\n\n{{ block.total_records }}\n\n{{ block.records }}`,
       layout: [
         {
-          id: 'intro',
-          type: 'markdown',
-          content: `# ${name || schema.name}`,
+          id: 'intro_node',
+          type: 'block',
+          blockId: 'intro',
         },
         {
           id: 'summary_metrics',
@@ -172,6 +177,13 @@ export function ReportEditorPage() {
       ],
       filters: [],
       blocks: [
+        {
+          id: 'intro',
+          type: 'markdown',
+          source: { schema: '', mode: 'filter' },
+          markdown: { content: `# ${name || schema.name}` },
+          filters: [],
+        },
         {
           id: 'total_records',
           type: 'metric',
@@ -1205,8 +1217,14 @@ function validateReportDefinition(definition: ReportDefinition): string[] {
     }
     blockIds.add(block.id);
     const sourceKind = block.source.kind ?? 'object_model';
+    const isStaticMarkdown =
+      block.type === 'markdown' && !block.dataset && !block.source.schema.trim();
+    if (block.type === 'markdown' && !block.markdown?.content) {
+      errors.push(`Block "${block.id}" needs markdown.content.`);
+    }
     if (
       !block.dataset &&
+      !isStaticMarkdown &&
       sourceKind === 'object_model' &&
       !block.source.schema.trim()
     ) {
@@ -1224,12 +1242,6 @@ function validateReportDefinition(definition: ReportDefinition): string[] {
       errors.push(
         `Block "${block.id}" references unknown dataset: ${block.dataset.id}`
       );
-    }
-  }
-
-  for (const placeholder of extractBlockPlaceholders(definition.markdown)) {
-    if (!blockIds.has(placeholder)) {
-      errors.push(`Markdown references unknown block: ${placeholder}`);
     }
   }
 

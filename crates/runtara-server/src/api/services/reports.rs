@@ -17,6 +17,7 @@ use crate::api::dto::reports::*;
 use crate::api::dto::workflows::WorkflowInstanceDto;
 use crate::api::repositories::object_model::ObjectStoreManager;
 use crate::api::repositories::reports::ReportRepository;
+use crate::api::repositories::workflows::WorkflowRepository;
 use crate::api::services::object_model::{
     InstanceService, SchemaService, ServiceError as ObjectModelServiceError,
 };
@@ -52,6 +53,8 @@ pub enum ReportServiceError {
     #[error("{0}")]
     Validation(String),
     #[error("{0}")]
+    ValidationIssue(ReportValidationIssue),
+    #[error("{0}")]
     Conflict(String),
     #[error("{0}")]
     Database(String),
@@ -59,6 +62,7 @@ pub enum ReportServiceError {
 
 pub struct ReportService {
     repo: ReportRepository,
+    workflow_repo: WorkflowRepository,
     schema_service: SchemaService,
     instance_service: InstanceService,
     connections: Arc<runtara_connections::ConnectionsFacade>,
@@ -85,14 +89,115 @@ struct ObjectModelOptionQuery<'a> {
     search_query: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ReportMarkdownSourcePlaceholder {
+    field_path: String,
+}
+
+fn report_validation_issue(
+    path: impl Into<String>,
+    code: impl Into<String>,
+    message: impl Into<String>,
+    hint: Option<String>,
+) -> ReportValidationIssue {
+    ReportValidationIssue {
+        path: path.into(),
+        code: code.into(),
+        message: message.into(),
+        hint,
+    }
+}
+
+fn report_validation_error(
+    path: impl Into<String>,
+    code: impl Into<String>,
+    message: impl Into<String>,
+    hint: Option<String>,
+) -> ReportServiceError {
+    ReportServiceError::ValidationIssue(report_validation_issue(path, code, message, hint))
+}
+
+fn report_validation_issue_from_error(error: ReportServiceError) -> ReportValidationIssue {
+    match error {
+        ReportServiceError::ValidationIssue(issue) => issue,
+        ReportServiceError::Validation(message) => report_validation_issue(
+            "$",
+            "VALIDATION_ERROR",
+            message,
+            Some(
+                "Use validate_report with mode='all' for syntax plus semantic checks.".to_string(),
+            ),
+        ),
+        other => report_validation_issue("$", "VALIDATION_ERROR", other.to_string(), None),
+    }
+}
+
 impl ReportService {
+    pub fn report_definition_json_schema() -> Value {
+        let mut schema = serde_json::to_value(schemars::schema_for!(ReportDefinition))
+            .unwrap_or_else(|_| json!({}));
+        seal_json_schema_objects(&mut schema);
+        schema
+    }
+
+    pub fn validate_report_definition_json_syntax(
+        definition: &Value,
+    ) -> Result<(), ReportServiceError> {
+        let errors = Self::validate_report_definition_json_syntax_issues(definition)?;
+        if !errors.is_empty() {
+            let first = errors
+                .into_iter()
+                .next()
+                .expect("syntax validation errors cannot be empty here");
+            return Err(ReportServiceError::ValidationIssue(first));
+        }
+        Ok(())
+    }
+
+    pub fn validate_report_definition_json_syntax_issues(
+        definition: &Value,
+    ) -> Result<Vec<ReportValidationIssue>, ReportServiceError> {
+        let schema = Self::report_definition_json_schema();
+        let validator = jsonschema::validator_for(&schema).map_err(|err| {
+            report_validation_error(
+                "$",
+                "REPORT_SCHEMA_INVALID",
+                format!("Report definition JSON Schema is invalid: {}", err),
+                None,
+            )
+        })?;
+        let errors = validator
+            .iter_errors(definition)
+            .take(10)
+            .map(|err| {
+                let instance_path = err.instance_path.to_string();
+                let path = if instance_path.is_empty() {
+                    "$".to_string()
+                } else {
+                    format!("${instance_path}")
+                };
+                report_validation_issue(
+                    path,
+                    "REPORT_JSON_SCHEMA_VALIDATION_ERROR",
+                    err.to_string(),
+                    Some(
+                        "Fetch get_report_authoring_schema for examples or GET /api/runtime/reports/schema for the machine schema."
+                            .to_string(),
+                    ),
+                )
+            })
+            .collect::<Vec<_>>();
+        Ok(errors)
+    }
+
     pub fn new(
         pool: PgPool,
         manager: Arc<ObjectStoreManager>,
         connections: Arc<runtara_connections::ConnectionsFacade>,
     ) -> Self {
         Self {
-            repo: ReportRepository::new(pool),
+            repo: ReportRepository::new(pool.clone()),
+            workflow_repo: WorkflowRepository::new(pool),
             schema_service: SchemaService::new(manager.clone(), connections.clone()),
             instance_service: InstanceService::new(manager, connections.clone()),
             connections,
@@ -240,13 +345,6 @@ impl ReportService {
         let block_id = block.id.clone();
 
         report.definition.blocks.insert(insert_index, block.clone());
-        if request.insert_markdown_placeholder {
-            insert_markdown_placeholder(
-                &mut report.definition.markdown,
-                &block_id,
-                Some(&position),
-            );
-        }
 
         let report = self.save_report_definition(tenant_id, report).await?;
         Ok(ReportBlockMutationResponse {
@@ -337,14 +435,6 @@ impl ReportService {
         let new_index = resolve_position_index(&report.definition.blocks, &request.position)?;
         report.definition.blocks.insert(new_index, block.clone());
 
-        if request.move_markdown_placeholder {
-            move_markdown_placeholder(
-                &mut report.definition.markdown,
-                block_id,
-                Some(&request.position),
-            );
-        }
-
         let report = self.save_report_definition(tenant_id, report).await?;
         Ok(ReportBlockMutationResponse {
             success: true,
@@ -359,15 +449,11 @@ impl ReportService {
         tenant_id: &str,
         id_or_slug: &str,
         block_id: &str,
-        request: RemoveReportBlockRequest,
+        _request: RemoveReportBlockRequest,
     ) -> Result<ReportBlockMutationResponse, ReportServiceError> {
         let mut report = self.get_report(tenant_id, id_or_slug).await?;
         let index = find_block_index(&report.definition.blocks, block_id)?;
         report.definition.blocks.remove(index);
-
-        if request.remove_markdown_placeholder {
-            remove_markdown_placeholder(&mut report.definition.markdown, block_id);
-        }
 
         let report = self.save_report_definition(tenant_id, report).await?;
         Ok(ReportBlockMutationResponse {
@@ -389,22 +475,9 @@ impl ReportService {
                 errors: vec![],
                 warnings: vec![],
             },
-            Err(ReportServiceError::Validation(message)) => ValidateReportResponse {
-                valid: false,
-                errors: vec![ReportValidationIssue {
-                    path: "$".to_string(),
-                    code: "VALIDATION_ERROR".to_string(),
-                    message,
-                }],
-                warnings: vec![],
-            },
             Err(error) => ValidateReportResponse {
                 valid: false,
-                errors: vec![ReportValidationIssue {
-                    path: "$".to_string(),
-                    code: "VALIDATION_ERROR".to_string(),
-                    message: error.to_string(),
-                }],
+                errors: vec![report_validation_issue_from_error(error)],
                 warnings: vec![],
             },
         }
@@ -1045,12 +1118,6 @@ impl ReportService {
         tenant_id: &str,
         definition: &ReportDefinition,
     ) -> Result<(), ReportServiceError> {
-        if definition.markdown.len() > 250_000 {
-            return Err(ReportServiceError::Validation(
-                "Report markdown is too large".to_string(),
-            ));
-        }
-
         let mut filter_ids = HashSet::new();
         for filter in &definition.filters {
             if filter.id.trim().is_empty() {
@@ -1064,10 +1131,11 @@ impl ReportService {
                     filter.id
                 )));
             }
-            self.validate_filter_options(tenant_id, filter).await?;
         }
         let report_condition_filter_defs = report_filter_definitions_by_id(&definition.filters);
         for filter in &definition.filters {
+            self.validate_filter_options(tenant_id, filter, &filter_ids)
+                .await?;
             validate_filter_option_condition_filter_refs(filter, &report_condition_filter_defs)?;
         }
 
@@ -1123,6 +1191,12 @@ impl ReportService {
                 &filter_ids,
             )?;
             block_types.insert(block.id.clone(), block.block_type);
+            let block_condition_filter_defs = block_condition_filter_definitions(definition, block);
+            let markdown_placeholders = if block.block_type == ReportBlockType::Markdown {
+                validate_report_markdown_block_shape(block)?
+            } else {
+                Vec::new()
+            };
             if block.block_type == ReportBlockType::Actions
                 && block.source.kind != ReportSourceKind::WorkflowRuntime
             {
@@ -1130,6 +1204,17 @@ impl ReportService {
                     "Block '{}' actions block requires a workflow_runtime source",
                     block.id
                 )));
+            }
+            if block.block_type == ReportBlockType::Markdown
+                && block.dataset.is_none()
+                && block.source.is_empty()
+            {
+                validate_report_markdown_placeholders_have_no_source(
+                    block,
+                    &markdown_placeholders,
+                )?;
+                validate_block_interactions(block, &filter_ids, &view_ids)?;
+                continue;
             }
             if let Some(dataset_query) = &block.dataset {
                 if !block.source.is_empty() {
@@ -1164,15 +1249,37 @@ impl ReportService {
                     None,
                 )?;
                 validate_dataset_block_output(block, &compiled.source)?;
+                validate_report_markdown_placeholders(block, &markdown_placeholders, &|field| {
+                    dataset_output_field_known(&compiled.source, field)
+                })?;
                 validate_block_interactions(block, &filter_ids, &view_ids)?;
                 continue;
             }
             if block.source.kind == ReportSourceKind::WorkflowRuntime {
-                validate_workflow_runtime_block(block, &filter_ids, &view_ids)?;
+                validate_workflow_runtime_block(
+                    block,
+                    &filter_ids,
+                    &view_ids,
+                    &block_condition_filter_defs,
+                )?;
+                let fields = workflow_runtime_fields(workflow_runtime_entity(block)?);
+                validate_report_markdown_placeholders(block, &markdown_placeholders, &|field| {
+                    markdown_output_field_known(field, &|candidate| {
+                        workflow_runtime_row_field_known(&fields, candidate)
+                    })
+                })?;
                 continue;
             }
             if block.source.kind == ReportSourceKind::System {
-                validate_system_block(block, &filter_ids, &view_ids)?;
+                validate_system_block(block, &filter_ids, &view_ids, &block_condition_filter_defs)?;
+                let fields = system_fields(system_entity(block)?);
+                let aggregate_output_fields = aggregate_output_fields(block);
+                validate_report_markdown_placeholders(block, &markdown_placeholders, &|field| {
+                    markdown_output_field_known(field, &|candidate| match block.source.mode {
+                        ReportSourceMode::Filter => system_row_field_known(&fields, candidate),
+                        ReportSourceMode::Aggregate => aggregate_output_fields.contains(candidate),
+                    })
+                })?;
                 continue;
             }
             if block.source.schema.trim().is_empty() {
@@ -1247,7 +1354,18 @@ impl ReportService {
                     ReportSourceMode::Aggregate => aggregate_output_fields.contains(field),
                 }
             };
-            let block_condition_filter_defs = block_condition_filter_definitions(definition, block);
+            validate_report_aggregate_specs(
+                &format!("block '{}'", block.id),
+                &block.source.aggregates,
+            )?;
+            if block.source.mode == ReportSourceMode::Aggregate
+                && block.source.aggregates.is_empty()
+            {
+                return Err(ReportServiceError::Validation(format!(
+                    "Block '{}' aggregate source must define at least one aggregate",
+                    block.id
+                )));
+            }
 
             if let Some(table) = &block.table {
                 for column in &table.columns {
@@ -1446,6 +1564,24 @@ impl ReportService {
                 &block_condition_filter_defs,
                 &format!("block '{}'", block.id),
             )?;
+            validate_report_condition_field_refs(
+                block.source.condition.as_ref(),
+                &is_known_field,
+                &format!("block '{}'", block.id),
+            )?;
+            validate_report_source_filter_mappings(
+                &block.source.filter_mappings,
+                &filter_ids,
+                &is_known_field,
+                "source.filterMappings",
+                &format!("block '{}'", block.id),
+            )?;
+            validate_report_markdown_placeholders(block, &markdown_placeholders, &|field| {
+                markdown_output_field_known(field, &|candidate| match block.source.mode {
+                    ReportSourceMode::Filter => is_known_field(candidate),
+                    ReportSourceMode::Aggregate => aggregate_output_fields.contains(candidate),
+                })
+            })?;
             self.validate_report_condition_subqueries(
                 tenant_id,
                 block.source.condition.as_ref(),
@@ -1477,8 +1613,14 @@ impl ReportService {
 
         let mut layout_node_ids = HashSet::new();
         for (index, node) in definition.layout.iter().enumerate() {
+            let node_value = serde_json::to_value(node).map_err(|err| {
+                ReportServiceError::Validation(format!(
+                    "Could not serialize layout node {} for validation: {}",
+                    index, err
+                ))
+            })?;
             validate_layout_node(
-                node,
+                &node_value,
                 &format!("$.layout[{index}]"),
                 &block_ids,
                 &block_types,
@@ -1515,8 +1657,14 @@ impl ReportService {
 
             let mut view_layout_node_ids = HashSet::new();
             for (node_index, node) in view.layout.iter().enumerate() {
+                let node_value = serde_json::to_value(node).map_err(|err| {
+                    ReportServiceError::Validation(format!(
+                        "Could not serialize report view '{}' layout node {} for validation: {}",
+                        view.id, node_index, err
+                    ))
+                })?;
                 validate_layout_node(
-                    node,
+                    &node_value,
                     &format!("$.views[{view_index}].layout[{node_index}]"),
                     &block_ids,
                     &block_types,
@@ -1526,16 +1674,125 @@ impl ReportService {
             }
         }
 
-        let placeholder_ids = extract_markdown_block_placeholders(&definition.markdown);
-        for placeholder in placeholder_ids {
-            if !block_ids.contains(&placeholder) {
-                return Err(ReportServiceError::Validation(format!(
-                    "Markdown references unknown report block '{}'",
-                    placeholder
-                )));
+        self.validate_workflow_references(tenant_id, definition)
+            .await?;
+
+        Ok(())
+    }
+
+    async fn validate_workflow_references(
+        &self,
+        tenant_id: &str,
+        definition: &ReportDefinition,
+    ) -> Result<(), ReportServiceError> {
+        for block in &definition.blocks {
+            if block.source.kind == ReportSourceKind::WorkflowRuntime {
+                let workflow_id = workflow_runtime_workflow_id(block)?;
+                self.validate_workflow_exists(
+                    tenant_id,
+                    workflow_id,
+                    &format!("block '{}' workflow_runtime source", block.id),
+                )
+                .await?;
+            }
+
+            if let Some(table) = &block.table {
+                for column in &table.columns {
+                    if let Some(action) = &column.workflow_action {
+                        self.validate_workflow_action_reference(
+                            tenant_id,
+                            action,
+                            &format!("block '{}' table column '{}'", block.id, column.field),
+                        )
+                        .await?;
+                    }
+                }
+                for action in &table.actions {
+                    self.validate_workflow_action_reference(
+                        tenant_id,
+                        &action.workflow_action,
+                        &format!("block '{}' table action '{}'", block.id, action.id),
+                    )
+                    .await?;
+                }
+            }
+
+            if let Some(card) = &block.card {
+                let mut actions = Vec::new();
+                collect_card_workflow_actions(
+                    card,
+                    &format!("block '{}' card", block.id),
+                    &mut actions,
+                );
+                for (action, context) in actions {
+                    self.validate_workflow_action_reference(tenant_id, action, &context)
+                        .await?;
+                }
             }
         }
 
+        Ok(())
+    }
+
+    async fn validate_workflow_exists(
+        &self,
+        tenant_id: &str,
+        workflow_id: &str,
+        context: &str,
+    ) -> Result<(), ReportServiceError> {
+        let exists = self
+            .workflow_repo
+            .exists(tenant_id, workflow_id)
+            .await
+            .map_err(map_sqlx_error)?;
+        if !exists {
+            return Err(report_validation_error(
+                "$",
+                "UNKNOWN_WORKFLOW",
+                format!("{context} references unknown workflow '{}'", workflow_id),
+                Some(
+                    "Create the workflow first or update workflowId to an existing workflow."
+                        .to_string(),
+                ),
+            ));
+        }
+        Ok(())
+    }
+
+    async fn validate_workflow_action_reference(
+        &self,
+        tenant_id: &str,
+        action: &ReportWorkflowActionConfig,
+        context: &str,
+    ) -> Result<(), ReportServiceError> {
+        self.validate_workflow_exists(tenant_id, &action.workflow_id, context)
+            .await?;
+        if let Some(version) = action.version {
+            if version <= 0 {
+                return Err(report_validation_error(
+                    "$",
+                    "INVALID_WORKFLOW_VERSION",
+                    format!("{context} workflowAction.version must be greater than zero"),
+                    Some("Omit version to use the current/latest workflow version, or set a positive version.".to_string()),
+                ));
+            }
+            let exists = self
+                .workflow_repo
+                .version_exists(tenant_id, &action.workflow_id, version)
+                .await
+                .map_err(map_sqlx_error)?;
+            if !exists {
+                return Err(report_validation_error(
+                    "$",
+                    "UNKNOWN_WORKFLOW_VERSION",
+                    format!(
+                        "{context} references unknown workflow '{}' version {}",
+                        action.workflow_id, version
+                    ),
+                    Some("Use an existing workflow version or omit version.".to_string()),
+                ));
+            }
+        }
         Ok(())
     }
 
@@ -1635,6 +1892,15 @@ impl ReportService {
                     dataset.id, measure.id
                 )));
             }
+            validate_report_aggregate_spec_shape(
+                &format!("Dataset '{}' measure '{}'", dataset.id, measure.id),
+                measure.op,
+                measure.field.as_deref(),
+                measure.distinct,
+                &measure.order_by,
+                measure.expression.as_ref(),
+                measure.percentile,
+            )?;
             if let Some(field) = &measure.field
                 && !is_schema_field(&schema_fields, field)
             {
@@ -1645,6 +1911,10 @@ impl ReportService {
             }
             if measure.op != ReportAggregateFn::Count
                 && measure.op != ReportAggregateFn::Expr
+                && !matches!(
+                    measure.op,
+                    ReportAggregateFn::PercentileCont | ReportAggregateFn::PercentileDisc
+                )
                 && measure
                     .field
                     .as_ref()
@@ -1678,6 +1948,7 @@ impl ReportService {
         &self,
         tenant_id: &str,
         filter: &ReportFilterDefinition,
+        filter_ids: &HashSet<String>,
     ) -> Result<(), ReportServiceError> {
         let Some(options) = filter.options.as_ref().and_then(Value::as_object) else {
             return Ok(());
@@ -1735,6 +2006,11 @@ impl ReportService {
                         filter.id, err
                     ))
                 })?;
+            validate_report_condition_field_refs(
+                Some(&condition),
+                &|field| is_schema_field(&schema_fields, field),
+                &format!("filter '{}'", filter.id),
+            )?;
             self.validate_report_condition_subqueries(
                 tenant_id,
                 Some(&condition),
@@ -1742,6 +2018,22 @@ impl ReportService {
                 &format!("filter '{}'", filter.id),
             )
             .await?;
+        }
+        if let Some(mappings) = options.get("filterMappings") {
+            let mappings = serde_json::from_value::<Vec<ReportFilterTarget>>(mappings.clone())
+                .map_err(|err| {
+                    ReportServiceError::Validation(format!(
+                        "Filter '{}' options.filterMappings is invalid: {}",
+                        filter.id, err
+                    ))
+                })?;
+            validate_report_source_filter_mappings(
+                &mappings,
+                filter_ids,
+                &|field| is_schema_field(&schema_fields, field),
+                "options.filterMappings",
+                &format!("filter '{}'", filter.id),
+            )?;
         }
 
         Ok(())
@@ -1826,6 +2118,11 @@ impl ReportService {
         validate_report_condition_filter_refs(
             lookup.condition.as_ref(),
             filter_defs,
+            &format!("{} lookup", context),
+        )?;
+        validate_report_condition_field_refs(
+            lookup.condition.as_ref(),
+            &|field| is_schema_field(&schema_fields, field),
             &format!("{} lookup", context),
         )?;
         self.validate_report_condition_subqueries(
@@ -1934,6 +2231,11 @@ impl ReportService {
                     }
 
                     if let Some(child) = subquery.get("condition").and_then(condition_from_value) {
+                        validate_report_condition_field_refs(
+                            Some(&child),
+                            &|field| is_schema_field(&schema_fields, field),
+                            &format!("{} condition subquery '{}'", context, schema_name),
+                        )?;
                         stack.push((child, true));
                     }
                     continue;
@@ -1995,6 +2297,21 @@ impl ReportService {
             |field: &str| -> bool { is_schema_field(&nested_schema_fields, field) };
         let nested_output_fields =
             aggregate_source_output_fields(&source.group_by, &source.aggregates);
+        validate_report_aggregate_specs(
+            &format!("block '{}' chart table column '{}'", block.id, column.field),
+            &source.aggregates,
+        )?;
+        if source.aggregates.is_empty() {
+            return Err(ReportServiceError::Validation(format!(
+                "Block '{}' chart table column '{}' aggregate source must define at least one aggregate",
+                block.id, column.field
+            )));
+        }
+        validate_report_condition_field_refs(
+            source.condition.as_ref(),
+            &is_nested_field,
+            &format!("block '{}' chart table column '{}'", block.id, column.field),
+        )?;
 
         for join in &source.join {
             let parent_field_ok = match block.source.mode {
@@ -2135,6 +2452,11 @@ impl ReportService {
                 block.id, column.field, select, source.schema
             )));
         }
+        validate_report_condition_field_refs(
+            source.condition.as_ref(),
+            &|field| is_schema_field(&nested_schema_fields, field),
+            &format!("block '{}' value table column '{}'", block.id, column.field),
+        )?;
 
         let join = &source.join[0];
         let parent_field_ok = match block.source.mode {
@@ -2228,7 +2550,16 @@ impl ReportService {
                 )
                 .await?
             }
-            ReportBlockType::Markdown => json!({}),
+            ReportBlockType::Markdown => {
+                self.render_markdown_block(
+                    tenant_id,
+                    definition,
+                    block,
+                    resolved_filters,
+                    block_request,
+                )
+                .await?
+            }
             ReportBlockType::Card => {
                 self.render_card_block(tenant_id, definition, block, resolved_filters)
                     .await?
@@ -3009,6 +3340,41 @@ impl ReportService {
         }))
     }
 
+    async fn render_markdown_block(
+        &self,
+        tenant_id: &str,
+        definition: &ReportDefinition,
+        block: &ReportBlockDefinition,
+        resolved_filters: &HashMap<String, Value>,
+        block_request: Option<&ReportBlockDataRequest>,
+    ) -> Result<Value, ReportServiceError> {
+        let markdown = block.markdown.as_ref().ok_or_else(|| {
+            ReportServiceError::Validation(format!(
+                "Block '{}' markdown block must define markdown.content",
+                block.id
+            ))
+        })?;
+        let mut data = serde_json::Map::new();
+        data.insert(
+            "content".to_string(),
+            Value::String(markdown.content.clone()),
+        );
+        if block.dataset.is_some() || !block.source.is_empty() {
+            data.insert(
+                "source".to_string(),
+                self.render_table_block(
+                    tenant_id,
+                    definition,
+                    block,
+                    resolved_filters,
+                    block_request,
+                )
+                .await?,
+            );
+        }
+        Ok(Value::Object(data))
+    }
+
     async fn workflow_runtime_actions_for_block_context(
         &self,
         tenant_id: &str,
@@ -3559,38 +3925,50 @@ impl ReportService {
                 ]),
             });
 
-            let query = ObjectModelOptionQuery {
-                context: format!(
-                    "block '{}' table column '{}' lookup",
-                    condition_context.block.id, column.field
-                ),
-                schema: lookup.schema.clone(),
-                connection_id: lookup.connection_id.as_deref(),
-                value_field: lookup.value_field.clone(),
-                label_field: lookup.label_field.clone(),
-                conditions,
-                search_fields: vec![],
-                search_query: String::new(),
-            };
-            let (options, page) = self
-                .query_object_model_options(tenant_id, query, 0, MAX_BROADCAST_JOIN_DIM_ROWS)
-                .await?;
-            if page.total_count > MAX_BROADCAST_JOIN_DIM_ROWS {
-                return Err(ReportServiceError::Validation(format!(
-                    "Lookup display for table column '{}' on '{}' would broadcast {} rows; cap is {}. Add a more selective lookup.condition.",
-                    column.field, lookup.schema, page.total_count, MAX_BROADCAST_JOIN_DIM_ROWS
-                )));
-            }
+            let labels_by_key = if lookup.value_field == "id" {
+                self.lookup_display_labels_by_filter(
+                    tenant_id,
+                    &lookup.schema,
+                    lookup.connection_id.as_deref(),
+                    &lookup.value_field,
+                    &lookup.label_field,
+                    conditions,
+                )
+                .await?
+            } else {
+                let query = ObjectModelOptionQuery {
+                    context: format!(
+                        "block '{}' table column '{}' lookup",
+                        condition_context.block.id, column.field
+                    ),
+                    schema: lookup.schema.clone(),
+                    connection_id: lookup.connection_id.as_deref(),
+                    value_field: lookup.value_field.clone(),
+                    label_field: lookup.label_field.clone(),
+                    conditions,
+                    search_fields: vec![],
+                    search_query: String::new(),
+                };
+                let (options, page) = self
+                    .query_object_model_options(tenant_id, query, 0, MAX_BROADCAST_JOIN_DIM_ROWS)
+                    .await?;
+                if page.total_count > MAX_BROADCAST_JOIN_DIM_ROWS {
+                    return Err(ReportServiceError::Validation(format!(
+                        "Lookup display for table column '{}' on '{}' would broadcast {} rows; cap is {}. Add a more selective lookup.condition.",
+                        column.field, lookup.schema, page.total_count, MAX_BROADCAST_JOIN_DIM_ROWS
+                    )));
+                }
 
-            let labels_by_key = options
-                .into_iter()
-                .map(|option| {
-                    (
-                        value_to_lookup_key(&option.value),
-                        Value::String(option.label),
-                    )
-                })
-                .collect::<HashMap<_, _>>();
+                options
+                    .into_iter()
+                    .map(|option| {
+                        (
+                            value_to_lookup_key(&option.value),
+                            Value::String(option.label),
+                        )
+                    })
+                    .collect::<HashMap<_, _>>()
+            };
 
             for row in rows.iter_mut() {
                 let Some(value) = row.get(&column.field) else {
@@ -3603,6 +3981,44 @@ impl ReportService {
         }
 
         Ok(())
+    }
+
+    async fn lookup_display_labels_by_filter(
+        &self,
+        tenant_id: &str,
+        schema: &str,
+        connection_id: Option<&str>,
+        value_field: &str,
+        label_field: &str,
+        conditions: Vec<Condition>,
+    ) -> Result<HashMap<String, Value>, ReportServiceError> {
+        let request = FilterRequest {
+            offset: 0,
+            limit: MAX_BROADCAST_JOIN_DIM_ROWS,
+            condition: combine_conditions(conditions),
+            sort_by: Some(vec![label_field.to_string(), "id".to_string()]),
+            sort_order: Some(vec!["asc".to_string(), "asc".to_string()]),
+            score_expression: None,
+            order_by: None,
+        };
+        let (instances, total) = self
+            .instance_service
+            .filter_instances_by_schema(tenant_id, schema, request, connection_id)
+            .await
+            .map_err(map_object_model_error)?;
+
+        if total > MAX_BROADCAST_JOIN_DIM_ROWS {
+            return Err(ReportServiceError::Validation(format!(
+                "Lookup display on '{}' would broadcast {} rows; cap is {}. Add a more selective lookup.condition.",
+                schema, total, MAX_BROADCAST_JOIN_DIM_ROWS
+            )));
+        }
+
+        Ok(lookup_display_labels_from_instances(
+            instances,
+            value_field,
+            label_field,
+        ))
     }
 
     async fn lookup_table_value_column(
@@ -4192,14 +4608,6 @@ fn validate_layout_node(
     validate_layout_visibility(object, path, filter_ids)?;
 
     match node_type {
-        "markdown" => {
-            if object.get("content").and_then(Value::as_str).is_none() {
-                return Err(ReportServiceError::Validation(format!(
-                    "Markdown layout node '{}' must include content",
-                    node_id
-                )));
-            }
-        }
         "block" => {
             let block_id = object
                 .get("blockId")
@@ -4510,10 +4918,155 @@ fn validate_block_interactions(
     Ok(())
 }
 
+fn validate_report_markdown_block_shape(
+    block: &ReportBlockDefinition,
+) -> Result<Vec<ReportMarkdownSourcePlaceholder>, ReportServiceError> {
+    if block.table.is_some()
+        || block.chart.is_some()
+        || block.metric.is_some()
+        || block.actions.is_some()
+        || block.card.is_some()
+    {
+        return Err(report_validation_error(
+            "$",
+            "INVALID_MARKDOWN_BLOCK_CONFIG",
+            format!(
+                "Block '{}' markdown blocks must not define table, chart, metric, actions, or card config",
+                block.id
+            ),
+            Some("Put narrative content in block.markdown.content and arrange it with layout block nodes.".to_string()),
+        ));
+    }
+    let markdown = block.markdown.as_ref().ok_or_else(|| {
+        report_validation_error(
+            "$",
+            "MISSING_MARKDOWN_CONFIG",
+            format!(
+                "Block '{}' markdown block must define markdown.content",
+                block.id
+            ),
+            Some("Use {\"type\":\"markdown\",\"markdown\":{\"content\":\"...\"}}.".to_string()),
+        )
+    })?;
+    if markdown.content.len() > 250_000 {
+        return Err(report_validation_error(
+            "$",
+            "MARKDOWN_CONTENT_TOO_LARGE",
+            format!("Block '{}' markdown.content is too large", block.id),
+            Some("Keep markdown.content under 250000 bytes.".to_string()),
+        ));
+    }
+    report_markdown_source_placeholders(&markdown.content, &format!("block '{}'", block.id))
+}
+
+fn report_markdown_source_placeholders(
+    content: &str,
+    context: &str,
+) -> Result<Vec<ReportMarkdownSourcePlaceholder>, ReportServiceError> {
+    let token_re =
+        Regex::new(r"\{\{\s*([^{}]+?)\s*\}\}").expect("report markdown token regex must compile");
+    let source_re = Regex::new(r"^source(?:\[[0-9]+\])?\.([A-Za-z0-9_.-]+)$")
+        .expect("report markdown source placeholder regex must compile");
+    let mut placeholders = Vec::new();
+    for capture in token_re.captures_iter(content) {
+        let expression = capture
+            .get(1)
+            .map(|value| value.as_str().trim())
+            .unwrap_or_default();
+        if let Some(source_capture) = source_re.captures(expression) {
+            let field_path = source_capture
+                .get(1)
+                .map(|value| value.as_str().trim().to_string())
+                .unwrap_or_default();
+            if field_path.is_empty() {
+                return Err(report_validation_error(
+                    "$",
+                    "INVALID_MARKDOWN_SOURCE_PLACEHOLDER",
+                    format!("{context} has an empty markdown source placeholder"),
+                    Some(
+                        "Use {{source.field}} or {{source[0].field}} with a non-empty field path."
+                            .to_string(),
+                    ),
+                ));
+            }
+            placeholders.push(ReportMarkdownSourcePlaceholder { field_path });
+            continue;
+        }
+        return Err(report_validation_error(
+            "$",
+            "UNSUPPORTED_MARKDOWN_PLACEHOLDER",
+            format!(
+                "{context} uses unsupported markdown placeholder '{{{{{expression}}}}}'"
+            ),
+            Some(
+                "Markdown blocks support only {{source.field}} and {{source[0].field}} interpolation."
+                    .to_string(),
+            ),
+        ));
+    }
+    Ok(placeholders)
+}
+
+fn validate_report_markdown_placeholders_have_no_source(
+    block: &ReportBlockDefinition,
+    placeholders: &[ReportMarkdownSourcePlaceholder],
+) -> Result<(), ReportServiceError> {
+    if !placeholders.is_empty() {
+        return Err(report_validation_error(
+            "$",
+            "MISSING_MARKDOWN_SOURCE",
+            format!(
+                "Block '{}' markdown placeholders reference source data but the block has no source or dataset",
+                block.id
+            ),
+            Some(
+                "Add block.source or block.dataset, or remove {{source...}} placeholders."
+                    .to_string(),
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_report_markdown_placeholders(
+    block: &ReportBlockDefinition,
+    placeholders: &[ReportMarkdownSourcePlaceholder],
+    is_known_field: &dyn Fn(&str) -> bool,
+) -> Result<(), ReportServiceError> {
+    for placeholder in placeholders {
+        if !is_known_field(&placeholder.field_path) {
+            return Err(report_validation_error(
+                "$",
+                "UNKNOWN_MARKDOWN_SOURCE_FIELD",
+                format!(
+                    "Block '{}' markdown references unknown source field '{}'",
+                    block.id, placeholder.field_path
+                ),
+                Some("Use a field produced by the markdown block source or dataset.".to_string()),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn markdown_output_field_known(field_path: &str, is_known_field: &dyn Fn(&str) -> bool) -> bool {
+    is_known_field(field_path)
+        || field_path
+            .split_once('.')
+            .map(|(first, _)| is_known_field(first))
+            .unwrap_or(false)
+}
+
+fn dataset_output_field_known(source: &ReportSource, field_path: &str) -> bool {
+    let output_fields = aggregate_source_output_fields(&source.group_by, &source.aggregates);
+    markdown_output_field_known(field_path, &|candidate| output_fields.contains(candidate))
+}
+
 fn validate_workflow_runtime_block(
     block: &ReportBlockDefinition,
     filter_ids: &HashSet<String>,
     view_ids: &HashSet<String>,
+    filter_defs: &HashMap<String, &ReportFilterDefinition>,
 ) -> Result<(), ReportServiceError> {
     let entity = workflow_runtime_entity(block)?;
     workflow_runtime_workflow_id(block)?;
@@ -4548,6 +5101,7 @@ fn validate_workflow_runtime_block(
 
     match block.block_type {
         ReportBlockType::Table => {}
+        ReportBlockType::Markdown => {}
         ReportBlockType::Actions if entity == ReportWorkflowRuntimeEntity::Actions => {}
         ReportBlockType::Actions => {
             return Err(ReportServiceError::Validation(format!(
@@ -4557,13 +5111,30 @@ fn validate_workflow_runtime_block(
         }
         _ => {
             return Err(ReportServiceError::Validation(format!(
-                "Block '{}' workflow_runtime source only supports table and actions blocks",
+                "Block '{}' workflow_runtime source only supports table, markdown, and actions blocks",
                 block.id
             )));
         }
     }
 
     let fields = workflow_runtime_fields(entity);
+    validate_report_condition_filter_refs(
+        block.source.condition.as_ref(),
+        filter_defs,
+        &format!("block '{}'", block.id),
+    )?;
+    validate_report_condition_field_refs(
+        block.source.condition.as_ref(),
+        &|field| workflow_runtime_row_field_known(&fields, field),
+        &format!("block '{}'", block.id),
+    )?;
+    validate_report_source_filter_mappings(
+        &block.source.filter_mappings,
+        filter_ids,
+        &|field| workflow_runtime_row_field_known(&fields, field),
+        "source.filterMappings",
+        &format!("block '{}'", block.id),
+    )?;
     if let Some(table) = &block.table {
         for column in &table.columns {
             if column.is_workflow_button() {
@@ -4639,6 +5210,7 @@ fn validate_system_block(
     block: &ReportBlockDefinition,
     filter_ids: &HashSet<String>,
     view_ids: &HashSet<String>,
+    filter_defs: &HashMap<String, &ReportFilterDefinition>,
 ) -> Result<(), ReportServiceError> {
     let entity = system_entity(block)?;
     if !block.source.schema.trim().is_empty() {
@@ -4664,13 +5236,37 @@ fn validate_system_block(
         ReportBlockType::Actions | ReportBlockType::Card
     ) {
         return Err(ReportServiceError::Validation(format!(
-            "Block '{}' system source only supports table, chart, and metric blocks",
+            "Block '{}' system source only supports table, chart, metric, and markdown blocks",
             block.id
         )));
     }
 
     let fields = system_fields(entity);
     let aggregate_output_fields = aggregate_output_fields(block);
+    validate_report_aggregate_specs(&format!("block '{}'", block.id), &block.source.aggregates)?;
+    if block.source.mode == ReportSourceMode::Aggregate && block.source.aggregates.is_empty() {
+        return Err(ReportServiceError::Validation(format!(
+            "Block '{}' aggregate source must define at least one aggregate",
+            block.id
+        )));
+    }
+    validate_report_condition_filter_refs(
+        block.source.condition.as_ref(),
+        filter_defs,
+        &format!("block '{}'", block.id),
+    )?;
+    validate_report_condition_field_refs(
+        block.source.condition.as_ref(),
+        &|field| system_row_field_known(&fields, field),
+        &format!("block '{}'", block.id),
+    )?;
+    validate_report_source_filter_mappings(
+        &block.source.filter_mappings,
+        filter_ids,
+        &|field| system_row_field_known(&fields, field),
+        "source.filterMappings",
+        &format!("block '{}'", block.id),
+    )?;
     let is_table_value_field = |field: &str| -> bool {
         match block.source.mode {
             ReportSourceMode::Filter => system_row_field_known(&fields, field),
@@ -4792,6 +5388,11 @@ fn validate_report_workflow_action_config(
             "{context} workflowAction.workflowId must not be empty"
         )));
     }
+    if action.version.is_some_and(|version| version <= 0) {
+        return Err(ReportServiceError::Validation(format!(
+            "{context} workflowAction.version must be greater than zero"
+        )));
+    }
     if let Some(input_key) = &action.context.input_key
         && input_key.trim().is_empty()
     {
@@ -4800,6 +5401,28 @@ fn validate_report_workflow_action_config(
         )));
     }
     Ok(())
+}
+
+fn collect_card_workflow_actions<'a>(
+    card: &'a ReportCardConfig,
+    context: &str,
+    actions: &mut Vec<(&'a ReportWorkflowActionConfig, String)>,
+) {
+    for group in &card.groups {
+        let group_context = match group.title.as_deref() {
+            Some(title) if !title.trim().is_empty() => format!("{context} group '{}'", title),
+            _ => context.to_string(),
+        };
+        for field in &group.fields {
+            let field_context = format!("{group_context} field '{}'", field.field);
+            if let Some(action) = &field.workflow_action {
+                actions.push((action, field_context.clone()));
+            }
+            if let Some(subcard) = &field.subcard {
+                collect_card_workflow_actions(subcard, &field_context, actions);
+            }
+        }
+    }
 }
 
 fn validate_report_table_action_config(
@@ -5385,6 +6008,286 @@ fn validate_report_condition_filter_refs(
         }
     }
     Ok(())
+}
+
+fn validate_report_condition_field_refs(
+    condition: Option<&Condition>,
+    is_known_field: &dyn Fn(&str) -> bool,
+    context: &str,
+) -> Result<(), ReportServiceError> {
+    if let Some(condition) = condition {
+        validate_report_condition_field_refs_at(condition, is_known_field, context, "condition")?;
+    }
+    Ok(())
+}
+
+fn validate_report_condition_field_refs_at(
+    condition: &Condition,
+    is_known_field: &dyn Fn(&str) -> bool,
+    context: &str,
+    path: &str,
+) -> Result<(), ReportServiceError> {
+    let op = condition.op.to_ascii_uppercase();
+    let args = condition.arguments.as_deref().ok_or_else(|| {
+        report_validation_error(
+            "$",
+            "INVALID_CONDITION_ARGUMENTS",
+            format!(
+            "{} {} operator '{}' requires arguments",
+            context, path, condition.op
+            ),
+            Some("Conditions must use { op, arguments } with the field name as the first operand for comparison operators.".to_string()),
+        )
+    })?;
+
+    match op.as_str() {
+        "AND" | "OR" => {
+            if args.is_empty() {
+                return Err(report_validation_error(
+                    "$",
+                    "INVALID_CONDITION_ARGUMENTS",
+                    format!(
+                        "{} {} operator '{}' requires at least one condition argument",
+                        context, path, condition.op
+                    ),
+                    Some("AND/OR arguments must be condition objects.".to_string()),
+                ));
+            }
+            for (index, argument) in args.iter().enumerate() {
+                let child = condition_from_value(argument).ok_or_else(|| {
+                    report_validation_error(
+                        "$",
+                        "INVALID_CONDITION_ARGUMENTS",
+                        format!(
+                            "{} {} operator '{}' argument {} must be a condition object",
+                            context, path, condition.op, index
+                        ),
+                        Some("Use nested condition objects inside logical operators.".to_string()),
+                    )
+                })?;
+                validate_report_condition_field_refs_at(
+                    &child,
+                    is_known_field,
+                    context,
+                    &format!("{path}.arguments[{index}]"),
+                )?;
+            }
+        }
+        "NOT" => {
+            if args.len() != 1 {
+                return Err(report_validation_error(
+                    "$",
+                    "INVALID_CONDITION_ARGUMENTS",
+                    format!(
+                        "{} {} operator '{}' requires exactly one condition argument",
+                        context, path, condition.op
+                    ),
+                    Some("NOT must wrap exactly one condition object.".to_string()),
+                ));
+            }
+            let child = condition_from_value(&args[0]).ok_or_else(|| {
+                report_validation_error(
+                    "$",
+                    "INVALID_CONDITION_ARGUMENTS",
+                    format!(
+                        "{} {} operator '{}' argument 0 must be a condition object",
+                        context, path, condition.op
+                    ),
+                    Some("NOT must wrap exactly one condition object.".to_string()),
+                )
+            })?;
+            validate_report_condition_field_refs_at(
+                &child,
+                is_known_field,
+                context,
+                &format!("{path}.arguments[0]"),
+            )?;
+        }
+        "EQ" | "NE" | "GT" | "LT" | "GTE" | "LTE" | "CONTAINS" | "IN" | "NOT_IN" => {
+            validate_report_condition_arg_count(context, path, &condition.op, args, 2)?;
+            validate_report_condition_field_arg(
+                context,
+                path,
+                &condition.op,
+                args,
+                is_known_field,
+            )?;
+        }
+        "IS_EMPTY" | "IS_NOT_EMPTY" | "IS_DEFINED" => {
+            validate_report_condition_arg_count(context, path, &condition.op, args, 1)?;
+            validate_report_condition_field_arg(
+                context,
+                path,
+                &condition.op,
+                args,
+                is_known_field,
+            )?;
+        }
+        "SIMILARITY_GTE" | "COSINE_DISTANCE_LTE" | "L2_DISTANCE_LTE" => {
+            validate_report_condition_arg_count(context, path, &condition.op, args, 3)?;
+            validate_report_condition_field_arg(
+                context,
+                path,
+                &condition.op,
+                args,
+                is_known_field,
+            )?;
+        }
+        _ => {
+            return Err(report_validation_error(
+                "$",
+                "UNSUPPORTED_CONDITION_OPERATOR",
+                format!(
+                    "{} {} uses unsupported condition operator '{}'",
+                    context, path, condition.op
+                ),
+                Some("Use Object Model condition operators such as EQ, NE, GT, GTE, LT, LTE, IN, NOT_IN, CONTAINS, IS_DEFINED, IS_EMPTY, or IS_NOT_EMPTY.".to_string()),
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_report_condition_arg_count(
+    context: &str,
+    path: &str,
+    op: &str,
+    args: &[Value],
+    expected: usize,
+) -> Result<(), ReportServiceError> {
+    if args.len() != expected {
+        return Err(report_validation_error(
+            "$",
+            "INVALID_CONDITION_ARGUMENTS",
+            format!(
+                "{} {} operator '{}' requires exactly {} argument{}",
+                context,
+                path,
+                op,
+                expected,
+                if expected == 1 { "" } else { "s" }
+            ),
+            Some("Check the condition operator arity and operand order.".to_string()),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_report_condition_field_arg(
+    context: &str,
+    path: &str,
+    op: &str,
+    args: &[Value],
+    is_known_field: &dyn Fn(&str) -> bool,
+) -> Result<(), ReportServiceError> {
+    let field = args
+        .first()
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|field| !field.is_empty())
+        .ok_or_else(|| {
+            report_validation_error(
+                "$",
+                "INVALID_CONDITION_FIELD",
+                format!(
+                    "{} {} operator '{}' first argument must be a non-empty field name",
+                    context, path, op
+                ),
+                Some(
+                    "The first operand must be a field available from the report source."
+                        .to_string(),
+                ),
+            )
+        })?;
+    if !is_known_field(field) {
+        return Err(report_validation_error(
+            "$",
+            "UNKNOWN_CONDITION_FIELD",
+            format!("{} {} references unknown field '{}'", context, path, field),
+            Some("Use a field from the source schema, joined schema alias, dataset output, workflow runtime entity, or system entity for this condition.".to_string()),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_report_source_filter_mappings(
+    mappings: &[ReportFilterTarget],
+    filter_ids: &HashSet<String>,
+    is_known_field: &dyn Fn(&str) -> bool,
+    path: &str,
+    context: &str,
+) -> Result<(), ReportServiceError> {
+    for (index, mapping) in mappings.iter().enumerate() {
+        let mapping_context = format!("{context} {path}[{index}]");
+        let filter_id = mapping
+            .filter_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|filter_id| !filter_id.is_empty())
+            .ok_or_else(|| {
+                report_validation_error(
+                    "$",
+                    "MISSING_FILTER_MAPPING_FILTER",
+                    format!("{mapping_context} must include filterId"),
+                    Some(
+                        "Each filterMappings entry must name the report filter it reads from."
+                            .to_string(),
+                    ),
+                )
+            })?;
+        if !filter_ids.contains(filter_id) {
+            return Err(report_validation_error(
+                "$",
+                "UNKNOWN_FILTER",
+                format!(
+                    "{mapping_context} references unknown filter '{}'",
+                    filter_id
+                ),
+                Some("Declare the filter in definition.filters before referencing it.".to_string()),
+            ));
+        }
+        if mapping.field.trim().is_empty() {
+            return Err(report_validation_error(
+                "$",
+                "MISSING_FILTER_MAPPING_FIELD",
+                format!("{mapping_context} field must not be empty"),
+                Some(
+                    "Set field to a source field that should receive the filter value.".to_string(),
+                ),
+            ));
+        }
+        if !is_known_field(&mapping.field) {
+            return Err(report_validation_error(
+                "$",
+                "UNKNOWN_FILTER_MAPPING_FIELD",
+                format!(
+                    "{mapping_context} references unknown field '{}'",
+                    mapping.field
+                ),
+                Some(
+                    "Use a field available from the target source schema or virtual entity."
+                        .to_string(),
+                ),
+            ));
+        }
+        if !is_known_filter_mapping_op(&mapping.op) {
+            return Err(report_validation_error(
+                "$",
+                "UNSUPPORTED_FILTER_MAPPING_OPERATOR",
+                format!("{mapping_context} uses unsupported op '{}'", mapping.op),
+                Some("Supported filter mapping operators are eq, ne, gt, gte, lt, lte, in, between, contains, and search.".to_string()),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn is_known_filter_mapping_op(op: &str) -> bool {
+    matches!(
+        op.to_ascii_lowercase().as_str(),
+        "eq" | "ne" | "gt" | "gte" | "lt" | "lte" | "in" | "between" | "contains" | "search"
+    )
 }
 
 fn resolve_report_condition_values(
@@ -8573,6 +9476,201 @@ fn aggregate_output_fields(block: &ReportBlockDefinition) -> HashSet<String> {
     aggregate_source_output_fields(&block.source.group_by, &block.source.aggregates)
 }
 
+fn validate_report_aggregate_specs(
+    context: &str,
+    aggregates: &[ReportAggregateSpec],
+) -> Result<(), ReportServiceError> {
+    let mut aliases = HashSet::new();
+    for aggregate in aggregates {
+        if aggregate.alias.trim().is_empty() {
+            return Err(ReportServiceError::Validation(format!(
+                "{} aggregate aliases cannot be empty",
+                context
+            )));
+        }
+        if !aliases.insert(aggregate.alias.clone()) {
+            return Err(ReportServiceError::Validation(format!(
+                "{} has duplicate aggregate alias '{}'",
+                context, aggregate.alias
+            )));
+        }
+        validate_report_aggregate_spec_shape(
+            &format!("{} aggregate '{}'", context, aggregate.alias),
+            aggregate.op,
+            aggregate.field.as_deref(),
+            aggregate.distinct,
+            &aggregate.order_by,
+            aggregate.expression.as_ref(),
+            aggregate.percentile,
+        )?;
+    }
+    Ok(())
+}
+
+fn validate_report_aggregate_spec_shape(
+    context: &str,
+    op: ReportAggregateFn,
+    field: Option<&str>,
+    distinct: bool,
+    order_by: &[ReportOrderBy],
+    expression: Option<&Value>,
+    percentile: Option<f64>,
+) -> Result<(), ReportServiceError> {
+    let field_empty = field.is_none_or(|field| field.trim().is_empty());
+    match op {
+        ReportAggregateFn::Count => {
+            if distinct && field_empty {
+                return Err(ReportServiceError::Validation(format!(
+                    "{context} count with distinct=true requires field"
+                )));
+            }
+            if !order_by.is_empty() {
+                return Err(ReportServiceError::Validation(format!(
+                    "{context} orderBy is only valid for first_value, last_value, percentile_cont, and percentile_disc"
+                )));
+            }
+            if expression.is_some() {
+                return Err(ReportServiceError::Validation(format!(
+                    "{context} expression is only valid for op expr"
+                )));
+            }
+            if percentile.is_some() {
+                return Err(ReportServiceError::Validation(format!(
+                    "{context} percentile is only valid for percentile_cont and percentile_disc"
+                )));
+            }
+        }
+        ReportAggregateFn::Sum
+        | ReportAggregateFn::Avg
+        | ReportAggregateFn::Min
+        | ReportAggregateFn::Max
+        | ReportAggregateFn::StddevSamp
+        | ReportAggregateFn::VarSamp => {
+            if field_empty {
+                return Err(ReportServiceError::Validation(format!(
+                    "{context} requires field for op {:?}",
+                    op
+                )));
+            }
+            if distinct {
+                return Err(ReportServiceError::Validation(format!(
+                    "{context} distinct is only valid for count"
+                )));
+            }
+            if !order_by.is_empty() {
+                return Err(ReportServiceError::Validation(format!(
+                    "{context} orderBy is only valid for first_value, last_value, percentile_cont, and percentile_disc"
+                )));
+            }
+            if expression.is_some() {
+                return Err(ReportServiceError::Validation(format!(
+                    "{context} expression is only valid for op expr"
+                )));
+            }
+            if percentile.is_some() {
+                return Err(ReportServiceError::Validation(format!(
+                    "{context} percentile is only valid for percentile_cont and percentile_disc"
+                )));
+            }
+        }
+        ReportAggregateFn::FirstValue | ReportAggregateFn::LastValue => {
+            if field_empty {
+                return Err(ReportServiceError::Validation(format!(
+                    "{context} requires field for op {:?}",
+                    op
+                )));
+            }
+            if distinct {
+                return Err(ReportServiceError::Validation(format!(
+                    "{context} distinct is only valid for count"
+                )));
+            }
+            if order_by.is_empty() {
+                return Err(ReportServiceError::Validation(format!(
+                    "{context} requires non-empty orderBy"
+                )));
+            }
+            if expression.is_some() {
+                return Err(ReportServiceError::Validation(format!(
+                    "{context} expression is only valid for op expr"
+                )));
+            }
+            if percentile.is_some() {
+                return Err(ReportServiceError::Validation(format!(
+                    "{context} percentile is only valid for percentile_cont and percentile_disc"
+                )));
+            }
+        }
+        ReportAggregateFn::PercentileCont | ReportAggregateFn::PercentileDisc => {
+            if !field_empty {
+                return Err(ReportServiceError::Validation(format!(
+                    "{context} takes its value field from orderBy, not field"
+                )));
+            }
+            if distinct {
+                return Err(ReportServiceError::Validation(format!(
+                    "{context} distinct is only valid for count"
+                )));
+            }
+            let percentile = percentile.ok_or_else(|| {
+                ReportServiceError::Validation(format!(
+                    "{context} requires percentile in [0.0, 1.0]"
+                ))
+            })?;
+            if !percentile.is_finite() || !(0.0..=1.0).contains(&percentile) {
+                return Err(ReportServiceError::Validation(format!(
+                    "{context} percentile must be a finite number in [0.0, 1.0]"
+                )));
+            }
+            if order_by.len() != 1 {
+                return Err(ReportServiceError::Validation(format!(
+                    "{context} requires exactly one orderBy entry"
+                )));
+            }
+            if expression.is_some() {
+                return Err(ReportServiceError::Validation(format!(
+                    "{context} expression is only valid for op expr"
+                )));
+            }
+        }
+        ReportAggregateFn::Expr => {
+            if !field_empty {
+                return Err(ReportServiceError::Validation(format!(
+                    "{context} must not specify field for op expr"
+                )));
+            }
+            if distinct {
+                return Err(ReportServiceError::Validation(format!(
+                    "{context} must not specify distinct for op expr"
+                )));
+            }
+            if !order_by.is_empty() {
+                return Err(ReportServiceError::Validation(format!(
+                    "{context} must not specify orderBy for op expr"
+                )));
+            }
+            if percentile.is_some() {
+                return Err(ReportServiceError::Validation(format!(
+                    "{context} percentile is only valid for percentile_cont and percentile_disc"
+                )));
+            }
+            let expression = expression.ok_or_else(|| {
+                ReportServiceError::Validation(format!("{context} requires expression for op expr"))
+            })?;
+            let normalized = normalize_report_aggregate_expression(expression);
+            serde_json::from_value::<runtara_object_store::ExprNode>(normalized).map_err(
+                |err| {
+                    ReportServiceError::Validation(format!(
+                        "{context} expression is invalid: {}",
+                        err
+                    ))
+                },
+            )?;
+        }
+    }
+    Ok(())
+}
+
 fn aggregate_source_output_fields(
     group_by: &[String],
     aggregates: &[ReportAggregateSpec],
@@ -8779,6 +9877,33 @@ fn flatten_instance(instance: crate::api::dto::object_model::Instance) -> Value 
     Value::Object(row)
 }
 
+fn lookup_display_labels_from_instances(
+    instances: Vec<crate::api::dto::object_model::Instance>,
+    value_field: &str,
+    label_field: &str,
+) -> HashMap<String, Value> {
+    instances
+        .into_iter()
+        .filter_map(|instance| {
+            let Value::Object(row) = flatten_instance(instance) else {
+                return None;
+            };
+            let key = row.get(value_field)?;
+            if value_is_empty(key) {
+                return None;
+            }
+            let label = row.get(label_field).unwrap_or(key);
+            Some((
+                value_to_lookup_key(key),
+                Value::String(filter_option_label(label)),
+            ))
+        })
+        .fold(HashMap::new(), |mut labels_by_key, (key, label)| {
+            labels_by_key.entry(key).or_insert(label);
+            labels_by_key
+        })
+}
+
 fn is_empty_data(data: &Value) -> bool {
     data.get("rows")
         .and_then(Value::as_array)
@@ -8844,28 +9969,6 @@ fn humanize_label(value: &str) -> String {
         })
         .collect::<Vec<_>>()
         .join(" ")
-}
-
-fn extract_markdown_block_placeholders(markdown: &str) -> Vec<String> {
-    let mut placeholders = Vec::new();
-    let mut rest = markdown;
-
-    while let Some(start) = rest.find("{{") {
-        rest = &rest[start + 2..];
-        let Some(end) = rest.find("}}") else {
-            break;
-        };
-        let candidate = rest[..end].trim();
-        if let Some(block_id) = candidate.strip_prefix("block.") {
-            let block_id = block_id.trim();
-            if !block_id.is_empty() {
-                placeholders.push(block_id.to_string());
-            }
-        }
-        rest = &rest[end + 2..];
-    }
-
-    placeholders
 }
 
 fn find_block_index(
@@ -8952,138 +10055,6 @@ fn apply_json_merge_patch(target: &mut Value, patch: &Value) {
     }
 }
 
-fn placeholder_text(block_id: &str) -> String {
-    format!("{{{{ block.{} }}}}", block_id)
-}
-
-fn find_placeholder_range(markdown: &str, block_id: &str) -> Option<std::ops::Range<usize>> {
-    let pattern = format!(r"\{{\{{\s*block\.{}\s*\}}\}}", regex::escape(block_id));
-    Regex::new(&pattern).ok()?.find(markdown).map(|m| m.range())
-}
-
-fn all_placeholder_ranges(markdown: &str) -> Vec<(String, std::ops::Range<usize>)> {
-    let Ok(regex) = Regex::new(r"\{\{\s*block\.([^}]+?)\s*\}\}") else {
-        return Vec::new();
-    };
-
-    regex
-        .captures_iter(markdown)
-        .filter_map(|captures| {
-            let block_id = captures.get(1)?.as_str().trim().to_string();
-            let range = captures.get(0)?.range();
-            if block_id.is_empty() {
-                None
-            } else {
-                Some((block_id, range))
-            }
-        })
-        .collect()
-}
-
-fn insert_markdown_placeholder(
-    markdown: &mut String,
-    block_id: &str,
-    position: Option<&ReportBlockPosition>,
-) {
-    if find_placeholder_range(markdown, block_id).is_some() {
-        return;
-    }
-
-    let placeholder = placeholder_text(block_id);
-
-    if let Some(position) = position {
-        if let Some(before_block_id) = &position.before_block_id
-            && let Some(range) = find_placeholder_range(markdown, before_block_id)
-        {
-            insert_placeholder_at(markdown, range.start, &placeholder);
-            return;
-        }
-
-        if let Some(after_block_id) = &position.after_block_id
-            && let Some(range) = find_placeholder_range(markdown, after_block_id)
-        {
-            insert_placeholder_at(markdown, range.end, &placeholder);
-            return;
-        }
-
-        if let Some(index) = position.index {
-            let placeholders = all_placeholder_ranges(markdown);
-            if let Some((_, range)) = placeholders.get(index) {
-                insert_placeholder_at(markdown, range.start, &placeholder);
-                return;
-            }
-        }
-    }
-
-    append_placeholder(markdown, &placeholder);
-}
-
-fn insert_placeholder_at(markdown: &mut String, index: usize, placeholder: &str) {
-    let mut insertion = String::new();
-    if index > 0 && !markdown[..index].ends_with("\n\n") {
-        insertion.push_str(if markdown[..index].ends_with('\n') {
-            "\n"
-        } else {
-            "\n\n"
-        });
-    }
-    insertion.push_str(placeholder);
-    if index < markdown.len() && !markdown[index..].starts_with("\n\n") {
-        insertion.push_str(if markdown[index..].starts_with('\n') {
-            "\n"
-        } else {
-            "\n\n"
-        });
-    }
-
-    markdown.insert_str(index, &insertion);
-    compact_blank_lines(markdown);
-}
-
-fn append_placeholder(markdown: &mut String, placeholder: &str) {
-    if markdown.trim().is_empty() {
-        *markdown = placeholder.to_string();
-        return;
-    }
-
-    if !markdown.ends_with('\n') {
-        markdown.push('\n');
-    }
-    if !markdown.ends_with("\n\n") {
-        markdown.push('\n');
-    }
-    markdown.push_str(placeholder);
-}
-
-fn move_markdown_placeholder(
-    markdown: &mut String,
-    block_id: &str,
-    position: Option<&ReportBlockPosition>,
-) {
-    if find_placeholder_range(markdown, block_id).is_none() {
-        return;
-    }
-
-    remove_markdown_placeholder(markdown, block_id);
-    insert_markdown_placeholder(markdown, block_id, position);
-}
-
-fn remove_markdown_placeholder(markdown: &mut String, block_id: &str) {
-    let Some(range) = find_placeholder_range(markdown, block_id) else {
-        return;
-    };
-
-    markdown.replace_range(range, "");
-    compact_blank_lines(markdown);
-    *markdown = markdown.trim().to_string();
-}
-
-fn compact_blank_lines(markdown: &mut String) {
-    while markdown.contains("\n\n\n") {
-        *markdown = markdown.replace("\n\n\n", "\n\n");
-    }
-}
-
 fn map_sqlx_error(error: sqlx::Error) -> ReportServiceError {
     if let sqlx::Error::Database(db_error) = &error
         && db_error
@@ -9104,6 +10075,25 @@ fn map_object_model_error(error: ObjectModelServiceError) -> ReportServiceError 
         ObjectModelServiceError::NotFound(message) => ReportServiceError::Validation(message),
         ObjectModelServiceError::Conflict(message) => ReportServiceError::Conflict(message),
         ObjectModelServiceError::DatabaseError(message) => ReportServiceError::Database(message),
+    }
+}
+
+fn seal_json_schema_objects(schema: &mut Value) {
+    match schema {
+        Value::Object(object) => {
+            if object.contains_key("properties") && !object.contains_key("additionalProperties") {
+                object.insert("additionalProperties".to_string(), Value::Bool(false));
+            }
+            for value in object.values_mut() {
+                seal_json_schema_objects(value);
+            }
+        }
+        Value::Array(values) => {
+            for value in values {
+                seal_json_schema_objects(value);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -9141,6 +10131,7 @@ mod tests {
             metric: None,
             actions: None,
             card: None,
+            markdown: None,
             filters: vec![],
             interactions: vec![],
             show_when: None,
@@ -9227,6 +10218,32 @@ mod tests {
         assert_eq!(
             columns[0].get("displayField"),
             Some(&json!("__lookupDisplay.suggested_category_id"))
+        );
+    }
+
+    #[test]
+    fn lookup_display_labels_from_instances_reads_platform_id() {
+        let labels = lookup_display_labels_from_instances(
+            vec![crate::api::dto::object_model::Instance {
+                id: "b628bfd4-a6a4-40c7-b33b-674611417334".to_string(),
+                tenant_id: "org_test".to_string(),
+                created_at: "2026-05-10T00:00:00Z".to_string(),
+                updated_at: "2026-05-10T00:00:00Z".to_string(),
+                schema_id: Some("category_schema".to_string()),
+                schema_name: Some("CategoryTreeNode".to_string()),
+                properties: json!({
+                    "node_id": "mro-bearings-bolts",
+                    "label_text": "MRO > Bearings > Bolts"
+                }),
+                computed: None,
+            }],
+            "id",
+            "label_text",
+        );
+
+        assert_eq!(
+            labels.get("b628bfd4-a6a4-40c7-b33b-674611417334"),
+            Some(&json!("MRO > Bearings > Bolts"))
         );
     }
 
@@ -9332,6 +10349,161 @@ mod tests {
     }
 
     #[test]
+    fn report_condition_field_validation_rejects_unknown_fields() {
+        let fields = HashSet::from(["status".to_string()]);
+        let condition = Condition {
+            op: "EQ".to_string(),
+            arguments: Some(vec![json!("missing_status"), json!("active")]),
+        };
+
+        let err = validate_report_condition_field_refs(
+            Some(&condition),
+            &|field| is_schema_field(&fields, field),
+            "block 'orders'",
+        )
+        .unwrap_err();
+
+        assert!(
+            err.to_string().contains("unknown field 'missing_status'"),
+            "{}",
+            err
+        );
+    }
+
+    #[test]
+    fn report_condition_field_validation_allows_filter_refs_and_subquery_operands() {
+        let fields = HashSet::from(["customer_id".to_string(), "created_at".to_string()]);
+        let condition = Condition {
+            op: "AND".to_string(),
+            arguments: Some(vec![
+                json!({"op": "GTE", "arguments": ["created_at", {"filter": "date_range", "path": "from"}]}),
+                json!({"op": "IN", "arguments": ["customer_id", {"subquery": {"schema": "Customer", "select": "id"}}]}),
+            ]),
+        };
+
+        validate_report_condition_field_refs(
+            Some(&condition),
+            &|field| is_schema_field(&fields, field),
+            "block 'orders'",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn report_aggregate_shape_validation_enforces_percentile_contract() {
+        let valid = vec![ReportAggregateSpec {
+            alias: "p95_amount".to_string(),
+            op: ReportAggregateFn::PercentileCont,
+            field: None,
+            distinct: false,
+            order_by: vec![ReportOrderBy {
+                field: "amount".to_string(),
+                direction: "asc".to_string(),
+            }],
+            expression: None,
+            percentile: Some(0.95),
+        }];
+        validate_report_aggregate_specs("block 'orders'", &valid).unwrap();
+
+        let mut invalid = valid[0].clone();
+        invalid.percentile = Some(1.5);
+        let err = validate_report_aggregate_specs("block 'orders'", &[invalid]).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("percentile must be a finite number"),
+            "{}",
+            err
+        );
+    }
+
+    #[test]
+    fn report_markdown_placeholders_support_source_paths() {
+        let mut block = test_block("intro");
+        block.block_type = ReportBlockType::Markdown;
+        block.source.mode = ReportSourceMode::Aggregate;
+        block.source.group_by = vec!["customer".to_string()];
+        block.source.aggregates = vec![ReportAggregateSpec {
+            alias: "revenue".to_string(),
+            op: ReportAggregateFn::Sum,
+            field: Some("total_amount".to_string()),
+            distinct: false,
+            order_by: vec![],
+            expression: None,
+            percentile: None,
+        }];
+        block.markdown = Some(ReportMarkdownConfig {
+            content: "Revenue: {{ source.revenue }}\nCustomer: {{source[0].customer.name}}"
+                .to_string(),
+        });
+
+        let placeholders = validate_report_markdown_block_shape(&block).unwrap();
+        let known_fields = HashSet::from(["customer".to_string(), "revenue".to_string()]);
+
+        validate_report_markdown_placeholders(&block, &placeholders, &|field| {
+            markdown_output_field_known(field, &|candidate| known_fields.contains(candidate))
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn report_markdown_placeholders_reject_block_placeholders() {
+        let err =
+            report_markdown_source_placeholders("{{ block.revenue_by_day }}", "block 'intro'")
+                .unwrap_err();
+        let issue = report_validation_issue_from_error(err);
+
+        assert_eq!(issue.code, "UNSUPPORTED_MARKDOWN_PLACEHOLDER");
+    }
+
+    #[test]
+    fn report_definition_json_schema_seals_known_object_shapes() {
+        let schema = ReportService::report_definition_json_schema();
+        assert_eq!(schema.get("additionalProperties"), Some(&json!(false)));
+        assert_eq!(
+            schema.pointer("/$defs/ReportBlockDefinition/additionalProperties"),
+            Some(&json!(false))
+        );
+    }
+
+    #[test]
+    fn report_definition_json_schema_validation_rejects_unknown_fields() {
+        let definition = json!({
+            "definitionVersion": 1,
+            "filters": [],
+            "blocks": [],
+            "unexpected": true
+        });
+
+        let err = ReportService::validate_report_definition_json_syntax(&definition).unwrap_err();
+        assert!(err.to_string().contains("unexpected"), "{}", err);
+    }
+
+    #[test]
+    fn report_definition_json_schema_validation_rejects_legacy_markdown_field() {
+        let definition = json!({
+            "definitionVersion": 1,
+            "markdown": "# Report",
+            "filters": [],
+            "blocks": []
+        });
+
+        let err = ReportService::validate_report_definition_json_syntax(&definition).unwrap_err();
+        assert!(err.to_string().contains("markdown"), "{}", err);
+    }
+
+    #[test]
+    fn report_definition_json_schema_validation_rejects_legacy_layout_markdown_node() {
+        let definition = json!({
+            "definitionVersion": 1,
+            "layout": [{"id": "intro", "type": "markdown", "content": "# Report"}],
+            "blocks": []
+        });
+
+        let err = ReportService::validate_report_definition_json_syntax(&definition).unwrap_err();
+        assert!(err.to_string().contains("markdown"), "{}", err);
+    }
+
+    #[test]
     fn report_view_navigation_accepts_parent_chain_and_back_filters() {
         let mut views = vec![
             test_view("a", None),
@@ -9394,27 +10566,6 @@ mod tests {
             )
             .unwrap(),
             2
-        );
-    }
-
-    #[test]
-    fn moves_markdown_placeholder_to_requested_position() {
-        let mut markdown =
-            "# Report\n\n{{ block.a }}\n\n{{ block.b }}\n\n{{ block.c }}".to_string();
-
-        move_markdown_placeholder(
-            &mut markdown,
-            "c",
-            Some(&ReportBlockPosition {
-                before_block_id: Some("a".to_string()),
-                ..Default::default()
-            }),
-        );
-
-        assert!(markdown.find("{{ block.c }}") < markdown.find("{{ block.a }}"));
-        assert_eq!(
-            extract_markdown_block_placeholders(&markdown),
-            vec!["c".to_string(), "a".to_string(), "b".to_string()]
         );
     }
 
@@ -9665,7 +10816,6 @@ mod tests {
         let dataset = test_dataset();
         let definition = ReportDefinition {
             definition_version: 1,
-            markdown: String::new(),
             layout: vec![],
             views: vec![],
             filters: vec![ReportFilterDefinition {
@@ -9720,7 +10870,6 @@ mod tests {
         let err = build_dataset_condition(
             &ReportDefinition {
                 definition_version: 1,
-                markdown: String::new(),
                 layout: vec![],
                 views: vec![],
                 filters: vec![],
@@ -9767,7 +10916,6 @@ mod tests {
         });
         let definition = ReportDefinition {
             definition_version: 1,
-            markdown: String::new(),
             layout: vec![],
             views: vec![],
             filters: vec![],

@@ -79,19 +79,6 @@ export function decodeFilterValue(
   return value;
 }
 
-export function extractBlockPlaceholders(markdown: string): string[] {
-  const ids: string[] = [];
-  const re = /\{\{\s*block\.([a-zA-Z0-9_-]+)\s*\}\}/g;
-  let match = re.exec(markdown);
-
-  while (match) {
-    ids.push(match[1]);
-    match = re.exec(markdown);
-  }
-
-  return ids;
-}
-
 export function extractLayoutBlockReferences(layout: ReportLayoutNode[] = []) {
   const ids: string[] = [];
   for (const node of layout) {

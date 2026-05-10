@@ -66,6 +66,7 @@ type EditorNode =
       kind: 'markdown';
       nodeId: string;
       layoutId?: string;
+      blockId: string;
       content: string;
     }
   | {
@@ -98,7 +99,6 @@ type BlockEditorProps = {
   onCreateMissing: () => void;
 };
 
-const BLOCK_PLACEHOLDER_RE = /\{\{\s*block\.([a-zA-Z0-9_-]+)\s*\}\}/g;
 const NONE_VALUE = '__none__';
 
 const BLOCK_TYPE_META: Record<
@@ -184,13 +184,18 @@ export function ReportDefinitionBuilder({
   };
 
   const addMarkdownAfter = (nodeIndex: number) => {
+    const block = createMarkdownBlock(
+      uniqueBlockId(value.blocks, 'markdown'),
+      '## New section'
+    );
     const nextNodes = insertAfter(nodes, nodeIndex, {
       kind: 'markdown',
-      nodeId: `markdown-${Date.now()}`,
-      layoutId: uniqueLayoutNodeId(value.layout ?? [], 'markdown'),
-      content: '## New section',
+      nodeId: `block-${block.id}`,
+      layoutId: uniqueLayoutNodeId(value.layout ?? [], `${block.id}_node`),
+      blockId: block.id,
+      content: block.markdown?.content ?? '',
     });
-    commitNodes(nextNodes);
+    commitNodes(nextNodes, [...value.blocks, block]);
   };
 
   const addBlockAfter = (
@@ -265,7 +270,7 @@ export function ReportDefinitionBuilder({
     const node = nodes[nodeIndex];
     const nextNodes = nodes.filter((_, index) => index !== nodeIndex);
     const nextBlocks =
-      node?.kind === 'block'
+      node?.kind === 'block' || node?.kind === 'markdown'
         ? value.blocks.filter((block) => block.id !== node.blockId)
         : value.blocks;
     commitNodes(nextNodes, nextBlocks);
@@ -1836,84 +1841,47 @@ function Field({ label, children }: { label: string; children: ReactNode }) {
   );
 }
 
+function blockToEditorNode(
+  block: ReportBlockDefinition,
+  layoutId: string
+): EditorNode {
+  if (block.type === 'markdown') {
+    return {
+      kind: 'markdown',
+      nodeId: `block-${block.id}`,
+      layoutId,
+      blockId: block.id,
+      content: block.markdown?.content ?? '',
+    };
+  }
+  return {
+    kind: 'block',
+    nodeId: `block-${block.id}`,
+    layoutId,
+    blockId: block.id,
+  };
+}
+
 function definitionToNodes(definition: ReportDefinition): EditorNode[] {
+  const blockById = new Map(definition.blocks.map((block) => [block.id, block]));
   if ((definition.layout?.length ?? 0) > 0) {
     const referencedBlockIds = new Set(
       extractLayoutBlockReferences(definition.layout)
     );
-    const nodes = (definition.layout ?? []).map(layoutNodeToEditorNode);
+    const nodes = (definition.layout ?? []).map((node) =>
+      layoutNodeToEditorNode(node, blockById)
+    );
     for (const block of definition.blocks) {
       if (!referencedBlockIds.has(block.id)) {
-        nodes.push({
-          kind: 'block',
-          nodeId: `block-${block.id}-appended`,
-          layoutId: uniqueLayoutNodeId(
-            definition.layout ?? [],
-            `${block.id}_node`
-          ),
-          blockId: block.id,
-        });
+        nodes.push(blockToEditorNode(block, `${block.id}_node`));
       }
     }
     return nodes;
   }
 
-  const nodes: EditorNode[] = [];
-  const referencedBlockIds = new Set<string>();
-  let lastIndex = 0;
-  let index = 0;
-  BLOCK_PLACEHOLDER_RE.lastIndex = 0;
-  let match = BLOCK_PLACEHOLDER_RE.exec(definition.markdown);
-
-  while (match) {
-    if (match.index > lastIndex) {
-      const content = definition.markdown.slice(lastIndex, match.index);
-      if (content.trim().length > 0) {
-        nodes.push({
-          kind: 'markdown',
-          nodeId: `markdown-${index}`,
-          layoutId: `markdown_${index + 1}`,
-          content: content.trim(),
-        });
-        index += 1;
-      }
-    }
-    nodes.push({
-      kind: 'block',
-      nodeId: `block-${match[1]}-${index}`,
-      layoutId: `${match[1]}_node`,
-      blockId: match[1],
-    });
-    referencedBlockIds.add(match[1]);
-    index += 1;
-    lastIndex = match.index + match[0].length;
-    match = BLOCK_PLACEHOLDER_RE.exec(definition.markdown);
-  }
-
-  if (lastIndex < definition.markdown.length) {
-    const content = definition.markdown.slice(lastIndex);
-    if (content.trim().length > 0) {
-      nodes.push({
-        kind: 'markdown',
-        nodeId: `markdown-${index}`,
-        layoutId: `markdown_${index + 1}`,
-        content: content.trim(),
-      });
-    }
-  }
-
-  for (const block of definition.blocks) {
-    if (!referencedBlockIds.has(block.id)) {
-      nodes.push({
-        kind: 'block',
-        nodeId: `block-${block.id}-appended`,
-        layoutId: `${block.id}_node`,
-        blockId: block.id,
-      });
-    }
-  }
-
-  return nodes;
+  return definition.blocks.map((block) =>
+    blockToEditorNode(block, `${block.id}_node`)
+  );
 }
 
 function nodesToDefinition(
@@ -1925,16 +1893,30 @@ function nodesToDefinition(
   const orderedBlocks: ReportBlockDefinition[] = [];
   const seenBlockIds = new Set<string>();
 
-  for (const blockId of collectEditorNodeBlockIds(nodes)) {
-    if (seenBlockIds.has(blockId)) continue;
-    const block = blockById.get(blockId);
-    if (!block) continue;
-    orderedBlocks.push(block);
-    seenBlockIds.add(blockId);
+  for (const node of nodes) {
+    if (node.kind === 'markdown') {
+      orderedBlocks.push(
+        createMarkdownBlock(
+          node.blockId,
+          node.content,
+          blockById.get(node.blockId)
+        )
+      );
+      seenBlockIds.add(node.blockId);
+      continue;
+    }
+    for (const blockId of collectEditorNodeBlockIds([node])) {
+      if (seenBlockIds.has(blockId)) continue;
+      const block = blockById.get(blockId);
+      if (!block) continue;
+      orderedBlocks.push(block);
+      seenBlockIds.add(blockId);
+    }
   }
 
   for (const block of blocks) {
-    if (!seenBlockIds.has(block.id)) {
+    if (seenBlockIds.has(block.id)) continue;
+    if (block.type !== 'markdown') {
       orderedBlocks.push(block);
     }
   }
@@ -1942,24 +1924,19 @@ function nodesToDefinition(
   return {
     ...definition,
     layout: nodes.map(editorNodeToLayoutNode),
-    markdown: nodes
-      .flatMap(editorNodeToMarkdownParts)
-      .filter((content) => content.length > 0)
-      .join('\n\n'),
     blocks: orderedBlocks,
   };
 }
 
-function layoutNodeToEditorNode(node: ReportLayoutNode): EditorNode {
-  if (node.type === 'markdown') {
-    return {
-      kind: 'markdown',
-      nodeId: `layout-${node.id}`,
-      layoutId: node.id,
-      content: node.content,
-    };
-  }
+function layoutNodeToEditorNode(
+  node: ReportLayoutNode,
+  blockById: Map<string, ReportBlockDefinition>
+): EditorNode {
   if (node.type === 'block') {
+    const block = blockById.get(node.blockId);
+    if (block?.type === 'markdown') {
+      return blockToEditorNode(block, node.id);
+    }
     return {
       kind: 'block',
       nodeId: `layout-${node.id}`,
@@ -1987,8 +1964,8 @@ function editorNodeToLayoutNode(node: EditorNode): ReportLayoutNode {
   if (node.kind === 'markdown') {
     return {
       id: node.layoutId ?? node.nodeId,
-      type: 'markdown',
-      content: node.content.trim(),
+      type: 'block',
+      blockId: node.blockId,
     };
   }
   if (node.kind === 'block') {
@@ -2009,44 +1986,9 @@ function editorNodeToLayoutNode(node: EditorNode): ReportLayoutNode {
   return node.layout;
 }
 
-function editorNodeToMarkdownParts(node: EditorNode): string[] {
-  if (node.kind === 'markdown') return [node.content.trim()];
-  if (node.kind === 'block') return [`{{ block.${node.blockId} }}`];
-  if (node.kind === 'metric_row') {
-    return [
-      node.title ? `## ${node.title}` : '',
-      ...node.blocks.map((blockId) => `{{ block.${blockId} }}`),
-    ];
-  }
-  return layoutNodeToMarkdownParts(node.layout);
-}
-
-function layoutNodeToMarkdownParts(node: ReportLayoutNode): string[] {
-  if (node.type === 'markdown') return [node.content.trim()];
-  if (node.type === 'block') return [`{{ block.${node.blockId} }}`];
-  if (node.type === 'metric_row') {
-    return [
-      node.title ? `## ${node.title}` : '',
-      ...node.blocks.map((blockId) => `{{ block.${blockId} }}`),
-    ];
-  }
-  if (node.type === 'section') {
-    return [
-      node.title ? `## ${node.title}` : '',
-      node.description ?? '',
-      ...(node.children ?? []).flatMap(layoutNodeToMarkdownParts),
-    ];
-  }
-  if (node.type === 'columns') {
-    return node.columns.flatMap((column) =>
-      (column.children ?? []).flatMap(layoutNodeToMarkdownParts)
-    );
-  }
-  return node.items.map((item) => `{{ block.${item.blockId} }}`);
-}
-
 function collectEditorNodeBlockIds(nodes: EditorNode[]): string[] {
   return nodes.flatMap((node) => {
+    if (node.kind === 'markdown') return [node.blockId];
     if (node.kind === 'block') return [node.blockId];
     if (node.kind === 'metric_row') return node.blocks;
     if (node.kind === 'layout')
@@ -2061,7 +2003,10 @@ function replaceBlockIdInNodes(
   nextBlockId: string
 ): EditorNode[] {
   return nodes.map((node) => {
-    if (node.kind === 'block' && node.blockId === previousBlockId) {
+    if (
+      (node.kind === 'block' || node.kind === 'markdown') &&
+      node.blockId === previousBlockId
+    ) {
       return { ...node, blockId: nextBlockId };
     }
     if (node.kind === 'metric_row') {
@@ -2162,6 +2107,26 @@ function emptyReportSource(): ReportBlockDefinition['source'] {
     orderBy: [],
     filterMappings: [],
     join: [],
+  };
+}
+
+function createMarkdownBlock(
+  id: string,
+  content: string,
+  existing?: ReportBlockDefinition
+): ReportBlockDefinition {
+  return {
+    id,
+    type: 'markdown',
+    title: existing?.title,
+    lazy: existing?.lazy ?? false,
+    source: existing?.source ?? emptyReportSource(),
+    dataset: existing?.dataset,
+    markdown: { content: content.trim() },
+    filters: existing?.filters ?? [],
+    interactions: existing?.interactions ?? [],
+    showWhen: existing?.showWhen,
+    hideWhenEmpty: existing?.hideWhenEmpty,
   };
 }
 

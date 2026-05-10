@@ -2,6 +2,7 @@
 //!
 //! Data transfer objects for schema and instance management
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
@@ -279,7 +280,7 @@ pub struct IndexDefinition {
 // Condition-based Filtering Structures
 // ============================================================================
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, JsonSchema)]
 pub struct Condition {
     pub op: String,
     #[serde(skip_serializing_if = "Option::is_none")]

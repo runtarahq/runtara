@@ -467,6 +467,9 @@ export interface ReportBlockDefinition {
       implicitPayload?: Record<string, unknown>;
     };
   };
+  markdown?: {
+    content: string;
+  };
   card?: ReportCardConfig;
   filters?: ReportFilterDefinition[];
   interactions?: ReportInteractionDefinition[];
@@ -514,11 +517,6 @@ type ReportLayoutNodeBase = {
 };
 
 export type ReportLayoutNode =
-  | ({
-      id: string;
-      type: 'markdown';
-      content: string;
-    } & ReportLayoutNodeBase)
   | ({
       id: string;
       type: 'block';
@@ -582,7 +580,6 @@ export interface ReportViewDefinition {
 
 export interface ReportDefinition {
   definitionVersion: number;
-  markdown: string;
   layout?: ReportLayoutNode[];
   views?: ReportViewDefinition[];
   datasets?: ReportDatasetDefinition[];

@@ -1196,6 +1196,10 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
             post(api::handlers::reports::validate_report),
         )
         .route(
+            "/api/runtime/reports/schema",
+            get(api::handlers::reports::get_report_definition_schema),
+        )
+        .route(
             "/api/runtime/reports/{report_id}",
             get(api::handlers::reports::get_report)
                 .put(api::handlers::reports::update_report)

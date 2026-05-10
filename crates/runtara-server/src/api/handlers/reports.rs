@@ -6,6 +6,7 @@ use axum::{
     http::StatusCode,
     response::Json,
 };
+use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use sqlx::PgPool;
 
@@ -15,6 +16,35 @@ use crate::api::services::reports::{ReportService, ReportServiceError};
 use crate::auth::AuthContext;
 use crate::runtime_client::RuntimeClient;
 use crate::workers::execution_engine::ExecutionEngine;
+
+pub async fn get_report_definition_schema() -> (StatusCode, Json<Value>) {
+    (
+        StatusCode::OK,
+        Json(json!({
+            "success": true,
+            "schema": ReportService::report_definition_json_schema(),
+        })),
+    )
+}
+
+fn parse_report_request<T: DeserializeOwned>(value: Value) -> Result<T, (StatusCode, Json<Value>)> {
+    let Some(definition) = value.get("definition") else {
+        return Err(error_response(ReportServiceError::Validation(
+            "Report request must include definition".to_string(),
+        )));
+    };
+    let syntax_issues = ReportService::validate_report_definition_json_syntax_issues(definition)
+        .map_err(error_response)?;
+    if let Some(issue) = syntax_issues.into_iter().next() {
+        return Err(error_response(ReportServiceError::ValidationIssue(issue)));
+    }
+    serde_json::from_value(value).map_err(|err| {
+        error_response(ReportServiceError::Validation(format!(
+            "Report request is invalid: {}",
+            err
+        )))
+    })
+}
 
 pub async fn list_reports(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
@@ -62,8 +92,9 @@ pub async fn create_report(
     State(pool): State<PgPool>,
     State(manager): State<Arc<ObjectStoreManager>>,
     State(connections): State<Arc<runtara_connections::ConnectionsFacade>>,
-    Json(request): Json<CreateReportRequest>,
+    Json(request): Json<Value>,
 ) -> Result<(StatusCode, Json<GetReportResponse>), (StatusCode, Json<Value>)> {
+    let request = parse_report_request::<CreateReportRequest>(request)?;
     let service = ReportService::new(pool, manager, connections);
 
     match service.create_report(&tenant_id, request).await {
@@ -84,8 +115,9 @@ pub async fn update_report(
     State(manager): State<Arc<ObjectStoreManager>>,
     State(connections): State<Arc<runtara_connections::ConnectionsFacade>>,
     Path(report_id): Path<String>,
-    Json(request): Json<UpdateReportRequest>,
+    Json(request): Json<Value>,
 ) -> Result<(StatusCode, Json<GetReportResponse>), (StatusCode, Json<Value>)> {
+    let request = parse_report_request::<UpdateReportRequest>(request)?;
     let service = ReportService::new(pool, manager, connections);
 
     match service.update_report(&tenant_id, &report_id, request).await {
@@ -126,8 +158,41 @@ pub async fn validate_report(
     State(pool): State<PgPool>,
     State(manager): State<Arc<ObjectStoreManager>>,
     State(connections): State<Arc<runtara_connections::ConnectionsFacade>>,
-    Json(request): Json<ValidateReportRequest>,
+    Json(request): Json<Value>,
 ) -> Result<(StatusCode, Json<ValidateReportResponse>), (StatusCode, Json<Value>)> {
+    let Some(definition) = request.get("definition") else {
+        return Ok((
+            StatusCode::OK,
+            Json(ValidateReportResponse {
+                valid: false,
+                errors: vec![ReportValidationIssue {
+                    path: "$.definition".to_string(),
+                    code: "MISSING_REPORT_DEFINITION".to_string(),
+                    message: "Report request must include definition".to_string(),
+                    hint: Some("Pass {\"definition\": <ReportDefinition>}.".to_string()),
+                }],
+                warnings: vec![],
+            }),
+        ));
+    };
+    let syntax_issues = ReportService::validate_report_definition_json_syntax_issues(definition)
+        .map_err(error_response)?;
+    if !syntax_issues.is_empty() {
+        return Ok((
+            StatusCode::OK,
+            Json(ValidateReportResponse {
+                valid: false,
+                errors: syntax_issues,
+                warnings: vec![],
+            }),
+        ));
+    }
+    let request = serde_json::from_value::<ValidateReportRequest>(request).map_err(|err| {
+        error_response(ReportServiceError::Validation(format!(
+            "Report request is invalid: {}",
+            err
+        )))
+    })?;
     let service = ReportService::new(pool, manager, connections);
     let response = service
         .validate_report(&tenant_id, &request.definition)
@@ -354,9 +419,7 @@ pub async fn remove_report_block(
     let service = ReportService::new(pool, manager, connections);
     let request = body
         .map(|Json(request)| request)
-        .unwrap_or(RemoveReportBlockRequest {
-            remove_markdown_placeholder: true,
-        });
+        .unwrap_or(RemoveReportBlockRequest {});
 
     match service
         .remove_report_block(&tenant_id, &report_id, &block_id, request)
@@ -376,6 +439,14 @@ fn error_response(error: ReportServiceError) -> (StatusCode, Json<Value>) {
         ReportServiceError::Validation(message) => (
             StatusCode::BAD_REQUEST,
             Json(json!({ "success": false, "message": message })),
+        ),
+        ReportServiceError::ValidationIssue(issue) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "success": false,
+                "message": issue.message.clone(),
+                "issue": issue,
+            })),
         ),
         ReportServiceError::Conflict(message) => (
             StatusCode::CONFLICT,

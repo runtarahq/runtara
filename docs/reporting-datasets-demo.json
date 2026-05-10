@@ -6,7 +6,6 @@
   "status": "published",
   "definition": {
     "definitionVersion": 1,
-    "markdown": "# Stock snapshots BI demo\n\nA semantic dataset-backed report over StockSnapshot.",
     "datasets": [
       {
         "id": "stock_snapshots",
@@ -84,6 +83,11 @@
     ],
     "layout": [
       {
+        "id": "intro_node",
+        "type": "block",
+        "blockId": "intro"
+      },
+      {
         "id": "summary",
         "type": "metric_row",
         "blocks": ["snapshot_count"]
@@ -105,6 +109,13 @@
       }
     ],
     "blocks": [
+      {
+        "id": "intro",
+        "type": "markdown",
+        "markdown": {
+          "content": "# Stock snapshots BI demo\n\nA semantic dataset-backed report over StockSnapshot."
+        }
+      },
       {
         "id": "snapshot_count",
         "type": "metric",

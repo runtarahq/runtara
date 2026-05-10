@@ -4,11 +4,14 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
 
+use crate::api::services::reports::ReportService;
+
 use super::super::server::SmoMcpServer;
 use super::internal_api::{
     api_delete, api_delete_with_body, api_get, api_patch, api_post, api_put, validate_path_param,
 };
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AuthoringSeverity {
     Error,
@@ -42,6 +45,10 @@ pub struct GetReportAuthoringSchemaParams {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+pub struct GetReportDefinitionSchemaParams {}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ListReportsParams {}
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -64,7 +71,7 @@ pub struct CreateReportParams {
     )]
     pub status: Option<String>,
     #[schemars(
-        description = "Full report definition: {definitionVersion, markdown, layout?, filters, datasets?, blocks}. For BI reports, define datasets and let blocks reference them. Every block must include a stable id; every layout node must include a stable id."
+        description = "Full report definition: {definitionVersion, layout?, filters, datasets?, blocks}. For BI reports, define datasets and let blocks reference them. Every block must include a stable id; every layout node must include a stable id."
     )]
     pub definition: Value,
 }
@@ -81,7 +88,7 @@ pub struct UpdateReportParams {
     #[schemars(description = "Report status: draft, published, or archived.")]
     pub status: Option<String>,
     #[schemars(
-        description = "Full replacement report definition: {definitionVersion, markdown, layout?, filters, datasets?, blocks}. Use datasets for BI reports and block/layout mutation tools for atomic edits."
+        description = "Full replacement report definition: {definitionVersion, layout?, filters, datasets?, blocks}. Use datasets for BI reports and block/layout mutation tools for atomic edits."
     )]
     pub definition: Value,
 }
@@ -93,11 +100,23 @@ pub struct DeleteReportParams {
     pub report_id: String,
 }
 
+#[derive(Debug, Clone, Copy, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ReportValidationMode {
+    Syntax,
+    Semantic,
+    All,
+}
+
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ValidateReportParams {
     #[schemars(description = "Report definition to validate before saving.")]
     pub definition: Value,
+    #[schemars(
+        description = "Validation mode: syntax runs JSON Schema only; semantic runs backend tenant-reference checks; all runs MCP authoring checks plus backend validation. Defaults to all."
+    )]
+    pub mode: Option<ReportValidationMode>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -153,10 +172,6 @@ pub struct AddReportBlockParams {
         description = "Insert after this block id. Mutually exclusive with index and before_block_id."
     )]
     pub after_block_id: Option<String>,
-    #[schemars(
-        description = "Also insert {{ block.<id> }} into report markdown. Defaults to true."
-    )]
-    pub insert_markdown_placeholder: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -202,10 +217,6 @@ pub struct MoveReportBlockParams {
         description = "Move after this block id. Mutually exclusive with index and before_block_id."
     )]
     pub after_block_id: Option<String>,
-    #[schemars(
-        description = "Also move the existing {{ block.<id> }} markdown placeholder when present. Defaults to true."
-    )]
-    pub move_markdown_placeholder: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -215,10 +226,6 @@ pub struct RemoveReportBlockParams {
     pub report_id: String,
     #[schemars(description = "Stable block id to remove.")]
     pub block_id: String,
-    #[schemars(
-        description = "Also remove {{ block.<id> }} from report markdown. Defaults to true."
-    )]
-    pub remove_markdown_placeholder: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -333,6 +340,18 @@ pub async fn get_report_authoring_schema(
     json_result(result)
 }
 
+pub async fn get_report_definition_schema(
+    _server: &SmoMcpServer,
+    _params: GetReportDefinitionSchemaParams,
+) -> Result<CallToolResult, rmcp::ErrorData> {
+    json_result(json!({
+        "success": true,
+        "kind": "json_schema",
+        "schema": ReportService::report_definition_json_schema(),
+        "hint": "This is the machine JSON Schema for report.definition. Use get_report_authoring_schema for AI-oriented examples and validate_report mode='all' before saving."
+    }))
+}
+
 pub async fn list_reports(
     server: &SmoMcpServer,
     _params: ListReportsParams,
@@ -429,8 +448,27 @@ pub async fn validate_report(
     server: &SmoMcpServer,
     params: ValidateReportParams,
 ) -> Result<CallToolResult, rmcp::ErrorData> {
+    let mode = params.mode.unwrap_or(ReportValidationMode::All);
+    if mode == ReportValidationMode::Syntax {
+        let errors =
+            ReportService::validate_report_definition_json_syntax_issues(&params.definition)
+                .map_err(|err| {
+                    rmcp::ErrorData::internal_error(
+                        "Could not run report JSON Schema validation.",
+                        Some(json!({ "message": err.to_string() })),
+                    )
+                })?;
+        return json_result(json!({
+            "valid": errors.is_empty(),
+            "mode": "syntax",
+            "errors": errors,
+            "warnings": [],
+            "hint": "Syntax mode validates the generated JSON Schema only. Use mode='all' before saving."
+        }));
+    }
+
     let issues = collect_report_definition_authoring_issues(&params.definition);
-    if authoring_errors(&issues).next().is_some() {
+    if mode == ReportValidationMode::All && authoring_errors(&issues).next().is_some() {
         return json_result(authoring_validation_response(issues));
     }
 
@@ -441,7 +479,14 @@ pub async fn validate_report(
     )
     .await?;
     let mut result = result;
-    merge_authoring_issues(&mut result, issues);
+    result["mode"] = json!(match mode {
+        ReportValidationMode::Syntax => "syntax",
+        ReportValidationMode::Semantic => "semantic",
+        ReportValidationMode::All => "all",
+    });
+    if mode == ReportValidationMode::All {
+        merge_authoring_issues(&mut result, issues);
+    }
     json_result(result)
 }
 
@@ -519,13 +564,10 @@ pub async fn add_report_block(
         return Err(authoring_invalid_params(issues));
     }
 
-    let mut body = json!({
+    let body = json!({
         "block": params.block,
         "position": position_body(params.index, params.before_block_id, params.after_block_id),
     });
-    if let Some(insert_markdown_placeholder) = params.insert_markdown_placeholder {
-        body["insertMarkdownPlaceholder"] = Value::Bool(insert_markdown_placeholder);
-    }
 
     let result = api_post(
         server,
@@ -590,12 +632,9 @@ pub async fn move_report_block(
 ) -> Result<CallToolResult, rmcp::ErrorData> {
     validate_path_param("report_id", &params.report_id)?;
     validate_path_param("block_id", &params.block_id)?;
-    let mut body = json!({
+    let body = json!({
         "position": position_body(params.index, params.before_block_id, params.after_block_id),
     });
-    if let Some(move_markdown_placeholder) = params.move_markdown_placeholder {
-        body["moveMarkdownPlaceholder"] = Value::Bool(move_markdown_placeholder);
-    }
 
     let result = api_post(
         server,
@@ -615,10 +654,7 @@ pub async fn remove_report_block(
 ) -> Result<CallToolResult, rmcp::ErrorData> {
     validate_path_param("report_id", &params.report_id)?;
     validate_path_param("block_id", &params.block_id)?;
-    let mut body = json!({});
-    if let Some(remove_markdown_placeholder) = params.remove_markdown_placeholder {
-        body["removeMarkdownPlaceholder"] = Value::Bool(remove_markdown_placeholder);
-    }
+    let body = json!({});
 
     let result = api_delete_with_body(
         server,
@@ -1131,6 +1167,7 @@ fn report_authoring_schema() -> Value {
         "definitionVersion": 1,
         "purpose": "Canonical MCP contract for authoring Runtara reports. Call this before create_report, update_report, add_report_block, replace_report_block, patch_report_block, or report layout mutations.",
         "relatedTools": [
+            "get_report_definition_schema",
             "list_workflows",
             "list_executions",
             "get_execution",
@@ -1148,8 +1185,7 @@ fn report_authoring_schema() -> Value {
         ],
         "definitionShape": {
             "definitionVersion": 1,
-            "markdown": "Backward-compatible narrative Markdown. Render data blocks with standalone placeholders like {{ block.daily_qty }} only when definition.layout is absent. Do not put block placeholders inside Markdown tables for alignment/layout.",
-            "layout": "Optional structured layout tree. Prefer this over Markdown placeholders for dashboards and report layout. Every layout node must include a stable id and type.",
+            "layout": "Optional structured layout tree. Layout arranges blocks only. Every layout node must include a stable id and type.",
             "views": "Optional named report views for master/detail navigation. Each view has an id, optional title/titleFrom/titleFromBlock, parentViewId + clearFiltersOnBack for generated breadcrumbs, optional manual breadcrumb override, and its own layout.",
             "filters": "Optional global filter presets. Each filter can apply to one or more block/source fields.",
             "datasets": "Optional semantic BI datasets. Prefer defining datasets for aggregate BI reports so blocks reference named dimensions/measures instead of raw aggregate specs.",
@@ -1212,14 +1248,14 @@ fn report_authoring_schema() -> Value {
         },
         "layoutGuidance": {
             "currentContract": [
-                "Prefer definition.layout for all visual arrangement.",
-                "Supported layout node types are markdown, block, metric_row, section, columns, and grid.",
+                "Use definition.layout for visual arrangement.",
+                "Supported layout node types are block, metric_row, section, columns, and grid.",
                 "Every layout node has a stable id so MCP can add, replace, patch, move, or remove one layout node at a time.",
-                "Use Markdown only for narrative text. If using legacy markdown placeholders, put each {{ block.<id> }} placeholder on its own line or paragraph.",
-                "Never wrap block placeholders in Markdown table rows such as | {{ block.a }} | {{ block.b }} |. Use metric_row, columns, or grid instead."
+                "Use type='markdown' blocks for narrative text. Layout references them with normal block layout nodes.",
+                "Do not put Markdown content directly in layout nodes."
             ],
             "layoutNodes": {
-                "markdown": {"id": "intro", "type": "markdown", "content": "# Report\n\nNarrative text."},
+                "markdownBlockReference": {"id": "intro_node", "type": "block", "blockId": "intro"},
                 "block": {"id": "records_node", "type": "block", "blockId": "records"},
                 "metric_row": {"id": "summary_metrics", "type": "metric_row", "blocks": ["total_records", "open_records"]},
                 "section": {"id": "summary_section", "type": "section", "title": "Summary", "description": "Optional context.", "children": [{"id": "summary_metrics", "type": "metric_row", "blocks": ["total_records"]}]},
@@ -1229,13 +1265,13 @@ fn report_authoring_schema() -> Value {
         },
         "blockShape": {
             "common": {
-                "id": "Stable id, unique within the report. Referenced as {{ block.<id> }} in markdown.",
+                "id": "Stable id, unique within the report. Layout block nodes reference this as blockId.",
                 "type": "table | chart | metric | actions | markdown | card",
                 "title": "Optional UI title.",
                 "lazy": "Optional boolean. Lazy blocks fetch only when requested.",
                 "showWhen": "Optional visibility condition such as {filter:'case_id', exists:true}. Use this for inline dependent content.",
                 "dataset": "Preferred BI query shape: {id, dimensions, measures, orderBy?, limit?}. The id must match definition.datasets[].id.",
-                "source": "Object Model data source and query plan. Required only when block.dataset is absent.",
+                "source": "Object Model data source and query plan. Required only when block.dataset is absent, except static markdown blocks can omit source data.",
                 "filters": "Optional per-block filter presets.",
                 "interactions": "Optional drill/cross-filter/navigation actions. Use point_click, row_click, or cell_click triggers with set_filter, clear_filter, clear_filters, and navigate_view actions."
             },
@@ -1272,6 +1308,14 @@ fn report_authoring_schema() -> Value {
                 "required": {
                     "metric.valueField": "Output field to display, usually an aggregate alias."
                 }
+            },
+            "markdown": {
+                "type": "markdown",
+                "configKey": "markdown",
+                "required": {
+                    "markdown.content": "Markdown content. Use {{source.field}} or {{source[0].field}} to interpolate the block's own source rows."
+                },
+                "note": "Markdown blocks can be static or data-backed. Static markdown blocks omit source/dataset. Data-backed markdown blocks may use source or dataset and interpolate source fields only; no loops or template helpers are supported."
             },
             "actions": {
                 "type": "actions",
@@ -1387,14 +1431,14 @@ fn report_authoring_schema() -> Value {
             "Do not use metric.valueAlias or top-level valueAlias. Use block.metric.valueField.",
             "Do not copy query_aggregate specs directly: report aggregates use op/field while query_aggregate uses fn/column.",
             "Do not use source.mode='aggregate' with table.columns pointing at ungrouped raw schema fields; use groupBy fields or aggregate aliases.",
-            "Do not use Markdown tables to align report block placeholders. Use definition.layout with metric_row, columns, or grid.",
+            "Do not put layout structure inside markdown.content. Use definition.layout with metric_row, columns, or grid.",
             "Do not omit layout node ids. MCP layout mutation tools address layout nodes by id.",
             "Do not hardcode large select option lists when the values live in Object Model data. Use filter.options.source='object_model'.",
             "Do not hardcode lookup editor option lists when the values live in another Object Model. Use editor.kind='lookup' and editor.lookup instead.",
             "Do not call workflow signals 'pendingInput' in report definitions. Use the generic actions abstraction: type='actions' and source.entity='actions'.",
             "Do not put schema, connectionId, joins, groupBy, or aggregates on workflow_runtime sources.",
             "Do not use type='actions' with Object Model sources; actions blocks currently require source.kind='workflow_runtime' and entity='actions'.",
-            "Always run validate_report before saving or mutating report blocks.",
+            "Always run validate_report with mode='all' before saving or mutating report blocks.",
             "Do not use type='card' with source.mode='aggregate' or workflow_runtime sources. Cards only support object_model + filter mode and render the first matching row.",
             "Do not put card fields at block.fields or block.card.fields. Use block.card.groups[].fields.",
             "Do not stuff arrays into kind='subcard' or objects into kind='subtable'. Subcard expects an object value, subtable expects an array of objects."
@@ -1423,10 +1467,15 @@ fn report_authoring_schema() -> Value {
                 }
             },
             "layout": [
-                {"id": "intro", "type": "markdown", "content": "# Demand summary\n\nLive Object Model data."},
+                {"id": "intro_node", "type": "block", "blockId": "intro"},
                 {"id": "summary", "type": "metric_row", "blocks": ["total_snaps", "unique_skus"]},
                 {"id": "main_grid", "type": "grid", "columns": 12, "items": [{"blockId": "daily_qty", "colSpan": 8}, {"blockId": "top_vendors", "colSpan": 4}]}
             ],
+            "markdownBlock": {
+                "id": "intro",
+                "type": "markdown",
+                "markdown": {"content": "# Demand summary\n\nLive Object Model data."}
+            },
             "table": {
                 "id": "products",
                 "type": "table",
@@ -1844,7 +1893,6 @@ fn collect_report_definition_authoring_issues(definition: &Value) -> Vec<Authori
         definition,
         &[
             "definitionVersion",
-            "markdown",
             "layout",
             "views",
             "filters",
@@ -1853,7 +1901,6 @@ fn collect_report_definition_authoring_issues(definition: &Value) -> Vec<Authori
         ],
         &mut issues,
     );
-    collect_markdown_layout_issues(definition, &mut issues);
     collect_layout_authoring_issues(definition, &mut issues);
     collect_report_view_authoring_issues(definition, &mut issues);
 
@@ -2075,22 +2122,6 @@ fn collect_dataset_authoring_issues(path: &str, dataset: &Value, issues: &mut Ve
             "MISSING_DATASET_MEASURES",
             "Dataset must include measures: [{id, label, op, field?, format}, ...].",
         )),
-    }
-}
-
-fn collect_markdown_layout_issues(definition: &Value, issues: &mut Vec<AuthoringIssue>) {
-    let Some(markdown) = definition.get("markdown").and_then(Value::as_str) else {
-        return;
-    };
-
-    for (index, line) in markdown.lines().enumerate() {
-        if line.contains("{{ block.") && line.contains('|') {
-            issues.push(warning(
-                format!("$.markdown:{}", index + 1),
-                "MARKDOWN_TABLE_BLOCK_LAYOUT",
-                "Do not place report block placeholders inside Markdown table rows. Report blocks render as block-level components, so Markdown pipe characters can appear as visible vertical lines. Put each {{ block.<id> }} placeholder on its own line until layout primitives are available.",
-            ));
-        }
     }
 }
 
@@ -2363,7 +2394,7 @@ fn collect_layout_node_authoring_issues(
         issues.push(error(
             format!("{path}.type"),
             "MISSING_LAYOUT_NODE_TYPE",
-            "Report layout node must include type: markdown, block, metric_row, section, columns, or grid.",
+            "Report layout node must include type: block, metric_row, section, columns, or grid.",
         ));
         return;
     };
@@ -2390,16 +2421,6 @@ fn collect_layout_node_authoring_issues(
     }
 
     match node_type {
-        "markdown" => {
-            collect_unknown_keys(path, node, &["id", "type", "content", "showWhen"], issues);
-            if object.get("content").and_then(Value::as_str).is_none() {
-                issues.push(error(
-                    format!("{path}.content"),
-                    "MISSING_LAYOUT_MARKDOWN_CONTENT",
-                    "Markdown layout nodes must include content.",
-                ));
-            }
-        }
         "block" => {
             collect_unknown_keys(path, node, &["id", "type", "blockId", "showWhen"], issues);
             collect_layout_block_reference_issue(
@@ -2616,6 +2637,7 @@ fn collect_report_block_authoring_issues(
         "metric",
         "actions",
         "card",
+        "markdown",
         "filters",
         "interactions",
         "showWhen",
@@ -2675,9 +2697,17 @@ fn collect_report_block_authoring_issues(
             ));
         }
         let has_dataset = block.get("dataset").is_some();
+        let block_type = block.get("type").and_then(Value::as_str);
+        let is_static_markdown = block_type == Some("markdown")
+            && !has_dataset
+            && block
+                .get("source")
+                .and_then(|source| source.get("schema"))
+                .and_then(Value::as_str)
+                .is_none_or(str::is_empty);
         match block.get("source") {
             Some(source) if source.is_object() => {
-                if !has_dataset {
+                if !has_dataset && !is_static_markdown {
                     match source_kind(source) {
                         "workflow_runtime" => {
                             if source
@@ -2715,7 +2745,7 @@ fn collect_report_block_authoring_issues(
                     }
                 }
             }
-            _ if !has_dataset => issues.push(error(
+            _ if !has_dataset && !is_static_markdown => issues.push(error(
                 format!("{path}.source"),
                 "MISSING_BLOCK_SOURCE",
                 "Report block must include either dataset or source. Object Model sources need schema; workflow_runtime sources need kind, entity, and workflowId.",
@@ -2744,6 +2774,9 @@ fn collect_report_block_authoring_issues(
     }
     if let Some(card) = block.get("card") {
         collect_card_issues(&format!("{path}.card"), card, issues);
+    }
+    if let Some(markdown) = block.get("markdown") {
+        collect_markdown_block_config_issues(&format!("{path}.markdown"), markdown, issues);
     }
     if let Some(filters) = block.get("filters") {
         match filters.as_array() {
@@ -2892,7 +2925,52 @@ fn collect_report_block_authoring_issues(
                 ));
             }
         }
+        Some("markdown") => {
+            if block.get("markdown").and_then(Value::as_object).is_none() {
+                issues.push(error(
+                    format!("{path}.markdown"),
+                    "MISSING_MARKDOWN_CONFIG",
+                    "Markdown blocks must include markdown.content.",
+                ));
+            }
+            for key in ["table", "chart", "metric", "actions", "card"] {
+                if block.get(key).is_some() {
+                    issues.push(error(
+                        format!("{path}.{key}"),
+                        "INVALID_MARKDOWN_BLOCK_CONFIG",
+                        "Markdown blocks must not define table, chart, metric, actions, or card config.",
+                    ));
+                }
+            }
+        }
         _ => {}
+    }
+}
+
+fn collect_markdown_block_config_issues(
+    path: &str,
+    markdown: &Value,
+    issues: &mut Vec<AuthoringIssue>,
+) {
+    let Some(markdown_object) = markdown.as_object() else {
+        issues.push(error(
+            path,
+            "INVALID_MARKDOWN_CONFIG",
+            "Report block markdown config must be an object.",
+        ));
+        return;
+    };
+    collect_unknown_keys(path, markdown, &["content"], issues);
+    if markdown_object
+        .get("content")
+        .and_then(Value::as_str)
+        .is_none()
+    {
+        issues.push(error(
+            format!("{path}.content"),
+            "MISSING_MARKDOWN_CONTENT",
+            "Markdown blocks must include markdown.content.",
+        ));
     }
 }
 
@@ -4771,6 +4849,7 @@ fn split_authoring_issues(issues: Vec<AuthoringIssue>) -> (Vec<Value>, Vec<Value
     (errors, warnings)
 }
 
+#[allow(dead_code)]
 fn warning(
     path: impl Into<String>,
     code: &'static str,
@@ -4805,7 +4884,6 @@ mod tests {
     fn report_authoring_lints_misplaced_table_columns() {
         let definition = json!({
             "definitionVersion": 1,
-            "markdown": "{{ block.products }}",
             "blocks": [{
                 "id": "products",
                 "type": "table",
@@ -4825,7 +4903,6 @@ mod tests {
     fn report_authoring_lints_chart_top_level_axes() {
         let definition = json!({
             "definitionVersion": 1,
-            "markdown": "{{ block.daily_qty }}",
             "blocks": [{
                 "id": "daily_qty",
                 "type": "chart",
@@ -4852,7 +4929,6 @@ mod tests {
     fn report_authoring_accepts_canonical_chart_shape() {
         let definition = json!({
             "definitionVersion": 1,
-            "markdown": "{{ block.daily_qty }}",
             "blocks": [{
                 "id": "daily_qty",
                 "type": "chart",
@@ -4880,7 +4956,6 @@ mod tests {
     fn report_authoring_accepts_dataset_backed_block_shape() {
         let definition = json!({
             "definitionVersion": 1,
-            "markdown": "{{ block.vendor_summary }}",
             "datasets": [{
                 "id": "stock_snapshots",
                 "label": "Stock snapshots",
@@ -4916,23 +4991,55 @@ mod tests {
     }
 
     #[test]
-    fn report_authoring_warns_for_markdown_table_block_layout() {
+    fn report_authoring_accepts_static_markdown_block() {
         let definition = json!({
             "definitionVersion": 1,
-            "markdown": "| | |\n|---|---|\n| {{ block.a }} | {{ block.b }} |",
+            "layout": [{"id": "intro_node", "type": "block", "blockId": "intro"}],
+            "blocks": [{
+                "id": "intro",
+                "type": "markdown",
+                "markdown": {"content": "# Report\n\nStatic copy."}
+            }]
+        });
+
+        let issues = collect_report_definition_authoring_issues(&definition);
+
+        assert!(authoring_errors(&issues).next().is_none());
+    }
+
+    #[test]
+    fn report_authoring_rejects_legacy_top_level_markdown() {
+        let definition = json!({
+            "definitionVersion": 1,
+            "markdown": "# Report",
+            "blocks": []
+        });
+
+        let issues = collect_report_definition_authoring_issues(&definition);
+        let response = authoring_validation_response(issues);
+        let errors = response["errors"].as_array().unwrap();
+
+        assert!(errors.iter().any(|error| {
+            error["path"] == json!("$.markdown") && error["code"] == json!("UNKNOWN_REPORT_FIELD")
+        }));
+    }
+
+    #[test]
+    fn report_authoring_accepts_structured_layout() {
+        let definition = json!({
+            "definitionVersion": 1,
+            "layout": [
+                {"id": "intro_node", "type": "block", "blockId": "intro"},
+                {"id": "summary", "type": "metric_row", "blocks": ["total"]}
+            ],
             "blocks": [
                 {
-                    "id": "a",
-                    "type": "metric",
-                    "source": {
-                        "schema": "StockSnapshot",
-                        "mode": "aggregate",
-                        "aggregates": [{"alias": "n", "op": "count"}]
-                    },
-                    "metric": {"valueField": "n"}
+                    "id": "intro",
+                    "type": "markdown",
+                    "markdown": {"content": "# Report"}
                 },
                 {
-                    "id": "b",
+                    "id": "total",
                     "type": "metric",
                     "source": {
                         "schema": "StockSnapshot",
@@ -4945,37 +5052,6 @@ mod tests {
         });
 
         let issues = collect_report_definition_authoring_issues(&definition);
-        let response = authoring_validation_response(issues);
-
-        assert_eq!(response["valid"], json!(true));
-        assert_eq!(
-            response["warnings"][0]["code"],
-            json!("MARKDOWN_TABLE_BLOCK_LAYOUT")
-        );
-    }
-
-    #[test]
-    fn report_authoring_accepts_structured_layout() {
-        let definition = json!({
-            "definitionVersion": 1,
-            "markdown": "# Report",
-            "layout": [
-                {"id": "intro", "type": "markdown", "content": "# Report"},
-                {"id": "summary", "type": "metric_row", "blocks": ["total"]}
-            ],
-            "blocks": [{
-                "id": "total",
-                "type": "metric",
-                "source": {
-                    "schema": "StockSnapshot",
-                    "mode": "aggregate",
-                    "aggregates": [{"alias": "n", "op": "count"}]
-                },
-                "metric": {"valueField": "n"}
-            }]
-        });
-
-        let issues = collect_report_definition_authoring_issues(&definition);
 
         assert!(authoring_errors(&issues).next().is_none());
     }
@@ -4984,7 +5060,6 @@ mod tests {
     fn report_authoring_accepts_auto_view_navigation() {
         let definition = json!({
             "definitionVersion": 1,
-            "markdown": "# Report",
             "filters": [
                 {"id": "case_id", "label": "Case", "type": "text", "strictWhenReferenced": true},
                 {"id": "task_id", "label": "Task", "type": "text", "strictWhenReferenced": true}
@@ -5015,7 +5090,6 @@ mod tests {
     fn report_authoring_rejects_cyclic_view_navigation() {
         let definition = json!({
             "definitionVersion": 1,
-            "markdown": "# Report",
             "views": [
                 {"id": "a", "parentViewId": "b"},
                 {"id": "b", "parentViewId": "a"}
@@ -5033,7 +5107,6 @@ mod tests {
     fn report_authoring_rejects_unknown_layout_block_reference() {
         let definition = json!({
             "definitionVersion": 1,
-            "markdown": "# Report",
             "layout": [{"id": "missing", "type": "block", "blockId": "missing_block"}],
             "blocks": []
         });
@@ -5048,7 +5121,6 @@ mod tests {
     fn report_authoring_rejects_unknown_keys_with_similar_key_hint() {
         let definition = json!({
             "definitionVerison": 1,
-            "markdown": "# Report",
             "blocks": [{
                 "id": "products",
                 "type": "table",
@@ -5080,7 +5152,6 @@ mod tests {
     fn report_authoring_rejects_unknown_filter_option_keys() {
         let definition = json!({
             "definitionVersion": 1,
-            "markdown": "# Report",
             "filters": [{
                 "id": "vendor",
                 "label": "Vendor",
@@ -5111,7 +5182,6 @@ mod tests {
     fn report_authoring_rejects_mapping_value_in_source_condition() {
         let definition = json!({
             "definitionVersion": 1,
-            "markdown": "{{ block.products }}",
             "blocks": [{
                 "id": "products",
                 "type": "table",
@@ -5140,7 +5210,6 @@ mod tests {
     fn report_authoring_accepts_condition_filter_ref() {
         let definition = json!({
             "definitionVersion": 1,
-            "markdown": "{{ block.products }}",
             "filters": [{
                 "id": "vendor_filter",
                 "label": "Vendor",
@@ -5175,7 +5244,6 @@ mod tests {
     fn report_authoring_accepts_condition_filter_ref_inside_subquery() {
         let definition = json!({
             "definitionVersion": 1,
-            "markdown": "{{ block.stock }}",
             "filters": [{
                 "id": "category",
                 "label": "Category",
@@ -5223,7 +5291,6 @@ mod tests {
     fn report_authoring_rejects_nested_condition_subquery() {
         let definition = json!({
             "definitionVersion": 1,
-            "markdown": "{{ block.stock }}",
             "blocks": [{
                 "id": "stock",
                 "type": "table",
@@ -5264,7 +5331,6 @@ mod tests {
     fn report_authoring_rejects_unknown_condition_filter_ref() {
         let definition = json!({
             "definitionVersion": 1,
-            "markdown": "{{ block.products }}",
             "filters": [{
                 "id": "vendor_filter",
                 "label": "Vendor",
@@ -5298,7 +5364,6 @@ mod tests {
     fn report_authoring_accepts_block_source_join_shape() {
         let definition = json!({
             "definitionVersion": 1,
-            "markdown": "{{ block.stock }}",
             "blocks": [{
                 "id": "stock",
                 "type": "table",
@@ -5337,7 +5402,6 @@ mod tests {
     fn report_authoring_accepts_value_column_source_select() {
         let definition = json!({
             "definitionVersion": 1,
-            "markdown": "{{ block.stock }}",
             "blocks": [{
                 "id": "stock",
                 "type": "table",
@@ -5368,7 +5432,6 @@ mod tests {
     fn report_authoring_accepts_lookup_editor_column_shape() {
         let definition = json!({
             "definitionVersion": 1,
-            "markdown": "{{ block.products }}",
             "filters": [{
                 "id": "vendor",
                 "label": "Vendor",
@@ -5424,7 +5487,6 @@ mod tests {
     fn report_authoring_rejects_lookup_editor_without_lookup_config() {
         let definition = json!({
             "definitionVersion": 1,
-            "markdown": "{{ block.products }}",
             "blocks": [{
                 "id": "products",
                 "type": "table",
@@ -5449,7 +5511,6 @@ mod tests {
     fn report_authoring_accepts_workflow_runtime_instances_table() {
         let definition = json!({
             "definitionVersion": 1,
-            "markdown": "{{ block.workflow_runs }}",
             "blocks": [{
                 "id": "workflow_runs",
                 "type": "table",
@@ -5482,7 +5543,6 @@ mod tests {
     fn report_authoring_accepts_workflow_button_visibility_conditions() {
         let definition = json!({
             "definitionVersion": 1,
-            "markdown": "{{ block.items }}",
             "blocks": [{
                 "id": "items",
                 "type": "table",
@@ -5532,7 +5592,6 @@ mod tests {
     fn report_authoring_accepts_workflow_runtime_actions_block() {
         let definition = json!({
             "definitionVersion": 1,
-            "markdown": "{{ block.workflow_actions }}",
             "blocks": [{
                 "id": "workflow_actions",
                 "type": "actions",
@@ -5557,7 +5616,6 @@ mod tests {
     fn report_authoring_accepts_workflow_runtime_actions_correlation_binding() {
         let definition = json!({
             "definitionVersion": 1,
-            "markdown": "{{ block.case_action }}",
             "filters": [{
                 "id": "case_id",
                 "label": "Case",
@@ -5599,7 +5657,6 @@ mod tests {
     fn report_authoring_rejects_actions_block_without_workflow_runtime_source() {
         let definition = json!({
             "definitionVersion": 1,
-            "markdown": "{{ block.workflow_actions }}",
             "blocks": [{
                 "id": "workflow_actions",
                 "type": "actions",
@@ -5666,7 +5723,6 @@ mod tests {
     fn report_authoring_rejects_value_column_source_without_select() {
         let definition = json!({
             "definitionVersion": 1,
-            "markdown": "{{ block.stock }}",
             "blocks": [{
                 "id": "stock",
                 "type": "table",

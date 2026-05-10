@@ -56,9 +56,9 @@ path as the rest of the application.
 A report is a saved definition with:
 
 - metadata such as name, slug, description, tags, owner, timestamps
-- a markdown document used as the report body
+- a structured layout used as the report body
 - report-level filters and presets
-- typed blocks embedded into the markdown
+- typed blocks referenced from the layout, including markdown narrative blocks
 - optional block-specific filters
 - optional default viewer state
 - a definition version used for validation and migration
@@ -69,7 +69,7 @@ A report viewer is the runtime page that:
 
 - loads the saved report definition
 - initializes filter state from defaults and URL params
-- renders markdown and block placeholders
+- renders layout nodes and typed blocks
 - fetches data for visible blocks
 - handles table pagination, table sorting, and chart/table filter changes
 - keeps user-selected filter state URL-addressable
@@ -80,7 +80,7 @@ A report author can:
 
 - create a report
 - edit report metadata
-- edit the markdown body
+- edit markdown blocks
 - add and configure blocks
 - configure report-level and block-level filters
 - preview the report against live object data
@@ -624,8 +624,9 @@ Later, the backend can add short-lived block query caching keyed by:
 
 ### Canonical Definition
 
-Reports should be stored as canonical JSON. Markdown is part of the definition,
-but executable behavior is described by typed JSON objects.
+Reports should be stored as canonical JSON. Layout is expressed as typed JSON
+nodes, and markdown is a typed block primitive rather than a top-level report
+body.
 
 This gives us:
 
@@ -644,7 +645,23 @@ Suggested persisted shape:
   "slug": "sales-overview",
   "description": "Revenue, orders, and active customers",
   "tags": ["sales"],
-  "markdown": "# Sales Overview\n\n{{ block.revenue_by_day }}\n\n{{ block.recent_orders }}\n",
+  "layout": [
+    {
+      "id": "intro_node",
+      "type": "block",
+      "blockId": "intro"
+    },
+    {
+      "id": "revenue_node",
+      "type": "block",
+      "blockId": "revenue_by_day"
+    },
+    {
+      "id": "orders_node",
+      "type": "block",
+      "blockId": "recent_orders"
+    }
+  ],
   "filters": [
     {
       "id": "date_range",
@@ -676,6 +693,13 @@ Suggested persisted shape:
     }
   ],
   "blocks": [
+    {
+      "id": "intro",
+      "type": "markdown",
+      "markdown": {
+        "content": "# Sales Overview\n\nRevenue and order activity for the selected period."
+      }
+    },
     {
       "id": "revenue_by_day",
       "type": "chart",
@@ -791,26 +815,37 @@ Suggested persisted shape:
 }
 ```
 
-### Markdown Authoring Syntax
+### Markdown Blocks
 
-The markdown body should stay familiar to users. It should support normal GFM
-markdown and block placeholders.
+Markdown should stay familiar to users, but it lives inside a typed markdown
+block. Layout placement still uses normal block layout nodes:
 
-Recommended placeholder syntax:
-
-```markdown
-# Sales Overview
-
-Revenue for the selected period:
-
-{{ block.revenue_by_day }}
-
-## Recent Orders
-
-{{ block.recent_orders }}
+```json
+{
+  "id": "intro",
+  "type": "markdown",
+  "source": {
+    "schema": "Order",
+    "mode": "aggregate",
+    "aggregates": [{ "alias": "revenue", "op": "sum", "field": "total_amount" }]
+  },
+  "markdown": {
+    "content": "# Sales Overview\n\nRevenue for the selected period: {{source.revenue}}"
+  }
+}
 ```
 
-This keeps the markdown readable and leaves block configuration in typed JSON.
+Markdown blocks support normal GFM markdown plus source interpolation from the
+same block only:
+
+```markdown
+{{source.field_name}}
+{{source[0].field_name}}
+```
+
+This keeps markdown readable while keeping layout and data configuration in
+typed JSON. Block placement is handled by `definition.layout`, not by embedding
+other report blocks in markdown.
 
 Alternative authoring syntax can be added later using fenced code blocks:
 
@@ -1149,7 +1184,8 @@ Responsibilities:
 
 The compiler takes a report definition and produces:
 
-- markdown AST or markdown string plus block placeholders
+- normalized layout tree
+- markdown block content with validated source placeholders
 - normalized filters
 - block dependency map
 - per-block executable query plan
@@ -1290,7 +1326,8 @@ viewers.
 The editor should be split into practical areas:
 
 - metadata
-- markdown body
+- layout
+- markdown blocks
 - filters
 - blocks
 - preview
@@ -1298,10 +1335,10 @@ The editor should be split into practical areas:
 The MVP editor can be form-based:
 
 1. Choose report name and slug.
-2. Write markdown body.
+2. Add or edit markdown blocks.
 3. Add filters.
 4. Add blocks.
-5. Insert block placeholders into markdown.
+5. Arrange blocks in the layout.
 6. Preview.
 7. Save.
 
@@ -1385,32 +1422,30 @@ The frontend rendering pipeline:
 
 1. Load report definition.
 2. Build initial filter state from definition defaults and URL params.
-3. Render report shell: title, toolbar, filters, markdown skeleton.
-4. Replace markdown block placeholders with `ReportBlockHost` components.
+3. Render report shell: title, toolbar, filters, and layout skeleton.
+4. Render layout block nodes with `ReportBlockHost` components.
 5. Fetch data for eager blocks.
 6. Fetch data for lazy blocks when they enter the viewport.
 7. Render each block according to its type.
 8. On filter change, update URL state and refetch dependent blocks.
 9. On table page or sort change, refetch only that table block.
 
-### Markdown Rendering
+### Markdown Block Rendering
 
 Use `react-markdown` with GFM support. Raw HTML should remain disabled.
 
-The renderer should recognize block placeholders in markdown:
+The renderer should recognize source placeholders inside markdown blocks:
 
 ```markdown
-{{ block.revenue_by_day }}
+{{source.revenue}}
+{{source[0].customer_name}}
 ```
 
-During render, placeholders are replaced with a component mount point:
+During render, placeholders are replaced with values from the markdown block's
+own rendered source data. Layout decides where the markdown block is mounted.
 
-```tsx
-<ReportBlockHost blockId="revenue_by_day" />
-```
-
-Unknown block placeholders should render an editor-visible warning and a
-viewer-visible block error.
+Unknown source placeholders should return an editor-visible validation error and
+a viewer-visible markdown block error.
 
 Normal fenced code blocks remain plain code blocks. Only recognized report block
 syntax is converted into dynamic UI.
@@ -1610,7 +1645,7 @@ Add a smoke test for:
 - Add Reports nav item and routes.
 - Add Reports list page.
 - Add viewer page.
-- Add markdown renderer with block placeholders.
+- Add markdown block renderer with source interpolation.
 - Add filter bar.
 - Add table block renderer.
 - Add metric block renderer.

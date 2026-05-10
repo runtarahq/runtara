@@ -1515,25 +1515,17 @@ function appendBlockToDefinition(
   block: ReportBlockDefinition
 ): ReportDefinition {
   const blocks = [...definition.blocks, block];
-  if ((definition.layout?.length ?? 0) > 0) {
-    return {
-      ...definition,
-      blocks,
-      layout: [
-        ...(definition.layout ?? []),
-        {
-          id: `${block.id}_node`,
-          type: 'block',
-          blockId: block.id,
-        },
-      ],
-    };
-  }
-
   return {
     ...definition,
     blocks,
-    markdown: `${definition.markdown ?? ''}\n\n{{ block.${block.id} }}`,
+    layout: [
+      ...(definition.layout ?? []),
+      {
+        id: `${block.id}_node`,
+        type: 'block',
+        blockId: block.id,
+      },
+    ],
   };
 }
 

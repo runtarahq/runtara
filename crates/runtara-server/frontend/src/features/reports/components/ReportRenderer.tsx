@@ -1,6 +1,4 @@
 import { CSSProperties, Fragment, useMemo } from 'react';
-import ReactMarkdown from 'react-markdown';
-import remarkGfm from 'remark-gfm';
 import {
   ReportDefinition,
   ReportInteractionOptions,
@@ -36,12 +34,6 @@ type ReportRendererProps = {
   onRefresh?: () => void | Promise<unknown>;
 };
 
-type MarkdownSegment =
-  | { type: 'markdown'; content: string }
-  | { type: 'block'; blockId: string };
-
-const BLOCK_PLACEHOLDER_RE = /\{\{\s*block\.([a-zA-Z0-9_-]+)\s*\}\}/g;
-
 export function ReportRenderer({
   reportId,
   definition,
@@ -62,10 +54,6 @@ export function ReportRenderer({
     [activeViewId, definition]
   );
   const hasStructuredLayout = layout.length > 0;
-  const segments = useMemo(
-    () => splitMarkdown(definition.markdown),
-    [definition.markdown]
-  );
 
   return (
     <div className="w-full">
@@ -91,29 +79,6 @@ export function ReportRenderer({
           onRefresh={onRefresh}
         />
       ) : (
-        segments.map((segment, index) => {
-          if (segment.type === 'markdown') {
-            return <MarkdownContent key={index} content={segment.content} />;
-          }
-
-          return (
-            <ReportBlockById
-              key={`${segment.blockId}-${index}`}
-              blockId={segment.blockId}
-              reportId={reportId}
-              definition={definition}
-              renderResponse={renderResponse}
-              filters={filters}
-              onFilterChange={onFilterChange}
-              onFiltersChange={onFiltersChange}
-              onNavigateView={onNavigateView}
-              onRefresh={onRefresh}
-            />
-          );
-        })
-      )}
-      {!hasStructuredLayout &&
-        segments.length === 0 &&
         definition.blocks
           .filter((block) => isVisibleByShowWhen(block.showWhen, filters))
           .map((block) => (
@@ -129,7 +94,8 @@ export function ReportRenderer({
                 onReportRefresh={onRefresh}
               />
             </Fragment>
-          ))}
+          ))
+      )}
     </div>
   );
 }
@@ -210,10 +176,6 @@ function LayoutNode({
   ) => void;
   onRefresh?: () => void | Promise<unknown>;
 }) {
-  if (node.type === 'markdown') {
-    return <MarkdownContent content={node.content} />;
-  }
-
   if (node.type === 'block') {
     return (
       <ReportBlockById
@@ -373,14 +335,6 @@ function LayoutNode({
   }
 
   return null;
-}
-
-function MarkdownContent({ content }: { content: string }) {
-  return (
-    <div className="prose prose-slate max-w-none dark:prose-invert">
-      <ReactMarkdown remarkPlugins={[remarkGfm]}>{content}</ReactMarkdown>
-    </div>
-  );
 }
 
 function ReportBlockById({
@@ -593,31 +547,4 @@ function resolveTitlePath(path: string, filters: Record<string, unknown>) {
     }
     return undefined;
   }, filters);
-}
-
-function splitMarkdown(markdown: string): MarkdownSegment[] {
-  const segments: MarkdownSegment[] = [];
-  let lastIndex = 0;
-  BLOCK_PLACEHOLDER_RE.lastIndex = 0;
-  let match = BLOCK_PLACEHOLDER_RE.exec(markdown);
-
-  while (match) {
-    if (match.index > lastIndex) {
-      segments.push({
-        type: 'markdown',
-        content: markdown.slice(lastIndex, match.index),
-      });
-    }
-    segments.push({ type: 'block', blockId: match[1] });
-    lastIndex = match.index + match[0].length;
-    match = BLOCK_PLACEHOLDER_RE.exec(markdown);
-  }
-
-  if (lastIndex < markdown.length) {
-    segments.push({ type: 'markdown', content: markdown.slice(lastIndex) });
-  }
-
-  return segments.filter(
-    (segment) => segment.type === 'block' || segment.content.trim().length > 0
-  );
 }
