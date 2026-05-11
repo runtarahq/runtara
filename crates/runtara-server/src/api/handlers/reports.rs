@@ -201,6 +201,37 @@ pub async fn validate_report(
     Ok((StatusCode::OK, Json(response)))
 }
 
+pub async fn preview_report(
+    crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
+    State(pool): State<PgPool>,
+    State(manager): State<Arc<ObjectStoreManager>>,
+    State(connections): State<Arc<runtara_connections::ConnectionsFacade>>,
+    Json(request): Json<Value>,
+) -> Result<(StatusCode, Json<ReportRenderResponse>), (StatusCode, Json<Value>)> {
+    let Some(definition) = request.get("definition") else {
+        return Err(error_response(ReportServiceError::Validation(
+            "Report preview request must include definition".to_string(),
+        )));
+    };
+    let syntax_issues = ReportService::validate_report_definition_json_syntax_issues(definition)
+        .map_err(error_response)?;
+    if let Some(issue) = syntax_issues.into_iter().next() {
+        return Err(error_response(ReportServiceError::ValidationIssue(issue)));
+    }
+    let request = serde_json::from_value::<ReportPreviewRequest>(request).map_err(|err| {
+        error_response(ReportServiceError::Validation(format!(
+            "Report preview request is invalid: {}",
+            err
+        )))
+    })?;
+    let service = ReportService::new(pool, manager, connections);
+
+    match service.preview_report(&tenant_id, request).await {
+        Ok(response) => Ok((StatusCode::OK, Json(response))),
+        Err(error) => Err(error_response(error)),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn render_report(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,

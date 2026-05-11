@@ -286,7 +286,8 @@ function FilterEditor({
           <CommandList>
             <CommandGroup>
               {TIME_RANGE_PRESETS.map((option) => {
-                const selected = String(value ?? 'last_30_days') === option.value;
+                const selected =
+                  String(value ?? 'last_30_days') === option.value;
                 return (
                   <CommandItem
                     key={option.value}
@@ -301,6 +302,37 @@ function FilterEditor({
             </CommandGroup>
           </CommandList>
         </Command>
+      </div>
+    );
+  }
+
+  if (filter.type === 'number_range') {
+    const range =
+      value && typeof value === 'object' && !Array.isArray(value)
+        ? (value as { min?: unknown; max?: unknown })
+        : {};
+    const updateRange = (key: 'min' | 'max', nextValue: string) => {
+      onChange({
+        ...range,
+        [key]: nextValue.trim().length === 0 ? undefined : Number(nextValue),
+      });
+    };
+    return (
+      <div className="grid gap-2 p-3 sm:grid-cols-2">
+        <Input
+          type="number"
+          value={formatRangeInputValue(range.min)}
+          onChange={(event) => updateRange('min', event.target.value)}
+          className="h-9"
+          placeholder="Min"
+        />
+        <Input
+          type="number"
+          value={formatRangeInputValue(range.max)}
+          onChange={(event) => updateRange('max', event.target.value)}
+          className="h-9"
+          placeholder="Max"
+        />
       </div>
     );
   }
@@ -374,10 +406,7 @@ function FilterEditor({
                   value={`${option.label} ${key}`}
                   onSelect={() => toggle(option)}
                 >
-                  <Checkbox
-                    checked={checked}
-                    className="pointer-events-none"
-                  />
+                  <Checkbox checked={checked} className="pointer-events-none" />
                   <span className="flex-1 truncate">
                     {formatOptionLabel(option.label, option.count)}
                   </span>
@@ -448,6 +477,18 @@ function describeFilterValue(
   if (filter.type === 'checkbox') {
     return value ? 'Yes' : 'No';
   }
+  if (filter.type === 'number_range') {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) {
+      return 'Any';
+    }
+    const range = value as { min?: unknown; max?: unknown };
+    if (range.min !== undefined && range.max !== undefined) {
+      return `${range.min} - ${range.max}`;
+    }
+    if (range.min !== undefined) return `>= ${range.min}`;
+    if (range.max !== undefined) return `<= ${range.max}`;
+    return 'Any';
+  }
   if (isEmptyValue(value)) return 'Any';
   return labelForValue(value, options);
 }
@@ -464,6 +505,11 @@ function optionKey(value: unknown): string {
   return JSON.stringify(value);
 }
 
+function formatRangeInputValue(value: unknown): string | number {
+  if (typeof value === 'number' || typeof value === 'string') return value;
+  return '';
+}
+
 function formatOptionLabel(label: string, count?: number): string {
   if (typeof count !== 'number') return label;
   return `${label} (${new Intl.NumberFormat().format(count)})`;
@@ -473,6 +519,12 @@ function isEmptyValue(value: unknown): boolean {
   if (value === null || value === undefined) return true;
   if (typeof value === 'string') return value.trim().length === 0;
   if (Array.isArray(value)) return value.length === 0;
+  if (typeof value === 'object') {
+    const range = value as { min?: unknown; max?: unknown };
+    if ('min' in range || 'max' in range) {
+      return range.min === undefined && range.max === undefined;
+    }
+  }
   return false;
 }
 

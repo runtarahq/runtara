@@ -742,6 +742,27 @@ export interface ReportRenderRequest {
   timezone?: string;
 }
 
+export interface ReportPreviewRequest extends ReportRenderRequest {
+  definition: ReportDefinition;
+}
+
+export interface ReportValidationIssue {
+  path: string;
+  code: string;
+  message: string;
+  hint?: string | null;
+}
+
+export interface ValidateReportRequest {
+  definition: ReportDefinition;
+}
+
+export interface ValidateReportResponse {
+  valid: boolean;
+  errors: ReportValidationIssue[];
+  warnings: ReportValidationIssue[];
+}
+
 export interface CreateReportRequest {
   name: string;
   slug?: string;

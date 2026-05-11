@@ -1,9 +1,23 @@
 import { ReactNode, useEffect, useMemo, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router';
-import { Plus, Save, Trash2 } from 'lucide-react';
+import {
+  AlertTriangle,
+  CheckCircle2,
+  Filter,
+  Plus,
+  RefreshCw,
+  Save,
+  Trash2,
+} from 'lucide-react';
 import { Schema } from '@/generated/RuntaraRuntimeApi';
+import {
+  Alert,
+  AlertDescription,
+  AlertTitle,
+} from '@/shared/components/ui/alert';
 import { Badge } from '@/shared/components/ui/badge';
 import { Button } from '@/shared/components/ui/button';
+import { Checkbox } from '@/shared/components/ui/checkbox';
 import { Input } from '@/shared/components/ui/input';
 import { Label } from '@/shared/components/ui/label';
 import { Textarea } from '@/shared/components/ui/textarea';
@@ -14,27 +28,45 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/shared/components/ui/select';
+import {
+  Tabs,
+  TabsContent,
+  TabsList,
+  TabsTrigger,
+} from '@/shared/components/ui/tabs';
 import { TileList, TilesPage } from '@/shared/components/tiles-page';
 import { usePageTitle } from '@/shared/hooks/usePageTitle';
 import { useObjectSchemaDtos } from '@/features/objects/hooks/useObjectSchemas';
 import {
   useCreateReport,
   useReport,
+  useReportPreview,
   useUpdateReport,
+  useValidateReport,
 } from '../hooks/useReports';
 import { ReportDefinitionBuilder } from '../components/ReportDefinitionBuilder';
 import { ReportDeleteButton } from '../components/ReportDeleteButton';
+import { ReportFilterBar } from '../components/ReportFilterBar';
+import { ReportRenderer } from '../components/ReportRenderer';
 import {
   ReportAggregateFn,
+  ReportBlockDefinition,
+  ReportCardConfig,
   ReportDatasetDefinition,
   ReportDatasetFieldType,
   ReportDatasetValueFormat,
   ReportDefinition,
+  ReportFilterDefinition,
+  ReportFilterType,
   ReportStatus,
+  ReportValidationIssue,
 } from '../types';
 import {
   extractLayoutBlockReferences,
+  getActiveReportLayout,
+  getFilterDefaultValue,
   humanizeFieldName,
+  isVisibleByShowWhen,
   slugify,
 } from '../utils';
 import { reconcileDatasetBlock } from '../datasetBlocks';
@@ -55,6 +87,7 @@ const EMPTY_DEFINITION: ReportDefinition = {
 };
 
 const NONE_SELECT_VALUE = '__none__';
+const ALL_TARGETS_SELECT_VALUE = '__all_targets__';
 
 const DATASET_FIELD_TYPES: ReportDatasetFieldType[] = [
   'string',
@@ -85,6 +118,33 @@ const DATASET_MEASURE_OPS: ReportAggregateFn[] = [
   'max',
 ];
 
+const FILTER_TYPE_OPTIONS: Array<{
+  label: string;
+  value: ReportFilterType;
+}> = [
+  { label: 'Select', value: 'select' },
+  { label: 'Multi-select', value: 'multi_select' },
+  { label: 'Radio', value: 'radio' },
+  { label: 'Checkbox', value: 'checkbox' },
+  { label: 'Time range', value: 'time_range' },
+  { label: 'Number range', value: 'number_range' },
+  { label: 'Text', value: 'text' },
+  { label: 'Search', value: 'search' },
+];
+
+const FILTER_OPERATOR_OPTIONS = [
+  { label: 'Equals', value: 'eq' },
+  { label: 'Not equals', value: 'ne' },
+  { label: 'Contains', value: 'contains' },
+  { label: 'Search', value: 'search' },
+  { label: 'In', value: 'in' },
+  { label: 'Greater than', value: 'gt' },
+  { label: 'Greater or equal', value: 'gte' },
+  { label: 'Less than', value: 'lt' },
+  { label: 'Less or equal', value: 'lte' },
+  { label: 'Between', value: 'between' },
+];
+
 export function ReportEditorPage() {
   const { reportId } = useParams();
   const isEditing = Boolean(reportId);
@@ -93,6 +153,7 @@ export function ReportEditorPage() {
   const { data: schemas = [] } = useObjectSchemaDtos();
   const createReport = useCreateReport();
   const updateReport = useUpdateReport();
+  const validateReport = useValidateReport();
 
   usePageTitle(isEditing ? 'Edit Report' : 'New Report');
 
@@ -130,7 +191,8 @@ export function ReportEditorPage() {
     slug.trim().length > 0 &&
     definitionErrors.length === 0 &&
     !createReport.isPending &&
-    !updateReport.isPending;
+    !updateReport.isPending &&
+    !validateReport.isPending;
 
   const handleNameChange = (value: string) => {
     setName(value);
@@ -221,6 +283,12 @@ export function ReportEditorPage() {
 
     setDefinition(starter);
     setLocalError(null);
+    validateReport.reset();
+  };
+
+  const handleValidate = async () => {
+    setLocalError(null);
+    await validateReport.mutateAsync({ definition });
   };
 
   const handleSave = async () => {
@@ -230,6 +298,12 @@ export function ReportEditorPage() {
     }
 
     setLocalError(null);
+    const validation = await validateReport.mutateAsync({ definition });
+    if (!validation.valid) {
+      setLocalError(validation.errors[0]?.message ?? 'Report is invalid.');
+      return;
+    }
+
     const payload = {
       name: name.trim(),
       slug: slug.trim(),
@@ -364,25 +438,58 @@ export function ReportEditorPage() {
         </section>
 
         <div className="flex flex-col gap-3">
-          <ReportDatasetsEditor
-            definition={definition}
-            schemas={schemas}
-            selectedSchema={selectedSchema}
-            onChange={(nextDefinition) => {
-              setDefinition(nextDefinition);
-              setLocalError(null);
-            }}
-          />
-          <ReportDefinitionBuilder
-            value={definition}
-            schemas={schemas}
-            selectedSchema={selectedSchema}
-            onSelectedSchemaChange={setSelectedSchema}
-            onChange={(nextDefinition) => {
-              setDefinition(nextDefinition);
-              setLocalError(null);
-            }}
-          />
+          <Tabs defaultValue="build" className="w-full">
+            <TabsList className="report-print-hidden">
+              <TabsTrigger value="build">Build</TabsTrigger>
+              <TabsTrigger value="preview">Preview</TabsTrigger>
+              <TabsTrigger value="validation">Validation</TabsTrigger>
+            </TabsList>
+            <TabsContent value="build" className="mt-3 flex flex-col gap-3">
+              <ReportFiltersEditor
+                definition={definition}
+                schemas={schemas}
+                onChange={(nextDefinition) => {
+                  setDefinition(nextDefinition);
+                  setLocalError(null);
+                  validateReport.reset();
+                }}
+              />
+              <ReportDatasetsEditor
+                definition={definition}
+                schemas={schemas}
+                selectedSchema={selectedSchema}
+                onChange={(nextDefinition) => {
+                  setDefinition(nextDefinition);
+                  setLocalError(null);
+                  validateReport.reset();
+                }}
+              />
+              <ReportDefinitionBuilder
+                value={definition}
+                schemas={schemas}
+                selectedSchema={selectedSchema}
+                onSelectedSchemaChange={setSelectedSchema}
+                onChange={(nextDefinition) => {
+                  setDefinition(nextDefinition);
+                  setLocalError(null);
+                  validateReport.reset();
+                }}
+              />
+            </TabsContent>
+            <TabsContent value="preview" className="mt-3">
+              <ReportPreviewPanel definition={definition} />
+            </TabsContent>
+            <TabsContent value="validation" className="mt-3">
+              <ReportValidationPanel
+                localErrors={definitionErrors}
+                serverErrors={validateReport.data?.errors ?? []}
+                serverWarnings={validateReport.data?.warnings ?? []}
+                isValid={validateReport.data?.valid}
+                isPending={validateReport.isPending}
+                onValidate={handleValidate}
+              />
+            </TabsContent>
+          </Tabs>
           {(localError || definitionErrors.length > 0) && (
             <p className="text-sm text-destructive">
               {localError ?? definitionErrors[0]}
@@ -391,6 +498,832 @@ export function ReportEditorPage() {
         </div>
       </div>
     </TilesPage>
+  );
+}
+
+function ReportFiltersEditor({
+  definition,
+  schemas,
+  onChange,
+}: {
+  definition: ReportDefinition;
+  schemas: Schema[];
+  onChange: (definition: ReportDefinition) => void;
+}) {
+  const filters = definition.filters ?? [];
+  const filterableBlocks = definition.blocks.filter((block) =>
+    canMapFilterToBlock(definition, block.id, schemas)
+  );
+
+  const updateFilters = (nextFilters: ReportFilterDefinition[]) => {
+    onChange({ ...definition, filters: nextFilters });
+  };
+
+  const updateFilter = (index: number, filter: ReportFilterDefinition) => {
+    updateFilters(
+      filters.map((current, currentIndex) =>
+        currentIndex === index ? normalizeFilterForType(filter) : current
+      )
+    );
+  };
+
+  const addFilter = () => {
+    updateFilters([...filters, createDefaultReportFilter(definition, schemas)]);
+  };
+
+  return (
+    <section className="flex flex-col gap-4 rounded-lg border bg-background p-4">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="flex items-center gap-2">
+          <h2 className="text-base font-semibold text-foreground">
+            Report filters
+          </h2>
+          <Badge variant="secondary">{filters.length} filters</Badge>
+        </div>
+        <Button type="button" variant="outline" size="sm" onClick={addFilter}>
+          <Filter className="mr-2 size-4" />
+          Add filter
+        </Button>
+      </div>
+
+      {filters.length === 0 ? (
+        <div className="rounded-lg border border-dashed bg-muted/20 p-6 text-sm text-muted-foreground">
+          No report-level filters. Add filters here when viewers should control
+          multiple blocks from the report header.
+        </div>
+      ) : (
+        <div className="flex flex-col gap-3">
+          {filters.map((filter, index) => (
+            <ReportFilterEditorCard
+              key={`filter-${index}-${filter.id}`}
+              filter={filter}
+              definition={definition}
+              schemas={schemas}
+              filterableBlocks={filterableBlocks}
+              onChange={(nextFilter) => updateFilter(index, nextFilter)}
+              onRemove={() =>
+                updateFilters(
+                  filters.filter((_, currentIndex) => currentIndex !== index)
+                )
+              }
+            />
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function ReportFilterEditorCard({
+  filter,
+  definition,
+  schemas,
+  filterableBlocks,
+  onChange,
+  onRemove,
+}: {
+  filter: ReportFilterDefinition;
+  definition: ReportDefinition;
+  schemas: Schema[];
+  filterableBlocks: ReportDefinition['blocks'];
+  onChange: (filter: ReportFilterDefinition) => void;
+  onRemove: () => void;
+}) {
+  const mappings = filter.appliesTo ?? [];
+  const optionsSource = filter.options?.source ?? 'static';
+  const optionsSchemaName =
+    filter.options?.schema ??
+    getBlockSourceSchema(definition, mappings[0]?.blockId ?? '') ??
+    schemas[0]?.name ??
+    '';
+  const optionSchema = schemas.find(
+    (schema) => schema.name === optionsSchemaName
+  );
+  const optionFields = getSchemaFieldNames(optionSchema);
+  const valueField = filter.options?.valueField ?? filter.options?.field ?? '';
+  const labelField = filter.options?.labelField ?? valueField;
+
+  const updateMapping = (
+    index: number,
+    patch: Partial<NonNullable<ReportFilterDefinition['appliesTo']>[number]>
+  ) => {
+    onChange({
+      ...filter,
+      appliesTo: mappings.map((mapping, currentIndex) =>
+        currentIndex === index ? { ...mapping, ...patch } : mapping
+      ),
+    });
+  };
+
+  const updateMappingTarget = (index: number, targetValue: string) => {
+    const mapping = mappings[index];
+    const blockId =
+      targetValue === ALL_TARGETS_SELECT_VALUE ? undefined : targetValue;
+    const fields = getFilterMappingFields(
+      definition,
+      blockId,
+      filterableBlocks,
+      schemas
+    );
+    const nextField = fields.includes(mapping?.field ?? '')
+      ? (mapping?.field ?? '')
+      : (fields[0] ?? mapping?.field ?? '');
+    updateMapping(index, {
+      blockId,
+      field: nextField,
+      op: mapping?.op ?? defaultFilterOperator(filter.type),
+    });
+  };
+
+  const addMapping = () => {
+    const block = filterableBlocks[0];
+    const fields = block
+      ? getFilterFieldNames(definition, block.id, schemas)
+      : getGlobalFilterFieldNames(definition, filterableBlocks, schemas);
+    const field = fields[0] ?? 'id';
+    onChange({
+      ...filter,
+      appliesTo: [
+        ...mappings,
+        { blockId: block?.id, field, op: defaultFilterOperator(filter.type) },
+      ],
+    });
+  };
+
+  const removeMapping = (index: number) => {
+    onChange({
+      ...filter,
+      appliesTo: mappings.filter((_, currentIndex) => currentIndex !== index),
+    });
+  };
+
+  return (
+    <div className="flex flex-col gap-4 rounded-lg border bg-muted/10 p-4">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="truncate text-sm font-semibold text-foreground">
+            {filter.label || filter.id || 'Untitled filter'}
+          </div>
+          <div className="text-xs text-muted-foreground">{filter.id}</div>
+        </div>
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon"
+          className="size-9"
+          onClick={onRemove}
+          aria-label={`Remove ${filter.label || filter.id}`}
+        >
+          <Trash2 className="size-4" />
+        </Button>
+      </div>
+
+      <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+        <EditorField label="Filter ID">
+          <Input
+            value={filter.id}
+            onChange={(event) =>
+              onChange({
+                ...filter,
+                id: slugify(event.target.value).replace(/-/g, '_'),
+              })
+            }
+          />
+        </EditorField>
+        <EditorField label="Label">
+          <Input
+            value={filter.label}
+            onChange={(event) =>
+              onChange({ ...filter, label: event.target.value })
+            }
+          />
+        </EditorField>
+        <EditorField label="Control">
+          <Select
+            value={filter.type}
+            onValueChange={(type) =>
+              onChange({
+                ...filter,
+                type: type as ReportFilterType,
+                default: defaultValueForFilterType(type as ReportFilterType),
+                appliesTo: (filter.appliesTo ?? []).map((mapping) => ({
+                  ...mapping,
+                  op: defaultFilterOperator(type as ReportFilterType),
+                })),
+              })
+            }
+          >
+            <SelectTrigger>
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {FILTER_TYPE_OPTIONS.map((option) => (
+                <SelectItem key={option.value} value={option.value}>
+                  {option.label}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </EditorField>
+        <DefaultValueEditor
+          filter={filter}
+          onChange={(value) => onChange({ ...filter, default: value })}
+        />
+      </div>
+
+      <div className="flex flex-col gap-3 rounded-md border bg-background p-3">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div>
+            <div className="text-sm font-semibold text-foreground">
+              Target mappings
+            </div>
+            <div className="text-xs text-muted-foreground">
+              Map one filter to every block, dataset query, or field it should
+              constrain.
+            </div>
+          </div>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={addMapping}
+          >
+            <Plus className="mr-2 size-4" />
+            Add mapping
+          </Button>
+        </div>
+        {mappings.length === 0 ? (
+          <div className="rounded-md border border-dashed bg-muted/20 p-3 text-sm text-muted-foreground">
+            No targets. The filter will render but will not constrain report
+            data.
+          </div>
+        ) : (
+          <div className="flex flex-col gap-2">
+            {mappings.map((mapping, mappingIndex) => {
+              const targetValue = mapping.blockId ?? ALL_TARGETS_SELECT_VALUE;
+              const targetFields = getFilterMappingFields(
+                definition,
+                mapping.blockId,
+                filterableBlocks,
+                schemas
+              );
+              return (
+                <div
+                  key={`mapping-${mappingIndex}-${mapping.blockId ?? 'all'}`}
+                  className="grid gap-2 rounded-md border p-3 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_12rem_40px]"
+                >
+                  <EditorField label="Applies to">
+                    <Select
+                      value={targetValue}
+                      onValueChange={(value) =>
+                        updateMappingTarget(mappingIndex, value)
+                      }
+                    >
+                      <SelectTrigger>
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value={ALL_TARGETS_SELECT_VALUE}>
+                          All compatible blocks and datasets
+                        </SelectItem>
+                        {filterableBlocks.map((block) => (
+                          <SelectItem key={block.id} value={block.id}>
+                            {block.title || block.id}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </EditorField>
+                  <EditorField label="Field">
+                    <Select
+                      value={mapping.field || NONE_SELECT_VALUE}
+                      disabled={targetFields.length === 0}
+                      onValueChange={(field) =>
+                        updateMapping(mappingIndex, { field })
+                      }
+                    >
+                      <SelectTrigger>
+                        <SelectValue placeholder="Select field" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value={NONE_SELECT_VALUE} disabled>
+                          Select field
+                        </SelectItem>
+                        {targetFields.map((field) => (
+                          <SelectItem key={field} value={field}>
+                            {field}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </EditorField>
+                  <EditorField label="Operator">
+                    <Select
+                      value={mapping.op ?? defaultFilterOperator(filter.type)}
+                      onValueChange={(op) =>
+                        updateMapping(mappingIndex, { op })
+                      }
+                    >
+                      <SelectTrigger>
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {FILTER_OPERATOR_OPTIONS.map((option) => (
+                          <SelectItem key={option.value} value={option.value}>
+                            {option.label}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </EditorField>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon"
+                    className="mt-6 size-9"
+                    onClick={() => removeMapping(mappingIndex)}
+                    aria-label="Remove mapping"
+                  >
+                    <Trash2 className="size-4" />
+                  </Button>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+
+      <div className="grid gap-3 md:grid-cols-2">
+        <label className="flex min-h-10 items-center gap-2 rounded-md border bg-background px-3 py-2 text-sm">
+          <Checkbox
+            checked={Boolean(filter.required)}
+            onCheckedChange={(checked) =>
+              onChange({ ...filter, required: Boolean(checked) })
+            }
+          />
+          Required
+        </label>
+        <label className="flex min-h-10 items-center gap-2 rounded-md border bg-background px-3 py-2 text-sm">
+          <Checkbox
+            checked={Boolean(filter.strictWhenReferenced)}
+            onCheckedChange={(checked) =>
+              onChange({ ...filter, strictWhenReferenced: Boolean(checked) })
+            }
+          />
+          Empty value hides dependent blocks
+        </label>
+      </div>
+
+      {usesOptions(filter.type) && (
+        <div className="flex flex-col gap-3 rounded-md border bg-background p-3">
+          <div className="grid gap-3 md:grid-cols-[12rem_minmax(0,1fr)]">
+            <EditorField label="Options source">
+              <Select
+                value={optionsSource}
+                onValueChange={(source) =>
+                  onChange({
+                    ...filter,
+                    options:
+                      source === 'object_model'
+                        ? {
+                            source: 'object_model',
+                            schema: optionsSchemaName,
+                            valueField: valueField || optionFields[0] || '',
+                            labelField:
+                              labelField || valueField || optionFields[0] || '',
+                            search: true,
+                          }
+                        : {
+                            source: 'static',
+                            values: filter.options?.values ?? [],
+                          },
+                  })
+                }
+              >
+                <SelectTrigger>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="static">Static values</SelectItem>
+                  <SelectItem value="object_model">
+                    Object Model lookup
+                  </SelectItem>
+                </SelectContent>
+              </Select>
+            </EditorField>
+            {optionsSource === 'static' ? (
+              <EditorField label="Static values">
+                <Input
+                  value={formatStaticFilterOptions(filter)}
+                  placeholder="open, closed, pending"
+                  onChange={(event) =>
+                    onChange({
+                      ...filter,
+                      options: {
+                        source: 'static',
+                        values: parseStaticFilterOptions(event.target.value),
+                      },
+                    })
+                  }
+                />
+              </EditorField>
+            ) : (
+              <div className="grid gap-3 md:grid-cols-3">
+                <EditorField label="Options schema">
+                  <Select
+                    value={optionsSchemaName}
+                    onValueChange={(schema) => {
+                      const fields = getSchemaFieldNames(
+                        schemas.find((candidate) => candidate.name === schema)
+                      );
+                      onChange({
+                        ...filter,
+                        options: {
+                          ...filter.options,
+                          source: 'object_model',
+                          schema,
+                          valueField: fields[0] ?? '',
+                          labelField: fields[0] ?? '',
+                          search: filter.options?.search ?? true,
+                        },
+                      });
+                    }}
+                  >
+                    <SelectTrigger>
+                      <SelectValue placeholder="Select schema" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {schemas.map((schema) => (
+                        <SelectItem key={schema.id} value={schema.name}>
+                          {schema.name}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </EditorField>
+                <EditorField label="Value field">
+                  <Select
+                    value={valueField || NONE_SELECT_VALUE}
+                    onValueChange={(field) =>
+                      onChange({
+                        ...filter,
+                        options: {
+                          ...filter.options,
+                          source: 'object_model',
+                          schema: optionsSchemaName,
+                          valueField: field,
+                          labelField: labelField || field,
+                          search: filter.options?.search ?? true,
+                        },
+                      })
+                    }
+                  >
+                    <SelectTrigger>
+                      <SelectValue placeholder="Field" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value={NONE_SELECT_VALUE} disabled>
+                        Select field
+                      </SelectItem>
+                      {optionFields.map((field) => (
+                        <SelectItem key={field} value={field}>
+                          {field}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </EditorField>
+                <EditorField label="Label field">
+                  <Select
+                    value={labelField || NONE_SELECT_VALUE}
+                    onValueChange={(field) =>
+                      onChange({
+                        ...filter,
+                        options: {
+                          ...filter.options,
+                          source: 'object_model',
+                          schema: optionsSchemaName,
+                          valueField: valueField || field,
+                          labelField: field,
+                          search: filter.options?.search ?? true,
+                        },
+                      })
+                    }
+                  >
+                    <SelectTrigger>
+                      <SelectValue placeholder="Field" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value={NONE_SELECT_VALUE} disabled>
+                        Select field
+                      </SelectItem>
+                      {optionFields.map((field) => (
+                        <SelectItem key={field} value={field}>
+                          {field}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </EditorField>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function DefaultValueEditor({
+  filter,
+  onChange,
+}: {
+  filter: ReportFilterDefinition;
+  onChange: (value: unknown) => void;
+}) {
+  if (filter.type === 'checkbox') {
+    return (
+      <EditorField label="Default">
+        <label className="flex min-h-10 items-center gap-2 rounded-md border bg-background px-3 py-2 text-sm">
+          <Checkbox
+            checked={Boolean(filter.default)}
+            onCheckedChange={(checked) => onChange(Boolean(checked))}
+          />
+          Checked
+        </label>
+      </EditorField>
+    );
+  }
+
+  if (filter.type === 'time_range') {
+    return (
+      <EditorField label="Default">
+        <Select
+          value={String(filter.default ?? 'last_30_days')}
+          onValueChange={onChange}
+        >
+          <SelectTrigger>
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="today">Today</SelectItem>
+            <SelectItem value="yesterday">Yesterday</SelectItem>
+            <SelectItem value="last_7_days">Last 7 days</SelectItem>
+            <SelectItem value="last_30_days">Last 30 days</SelectItem>
+            <SelectItem value="this_month">This month</SelectItem>
+            <SelectItem value="last_month">Last month</SelectItem>
+            <SelectItem value="year_to_date">Year to date</SelectItem>
+          </SelectContent>
+        </Select>
+      </EditorField>
+    );
+  }
+
+  if (filter.type === 'multi_select') {
+    return (
+      <EditorField label="Default values">
+        <Input
+          value={Array.isArray(filter.default) ? filter.default.join(', ') : ''}
+          placeholder="open, pending"
+          onChange={(event) =>
+            onChange(
+              event.target.value
+                .split(',')
+                .map((part) => part.trim())
+                .filter(Boolean)
+            )
+          }
+        />
+      </EditorField>
+    );
+  }
+
+  return (
+    <EditorField label="Default">
+      <Input
+        value={String(filter.default ?? '')}
+        onChange={(event) => onChange(event.target.value)}
+      />
+    </EditorField>
+  );
+}
+
+function ReportPreviewPanel({ definition }: { definition: ReportDefinition }) {
+  const [filters, setFilters] = useState<Record<string, unknown>>(() =>
+    defaultReportFilterValues(definition)
+  );
+
+  useEffect(() => {
+    setFilters(defaultReportFilterValues(definition));
+  }, [definition.filters]);
+
+  const previewDefinition = useMemo(
+    () => createPreviewDefinition(definition),
+    [definition]
+  );
+  const visibleBlocks = useMemo(
+    () => getPreviewBlocks(previewDefinition, filters),
+    [filters, previewDefinition]
+  );
+  const previewRequest = useMemo(
+    () => ({
+      definition: previewDefinition,
+      filters,
+      blocks: visibleBlocks.map((block) => ({
+        id: block.id,
+        page:
+          block.type === 'table'
+            ? {
+                offset: 0,
+                size: block.table?.pagination?.defaultPageSize ?? 50,
+              }
+            : undefined,
+        sort: block.table?.defaultSort ?? [],
+      })),
+      timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+    }),
+    [filters, previewDefinition, visibleBlocks]
+  );
+  const { data, isFetching, isError, error, refetch } = useReportPreview(
+    previewRequest,
+    visibleBlocks.length > 0
+  );
+
+  return (
+    <section className="flex flex-col gap-4 rounded-lg border bg-background p-4">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="flex items-center gap-2">
+          <h2 className="text-base font-semibold text-foreground">Preview</h2>
+          <Badge variant="secondary">{visibleBlocks.length} blocks</Badge>
+        </div>
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          disabled={isFetching}
+          onClick={() => refetch()}
+        >
+          <RefreshCw className="mr-2 size-4" />
+          Refresh
+        </Button>
+      </div>
+
+      <ReportFilterBar
+        definition={previewDefinition}
+        values={filters}
+        onChange={(filterId, value) =>
+          setFilters((current) => ({ ...current, [filterId]: value }))
+        }
+      />
+
+      {isError && (
+        <Alert variant="destructive">
+          <AlertTriangle className="size-4" />
+          <AlertTitle>Preview failed</AlertTitle>
+          <AlertDescription>{error.message}</AlertDescription>
+        </Alert>
+      )}
+
+      {visibleBlocks.length === 0 ? (
+        <div className="rounded-lg border border-dashed bg-muted/20 p-6 text-sm text-muted-foreground">
+          Add a block to preview this report.
+        </div>
+      ) : (
+        <div className={isFetching ? 'opacity-60' : undefined}>
+          <ReportRenderer
+            reportId="preview"
+            definition={previewDefinition}
+            renderResponse={data}
+            filters={filters}
+          />
+        </div>
+      )}
+    </section>
+  );
+}
+
+function ReportValidationPanel({
+  localErrors,
+  serverErrors,
+  serverWarnings,
+  isValid,
+  isPending,
+  onValidate,
+}: {
+  localErrors: string[];
+  serverErrors: ReportValidationIssue[];
+  serverWarnings: ReportValidationIssue[];
+  isValid: boolean | undefined;
+  isPending: boolean;
+  onValidate: () => void | Promise<void>;
+}) {
+  return (
+    <section className="flex flex-col gap-4 rounded-lg border bg-background p-4">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="flex items-center gap-2">
+          <h2 className="text-base font-semibold text-foreground">
+            Validation
+          </h2>
+          {isValid === true && localErrors.length === 0 ? (
+            <Badge variant="success">Valid</Badge>
+          ) : isValid === false || localErrors.length > 0 ? (
+            <Badge variant="destructive">Needs attention</Badge>
+          ) : (
+            <Badge variant="secondary">Not checked</Badge>
+          )}
+        </div>
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          disabled={isPending}
+          onClick={onValidate}
+        >
+          {isPending ? (
+            <RefreshCw className="mr-2 size-4 animate-spin" />
+          ) : (
+            <CheckCircle2 className="mr-2 size-4" />
+          )}
+          Validate
+        </Button>
+      </div>
+
+      {localErrors.length === 0 &&
+      serverErrors.length === 0 &&
+      serverWarnings.length === 0 &&
+      isValid === true ? (
+        <Alert>
+          <CheckCircle2 className="size-4" />
+          <AlertTitle>Ready to save</AlertTitle>
+          <AlertDescription>
+            The report definition passed local and server validation.
+          </AlertDescription>
+        </Alert>
+      ) : (
+        <div className="flex flex-col gap-3">
+          {localErrors.length > 0 && (
+            <ValidationIssueList
+              title="Local checks"
+              issues={localErrors.map((message) => ({
+                path: '$',
+                code: 'LOCAL_VALIDATION',
+                message,
+              }))}
+            />
+          )}
+          {serverErrors.length > 0 && (
+            <ValidationIssueList title="Server errors" issues={serverErrors} />
+          )}
+          {serverWarnings.length > 0 && (
+            <ValidationIssueList
+              title="Server warnings"
+              issues={serverWarnings}
+            />
+          )}
+          {localErrors.length === 0 &&
+            serverErrors.length === 0 &&
+            serverWarnings.length === 0 && (
+              <div className="rounded-lg border border-dashed bg-muted/20 p-6 text-sm text-muted-foreground">
+                Run validation to check report syntax, schema references,
+                filters, workflows, and block configuration.
+              </div>
+            )}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function ValidationIssueList({
+  title,
+  issues,
+}: {
+  title: string;
+  issues: ReportValidationIssue[];
+}) {
+  return (
+    <div className="rounded-lg border bg-muted/10 p-3">
+      <div className="mb-2 text-sm font-semibold text-foreground">{title}</div>
+      <div className="flex flex-col gap-2">
+        {issues.map((issue, index) => (
+          <div
+            key={`${issue.code}-${issue.path}-${index}`}
+            className="rounded-md border bg-background p-3 text-sm"
+          >
+            <div className="flex flex-wrap items-center gap-2">
+              <Badge variant="outline">{issue.code}</Badge>
+              <span className="text-xs text-muted-foreground">
+                {issue.path}
+              </span>
+            </div>
+            <p className="mt-2 text-foreground">{issue.message}</p>
+            {issue.hint && (
+              <p className="mt-1 text-xs text-muted-foreground">{issue.hint}</p>
+            )}
+          </div>
+        ))}
+      </div>
+    </div>
   );
 }
 
@@ -1113,6 +2046,274 @@ function inferDatasetFormat(field: string): ReportDatasetValueFormat {
   return 'string';
 }
 
+function createDefaultReportFilter(
+  definition: ReportDefinition,
+  schemas: Schema[]
+): ReportFilterDefinition {
+  const block = definition.blocks.find((candidate) =>
+    canMapFilterToBlock(definition, candidate.id, schemas)
+  );
+  const fields = block
+    ? getFilterFieldNames(definition, block.id, schemas)
+    : [];
+  const field =
+    fields.find((candidate) => /status|state|type|category/i.test(candidate)) ??
+    fields[0] ??
+    'id';
+  const id = uniqueReportFilterId(definition.filters, field);
+
+  return {
+    id,
+    label: humanizeFieldName(field),
+    type: 'select',
+    default: '',
+    required: false,
+    strictWhenReferenced: false,
+    options: { source: 'static', values: [] },
+    appliesTo: block ? [{ blockId: block.id, field, op: 'eq' }] : [],
+  };
+}
+
+function normalizeFilterForType(
+  filter: ReportFilterDefinition
+): ReportFilterDefinition {
+  if (!usesOptions(filter.type) && filter.options) {
+    const { options: _options, ...rest } = filter;
+    return rest;
+  }
+
+  if (usesOptions(filter.type) && !filter.options) {
+    return { ...filter, options: { source: 'static', values: [] } };
+  }
+
+  return filter;
+}
+
+function defaultValueForFilterType(type: ReportFilterType): unknown {
+  if (type === 'multi_select') return [];
+  if (type === 'checkbox') return false;
+  if (type === 'time_range') return 'last_30_days';
+  if (type === 'number_range') return {};
+  return '';
+}
+
+function defaultFilterOperator(type: ReportFilterType): string {
+  if (type === 'multi_select') return 'in';
+  if (type === 'time_range' || type === 'number_range') return 'between';
+  if (type === 'search') return 'search';
+  if (type === 'text') return 'contains';
+  return 'eq';
+}
+
+function usesOptions(type: ReportFilterType): boolean {
+  return type === 'select' || type === 'multi_select' || type === 'radio';
+}
+
+function uniqueReportFilterId(
+  filters: ReportFilterDefinition[],
+  seed: string
+): string {
+  const existingIds = new Set(filters.map((filter) => filter.id));
+  const base = slugify(seed || 'filter').replace(/-/g, '_') || 'filter';
+  let candidate = base.endsWith('_filter') ? base : `${base}_filter`;
+  let suffix = 1;
+  while (existingIds.has(candidate)) {
+    suffix += 1;
+    candidate = `${base}_filter_${suffix}`;
+  }
+  return candidate;
+}
+
+function canMapFilterToBlock(
+  definition: ReportDefinition,
+  blockId: string,
+  schemas: Schema[]
+): boolean {
+  return getFilterFieldNames(definition, blockId, schemas).length > 0;
+}
+
+function getFilterFieldNames(
+  definition: ReportDefinition,
+  blockId: string,
+  schemas: Schema[]
+): string[] {
+  const block = definition.blocks.find((candidate) => candidate.id === blockId);
+  if (!block) return [];
+
+  const schemaName = getBlockSourceSchema(definition, blockId);
+  const schema = schemas.find((candidate) => candidate.name === schemaName);
+  const schemaFields = getSchemaFieldNamesWithSystem(schema);
+  if (schemaFields.length > 0) return schemaFields;
+
+  const configuredFields = [
+    ...(block.table?.columns ?? []).map((column) => column.field),
+    ...(block.source.groupBy ?? []),
+    ...(block.source.aggregates ?? []).flatMap((aggregate) =>
+      aggregate.field ? [aggregate.field] : []
+    ),
+  ];
+  return Array.from(new Set(configuredFields)).filter(Boolean);
+}
+
+function getFilterMappingFields(
+  definition: ReportDefinition,
+  blockId: string | undefined,
+  filterableBlocks: ReportDefinition['blocks'],
+  schemas: Schema[]
+): string[] {
+  if (blockId) {
+    return getFilterFieldNames(definition, blockId, schemas);
+  }
+  return getGlobalFilterFieldNames(definition, filterableBlocks, schemas);
+}
+
+function getGlobalFilterFieldNames(
+  definition: ReportDefinition,
+  filterableBlocks: ReportDefinition['blocks'],
+  schemas: Schema[]
+): string[] {
+  const fields = [
+    ...filterableBlocks.flatMap((block) =>
+      getFilterFieldNames(definition, block.id, schemas)
+    ),
+    ...(definition.datasets ?? []).flatMap((dataset) => [
+      ...dataset.dimensions.map((dimension) => dimension.field),
+      ...(dataset.timeDimension ? [dataset.timeDimension] : []),
+      ...dataset.measures.flatMap((measure) =>
+        measure.field ? [measure.field] : []
+      ),
+    ]),
+  ];
+  return Array.from(new Set(fields)).filter(Boolean);
+}
+
+function getBlockSourceSchema(
+  definition: ReportDefinition,
+  blockId: string
+): string | undefined {
+  const block = definition.blocks.find((candidate) => candidate.id === blockId);
+  if (!block) return undefined;
+  if (block.dataset) {
+    return definition.datasets?.find(
+      (dataset) => dataset.id === block.dataset?.id
+    )?.source.schema;
+  }
+  return block.source?.schema || undefined;
+}
+
+function getSchemaFieldNamesWithSystem(schema: Schema | undefined): string[] {
+  const fields = (schema?.columns ?? [])
+    .map((column) => column.name)
+    .filter(Boolean);
+  return Array.from(new Set(['id', ...fields, 'createdAt', 'updatedAt']));
+}
+
+function formatStaticFilterOptions(filter: ReportFilterDefinition): string {
+  return (
+    filter.options?.values?.map((option) => String(option.value)).join(', ') ??
+    ''
+  );
+}
+
+function parseStaticFilterOptions(value: string) {
+  return value
+    .split(',')
+    .map((part) => part.trim())
+    .filter(Boolean)
+    .map((part) => ({ label: humanizeFieldName(part), value: part }));
+}
+
+function defaultReportFilterValues(definition: ReportDefinition) {
+  return Object.fromEntries(
+    definition.filters.map((filter) => [
+      filter.id,
+      getFilterDefaultValue(filter),
+    ])
+  );
+}
+
+function createPreviewDefinition(
+  definition: ReportDefinition
+): ReportDefinition {
+  return {
+    ...definition,
+    blocks: definition.blocks.map(sanitizePreviewBlock),
+  };
+}
+
+function sanitizePreviewBlock(
+  block: ReportBlockDefinition
+): ReportBlockDefinition {
+  if (block.type === 'actions') {
+    return {
+      id: block.id,
+      type: 'markdown',
+      title: block.title,
+      lazy: false,
+      source: { schema: '', mode: 'filter' },
+      markdown: {
+        content:
+          '_Workflow action blocks are hidden in editor preview to avoid accidental execution._',
+      },
+      filters: [],
+      showWhen: block.showWhen,
+    };
+  }
+
+  return {
+    ...block,
+    lazy: false,
+    actions: undefined,
+    interactions: [],
+    table: block.table
+      ? {
+          ...block.table,
+          selectable: false,
+          actions: [],
+          columns: block.table.columns?.map((column) => ({
+            ...column,
+            editable: false,
+            workflowAction: undefined,
+            interactionButtons: [],
+          })),
+        }
+      : block.table,
+    card: block.card ? sanitizePreviewCard(block.card) : block.card,
+  };
+}
+
+function sanitizePreviewCard(card: ReportCardConfig): ReportCardConfig {
+  return {
+    ...card,
+    groups: card.groups.map((group) => ({
+      ...group,
+      fields: group.fields.map((field) => ({
+        ...field,
+        editable: false,
+        workflowAction: undefined,
+        subcard: field.subcard
+          ? sanitizePreviewCard(field.subcard)
+          : field.subcard,
+      })),
+    })),
+  };
+}
+
+function getPreviewBlocks(
+  definition: ReportDefinition,
+  filters: Record<string, unknown>
+) {
+  const layout = getActiveReportLayout(definition);
+  const visibleLayoutBlockIds = new Set(
+    layout.length > 0 ? extractLayoutBlockReferences(layout) : []
+  );
+
+  return definition.blocks.filter((block) => {
+    if (!isVisibleByShowWhen(block.showWhen, filters)) return false;
+    return layout.length === 0 || visibleLayoutBlockIds.has(block.id);
+  });
+}
+
 function uniqueDatasetId(
   datasets: ReportDatasetDefinition[],
   baseId: string
@@ -1140,7 +2341,33 @@ function uniqueDatasetFieldId(existing: Set<string>, baseId: string): string {
 function validateReportDefinition(definition: ReportDefinition): string[] {
   const errors: string[] = [];
   const blockIds = new Set<string>();
+  const declaredBlockIds = new Set(definition.blocks.map((block) => block.id));
   const datasetIds = new Set<string>();
+  const filterIds = new Set<string>();
+
+  for (const filter of definition.filters ?? []) {
+    if (!filter.id.trim()) {
+      errors.push('Every report filter needs an ID.');
+      continue;
+    }
+    if (filterIds.has(filter.id)) {
+      errors.push(`Duplicate report filter ID: ${filter.id}`);
+    }
+    filterIds.add(filter.id);
+    if (!filter.label.trim()) {
+      errors.push(`Filter "${filter.id}" needs a label.`);
+    }
+    for (const mapping of filter.appliesTo ?? []) {
+      if (!mapping.field.trim()) {
+        errors.push(`Filter "${filter.id}" has a mapping without a field.`);
+      }
+      if (mapping.blockId && !declaredBlockIds.has(mapping.blockId)) {
+        errors.push(
+          `Filter "${filter.id}" maps to unknown block: ${mapping.blockId}`
+        );
+      }
+    }
+  }
 
   for (const dataset of definition.datasets ?? []) {
     if (!dataset.id.trim()) {
@@ -1218,7 +2445,9 @@ function validateReportDefinition(definition: ReportDefinition): string[] {
     blockIds.add(block.id);
     const sourceKind = block.source.kind ?? 'object_model';
     const isStaticMarkdown =
-      block.type === 'markdown' && !block.dataset && !block.source.schema.trim();
+      block.type === 'markdown' &&
+      !block.dataset &&
+      !block.source.schema.trim();
     if (block.type === 'markdown' && !block.markdown?.content) {
       errors.push(`Block "${block.id}" needs markdown.content.`);
     }
@@ -1242,6 +2471,32 @@ function validateReportDefinition(definition: ReportDefinition): string[] {
       errors.push(
         `Block "${block.id}" references unknown dataset: ${block.dataset.id}`
       );
+    }
+    for (const datasetFilter of block.dataset?.datasetFilters ?? []) {
+      if (!datasetFilter.field.trim()) {
+        errors.push(
+          `Block "${block.id}" has a dataset filter without a field.`
+        );
+      }
+    }
+    if (!block.dataset && sourceKind === 'object_model') {
+      const joinAliases = new Set<string>();
+      for (const join of block.source.join ?? []) {
+        if (!join.schema.trim()) {
+          errors.push(`Block "${block.id}" has a join without a schema.`);
+        }
+        if (!join.parentField.trim()) {
+          errors.push(`Block "${block.id}" has a join without a parent field.`);
+        }
+        if (!join.field.trim()) {
+          errors.push(`Block "${block.id}" has a join without a joined field.`);
+        }
+        const alias = join.alias?.trim() || join.schema;
+        if (joinAliases.has(alias)) {
+          errors.push(`Block "${block.id}" has duplicate join alias: ${alias}`);
+        }
+        joinAliases.add(alias);
+      }
     }
   }
 

@@ -177,6 +177,8 @@ export const queryKeys = {
     lists: () => [...queryKeys.reports.all, 'list'] as const,
     details: () => [...queryKeys.reports.all, 'detail'] as const,
     byId: (id: string) => [...queryKeys.reports.details(), id] as const,
+    preview: (request: unknown) =>
+      [...queryKeys.reports.all, 'preview', request] as const,
     render: (id: string, request: unknown) =>
       [...queryKeys.reports.byId(id), 'render', request] as const,
     block: (id: string, blockId: string, request: unknown) =>

@@ -551,6 +551,75 @@ impl ReportService {
         })
     }
 
+    pub async fn preview_report(
+        &self,
+        tenant_id: &str,
+        request: ReportPreviewRequest,
+    ) -> Result<ReportRenderResponse, ReportServiceError> {
+        self.validate_definition(tenant_id, &request.definition)
+            .await?;
+
+        let resolved_filters = resolve_filters(&request.definition, &request.filters);
+        let requested_blocks = requested_blocks(&request.definition, request.blocks.as_deref());
+        let request_by_id: HashMap<_, _> = request
+            .blocks
+            .unwrap_or_default()
+            .into_iter()
+            .map(|block| (block.id.clone(), block))
+            .collect();
+
+        let mut blocks = HashMap::new();
+        let mut errors = Vec::new();
+
+        for block in requested_blocks {
+            let block_request = request_by_id.get(&block.id);
+            let result = self
+                .render_block(
+                    tenant_id,
+                    &request.definition,
+                    block,
+                    &resolved_filters,
+                    block_request,
+                )
+                .await;
+
+            match result {
+                Ok(rendered) => {
+                    blocks.insert(block.id.clone(), rendered);
+                }
+                Err(error) => {
+                    let block_error = ReportBlockError {
+                        code: "BLOCK_RENDER_FAILED".to_string(),
+                        message: error.to_string(),
+                        block_id: Some(block.id.clone()),
+                    };
+                    errors.push(block_error.clone());
+                    blocks.insert(
+                        block.id.clone(),
+                        ReportBlockRenderResult {
+                            block_type: block.block_type,
+                            status: ReportBlockStatus::Error,
+                            title: block.title.clone(),
+                            data: None,
+                            error: Some(block_error),
+                        },
+                    );
+                }
+            }
+        }
+
+        Ok(ReportRenderResponse {
+            success: true,
+            report: ReportRenderMetadata {
+                id: "preview".to_string(),
+                definition_version: request.definition.definition_version,
+            },
+            resolved_filters,
+            blocks,
+            errors,
+        })
+    }
+
     pub async fn render_report_block(
         &self,
         tenant_id: &str,

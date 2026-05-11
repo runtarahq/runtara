@@ -1459,6 +1459,17 @@ pub struct ReportRenderRequest {
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct ReportPreviewRequest {
+    pub definition: ReportDefinition,
+    #[serde(default)]
+    pub filters: HashMap<String, Value>,
+    #[serde(default)]
+    pub blocks: Option<Vec<ReportBlockDataRequest>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timezone: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct ReportFilterOptionsRequest {
     #[serde(default)]
     pub filters: HashMap<String, Value>,

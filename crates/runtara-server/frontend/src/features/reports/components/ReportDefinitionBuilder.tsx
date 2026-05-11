@@ -34,11 +34,13 @@ import {
   ReportBlockDefinition,
   ReportBlockType,
   ReportChartKind,
+  ReportDatasetFilterRequest,
   ReportDatasetDefinition,
   ReportDefinition,
   ReportFilterDefinition,
   ReportFilterType,
   ReportLayoutNode,
+  ReportSourceJoin,
   ReportTableColumn,
 } from '../types';
 import {
@@ -121,6 +123,8 @@ const AGGREGATE_OPTIONS: Array<{
   { label: 'Average', value: 'avg' },
   { label: 'Minimum', value: 'min' },
   { label: 'Maximum', value: 'max' },
+  { label: 'First value', value: 'first_value' },
+  { label: 'Last value', value: 'last_value' },
 ];
 
 const FILTER_TYPE_OPTIONS: Array<{
@@ -131,6 +135,7 @@ const FILTER_TYPE_OPTIONS: Array<{
   { label: 'Multi-select', value: 'multi_select' },
   { label: 'Radio', value: 'radio' },
   { label: 'Time range', value: 'time_range' },
+  { label: 'Number range', value: 'number_range' },
   { label: 'Text', value: 'text' },
   { label: 'Search', value: 'search' },
   { label: 'Checkbox', value: 'checkbox' },
@@ -145,6 +150,44 @@ const CHART_KIND_OPTIONS: Array<{
   { label: 'Area', value: 'area' },
   { label: 'Pie', value: 'pie' },
   { label: 'Donut', value: 'donut' },
+];
+
+const COLUMN_FORMAT_OPTIONS = [
+  { label: 'Default', value: NONE_VALUE },
+  { label: 'Number', value: 'number' },
+  { label: 'Decimal', value: 'decimal' },
+  { label: 'Currency', value: 'currency' },
+  { label: 'Percent', value: 'percent' },
+  { label: 'Date', value: 'date' },
+  { label: 'Datetime', value: 'datetime' },
+  { label: 'Pill', value: 'pill' },
+  { label: 'Bar indicator', value: 'bar_indicator' },
+  { label: 'JSON', value: 'json' },
+  { label: 'Markdown', value: 'markdown' },
+];
+
+const ALIGN_OPTIONS = [
+  { label: 'Left', value: 'left' },
+  { label: 'Center', value: 'center' },
+  { label: 'Right', value: 'right' },
+];
+
+const JOIN_KIND_OPTIONS = [
+  { label: 'Left join', value: 'left' },
+  { label: 'Inner join', value: 'inner' },
+];
+
+const CONDITION_OPERATOR_OPTIONS = [
+  { label: 'Equals', value: 'eq' },
+  { label: 'Not equals', value: 'ne' },
+  { label: 'Contains', value: 'contains' },
+  { label: 'Search', value: 'search' },
+  { label: 'In', value: 'in' },
+  { label: 'Greater than', value: 'gt' },
+  { label: 'Greater or equal', value: 'gte' },
+  { label: 'Less than', value: 'lt' },
+  { label: 'Less or equal', value: 'lte' },
+  { label: 'Between', value: 'between' },
 ];
 
 export function ReportDefinitionBuilder({
@@ -685,7 +728,8 @@ function ReportBlockEditor({
     : undefined;
   const schemaName = source.schema || dataset?.source.schema || '';
   const schema = schemas.find((candidate) => candidate.name === schemaName);
-  const fields = getSchemaFields(schema);
+  const baseFields = getSchemaFields(schema);
+  const fields = getBlockAvailableFields(schema, source.join, schemas);
   const isDatasetBlock = Boolean(block.dataset);
   const isWorkflowRuntimeBlock = source.kind === 'workflow_runtime';
 
@@ -909,6 +953,17 @@ function ReportBlockEditor({
         </div>
       </div>
 
+      {!isDatasetBlock &&
+        !isWorkflowRuntimeBlock &&
+        source.kind !== 'system' && (
+          <SourceJoinsEditor
+            block={block}
+            schemas={schemas}
+            baseFields={baseFields}
+            onChange={onChange}
+          />
+        )}
+
       <Separator />
 
       {isDatasetBlock ? (
@@ -935,6 +990,13 @@ function ReportBlockEditor({
           )}
           {blockType === 'chart' && (
             <ChartBlockSettings
+              block={block}
+              fields={fields}
+              onChange={onChange}
+            />
+          )}
+          {blockType === 'card' && (
+            <CardBlockSettings
               block={block}
               fields={fields}
               onChange={onChange}
@@ -983,6 +1045,8 @@ function DatasetBlockSettings({
   const selectedMeasures = new Set(measures);
   const outputFields = datasetQueryOutputFields(query);
   const sort = query.orderBy?.[0];
+  const datasetFilters = query.datasetFilters ?? [];
+  const datasetFilterFields = datasetFilterableFields(dataset);
 
   const updateQuery = (nextQuery: ReportBlockDatasetQuery) => {
     onChange(reconcileDatasetBlock(block, dataset, nextQuery));
@@ -990,6 +1054,32 @@ function DatasetBlockSettings({
 
   const updateBlock = (patch: Partial<ReportBlockDefinition>) => {
     onChange({ ...block, ...patch });
+  };
+
+  const updateDatasetFilter = (
+    index: number,
+    patch: Partial<ReportDatasetFilterRequest>
+  ) => {
+    updateQuery({
+      ...query,
+      datasetFilters: datasetFilters.map((filter, currentIndex) =>
+        currentIndex === index ? { ...filter, ...patch } : filter
+      ),
+    });
+  };
+
+  const addDatasetFilter = () => {
+    updateQuery({
+      ...query,
+      datasetFilters: [
+        ...datasetFilters,
+        {
+          field: datasetFilterFields[0] ?? outputFields[0] ?? '',
+          op: 'eq',
+          value: '',
+        },
+      ],
+    });
   };
 
   return (
@@ -1069,6 +1159,117 @@ function DatasetBlockSettings({
             }
           />
         </Field>
+      </div>
+
+      <div className="flex flex-col gap-3 rounded-md border bg-muted/10 p-3">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="flex items-center gap-2">
+            <Label>Dataset filters</Label>
+            <Badge variant="secondary">{datasetFilters.length} filters</Badge>
+          </div>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            disabled={datasetFilterFields.length === 0}
+            onClick={addDatasetFilter}
+          >
+            <Plus className="mr-2 size-4" />
+            Add filter
+          </Button>
+        </div>
+        {datasetFilters.length === 0 ? (
+          <div className="rounded-md border border-dashed bg-background p-3 text-sm text-muted-foreground">
+            No fixed dataset filters. Use these for block-specific constraints
+            that should always apply before rendering.
+          </div>
+        ) : (
+          <div className="flex flex-col gap-2">
+            {datasetFilters.map((filter, index) => (
+              <div
+                key={`dataset-filter-${index}-${filter.field}`}
+                className="grid gap-2 rounded-md border bg-background p-3 md:grid-cols-[minmax(0,1fr)_12rem_minmax(0,1fr)_40px]"
+              >
+                <Field label="Field">
+                  <Select
+                    value={filter.field || NONE_VALUE}
+                    onValueChange={(field) =>
+                      updateDatasetFilter(index, { field })
+                    }
+                  >
+                    <SelectTrigger>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value={NONE_VALUE} disabled>
+                        Select field
+                      </SelectItem>
+                      {datasetFilterFields.map((field) => (
+                        <SelectItem key={field} value={field}>
+                          {datasetFieldLabel(dataset, field)}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </Field>
+                <Field label="Operator">
+                  <Select
+                    value={filter.op ?? 'eq'}
+                    onValueChange={(op) => updateDatasetFilter(index, { op })}
+                  >
+                    <SelectTrigger>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {CONDITION_OPERATOR_OPTIONS.map((option) => (
+                        <SelectItem key={option.value} value={option.value}>
+                          {option.label}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </Field>
+                <Field label="Value">
+                  <Input
+                    value={formatDatasetFilterValue(filter.value, filter.op)}
+                    placeholder={
+                      filter.op === 'between'
+                        ? '10..20'
+                        : filter.op === 'in'
+                          ? 'open, pending'
+                          : 'Value'
+                    }
+                    onChange={(event) =>
+                      updateDatasetFilter(index, {
+                        value: parseDatasetFilterValue(
+                          event.target.value,
+                          filter.op
+                        ),
+                      })
+                    }
+                  />
+                </Field>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  className="mt-6 size-9"
+                  onClick={() =>
+                    updateQuery({
+                      ...query,
+                      datasetFilters: datasetFilters.filter(
+                        (_, currentIndex) => currentIndex !== index
+                      ),
+                    })
+                  }
+                  aria-label="Remove dataset filter"
+                >
+                  <Trash2 className="size-4" />
+                </Button>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
 
       <div className="grid gap-4 xl:grid-cols-2">
@@ -1219,6 +1420,238 @@ function DatasetBlockSettings({
   );
 }
 
+function SourceJoinsEditor({
+  block,
+  schemas,
+  baseFields,
+  onChange,
+}: {
+  block: ReportBlockDefinition;
+  schemas: Schema[];
+  baseFields: string[];
+  onChange: (block: ReportBlockDefinition) => void;
+}) {
+  const joins = block.source.join ?? [];
+
+  const updateJoins = (nextJoins: ReportSourceJoin[]) => {
+    onChange({
+      ...block,
+      source: {
+        ...block.source,
+        join: nextJoins,
+      },
+    });
+  };
+
+  const updateJoin = (index: number, patch: Partial<ReportSourceJoin>) => {
+    updateJoins(
+      joins.map((join, currentIndex) =>
+        currentIndex === index ? { ...join, ...patch } : join
+      )
+    );
+  };
+
+  const addJoin = () => {
+    const schema =
+      schemas.find((candidate) => candidate.name !== block.source.schema) ??
+      schemas[0];
+    const joinedFields = getSchemaFields(schema);
+    updateJoins([
+      ...joins,
+      {
+        schema: schema?.name ?? '',
+        alias: uniqueJoinAlias(joins, schema?.name ?? 'joined'),
+        parentField: baseFields[0] ?? 'id',
+        field: joinedFields[0] ?? 'id',
+        op: 'eq',
+        kind: 'left',
+      },
+    ]);
+  };
+
+  return (
+    <div className="flex flex-col gap-3 rounded-md border bg-muted/10 p-3">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex items-center gap-2">
+          <Label>Source joins</Label>
+          <Badge variant="secondary">{joins.length} joins</Badge>
+        </div>
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          disabled={schemas.length === 0 || baseFields.length === 0}
+          onClick={addJoin}
+        >
+          <Plus className="mr-2 size-4" />
+          Add join
+        </Button>
+      </div>
+      {joins.length === 0 ? (
+        <div className="rounded-md border border-dashed bg-background p-3 text-sm text-muted-foreground">
+          No joins. Add one to expose joined fields as alias.field in columns,
+          groupings, aggregates, filters, and cards.
+        </div>
+      ) : (
+        <div className="flex flex-col gap-2">
+          {joins.map((join, index) => {
+            const joinedSchema = schemas.find(
+              (candidate) => candidate.name === join.schema
+            );
+            const joinedFields = getSchemaFields(joinedSchema);
+            return (
+              <div
+                key={`join-${index}-${join.alias ?? join.schema}`}
+                className="grid gap-2 rounded-md border bg-background p-3 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_minmax(0,1fr)_minmax(0,1fr)_9rem_9rem_40px]"
+              >
+                <Field label="Joined schema">
+                  <Select
+                    value={join.schema || NONE_VALUE}
+                    onValueChange={(schemaName) => {
+                      const nextSchema = schemas.find(
+                        (candidate) => candidate.name === schemaName
+                      );
+                      const nextFields = getSchemaFields(nextSchema);
+                      updateJoin(index, {
+                        schema: schemaName,
+                        alias: uniqueJoinAlias(joins, schemaName, index),
+                        field: nextFields.includes(join.field)
+                          ? join.field
+                          : (nextFields[0] ?? join.field),
+                      });
+                    }}
+                  >
+                    <SelectTrigger>
+                      <SelectValue placeholder="Schema" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value={NONE_VALUE} disabled>
+                        Select schema
+                      </SelectItem>
+                      {schemas.map((schema) => (
+                        <SelectItem key={schema.id} value={schema.name}>
+                          {schema.name}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </Field>
+                <Field label="Alias">
+                  <Input
+                    value={join.alias ?? ''}
+                    placeholder={slugify(join.schema).replace(/-/g, '_')}
+                    onChange={(event) =>
+                      updateJoin(index, {
+                        alias:
+                          slugify(event.target.value).replace(/-/g, '_') ||
+                          undefined,
+                      })
+                    }
+                  />
+                </Field>
+                <Field label="Parent field">
+                  <Select
+                    value={join.parentField || NONE_VALUE}
+                    onValueChange={(parentField) =>
+                      updateJoin(index, { parentField })
+                    }
+                  >
+                    <SelectTrigger>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value={NONE_VALUE} disabled>
+                        Select field
+                      </SelectItem>
+                      {baseFields.map((field) => (
+                        <SelectItem key={field} value={field}>
+                          {field}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </Field>
+                <Field label="Joined field">
+                  <Select
+                    value={join.field || NONE_VALUE}
+                    onValueChange={(field) => updateJoin(index, { field })}
+                  >
+                    <SelectTrigger>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value={NONE_VALUE} disabled>
+                        Select field
+                      </SelectItem>
+                      {joinedFields.map((field) => (
+                        <SelectItem key={field} value={field}>
+                          {field}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </Field>
+                <Field label="Kind">
+                  <Select
+                    value={join.kind ?? 'inner'}
+                    onValueChange={(kind) =>
+                      updateJoin(index, {
+                        kind: kind as NonNullable<ReportSourceJoin['kind']>,
+                      })
+                    }
+                  >
+                    <SelectTrigger>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {JOIN_KIND_OPTIONS.map((option) => (
+                        <SelectItem key={option.value} value={option.value}>
+                          {option.label}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </Field>
+                <Field label="Operator">
+                  <Select
+                    value={join.op ?? 'eq'}
+                    onValueChange={(op) => updateJoin(index, { op })}
+                  >
+                    <SelectTrigger>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {CONDITION_OPERATOR_OPTIONS.map((option) => (
+                        <SelectItem key={option.value} value={option.value}>
+                          {option.label}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </Field>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  className="mt-6 size-9"
+                  onClick={() =>
+                    updateJoins(
+                      joins.filter((_, currentIndex) => currentIndex !== index)
+                    )
+                  }
+                  aria-label="Remove join"
+                >
+                  <Trash2 className="size-4" />
+                </Button>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function TableBlockSettings({
   block,
   fields,
@@ -1245,6 +1678,13 @@ function TableBlockSettings({
       },
       source: { ...block.source, mode: 'filter' },
     });
+  };
+  const updateColumn = (index: number, patch: Partial<ReportTableColumn>) => {
+    updateColumns(
+      columns.map((column, currentIndex) =>
+        currentIndex === index ? { ...column, ...patch } : column
+      )
+    );
   };
 
   return (
@@ -1355,22 +1795,212 @@ function TableBlockSettings({
         </div>
       </div>
       {columns.length > 0 && (
-        <div className="grid gap-2 md:grid-cols-2">
+        <div className="flex flex-col gap-3">
           {columns.map((column, index) => (
-            <Field key={column.field} label={`${column.field} label`}>
-              <Input
-                value={column.label ?? ''}
-                placeholder={humanizeFieldName(column.field)}
-                onChange={(event) => {
-                  const nextColumns = columns.map((current, currentIndex) =>
-                    currentIndex === index
-                      ? { ...current, label: event.target.value }
-                      : current
-                  );
-                  updateColumns(nextColumns);
-                }}
-              />
-            </Field>
+            <div key={column.field} className="rounded-md border p-3">
+              <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+                <div className="min-w-0">
+                  <div className="truncate text-sm font-semibold text-foreground">
+                    {column.label || humanizeFieldName(column.field)}
+                  </div>
+                  <div className="text-xs text-muted-foreground">
+                    {column.field}
+                  </div>
+                </div>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  className="size-8"
+                  onClick={() =>
+                    updateColumns(
+                      columns.filter(
+                        (_, currentIndex) => currentIndex !== index
+                      )
+                    )
+                  }
+                  aria-label={`Remove ${column.field}`}
+                >
+                  <Trash2 className="size-4" />
+                </Button>
+              </div>
+              <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+                <Field label="Label">
+                  <Input
+                    value={column.label ?? ''}
+                    placeholder={humanizeFieldName(column.field)}
+                    onChange={(event) =>
+                      updateColumn(index, { label: event.target.value })
+                    }
+                  />
+                </Field>
+                <Field label="Format">
+                  <Select
+                    value={column.format ?? NONE_VALUE}
+                    onValueChange={(format) =>
+                      updateColumn(index, {
+                        format: format === NONE_VALUE ? undefined : format,
+                      })
+                    }
+                  >
+                    <SelectTrigger>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {COLUMN_FORMAT_OPTIONS.map((option) => (
+                        <SelectItem key={option.value} value={option.value}>
+                          {option.label}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </Field>
+                <Field label="Align">
+                  <Select
+                    value={column.align ?? 'left'}
+                    onValueChange={(align) =>
+                      updateColumn(index, {
+                        align: align as ReportTableColumn['align'],
+                      })
+                    }
+                  >
+                    <SelectTrigger>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {ALIGN_OPTIONS.map((option) => (
+                        <SelectItem key={option.value} value={option.value}>
+                          {option.label}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </Field>
+                <Field label="Display field">
+                  <Select
+                    value={column.displayField ?? NONE_VALUE}
+                    onValueChange={(field) =>
+                      updateColumn(index, {
+                        displayField: field === NONE_VALUE ? undefined : field,
+                      })
+                    }
+                  >
+                    <SelectTrigger>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value={NONE_VALUE}>Same as field</SelectItem>
+                      {fields.map((field) => (
+                        <SelectItem key={field} value={field}>
+                          {field}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </Field>
+                <Field label="Secondary field">
+                  <Select
+                    value={column.secondaryField ?? NONE_VALUE}
+                    onValueChange={(field) =>
+                      updateColumn(index, {
+                        secondaryField:
+                          field === NONE_VALUE ? undefined : field,
+                      })
+                    }
+                  >
+                    <SelectTrigger>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value={NONE_VALUE}>None</SelectItem>
+                      {fields.map((field) => (
+                        <SelectItem key={field} value={field}>
+                          {field}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </Field>
+                <Field label="Link field">
+                  <Select
+                    value={column.linkField ?? NONE_VALUE}
+                    onValueChange={(field) =>
+                      updateColumn(index, {
+                        linkField: field === NONE_VALUE ? undefined : field,
+                      })
+                    }
+                  >
+                    <SelectTrigger>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value={NONE_VALUE}>None</SelectItem>
+                      {fields.map((field) => (
+                        <SelectItem key={field} value={field}>
+                          {field}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </Field>
+                <Field label="Tooltip field">
+                  <Select
+                    value={column.tooltipField ?? NONE_VALUE}
+                    onValueChange={(field) =>
+                      updateColumn(index, {
+                        tooltipField: field === NONE_VALUE ? undefined : field,
+                      })
+                    }
+                  >
+                    <SelectTrigger>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value={NONE_VALUE}>None</SelectItem>
+                      {fields.map((field) => (
+                        <SelectItem key={field} value={field}>
+                          {field}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </Field>
+                <Field label="Pill variants">
+                  <Input
+                    value={formatPillVariants(column.pillVariants)}
+                    placeholder="open:success, closed:muted"
+                    disabled={column.format !== 'pill'}
+                    onChange={(event) =>
+                      updateColumn(index, {
+                        pillVariants: parsePillVariants(event.target.value),
+                      })
+                    }
+                  />
+                </Field>
+              </div>
+              <div className="mt-3 grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
+                <label className="flex min-h-10 items-center gap-2 rounded-md border px-3 py-2 text-sm">
+                  <Checkbox
+                    checked={Boolean(column.editable)}
+                    onCheckedChange={(checked) =>
+                      updateColumn(index, { editable: Boolean(checked) })
+                    }
+                  />
+                  Editable
+                </label>
+                <label className="flex min-h-10 items-center gap-2 rounded-md border px-3 py-2 text-sm">
+                  <Checkbox
+                    checked={Boolean(column.descriptive)}
+                    onCheckedChange={(checked) =>
+                      updateColumn(index, {
+                        descriptive: Boolean(checked),
+                      })
+                    }
+                  />
+                  Descriptive label
+                </label>
+              </div>
+            </div>
           ))}
         </div>
       )}
@@ -1669,6 +2299,250 @@ function ChartBlockSettings({
   );
 }
 
+function CardBlockSettings({
+  block,
+  fields,
+  onChange,
+}: {
+  block: ReportBlockDefinition;
+  fields: string[];
+  onChange: (block: ReportBlockDefinition) => void;
+}) {
+  const groups = block.card?.groups ?? [];
+  const primaryGroup = groups[0] ?? {
+    id: 'details',
+    title: 'Details',
+    columns: 2,
+    fields: [],
+  };
+  const selectedFields = new Set(
+    primaryGroup.fields.map((field) => field.field)
+  );
+
+  const updateGroup = (nextGroup: typeof primaryGroup) => {
+    onChange({
+      ...block,
+      source: { ...block.source, mode: 'filter', limit: 1 },
+      card: {
+        groups: [nextGroup, ...groups.slice(1)],
+      },
+    });
+  };
+
+  const updateField = (
+    index: number,
+    patch: Partial<(typeof primaryGroup.fields)[number]>
+  ) => {
+    updateGroup({
+      ...primaryGroup,
+      fields: primaryGroup.fields.map((field, currentIndex) =>
+        currentIndex === index ? { ...field, ...patch } : field
+      ),
+    });
+  };
+
+  return (
+    <div className="flex flex-col gap-4">
+      <div className="grid gap-3 md:grid-cols-3">
+        <Field label="Group title">
+          <Input
+            value={primaryGroup.title ?? ''}
+            placeholder="Details"
+            onChange={(event) =>
+              updateGroup({ ...primaryGroup, title: event.target.value })
+            }
+          />
+        </Field>
+        <Field label="Columns">
+          <Input
+            type="number"
+            min={1}
+            max={4}
+            value={primaryGroup.columns ?? 2}
+            onChange={(event) =>
+              updateGroup({
+                ...primaryGroup,
+                columns: Math.min(
+                  4,
+                  Math.max(1, Number(event.target.value) || 2)
+                ),
+              })
+            }
+          />
+        </Field>
+        <Field label="Record limit">
+          <Input value="1" readOnly className="bg-muted/40" />
+        </Field>
+      </div>
+
+      <div className="flex flex-col gap-2">
+        <Label>Fields</Label>
+        <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
+          {fields.map((field) => (
+            <label
+              key={field}
+              className="flex min-h-10 items-center gap-2 rounded-md border px-3 py-2 text-sm"
+            >
+              <Checkbox
+                checked={selectedFields.has(field)}
+                onCheckedChange={(checked) => {
+                  const nextFields = checked
+                    ? [
+                        ...primaryGroup.fields,
+                        {
+                          field,
+                          label: humanizeFieldName(field),
+                          kind: 'value' as const,
+                        },
+                      ]
+                    : primaryGroup.fields.filter(
+                        (item) => item.field !== field
+                      );
+                  updateGroup({ ...primaryGroup, fields: nextFields });
+                }}
+              />
+              <span className="truncate">{field}</span>
+            </label>
+          ))}
+        </div>
+      </div>
+
+      {primaryGroup.fields.length > 0 && (
+        <div className="flex flex-col gap-3">
+          {primaryGroup.fields.map((field, index) => (
+            <div key={field.field} className="rounded-md border p-3">
+              <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+                <div>
+                  <div className="text-sm font-semibold text-foreground">
+                    {field.label || humanizeFieldName(field.field)}
+                  </div>
+                  <div className="text-xs text-muted-foreground">
+                    {field.field}
+                  </div>
+                </div>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  className="size-8"
+                  onClick={() =>
+                    updateGroup({
+                      ...primaryGroup,
+                      fields: primaryGroup.fields.filter(
+                        (_, currentIndex) => currentIndex !== index
+                      ),
+                    })
+                  }
+                  aria-label={`Remove ${field.field}`}
+                >
+                  <Trash2 className="size-4" />
+                </Button>
+              </div>
+              <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+                <Field label="Label">
+                  <Input
+                    value={field.label ?? ''}
+                    placeholder={humanizeFieldName(field.field)}
+                    onChange={(event) =>
+                      updateField(index, { label: event.target.value })
+                    }
+                  />
+                </Field>
+                <Field label="Kind">
+                  <Select
+                    value={field.kind ?? 'value'}
+                    onValueChange={(kind) =>
+                      updateField(index, {
+                        kind: kind as NonNullable<typeof field.kind>,
+                      })
+                    }
+                  >
+                    <SelectTrigger>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="value">Value</SelectItem>
+                      <SelectItem value="json">JSON</SelectItem>
+                      <SelectItem value="markdown">Markdown</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </Field>
+                <Field label="Format">
+                  <Select
+                    value={field.format ?? NONE_VALUE}
+                    onValueChange={(format) =>
+                      updateField(index, {
+                        format: format === NONE_VALUE ? undefined : format,
+                      })
+                    }
+                  >
+                    <SelectTrigger>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {COLUMN_FORMAT_OPTIONS.map((option) => (
+                        <SelectItem key={option.value} value={option.value}>
+                          {option.label}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </Field>
+                <Field label="Display field">
+                  <Select
+                    value={field.displayField ?? NONE_VALUE}
+                    onValueChange={(displayField) =>
+                      updateField(index, {
+                        displayField:
+                          displayField === NONE_VALUE
+                            ? undefined
+                            : displayField,
+                      })
+                    }
+                  >
+                    <SelectTrigger>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value={NONE_VALUE}>Same as field</SelectItem>
+                      {fields.map((candidate) => (
+                        <SelectItem key={candidate} value={candidate}>
+                          {candidate}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </Field>
+              </div>
+              <div className="mt-3 grid gap-2 sm:grid-cols-2">
+                <label className="flex min-h-10 items-center gap-2 rounded-md border px-3 py-2 text-sm">
+                  <Checkbox
+                    checked={Boolean(field.editable)}
+                    disabled={(field.kind ?? 'value') !== 'value'}
+                    onCheckedChange={(checked) =>
+                      updateField(index, { editable: Boolean(checked) })
+                    }
+                  />
+                  Editable
+                </label>
+                <label className="flex min-h-10 items-center gap-2 rounded-md border px-3 py-2 text-sm">
+                  <Checkbox
+                    checked={Boolean(field.collapsed)}
+                    onCheckedChange={(checked) =>
+                      updateField(index, { collapsed: Boolean(checked) })
+                    }
+                  />
+                  Collapsed by default
+                </label>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function BlockFiltersEditor({
   block,
   fields,
@@ -1863,7 +2737,9 @@ function blockToEditorNode(
 }
 
 function definitionToNodes(definition: ReportDefinition): EditorNode[] {
-  const blockById = new Map(definition.blocks.map((block) => [block.id, block]));
+  const blockById = new Map(
+    definition.blocks.map((block) => [block.id, block])
+  );
   if ((definition.layout?.length ?? 0) > 0) {
     const referencedBlockIds = new Set(
       extractLayoutBlockReferences(definition.layout)
@@ -2098,6 +2974,104 @@ function getSchemaFields(schema: Schema | undefined): string[] {
   return ['id', ...schemaFields, 'createdAt', 'updatedAt'];
 }
 
+function datasetFilterableFields(dataset: ReportDatasetDefinition): string[] {
+  return Array.from(
+    new Set([
+      ...dataset.dimensions.map((dimension) => dimension.field),
+      ...(dataset.timeDimension ? [dataset.timeDimension] : []),
+      ...dataset.measures.flatMap((measure) =>
+        measure.field ? [measure.field] : []
+      ),
+    ])
+  ).filter(Boolean);
+}
+
+function formatDatasetFilterValue(value: unknown, op?: string): string {
+  if (op === 'between' && isRecord(value)) {
+    const from = value.min ?? value.from ?? '';
+    const to = value.max ?? value.to ?? '';
+    return `${from}..${to}`;
+  }
+  if (Array.isArray(value)) return value.map(String).join(', ');
+  if (value === null || value === undefined) return '';
+  return String(value);
+}
+
+function parseDatasetFilterValue(value: string, op?: string): unknown {
+  const trimmed = value.trim();
+  if (op === 'between') {
+    const [min = '', max = ''] = trimmed.includes('..')
+      ? trimmed.split('..')
+      : trimmed.split(',');
+    return {
+      min: parseDatasetScalar(min.trim()),
+      max: parseDatasetScalar(max.trim()),
+    };
+  }
+  if (op === 'in') {
+    return trimmed
+      .split(',')
+      .map((part) => parseDatasetScalar(part.trim()))
+      .filter((part) => part !== '');
+  }
+  return parseDatasetScalar(trimmed);
+}
+
+function parseDatasetScalar(value: string): unknown {
+  if (value === '') return '';
+  if (value === 'true') return true;
+  if (value === 'false') return false;
+  if (/^-?\d+(\.\d+)?$/.test(value)) return Number(value);
+  return value;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function getBlockAvailableFields(
+  schema: Schema | undefined,
+  joins: ReportSourceJoin[] | undefined,
+  schemas: Schema[]
+): string[] {
+  const baseFields = getSchemaFields(schema);
+  const joinedFields =
+    joins?.flatMap((join) => {
+      const alias = effectiveJoinAlias(join);
+      const joinedSchema = schemas.find(
+        (candidate) => candidate.name === join.schema
+      );
+      if (!alias || !joinedSchema) return [];
+      return getSchemaFields(joinedSchema).map((field) => `${alias}.${field}`);
+    }) ?? [];
+  return Array.from(new Set([...baseFields, ...joinedFields]));
+}
+
+function effectiveJoinAlias(join: ReportSourceJoin): string {
+  return join.alias?.trim() || join.schema;
+}
+
+function uniqueJoinAlias(
+  joins: ReportSourceJoin[],
+  seed: string,
+  ignoreIndex?: number
+): string {
+  const existing = new Set(
+    joins
+      .filter((_, index) => index !== ignoreIndex)
+      .map(effectiveJoinAlias)
+      .filter(Boolean)
+  );
+  const base = slugify(seed || 'joined').replace(/-/g, '_') || 'joined';
+  let candidate = base;
+  let suffix = 2;
+  while (existing.has(candidate)) {
+    candidate = `${base}_${suffix}`;
+    suffix += 1;
+  }
+  return candidate;
+}
+
 function emptyReportSource(): ReportBlockDefinition['source'] {
   return {
     schema: '',
@@ -2181,6 +3155,27 @@ function createDefaultBlock(
     };
   }
 
+  if (type === 'card') {
+    return {
+      id,
+      type,
+      title,
+      lazy: false,
+      source: { ...source, limit: 1 },
+      card: {
+        groups: [
+          {
+            id: 'details',
+            title: 'Details',
+            columns: 2,
+            fields: [],
+          },
+        ],
+      },
+      filters: [],
+    };
+  }
+
   return {
     id,
     type,
@@ -2251,6 +3246,29 @@ function convertBlockType(
     };
   }
 
+  if (type === 'card') {
+    return {
+      ...base,
+      source: {
+        ...base.source,
+        mode: 'filter',
+        groupBy: [],
+        aggregates: [],
+        limit: 1,
+      },
+      card: block.card ?? {
+        groups: [
+          {
+            id: 'details',
+            title: 'Details',
+            columns: 2,
+            fields: [],
+          },
+        ],
+      },
+    };
+  }
+
   return {
     ...base,
     source: {
@@ -2301,6 +3319,26 @@ function changeBlockSchema(
 
   if (block.type === 'metric') {
     return convertBlockType(nextBlock, 'metric', fields);
+  }
+
+  if (block.type === 'card') {
+    return {
+      ...convertBlockType(nextBlock, 'card', fields),
+      card: {
+        groups: [
+          {
+            id: 'details',
+            title: 'Details',
+            columns: 2,
+            fields: fields.slice(0, 6).map((field) => ({
+              field,
+              label: humanizeFieldName(field),
+              kind: 'value' as const,
+            })),
+          },
+        ],
+      },
+    };
   }
 
   return nextBlock;
@@ -2395,4 +3433,26 @@ function parseFilterOptions(value: string) {
     .map((part) => part.trim())
     .filter(Boolean)
     .map((part) => ({ label: humanizeFieldName(part), value: part }));
+}
+
+function formatPillVariants(variants: Record<string, string> | undefined) {
+  if (!variants) return '';
+  return Object.entries(variants)
+    .map(([value, variant]) => `${value}:${variant}`)
+    .join(', ');
+}
+
+function parsePillVariants(value: string) {
+  const variants = Object.fromEntries(
+    value
+      .split(',')
+      .map((part) => part.trim())
+      .filter(Boolean)
+      .map((part) => {
+        const [key, variant = 'default'] = part.split(':');
+        return [key.trim(), variant.trim()];
+      })
+      .filter(([key]) => key.length > 0)
+  );
+  return Object.keys(variants).length > 0 ? variants : undefined;
 }
