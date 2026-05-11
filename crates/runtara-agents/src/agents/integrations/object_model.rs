@@ -169,14 +169,6 @@ pub struct CreateInstanceOutput {
 
 /// Input for querying instances from the object model
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct QueryScoreExpression {
-    /// Output alias. The value is returned under `computed[alias]`.
-    pub alias: String,
-    /// Expression tree, for example a COSINE_DISTANCE call over a vector field.
-    pub expression: Value,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum QueryOrderByTarget {
     Column { name: String },
@@ -231,8 +223,7 @@ pub struct QueryInstancesInput {
     /// for index-backed nearest-neighbor vector retrieval.
     #[field(
         display_name = "Score Expression",
-        description = "Optional computed score column. For vector nearest-neighbor search, use COSINE_DISTANCE or L2_DISTANCE here and order by the alias ascending.",
-        example = r#"{"alias":"distance","expression":{"fn":"COSINE_DISTANCE","arguments":[{"valueType":"reference","value":"embedding"},{"valueType":"immediate","value":[0.1,0.2,0.3]}]}}"#
+        description = "Optional computed score column. For vector nearest-neighbor search, use COSINE_DISTANCE or L2_DISTANCE here and order by the alias ascending."
     )]
     #[serde(
         default,
@@ -240,14 +231,13 @@ pub struct QueryInstancesInput {
         alias = "score_expression",
         skip_serializing_if = "Option::is_none"
     )]
-    pub score_expression: Option<QueryScoreExpression>,
+    pub score_expression: Option<HashMap<String, Value>>,
 
     /// Optional structured ordering. When set, supersedes `sortBy` /
     /// `sortOrder` in the object model API.
     #[field(
         display_name = "Order By",
-        description = "Optional structured ordering. For vector nearest-neighbor search, order by the score expression alias ascending.",
-        example = r#"[{"expression":{"kind":"alias","name":"distance"},"direction":"ASC"}]"#
+        description = "Optional structured ordering. For vector nearest-neighbor search, order by the score expression alias ascending."
     )]
     #[serde(
         default,
@@ -1747,4 +1737,47 @@ pub fn save_memory(input: SaveMemoryInput) -> Result<SaveMemoryOutput, AgentErro
         message_count,
         error: None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn query_instances_score_expression_metadata_is_object_shaped() {
+        let field = __INPUT_META_QueryInstancesInput
+            .fields
+            .iter()
+            .find(|field| field.name == "score_expression")
+            .expect("score_expression metadata");
+
+        assert_eq!(field.type_name, "HashMap<String, Value>");
+    }
+
+    #[test]
+    fn query_instances_input_accepts_object_score_expression() {
+        let input: QueryInstancesInput = serde_json::from_value(json!({
+            "schema_name": "UnspscNode",
+            "score_expression": {
+                "alias": "vec_dist",
+                "expression": {
+                    "fn": "COSINE_DISTANCE",
+                    "arguments": [
+                        {"valueType": "reference", "value": "embedding"},
+                        {"valueType": "immediate", "value": [0.1, 0.2, 0.3]}
+                    ]
+                }
+            },
+            "order_by": [{
+                "expression": {"kind": "alias", "name": "vec_dist"},
+                "direction": "ASC"
+            }],
+            "limit": 25
+        }))
+        .unwrap();
+
+        let score_expression = input.score_expression.unwrap();
+        assert_eq!(score_expression["alias"], json!("vec_dist"));
+        assert_eq!(input.order_by.unwrap().len(), 1);
+    }
 }

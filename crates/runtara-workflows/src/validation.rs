@@ -5556,6 +5556,90 @@ mod tests {
     }
 
     #[test]
+    fn object_model_query_instances_accepts_object_score_expression() {
+        let mut mapping = InputMapping::new();
+        mapping.insert(
+            "schema_name".to_string(),
+            MappingValue::Immediate(runtara_dsl::ImmediateValue {
+                value: serde_json::json!("UnspscNode"),
+            }),
+        );
+        mapping.insert(
+            "score_expression".to_string(),
+            MappingValue::Immediate(runtara_dsl::ImmediateValue {
+                value: serde_json::json!({
+                    "alias": "vec_dist",
+                    "expression": {
+                        "fn": "COSINE_DISTANCE",
+                        "arguments": [
+                            {"valueType": "reference", "value": "embedding"},
+                            {"valueType": "immediate", "value": [0.1, 0.2, 0.3]}
+                        ]
+                    }
+                }),
+            }),
+        );
+        mapping.insert(
+            "order_by".to_string(),
+            MappingValue::Immediate(runtara_dsl::ImmediateValue {
+                value: serde_json::json!([{
+                    "expression": {"kind": "alias", "name": "vec_dist"},
+                    "direction": "ASC"
+                }]),
+            }),
+        );
+        mapping.insert(
+            "limit".to_string(),
+            MappingValue::Immediate(runtara_dsl::ImmediateValue {
+                value: serde_json::json!(25),
+            }),
+        );
+
+        let mut steps = HashMap::new();
+        steps.insert(
+            "knn".to_string(),
+            Step::Agent(AgentStep {
+                id: "knn".to_string(),
+                name: None,
+                agent_id: "object_model".to_string(),
+                capability_id: "query-instances".to_string(),
+                connection_id: None,
+                input_mapping: Some(mapping),
+                max_retries: None,
+                retry_delay: None,
+                timeout: None,
+                compensation: None,
+                breakpoint: None,
+                durable: None,
+            }),
+        );
+        steps.insert("finish".to_string(), create_finish_step("finish", None));
+
+        let mut graph = create_basic_graph(steps, "knn");
+        graph.execution_plan = vec![runtara_dsl::ExecutionPlanEdge {
+            from_step: "knn".to_string(),
+            to_step: "finish".to_string(),
+            label: None,
+            condition: None,
+            priority: None,
+        }];
+
+        let result = validate_workflow(&graph);
+
+        assert!(
+            !result.errors.iter().any(|error| matches!(
+                error,
+                ValidationError::TypeMismatch { field_name, expected_type, actual_type, .. }
+                    if field_name == "score_expression"
+                        && expected_type == "string"
+                        && actual_type == "object"
+            )),
+            "{:?}",
+            result.errors
+        );
+    }
+
+    #[test]
     fn test_error_display_duplicate_step_name() {
         let error = ValidationError::DuplicateStepName {
             name: "Fetch Data".to_string(),
