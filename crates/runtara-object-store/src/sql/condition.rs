@@ -9,6 +9,8 @@ use crate::types::ColumnType;
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
 
+const PG_TRGM_DEFAULT_SIMILARITY_THRESHOLD: f64 = 0.3;
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ConditionSubquery {
@@ -844,10 +846,21 @@ fn build_condition_clause_at(
             }
 
             params.push(serde_json::Value::String(value.to_string()));
-            let clause = format!(
-                "similarity(\"{}\"::text, ${}::text) >= {:.6}",
-                field, param_offset, threshold
-            );
+            let value_sql = format!("${}::text", param_offset);
+            let similarity_sql = format!("similarity(\"{}\"::text, {})", field, value_sql);
+            let clause = if threshold >= PG_TRGM_DEFAULT_SIMILARITY_THRESHOLD {
+                // `pg_trgm` GIN indexes are used through the `%` operator, whose
+                // default threshold is 0.3. Keep the explicit similarity check
+                // so callers can request stricter thresholds without depending
+                // on the session GUC. For thresholds below 0.3 we skip `%` to
+                // preserve semantics.
+                format!(
+                    "(\"{}\"::text % {} AND {} >= {:.6})",
+                    field, value_sql, similarity_sql, threshold
+                )
+            } else {
+                format!("{} >= {:.6}", similarity_sql, threshold)
+            };
             *param_offset += 1;
             Ok((clause, params))
         }
@@ -2062,7 +2075,28 @@ mod tests {
         };
         let mut offset = 1;
         let (clause, params) = build_condition_clause(&condition, &mut offset, &schema).unwrap();
-        assert_eq!(clause, "similarity(\"name\"::text, $1::text) >= 0.300000");
+        assert_eq!(
+            clause,
+            "(\"name\"::text % $1::text AND similarity(\"name\"::text, $1::text) >= 0.300000)"
+        );
+        assert_eq!(params, vec![serde_json::json!("blue jacket")]);
+        assert_eq!(offset, 2);
+    }
+
+    #[test]
+    fn test_similarity_gte_below_pg_trgm_default_threshold_preserves_semantics() {
+        let schema = make_test_schema();
+        let condition = Condition {
+            op: "SIMILARITY_GTE".to_string(),
+            arguments: Some(vec![
+                serde_json::json!("name"),
+                serde_json::json!("blue jacket"),
+                serde_json::json!(0.2),
+            ]),
+        };
+        let mut offset = 1;
+        let (clause, params) = build_condition_clause(&condition, &mut offset, &schema).unwrap();
+        assert_eq!(clause, "similarity(\"name\"::text, $1::text) >= 0.200000");
         assert_eq!(params, vec![serde_json::json!("blue jacket")]);
         assert_eq!(offset, 2);
     }
@@ -2128,6 +2162,7 @@ mod tests {
         let (clause, params) = build_condition_clause(&condition, &mut offset, &schema).unwrap();
         assert!(clause.contains("$1::text"));
         assert!(clause.contains("similarity(\"name\"::text, $2::text)"));
+        assert!(clause.contains("\"name\"::text % $2::text"));
         assert_eq!(params.len(), 2);
         assert_eq!(offset, 3);
     }

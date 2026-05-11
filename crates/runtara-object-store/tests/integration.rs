@@ -12,7 +12,8 @@ use runtara_object_store::instance::{BulkCreateOptions, Condition, ConflictMode,
 use runtara_object_store::types::{ColumnDefinition, ColumnType, IndexDefinition};
 use runtara_object_store::{
     AggregateFn, AggregateOrderBy, AggregateRequest, AggregateSpec, CreateSchemaRequest,
-    FilterRequest, ObjectStore, SimpleFilter, SortDirection, StoreConfig, UpdateSchemaRequest,
+    FilterRequest, ObjectStore, OrderByEntry, OrderByTarget, ScoreExpression, SimpleFilter,
+    SortDirection, StoreConfig, UpdateSchemaRequest, VectorIndexMethod,
 };
 
 /// Get a unique test prefix for this test run
@@ -535,6 +536,93 @@ async fn test_delete_instance() {
         .expect("Should not error");
 
     assert!(found.is_none());
+
+    cleanup_test(&store, &prefix).await;
+}
+
+#[tokio::test]
+async fn test_vector_distance_score_expression_returns_computed_distance() {
+    let Some((store, prefix)) = create_test_store().await else {
+        eprintln!("Skipping test: TEST_DATABASE_URL not set");
+        return;
+    };
+
+    let table_name = format!("{}_vector_score", prefix);
+    store
+        .create_schema(CreateSchemaRequest {
+            name: "vector_score".to_string(),
+            description: None,
+            table_name,
+            columns: vec![
+                ColumnDefinition::new("title", ColumnType::String),
+                ColumnDefinition::new(
+                    "embedding",
+                    ColumnType::Vector {
+                        dimension: 4,
+                        index_method: Some(VectorIndexMethod::Hnsw),
+                    },
+                ),
+            ],
+            indexes: None,
+        })
+        .await
+        .expect("Should create vector schema");
+
+    store
+        .create_instance(
+            "vector_score",
+            serde_json::json!({"title": "alpha", "embedding": [1.0, 0.0, 0.0, 0.0]}),
+        )
+        .await
+        .expect("Should create alpha vector");
+    store
+        .create_instance(
+            "vector_score",
+            serde_json::json!({"title": "beta", "embedding": [0.0, 1.0, 0.0, 0.0]}),
+        )
+        .await
+        .expect("Should create beta vector");
+
+    let (instances, total) = store
+        .filter_instances(
+            "vector_score",
+            FilterRequest {
+                limit: 2,
+                score_expression: Some(ScoreExpression {
+                    alias: "distance".to_string(),
+                    expression: serde_json::json!({
+                        "fn": "COSINE_DISTANCE",
+                        "arguments": [
+                            {"valueType": "reference", "value": "embedding"},
+                            {"valueType": "immediate", "value": [1.0, 0.0, 0.0, 0.0]}
+                        ]
+                    }),
+                }),
+                order_by: Some(vec![OrderByEntry {
+                    expression: OrderByTarget::Alias {
+                        name: "distance".to_string(),
+                    },
+                    direction: SortDirection::Asc,
+                }]),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("Should query vectors by cosine distance");
+
+    assert_eq!(total, 2);
+    assert_eq!(instances.len(), 2);
+    assert_eq!(instances[0].properties["title"], "alpha");
+    let distance = instances[0]
+        .computed
+        .as_ref()
+        .and_then(|c| c.get("distance"))
+        .and_then(|v| v.as_f64())
+        .expect("distance should be decoded from pgvector float8");
+    assert!(
+        distance < 0.001,
+        "expected near-zero distance, got {distance}"
+    );
 
     cleanup_test(&store, &prefix).await;
 }

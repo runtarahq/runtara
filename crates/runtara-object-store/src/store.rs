@@ -2133,12 +2133,19 @@ impl ObjectStore {
         }
 
         // Pull the score-expression column out of the row, if requested.
-        // pg_trgm `similarity()` returns `real`; sqlx maps it to `f32`.
+        // pg_trgm `similarity()` / `ts_rank()` return `real` (`f32`), while
+        // pgvector distance operators return `double precision` (`f64`).
         let computed = score_alias.and_then(|alias| {
             row.try_get::<Option<f32>, _>(alias)
                 .ok()
                 .flatten()
                 .and_then(|f| serde_json::Number::from_f64(f as f64))
+                .or_else(|| {
+                    row.try_get::<Option<f64>, _>(alias)
+                        .ok()
+                        .flatten()
+                        .and_then(serde_json::Number::from_f64)
+                })
                 .map(|num| {
                     let mut map = serde_json::Map::new();
                     map.insert(alias.to_string(), serde_json::Value::Number(num));
