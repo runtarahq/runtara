@@ -207,6 +207,10 @@ async fn test_update_schema_reconciles_physical_indexes() {
         .expect("status_idx should be recreated");
     assert!(status_def.contains("UNIQUE INDEX"), "{status_def}");
     assert!(
+        status_def.contains("WHERE (deleted = false)"),
+        "{status_def}"
+    );
+    assert!(
         status_def.contains("(sku)") || status_def.contains("(\"sku\")"),
         "{status_def}"
     );
@@ -240,6 +244,77 @@ async fn test_update_schema_reconciles_physical_indexes() {
             .await
             .is_some()
     );
+
+    cleanup_test(&store, &prefix).await;
+}
+
+#[tokio::test]
+async fn test_unique_index_can_be_added_with_soft_deleted_duplicates() {
+    let Some((store, prefix)) = create_test_store().await else {
+        eprintln!("Skipping test: TEST_DATABASE_URL not set");
+        return;
+    };
+
+    let table_name = format!("{}_unique_after_delete", prefix);
+    let request = CreateSchemaRequest {
+        name: "unique_after_delete".to_string(),
+        description: None,
+        table_name,
+        columns: vec![
+            ColumnDefinition::new("sku", ColumnType::String).not_null(),
+            ColumnDefinition::new("name", ColumnType::String),
+        ],
+        indexes: None,
+    };
+
+    store
+        .create_schema(request)
+        .await
+        .expect("Should create schema");
+
+    let old_id = store
+        .create_instance(
+            "unique_after_delete",
+            serde_json::json!({"sku": "A", "name": "old"}),
+        )
+        .await
+        .expect("Should create old duplicate");
+
+    store
+        .delete_instance("unique_after_delete", &old_id)
+        .await
+        .expect("Should soft delete old duplicate");
+
+    store
+        .create_instance(
+            "unique_after_delete",
+            serde_json::json!({"sku": "A", "name": "active"}),
+        )
+        .await
+        .expect("Should create active duplicate");
+
+    store
+        .update_schema(
+            "unique_after_delete",
+            UpdateSchemaRequest {
+                indexes: Some(vec![
+                    IndexDefinition::new("sku_unique", vec!["sku".to_string()]).unique(),
+                ]),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("Soft-deleted duplicates should not block unique index creation");
+
+    let err = store
+        .create_instance(
+            "unique_after_delete",
+            serde_json::json!({"sku": "A", "name": "second active"}),
+        )
+        .await
+        .expect_err("Active duplicates should still violate the unique index");
+
+    assert!(err.to_string().contains("duplicate key"), "{err}");
 
     cleanup_test(&store, &prefix).await;
 }
@@ -536,6 +611,72 @@ async fn test_delete_instance() {
         .expect("Should not error");
 
     assert!(found.is_none());
+
+    cleanup_test(&store, &prefix).await;
+}
+
+#[tokio::test]
+async fn test_unique_column_allows_reuse_after_soft_delete() {
+    let Some((store, prefix)) = create_test_store().await else {
+        eprintln!("Skipping test: TEST_DATABASE_URL not set");
+        return;
+    };
+
+    let table_name = format!("{}_unique_live", prefix);
+    let request = CreateSchemaRequest {
+        name: "unique_live".to_string(),
+        description: None,
+        table_name: table_name.clone(),
+        columns: vec![
+            ColumnDefinition::new("sku", ColumnType::String)
+                .unique()
+                .not_null(),
+            ColumnDefinition::new("name", ColumnType::String),
+        ],
+        indexes: None,
+    };
+
+    store
+        .create_schema(request)
+        .await
+        .expect("Should create schema");
+
+    let original_id = store
+        .create_instance(
+            "unique_live",
+            serde_json::json!({"sku": "A", "name": "old"}),
+        )
+        .await
+        .expect("Should create original instance");
+
+    store
+        .delete_instance("unique_live", &original_id)
+        .await
+        .expect("Should soft delete original instance");
+
+    let replacement_id = store
+        .create_instance(
+            "unique_live",
+            serde_json::json!({"sku": "A", "name": "new"}),
+        )
+        .await
+        .expect("Soft-deleted row should not block unique reuse");
+
+    let (instances, total) = store
+        .query_instances(SimpleFilter::new("unique_live"))
+        .await
+        .expect("Should query visible rows");
+
+    assert_eq!(total, 1);
+    assert_eq!(instances.len(), 1);
+    assert_eq!(instances[0].id, replacement_id);
+    assert_eq!(instances[0].properties["name"], "new");
+
+    let raw_count: i64 = sqlx::query_scalar(&format!("SELECT COUNT(*) FROM \"{}\"", table_name))
+        .fetch_one(store.pool())
+        .await
+        .expect("Should count raw rows");
+    assert_eq!(raw_count, 2, "soft delete should leave the tombstone row");
 
     cleanup_test(&store, &prefix).await;
 }
