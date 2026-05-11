@@ -79,6 +79,16 @@ def col(field, label=None, fmt=None, **extra):
     return c
 
 
+def open_case_actions(view_id):
+    return [
+        {"type": "set_filter", "filterId": "case_id", "valueFrom": "datum.id"},
+        {"type": "set_filter", "filterId": "loan_application_id", "valueFrom": "datum.loan_application_id"},
+        {"type": "set_filter", "filterId": "dossier_id", "valueFrom": "datum.dossier_id"},
+        {"type": "set_filter", "filterId": "human_decision_id", "valueFrom": "datum.human_decision_id"},
+        {"type": "navigate_view", "viewId": view_id},
+    ]
+
+
 PILL_DECISION = {
     "APPROVED": "success",
     "DECLINED": "destructive",
@@ -266,24 +276,26 @@ blocks.append({
             col("rule_pack_version_at_decision", "Rule pack"),
             col("tmd_version_at_decision", "TMD"),
             col("current_owner", "Owner"),
+            col("views", "Views", type="interaction_buttons", interactionButtons=[
+                {
+                    "id": "overview",
+                    "label": "Overview",
+                    "icon": "eye",
+                    "actions": open_case_actions("overview"),
+                },
+                {
+                    "id": "audit",
+                    "label": "Audit",
+                    "icon": "file_text",
+                    "actions": open_case_actions("detail"),
+                },
+            ]),
         ],
         "defaultSort": [{"field": "opened_at", "direction": "desc"}],
         "pagination": {"defaultPageSize": 50, "allowedPageSizes": [25, 50, 100]},
     },
     "filters": [],
-    "interactions": [
-        {
-            "id": "open_case",
-            "trigger": {"event": "row_click"},
-            "actions": [
-                {"type": "set_filter", "filterId": "case_id", "valueFrom": "datum.id"},
-                {"type": "set_filter", "filterId": "loan_application_id", "valueFrom": "datum.loan_application_id"},
-                {"type": "set_filter", "filterId": "dossier_id", "valueFrom": "datum.dossier_id"},
-                {"type": "set_filter", "filterId": "human_decision_id", "valueFrom": "datum.human_decision_id"},
-                {"type": "navigate_view", "viewId": "detail"},
-            ],
-        }
-    ],
+    "interactions": [],
 })
 
 # 1. Case header KPIs
@@ -894,6 +906,19 @@ detail_layout = [
     ], description="Version pins needed to re-execute this case end-to-end."),
 ]
 
+overview_layout = [
+    section("overview_header", "1. Case overview", [
+        metric_row("overview_kpis", [
+            "kpi_status", "kpi_final_decision", "kpi_scoring_band",
+            "kpi_ai_decision", "kpi_human_decision",
+        ]),
+        block_node("case_header"),
+    ]),
+    section("overview_timeline", "2. Decision timeline", [
+        block_node("decision_timeline"),
+    ]),
+]
+
 views = [
     {
         "id": "list",
@@ -901,10 +926,18 @@ views = [
         "layout": [block_node("cases_list")],
     },
     {
+        "id": "overview",
+        "titleFromBlock": {"block": "case_header", "field": "id"},
+        "breadcrumb": [
+            {"label": "Loan cases", "viewId": "list", "clearFilters": ["case_id", "loan_application_id", "dossier_id", "human_decision_id"]}
+        ],
+        "layout": overview_layout,
+    },
+    {
         "id": "detail",
         "titleFromBlock": {"block": "case_header", "field": "id"},
         "breadcrumb": [
-            {"label": "Loan cases", "viewId": "list", "clearFilters": ["case_id", "loan_application_id"]}
+            {"label": "Loan cases", "viewId": "list", "clearFilters": ["case_id", "loan_application_id", "dossier_id", "human_decision_id"]}
         ],
         "layout": detail_layout,
     },
@@ -943,7 +976,6 @@ filters = [
 
 definition = {
     "definitionVersion": 1,
-    "markdown": "",
     "filters": filters,
     "views": views,
     "blocks": blocks,

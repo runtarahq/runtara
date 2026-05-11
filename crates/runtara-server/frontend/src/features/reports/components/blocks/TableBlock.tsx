@@ -1,10 +1,14 @@
 import { memo, useCallback, useMemo, useState } from 'react';
 import {
+  Activity,
   ArrowDown,
+  ArrowRight,
   ArrowUp,
   ChevronLeft,
   ChevronRight,
+  Eye,
   ExternalLink,
+  FileText,
   Loader2,
   Pencil,
   Play,
@@ -42,9 +46,11 @@ import {
   ReportBlockDefinition,
   ReportBlockResult,
   ReportEditorConfig,
+  ReportInteractionAction,
   ReportOrderBy,
   ReportTableActionConfig,
   ReportTableColumn,
+  ReportTableInteractionButtonConfig,
   ReportWorkflowActionConfig,
 } from '../../types';
 import {
@@ -52,6 +58,7 @@ import {
   humanizeFieldName,
   isWorkflowActionDisabled,
   isWorkflowActionVisible,
+  matchesReportRowCondition,
 } from '../../utils';
 import { FieldEditor } from './editable/FieldEditor';
 import { useReportWriteback } from './editable/useReportWriteback';
@@ -62,7 +69,7 @@ type TableColumn = {
   label?: string;
   displayField?: string;
   format?: string | null;
-  type?: 'value' | 'chart' | 'workflow_button';
+  type?: 'value' | 'chart' | 'workflow_button' | 'interaction_buttons';
   chart?: ReportTableColumn['chart'];
   secondaryField?: string;
   linkField?: string;
@@ -73,6 +80,7 @@ type TableColumn = {
   editable?: boolean;
   editor?: ReportEditorConfig;
   workflowAction?: ReportWorkflowActionConfig;
+  interactionButtons?: ReportTableInteractionButtonConfig[];
 };
 
 type TableData = {
@@ -113,6 +121,10 @@ type TableBlockProps = {
   onSortChange: (sort: ReportOrderBy[]) => void;
   onRowClick?: (row: Record<string, unknown>) => void;
   onCellClick?: (cell: Record<string, unknown>) => boolean;
+  onInteractionButtonClick?: (
+    actions: ReportInteractionAction[],
+    row: Record<string, unknown>
+  ) => boolean;
   onRefresh?: () => void | Promise<void>;
 };
 
@@ -132,6 +144,7 @@ export function TableBlock({
   onSortChange,
   onRowClick,
   onCellClick,
+  onInteractionButtonClick,
   onRefresh,
 }: TableBlockProps) {
   const writeback = useReportWriteback(reportId);
@@ -317,7 +330,7 @@ export function TableBlock({
                   aria-sort={getAriaSort(sortDirection)}
                   className={cn(
                     'h-10 whitespace-nowrap',
-                    isWorkflowButtonColumn(column) && 'report-print-hidden',
+                    isActionColumn(column) && 'report-print-hidden',
                     column.align === 'right' && 'text-right'
                   )}
                 >
@@ -387,6 +400,7 @@ export function TableBlock({
                   onCancelCell={cancelCell}
                   onRowClick={onRowClick}
                   onCellClick={onCellClick}
+                  onInteractionButtonClick={onInteractionButtonClick}
                   onRunWorkflow={workflowAction.run}
                   isWorkflowRunning={workflowAction.isRunning}
                 />
@@ -484,6 +498,10 @@ type TableBodyRowProps = {
   onCancelCell: () => void;
   onRowClick?: (row: Record<string, unknown>) => void;
   onCellClick?: (cell: Record<string, unknown>) => boolean;
+  onInteractionButtonClick?: (
+    actions: ReportInteractionAction[],
+    row: Record<string, unknown>
+  ) => boolean;
   onRunWorkflow: (args: {
     key: string;
     action: ReportWorkflowActionConfig;
@@ -516,6 +534,7 @@ function TableBodyRow({
   onCancelCell,
   onRowClick,
   onCellClick,
+  onInteractionButtonClick,
   onRunWorkflow,
   isWorkflowRunning,
 }: TableBodyRowProps) {
@@ -560,7 +579,7 @@ function TableBodyRow({
             className={cn(
               'group/cell relative py-3 align-top',
               column.align === 'right' && 'text-right tabular-nums',
-              isWorkflowButtonColumn(column) && 'report-print-hidden',
+              isActionColumn(column) && 'report-print-hidden',
               writebackContext && !isEditing && 'pr-8'
             )}
             onClick={(event) => {
@@ -620,6 +639,12 @@ function TableBodyRow({
                     actionKey={workflowActionKey}
                     onRun={onRunWorkflow}
                   />
+                ) : isInteractionButtonsColumn(column) ? (
+                  <InteractionButtonsCell
+                    buttons={column.interactionButtons ?? []}
+                    row={rowObject}
+                    onRun={onInteractionButtonClick}
+                  />
                 ) : column.workflowAction ? null : (
                   <TableCellValue
                     column={column}
@@ -672,6 +697,8 @@ function areTableBodyRowPropsEqual(
     editingStateEqual &&
     Boolean(previous.onRowClick) === Boolean(next.onRowClick) &&
     Boolean(previous.onCellClick) === Boolean(next.onCellClick) &&
+    Boolean(previous.onInteractionButtonClick) ===
+      Boolean(next.onInteractionButtonClick) &&
     previous.isWorkflowRunning === next.isWorkflowRunning
   );
 }
@@ -720,18 +747,31 @@ function normalizeColumns(
       editable: configured?.editable ?? merged.editable,
       editor: configured?.editor ?? merged.editor,
       workflowAction: configured?.workflowAction ?? merged.workflowAction,
+      interactionButtons:
+        configured?.interactionButtons ?? merged.interactionButtons,
     };
   });
 }
 
 function isNonSortableColumn(column: TableColumn): boolean {
-  return column.type === 'chart' || isWorkflowButtonColumn(column);
+  return column.type === 'chart' || isActionColumn(column);
 }
 
 function isWorkflowButtonColumn(column: TableColumn): boolean {
   return (
     column.type === 'workflow_button' || column.workflowAction !== undefined
   );
+}
+
+function isInteractionButtonsColumn(column: TableColumn): boolean {
+  return (
+    column.type === 'interaction_buttons' ||
+    (column.interactionButtons?.length ?? 0) > 0
+  );
+}
+
+function isActionColumn(column: TableColumn): boolean {
+  return isWorkflowButtonColumn(column) || isInteractionButtonsColumn(column);
 }
 
 function defaultAlign(format?: string | null): TableColumn['align'] {
@@ -778,7 +818,7 @@ function getWritebackContext(
   rowObject: Record<string, unknown>
 ): WritebackContext | null {
   if (!column.editable) return null;
-  if (column.type === 'chart' || isWorkflowButtonColumn(column)) return null;
+  if (column.type === 'chart' || isActionColumn(column)) return null;
   const id = rowObject.id;
   const schemaId = rowObject.schemaId;
   if (typeof id !== 'string' || typeof schemaId !== 'string') return null;
@@ -896,6 +936,97 @@ function WorkflowActionButton({
       </span>
     </Button>
   );
+}
+
+function InteractionButtonsCell({
+  buttons,
+  row,
+  onRun,
+}: {
+  buttons: ReportTableInteractionButtonConfig[];
+  row: Record<string, unknown>;
+  onRun?: (
+    actions: ReportInteractionAction[],
+    row: Record<string, unknown>
+  ) => boolean;
+}) {
+  const visibleButtons = buttons.filter((button) =>
+    isInteractionButtonVisible(button, row)
+  );
+
+  if (visibleButtons.length === 0) {
+    return <span className="text-muted-foreground">-</span>;
+  }
+
+  return (
+    <div className="flex flex-wrap items-center gap-1.5">
+      {visibleButtons.map((button) => {
+        const disabled = isInteractionButtonDisabled(button, row);
+        const Icon = iconForInteractionButton(button.icon);
+        const label = button.label ?? humanizeFieldName(button.id);
+
+        return (
+          <Button
+            key={button.id}
+            type="button"
+            variant="outline"
+            size="sm"
+            className="h-8 max-w-full gap-1.5 px-2.5"
+            disabled={disabled}
+            onClick={(event) => {
+              event.stopPropagation();
+              if (disabled) return;
+              onRun?.(button.actions, row);
+            }}
+          >
+            <Icon className="h-3.5 w-3.5" />
+            <span className="truncate">{label}</span>
+          </Button>
+        );
+      })}
+    </div>
+  );
+}
+
+function isInteractionButtonVisible(
+  button: ReportTableInteractionButtonConfig,
+  row: Record<string, unknown>
+): boolean {
+  if (
+    button.visibleWhen &&
+    !matchesReportRowCondition(button.visibleWhen, row)
+  ) {
+    return false;
+  }
+  if (button.hiddenWhen && matchesReportRowCondition(button.hiddenWhen, row)) {
+    return false;
+  }
+  return true;
+}
+
+function isInteractionButtonDisabled(
+  button: ReportTableInteractionButtonConfig,
+  row: Record<string, unknown>
+): boolean {
+  return button.disabledWhen
+    ? matchesReportRowCondition(button.disabledWhen, row)
+    : false;
+}
+
+function iconForInteractionButton(
+  icon: ReportTableInteractionButtonConfig['icon']
+) {
+  switch (icon) {
+    case 'file_text':
+      return FileText;
+    case 'activity':
+      return Activity;
+    case 'arrow_right':
+      return ArrowRight;
+    case 'eye':
+    default:
+      return Eye;
+  }
 }
 
 function getRowObject(

@@ -1235,6 +1235,15 @@ impl ReportService {
                     None,
                 )?;
                 validate_dataset_block_output(block, &compiled.source)?;
+                if let Some(table) = &block.table {
+                    validate_report_table_interaction_button_columns(
+                        table,
+                        &filter_ids,
+                        &view_ids,
+                        &|field| dataset_output_field_known(&compiled.source, field),
+                        &format!("block '{}'", block.id),
+                    )?;
+                }
                 validate_report_markdown_placeholders(block, &markdown_placeholders, &|field| {
                     dataset_output_field_known(&compiled.source, field)
                 })?;
@@ -1398,6 +1407,17 @@ impl ReportService {
                             is_table_value_field,
                             &format!(
                                 "Block '{}' workflow button column '{}'",
+                                block.id, column.field
+                            ),
+                        )?;
+                    } else if column.is_interaction_buttons() {
+                        validate_report_interaction_buttons(
+                            &column.interaction_buttons,
+                            &filter_ids,
+                            &view_ids,
+                            &is_table_value_field,
+                            &format!(
+                                "Block '{}' interaction button column '{}'",
                                 block.id, column.field
                             ),
                         )?;
@@ -4837,67 +4857,174 @@ fn validate_block_interactions(
             )));
         }
         for action in &interaction.actions {
-            match action.action_type.as_str() {
-                "set_filter" => {
-                    let Some(filter_id) = action.filter_id.as_deref() else {
-                        return Err(ReportServiceError::Validation(format!(
-                            "Block '{}' interaction '{}' set_filter action must include filterId",
-                            block.id, interaction.id
-                        )));
-                    };
-                    if !filter_ids.contains(filter_id) {
-                        return Err(ReportServiceError::Validation(format!(
-                            "Block '{}' interaction '{}' references unknown filter '{}'",
-                            block.id, interaction.id, filter_id
-                        )));
-                    }
-                    if action.value_from.is_none() && action.value.is_none() {
-                        return Err(ReportServiceError::Validation(format!(
-                            "Block '{}' interaction '{}' set_filter action must include value or valueFrom",
-                            block.id, interaction.id
-                        )));
-                    }
-                }
-                "clear_filter" => {
-                    let Some(filter_id) = action.filter_id.as_deref() else {
-                        return Err(ReportServiceError::Validation(format!(
-                            "Block '{}' interaction '{}' clear_filter action must include filterId",
-                            block.id, interaction.id
-                        )));
-                    };
-                    if !filter_ids.contains(filter_id) {
-                        return Err(ReportServiceError::Validation(format!(
-                            "Block '{}' interaction '{}' references unknown filter '{}'",
-                            block.id, interaction.id, filter_id
-                        )));
-                    }
-                }
-                "clear_filters" => {
-                    for filter_id in &action.filter_ids {
-                        if !filter_ids.contains(filter_id) {
-                            return Err(ReportServiceError::Validation(format!(
-                                "Block '{}' interaction '{}' references unknown filter '{}'",
-                                block.id, interaction.id, filter_id
-                            )));
-                        }
-                    }
-                }
-                "navigate_view" => {
-                    let Some(view_id) = action.view_id.as_deref() else {
-                        return Err(ReportServiceError::Validation(format!(
-                            "Block '{}' interaction '{}' navigate_view action must include viewId",
-                            block.id, interaction.id
-                        )));
-                    };
-                    if !view_ids.contains(view_id) {
-                        return Err(ReportServiceError::Validation(format!(
-                            "Block '{}' interaction '{}' references unknown view '{}'",
-                            block.id, interaction.id, view_id
-                        )));
-                    }
-                }
-                _ => {}
+            validate_report_interaction_action(
+                action,
+                filter_ids,
+                view_ids,
+                &format!("Block '{}' interaction '{}'", block.id, interaction.id),
+            )?;
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_report_interaction_action(
+    action: &ReportInteractionAction,
+    filter_ids: &HashSet<String>,
+    view_ids: &HashSet<String>,
+    context: &str,
+) -> Result<(), ReportServiceError> {
+    match action.action_type.as_str() {
+        "set_filter" => {
+            let Some(filter_id) = action.filter_id.as_deref() else {
+                return Err(ReportServiceError::Validation(format!(
+                    "{context} set_filter action must include filterId"
+                )));
+            };
+            if !filter_ids.contains(filter_id) {
+                return Err(ReportServiceError::Validation(format!(
+                    "{context} references unknown filter '{filter_id}'"
+                )));
             }
+            if action.value_from.is_none() && action.value.is_none() {
+                return Err(ReportServiceError::Validation(format!(
+                    "{context} set_filter action must include value or valueFrom"
+                )));
+            }
+        }
+        "clear_filter" => {
+            let Some(filter_id) = action.filter_id.as_deref() else {
+                return Err(ReportServiceError::Validation(format!(
+                    "{context} clear_filter action must include filterId"
+                )));
+            };
+            if !filter_ids.contains(filter_id) {
+                return Err(ReportServiceError::Validation(format!(
+                    "{context} references unknown filter '{filter_id}'"
+                )));
+            }
+        }
+        "clear_filters" => {
+            for filter_id in &action.filter_ids {
+                if !filter_ids.contains(filter_id) {
+                    return Err(ReportServiceError::Validation(format!(
+                        "{context} references unknown filter '{filter_id}'"
+                    )));
+                }
+            }
+        }
+        "navigate_view" => {
+            let Some(view_id) = action.view_id.as_deref() else {
+                return Err(ReportServiceError::Validation(format!(
+                    "{context} navigate_view action must include viewId"
+                )));
+            };
+            if !view_ids.contains(view_id) {
+                return Err(ReportServiceError::Validation(format!(
+                    "{context} references unknown view '{view_id}'"
+                )));
+            }
+        }
+        _ => {}
+    }
+
+    Ok(())
+}
+
+fn validate_report_table_interaction_button_columns(
+    table: &ReportTableConfig,
+    filter_ids: &HashSet<String>,
+    view_ids: &HashSet<String>,
+    is_known_field: &dyn Fn(&str) -> bool,
+    context: &str,
+) -> Result<(), ReportServiceError> {
+    for column in &table.columns {
+        if column.is_interaction_buttons() {
+            validate_report_interaction_buttons(
+                &column.interaction_buttons,
+                filter_ids,
+                view_ids,
+                is_known_field,
+                &format!("{context} interaction button column '{}'", column.field),
+            )?;
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_report_interaction_buttons(
+    buttons: &[ReportTableInteractionButtonConfig],
+    filter_ids: &HashSet<String>,
+    view_ids: &HashSet<String>,
+    is_known_field: &dyn Fn(&str) -> bool,
+    context: &str,
+) -> Result<(), ReportServiceError> {
+    if buttons.is_empty() {
+        return Err(ReportServiceError::Validation(format!(
+            "{context} must define interactionButtons"
+        )));
+    }
+
+    let row_field_known = |field: &str| {
+        is_known_field(field)
+            || is_report_row_metadata_field(field)
+            || field
+                .split_once('.')
+                .is_some_and(|(base, _)| is_known_field(base) || is_report_row_metadata_field(base))
+    };
+
+    let mut button_ids = HashSet::new();
+    for button in buttons {
+        if button.id.trim().is_empty() {
+            return Err(ReportServiceError::Validation(format!(
+                "{context} button IDs cannot be empty"
+            )));
+        }
+        if !button_ids.insert(button.id.clone()) {
+            return Err(ReportServiceError::Validation(format!(
+                "{context} has duplicate button ID '{}'",
+                button.id
+            )));
+        }
+        if button.actions.is_empty() {
+            return Err(ReportServiceError::Validation(format!(
+                "{context} button '{}' must define at least one action",
+                button.id
+            )));
+        }
+        for action in &button.actions {
+            validate_report_interaction_action(
+                action,
+                filter_ids,
+                view_ids,
+                &format!("{context} button '{}'", button.id),
+            )?;
+        }
+        if let Some(condition) = &button.visible_when {
+            validate_report_workflow_action_row_condition(
+                condition,
+                &row_field_known,
+                context,
+                &format!("interactionButtons['{}'].visibleWhen", button.id),
+            )?;
+        }
+        if let Some(condition) = &button.hidden_when {
+            validate_report_workflow_action_row_condition(
+                condition,
+                &row_field_known,
+                context,
+                &format!("interactionButtons['{}'].hiddenWhen", button.id),
+            )?;
+        }
+        if let Some(condition) = &button.disabled_when {
+            validate_report_workflow_action_row_condition(
+                condition,
+                &row_field_known,
+                context,
+                &format!("interactionButtons['{}'].disabledWhen", button.id),
+            )?;
         }
     }
 
@@ -5153,6 +5280,19 @@ fn validate_workflow_runtime_block(
                 )?;
                 continue;
             }
+            if column.is_interaction_buttons() {
+                validate_report_interaction_buttons(
+                    &column.interaction_buttons,
+                    filter_ids,
+                    view_ids,
+                    &|field| workflow_runtime_row_field_known(&fields, field),
+                    &format!(
+                        "Block '{}' interaction button column '{}'",
+                        block.id, column.field
+                    ),
+                )?;
+                continue;
+            }
             if column.is_chart() || column.is_value_lookup() {
                 return Err(ReportServiceError::Validation(format!(
                     "Block '{}' workflow_runtime table columns cannot use nested sources",
@@ -5262,6 +5402,19 @@ fn validate_system_block(
 
     if let Some(table) = &block.table {
         for column in &table.columns {
+            if column.is_interaction_buttons() {
+                validate_report_interaction_buttons(
+                    &column.interaction_buttons,
+                    filter_ids,
+                    view_ids,
+                    &is_table_value_field,
+                    &format!(
+                        "Block '{}' interaction button column '{}'",
+                        block.id, column.field
+                    ),
+                )?;
+                continue;
+            }
             if column.is_chart() || column.is_value_lookup() || column.is_workflow_button() {
                 return Err(ReportServiceError::Validation(format!(
                     "Block '{}' system table columns cannot use nested sources or workflow buttons",
@@ -9103,6 +9256,9 @@ fn validate_dataset_block_output(
                     block.id
                 )));
             }
+            if column.is_interaction_buttons() {
+                continue;
+            }
             if !output_fields.contains(&column.field) {
                 return Err(ReportServiceError::Validation(format!(
                     "Block '{}' references unknown dataset table field '{}'",
@@ -9358,6 +9514,7 @@ fn auto_lookup_display_field(column: &ReportTableColumn) -> Option<String> {
         || column.is_chart()
         || column.is_value_lookup()
         || column.is_workflow_button()
+        || column.is_interaction_buttons()
     {
         return None;
     }
@@ -9385,7 +9542,7 @@ fn project_aggregate_table_rows(
                 .columns
                 .iter()
                 .map(|column| {
-                    if column.is_chart() {
+                    if column.is_chart() || column.is_interaction_buttons() {
                         return Ok(Value::Null);
                     }
                     let Some(source_index) = source_indexes.get(column.field.as_str()) else {
@@ -10248,6 +10405,7 @@ mod tests {
             editable: false,
             editor: None,
             workflow_action: None,
+            interaction_buttons: vec![],
         }
     }
 
@@ -11267,6 +11425,84 @@ mod tests {
             &HashSet::from(["detail".to_string()]),
         )
         .unwrap();
+    }
+
+    #[test]
+    fn table_interaction_buttons_accept_filter_and_view_navigation_actions() {
+        let column: ReportTableColumn = serde_json::from_value(json!({
+            "field": "views",
+            "label": "Views",
+            "type": "interaction_buttons",
+            "interactionButtons": [
+                {
+                    "id": "summary",
+                    "label": "Summary",
+                    "icon": "eye",
+                    "actions": [
+                        {"type": "set_filter", "filterId": "sku", "valueFrom": "datum.sku"},
+                        {"type": "navigate_view", "viewId": "summary"}
+                    ]
+                },
+                {
+                    "id": "audit",
+                    "label": "Audit",
+                    "icon": "file_text",
+                    "actions": [
+                        {"type": "set_filter", "filterId": "sku", "valueFrom": "datum.sku"},
+                        {"type": "navigate_view", "viewId": "audit"}
+                    ]
+                }
+            ]
+        }))
+        .unwrap();
+
+        assert!(column.is_interaction_buttons());
+        validate_report_interaction_buttons(
+            &column.interaction_buttons,
+            &HashSet::from(["sku".to_string()]),
+            &HashSet::from(["summary".to_string(), "audit".to_string()]),
+            &|field| field == "sku",
+            "block 'stock' interaction button column 'views'",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn aggregate_table_projection_allows_interaction_button_columns() {
+        let mut actions_column = table_column("views");
+        actions_column.column_type = Some(ReportTableColumnType::InteractionButtons);
+        actions_column.interaction_buttons = vec![ReportTableInteractionButtonConfig {
+            id: "summary".to_string(),
+            label: Some("Summary".to_string()),
+            icon: Some("eye".to_string()),
+            visible_when: None,
+            hidden_when: None,
+            disabled_when: None,
+            actions: vec![ReportInteractionAction {
+                action_type: "navigate_view".to_string(),
+                filter_id: None,
+                filter_ids: vec![],
+                view_id: Some("summary".to_string()),
+                value_from: None,
+                value: None,
+            }],
+        }];
+        let table = ReportTableConfig {
+            columns: vec![table_column("vendor"), actions_column],
+            selectable: false,
+            actions: vec![],
+            default_sort: vec![],
+            pagination: None,
+        };
+
+        let rows = project_aggregate_table_rows(
+            Some(&table),
+            &["vendor".to_string()],
+            vec![vec![json!("ACME")]],
+        )
+        .unwrap();
+
+        assert_eq!(rows, vec![vec![json!("ACME"), Value::Null]]);
     }
 
     #[test]

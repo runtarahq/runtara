@@ -1309,7 +1309,8 @@ fn report_authoring_schema() -> Value {
                     "note": "Writeback is opt-in per column. Auth + type validation happens on the object-model endpoint, not in the report layer — viewers need write permission on the underlying schema. The 'editable' flag here is a UI hint; it does not relax server-side authorization."
                 },
                 "workflowAction": "Optional table column button: set type='workflow_button' and workflowAction={workflowId, version?, label?, runningLabel?, successMessage?, reloadBlock?, visibleWhen?, hiddenWhen?, disabledWhen?, context?}. context.mode is row | field | value. mode=row passes the whole row as workflow data; mode=field passes context.field or column.field; mode=value passes the cell value. context.inputKey wraps the context as {inputKey: context}. visibleWhen/hiddenWhen/disabledWhen are row-level condition DSL objects evaluated against the rendered row, e.g. disabledWhen={op:'EQ', arguments:['status','processed']}.",
-                "note": "Tables support source.mode='filter' for row data and source.mode='aggregate' for grouped aggregate result sets. Configure visible/searchable/sortable fields in table.columns. A table column may use type='chart' for inline aggregate charts, type='value' with source.select for scalar joined lookups, type='workflow_button' with workflowAction for a row-scoped workflow launcher, or table.actions[] for table-wide selected-row workflow launchers. To enable inline writeback on a column, see writeback.editable."
+                "interactionButtons": "Optional row navigation/action buttons: set type='interaction_buttons' and interactionButtons=[{id,label?,icon?,visibleWhen?,hiddenWhen?,disabledWhen?,actions:[...]}]. Button actions use the same set_filter, clear_filter, clear_filters, and navigate_view vocabulary as block.interactions. Use this for rows like SKU | Qty | Price | View 1 | View 2.",
+                "note": "Tables support source.mode='filter' for row data and source.mode='aggregate' for grouped aggregate result sets. Configure visible/searchable/sortable fields in table.columns. A table column may use type='chart' for inline aggregate charts, type='value' with source.select for scalar joined lookups, type='workflow_button' with workflowAction for a row-scoped workflow launcher, type='interaction_buttons' with interactionButtons for row-scoped report navigation/action buttons, or table.actions[] for table-wide selected-row workflow launchers. To enable inline writeback on a column, see writeback.editable."
             },
             "chart": {
                 "type": "chart",
@@ -1439,6 +1440,7 @@ fn report_authoring_schema() -> Value {
             "For type='actions', do not configure table columns; the block renders forms from each action.inputSchema and submits through the report-scoped workflow action endpoint.",
             "For type='card', use card.groups[].fields. Each field references a row property by name. Use kind='subtable' (with subtable.columns) for arrays-of-objects and kind='subcard' (with subcard.groups) for nested objects. Use format='pill' + pillVariants to color-code enum/status fields.",
             "For workflow launch buttons, use table.columns[].type='workflow_button' or card.groups[].fields[].kind='workflow_button' with workflowAction.workflowId. Set workflowAction.context.mode='row' to pass the whole row, 'field' to pass a row field, or 'value' to pass the cell/field value. Use workflowAction.visibleWhen or hiddenWhen for row-level visibility, and disabledWhen for visible-but-disabled buttons, e.g. disabledWhen={op:'EQ', arguments:['status','processed']}. For table-wide bulk workflow buttons, use table.actions[] with workflowAction.context.mode='selection'; buttons remain visible but disabled until one or more current table rows are selected.",
+            "For row-scoped report navigation buttons, use table.columns[].type='interaction_buttons' with interactionButtons. Each button can set row-derived filters and navigate to a named view, e.g. actions=[{type:'set_filter', filterId:'sku', valueFrom:'datum.sku'}, {type:'navigate_view', viewId:'inventory_detail'}].",
             "For editable lookup/reference fields, keep the stored id in field, optionally render a joined label with displayField, and set editor.kind='lookup' with editor.lookup={schema, valueField, labelField, searchFields?}. Lookup search automatically uses generated tsvector fields when the lookup schema has them."
         ],
         "commonMistakes": [
@@ -3382,6 +3384,7 @@ fn collect_table_issues(path: &str, table: &Value, issues: &mut Vec<AuthoringIss
                     "editable",
                     "editor",
                     "workflowAction",
+                    "interactionButtons",
                 ],
                 issues,
             );
@@ -3437,6 +3440,26 @@ fn collect_table_issues(path: &str, table: &Value, issues: &mut Vec<AuthoringIss
                     WorkflowActionScope::RowScoped,
                     issues,
                 );
+            }
+            if let Some(buttons) = column.get("interactionButtons") {
+                match buttons.as_array() {
+                    Some(buttons) => {
+                        for (button_index, button) in buttons.iter().enumerate() {
+                            collect_interaction_button_issues(
+                                &format!(
+                                    "{path}.columns[{index}].interactionButtons[{button_index}]"
+                                ),
+                                button,
+                                issues,
+                            );
+                        }
+                    }
+                    None => issues.push(error(
+                        format!("{path}.columns[{index}].interactionButtons"),
+                        "INVALID_INTERACTION_BUTTONS",
+                        "interactionButtons must be an array.",
+                    )),
+                }
             }
         }
     }
@@ -4222,30 +4245,86 @@ fn collect_interaction_issues(path: &str, interaction: &Value, issues: &mut Vec<
         );
     }
     if let Some(actions) = interaction.get("actions") {
-        match actions.as_array() {
-            Some(actions) => {
-                for (index, action) in actions.iter().enumerate() {
-                    collect_unknown_keys(
-                        &format!("{path}.actions[{index}]"),
-                        action,
-                        &[
-                            "type",
-                            "filterId",
-                            "filterIds",
-                            "viewId",
-                            "valueFrom",
-                            "value",
-                        ],
-                        issues,
-                    );
-                }
+        collect_interaction_actions_issues(
+            &format!("{path}.actions"),
+            actions,
+            "Report interaction actions must be an array.",
+            issues,
+        );
+    }
+}
+
+fn collect_interaction_button_issues(path: &str, button: &Value, issues: &mut Vec<AuthoringIssue>) {
+    collect_unknown_keys(
+        path,
+        button,
+        &[
+            "id",
+            "label",
+            "icon",
+            "visibleWhen",
+            "hiddenWhen",
+            "disabledWhen",
+            "actions",
+        ],
+        issues,
+    );
+    if button
+        .get("id")
+        .and_then(Value::as_str)
+        .is_none_or(str::is_empty)
+    {
+        issues.push(error(
+            format!("{path}.id"),
+            "MISSING_INTERACTION_BUTTON_ID",
+            "Interaction buttons must include a stable id.",
+        ));
+    }
+    if let Some(actions) = button.get("actions") {
+        collect_interaction_actions_issues(
+            &format!("{path}.actions"),
+            actions,
+            "Interaction button actions must be an array.",
+            issues,
+        );
+    } else {
+        issues.push(error(
+            format!("{path}.actions"),
+            "MISSING_INTERACTION_BUTTON_ACTIONS",
+            "Interaction buttons must define actions.",
+        ));
+    }
+}
+
+fn collect_interaction_actions_issues(
+    path: &str,
+    actions: &Value,
+    invalid_message: &str,
+    issues: &mut Vec<AuthoringIssue>,
+) {
+    match actions.as_array() {
+        Some(actions) => {
+            for (index, action) in actions.iter().enumerate() {
+                collect_unknown_keys(
+                    &format!("{path}[{index}]"),
+                    action,
+                    &[
+                        "type",
+                        "filterId",
+                        "filterIds",
+                        "viewId",
+                        "valueFrom",
+                        "value",
+                    ],
+                    issues,
+                );
             }
-            None => issues.push(error(
-                format!("{path}.actions"),
-                "INVALID_INTERACTION_ACTIONS",
-                "Report interaction actions must be an array.",
-            )),
         }
+        None => issues.push(error(
+            path.to_string(),
+            "INVALID_INTERACTION_ACTIONS",
+            invalid_message,
+        )),
     }
 }
 
@@ -5614,6 +5693,66 @@ mod tests {
 
         assert!(!codes.contains(&"UNKNOWN_KEY"));
         assert!(!codes.contains(&"MISSING_WORKFLOW_ACTION_WORKFLOW_ID"));
+        assert!(authoring_errors(&issues).next().is_none());
+    }
+
+    #[test]
+    fn report_authoring_accepts_interaction_button_columns() {
+        let definition = json!({
+            "definitionVersion": 1,
+            "filters": [
+                {"id": "sku", "label": "SKU", "type": "text", "strictWhenReferenced": true}
+            ],
+            "views": [
+                {"id": "list", "title": "Inventory", "layout": [{"id": "items_node", "type": "block", "blockId": "items"}]},
+                {"id": "stock_detail", "title": "Stock detail", "parentViewId": "list", "layout": []},
+                {"id": "price_detail", "title": "Price detail", "parentViewId": "list", "layout": []}
+            ],
+            "blocks": [{
+                "id": "items",
+                "type": "table",
+                "source": {"schema": "Item", "mode": "filter"},
+                "table": {
+                    "columns": [
+                        {"field": "sku", "label": "SKU"},
+                        {"field": "qty", "label": "Qty", "format": "number"},
+                        {"field": "price", "label": "Price", "format": "currency"},
+                        {
+                            "field": "views",
+                            "label": "Views",
+                            "type": "interaction_buttons",
+                            "interactionButtons": [
+                                {
+                                    "id": "stock",
+                                    "label": "View 1",
+                                    "icon": "eye",
+                                    "actions": [
+                                        {"type": "set_filter", "filterId": "sku", "valueFrom": "datum.sku"},
+                                        {"type": "navigate_view", "viewId": "stock_detail"}
+                                    ]
+                                },
+                                {
+                                    "id": "price",
+                                    "label": "View 2",
+                                    "icon": "file_text",
+                                    "actions": [
+                                        {"type": "set_filter", "filterId": "sku", "valueFrom": "datum.sku"},
+                                        {"type": "navigate_view", "viewId": "price_detail"}
+                                    ]
+                                }
+                            ]
+                        }
+                    ]
+                }
+            }]
+        });
+
+        let issues = collect_report_definition_authoring_issues(&definition);
+        let codes = issue_codes(&issues);
+
+        assert!(!codes.contains(&"UNKNOWN_KEY"));
+        assert!(!codes.contains(&"INVALID_INTERACTION_BUTTONS"));
+        assert!(!codes.contains(&"MISSING_INTERACTION_BUTTON_ACTIONS"));
         assert!(authoring_errors(&issues).next().is_none());
     }
 

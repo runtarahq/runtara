@@ -1035,6 +1035,44 @@ pub struct ReportTableColumn {
         skip_serializing_if = "Option::is_none"
     )]
     pub workflow_action: Option<ReportWorkflowActionConfig>,
+    /// Optional row-scoped report interaction buttons rendered in this table
+    /// column. Each button executes the same interaction action vocabulary used
+    /// by block interactions, such as set_filter followed by navigate_view.
+    #[serde(
+        default,
+        rename = "interactionButtons",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub interaction_buttons: Vec<ReportTableInteractionButtonConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, JsonSchema)]
+pub struct ReportTableInteractionButtonConfig {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<String>,
+    #[serde(
+        default,
+        rename = "visibleWhen",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub visible_when: Option<Condition>,
+    #[serde(
+        default,
+        rename = "hiddenWhen",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub hidden_when: Option<Condition>,
+    #[serde(
+        default,
+        rename = "disabledWhen",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub disabled_when: Option<Condition>,
+    #[serde(default)]
+    pub actions: Vec<ReportInteractionAction>,
 }
 
 /// Explicit editor configuration for an editable column or card field.
@@ -1132,6 +1170,7 @@ pub enum ReportTableColumnType {
     Value,
     Chart,
     WorkflowButton,
+    InteractionButtons,
 }
 
 impl ReportTableColumn {
@@ -1148,6 +1187,13 @@ impl ReportTableColumn {
             self.column_type,
             Some(ReportTableColumnType::WorkflowButton)
         ) || self.workflow_action.is_some()
+    }
+
+    pub fn is_interaction_buttons(&self) -> bool {
+        matches!(
+            self.column_type,
+            Some(ReportTableColumnType::InteractionButtons)
+        ) || !self.interaction_buttons.is_empty()
     }
 }
 

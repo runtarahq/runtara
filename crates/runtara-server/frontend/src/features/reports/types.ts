@@ -393,7 +393,7 @@ export interface ReportTableColumn {
   /** Row field rendered instead of `field` while sort/writeback still target `field`. */
   displayField?: string;
   format?: string;
-  type?: 'value' | 'chart' | 'workflow_button';
+  type?: 'value' | 'chart' | 'workflow_button' | 'interaction_buttons';
   chart?: {
     kind: ReportChartKind;
     x: string;
@@ -423,6 +423,18 @@ export interface ReportTableColumn {
   editor?: ReportEditorConfig;
   /** Workflow launcher rendered as a button in this column. */
   workflowAction?: ReportWorkflowActionConfig;
+  /** Row-scoped report interaction buttons rendered in this column. */
+  interactionButtons?: ReportTableInteractionButtonConfig[];
+}
+
+export interface ReportTableInteractionButtonConfig {
+  id: string;
+  label?: string;
+  icon?: 'eye' | 'file_text' | 'activity' | 'arrow_right';
+  visibleWhen?: ReportRowCondition;
+  hiddenWhen?: ReportRowCondition;
+  disabledWhen?: ReportRowCondition;
+  actions: ReportInteractionAction[];
 }
 
 export interface ReportTableActionConfig {
