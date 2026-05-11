@@ -8,7 +8,8 @@ use crate::api::services::reports::ReportService;
 
 use super::super::server::SmoMcpServer;
 use super::internal_api::{
-    api_delete, api_delete_with_body, api_get, api_patch, api_post, api_put, validate_path_param,
+    api_delete, api_delete_with_body, api_get, api_patch, api_post, api_put, normalize_json_arg,
+    validate_path_param,
 };
 
 #[allow(dead_code)]
@@ -73,6 +74,7 @@ pub struct CreateReportParams {
     #[schemars(
         description = "Full report definition: {definitionVersion, layout?, filters, datasets?, blocks}. For BI reports, define datasets and let blocks reference them. Every block must include a stable id; every layout node must include a stable id."
     )]
+    #[schemars(schema_with = "crate::mcp::tools::internal_api::json_object_schema")]
     pub definition: Value,
 }
 
@@ -90,6 +92,7 @@ pub struct UpdateReportParams {
     #[schemars(
         description = "Full replacement report definition: {definitionVersion, layout?, filters, datasets?, blocks}. Use datasets for BI reports and block/layout mutation tools for atomic edits."
     )]
+    #[schemars(schema_with = "crate::mcp::tools::internal_api::json_object_schema")]
     pub definition: Value,
 }
 
@@ -112,6 +115,7 @@ pub enum ReportValidationMode {
 #[serde(deny_unknown_fields)]
 pub struct ValidateReportParams {
     #[schemars(description = "Report definition to validate before saving.")]
+    #[schemars(schema_with = "crate::mcp::tools::internal_api::json_object_schema")]
     pub definition: Value,
     #[schemars(
         description = "Validation mode: syntax runs JSON Schema only; semantic runs backend tenant-reference checks; all runs MCP authoring checks plus backend validation. Defaults to all."
@@ -159,6 +163,7 @@ pub struct AddReportBlockParams {
     #[schemars(description = "Report id or slug")]
     pub report_id: String,
     #[schemars(description = "Full block definition. The block must include a unique stable id.")]
+    #[schemars(schema_with = "crate::mcp::tools::internal_api::json_object_schema")]
     pub block: Value,
     #[schemars(
         description = "Insert at zero-based block index. Mutually exclusive with before_block_id and after_block_id."
@@ -182,6 +187,7 @@ pub struct ReplaceReportBlockParams {
     #[schemars(description = "Stable block id to replace. The replacement block id must match.")]
     pub block_id: String,
     #[schemars(description = "Full replacement block definition.")]
+    #[schemars(schema_with = "crate::mcp::tools::internal_api::json_object_schema")]
     pub block: Value,
 }
 
@@ -195,6 +201,7 @@ pub struct PatchReportBlockParams {
     #[schemars(
         description = "RFC 7386-style JSON merge patch applied to the block definition. The id field cannot be changed."
     )]
+    #[schemars(schema_with = "crate::mcp::tools::internal_api::json_object_schema")]
     pub patch: Value,
 }
 
@@ -234,6 +241,7 @@ pub struct AddReportLayoutNodeParams {
     #[schemars(description = "Report id or slug")]
     pub report_id: String,
     #[schemars(description = "Full layout node. Must include stable id and type.")]
+    #[schemars(schema_with = "crate::mcp::tools::internal_api::json_object_schema")]
     pub node: Value,
     #[schemars(
         description = "Optional container layout node id. Omit to insert at the root layout array. Sections accept children; columns require column_id."
@@ -265,6 +273,7 @@ pub struct ReplaceReportLayoutNodeParams {
     #[schemars(description = "Stable layout node id to replace.")]
     pub node_id: String,
     #[schemars(description = "Full replacement layout node. Its id must match node_id.")]
+    #[schemars(schema_with = "crate::mcp::tools::internal_api::json_object_schema")]
     pub node: Value,
 }
 
@@ -278,6 +287,7 @@ pub struct PatchReportLayoutNodeParams {
     #[schemars(
         description = "RFC 7386-style JSON merge patch applied to the layout node. The id field cannot be changed."
     )]
+    #[schemars(schema_with = "crate::mcp::tools::internal_api::json_object_schema")]
     pub patch: Value,
 }
 
@@ -377,14 +387,15 @@ pub async fn create_report(
     server: &SmoMcpServer,
     params: CreateReportParams,
 ) -> Result<CallToolResult, rmcp::ErrorData> {
-    let issues = collect_report_definition_authoring_issues(&params.definition);
+    let definition = normalize_json_arg(params.definition, "definition")?;
+    let issues = collect_report_definition_authoring_issues(&definition);
     if authoring_errors(&issues).next().is_some() {
         return Err(authoring_invalid_params(issues));
     }
 
     let mut body = json!({
         "name": params.name,
-        "definition": params.definition,
+        "definition": definition,
         "tags": params.tags.unwrap_or_default(),
     });
     if let Some(slug) = params.slug {
@@ -406,7 +417,8 @@ pub async fn update_report(
     params: UpdateReportParams,
 ) -> Result<CallToolResult, rmcp::ErrorData> {
     validate_path_param("report_id", &params.report_id)?;
-    let issues = collect_report_definition_authoring_issues(&params.definition);
+    let definition = normalize_json_arg(params.definition, "definition")?;
+    let issues = collect_report_definition_authoring_issues(&definition);
     if authoring_errors(&issues).next().is_some() {
         return Err(authoring_invalid_params(issues));
     }
@@ -416,7 +428,7 @@ pub async fn update_report(
         "slug": params.slug,
         "description": params.description,
         "tags": params.tags.unwrap_or_default(),
-        "definition": params.definition,
+        "definition": definition,
     });
     if let Some(status) = params.status {
         body["status"] = Value::String(status);
@@ -449,15 +461,15 @@ pub async fn validate_report(
     params: ValidateReportParams,
 ) -> Result<CallToolResult, rmcp::ErrorData> {
     let mode = params.mode.unwrap_or(ReportValidationMode::All);
+    let definition = normalize_json_arg(params.definition, "definition")?;
     if mode == ReportValidationMode::Syntax {
-        let errors =
-            ReportService::validate_report_definition_json_syntax_issues(&params.definition)
-                .map_err(|err| {
-                    rmcp::ErrorData::internal_error(
-                        "Could not run report JSON Schema validation.",
-                        Some(json!({ "message": err.to_string() })),
-                    )
-                })?;
+        let errors = ReportService::validate_report_definition_json_syntax_issues(&definition)
+            .map_err(|err| {
+                rmcp::ErrorData::internal_error(
+                    "Could not run report JSON Schema validation.",
+                    Some(json!({ "message": err.to_string() })),
+                )
+            })?;
         return json_result(json!({
             "valid": errors.is_empty(),
             "mode": "syntax",
@@ -467,7 +479,7 @@ pub async fn validate_report(
         }));
     }
 
-    let issues = collect_report_definition_authoring_issues(&params.definition);
+    let issues = collect_report_definition_authoring_issues(&definition);
     if mode == ReportValidationMode::All && authoring_errors(&issues).next().is_some() {
         return json_result(authoring_validation_response(issues));
     }
@@ -475,7 +487,7 @@ pub async fn validate_report(
     let result = api_post(
         server,
         "/api/runtime/reports/validate",
-        Some(json!({ "definition": params.definition })),
+        Some(json!({ "definition": definition })),
     )
     .await?;
     let mut result = result;
@@ -558,14 +570,15 @@ pub async fn add_report_block(
     params: AddReportBlockParams,
 ) -> Result<CallToolResult, rmcp::ErrorData> {
     validate_path_param("report_id", &params.report_id)?;
+    let block = normalize_json_arg(params.block, "block")?;
     let mut issues = Vec::new();
-    collect_report_block_authoring_issues("$.block", &params.block, true, &mut issues);
+    collect_report_block_authoring_issues("$.block", &block, true, &mut issues);
     if authoring_errors(&issues).next().is_some() {
         return Err(authoring_invalid_params(issues));
     }
 
     let body = json!({
-        "block": params.block,
+        "block": block,
         "position": position_body(params.index, params.before_block_id, params.after_block_id),
     });
 
@@ -584,8 +597,9 @@ pub async fn replace_report_block(
 ) -> Result<CallToolResult, rmcp::ErrorData> {
     validate_path_param("report_id", &params.report_id)?;
     validate_path_param("block_id", &params.block_id)?;
+    let block = normalize_json_arg(params.block, "block")?;
     let mut issues = Vec::new();
-    collect_report_block_authoring_issues("$.block", &params.block, true, &mut issues);
+    collect_report_block_authoring_issues("$.block", &block, true, &mut issues);
     if authoring_errors(&issues).next().is_some() {
         return Err(authoring_invalid_params(issues));
     }
@@ -596,7 +610,7 @@ pub async fn replace_report_block(
             "/api/runtime/reports/{}/blocks/{}",
             params.report_id, params.block_id
         ),
-        Some(json!({ "block": params.block })),
+        Some(json!({ "block": block })),
     )
     .await?;
     json_result(result)
@@ -608,8 +622,9 @@ pub async fn patch_report_block(
 ) -> Result<CallToolResult, rmcp::ErrorData> {
     validate_path_param("report_id", &params.report_id)?;
     validate_path_param("block_id", &params.block_id)?;
+    let patch = normalize_json_arg(params.patch, "patch")?;
     let mut issues = Vec::new();
-    collect_report_block_authoring_issues("$.patch", &params.patch, false, &mut issues);
+    collect_report_block_authoring_issues("$.patch", &patch, false, &mut issues);
     if authoring_errors(&issues).next().is_some() {
         return Err(authoring_invalid_params(issues));
     }
@@ -620,7 +635,7 @@ pub async fn patch_report_block(
             "/api/runtime/reports/{}/blocks/{}",
             params.report_id, params.block_id
         ),
-        Some(json!({ "patch": params.patch })),
+        Some(json!({ "patch": patch })),
     )
     .await?;
     json_result(result)
@@ -673,6 +688,7 @@ pub async fn add_report_layout_node(
     params: AddReportLayoutNodeParams,
 ) -> Result<CallToolResult, rmcp::ErrorData> {
     validate_path_param("report_id", &params.report_id)?;
+    let node = normalize_json_arg(params.node, "node")?;
     let mut report = get_report_value(server, &params.report_id).await?;
     let definition = report_definition_mut(&mut report)?;
     let layout = layout_array_mut(definition)?;
@@ -681,7 +697,7 @@ pub async fn add_report_layout_node(
         layout,
         params.parent_node_id.as_deref(),
         params.column_id.as_deref(),
-        params.node,
+        node,
         LayoutPosition {
             index: params.index,
             before_node_id: params.before_node_id.as_deref(),
@@ -698,7 +714,8 @@ pub async fn replace_report_layout_node(
 ) -> Result<CallToolResult, rmcp::ErrorData> {
     validate_path_param("report_id", &params.report_id)?;
     validate_path_param("node_id", &params.node_id)?;
-    if params.node.get("id").and_then(Value::as_str) != Some(params.node_id.as_str()) {
+    let node = normalize_json_arg(params.node, "node")?;
+    if node.get("id").and_then(Value::as_str) != Some(params.node_id.as_str()) {
         return Err(rmcp::ErrorData::invalid_params(
             "Replacement layout node id must match node_id.",
             None,
@@ -708,7 +725,7 @@ pub async fn replace_report_layout_node(
     let mut report = get_report_value(server, &params.report_id).await?;
     let definition = report_definition_mut(&mut report)?;
     let layout = layout_array_mut(definition)?;
-    if !replace_layout_node(layout, &params.node_id, params.node) {
+    if !replace_layout_node(layout, &params.node_id, node) {
         return Err(layout_node_not_found(&params.node_id));
     }
 
@@ -721,13 +738,14 @@ pub async fn patch_report_layout_node(
 ) -> Result<CallToolResult, rmcp::ErrorData> {
     validate_path_param("report_id", &params.report_id)?;
     validate_path_param("node_id", &params.node_id)?;
-    if !params.patch.is_object() {
+    let patch = normalize_json_arg(params.patch, "patch")?;
+    if !patch.is_object() {
         return Err(rmcp::ErrorData::invalid_params(
             "Report layout node patch must be a JSON object.",
             None,
         ));
     }
-    if params.patch.get("id").is_some() {
+    if patch.get("id").is_some() {
         return Err(rmcp::ErrorData::invalid_params(
             "Report layout node id cannot be changed with patch_report_layout_node.",
             None,
@@ -737,7 +755,7 @@ pub async fn patch_report_layout_node(
     let mut report = get_report_value(server, &params.report_id).await?;
     let definition = report_definition_mut(&mut report)?;
     let layout = layout_array_mut(definition)?;
-    if !patch_layout_node(layout, &params.node_id, &params.patch) {
+    if !patch_layout_node(layout, &params.node_id, &patch) {
         return Err(layout_node_not_found(&params.node_id));
     }
 
@@ -4879,6 +4897,17 @@ fn error(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use schemars::JsonSchema;
+
+    fn generated_property_schema<T: JsonSchema>(property: &str) -> Value {
+        let schema = serde_json::to_value(schemars::schema_for!(T)).unwrap();
+        schema
+            .get("properties")
+            .and_then(Value::as_object)
+            .and_then(|properties| properties.get(property))
+            .cloned()
+            .unwrap_or_else(|| panic!("missing property schema for {property}: {schema:#}"))
+    }
 
     #[test]
     fn report_authoring_lints_misplaced_table_columns() {
@@ -5717,6 +5746,30 @@ mod tests {
             .expect("card.fieldShape.kind is a string");
         assert!(kinds.contains("subcard") && kinds.contains("subtable"));
         assert_eq!(schema["examples"]["card"]["type"], json!("card"));
+    }
+
+    #[test]
+    fn report_authoring_tool_body_schemas_declare_objects() {
+        let create_definition = generated_property_schema::<CreateReportParams>("definition");
+        let update_definition = generated_property_schema::<UpdateReportParams>("definition");
+        let validate_definition = generated_property_schema::<ValidateReportParams>("definition");
+        let add_block = generated_property_schema::<AddReportBlockParams>("block");
+        let replace_block = generated_property_schema::<ReplaceReportBlockParams>("block");
+        let patch_block = generated_property_schema::<PatchReportBlockParams>("patch");
+        let add_layout_node = generated_property_schema::<AddReportLayoutNodeParams>("node");
+        let replace_layout_node =
+            generated_property_schema::<ReplaceReportLayoutNodeParams>("node");
+        let patch_layout_node = generated_property_schema::<PatchReportLayoutNodeParams>("patch");
+
+        assert_eq!(create_definition["type"], "object");
+        assert_eq!(update_definition["type"], "object");
+        assert_eq!(validate_definition["type"], "object");
+        assert_eq!(add_block["type"], "object");
+        assert_eq!(replace_block["type"], "object");
+        assert_eq!(patch_block["type"], "object");
+        assert_eq!(add_layout_node["type"], "object");
+        assert_eq!(replace_layout_node["type"], "object");
+        assert_eq!(patch_layout_node["type"], "object");
     }
 
     #[test]
