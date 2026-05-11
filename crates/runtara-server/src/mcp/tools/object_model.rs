@@ -324,6 +324,20 @@ pub struct QueryObjectInstancesParams {
     )]
     pub condition: Option<serde_json::Value>,
     #[schemars(
+        description = "Optional computed score expression. For vector nearest-neighbor search, \
+                       use {alias:'distance', expression:{fn:'COSINE_DISTANCE', \
+                       arguments:[{valueType:'reference', value:'embedding'}, \
+                       {valueType:'immediate', value:[number,...]}]}} and order by \
+                       that alias ASC."
+    )]
+    pub score_expression: Option<serde_json::Value>,
+    #[schemars(
+        description = "Optional structured order: [{expression:{kind:'alias'|'column', \
+                       name}, direction:'ASC'|'DESC'}]. Use an alias target matching \
+                       score_expression.alias for vector nearest-neighbor search."
+    )]
+    pub order_by: Option<serde_json::Value>,
+    #[schemars(
         description = "Max results. Set explicitly for large schemas; use offset for paging."
     )]
     pub limit: Option<i64>,
@@ -662,17 +676,7 @@ pub async fn query_object_instances(
     params: QueryObjectInstancesParams,
 ) -> Result<CallToolResult, rmcp::ErrorData> {
     validate_path_param("schema_name", &params.schema_name)?;
-    let mut body = serde_json::json!({});
-    if let Some(condition) = params.condition {
-        body["condition"] = normalize_condition(condition)?;
-    }
-    if let Some(limit) = params.limit {
-        body["limit"] = serde_json::json!(limit);
-    }
-    if let Some(offset) = params.offset {
-        body["offset"] = serde_json::json!(offset);
-    }
-    ensure_request_payload_reasonable("query_object_instances", &body)?;
+    let body = build_query_object_instances_body(&params)?;
     let result = with_payload_too_large_guidance(
         api_post(
             server,
@@ -693,6 +697,29 @@ pub async fn query_object_instances(
         &["totalCount", "total_count"],
     );
     json_result_with_guidance(result, guidance)
+}
+
+fn build_query_object_instances_body(
+    params: &QueryObjectInstancesParams,
+) -> Result<serde_json::Value, rmcp::ErrorData> {
+    let mut body = serde_json::json!({});
+    if let Some(condition) = params.condition.clone() {
+        body["condition"] = normalize_condition(condition)?;
+    }
+    if let Some(score_expression) = &params.score_expression {
+        body["scoreExpression"] = score_expression.clone();
+    }
+    if let Some(order_by) = &params.order_by {
+        body["orderBy"] = order_by.clone();
+    }
+    if let Some(limit) = params.limit {
+        body["limit"] = serde_json::json!(limit);
+    }
+    if let Some(offset) = params.offset {
+        body["offset"] = serde_json::json!(offset);
+    }
+    ensure_request_payload_reasonable("query_object_instances", &body)?;
+    Ok(body)
 }
 
 pub async fn query_aggregate(
@@ -1034,6 +1061,36 @@ mod tests {
                 ]
             })
         );
+    }
+
+    #[test]
+    fn query_object_instances_body_carries_score_expression_and_order_by() {
+        let params = QueryObjectInstancesParams {
+            schema_name: "UnspscNode".to_string(),
+            condition: None,
+            score_expression: Some(json!({
+                "alias": "distance",
+                "expression": {
+                    "fn": "COSINE_DISTANCE",
+                    "arguments": [
+                        {"valueType": "reference", "value": "embedding"},
+                        {"valueType": "immediate", "value": [0.1, 0.2, 0.3]}
+                    ]
+                }
+            })),
+            order_by: Some(json!([{
+                "expression": {"kind": "alias", "name": "distance"},
+                "direction": "ASC"
+            }])),
+            limit: Some(25),
+            offset: Some(0),
+        };
+
+        let body = build_query_object_instances_body(&params).unwrap();
+
+        assert_eq!(body["scoreExpression"]["alias"], "distance");
+        assert_eq!(body["orderBy"][0]["expression"]["name"], "distance");
+        assert_eq!(body["limit"], 25);
     }
 
     #[test]

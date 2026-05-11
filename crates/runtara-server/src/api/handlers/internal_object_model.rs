@@ -17,7 +17,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use super::object_model::ObjectModelState;
-use crate::api::dto::object_model::{CreateSchemaRequest, FilterRequest};
+use crate::api::dto::object_model::{
+    CreateSchemaRequest, FilterRequest, OrderByEntry, ScoreExpression,
+};
 use crate::api::services::object_model::{InstanceService, SchemaService, ServiceError};
 
 // ============================================================================
@@ -71,6 +73,22 @@ pub struct InternalQueryInstancesRequest {
     pub sort_by: Option<Vec<String>>,
     #[serde(rename = "sortOrder", skip_serializing_if = "Option::is_none", default)]
     pub sort_order: Option<Vec<String>>,
+    /// Optional computed score column. Used with `orderBy` for vector KNN.
+    #[serde(
+        rename = "scoreExpression",
+        alias = "score_expression",
+        skip_serializing_if = "Option::is_none",
+        default
+    )]
+    pub score_expression: Option<ScoreExpression>,
+    /// Optional structured order-by entries. When set, supersedes sortBy/sortOrder.
+    #[serde(
+        rename = "orderBy",
+        alias = "order_by",
+        skip_serializing_if = "Option::is_none",
+        default
+    )]
+    pub order_by: Option<Vec<OrderByEntry>>,
 }
 
 fn default_limit() -> i64 {
@@ -367,8 +385,8 @@ pub async fn query_instances(
             condition: request.condition,
             sort_by: request.sort_by,
             sort_order: request.sort_order,
-            score_expression: None,
-            order_by: None,
+            score_expression: request.score_expression,
+            order_by: request.order_by,
         };
 
         match service
@@ -409,8 +427,8 @@ pub async fn query_instances(
             condition: Some(condition),
             sort_by: request.sort_by,
             sort_order: request.sort_order,
-            score_expression: None,
-            order_by: None,
+            score_expression: request.score_expression,
+            order_by: request.order_by,
         };
 
         match service
@@ -1092,6 +1110,9 @@ fn instance_to_flat_value(instance: crate::api::dto::object_model::Instance) -> 
             map.insert(k, v);
         }
     }
+    if let Some(computed) = instance.computed {
+        map.insert("computed".to_string(), Value::Object(computed));
+    }
     Value::Object(map)
 }
 
@@ -1130,5 +1151,64 @@ fn simple_filters_to_condition(
             op: "AND".to_string(),
             arguments: Some(eq_conditions),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::api::dto::object_model::{Instance, OrderByTarget, SortDirection};
+
+    #[test]
+    fn query_instances_request_accepts_score_expression_and_order_by() {
+        let request: InternalQueryInstancesRequest = serde_json::from_value(json!({
+            "schema_name": "UnspscNode",
+            "scoreExpression": {
+                "alias": "distance",
+                "expression": {
+                    "fn": "COSINE_DISTANCE",
+                    "arguments": [
+                        {"valueType": "reference", "value": "embedding"},
+                        {"valueType": "immediate", "value": [0.1, 0.2, 0.3]}
+                    ]
+                }
+            },
+            "orderBy": [{
+                "expression": {"kind": "alias", "name": "distance"},
+                "direction": "ASC"
+            }],
+            "limit": 25
+        }))
+        .unwrap();
+
+        let score = request.score_expression.unwrap();
+        assert_eq!(score.alias, "distance");
+
+        let order_by = request.order_by.unwrap();
+        assert_eq!(order_by[0].direction, SortDirection::Asc);
+        match &order_by[0].expression {
+            OrderByTarget::Alias { name } => assert_eq!(name, "distance"),
+            other => panic!("expected alias order target, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn instance_to_flat_value_preserves_computed_scores() {
+        let mut computed = serde_json::Map::new();
+        computed.insert("distance".to_string(), json!(0.125));
+
+        let flat = instance_to_flat_value(Instance {
+            id: "row-1".to_string(),
+            tenant_id: "tenant-1".to_string(),
+            created_at: "2026-05-11T00:00:00Z".to_string(),
+            updated_at: "2026-05-11T00:00:00Z".to_string(),
+            schema_id: None,
+            schema_name: Some("UnspscNode".to_string()),
+            properties: json!({"commodityTitle": "ball bearing"}),
+            computed: Some(computed),
+        });
+
+        assert_eq!(flat["commodityTitle"], "ball bearing");
+        assert_eq!(flat["computed"]["distance"], json!(0.125));
     }
 }

@@ -168,6 +168,29 @@ pub struct CreateInstanceOutput {
 }
 
 /// Input for querying instances from the object model
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QueryScoreExpression {
+    /// Output alias. The value is returned under `computed[alias]`.
+    pub alias: String,
+    /// Expression tree, for example a COSINE_DISTANCE call over a vector field.
+    pub expression: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+pub enum QueryOrderByTarget {
+    Column { name: String },
+    Alias { name: String },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QueryOrderByEntry {
+    pub expression: QueryOrderByTarget,
+    /// "ASC" or "DESC". Defaults to "ASC" when omitted.
+    #[serde(default = "default_asc")]
+    pub direction: String,
+}
+
 #[derive(Debug, Deserialize, CapabilityInput)]
 #[capability_input(display_name = "Query Instances Input")]
 pub struct QueryInstancesInput {
@@ -203,6 +226,36 @@ pub struct QueryInstancesInput {
     )]
     #[serde(default)]
     pub condition: Option<ConditionExpression>,
+
+    /// Optional computed score column. Use this with `order_by` on the alias
+    /// for index-backed nearest-neighbor vector retrieval.
+    #[field(
+        display_name = "Score Expression",
+        description = "Optional computed score column. For vector nearest-neighbor search, use COSINE_DISTANCE or L2_DISTANCE here and order by the alias ascending.",
+        example = r#"{"alias":"distance","expression":{"fn":"COSINE_DISTANCE","arguments":[{"valueType":"reference","value":"embedding"},{"valueType":"immediate","value":[0.1,0.2,0.3]}]}}"#
+    )]
+    #[serde(
+        default,
+        rename = "scoreExpression",
+        alias = "score_expression",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub score_expression: Option<QueryScoreExpression>,
+
+    /// Optional structured ordering. When set, supersedes `sortBy` /
+    /// `sortOrder` in the object model API.
+    #[field(
+        display_name = "Order By",
+        description = "Optional structured ordering. For vector nearest-neighbor search, order by the score expression alias ascending.",
+        example = r#"[{"expression":{"kind":"alias","name":"distance"},"direction":"ASC"}]"#
+    )]
+    #[serde(
+        default,
+        rename = "orderBy",
+        alias = "order_by",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub order_by: Option<Vec<QueryOrderByEntry>>,
 
     /// Maximum number of results
     #[field(
@@ -495,6 +548,8 @@ pub fn query_instances(input: QueryInstancesInput) -> Result<QueryInstancesOutpu
             "schema_name": input.schema_name,
             "filters": input.filters,
             "condition": condition_json,
+            "scoreExpression": input.score_expression,
+            "orderBy": input.order_by,
             "limit": input.limit as i64,
             "offset": input.offset as i64,
         }),
