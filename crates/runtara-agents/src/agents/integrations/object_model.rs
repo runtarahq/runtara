@@ -223,7 +223,7 @@ pub struct QueryInstancesInput {
     /// for index-backed nearest-neighbor vector retrieval.
     #[field(
         display_name = "Score Expression",
-        description = "Optional computed score column. For vector nearest-neighbor search, use COSINE_DISTANCE or L2_DISTANCE here and order by the alias ascending."
+        description = "Optional computed score column passed as an object, not an escaped JSON string. For vector nearest-neighbor search, use {\"alias\":\"distance\",\"expression\":{\"fn\":\"COSINE_DISTANCE\",\"arguments\":[{\"valueType\":\"reference\",\"value\":\"embedding\"},{\"valueType\":\"immediate\",\"value\":[0.1,0.2,0.3]}]}} and order by the alias ascending. Workflow references such as steps.embed.outputs.embeddings.0 are valid as the vector argument."
     )]
     #[serde(
         default,

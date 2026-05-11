@@ -430,8 +430,8 @@ pub struct QueryObjectInstancesParams {
     )]
     pub condition: Option<serde_json::Value>,
     #[schemars(
-        description = "Optional computed score expression. For vector nearest-neighbor search, \
-                       use {alias:'distance', expression:{fn:'COSINE_DISTANCE', \
+        description = "Optional computed score expression object, not an escaped JSON string. \
+                       For vector nearest-neighbor search, use {alias:'distance', expression:{fn:'COSINE_DISTANCE', \
                        arguments:[{valueType:'reference', value:'embedding'}, \
                        {valueType:'immediate', value:[number,...]}]}} and order by \
                        that alias ASC."

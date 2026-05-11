@@ -521,6 +521,47 @@ mod tests {
     }
 
     #[test]
+    fn immediate_score_expression_resolves_step_vector_ref() {
+        let inputs = json!({
+            "score_expression": {
+                "valueType": "immediate",
+                "value": {
+                    "alias": "vec_dist",
+                    "expression": {
+                        "fn": "COSINE_DISTANCE",
+                        "arguments": [
+                            {"valueType": "reference", "value": "embedding"},
+                            {"valueType": "reference", "value": "steps.embed.outputs.embeddings.0"}
+                        ]
+                    }
+                }
+            }
+        });
+        let source = json!({
+            "data": {},
+            "variables": {},
+            "steps": {
+                "embed": {
+                    "outputs": {
+                        "embeddings": [[1.0, 0.0, 0.0, 0.0]]
+                    }
+                }
+            }
+        });
+
+        let resolved = resolve_nested_references(inputs, &source);
+        let final_inputs = unwrap_top_level_immediate_envelopes(resolved);
+
+        assert_eq!(
+            final_inputs["score_expression"]["expression"]["arguments"],
+            json!([
+                {"valueType": "reference", "value": "embedding"},
+                {"valueType": "immediate", "value": [1.0, 0.0, 0.0, 0.0]}
+            ])
+        );
+    }
+
+    #[test]
     fn unwrap_top_level_ignores_nested_immediates() {
         // Only the outermost wrapper of each field is stripped — nested
         // immediates inside (e.g. inside ConditionExpression arguments)

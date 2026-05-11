@@ -721,13 +721,25 @@ impl RuntimeClient {
         tenant_id: &str,
         name: &str,
     ) -> Result<Option<String>, RuntimeError> {
+        Ok(self
+            .find_image_by_name_summary(tenant_id, name)
+            .await?
+            .map(|image| image.image_id))
+    }
+
+    /// Find an image by name for a tenant and return the full summary.
+    pub async fn find_image_by_name_summary(
+        &self,
+        tenant_id: &str,
+        name: &str,
+    ) -> Result<Option<runtara_management_sdk::ImageSummary>, RuntimeError> {
         // List all images and find by name
         // Note: This could be optimized with server-side filtering if the SDK supports it
         let result = self.list_images(tenant_id, 1000).await?;
 
         for image in result.images {
             if image.name == name {
-                return Ok(Some(image.image_id));
+                return Ok(Some(image));
             }
         }
 

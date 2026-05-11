@@ -146,6 +146,8 @@ struct ImageSummaryJson {
     description: Option<String>,
     runner_type: String,
     created_at_ms: i64,
+    #[serde(default)]
+    metadata: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -913,6 +915,7 @@ impl ManagementSdk {
                 description: img.description,
                 runner_type: runner_type_from_string(&img.runner_type),
                 created_at: ms_to_datetime(img.created_at_ms),
+                metadata: img.metadata,
             })
             .collect();
 
@@ -952,6 +955,7 @@ impl ManagementSdk {
                 description: img.description,
                 runner_type: runner_type_from_string(&img.runner_type),
                 created_at: ms_to_datetime(img.created_at_ms),
+                metadata: img.metadata,
             })),
             None => Ok(None),
         }

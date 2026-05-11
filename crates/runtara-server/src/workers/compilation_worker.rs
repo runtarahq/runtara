@@ -7,10 +7,11 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use opentelemetry::KeyValue;
-use sqlx::PgPool;
+use sqlx::{PgPool, Row};
 use tracing::{error, info, instrument, warn};
 
 use crate::api::repositories::workflows::WorkflowRepository;
+use crate::api::repositories::workflows::workflow_definition_checksum;
 use crate::api::services::compilation::CompilationService;
 use crate::observability::metrics;
 use crate::runtime_client::RuntimeClient;
@@ -260,24 +261,43 @@ async fn check_compilation_status(
     workflow_id: &str,
     version: i32,
 ) -> Result<CompilationStatus, sqlx::Error> {
-    let result = sqlx::query!(
+    let result = sqlx::query(
         r#"
-        SELECT compilation_status, registered_image_id
-        FROM workflow_compilations
-        WHERE tenant_id = $1 AND workflow_id = $2 AND version = $3
+        SELECT sc.compilation_status,
+               sc.registered_image_id,
+               sc.source_checksum,
+               wd.definition
+        FROM workflow_definitions wd
+        LEFT JOIN workflow_compilations sc
+          ON sc.tenant_id = wd.tenant_id
+         AND sc.workflow_id = wd.workflow_id
+         AND sc.version = wd.version
+        WHERE wd.tenant_id = $1
+          AND wd.workflow_id = $2
+          AND wd.version = $3
+          AND wd.deleted_at IS NULL
         "#,
-        tenant_id,
-        workflow_id,
-        version
     )
+    .bind(tenant_id)
+    .bind(workflow_id)
+    .bind(version)
     .fetch_optional(pool)
     .await?;
 
     match result {
         Some(record) => {
-            if record.compilation_status == "success" && record.registered_image_id.is_some() {
+            let compilation_status: Option<String> = record.try_get("compilation_status")?;
+            let registered_image_id: Option<String> = record.try_get("registered_image_id")?;
+            let source_checksum: Option<String> = record.try_get("source_checksum")?;
+            let definition: serde_json::Value = record.try_get("definition")?;
+            let current_checksum = workflow_definition_checksum(&definition);
+
+            if compilation_status.as_deref() == Some("success")
+                && registered_image_id.is_some()
+                && source_checksum.as_deref() == Some(current_checksum.as_str())
+            {
                 Ok(CompilationStatus::Success)
-            } else if record.compilation_status == "failed" {
+            } else if compilation_status.as_deref() == Some("failed") {
                 Ok(CompilationStatus::Failed)
             } else {
                 // Partial compilation (compiled but not registered) - retry

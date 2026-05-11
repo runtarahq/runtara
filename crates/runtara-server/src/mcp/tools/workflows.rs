@@ -39,12 +39,18 @@ async fn compile_workflow_for_mcp(
     server: &SmoMcpServer,
     workflow_id: &str,
     version: i32,
+    force_recompile: bool,
 ) -> Result<McpCompileResult, rmcp::ErrorData> {
     validate_path_param("workflow_id", workflow_id)?;
 
     let repository = WorkflowRepository::new(server.pool.clone());
 
-    if let Some(image_id) = get_fresh_registered_image_id(server, workflow_id, version).await? {
+    if !force_recompile
+        && let Some(image_id) = repository
+            .get_fresh_registered_image_id(&server.tenant_id, workflow_id, version)
+            .await
+            .map_err(|e| err(format!("Failed to check compilation freshness: {}", e)))?
+    {
         return Ok(McpCompileResult {
             completed: true,
             value: serde_json::json!({
@@ -101,7 +107,7 @@ async fn compile_workflow_for_mcp(
         &server.tenant_id,
         workflow_id,
         version,
-        false,
+        force_recompile || !pending,
     )
     .await
     .map_err(|e| err(format!("Failed to enqueue compilation: {}", e)))?;
@@ -133,43 +139,6 @@ async fn compile_workflow_for_mcp(
     }
 
     query_mcp_compilation_result(server, workflow_id, version).await
-}
-
-async fn get_fresh_registered_image_id(
-    server: &SmoMcpServer,
-    workflow_id: &str,
-    version: i32,
-) -> Result<Option<String>, rmcp::ErrorData> {
-    let record = sqlx::query(
-        r#"
-        SELECT sc.registered_image_id
-        FROM workflow_compilations sc
-        JOIN workflow_definitions wd
-          ON wd.tenant_id = sc.tenant_id
-         AND wd.workflow_id = sc.workflow_id
-         AND wd.version = sc.version
-        WHERE sc.tenant_id = $1
-          AND sc.workflow_id = $2
-          AND sc.version = $3
-          AND sc.compilation_status = 'success'
-          AND sc.registered_image_id IS NOT NULL
-          AND sc.compiled_at >= wd.updated_at
-          AND wd.deleted_at IS NULL
-        "#,
-    )
-    .bind(&server.tenant_id)
-    .bind(workflow_id)
-    .bind(version)
-    .fetch_optional(&server.pool)
-    .await
-    .map_err(|e| err(format!("Failed to check compilation freshness: {}", e)))?;
-
-    record
-        .map(|row| {
-            row.try_get::<String, _>("registered_image_id")
-                .map_err(|e| err(format!("Failed to read registered image id: {}", e)))
-        })
-        .transpose()
 }
 
 async fn query_mcp_compilation_result(
@@ -319,6 +288,11 @@ pub struct CompileWorkflowParams {
     pub workflow_id: String,
     #[schemars(description = "Version number to compile")]
     pub version: i32,
+    #[serde(default)]
+    #[schemars(
+        description = "Force a rebuild even if the version appears compiled. Use after in-place graph mutations or when a runtime image may be stale."
+    )]
+    pub force: bool,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -714,7 +688,8 @@ pub async fn compile_workflow(
     server: &SmoMcpServer,
     params: CompileWorkflowParams,
 ) -> Result<CallToolResult, rmcp::ErrorData> {
-    let result = compile_workflow_for_mcp(server, &params.workflow_id, params.version).await?;
+    let result =
+        compile_workflow_for_mcp(server, &params.workflow_id, params.version, params.force).await?;
     json_result(result.value)
 }
 
@@ -976,7 +951,8 @@ pub async fn deploy_workflow(
     // Step 2: Compile parent. This goes through the queue with an MCP-safe wait
     // window so large embedded parents can continue compiling after the tool
     // call returns.
-    let compile_result = compile_workflow_for_mcp(server, &params.workflow_id, version_num).await?;
+    let compile_result =
+        compile_workflow_for_mcp(server, &params.workflow_id, version_num, false).await?;
     if !compile_result.completed {
         let mut response = serde_json::json!({
             "success": false,
@@ -1136,7 +1112,8 @@ pub async fn deploy_latest(
     // Compile through the queue without force-recompiling on retries. Graph
     // mutations already invalidate the latest version, and avoiding force here
     // prevents a retry from deleting a successful long-running parent compile.
-    let compile_result = compile_workflow_for_mcp(server, &params.workflow_id, version).await?;
+    let compile_result =
+        compile_workflow_for_mcp(server, &params.workflow_id, version, false).await?;
     if !compile_result.completed {
         let mut response = serde_json::json!({
             "success": false,

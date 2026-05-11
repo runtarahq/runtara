@@ -678,7 +678,7 @@ pub async fn compile_workflow_handler(
         // Check if already compiled
         let repository = WorkflowRepository::new(pool.clone());
         match repository
-            .get_registered_image_id(&tenant_id, &workflow_id, version_num)
+            .get_fresh_registered_image_id(&tenant_id, &workflow_id, version_num)
             .await
         {
             Ok(Some(image_id)) => {
