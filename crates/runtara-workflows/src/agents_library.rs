@@ -146,8 +146,8 @@ fn load_wasm_library() -> io::Result<NativeLibraryInfo> {
     if !lib_dir.exists() {
         return Err(io::Error::other(format!(
             "Pre-compiled WASM library not found. Expected at: {:?}\n\n\
-             To build it, run:\n  ./scripts/build_native_library.sh --target wasm32-wasip2\n\n\
-             Or set RUNTARA_WASM_LIBRARY_DIR to point to a pre-compiled WASM stdlib.",
+             Build and stage it per docs/e2e-testing-for-agents.md, or set \
+             RUNTARA_WASM_LIBRARY_DIR to point to a pre-compiled WASM stdlib.",
             lib_dir
         )));
     }

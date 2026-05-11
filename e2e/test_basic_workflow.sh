@@ -38,8 +38,10 @@ export RUNTARA_SKIP_CERT_VERIFICATION="${RUNTARA_SKIP_CERT_VERIFICATION:-true}"
 export DATA_DIR="${DATA_DIR:-.data}"
 
 # Test input and expected output
-# Wrap the actual input in {"input": ...} because workflow accesses data.input
-INPUT_JSON='{"input": {"message": "Hello from E2E test", "number": 42}}'
+# Wrap the actual input under "data" so the workflow's `data.input` reference
+# resolves. The runtime envelope is {"data": {...}, "variables": {...}}; only
+# the HTTP `/execute` route auto-wraps callers' inputs under `data`.
+INPUT_JSON='{"data": {"input": {"message": "Hello from E2E test", "number": 42}}}'
 EXPECTED_OUTPUT_FIELD="message"
 EXPECTED_OUTPUT_VALUE="Hello from E2E test"
 

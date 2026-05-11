@@ -26,8 +26,8 @@
 //!   test-capability --agent <id> --capability <id> --tenant <id> --input <json> [--connection <json>]
 
 use runtara_management_sdk::{
-    ListImagesOptions, ListInstancesOptions, ManagementSdk, RegisterImageOptions, SdkConfig,
-    StartInstanceOptions, StopInstanceOptions, TestCapabilityOptions,
+    ListImagesOptions, ListInstancesOptions, ManagementSdk, RegisterImageOptions, RunnerType,
+    SdkConfig, StartInstanceOptions, StopInstanceOptions, TestCapabilityOptions,
 };
 use std::fs;
 use std::process::ExitCode;
@@ -524,7 +524,14 @@ async fn execute_command(sdk: &ManagementSdk, cmd: Command) -> Result<(), String
             let binary = fs::read(&binary_path)
                 .map_err(|e| format!("Failed to read binary {}: {}", binary_path, e))?;
 
+            // Auto-detect WASM via magic bytes ("\0asm"); fall back to default
+            // (OCI) for everything else. Keeps the e2e/dev flow working without
+            // a manual flag — runtara-compile always emits WASM today.
+            let is_wasm = binary.starts_with(b"\0asm");
             let mut options = RegisterImageOptions::new(&tenant_id, &name, binary);
+            if is_wasm {
+                options = options.with_runner_type(RunnerType::Wasm);
+            }
             if let Some(desc) = description {
                 options = options.with_description(desc);
             }

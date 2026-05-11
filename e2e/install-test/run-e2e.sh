@@ -42,12 +42,15 @@ docker compose up -d --build 2>&1 | tail -5
 # ─── Wait for healthy ────────────────────────────────────────────────────────
 
 info "Waiting for runtara-server to be healthy..."
-for i in $(seq 1 30); do
+# First boot compiles the agent dispatcher (rustc → wasm32-wasip2) before
+# binding the HTTP listener, which can take well over a minute in a cold
+# container. Give it room.
+for i in $(seq 1 120); do
     if curl -sf "$API/health" > /dev/null 2>&1; then
         break
     fi
-    if [ "$i" -eq 30 ]; then
-        fail "Server did not become healthy within 30s"
+    if [ "$i" -eq 120 ]; then
+        fail "Server did not become healthy within 120s"
     fi
     sleep 1
 done

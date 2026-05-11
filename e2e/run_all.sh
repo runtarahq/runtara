@@ -48,10 +48,10 @@ run_test() {
 
     if "${test_script}"; then
         echo -e "${GREEN}PASSED: ${test_name}${NC}"
-        ((TESTS_PASSED++))
+        TESTS_PASSED=$((TESTS_PASSED + 1))
     else
         echo -e "${RED}FAILED: ${test_name}${NC}"
-        ((TESTS_FAILED++))
+        TESTS_FAILED=$((TESTS_FAILED + 1))
         FAILED_TESTS="${FAILED_TESTS}\n  - ${test_name}"
     fi
     echo ""

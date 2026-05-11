@@ -43,8 +43,9 @@ export DATA_DIR="${DATA_DIR:-.data}"
 # Use a short delay for testing (3 seconds)
 # This should be long enough to test the mechanism but short enough to not slow down tests
 DELAY_MS=3000
-# Wrap in {"input": ...} because workflow accesses data.input.delay_ms
-INPUT_JSON="{\"input\": {\"delay_ms\": ${DELAY_MS}}}"
+# Wrap under "data" so the workflow's `data.input.delay_ms` reference resolves.
+# The runtime envelope is {"data": {...}, "variables": {...}}.
+INPUT_JSON="{\"data\": {\"input\": {\"delay_ms\": ${DELAY_MS}}}}"
 
 # Cleanup on exit
 cleanup() {
