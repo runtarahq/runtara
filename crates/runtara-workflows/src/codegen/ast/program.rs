@@ -1119,6 +1119,22 @@ fn emit_input_structs() -> TokenStream {
         }
 
         #[allow(dead_code)]
+        fn __is_qualified_workflow_path(path: &str) -> bool {
+            matches!(
+                path.split('.').next(),
+                Some("data" | "variables" | "workflow" | "steps" | "loop")
+            )
+        }
+
+        #[allow(dead_code)]
+        fn __is_unqualified_reference_envelope(value: &serde_json::Value) -> bool {
+            let Some(path) = value.get("value").and_then(|v| v.as_str()) else {
+                return false;
+            };
+            __is_reference_envelope(value) && !__is_qualified_workflow_path(path)
+        }
+
+        #[allow(dead_code)]
         fn __is_field_argument_operator(op: &str) -> bool {
             matches!(
                 op.to_ascii_uppercase().as_str(),
@@ -1182,6 +1198,19 @@ fn emit_input_structs() -> TokenStream {
                     if is_immediate_envelope {
                         if let Some(inner) = map.get_mut("value") {
                             __walk_nested_references_direct(inner, inputs, steps_context);
+                        }
+                        return;
+                    }
+
+                    let fn_call = map.get("fn").and_then(|v| v.as_str()).map(str::to_owned);
+                    if fn_call.is_some()
+                        && let Some(args) = map.get_mut("arguments").and_then(|v| v.as_array_mut())
+                    {
+                        for arg in args.iter_mut() {
+                            if __is_unqualified_reference_envelope(arg) {
+                                continue;
+                            }
+                            __walk_nested_references_direct(arg, inputs, steps_context);
                         }
                         return;
                     }
