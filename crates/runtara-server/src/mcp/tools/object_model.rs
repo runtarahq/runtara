@@ -5,7 +5,8 @@ use serde_json::Value;
 
 use super::super::server::SmoMcpServer;
 use super::internal_api::{
-    api_delete, api_delete_with_body, api_get, api_patch, api_post, api_put, validate_path_param,
+    api_delete, api_delete_with_body, api_get, api_patch, api_post, api_put, encode_path_param,
+    validate_identifier_param, validate_path_param,
 };
 
 fn json_result(value: serde_json::Value) -> Result<CallToolResult, rmcp::ErrorData> {
@@ -123,6 +124,111 @@ fn ensure_request_payload_reasonable(tool_name: &str, body: &Value) -> Result<()
         ),
         None,
     ))
+}
+
+fn with_connection_id_query(
+    path: &str,
+    connection_id: Option<&str>,
+) -> Result<String, rmcp::ErrorData> {
+    match connection_id {
+        Some(connection_id) => {
+            validate_identifier_param("connection_id", connection_id)?;
+            Ok(format!(
+                "{}?connectionId={}",
+                path,
+                encode_path_param(connection_id)
+            ))
+        }
+        None => Ok(path.to_string()),
+    }
+}
+
+fn sql_params_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    schemars::json_schema!({
+        "type": "array",
+        "description": "Typed positional SQL parameters. Items are bound in array order: first item is $1, second is $2. Use Postgres/SQLx positional placeholders; named parameters are not supported.",
+        "items": {
+            "type": "object",
+            "required": ["type", "value"],
+            "properties": {
+                "type": {
+                    "type": "string",
+                    "enum": ["string", "integer", "decimal", "boolean", "timestamp", "json", "enum", "vector"],
+                    "description": "Object Model column type used to validate and bind the value."
+                },
+                "value": {
+                    "description": "Parameter value. Use null for SQL NULL. Timestamp values must be RFC3339 strings. Vector values must be number arrays matching dimension."
+                },
+                "precision": {
+                    "type": "integer",
+                    "description": "Decimal precision; optional for type=decimal."
+                },
+                "scale": {
+                    "type": "integer",
+                    "description": "Decimal scale; optional for type=decimal."
+                },
+                "values": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Allowed values; required for type=enum."
+                },
+                "dimension": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 16000,
+                    "description": "Vector dimension; required for type=vector."
+                }
+            },
+            "additionalProperties": true
+        }
+    })
+}
+
+fn sql_result_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    schemars::json_schema!({
+        "type": "array",
+        "description": "Expected result columns for typed SQL reads. Each item names a selected SQL column and its Object Model type.",
+        "items": {
+            "type": "object",
+            "required": ["name", "type"],
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "Column name or SQL alias in the SELECT result."
+                },
+                "type": {
+                    "type": "string",
+                    "enum": ["string", "integer", "decimal", "boolean", "timestamp", "json", "enum", "vector"],
+                    "description": "Expected Object Model column type for decoding this result column."
+                },
+                "nullable": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Whether SQL NULL is allowed for this column."
+                },
+                "precision": {
+                    "type": "integer",
+                    "description": "Decimal precision; optional for type=decimal."
+                },
+                "scale": {
+                    "type": "integer",
+                    "description": "Decimal scale; optional for type=decimal."
+                },
+                "values": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Allowed values; required for type=enum."
+                },
+                "dimension": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 16000,
+                    "description": "Vector dimension; required for type=vector."
+                }
+            },
+            "additionalProperties": true
+        }
+    })
 }
 
 fn with_payload_too_large_guidance<T>(
@@ -403,6 +509,60 @@ pub struct QueryAggregateParams {
     pub limit: Option<i64>,
     #[schemars(description = "Pagination offset")]
     pub offset: Option<i64>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct QuerySqlParams {
+    #[schemars(
+        description = "SQL string using Postgres/SQLx positional placeholders ($1, $2, ...). Named parameters are not supported. Include LIMIT/OFFSET directly in SELECT statements for interactive MCP reads."
+    )]
+    pub sql: String,
+    #[schemars(schema_with = "sql_params_schema")]
+    #[serde(default)]
+    pub params: Vec<serde_json::Value>,
+    #[schemars(schema_with = "sql_result_schema")]
+    #[serde(rename = "resultSchema", alias = "result_schema")]
+    pub result_schema: Vec<serde_json::Value>,
+    #[schemars(
+        description = "Optional connection ID for database selection. Omit to use the default object-model database."
+    )]
+    #[serde(rename = "connectionId", alias = "connection_id")]
+    pub connection_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct QuerySqlRawParams {
+    #[schemars(
+        description = "SQL string using Postgres/SQLx positional placeholders ($1, $2, ...). Named parameters are not supported. Include LIMIT/OFFSET directly in SELECT statements for interactive MCP reads."
+    )]
+    pub sql: String,
+    #[schemars(schema_with = "sql_params_schema")]
+    #[serde(default)]
+    pub params: Vec<serde_json::Value>,
+    #[schemars(
+        description = "Optional connection ID for database selection. Omit to use the default object-model database."
+    )]
+    #[serde(rename = "connectionId", alias = "connection_id")]
+    pub connection_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ExecuteSqlParams {
+    #[schemars(
+        description = "SQL command using Postgres/SQLx positional placeholders ($1, $2, ...). Named parameters are not supported. Execute is for commands and returns rowsAffected. Postgres prepared statements accept one SQL statement per call."
+    )]
+    pub sql: String,
+    #[schemars(schema_with = "sql_params_schema")]
+    #[serde(default)]
+    pub params: Vec<serde_json::Value>,
+    #[schemars(
+        description = "Optional connection ID for database selection. Omit to use the default object-model database."
+    )]
+    #[serde(rename = "connectionId", alias = "connection_id")]
+    pub connection_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -766,6 +926,106 @@ pub async fn query_aggregate(
     json_result_with_guidance(result, guidance)
 }
 
+fn build_query_sql_body(params: &QuerySqlParams) -> serde_json::Value {
+    serde_json::json!({
+        "sql": params.sql.clone(),
+        "params": params.params.clone(),
+        "resultSchema": params.result_schema.clone(),
+    })
+}
+
+fn build_query_sql_raw_body(params: &QuerySqlRawParams) -> serde_json::Value {
+    serde_json::json!({
+        "sql": params.sql.clone(),
+        "params": params.params.clone(),
+    })
+}
+
+fn build_execute_sql_body(params: &ExecuteSqlParams) -> serde_json::Value {
+    serde_json::json!({
+        "sql": params.sql.clone(),
+        "params": params.params.clone(),
+    })
+}
+
+pub async fn query_sql(
+    server: &SmoMcpServer,
+    params: QuerySqlParams,
+) -> Result<CallToolResult, rmcp::ErrorData> {
+    let path = with_connection_id_query(
+        "/api/runtime/object-model/sql/query",
+        params.connection_id.as_deref(),
+    )?;
+    let body = build_query_sql_body(&params);
+    ensure_request_payload_reasonable("query_sql", &body)?;
+    let result =
+        with_payload_too_large_guidance(api_post(server, &path, Some(body)).await, "query_sql")?;
+    let guidance = result_size_guidance(
+        &result,
+        "query_sql",
+        None,
+        &["rows"],
+        &["rowCount", "row_count"],
+    );
+    json_result_with_guidance(result, guidance)
+}
+
+pub async fn query_sql_one(
+    server: &SmoMcpServer,
+    params: QuerySqlParams,
+) -> Result<CallToolResult, rmcp::ErrorData> {
+    let path = with_connection_id_query(
+        "/api/runtime/object-model/sql/query-one",
+        params.connection_id.as_deref(),
+    )?;
+    let body = build_query_sql_body(&params);
+    ensure_request_payload_reasonable("query_sql_one", &body)?;
+    let result = with_payload_too_large_guidance(
+        api_post(server, &path, Some(body)).await,
+        "query_sql_one",
+    )?;
+    json_result(result)
+}
+
+pub async fn query_sql_raw(
+    server: &SmoMcpServer,
+    params: QuerySqlRawParams,
+) -> Result<CallToolResult, rmcp::ErrorData> {
+    let path = with_connection_id_query(
+        "/api/runtime/object-model/sql/query-raw",
+        params.connection_id.as_deref(),
+    )?;
+    let body = build_query_sql_raw_body(&params);
+    ensure_request_payload_reasonable("query_sql_raw", &body)?;
+    let result = with_payload_too_large_guidance(
+        api_post(server, &path, Some(body)).await,
+        "query_sql_raw",
+    )?;
+    let guidance = result_size_guidance(
+        &result,
+        "query_sql_raw",
+        None,
+        &["rows"],
+        &["rowCount", "row_count"],
+    );
+    json_result_with_guidance(result, guidance)
+}
+
+pub async fn execute_sql(
+    server: &SmoMcpServer,
+    params: ExecuteSqlParams,
+) -> Result<CallToolResult, rmcp::ErrorData> {
+    let path = with_connection_id_query(
+        "/api/runtime/object-model/sql/execute",
+        params.connection_id.as_deref(),
+    )?;
+    let body = build_execute_sql_body(&params);
+    ensure_request_payload_reasonable("execute_sql", &body)?;
+    let result =
+        with_payload_too_large_guidance(api_post(server, &path, Some(body)).await, "execute_sql")?;
+    json_result(result)
+}
+
 pub async fn create_object_instance(
     server: &SmoMcpServer,
     params: CreateObjectInstanceParams,
@@ -990,6 +1250,50 @@ mod tests {
         assert!(
             schema_allows_array(&update_indexes),
             "update indexes schema should allow arrays: {update_indexes:#}"
+        );
+    }
+
+    #[test]
+    fn sql_tool_params_generate_array_schemas_for_typed_params() {
+        let sql_params = generated_property_schema::<QuerySqlParams>("params");
+        let raw_params = generated_property_schema::<QuerySqlRawParams>("params");
+        let execute_params = generated_property_schema::<ExecuteSqlParams>("params");
+        let result_schema = generated_property_schema::<QuerySqlParams>("resultSchema");
+
+        assert!(
+            schema_allows_array(&sql_params),
+            "query_sql params schema should allow arrays: {sql_params:#}"
+        );
+        assert!(
+            schema_allows_array(&raw_params),
+            "query_sql_raw params schema should allow arrays: {raw_params:#}"
+        );
+        assert!(
+            schema_allows_array(&execute_params),
+            "execute_sql params schema should allow arrays: {execute_params:#}"
+        );
+        assert!(
+            schema_allows_array(&result_schema),
+            "query_sql resultSchema schema should allow arrays: {result_schema:#}"
+        );
+    }
+
+    #[test]
+    fn query_sql_body_uses_http_result_schema_wire_name() {
+        let params = QuerySqlParams {
+            sql: "SELECT $1 AS label".to_string(),
+            params: vec![json!({"type": "string", "value": "alpha"})],
+            result_schema: vec![json!({"name": "label", "type": "string"})],
+            connection_id: Some("conn-1".to_string()),
+        };
+
+        assert_eq!(
+            build_query_sql_body(&params),
+            json!({
+                "sql": "SELECT $1 AS label",
+                "params": [{"type": "string", "value": "alpha"}],
+                "resultSchema": [{"name": "label", "type": "string"}]
+            })
         );
     }
 

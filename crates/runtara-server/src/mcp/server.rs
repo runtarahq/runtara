@@ -413,6 +413,46 @@ impl SmoMcpServer {
         tools::object_model::query_aggregate(self, params.0).await
     }
 
+    #[tool(
+        description = "Run a typed SQL SELECT against the tenant's object-model database through SQLx prepared statements. Use Postgres positional placeholders ($1, $2, ...); params are typed and bound in array order. Provide resultSchema so rows are decoded and validated into JSON. Include LIMIT/OFFSET in the SQL for large reads."
+    )]
+    async fn query_sql(
+        &self,
+        params: Parameters<tools::object_model::QuerySqlParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        tools::object_model::query_sql(self, params.0).await
+    }
+
+    #[tool(
+        description = "Run a typed SQL SELECT that must return exactly one row. Same parameters as query_sql: SQLx prepared statement with positional $1/$2 bindings plus resultSchema. Returns an error if the query returns zero or multiple rows."
+    )]
+    async fn query_sql_one(
+        &self,
+        params: Parameters<tools::object_model::QuerySqlParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        tools::object_model::query_sql_one(self, params.0).await
+    }
+
+    #[tool(
+        description = "Run a raw SQL SELECT against the tenant's object-model database through SQLx prepared statements. Use Postgres positional placeholders ($1, $2, ...); params are typed and bound in array order. Returns generic JSON rows without a resultSchema. Include LIMIT/OFFSET in the SQL for large reads."
+    )]
+    async fn query_sql_raw(
+        &self,
+        params: Parameters<tools::object_model::QuerySqlRawParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        tools::object_model::query_sql_raw(self, params.0).await
+    }
+
+    #[tool(
+        description = "Execute one SQL command against the tenant's object-model database through a SQLx prepared statement. Use Postgres positional placeholders ($1, $2, ...); params are typed and bound in array order. Returns rowsAffected."
+    )]
+    async fn execute_sql(
+        &self,
+        params: Parameters<tools::object_model::ExecuteSqlParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        tools::object_model::execute_sql(self, params.0).await
+    }
+
     #[tool(description = "Create a new object model instance.")]
     async fn create_object_instance(
         &self,
@@ -987,7 +1027,7 @@ impl ServerHandler for SmoMcpServer {
                 **Workflows**: get_workflow_authoring_schema, list_workflows, get_workflow, create_workflow, update_workflow, compile_workflow, deploy_workflow (bulk graph), deploy_latest (after mutations), preflight_compile, set_current_version, diff_workflow_versions, validate_graph, validate_mappings — call get_workflow_authoring_schema before authoring raw workflow JSON\n\
                 **Execution**: execute_workflow, execute_workflow_sync, execute_workflow_wait, list_executions, get_execution, get_step_summaries (supports compact mode), get_step_events, stop_execution, pause_execution, resume_execution\n\
                 **Debugging**: inspect_step (one-call step debugger), trace_reference (resolve a reference path at runtime), why_execution_failed (one-call failure diagnosis)\n\
-                **Object Model**: list_object_schemas, get_object_schema, create_object_schema, update_object_schema, delete_object_schema, list_object_instances, query_object_instances, create_object_instance, update_object_instance\n\
+                **Object Model**: list_object_schemas, get_object_schema, create_object_schema, update_object_schema, delete_object_schema, list_object_instances, query_object_instances, query_aggregate, query_sql, query_sql_one, query_sql_raw, execute_sql, create_object_instance, update_object_instance, bulk_create_instances, bulk_update_instances, bulk_delete_instances. SQL tools use SQLx prepared statements with Postgres positional placeholders ($1, $2, ...), not named parameters; params are typed and bound in array order, and execute_sql returns rowsAffected.\n\
                 **Reports**: get_report_authoring_schema, get_report_definition_schema, list_reports, get_report, create_report, update_report, delete_report, validate_report, render_report, get_report_block_data, add_report_block, replace_report_block, patch_report_block, move_report_block, remove_report_block, add_report_layout_node, replace_report_layout_node, patch_report_layout_node, move_report_layout_node, remove_report_layout_node — call get_report_authoring_schema before authoring; use get_report_definition_schema for the generated JSON Schema; report blocks and layout nodes have stable ids; use layout nodes (metric_row, columns, grid, section) instead of Markdown tables for alignment; reports can use Object Model sources, lookup editors for reference fields, or virtual workflow_runtime sources for workflow instance status/actions\n\
                 **Agents & DSL**: list_agents, get_agent, get_capability, test_capability, list_step_types, get_step_type_schema\n\
                 **Graph Mutations**: set_workflow_metadata (name/description), add_agent_step (high-level: validates capability, creates step, connects edges), add_step, remove_step, update_step, connect_steps, disconnect_steps, set_entry_point, set_mapping, remove_mapping, set_input_schema, set_output_schema, set_variable, remove_variable, list_references (returns copy-paste-ready mapping objects) — first call creates a new version, subsequent calls update it in-place. All support nested subgraphs via optional path parameter. Prefer mutation tools over raw graph JSON. Use deploy_latest after mutations to compile and deploy.\n\

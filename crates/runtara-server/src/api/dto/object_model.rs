@@ -670,6 +670,79 @@ pub struct FilterInstancesResponse {
 }
 
 // ============================================================================
+// Raw SQL Query DTOs
+// ============================================================================
+
+/// Typed positional SQL parameter. Parameters are bound in array order:
+/// first item = `$1`, second item = `$2`, etc.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct SqlParam {
+    #[serde(flatten)]
+    pub column_type: ColumnType,
+    pub value: serde_json::Value,
+}
+
+/// Expected column for typed SQL query responses.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct SqlResultColumn {
+    pub name: String,
+    #[serde(flatten)]
+    pub column_type: ColumnType,
+    #[serde(default = "default_nullable")]
+    pub nullable: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct SqlQueryRequest {
+    /// SQL string using native Postgres / SQLx positional placeholders.
+    /// Example: `SELECT * FROM customers WHERE email = $1`.
+    pub sql: String,
+    #[serde(default)]
+    pub params: Vec<SqlParam>,
+    #[serde(rename = "resultSchema")]
+    pub result_schema: Vec<SqlResultColumn>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct SqlRawQueryRequest {
+    /// SQL string using native Postgres / SQLx positional placeholders.
+    /// Example: `SELECT * FROM customers WHERE email = $1`.
+    pub sql: String,
+    #[serde(default)]
+    pub params: Vec<SqlParam>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct SqlExecuteRequest {
+    /// SQL command using native Postgres / SQLx positional placeholders.
+    /// Example: `UPDATE customers SET status = $1 WHERE id = $2`.
+    pub sql: String,
+    #[serde(default)]
+    pub params: Vec<SqlParam>,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct SqlQueryResponse {
+    pub success: bool,
+    pub rows: Vec<serde_json::Value>,
+    #[serde(rename = "rowCount")]
+    pub row_count: usize,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct SqlQueryOneResponse {
+    pub success: bool,
+    pub row: serde_json::Value,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct SqlExecuteResponse {
+    pub success: bool,
+    #[serde(rename = "rowsAffected")]
+    pub rows_affected: u64,
+}
+
+// ============================================================================
 // Aggregate (GROUP BY) DTOs
 // ============================================================================
 
@@ -1074,6 +1147,25 @@ impl From<FilterRequest> for StoreFilterRequest {
             order_by: req
                 .order_by
                 .map(|entries| entries.into_iter().map(Into::into).collect()),
+        }
+    }
+}
+
+impl From<SqlParam> for runtara_object_store::SqlParam {
+    fn from(param: SqlParam) -> Self {
+        Self {
+            column_type: param.column_type.into(),
+            value: param.value,
+        }
+    }
+}
+
+impl From<SqlResultColumn> for runtara_object_store::SqlResultColumn {
+    fn from(column: SqlResultColumn) -> Self {
+        Self {
+            name: column.name,
+            column_type: column.column_type.into(),
+            nullable: column.nullable,
         }
     }
 }

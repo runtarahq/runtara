@@ -96,6 +96,10 @@ use runtime_client::RuntimeClient;
         api::handlers::object_model::create_instance,
         api::handlers::object_model::filter_instances,
         api::handlers::object_model::aggregate_instances,
+        api::handlers::object_model::query_sql,
+        api::handlers::object_model::query_sql_one,
+        api::handlers::object_model::query_sql_raw,
+        api::handlers::object_model::execute_sql,
         api::handlers::object_model::get_instance_by_id,
         api::handlers::object_model::update_instance,
         api::handlers::object_model::delete_instance,
@@ -276,6 +280,14 @@ use runtime_client::RuntimeClient;
             api::dto::object_model::ScoreExpression,
             api::dto::object_model::OrderByTarget,
             api::dto::object_model::OrderByEntry,
+            api::dto::object_model::SqlParam,
+            api::dto::object_model::SqlResultColumn,
+            api::dto::object_model::SqlQueryRequest,
+            api::dto::object_model::SqlRawQueryRequest,
+            api::dto::object_model::SqlExecuteRequest,
+            api::dto::object_model::SqlQueryResponse,
+            api::dto::object_model::SqlQueryOneResponse,
+            api::dto::object_model::SqlExecuteResponse,
             // CSV Import/Export DTOs
             api::dto::csv_import_export::CsvExportRequest,
             api::dto::csv_import_export::CsvPreviewJsonRequest,
@@ -1438,6 +1450,22 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         .route(
             "/api/runtime/object-model/instances/schema/{name}/aggregate",
             post(api::handlers::object_model::aggregate_instances),
+        )
+        .route(
+            "/api/runtime/object-model/sql/query",
+            post(api::handlers::object_model::query_sql),
+        )
+        .route(
+            "/api/runtime/object-model/sql/query-one",
+            post(api::handlers::object_model::query_sql_one),
+        )
+        .route(
+            "/api/runtime/object-model/sql/query-raw",
+            post(api::handlers::object_model::query_sql_raw),
+        )
+        .route(
+            "/api/runtime/object-model/sql/execute",
+            post(api::handlers::object_model::execute_sql),
         )
         .route(
             "/api/runtime/object-model/instances/{schema_id}/{instance_id}",
