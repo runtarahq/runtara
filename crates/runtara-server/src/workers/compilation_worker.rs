@@ -56,17 +56,18 @@ pub async fn run(
         "Starting compilation worker"
     );
 
-    let queue = match CompilationQueue::new(config.redis_url.clone()) {
-        Ok(q) => q,
+    let manager = match crate::valkey::get_or_create_manager(&config.redis_url).await {
+        Ok(m) => m,
         Err(e) => {
             error!(
                 worker_id = %worker_id,
                 error = %e,
-                "Failed to create compilation queue, worker will not start"
+                "Failed to initialize Redis connection manager, worker will not start"
             );
             return;
         }
     };
+    let queue = CompilationQueue::new(manager);
 
     // Recover any orphaned pending compilations (from previous crashes)
     match queue.recover_orphaned().await {
@@ -339,7 +340,7 @@ pub async fn enqueue_compilation(
     version: i32,
     force_recompile: bool,
 ) -> Result<bool, crate::valkey::compilation_queue::CompilationQueueError> {
-    let queue = CompilationQueue::new(redis_url.to_string())?;
+    let queue = open_shared_queue(redis_url).await?;
     let request = CompilationRequest::new_with_force(
         tenant_id.to_string(),
         workflow_id.to_string(),
@@ -356,7 +357,7 @@ pub async fn is_compilation_pending(
     workflow_id: &str,
     version: i32,
 ) -> Result<bool, crate::valkey::compilation_queue::CompilationQueueError> {
-    let queue = CompilationQueue::new(redis_url.to_string())?;
+    let queue = open_shared_queue(redis_url).await?;
     let request = CompilationRequest::new(tenant_id.to_string(), workflow_id.to_string(), version);
     queue.is_pending(&request).await
 }
@@ -371,12 +372,26 @@ pub async fn wait_for_compilation(
     version: i32,
     timeout: Duration,
 ) -> Result<bool, crate::valkey::compilation_queue::CompilationQueueError> {
-    let queue = CompilationQueue::new(redis_url.to_string())?;
+    let queue = open_shared_queue(redis_url).await?;
     let request = CompilationRequest::new(tenant_id.to_string(), workflow_id.to_string(), version);
     let poll_interval = Duration::from_millis(100);
     queue
         .wait_for_completion(&request, timeout, poll_interval)
         .await
+}
+
+/// Build a CompilationQueue backed by the shared, process-wide connection
+/// manager so each utility call reuses an existing pooled connection
+/// instead of opening a new TCP socket.
+async fn open_shared_queue(
+    redis_url: &str,
+) -> Result<CompilationQueue, crate::valkey::compilation_queue::CompilationQueueError> {
+    let manager = crate::valkey::get_or_create_manager(redis_url)
+        .await
+        .map_err(|e| {
+            crate::valkey::compilation_queue::CompilationQueueError::ConnectionError(e.to_string())
+        })?;
+    Ok(CompilationQueue::new(manager))
 }
 
 #[cfg(test)]

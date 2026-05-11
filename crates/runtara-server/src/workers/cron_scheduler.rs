@@ -36,10 +36,10 @@ impl Default for CronSchedulerConfig {
 }
 
 /// Background worker that schedules cron-triggered workflow executions
-#[instrument(skip(pool, redis_url, shutdown))]
+#[instrument(skip(pool, trigger_stream, shutdown))]
 pub async fn run(
     pool: PgPool,
-    redis_url: String,
+    trigger_stream: TriggerStreamPublisher,
     config: CronSchedulerConfig,
     shutdown: ShutdownSignal,
 ) {
@@ -52,8 +52,6 @@ pub async fn run(
         check_interval_secs = config.check_interval_secs,
         "Starting cron scheduler"
     );
-
-    let trigger_stream = TriggerStreamPublisher::new(redis_url);
 
     // Main scheduling loop
     let mut interval = tokio::time::interval(Duration::from_secs(config.check_interval_secs));

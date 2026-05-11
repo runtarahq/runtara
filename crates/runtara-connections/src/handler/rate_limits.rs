@@ -45,9 +45,9 @@ pub async fn list_rate_limits_handler(
         state.db_pool.clone(),
         state.cipher.clone(),
     ));
-    let service = RateLimitService::with_redis_url_and_db_pool(
+    let service = RateLimitService::with_redis_manager_and_db_pool(
         repository,
-        state.redis_url.clone(),
+        state.redis_manager.clone(),
         state.db_pool,
     );
 
@@ -138,9 +138,9 @@ pub async fn get_connection_rate_limit_status_handler(
         state.db_pool.clone(),
         state.cipher.clone(),
     ));
-    let service = RateLimitService::with_redis_url_and_db_pool(
+    let service = RateLimitService::with_redis_manager_and_db_pool(
         repository,
-        state.redis_url.clone(),
+        state.redis_manager.clone(),
         state.db_pool,
     );
 

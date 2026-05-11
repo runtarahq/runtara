@@ -2,9 +2,9 @@
 //!
 //! Reads step execution events from Redis for debugging workflow executions.
 
-use redis::{AsyncCommands, Client};
+use redis::AsyncCommands;
+use redis::aio::ConnectionManager;
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
 
 /// Represents a single step execution event
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -35,15 +35,15 @@ pub struct StepEvent {
 
 /// Reads step execution events from Redis (async operations)
 pub struct StepEventReader {
-    client: Option<Arc<Client>>,
+    manager: Option<ConnectionManager>,
     instance_id: String,
 }
 
 impl StepEventReader {
-    /// Creates a new step event reader
-    pub fn new(client: Option<Arc<Client>>, instance_id: String) -> Self {
+    /// Creates a new step event reader from a shared connection manager.
+    pub fn new(manager: Option<ConnectionManager>, instance_id: String) -> Self {
         Self {
-            client,
+            manager,
             instance_id,
         }
     }
@@ -55,12 +55,10 @@ impl StepEventReader {
         status_filter: Option<&str>,
         limit: Option<usize>,
     ) -> Result<Vec<StepEvent>, String> {
-        let client = self.client.as_ref().ok_or("Redis client not available")?;
-
-        let mut conn = client
-            .get_multiplexed_async_connection()
-            .await
-            .map_err(|e| format!("Failed to connect to Redis: {}", e))?;
+        let mut conn = self
+            .manager
+            .clone()
+            .ok_or("Redis client not available")?;
 
         let key = format!("step_events:{}", self.instance_id);
         let events_data: Vec<(String, String)> = conn

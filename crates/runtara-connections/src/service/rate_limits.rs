@@ -5,14 +5,15 @@
 
 use crate::repository::connections::ConnectionRepository;
 use crate::types::*;
-use redis::Commands;
+use redis::AsyncCommands;
+use redis::aio::ConnectionManager;
 use sqlx::PgPool;
 use std::collections::HashMap;
 use std::sync::Arc;
 
 pub struct RateLimitService {
     connection_repository: Arc<ConnectionRepository>,
-    redis_url: Option<String>,
+    redis_manager: Option<ConnectionManager>,
     db_pool: Option<PgPool>,
 }
 
@@ -37,19 +38,19 @@ impl RateLimitService {
     pub fn new(connection_repository: Arc<ConnectionRepository>) -> Self {
         Self {
             connection_repository,
-            redis_url: None,
+            redis_manager: None,
             db_pool: None,
         }
     }
 
-    /// Create service with a specific Redis URL
-    pub fn with_redis_url(
+    /// Create service with a shared Redis connection manager
+    pub fn with_redis_manager(
         connection_repository: Arc<ConnectionRepository>,
-        redis_url: Option<String>,
+        redis_manager: Option<ConnectionManager>,
     ) -> Self {
         Self {
             connection_repository,
-            redis_url,
+            redis_manager,
             db_pool: None,
         }
     }
@@ -58,20 +59,20 @@ impl RateLimitService {
     pub fn with_db_pool(connection_repository: Arc<ConnectionRepository>, db_pool: PgPool) -> Self {
         Self {
             connection_repository,
-            redis_url: None,
+            redis_manager: None,
             db_pool: Some(db_pool),
         }
     }
 
-    /// Create service with both Redis URL and database pool
-    pub fn with_redis_url_and_db_pool(
+    /// Create service with both Redis connection manager and database pool
+    pub fn with_redis_manager_and_db_pool(
         connection_repository: Arc<ConnectionRepository>,
-        redis_url: Option<String>,
+        redis_manager: Option<ConnectionManager>,
         db_pool: PgPool,
     ) -> Self {
         Self {
             connection_repository,
-            redis_url,
+            redis_manager,
             db_pool: Some(db_pool),
         }
     }
@@ -93,7 +94,7 @@ impl RateLimitService {
         let config = connection.rate_limit_config;
 
         // Fetch Redis state
-        let state = self.fetch_redis_state(connection_id);
+        let state = self.fetch_redis_state(connection_id).await;
 
         // Compute metrics
         let metrics = self.compute_metrics(&config, &state);
@@ -134,7 +135,7 @@ impl RateLimitService {
         let connection_ids: Vec<String> = connections.iter().map(|c| c.id.clone()).collect();
 
         // Batch fetch Redis states
-        let states = self.fetch_redis_states_batch(&connection_ids);
+        let states = self.fetch_redis_states_batch(&connection_ids).await;
 
         // Fetch period stats for all connections
         let period_stats = self
@@ -166,29 +167,27 @@ impl RateLimitService {
     }
 
     /// Fetch rate limit state from Redis for a single connection
-    fn fetch_redis_state(&self, connection_id: &str) -> RateLimitStateDto {
-        let Some(ref url) = self.redis_url else {
+    async fn fetch_redis_state(&self, connection_id: &str) -> RateLimitStateDto {
+        let Some(manager) = self.redis_manager.clone() else {
             return RateLimitStateDto::default();
         };
 
-        let result = self.fetch_redis_state_internal(url, connection_id);
-        result.unwrap_or_default()
+        self.fetch_redis_state_internal(manager, connection_id)
+            .await
+            .unwrap_or_default()
     }
 
     /// Internal helper to fetch Redis state with error handling
-    fn fetch_redis_state_internal(
+    async fn fetch_redis_state_internal(
         &self,
-        url: &str,
+        mut conn: ConnectionManager,
         connection_id: &str,
     ) -> Result<RateLimitStateDto, redis::RedisError> {
-        let client = redis::Client::open(url)?;
-        let mut conn = client.get_connection()?;
-
         let key = format!("rate_limit:{}", connection_id);
         let learned_key = format!("rate_limit_learned:{}", connection_id);
 
         // Fetch token bucket state
-        let bucket: HashMap<String, String> = conn.hgetall(&key)?;
+        let bucket: HashMap<String, String> = conn.hgetall(&key).await?;
 
         let current_tokens = bucket.get("tokens").and_then(|s| s.parse::<f64>().ok());
 
@@ -210,7 +209,7 @@ impl RateLimitService {
             .and_then(|s| s.parse::<i64>().ok());
 
         // Fetch learned limit
-        let learned_limit: Option<u32> = conn.get(&learned_key).ok();
+        let learned_limit: Option<u32> = conn.get(&learned_key).await.ok();
 
         Ok(RateLimitStateDto {
             available: true,
@@ -224,13 +223,13 @@ impl RateLimitService {
     }
 
     /// Batch fetch Redis states for multiple connections
-    fn fetch_redis_states_batch(
+    async fn fetch_redis_states_batch(
         &self,
         connection_ids: &[String],
     ) -> HashMap<String, RateLimitStateDto> {
         let mut states = HashMap::new();
 
-        let Some(ref url) = self.redis_url else {
+        let Some(manager) = self.redis_manager.clone() else {
             // Redis not configured - return default states
             for id in connection_ids {
                 states.insert(id.clone(), RateLimitStateDto::default());
@@ -239,7 +238,10 @@ impl RateLimitService {
         };
 
         // Try to batch fetch, fall back to defaults on error
-        match self.fetch_redis_states_batch_internal(url, connection_ids) {
+        match self
+            .fetch_redis_states_batch_internal(manager, connection_ids)
+            .await
+        {
             Ok(fetched) => fetched,
             Err(_) => {
                 // Redis error - return unavailable states
@@ -252,14 +254,11 @@ impl RateLimitService {
     }
 
     /// Internal helper for batch Redis fetch
-    fn fetch_redis_states_batch_internal(
+    async fn fetch_redis_states_batch_internal(
         &self,
-        url: &str,
+        mut conn: ConnectionManager,
         connection_ids: &[String],
     ) -> Result<HashMap<String, RateLimitStateDto>, redis::RedisError> {
-        let client = redis::Client::open(url)?;
-        let mut conn = client.get_connection()?;
-
         let mut states = HashMap::new();
 
         // Build pipeline for efficient batch query
@@ -274,7 +273,7 @@ impl RateLimitService {
         }
 
         // Execute pipeline
-        let results: Vec<redis::Value> = pipe.query(&mut conn)?;
+        let results: Vec<redis::Value> = pipe.query_async(&mut conn).await?;
 
         // Parse results (2 values per connection: hash + learned)
         for (idx, conn_id) in connection_ids.iter().enumerate() {
@@ -523,7 +522,7 @@ impl RateLimitService {
         metadata: Option<serde_json::Value>,
     ) -> Result<(), ServiceError> {
         // Increment Redis counters
-        if let Err(e) = self.increment_call_counters(connection_id) {
+        if let Err(e) = self.increment_call_counters(connection_id).await {
             tracing::warn!(
                 connection_id = connection_id,
                 error = %e,
@@ -547,13 +546,10 @@ impl RateLimitService {
     }
 
     /// Increment call counters in Redis
-    fn increment_call_counters(&self, connection_id: &str) -> Result<(), redis::RedisError> {
-        let Some(ref url) = self.redis_url else {
+    async fn increment_call_counters(&self, connection_id: &str) -> Result<(), redis::RedisError> {
+        let Some(mut conn) = self.redis_manager.clone() else {
             return Ok(()); // Redis not configured, skip
         };
-
-        let client = redis::Client::open(url.as_str())?;
-        let mut conn = client.get_connection()?;
 
         let key = format!("rate_limit:{}", connection_id);
         let now_ms = std::time::SystemTime::now()
@@ -573,7 +569,7 @@ impl RateLimitService {
         // Set window start if not already set (HSETNX)
         pipe.cmd("HSETNX").arg(&key).arg("window_start").arg(now_ms);
 
-        let _: () = pipe.query(&mut conn)?;
+        let _: () = pipe.query_async(&mut conn).await?;
 
         Ok(())
     }
@@ -763,13 +759,13 @@ impl RateLimitService {
 
     /// Reset window counters (called when a new window starts)
     #[allow(dead_code)]
-    pub fn reset_window_counters(&self, connection_id: &str) -> Result<(), redis::RedisError> {
-        let Some(ref url) = self.redis_url else {
+    pub async fn reset_window_counters(
+        &self,
+        connection_id: &str,
+    ) -> Result<(), redis::RedisError> {
+        let Some(mut conn) = self.redis_manager.clone() else {
             return Ok(());
         };
-
-        let client = redis::Client::open(url.as_str())?;
-        let mut conn = client.get_connection()?;
 
         let key = format!("rate_limit:{}", connection_id);
         let now_ms = std::time::SystemTime::now()
@@ -781,7 +777,7 @@ impl RateLimitService {
         let mut pipe = redis::pipe();
         pipe.hset(&key, "calls_window", 0i64);
         pipe.hset(&key, "window_start", now_ms);
-        let _: () = pipe.query(&mut conn)?;
+        let _: () = pipe.query_async(&mut conn).await?;
 
         Ok(())
     }

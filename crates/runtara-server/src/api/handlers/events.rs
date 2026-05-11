@@ -49,6 +49,7 @@ use crate::api::repositories::triggers::TriggerRepository;
 pub async fn capture_http_event(
     State(pool): State<PgPool>,
     State(connections): State<std::sync::Arc<runtara_connections::ConnectionsFacade>>,
+    State(trigger_stream): State<Option<std::sync::Arc<TriggerStreamPublisher>>>,
     Path((trigger_id, action)): Path<(String, String)>,
     request: Request,
 ) -> Result<(StatusCode, Json<Value>), (StatusCode, Json<Value>)> {
@@ -61,9 +62,11 @@ pub async fn capture_http_event(
     let uri = parts.uri.clone();
     let headers = parts.headers.clone();
 
-    // Get Redis connection URL from environment
-    let redis_url = match crate::valkey::build_redis_url() {
-        Some(url) => url,
+    // Pull the shared trigger stream publisher from AppState (created once at
+    // startup with the shared Redis connection manager). Avoids opening a new
+    // TCP connection per webhook request.
+    let trigger_stream = match trigger_stream {
+        Some(t) => t,
         None => {
             eprintln!("VALKEY_HOST not configured");
             let error_response = json!({
@@ -209,8 +212,7 @@ pub async fn capture_http_event(
             debug,
         );
 
-        // Publish to trigger stream
-        let trigger_stream = TriggerStreamPublisher::new(redis_url);
+        // Publish to trigger stream (reuses shared connection manager).
         match trigger_stream.publish(&tenant_id, &event).await {
             Ok(stream_id) => {
                 // Update trigger's last_run timestamp
