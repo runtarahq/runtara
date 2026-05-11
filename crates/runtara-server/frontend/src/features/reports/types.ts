@@ -28,9 +28,25 @@ export interface ReportWorkflowActionContext {
   inputKey?: string;
 }
 
-export interface ReportRowCondition {
+export interface ReportCondition {
   op: string;
   arguments?: unknown[];
+}
+
+export type ReportRowCondition = ReportCondition;
+
+export interface ReportConditionFilterRef {
+  filter: string;
+  path: string;
+}
+
+export interface ReportConditionSubquery {
+  subquery: {
+    schema: string;
+    select: string;
+    connectionId?: string;
+    condition?: ReportCondition;
+  };
 }
 
 export interface ReportWorkflowActionConfig {
@@ -118,7 +134,7 @@ export interface ReportLookupConfig {
   valueField: string;
   labelField: string;
   searchFields?: string[];
-  condition?: unknown;
+  condition?: ReportCondition;
   filterMappings?: Array<{
     filterId: string;
     field: string;
@@ -186,7 +202,7 @@ export interface ReportFilterOptionsConfig {
     field: string;
     op?: string;
   }>;
-  condition?: unknown;
+  condition?: ReportCondition;
 }
 
 export interface ReportFilterDefinition {
@@ -336,7 +352,7 @@ export interface ReportSource {
   workflowId?: string;
   instanceId?: string;
   mode?: 'filter' | 'aggregate';
-  condition?: unknown;
+  condition?: ReportCondition;
   filterMappings?: Array<{
     filterId: string;
     field: string;

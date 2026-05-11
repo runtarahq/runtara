@@ -58,8 +58,10 @@ import {
   ReportDefinition,
   ReportFilterDefinition,
   ReportFilterType,
+  ReportLayoutNode,
   ReportStatus,
   ReportValidationIssue,
+  ReportViewDefinition,
 } from '../types';
 import {
   extractLayoutBlockReferences,
@@ -458,6 +460,14 @@ export function ReportEditorPage() {
                 definition={definition}
                 schemas={schemas}
                 selectedSchema={selectedSchema}
+                onChange={(nextDefinition) => {
+                  setDefinition(nextDefinition);
+                  setLocalError(null);
+                  validateReport.reset();
+                }}
+              />
+              <ReportViewsEditor
+                definition={definition}
                 onChange={(nextDefinition) => {
                   setDefinition(nextDefinition);
                   setLocalError(null);
@@ -1323,6 +1333,294 @@ function ValidationIssueList({
           </div>
         ))}
       </div>
+    </div>
+  );
+}
+
+function ReportViewsEditor({
+  definition,
+  onChange,
+}: {
+  definition: ReportDefinition;
+  onChange: (definition: ReportDefinition) => void;
+}) {
+  const views = definition.views ?? [];
+  const blockOptions = definition.blocks;
+  const filterOptions = definition.filters ?? [];
+
+  const updateViews = (nextViews: ReportViewDefinition[]) => {
+    onChange({ ...definition, views: nextViews });
+  };
+
+  const updateView = (index: number, view: ReportViewDefinition) => {
+    updateViews(
+      views.map((current, currentIndex) =>
+        currentIndex === index ? view : current
+      )
+    );
+  };
+
+  const addView = () => {
+    const id = uniqueViewId(views, views.length === 0 ? 'list' : 'detail');
+    updateViews([
+      ...views,
+      {
+        id,
+        title: humanizeFieldName(id),
+        layout:
+          definition.layout ?? blockOptions.slice(0, 3).map(blockToLayoutNode),
+      },
+    ]);
+  };
+
+  return (
+    <section className="flex flex-col gap-4 rounded-lg border bg-background p-4">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="flex items-center gap-2">
+          <h2 className="text-base font-semibold text-foreground">
+            Views and navigation
+          </h2>
+          <Badge variant="secondary">{views.length} views</Badge>
+        </div>
+        <Button type="button" variant="outline" size="sm" onClick={addView}>
+          <Plus className="mr-2 size-4" />
+          Add view
+        </Button>
+      </div>
+
+      {views.length === 0 ? (
+        <div className="rounded-lg border border-dashed bg-muted/20 p-6 text-sm text-muted-foreground">
+          No named views. Add views when row clicks or buttons should navigate
+          between list, detail, audit, or drilldown layouts.
+        </div>
+      ) : (
+        <div className="flex flex-col gap-3">
+          {views.map((view, index) => (
+            <ReportViewEditorCard
+              key={`${view.id}-${index}`}
+              view={view}
+              views={views}
+              blocks={blockOptions}
+              filters={filterOptions}
+              onChange={(nextView) => updateView(index, nextView)}
+              onRemove={() =>
+                updateViews(
+                  views.filter((_, currentIndex) => currentIndex !== index)
+                )
+              }
+            />
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function ReportViewEditorCard({
+  view,
+  views,
+  blocks,
+  filters,
+  onChange,
+  onRemove,
+}: {
+  view: ReportViewDefinition;
+  views: ReportViewDefinition[];
+  blocks: ReportBlockDefinition[];
+  filters: ReportFilterDefinition[];
+  onChange: (view: ReportViewDefinition) => void;
+  onRemove: () => void;
+}) {
+  const layoutBlockIds = extractLayoutBlockReferences(view.layout ?? []);
+  const layoutBlockSet = new Set(layoutBlockIds);
+  const titleFromBlock = view.titleFromBlock;
+
+  const updateLayoutBlocks = (blockIds: string[]) => {
+    onChange({
+      ...view,
+      layout: blockIds
+        .map((blockId) => blocks.find((block) => block.id === blockId))
+        .filter((block): block is ReportBlockDefinition => Boolean(block))
+        .map(blockToLayoutNode),
+    });
+  };
+
+  const updateClearFilters = (value: string) => {
+    onChange({
+      ...view,
+      clearFiltersOnBack: value
+        .split(',')
+        .map((part) => part.trim())
+        .filter(Boolean),
+    });
+  };
+
+  return (
+    <div className="flex flex-col gap-4 rounded-lg border bg-muted/10 p-4">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="truncate text-sm font-semibold text-foreground">
+            {view.title || view.id}
+          </div>
+          <div className="text-xs text-muted-foreground">{view.id}</div>
+        </div>
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon"
+          className="size-9"
+          onClick={onRemove}
+          aria-label={`Remove ${view.id}`}
+        >
+          <Trash2 className="size-4" />
+        </Button>
+      </div>
+
+      <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+        <EditorField label="View ID">
+          <Input
+            value={view.id}
+            onChange={(event) =>
+              onChange({
+                ...view,
+                id: slugify(event.target.value).replace(/-/g, '_'),
+              })
+            }
+          />
+        </EditorField>
+        <EditorField label="Title">
+          <Input
+            value={view.title ?? ''}
+            onChange={(event) =>
+              onChange({ ...view, title: event.target.value })
+            }
+          />
+        </EditorField>
+        <EditorField label="Parent view">
+          <Select
+            value={view.parentViewId ?? NONE_SELECT_VALUE}
+            onValueChange={(parentViewId) =>
+              onChange({
+                ...view,
+                parentViewId:
+                  parentViewId === NONE_SELECT_VALUE ? undefined : parentViewId,
+              })
+            }
+          >
+            <SelectTrigger>
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value={NONE_SELECT_VALUE}>None</SelectItem>
+              {views
+                .filter((candidate) => candidate.id !== view.id)
+                .map((candidate) => (
+                  <SelectItem key={candidate.id} value={candidate.id}>
+                    {candidate.title || candidate.id}
+                  </SelectItem>
+                ))}
+            </SelectContent>
+          </Select>
+        </EditorField>
+        <EditorField label="Clear filters on back">
+          <Input
+            value={(view.clearFiltersOnBack ?? []).join(', ')}
+            placeholder="case_id, audit_id"
+            onChange={(event) => updateClearFilters(event.target.value)}
+          />
+        </EditorField>
+      </div>
+
+      <div className="grid gap-3 md:grid-cols-3">
+        <EditorField label="Title from filter path">
+          <Input
+            value={view.titleFrom ?? ''}
+            placeholder="case_id.value"
+            onChange={(event) =>
+              onChange({
+                ...view,
+                titleFrom: event.target.value || undefined,
+              })
+            }
+          />
+        </EditorField>
+        <EditorField label="Title block">
+          <Select
+            value={titleFromBlock?.block ?? NONE_SELECT_VALUE}
+            onValueChange={(block) =>
+              onChange({
+                ...view,
+                titleFromBlock:
+                  block === NONE_SELECT_VALUE
+                    ? undefined
+                    : { block, field: titleFromBlock?.field },
+              })
+            }
+          >
+            <SelectTrigger>
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value={NONE_SELECT_VALUE}>None</SelectItem>
+              {blocks.map((block) => (
+                <SelectItem key={block.id} value={block.id}>
+                  {block.title || block.id}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </EditorField>
+        <EditorField label="Title block field">
+          <Input
+            value={titleFromBlock?.field ?? ''}
+            disabled={!titleFromBlock?.block}
+            placeholder="name"
+            onChange={(event) =>
+              onChange({
+                ...view,
+                titleFromBlock: titleFromBlock?.block
+                  ? {
+                      block: titleFromBlock.block,
+                      field: event.target.value || undefined,
+                    }
+                  : undefined,
+              })
+            }
+          />
+        </EditorField>
+      </div>
+
+      <div className="flex flex-col gap-2">
+        <div className="flex items-center gap-2">
+          <Label>View layout blocks</Label>
+          <Badge variant="secondary">{layoutBlockIds.length} blocks</Badge>
+        </div>
+        <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
+          {blocks.map((block) => (
+            <label
+              key={block.id}
+              className="flex min-h-10 items-center gap-2 rounded-md border bg-background px-3 py-2 text-sm"
+            >
+              <Checkbox
+                checked={layoutBlockSet.has(block.id)}
+                onCheckedChange={(checked) => {
+                  const nextBlocks = checked
+                    ? [...layoutBlockIds, block.id]
+                    : layoutBlockIds.filter((blockId) => blockId !== block.id);
+                  updateLayoutBlocks(nextBlocks);
+                }}
+              />
+              <span className="truncate">{block.title || block.id}</span>
+            </label>
+          ))}
+        </div>
+      </div>
+
+      {filters.length > 0 && (
+        <div className="text-xs text-muted-foreground">
+          Available filters: {filters.map((filter) => filter.id).join(', ')}
+        </div>
+      )}
     </div>
   );
 }
@@ -2338,12 +2636,32 @@ function uniqueDatasetFieldId(existing: Set<string>, baseId: string): string {
   return `${fallback}_${index}`;
 }
 
+function uniqueViewId(views: ReportViewDefinition[], seed: string): string {
+  const existing = new Set(views.map((view) => view.id));
+  const base = slugify(seed || 'view').replace(/-/g, '_') || 'view';
+  if (!existing.has(base)) return base;
+  let index = 2;
+  while (existing.has(`${base}_${index}`)) {
+    index += 1;
+  }
+  return `${base}_${index}`;
+}
+
+function blockToLayoutNode(block: ReportBlockDefinition): ReportLayoutNode {
+  return {
+    id: `${block.id}_node`,
+    type: 'block',
+    blockId: block.id,
+  };
+}
+
 function validateReportDefinition(definition: ReportDefinition): string[] {
   const errors: string[] = [];
   const blockIds = new Set<string>();
   const declaredBlockIds = new Set(definition.blocks.map((block) => block.id));
   const datasetIds = new Set<string>();
   const filterIds = new Set<string>();
+  const viewIds = new Set<string>();
 
   for (const filter of definition.filters ?? []) {
     if (!filter.id.trim()) {
@@ -2497,6 +2815,33 @@ function validateReportDefinition(definition: ReportDefinition): string[] {
         }
         joinAliases.add(alias);
       }
+    }
+  }
+
+  for (const view of definition.views ?? []) {
+    if (!view.id.trim()) {
+      errors.push('Every report view needs an ID.');
+      continue;
+    }
+    if (viewIds.has(view.id)) {
+      errors.push(`Duplicate report view ID: ${view.id}`);
+    }
+    viewIds.add(view.id);
+    if (view.parentViewId && view.parentViewId === view.id) {
+      errors.push(`View "${view.id}" cannot use itself as parent.`);
+    }
+    for (const blockId of extractLayoutBlockReferences(view.layout)) {
+      if (!declaredBlockIds.has(blockId)) {
+        errors.push(`View "${view.id}" references unknown block: ${blockId}`);
+      }
+    }
+  }
+
+  for (const view of definition.views ?? []) {
+    if (view.parentViewId && !viewIds.has(view.parentViewId)) {
+      errors.push(
+        `View "${view.id}" references unknown parent view: ${view.parentViewId}`
+      );
     }
   }
 

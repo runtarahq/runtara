@@ -1,4 +1,4 @@
-import { DragEvent, ReactNode, useMemo, useState } from 'react';
+import { DragEvent, ReactNode, useEffect, useMemo, useState } from 'react';
 import {
   Copy,
   CreditCard,
@@ -34,14 +34,19 @@ import {
   ReportBlockDefinition,
   ReportBlockType,
   ReportChartKind,
+  ReportCondition,
   ReportDatasetFilterRequest,
   ReportDatasetDefinition,
   ReportDefinition,
   ReportFilterDefinition,
   ReportFilterType,
+  ReportInteractionAction,
   ReportLayoutNode,
   ReportSourceJoin,
   ReportTableColumn,
+  ReportTableInteractionButtonConfig,
+  ReportViewDefinition,
+  ReportWorkflowActionConfig,
 } from '../types';
 import {
   createDefaultDatasetBlockQuery,
@@ -95,6 +100,8 @@ type BlockEditorProps = {
   blockId: string;
   schemas: Schema[];
   datasets: ReportDatasetDefinition[];
+  reportFilters: ReportFilterDefinition[];
+  views: ReportViewDefinition[];
   onChange: (block: ReportBlockDefinition) => void;
   onDuplicate: () => void;
   onRemove: () => void;
@@ -188,6 +195,62 @@ const CONDITION_OPERATOR_OPTIONS = [
   { label: 'Less than', value: 'lt' },
   { label: 'Less or equal', value: 'lte' },
   { label: 'Between', value: 'between' },
+];
+
+const CONDITION_BUILDER_OPERATORS = [
+  { label: 'Equals', value: 'EQ' },
+  { label: 'Not equals', value: 'NE' },
+  { label: 'Contains', value: 'CONTAINS' },
+  { label: 'In', value: 'IN' },
+  { label: 'Not in', value: 'NOT_IN' },
+  { label: 'Greater than', value: 'GT' },
+  { label: 'Greater or equal', value: 'GTE' },
+  { label: 'Less than', value: 'LT' },
+  { label: 'Less or equal', value: 'LTE' },
+];
+
+const CONDITION_VALUE_SOURCES = [
+  { label: 'Literal', value: 'literal' },
+  { label: 'Report filter', value: 'filter' },
+  { label: 'Subquery', value: 'subquery' },
+];
+
+const FILTER_REF_PATHS: Record<ReportFilterType, string[]> = {
+  select: ['value'],
+  multi_select: ['values'],
+  radio: ['value'],
+  checkbox: ['value'],
+  time_range: ['from', 'to'],
+  number_range: ['min', 'max'],
+  text: ['value'],
+  search: ['value'],
+};
+
+const WORKFLOW_CONTEXT_MODES = [
+  { label: 'Row', value: 'row' },
+  { label: 'Field', value: 'field' },
+  { label: 'Value', value: 'value' },
+  { label: 'Selection', value: 'selection' },
+];
+
+const INTERACTION_EVENTS = [
+  { label: 'Row click', value: 'row_click' },
+  { label: 'Cell click', value: 'cell_click' },
+  { label: 'Point click', value: 'point_click' },
+];
+
+const INTERACTION_ACTION_TYPES = [
+  { label: 'Set filter', value: 'set_filter' },
+  { label: 'Clear filter', value: 'clear_filter' },
+  { label: 'Clear filters', value: 'clear_filters' },
+  { label: 'Navigate view', value: 'navigate_view' },
+];
+
+const INTERACTION_BUTTON_ICONS = [
+  { label: 'Eye', value: 'eye' },
+  { label: 'File text', value: 'file_text' },
+  { label: 'Activity', value: 'activity' },
+  { label: 'Arrow right', value: 'arrow_right' },
 ];
 
 export function ReportDefinitionBuilder({
@@ -478,6 +541,8 @@ export function ReportDefinitionBuilder({
                   blockId={node.blockId}
                   schemas={schemas}
                   datasets={value.datasets ?? []}
+                  reportFilters={value.filters ?? []}
+                  views={value.views ?? []}
                   onChange={(block) => updateBlock(node.blockId, block)}
                   onDuplicate={() => duplicateBlock(node.blockId)}
                   onRemove={() => removeNode(index)}
@@ -691,6 +756,8 @@ function ReportBlockEditor({
   blockId,
   schemas,
   datasets,
+  reportFilters,
+  views,
   onChange,
   onDuplicate,
   onRemove,
@@ -978,6 +1045,8 @@ function ReportBlockEditor({
             <TableBlockSettings
               block={block}
               fields={fields}
+              reportFilters={reportFilters}
+              views={views}
               onChange={onChange}
             />
           )}
@@ -1011,6 +1080,35 @@ function ReportBlockEditor({
           <BlockFiltersEditor
             block={block}
             fields={fields}
+            onChange={onChange}
+          />
+        </>
+      )}
+
+      {!isDatasetBlock && (
+        <>
+          <Separator />
+          <SourceConditionEditor
+            title="Source condition"
+            condition={asReportCondition(block.source.condition)}
+            fields={fields}
+            schemas={schemas}
+            reportFilters={[...reportFilters, ...(block.filters ?? [])]}
+            onChange={(condition) =>
+              onChange({
+                ...block,
+                source: {
+                  ...block.source,
+                  condition,
+                },
+              })
+            }
+          />
+          <BlockInteractionsEditor
+            block={block}
+            fields={fields}
+            reportFilters={reportFilters}
+            views={views}
             onChange={onChange}
           />
         </>
@@ -1652,13 +1750,1212 @@ function SourceJoinsEditor({
   );
 }
 
-function TableBlockSettings({
+function SourceConditionEditor({
+  title,
+  condition,
+  fields,
+  schemas,
+  reportFilters,
+  allowFilterRefs = true,
+  allowSubquery = true,
+  onChange,
+}: {
+  title: string;
+  condition: ReportCondition | undefined;
+  fields: string[];
+  schemas: Schema[];
+  reportFilters: ReportFilterDefinition[];
+  allowFilterRefs?: boolean;
+  allowSubquery?: boolean;
+  onChange: (condition: ReportCondition | undefined) => void;
+}) {
+  const rows = conditionToRules(condition);
+  const groupOp =
+    condition?.op === 'AND' || condition?.op === 'OR' ? condition.op : 'AND';
+  const [jsonDraft, setJsonDraft] = useState(formatConditionJson(condition));
+  const [jsonError, setJsonError] = useState<string | null>(null);
+
+  useEffect(() => {
+    setJsonDraft(formatConditionJson(condition));
+    setJsonError(null);
+  }, [condition]);
+
+  const commitRows = (nextRows: ReportCondition[], nextGroupOp = groupOp) => {
+    onChange(rulesToCondition(nextRows, nextGroupOp));
+  };
+
+  const parseJsonDraft = () => {
+    const trimmed = jsonDraft.trim();
+    if (!trimmed || trimmed === 'null') {
+      setJsonError(null);
+      onChange(undefined);
+      return;
+    }
+    try {
+      const parsed = JSON.parse(trimmed);
+      if (!isReportCondition(parsed)) {
+        setJsonError('JSON must be a condition object with op.');
+        return;
+      }
+      setJsonError(null);
+      onChange(parsed);
+    } catch (error) {
+      setJsonError(error instanceof Error ? error.message : 'Invalid JSON.');
+    }
+  };
+
+  return (
+    <div className="flex flex-col gap-3 rounded-md border bg-muted/10 p-3">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex items-center gap-2">
+          <Label>{title}</Label>
+          <Badge variant="secondary">{rows.length} rules</Badge>
+        </div>
+        <div className="flex flex-wrap gap-2">
+          <Select
+            value={groupOp}
+            disabled={rows.length < 2}
+            onValueChange={(op) =>
+              commitRows(rows, op as ReportCondition['op'])
+            }
+          >
+            <SelectTrigger className="h-9 w-28">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="AND">All</SelectItem>
+              <SelectItem value="OR">Any</SelectItem>
+            </SelectContent>
+          </Select>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={() =>
+              commitRows([
+                ...rows,
+                createDefaultConditionRule(fields[0] ?? 'id'),
+              ])
+            }
+          >
+            <Plus className="mr-2 size-4" />
+            Add rule
+          </Button>
+        </div>
+      </div>
+
+      {rows.length === 0 ? (
+        <div className="rounded-md border border-dashed bg-background p-3 text-sm text-muted-foreground">
+          No condition. This source renders without an additional condition.
+        </div>
+      ) : (
+        <div className="flex flex-col gap-2">
+          {rows.map((rule, index) => (
+            <ConditionRuleEditor
+              key={`condition-rule-${index}`}
+              rule={rule}
+              fields={fields}
+              schemas={schemas}
+              reportFilters={reportFilters}
+              allowFilterRefs={allowFilterRefs}
+              allowSubquery={allowSubquery}
+              onChange={(nextRule) =>
+                commitRows(
+                  rows.map((row, currentIndex) =>
+                    currentIndex === index ? nextRule : row
+                  )
+                )
+              }
+              onRemove={() =>
+                commitRows(
+                  rows.filter((_, currentIndex) => currentIndex !== index)
+                )
+              }
+            />
+          ))}
+        </div>
+      )}
+
+      <Field label="Advanced condition JSON">
+        <Textarea
+          value={jsonDraft}
+          className="min-h-28 font-mono text-xs"
+          placeholder='{"op":"EQ","arguments":["status","open"]}'
+          onChange={(event) => setJsonDraft(event.target.value)}
+          onBlur={parseJsonDraft}
+        />
+      </Field>
+      {jsonError && <p className="text-xs text-destructive">{jsonError}</p>}
+    </div>
+  );
+}
+
+function ConditionRuleEditor({
+  rule,
+  fields,
+  schemas,
+  reportFilters,
+  allowFilterRefs,
+  allowSubquery,
+  onChange,
+  onRemove,
+}: {
+  rule: ReportCondition;
+  fields: string[];
+  schemas: Schema[];
+  reportFilters: ReportFilterDefinition[];
+  allowFilterRefs: boolean;
+  allowSubquery: boolean;
+  onChange: (rule: ReportCondition) => void;
+  onRemove: () => void;
+}) {
+  const args = rule.arguments ?? [];
+  const field = String(args[0] ?? fields[0] ?? '');
+  const value = args[1];
+  const valueSource = conditionValueSource(value);
+  const filterRef = isFilterRefOperand(value) ? value : undefined;
+  const subquery = isSubqueryOperand(value) ? value.subquery : undefined;
+  const valueSourceOptions = CONDITION_VALUE_SOURCES.filter((option) => {
+    if (option.value === 'filter') return allowFilterRefs;
+    if (option.value === 'subquery') return allowSubquery;
+    return true;
+  });
+
+  const update = (patch: { op?: string; field?: string; value?: unknown }) => {
+    onChange({
+      op: patch.op ?? rule.op ?? 'EQ',
+      arguments: [patch.field ?? field, patch.value ?? value ?? ''],
+    });
+  };
+
+  return (
+    <div className="flex flex-col gap-3 rounded-md border bg-background p-3">
+      <div className="grid gap-2 md:grid-cols-[minmax(0,1fr)_12rem_12rem_40px]">
+        <Field label="Field">
+          <Input
+            value={field}
+            list="report-condition-fields"
+            onChange={(event) => update({ field: event.target.value })}
+          />
+          <datalist id="report-condition-fields">
+            {fields.map((field) => (
+              <option key={field} value={field} />
+            ))}
+          </datalist>
+        </Field>
+        <Field label="Operator">
+          <Select
+            value={rule.op ?? 'EQ'}
+            onValueChange={(op) => update({ op })}
+          >
+            <SelectTrigger>
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {CONDITION_BUILDER_OPERATORS.map((option) => (
+                <SelectItem key={option.value} value={option.value}>
+                  {option.label}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </Field>
+        <Field label="Value source">
+          <Select
+            value={valueSource}
+            onValueChange={(source) =>
+              update({
+                value:
+                  source === 'filter'
+                    ? createFilterRefOperand(reportFilters[0])
+                    : source === 'subquery'
+                      ? createSubqueryOperand(schemas[0])
+                      : '',
+              })
+            }
+          >
+            <SelectTrigger>
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {valueSourceOptions.map((option) => (
+                <SelectItem key={option.value} value={option.value}>
+                  {option.label}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </Field>
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon"
+          className="mt-6 size-9"
+          onClick={onRemove}
+          aria-label="Remove condition rule"
+        >
+          <Trash2 className="size-4" />
+        </Button>
+      </div>
+
+      {valueSource === 'filter' && filterRef ? (
+        <FilterRefOperandEditor
+          operand={filterRef}
+          reportFilters={reportFilters}
+          onChange={(operand) => update({ value: operand })}
+        />
+      ) : valueSource === 'subquery' && subquery ? (
+        <SubqueryOperandEditor
+          operand={{ subquery }}
+          schemas={schemas}
+          reportFilters={reportFilters}
+          onChange={(operand) => update({ value: operand })}
+        />
+      ) : (
+        <Field label="Value">
+          <Input
+            value={formatConditionLiteral(value, rule.op)}
+            placeholder={
+              rule.op === 'IN' || rule.op === 'NOT_IN' ? 'a, b' : 'Value'
+            }
+            onChange={(event) =>
+              update({
+                value: parseConditionLiteral(event.target.value, rule.op),
+              })
+            }
+          />
+        </Field>
+      )}
+    </div>
+  );
+}
+
+function FilterRefOperandEditor({
+  operand,
+  reportFilters,
+  onChange,
+}: {
+  operand: { filter: string; path: string };
+  reportFilters: ReportFilterDefinition[];
+  onChange: (operand: { filter: string; path: string }) => void;
+}) {
+  const selectedFilter =
+    reportFilters.find((filter) => filter.id === operand.filter) ??
+    reportFilters[0];
+  const paths = selectedFilter
+    ? FILTER_REF_PATHS[selectedFilter.type]
+    : ['value'];
+
+  return (
+    <div className="grid gap-2 md:grid-cols-2">
+      <Field label="Report filter">
+        <Select
+          value={selectedFilter?.id ?? NONE_VALUE}
+          disabled={reportFilters.length === 0}
+          onValueChange={(filterId) => {
+            const filter = reportFilters.find(
+              (candidate) => candidate.id === filterId
+            );
+            onChange(createFilterRefOperand(filter));
+          }}
+        >
+          <SelectTrigger>
+            <SelectValue placeholder="Select filter" />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value={NONE_VALUE} disabled>
+              Select filter
+            </SelectItem>
+            {reportFilters.map((filter) => (
+              <SelectItem key={filter.id} value={filter.id}>
+                {filter.label || filter.id}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      </Field>
+      <Field label="Filter value">
+        <Select
+          value={paths.includes(operand.path) ? operand.path : paths[0]}
+          disabled={!selectedFilter}
+          onValueChange={(path) => onChange({ ...operand, path })}
+        >
+          <SelectTrigger>
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            {paths.map((path) => (
+              <SelectItem key={path} value={path}>
+                {path}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      </Field>
+    </div>
+  );
+}
+
+function SubqueryOperandEditor({
+  operand,
+  schemas,
+  reportFilters,
+  onChange,
+}: {
+  operand: {
+    subquery: { schema: string; select: string; condition?: ReportCondition };
+  };
+  schemas: Schema[];
+  reportFilters: ReportFilterDefinition[];
+  onChange: (operand: {
+    subquery: { schema: string; select: string; condition?: ReportCondition };
+  }) => void;
+}) {
+  const schema = schemas.find(
+    (candidate) => candidate.name === operand.subquery.schema
+  );
+  const fields = getSchemaFields(schema);
+
+  const updateSubquery = (patch: Partial<typeof operand.subquery>) => {
+    onChange({ subquery: { ...operand.subquery, ...patch } });
+  };
+
+  return (
+    <div className="flex flex-col gap-3 rounded-md border bg-muted/10 p-3">
+      <div className="grid gap-2 md:grid-cols-2">
+        <Field label="Subquery schema">
+          <Select
+            value={operand.subquery.schema || NONE_VALUE}
+            onValueChange={(schemaName) => {
+              const nextSchema = schemas.find(
+                (candidate) => candidate.name === schemaName
+              );
+              const nextFields = getSchemaFields(nextSchema);
+              updateSubquery({
+                schema: schemaName,
+                select: nextFields.includes(operand.subquery.select)
+                  ? operand.subquery.select
+                  : (nextFields[0] ?? ''),
+              });
+            }}
+          >
+            <SelectTrigger>
+              <SelectValue placeholder="Select schema" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value={NONE_VALUE} disabled>
+                Select schema
+              </SelectItem>
+              {schemas.map((schema) => (
+                <SelectItem key={schema.id} value={schema.name}>
+                  {schema.name}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </Field>
+        <Field label="Select field">
+          <Select
+            value={operand.subquery.select || NONE_VALUE}
+            onValueChange={(select) => updateSubquery({ select })}
+          >
+            <SelectTrigger>
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value={NONE_VALUE} disabled>
+                Select field
+              </SelectItem>
+              {fields.map((field) => (
+                <SelectItem key={field} value={field}>
+                  {field}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </Field>
+      </div>
+      <SourceConditionEditor
+        title="Subquery condition"
+        condition={operand.subquery.condition}
+        fields={fields}
+        schemas={schemas}
+        reportFilters={reportFilters}
+        allowSubquery={false}
+        onChange={(condition) => updateSubquery({ condition })}
+      />
+    </div>
+  );
+}
+
+function WorkflowActionEditor({
+  title,
+  action,
+  fields,
+  onChange,
+}: {
+  title: string;
+  action: ReportWorkflowActionConfig | undefined;
+  fields: string[];
+  onChange: (action: ReportWorkflowActionConfig) => void;
+}) {
+  const current = action ?? createDefaultWorkflowAction();
+  const update = (patch: Partial<ReportWorkflowActionConfig>) => {
+    onChange({ ...current, ...patch });
+  };
+  const context = current.context ?? { mode: 'row' as const };
+
+  return (
+    <div className="mt-3 flex flex-col gap-3 rounded-md border bg-muted/10 p-3">
+      <div className="flex items-center justify-between gap-2">
+        <Label>{title}</Label>
+        {!action && (
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={() => onChange(current)}
+          >
+            Create config
+          </Button>
+        )}
+      </div>
+      <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+        <Field label="Workflow ID">
+          <Input
+            value={current.workflowId}
+            onChange={(event) => update({ workflowId: event.target.value })}
+          />
+        </Field>
+        <Field label="Version">
+          <Input
+            type="number"
+            min={1}
+            value={current.version ?? ''}
+            placeholder="Latest"
+            onChange={(event) =>
+              update({
+                version: event.target.value
+                  ? Number(event.target.value)
+                  : undefined,
+              })
+            }
+          />
+        </Field>
+        <Field label="Label">
+          <Input
+            value={current.label ?? ''}
+            placeholder="Run workflow"
+            onChange={(event) => update({ label: event.target.value })}
+          />
+        </Field>
+        <Field label="Running label">
+          <Input
+            value={current.runningLabel ?? ''}
+            placeholder="Running..."
+            onChange={(event) => update({ runningLabel: event.target.value })}
+          />
+        </Field>
+        <Field label="Success message">
+          <Input
+            value={current.successMessage ?? ''}
+            onChange={(event) => update({ successMessage: event.target.value })}
+          />
+        </Field>
+        <Field label="Context mode">
+          <Select
+            value={context.mode ?? 'row'}
+            onValueChange={(mode) =>
+              update({
+                context: {
+                  ...context,
+                  mode: mode as NonNullable<typeof context.mode>,
+                },
+              })
+            }
+          >
+            <SelectTrigger>
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {WORKFLOW_CONTEXT_MODES.map((option) => (
+                <SelectItem key={option.value} value={option.value}>
+                  {option.label}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </Field>
+        <Field label="Context field">
+          <Select
+            value={context.field ?? NONE_VALUE}
+            onValueChange={(field) =>
+              update({
+                context: {
+                  ...context,
+                  field: field === NONE_VALUE ? undefined : field,
+                },
+              })
+            }
+          >
+            <SelectTrigger>
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value={NONE_VALUE}>None</SelectItem>
+              {fields.map((field) => (
+                <SelectItem key={field} value={field}>
+                  {field}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </Field>
+        <label className="mt-6 flex min-h-10 items-center gap-2 rounded-md border bg-background px-3 py-2 text-sm">
+          <Checkbox
+            checked={Boolean(current.reloadBlock)}
+            onCheckedChange={(checked) =>
+              update({ reloadBlock: Boolean(checked) })
+            }
+          />
+          Reload block
+        </label>
+      </div>
+      <div className="grid gap-3 xl:grid-cols-3">
+        <RowConditionEditor
+          title="Visible when"
+          condition={current.visibleWhen}
+          fields={fields}
+          onChange={(visibleWhen) => update({ visibleWhen })}
+        />
+        <RowConditionEditor
+          title="Hidden when"
+          condition={current.hiddenWhen}
+          fields={fields}
+          onChange={(hiddenWhen) => update({ hiddenWhen })}
+        />
+        <RowConditionEditor
+          title="Disabled when"
+          condition={current.disabledWhen}
+          fields={fields}
+          onChange={(disabledWhen) => update({ disabledWhen })}
+        />
+      </div>
+    </div>
+  );
+}
+
+function RowConditionEditor({
+  title,
+  condition,
+  fields,
+  onChange,
+}: {
+  title: string;
+  condition: ReportCondition | undefined;
+  fields: string[];
+  onChange: (condition: ReportCondition | undefined) => void;
+}) {
+  return (
+    <SourceConditionEditor
+      title={title}
+      condition={condition}
+      fields={fields}
+      schemas={[]}
+      reportFilters={[]}
+      allowFilterRefs={false}
+      allowSubquery={false}
+      onChange={onChange}
+    />
+  );
+}
+
+function InteractionButtonsEditor({
+  buttons,
+  fields,
+  reportFilters,
+  views,
+  onChange,
+}: {
+  buttons: ReportTableInteractionButtonConfig[];
+  fields: string[];
+  reportFilters: ReportFilterDefinition[];
+  views: ReportViewDefinition[];
+  onChange: (buttons: ReportTableInteractionButtonConfig[]) => void;
+}) {
+  const updateButton = (
+    index: number,
+    patch: Partial<ReportTableInteractionButtonConfig>
+  ) => {
+    onChange(
+      buttons.map((button, currentIndex) =>
+        currentIndex === index ? { ...button, ...patch } : button
+      )
+    );
+  };
+
+  return (
+    <div className="mt-3 flex flex-col gap-3 rounded-md border bg-muted/10 p-3">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <Label>Interaction buttons</Label>
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          onClick={() =>
+            onChange([...buttons, createDefaultInteractionButton()])
+          }
+        >
+          <Plus className="mr-2 size-4" />
+          Add button
+        </Button>
+      </div>
+      {buttons.length === 0 ? (
+        <div className="rounded-md border border-dashed bg-background p-3 text-sm text-muted-foreground">
+          No interaction buttons.
+        </div>
+      ) : (
+        <div className="flex flex-col gap-2">
+          {buttons.map((button, index) => (
+            <div
+              key={`${button.id}-${index}`}
+              className="rounded-md border bg-background p-3"
+            >
+              <div className="mb-3 grid gap-2 md:grid-cols-[1fr_1fr_10rem_40px]">
+                <Field label="ID">
+                  <Input
+                    value={button.id}
+                    onChange={(event) =>
+                      updateButton(index, {
+                        id: slugify(event.target.value).replace(/-/g, '_'),
+                      })
+                    }
+                  />
+                </Field>
+                <Field label="Label">
+                  <Input
+                    value={button.label ?? ''}
+                    onChange={(event) =>
+                      updateButton(index, { label: event.target.value })
+                    }
+                  />
+                </Field>
+                <Field label="Icon">
+                  <Select
+                    value={button.icon ?? 'arrow_right'}
+                    onValueChange={(icon) =>
+                      updateButton(index, {
+                        icon: icon as NonNullable<typeof button.icon>,
+                      })
+                    }
+                  >
+                    <SelectTrigger>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {INTERACTION_BUTTON_ICONS.map((option) => (
+                        <SelectItem key={option.value} value={option.value}>
+                          {option.label}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </Field>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  className="mt-6 size-9"
+                  onClick={() =>
+                    onChange(
+                      buttons.filter(
+                        (_, currentIndex) => currentIndex !== index
+                      )
+                    )
+                  }
+                  aria-label="Remove interaction button"
+                >
+                  <Trash2 className="size-4" />
+                </Button>
+              </div>
+              <InteractionActionsEditor
+                actions={button.actions}
+                fields={fields}
+                reportFilters={reportFilters}
+                views={views}
+                onChange={(actions) => updateButton(index, { actions })}
+              />
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function BlockInteractionsEditor({
   block,
   fields,
+  reportFilters,
+  views,
   onChange,
 }: {
   block: ReportBlockDefinition;
   fields: string[];
+  reportFilters: ReportFilterDefinition[];
+  views: ReportViewDefinition[];
+  onChange: (block: ReportBlockDefinition) => void;
+}) {
+  const interactions = block.interactions ?? [];
+  const updateInteraction = (
+    index: number,
+    patch: Partial<NonNullable<ReportBlockDefinition['interactions']>[number]>
+  ) => {
+    onChange({
+      ...block,
+      interactions: interactions.map((interaction, currentIndex) =>
+        currentIndex === index ? { ...interaction, ...patch } : interaction
+      ),
+    });
+  };
+
+  return (
+    <div className="flex flex-col gap-3 rounded-md border bg-muted/10 p-3">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex items-center gap-2">
+          <Label>Block interactions</Label>
+          <Badge variant="secondary">{interactions.length} interactions</Badge>
+        </div>
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          onClick={() =>
+            onChange({
+              ...block,
+              interactions: [...interactions, createDefaultBlockInteraction()],
+            })
+          }
+        >
+          <Plus className="mr-2 size-4" />
+          Add interaction
+        </Button>
+      </div>
+      {interactions.length === 0 ? (
+        <div className="rounded-md border border-dashed bg-background p-3 text-sm text-muted-foreground">
+          No row, cell, or chart interactions.
+        </div>
+      ) : (
+        <div className="flex flex-col gap-2">
+          {interactions.map((interaction, index) => (
+            <div
+              key={`${interaction.id}-${index}`}
+              className="rounded-md border bg-background p-3"
+            >
+              <div className="mb-3 grid gap-2 md:grid-cols-[1fr_12rem_1fr_40px]">
+                <Field label="ID">
+                  <Input
+                    value={interaction.id}
+                    onChange={(event) =>
+                      updateInteraction(index, {
+                        id: slugify(event.target.value).replace(/-/g, '_'),
+                      })
+                    }
+                  />
+                </Field>
+                <Field label="Event">
+                  <Select
+                    value={interaction.trigger.event}
+                    onValueChange={(event) =>
+                      updateInteraction(index, {
+                        trigger: { ...interaction.trigger, event },
+                      })
+                    }
+                  >
+                    <SelectTrigger>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {INTERACTION_EVENTS.map((option) => (
+                        <SelectItem key={option.value} value={option.value}>
+                          {option.label}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </Field>
+                <Field label="Trigger field">
+                  <Select
+                    value={interaction.trigger.field ?? NONE_VALUE}
+                    onValueChange={(field) =>
+                      updateInteraction(index, {
+                        trigger: {
+                          ...interaction.trigger,
+                          field: field === NONE_VALUE ? undefined : field,
+                        },
+                      })
+                    }
+                  >
+                    <SelectTrigger>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value={NONE_VALUE}>Any field</SelectItem>
+                      {fields.map((field) => (
+                        <SelectItem key={field} value={field}>
+                          {field}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </Field>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  className="mt-6 size-9"
+                  onClick={() =>
+                    onChange({
+                      ...block,
+                      interactions: interactions.filter(
+                        (_, currentIndex) => currentIndex !== index
+                      ),
+                    })
+                  }
+                  aria-label="Remove interaction"
+                >
+                  <Trash2 className="size-4" />
+                </Button>
+              </div>
+              <InteractionActionsEditor
+                actions={interaction.actions}
+                fields={fields}
+                reportFilters={reportFilters}
+                views={views}
+                onChange={(actions) => updateInteraction(index, { actions })}
+              />
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function InteractionActionsEditor({
+  actions,
+  fields,
+  reportFilters,
+  views,
+  onChange,
+}: {
+  actions: ReportInteractionAction[];
+  fields: string[];
+  reportFilters: ReportFilterDefinition[];
+  views: ReportViewDefinition[];
+  onChange: (actions: ReportInteractionAction[]) => void;
+}) {
+  const updateAction = (
+    index: number,
+    patch: Partial<ReportInteractionAction>
+  ) => {
+    onChange(
+      actions.map((action, currentIndex) =>
+        currentIndex === index ? { ...action, ...patch } : action
+      )
+    );
+  };
+
+  return (
+    <div className="flex flex-col gap-2">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <Label>Actions</Label>
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          onClick={() =>
+            onChange([...actions, createDefaultInteractionAction()])
+          }
+        >
+          <Plus className="mr-2 size-4" />
+          Add action
+        </Button>
+      </div>
+      {actions.length === 0 ? (
+        <div className="rounded-md border border-dashed bg-muted/20 p-3 text-sm text-muted-foreground">
+          No actions.
+        </div>
+      ) : (
+        actions.map((action, index) => (
+          <div
+            key={`interaction-action-${index}`}
+            className="grid gap-2 rounded-md border p-3 md:grid-cols-[12rem_minmax(0,1fr)_minmax(0,1fr)_40px]"
+          >
+            <Field label="Action">
+              <Select
+                value={action.type}
+                onValueChange={(type) =>
+                  updateAction(index, normalizeInteractionAction(type, fields))
+                }
+              >
+                <SelectTrigger>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {INTERACTION_ACTION_TYPES.map((option) => (
+                    <SelectItem key={option.value} value={option.value}>
+                      {option.label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </Field>
+            {action.type === 'set_filter' || action.type === 'clear_filter' ? (
+              <Field label="Filter">
+                <Select
+                  value={action.filterId ?? NONE_VALUE}
+                  disabled={reportFilters.length === 0}
+                  onValueChange={(filterId) =>
+                    updateAction(index, { filterId })
+                  }
+                >
+                  <SelectTrigger>
+                    <SelectValue placeholder="Select filter" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value={NONE_VALUE} disabled>
+                      Select filter
+                    </SelectItem>
+                    {reportFilters.map((filter) => (
+                      <SelectItem key={filter.id} value={filter.id}>
+                        {filter.label || filter.id}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </Field>
+            ) : action.type === 'clear_filters' ? (
+              <Field label="Filters">
+                <Input
+                  value={(action.filterIds ?? []).join(', ')}
+                  placeholder="status_filter, owner_filter"
+                  onChange={(event) =>
+                    updateAction(index, {
+                      filterIds: event.target.value
+                        .split(',')
+                        .map((part) => part.trim())
+                        .filter(Boolean),
+                    })
+                  }
+                />
+              </Field>
+            ) : (
+              <Field label="View">
+                <Select
+                  value={action.viewId ?? NONE_VALUE}
+                  disabled={views.length === 0}
+                  onValueChange={(viewId) => updateAction(index, { viewId })}
+                >
+                  <SelectTrigger>
+                    <SelectValue placeholder="Select view" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value={NONE_VALUE} disabled>
+                      Select view
+                    </SelectItem>
+                    {views.map((view) => (
+                      <SelectItem key={view.id} value={view.id}>
+                        {view.title || view.id}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </Field>
+            )}
+            {action.type === 'set_filter' ? (
+              <Field label="Value from">
+                <Select
+                  value={stripDatumPrefix(action.valueFrom) ?? NONE_VALUE}
+                  onValueChange={(field) =>
+                    updateAction(index, {
+                      valueFrom:
+                        field === NONE_VALUE ? undefined : `datum.${field}`,
+                      value: undefined,
+                    })
+                  }
+                >
+                  <SelectTrigger>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value={NONE_VALUE}>Literal value</SelectItem>
+                    {fields.map((field) => (
+                      <SelectItem key={field} value={field}>
+                        {field}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                {!action.valueFrom && (
+                  <Input
+                    className="mt-2"
+                    value={formatConditionLiteral(action.value, 'EQ')}
+                    onChange={(event) =>
+                      updateAction(index, {
+                        value: parseConditionLiteral(event.target.value, 'EQ'),
+                      })
+                    }
+                  />
+                )}
+              </Field>
+            ) : (
+              <span />
+            )}
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon"
+              className="mt-6 size-9"
+              onClick={() =>
+                onChange(
+                  actions.filter((_, currentIndex) => currentIndex !== index)
+                )
+              }
+              aria-label="Remove interaction action"
+            >
+              <Trash2 className="size-4" />
+            </Button>
+          </div>
+        ))
+      )}
+    </div>
+  );
+}
+
+function TableActionsEditor({
+  actions,
+  fields,
+  onChange,
+}: {
+  actions: NonNullable<ReportBlockDefinition['table']>['actions'];
+  fields: string[];
+  onChange: (
+    actions: NonNullable<ReportBlockDefinition['table']>['actions']
+  ) => void;
+}) {
+  const safeActions = actions ?? [];
+  const updateAction = (
+    index: number,
+    patch: Partial<(typeof safeActions)[number]>
+  ) => {
+    onChange(
+      safeActions.map((action, currentIndex) =>
+        currentIndex === index ? { ...action, ...patch } : action
+      )
+    );
+  };
+
+  return (
+    <div className="flex flex-col gap-3 rounded-md border bg-muted/10 p-3">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex items-center gap-2">
+          <Label>Table workflow actions</Label>
+          <Badge variant="secondary">{safeActions.length} actions</Badge>
+        </div>
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          onClick={() =>
+            onChange([
+              ...safeActions,
+              {
+                id: 'run_workflow',
+                label: 'Run workflow',
+                workflowAction: createDefaultWorkflowAction(),
+              },
+            ])
+          }
+        >
+          <Plus className="mr-2 size-4" />
+          Add action
+        </Button>
+      </div>
+      {safeActions.length === 0 ? (
+        <div className="rounded-md border border-dashed bg-background p-3 text-sm text-muted-foreground">
+          No table-level workflow actions.
+        </div>
+      ) : (
+        <div className="flex flex-col gap-2">
+          {safeActions.map((action, index) => (
+            <div
+              key={`${action.id}-${index}`}
+              className="rounded-md border bg-background p-3"
+            >
+              <div className="mb-3 grid gap-2 md:grid-cols-[1fr_1fr_40px]">
+                <Field label="Action ID">
+                  <Input
+                    value={action.id}
+                    onChange={(event) =>
+                      updateAction(index, {
+                        id: slugify(event.target.value).replace(/-/g, '_'),
+                      })
+                    }
+                  />
+                </Field>
+                <Field label="Label">
+                  <Input
+                    value={action.label ?? ''}
+                    onChange={(event) =>
+                      updateAction(index, { label: event.target.value })
+                    }
+                  />
+                </Field>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  className="mt-6 size-9"
+                  onClick={() =>
+                    onChange(
+                      safeActions.filter(
+                        (_, currentIndex) => currentIndex !== index
+                      )
+                    )
+                  }
+                  aria-label="Remove table workflow action"
+                >
+                  <Trash2 className="size-4" />
+                </Button>
+              </div>
+              <WorkflowActionEditor
+                title="Workflow config"
+                action={action.workflowAction}
+                fields={fields}
+                onChange={(workflowAction) =>
+                  updateAction(index, { workflowAction })
+                }
+              />
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function TableBlockSettings({
+  block,
+  fields,
+  reportFilters,
+  views,
+  onChange,
+}: {
+  block: ReportBlockDefinition;
+  fields: string[];
+  reportFilters: ReportFilterDefinition[];
+  views: ReportViewDefinition[];
   onChange: (block: ReportBlockDefinition) => void;
 }) {
   const columns = block.table?.columns ?? [];
@@ -1977,6 +3274,30 @@ function TableBlockSettings({
                     }
                   />
                 </Field>
+                <Field label="Column type">
+                  <Select
+                    value={column.type ?? 'value'}
+                    onValueChange={(type) =>
+                      updateColumn(
+                        index,
+                        normalizeTableColumnForType(column, type)
+                      )
+                    }
+                  >
+                    <SelectTrigger>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="value">Value</SelectItem>
+                      <SelectItem value="workflow_button">
+                        Workflow button
+                      </SelectItem>
+                      <SelectItem value="interaction_buttons">
+                        Interaction buttons
+                      </SelectItem>
+                    </SelectContent>
+                  </Select>
+                </Field>
               </div>
               <div className="mt-3 grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
                 <label className="flex min-h-10 items-center gap-2 rounded-md border px-3 py-2 text-sm">
@@ -2000,10 +3321,52 @@ function TableBlockSettings({
                   Descriptive label
                 </label>
               </div>
+              {column.type === 'workflow_button' || column.workflowAction ? (
+                <WorkflowActionEditor
+                  title="Workflow button"
+                  action={column.workflowAction}
+                  fields={fields}
+                  onChange={(workflowAction) =>
+                    updateColumn(index, {
+                      type: 'workflow_button',
+                      workflowAction,
+                    })
+                  }
+                />
+              ) : null}
+              {column.type === 'interaction_buttons' ||
+              (column.interactionButtons?.length ?? 0) > 0 ? (
+                <InteractionButtonsEditor
+                  buttons={column.interactionButtons ?? []}
+                  fields={fields}
+                  reportFilters={reportFilters}
+                  views={views}
+                  onChange={(interactionButtons) =>
+                    updateColumn(index, {
+                      type: 'interaction_buttons',
+                      interactionButtons,
+                    })
+                  }
+                />
+              ) : null}
             </div>
           ))}
         </div>
       )}
+      <TableActionsEditor
+        actions={block.table?.actions ?? []}
+        fields={fields}
+        onChange={(actions) =>
+          onChange({
+            ...block,
+            table: {
+              ...block.table,
+              columns,
+              actions,
+            },
+          })
+        }
+      />
     </div>
   );
 }
@@ -2464,6 +3827,9 @@ function CardBlockSettings({
                       <SelectItem value="value">Value</SelectItem>
                       <SelectItem value="json">JSON</SelectItem>
                       <SelectItem value="markdown">Markdown</SelectItem>
+                      <SelectItem value="workflow_button">
+                        Workflow button
+                      </SelectItem>
                     </SelectContent>
                   </Select>
                 </Field>
@@ -2535,6 +3901,19 @@ function CardBlockSettings({
                   Collapsed by default
                 </label>
               </div>
+              {(field.kind === 'workflow_button' || field.workflowAction) && (
+                <WorkflowActionEditor
+                  title="Workflow button"
+                  action={field.workflowAction}
+                  fields={fields}
+                  onChange={(workflowAction) =>
+                    updateField(index, {
+                      kind: 'workflow_button',
+                      workflowAction,
+                    })
+                  }
+                />
+              )}
             </div>
           ))}
         </div>
@@ -3027,6 +4406,222 @@ function parseDatasetScalar(value: string): unknown {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function isReportCondition(value: unknown): value is ReportCondition {
+  return isRecord(value) && typeof value.op === 'string';
+}
+
+function asReportCondition(value: unknown): ReportCondition | undefined {
+  return isReportCondition(value) ? value : undefined;
+}
+
+function isLogicalCondition(condition: ReportCondition | undefined): boolean {
+  return condition?.op === 'AND' || condition?.op === 'OR';
+}
+
+function conditionToRules(
+  condition: ReportCondition | undefined
+): ReportCondition[] {
+  if (!condition) return [];
+  if (!isLogicalCondition(condition)) return [condition];
+  return (condition.arguments ?? []).filter(isReportCondition);
+}
+
+function rulesToCondition(
+  rows: ReportCondition[],
+  groupOp: ReportCondition['op']
+): ReportCondition | undefined {
+  if (rows.length === 0) return undefined;
+  if (rows.length === 1) return rows[0];
+  return { op: groupOp, arguments: rows };
+}
+
+function createDefaultConditionRule(field: string): ReportCondition {
+  return { op: 'EQ', arguments: [field, ''] };
+}
+
+function conditionValueSource(value: unknown): string {
+  if (isFilterRefOperand(value)) return 'filter';
+  if (isSubqueryOperand(value)) return 'subquery';
+  return 'literal';
+}
+
+function isFilterRefOperand(
+  value: unknown
+): value is { filter: string; path: string } {
+  return (
+    isRecord(value) &&
+    typeof value.filter === 'string' &&
+    typeof value.path === 'string'
+  );
+}
+
+function isSubqueryOperand(value: unknown): value is {
+  subquery: { schema: string; select: string; condition?: ReportCondition };
+} {
+  return isRecord(value) && isRecord(value.subquery);
+}
+
+function createFilterRefOperand(filter: ReportFilterDefinition | undefined): {
+  filter: string;
+  path: string;
+} {
+  return {
+    filter: filter?.id ?? '',
+    path: filter ? FILTER_REF_PATHS[filter.type][0] : 'value',
+  };
+}
+
+function createSubqueryOperand(schema: Schema | undefined): {
+  subquery: { schema: string; select: string };
+} {
+  const fields = getSchemaFields(schema);
+  return {
+    subquery: {
+      schema: schema?.name ?? '',
+      select: fields[0] ?? 'id',
+    },
+  };
+}
+
+function formatConditionJson(condition: ReportCondition | undefined): string {
+  return condition ? JSON.stringify(condition, null, 2) : '';
+}
+
+function formatConditionLiteral(value: unknown, op?: string): string {
+  if ((op === 'IN' || op === 'NOT_IN') && Array.isArray(value)) {
+    return value.map(String).join(', ');
+  }
+  if (value === null || value === undefined) return '';
+  if (typeof value === 'object') return JSON.stringify(value);
+  return String(value);
+}
+
+function parseConditionLiteral(value: string, op?: string): unknown {
+  const trimmed = value.trim();
+  if (op === 'IN' || op === 'NOT_IN') {
+    return trimmed
+      .split(',')
+      .map((part) => parseDatasetScalar(part.trim()))
+      .filter((part) => part !== '');
+  }
+  return parseDatasetScalar(trimmed);
+}
+
+function createDefaultWorkflowAction(): ReportWorkflowActionConfig {
+  return {
+    workflowId: '',
+    label: 'Run workflow',
+    reloadBlock: true,
+    context: { mode: 'row' },
+  };
+}
+
+function normalizeTableColumnForType(
+  column: ReportTableColumn,
+  type: string
+): Partial<ReportTableColumn> {
+  if (type === 'workflow_button') {
+    return {
+      type: 'workflow_button',
+      workflowAction: column.workflowAction ?? createDefaultWorkflowAction(),
+      interactionButtons: [],
+    };
+  }
+  if (type === 'interaction_buttons') {
+    return {
+      type: 'interaction_buttons',
+      workflowAction: undefined,
+      interactionButtons:
+        column.interactionButtons && column.interactionButtons.length > 0
+          ? column.interactionButtons
+          : [createDefaultInteractionButton()],
+    };
+  }
+  return {
+    type: undefined,
+    workflowAction: undefined,
+    interactionButtons: [],
+  };
+}
+
+function createDefaultInteractionButton(): ReportTableInteractionButtonConfig {
+  return {
+    id: 'open',
+    label: 'Open',
+    icon: 'arrow_right',
+    actions: [createDefaultInteractionAction()],
+  };
+}
+
+function createDefaultBlockInteraction(): NonNullable<
+  ReportBlockDefinition['interactions']
+>[number] {
+  return {
+    id: 'open_detail',
+    trigger: { event: 'row_click' },
+    actions: [createDefaultInteractionAction()],
+  };
+}
+
+function createDefaultInteractionAction(): ReportInteractionAction {
+  return {
+    type: 'set_filter',
+    filterId: undefined,
+    valueFrom: 'datum.id',
+  };
+}
+
+function normalizeInteractionAction(
+  type: string,
+  fields: string[]
+): Partial<ReportInteractionAction> {
+  if (type === 'set_filter') {
+    return {
+      type,
+      filterId: undefined,
+      filterIds: [],
+      viewId: undefined,
+      valueFrom: `datum.${fields[0] ?? 'id'}`,
+      value: undefined,
+    };
+  }
+  if (type === 'clear_filter') {
+    return {
+      type,
+      filterId: undefined,
+      filterIds: [],
+      viewId: undefined,
+      valueFrom: undefined,
+      value: undefined,
+    };
+  }
+  if (type === 'clear_filters') {
+    return {
+      type,
+      filterId: undefined,
+      filterIds: [],
+      viewId: undefined,
+      valueFrom: undefined,
+      value: undefined,
+    };
+  }
+  return {
+    type: 'navigate_view',
+    filterId: undefined,
+    filterIds: [],
+    viewId: undefined,
+    valueFrom: undefined,
+    value: undefined,
+  };
+}
+
+function stripDatumPrefix(valueFrom: string | undefined): string | undefined {
+  if (!valueFrom) return undefined;
+  return valueFrom.startsWith('datum.')
+    ? valueFrom.slice('datum.'.length)
+    : valueFrom;
 }
 
 function getBlockAvailableFields(
