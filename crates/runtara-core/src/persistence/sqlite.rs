@@ -260,14 +260,15 @@ impl Persistence for SqlitePersistence {
     async fn insert_event(&self, event: &EventRecord) -> Result<(), CoreError> {
         sqlx::query(
             r#"
-            INSERT INTO instance_events (instance_id, event_type, checkpoint_id, payload, created_at, subtype)
-            VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP, ?)
+            INSERT INTO instance_events (instance_id, event_type, checkpoint_id, payload, payload_json, created_at, subtype)
+            VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?)
             "#,
         )
         .bind(&event.instance_id)
         .bind(&event.event_type)
         .bind(&event.checkpoint_id)
         .bind(&event.payload)
+        .bind(&event.payload_json)
         .bind(&event.subtype)
         .execute(&self.pool)
         .await?;
@@ -779,6 +780,7 @@ mod tests {
             event_type: "started".to_string(),
             checkpoint_id: None,
             payload: None,
+            payload_json: None,
             created_at: Utc::now(),
             subtype: None,
         };
@@ -1487,7 +1489,8 @@ mod tests {
             instance_id: instance_id.to_string(),
             event_type: "custom".to_string(),
             checkpoint_id: None,
-            payload: Some(serde_json::to_vec(&payload).unwrap()),
+            payload: None,
+            payload_json: Some(payload),
             created_at: Utc::now(),
             subtype: Some("step_debug_start".to_string()),
         };
@@ -1521,7 +1524,8 @@ mod tests {
             instance_id: instance_id.to_string(),
             event_type: "custom".to_string(),
             checkpoint_id: None,
-            payload: Some(serde_json::to_vec(&payload).unwrap()),
+            payload: None,
+            payload_json: Some(payload),
             created_at: Utc::now(),
             subtype: Some("step_debug_end".to_string()),
         };

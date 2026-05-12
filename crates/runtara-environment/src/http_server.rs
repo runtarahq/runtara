@@ -313,9 +313,9 @@ struct EventSummaryJson {
     event_type: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     checkpoint_id: Option<String>,
-    /// Base64-encoded payload.
+    /// Structured JSON payload.
     #[serde(skip_serializing_if = "Option::is_none")]
-    payload: Option<String>,
+    payload_json: Option<Value>,
     created_at_ms: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
     subtype: Option<String>,
@@ -1580,9 +1580,7 @@ async fn handle_list_events(
             instance_id: ev.instance_id,
             event_type: ev.event_type,
             checkpoint_id: ev.checkpoint_id,
-            payload: ev
-                .payload
-                .map(|p| base64::engine::general_purpose::STANDARD.encode(&p)),
+            payload_json: ev.payload_json,
             created_at_ms: ev.created_at.timestamp_millis(),
             subtype: ev.subtype,
         })
@@ -1747,10 +1745,7 @@ async fn handle_get_scope_ancestors(
         std::collections::HashMap::new();
 
     for event in events {
-        let Some(payload) = &event.payload else {
-            continue;
-        };
-        let Ok(payload_json) = serde_json::from_slice::<Value>(payload) else {
+        let Some(payload_json) = &event.payload_json else {
             continue;
         };
         let Some(sid) = payload_json.get("scope_id").and_then(|v| v.as_str()) else {

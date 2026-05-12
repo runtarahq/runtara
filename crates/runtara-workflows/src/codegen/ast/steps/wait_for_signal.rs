@@ -276,9 +276,8 @@ pub fn emit(step: &WaitForSignalStep, ctx: &mut EmitContext) -> Result<TokenStre
                     "context": __action_context,
                 });
                 {
-                    let __payload_bytes = serde_json::to_vec(&__event_data).unwrap_or_default();
                     let mut __sdk = sdk().lock().unwrap();
-                    let _ = __sdk.custom_event("external_input_requested", __payload_bytes);
+                    let _ = __sdk.custom_event("external_input_requested", __event_data);
                 }
             }
 

@@ -88,9 +88,8 @@ pub fn emit(step: &LogStep, ctx: &mut EmitContext) -> Result<TokenStream, Codege
                         .unwrap_or(0),
                 });
 
-                let __payload_bytes = serde_json::to_vec(&__log_payload).unwrap_or_default();
                 let __sdk_guard = sdk().lock().unwrap();
-                let _ = __sdk_guard.custom_event("workflow_log", __payload_bytes);
+                let _ = __sdk_guard.custom_event("workflow_log", __log_payload);
             }
 
             let #step_var = __step_output_envelope(

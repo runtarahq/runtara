@@ -8,8 +8,10 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use base64::Engine;
 use chrono::{DateTime, Utc};
 use runtara_core::persistence::{CompleteInstanceParams, EventRecord, Persistence};
+use serde_json::{Value, json};
 use tracing::{debug, info, instrument};
 
 use super::SdkBackend;
@@ -57,6 +59,19 @@ impl EmbeddedBackend {
             tenant_id: tenant_id.into(),
             rt,
         }
+    }
+
+    fn event_json_from_bytes(bytes: &[u8]) -> Option<Value> {
+        if bytes.is_empty() {
+            return None;
+        }
+
+        serde_json::from_slice(bytes).ok().or_else(|| {
+            Some(json!({
+                "encoding": "base64",
+                "data": base64::engine::general_purpose::STANDARD.encode(bytes),
+            }))
+        })
     }
 }
 
@@ -170,6 +185,7 @@ impl SdkBackend for EmbeddedBackend {
             event_type: "heartbeat".to_string(),
             checkpoint_id: None,
             payload: None,
+            payload_json: None,
             created_at: Utc::now(),
             subtype: None,
         };
@@ -195,7 +211,8 @@ impl SdkBackend for EmbeddedBackend {
             instance_id: self.instance_id.clone(),
             event_type: "completed".to_string(),
             checkpoint_id: None,
-            payload: Some(output.to_vec()),
+            payload: None,
+            payload_json: Self::event_json_from_bytes(output),
             created_at: Utc::now(),
             subtype: None,
         };
@@ -221,7 +238,8 @@ impl SdkBackend for EmbeddedBackend {
             instance_id: self.instance_id.clone(),
             event_type: "failed".to_string(),
             checkpoint_id: None,
-            payload: Some(error.as_bytes().to_vec()),
+            payload: None,
+            payload_json: Some(json!({ "message": error })),
             created_at: Utc::now(),
             subtype: None,
         };
@@ -249,6 +267,7 @@ impl SdkBackend for EmbeddedBackend {
             event_type: "suspended".to_string(),
             checkpoint_id: None,
             payload: None,
+            payload_json: None,
             created_at: Utc::now(),
             subtype: None,
         };
@@ -302,6 +321,10 @@ impl SdkBackend for EmbeddedBackend {
             event_type: "suspended".to_string(),
             checkpoint_id: Some(checkpoint_id.to_string()),
             payload: None,
+            payload_json: Some(json!({
+                "wake_at_ms": wake_at.timestamp_millis(),
+                "checkpoint_id": checkpoint_id,
+            })),
             created_at: Utc::now(),
             subtype: Some("sleeping".to_string()),
         };
@@ -314,14 +337,15 @@ impl SdkBackend for EmbeddedBackend {
         Ok(())
     }
 
-    #[instrument(skip(self, payload), fields(instance_id = %self.instance_id, subtype = %subtype, payload_size = payload.len()))]
-    fn send_custom_event(&self, subtype: &str, payload: Vec<u8>) -> Result<()> {
+    #[instrument(skip(self, payload), fields(instance_id = %self.instance_id, subtype = %subtype))]
+    fn send_custom_event(&self, subtype: &str, payload: Value) -> Result<()> {
         let event = EventRecord {
             id: None,
             instance_id: self.instance_id.clone(),
             event_type: "custom".to_string(),
             checkpoint_id: None,
-            payload: Some(payload),
+            payload: None,
+            payload_json: Some(payload),
             created_at: Utc::now(),
             subtype: Some(subtype.to_string()),
         };

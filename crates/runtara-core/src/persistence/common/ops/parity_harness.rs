@@ -120,7 +120,8 @@ pub async fn run_parity_sequence<P: Persistence>(backend: &P) {
         instance_id: instance_id.clone(),
         event_type: "custom".to_string(),
         checkpoint_id: Some(checkpoint_id.to_string()),
-        payload: Some(br#"{"note":"hello"}"#.to_vec()),
+        payload: None,
+        payload_json: Some(serde_json::json!({"note": "hello"})),
         created_at: Utc::now(),
         subtype: Some("parity-test".to_string()),
     };

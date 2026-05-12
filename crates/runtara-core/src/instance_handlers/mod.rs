@@ -27,6 +27,7 @@ mod types;
 pub(crate) mod mock_persistence;
 
 pub use self::checkpoint::{handle_checkpoint, handle_get_checkpoint, handle_sleep};
+pub(crate) use self::event::event_json_from_bytes;
 pub use self::event::{handle_instance_event, handle_retry_attempt};
 pub use self::mappers::{map_event_type, map_signal_type, map_status};
 pub use self::registration::handle_register_instance;

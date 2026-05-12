@@ -199,7 +199,7 @@ struct EventSummaryJson {
     #[serde(default)]
     checkpoint_id: Option<String>,
     #[serde(default)]
-    payload: Option<String>,
+    payload_json: Option<serde_json::Value>,
     created_at_ms: i64,
     #[serde(default)]
     subtype: Option<String>,
@@ -1334,19 +1334,14 @@ impl ManagementSdk {
         let events = json
             .events
             .into_iter()
-            .map(|ev| {
-                // Decode base64 payload as JSON if present
-                let payload = ev.payload.as_deref().and_then(decode_base64_json);
-
-                EventSummary {
-                    id: ev.id,
-                    instance_id: ev.instance_id,
-                    event_type: ev.event_type,
-                    checkpoint_id: ev.checkpoint_id,
-                    payload,
-                    created_at: ms_to_datetime(ev.created_at_ms),
-                    subtype: ev.subtype,
-                }
+            .map(|ev| EventSummary {
+                id: ev.id,
+                instance_id: ev.instance_id,
+                event_type: ev.event_type,
+                checkpoint_id: ev.checkpoint_id,
+                payload: ev.payload_json,
+                created_at: ms_to_datetime(ev.created_at_ms),
+                subtype: ev.subtype,
             })
             .collect();
 

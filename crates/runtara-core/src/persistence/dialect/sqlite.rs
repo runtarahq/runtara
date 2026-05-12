@@ -155,7 +155,7 @@ impl Dialect for SqliteDialect {
 
     fn sql_list_events(order_direction: &str) -> String {
         format!(
-            "SELECT id, instance_id, event_type, checkpoint_id, payload, created_at, subtype \
+            "SELECT id, instance_id, event_type, checkpoint_id, payload, payload_json, created_at, subtype \
              FROM instance_events \
              WHERE instance_id = ?1 \
                AND (?2 IS NULL OR event_type = ?2) \
@@ -163,20 +163,20 @@ impl Dialect for SqliteDialect {
                AND (?4 IS NULL OR created_at >= ?4) \
                AND (?5 IS NULL OR created_at < ?5) \
                AND (?6 IS NULL OR ( \
-                   payload IS NOT NULL \
-                   AND CAST(payload AS TEXT) LIKE '%' || ?6 || '%' \
+                   payload_json IS NOT NULL \
+                   AND payload_json LIKE '%' || ?6 || '%' \
                )) \
                AND (?7 IS NULL OR ( \
-                   payload IS NOT NULL \
-                   AND json_extract(CAST(payload AS TEXT), '$.scope_id') = ?7 \
+                   payload_json IS NOT NULL \
+                   AND json_extract(payload_json, '$.scope_id') = ?7 \
                )) \
                AND (?8 IS NULL OR ( \
-                   payload IS NOT NULL \
-                   AND json_extract(CAST(payload AS TEXT), '$.parent_scope_id') = ?8 \
+                   payload_json IS NOT NULL \
+                   AND json_extract(payload_json, '$.parent_scope_id') = ?8 \
                )) \
                AND (NOT ?9 OR ( \
-                   payload IS NULL \
-                   OR json_extract(CAST(payload AS TEXT), '$.parent_scope_id') IS NULL \
+                   payload_json IS NULL \
+                   OR json_extract(payload_json, '$.parent_scope_id') IS NULL \
                )) \
              ORDER BY created_at {order_direction}, id {order_direction} \
              LIMIT ?10 OFFSET ?11"
@@ -192,20 +192,20 @@ impl Dialect for SqliteDialect {
            AND (?4 IS NULL OR created_at >= ?4) \
            AND (?5 IS NULL OR created_at < ?5) \
            AND (?6 IS NULL OR ( \
-               payload IS NOT NULL \
-               AND CAST(payload AS TEXT) LIKE '%' || ?6 || '%' \
+               payload_json IS NOT NULL \
+               AND payload_json LIKE '%' || ?6 || '%' \
            )) \
            AND (?7 IS NULL OR ( \
-               payload IS NOT NULL \
-               AND json_extract(CAST(payload AS TEXT), '$.scope_id') = ?7 \
+               payload_json IS NOT NULL \
+               AND json_extract(payload_json, '$.scope_id') = ?7 \
            )) \
            AND (?8 IS NULL OR ( \
-               payload IS NOT NULL \
-               AND json_extract(CAST(payload AS TEXT), '$.parent_scope_id') = ?8 \
+               payload_json IS NOT NULL \
+               AND json_extract(payload_json, '$.parent_scope_id') = ?8 \
            )) \
            AND (NOT ?9 OR ( \
-               payload IS NULL \
-               OR json_extract(CAST(payload AS TEXT), '$.parent_scope_id') IS NULL \
+               payload_json IS NULL \
+               OR json_extract(payload_json, '$.parent_scope_id') IS NULL \
            ))"
     }
 
@@ -218,26 +218,26 @@ impl Dialect for SqliteDialect {
             "WITH start_events AS ( \
                 SELECT \
                     id, \
-                    json_extract(CAST(payload AS TEXT), '$.step_id') as step_id, \
-                    json_extract(CAST(payload AS TEXT), '$.step_name') as step_name, \
-                    json_extract(CAST(payload AS TEXT), '$.step_type') as step_type, \
-                    json_extract(CAST(payload AS TEXT), '$.scope_id') as scope_id, \
-                    json_extract(CAST(payload AS TEXT), '$.parent_scope_id') as parent_scope_id, \
-                    json_extract(CAST(payload AS TEXT), '$.inputs') as inputs, \
+                    json_extract(payload_json, '$.step_id') as step_id, \
+                    json_extract(payload_json, '$.step_name') as step_name, \
+                    json_extract(payload_json, '$.step_type') as step_type, \
+                    json_extract(payload_json, '$.scope_id') as scope_id, \
+                    json_extract(payload_json, '$.parent_scope_id') as parent_scope_id, \
+                    json_extract(payload_json, '$.inputs') as inputs, \
                     created_at \
                 FROM instance_events \
-                WHERE instance_id = ?1 AND subtype = 'step_debug_start' \
+                WHERE instance_id = ?1 AND subtype = 'step_debug_start' AND payload_json IS NOT NULL \
             ), \
             end_events AS ( \
                 SELECT \
-                    json_extract(CAST(payload AS TEXT), '$.step_id') as step_id, \
-                    json_extract(CAST(payload AS TEXT), '$.scope_id') as scope_id, \
-                    json_extract(CAST(payload AS TEXT), '$.outputs') as outputs, \
-                    json_extract(CAST(payload AS TEXT), '$.error') as error, \
-                    json_extract(CAST(payload AS TEXT), '$.outputs._error') as output_error, \
+                    json_extract(payload_json, '$.step_id') as step_id, \
+                    json_extract(payload_json, '$.scope_id') as scope_id, \
+                    json_extract(payload_json, '$.outputs') as outputs, \
+                    json_extract(payload_json, '$.error') as error, \
+                    json_extract(payload_json, '$.outputs._error') as output_error, \
                     created_at \
                 FROM instance_events \
-                WHERE instance_id = ?1 AND subtype = 'step_debug_end' \
+                WHERE instance_id = ?1 AND subtype = 'step_debug_end' AND payload_json IS NOT NULL \
             ), \
             paired AS ( \
                 SELECT \
@@ -283,21 +283,21 @@ impl Dialect for SqliteDialect {
     fn sql_count_step_summaries() -> &'static str {
         "WITH start_events AS ( \
             SELECT \
-                json_extract(CAST(payload AS TEXT), '$.step_id') as step_id, \
-                json_extract(CAST(payload AS TEXT), '$.step_type') as step_type, \
-                json_extract(CAST(payload AS TEXT), '$.scope_id') as scope_id, \
-                json_extract(CAST(payload AS TEXT), '$.parent_scope_id') as parent_scope_id \
+                json_extract(payload_json, '$.step_id') as step_id, \
+                json_extract(payload_json, '$.step_type') as step_type, \
+                json_extract(payload_json, '$.scope_id') as scope_id, \
+                json_extract(payload_json, '$.parent_scope_id') as parent_scope_id \
             FROM instance_events \
-            WHERE instance_id = ?1 AND subtype = 'step_debug_start' \
+            WHERE instance_id = ?1 AND subtype = 'step_debug_start' AND payload_json IS NOT NULL \
         ), \
         end_events AS ( \
             SELECT \
-                json_extract(CAST(payload AS TEXT), '$.step_id') as step_id, \
-                json_extract(CAST(payload AS TEXT), '$.scope_id') as scope_id, \
-                json_extract(CAST(payload AS TEXT), '$.error') as error, \
-                json_extract(CAST(payload AS TEXT), '$.outputs._error') as output_error \
+                json_extract(payload_json, '$.step_id') as step_id, \
+                json_extract(payload_json, '$.scope_id') as scope_id, \
+                json_extract(payload_json, '$.error') as error, \
+                json_extract(payload_json, '$.outputs._error') as output_error \
             FROM instance_events \
-            WHERE instance_id = ?1 AND subtype = 'step_debug_end' \
+            WHERE instance_id = ?1 AND subtype = 'step_debug_end' AND payload_json IS NOT NULL \
         ), \
         paired AS ( \
             SELECT \

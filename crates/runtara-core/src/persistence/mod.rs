@@ -94,8 +94,11 @@ pub struct EventRecord {
     pub event_type: String,
     /// Associated checkpoint ID if applicable.
     pub checkpoint_id: Option<String>,
-    /// Optional event payload data.
+    /// Legacy raw event payload data. New event writes use `payload_json`.
     pub payload: Option<Vec<u8>>,
+    /// Structured JSON event payload for new events.
+    #[sqlx(default)]
+    pub payload_json: Option<serde_json::Value>,
     /// When the event occurred.
     pub created_at: DateTime<Utc>,
     /// Arbitrary subtype for custom events.

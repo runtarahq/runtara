@@ -1046,7 +1046,7 @@ pub struct EventSummary {
     pub event_type: String,
     /// Associated checkpoint ID if applicable.
     pub checkpoint_id: Option<String>,
-    /// Event payload as JSON (parsed from bytes).
+    /// Event payload as structured JSON.
     pub payload: Option<serde_json::Value>,
     /// When the event was created.
     pub created_at: DateTime<Utc>,

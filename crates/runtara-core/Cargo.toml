@@ -28,7 +28,7 @@ server = ["dep:dotenvy", "dep:axum"]
 tokio = { version = "1", features = ["full"] }
 
 # Database
-sqlx = { version = "0.8", features = ["runtime-tokio", "tls-rustls-ring-webpki", "postgres", "sqlite", "uuid", "chrono", "macros", "migrate"] }
+sqlx = { version = "0.8", features = ["runtime-tokio", "tls-rustls-ring-webpki", "postgres", "sqlite", "uuid", "chrono", "json", "macros", "migrate"] }
 
 
 # Configuration (optional, for server mode)
