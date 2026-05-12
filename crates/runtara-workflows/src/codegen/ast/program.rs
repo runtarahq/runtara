@@ -1823,55 +1823,7 @@ fn emit_error_routing(
 
 /// Collect all steps along an error branch until we hit a Finish step or merge back.
 fn collect_error_branch_steps(start_step_id: &str, graph: &ExecutionGraph) -> Vec<String> {
-    use std::collections::HashSet;
-
-    let mut branch_steps = Vec::new();
-    let mut visited = HashSet::new();
-    let mut current_step_id = start_step_id.to_string();
-
-    loop {
-        if visited.contains(&current_step_id) {
-            break;
-        }
-        visited.insert(current_step_id.clone());
-
-        let step = match graph.steps.get(&current_step_id) {
-            Some(s) => s,
-            None => break,
-        };
-
-        branch_steps.push(current_step_id.clone());
-
-        // Stop at Finish steps (they return)
-        if matches!(step, Step::Finish(_)) {
-            break;
-        }
-
-        // Stop at branching steps (Conditional, routing Switch) — they have their own branches
-        if steps::branching::is_branching_step(step) {
-            break;
-        }
-
-        // Find the next step (follow unlabeled or "next" edges, skip onError)
-        let mut next_step_id = None;
-        for edge in &graph.execution_plan {
-            if edge.from_step == current_step_id {
-                let label = edge.label.as_deref().unwrap_or("");
-                // Follow normal flow, skip onError/true/false branches
-                if label.is_empty() || label == "next" {
-                    next_step_id = Some(edge.to_step.clone());
-                    break;
-                }
-            }
-        }
-
-        match next_step_id {
-            Some(next) => current_step_id = next,
-            None => break,
-        }
-    }
-
-    branch_steps
+    steps::branching::collect_branch_steps(start_step_id, graph, None)
 }
 
 /// Emit debug start logging using RuntimeContext.
@@ -3397,6 +3349,96 @@ mod tests {
 
         assert!(branch_steps.contains(&"step2".to_string()));
         assert!(!branch_steps.contains(&"error-step".to_string()));
+    }
+
+    #[test]
+    fn test_collect_error_branch_topologically_orders_fan_in() {
+        fn log_step(id: &str) -> Step {
+            Step::Log(LogStep {
+                id: id.to_string(),
+                name: None,
+                message: id.to_string(),
+                level: LogLevel::Info,
+                context: None,
+                breakpoint: None,
+            })
+        }
+
+        fn plan_edge(from: &str, to: &str) -> ExecutionPlanEdge {
+            ExecutionPlanEdge {
+                from_step: from.to_string(),
+                to_step: to.to_string(),
+                label: None,
+                condition: None,
+                priority: None,
+            }
+        }
+
+        let mut steps = HashMap::new();
+        for id in [
+            "handler",
+            "branch_a",
+            "branch_b1",
+            "branch_b2",
+            "branch_c1",
+            "branch_c2",
+            "branch_c3",
+            "merge",
+        ] {
+            steps.insert(id.to_string(), log_step(id));
+        }
+        steps.insert(
+            "finish".to_string(),
+            Step::Finish(FinishStep {
+                id: "finish".to_string(),
+                name: None,
+                input_mapping: None,
+                breakpoint: None,
+            }),
+        );
+
+        let graph = ExecutionGraph {
+            name: None,
+            description: None,
+            entry_point: "handler".to_string(),
+            steps,
+            execution_plan: vec![
+                plan_edge("handler", "branch_a"),
+                plan_edge("handler", "branch_b1"),
+                plan_edge("handler", "branch_c1"),
+                plan_edge("branch_b1", "branch_b2"),
+                plan_edge("branch_c1", "branch_c2"),
+                plan_edge("branch_c2", "branch_c3"),
+                plan_edge("branch_a", "merge"),
+                plan_edge("branch_b2", "merge"),
+                plan_edge("branch_c3", "merge"),
+                plan_edge("merge", "finish"),
+            ],
+            variables: HashMap::new(),
+            input_schema: HashMap::new(),
+            output_schema: HashMap::new(),
+            notes: None,
+            nodes: None,
+            edges: None,
+            ..Default::default()
+        };
+
+        let branch_steps = collect_error_branch_steps("handler", &graph);
+
+        assert_eq!(
+            branch_steps,
+            vec![
+                "handler",
+                "branch_a",
+                "branch_b1",
+                "branch_c1",
+                "branch_b2",
+                "branch_c2",
+                "branch_c3",
+                "merge",
+                "finish",
+            ]
+        );
     }
 
     // ==========================================

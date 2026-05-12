@@ -6,7 +6,7 @@
 //! branch code emission. Used by both Conditional (2-way) and routing
 //! Switch (N-way) step emitters.
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use proc_macro2::TokenStream;
 use quote::quote;
@@ -14,7 +14,7 @@ use quote::quote;
 use super::StepEmitter;
 use crate::codegen::ast::CodegenError;
 use crate::codegen::ast::context::EmitContext;
-use runtara_dsl::{ExecutionGraph, Step};
+use runtara_dsl::{ExecutionGraph, ExecutionPlanEdge, Step};
 
 /// Returns true if this step is a branching control flow step
 /// (Conditional or routing Switch).
@@ -50,6 +50,11 @@ pub fn branch_labels(step: &Step) -> Vec<String> {
         }
         _ => vec![],
     }
+}
+
+fn is_normal_flow_edge(edge: &ExecutionPlanEdge) -> bool {
+    let label = edge.label.as_deref().unwrap_or("");
+    label.is_empty() || label == "next"
 }
 
 /// Find the merge point where two branches converge (diamond pattern detection).
@@ -140,16 +145,13 @@ pub fn collect_reachable_steps(start_step_id: &str, graph: &ExecutionGraph) -> V
             continue;
         }
 
-        // For non-branching steps, follow "next" or unlabeled edges
+        // For non-branching steps, follow all "next" or unlabeled edges.
         for edge in &graph.execution_plan {
-            if edge.from_step == current_step_id {
-                let label = edge.label.as_deref().unwrap_or("");
-                if label == "next" || label.is_empty() {
-                    if !visited.contains(&edge.to_step) {
-                        queue.push_back(edge.to_step.clone());
-                    }
-                    break;
-                }
+            if edge.from_step == current_step_id
+                && is_normal_flow_edge(edge)
+                && !visited.contains(&edge.to_step)
+            {
+                queue.push_back(edge.to_step.clone());
             }
         }
     }
@@ -164,56 +166,104 @@ pub fn collect_branch_steps(
     graph: &ExecutionGraph,
     stop_at: Option<&str>,
 ) -> Vec<String> {
-    let mut branch_steps = Vec::new();
+    let mut reachable = HashSet::new();
+    let mut discovery_order = Vec::new();
     let mut visited = HashSet::new();
-    let mut current_step_id = start_step_id.to_string();
+    let mut queue = VecDeque::new();
 
-    loop {
-        if visited.contains(&current_step_id) {
-            break;
+    queue.push_back(start_step_id.to_string());
+
+    while let Some(current_step_id) = queue.pop_front() {
+        if !visited.insert(current_step_id.clone()) {
+            continue;
         }
 
-        // Stop before the merge point (it will be emitted separately after the branch)
-        if let Some(merge_point) = stop_at
-            && current_step_id == merge_point
-        {
-            break;
+        // Stop before the merge point. It is emitted once as common suffix.
+        if stop_at.is_some_and(|merge_point| current_step_id == merge_point) {
+            continue;
         }
-
-        visited.insert(current_step_id.clone());
 
         let step = match graph.steps.get(&current_step_id) {
             Some(s) => s,
-            None => break,
+            None => continue,
         };
 
-        branch_steps.push(current_step_id.clone());
+        reachable.insert(current_step_id.clone());
+        discovery_order.push(current_step_id.clone());
 
-        // Stop at Finish steps (they return)
-        if matches!(step, Step::Finish(_)) {
-            break;
+        // Finish and branching steps terminate this collected branch body. Branching
+        // steps emit their own nested branches, and Finish returns from the workflow.
+        if matches!(step, Step::Finish(_)) || is_branching_step(step) {
+            continue;
         }
 
-        // Stop at branching steps (they emit their own branch code)
-        if is_branching_step(step) {
-            break;
-        }
-
-        // Find the next step (follow "next" label or unlabeled edge)
-        let mut next_step_id = None;
         for edge in &graph.execution_plan {
-            if edge.from_step == current_step_id {
-                let label = edge.label.as_deref().unwrap_or("");
-                if label == "next" || label.is_empty() {
-                    next_step_id = Some(edge.to_step.clone());
-                    break;
+            if edge.from_step == current_step_id
+                && is_normal_flow_edge(edge)
+                && !visited.contains(&edge.to_step)
+            {
+                queue.push_back(edge.to_step.clone());
+            }
+        }
+    }
+
+    let mut indegree: HashMap<String, usize> = discovery_order
+        .iter()
+        .map(|step_id| (step_id.clone(), 0))
+        .collect();
+
+    for edge in &graph.execution_plan {
+        if is_normal_flow_edge(edge)
+            && reachable.contains(&edge.from_step)
+            && reachable.contains(&edge.to_step)
+        {
+            *indegree.entry(edge.to_step.clone()).or_insert(0) += 1;
+        }
+    }
+
+    let mut branch_steps = Vec::new();
+    let mut ready = VecDeque::new();
+    let mut queued = HashSet::new();
+
+    if reachable.contains(start_step_id) {
+        ready.push_back(start_step_id.to_string());
+        queued.insert(start_step_id.to_string());
+    }
+
+    while let Some(step_id) = ready.pop_front() {
+        branch_steps.push(step_id.clone());
+
+        let step = match graph.steps.get(&step_id) {
+            Some(s) => s,
+            None => continue,
+        };
+
+        if matches!(step, Step::Finish(_)) || is_branching_step(step) {
+            continue;
+        }
+
+        for edge in &graph.execution_plan {
+            if edge.from_step != step_id
+                || !is_normal_flow_edge(edge)
+                || !reachable.contains(&edge.to_step)
+            {
+                continue;
+            }
+
+            if let Some(count) = indegree.get_mut(&edge.to_step) {
+                *count = count.saturating_sub(1);
+                if *count == 0 && queued.insert(edge.to_step.clone()) {
+                    ready.push_back(edge.to_step.clone());
                 }
             }
         }
+    }
 
-        match next_step_id {
-            Some(next) => current_step_id = next,
-            None => break,
+    // Validation should reject normal-flow cycles, but keep branch emission
+    // deterministic if a caller reaches this point with one.
+    for step_id in discovery_order {
+        if !queued.contains(&step_id) {
+            branch_steps.push(step_id);
         }
     }
 
@@ -663,6 +713,30 @@ mod tests {
         assert!(reachable.contains(&"end".to_string()));
     }
 
+    #[test]
+    fn test_collect_reachable_follows_all_normal_successors() {
+        let mut steps = HashMap::new();
+        for id in ["start", "a", "b", "merge"] {
+            steps.insert(id.to_string(), make_log_step(id));
+        }
+        steps.insert("finish".to_string(), make_finish_step("finish"));
+
+        let graph = make_graph(
+            "start",
+            steps,
+            vec![
+                edge("start", "a", None),
+                edge("start", "b", None),
+                edge("a", "merge", None),
+                edge("b", "merge", None),
+                edge("merge", "finish", None),
+            ],
+        );
+
+        let reachable = collect_reachable_steps("start", &graph);
+        assert_eq!(reachable, vec!["start", "a", "b", "merge", "finish"]);
+    }
+
     // ── collect_branch_steps ─────────────────────────────────────
 
     #[test]
@@ -726,6 +800,81 @@ mod tests {
         let branch = collect_branch_steps("log", &graph, None);
         // Non-routing switch is NOT a branching step, so walk continues through it
         assert_eq!(branch, vec!["log", "sw", "end"]);
+    }
+
+    #[test]
+    fn test_collect_branch_topologically_orders_fan_in() {
+        let mut steps = HashMap::new();
+        for id in [
+            "start",
+            "branch_a",
+            "branch_b1",
+            "branch_b2",
+            "branch_c1",
+            "branch_c2",
+            "branch_c3",
+            "merge",
+        ] {
+            steps.insert(id.to_string(), make_log_step(id));
+        }
+        steps.insert("finish".to_string(), make_finish_step("finish"));
+
+        let graph = make_graph(
+            "start",
+            steps,
+            vec![
+                edge("start", "branch_a", None),
+                edge("start", "branch_b1", None),
+                edge("start", "branch_c1", None),
+                edge("branch_b1", "branch_b2", None),
+                edge("branch_c1", "branch_c2", None),
+                edge("branch_c2", "branch_c3", None),
+                edge("branch_a", "merge", None),
+                edge("branch_b2", "merge", None),
+                edge("branch_c3", "merge", None),
+                edge("merge", "finish", None),
+            ],
+        );
+
+        let branch = collect_branch_steps("start", &graph, None);
+
+        assert_eq!(
+            branch,
+            vec![
+                "start",
+                "branch_a",
+                "branch_b1",
+                "branch_c1",
+                "branch_b2",
+                "branch_c2",
+                "branch_c3",
+                "merge",
+                "finish",
+            ]
+        );
+    }
+
+    #[test]
+    fn test_collect_branch_stops_before_merge_after_fan_out() {
+        let mut steps = HashMap::new();
+        for id in ["start", "a", "b", "merge", "finish"] {
+            steps.insert(id.to_string(), make_log_step(id));
+        }
+
+        let graph = make_graph(
+            "start",
+            steps,
+            vec![
+                edge("start", "a", None),
+                edge("start", "b", None),
+                edge("a", "merge", None),
+                edge("b", "merge", None),
+                edge("merge", "finish", None),
+            ],
+        );
+
+        let branch = collect_branch_steps("start", &graph, Some("merge"));
+        assert_eq!(branch, vec!["start", "a", "b"]);
     }
 
     // ── nested conditionals ──────────────────────────────────────
