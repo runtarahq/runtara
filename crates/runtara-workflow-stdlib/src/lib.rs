@@ -103,7 +103,7 @@ pub mod prelude {
     pub use serde::{Deserialize, Serialize};
     pub use serde_json;
 
-    // Agent registry (server-side, inventory-based)
+    // Agent registry
     pub use runtara_agents::registry;
 
     // Capability dispatch (static dispatch for workflow binaries)

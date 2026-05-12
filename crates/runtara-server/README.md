@@ -57,8 +57,8 @@ does not strip the tenant segment before forwarding).
 - Depends on `runtara-workflows`, `runtara-core` (with the `server` feature),
   and `runtara-environment` for execution, persistence, and the object model.
 - Links `runtara-agents` with `integrations` + `native` features and
-  re-exports `runtara_agents::integrations` so the `inventory`-based agent
-  registry survives linker optimization.
+  re-exports `runtara_agents::integrations` so the static agent registry keeps
+  integration modules reachable.
 - Pulls in `runtara-management-sdk`, `runtara-dsl`, `runtara-connections`,
   `runtara-object-store`, `runtara-text-parser`, and `runtara-workflow-stdlib`
   to expose their functionality over the HTTP API.

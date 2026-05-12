@@ -51,22 +51,14 @@ pub fn no_errors_action(input: ErrorTestInput) -> Result<String, String> {
 
 #[test]
 fn test_capability_with_errors_has_known_errors() {
-    use runtara_dsl::agent_meta::get_all_capabilities;
-
-    let cap = get_all_capabilities()
-        .find(|c| c.capability_id == "error-test-action")
-        .expect("error-test-action capability should be registered");
+    let cap = &__CAPABILITY_META_ERROR_TEST_ACTION;
 
     assert_eq!(cap.known_errors.len(), 4, "Should have 4 known errors");
 }
 
 #[test]
 fn test_capability_without_errors_has_empty_known_errors() {
-    use runtara_dsl::agent_meta::get_all_capabilities;
-
-    let cap = get_all_capabilities()
-        .find(|c| c.capability_id == "no-errors-action")
-        .expect("no-errors-action capability should be registered");
+    let cap = &__CAPABILITY_META_NO_ERRORS_ACTION;
 
     assert!(
         cap.known_errors.is_empty(),
@@ -76,11 +68,9 @@ fn test_capability_without_errors_has_empty_known_errors() {
 
 #[test]
 fn test_transient_error_attributes() {
-    use runtara_dsl::agent_meta::{ErrorKind, get_all_capabilities};
+    use runtara_dsl::agent_meta::ErrorKind;
 
-    let cap = get_all_capabilities()
-        .find(|c| c.capability_id == "error-test-action")
-        .expect("error-test-action capability should be registered");
+    let cap = &__CAPABILITY_META_ERROR_TEST_ACTION;
 
     // Find NETWORK_ERROR
     let network_error = cap
@@ -97,11 +87,9 @@ fn test_transient_error_attributes() {
 
 #[test]
 fn test_transient_error_with_multiple_attributes() {
-    use runtara_dsl::agent_meta::{ErrorKind, get_all_capabilities};
+    use runtara_dsl::agent_meta::ErrorKind;
 
-    let cap = get_all_capabilities()
-        .find(|c| c.capability_id == "error-test-action")
-        .expect("error-test-action capability should be registered");
+    let cap = &__CAPABILITY_META_ERROR_TEST_ACTION;
 
     // Find TIMEOUT
     let timeout_error = cap
@@ -119,11 +107,9 @@ fn test_transient_error_with_multiple_attributes() {
 
 #[test]
 fn test_permanent_error_attributes() {
-    use runtara_dsl::agent_meta::{ErrorKind, get_all_capabilities};
+    use runtara_dsl::agent_meta::ErrorKind;
 
-    let cap = get_all_capabilities()
-        .find(|c| c.capability_id == "error-test-action")
-        .expect("error-test-action capability should be registered");
+    let cap = &__CAPABILITY_META_ERROR_TEST_ACTION;
 
     // Find INVALID_URL
     let invalid_url_error = cap
@@ -140,11 +126,9 @@ fn test_permanent_error_attributes() {
 
 #[test]
 fn test_permanent_error_without_attributes() {
-    use runtara_dsl::agent_meta::{ErrorKind, get_all_capabilities};
+    use runtara_dsl::agent_meta::ErrorKind;
 
-    let cap = get_all_capabilities()
-        .find(|c| c.capability_id == "error-test-action")
-        .expect("error-test-action capability should be registered");
+    let cap = &__CAPABILITY_META_ERROR_TEST_ACTION;
 
     // Find AUTH_FAILED
     let auth_error = cap
@@ -163,19 +147,11 @@ fn test_permanent_error_without_attributes() {
 
 #[test]
 fn test_known_errors_in_api_format() {
-    use runtara_dsl::agent_meta::get_agents;
-
-    let agents = get_agents();
-    let error_test_agent = agents
-        .iter()
-        .find(|a| a.id == "error_test")
-        .expect("error_test agent should be registered");
-
-    let cap = error_test_agent
-        .capabilities
-        .iter()
-        .find(|c| c.id == "error-test-action")
-        .expect("error-test-action capability should exist");
+    let cap = runtara_dsl::agent_meta::capability_to_api(
+        &__CAPABILITY_META_ERROR_TEST_ACTION,
+        Some(&__INPUT_META_ErrorTestInput),
+        None,
+    );
 
     assert_eq!(cap.known_errors.len(), 4);
 
@@ -192,19 +168,11 @@ fn test_known_errors_in_api_format() {
 
 #[test]
 fn test_capability_without_errors_in_api_format() {
-    use runtara_dsl::agent_meta::get_agents;
-
-    let agents = get_agents();
-    let error_test_agent = agents
-        .iter()
-        .find(|a| a.id == "error_test")
-        .expect("error_test agent should be registered");
-
-    let cap = error_test_agent
-        .capabilities
-        .iter()
-        .find(|c| c.id == "no-errors-action")
-        .expect("no-errors-action capability should exist");
+    let cap = runtara_dsl::agent_meta::capability_to_api(
+        &__CAPABILITY_META_NO_ERRORS_ACTION,
+        Some(&__INPUT_META_ErrorTestInput),
+        None,
+    );
 
     assert!(
         cap.known_errors.is_empty(),
@@ -214,22 +182,14 @@ fn test_capability_without_errors_in_api_format() {
 
 #[test]
 fn test_api_serialization_excludes_empty_known_errors() {
-    use runtara_dsl::agent_meta::get_agents;
-
-    let agents = get_agents();
-    let error_test_agent = agents
-        .iter()
-        .find(|a| a.id == "error_test")
-        .expect("error_test agent should be registered");
-
-    let cap = error_test_agent
-        .capabilities
-        .iter()
-        .find(|c| c.id == "no-errors-action")
-        .expect("no-errors-action capability should exist");
+    let cap = runtara_dsl::agent_meta::capability_to_api(
+        &__CAPABILITY_META_NO_ERRORS_ACTION,
+        Some(&__INPUT_META_ErrorTestInput),
+        None,
+    );
 
     // Serialize to JSON and verify knownErrors is not present
-    let json = serde_json::to_value(cap).unwrap();
+    let json = serde_json::to_value(&cap).unwrap();
     assert!(
         json.get("knownErrors").is_none(),
         "Empty knownErrors should be skipped in JSON serialization"
@@ -238,22 +198,14 @@ fn test_api_serialization_excludes_empty_known_errors() {
 
 #[test]
 fn test_api_serialization_includes_non_empty_known_errors() {
-    use runtara_dsl::agent_meta::get_agents;
-
-    let agents = get_agents();
-    let error_test_agent = agents
-        .iter()
-        .find(|a| a.id == "error_test")
-        .expect("error_test agent should be registered");
-
-    let cap = error_test_agent
-        .capabilities
-        .iter()
-        .find(|c| c.id == "error-test-action")
-        .expect("error-test-action capability should exist");
+    let cap = runtara_dsl::agent_meta::capability_to_api(
+        &__CAPABILITY_META_ERROR_TEST_ACTION,
+        Some(&__INPUT_META_ErrorTestInput),
+        None,
+    );
 
     // Serialize to JSON and verify knownErrors is present
-    let json = serde_json::to_value(cap).unwrap();
+    let json = serde_json::to_value(&cap).unwrap();
     let known_errors = json
         .get("knownErrors")
         .expect("knownErrors should be present for capability with errors");
@@ -267,9 +219,8 @@ fn test_api_serialization_includes_non_empty_known_errors() {
 
 #[test]
 fn test_http_agent_has_known_errors() {
-    use runtara_dsl::agent_meta::get_all_capabilities;
+    use runtara_agents::registry::get_all_capabilities;
 
-    // The http module should be registered via runtara-agents dependency
     let http_cap = get_all_capabilities()
         .find(|c| c.module == Some("http") && c.capability_id == "http-request");
 
@@ -300,9 +251,8 @@ fn test_http_agent_has_known_errors() {
 
 #[test]
 fn test_sftp_agent_has_known_errors() {
-    use runtara_dsl::agent_meta::get_all_capabilities;
+    use runtara_agents::registry::get_all_capabilities;
 
-    // Check SFTP capabilities
     let sftp_caps: Vec<_> = get_all_capabilities()
         .filter(|c| c.module == Some("sftp"))
         .collect();

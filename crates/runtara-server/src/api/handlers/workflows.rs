@@ -1809,7 +1809,7 @@ pub async fn list_step_types_handler() -> Result<Json<ListStepTypesResponse>, St
         category: "control".to_string(),
     }];
 
-    // Add all registered step types from inventory
+    // Add all registered step types from the static registry.
     for meta in runtara_dsl::agent_meta::get_all_step_types() {
         step_types.push(StepTypeInfo {
             id: meta.id.to_string(),

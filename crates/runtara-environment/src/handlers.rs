@@ -1539,7 +1539,7 @@ pub struct ListAgentsResponse {
 /// This returns metadata about all available agents and their capabilities.
 /// It runs in-process (no OCI container needed) since it only returns metadata.
 pub async fn handle_list_agents(_state: &EnvironmentHandlerState) -> Result<ListAgentsResponse> {
-    use runtara_dsl::agent_meta::get_agents;
+    use runtara_agents::registry::get_agents;
 
     let agents = get_agents();
     let agents_json = serde_json::to_vec(&agents)
@@ -1578,7 +1578,7 @@ pub async fn handle_get_capability(
     _state: &EnvironmentHandlerState,
     request: GetCapabilityRequest,
 ) -> Result<GetCapabilityResponse> {
-    use runtara_dsl::agent_meta::get_capability_inputs;
+    use runtara_agents::registry::get_capability_inputs;
 
     match get_capability_inputs(&request.agent_id, &request.capability_id) {
         Some(inputs) => {

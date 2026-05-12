@@ -54,6 +54,7 @@ tracing = "0.1"
 
 # Connection type metadata
 runtara-dsl = { path = "../runtara-dsl" }
+runtara-agents = { path = "../runtara-agents", default-features = false, features = ["integrations"] }
 
 # OpenAPI (optional)
 utoipa = { version = "5", optional = true }

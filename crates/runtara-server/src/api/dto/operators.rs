@@ -14,7 +14,7 @@ pub fn get_agents() -> Vec<AgentInfo> {
         .map(String::from)
         .collect();
 
-    runtara_dsl::agent_meta::get_agents()
+    runtara_agents::registry::get_agents()
         .into_iter()
         .map(|mut agent| {
             if agent.id == "http" {
@@ -71,7 +71,7 @@ mod tests {
             http.integration_ids
         );
 
-        // runtara-agents extractors (registered via inventory in runtara-agents)
+        // runtara-agents extractors from the static registry
         assert!(
             http.integration_ids
                 .contains(&"shopify_access_token".to_string()),
@@ -103,7 +103,7 @@ mod tests {
         let sharepoint = agents
             .iter()
             .find(|a| a.id == "sharepoint")
-            .expect("sharepoint agent should be registered via inventory::submit!");
+            .expect("sharepoint agent should be registered");
 
         assert!(
             sharepoint

@@ -138,7 +138,7 @@ pub struct TextCompletionOutput {
     module = "openai",
     display_name = "Text Completion (OpenAI)",
     description = "Generate text completion using OpenAI models",
-    // Register the openai module with inventory
+    // Define the openai module metadata
     module_display_name = "OpenAI",
     module_description = "OpenAI LLM integration for text completion, image generation, structured output, and vision capabilities",
     module_has_side_effects = true,

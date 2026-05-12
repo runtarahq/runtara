@@ -2,17 +2,14 @@
 //! Static capability dispatch table for workflow binaries.
 //!
 //! This module provides a compile-time dispatch table that maps (module, capability_id)
-//! pairs directly to executor functions. It replaces `inventory::iter()` at runtime
-//! for workflow binaries, eliminating the `inventory` crate dependency from compiled
-//! workflows.
+//! pairs directly to executor functions.
 //!
-//! The server-side code (runtime HTTP server) continues to use inventory-based
-//! dispatch via `registry::execute_capability()` for metadata APIs and dynamic
-//! capability discovery.
+//! The server-side code uses `runtara_agents::registry::execute_capability()`,
+//! which is backed by the same statically compiled registry.
 //!
 //! When adding a new capability with `#[capability]`, add a corresponding entry
 //! to the match table below. A test (`test_dispatch_table_completeness`) verifies
-//! that all inventory-registered capabilities have dispatch entries.
+//! that all statically registered capabilities have dispatch entries.
 
 /// Execute a native-only capability via the agent service HTTP endpoint.
 ///
@@ -79,8 +76,7 @@ pub fn native_agent_stub(
 /// Execute a capability by module and capability_id using static dispatch.
 ///
 /// This is the workflow-binary equivalent of `registry::execute_capability()`.
-/// Instead of iterating over inventory-registered executors at runtime, it uses
-/// a compile-time match table for direct dispatch.
+/// It uses a compile-time match table for direct dispatch.
 pub fn execute_capability(
     module: &str,
     capability_id: &str,
@@ -724,6 +720,50 @@ pub fn execute_capability(
             )
         }
 
+        // --- sharepoint ---
+        ("sharepoint", "sharepoint-list-drives") => {
+            (runtara_agents::integrations::sharepoint::__CAPABILITY_EXECUTOR_SHAREPOINT_LIST_DRIVES.execute)(input)
+        }
+        ("sharepoint", "sharepoint-list-children") => {
+            (runtara_agents::integrations::sharepoint::__CAPABILITY_EXECUTOR_SHAREPOINT_LIST_CHILDREN.execute)(input)
+        }
+        ("sharepoint", "sharepoint-get-item") => {
+            (runtara_agents::integrations::sharepoint::__CAPABILITY_EXECUTOR_SHAREPOINT_GET_ITEM.execute)(input)
+        }
+        ("sharepoint", "sharepoint-get-item-by-path") => {
+            (runtara_agents::integrations::sharepoint::__CAPABILITY_EXECUTOR_SHAREPOINT_GET_ITEM_BY_PATH.execute)(input)
+        }
+        ("sharepoint", "sharepoint-download-file") => {
+            (runtara_agents::integrations::sharepoint::__CAPABILITY_EXECUTOR_SHAREPOINT_DOWNLOAD_FILE.execute)(input)
+        }
+        ("sharepoint", "sharepoint-upload-file") => {
+            (runtara_agents::integrations::sharepoint::__CAPABILITY_EXECUTOR_SHAREPOINT_UPLOAD_FILE.execute)(input)
+        }
+        ("sharepoint", "sharepoint-upload-file-large") => {
+            (runtara_agents::integrations::sharepoint::__CAPABILITY_EXECUTOR_SHAREPOINT_UPLOAD_FILE_LARGE.execute)(input)
+        }
+        ("sharepoint", "sharepoint-create-folder") => {
+            (runtara_agents::integrations::sharepoint::__CAPABILITY_EXECUTOR_SHAREPOINT_CREATE_FOLDER.execute)(input)
+        }
+        ("sharepoint", "sharepoint-delete-item") => {
+            (runtara_agents::integrations::sharepoint::__CAPABILITY_EXECUTOR_SHAREPOINT_DELETE_ITEM.execute)(input)
+        }
+        ("sharepoint", "sharepoint-copy-item") => {
+            (runtara_agents::integrations::sharepoint::__CAPABILITY_EXECUTOR_SHAREPOINT_COPY_ITEM.execute)(input)
+        }
+        ("sharepoint", "sharepoint-move-item") => {
+            (runtara_agents::integrations::sharepoint::__CAPABILITY_EXECUTOR_SHAREPOINT_MOVE_ITEM.execute)(input)
+        }
+        ("sharepoint", "sharepoint-get-copy-status") => {
+            (runtara_agents::integrations::sharepoint::__CAPABILITY_EXECUTOR_SHAREPOINT_GET_COPY_STATUS.execute)(input)
+        }
+        ("sharepoint", "sharepoint-search") => {
+            (runtara_agents::integrations::sharepoint::__CAPABILITY_EXECUTOR_SHAREPOINT_SEARCH.execute)(input)
+        }
+        ("sharepoint", "sharepoint-search-global") => {
+            (runtara_agents::integrations::sharepoint::__CAPABILITY_EXECUTOR_SHAREPOINT_SEARCH_GLOBAL.execute)(input)
+        }
+
         // --- shopify ---
         ("shopify", "add-products-to-collection") => {
             (runtara_agents::integrations::shopify::__CAPABILITY_EXECUTOR_ADD_PRODUCTS_TO_COLLECTION.execute)(
@@ -1004,15 +1044,14 @@ pub fn execute_capability(
 mod tests {
     use super::*;
 
-    /// Verify that every capability registered via inventory has a corresponding
+    /// Verify that every statically registered capability has a corresponding
     /// entry in the static dispatch table. This catches missing entries when new
     /// capabilities are added.
-    #[cfg(not(target_family = "wasm"))]
     #[test]
     fn test_dispatch_table_completeness() {
         let dummy_input = serde_json::json!({});
 
-        for executor in inventory::iter::<&'static runtara_dsl::agent_meta::CapabilityExecutor> {
+        for executor in runtara_agents::registry::get_all_executors() {
             let result =
                 execute_capability(executor.module, executor.capability_id, dummy_input.clone());
             // We don't care about the result (it will likely fail due to bad input),

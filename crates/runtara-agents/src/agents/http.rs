@@ -421,8 +421,8 @@ pub fn http_request(input: HttpRequestInput) -> Result<HttpResponse, String> {
     let mut url = input.url.clone();
 
     // If connection data is provided, extract config and merge.
-    // In WASM, inventory-based extractors are unavailable — skip local extraction
-    // and let the HTTP proxy handle credential injection via X-Runtara-Connection-Id.
+    // In WASM, skip local extraction and let the HTTP proxy handle credential
+    // injection via X-Runtara-Connection-Id.
     if let Some(ref raw) = input._connection {
         #[cfg(not(target_family = "wasm"))]
         {

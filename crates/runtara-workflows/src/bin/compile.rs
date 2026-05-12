@@ -19,9 +19,7 @@
 use runtara_dsl::{ExecutionGraph, Step};
 use runtara_workflows::compile::{CompilationInput, compile_workflow};
 
-// Force-link agent crate so inventory can discover capability metadata at
-// validation time. Without this, the validator reports "Available
-// capabilities: (none)" for every agent step.
+// Force-link agent crate so validation uses the static capability registry.
 #[allow(unused_imports)]
 use runtara_agents as _;
 use runtara_workflows::validation::validate_workflow;

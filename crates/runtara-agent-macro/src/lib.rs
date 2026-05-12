@@ -8,8 +8,8 @@
 //! - `#[derive(CapabilityOutput)]` - generates output metadata from struct fields
 //! - `#[derive(StepMeta)]` - generates step type metadata for DSL generation
 //!
-//! The macros generate static metadata that can be collected at runtime using
-//! the `inventory` crate for agent and step discovery.
+//! The macros generate named static metadata. Consumers build explicit static
+//! registries from those symbols for deterministic native and WASM discovery.
 //!
 //! Note: The metadata types (CapabilityMeta, InputTypeMeta, StepTypeMeta, etc.) are defined
 //! in `runtara-dsl` crate to avoid proc-macro crate limitations.
@@ -387,8 +387,6 @@ pub fn capability(attr: TokenStream, item: TokenStream) -> TokenStream {
                         secure: #mod_secure,
                     };
 
-                #[cfg(not(target_family = "wasm"))]
-                const _: () = { inventory::submit! { &#module_meta_ident }; };
             })
         } else {
             None
@@ -526,9 +524,6 @@ pub fn capability(attr: TokenStream, item: TokenStream) -> TokenStream {
             tags: #tags_token,
         };
 
-        #[cfg(not(target_family = "wasm"))]
-        const _: () = { inventory::submit! { &#meta_ident }; };
-
         #executor_wrapper
 
         #[allow(non_upper_case_globals)]
@@ -538,9 +533,6 @@ pub fn capability(attr: TokenStream, item: TokenStream) -> TokenStream {
             capability_id: #capability_id,
             execute: #executor_fn_ident,
         };
-
-        #[cfg(not(target_family = "wasm"))]
-        const _: () = { inventory::submit! { &#executor_ident }; };
 
         #module_registration
     };
@@ -699,8 +691,6 @@ pub fn derive_capability_input(input: TokenStream) -> TokenStream {
             fields: &[#(#field_metas),*],
         };
 
-        #[cfg(not(target_family = "wasm"))]
-        const _: () = { inventory::submit! { &#meta_ident }; };
     };
 
     TokenStream::from(expanded)
@@ -962,8 +952,6 @@ pub fn derive_connection_params(input: TokenStream) -> TokenStream {
             oauth_config: #oauth_config_token,
         };
 
-        #[cfg(not(target_family = "wasm"))]
-        const _: () = { inventory::submit! { &#meta_ident }; };
     };
 
     TokenStream::from(expanded)
@@ -1130,8 +1118,6 @@ pub fn derive_capability_output(input: TokenStream) -> TokenStream {
             fields: &[#(#field_metas),*],
         };
 
-        #[cfg(not(target_family = "wasm"))]
-        const _: () = { inventory::submit! { &#meta_ident }; };
     };
 
     TokenStream::from(expanded)
@@ -1233,8 +1219,6 @@ pub fn derive_step_meta(input: TokenStream) -> TokenStream {
             schema_fn: #schema_fn_ident,
         };
 
-        #[cfg(not(target_family = "wasm"))]
-        const _: () = { inventory::submit! { &#meta_ident }; };
     };
 
     TokenStream::from(expanded)

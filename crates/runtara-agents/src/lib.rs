@@ -52,6 +52,7 @@ pub mod connections;
 
 // Re-export shared infrastructure
 pub mod registry;
+mod static_registry;
 
 // Re-export commonly used types for workflow code
 pub use serde;

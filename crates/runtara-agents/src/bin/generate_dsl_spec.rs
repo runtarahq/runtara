@@ -14,15 +14,13 @@
 //!   cargo run -p runtara-agents --bin generate_dsl_spec -- --agents-only > agents.json
 
 use runtara_dsl::DSL_VERSION;
-use runtara_dsl::agent_meta::{
-    get_agents, get_all_connection_types, validate_agent_metadata_or_panic,
-};
 use runtara_dsl::spec::{AGENT_VERSION, generate_agent_openapi_spec, generate_dsl_schema};
 use serde_json::{Value, json};
 use std::env;
 
-// Force linking of runtara_agents to ensure all inventory registrations are included
-extern crate runtara_agents;
+use runtara_agents::registry::{
+    get_agents, get_all_connection_types, validate_agent_metadata_or_panic,
+};
 
 fn main() {
     // Validate agent metadata before generating specs

@@ -79,4 +79,3 @@ opentelemetry-appender-tracing = { version = "0.28", optional = true }
 
 [dev-dependencies]
 runtara-dsl = { path = "../runtara-dsl" }
-inventory = "0.3"

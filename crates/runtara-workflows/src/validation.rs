@@ -1767,7 +1767,7 @@ fn has_path(adjacency: &HashMap<String, Vec<String>>, from: &str, to: &str) -> b
 
 fn validate_agents(graph: &ExecutionGraph, result: &mut ValidationResult) {
     // Get available agents
-    let available_agents: Vec<String> = runtara_dsl::agent_meta::get_all_agent_modules()
+    let available_agents: Vec<String> = runtara_agents::registry::get_all_agent_modules()
         .into_iter()
         .map(|m| m.id.to_string())
         .collect();
@@ -1775,7 +1775,7 @@ fn validate_agents(graph: &ExecutionGraph, result: &mut ValidationResult) {
     for (step_id, step) in &graph.steps {
         if let Step::Agent(agent_step) = step {
             // Validate agent exists
-            let agent_module = runtara_dsl::agent_meta::find_agent_module(&agent_step.agent_id);
+            let agent_module = runtara_agents::registry::find_agent_module(&agent_step.agent_id);
 
             if agent_module.is_none() {
                 result.errors.push(ValidationError::UnknownAgent {
@@ -1787,7 +1787,7 @@ fn validate_agents(graph: &ExecutionGraph, result: &mut ValidationResult) {
             }
 
             // Validate capability exists
-            let capability_inputs = runtara_dsl::agent_meta::get_capability_inputs(
+            let capability_inputs = runtara_agents::registry::get_capability_inputs(
                 &agent_step.agent_id,
                 &agent_step.capability_id,
             );
@@ -1802,7 +1802,7 @@ fn validate_agents(graph: &ExecutionGraph, result: &mut ValidationResult) {
             if capability_inputs.is_none() {
                 // Get available capabilities for this agent
                 let available_capabilities: Vec<String> =
-                    runtara_dsl::agent_meta::get_all_capabilities()
+                    runtara_agents::registry::get_all_capabilities()
                         .filter(|c| {
                             c.module
                                 .map(|m| m.eq_ignore_ascii_case(&agent_step.agent_id))
@@ -2561,7 +2561,7 @@ fn validate_compensation_recursive(graph: &ExecutionGraph, result: &mut Validati
     for (step_id, step) in &graph.steps {
         if let Step::Agent(agent_step) = step {
             // Find the capability metadata
-            let capability = runtara_dsl::agent_meta::get_all_capabilities().find(|c| {
+            let capability = runtara_agents::registry::get_all_capabilities().find(|c| {
                 c.module
                     .map(|m| m.eq_ignore_ascii_case(&agent_step.agent_id))
                     .unwrap_or(false)
@@ -3690,7 +3690,7 @@ mod tests {
         AgentStep, EmbedWorkflowStep, FinishStep, LogLevel, LogStep, ReferenceValue,
     };
 
-    // Link runtara-agents so that the inventory crate can find registered capabilities
+    // Keep runtara-agents linked so tests use the same static capability registry.
     #[allow(unused_imports)]
     use runtara_agents as _;
 

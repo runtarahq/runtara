@@ -9,7 +9,8 @@ use crate::crypto::CredentialCipher;
 use crate::repository::connections::ConnectionRepository;
 use crate::repository::oauth::OAuthRepository;
 use rand::RngCore;
-use runtara_dsl::agent_meta::{OAuthConfig, find_connection_type};
+use runtara_agents::registry::find_connection_type;
+use runtara_dsl::agent_meta::OAuthConfig;
 use serde_json::{Value, json};
 use sqlx::PgPool;
 

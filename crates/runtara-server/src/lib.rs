@@ -20,12 +20,10 @@ pub mod workers;
 
 pub use server::start;
 
-// Link runtara_agents crate to ensure inventory collects agent metadata at runtime
-// This is required for the runtime metadata API to work
+// Link runtara_agents so the static metadata registry is available at runtime.
 extern crate runtara_agents;
 
-// Force linker to include integration agents' inventory items by referencing the module
-// Without this, the linker may optimize out the unused symbols
+// Keep integration agents reachable for metadata and execution APIs.
 pub use runtara_agents::integrations;
 
 // Re-export spec_generator from runtara-dsl

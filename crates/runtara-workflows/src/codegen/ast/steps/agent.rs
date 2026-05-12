@@ -15,8 +15,8 @@ use super::super::mapping;
 use super::{
     emit_agent_span_start, emit_breakpoint_check, emit_step_debug_end, emit_step_debug_start,
 };
+use runtara_agents::registry::{get_all_capabilities, get_capability_inputs};
 use runtara_dsl::AgentStep;
-use runtara_dsl::agent_meta::{get_all_capabilities, get_capability_inputs};
 
 /// Check if a capability requires rate limiting by looking up its metadata.
 /// Returns true if the capability has rate_limited = true in its #[capability] macro.
@@ -607,7 +607,7 @@ mod tests {
     use runtara_dsl::{ImmediateValue, MappingValue, ReferenceValue, ValueType};
     use std::collections::HashMap;
 
-    // Link runtara-agents so inventory exposes real capability metadata in tests.
+    // Keep runtara-agents linked so tests use the same static capability registry.
     #[allow(unused_imports)]
     use runtara_agents as _;
 

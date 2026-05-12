@@ -10,7 +10,7 @@
 //! The fix captures the PID immediately from child.id() at spawn time,
 //! which is always available and reliable.
 
-// Link runtara-agents to register agent capability metadata via inventory.
+// Link runtara-agents so validation sees the static capability registry.
 use runtara_agents as _;
 
 use runtara_core::persistence::Persistence;

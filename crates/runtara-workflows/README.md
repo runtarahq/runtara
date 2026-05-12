@@ -25,7 +25,7 @@ Other useful flags: `--validate` (no compilation), `--analyze` (report only), `-
 
 - Primary consumer: `runtara-server` — `src/compiler/` and the workflows API (`api/services/compilation.rs`, `api/services/workflows.rs`) drive compilation on workflow create/update.
 - Also consumed by `runtara-connections` for connection-bound workflow compilation paths.
-- Upstream deps: `runtara-dsl` (workflow/execution-graph types, re-exported), `runtara-agents` (capability inventory linked at validation time), `runtara-ai`.
+- Upstream deps: `runtara-dsl` (workflow/execution-graph types, re-exported), `runtara-agents` (static capability registry linked at validation time), `runtara-ai`.
 - Key integration point: `compile::compile_workflow` — the server calls it after a `ChildWorkflowInput` list is resolved; the result is an artifact path plus metadata the dispatcher registers for execution.
 - This crate is a host-side build tool (runs on native host). The *output* runs as a WASM guest inside wasmtime on the workflow-instance side.
 

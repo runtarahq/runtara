@@ -178,7 +178,7 @@ pub const DISPATCHER_WORKFLOW_ID: &str = "__agent_dispatcher__";
 /// v21: Switched from write_completed/output.json to SDK protocol (QUIC to runtara-core)
 /// v22: Compile to WASM (same mechanism as workflows) instead of native host binary
 /// v23: Load input from runtara-core via SDK instead of /data/input.json (WASM has no filesystem)
-/// v24: Use static dispatch table instead of inventory registry (inventory unavailable in WASM)
+/// v24: Use static dispatch table for WASM-compatible agent dispatch
 /// v28: Add missing dispatch entries for ai_tools/ai-embed-text and object_model/query-aggregate
 /// v29: Add SharePoint integration agent (file CRUD via Microsoft Graph) and percent-encode the search query path
 /// v30: Add sharepoint_search_global capability using Microsoft Search API for app-only-friendly search

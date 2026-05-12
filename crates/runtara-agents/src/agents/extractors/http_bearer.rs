@@ -59,8 +59,3 @@ impl HttpConnectionExtractor for HttpBearerExtractor {
         })
     }
 }
-
-#[cfg(not(target_family = "wasm"))]
-inventory::submit! {
-    &HttpBearerExtractor as &'static dyn HttpConnectionExtractor
-}

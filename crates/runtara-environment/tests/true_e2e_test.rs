@@ -18,8 +18,7 @@
 //! - crun installed on the system
 //! - Running as a user who can execute containers (or with appropriate capabilities)
 
-// Link runtara-agents to register agent capability metadata via inventory.
-// This is required for validation to find agent capabilities.
+// Link runtara-agents so validation sees the static capability registry.
 use runtara_agents as _;
 
 use runtara_core::persistence::Persistence;

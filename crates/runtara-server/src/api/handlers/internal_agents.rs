@@ -65,7 +65,7 @@ async fn run_agent(
     let capability_id = capability_id.to_string();
 
     let result = tokio::task::spawn_blocking(move || {
-        runtara_dsl::agent_meta::execute_capability(&module, &capability_id, input)
+        runtara_agents::registry::execute_capability(&module, &capability_id, input)
     })
     .await;
 

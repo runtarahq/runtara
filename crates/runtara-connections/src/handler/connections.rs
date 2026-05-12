@@ -405,7 +405,7 @@ pub async fn get_connections_by_operator_handler(
 // ============================================================================
 
 use crate::util::rate_limit_defaults::get_default_rate_limit_config;
-use runtara_dsl::agent_meta::{find_connection_type, get_all_connection_types};
+use runtara_agents::registry::{find_connection_type, get_all_connection_types};
 
 /// Convert ConnectionTypeMeta to ConnectionTypeDto
 fn meta_to_dto(meta: &runtara_dsl::agent_meta::ConnectionTypeMeta) -> ConnectionTypeDto {

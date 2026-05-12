@@ -7,7 +7,7 @@ Single source of truth for Runtara's workflow DSL types — the Rust structs tha
 
 ## What it is
 
-A typed representation of a workflow execution graph: `Workflow`, `ExecutionGraph`, `Step` (Agent, Conditional, Split, Switch, While, Log, Error, ...), and `MappingValue` (`Reference`, `Immediate`, `Composite`, `Template`). Serde handles JSON round-trips, `schemars` auto-generates the matching JSON Schema at build time (pinned to `DSL_VERSION`, currently `3.0.0`), and step metadata is collected via `inventory` so the schema stays in sync with the step structs themselves. The public entry points are `parse_workflow`, `parse_execution_graph`, `get_step_types`, plus helpers like `ExecutionGraph::get_terminal_errors` for introspection.
+A typed representation of a workflow execution graph: `Workflow`, `ExecutionGraph`, `Step` (Agent, Conditional, Split, Switch, While, Log, Error, ...), and `MappingValue` (`Reference`, `Immediate`, `Composite`, `Template`). Serde handles JSON round-trips, `schemars` auto-generates the matching JSON Schema at build time (pinned to `DSL_VERSION`, currently `3.0.0`), and step metadata is exposed through a static registry so the schema stays in sync with the step structs themselves. The public entry points are `parse_workflow`, `parse_execution_graph`, `get_step_types`, plus helpers like `ExecutionGraph::get_terminal_errors` for introspection.
 
 ## Using it standalone
 
@@ -33,8 +33,8 @@ Enable the `utoipa` feature if you need `ToSchema` derives for OpenAPI generatio
 
 - Consumed by `runtara-workflows` (compiler/executor), `runtara-agents` (capability metadata), and `runtara-server` (REST validation + OpenAPI surface).
 - Also pulled in by `runtara-core`, `runtara-connections`, `runtara-workflow-stdlib`, `runtara-text-parser`, `runtara-environment`, and `runtara-test-harness` — nearly every runtime crate touches these types.
-- Depends only on `serde`, `serde_json`, `schemars`, and `inventory`; `utoipa` is optional.
-- Step struct definitions register themselves via `inventory` in `step_registration.rs`, so `get_step_types()` and generated schema never drift from the actual enum variants.
+- Depends only on `serde`, `serde_json`, and `schemars`; `utoipa` is optional.
+- Step type metadata is defined in `step_registration.rs`, so `get_step_types()` and generated schema never drift from the actual enum variants.
 - Runs everywhere the rest of Runtara runs — native host, WASI agents, and build scripts (the schema JSON in `specs/dsl/v3.0.0/schema.json` is regenerated from these types).
 
 ## License

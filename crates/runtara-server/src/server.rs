@@ -547,7 +547,7 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
 
     // Validate agent metadata - ensures all capabilities have CapabilityInput and CapabilityOutput defined
     // This catches missing metadata at startup rather than at runtime
-    runtara_dsl::agent_meta::validate_agent_metadata_or_panic();
+    runtara_agents::registry::validate_agent_metadata_or_panic();
     println!("✓ Agent metadata validated");
 
     println!("✓ Configured for tenant: {}", server_config.tenant_id);

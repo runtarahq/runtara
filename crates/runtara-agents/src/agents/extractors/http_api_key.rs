@@ -67,8 +67,3 @@ impl HttpConnectionExtractor for HttpApiKeyExtractor {
         })
     }
 }
-
-#[cfg(not(target_family = "wasm"))]
-inventory::submit! {
-    &HttpApiKeyExtractor as &'static dyn HttpConnectionExtractor
-}

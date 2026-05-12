@@ -288,7 +288,7 @@ pub struct CommerceGetProductsOutput {
     module = "commerce",
     display_name = "Get Products",
     description = "Get products from a commerce platform with optional filtering and pagination",
-    // Register the commerce module with inventory
+    // Define the commerce module metadata
     module_display_name = "Commerce",
     module_description = "Unified interface for product, order, and inventory management across multiple e-commerce platforms",
     module_has_side_effects = true,

@@ -1,8 +1,8 @@
 //! API endpoints for serving DSL and agent specifications
 //!
 //! Specs are generated at compile time from runtara-dsl and embedded into the binary.
-//! Step type schemas are generated dynamically from inventory-registered metadata
-//! to stay in sync with the implementation.
+//! Step type schemas are generated dynamically from static step metadata to stay
+//! in sync with the implementation.
 
 use axum::{extract::Path, http::StatusCode, response::Json};
 use runtara_dsl::{DSL_VERSION, spec};
@@ -208,13 +208,13 @@ pub async fn get_agents_spec_version(
 }
 
 // ============================================================================
-// Dynamic Step Type Endpoints (generated from inventory)
+// Dynamic Step Type Endpoints
 // ============================================================================
 
 /// List all step types with their schemas
 ///
 /// Returns a list of all available step types with full JSON Schema for each.
-/// This is generated dynamically from the inventory-registered step metadata.
+/// This is generated dynamically from static step metadata.
 #[utoipa::path(
     get,
     path = "/api/runtime/specs/dsl/steps",

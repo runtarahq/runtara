@@ -1009,7 +1009,7 @@ pub struct ProductImageInput {
     display_name = "Set Product",
     description = "Create or update a Shopify product using productSet mutation",
     side_effects = true,
-    // Register the shopify module with inventory
+    // Define the shopify module metadata
     module_display_name = "Shopify",
     module_description = "Shopify GraphQL Admin API integration for product, order, inventory, and customer operations",
     module_has_side_effects = true,

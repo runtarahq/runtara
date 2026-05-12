@@ -220,7 +220,7 @@ impl ConnectionService {
         status: Option<String>,
     ) -> Result<Vec<ConnectionDto>, ServiceError> {
         // Look up agent metadata to get integration_ids
-        let agents = runtara_dsl::agent_meta::get_agents();
+        let agents = runtara_agents::registry::get_agents();
         let agent_info = agents
             .into_iter()
             .find(|agent| agent.id.eq_ignore_ascii_case(operator_name));

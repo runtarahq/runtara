@@ -3,7 +3,8 @@
 //! Agent capability metadata types for runtime introspection
 //!
 //! These types are used by the `runtara-agent-macro` crate to generate
-//! metadata that can be collected at runtime using the `inventory` crate.
+//! named static metadata. Runtime crates build explicit static registries from
+//! those symbols for deterministic native and WASM discovery.
 
 /// Trait for types that can provide their enum variant names.
 /// Used by the CapabilityInput macro to extract enum values for API metadata.
@@ -18,7 +19,7 @@ pub type EnumVariantsFn = fn() -> &'static [&'static str];
 /// Synchronous executor function type for agent capabilities.
 pub type CapabilityExecutorFn = fn(serde_json::Value) -> Result<serde_json::Value, String>;
 
-/// Executor for an agent capability - registered via inventory
+/// Executor for an agent capability.
 pub struct CapabilityExecutor {
     /// The agent module name (e.g., "utils", "transform")
     pub module: &'static str,
@@ -28,39 +29,16 @@ pub struct CapabilityExecutor {
     pub execute: CapabilityExecutorFn,
 }
 
-// Register CapabilityExecutor with inventory (skipped on WASM targets)
-#[cfg(not(target_family = "wasm"))]
-inventory::collect!(&'static CapabilityExecutor);
-
-/// Execute a capability by module and capability_id using inventory-registered executors.
-#[cfg(not(target_family = "wasm"))]
-pub fn execute_capability(
-    module: &str,
-    capability_id: &str,
-    input: serde_json::Value,
-) -> Result<serde_json::Value, String> {
-    let module_lower = module.to_lowercase();
-
-    for executor in inventory::iter::<&'static CapabilityExecutor> {
-        if executor.module == module_lower && executor.capability_id == capability_id {
-            return (executor.execute)(input);
-        }
-    }
-
-    Err(format!("Unknown capability: {}:{}", module, capability_id))
-}
-
-/// Execute a capability (not available on WASM).
-#[cfg(target_family = "wasm")]
+/// Execute a capability by module and capability_id.
+///
+/// Agent execution is provided by `runtara-agents::registry`. This fallback
+/// remains for older callers that still compile against `runtara-dsl` directly.
 pub fn execute_capability(
     module: &str,
     capability_id: &str,
     _input: serde_json::Value,
 ) -> Result<serde_json::Value, String> {
-    Err(format!(
-        "inventory not available in WASM: {}:{}",
-        module, capability_id
-    ))
+    Err(format!("Unknown capability: {}:{}", module, capability_id))
 }
 
 /// Hint for how to compensate (undo) a capability's effects.
@@ -121,10 +99,6 @@ pub mod capability_tags {
     /// Capability can save/write conversation memory
     pub const MEMORY_WRITE: &str = "memory:write";
 }
-
-// Register CapabilityMeta with inventory (skipped on WASM targets)
-#[cfg(not(target_family = "wasm"))]
-inventory::collect!(&'static CapabilityMeta);
 
 /// Error category for capability errors
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -207,10 +181,6 @@ pub struct InputTypeMeta {
     pub fields: &'static [InputFieldMeta],
 }
 
-// Register InputTypeMeta with inventory (skipped on WASM targets)
-#[cfg(not(target_family = "wasm"))]
-inventory::collect!(&'static InputTypeMeta);
-
 /// Metadata for an output field
 #[derive(Debug, Clone)]
 pub struct OutputFieldMeta {
@@ -247,48 +217,17 @@ pub struct OutputTypeMeta {
     pub fields: &'static [OutputFieldMeta],
 }
 
-// Register OutputTypeMeta with inventory (skipped on WASM targets)
-#[cfg(not(target_family = "wasm"))]
-inventory::collect!(&'static OutputTypeMeta);
-
 /// Get all registered capability metadata
-#[cfg(not(target_family = "wasm"))]
-pub fn get_all_capabilities() -> impl Iterator<Item = &'static CapabilityMeta> {
-    inventory::iter::<&'static CapabilityMeta>
-        .into_iter()
-        .copied()
-}
-
-/// Get all registered capability metadata (empty on WASM).
-#[cfg(target_family = "wasm")]
 pub fn get_all_capabilities() -> std::iter::Empty<&'static CapabilityMeta> {
     std::iter::empty()
 }
 
 /// Get all registered input type metadata
-#[cfg(not(target_family = "wasm"))]
-pub fn get_all_input_types() -> impl Iterator<Item = &'static InputTypeMeta> {
-    inventory::iter::<&'static InputTypeMeta>
-        .into_iter()
-        .copied()
-}
-
-/// Get all registered input type metadata (empty on WASM).
-#[cfg(target_family = "wasm")]
 pub fn get_all_input_types() -> std::iter::Empty<&'static InputTypeMeta> {
     std::iter::empty()
 }
 
 /// Get all registered output type metadata
-#[cfg(not(target_family = "wasm"))]
-pub fn get_all_output_types() -> impl Iterator<Item = &'static OutputTypeMeta> {
-    inventory::iter::<&'static OutputTypeMeta>
-        .into_iter()
-        .copied()
-}
-
-/// Get all registered output type metadata (empty on WASM).
-#[cfg(target_family = "wasm")]
 pub fn get_all_output_types() -> std::iter::Empty<&'static OutputTypeMeta> {
     std::iter::empty()
 }
@@ -495,10 +434,6 @@ pub struct AgentModuleConfig {
     pub secure: bool,
 }
 
-// Register AgentModuleConfig with inventory (skipped on WASM targets)
-#[cfg(not(target_family = "wasm"))]
-inventory::collect!(&'static AgentModuleConfig);
-
 /// Built-in agent module configurations
 pub const BUILTIN_AGENT_MODULES: &[AgentModuleConfig] = &[
     AgentModuleConfig {
@@ -615,31 +550,11 @@ pub const BUILTIN_AGENT_MODULES: &[AgentModuleConfig] = &[
     },
 ];
 
-/// Get all agent modules (built-in + inventory-registered).
-/// Built-in modules take precedence over inventory-registered ones with the same id.
-/// Modules are deduplicated by id.
+/// Get built-in agent modules.
+///
+/// Full agent registries are provided by `runtara-agents::registry`.
 pub fn get_all_agent_modules() -> Vec<&'static AgentModuleConfig> {
-    use std::collections::HashSet;
-
-    let mut seen_ids = HashSet::new();
-    let mut modules = Vec::new();
-
-    // Add built-in modules first (they take precedence)
-    for module in BUILTIN_AGENT_MODULES {
-        if seen_ids.insert(module.id) {
-            modules.push(module);
-        }
-    }
-
-    // Add inventory-registered modules (skip if id already exists)
-    #[cfg(not(target_family = "wasm"))]
-    for module in inventory::iter::<&'static AgentModuleConfig> {
-        if seen_ids.insert(module.id) {
-            modules.push(*module);
-        }
-    }
-
-    modules
+    BUILTIN_AGENT_MODULES.iter().collect()
 }
 
 /// Find agent module config by id
@@ -654,7 +569,7 @@ pub fn find_agent_module(id: &str) -> Option<&'static AgentModuleConfig> {
 /// Function pointer type for generating JSON schema
 pub type SchemaGeneratorFn = fn() -> schemars::schema::RootSchema;
 
-/// Metadata for a step type - registered via inventory
+/// Metadata for a step type.
 #[derive(Debug, Clone)]
 pub struct StepTypeMeta {
     /// Step type ID in PascalCase (e.g., "Conditional", "Agent")
@@ -669,22 +584,9 @@ pub struct StepTypeMeta {
     pub schema_fn: SchemaGeneratorFn,
 }
 
-// Register StepTypeMeta with inventory (skipped on WASM targets)
-#[cfg(not(target_family = "wasm"))]
-inventory::collect!(&'static StepTypeMeta);
-
 /// Get all registered step type metadata
-#[cfg(not(target_family = "wasm"))]
 pub fn get_all_step_types() -> impl Iterator<Item = &'static StepTypeMeta> {
-    inventory::iter::<&'static StepTypeMeta>
-        .into_iter()
-        .copied()
-}
-
-/// Get all registered step type metadata (empty on WASM).
-#[cfg(target_family = "wasm")]
-pub fn get_all_step_types() -> std::iter::Empty<&'static StepTypeMeta> {
-    std::iter::empty()
+    crate::step_registration::STEP_TYPES.iter().copied()
 }
 
 /// Find step type metadata by id
@@ -954,7 +856,7 @@ pub struct OAuthConfig {
     pub default_scopes: &'static str,
 }
 
-/// Metadata for a connection type - registered via inventory
+/// Metadata for a connection type.
 #[derive(Debug, Clone)]
 pub struct ConnectionTypeMeta {
     /// Unique identifier for this connection type (e.g., "bearer", "sftp")
@@ -975,20 +877,7 @@ pub struct ConnectionTypeMeta {
     pub oauth_config: Option<&'static OAuthConfig>,
 }
 
-// Register ConnectionTypeMeta with inventory (skipped on WASM targets)
-#[cfg(not(target_family = "wasm"))]
-inventory::collect!(&'static ConnectionTypeMeta);
-
 /// Get all registered connection type metadata
-#[cfg(not(target_family = "wasm"))]
-pub fn get_all_connection_types() -> impl Iterator<Item = &'static ConnectionTypeMeta> {
-    inventory::iter::<&'static ConnectionTypeMeta>
-        .into_iter()
-        .copied()
-}
-
-/// Get all registered connection type metadata (empty on WASM).
-#[cfg(target_family = "wasm")]
 pub fn get_all_connection_types() -> std::iter::Empty<&'static ConnectionTypeMeta> {
     std::iter::empty()
 }
@@ -999,7 +888,7 @@ pub fn find_connection_type(integration_id: &str) -> Option<&'static ConnectionT
 }
 
 // ============================================================================
-// Conversion Functions (inventory metadata -> API types)
+// Conversion Functions (static metadata -> API types)
 // ============================================================================
 
 /// Type conversion result with optional schema
@@ -1140,7 +1029,7 @@ fn get_condition_expression_schema() -> serde_json::Value {
 }
 
 /// Convert InputFieldMeta to CapabilityField
-fn input_field_to_api(field: &InputFieldMeta) -> CapabilityField {
+pub fn input_field_to_api(field: &InputFieldMeta) -> CapabilityField {
     let type_result = rust_to_json_schema_type_with_schema(field.type_name);
 
     let items = type_result.items_json.map(|items_str| {
@@ -1198,7 +1087,7 @@ fn input_field_to_api(field: &InputFieldMeta) -> CapabilityField {
 }
 
 /// Convert OutputFieldMeta to OutputField
-fn output_field_to_api(field: &OutputFieldMeta) -> OutputField {
+pub fn output_field_to_api(field: &OutputFieldMeta) -> OutputField {
     let (type_name, format, _) = rust_to_json_schema_type(field.type_name);
 
     OutputField {
@@ -1219,7 +1108,7 @@ fn output_field_to_api(field: &OutputFieldMeta) -> OutputField {
 }
 
 /// Convert CapabilityMeta to CapabilityInfo
-fn capability_to_api(
+pub fn capability_to_api(
     cap: &CapabilityMeta,
     input_type_meta: Option<&InputTypeMeta>,
     output_type_meta: Option<&OutputTypeMeta>,
@@ -1271,7 +1160,7 @@ fn capability_to_api(
     }
 }
 
-/// Build API-compatible agent list from inventory-registered metadata
+/// Build API-compatible agent list from this crate's local metadata.
 pub fn get_agents() -> Vec<AgentInfo> {
     use std::collections::HashMap;
 

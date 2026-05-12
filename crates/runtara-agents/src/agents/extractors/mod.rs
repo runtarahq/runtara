@@ -6,14 +6,14 @@
 //! from raw connection parameters. Each integration type has its own extractor
 //! that validates and transforms connection parameters into `HttpConnectionConfig`.
 //!
-//! Extractors are registered using the `inventory` crate for automatic discovery.
+//! Extractors are registered in a small static list for deterministic discovery.
 
 use serde_json::Value;
 use std::collections::HashMap;
 
-mod http_api_key;
-mod http_bearer;
-mod sftp;
+pub(crate) mod http_api_key;
+pub(crate) mod http_bearer;
+pub(crate) mod sftp;
 
 #[cfg(test)]
 mod tests;
@@ -48,35 +48,44 @@ pub trait HttpConnectionExtractor: Send + Sync {
     fn extract(&self, params: &Value) -> Result<HttpConnectionConfig, String>;
 }
 
-// Collect all extractors via inventory (skipped on WASM targets)
-#[cfg(not(target_family = "wasm"))]
-inventory::collect!(&'static dyn HttpConnectionExtractor);
+static HTTP_EXTRACTORS: &[&dyn HttpConnectionExtractor] = &[
+    &HttpBearerExtractor,
+    &HttpApiKeyExtractor,
+    #[cfg(feature = "integrations")]
+    &crate::integrations::connection_types::ShopifyExtractor,
+    #[cfg(feature = "integrations")]
+    &crate::integrations::connection_types::ShopifyClientCredentialsExtractor,
+    #[cfg(feature = "integrations")]
+    &crate::integrations::connection_types::OpenAiExtractor,
+    #[cfg(feature = "integrations")]
+    &crate::integrations::connection_types::MicrosoftEntraClientCredentialsExtractor,
+    #[cfg(feature = "integrations")]
+    &crate::integrations::connection_types::MailgunExtractor,
+    #[cfg(feature = "integrations")]
+    &crate::integrations::connection_types::HubSpotExtractor,
+    #[cfg(feature = "integrations")]
+    &crate::integrations::connection_types::HubSpotAccessTokenExtractor,
+    #[cfg(feature = "integrations")]
+    &crate::integrations::connection_types::StripeExtractor,
+];
 
 /// Returns all integration_ids that have a registered `HttpConnectionExtractor`.
-#[cfg(not(target_family = "wasm"))]
 pub fn get_http_extractor_ids() -> Vec<&'static str> {
-    inventory::iter::<&'static dyn HttpConnectionExtractor>
-        .into_iter()
-        .map(|e| e.integration_id())
+    HTTP_EXTRACTORS
+        .iter()
+        .map(|extractor| extractor.integration_id())
         .collect()
-}
-
-/// Returns all integration_ids (empty on WASM).
-#[cfg(target_family = "wasm")]
-pub fn get_http_extractor_ids() -> Vec<&'static str> {
-    vec![]
 }
 
 /// Extract HTTP connection config from a raw connection
 ///
 /// Looks up the appropriate extractor based on `integration_id` and applies it.
-#[cfg(not(target_family = "wasm"))]
 pub fn extract_http_config(
     integration_id: &str,
     parameters: &Value,
     rate_limit_config: Option<Value>,
 ) -> Result<HttpConnectionConfig, String> {
-    for extractor in inventory::iter::<&'static dyn HttpConnectionExtractor> {
+    for extractor in HTTP_EXTRACTORS {
         if extractor.integration_id() == integration_id {
             let mut config = extractor.extract(parameters)?;
             config.rate_limit_config = rate_limit_config;
@@ -86,21 +95,6 @@ pub fn extract_http_config(
     Err(format!(
         "No extractor found for integration_id: '{}'. Available extractors: {:?}",
         integration_id,
-        inventory::iter::<&'static dyn HttpConnectionExtractor>()
-            .map(|e| e.integration_id())
-            .collect::<Vec<_>>()
-    ))
-}
-
-/// Extract HTTP connection config (not available on WASM).
-#[cfg(target_family = "wasm")]
-pub fn extract_http_config(
-    integration_id: &str,
-    _parameters: &Value,
-    _rate_limit_config: Option<Value>,
-) -> Result<HttpConnectionConfig, String> {
-    Err(format!(
-        "inventory not available in WASM: extract_http_config for '{}'",
-        integration_id
+        get_http_extractor_ids()
     ))
 }

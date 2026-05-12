@@ -32,7 +32,7 @@ pub mod spec;
 // DSL flat-map schema → JSON Schema conversion
 pub mod schema_convert;
 
-// Step type metadata registration (auto-registers step types with inventory)
+// Step type metadata registry.
 mod step_registration;
 
 // ============================================================================
@@ -68,7 +68,7 @@ pub struct StepTypeInfo {
     pub description: String,
 }
 
-/// Get metadata for all step types (collected via inventory from step_registration.rs)
+/// Get metadata for all step types.
 ///
 /// This function returns step type metadata that is automatically derived from
 /// the actual step struct definitions, ensuring the DSL schema is always in sync
@@ -81,7 +81,7 @@ pub fn get_step_types() -> Vec<StepTypeInfo> {
         description: "Entry point - receives workflow inputs".to_string(),
     }];
 
-    // Collect step types registered via inventory
+    // Collect statically registered step types.
     for meta in agent_meta::get_all_step_types() {
         steps.push(StepTypeInfo {
             step_type: meta.id.to_string(),
@@ -415,7 +415,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_get_step_types_from_inventory() {
+    fn test_get_step_types_from_static_registry() {
         let step_types = get_step_types();
 
         // Should have at least 11 step types (Start + 10 registered)

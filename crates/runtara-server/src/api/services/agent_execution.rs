@@ -5,8 +5,7 @@
 //! this service via HTTP instead of running agents in-process.
 //!
 //! Unlike agent_testing (which uses the OCI dispatcher container), this service
-//! calls `execute_capability` directly — the agent inventory is already linked
-//! into the runtara-server binary.
+//! calls `execute_capability` directly through the statically linked registry.
 
 use serde_json::Value;
 use std::sync::Arc;
@@ -89,9 +88,9 @@ impl AgentExecutionService {
 
         let start = Instant::now();
 
-        // Execute directly via the inventory-based registry.
-        // All agents are linked into runtara-server at compile time.
-        let result = runtara_dsl::agent_meta::execute_capability(agent_id, capability_id, inputs);
+        // Execute directly via the static registry. All agents are linked into
+        // runtara-server at compile time.
+        let result = runtara_agents::registry::execute_capability(agent_id, capability_id, inputs);
 
         let execution_time_ms = start.elapsed().as_secs_f64() * 1000.0;
 

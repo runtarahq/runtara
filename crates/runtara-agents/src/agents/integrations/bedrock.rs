@@ -129,7 +129,7 @@ pub struct TextCompletionOutput {
     module = "bedrock",
     display_name = "Text Completion (Bedrock)",
     description = "Generate text completion using AWS Bedrock models (Claude, Titan)",
-    // Register the bedrock module with inventory
+    // Define the bedrock module metadata
     module_display_name = "AWS Bedrock",
     module_description = "AWS Bedrock LLM integration for text completion, image generation, structured output, and vision capabilities using Claude and Titan models",
     module_has_side_effects = true,

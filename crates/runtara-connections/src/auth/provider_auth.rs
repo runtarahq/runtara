@@ -1,6 +1,6 @@
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use reqwest::Client;
-use runtara_dsl::agent_meta::find_connection_type;
+use runtara_agents::registry::find_connection_type;
 use serde_json::Value;
 use std::collections::HashMap;
 

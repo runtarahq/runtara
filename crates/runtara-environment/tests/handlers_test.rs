@@ -900,10 +900,8 @@ async fn test_list_agents_returns_valid_json() {
         agents
     );
 
-    // Note: In the test environment, runtara-workflow-stdlib is not linked,
-    // so agents are not registered via the inventory crate. The list may be empty.
-    // In production, when the test harness binary runs (which links runtara-workflow-stdlib),
-    // agents will be available.
+    // Note: In reduced test builds the full agent feature set may not be linked,
+    // so the list may be smaller than production.
 
     // If agents are present (e.g., in an integration test with full dependencies),
     // verify they have required fields

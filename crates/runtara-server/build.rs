@@ -183,7 +183,7 @@ fn generate_specs(out_dir: &Path) {
 
     // Generate Agent OpenAPI spec
     println!("cargo:warning=   → Generating Agent OpenAPI spec...");
-    let agents = runtara_dsl::agent_meta::get_agents();
+    let agents = runtara_agents::registry::get_agents();
     let agents_json: Vec<serde_json::Value> = agents
         .iter()
         .map(|a| serde_json::to_value(a).expect("Failed to serialize agent"))

@@ -5,8 +5,8 @@
 //! - OpenAI (openai_api_key)
 //! - AWS Bedrock (aws_credentials)
 //!
-//! These connection types are registered via the inventory crate and will be
-//! returned by the `/api/runtime/connections/types` endpoint.
+//! These connection types are included in the static agent registry and returned
+//! by the `/api/runtime/connections/types` endpoint.
 
 use crate::extractors::{HttpConnectionConfig, HttpConnectionExtractor};
 use runtara_agent_macro::ConnectionParams;
@@ -85,11 +85,6 @@ impl HttpConnectionExtractor for ShopifyExtractor {
             rate_limit_config: None,
         })
     }
-}
-
-#[cfg(not(target_family = "wasm"))]
-inventory::submit! {
-    &ShopifyExtractor as &'static dyn HttpConnectionExtractor
 }
 
 // ============================================================================
@@ -246,11 +241,6 @@ impl HttpConnectionExtractor for ShopifyClientCredentialsExtractor {
     }
 }
 
-#[cfg(not(target_family = "wasm"))]
-inventory::submit! {
-    &ShopifyClientCredentialsExtractor as &'static dyn HttpConnectionExtractor
-}
-
 // ============================================================================
 // OpenAI Connection Type
 // ============================================================================
@@ -324,11 +314,6 @@ impl HttpConnectionExtractor for OpenAiExtractor {
             rate_limit_config: None,
         })
     }
-}
-
-#[cfg(not(target_family = "wasm"))]
-inventory::submit! {
-    &OpenAiExtractor as &'static dyn HttpConnectionExtractor
 }
 
 // ============================================================================
@@ -598,11 +583,6 @@ impl HttpConnectionExtractor for MicrosoftEntraClientCredentialsExtractor {
     }
 }
 
-#[cfg(not(target_family = "wasm"))]
-inventory::submit! {
-    &MicrosoftEntraClientCredentialsExtractor as &'static dyn HttpConnectionExtractor
-}
-
 // ============================================================================
 // Mailgun Connection Type
 // ============================================================================
@@ -692,11 +672,6 @@ impl HttpConnectionExtractor for MailgunExtractor {
     }
 }
 
-#[cfg(not(target_family = "wasm"))]
-inventory::submit! {
-    &MailgunExtractor as &'static dyn HttpConnectionExtractor
-}
-
 // ============================================================================
 // HubSpot Connection Type (OAuth2 Authorization Code)
 // ============================================================================
@@ -781,11 +756,6 @@ impl HttpConnectionExtractor for HubSpotExtractor {
     }
 }
 
-#[cfg(not(target_family = "wasm"))]
-inventory::submit! {
-    &HubSpotExtractor as &'static dyn HttpConnectionExtractor
-}
-
 // ============================================================================
 // HubSpot Connection Type (Static Access Token — Developer Projects)
 // ============================================================================
@@ -839,11 +809,6 @@ impl HttpConnectionExtractor for HubSpotAccessTokenExtractor {
             rate_limit_config: None,
         })
     }
-}
-
-#[cfg(not(target_family = "wasm"))]
-inventory::submit! {
-    &HubSpotAccessTokenExtractor as &'static dyn HttpConnectionExtractor
 }
 
 // ============================================================================
@@ -983,9 +948,4 @@ impl HttpConnectionExtractor for StripeExtractor {
             rate_limit_config: None,
         })
     }
-}
-
-#[cfg(not(target_family = "wasm"))]
-inventory::submit! {
-    &StripeExtractor as &'static dyn HttpConnectionExtractor
 }
