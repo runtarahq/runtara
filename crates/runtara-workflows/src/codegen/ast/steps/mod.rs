@@ -752,57 +752,108 @@ pub fn emit_child_workflow_span_end() -> TokenStream {
     quote! {}
 }
 
-/// Build execution order using BFS traversal from entry point.
-/// Stops at Conditional steps (branches handled separately).
+fn is_normal_flow_edge(edge: &ExecutionPlanEdge) -> bool {
+    let label = edge.label.as_deref().unwrap_or("");
+    label.is_empty() || label == "next"
+}
+
+/// Build execution order from the entry point.
+///
+/// The generated workflow executes steps in this order, so fan-in nodes must
+/// appear only after all reachable normal-flow predecessors have appeared.
+/// Branching control-flow steps emit their own branch bodies, so traversal stops
+/// at those steps just as before.
 pub fn build_execution_order(graph: &ExecutionGraph) -> Vec<String> {
-    use std::collections::{HashSet, VecDeque};
+    use std::collections::{HashMap, HashSet, VecDeque};
 
-    let mut order = Vec::new();
-    let mut visited = HashSet::new();
-    let mut queue = VecDeque::new();
+    let mut reachable = HashSet::new();
+    let mut discovery_order = Vec::new();
+    let mut discovery_queue = VecDeque::new();
 
-    queue.push_back(graph.entry_point.clone());
+    reachable.insert(graph.entry_point.clone());
+    discovery_order.push(graph.entry_point.clone());
+    discovery_queue.push_back(graph.entry_point.clone());
 
-    while let Some(step_id) = queue.pop_front() {
-        if visited.contains(&step_id) {
-            continue;
-        }
-        visited.insert(step_id.clone());
-        order.push(step_id.clone());
-
-        // Get the step to check its type
+    while let Some(step_id) = discovery_queue.pop_front() {
         let step = match graph.steps.get(&step_id) {
             Some(s) => s,
             None => continue,
         };
 
-        // Stop BFS at branching steps (Conditional, routing Switch) -
-        // branches handled by the step emitter itself
+        // Stop at branching steps (Conditional, routing Switch) - branches are
+        // handled by the step emitter itself.
         if branching::is_branching_step(step) {
             continue;
         }
 
-        // For AI Agent steps, only follow the default (unlabeled) edge.
-        // Labeled edges are tool branches handled internally by the AI agent loop.
-        let is_ai_agent = matches!(step, Step::AiAgent(_));
-
-        // Find next steps from execution plan
         for edge in &graph.execution_plan {
-            if edge.from_step == step_id {
-                let label = edge.label.as_deref().unwrap_or("");
-                // Skip true/false labels (Conditional branches)
-                if label == "true" || label == "false" {
-                    continue;
-                }
-                // For AI Agent steps, skip labeled edges (tool branches).
-                // "next" is a reserved label meaning "continue to next step" — follow it.
-                if is_ai_agent && !label.is_empty() && label != "next" {
-                    continue;
-                }
-                if !visited.contains(&edge.to_step) {
-                    queue.push_back(edge.to_step.clone());
+            if edge.from_step == step_id
+                && is_normal_flow_edge(edge)
+                && reachable.insert(edge.to_step.clone())
+            {
+                discovery_order.push(edge.to_step.clone());
+                discovery_queue.push_back(edge.to_step.clone());
+            }
+        }
+    }
+
+    let mut indegree: HashMap<String, usize> = discovery_order
+        .iter()
+        .map(|step_id| (step_id.clone(), 0))
+        .collect();
+
+    for edge in &graph.execution_plan {
+        if is_normal_flow_edge(edge)
+            && reachable.contains(&edge.from_step)
+            && reachable.contains(&edge.to_step)
+        {
+            *indegree.entry(edge.to_step.clone()).or_insert(0) += 1;
+        }
+    }
+
+    let mut order = Vec::new();
+    let mut ready = VecDeque::new();
+    let mut queued = HashSet::new();
+
+    if reachable.contains(&graph.entry_point) {
+        ready.push_back(graph.entry_point.clone());
+        queued.insert(graph.entry_point.clone());
+    }
+
+    while let Some(step_id) = ready.pop_front() {
+        order.push(step_id.clone());
+
+        let step = match graph.steps.get(&step_id) {
+            Some(s) => s,
+            None => continue,
+        };
+
+        if branching::is_branching_step(step) {
+            continue;
+        }
+
+        for edge in &graph.execution_plan {
+            if edge.from_step != step_id
+                || !is_normal_flow_edge(edge)
+                || !reachable.contains(&edge.to_step)
+            {
+                continue;
+            }
+
+            if let Some(count) = indegree.get_mut(&edge.to_step) {
+                *count = count.saturating_sub(1);
+                if *count == 0 && queued.insert(edge.to_step.clone()) {
+                    ready.push_back(edge.to_step.clone());
                 }
             }
+        }
+    }
+
+    // Validation should reject normal-flow cycles, but keep code generation
+    // deterministic if a caller reaches this point with one.
+    for step_id in discovery_order {
+        if !queued.contains(&step_id) {
+            order.push(step_id);
         }
     }
 
@@ -1249,6 +1300,91 @@ mod tests {
             edges: None,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn test_build_execution_order_waits_for_all_fan_in_predecessors() {
+        use runtara_dsl::{ExecutionGraph, ExecutionPlanEdge, FinishStep, LogLevel, LogStep, Step};
+        use std::collections::HashMap;
+
+        fn log_step(id: &str) -> Step {
+            Step::Log(LogStep {
+                id: id.to_string(),
+                name: Some(id.to_string()),
+                level: LogLevel::Info,
+                message: id.to_string(),
+                context: None,
+                breakpoint: None,
+            })
+        }
+
+        fn edge(from_step: &str, to_step: &str) -> ExecutionPlanEdge {
+            ExecutionPlanEdge {
+                from_step: from_step.to_string(),
+                to_step: to_step.to_string(),
+                label: None,
+                condition: None,
+                priority: None,
+            }
+        }
+
+        let mut steps = HashMap::new();
+        for step_id in [
+            "start",
+            "branch_a",
+            "branch_b1",
+            "branch_b2",
+            "branch_c1",
+            "branch_c2",
+            "branch_c3",
+            "merge",
+        ] {
+            steps.insert(step_id.to_string(), log_step(step_id));
+        }
+        steps.insert(
+            "finish".to_string(),
+            Step::Finish(FinishStep {
+                id: "finish".to_string(),
+                name: Some("finish".to_string()),
+                input_mapping: None,
+                breakpoint: None,
+            }),
+        );
+
+        let graph = ExecutionGraph {
+            entry_point: "start".to_string(),
+            steps,
+            execution_plan: vec![
+                edge("start", "branch_a"),
+                edge("start", "branch_b1"),
+                edge("start", "branch_c1"),
+                edge("branch_b1", "branch_b2"),
+                edge("branch_c1", "branch_c2"),
+                edge("branch_c2", "branch_c3"),
+                edge("branch_a", "merge"),
+                edge("branch_b2", "merge"),
+                edge("branch_c3", "merge"),
+                edge("merge", "finish"),
+            ],
+            ..Default::default()
+        };
+
+        let order = build_execution_order(&graph);
+
+        assert_eq!(
+            order,
+            vec![
+                "start",
+                "branch_a",
+                "branch_b1",
+                "branch_c1",
+                "branch_b2",
+                "branch_c2",
+                "branch_c3",
+                "merge",
+                "finish"
+            ]
+        );
     }
 
     #[test]

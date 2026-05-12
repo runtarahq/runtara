@@ -217,6 +217,13 @@ impl ObjectStore {
         let default_index_sql = ddl.generate_default_index(&request.table_name);
         sqlx::query(&default_index_sql).execute(&mut *tx).await?;
 
+        // Create partial unique indexes for column-level uniqueness. Inline
+        // UNIQUE constraints would include tombstoned rows.
+        for unique_sql in ddl.generate_unique_column_indexes(&request.table_name, &request.columns)
+        {
+            sqlx::query(&unique_sql).execute(&mut *tx).await?;
+        }
+
         // Create trigram (`gin_trgm_ops`) indexes for any column that wants
         // them. Empty if no column has `text_index = trigram`.
         for trigram_sql in ddl.generate_trigram_indexes(&request.table_name, &request.columns) {
@@ -1315,6 +1322,7 @@ impl ObjectStore {
             .iter()
             .map(|c| quote_identifier(c))
             .collect();
+        let conflict_target = live_conflict_target(&conflict_cols);
         let conflict_set: std::collections::HashSet<&str> =
             conflict_columns.iter().map(String::as_str).collect();
 
@@ -1377,19 +1385,19 @@ impl ObjectStore {
                 let upsert_sql = if update_sets.is_empty() {
                     // Nothing to update for this group — skip conflicts via DO NOTHING.
                     format!(
-                        "INSERT INTO {} ({}) VALUES {} ON CONFLICT ({}) DO NOTHING",
+                        "INSERT INTO {} ({}) VALUES {} ON CONFLICT {} DO NOTHING",
                         quote_identifier(&schema.table_name),
                         column_names.join(", "),
                         placeholders.join(", "),
-                        conflict_cols.join(", ")
+                        conflict_target
                     )
                 } else {
                     format!(
-                        "INSERT INTO {} ({}) VALUES {} ON CONFLICT ({}) DO UPDATE SET {}",
+                        "INSERT INTO {} ({}) VALUES {} ON CONFLICT {} DO UPDATE SET {}",
                         quote_identifier(&schema.table_name),
                         column_names.join(", "),
                         placeholders.join(", "),
-                        conflict_cols.join(", "),
+                        conflict_target,
                         update_sets.join(", ")
                     )
                 };
@@ -1544,7 +1552,7 @@ impl ObjectStore {
                     .iter()
                     .map(|c| quote_identifier(c))
                     .collect();
-                let clause = format!(" ON CONFLICT ({}) DO NOTHING", cols.join(", "));
+                let clause = format!(" ON CONFLICT {} DO NOTHING", live_conflict_target(&cols));
                 vec![(clause, validated)]
             }
             ConflictMode::Upsert { conflict_columns } => {
@@ -1552,6 +1560,7 @@ impl ObjectStore {
                     .iter()
                     .map(|c| quote_identifier(c))
                     .collect();
+                let conflict_target = live_conflict_target(&cols);
                 let conflict_set: std::collections::HashSet<&str> =
                     conflict_columns.iter().map(String::as_str).collect();
                 let mut row_groups: std::collections::HashMap<Vec<String>, Vec<ValidatedRow>> =
@@ -1576,11 +1585,11 @@ impl ObjectStore {
                         }
                         let clause = if update_sets.is_empty() {
                             // Group has nothing to update — skip conflicts.
-                            format!(" ON CONFLICT ({}) DO NOTHING", cols.join(", "))
+                            format!(" ON CONFLICT {} DO NOTHING", conflict_target)
                         } else {
                             format!(
-                                " ON CONFLICT ({}) DO UPDATE SET {}",
-                                cols.join(", "),
+                                " ON CONFLICT {} DO UPDATE SET {}",
+                                conflict_target,
                                 update_sets.join(", ")
                             )
                         };
@@ -2133,12 +2142,19 @@ impl ObjectStore {
         }
 
         // Pull the score-expression column out of the row, if requested.
-        // pg_trgm `similarity()` returns `real`; sqlx maps it to `f32`.
+        // pg_trgm `similarity()` / `ts_rank()` return `real` (`f32`), while
+        // pgvector distance operators return `double precision` (`f64`).
         let computed = score_alias.and_then(|alias| {
             row.try_get::<Option<f32>, _>(alias)
                 .ok()
                 .flatten()
                 .and_then(|f| serde_json::Number::from_f64(f as f64))
+                .or_else(|| {
+                    row.try_get::<Option<f64>, _>(alias)
+                        .ok()
+                        .flatten()
+                        .and_then(serde_json::Number::from_f64)
+                })
                 .map(|num| {
                     let mut map = serde_json::Map::new();
                     map.insert(alias.to_string(), serde_json::Value::Number(num));
@@ -2426,6 +2442,10 @@ fn update_signature(
         .filter(|col| properties_obj.contains_key(&col.name))
         .map(|col| col.name.clone())
         .collect()
+}
+
+fn live_conflict_target(quoted_columns: &[String]) -> String {
+    format!("({}) WHERE deleted = FALSE", quoted_columns.join(", "))
 }
 
 /// Validate a single instance payload for an INSERT operation.

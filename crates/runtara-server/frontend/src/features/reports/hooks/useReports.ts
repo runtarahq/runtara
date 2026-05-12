@@ -9,8 +9,10 @@ import {
   getReportFilterOptions,
   getReportLookupOptions,
   listReports,
+  previewReport,
   queryReportDataset,
   renderReport,
+  validateReport,
   updateReport,
 } from '../queries';
 import {
@@ -24,10 +26,13 @@ import {
   ReportFilterOptionsResponse,
   ReportLookupOptionsRequest,
   ReportLookupOptionsResponse,
+  ReportPreviewRequest,
   ReportRenderRequest,
   ReportRenderResponse,
   ReportSummary,
   UpdateReportRequest,
+  ValidateReportRequest,
+  ValidateReportResponse,
 } from '../types';
 
 export function useReports() {
@@ -54,6 +59,17 @@ export function useReportRender(
     queryKey: queryKeys.reports.render(reportId ?? '', request ?? {}),
     queryFn: (token, context) => renderReport(token, context),
     enabled: Boolean(reportId && request && enabled),
+  });
+}
+
+export function useReportPreview(
+  request: ReportPreviewRequest | undefined,
+  enabled: boolean
+) {
+  return useCustomQuery<ReportRenderResponse | null>({
+    queryKey: queryKeys.reports.preview(request ?? {}),
+    queryFn: (token, context) => previewReport(token, context),
+    enabled: Boolean(request && enabled),
   });
 }
 
@@ -141,6 +157,12 @@ export function useCreateReport() {
       queryClient.invalidateQueries({ queryKey: queryKeys.reports.lists() });
       queryClient.setQueryData(queryKeys.reports.byId(report.id), report);
     },
+  });
+}
+
+export function useValidateReport() {
+  return useCustomMutation<ValidateReportResponse, ValidateReportRequest>({
+    mutationFn: (token, request) => validateReport(token, request),
   });
 }
 

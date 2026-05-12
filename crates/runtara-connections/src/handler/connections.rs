@@ -592,9 +592,9 @@ pub async fn get_connection_for_runtime_handler(
         state.db_pool.clone(),
         state.cipher.clone(),
     ));
-    let rate_limit_service = Arc::new(RateLimitService::with_redis_url_and_db_pool(
+    let rate_limit_service = Arc::new(RateLimitService::with_redis_manager_and_db_pool(
         repository.clone(),
-        state.redis_url.clone(),
+        state.redis_manager.clone(),
         state.db_pool,
     ));
     let service = ConnectionService::with_rate_limit_service(repository, rate_limit_service);

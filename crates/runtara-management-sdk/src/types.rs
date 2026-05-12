@@ -638,6 +638,9 @@ pub struct ImageSummary {
     pub runner_type: RunnerType,
     /// When the image was created.
     pub created_at: DateTime<Utc>,
+    /// Optional metadata stored with the image.
+    #[serde(default)]
+    pub metadata: Option<serde_json::Value>,
 }
 
 /// Options for listing images.

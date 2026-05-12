@@ -518,6 +518,86 @@ impl InstanceService {
             })
     }
 
+    /// Execute a typed positional SQL query against the tenant's object-model database.
+    pub async fn query_sql(
+        &self,
+        tenant_id: &str,
+        request: SqlQueryRequest,
+        connection_id: Option<&str>,
+    ) -> Result<Vec<serde_json::Value>, ServiceError> {
+        let store = get_store(&self.manager, Some(&self.facade), connection_id, tenant_id).await?;
+        let params: Vec<runtara_object_store::SqlParam> =
+            request.params.into_iter().map(Into::into).collect();
+        let result_schema: Vec<runtara_object_store::SqlResultColumn> =
+            request.result_schema.into_iter().map(Into::into).collect();
+
+        let rows = store
+            .query(&request.sql, &params, &result_schema)
+            .await
+            .map_err(map_raw_sql_error)?;
+
+        Ok(sql_rows_to_values(rows))
+    }
+
+    /// Execute a typed positional SQL query that must return exactly one row.
+    pub async fn query_sql_one(
+        &self,
+        tenant_id: &str,
+        request: SqlQueryRequest,
+        connection_id: Option<&str>,
+    ) -> Result<serde_json::Value, ServiceError> {
+        let store = get_store(&self.manager, Some(&self.facade), connection_id, tenant_id).await?;
+        let params: Vec<runtara_object_store::SqlParam> =
+            request.params.into_iter().map(Into::into).collect();
+        let result_schema: Vec<runtara_object_store::SqlResultColumn> =
+            request.result_schema.into_iter().map(Into::into).collect();
+
+        let row = store
+            .query_one(&request.sql, &params, &result_schema)
+            .await
+            .map_err(map_raw_sql_error)?;
+
+        Ok(serde_json::Value::Object(row))
+    }
+
+    /// Execute a positional SQL query and return raw decoded rows.
+    pub async fn query_sql_raw(
+        &self,
+        tenant_id: &str,
+        request: SqlRawQueryRequest,
+        connection_id: Option<&str>,
+    ) -> Result<Vec<serde_json::Value>, ServiceError> {
+        let store = get_store(&self.manager, Some(&self.facade), connection_id, tenant_id).await?;
+        let params: Vec<runtara_object_store::SqlParam> =
+            request.params.into_iter().map(Into::into).collect();
+
+        let rows = store
+            .query_raw(&request.sql, &params)
+            .await
+            .map_err(map_raw_sql_error)?;
+
+        Ok(sql_rows_to_values(rows))
+    }
+
+    /// Execute a positional SQL command and return rows affected.
+    pub async fn execute_sql(
+        &self,
+        tenant_id: &str,
+        request: SqlExecuteRequest,
+        connection_id: Option<&str>,
+    ) -> Result<u64, ServiceError> {
+        let store = get_store(&self.manager, Some(&self.facade), connection_id, tenant_id).await?;
+        let params: Vec<runtara_object_store::SqlParam> =
+            request.params.into_iter().map(Into::into).collect();
+
+        let result = store
+            .execute(&request.sql, &params)
+            .await
+            .map_err(map_raw_sql_error)?;
+
+        Ok(result.rows_affected)
+    }
+
     /// Get a single instance by ID
     pub async fn get_instance_by_id(
         &self,
@@ -745,6 +825,28 @@ impl InstanceService {
 // ============================================================================
 // Service Errors
 // ============================================================================
+
+fn sql_rows_to_values(rows: runtara_object_store::SqlRows) -> Vec<serde_json::Value> {
+    rows.rows
+        .into_iter()
+        .map(serde_json::Value::Object)
+        .collect()
+}
+
+fn map_raw_sql_error(error: runtara_object_store::ObjectStoreError) -> ServiceError {
+    match error {
+        runtara_object_store::ObjectStoreError::Validation(msg)
+        | runtara_object_store::ObjectStoreError::InvalidCondition(msg) => {
+            ServiceError::ValidationError(msg)
+        }
+        runtara_object_store::ObjectStoreError::SchemaNotFound(msg)
+        | runtara_object_store::ObjectStoreError::InstanceNotFound(msg) => {
+            ServiceError::NotFound(msg)
+        }
+        runtara_object_store::ObjectStoreError::Conflict(msg) => ServiceError::Conflict(msg),
+        other => ServiceError::DatabaseError(other.to_string()),
+    }
+}
 
 /// Normalize the two supported bulk-create shapes (object form vs columnar
 /// form) into a single `Vec<Value>` of record objects that the store accepts.

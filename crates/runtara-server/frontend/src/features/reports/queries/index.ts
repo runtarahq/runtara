@@ -11,6 +11,7 @@ import {
   ReportFilterOptionsResponse,
   ReportLookupOptionsRequest,
   ReportLookupOptionsResponse,
+  ReportPreviewRequest,
   ReportRenderRequest,
   ReportRenderResponse,
   ReportWorkflowInstanceStatus,
@@ -18,6 +19,8 @@ import {
   RunReportWorkflowResponse,
   ReportSummary,
   UpdateReportRequest,
+  ValidateReportRequest,
+  ValidateReportResponse,
 } from '../types';
 
 export async function listReports(token: string): Promise<ReportSummary[]> {
@@ -76,6 +79,36 @@ export async function deleteReport(
     `/api/runtime/reports/${encodeURIComponent(reportId)}`,
     createAuthHeaders(token)
   );
+}
+
+export async function validateReport(
+  token: string,
+  request: ValidateReportRequest
+): Promise<ValidateReportResponse> {
+  const result = await RuntimeREST.instance.post(
+    '/api/runtime/reports/validate',
+    request,
+    createAuthHeaders(token)
+  );
+  return result.data;
+}
+
+export async function previewReport(
+  token: string,
+  context: { queryKey: readonly unknown[] }
+): Promise<ReportRenderResponse | null> {
+  const request = context.queryKey[2] as ReportPreviewRequest | undefined;
+
+  if (!request) {
+    return null;
+  }
+
+  const result = await RuntimeREST.instance.post(
+    '/api/runtime/reports/preview',
+    request,
+    createAuthHeaders(token)
+  );
+  return result.data;
 }
 
 export async function renderReport(

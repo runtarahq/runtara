@@ -1,6 +1,7 @@
 use chrono::{DateTime, Utc};
 use serde_json::Value;
-use sqlx::PgPool;
+use sha2::Digest;
+use sqlx::{PgPool, Row};
 
 use crate::api::dto::workflows::{Note, WorkflowDto, WorkflowVersionInfoDto};
 use crate::types::MemoryTier;
@@ -14,6 +15,21 @@ type WorkflowVersionRow = (
     Option<i32>,           // current_version
     Option<i32>,           // latest_version
 );
+
+pub fn workflow_definition_checksum(definition: &Value) -> String {
+    let bytes = serde_json::to_vec(definition).unwrap_or_default();
+    hex::encode(sha2::Sha256::digest(&bytes))
+}
+
+pub struct CompilationSuccessRecord<'a> {
+    pub tenant_id: &'a str,
+    pub workflow_id: &'a str,
+    pub version: i32,
+    pub build_dir: &'a std::path::Path,
+    pub binary_size: i32,
+    pub binary_checksum: &'a str,
+    pub source_checksum: &'a str,
+}
 
 /// Repository for workflow CRUD operations
 #[allow(dead_code)]
@@ -920,18 +936,13 @@ impl WorkflowRepository {
     /// The binary itself is stored on filesystem, not in the database.
     pub async fn record_compilation_success(
         &self,
-        tenant_id: &str,
-        workflow_id: &str,
-        version: i32,
-        build_dir: &std::path::Path,
-        binary_size: i32,
-        binary_checksum: &str,
+        record: CompilationSuccessRecord<'_>,
     ) -> Result<(), sqlx::Error> {
-        sqlx::query!(
+        sqlx::query(
             r#"
             INSERT INTO workflow_compilations
-                (tenant_id, workflow_id, version, compiled_at, translated_path, compilation_status, wasm_size, wasm_checksum, runtara_version)
-            VALUES ($1, $2, $3, NOW(), $4, 'success', $5, $6, $7)
+                (tenant_id, workflow_id, version, compiled_at, translated_path, compilation_status, wasm_size, wasm_checksum, runtara_version, source_checksum)
+            VALUES ($1, $2, $3, NOW(), $4, 'success', $5, $6, $7, $8)
             ON CONFLICT (tenant_id, workflow_id, version)
             DO UPDATE SET
                 compiled_at = NOW(),
@@ -940,16 +951,18 @@ impl WorkflowRepository {
                 error_message = NULL,
                 wasm_size = $5,
                 wasm_checksum = $6,
-                runtara_version = $7
+                runtara_version = $7,
+                source_checksum = $8
             "#,
-            tenant_id,
-            workflow_id,
-            version,
-            build_dir.to_string_lossy().to_string(),
-            binary_size,
-            binary_checksum,
-            env!("BUILD_VERSION")
         )
+        .bind(record.tenant_id)
+        .bind(record.workflow_id)
+        .bind(record.version)
+        .bind(record.build_dir.to_string_lossy().to_string())
+        .bind(record.binary_size)
+        .bind(record.binary_checksum)
+        .bind(env!("BUILD_VERSION"))
+        .bind(record.source_checksum)
         .execute(&self.pool)
         .await?;
 
@@ -967,25 +980,28 @@ impl WorkflowRepository {
         workflow_id: &str,
         version: i32,
         image_id: &str,
+        source_checksum: Option<&str>,
     ) -> Result<(), sqlx::Error> {
-        sqlx::query!(
+        sqlx::query(
             r#"
             INSERT INTO workflow_compilations
-                (tenant_id, workflow_id, version, compiled_at, translated_path, compilation_status, registered_image_id, runtara_version)
-            VALUES ($1, $2, $3, NOW(), '', 'success', $4, $5)
+                (tenant_id, workflow_id, version, compiled_at, translated_path, compilation_status, registered_image_id, runtara_version, source_checksum)
+            VALUES ($1, $2, $3, NOW(), '', 'success', $4, $5, $6)
             ON CONFLICT (tenant_id, workflow_id, version)
             DO UPDATE SET
                 registered_image_id = $4,
                 compilation_status = 'success',
                 error_message = NULL,
-                runtara_version = $5
+                runtara_version = $5,
+                source_checksum = COALESCE($6, workflow_compilations.source_checksum)
             "#,
-            tenant_id,
-            workflow_id,
-            version,
-            image_id,
-            env!("BUILD_VERSION")
         )
+        .bind(tenant_id)
+        .bind(workflow_id)
+        .bind(version)
+        .bind(image_id)
+        .bind(env!("BUILD_VERSION"))
+        .bind(source_checksum)
         .execute(&self.pool)
         .await?;
 
@@ -1018,6 +1034,48 @@ impl WorkflowRepository {
         .await?;
 
         Ok(result.and_then(|r| r.registered_image_id))
+    }
+
+    pub async fn get_fresh_registered_image_id(
+        &self,
+        tenant_id: &str,
+        workflow_id: &str,
+        version: i32,
+    ) -> Result<Option<String>, sqlx::Error> {
+        let row = sqlx::query(
+            r#"
+            SELECT sc.registered_image_id, sc.source_checksum, wd.definition
+            FROM workflow_definitions wd
+            LEFT JOIN workflow_compilations sc
+              ON sc.tenant_id = wd.tenant_id
+             AND sc.workflow_id = wd.workflow_id
+             AND sc.version = wd.version
+             AND sc.compilation_status = 'success'
+            WHERE wd.tenant_id = $1
+              AND wd.workflow_id = $2
+              AND wd.version = $3
+              AND wd.deleted_at IS NULL
+            "#,
+        )
+        .bind(tenant_id)
+        .bind(workflow_id)
+        .bind(version)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        let Some(row) = row else {
+            return Ok(None);
+        };
+
+        let image_id: Option<String> = row.try_get("registered_image_id")?;
+        let stored_checksum: Option<String> = row.try_get("source_checksum")?;
+        let definition: Value = row.try_get("definition")?;
+        let current_checksum = workflow_definition_checksum(&definition);
+
+        Ok(match (image_id, stored_checksum) {
+            (Some(image_id), Some(stored)) if stored == current_checksum => Some(image_id),
+            _ => None,
+        })
     }
 
     /// Update workflow by creating a new version
@@ -1774,51 +1832,75 @@ impl WorkflowRepository {
         workflow_id: &str,
         version: i32,
     ) -> Result<CompilationStatus, sqlx::Error> {
-        let compilation_record = sqlx::query!(
+        let compilation_record = sqlx::query(
             r#"
-            SELECT compilation_status, translated_path, registered_image_id, error_message
-            FROM workflow_compilations
-            WHERE tenant_id = $1 AND workflow_id = $2 AND version = $3
+            SELECT sc.compilation_status,
+                   sc.translated_path,
+                   sc.registered_image_id,
+                   sc.error_message,
+                   sc.source_checksum,
+                   wd.definition
+            FROM workflow_definitions wd
+            LEFT JOIN workflow_compilations sc
+              ON sc.tenant_id = wd.tenant_id
+             AND sc.workflow_id = wd.workflow_id
+             AND sc.version = wd.version
+            WHERE wd.tenant_id = $1
+              AND wd.workflow_id = $2
+              AND wd.version = $3
+              AND wd.deleted_at IS NULL
             "#,
-            tenant_id,
-            workflow_id,
-            version
         )
+        .bind(tenant_id)
+        .bind(workflow_id)
+        .bind(version)
         .fetch_optional(&self.pool)
         .await?;
 
         match compilation_record {
-            Some(record)
-                if record.compilation_status == "success"
-                    && record.registered_image_id.is_some() =>
-            {
-                Ok(CompilationStatus::Ready {
-                    translated_path: record.translated_path,
-                    registered_image_id: record.registered_image_id.unwrap_or_default(),
-                })
-            }
-            Some(record) if record.compilation_status == "failed" => {
-                let error_msg = record
-                    .error_message
-                    .unwrap_or_else(|| "Unknown compilation error".to_string());
-                // Log at ERROR level so it's visible in logs
-                tracing::error!(
-                    tenant_id = %tenant_id,
-                    workflow_id = %workflow_id,
-                    version = version,
-                    compilation_error = %error_msg,
-                    "COMPILATION FAILED - deleting record for retry"
-                );
-                // Delete failed record so it can be retried
-                let _ = sqlx::query!(
-                    "DELETE FROM workflow_compilations WHERE tenant_id = $1 AND workflow_id = $2 AND version = $3",
-                    tenant_id,
-                    workflow_id,
-                    version
-                )
-                .execute(&self.pool)
-                .await;
-                Ok(CompilationStatus::Failed { error: error_msg })
+            Some(record) => {
+                let compilation_status: Option<String> = record.try_get("compilation_status")?;
+                let translated_path: Option<String> = record.try_get("translated_path")?;
+                let registered_image_id: Option<String> = record.try_get("registered_image_id")?;
+                let error_message: Option<String> = record.try_get("error_message")?;
+                let source_checksum: Option<String> = record.try_get("source_checksum")?;
+                let definition: Value = record.try_get("definition")?;
+                let current_checksum = workflow_definition_checksum(&definition);
+
+                if compilation_status.as_deref() == Some("success")
+                    && registered_image_id.is_some()
+                    && source_checksum.as_deref() == Some(current_checksum.as_str())
+                {
+                    return Ok(CompilationStatus::Ready {
+                        translated_path: translated_path.unwrap_or_default(),
+                        registered_image_id: registered_image_id.unwrap_or_default(),
+                    });
+                }
+
+                if compilation_status.as_deref() == Some("failed") {
+                    let error_msg =
+                        error_message.unwrap_or_else(|| "Unknown compilation error".to_string());
+                    // Log at ERROR level so it's visible in logs
+                    tracing::error!(
+                        tenant_id = %tenant_id,
+                        workflow_id = %workflow_id,
+                        version = version,
+                        compilation_error = %error_msg,
+                        "COMPILATION FAILED - deleting record for retry"
+                    );
+                    // Delete failed record so it can be retried
+                    let _ = sqlx::query(
+                        "DELETE FROM workflow_compilations WHERE tenant_id = $1 AND workflow_id = $2 AND version = $3",
+                    )
+                    .bind(tenant_id)
+                    .bind(workflow_id)
+                    .bind(version)
+                    .execute(&self.pool)
+                    .await;
+                    return Ok(CompilationStatus::Failed { error: error_msg });
+                }
+
+                Ok(CompilationStatus::NotReady)
             }
             _ => Ok(CompilationStatus::NotReady),
         }

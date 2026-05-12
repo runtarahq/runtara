@@ -7,10 +7,11 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use opentelemetry::KeyValue;
-use sqlx::PgPool;
+use sqlx::{PgPool, Row};
 use tracing::{error, info, instrument, warn};
 
 use crate::api::repositories::workflows::WorkflowRepository;
+use crate::api::repositories::workflows::workflow_definition_checksum;
 use crate::api::services::compilation::CompilationService;
 use crate::observability::metrics;
 use crate::runtime_client::RuntimeClient;
@@ -56,17 +57,18 @@ pub async fn run(
         "Starting compilation worker"
     );
 
-    let queue = match CompilationQueue::new(config.redis_url.clone()) {
-        Ok(q) => q,
+    let manager = match crate::valkey::get_or_create_manager(&config.redis_url).await {
+        Ok(m) => m,
         Err(e) => {
             error!(
                 worker_id = %worker_id,
                 error = %e,
-                "Failed to create compilation queue, worker will not start"
+                "Failed to initialize Redis connection manager, worker will not start"
             );
             return;
         }
     };
+    let queue = CompilationQueue::new(manager);
 
     // Recover any orphaned pending compilations (from previous crashes)
     match queue.recover_orphaned().await {
@@ -260,24 +262,43 @@ async fn check_compilation_status(
     workflow_id: &str,
     version: i32,
 ) -> Result<CompilationStatus, sqlx::Error> {
-    let result = sqlx::query!(
+    let result = sqlx::query(
         r#"
-        SELECT compilation_status, registered_image_id
-        FROM workflow_compilations
-        WHERE tenant_id = $1 AND workflow_id = $2 AND version = $3
+        SELECT sc.compilation_status,
+               sc.registered_image_id,
+               sc.source_checksum,
+               wd.definition
+        FROM workflow_definitions wd
+        LEFT JOIN workflow_compilations sc
+          ON sc.tenant_id = wd.tenant_id
+         AND sc.workflow_id = wd.workflow_id
+         AND sc.version = wd.version
+        WHERE wd.tenant_id = $1
+          AND wd.workflow_id = $2
+          AND wd.version = $3
+          AND wd.deleted_at IS NULL
         "#,
-        tenant_id,
-        workflow_id,
-        version
     )
+    .bind(tenant_id)
+    .bind(workflow_id)
+    .bind(version)
     .fetch_optional(pool)
     .await?;
 
     match result {
         Some(record) => {
-            if record.compilation_status == "success" && record.registered_image_id.is_some() {
+            let compilation_status: Option<String> = record.try_get("compilation_status")?;
+            let registered_image_id: Option<String> = record.try_get("registered_image_id")?;
+            let source_checksum: Option<String> = record.try_get("source_checksum")?;
+            let definition: serde_json::Value = record.try_get("definition")?;
+            let current_checksum = workflow_definition_checksum(&definition);
+
+            if compilation_status.as_deref() == Some("success")
+                && registered_image_id.is_some()
+                && source_checksum.as_deref() == Some(current_checksum.as_str())
+            {
                 Ok(CompilationStatus::Success)
-            } else if record.compilation_status == "failed" {
+            } else if compilation_status.as_deref() == Some("failed") {
                 Ok(CompilationStatus::Failed)
             } else {
                 // Partial compilation (compiled but not registered) - retry
@@ -339,7 +360,7 @@ pub async fn enqueue_compilation(
     version: i32,
     force_recompile: bool,
 ) -> Result<bool, crate::valkey::compilation_queue::CompilationQueueError> {
-    let queue = CompilationQueue::new(redis_url.to_string())?;
+    let queue = open_shared_queue(redis_url).await?;
     let request = CompilationRequest::new_with_force(
         tenant_id.to_string(),
         workflow_id.to_string(),
@@ -356,7 +377,7 @@ pub async fn is_compilation_pending(
     workflow_id: &str,
     version: i32,
 ) -> Result<bool, crate::valkey::compilation_queue::CompilationQueueError> {
-    let queue = CompilationQueue::new(redis_url.to_string())?;
+    let queue = open_shared_queue(redis_url).await?;
     let request = CompilationRequest::new(tenant_id.to_string(), workflow_id.to_string(), version);
     queue.is_pending(&request).await
 }
@@ -371,12 +392,26 @@ pub async fn wait_for_compilation(
     version: i32,
     timeout: Duration,
 ) -> Result<bool, crate::valkey::compilation_queue::CompilationQueueError> {
-    let queue = CompilationQueue::new(redis_url.to_string())?;
+    let queue = open_shared_queue(redis_url).await?;
     let request = CompilationRequest::new(tenant_id.to_string(), workflow_id.to_string(), version);
     let poll_interval = Duration::from_millis(100);
     queue
         .wait_for_completion(&request, timeout, poll_interval)
         .await
+}
+
+/// Build a CompilationQueue backed by the shared, process-wide connection
+/// manager so each utility call reuses an existing pooled connection
+/// instead of opening a new TCP socket.
+async fn open_shared_queue(
+    redis_url: &str,
+) -> Result<CompilationQueue, crate::valkey::compilation_queue::CompilationQueueError> {
+    let manager = crate::valkey::get_or_create_manager(redis_url)
+        .await
+        .map_err(|e| {
+            crate::valkey::compilation_queue::CompilationQueueError::ConnectionError(e.to_string())
+        })?;
+    Ok(CompilationQueue::new(manager))
 }
 
 #[cfg(test)]

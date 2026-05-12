@@ -13,9 +13,12 @@ pub struct ConnectionsConfig {
     /// PostgreSQL connection pool.
     pub db_pool: PgPool,
 
-    /// Redis/Valkey URL for rate-limit state storage.
+    /// Shared Redis/Valkey connection manager for rate-limit state storage.
     /// `None` disables real-time rate-limit tracking (graceful degradation).
-    pub redis_url: Option<String>,
+    ///
+    /// Built once by the host at startup (`redis::aio::ConnectionManager::new`)
+    /// and shared across all handlers. Cheap to clone — internally an `Arc`.
+    pub redis_manager: Option<redis::aio::ConnectionManager>,
 
     /// Public base URL used to construct OAuth2 redirect URIs.
     /// Example: `"https://api.example.com"`
@@ -38,7 +41,7 @@ pub struct ConnectionsConfig {
 #[derive(Clone)]
 pub struct ConnectionsState {
     pub db_pool: PgPool,
-    pub redis_url: Option<String>,
+    pub redis_manager: Option<redis::aio::ConnectionManager>,
     pub public_base_url: String,
     pub http_client: reqwest::Client,
     pub cipher: Arc<dyn CredentialCipher>,
@@ -48,7 +51,7 @@ impl ConnectionsState {
     pub fn from_config(config: ConnectionsConfig) -> Self {
         Self {
             db_pool: config.db_pool,
-            redis_url: config.redis_url,
+            redis_manager: config.redis_manager,
             public_base_url: config.public_base_url,
             http_client: config.http_client,
             cipher: config.cipher,

@@ -168,6 +168,21 @@ pub struct CreateInstanceOutput {
 }
 
 /// Input for querying instances from the object model
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+pub enum QueryOrderByTarget {
+    Column { name: String },
+    Alias { name: String },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QueryOrderByEntry {
+    pub expression: QueryOrderByTarget,
+    /// "ASC" or "DESC". Defaults to "ASC" when omitted.
+    #[serde(default = "default_asc")]
+    pub direction: String,
+}
+
 #[derive(Debug, Deserialize, CapabilityInput)]
 #[capability_input(display_name = "Query Instances Input")]
 pub struct QueryInstancesInput {
@@ -203,6 +218,34 @@ pub struct QueryInstancesInput {
     )]
     #[serde(default)]
     pub condition: Option<ConditionExpression>,
+
+    /// Optional computed score column. Use this with `order_by` on the alias
+    /// for index-backed nearest-neighbor vector retrieval.
+    #[field(
+        display_name = "Score Expression",
+        description = "Optional computed score column passed as an object, not an escaped JSON string. For vector nearest-neighbor search, use {\"alias\":\"distance\",\"expression\":{\"fn\":\"COSINE_DISTANCE\",\"arguments\":[{\"valueType\":\"reference\",\"value\":\"embedding\"},{\"valueType\":\"immediate\",\"value\":[0.1,0.2,0.3]}]}} and order by the alias ascending. Workflow references such as steps.embed.outputs.embeddings.0 are valid as the vector argument."
+    )]
+    #[serde(
+        default,
+        rename = "scoreExpression",
+        alias = "score_expression",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub score_expression: Option<HashMap<String, Value>>,
+
+    /// Optional structured ordering. When set, supersedes `sortBy` /
+    /// `sortOrder` in the object model API.
+    #[field(
+        display_name = "Order By",
+        description = "Optional structured ordering. For vector nearest-neighbor search, order by the score expression alias ascending."
+    )]
+    #[serde(
+        default,
+        rename = "orderBy",
+        alias = "order_by",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub order_by: Option<Vec<QueryOrderByEntry>>,
 
     /// Maximum number of results
     #[field(
@@ -495,6 +538,8 @@ pub fn query_instances(input: QueryInstancesInput) -> Result<QueryInstancesOutpu
             "schema_name": input.schema_name,
             "filters": input.filters,
             "condition": condition_json,
+            "scoreExpression": input.score_expression,
+            "orderBy": input.order_by,
             "limit": input.limit as i64,
             "offset": input.offset as i64,
         }),
@@ -1692,4 +1737,47 @@ pub fn save_memory(input: SaveMemoryInput) -> Result<SaveMemoryOutput, AgentErro
         message_count,
         error: None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn query_instances_score_expression_metadata_is_object_shaped() {
+        let field = __INPUT_META_QueryInstancesInput
+            .fields
+            .iter()
+            .find(|field| field.name == "score_expression")
+            .expect("score_expression metadata");
+
+        assert_eq!(field.type_name, "HashMap<String, Value>");
+    }
+
+    #[test]
+    fn query_instances_input_accepts_object_score_expression() {
+        let input: QueryInstancesInput = serde_json::from_value(json!({
+            "schema_name": "UnspscNode",
+            "score_expression": {
+                "alias": "vec_dist",
+                "expression": {
+                    "fn": "COSINE_DISTANCE",
+                    "arguments": [
+                        {"valueType": "reference", "value": "embedding"},
+                        {"valueType": "immediate", "value": [0.1, 0.2, 0.3]}
+                    ]
+                }
+            },
+            "order_by": [{
+                "expression": {"kind": "alias", "name": "vec_dist"},
+                "direction": "ASC"
+            }],
+            "limit": 25
+        }))
+        .unwrap();
+
+        let score_expression = input.score_expression.unwrap();
+        assert_eq!(score_expression["alias"], json!("vec_dist"));
+        assert_eq!(input.order_by.unwrap().len(), 1);
+    }
 }

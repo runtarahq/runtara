@@ -54,6 +54,22 @@ impl<'a> DdlGenerator<'a> {
         format!("CREATE TABLE {} ({})", quoted_table, column_defs.join(", "))
     }
 
+    /// Emit partial unique indexes for columns declared with `unique = true`.
+    ///
+    /// Column-level UNIQUE constraints cannot be partial, so soft-delete-aware
+    /// uniqueness has to be represented as an index on live rows only.
+    pub fn generate_unique_column_indexes(
+        &self,
+        table_name: &str,
+        columns: &[ColumnDefinition],
+    ) -> Vec<String> {
+        columns
+            .iter()
+            .filter(|c| c.unique)
+            .map(|c| Self::unique_column_index_create(table_name, &c.name))
+            .collect()
+    }
+
     /// Generate ALTER TABLE statements to modify table structure
     pub fn generate_alter_table(
         &self,
@@ -72,6 +88,9 @@ impl<'a> DdlGenerator<'a> {
                     quoted_table,
                     Self::format_column_definition(new_col)
                 ));
+                if new_col.unique {
+                    statements.push(Self::unique_column_index_create(table_name, &new_col.name));
+                }
                 // If the new column wants a trigram index, emit the partial
                 // GIN/`gin_trgm_ops` index alongside the ADD COLUMN statement.
                 if new_col.requires_trigram_index() {
@@ -90,6 +109,9 @@ impl<'a> DdlGenerator<'a> {
         // Find dropped columns
         for old_col in old_columns {
             if !new_columns.iter().any(|c| c.name == old_col.name) {
+                if old_col.unique {
+                    statements.push(Self::unique_column_index_drop(table_name, &old_col.name));
+                }
                 if old_col.requires_trigram_index() {
                     statements.push(Self::trigram_index_drop(table_name, &old_col.name));
                 }
@@ -152,6 +174,15 @@ impl<'a> DdlGenerator<'a> {
                         ));
                     }
                 }
+
+                if old_col.unique != new_col.unique {
+                    if new_col.unique {
+                        statements
+                            .push(Self::unique_column_index_create(table_name, &new_col.name));
+                    } else {
+                        statements.push(Self::unique_column_index_drop(table_name, &new_col.name));
+                    }
+                }
             }
         }
 
@@ -176,6 +207,11 @@ impl<'a> DdlGenerator<'a> {
             .collect();
 
         let unique_clause = if index.unique { "UNIQUE " } else { "" };
+        let predicate = if index.unique {
+            " WHERE deleted = FALSE"
+        } else {
+            ""
+        };
 
         format!(
             "CREATE {}INDEX {} ON {}({})",
@@ -183,7 +219,7 @@ impl<'a> DdlGenerator<'a> {
             quoted_index_name,
             quoted_table,
             quoted_columns.join(", ")
-        )
+        ) + predicate
     }
 
     /// Generate DROP INDEX statement for a user-defined schema index.
@@ -240,6 +276,25 @@ impl<'a> DdlGenerator<'a> {
             "CREATE INDEX {} ON {}(created_at DESC) WHERE deleted = FALSE",
             quoted_index, quoted_table
         )
+    }
+
+    fn unique_column_index_name(table_name: &str, column: &str) -> String {
+        format!("idx_{}_{}_unique_live", table_name, column)
+    }
+
+    fn unique_column_index_create(table_name: &str, column: &str) -> String {
+        let quoted_table = quote_identifier(table_name);
+        let quoted_column = quote_identifier(column);
+        let quoted_index = quote_identifier(&Self::unique_column_index_name(table_name, column));
+        format!(
+            "CREATE UNIQUE INDEX {} ON {}({}) WHERE deleted = FALSE",
+            quoted_index, quoted_table, quoted_column
+        )
+    }
+
+    fn unique_column_index_drop(table_name: &str, column: &str) -> String {
+        let quoted_index = quote_identifier(&Self::unique_column_index_name(table_name, column));
+        format!("DROP INDEX IF EXISTS {}", quoted_index)
     }
 
     /// Emit `CREATE INDEX … USING GIN … gin_trgm_ops` statements for every
@@ -366,11 +421,6 @@ impl<'a> DdlGenerator<'a> {
             col.column_type.to_sql_type(&col.name),
         ];
 
-        // UNIQUE constraint
-        if col.unique {
-            parts.push("UNIQUE".to_string());
-        }
-
         // NOT NULL constraint
         if !col.nullable {
             parts.push("NOT NULL".to_string());
@@ -459,7 +509,8 @@ mod tests {
         assert!(ddl.contains("CREATE TABLE"));
         assert!(ddl.contains("\"products\""));
         assert!(ddl.contains("id VARCHAR(255) PRIMARY KEY"));
-        assert!(ddl.contains("\"sku\" TEXT UNIQUE NOT NULL"));
+        assert!(ddl.contains("\"sku\" TEXT NOT NULL"));
+        assert!(!ddl.contains("\"sku\" TEXT UNIQUE"));
         assert!(ddl.contains("\"price\" NUMERIC(10,2) DEFAULT 0.00"));
         assert!(ddl.contains("created_at TIMESTAMPTZ"));
         assert!(ddl.contains("updated_at TIMESTAMPTZ"));
@@ -592,7 +643,8 @@ mod tests {
 
         let ddl = generator.generate_create_table("users", &columns);
 
-        assert!(ddl.contains("\"email\" TEXT UNIQUE NOT NULL"));
+        assert!(ddl.contains("\"email\" TEXT NOT NULL"));
+        assert!(!ddl.contains("\"email\" TEXT UNIQUE"));
         assert!(ddl.contains("\"status\" TEXT NOT NULL DEFAULT 'active'"));
         assert!(ddl.contains("\"notes\" TEXT")); // No NOT NULL
     }
@@ -648,7 +700,7 @@ mod tests {
 
         assert_eq!(
             ddl,
-            "CREATE UNIQUE INDEX \"products_sku_idx\" ON \"products\"(\"sku\")"
+            "CREATE UNIQUE INDEX \"products_sku_idx\" ON \"products\"(\"sku\") WHERE deleted = FALSE"
         );
     }
 
@@ -760,7 +812,7 @@ mod tests {
         assert_eq!(statements[0], "DROP INDEX IF EXISTS \"orders_status_idx\"");
         assert_eq!(
             statements[1],
-            "CREATE UNIQUE INDEX \"orders_status_idx\" ON \"orders\"(\"status\", \"sku\")"
+            "CREATE UNIQUE INDEX \"orders_status_idx\" ON \"orders\"(\"status\", \"sku\") WHERE deleted = FALSE"
         );
     }
 
@@ -1010,7 +1062,7 @@ mod tests {
         let col = ColumnDefinition::new("sku", ColumnType::String).unique();
         let formatted = DdlGenerator::format_column_definition(&col);
 
-        assert_eq!(formatted, "\"sku\" TEXT UNIQUE");
+        assert_eq!(formatted, "\"sku\" TEXT");
     }
 
     #[test]
@@ -1020,7 +1072,27 @@ mod tests {
             .not_null();
         let formatted = DdlGenerator::format_column_definition(&col);
 
-        assert_eq!(formatted, "\"code\" TEXT UNIQUE NOT NULL");
+        assert_eq!(formatted, "\"code\" TEXT NOT NULL");
+    }
+
+    #[test]
+    fn test_generate_unique_column_indexes_are_partial() {
+        let config = default_config();
+        let generator = DdlGenerator::new(&config);
+
+        let columns = vec![
+            ColumnDefinition::new("sku", ColumnType::String).unique(),
+            ColumnDefinition::new("name", ColumnType::String),
+        ];
+
+        let statements = generator.generate_unique_column_indexes("products", &columns);
+
+        assert_eq!(
+            statements,
+            vec![
+                "CREATE UNIQUE INDEX \"idx_products_sku_unique_live\" ON \"products\"(\"sku\") WHERE deleted = FALSE"
+            ]
+        );
     }
 
     #[test]

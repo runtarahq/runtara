@@ -2,11 +2,13 @@ use std::sync::{Arc, OnceLock};
 use tokio::sync::Semaphore;
 use tracing::{debug, info, warn};
 
-use crate::api::repositories::workflows::WorkflowRepository;
+use crate::api::repositories::workflows::{
+    CompilationSuccessRecord, WorkflowRepository, workflow_definition_checksum,
+};
 use crate::compiler::child_workflows::load_child_workflows;
 use crate::runtime_client::RuntimeClient;
 use runtara_dsl::parse_execution_graph;
-use runtara_management_sdk::{RegisterImageStreamOptions, RunnerType};
+use runtara_management_sdk::{ImageSummary, RegisterImageStreamOptions, RunnerType};
 use runtara_workflows::{ChildWorkflowInput, CompilationInput, compile_workflow};
 
 /// Global semaphore limiting concurrent compilations across all code paths.
@@ -26,6 +28,14 @@ fn compilation_semaphore() -> &'static Semaphore {
         );
         Semaphore::new(max)
     })
+}
+
+fn image_source_checksum(image: &ImageSummary) -> Option<&str> {
+    image
+        .metadata
+        .as_ref()
+        .and_then(|m| m.pointer("/workflow/sourceChecksum"))
+        .and_then(|v| v.as_str())
 }
 
 /// Service for workflow compilation operations
@@ -95,6 +105,7 @@ impl CompilationService {
             duration_ms = step_start.elapsed().as_millis(),
             "compile: step 1 completed - definition fetched"
         );
+        let source_checksum = workflow_definition_checksum(&definition);
 
         let version_u32 = version as u32;
 
@@ -140,7 +151,7 @@ impl CompilationService {
             None
         } else {
             self.repository
-                .get_registered_image_id(tenant_id, workflow_id, version)
+                .get_fresh_registered_image_id(tenant_id, workflow_id, version)
                 .await
                 .map_err(|e| {
                     ServiceError::DatabaseError(format!("Failed to check existing image: {}", e))
@@ -176,8 +187,14 @@ impl CompilationService {
             let image_name = format!("{}:{}", workflow_id, version);
             let step_start = std::time::Instant::now();
             debug!("compile: step 5b - checking runtara-environment for existing image");
-            match client.find_image_by_name(tenant_id, &image_name).await {
-                Ok(Some(existing_id)) => {
+            match client
+                .find_image_by_name_summary(tenant_id, &image_name)
+                .await
+            {
+                Ok(Some(existing_image))
+                    if image_source_checksum(&existing_image) == Some(source_checksum.as_str()) =>
+                {
+                    let existing_id = existing_image.image_id;
                     info!(
                         duration_ms = step_start.elapsed().as_millis(),
                         total_duration_ms = compile_start.elapsed().as_millis(),
@@ -189,7 +206,13 @@ impl CompilationService {
                     // Record this in our DB so we don't check again
                     let _ = self
                         .repository
-                        .record_registered_image_id(tenant_id, workflow_id, version, &existing_id)
+                        .record_registered_image_id(
+                            tenant_id,
+                            workflow_id,
+                            version,
+                            &existing_id,
+                            Some(&source_checksum),
+                        )
                         .await;
                     return Ok(CompilationResultDto {
                         workflow_id: workflow_id.to_string(),
@@ -199,6 +222,12 @@ impl CompilationService {
                         binary_checksum: String::new(),
                         image_id: Some(existing_id),
                     });
+                }
+                Ok(Some(_)) => {
+                    debug!(
+                        duration_ms = step_start.elapsed().as_millis(),
+                        "compile: step 5b found image name but source checksum differed or was absent; rebuilding"
+                    );
                 }
                 Ok(None) => {
                     debug!(
@@ -251,14 +280,15 @@ impl CompilationService {
         let step_start = std::time::Instant::now();
         debug!("compile: step 7 - recording compilation success in database");
         self.repository
-            .record_compilation_success(
+            .record_compilation_success(CompilationSuccessRecord {
                 tenant_id,
                 workflow_id,
                 version,
-                &result.build_dir,
-                result.binary_size as i32,
-                &result.binary_checksum,
-            )
+                build_dir: &result.build_dir,
+                binary_size: result.binary_size as i32,
+                binary_checksum: &result.binary_checksum,
+                source_checksum: &source_checksum,
+            })
             .await
             .map_err(|e| {
                 warn!("Failed to record compilation success: {}", e);
@@ -283,7 +313,14 @@ impl CompilationService {
             "compile: step 8 - registering image with runtara-environment"
         );
         let image_id = self
-            .register_image(client, tenant_id, workflow_id, version_u32, &result)
+            .register_image(
+                client,
+                tenant_id,
+                workflow_id,
+                version_u32,
+                &result,
+                &source_checksum,
+            )
             .await?;
         debug!(
             duration_ms = step_start.elapsed().as_millis(),
@@ -295,7 +332,13 @@ impl CompilationService {
         let step_start = std::time::Instant::now();
         debug!("compile: step 8b - recording registered image ID in database");
         self.repository
-            .record_registered_image_id(tenant_id, workflow_id, version, &image_id)
+            .record_registered_image_id(
+                tenant_id,
+                workflow_id,
+                version,
+                &image_id,
+                Some(&source_checksum),
+            )
             .await
             .map_err(|e| {
                 ServiceError::DatabaseError(format!("Failed to record registered image ID: {}", e))
@@ -430,6 +473,7 @@ impl CompilationService {
         workflow_id: &str,
         version: u32,
         compilation_result: &runtara_workflows::NativeCompilationResult,
+        source_checksum: &str,
     ) -> Result<String, ServiceError> {
         // Build the image name: {workflow_id}:{version}
         let image_name = format!("{}:{}", workflow_id, version);
@@ -462,7 +506,14 @@ impl CompilationService {
                 },
             )
             .with_sha256(&compilation_result.binary_checksum)
-            .with_metadata(serde_json::json!({"variables": compilation_result.default_variables}));
+            .with_metadata(serde_json::json!({
+                "variables": compilation_result.default_variables,
+                "workflow": {
+                    "workflowId": workflow_id,
+                    "version": version,
+                    "sourceChecksum": source_checksum,
+                }
+            }));
 
         // Open the binary file for streaming
         let file = tokio::fs::File::open(&binary_path).await.map_err(|e| {

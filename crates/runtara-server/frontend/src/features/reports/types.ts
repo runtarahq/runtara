@@ -28,9 +28,25 @@ export interface ReportWorkflowActionContext {
   inputKey?: string;
 }
 
-export interface ReportRowCondition {
+export interface ReportCondition {
   op: string;
   arguments?: unknown[];
+}
+
+export type ReportRowCondition = ReportCondition;
+
+export interface ReportConditionFilterRef {
+  filter: string;
+  path: string;
+}
+
+export interface ReportConditionSubquery {
+  subquery: {
+    schema: string;
+    select: string;
+    connectionId?: string;
+    condition?: ReportCondition;
+  };
 }
 
 export interface ReportWorkflowActionConfig {
@@ -118,7 +134,7 @@ export interface ReportLookupConfig {
   valueField: string;
   labelField: string;
   searchFields?: string[];
-  condition?: unknown;
+  condition?: ReportCondition;
   filterMappings?: Array<{
     filterId: string;
     field: string;
@@ -186,7 +202,7 @@ export interface ReportFilterOptionsConfig {
     field: string;
     op?: string;
   }>;
-  condition?: unknown;
+  condition?: ReportCondition;
 }
 
 export interface ReportFilterDefinition {
@@ -336,7 +352,7 @@ export interface ReportSource {
   workflowId?: string;
   instanceId?: string;
   mode?: 'filter' | 'aggregate';
-  condition?: unknown;
+  condition?: ReportCondition;
   filterMappings?: Array<{
     filterId: string;
     field: string;
@@ -393,7 +409,7 @@ export interface ReportTableColumn {
   /** Row field rendered instead of `field` while sort/writeback still target `field`. */
   displayField?: string;
   format?: string;
-  type?: 'value' | 'chart' | 'workflow_button';
+  type?: 'value' | 'chart' | 'workflow_button' | 'interaction_buttons';
   chart?: {
     kind: ReportChartKind;
     x: string;
@@ -423,6 +439,18 @@ export interface ReportTableColumn {
   editor?: ReportEditorConfig;
   /** Workflow launcher rendered as a button in this column. */
   workflowAction?: ReportWorkflowActionConfig;
+  /** Row-scoped report interaction buttons rendered in this column. */
+  interactionButtons?: ReportTableInteractionButtonConfig[];
+}
+
+export interface ReportTableInteractionButtonConfig {
+  id: string;
+  label?: string;
+  icon?: 'eye' | 'file_text' | 'activity' | 'arrow_right';
+  visibleWhen?: ReportRowCondition;
+  hiddenWhen?: ReportRowCondition;
+  disabledWhen?: ReportRowCondition;
+  actions: ReportInteractionAction[];
 }
 
 export interface ReportTableActionConfig {
@@ -728,6 +756,27 @@ export interface ReportRenderRequest {
   filters: Record<string, unknown>;
   blocks?: ReportBlockDataRequest[];
   timezone?: string;
+}
+
+export interface ReportPreviewRequest extends ReportRenderRequest {
+  definition: ReportDefinition;
+}
+
+export interface ReportValidationIssue {
+  path: string;
+  code: string;
+  message: string;
+  hint?: string | null;
+}
+
+export interface ValidateReportRequest {
+  definition: ReportDefinition;
+}
+
+export interface ValidateReportResponse {
+  valid: boolean;
+  errors: ReportValidationIssue[];
+  warnings: ReportValidationIssue[];
 }
 
 export interface CreateReportRequest {

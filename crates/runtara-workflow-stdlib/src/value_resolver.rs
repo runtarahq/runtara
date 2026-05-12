@@ -125,6 +125,29 @@ fn walk(value: &mut Value, source: &Value) {
                 return;
             }
 
+            // Row-level object-model score expressions use `fn` calls whose
+            // arguments may mix Object Model column refs and workflow refs:
+            //   {fn:"COSINE_DISTANCE", arguments:[
+            //      {valueType:"reference", value:"embedding"},
+            //      {valueType:"reference", value:"data.query_embedding"}
+            //   ]}
+            //
+            // Unqualified refs are column names and must stay as references
+            // for the object-store expression validator. Qualified workflow
+            // refs (`data.*`, `steps.*`, etc.) should still resolve.
+            let fn_call = map.get("fn").and_then(|v| v.as_str()).map(str::to_owned);
+            if fn_call.is_some()
+                && let Some(args) = map.get_mut("arguments").and_then(|v| v.as_array_mut())
+            {
+                for arg in args.iter_mut() {
+                    if is_unqualified_reference_envelope(arg) {
+                        continue;
+                    }
+                    walk(arg, source);
+                }
+                return;
+            }
+
             // Object-model condition payloads use the same MappingValue
             // envelope for two different concepts:
             // - argument 0 of field-based operations names an Object Model
@@ -186,6 +209,20 @@ fn is_reference_envelope(value: &Value) -> bool {
         value.get("valueType"),
         Some(Value::String(s)) if s == "reference"
     ) && matches!(value.get("value"), Some(Value::String(_)))
+}
+
+fn is_unqualified_reference_envelope(value: &Value) -> bool {
+    let Some(path) = value.get("value").and_then(|v| v.as_str()) else {
+        return false;
+    };
+    is_reference_envelope(value) && !is_qualified_workflow_path(path)
+}
+
+fn is_qualified_workflow_path(path: &str) -> bool {
+    matches!(
+        path.split('.').next(),
+        Some("data" | "variables" | "workflow" | "steps" | "loop")
+    )
 }
 
 fn is_field_argument_operator(op: &str) -> bool {
@@ -410,6 +447,117 @@ mod tests {
                     ]
                 }
             })
+        );
+    }
+
+    #[test]
+    fn score_expression_preserves_column_ref_and_resolves_query_ref() {
+        let inputs = json!({
+            "schema_name": "UnspscNode",
+            "score_expression": {
+                "alias": "trgm_sim",
+                "expression": {
+                    "fn": "SIMILARITY",
+                    "arguments": [
+                        {"valueType": "reference", "value": "commodity_title"},
+                        {"valueType": "reference", "value": "data.customer_category"}
+                    ]
+                }
+            }
+        });
+
+        let resolved = resolve_nested_references(inputs, &source());
+        let final_inputs = unwrap_top_level_immediate_envelopes(resolved);
+
+        assert_eq!(
+            final_inputs,
+            json!({
+                "schema_name": "UnspscNode",
+                "score_expression": {
+                    "alias": "trgm_sim",
+                    "expression": {
+                        "fn": "SIMILARITY",
+                        "arguments": [
+                            {"valueType": "reference", "value": "commodity_title"},
+                            {"valueType": "immediate", "value": "leather wallet brown"}
+                        ]
+                    }
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn score_expression_preserves_vector_column_ref() {
+        let inputs = json!({
+            "schema_name": "UnspscNode",
+            "score_expression": {
+                "alias": "vec_dist",
+                "expression": {
+                    "fn": "COSINE_DISTANCE",
+                    "arguments": [
+                        {"valueType": "reference", "value": "embedding"},
+                        {"valueType": "reference", "value": "data.query_embedding"}
+                    ]
+                }
+            }
+        });
+        let source = json!({
+            "data": {"query_embedding": [1.0, 0.0, 0.0, 0.0]},
+            "variables": {},
+            "steps": {}
+        });
+
+        let resolved = resolve_nested_references(inputs, &source);
+        let final_inputs = unwrap_top_level_immediate_envelopes(resolved);
+
+        assert_eq!(
+            final_inputs["score_expression"]["expression"]["arguments"],
+            json!([
+                {"valueType": "reference", "value": "embedding"},
+                {"valueType": "immediate", "value": [1.0, 0.0, 0.0, 0.0]}
+            ])
+        );
+    }
+
+    #[test]
+    fn immediate_score_expression_resolves_step_vector_ref() {
+        let inputs = json!({
+            "score_expression": {
+                "valueType": "immediate",
+                "value": {
+                    "alias": "vec_dist",
+                    "expression": {
+                        "fn": "COSINE_DISTANCE",
+                        "arguments": [
+                            {"valueType": "reference", "value": "embedding"},
+                            {"valueType": "reference", "value": "steps.embed.outputs.embeddings.0"}
+                        ]
+                    }
+                }
+            }
+        });
+        let source = json!({
+            "data": {},
+            "variables": {},
+            "steps": {
+                "embed": {
+                    "outputs": {
+                        "embeddings": [[1.0, 0.0, 0.0, 0.0]]
+                    }
+                }
+            }
+        });
+
+        let resolved = resolve_nested_references(inputs, &source);
+        let final_inputs = unwrap_top_level_immediate_envelopes(resolved);
+
+        assert_eq!(
+            final_inputs["score_expression"]["expression"]["arguments"],
+            json!([
+                {"valueType": "reference", "value": "embedding"},
+                {"valueType": "immediate", "value": [1.0, 0.0, 0.0, 0.0]}
+            ])
         );
     }
 

@@ -4,18 +4,21 @@
 //! Stream naming: runtara:triggers:{tenant_id}
 
 use redis::AsyncCommands;
+use redis::aio::ConnectionManager;
 
 use crate::api::dto::trigger_event::TriggerEvent;
 
 /// Publisher for trigger events to Redis streams
 pub struct TriggerStreamPublisher {
-    redis_url: String,
+    /// Shared Redis connection manager (built once at startup; cloned per
+    /// publish to reuse the existing connection pool).
+    manager: ConnectionManager,
 }
 
 impl TriggerStreamPublisher {
-    /// Create a new publisher with the given Redis URL
-    pub fn new(redis_url: String) -> Self {
-        Self { redis_url }
+    /// Create a new publisher from a shared connection manager.
+    pub fn new(manager: ConnectionManager) -> Self {
+        Self { manager }
     }
 
     /// Publish a trigger event to the tenant's trigger stream
@@ -30,14 +33,8 @@ impl TriggerStreamPublisher {
         let event_json = serde_json::to_string(event)
             .map_err(|e| TriggerStreamError::SerializationError(e.to_string()))?;
 
-        // Create Redis client and get connection
-        let redis_client = redis::Client::open(self.redis_url.as_str())
-            .map_err(|e| TriggerStreamError::ConnectionError(e.to_string()))?;
-
-        let mut redis_conn = redis_client
-            .get_multiplexed_async_connection()
-            .await
-            .map_err(|e| TriggerStreamError::ConnectionError(e.to_string()))?;
+        // Reuse the shared connection manager — no new TCP per call.
+        let mut redis_conn = self.manager.clone();
 
         // Construct Redis stream key
         let stream_key = format!("runtara:triggers:{}", tenant_id);

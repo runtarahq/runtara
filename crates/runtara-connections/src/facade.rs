@@ -37,12 +37,12 @@ impl ConnectionsFacade {
     }
 
     /// Build a rate-limit analytics service using the facade's configured
-    /// PostgreSQL pool and Redis URL.
+    /// PostgreSQL pool and shared Redis connection manager.
     pub fn rate_limit_service(&self) -> RateLimitService {
         let repo = Arc::new(self.repo());
-        RateLimitService::with_redis_url_and_db_pool(
+        RateLimitService::with_redis_manager_and_db_pool(
             repo,
-            self.state.redis_url.clone(),
+            self.state.redis_manager.clone(),
             self.state.db_pool.clone(),
         )
     }
@@ -216,33 +216,9 @@ impl ConnectionsFacade {
             return Ok(());
         }
 
-        let redis_url = match &self.state.redis_url {
-            Some(url) => url,
+        let mut conn = match self.state.redis_manager.clone() {
+            Some(m) => m,
             None => return Ok(()), // No Redis — fail open
-        };
-
-        let client = match redis::Client::open(redis_url.as_str()) {
-            Ok(c) => c,
-            Err(e) => {
-                tracing::warn!(
-                    connection_id = connection_id,
-                    error = %e,
-                    "Redis connect failed for rate limit check — allowing request"
-                );
-                return Ok(());
-            }
-        };
-
-        let mut conn = match client.get_multiplexed_async_connection().await {
-            Ok(c) => c,
-            Err(e) => {
-                tracing::warn!(
-                    connection_id = connection_id,
-                    error = %e,
-                    "Redis connection failed for rate limit check — allowing request"
-                );
-                return Ok(());
-            }
         };
 
         let key = format!("rate_limit:{}", connection_id);

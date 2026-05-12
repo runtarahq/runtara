@@ -70,6 +70,8 @@ struct ImageSummaryJson {
     description: Option<String>,
     runner_type: String,
     created_at_ms: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    metadata: Option<Value>,
 }
 
 /// List images query parameters.
@@ -881,6 +883,7 @@ async fn handle_list_images(
                     description: img.description,
                     runner_type: runner_type_to_string(img.runner_type).to_string(),
                     created_at_ms: img.created_at.timestamp_millis(),
+                    metadata: img.metadata,
                 })
                 .collect();
             Json(json!({
@@ -932,6 +935,7 @@ async fn handle_get_image(
                     description: img.description,
                     runner_type: runner_type_to_string(img.runner_type).to_string(),
                     created_at_ms: img.created_at.timestamp_millis(),
+                    metadata: img.metadata,
                 }
             }))
             .into_response()

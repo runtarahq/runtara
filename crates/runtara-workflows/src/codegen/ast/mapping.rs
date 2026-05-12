@@ -177,19 +177,28 @@ pub fn emit_mapping_value(
 fn emit_reference_value(
     ref_val: &ReferenceValue,
     ctx: &EmitContext,
-    _source_var: &proc_macro2::Ident,
+    source_var: &proc_macro2::Ident,
 ) -> TokenStream {
     let path = &ref_val.value;
     let json_pointer = path_to_json_pointer(path);
     let inputs = &ctx.inputs_var;
     let steps_context = &ctx.steps_context_var;
+    let lookup_expr = if reference_needs_source_lookup(path) {
+        quote! {
+            __lookup_value_pointer(&#source_var, #json_pointer)
+        }
+    } else {
+        quote! {
+            __lookup_source_pointer(#inputs.as_ref(), &#steps_context, #json_pointer)
+        }
+    };
 
     // Generate the base lookup, using default value if provided
     let lookup = if let Some(default_val) = &ref_val.default {
         let default_tokens = super::json_to_tokens(default_val);
         quote! {
             {
-                let looked_up = __lookup_source_pointer(#inputs.as_ref(), &#steps_context, #json_pointer);
+                let looked_up = #lookup_expr;
                 match looked_up {
                     Some(serde_json::Value::Null) | None => #default_tokens,
                     Some(v) => v,
@@ -198,8 +207,7 @@ fn emit_reference_value(
         }
     } else {
         quote! {
-            __lookup_source_pointer(#inputs.as_ref(), &#steps_context, #json_pointer)
-                .unwrap_or(serde_json::Value::Null)
+            #lookup_expr.unwrap_or(serde_json::Value::Null)
         }
     };
 
@@ -421,6 +429,14 @@ pub fn path_to_json_pointer(path: &str) -> String {
     format!("/{}", parts.join("/"))
 }
 
+fn reference_needs_source_lookup(path: &str) -> bool {
+    matches!(first_reference_segment(path), "item" | "loop")
+}
+
+fn first_reference_segment(path: &str) -> &str {
+    path.split(['.', '[']).next().unwrap_or(path)
+}
+
 /// Emit code to build the step inputs data source.
 /// This combines data, variables, and steps context into a single source object.
 pub fn emit_build_source(ctx: &EmitContext) -> TokenStream {
@@ -434,9 +450,10 @@ pub fn emit_build_source(ctx: &EmitContext) -> TokenStream {
 
 /// Return true when a mapping needs the full source object.
 ///
-/// Direct references and nested reference envelopes can be resolved against
-/// `WorkflowInputs` plus `steps_context`; templates still need the full source
-/// object because minijinja renders against that aggregate context.
+/// Most direct references and nested reference envelopes can be resolved
+/// against `WorkflowInputs` plus `steps_context`. Scoped references such as
+/// `item.*` and `loop.*` need the full source object because their values are
+/// injected by the step emitter at runtime.
 pub fn input_mapping_needs_source(mapping: &InputMapping) -> bool {
     mapping.values().any(mapping_value_needs_source)
 }
@@ -445,11 +462,12 @@ pub fn input_mapping_needs_source(mapping: &InputMapping) -> bool {
 pub fn mapping_value_needs_source(value: &MappingValue) -> bool {
     match value {
         MappingValue::Template(_) => true,
+        MappingValue::Reference(ref_val) => reference_needs_source_lookup(&ref_val.value),
         MappingValue::Composite(comp) => match &comp.value {
             CompositeInner::Object(map) => map.values().any(mapping_value_needs_source),
             CompositeInner::Array(values) => values.iter().any(mapping_value_needs_source),
         },
-        MappingValue::Reference(_) | MappingValue::Immediate(_) => false,
+        MappingValue::Immediate(_) => false,
     }
 }
 
@@ -613,6 +631,41 @@ mod tests {
         assert!(code.contains("source"));
         assert!(code.contains("pointer"));
         assert!(code.contains("/data/user/name"));
+    }
+
+    #[test]
+    fn test_emit_reference_value_scoped_item_uses_source_object() {
+        let ref_val = ReferenceValue {
+            value: "item.status".to_string(),
+            type_hint: None,
+            default: None,
+        };
+        let ctx = EmitContext::new(false);
+        let source_var = Ident::new("item_source", Span::call_site());
+        let tokens = emit_reference_value(&ref_val, &ctx, &source_var);
+        let code = tokens.to_string();
+
+        assert!(code.contains("__lookup_value_pointer"));
+        assert!(code.contains("item_source"));
+        assert!(code.contains("/item/status"));
+        assert!(!code.contains("__lookup_source_pointer"));
+    }
+
+    #[test]
+    fn test_emit_reference_value_scoped_loop_uses_source_object() {
+        let ref_val = ReferenceValue {
+            value: "loop.index".to_string(),
+            type_hint: None,
+            default: None,
+        };
+        let ctx = EmitContext::new(false);
+        let source_var = Ident::new("source", Span::call_site());
+        let tokens = emit_reference_value(&ref_val, &ctx, &source_var);
+        let code = tokens.to_string();
+
+        assert!(code.contains("__lookup_value_pointer"));
+        assert!(code.contains("/loop/index"));
+        assert!(!code.contains("__lookup_source_pointer"));
     }
 
     #[test]
@@ -918,6 +971,47 @@ mod tests {
         // workflow.inputs structure is built by the shared helper.
         assert!(code.contains("__build_step_source"));
         assert!(code.contains("inputs"));
+    }
+
+    #[test]
+    fn test_mapping_value_needs_source_for_scoped_references() {
+        let item_ref = MappingValue::Reference(ReferenceValue {
+            value: "item.status".to_string(),
+            type_hint: None,
+            default: None,
+        });
+        let loop_ref = MappingValue::Reference(ReferenceValue {
+            value: "loop.index".to_string(),
+            type_hint: None,
+            default: None,
+        });
+        let data_ref = MappingValue::Reference(ReferenceValue {
+            value: "data.item.status".to_string(),
+            type_hint: None,
+            default: None,
+        });
+
+        assert!(mapping_value_needs_source(&item_ref));
+        assert!(mapping_value_needs_source(&loop_ref));
+        assert!(!mapping_value_needs_source(&data_ref));
+    }
+
+    #[test]
+    fn test_mapping_value_needs_source_for_nested_scoped_references() {
+        let mut map = std::collections::HashMap::new();
+        map.insert(
+            "status".to_string(),
+            MappingValue::Reference(ReferenceValue {
+                value: "item.status".to_string(),
+                type_hint: None,
+                default: None,
+            }),
+        );
+        let composite = MappingValue::Composite(CompositeValue {
+            value: CompositeInner::Object(map),
+        });
+
+        assert!(mapping_value_needs_source(&composite));
     }
 
     // ==========================================

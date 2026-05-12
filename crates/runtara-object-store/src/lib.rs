@@ -89,6 +89,7 @@
 pub mod config;
 pub mod error;
 pub mod instance;
+pub mod query;
 pub mod schema;
 pub mod sql;
 pub mod store;
@@ -105,6 +106,7 @@ pub use instance::{
     CreateInstanceRequest, FilterRequest, Instance, OrderByEntry, OrderByTarget, ScoreExpression,
     SimpleFilter, UpdateInstanceRequest, ValidationMode,
 };
+pub use query::{SqlExecuteResult, SqlParam, SqlResultColumn, SqlRows};
 pub use schema::{CreateSchemaRequest, Schema, UpdateSchemaRequest};
 pub use store::ObjectStore;
 pub use types::{ColumnDefinition, ColumnType, IndexDefinition, TextIndexKind, VectorIndexMethod};

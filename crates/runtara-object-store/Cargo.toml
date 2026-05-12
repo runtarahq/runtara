@@ -11,7 +11,7 @@ categories = ["database"]
 publish = false
 
 [dependencies]
-sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "chrono", "json", "rust_decimal", "tls-rustls"] }
+sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "chrono", "json", "rust_decimal", "uuid", "tls-rustls"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 chrono = { version = "0.4", features = ["serde"] }

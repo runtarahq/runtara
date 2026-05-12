@@ -634,6 +634,12 @@ pub fn emit(step: &SplitStep, ctx: &mut EmitContext) -> Result<TokenStream, Code
                 // Inject iteration index as _index (0-based) for backward compatibility
                 merged_vars.insert("_index".to_string(), serde_json::json!(idx));
 
+                // Expose the current element as `item` through the generated
+                // source object for Split subgraphs. `data` remains the
+                // canonical item payload; this preserves existing workflows
+                // and fixtures that reference the split element as `item`.
+                merged_vars.insert("_item".to_string(), item.clone());
+
                 // Generate scope ID for this iteration
                 let __iteration_scope_id = {
                     let parent_scope = merged_vars.get("_scope_id")
@@ -1135,6 +1141,24 @@ mod tests {
         assert!(
             code.contains("_index"),
             "Should inject _index for backward compatibility"
+        );
+    }
+
+    #[test]
+    fn test_emit_split_exposes_item_root_to_subgraph() {
+        let mut ctx = EmitContext::new(false);
+        let split_step = create_split_step("split-item-root", "data.items");
+
+        let tokens = emit(&split_step, &mut ctx).unwrap();
+        let code = tokens.to_string();
+
+        assert!(
+            code.contains("_item"),
+            "Should inject current split element for item.* references"
+        );
+        assert!(
+            code.contains("item . clone"),
+            "Should clone the current split item into subgraph variables"
         );
     }
 

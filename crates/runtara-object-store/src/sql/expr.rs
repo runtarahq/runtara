@@ -921,9 +921,9 @@ pub(crate) fn render_row_expression(
             // Distance fns also need bespoke rendering: arg 0 is a vector
             // column reference (no cast), arg 1 is either a vector literal
             // (rendered as a `[a,b,c]` text immediate cast to ::vector) or
-            // another vector column reference (no cast). The result is cast
-            // to ::real to match the f32 score-extraction path used for
-            // `similarity()` and `ts_rank`.
+            // another vector column reference (no cast). Keep the distance
+            // operator uncast so `ORDER BY <alias> LIMIT ...` can be planned as
+            // an HNSW / IVFFlat nearest-neighbor index scan.
             if call.fn_.is_distance() {
                 let op = call.fn_.distance_op().expect("validated as distance fn");
                 let col_name = match &call.arguments[0] {
@@ -951,7 +951,7 @@ pub(crate) fn render_row_expression(
                     }
                     _ => unreachable!("validated above"),
                 };
-                return Ok(format!("(\"{}\" {} {})::real", col_name, op, rhs_sql));
+                return Ok(format!("(\"{}\" {} {})", col_name, op, rhs_sql));
             }
 
             // Levenshtein renders as `levenshtein(($1)::text, ($2)::text)::real`.
@@ -1346,6 +1346,13 @@ mod tests {
                     },
                 )
                 .not_null(),
+                ColumnDefinition::new(
+                    "embedding",
+                    ColumnType::Vector {
+                        dimension: 4,
+                        index_method: None,
+                    },
+                ),
             ],
         )
     }
@@ -1577,6 +1584,53 @@ mod tests {
             r#"ts_rank("keywords_tsv", plainto_tsquery('english', $1::text))"#
         );
         assert_eq!(params, vec![serde_json::json!("blue jacket")]);
+        assert_eq!(offset, 2);
+    }
+
+    #[test]
+    fn cosine_distance_accepts_vector_column_and_literal() {
+        let schema = product_schema();
+        let node = fn_call(
+            ExprFn::CosineDistance,
+            vec![
+                col_ref("embedding"),
+                imm(serde_json::json!([1.0, 0.0, 0.0, 0.0])),
+            ],
+        );
+        assert_eq!(
+            validate_row_expression(&node, &schema, 0).unwrap(),
+            AliasKind::Numeric
+        );
+    }
+
+    #[test]
+    fn cosine_distance_rejects_literal_dimension_mismatch() {
+        let schema = product_schema();
+        let node = fn_call(
+            ExprFn::CosineDistance,
+            vec![col_ref("embedding"), imm(serde_json::json!([1.0, 0.0]))],
+        );
+        let err = validate_row_expression(&node, &schema, 0).unwrap_err();
+        assert!(err.contains("dimension 2"), "{}", err);
+        assert!(err.contains("dimension 4"), "{}", err);
+    }
+
+    #[test]
+    fn cosine_distance_renders_raw_pgvector_operator_for_knn_indexing() {
+        let schema = product_schema();
+        let node = fn_call(
+            ExprFn::CosineDistance,
+            vec![
+                col_ref("embedding"),
+                imm(serde_json::json!([1.0, 0.0, 0.0, 0.0])),
+            ],
+        );
+        let mut params = vec![];
+        let mut offset = 1_i32;
+        let sql = render_row_expression(&node, &schema, &mut params, &mut offset, 0).unwrap();
+        assert_eq!(sql, r#"("embedding" <=> $1::vector)"#);
+        assert!(!sql.contains("::real"), "{}", sql);
+        assert_eq!(params, vec![serde_json::json!("[1.0,0.0,0.0,0.0]")]);
         assert_eq!(offset, 2);
     }
 }

@@ -507,7 +507,7 @@ impl ExecutionEngine {
         // 5. Image ID
         let image_id = self
             .workflow_repo
-            .get_registered_image_id(req.tenant_id, req.workflow_id, version)
+            .get_fresh_registered_image_id(req.tenant_id, req.workflow_id, version)
             .await
             .map_err(|e| {
                 ExecutionError::DatabaseError(format!("Failed to get registered image ID: {}", e))
@@ -1508,7 +1508,7 @@ impl ExecutionEngine {
         version: i32,
     ) -> Result<String, ExecutionError> {
         self.workflow_repo
-            .get_registered_image_id(tenant_id, workflow_id, version)
+            .get_fresh_registered_image_id(tenant_id, workflow_id, version)
             .await
             .map_err(|e| {
                 ExecutionError::DatabaseError(format!("Failed to get registered image ID: {}", e))

@@ -7,6 +7,7 @@ import { Button } from '@/shared/components/ui/button';
 import {
   ReportBlockDefinition,
   ReportBlockResult,
+  ReportInteractionAction,
   ReportInteractionOptions,
   ReportOrderBy,
 } from '../types';
@@ -116,7 +117,9 @@ export function ReportBlockHost({
       (block.table?.columns ?? [])
         .filter(
           (column) =>
-            column.type !== 'workflow_button' && !column.workflowAction
+            column.type !== 'workflow_button' &&
+            column.type !== 'interaction_buttons' &&
+            !column.workflowAction
         )
         .flatMap((column) =>
           column.displayField
@@ -183,55 +186,44 @@ export function ReportBlockHost({
       void onReportRefresh?.();
     }, 1250);
   };
-  const runInteraction = (
-    event: string,
+  const runInteractionActions = (
+    actions: ReportInteractionAction[],
     datum: Record<string, unknown>
   ): boolean => {
     let handled = false;
     const updates: Record<string, unknown> = {};
     const clearFilters = new Set<string>();
     let nextViewId: string | null | undefined;
-    for (const interaction of block.interactions ?? []) {
-      if (interaction.trigger.event !== event) continue;
-      const triggerField = interaction.trigger.field;
-      if (triggerField) {
-        if (datum.field !== undefined) {
-          if (datum.field !== triggerField) continue;
-        } else if (!(triggerField in datum)) {
-          continue;
+    for (const action of actions) {
+      if (action.type === 'set_filter' && action.filterId) {
+        const value =
+          action.valueFrom !== undefined
+            ? resolveInteractionValue(action.valueFrom, datum)
+            : action.value;
+        if (value !== undefined) {
+          updates[action.filterId] = value;
+          handled = true;
         }
+        continue;
       }
-      for (const action of interaction.actions) {
-        if (action.type === 'set_filter' && action.filterId) {
-          const value =
-            action.valueFrom !== undefined
-              ? resolveInteractionValue(action.valueFrom, datum)
-              : action.value;
-          if (value !== undefined) {
-            updates[action.filterId] = value;
-            handled = true;
-          }
-          continue;
-        }
 
-        if (action.type === 'clear_filter' && action.filterId) {
-          clearFilters.add(action.filterId);
-          handled = true;
-          continue;
-        }
+      if (action.type === 'clear_filter' && action.filterId) {
+        clearFilters.add(action.filterId);
+        handled = true;
+        continue;
+      }
 
-        if (action.type === 'clear_filters') {
-          for (const filterId of action.filterIds ?? []) {
-            clearFilters.add(filterId);
-          }
-          handled = true;
-          continue;
+      if (action.type === 'clear_filters') {
+        for (const filterId of action.filterIds ?? []) {
+          clearFilters.add(filterId);
         }
+        handled = true;
+        continue;
+      }
 
-        if (action.type === 'navigate_view' && action.viewId) {
-          nextViewId = action.viewId;
-          handled = true;
-        }
+      if (action.type === 'navigate_view' && action.viewId) {
+        nextViewId = action.viewId;
+        handled = true;
       }
     }
     if (handled) {
@@ -255,6 +247,26 @@ export function ReportBlockHost({
       }
     }
     return handled;
+  };
+
+  const runInteraction = (
+    event: string,
+    datum: Record<string, unknown>
+  ): boolean => {
+    const actions: ReportInteractionAction[] = [];
+    for (const interaction of block.interactions ?? []) {
+      if (interaction.trigger.event !== event) continue;
+      const triggerField = interaction.trigger.field;
+      if (triggerField) {
+        if (datum.field !== undefined) {
+          if (datum.field !== triggerField) continue;
+        } else if (!(triggerField in datum)) {
+          continue;
+        }
+      }
+      actions.push(...interaction.actions);
+    }
+    return runInteractionActions(actions, datum);
   };
 
   if (block.hideWhenEmpty && result?.status === 'empty') {
@@ -330,6 +342,7 @@ export function ReportBlockHost({
             setPage((current) => ({ ...current, offset: 0 }));
           }}
           onBlockInteraction={runInteraction}
+          onInteractionButtonClick={runInteractionActions}
           onRefresh={refreshAfterActionSubmit}
         />
       )}
@@ -347,6 +360,7 @@ function RenderedBlock({
   onPageChange,
   onSortChange,
   onBlockInteraction,
+  onInteractionButtonClick,
   onRefresh,
 }: {
   reportId: string;
@@ -360,6 +374,10 @@ function RenderedBlock({
   onBlockInteraction: (
     event: string,
     datum: Record<string, unknown>
+  ) => boolean;
+  onInteractionButtonClick: (
+    actions: ReportInteractionAction[],
+    row: Record<string, unknown>
   ) => boolean;
   onRefresh: () => void | Promise<void>;
 }) {
@@ -384,6 +402,7 @@ function RenderedBlock({
             ? (cell) => onBlockInteraction('cell_click', cell)
             : undefined
         }
+        onInteractionButtonClick={onInteractionButtonClick}
         onRefresh={onRefresh}
       />
     );

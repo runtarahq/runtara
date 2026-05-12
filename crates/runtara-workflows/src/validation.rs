@@ -1595,28 +1595,10 @@ fn collect_step_mappings(step: &Step) -> Vec<&InputMapping> {
 
 /// Validate that step references only refer to steps that have already executed.
 fn validate_execution_order(graph: &ExecutionGraph, result: &mut ValidationResult) {
-    // Build execution order from entry_point and execution_plan
-    let order = compute_execution_order(graph);
-
-    // If order is empty (shouldn't happen if graph validation passed), skip
-    if order.is_empty() {
-        return;
-    }
-
-    // Create position map: step_id -> position in execution order
-    let position_map: HashMap<String, usize> = order
-        .iter()
-        .enumerate()
-        .map(|(i, s)| (s.clone(), i))
-        .collect();
+    let adjacency = build_adjacency(graph);
 
     // Check each step's references
     for (step_id, step) in &graph.steps {
-        let current_position = match position_map.get(step_id) {
-            Some(pos) => *pos,
-            None => continue, // Step not in order (unreachable, already caught)
-        };
-
         let mappings = collect_step_mappings(step);
 
         for mapping in mappings {
@@ -1629,8 +1611,8 @@ fn validate_execution_order(graph: &ExecutionGraph, result: &mut ValidationResul
                         continue;
                     }
 
-                    if let Some(ref_position) = position_map.get(&referenced_step_id)
-                        && *ref_position >= current_position
+                    if graph.steps.contains_key(&referenced_step_id)
+                        && !has_path(&adjacency, &referenced_step_id, step_id)
                     {
                         result.errors.push(ValidationError::StepNotYetExecuted {
                             step_id: step_id.clone(),
@@ -1658,14 +1640,7 @@ fn validate_execution_order(graph: &ExecutionGraph, result: &mut ValidationResul
     }
 }
 
-/// Compute execution order from entry_point following execution_plan edges.
-/// Returns steps in the order they would execute.
-fn compute_execution_order(graph: &ExecutionGraph) -> Vec<String> {
-    let mut order = Vec::new();
-    let mut visited = HashSet::new();
-    let mut queue = std::collections::VecDeque::new();
-
-    // Build adjacency list from execution plan
+fn build_adjacency(graph: &ExecutionGraph) -> HashMap<String, Vec<String>> {
     let mut adjacency: HashMap<String, Vec<String>> = HashMap::new();
     for edge in &graph.execution_plan {
         adjacency
@@ -1673,16 +1648,23 @@ fn compute_execution_order(graph: &ExecutionGraph) -> Vec<String> {
             .or_default()
             .push(edge.to_step.clone());
     }
+    adjacency
+}
 
-    // BFS from entry point to establish order
-    queue.push_back(graph.entry_point.clone());
+fn has_path(adjacency: &HashMap<String, Vec<String>>, from: &str, to: &str) -> bool {
+    let mut visited = HashSet::new();
+    let mut queue = std::collections::VecDeque::new();
+
+    queue.push_back(from.to_string());
 
     while let Some(step_id) = queue.pop_front() {
+        if step_id == to {
+            return true;
+        }
         if visited.contains(&step_id) {
             continue;
         }
         visited.insert(step_id.clone());
-        order.push(step_id.clone());
 
         if let Some(neighbors) = adjacency.get(&step_id) {
             for neighbor in neighbors {
@@ -1693,7 +1675,7 @@ fn compute_execution_order(graph: &ExecutionGraph) -> Vec<String> {
         }
     }
 
-    order
+    false
 }
 
 // ============================================================================
@@ -5024,6 +5006,81 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_fan_in_step_can_reference_all_incoming_predecessors() {
+        let mut steps = HashMap::new();
+
+        steps.insert(
+            "start".to_string(),
+            create_agent_step("start", "transform", None),
+        );
+        steps.insert(
+            "left".to_string(),
+            create_agent_step("left", "transform", None),
+        );
+        steps.insert(
+            "right".to_string(),
+            create_agent_step("right", "transform", None),
+        );
+
+        let mut mapping = HashMap::new();
+        mapping.insert("left".to_string(), ref_value("steps.left.outputs.result"));
+        mapping.insert("right".to_string(), ref_value("steps.right.outputs.result"));
+        steps.insert(
+            "join".to_string(),
+            create_agent_step("join", "transform", Some(mapping)),
+        );
+        steps.insert("finish".to_string(), create_finish_step("finish", None));
+
+        let mut graph = create_basic_graph(steps, "start");
+        graph.execution_plan = vec![
+            runtara_dsl::ExecutionPlanEdge {
+                from_step: "start".to_string(),
+                to_step: "left".to_string(),
+                label: None,
+                condition: None,
+                priority: None,
+            },
+            runtara_dsl::ExecutionPlanEdge {
+                from_step: "start".to_string(),
+                to_step: "right".to_string(),
+                label: None,
+                condition: None,
+                priority: None,
+            },
+            runtara_dsl::ExecutionPlanEdge {
+                from_step: "left".to_string(),
+                to_step: "join".to_string(),
+                label: None,
+                condition: None,
+                priority: None,
+            },
+            runtara_dsl::ExecutionPlanEdge {
+                from_step: "right".to_string(),
+                to_step: "join".to_string(),
+                label: None,
+                condition: None,
+                priority: None,
+            },
+            runtara_dsl::ExecutionPlanEdge {
+                from_step: "join".to_string(),
+                to_step: "finish".to_string(),
+                label: None,
+                condition: None,
+                priority: None,
+            },
+        ];
+
+        let result = validate_workflow(&graph);
+        assert!(
+            !result
+                .errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::StepNotYetExecuted { .. })),
+            "Expected no StepNotYetExecuted error for fan-in predecessor references"
+        );
+    }
+
     // --- Variable Existence Validation Tests ---
 
     #[test]
@@ -5550,6 +5607,90 @@ mod tests {
                 .errors
                 .iter()
                 .any(|error| matches!(error, ValidationError::InvalidConditionShape { .. })),
+            "{:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn object_model_query_instances_accepts_object_score_expression() {
+        let mut mapping = InputMapping::new();
+        mapping.insert(
+            "schema_name".to_string(),
+            MappingValue::Immediate(runtara_dsl::ImmediateValue {
+                value: serde_json::json!("UnspscNode"),
+            }),
+        );
+        mapping.insert(
+            "score_expression".to_string(),
+            MappingValue::Immediate(runtara_dsl::ImmediateValue {
+                value: serde_json::json!({
+                    "alias": "vec_dist",
+                    "expression": {
+                        "fn": "COSINE_DISTANCE",
+                        "arguments": [
+                            {"valueType": "reference", "value": "embedding"},
+                            {"valueType": "immediate", "value": [0.1, 0.2, 0.3]}
+                        ]
+                    }
+                }),
+            }),
+        );
+        mapping.insert(
+            "order_by".to_string(),
+            MappingValue::Immediate(runtara_dsl::ImmediateValue {
+                value: serde_json::json!([{
+                    "expression": {"kind": "alias", "name": "vec_dist"},
+                    "direction": "ASC"
+                }]),
+            }),
+        );
+        mapping.insert(
+            "limit".to_string(),
+            MappingValue::Immediate(runtara_dsl::ImmediateValue {
+                value: serde_json::json!(25),
+            }),
+        );
+
+        let mut steps = HashMap::new();
+        steps.insert(
+            "knn".to_string(),
+            Step::Agent(AgentStep {
+                id: "knn".to_string(),
+                name: None,
+                agent_id: "object_model".to_string(),
+                capability_id: "query-instances".to_string(),
+                connection_id: None,
+                input_mapping: Some(mapping),
+                max_retries: None,
+                retry_delay: None,
+                timeout: None,
+                compensation: None,
+                breakpoint: None,
+                durable: None,
+            }),
+        );
+        steps.insert("finish".to_string(), create_finish_step("finish", None));
+
+        let mut graph = create_basic_graph(steps, "knn");
+        graph.execution_plan = vec![runtara_dsl::ExecutionPlanEdge {
+            from_step: "knn".to_string(),
+            to_step: "finish".to_string(),
+            label: None,
+            condition: None,
+            priority: None,
+        }];
+
+        let result = validate_workflow(&graph);
+
+        assert!(
+            !result.errors.iter().any(|error| matches!(
+                error,
+                ValidationError::TypeMismatch { field_name, expected_type, actual_type, .. }
+                    if field_name == "score_expression"
+                        && expected_type == "string"
+                        && actual_type == "object"
+            )),
             "{:?}",
             result.errors
         );

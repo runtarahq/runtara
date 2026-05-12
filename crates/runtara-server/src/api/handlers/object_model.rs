@@ -1365,3 +1365,185 @@ pub async fn aggregate_instances(
         )),
     }
 }
+
+/// Execute a typed positional SQL query.
+///
+/// SQL uses native Postgres / SQLx placeholders (`$1`, `$2`, ...). Parameters
+/// are bound in array order and result rows are validated against
+/// `resultSchema`.
+#[utoipa::path(
+    post,
+    path = "/api/runtime/object-model/sql/query",
+    request_body = SqlQueryRequest,
+    params(
+        ("connectionId" = Option<String>, Query, description = "Optional connection ID for database selection")
+    ),
+    responses(
+        (status = 200, description = "SQL query executed successfully", body = SqlQueryResponse),
+        (status = 400, description = "Invalid SQL query, parameter, or result schema", body = Value),
+        (status = 500, description = "Database error", body = Value),
+    ),
+    tag = "object-model"
+)]
+pub async fn query_sql(
+    crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
+    State(state): State<Arc<ObjectModelState>>,
+    Query(params): Query<ConnectionQueryParams>,
+    Json(request): Json<SqlQueryRequest>,
+) -> Result<(StatusCode, Json<SqlQueryResponse>), (StatusCode, Json<Value>)> {
+    let service = InstanceService::new(state.manager.clone(), state.connections.clone());
+
+    match service
+        .query_sql(&tenant_id, request, params.connection_id.as_deref())
+        .await
+    {
+        Ok(rows) => {
+            let row_count = rows.len();
+            Ok((
+                StatusCode::OK,
+                Json(SqlQueryResponse {
+                    success: true,
+                    rows,
+                    row_count,
+                }),
+            ))
+        }
+        Err(error) => Err(raw_sql_error_response(error)),
+    }
+}
+
+/// Execute a typed positional SQL query that must return exactly one row.
+#[utoipa::path(
+    post,
+    path = "/api/runtime/object-model/sql/query-one",
+    request_body = SqlQueryRequest,
+    params(
+        ("connectionId" = Option<String>, Query, description = "Optional connection ID for database selection")
+    ),
+    responses(
+        (status = 200, description = "SQL query returned exactly one row", body = SqlQueryOneResponse),
+        (status = 400, description = "Invalid SQL query, result schema, or cardinality", body = Value),
+        (status = 500, description = "Database error", body = Value),
+    ),
+    tag = "object-model"
+)]
+pub async fn query_sql_one(
+    crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
+    State(state): State<Arc<ObjectModelState>>,
+    Query(params): Query<ConnectionQueryParams>,
+    Json(request): Json<SqlQueryRequest>,
+) -> Result<(StatusCode, Json<SqlQueryOneResponse>), (StatusCode, Json<Value>)> {
+    let service = InstanceService::new(state.manager.clone(), state.connections.clone());
+
+    match service
+        .query_sql_one(&tenant_id, request, params.connection_id.as_deref())
+        .await
+    {
+        Ok(row) => Ok((
+            StatusCode::OK,
+            Json(SqlQueryOneResponse { success: true, row }),
+        )),
+        Err(error) => Err(raw_sql_error_response(error)),
+    }
+}
+
+/// Execute a positional SQL query and return raw rows without result-schema validation.
+#[utoipa::path(
+    post,
+    path = "/api/runtime/object-model/sql/query-raw",
+    request_body = SqlRawQueryRequest,
+    params(
+        ("connectionId" = Option<String>, Query, description = "Optional connection ID for database selection")
+    ),
+    responses(
+        (status = 200, description = "Raw SQL query executed successfully", body = SqlQueryResponse),
+        (status = 400, description = "Invalid SQL query or parameter", body = Value),
+        (status = 500, description = "Database error", body = Value),
+    ),
+    tag = "object-model"
+)]
+pub async fn query_sql_raw(
+    crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
+    State(state): State<Arc<ObjectModelState>>,
+    Query(params): Query<ConnectionQueryParams>,
+    Json(request): Json<SqlRawQueryRequest>,
+) -> Result<(StatusCode, Json<SqlQueryResponse>), (StatusCode, Json<Value>)> {
+    let service = InstanceService::new(state.manager.clone(), state.connections.clone());
+
+    match service
+        .query_sql_raw(&tenant_id, request, params.connection_id.as_deref())
+        .await
+    {
+        Ok(rows) => {
+            let row_count = rows.len();
+            Ok((
+                StatusCode::OK,
+                Json(SqlQueryResponse {
+                    success: true,
+                    rows,
+                    row_count,
+                }),
+            ))
+        }
+        Err(error) => Err(raw_sql_error_response(error)),
+    }
+}
+
+/// Execute a positional SQL command and return rows affected.
+#[utoipa::path(
+    post,
+    path = "/api/runtime/object-model/sql/execute",
+    request_body = SqlExecuteRequest,
+    params(
+        ("connectionId" = Option<String>, Query, description = "Optional connection ID for database selection")
+    ),
+    responses(
+        (status = 200, description = "SQL command executed successfully", body = SqlExecuteResponse),
+        (status = 400, description = "Invalid SQL command or parameter", body = Value),
+        (status = 500, description = "Database error", body = Value),
+    ),
+    tag = "object-model"
+)]
+pub async fn execute_sql(
+    crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
+    State(state): State<Arc<ObjectModelState>>,
+    Query(params): Query<ConnectionQueryParams>,
+    Json(request): Json<SqlExecuteRequest>,
+) -> Result<(StatusCode, Json<SqlExecuteResponse>), (StatusCode, Json<Value>)> {
+    let service = InstanceService::new(state.manager.clone(), state.connections.clone());
+
+    match service
+        .execute_sql(&tenant_id, request, params.connection_id.as_deref())
+        .await
+    {
+        Ok(rows_affected) => Ok((
+            StatusCode::OK,
+            Json(SqlExecuteResponse {
+                success: true,
+                rows_affected,
+            }),
+        )),
+        Err(error) => Err(raw_sql_error_response(error)),
+    }
+}
+
+fn raw_sql_error_response(error: ServiceError) -> (StatusCode, Json<Value>) {
+    match error {
+        ServiceError::ValidationError(msg) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"success": false, "error": msg})),
+        ),
+        ServiceError::NotFound(msg) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({"success": false, "error": msg})),
+        ),
+        ServiceError::Conflict(msg) => (
+            StatusCode::CONFLICT,
+            Json(json!({"success": false, "error": msg})),
+        ),
+        ServiceError::DatabaseError(msg) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"success": false, "error": msg})),
+        ),
+    }
+}

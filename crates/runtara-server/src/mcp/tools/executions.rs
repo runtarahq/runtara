@@ -579,6 +579,44 @@ fn resolve_nested_reference_envelopes(
 ) -> serde_json::Value {
     match value {
         serde_json::Value::Object(map) => {
+            let fn_call = map.get("fn").and_then(|v| v.as_str());
+            if fn_call.is_some()
+                && let Some(arguments) = map.get("arguments").and_then(|v| v.as_array())
+            {
+                let mut resolved = serde_json::Map::new();
+                for (key, child) in map {
+                    if key == "arguments" {
+                        let resolved_args: Vec<serde_json::Value> = arguments
+                            .iter()
+                            .map(|arg| {
+                                if is_unqualified_reference_envelope(arg) {
+                                    arg.clone()
+                                } else {
+                                    resolve_nested_reference_envelopes(
+                                        arg,
+                                        summaries,
+                                        execution,
+                                        unresolved_refs,
+                                    )
+                                }
+                            })
+                            .collect();
+                        resolved.insert(key.clone(), serde_json::Value::Array(resolved_args));
+                    } else {
+                        resolved.insert(
+                            key.clone(),
+                            resolve_nested_reference_envelopes(
+                                child,
+                                summaries,
+                                execution,
+                                unresolved_refs,
+                            ),
+                        );
+                    }
+                }
+                return serde_json::Value::Object(resolved);
+            }
+
             let condition_op = map.get("op").and_then(|v| v.as_str()).map(str::to_owned);
             if let Some(op) = condition_op.as_deref()
                 && let Some(arguments) = map.get("arguments").and_then(|v| v.as_array())
@@ -683,6 +721,20 @@ fn is_reference_envelope(value: &serde_json::Value) -> bool {
         value.get("valueType"),
         Some(serde_json::Value::String(s)) if s == "reference"
     ) && matches!(value.get("value"), Some(serde_json::Value::String(_)))
+}
+
+fn is_unqualified_reference_envelope(value: &serde_json::Value) -> bool {
+    let Some(path) = value.get("value").and_then(|v| v.as_str()) else {
+        return false;
+    };
+    is_reference_envelope(value) && !is_qualified_workflow_path(path)
+}
+
+fn is_qualified_workflow_path(path: &str) -> bool {
+    matches!(
+        path.split('.').next(),
+        Some("data" | "variables" | "workflow" | "steps" | "loop")
+    )
 }
 
 fn is_field_argument_operator(op: &str) -> bool {
@@ -1197,6 +1249,13 @@ mod tests {
                             "status": "active",
                             "nested": {"name": "from-step"}
                         }
+                    },
+                    {
+                        "stepId": "embed",
+                        "status": "completed",
+                        "outputs": {
+                            "embeddings": [[0.1, 0.2, 0.3]]
+                        }
                     }
                 ]
             }
@@ -1314,6 +1373,40 @@ mod tests {
         assert!(resolved["condition"].get("resolutionNote").is_none());
         assert!(
             resolved["condition"]
+                .get("unresolvedNestedReferences")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn score_expression_resolution_preserves_column_ref_and_resolves_query_vector() {
+        let input_mapping = json!({
+            "score_expression": {
+                "valueType": "immediate",
+                "value": {
+                    "alias": "distance",
+                    "expression": {
+                        "fn": "COSINE_DISTANCE",
+                        "arguments": [
+                            {"valueType": "reference", "value": "embedding"},
+                            {"valueType": "reference", "value": "steps.embed.outputs.embeddings.0"}
+                        ]
+                    }
+                }
+            }
+        });
+
+        let resolved = resolve_input_mappings(&input_mapping, &summaries(), &execution());
+
+        assert_eq!(
+            resolved["score_expression"]["resolvedValue"]["expression"]["arguments"],
+            json!([
+                {"valueType": "reference", "value": "embedding"},
+                {"valueType": "immediate", "value": [0.1, 0.2, 0.3]}
+            ])
+        );
+        assert!(
+            resolved["score_expression"]
                 .get("unresolvedNestedReferences")
                 .is_none()
         );
