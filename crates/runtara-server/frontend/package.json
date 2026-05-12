@@ -12,6 +12,8 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "build:wasm-validation": "node scripts/build-validation-wasm.mjs",
+    "prebuild": "npm run build:wasm-validation",
     "build": "tsc -b && vite build",
     "build:watch": "vite build --watch",
     "lint": "eslint .",

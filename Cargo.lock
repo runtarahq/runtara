@@ -3713,6 +3713,7 @@ dependencies = [
  "chrono-tz",
  "csv",
  "encoding_rs",
+ "getrandom 0.2.16",
  "glob",
  "hmac 0.12.1",
  "md-5 0.10.6",
@@ -4028,6 +4029,18 @@ dependencies = [
  "tracing-opentelemetry 0.29.0",
  "tracing-subscriber",
  "urlencoding",
+]
+
+[[package]]
+name = "runtara-workflow-validation-wasm"
+version = "4.8.0"
+dependencies = [
+ "runtara-agents",
+ "runtara-dsl",
+ "runtara-workflows",
+ "serde",
+ "serde_json",
+ "wasm-bindgen",
 ]
 
 [[package]]

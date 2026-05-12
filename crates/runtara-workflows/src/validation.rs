@@ -23,6 +23,7 @@
 //! | 4 | Configuration warnings |
 //! | 5 | Child workflow validation (version format) |
 //! | 7.5 | Data and variable reference validation |
+//! | 7.6 | Runtime condition type validation |
 //! | 8 | Step name validation (duplicates) |
 //! | 9 | Compensation validation (warnings) |
 //! | 10 | Edge condition validation (priorities) |
@@ -60,6 +61,7 @@
 //! | E072 | InvalidConditionalEdge | Conditional outgoing edge is not a true/false branch |
 //! | E080 | TypeMismatch | Value type doesn't match expected |
 //! | E081 | InvalidEnumValue | Enum value not in allowed set |
+//! | E026 | ConditionTypeMismatch | Condition compares operands whose inferred types cannot match |
 //! | E090 | DuplicateStepName | Multiple steps with same name |
 //! | E100 | DuplicateEdgePriority | Edges with duplicate priority |
 //! | E101 | MultipleDefaultEdges | Multiple unconditional edges |
@@ -67,6 +69,7 @@
 use crate::dependency_analysis::{DependencyGraph, WorkflowReference};
 use runtara_dsl::{
     CompositeInner, ExecutionGraph, InputMapping, MappingValue, SchemaField, SchemaFieldType, Step,
+    agent_meta::{AgentInfo, CapabilityInfo},
 };
 use std::collections::{HashMap, HashSet};
 
@@ -273,6 +276,16 @@ pub enum ValidationError {
         step_id: String,
         field_name: String,
         path: String,
+        message: String,
+    },
+    /// A workflow runtime condition compares operands whose inferred JSON
+    /// types are incompatible.
+    ConditionTypeMismatch {
+        step_id: String,
+        path: String,
+        operator: String,
+        left_type: String,
+        right_type: String,
         message: String,
     },
 
@@ -700,6 +713,20 @@ impl std::fmt::Display for ValidationError {
                     step_id, field_name, path, message
                 )
             }
+            ValidationError::ConditionTypeMismatch {
+                step_id,
+                path,
+                operator,
+                left_type,
+                right_type,
+                message,
+            } => {
+                write!(
+                    f,
+                    "[E026] Step '{}': condition {} at {} compares '{}' with '{}': {}",
+                    step_id, operator, path, left_type, right_type, message
+                )
+            }
 
             // Naming Errors
             ValidationError::DuplicateStepName { name, step_ids } => {
@@ -1072,7 +1099,20 @@ impl std::fmt::Display for ValidationWarning {
 ///
 /// Returns a `ValidationResult` containing errors and warnings.
 /// Compilation should fail if there are any errors.
+#[cfg(feature = "builtin-agent-registry")]
 pub fn validate_workflow(graph: &ExecutionGraph) -> ValidationResult {
+    let agents = runtara_agents::registry::get_agents();
+    validate_workflow_with_agent_metadata(graph, &agents)
+}
+
+/// Validate a workflow with an explicit static agent metadata snapshot.
+///
+/// Browser/WASM callers use this entrypoint with metadata generated at build
+/// time so validation does not need to link executable agent implementations.
+pub fn validate_workflow_with_agent_metadata(
+    graph: &ExecutionGraph,
+    agents: &[AgentInfo],
+) -> ValidationResult {
     let mut result = ValidationResult::default();
 
     // Phase 1: Graph structure validation
@@ -1085,7 +1125,7 @@ pub fn validate_workflow(graph: &ExecutionGraph) -> ValidationResult {
     validate_execution_order(graph, &mut result);
 
     // Phase 3: Agent/capability validation
-    validate_agents(graph, &mut result);
+    validate_agents(graph, agents, &mut result);
 
     // Phase 4: Configuration warnings
     validate_configuration(graph, &mut result);
@@ -1096,11 +1136,14 @@ pub fn validate_workflow(graph: &ExecutionGraph) -> ValidationResult {
     // Phase 7.5: Reference validation (data.* and variables.* definitions)
     validate_data_and_variable_references(graph, &mut result);
 
+    // Phase 7.6: Runtime condition type validation
+    validate_runtime_condition_types(graph, agents, &mut result);
+
     // Phase 8: Step name validation
     validate_step_names(graph, &mut result);
 
     // Phase 9: Compensation validation (warnings for missing compensation)
-    validate_compensation(graph, &mut result);
+    validate_compensation(graph, agents, &mut result);
 
     // Phase 10: Edge condition validation (unique priorities, at most one default)
     validate_edge_conditions(graph, &mut result);
@@ -1113,6 +1156,7 @@ pub fn validate_workflow(graph: &ExecutionGraph) -> ValidationResult {
 
 /// Legacy function for backward compatibility.
 /// Returns only errors (no warnings) as a Vec.
+#[cfg(feature = "builtin-agent-registry")]
 pub fn validate_workflow_errors(graph: &ExecutionGraph) -> Vec<ValidationError> {
     validate_workflow(graph).errors
 }
@@ -1121,11 +1165,22 @@ pub fn validate_workflow_errors(graph: &ExecutionGraph) -> Vec<ValidationError> 
 ///
 /// This extended validation function can check EmbedWorkflow input mappings
 /// against child workflow inputSchemas.
+#[cfg(feature = "builtin-agent-registry")]
 pub fn validate_workflow_with_children(
     graph: &ExecutionGraph,
     child_workflows: &HashMap<String, ExecutionGraph>,
 ) -> ValidationResult {
-    let mut result = validate_workflow(graph);
+    let agents = runtara_agents::registry::get_agents();
+    validate_workflow_with_children_and_agent_metadata(graph, child_workflows, &agents)
+}
+
+/// Validate a workflow with child workflow definitions and explicit agent metadata.
+pub fn validate_workflow_with_children_and_agent_metadata(
+    graph: &ExecutionGraph,
+    child_workflows: &HashMap<String, ExecutionGraph>,
+    agents: &[AgentInfo],
+) -> ValidationResult {
+    let mut result = validate_workflow_with_agent_metadata(graph, agents);
 
     // Check for circular dependencies first
     validate_circular_dependencies(graph, child_workflows, &mut result);
@@ -1765,19 +1820,32 @@ fn has_path(adjacency: &HashMap<String, Vec<String>>, from: &str, to: &str) -> b
 // Phase 3: Agent/Capability Validation
 // ============================================================================
 
-fn validate_agents(graph: &ExecutionGraph, result: &mut ValidationResult) {
+fn find_agent_metadata<'a>(agents: &'a [AgentInfo], agent_id: &str) -> Option<&'a AgentInfo> {
+    agents
+        .iter()
+        .find(|agent| agent.id.eq_ignore_ascii_case(agent_id))
+}
+
+fn find_capability_metadata<'a>(
+    agent: &'a AgentInfo,
+    capability_id: &str,
+) -> Option<&'a CapabilityInfo> {
+    agent
+        .capabilities
+        .iter()
+        .find(|capability| capability.id.eq_ignore_ascii_case(capability_id))
+}
+
+fn validate_agents(graph: &ExecutionGraph, agents: &[AgentInfo], result: &mut ValidationResult) {
     // Get available agents
-    let available_agents: Vec<String> = runtara_agents::registry::get_all_agent_modules()
-        .into_iter()
-        .map(|m| m.id.to_string())
-        .collect();
+    let available_agents: Vec<String> = agents.iter().map(|agent| agent.id.clone()).collect();
 
     for (step_id, step) in &graph.steps {
         if let Step::Agent(agent_step) = step {
             // Validate agent exists
-            let agent_module = runtara_agents::registry::find_agent_module(&agent_step.agent_id);
+            let agent = find_agent_metadata(agents, &agent_step.agent_id);
 
-            if agent_module.is_none() {
+            if agent.is_none() {
                 result.errors.push(ValidationError::UnknownAgent {
                     step_id: step_id.clone(),
                     agent_id: agent_step.agent_id.clone(),
@@ -1787,10 +1855,8 @@ fn validate_agents(graph: &ExecutionGraph, result: &mut ValidationResult) {
             }
 
             // Validate capability exists
-            let capability_inputs = runtara_agents::registry::get_capability_inputs(
-                &agent_step.agent_id,
-                &agent_step.capability_id,
-            );
+            let capability =
+                agent.and_then(|agent| find_capability_metadata(agent, &agent_step.capability_id));
 
             if agent_step.agent_id == "object_model"
                 && let Some(mapping) = &agent_step.input_mapping
@@ -1799,17 +1865,17 @@ fn validate_agents(graph: &ExecutionGraph, result: &mut ValidationResult) {
                 validate_condition_input_mapping(step_id, "condition", condition, result);
             }
 
-            if capability_inputs.is_none() {
+            if capability.is_none() {
                 // Get available capabilities for this agent
-                let available_capabilities: Vec<String> =
-                    runtara_agents::registry::get_all_capabilities()
-                        .filter(|c| {
-                            c.module
-                                .map(|m| m.eq_ignore_ascii_case(&agent_step.agent_id))
-                                .unwrap_or(false)
-                        })
-                        .map(|c| c.capability_id.to_string())
-                        .collect();
+                let available_capabilities: Vec<String> = agent
+                    .map(|agent| {
+                        agent
+                            .capabilities
+                            .iter()
+                            .map(|capability| capability.id.clone())
+                            .collect()
+                    })
+                    .unwrap_or_default();
 
                 result.errors.push(ValidationError::UnknownCapability {
                     step_id: step_id.clone(),
@@ -1821,7 +1887,8 @@ fn validate_agents(graph: &ExecutionGraph, result: &mut ValidationResult) {
             }
 
             // Validate required inputs are provided
-            if let Some(inputs) = capability_inputs {
+            if let Some(capability) = capability {
+                let inputs = &capability.inputs;
                 // Extract root field names from provided keys.
                 // Input mappings can use nested paths like "data.field_name" to build nested objects.
                 // We need to extract the root field name ("data") to check if it's provided.
@@ -1841,7 +1908,7 @@ fn validate_agents(graph: &ExecutionGraph, result: &mut ValidationResult) {
                 let available_fields: Vec<String> = inputs.iter().map(|f| f.name.clone()).collect();
 
                 // Check for missing required inputs
-                for input in &inputs {
+                for input in inputs {
                     if input.required && !provided_keys.contains(&input.name) {
                         // Skip _connection as it's injected automatically
                         if input.name == "_connection" {
@@ -1929,10 +1996,10 @@ fn validate_agents(graph: &ExecutionGraph, result: &mut ValidationResult) {
     for step in graph.steps.values() {
         match step {
             Step::Split(split_step) => {
-                validate_agents(&split_step.subgraph, result);
+                validate_agents(&split_step.subgraph, agents, result);
             }
             Step::While(while_step) => {
-                validate_agents(&while_step.subgraph, result);
+                validate_agents(&while_step.subgraph, agents, result);
             }
             _ => {}
         }
@@ -2553,21 +2620,24 @@ fn collect_step_names(graph: &ExecutionGraph, name_to_step_ids: &mut HashMap<Str
 /// - Don't have compensation defined
 ///
 /// The warning includes a suggestion if the agent provides compensation hints.
-fn validate_compensation(graph: &ExecutionGraph, result: &mut ValidationResult) {
-    validate_compensation_recursive(graph, result);
+fn validate_compensation(
+    graph: &ExecutionGraph,
+    agents: &[AgentInfo],
+    result: &mut ValidationResult,
+) {
+    validate_compensation_recursive(graph, agents, result);
 }
 
-fn validate_compensation_recursive(graph: &ExecutionGraph, result: &mut ValidationResult) {
+fn validate_compensation_recursive(
+    graph: &ExecutionGraph,
+    agents: &[AgentInfo],
+    result: &mut ValidationResult,
+) {
     for (step_id, step) in &graph.steps {
         if let Step::Agent(agent_step) = step {
             // Find the capability metadata
-            let capability = runtara_agents::registry::get_all_capabilities().find(|c| {
-                c.module
-                    .map(|m| m.eq_ignore_ascii_case(&agent_step.agent_id))
-                    .unwrap_or(false)
-                    && c.capability_id
-                        .eq_ignore_ascii_case(&agent_step.capability_id)
-            });
+            let capability = find_agent_metadata(agents, &agent_step.agent_id)
+                .and_then(|agent| find_capability_metadata(agent, &agent_step.capability_id));
 
             // Check if capability has side effects and no compensation is defined
             if let Some(cap) = capability
@@ -2579,8 +2649,8 @@ fn validate_compensation_recursive(graph: &ExecutionGraph, result: &mut Validati
                     cap.compensation_hint
                         .as_ref()
                         .map(|hint| CompensationSuggestion {
-                            compensation_capability_id: hint.capability_id.to_string(),
-                            description: hint.description.map(|s| s.to_string()),
+                            compensation_capability_id: hint.capability_id.clone(),
+                            description: hint.description.clone(),
                         });
 
                 result
@@ -2597,10 +2667,10 @@ fn validate_compensation_recursive(graph: &ExecutionGraph, result: &mut Validati
         // Recursively validate subgraphs
         match step {
             Step::Split(split_step) => {
-                validate_compensation_recursive(&split_step.subgraph, result);
+                validate_compensation_recursive(&split_step.subgraph, agents, result);
             }
             Step::While(while_step) => {
-                validate_compensation_recursive(&while_step.subgraph, result);
+                validate_compensation_recursive(&while_step.subgraph, agents, result);
             }
             _ => {}
         }
@@ -3437,6 +3507,897 @@ fn validate_data_and_variable_references_with_context(
             }
             _ => {}
         }
+    }
+}
+
+// ============================================================================
+// Phase 7.6: Runtime Condition Type Validation
+// ============================================================================
+
+/// Validate obvious type mismatches in conditions evaluated by generated
+/// workflow code. This intentionally stays conservative: unknown runtime
+/// values are allowed, but statically inferred boolean-vs-string style bugs are
+/// rejected before compilation.
+fn validate_runtime_condition_types(
+    graph: &ExecutionGraph,
+    agents: &[AgentInfo],
+    result: &mut ValidationResult,
+) {
+    let context = ConditionTypeContext {
+        graph,
+        agents,
+        inherited_variables: HashMap::new(),
+        has_implicit_data: false,
+        loop_output_types: HashMap::new(),
+    };
+    validate_runtime_condition_types_with_context(graph, &context, result);
+}
+
+#[derive(Debug, Clone)]
+struct ConditionTypeContext<'a> {
+    graph: &'a ExecutionGraph,
+    agents: &'a [AgentInfo],
+    inherited_variables: HashMap<String, StaticValueType>,
+    has_implicit_data: bool,
+    loop_output_types: HashMap<String, StaticValueType>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StaticValueType {
+    Null,
+    Boolean,
+    Integer,
+    Number,
+    String,
+    Array,
+    Object,
+    Json,
+    File,
+}
+
+impl StaticValueType {
+    fn name(self) -> &'static str {
+        match self {
+            StaticValueType::Null => "null",
+            StaticValueType::Boolean => "boolean",
+            StaticValueType::Integer => "integer",
+            StaticValueType::Number => "number",
+            StaticValueType::String => "string",
+            StaticValueType::Array => "array",
+            StaticValueType::Object => "object",
+            StaticValueType::Json => "json",
+            StaticValueType::File => "file",
+        }
+    }
+
+    fn is_numeric(self) -> bool {
+        matches!(self, StaticValueType::Integer | StaticValueType::Number)
+    }
+
+    fn from_json(value: &serde_json::Value) -> Self {
+        match value {
+            serde_json::Value::Null => StaticValueType::Null,
+            serde_json::Value::Bool(_) => StaticValueType::Boolean,
+            serde_json::Value::Number(n) => {
+                if n.is_i64() || n.is_u64() {
+                    StaticValueType::Integer
+                } else {
+                    StaticValueType::Number
+                }
+            }
+            serde_json::Value::String(_) => StaticValueType::String,
+            serde_json::Value::Array(_) => StaticValueType::Array,
+            serde_json::Value::Object(_) => StaticValueType::Object,
+        }
+    }
+
+    fn from_schema_field_type(field_type: &SchemaFieldType) -> Self {
+        match field_type {
+            SchemaFieldType::String => StaticValueType::String,
+            SchemaFieldType::Integer => StaticValueType::Integer,
+            SchemaFieldType::Number => StaticValueType::Number,
+            SchemaFieldType::Boolean => StaticValueType::Boolean,
+            SchemaFieldType::Array => StaticValueType::Array,
+            SchemaFieldType::Object => StaticValueType::Object,
+            SchemaFieldType::File => StaticValueType::File,
+        }
+    }
+
+    fn from_variable_type(var_type: &runtara_dsl::VariableType) -> Self {
+        match var_type {
+            runtara_dsl::VariableType::String => StaticValueType::String,
+            runtara_dsl::VariableType::Number => StaticValueType::Number,
+            runtara_dsl::VariableType::Integer => StaticValueType::Integer,
+            runtara_dsl::VariableType::Boolean => StaticValueType::Boolean,
+            runtara_dsl::VariableType::Array => StaticValueType::Array,
+            runtara_dsl::VariableType::Object => StaticValueType::Object,
+            runtara_dsl::VariableType::File => StaticValueType::File,
+        }
+    }
+
+    fn from_value_type(value_type: &runtara_dsl::ValueType) -> Self {
+        match value_type {
+            runtara_dsl::ValueType::String => StaticValueType::String,
+            runtara_dsl::ValueType::Integer => StaticValueType::Integer,
+            runtara_dsl::ValueType::Number => StaticValueType::Number,
+            runtara_dsl::ValueType::Boolean => StaticValueType::Boolean,
+            runtara_dsl::ValueType::Json => StaticValueType::Json,
+            runtara_dsl::ValueType::File => StaticValueType::File,
+        }
+    }
+}
+
+fn validate_runtime_condition_types_with_context(
+    graph: &ExecutionGraph,
+    context: &ConditionTypeContext<'_>,
+    result: &mut ValidationResult,
+) {
+    for (step_id, step) in &graph.steps {
+        match step {
+            Step::Conditional(cond_step) => {
+                validate_condition_expression_types(
+                    step_id,
+                    "condition",
+                    &cond_step.condition,
+                    context,
+                    result,
+                );
+            }
+            Step::Filter(filter_step) => {
+                validate_condition_expression_types(
+                    step_id,
+                    "config.condition",
+                    &filter_step.config.condition,
+                    context,
+                    result,
+                );
+            }
+            Step::While(while_step) => {
+                let loop_output_types = collect_finish_output_types(
+                    &while_step.subgraph,
+                    context.agents,
+                    &context.loop_output_types,
+                );
+                let while_context = ConditionTypeContext {
+                    graph,
+                    agents: context.agents,
+                    inherited_variables: context.inherited_variables.clone(),
+                    has_implicit_data: context.has_implicit_data,
+                    loop_output_types,
+                };
+                validate_condition_expression_types(
+                    step_id,
+                    "condition",
+                    &while_step.condition,
+                    &while_context,
+                    result,
+                );
+            }
+            _ => {}
+        }
+    }
+
+    for (index, edge) in graph.execution_plan.iter().enumerate() {
+        if let Some(condition) = &edge.condition {
+            validate_condition_expression_types(
+                &edge.from_step,
+                &format!("executionPlan[{index}].condition"),
+                condition,
+                context,
+                result,
+            );
+        }
+    }
+
+    for step in graph.steps.values() {
+        match step {
+            Step::Split(split_step) => {
+                let inherited_variables = split_step
+                    .config
+                    .as_ref()
+                    .and_then(|config| config.variables.as_ref())
+                    .map(|variables| {
+                        variables
+                            .iter()
+                            .filter_map(|(name, value)| {
+                                mapping_value_static_type(value, context)
+                                    .map(|value_type| (name.clone(), value_type))
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let subgraph_context = ConditionTypeContext {
+                    graph: &split_step.subgraph,
+                    agents: context.agents,
+                    inherited_variables,
+                    has_implicit_data: true,
+                    loop_output_types: context.loop_output_types.clone(),
+                };
+                validate_runtime_condition_types_with_context(
+                    &split_step.subgraph,
+                    &subgraph_context,
+                    result,
+                );
+            }
+            Step::While(while_step) => {
+                let loop_output_types = collect_finish_output_types(
+                    &while_step.subgraph,
+                    context.agents,
+                    &context.loop_output_types,
+                );
+                let subgraph_context = ConditionTypeContext {
+                    graph: &while_step.subgraph,
+                    agents: context.agents,
+                    inherited_variables: HashMap::new(),
+                    has_implicit_data: true,
+                    loop_output_types,
+                };
+                validate_runtime_condition_types_with_context(
+                    &while_step.subgraph,
+                    &subgraph_context,
+                    result,
+                );
+            }
+            Step::WaitForSignal(wait_step) => {
+                if let Some(on_wait) = &wait_step.on_wait {
+                    let on_wait_context = ConditionTypeContext {
+                        graph: on_wait,
+                        agents: context.agents,
+                        inherited_variables: HashMap::new(),
+                        has_implicit_data: false,
+                        loop_output_types: HashMap::new(),
+                    };
+                    validate_runtime_condition_types_with_context(
+                        on_wait,
+                        &on_wait_context,
+                        result,
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn validate_condition_expression_types(
+    step_id: &str,
+    path: &str,
+    expr: &runtara_dsl::ConditionExpression,
+    context: &ConditionTypeContext<'_>,
+    result: &mut ValidationResult,
+) {
+    if let runtara_dsl::ConditionExpression::Operation(op) = expr {
+        for (index, arg) in op.arguments.iter().enumerate() {
+            if let runtara_dsl::ConditionArgument::Expression(nested) = arg {
+                validate_condition_expression_types(
+                    step_id,
+                    &format!("{path}.arguments[{index}]"),
+                    nested,
+                    context,
+                    result,
+                );
+            }
+        }
+
+        validate_condition_operation_types(step_id, path, op, context, result);
+    }
+}
+
+fn validate_condition_operation_types(
+    step_id: &str,
+    path: &str,
+    op: &runtara_dsl::ConditionOperation,
+    context: &ConditionTypeContext<'_>,
+    result: &mut ValidationResult,
+) {
+    use runtara_dsl::ConditionOperator;
+
+    match op.op {
+        ConditionOperator::Eq | ConditionOperator::Ne => {
+            if op.arguments.len() >= 2 {
+                validate_equality_operand_types(
+                    step_id,
+                    path,
+                    op,
+                    &op.arguments[0],
+                    &op.arguments[1],
+                    context,
+                    result,
+                );
+            }
+        }
+        ConditionOperator::Gt
+        | ConditionOperator::Gte
+        | ConditionOperator::Lt
+        | ConditionOperator::Lte => {
+            for index in 0..op.arguments.len().min(2) {
+                validate_numeric_condition_operand(
+                    step_id,
+                    &format!("{path}.arguments[{index}]"),
+                    op,
+                    &op.arguments[index],
+                    context,
+                    result,
+                );
+            }
+        }
+        ConditionOperator::StartsWith | ConditionOperator::EndsWith => {
+            for index in 0..op.arguments.len().min(2) {
+                validate_string_condition_operand(
+                    step_id,
+                    &format!("{path}.arguments[{index}]"),
+                    op,
+                    &op.arguments[index],
+                    context,
+                    result,
+                );
+            }
+        }
+        ConditionOperator::Contains => {
+            if let Some(array_arg) = op.arguments.first() {
+                validate_array_condition_operand(
+                    step_id,
+                    &format!("{path}.arguments[0]"),
+                    op,
+                    array_arg,
+                    context,
+                    result,
+                );
+            }
+        }
+        ConditionOperator::In | ConditionOperator::NotIn => {
+            if let Some(array_arg) = op.arguments.get(1) {
+                validate_array_condition_operand(
+                    step_id,
+                    &format!("{path}.arguments[1]"),
+                    op,
+                    array_arg,
+                    context,
+                    result,
+                );
+            }
+        }
+        ConditionOperator::And
+        | ConditionOperator::Or
+        | ConditionOperator::Not
+        | ConditionOperator::Length
+        | ConditionOperator::IsDefined
+        | ConditionOperator::IsEmpty
+        | ConditionOperator::IsNotEmpty
+        | ConditionOperator::SimilarityGte
+        | ConditionOperator::Match
+        | ConditionOperator::CosineDistanceLte
+        | ConditionOperator::L2DistanceLte => {}
+    }
+}
+
+fn validate_equality_operand_types(
+    step_id: &str,
+    path: &str,
+    op: &runtara_dsl::ConditionOperation,
+    left: &runtara_dsl::ConditionArgument,
+    right: &runtara_dsl::ConditionArgument,
+    context: &ConditionTypeContext<'_>,
+    result: &mut ValidationResult,
+) {
+    let Some(left_type) = condition_argument_static_type(left, context) else {
+        return;
+    };
+    let Some(right_type) = condition_argument_static_type(right, context) else {
+        return;
+    };
+
+    if equality_types_may_match(left_type, right_type) {
+        return;
+    }
+
+    let message = if matches!(
+        (left_type, right_type),
+        (StaticValueType::Boolean, StaticValueType::String)
+            | (StaticValueType::String, StaticValueType::Boolean)
+    ) {
+        "boolean values are not equal to quoted strings at runtime; use a boolean literal such as true or false".to_string()
+    } else {
+        "runtime equality does not coerce these JSON types".to_string()
+    };
+
+    push_condition_type_mismatch(
+        result,
+        step_id,
+        &format!("{path}.arguments[0..2]"),
+        condition_operator_name(&op.op),
+        left_type,
+        right_type,
+        message,
+    );
+}
+
+fn validate_numeric_condition_operand(
+    step_id: &str,
+    path: &str,
+    op: &runtara_dsl::ConditionOperation,
+    arg: &runtara_dsl::ConditionArgument,
+    context: &ConditionTypeContext<'_>,
+    result: &mut ValidationResult,
+) {
+    let Some(value_type) = condition_argument_static_type(arg, context) else {
+        return;
+    };
+
+    if value_type.is_numeric()
+        || value_type == StaticValueType::Boolean
+        || value_type == StaticValueType::Json
+    {
+        return;
+    }
+
+    if value_type == StaticValueType::String {
+        if let Some(serde_json::Value::String(value)) = immediate_value_from_condition_arg(arg)
+            && value.parse::<f64>().is_err()
+        {
+            push_condition_type_mismatch(
+                result,
+                step_id,
+                path,
+                condition_operator_name(&op.op),
+                StaticValueType::Number,
+                value_type,
+                "numeric comparisons can only parse numeric string literals".to_string(),
+            );
+        }
+        return;
+    }
+
+    push_condition_type_mismatch(
+        result,
+        step_id,
+        path,
+        condition_operator_name(&op.op),
+        StaticValueType::Number,
+        value_type,
+        "numeric comparisons require operands that can be converted to numbers".to_string(),
+    );
+}
+
+fn validate_string_condition_operand(
+    step_id: &str,
+    path: &str,
+    op: &runtara_dsl::ConditionOperation,
+    arg: &runtara_dsl::ConditionArgument,
+    context: &ConditionTypeContext<'_>,
+    result: &mut ValidationResult,
+) {
+    let Some(value_type) = condition_argument_static_type(arg, context) else {
+        return;
+    };
+
+    if value_type == StaticValueType::String || value_type == StaticValueType::Json {
+        return;
+    }
+
+    push_condition_type_mismatch(
+        result,
+        step_id,
+        path,
+        condition_operator_name(&op.op),
+        StaticValueType::String,
+        value_type,
+        "string operators require string operands".to_string(),
+    );
+}
+
+fn validate_array_condition_operand(
+    step_id: &str,
+    path: &str,
+    op: &runtara_dsl::ConditionOperation,
+    arg: &runtara_dsl::ConditionArgument,
+    context: &ConditionTypeContext<'_>,
+    result: &mut ValidationResult,
+) {
+    let Some(value_type) = condition_argument_static_type(arg, context) else {
+        return;
+    };
+
+    if value_type == StaticValueType::Array || value_type == StaticValueType::Json {
+        return;
+    }
+
+    push_condition_type_mismatch(
+        result,
+        step_id,
+        path,
+        condition_operator_name(&op.op),
+        StaticValueType::Array,
+        value_type,
+        "array membership operators require an array operand".to_string(),
+    );
+}
+
+fn push_condition_type_mismatch(
+    result: &mut ValidationResult,
+    step_id: &str,
+    path: &str,
+    operator: &str,
+    expected_type: StaticValueType,
+    actual_type: StaticValueType,
+    message: String,
+) {
+    result.errors.push(ValidationError::ConditionTypeMismatch {
+        step_id: step_id.to_string(),
+        path: path.to_string(),
+        operator: operator.to_string(),
+        left_type: expected_type.name().to_string(),
+        right_type: actual_type.name().to_string(),
+        message,
+    });
+}
+
+fn equality_types_may_match(left: StaticValueType, right: StaticValueType) -> bool {
+    left == right
+        || left == StaticValueType::Null
+        || right == StaticValueType::Null
+        || (left.is_numeric() && right.is_numeric())
+        || matches!(
+            (left, right),
+            (
+                StaticValueType::String,
+                StaticValueType::Integer | StaticValueType::Number
+            ) | (
+                StaticValueType::Integer | StaticValueType::Number,
+                StaticValueType::String
+            ) | (StaticValueType::Json, _)
+                | (_, StaticValueType::Json)
+        )
+}
+
+fn condition_argument_static_type(
+    arg: &runtara_dsl::ConditionArgument,
+    context: &ConditionTypeContext<'_>,
+) -> Option<StaticValueType> {
+    match arg {
+        runtara_dsl::ConditionArgument::Expression(expr) => {
+            condition_expression_value_type(expr, context)
+        }
+        runtara_dsl::ConditionArgument::Value(value) => mapping_value_static_type(value, context),
+    }
+}
+
+fn condition_expression_value_type(
+    expr: &runtara_dsl::ConditionExpression,
+    context: &ConditionTypeContext<'_>,
+) -> Option<StaticValueType> {
+    match expr {
+        runtara_dsl::ConditionExpression::Operation(op) => {
+            if op.op == runtara_dsl::ConditionOperator::Length {
+                Some(StaticValueType::Integer)
+            } else {
+                Some(StaticValueType::Boolean)
+            }
+        }
+        runtara_dsl::ConditionExpression::Value(value) => mapping_value_static_type(value, context),
+    }
+}
+
+fn mapping_value_static_type(
+    value: &MappingValue,
+    context: &ConditionTypeContext<'_>,
+) -> Option<StaticValueType> {
+    match value {
+        MappingValue::Reference(reference) => reference
+            .type_hint
+            .as_ref()
+            .map(StaticValueType::from_value_type)
+            .or_else(|| reference_static_type(&reference.value, context)),
+        MappingValue::Immediate(immediate) => Some(StaticValueType::from_json(&immediate.value)),
+        MappingValue::Composite(composite) => match &composite.value {
+            CompositeInner::Object(_) => Some(StaticValueType::Object),
+            CompositeInner::Array(_) => Some(StaticValueType::Array),
+        },
+        MappingValue::Template(_) => None,
+    }
+}
+
+fn immediate_value_from_condition_arg(
+    arg: &runtara_dsl::ConditionArgument,
+) -> Option<&serde_json::Value> {
+    match arg {
+        runtara_dsl::ConditionArgument::Value(MappingValue::Immediate(immediate)) => {
+            Some(&immediate.value)
+        }
+        _ => None,
+    }
+}
+
+fn reference_static_type(
+    reference: &str,
+    context: &ConditionTypeContext<'_>,
+) -> Option<StaticValueType> {
+    let segments = reference_segments(reference);
+
+    match segments.first().map(String::as_str) {
+        Some("loop") => loop_reference_static_type(&segments, context),
+        Some("data") => data_reference_static_type(reference, context),
+        Some("variables") => variable_reference_static_type(&segments, context),
+        Some("steps") => step_reference_static_type(&segments, context),
+        Some("__error") => error_reference_static_type(&segments),
+        _ => None,
+    }
+}
+
+fn loop_reference_static_type(
+    segments: &[String],
+    context: &ConditionTypeContext<'_>,
+) -> Option<StaticValueType> {
+    match segments {
+        [root, field] if root == "loop" && field == "index" => Some(StaticValueType::Integer),
+        [root, outputs, field, ..] if root == "loop" && outputs == "outputs" => {
+            context.loop_output_types.get(field).copied()
+        }
+        _ => None,
+    }
+}
+
+fn data_reference_static_type(
+    reference: &str,
+    context: &ConditionTypeContext<'_>,
+) -> Option<StaticValueType> {
+    if context.has_implicit_data || context.graph.input_schema.is_empty() {
+        return None;
+    }
+
+    schema_reference_static_type(reference, "data", &context.graph.input_schema)
+}
+
+fn variable_reference_static_type(
+    segments: &[String],
+    context: &ConditionTypeContext<'_>,
+) -> Option<StaticValueType> {
+    let variable_name = segments.get(1)?;
+
+    if let Some(inherited_type) = context.inherited_variables.get(variable_name) {
+        return Some(*inherited_type);
+    }
+
+    match variable_name.as_str() {
+        "_workflow_id" | "_instance_id" | "_tenant_id" | "_signal_id" => {
+            return Some(StaticValueType::String);
+        }
+        "_index" => return Some(StaticValueType::Integer),
+        "_loop_indices" => return Some(StaticValueType::Array),
+        _ => {}
+    }
+
+    let variable = context.graph.variables.get(variable_name)?;
+    if segments.len() <= 2 {
+        return Some(StaticValueType::from_variable_type(&variable.var_type));
+    }
+
+    json_path_static_type(&variable.value, &segments[2..])
+        .or_else(|| Some(StaticValueType::from_variable_type(&variable.var_type)))
+}
+
+fn step_reference_static_type(
+    segments: &[String],
+    context: &ConditionTypeContext<'_>,
+) -> Option<StaticValueType> {
+    let step_id = segments.get(1)?;
+    if segments.get(2).map(String::as_str) != Some("outputs") {
+        return None;
+    }
+    let output_field = segments.get(3)?;
+    let step = context.graph.steps.get(step_id)?;
+
+    match step {
+        Step::Conditional(_) if output_field == "result" => Some(StaticValueType::Boolean),
+        Step::Finish(finish_step) => finish_step
+            .input_mapping
+            .as_ref()
+            .and_then(|mapping| mapping.get(output_field))
+            .and_then(|value| mapping_value_static_type(value, context)),
+        Step::While(while_step) => {
+            let output_types = collect_finish_output_types(
+                &while_step.subgraph,
+                context.agents,
+                &context.loop_output_types,
+            );
+            output_types.get(output_field).copied()
+        }
+        Step::Split(_) if output_field == "result" => Some(StaticValueType::Array),
+        Step::Agent(agent_step) => {
+            infer_agent_output_field_type(agent_step, output_field, context.agents)
+        }
+        _ => None,
+    }
+}
+
+fn error_reference_static_type(segments: &[String]) -> Option<StaticValueType> {
+    match segments.get(1).map(String::as_str) {
+        Some("code" | "message" | "category" | "severity") => Some(StaticValueType::String),
+        Some("attributes") => Some(StaticValueType::Object),
+        _ => None,
+    }
+}
+
+fn schema_reference_static_type(
+    reference: &str,
+    root: &str,
+    schema: &HashMap<String, SchemaField>,
+) -> Option<StaticValueType> {
+    let segments = reference_segments(reference);
+    if segments.len() <= 1 || segments.first().map(String::as_str) != Some(root) {
+        return None;
+    }
+
+    let mut current_field = schema.get(segments.get(1)?)?;
+    let mut index = 2;
+
+    while index < segments.len() {
+        let segment = &segments[index];
+
+        if current_field.field_type == SchemaFieldType::Array {
+            if segment.parse::<usize>().is_ok() {
+                current_field = current_field.items.as_deref()?;
+                index += 1;
+                continue;
+            }
+            return None;
+        }
+
+        if current_field.field_type != SchemaFieldType::Object {
+            return None;
+        }
+
+        current_field = current_field.properties.as_ref()?.get(segment)?;
+        index += 1;
+    }
+
+    Some(StaticValueType::from_schema_field_type(
+        &current_field.field_type,
+    ))
+}
+
+fn json_path_static_type(
+    value: &serde_json::Value,
+    path_segments: &[String],
+) -> Option<StaticValueType> {
+    let mut current = value;
+    for segment in path_segments {
+        match current {
+            serde_json::Value::Object(map) => current = map.get(segment)?,
+            serde_json::Value::Array(items) => {
+                current = items.get(segment.parse::<usize>().ok()?)?
+            }
+            _ => return None,
+        }
+    }
+    Some(StaticValueType::from_json(current))
+}
+
+fn collect_finish_output_types(
+    graph: &ExecutionGraph,
+    agents: &[AgentInfo],
+    inherited_loop_output_types: &HashMap<String, StaticValueType>,
+) -> HashMap<String, StaticValueType> {
+    let context = ConditionTypeContext {
+        graph,
+        agents,
+        inherited_variables: HashMap::new(),
+        has_implicit_data: true,
+        loop_output_types: inherited_loop_output_types.clone(),
+    };
+    let mut output_types: HashMap<String, Option<StaticValueType>> = HashMap::new();
+
+    for step in graph.steps.values() {
+        if let Step::Finish(finish_step) = step
+            && let Some(mapping) = &finish_step.input_mapping
+        {
+            for (field, value) in mapping {
+                if let Some(value_type) = mapping_value_static_type(value, &context) {
+                    output_types
+                        .entry(field.clone())
+                        .and_modify(|existing| {
+                            *existing = merge_static_value_types(*existing, value_type);
+                        })
+                        .or_insert(Some(value_type));
+                }
+            }
+        }
+    }
+
+    output_types
+        .into_iter()
+        .filter_map(|(field, value_type)| value_type.map(|value_type| (field, value_type)))
+        .collect()
+}
+
+fn merge_static_value_types(
+    existing: Option<StaticValueType>,
+    next: StaticValueType,
+) -> Option<StaticValueType> {
+    let existing = existing?;
+    if existing == next {
+        return Some(existing);
+    }
+    if existing.is_numeric() && next.is_numeric() {
+        return Some(StaticValueType::Number);
+    }
+    None
+}
+
+fn infer_agent_output_field_type(
+    agent_step: &runtara_dsl::AgentStep,
+    output_field: &str,
+    agents: &[AgentInfo],
+) -> Option<StaticValueType> {
+    let capability = find_agent_metadata(agents, &agent_step.agent_id)
+        .and_then(|agent| find_capability_metadata(agent, &agent_step.capability_id))?;
+    let output_type = capability.output.type_name.as_str();
+
+    if output_field == "result"
+        && let Some(value_type) = rust_type_name_static_type(output_type)
+    {
+        return Some(value_type);
+    }
+
+    let field = capability
+        .output
+        .fields
+        .as_deref()?
+        .iter()
+        .find(|field| field.name == output_field)?;
+    rust_type_name_static_type(&field.type_name)
+}
+
+fn rust_type_name_static_type(type_name: &str) -> Option<StaticValueType> {
+    let lower = type_name
+        .trim()
+        .trim_start_matches("Option<")
+        .trim_end_matches('>')
+        .to_ascii_lowercase();
+
+    match lower.as_str() {
+        "string" | "str" => Some(StaticValueType::String),
+        "bool" | "boolean" => Some(StaticValueType::Boolean),
+        "i8" | "i16" | "i32" | "i64" | "i128" | "isize" | "u8" | "u16" | "u32" | "u64" | "u128"
+        | "usize" | "integer" | "int" => Some(StaticValueType::Integer),
+        "f32" | "f64" | "number" | "float" => Some(StaticValueType::Number),
+        "value" | "serde_json::value" | "serde_json::value::value" | "json" => {
+            Some(StaticValueType::Json)
+        }
+        _ if lower.starts_with("vec<") => Some(StaticValueType::Array),
+        _ if lower.starts_with("hashmap<") || lower.ends_with("map") => {
+            Some(StaticValueType::Object)
+        }
+        _ => None,
+    }
+}
+
+fn condition_operator_name(op: &runtara_dsl::ConditionOperator) -> &'static str {
+    use runtara_dsl::ConditionOperator;
+
+    match op {
+        ConditionOperator::And => "AND",
+        ConditionOperator::Or => "OR",
+        ConditionOperator::Not => "NOT",
+        ConditionOperator::Gt => "GT",
+        ConditionOperator::Gte => "GTE",
+        ConditionOperator::Lt => "LT",
+        ConditionOperator::Lte => "LTE",
+        ConditionOperator::Eq => "EQ",
+        ConditionOperator::Ne => "NE",
+        ConditionOperator::StartsWith => "STARTS_WITH",
+        ConditionOperator::EndsWith => "ENDS_WITH",
+        ConditionOperator::Contains => "CONTAINS",
+        ConditionOperator::In => "IN",
+        ConditionOperator::NotIn => "NOT_IN",
+        ConditionOperator::Length => "LENGTH",
+        ConditionOperator::IsDefined => "IS_DEFINED",
+        ConditionOperator::IsEmpty => "IS_EMPTY",
+        ConditionOperator::IsNotEmpty => "IS_NOT_EMPTY",
+        ConditionOperator::SimilarityGte => "SIMILARITY_GTE",
+        ConditionOperator::Match => "MATCH",
+        ConditionOperator::CosineDistanceLte => "COSINE_DISTANCE_LTE",
+        ConditionOperator::L2DistanceLte => "L2_DISTANCE_LTE",
     }
 }
 
@@ -4725,6 +5686,161 @@ mod tests {
         }
     }
 
+    fn create_loop_outputs_has_more_condition(
+        value: serde_json::Value,
+    ) -> runtara_dsl::ConditionExpression {
+        use runtara_dsl::{
+            ConditionArgument, ConditionExpression, ConditionOperation, ConditionOperator,
+            ImmediateValue,
+        };
+
+        ConditionExpression::Operation(ConditionOperation {
+            op: ConditionOperator::Ne,
+            arguments: vec![
+                ConditionArgument::Value(ref_value("loop.outputs.has_more")),
+                ConditionArgument::Value(MappingValue::Immediate(ImmediateValue { value })),
+            ],
+        })
+    }
+
+    fn create_boolean_loop_output_subgraph() -> ExecutionGraph {
+        use runtara_dsl::ImmediateValue;
+
+        let mut keep_mapping = HashMap::new();
+        keep_mapping.insert(
+            "has_more".to_string(),
+            MappingValue::Immediate(ImmediateValue {
+                value: serde_json::json!(true),
+            }),
+        );
+
+        let mut stop_mapping = HashMap::new();
+        stop_mapping.insert(
+            "has_more".to_string(),
+            MappingValue::Immediate(ImmediateValue {
+                value: serde_json::json!(false),
+            }),
+        );
+
+        let mut steps = HashMap::new();
+        steps.insert("check".to_string(), create_conditional_step("check"));
+        steps.insert(
+            "keepGoing".to_string(),
+            create_finish_step("keepGoing", Some(keep_mapping)),
+        );
+        steps.insert(
+            "stopHere".to_string(),
+            create_finish_step("stopHere", Some(stop_mapping)),
+        );
+
+        ExecutionGraph {
+            name: None,
+            description: None,
+            steps,
+            entry_point: "check".to_string(),
+            execution_plan: vec![
+                runtara_dsl::ExecutionPlanEdge {
+                    from_step: "check".to_string(),
+                    to_step: "keepGoing".to_string(),
+                    label: Some("true".to_string()),
+                    condition: None,
+                    priority: None,
+                },
+                runtara_dsl::ExecutionPlanEdge {
+                    from_step: "check".to_string(),
+                    to_step: "stopHere".to_string(),
+                    label: Some("false".to_string()),
+                    condition: None,
+                    priority: None,
+                },
+            ],
+            variables: HashMap::new(),
+            input_schema: HashMap::new(),
+            output_schema: HashMap::new(),
+            notes: None,
+            nodes: None,
+            edges: None,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn test_while_condition_rejects_quoted_false_for_boolean_loop_output() {
+        let mut steps = HashMap::new();
+        steps.insert(
+            "loop".to_string(),
+            create_while_step(
+                "loop",
+                create_loop_outputs_has_more_condition(serde_json::json!("false")),
+                create_boolean_loop_output_subgraph(),
+                Some(5),
+            ),
+        );
+        steps.insert("finish".to_string(), create_finish_step("finish", None));
+
+        let mut graph = create_basic_graph(steps, "loop");
+        graph.execution_plan = vec![runtara_dsl::ExecutionPlanEdge {
+            from_step: "loop".to_string(),
+            to_step: "finish".to_string(),
+            label: None,
+            condition: None,
+            priority: None,
+        }];
+
+        let result = validate_workflow(&graph);
+        assert!(
+            result.errors.iter().any(|e| matches!(
+                e,
+                ValidationError::ConditionTypeMismatch {
+                    step_id,
+                    operator,
+                    left_type,
+                    right_type,
+                    ..
+                } if step_id == "loop"
+                    && operator == "NE"
+                    && left_type == "boolean"
+                    && right_type == "string"
+            )),
+            "Expected boolean-vs-string condition type error. Errors: {:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn test_while_condition_accepts_boolean_false_for_boolean_loop_output() {
+        let mut steps = HashMap::new();
+        steps.insert(
+            "loop".to_string(),
+            create_while_step(
+                "loop",
+                create_loop_outputs_has_more_condition(serde_json::json!(false)),
+                create_boolean_loop_output_subgraph(),
+                Some(5),
+            ),
+        );
+        steps.insert("finish".to_string(), create_finish_step("finish", None));
+
+        let mut graph = create_basic_graph(steps, "loop");
+        graph.execution_plan = vec![runtara_dsl::ExecutionPlanEdge {
+            from_step: "loop".to_string(),
+            to_step: "finish".to_string(),
+            label: None,
+            condition: None,
+            priority: None,
+        }];
+
+        let result = validate_workflow(&graph);
+        assert!(
+            !result
+                .errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::ConditionTypeMismatch { .. })),
+            "Did not expect condition type errors. Errors: {:?}",
+            result.errors
+        );
+    }
+
     #[test]
     fn test_while_step_valid_condition() {
         let mut steps = HashMap::new();
@@ -5897,6 +7013,24 @@ mod tests {
         assert!(display.contains("method"));
         assert!(display.contains("INVALID"));
         assert!(display.contains("GET, POST"));
+    }
+
+    #[test]
+    fn test_error_display_condition_type_mismatch() {
+        let error = ValidationError::ConditionTypeMismatch {
+            step_id: "loop".to_string(),
+            path: "condition.arguments[0..2]".to_string(),
+            operator: "NE".to_string(),
+            left_type: "boolean".to_string(),
+            right_type: "string".to_string(),
+            message: "use a boolean literal".to_string(),
+        };
+        let display = format!("{}", error);
+        assert!(display.contains("[E026]"));
+        assert!(display.contains("loop"));
+        assert!(display.contains("NE"));
+        assert!(display.contains("boolean"));
+        assert!(display.contains("string"));
     }
 
     fn create_object_model_bulk_update_step(id: &str, condition: serde_json::Value) -> Step {

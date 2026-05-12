@@ -75,37 +75,67 @@
 #![deny(missing_docs)]
 
 /// Pre-compiled agents library management.
+#[cfg(all(
+    feature = "compiler",
+    not(all(target_family = "wasm", not(target_os = "wasi")))
+))]
 pub mod agents_library;
 
 /// AST code generation from execution graphs.
+#[cfg(all(
+    feature = "compiler",
+    not(all(target_family = "wasm", not(target_os = "wasi")))
+))]
 pub mod codegen;
 
 /// Compilation orchestration and rustc invocation.
+#[cfg(all(
+    feature = "compiler",
+    not(all(target_family = "wasm", not(target_os = "wasi")))
+))]
 pub mod compile;
 
 /// Dependency analysis for child workflows.
 pub mod dependency_analysis;
 
 /// File path utilities for workflows and data.
+#[cfg(all(
+    feature = "compiler",
+    not(all(target_family = "wasm", not(target_os = "wasi")))
+))]
 pub mod paths;
 
 /// Workflow validation for security and correctness.
 pub mod validation;
 
 // Re-export main types
+#[cfg(all(
+    feature = "compiler",
+    not(all(target_family = "wasm", not(target_os = "wasi")))
+))]
 pub use agents_library::{
     NativeLibraryInfo, get_native_library, get_stdlib_name, get_wasm_native_library,
 };
+#[cfg(all(
+    feature = "compiler",
+    not(all(target_family = "wasm", not(target_os = "wasi")))
+))]
 pub use compile::{
     ChildDependency, ChildWorkflowInput, CompilationInput, NativeCompilationResult,
     compile_workflow, translate_workflow, workflow_has_side_effects,
 };
 pub use dependency_analysis::{DependencyGraph, WorkflowReference};
+#[cfg(all(
+    feature = "compiler",
+    not(all(target_family = "wasm", not(target_os = "wasi")))
+))]
 pub use paths::{get_data_dir, get_workflow_dir, get_workflow_json_path};
 pub use validation::{
-    MissingInputField, ValidationError, ValidationResult, validate_workflow,
-    validate_workflow_with_children,
+    MissingInputField, ValidationError, ValidationResult, validate_workflow_with_agent_metadata,
+    validate_workflow_with_children_and_agent_metadata,
 };
+#[cfg(feature = "builtin-agent-registry")]
+pub use validation::{validate_workflow, validate_workflow_with_children};
 
 // Re-export DSL types for convenience
 pub use runtara_dsl::{ExecutionGraph, Workflow};

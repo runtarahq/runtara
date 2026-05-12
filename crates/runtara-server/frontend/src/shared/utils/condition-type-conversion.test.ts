@@ -139,6 +139,49 @@ describe('condition-type-conversion', () => {
       expect(converted).toEqual(['name', 'John']);
     });
 
+    it('should honor explicit boolean immediate type for EQ/NE operands', () => {
+      const args = [
+        { valueType: 'reference', value: 'loop.outputs.has_more' },
+        {
+          valueType: 'immediate',
+          value: 'false',
+          immediateType: 'boolean',
+        },
+      ];
+      const converted = convertConditionArguments('NE', args);
+
+      expect(converted).toEqual([
+        { valueType: 'reference', value: 'loop.outputs.has_more' },
+        { valueType: 'immediate', value: false },
+      ]);
+    });
+
+    it('should preserve existing JSON boolean immediate values', () => {
+      const args = [
+        { valueType: 'reference', value: 'loop.outputs.has_more' },
+        { valueType: 'immediate', value: false },
+      ];
+      const converted = convertConditionArguments('NE', args);
+
+      expect(converted).toEqual([
+        { valueType: 'reference', value: 'loop.outputs.has_more' },
+        { valueType: 'immediate', value: false },
+      ]);
+    });
+
+    it('should preserve existing JSON number immediate values for equality checks', () => {
+      const args = [
+        { valueType: 'reference', value: 'steps.count.outputs' },
+        { valueType: 'immediate', value: 3 },
+      ];
+      const converted = convertConditionArguments('EQ', args);
+
+      expect(converted).toEqual([
+        { valueType: 'reference', value: 'steps.count.outputs' },
+        { valueType: 'immediate', value: 3 },
+      ]);
+    });
+
     it('should convert EQ value to number when schema says INTEGER', () => {
       const args = ['product_price', '12000'];
       const schema = { product_price: { dataType: 'INTEGER' } };

@@ -9,6 +9,7 @@ members = [
     # Workflow compilation library
     "crates/runtara-dsl",
     "crates/runtara-workflows",
+    "crates/runtara-workflow-validation-wasm",
     "crates/runtara-agents",
     "crates/runtara-ai",
     "crates/runtara-http",

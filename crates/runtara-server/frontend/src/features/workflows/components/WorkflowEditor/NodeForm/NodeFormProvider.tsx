@@ -1,5 +1,5 @@
 import { WorkflowDto } from '@/generated/RuntaraRuntimeApi';
-import { ExtendedAgent } from '@/features/workflows/queries';
+import { ExtendedAgent, toExtendedAgent } from '@/features/workflows/queries';
 import { StepTypeInfo } from '@/generated/RuntaraRuntimeApi.ts';
 import { useCustomQuery } from '@/shared/hooks/api';
 import { queryKeys } from '@/shared/queries/query-keys.ts';
@@ -14,6 +14,7 @@ import {
   getWorkflowStepTypes,
 } from '@/features/workflows/queries';
 import { SchemaField } from '../EditorSidebar/SchemaFieldsEditor';
+import { useMultipleAgentDetails } from '@/features/workflows/hooks';
 
 /** Simple variable type matching the WorkflowEditor prop type */
 interface SimpleVariable {
@@ -100,8 +101,9 @@ export const NodeFormProvider = ({
     } as any,
   });
 
-  // Extract agents from wrapped response { agents: ExtendedAgent[] }
-  const agents: ExtendedAgent[] = useMemo(
+  // Extract compact agents from wrapped response { agents: ExtendedAgent[] }.
+  // Capability schemas are hydrated only for agents used by the current graph.
+  const compactAgents: ExtendedAgent[] = useMemo(
     () => (agentsQuery.data as any)?.agents || [],
     [agentsQuery.data]
   );
@@ -167,6 +169,37 @@ export const NodeFormProvider = ({
     return newGraph;
   }, [graphSignature]);
 
+  const graphAgentIds = useMemo(() => {
+    const ids = new Set<string>();
+
+    for (const step of Object.values(executionGraph?.steps || {})) {
+      const agentId = (step as any)?.agentId;
+      if (typeof agentId === 'string' && agentId) {
+        ids.add(agentId);
+      }
+    }
+
+    return Array.from(ids).sort();
+  }, [executionGraph]);
+
+  const {
+    agentDetailsMap,
+    isLoading: agentDetailsLoading,
+  } = useMultipleAgentDetails(graphAgentIds, {
+    enabled: graphAgentIds.length > 0,
+  });
+
+  const agents: ExtendedAgent[] = useMemo(() => {
+    if (agentDetailsMap.size === 0) {
+      return compactAgents;
+    }
+
+    return compactAgents.map((agent) => {
+      const details = agentDetailsMap.get(agent.id);
+      return details ? toExtendedAgent(details) : agent;
+    });
+  }, [compactAgents, agentDetailsMap]);
+
   const previousSteps = useMemo(
     () =>
       !!nodeId || !!parentNodeId
@@ -190,6 +223,7 @@ export const NodeFormProvider = ({
 
   const isLoading =
     agentsQuery.isFetching ||
+    agentDetailsLoading ||
     stepTypesQuery.isFetching ||
     workflowsQuery.isFetching;
 

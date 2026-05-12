@@ -216,7 +216,11 @@ export function convertOperandValue(
  */
 function isConditionArgument(
   arg: any
-): arg is { valueType: 'immediate' | 'reference'; value: string } {
+): arg is {
+  valueType: 'immediate' | 'reference';
+  value: any;
+  immediateType?: 'number' | 'boolean' | 'string';
+} {
   return (
     typeof arg === 'object' &&
     arg !== null &&
@@ -224,6 +228,30 @@ function isConditionArgument(
     'value' in arg &&
     !('op' in arg)
   );
+}
+
+function inferImmediateArgumentType(
+  arg: {
+    value: any;
+    immediateType?: 'number' | 'boolean' | 'string';
+  },
+  operator: string,
+  index: number,
+  fieldDataType?: string
+): 'number' | 'boolean' | 'string' {
+  if (arg.immediateType) {
+    return arg.immediateType;
+  }
+
+  if (typeof arg.value === 'boolean') {
+    return 'boolean';
+  }
+
+  if (typeof arg.value === 'number') {
+    return 'number';
+  }
+
+  return inferOperandType(operator, index, arg.value, fieldDataType);
 }
 
 /**
@@ -257,10 +285,10 @@ export function convertConditionArguments(
         return { valueType: 'reference', value: arg.value };
       }
       // For immediate types, apply type conversion to the value
-      const inferredType = inferOperandType(
+      const inferredType = inferImmediateArgumentType(
+        arg,
         operator,
         index,
-        arg.value,
         fieldDataType
       );
       const convertedValue = convertOperandValue(arg.value, inferredType);

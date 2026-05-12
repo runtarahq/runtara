@@ -17,6 +17,6 @@ thiserror = "2"
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
 ureq = { version = "2", features = ["json", "tls"] }
 
-[target.'cfg(target_family = "wasm")'.dependencies]
+[target.'cfg(all(target_family = "wasm", target_os = "wasi"))'.dependencies]
 # Pin to wasi 0.14.2 which uses wasip2 1.0.1 (WASI 0.2.4) matching Rust's std
 wasi = { version = "=0.14.2", features = ["std"] }

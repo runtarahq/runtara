@@ -8,6 +8,7 @@ import { WorkflowActionsForm } from '@/features/workflows/pages/Workflow/Workflo
 import { Loader } from '@/shared/components/loader.tsx';
 import { composeExecutionGraph } from '@/features/workflows/components/WorkflowEditor/CustomNodes/utils.tsx';
 import { validateWorkflowStructure } from '@/features/workflows/utils/graph-validation';
+import { validateExecutionGraphWithRust } from '@/features/workflows/utils/rust-workflow-validation';
 import '@xyflow/react/dist/base.css';
 import { queryClient } from '@/main.tsx';
 import { slugify } from '@/shared/utils/string-utils';
@@ -1203,11 +1204,6 @@ export function Workflow() {
       return;
     }
 
-    // If only warnings, still show them but continue with save
-    if (clientWarnings.length > 0) {
-      useValidationStore.getState().setMessages(clientWarnings);
-    }
-
     // Build variables object for execution graph
     // Use staged changes if available, otherwise use original data
     // Convert from UI format [{ name, value, type }, ...] to API format { varName: { type, value }, ... }
@@ -1278,6 +1274,38 @@ export function Workflow() {
       }
     );
 
+    const rustValidation =
+      await validateExecutionGraphWithRust(executionGraph);
+    const rustErrors = convertClientErrors(
+      rustValidation.errors,
+      finalState.nodes
+    );
+    const rustWarnings = convertClientWarnings(
+      rustValidation.warnings,
+      finalState.nodes
+    );
+    const preSaveWarnings = [...clientWarnings, ...rustWarnings];
+
+    if (rustErrors.length > 0) {
+      useValidationStore
+        .getState()
+        .setMessages([...rustErrors, ...preSaveWarnings]);
+
+      const firstErrorStepId = useValidationStore
+        .getState()
+        .getFirstErrorStepId();
+      if (firstErrorStepId) {
+        useWorkflowStore.getState().setSelectedNodeId(firstErrorStepId);
+        useWorkflowStore.getState().setPendingCenterNodeId(firstErrorStepId);
+      }
+      return;
+    }
+
+    // If only warnings, still show them but continue with save.
+    if (preSaveWarnings.length > 0) {
+      useValidationStore.getState().setMessages(preSaveWarnings);
+    }
+
     // Single update call for workflow, metadata, and schemas
     try {
       await new Promise((resolve, reject) => {
@@ -1310,7 +1338,7 @@ export function Workflow() {
         // Combine server errors with client warnings so both are visible (SYN-234)
         useValidationStore
           .getState()
-          .setMessages([...serverErrors, ...clientWarnings]);
+          .setMessages([...serverErrors, ...preSaveWarnings]);
 
         // Also set in workflowStore for node highlighting (existing behavior)
         useWorkflowStore.getState().setValidationErrors(validationErrors);

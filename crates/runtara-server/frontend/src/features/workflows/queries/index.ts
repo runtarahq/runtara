@@ -1,7 +1,9 @@
 import {
+  AgentInfo,
   ApiResponseWorkflowDto,
   CapabilityInfo,
   FoldersResponse,
+  ListStepTypesResponse,
   MoveWorkflowRequest,
   RenameFolderRequest,
   WorkflowInstanceDto,
@@ -9,6 +11,12 @@ import {
 import { executionGraphToReactFlow } from '@/features/workflows/components/WorkflowEditor/CustomNodes/utils.tsx';
 import { ExecutionGraphDto } from '@/features/workflows/types/execution-graph';
 import { parseSchema } from '@/features/workflows/utils/schema';
+import {
+  getStaticAgentWithRust,
+  getStaticAgentsWithRust,
+  getStaticStepTypesWithRust,
+  StaticAgentSummary,
+} from '@/features/workflows/utils/rust-workflow-validation';
 import { RuntimeREST } from '@/shared/queries';
 import { createAuthHeaders, getRuntimeBaseUrl } from '@/shared/queries/utils';
 
@@ -49,6 +57,28 @@ export interface ExtendedAgent {
   integrationIds: string[];
   /** Capabilities indexed by capability ID for O(1) lookup */
   supportedCapabilities: Record<string, CapabilityInfo>;
+}
+
+type AgentMetadata = StaticAgentSummary | AgentInfo;
+
+export function toExtendedAgent(agentInfo: AgentMetadata): ExtendedAgent {
+  const supportedCapabilities: Record<string, CapabilityInfo> = {};
+
+  const capabilities =
+    'capabilities' in agentInfo ? agentInfo.capabilities || [] : [];
+
+  for (const capability of capabilities) {
+    supportedCapabilities[capability.id] = capability;
+  }
+
+  return {
+    id: agentInfo.id,
+    name: agentInfo.name,
+    description: agentInfo.description,
+    supportsConnections: agentInfo.supportsConnections ?? false,
+    integrationIds: agentInfo.integrationIds ?? [],
+    supportedCapabilities,
+  };
 }
 
 export async function getWorkflows(token: string) {
@@ -322,77 +352,35 @@ export async function setCurrentVersion(
   return result.data;
 }
 
-export async function getWorkflowStepTypes(token: string) {
-  const result = await RuntimeREST.api.listStepTypesHandler(
-    createAuthHeaders(token)
-  );
-
-  // Return the full wrapped response { step_types: StepTypeInfo[] }
-  // UI components will extract the step_types array
-  return result.data;
-}
-
-// Helper function to fetch agent details using path parameter
-async function fetchAgentDetails(token: string, agentId: string) {
-  const url = `${getRuntimeBaseUrl()}/agents/${encodeURIComponent(agentId)}`;
-  console.log('[fetchAgentDetails] URL:', url, 'agentId:', agentId);
-  const response = await fetch(url, {
-    method: 'GET',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${token}`,
-    },
-  });
-
-  if (!response.ok) {
-    throw new Error(`Failed to fetch agent details: ${response.statusText}`);
-  }
-
-  return response.json();
+export async function getWorkflowStepTypes(
+  token: string
+): Promise<ListStepTypesResponse> {
+  void token;
+  return getStaticStepTypesWithRust();
 }
 
 export async function getAgents(token: string) {
-  const result = await RuntimeREST.api.listAgentsHandler(
-    createAuthHeaders(token)
+  void token;
+  const agentSummaries = await getStaticAgentsWithRust();
+  const agents = await Promise.all(
+    agentSummaries.map(async (summary) => {
+      const details = await getStaticAgentWithRust(summary.id);
+      return toExtendedAgent(details ?? summary);
+    })
   );
-
-  // Fetch full details for each agent to get capability schemas
-  // Use agent ID (not name) as the API identifier
-  const agentDetailsPromises = result.data.agents.map((agentSummary) =>
-    fetchAgentDetails(token, agentSummary.id)
-  );
-
-  const agentsWithDetails = await Promise.all(agentDetailsPromises);
-
-  // Convert AgentInfo[] to ExtendedAgent[] format
-  const agents: ExtendedAgent[] = agentsWithDetails.map((agentInfo) => {
-    // Convert capabilities array to supportedCapabilities Record for O(1) lookup
-    const supportedCapabilities: Record<string, CapabilityInfo> = {};
-
-    for (const capability of agentInfo.capabilities) {
-      supportedCapabilities[capability.id] = capability;
-    }
-
-    return {
-      id: agentInfo.id,
-      name: agentInfo.name,
-      description: agentInfo.description,
-      supportsConnections: agentInfo.supportsConnections,
-      integrationIds: agentInfo.integrationIds,
-      supportedCapabilities,
-    };
-  });
-
   return { agents };
 }
 
-export async function getAgentDetails(token: string, agentId: string) {
+export async function getAgentDetails(
+  token: string,
+  agentId: string
+): Promise<AgentInfo | null> {
+  void token;
   if (!agentId) {
     return null;
   }
 
-  // Return the AgentInfo with full details including capabilities
-  return fetchAgentDetails(token, agentId);
+  return getStaticAgentWithRust(agentId);
 }
 
 export async function replayWorkflow(token: string, instanceId: string) {

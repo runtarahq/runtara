@@ -10,10 +10,15 @@ mod native;
 #[cfg(not(target_family = "wasm"))]
 pub use native::NativeHttpClient as HttpClient;
 
-#[cfg(target_family = "wasm")]
+#[cfg(all(target_family = "wasm", target_os = "wasi"))]
 mod wasi_backend;
-#[cfg(target_family = "wasm")]
+#[cfg(all(target_family = "wasm", target_os = "wasi"))]
 pub use wasi_backend::WasiHttpClient as HttpClient;
+
+#[cfg(all(target_family = "wasm", not(target_os = "wasi")))]
+mod wasm_js_backend;
+#[cfg(all(target_family = "wasm", not(target_os = "wasi")))]
+pub use wasm_js_backend::WasmJsHttpClient as HttpClient;
 
 use std::collections::HashMap;
 use std::sync::OnceLock;
@@ -141,8 +146,10 @@ impl RequestBuilder {
     pub fn call(self) -> Result<HttpResponse, HttpError> {
         #[cfg(not(target_family = "wasm"))]
         return native::execute(self);
-        #[cfg(target_family = "wasm")]
+        #[cfg(all(target_family = "wasm", target_os = "wasi"))]
         return wasi_backend::execute(self);
+        #[cfg(all(target_family = "wasm", not(target_os = "wasi")))]
+        return wasm_js_backend::execute(self);
     }
 
     /// Execute the request through the HTTP proxy (if configured).
@@ -233,8 +240,10 @@ impl RequestBuilder {
         // Execute directly (bypass proxy check to avoid recursion)
         #[cfg(not(target_family = "wasm"))]
         let proxy_response = native::execute(proxy_request)?;
-        #[cfg(target_family = "wasm")]
+        #[cfg(all(target_family = "wasm", target_os = "wasi"))]
         let proxy_response = wasi_backend::execute(proxy_request)?;
+        #[cfg(all(target_family = "wasm", not(target_os = "wasi")))]
+        let proxy_response = wasm_js_backend::execute(proxy_request)?;
 
         // Parse proxy response
         let resp_json: serde_json::Value = serde_json::from_slice(&proxy_response.body)

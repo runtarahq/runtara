@@ -15,6 +15,13 @@ function extractStepNamesFromMessage(message: string): string[] {
     return quotedMatch.map((m) => m.replace(/"/g, ''));
   }
 
+  const singleQuotedStepMatch = message.match(/Step '([^']+)'/gi);
+  if (singleQuotedStepMatch) {
+    return singleQuotedStepMatch
+      .map((m) => m.match(/Step '([^']+)'/i)?.[1])
+      .filter((value): value is string => Boolean(value));
+  }
+
   // Look for names after "Step: " or similar patterns
   const stepMatch = message.match(/step[:\s]+([^,.\n]+)/i);
   if (stepMatch) {

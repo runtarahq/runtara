@@ -109,12 +109,14 @@ fn build_index_html(base_href: &str) -> (Bytes, String) {
 
 /// CSP for HTML responses. Parameterized by the base64 SHA-256 hash of the
 /// inline config script we just injected so the browser allows it to run.
+/// The embedded UI also instantiates the workflow validation WASM module, which
+/// browsers gate through `script-src`.
 /// Operators tightening for production should front the server with a reverse
 /// proxy that overrides this header.
 fn build_html_csp(inline_script_sha256_b64: &str) -> String {
     format!(
         "default-src 'self'; \
-         script-src 'self' https://plausible.io 'sha256-{inline_script_sha256_b64}'; \
+         script-src 'self' 'wasm-unsafe-eval' https://plausible.io 'sha256-{inline_script_sha256_b64}'; \
          style-src 'self' 'unsafe-inline'; \
          img-src 'self' data: blob:; \
          font-src 'self' data:; \
@@ -302,4 +304,19 @@ fn asset_response(path: &str, file: EmbeddedFile, csp: &str) -> Response {
         )
         .body(Body::from(file.data.into_owned()))
         .unwrap()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn html_csp_allows_browser_wasm_without_general_eval() {
+        let csp = build_html_csp("test-hash");
+
+        assert!(csp.contains("script-src"));
+        assert!(csp.contains("'wasm-unsafe-eval'"));
+        assert!(!csp.contains("'unsafe-eval'"));
+        assert!(csp.contains("'sha256-test-hash'"));
+    }
 }

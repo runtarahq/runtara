@@ -45,6 +45,16 @@ The crate can bundle the `./frontend` React app into the binary behind the
 cargo build -p runtara-server --features embed-ui
 ```
 
+`npm run build` refreshes the browser workflow-validation WASM package before
+creating `frontend/dist`. The `embed-ui` Cargo build also refreshes it when
+Rust validation or agent metadata sources change, then rebuilds `frontend/dist`
+so embedded assets stay in sync. Install `wasm-pack` if the generated package
+is stale:
+
+```bash
+cargo install wasm-pack --locked
+```
+
 Without env config the UI is served at `/ui/` (self-hosted). For a tenant
 deployed behind a gateway that routes `/ui/<tenant-id>/…` externally, set
 `RUNTARA_UI_BASE_PATH=/ui/<tenant-id>` so the `<base href>` injected into

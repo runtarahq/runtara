@@ -1,8 +1,10 @@
 #![allow(unused_imports)]
 
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
+
+const VALIDATION_WASM_FINGERPRINT_VERSION: &str = "runtara-validation-wasm-v1";
 
 fn main() {
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap();
@@ -77,6 +79,12 @@ fn main() {
     // When the `embed-ui` feature is on, rust_embed needs frontend/dist to exist at
     // compile time. Surface a helpful error up-front if it's missing.
     if std::env::var("CARGO_FEATURE_EMBED_UI").is_ok() {
+        let validation_wasm_rebuilt =
+            build_workflow_validation_wasm_if_needed(workspace_root, crate_dir);
+        if validation_wasm_rebuilt {
+            rebuild_frontend_dist(crate_dir);
+        }
+
         let dist = crate_dir.join("frontend/dist");
         let index = dist.join("index.html");
         if !index.exists() {
@@ -89,6 +97,217 @@ fn main() {
             );
         }
         println!("cargo:rerun-if-changed={}", dist.display());
+    }
+}
+
+fn build_workflow_validation_wasm_if_needed(workspace_root: &Path, crate_dir: &Path) -> bool {
+    let wasm_crate = workspace_root.join("crates/runtara-workflow-validation-wasm");
+    let output_dir = crate_dir.join("frontend/src/wasm/workflow-validation");
+    let fingerprint_file = output_dir.join("runtara_workflow_validation.fingerprint");
+    let required_outputs = [
+        "package.json",
+        "runtara_workflow_validation.d.ts",
+        "runtara_workflow_validation.js",
+        "runtara_workflow_validation_bg.wasm",
+        "runtara_workflow_validation_bg.wasm.d.ts",
+    ];
+
+    let inputs = validation_wasm_inputs(workspace_root);
+    for input in &inputs {
+        if input.exists() {
+            println!("cargo:rerun-if-changed={}", input.display());
+        }
+    }
+
+    let fingerprint = validation_wasm_fingerprint(workspace_root, &inputs);
+    let outputs_exist = required_outputs
+        .iter()
+        .all(|name| output_dir.join(name).is_file());
+    let current_fingerprint = fs::read_to_string(&fingerprint_file)
+        .map(|value| value.trim() == fingerprint)
+        .unwrap_or(false);
+
+    if outputs_exist && current_fingerprint {
+        println!("cargo:warning=   ✓ Browser validation WASM is up-to-date");
+        return false;
+    }
+
+    if Command::new("wasm-pack").arg("--version").output().is_err() {
+        panic!(
+            "\n\n`embed-ui` feature needs to rebuild browser validation WASM, \
+             but `wasm-pack` is not available.\n\
+             Install it first:\n\n\
+             \x20   cargo install wasm-pack --locked\n\n"
+        );
+    }
+
+    println!("cargo:warning=");
+    println!("cargo:warning=╔════════════════════════════════════════════════════════════════╗");
+    println!("cargo:warning=║  🧩 BUILDING BROWSER WORKFLOW VALIDATION WASM                  ║");
+    println!("cargo:warning=╚════════════════════════════════════════════════════════════════╝");
+
+    fs::create_dir_all(&output_dir).expect("Failed to create validation WASM output directory");
+
+    let mut cmd = Command::new("wasm-pack");
+    cmd.args(["build"])
+        .arg(&wasm_crate)
+        .args(["--target", "web"])
+        .arg("--out-dir")
+        .arg(&output_dir)
+        .args(["--out-name", "runtara_workflow_validation"])
+        .env(
+            "CARGO_TARGET_DIR",
+            workspace_root.join("target/validation-wasm-pack"),
+        );
+
+    let status = cmd
+        .current_dir(workspace_root)
+        .status()
+        .expect("Failed to run wasm-pack for browser validation WASM");
+    if !status.success() {
+        panic!("wasm-pack failed while building browser validation WASM");
+    }
+
+    let generated_gitignore = output_dir.join(".gitignore");
+    if generated_gitignore.exists() {
+        fs::remove_file(&generated_gitignore)
+            .expect("Failed to remove generated validation WASM .gitignore");
+    }
+
+    fs::write(&fingerprint_file, format!("{fingerprint}\n"))
+        .expect("Failed to write validation WASM fingerprint");
+
+    println!(
+        "cargo:warning=   ✓ Browser validation WASM generated at {}",
+        output_dir.display()
+    );
+    println!("cargo:warning=");
+
+    true
+}
+
+fn rebuild_frontend_dist(crate_dir: &Path) {
+    let frontend_dir = crate_dir.join("frontend");
+    println!("cargo:warning=");
+    println!("cargo:warning=╔════════════════════════════════════════════════════════════════╗");
+    println!("cargo:warning=║  📦 REBUILDING FRONTEND DIST AFTER VALIDATION WASM UPDATE      ║");
+    println!("cargo:warning=╚════════════════════════════════════════════════════════════════╝");
+
+    let status = Command::new("npm")
+        .args(["run", "build"])
+        .current_dir(&frontend_dir)
+        .status()
+        .expect("Failed to run npm build for embedded frontend");
+
+    if !status.success() {
+        panic!(
+            "\n\n`embed-ui` regenerated browser validation WASM but failed to rebuild \
+             frontend/dist.\n\
+             Build the frontend manually and retry:\n\n\
+             \x20   cd {} && npm ci && npm run build\n\n",
+            frontend_dir.display()
+        );
+    }
+
+    println!("cargo:warning=   ✓ frontend/dist rebuilt");
+    println!("cargo:warning=");
+}
+
+fn validation_wasm_inputs(workspace_root: &Path) -> Vec<PathBuf> {
+    [
+        "Cargo.toml",
+        "Cargo.lock",
+        "crates/runtara-workflow-validation-wasm/Cargo.toml",
+        "crates/runtara-workflow-validation-wasm/build.rs",
+        "crates/runtara-workflow-validation-wasm/src",
+        "crates/runtara-workflows/Cargo.toml",
+        "crates/runtara-workflows/src",
+        "crates/runtara-dsl/Cargo.toml",
+        "crates/runtara-dsl/src",
+        "crates/runtara-agents/Cargo.toml",
+        "crates/runtara-agents/src",
+        "crates/runtara-ai/Cargo.toml",
+        "crates/runtara-ai/src",
+        "crates/runtara-http/Cargo.toml",
+        "crates/runtara-http/src",
+    ]
+    .into_iter()
+    .map(|path| workspace_root.join(path))
+    .collect()
+}
+
+fn validation_wasm_fingerprint(workspace_root: &Path, inputs: &[PathBuf]) -> String {
+    let mut files = Vec::new();
+    for input in inputs {
+        collect_files(input, &mut files);
+    }
+    files.sort();
+
+    let mut hash = Fnv1a64::new();
+    hash.write(VALIDATION_WASM_FINGERPRINT_VERSION.as_bytes());
+
+    for file in files {
+        let relative = file.strip_prefix(workspace_root).unwrap_or(&file);
+        hash.write(relative.to_string_lossy().as_bytes());
+        hash.write(&[0]);
+        let content = fs::read(&file).unwrap_or_else(|e| {
+            panic!(
+                "Failed to read validation WASM input {}: {}",
+                file.display(),
+                e
+            )
+        });
+        hash.write(&content);
+        hash.write(&[0]);
+    }
+
+    format!("{:016x}", hash.finish())
+}
+
+fn collect_files(path: &Path, files: &mut Vec<PathBuf>) {
+    if path.is_file() {
+        files.push(path.to_path_buf());
+        return;
+    }
+
+    if !path.is_dir() {
+        return;
+    }
+
+    let entries = fs::read_dir(path).unwrap_or_else(|e| {
+        panic!(
+            "Failed to read validation WASM input dir {}: {}",
+            path.display(),
+            e
+        )
+    });
+    for entry in entries {
+        let entry = entry.expect("Failed to read validation WASM input dir entry");
+        let path = entry.path();
+        if path.is_dir() {
+            collect_files(&path, files);
+        } else if path.is_file() {
+            files.push(path);
+        }
+    }
+}
+
+struct Fnv1a64(u64);
+
+impl Fnv1a64 {
+    fn new() -> Self {
+        Self(0xcbf29ce484222325)
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        for byte in bytes {
+            self.0 ^= u64::from(*byte);
+            self.0 = self.0.wrapping_mul(0x100000001b3);
+        }
+    }
+
+    fn finish(&self) -> u64 {
+        self.0
     }
 }
 
