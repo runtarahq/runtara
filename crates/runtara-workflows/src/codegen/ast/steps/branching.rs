@@ -11,9 +11,9 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use proc_macro2::TokenStream;
 use quote::quote;
 
-use super::StepEmitter;
 use crate::codegen::ast::CodegenError;
 use crate::codegen::ast::context::EmitContext;
+use crate::codegen::ast::program;
 use runtara_dsl::{ExecutionGraph, ExecutionPlanEdge, Step};
 
 /// Returns true if this step is a branching control flow step
@@ -285,7 +285,7 @@ pub fn emit_branch_code(
     let step_codes: Vec<TokenStream> = branch_steps
         .iter()
         .filter_map(|step_id| graph.steps.get(step_id))
-        .map(|step| step.emit(ctx, graph))
+        .map(|step| program::emit_step_execution(step, graph, ctx))
         .collect::<Result<Vec<_>, _>>()?;
 
     Ok(quote! {

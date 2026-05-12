@@ -243,13 +243,16 @@ pub fn emit(step: &WhileStep, ctx: &mut EmitContext) -> Result<TokenStream, Code
                     __loop_index += 1;
                 }
 
-                serde_json::json!({
-                    "stepId": #step_id,
-                    "stepName": #step_name_display,
-                    "stepType": "While",
+                let __while_outputs = serde_json::json!({
                     "iterations": __loop_index,
                     "outputs": __loop_outputs
-                })
+                });
+                __step_output_envelope(
+                    #step_id,
+                    #step_name_display,
+                    "While",
+                    &__while_outputs,
+                )
             };
 
             #debug_end
@@ -541,12 +544,8 @@ mod tests {
 
         // Verify output structure
         assert!(
-            code.contains("\"stepId\""),
-            "Should include stepId in output"
-        );
-        assert!(
-            code.contains("\"stepType\""),
-            "Should include stepType in output"
+            code.contains("__step_output_envelope"),
+            "Should use the standard step output envelope"
         );
         assert!(code.contains("\"While\""), "Should have stepType = While");
         assert!(

@@ -756,6 +756,12 @@ fn emit_input_structs() -> TokenStream {
             {
                 source_map.insert("loop".to_string(), loop_ctx.clone());
             }
+            if let Some(item) = (*inputs.variables)
+                .as_object()
+                .and_then(|v| v.get("_item"))
+            {
+                source_map.insert("item".to_string(), item.clone());
+            }
 
             serde_json::Value::Object(source_map)
         }
@@ -1037,6 +1043,12 @@ fn emit_input_structs() -> TokenStream {
                     .and_then(|vars| vars.get("_loop"))
                     .and_then(|loop_ctx| __lookup_value_pointer(loop_ctx, tail));
             }
+            if let Some(tail) = __pointer_tail(pointer, "/item") {
+                return (*inputs.variables)
+                    .as_object()
+                    .and_then(|vars| vars.get("_item"))
+                    .and_then(|item| __lookup_value_pointer(item, tail));
+            }
             if pointer == "/steps" {
                 return Some(serde_json::Value::Object(steps_context.clone()));
             }
@@ -1122,7 +1134,7 @@ fn emit_input_structs() -> TokenStream {
         fn __is_qualified_workflow_path(path: &str) -> bool {
             matches!(
                 path.split('.').next(),
-                Some("data" | "variables" | "workflow" | "steps" | "loop")
+                Some("data" | "variables" | "workflow" | "steps" | "loop" | "item")
             )
         }
 
@@ -1611,7 +1623,7 @@ fn emit_execute_workflow(
 }
 
 /// Emit code for a single step execution.
-fn emit_step_execution(
+pub(crate) fn emit_step_execution(
     step: &Step,
     graph: &ExecutionGraph,
     ctx: &mut EmitContext,
@@ -3107,6 +3119,27 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_emit_program_helpers_support_scoped_item_root() {
+        let graph = create_minimal_finish_graph("finish");
+        let mut ctx = EmitContext::new(false);
+        let tokens = emit_program(&graph, &mut ctx).unwrap();
+        let code = tokens.to_string();
+
+        assert!(
+            code.contains("_item"),
+            "Should read split item from workflow variables"
+        );
+        assert!(
+            code.contains("/item"),
+            "Should support direct item pointer lookup"
+        );
+        assert!(
+            code.contains("\"item\""),
+            "Should treat item as a qualified scoped root"
+        );
+    }
+
     // ==========================================
     // Tests for collect_error_branch_steps
     // ==========================================
@@ -3506,6 +3539,117 @@ mod tests {
         );
         assert!(code.contains("__error_msg"), "Should capture error message");
         assert!(code.contains("error"), "Should set error context");
+    }
+
+    #[test]
+    fn test_branch_emission_wraps_on_error_steps() {
+        let condition = ConditionExpression::Operation(ConditionOperation {
+            op: ConditionOperator::Eq,
+            arguments: vec![
+                ConditionArgument::Value(MappingValue::Immediate(ImmediateValue {
+                    value: serde_json::json!(1),
+                })),
+                ConditionArgument::Value(MappingValue::Immediate(ImmediateValue {
+                    value: serde_json::json!(1),
+                })),
+            ],
+        });
+
+        let mut steps = HashMap::new();
+        steps.insert(
+            "cond".to_string(),
+            Step::Conditional(ConditionalStep {
+                id: "cond".to_string(),
+                name: None,
+                condition,
+                breakpoint: None,
+            }),
+        );
+        steps.insert(
+            "agent1".to_string(),
+            Step::Agent(AgentStep {
+                id: "agent1".to_string(),
+                name: None,
+                agent_id: "text".to_string(),
+                capability_id: "render-template".to_string(),
+                input_mapping: None,
+                max_retries: None,
+                retry_delay: None,
+                timeout: None,
+                connection_id: None,
+                compensation: None,
+                breakpoint: None,
+                durable: None,
+            }),
+        );
+        for id in ["finish", "error-finish"] {
+            steps.insert(
+                id.to_string(),
+                Step::Finish(FinishStep {
+                    id: id.to_string(),
+                    name: None,
+                    input_mapping: None,
+                    breakpoint: None,
+                }),
+            );
+        }
+
+        let graph = ExecutionGraph {
+            name: None,
+            description: None,
+            entry_point: "cond".to_string(),
+            steps,
+            execution_plan: vec![
+                ExecutionPlanEdge {
+                    from_step: "cond".to_string(),
+                    to_step: "agent1".to_string(),
+                    label: Some("true".to_string()),
+                    condition: None,
+                    priority: None,
+                },
+                ExecutionPlanEdge {
+                    from_step: "cond".to_string(),
+                    to_step: "finish".to_string(),
+                    label: Some("false".to_string()),
+                    condition: None,
+                    priority: None,
+                },
+                ExecutionPlanEdge {
+                    from_step: "agent1".to_string(),
+                    to_step: "finish".to_string(),
+                    label: None,
+                    condition: None,
+                    priority: None,
+                },
+                ExecutionPlanEdge {
+                    from_step: "agent1".to_string(),
+                    to_step: "error-finish".to_string(),
+                    label: Some("onError".to_string()),
+                    condition: None,
+                    priority: None,
+                },
+            ],
+            variables: HashMap::new(),
+            input_schema: HashMap::new(),
+            output_schema: HashMap::new(),
+            notes: None,
+            nodes: None,
+            edges: None,
+            ..Default::default()
+        };
+
+        let mut ctx = EmitContext::new(false);
+        let tokens = emit_program(&graph, &mut ctx).unwrap();
+        let code = tokens.to_string();
+
+        assert!(
+            code.contains("__step_result"),
+            "branch-emitted agent should keep the onError wrapper"
+        );
+        assert!(
+            code.contains("error-finish"),
+            "branch-emitted onError handler should be included"
+        );
     }
 
     // ==========================================
