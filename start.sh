@@ -22,6 +22,10 @@ NC='\033[0m' # No Color
 DATA_DIR="${DATA_DIR:-.data}"
 DATABASE_URL="${RUNTARA_DATABASE_URL:-postgres://localhost/runtara}"
 
+# Workflow runner. `wasm` matches the dev toolchain (runtara-compile emits
+# wasm32-wasip2 binaries); set RUNTARA_RUNNER=oci to run OCI bundles instead.
+RUNNER="${RUNTARA_RUNNER:-wasm}"
+
 # Port configuration
 CORE_PORT="${RUNTARA_CORE_PORT:-8001}"        # Core: instances connect here (SDK)
 ENV_PORT="${RUNTARA_ENV_PORT:-8002}"          # Environment: Management SDK connects here
@@ -117,8 +121,10 @@ start_server() {
     print_status "Starting runtara-environment with embedded core..."
     print_status "  Environment port: ${ENV_PORT} (Management SDK)"
     print_status "  Core port: ${CORE_PORT} (Instance SDK)"
+    print_status "  Runner: ${RUNNER}"
 
     RUNTARA_DATABASE_URL="${DATABASE_URL}" \
+    RUNTARA_RUNNER="${RUNNER}" \
     RUNTARA_ENV_HTTP_PORT="${ENV_PORT}" \
     RUNTARA_CORE_ADDR="127.0.0.1:${CORE_PORT}" \
     DATA_DIR="${DATA_DIR}" \
@@ -186,6 +192,7 @@ usage() {
     echo ""
     echo "Environment Variables:"
     echo "  RUNTARA_DATABASE_URL    PostgreSQL connection string (default: postgres://localhost/runtara)"
+    echo "  RUNTARA_RUNNER          Workflow runner: wasm | oci | native (default: wasm)"
     echo "  DATA_DIR                Data directory (default: .data)"
     echo "  RUNTARA_CORE_PORT       Core instance HTTP port (default: 8001)"
     echo "  RUNTARA_ENV_PORT        Environment HTTP port (default: 8002)"
