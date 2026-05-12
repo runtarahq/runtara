@@ -1087,6 +1087,7 @@ function cleanNodeData(steps: Record<string, any>) {
     if (restData.stepType === 'Switch') {
       // Remove inputMapping for Switch steps - we use config instead
       delete cleaned[id].inputMapping;
+      delete cleaned[id].switchRoutingMode;
 
       const switchConfig: {
         value?: { valueType: string; value: unknown };

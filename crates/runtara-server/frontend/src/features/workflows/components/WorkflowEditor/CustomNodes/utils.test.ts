@@ -584,6 +584,72 @@ describe('Backend DSL serialization', () => {
     expect(step).not.toHaveProperty('groupByExpectedKeys');
     expect(step).not.toHaveProperty('renderingParameters');
   });
+
+  it('does not leak Switch routing UI state into backend DSL', () => {
+    const graph = composeExecutionGraph(
+      [
+        {
+          id: 'route',
+          type: NODE_TYPES.SwitchNode,
+          position: { x: 0, y: 0 },
+          data: {
+            id: 'route',
+            stepType: 'Switch',
+            name: 'Route',
+            switchRoutingMode: true,
+            inputMapping: [
+              {
+                type: 'value',
+                valueType: 'reference',
+                value: 'data.status',
+              },
+              {
+                type: 'cases',
+                value: [
+                  {
+                    match: 'approved',
+                    matchType: 'exact',
+                    output: 'approved',
+                    route: 'approved',
+                  },
+                ],
+              },
+              {
+                type: 'default',
+                value: 'fallback',
+              },
+            ],
+          },
+        },
+      ] as any,
+      [],
+      { name: 'switch-routing-workflow' }
+    );
+
+    const step = (graph!.steps as Record<string, any>).route;
+    expect(step).toMatchObject({
+      id: 'route',
+      stepType: 'Switch',
+      name: 'Route',
+      config: {
+        value: {
+          valueType: 'reference',
+          value: 'data.status',
+        },
+        cases: [
+          {
+            match: 'approved',
+            matchType: 'EQ',
+            output: 'approved',
+            route: 'approved',
+          },
+        ],
+        default: 'fallback',
+      },
+    });
+    expect(step).not.toHaveProperty('switchRoutingMode');
+    expect(step).not.toHaveProperty('inputMapping');
+  });
 });
 
 describe('Split variable round-trip', () => {
