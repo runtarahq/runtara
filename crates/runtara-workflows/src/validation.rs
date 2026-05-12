@@ -53,6 +53,8 @@
 //! | E054 | ChildMissingInputSchema | EmbedWorkflow provides inputs but child has no schema |
 //! | E055 | MissingChildRequiredInputs | EmbedWorkflow missing required child inputs |
 //! | E056 | CircularDependency | Circular dependency between workflows |
+//! | E058 | UndefinedReferenceField | Nested `data.*`/`variables.*` field not known under a validated prefix |
+//! | E059 | ReferenceNonObjectTraversal | Reference tries to traverse through a scalar or invalid container |
 //! | E060 | StepNotYetExecuted | Reference to step that hasn't executed |
 //! | E070 | UnknownVariable | Variable doesn't exist |
 //! | E072 | InvalidConditionalEdge | Conditional outgoing edge is not a true/false branch |
@@ -63,7 +65,9 @@
 //! | E101 | MultipleDefaultEdges | Multiple unconditional edges |
 
 use crate::dependency_analysis::{DependencyGraph, WorkflowReference};
-use runtara_dsl::{CompositeInner, ExecutionGraph, InputMapping, MappingValue, Step};
+use runtara_dsl::{
+    CompositeInner, ExecutionGraph, InputMapping, MappingValue, SchemaField, SchemaFieldType, Step,
+};
 use std::collections::{HashMap, HashSet};
 
 // ============================================================================
@@ -193,6 +197,26 @@ pub enum ValidationError {
         reference: String,
         variable_name: String,
         available_variables: Vec<String>,
+    },
+
+    /// A reference enters a known object/schema area and names a field that is
+    /// known not to exist.
+    UndefinedReferenceField {
+        step_id: String,
+        reference: String,
+        known_prefix: String,
+        missing_field: String,
+        available_fields: Vec<String>,
+    },
+
+    /// A reference tries to traverse through a value/schema that is known not
+    /// to be an object or array container.
+    ReferenceNonObjectTraversal {
+        step_id: String,
+        reference: String,
+        known_prefix: String,
+        actual_type: String,
+        attempted_field: String,
     },
 
     // === EmbedWorkflow Input Validation Errors ===
@@ -508,6 +532,45 @@ impl std::fmt::Display for ValidationError {
                     }
                 )
             }
+            ValidationError::UndefinedReferenceField {
+                step_id,
+                reference,
+                known_prefix,
+                missing_field,
+                available_fields,
+            } => {
+                let suggestion = find_similar_name(missing_field, available_fields);
+                let suggestion_text = suggestion
+                    .map(|s| format!(". Did you mean '{}'?", s))
+                    .unwrap_or_default();
+                write!(
+                    f,
+                    "[E058] Step '{}' references '{}' but '{}' has no field '{}'{}\n       Available fields: {}",
+                    step_id,
+                    reference,
+                    known_prefix,
+                    missing_field,
+                    suggestion_text,
+                    if available_fields.is_empty() {
+                        "(none)".to_string()
+                    } else {
+                        available_fields.join(", ")
+                    }
+                )
+            }
+            ValidationError::ReferenceNonObjectTraversal {
+                step_id,
+                reference,
+                known_prefix,
+                actual_type,
+                attempted_field,
+            } => {
+                write!(
+                    f,
+                    "[E059] Step '{}' references '{}' but '{}' is '{}' and cannot be traversed to '{}'",
+                    step_id, reference, known_prefix, actual_type, attempted_field
+                )
+            }
             ValidationError::ChildMissingInputSchema {
                 step_id,
                 child_workflow_id,
@@ -819,6 +882,14 @@ pub enum ValidationWarning {
         /// If the agent provides a compensation hint, this suggests what to use.
         suggested_compensation: Option<CompensationSuggestion>,
     },
+    /// A reference is valid through a known prefix, but the remaining suffix is
+    /// inside an open/dynamic object where static validation cannot prove fields.
+    PartiallyUnverifiedReference {
+        step_id: String,
+        reference: String,
+        known_prefix: String,
+        unverified_suffix: String,
+    },
 }
 
 // ============================================================================
@@ -976,6 +1047,18 @@ impl std::fmt::Display for ValidationWarning {
                         base_msg
                     )
                 }
+            }
+            ValidationWarning::PartiallyUnverifiedReference {
+                step_id,
+                reference,
+                known_prefix,
+                unverified_suffix,
+            } => {
+                write!(
+                    f,
+                    "[W051] Step '{}' references '{}'. The path is valid through '{}', but '{}' is inside a dynamic object and cannot be validated statically.",
+                    step_id, reference, known_prefix, unverified_suffix
+                )
             }
         }
     }
@@ -2918,6 +3001,267 @@ fn parse_reference(reference: &str) -> Option<(&str, &str)> {
     Some((root, parts[1]))
 }
 
+fn reference_segments(reference: &str) -> Vec<String> {
+    let mut segments = Vec::new();
+    let mut current = String::new();
+    let mut chars = reference.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        match ch {
+            '.' => {
+                if !current.is_empty() {
+                    segments.push(std::mem::take(&mut current));
+                }
+            }
+            '[' => {
+                if !current.is_empty() {
+                    segments.push(std::mem::take(&mut current));
+                }
+
+                let mut bracket = String::new();
+                for next in chars.by_ref() {
+                    if next == ']' {
+                        break;
+                    }
+                    bracket.push(next);
+                }
+
+                let bracket = bracket
+                    .trim()
+                    .trim_matches(|c| c == '\'' || c == '"')
+                    .to_string();
+                if !bracket.is_empty() {
+                    segments.push(bracket);
+                }
+            }
+            _ => current.push(ch),
+        }
+    }
+
+    if !current.is_empty() {
+        segments.push(current);
+    }
+
+    segments
+}
+
+fn validate_schema_reference_path(
+    step_id: &str,
+    reference: &str,
+    root: &str,
+    schema: &HashMap<String, SchemaField>,
+    result: &mut ValidationResult,
+) {
+    let segments = reference_segments(reference);
+    if segments.len() <= 1 || segments.first().map(String::as_str) != Some(root) {
+        return;
+    }
+
+    let Some(first_field) = segments.get(1) else {
+        return;
+    };
+
+    let Some(mut current_field) = schema.get(first_field) else {
+        result.errors.push(ValidationError::UndefinedDataReference {
+            step_id: step_id.to_string(),
+            reference: reference.to_string(),
+            field_name: first_field.clone(),
+            available_fields: sorted_keys(schema),
+        });
+        return;
+    };
+
+    let mut known_prefix = format!("{}.{}", root, first_field);
+    let mut index = 2;
+
+    while index < segments.len() {
+        let segment = &segments[index];
+
+        if current_field.field_type == SchemaFieldType::Array {
+            if segment.parse::<usize>().is_ok() {
+                if let Some(item_schema) = current_field.items.as_deref() {
+                    current_field = item_schema;
+                    known_prefix.push_str(&format!("[{}]", segment));
+                    index += 1;
+                    continue;
+                }
+
+                let suffix = segments[index + 1..].join(".");
+                if !suffix.is_empty() {
+                    result
+                        .warnings
+                        .push(ValidationWarning::PartiallyUnverifiedReference {
+                            step_id: step_id.to_string(),
+                            reference: reference.to_string(),
+                            known_prefix,
+                            unverified_suffix: suffix,
+                        });
+                }
+                return;
+            }
+
+            result
+                .errors
+                .push(ValidationError::ReferenceNonObjectTraversal {
+                    step_id: step_id.to_string(),
+                    reference: reference.to_string(),
+                    known_prefix,
+                    actual_type: "array".to_string(),
+                    attempted_field: segment.clone(),
+                });
+            return;
+        }
+
+        if current_field.field_type != SchemaFieldType::Object {
+            result
+                .errors
+                .push(ValidationError::ReferenceNonObjectTraversal {
+                    step_id: step_id.to_string(),
+                    reference: reference.to_string(),
+                    known_prefix,
+                    actual_type: schema_field_type_name(&current_field.field_type).to_string(),
+                    attempted_field: segment.clone(),
+                });
+            return;
+        }
+
+        let Some(properties) = current_field.properties.as_ref() else {
+            let suffix = segments[index..].join(".");
+            if !suffix.is_empty() {
+                result
+                    .warnings
+                    .push(ValidationWarning::PartiallyUnverifiedReference {
+                        step_id: step_id.to_string(),
+                        reference: reference.to_string(),
+                        known_prefix,
+                        unverified_suffix: suffix,
+                    });
+            }
+            return;
+        };
+
+        let Some(next_field) = properties.get(segment) else {
+            result
+                .errors
+                .push(ValidationError::UndefinedReferenceField {
+                    step_id: step_id.to_string(),
+                    reference: reference.to_string(),
+                    known_prefix,
+                    missing_field: segment.clone(),
+                    available_fields: sorted_keys(properties),
+                });
+            return;
+        };
+
+        current_field = next_field;
+        known_prefix.push('.');
+        known_prefix.push_str(segment);
+        index += 1;
+    }
+}
+
+fn validate_variable_reference_path(
+    step_id: &str,
+    reference: &str,
+    variable_name: &str,
+    value: &serde_json::Value,
+    result: &mut ValidationResult,
+) {
+    let segments = reference_segments(reference);
+    if segments.len() <= 2 || segments.first().map(String::as_str) != Some("variables") {
+        return;
+    }
+
+    let mut current_value = value;
+    let mut known_prefix = format!("variables.{}", variable_name);
+
+    for segment in segments.iter().skip(2) {
+        match current_value {
+            serde_json::Value::Object(map) => {
+                let Some(next_value) = map.get(segment) else {
+                    result
+                        .errors
+                        .push(ValidationError::UndefinedReferenceField {
+                            step_id: step_id.to_string(),
+                            reference: reference.to_string(),
+                            known_prefix,
+                            missing_field: segment.clone(),
+                            available_fields: sorted_value_keys(map),
+                        });
+                    return;
+                };
+                current_value = next_value;
+                known_prefix.push('.');
+                known_prefix.push_str(segment);
+            }
+            serde_json::Value::Array(items) => {
+                let Ok(index) = segment.parse::<usize>() else {
+                    result
+                        .errors
+                        .push(ValidationError::ReferenceNonObjectTraversal {
+                            step_id: step_id.to_string(),
+                            reference: reference.to_string(),
+                            known_prefix,
+                            actual_type: "array".to_string(),
+                            attempted_field: segment.clone(),
+                        });
+                    return;
+                };
+                let Some(next_value) = items.get(index) else {
+                    result
+                        .errors
+                        .push(ValidationError::UndefinedReferenceField {
+                            step_id: step_id.to_string(),
+                            reference: reference.to_string(),
+                            known_prefix,
+                            missing_field: segment.clone(),
+                            available_fields: (0..items.len()).map(|i| i.to_string()).collect(),
+                        });
+                    return;
+                };
+                current_value = next_value;
+                known_prefix.push_str(&format!("[{}]", index));
+            }
+            other => {
+                result
+                    .errors
+                    .push(ValidationError::ReferenceNonObjectTraversal {
+                        step_id: step_id.to_string(),
+                        reference: reference.to_string(),
+                        known_prefix,
+                        actual_type: get_json_type_name(other),
+                        attempted_field: segment.clone(),
+                    });
+                return;
+            }
+        }
+    }
+}
+
+fn sorted_keys(map: &HashMap<String, SchemaField>) -> Vec<String> {
+    let mut keys: Vec<String> = map.keys().cloned().collect();
+    keys.sort();
+    keys
+}
+
+fn sorted_value_keys(map: &serde_json::Map<String, serde_json::Value>) -> Vec<String> {
+    let mut keys: Vec<String> = map.keys().cloned().collect();
+    keys.sort();
+    keys
+}
+
+fn schema_field_type_name(field_type: &SchemaFieldType) -> &'static str {
+    match field_type {
+        SchemaFieldType::String => "string",
+        SchemaFieldType::Integer => "integer",
+        SchemaFieldType::Number => "number",
+        SchemaFieldType::Boolean => "boolean",
+        SchemaFieldType::Array => "array",
+        SchemaFieldType::Object => "object",
+        SchemaFieldType::File => "file",
+    }
+}
+
 /// Extract all reference strings from a MappingValue.
 fn extract_references_from_mapping_value(value: &MappingValue, refs: &mut Vec<String>) {
     match value {
@@ -2985,8 +3329,6 @@ fn validate_data_and_variable_references_with_context(
     has_implicit_data: bool,
     result: &mut ValidationResult,
 ) {
-    let available_data_fields: Vec<String> = graph.input_schema.keys().cloned().collect();
-
     // Merge inherited variables with graph's own variables + built-in runtime variables.
     // Built-in variables are injected at runtime by the codegen (program.rs) and propagated
     // through all subgraphs (Split, While, EmbedWorkflow, WaitForSignal).
@@ -3013,13 +3355,14 @@ fn validate_data_and_variable_references_with_context(
                                     step_id: step_id.clone(),
                                     reference: reference.clone(),
                                 });
-                            } else if !graph.input_schema.contains_key(field_name) {
-                                result.errors.push(ValidationError::UndefinedDataReference {
-                                    step_id: step_id.clone(),
-                                    reference: reference.clone(),
-                                    field_name: field_name.to_string(),
-                                    available_fields: available_data_fields.clone(),
-                                });
+                            } else {
+                                validate_schema_reference_path(
+                                    step_id,
+                                    &reference,
+                                    "data",
+                                    &graph.input_schema,
+                                    result,
+                                );
                             }
                         }
                         // If has_implicit_data is true, any data.* reference is valid
@@ -3034,6 +3377,14 @@ fn validate_data_and_variable_references_with_context(
                                     variable_name: field_name.to_string(),
                                     available_variables: available_variables.clone(),
                                 });
+                        } else if let Some(variable) = graph.variables.get(field_name) {
+                            validate_variable_reference_path(
+                                step_id,
+                                &reference,
+                                field_name,
+                                &variable.value,
+                                result,
+                            );
                         }
                     }
                     _ => {}
@@ -3394,6 +3745,33 @@ mod tests {
             type_hint: None,
             default: None,
         })
+    }
+
+    fn schema_field(field_type: SchemaFieldType) -> SchemaField {
+        SchemaField {
+            field_type,
+            description: None,
+            required: false,
+            default: None,
+            example: None,
+            items: None,
+            enum_values: None,
+            label: None,
+            placeholder: None,
+            order: None,
+            format: None,
+            min: None,
+            max: None,
+            pattern: None,
+            properties: None,
+            visible_when: None,
+        }
+    }
+
+    fn object_schema_field(properties: HashMap<String, SchemaField>) -> SchemaField {
+        let mut field = schema_field(SchemaFieldType::Object);
+        field.properties = Some(properties);
+        field
     }
 
     fn create_basic_graph(steps: HashMap<String, Step>, entry_point: &str) -> ExecutionGraph {
@@ -5762,6 +6140,190 @@ mod tests {
         assert_eq!(get_json_type_name(&serde_json::json!([1, 2, 3])), "array");
         assert_eq!(get_json_type_name(&serde_json::json!({"a": 1})), "object");
         assert_eq!(get_json_type_name(&serde_json::json!(null)), "null");
+    }
+
+    #[test]
+    fn test_data_reference_nested_known_path_is_valid() {
+        let mut mapping = HashMap::new();
+        mapping.insert("value".to_string(), ref_value("data.a.b.c"));
+
+        let mut steps = HashMap::new();
+        steps.insert(
+            "agent".to_string(),
+            create_agent_step("agent", "transform", Some(mapping)),
+        );
+
+        let mut b_props = HashMap::new();
+        b_props.insert("c".to_string(), schema_field(SchemaFieldType::String));
+        let mut a_props = HashMap::new();
+        a_props.insert("b".to_string(), object_schema_field(b_props));
+
+        let mut graph = create_basic_graph(steps, "agent");
+        graph
+            .input_schema
+            .insert("a".to_string(), object_schema_field(a_props));
+
+        let result = validate_workflow(&graph);
+
+        assert!(
+            !result.errors.iter().any(|error| matches!(
+                error,
+                ValidationError::UndefinedDataReference { .. }
+                    | ValidationError::UndefinedReferenceField { .. }
+                    | ValidationError::ReferenceNonObjectTraversal { .. }
+            )),
+            "{:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn test_data_reference_unknown_nested_field_errors() {
+        let mut mapping = HashMap::new();
+        mapping.insert("value".to_string(), ref_value("data.a.d"));
+
+        let mut steps = HashMap::new();
+        steps.insert(
+            "agent".to_string(),
+            create_agent_step("agent", "transform", Some(mapping)),
+        );
+
+        let mut a_props = HashMap::new();
+        a_props.insert("b".to_string(), schema_field(SchemaFieldType::String));
+
+        let mut graph = create_basic_graph(steps, "agent");
+        graph
+            .input_schema
+            .insert("a".to_string(), object_schema_field(a_props));
+
+        let result = validate_workflow(&graph);
+
+        assert!(
+            result.errors.iter().any(|error| matches!(
+                error,
+                ValidationError::UndefinedReferenceField {
+                    known_prefix,
+                    missing_field,
+                    ..
+                } if known_prefix == "data.a" && missing_field == "d"
+            )),
+            "{:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn test_data_reference_dynamic_object_suffix_warns() {
+        let mut mapping = HashMap::new();
+        mapping.insert("value".to_string(), ref_value("data.a.b.anything"));
+
+        let mut steps = HashMap::new();
+        steps.insert(
+            "agent".to_string(),
+            create_agent_step("agent", "transform", Some(mapping)),
+        );
+
+        let mut a_props = HashMap::new();
+        a_props.insert("b".to_string(), schema_field(SchemaFieldType::Object));
+
+        let mut graph = create_basic_graph(steps, "agent");
+        graph
+            .input_schema
+            .insert("a".to_string(), object_schema_field(a_props));
+
+        let result = validate_workflow(&graph);
+
+        assert!(
+            !result.errors.iter().any(|error| matches!(
+                error,
+                ValidationError::UndefinedReferenceField { .. }
+                    | ValidationError::ReferenceNonObjectTraversal { .. }
+            )),
+            "{:?}",
+            result.errors
+        );
+        assert!(
+            result.warnings.iter().any(|warning| matches!(
+                warning,
+                ValidationWarning::PartiallyUnverifiedReference {
+                    known_prefix,
+                    unverified_suffix,
+                    ..
+                } if known_prefix == "data.a.b" && unverified_suffix == "anything"
+            )),
+            "{:?}",
+            result.warnings
+        );
+    }
+
+    #[test]
+    fn test_data_reference_non_object_traversal_errors() {
+        let mut mapping = HashMap::new();
+        mapping.insert("value".to_string(), ref_value("data.a.b"));
+
+        let mut steps = HashMap::new();
+        steps.insert(
+            "agent".to_string(),
+            create_agent_step("agent", "transform", Some(mapping)),
+        );
+
+        let mut graph = create_basic_graph(steps, "agent");
+        graph
+            .input_schema
+            .insert("a".to_string(), schema_field(SchemaFieldType::String));
+
+        let result = validate_workflow(&graph);
+
+        assert!(
+            result.errors.iter().any(|error| matches!(
+                error,
+                ValidationError::ReferenceNonObjectTraversal {
+                    known_prefix,
+                    actual_type,
+                    attempted_field,
+                    ..
+                } if known_prefix == "data.a" && actual_type == "string" && attempted_field == "b"
+            )),
+            "{:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn test_variable_reference_known_object_unknown_field_errors() {
+        let mut mapping = HashMap::new();
+        mapping.insert("value".to_string(), ref_value("variables.config.timeout"));
+
+        let mut steps = HashMap::new();
+        steps.insert(
+            "agent".to_string(),
+            create_agent_step("agent", "transform", Some(mapping)),
+        );
+
+        let mut graph = create_basic_graph(steps, "agent");
+        graph.variables.insert(
+            "config".to_string(),
+            runtara_dsl::Variable {
+                var_type: runtara_dsl::VariableType::Object,
+                value: serde_json::json!({ "url": "https://example.com" }),
+                description: None,
+            },
+        );
+
+        let result = validate_workflow(&graph);
+
+        assert!(
+            result.errors.iter().any(|error| matches!(
+                error,
+                ValidationError::UndefinedReferenceField {
+                    known_prefix,
+                    missing_field,
+                    ..
+                } if known_prefix == "variables.config" && missing_field == "timeout"
+            )),
+            "{:?}",
+            result.errors
+        );
     }
 
     #[test]

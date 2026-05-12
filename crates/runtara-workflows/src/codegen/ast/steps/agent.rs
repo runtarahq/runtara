@@ -16,7 +16,7 @@ use super::{
     emit_agent_span_start, emit_breakpoint_check, emit_step_debug_end, emit_step_debug_start,
 };
 use runtara_dsl::AgentStep;
-use runtara_dsl::agent_meta::get_all_capabilities;
+use runtara_dsl::agent_meta::{get_all_capabilities, get_capability_inputs};
 
 /// Check if a capability requires rate limiting by looking up its metadata.
 /// Returns true if the capability has rate_limited = true in its #[capability] macro.
@@ -138,6 +138,58 @@ pub fn emit(step: &AgentStep, ctx: &mut EmitContext) -> Result<TokenStream, Code
         )
     };
 
+    // Generate resolved-input validation for required capability inputs. Static
+    // validation proves the mapping key exists; this catches runtime references
+    // that resolve to null/missing before agent deserialization.
+    let required_input_fields: Vec<TokenStream> = get_capability_inputs(agent_id, capability_id)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|field| field.required && field.name != "_connection")
+        .map(|field| {
+            let name = field.name;
+            let field_type = field.type_name;
+            let description = field.description;
+            let description_token = if let Some(description) = description {
+                quote! { Some(#description) }
+            } else {
+                quote! { None }
+            };
+            quote! {
+                ::runtara_workflow_stdlib::RequiredAgentInput {
+                    name: #name,
+                    field_type: #field_type,
+                    description: #description_token,
+                }
+            }
+        })
+        .collect();
+
+    let step_name_token = if let Some(step_name) = step_name {
+        quote! { Some(#step_name) }
+    } else {
+        quote! { None }
+    };
+
+    let runtime_input_validation = if required_input_fields.is_empty() {
+        quote! { Ok(()) }
+    } else {
+        quote! {
+            {
+                static REQUIRED_AGENT_INPUTS: &[::runtara_workflow_stdlib::RequiredAgentInput] =
+                    &[#(#required_input_fields),*];
+                ::runtara_workflow_stdlib::validate_agent_inputs(
+                    #step_id,
+                    #step_name_token,
+                    #agent_id,
+                    #capability_id,
+                    &#step_inputs_var,
+                    REQUIRED_AGENT_INPUTS,
+                )
+                .map_err(|e| e.to_json_string())
+            }
+        }
+    };
+
     // Clone workflow inputs var for debug events (to access _loop_indices)
     let workflow_inputs_var = ctx.inputs_var.clone();
 
@@ -205,7 +257,13 @@ pub fn emit(step: &AgentStep, ctx: &mut EmitContext) -> Result<TokenStream, Code
         let __step_result: std::result::Result<(), String> = __step_span.in_scope(|| {
             #debug_start
 
-            #execute_capability
+            let __cap_result = match #runtime_input_validation {
+                Ok(()) => {
+                    #execute_capability
+                    __cap_result
+                }
+                Err(__validation_err) => Err(__validation_err),
+            };
 
             match __cap_result {
                 Ok(__cap_value) => {
@@ -546,8 +604,12 @@ fn emit_connection_fetch(
 mod tests {
     use super::*;
     use crate::codegen::ast::context::EmitContext;
-    use runtara_dsl::{ImmediateValue, MappingValue, ReferenceValue};
+    use runtara_dsl::{ImmediateValue, MappingValue, ReferenceValue, ValueType};
     use std::collections::HashMap;
+
+    // Link runtara-agents so inventory exposes real capability metadata in tests.
+    #[allow(unused_imports)]
+    use runtara_agents as _;
 
     /// Helper to create a minimal agent step for testing.
     fn create_agent_step(step_id: &str, agent_id: &str, capability_id: &str) -> AgentStep {
@@ -587,6 +649,46 @@ mod tests {
         assert!(
             !code.contains("# [resilient") && !code.contains("#[resilient"),
             "Default retry config should not emit a per-step resilient function"
+        );
+    }
+
+    #[test]
+    fn test_emit_agent_validates_required_inputs_before_dispatch() {
+        let mut ctx = EmitContext::new(false);
+        let mut step = create_agent_step("fetch-url", "http", "http-request");
+        step.input_mapping = Some(HashMap::from([(
+            "url".to_string(),
+            MappingValue::Reference(ReferenceValue {
+                value: "data.url".to_string(),
+                type_hint: Some(ValueType::String),
+                default: None,
+            }),
+        )]));
+
+        let code = emit(&step, &mut ctx).unwrap().to_string();
+
+        assert!(
+            code.contains("REQUIRED_AGENT_INPUTS"),
+            "required agent inputs should be embedded in generated code: {code}"
+        );
+        assert!(
+            code.contains("validate_agent_inputs"),
+            "resolved inputs should be validated before agent dispatch: {code}"
+        );
+        assert!(
+            code.contains("RequiredAgentInput") && code.contains("url"),
+            "http-request should validate its required url input: {code}"
+        );
+        assert!(
+            !code.contains("HTTP verb for the request") && !code.contains("fail_on_error"),
+            "optional/defaulted http-request inputs should not be required: {code}"
+        );
+
+        let validation_index = code.find("validate_agent_inputs").unwrap();
+        let dispatch_index = code.find("__agent_durable").unwrap();
+        assert!(
+            validation_index < dispatch_index,
+            "validation should run before durable capability dispatch: {code}"
         );
     }
 

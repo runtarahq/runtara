@@ -67,6 +67,9 @@ pub mod template;
 // Child workflow input validation (runtime)
 pub mod child_input_validation;
 
+// Agent capability input validation (runtime)
+pub mod agent_input_validation;
+
 // Capability dispatch for generated workflow binaries
 // Product stdlibs can override with static dispatch tables
 pub mod dispatch;
@@ -110,6 +113,11 @@ pub mod prelude {
     pub use crate::child_input_validation::{
         ChildInputSchema, ChildInputValidationError, RequiredField, validate_child_inputs,
     };
+
+    // Agent input validation for Agent steps
+    pub use crate::agent_input_validation::{
+        AgentInputValidationError, RequiredAgentInput, validate_agent_inputs,
+    };
 }
 
 // Direct access to commonly used modules
@@ -119,4 +127,9 @@ pub use runtime::{Error, Result};
 // Re-export child input validation for generated code
 pub use child_input_validation::{
     ChildInputSchema, ChildInputValidationError, RequiredField, validate_child_inputs,
+};
+
+// Re-export agent input validation for generated code
+pub use agent_input_validation::{
+    AgentInputValidationError, RequiredAgentInput, validate_agent_inputs,
 };

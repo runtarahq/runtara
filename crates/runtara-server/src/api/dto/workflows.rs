@@ -340,6 +340,42 @@ impl ValidationErrorDto {
                 None,
                 None,
             ),
+            ValidationError::UndefinedReferenceField {
+                step_id,
+                reference,
+                known_prefix,
+                missing_field,
+                available_fields,
+            } => (
+                "E058".to_string(),
+                format!(
+                    "Step '{}' references '{}' but '{}' has no field '{}'. Available fields: {}",
+                    step_id,
+                    reference,
+                    known_prefix,
+                    missing_field,
+                    available_fields.join(", ")
+                ),
+                Some(step_id.clone()),
+                Some(missing_field.clone()),
+                None,
+            ),
+            ValidationError::ReferenceNonObjectTraversal {
+                step_id,
+                reference,
+                known_prefix,
+                actual_type,
+                attempted_field,
+            } => (
+                "E059".to_string(),
+                format!(
+                    "Step '{}' references '{}' but '{}' is '{}' and cannot be traversed to '{}'",
+                    step_id, reference, known_prefix, actual_type, attempted_field
+                ),
+                Some(step_id.clone()),
+                Some(attempted_field.clone()),
+                None,
+            ),
             ValidationError::ChildMissingInputSchema {
                 step_id,
                 child_workflow_id,

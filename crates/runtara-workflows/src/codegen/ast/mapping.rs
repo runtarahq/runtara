@@ -221,7 +221,7 @@ fn emit_reference_value(
                         serde_json::Value::String(s) => serde_json::Value::String(s.clone()),
                         serde_json::Value::Number(n) => serde_json::Value::String(n.to_string()),
                         serde_json::Value::Bool(b) => serde_json::Value::String(b.to_string()),
-                        serde_json::Value::Null => serde_json::Value::String("".to_string()),
+                        serde_json::Value::Null => serde_json::Value::Null,
                         _ => serde_json::Value::String(val.to_string()),
                     }
                 }
@@ -249,6 +249,7 @@ fn emit_reference_value(
                         serde_json::Value::Bool(b) => {
                             serde_json::Value::Number(serde_json::Number::from(if *b { 1 } else { 0 }))
                         }
+                        serde_json::Value::Null => serde_json::Value::Null,
                         _ => serde_json::Value::Number(serde_json::Number::from(0)),
                     }
                 }
@@ -275,6 +276,7 @@ fn emit_reference_value(
                                 .map(serde_json::Value::Number)
                                 .unwrap_or(serde_json::Value::Number(serde_json::Number::from(0)))
                         }
+                        serde_json::Value::Null => serde_json::Value::Null,
                         _ => serde_json::Value::Number(serde_json::Number::from(0)),
                     }
                 }
@@ -292,7 +294,7 @@ fn emit_reference_value(
                         serde_json::Value::Number(n) => {
                             serde_json::Value::Bool(n.as_i64().map(|i| i != 0).unwrap_or(false))
                         }
-                        serde_json::Value::Null => serde_json::Value::Bool(false),
+                        serde_json::Value::Null => serde_json::Value::Null,
                         serde_json::Value::Array(a) => serde_json::Value::Bool(!a.is_empty()),
                         serde_json::Value::Object(o) => serde_json::Value::Bool(!o.is_empty()),
                     }
@@ -752,6 +754,30 @@ mod tests {
         assert!(code.contains("Bool"));
         assert!(code.contains("\"true\""));
         assert!(code.contains("\"1\""));
+    }
+
+    #[test]
+    fn test_emit_reference_type_hints_preserve_null_without_default() {
+        for type_hint in [
+            ValueType::String,
+            ValueType::Integer,
+            ValueType::Number,
+            ValueType::Boolean,
+        ] {
+            let ref_val = ReferenceValue {
+                value: "data.required".to_string(),
+                type_hint: Some(type_hint),
+                default: None,
+            };
+            let ctx = EmitContext::new(false);
+            let source_var = Ident::new("source", Span::call_site());
+            let code = emit_reference_value(&ref_val, &ctx, &source_var).to_string();
+
+            assert!(
+                code.contains("serde_json :: Value :: Null => serde_json :: Value :: Null"),
+                "type hint should preserve null instead of creating a default-ish scalar: {code}"
+            );
+        }
     }
 
     #[test]
