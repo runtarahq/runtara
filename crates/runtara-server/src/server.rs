@@ -616,13 +616,36 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
     };
     let auth_kind = auth_providers.kind;
 
+    // Build the single, process-wide Valkey/Redis connection manager. Every
+    // subsystem that needs Redis — connections facade rate limiting, trigger
+    // stream publisher, compilation worker, cron scheduler, MCP/handler
+    // utility calls — clones this manager instead of opening its own TCP
+    // connection per call.
+    let redis_manager: Option<redis::aio::ConnectionManager> =
+        match crate::valkey::build_redis_url() {
+            Some(url) => match crate::valkey::init_shared_manager(&url).await {
+                Ok(m) => {
+                    println!("✓ Shared Valkey connection manager initialized");
+                    Some(m)
+                }
+                Err(e) => {
+                    eprintln!(
+                        "⚠ Failed to initialize shared Valkey connection manager: {}",
+                        e
+                    );
+                    None
+                }
+            },
+            None => None,
+        };
+
     // Construct connections crate config and facade.
     // Cipher is built from RUNTARA_CONNECTIONS_ENCRYPTION_KEY env var — falls
     // back to NoOp (plaintext at rest) with a loud warning if missing. See
     // runtara_connections::crypto::cipher_from_env for details.
     let connections_config = runtara_connections::ConnectionsConfig {
         db_pool: pool.clone(),
-        redis_url: crate::valkey::build_redis_url(),
+        redis_manager: redis_manager.clone(),
         public_base_url: std::env::var("PUBLIC_BASE_URL")
             .unwrap_or_else(|_| "http://localhost:8080".to_string()),
         http_client: reqwest::Client::new(),
@@ -797,39 +820,14 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
     // Initialize Valkey-based workers (optional but recommended)
     let valkey_config = valkey::ValkeyConfig::from_env();
 
-    // Create trigger stream publisher if Valkey is configured
-    let trigger_stream: Option<Arc<api::repositories::trigger_stream::TriggerStreamPublisher>> =
-        valkey_config.as_ref().map(|config| {
-            Arc::new(
-                api::repositories::trigger_stream::TriggerStreamPublisher::new(
-                    config.connection_url(),
-                ),
-            )
-        });
+    // Reuse the shared connection manager built above (no second TCP).
+    let valkey_conn = redis_manager.clone();
 
-    // Create Valkey connection manager for session queue operations
-    let valkey_conn: Option<redis::aio::ConnectionManager> = match &valkey_config {
-        Some(config) => {
-            let url = config.connection_url();
-            match redis::Client::open(url.as_str()) {
-                Ok(client) => match redis::aio::ConnectionManager::new(client).await {
-                    Ok(conn) => {
-                        println!("✓ Valkey connection manager initialized (for sessions)");
-                        Some(conn)
-                    }
-                    Err(e) => {
-                        eprintln!("⚠ Failed to create Valkey connection manager: {}", e);
-                        None
-                    }
-                },
-                Err(e) => {
-                    eprintln!("⚠ Failed to create Valkey client: {}", e);
-                    None
-                }
-            }
-        }
-        None => None,
-    };
+    // Create trigger stream publisher backed by the shared manager.
+    let trigger_stream: Option<Arc<api::repositories::trigger_stream::TriggerStreamPublisher>> =
+        redis_manager
+            .clone()
+            .map(|m| Arc::new(api::repositories::trigger_stream::TriggerStreamPublisher::new(m)));
 
     if let Some(ref config) = valkey_config {
         println!("Valkey configuration detected, starting workers...");
@@ -837,7 +835,6 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         // Clone config for different workers
         let trigger_worker_config = config.clone();
         let compilation_worker_config = config.clone();
-        let cron_config = config.clone();
         let cleanup_config = config.clone();
 
         // Clone resources for trigger worker
@@ -890,22 +887,24 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
 
         // Start cron scheduler
         let cron_pool = pool.clone();
-        let cron_redis_url = cron_config.connection_url();
+        let cron_trigger_stream = redis_manager
+            .clone()
+            .map(api::repositories::trigger_stream::TriggerStreamPublisher::new);
         let cron_tenant_id = tenant_id.clone();
         let cron_shutdown = shutdown_signal.clone();
         tokio::spawn(async move {
+            let Some(ts) = cron_trigger_stream else {
+                tracing::warn!(
+                    "Cron scheduler not started: shared Valkey connection manager unavailable"
+                );
+                return;
+            };
             let scheduler_config = workers::cron_scheduler::CronSchedulerConfig {
                 tenant_id: cron_tenant_id,
                 check_interval_secs: 60,
             };
 
-            workers::cron_scheduler::run(
-                cron_pool,
-                cron_redis_url,
-                scheduler_config,
-                cron_shutdown,
-            )
-            .await;
+            workers::cron_scheduler::run(cron_pool, ts, scheduler_config, cron_shutdown).await;
         });
 
         // NOTE: Container monitoring is now handled directly by runtara-environment.

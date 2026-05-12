@@ -10,6 +10,7 @@
 //! - Atomic operations: uses Lua scripts for thread safety
 //! - Polling support: for waiting until compilation completes
 
+use redis::aio::ConnectionManager;
 use redis::{AsyncCommands, Script};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
@@ -88,8 +89,9 @@ impl CompilationRequest {
 /// - `runtara:compilation:queue` - LIST for ordered processing
 /// - `runtara:compilation:pending` - SET for deduplication and tracking
 pub struct CompilationQueue {
-    /// Redis client (reused across operations to avoid parsing URL repeatedly)
-    client: redis::Client,
+    /// Shared Redis connection manager (built once at startup and cloned per
+    /// operation — no new TCP connection per call).
+    manager: ConnectionManager,
 }
 
 impl CompilationQueue {
@@ -100,23 +102,14 @@ impl CompilationQueue {
     /// Hash key storing full request payloads by dedupe key.
     const REQUESTS_KEY: &'static str = "runtara:compilation:requests";
 
-    /// Create a new compilation queue
-    ///
-    /// Returns an error if the Redis URL is invalid.
-    pub fn new(redis_url: String) -> Result<Self, CompilationQueueError> {
-        let client = redis::Client::open(redis_url.as_str())
-            .map_err(|e| CompilationQueueError::ConnectionError(e.to_string()))?;
-        Ok(Self { client })
+    /// Create a new compilation queue from a shared connection manager.
+    pub fn new(manager: ConnectionManager) -> Self {
+        Self { manager }
     }
 
-    /// Get a multiplexed async connection from the client
-    async fn get_connection(
-        &self,
-    ) -> Result<redis::aio::MultiplexedConnection, CompilationQueueError> {
-        self.client
-            .get_multiplexed_async_connection()
-            .await
-            .map_err(|e| CompilationQueueError::ConnectionError(e.to_string()))
+    /// Get a connection from the shared manager (cheap clone — no TCP).
+    fn get_connection(&self) -> ConnectionManager {
+        self.manager.clone()
     }
 
     /// Enqueue a compilation request if not already pending
@@ -128,7 +121,7 @@ impl CompilationQueue {
         &self,
         request: &CompilationRequest,
     ) -> Result<bool, CompilationQueueError> {
-        let mut conn = self.get_connection().await?;
+        let mut conn = self.get_connection();
 
         let key = request.unique_key();
         let payload = request
@@ -205,7 +198,7 @@ impl CompilationQueue {
         &self,
         timeout: Duration,
     ) -> Result<Option<CompilationRequest>, CompilationQueueError> {
-        let mut conn = self.get_connection().await?;
+        let mut conn = self.get_connection();
 
         // BLPOP with timeout (returns list name and value)
         let result: Option<(String, String)> = redis::cmd("BLPOP")
@@ -248,7 +241,7 @@ impl CompilationQueue {
         &self,
         request: &CompilationRequest,
     ) -> Result<(), CompilationQueueError> {
-        let mut conn = self.get_connection().await?;
+        let mut conn = self.get_connection();
 
         let key = request.unique_key();
 
@@ -278,7 +271,7 @@ impl CompilationQueue {
         &self,
         request: &CompilationRequest,
     ) -> Result<bool, CompilationQueueError> {
-        let mut conn = self.get_connection().await?;
+        let mut conn = self.get_connection();
 
         let key = request.unique_key();
 
@@ -292,7 +285,7 @@ impl CompilationQueue {
 
     /// Get the number of pending compilations
     pub async fn pending_count(&self) -> Result<usize, CompilationQueueError> {
-        let mut conn = self.get_connection().await?;
+        let mut conn = self.get_connection();
 
         let count: usize = conn
             .scard(Self::PENDING_KEY)
@@ -339,7 +332,7 @@ impl CompilationQueue {
     ///
     /// It moves any pending items that are NOT in the queue back to the queue.
     pub async fn recover_orphaned(&self) -> Result<usize, CompilationQueueError> {
-        let mut conn = self.get_connection().await?;
+        let mut conn = self.get_connection();
 
         // Get all pending items
         let pending: Vec<String> = conn
@@ -466,67 +459,6 @@ mod tests {
         assert_eq!(parsed.workflow_id, "workflow-123");
         assert_eq!(parsed.version, 42);
         assert!(parsed.force_recompile);
-    }
-
-    // =========================================================================
-    // CompilationQueue::new Result handling tests
-    // =========================================================================
-
-    #[test]
-    fn test_compilation_queue_new_with_valid_url() {
-        // Valid Redis URL should succeed in creating the client
-        // Note: This doesn't actually connect - it just validates URL parsing
-        let result = CompilationQueue::new("redis://localhost:6379".to_string());
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn test_compilation_queue_new_with_password() {
-        // URL with authentication should parse correctly
-        let result = CompilationQueue::new("redis://:password@localhost:6379".to_string());
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn test_compilation_queue_new_with_user_password() {
-        // URL with user and password should parse correctly
-        let result = CompilationQueue::new("redis://user:password@localhost:6379".to_string());
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn test_compilation_queue_new_with_database() {
-        // URL with database selection
-        let result = CompilationQueue::new("redis://localhost:6379/1".to_string());
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn test_compilation_queue_new_with_invalid_url() {
-        // Invalid URL should return ConnectionError
-        let result = CompilationQueue::new("not-a-valid-url".to_string());
-        assert!(result.is_err());
-
-        if let Err(CompilationQueueError::ConnectionError(msg)) = result {
-            // Should contain some error message about invalid URL
-            assert!(!msg.is_empty());
-        } else {
-            panic!("Expected ConnectionError variant");
-        }
-    }
-
-    #[test]
-    fn test_compilation_queue_new_with_empty_url() {
-        // Empty URL should fail
-        let result = CompilationQueue::new("".to_string());
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_compilation_queue_new_with_wrong_scheme() {
-        // Wrong scheme (http instead of redis) should fail
-        let result = CompilationQueue::new("http://localhost:6379".to_string());
-        assert!(result.is_err());
     }
 
     // =========================================================================

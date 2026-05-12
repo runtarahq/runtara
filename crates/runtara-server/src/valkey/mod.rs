@@ -4,6 +4,44 @@ pub mod compilation_queue;
 pub mod events;
 pub mod stream;
 
+use redis::RedisError;
+use redis::aio::ConnectionManager;
+use tokio::sync::OnceCell;
+
+/// Process-wide shared Redis connection manager.
+///
+/// Built lazily on first use (or eagerly at server startup via
+/// [`init_shared_manager`]) and shared across every subsystem that talks
+/// to Valkey. The manager itself wraps an `Arc`, so cloning is cheap and
+/// every clone reuses the same multiplexed connection pool — no new TCP
+/// per request.
+///
+/// The URL is captured at first initialization. The server runs against a
+/// single Valkey instance whose URL is fixed for the process lifetime, so
+/// caching a single manager (rather than keying by URL) is intentional.
+static SHARED_MANAGER: OnceCell<ConnectionManager> = OnceCell::const_new();
+
+/// Return the shared connection manager, building it on first call.
+///
+/// Subsequent calls are O(1) clones. Returns an error only if Redis is
+/// unreachable on the very first call (subsequent reconnects are handled
+/// transparently by `ConnectionManager`).
+pub async fn get_or_create_manager(redis_url: &str) -> Result<ConnectionManager, RedisError> {
+    SHARED_MANAGER
+        .get_or_try_init(|| async {
+            let client = redis::Client::open(redis_url)?;
+            ConnectionManager::new(client).await
+        })
+        .await
+        .cloned()
+}
+
+/// Eagerly initialize the shared manager at startup. Safe to call multiple
+/// times; only the first call performs the connection.
+pub async fn init_shared_manager(redis_url: &str) -> Result<ConnectionManager, RedisError> {
+    get_or_create_manager(redis_url).await
+}
+
 /// Valkey configuration loaded from environment variables
 #[derive(Debug, Clone)]
 pub struct ValkeyConfig {

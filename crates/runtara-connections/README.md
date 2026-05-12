@@ -10,11 +10,11 @@ Two surfaces are exposed: an Axum router bundle (`connections_router`, `admin_ro
 
 ## Using it standalone
 
-Not a standalone crate — `publish = false`, and it assumes the host supplies a `PgPool`, an optional Redis URL, an encryption key, and an Axum app to mount routers on. The intended pattern is:
+Not a standalone crate — `publish = false`, and it assumes the host supplies a `PgPool`, an optional shared `redis::aio::ConnectionManager`, an encryption key, and an Axum app to mount routers on. The intended pattern is:
 
 ```rust
 let config = runtara_connections::ConnectionsConfig {
-    db_pool, redis_url, public_base_url, http_client,
+    db_pool, redis_manager, public_base_url, http_client,
     cipher: runtara_connections::cipher_from_env(),
 };
 let facade = Arc::new(runtara_connections::ConnectionsFacade::new(
