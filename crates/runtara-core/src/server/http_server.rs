@@ -29,7 +29,7 @@ use crate::instance_handlers::{
     PollSignalsRequest as HandlerPollSignalsRequest,
     RegisterInstanceRequest as HandlerRegisterRequest,
     RetryAttemptEvent as HandlerRetryAttemptEvent, SignalAck as HandlerSignalAck, SignalType,
-    SleepRequest as HandlerSleepRequest, event_json_from_bytes,
+    SleepRequest as HandlerSleepRequest,
 };
 
 // ============================================================================
@@ -121,9 +121,9 @@ pub struct InstanceEventRequest {
     pub event_type: String,
     #[serde(default)]
     pub checkpoint_id: Option<String>,
-    /// Structured event payload.
+    /// Payload (base64-encoded)
     #[serde(default)]
-    pub payload_json: Option<Value>,
+    pub payload: Option<String>,
     #[serde(default)]
     pub subtype: Option<String>,
 }
@@ -422,17 +422,30 @@ async fn instance_event_handler(
     Json(body): Json<InstanceEventRequest>,
 ) -> impl IntoResponse {
     let payload = body
-        .payload_json
-        .as_ref()
-        .and_then(|payload| serde_json::to_vec(payload).ok())
-        .unwrap_or_default();
+        .payload
+        .as_deref()
+        .map(|p| base64::engine::general_purpose::STANDARD.decode(p))
+        .transpose();
+
+    let payload = match payload {
+        Ok(p) => p.unwrap_or_default(),
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "error": format!("Invalid base64 payload: {}", e),
+                    "code": "INVALID_PAYLOAD"
+                })),
+            )
+                .into_response();
+        }
+    };
 
     let event = HandlerInstanceEvent {
         instance_id,
         event_type: event_type_from_string(&body.event_type),
         checkpoint_id: body.checkpoint_id,
         payload,
-        payload_json: body.payload_json,
         timestamp_ms: chrono::Utc::now().timestamp_millis(),
         subtype: body.subtype,
     };
@@ -497,7 +510,6 @@ async fn completed_handler(
         instance_id,
         event_type: HandlerEventType::EventCompleted as i32,
         checkpoint_id: None,
-        payload_json: event_json_from_bytes(&payload),
         payload,
         timestamp_ms: chrono::Utc::now().timestamp_millis(),
         subtype: None,
@@ -535,7 +547,6 @@ async fn failed_handler(
         event_type: HandlerEventType::EventFailed as i32,
         checkpoint_id: None,
         payload: error_msg.as_bytes().to_vec(),
-        payload_json: Some(json!({ "message": error_msg })),
         timestamp_ms: chrono::Utc::now().timestamp_millis(),
         subtype: None,
     };
@@ -566,7 +577,6 @@ async fn suspended_handler(
         event_type: HandlerEventType::EventSuspended as i32,
         checkpoint_id: None,
         payload: Vec::new(),
-        payload_json: None,
         timestamp_ms: chrono::Utc::now().timestamp_millis(),
         subtype: None,
     };

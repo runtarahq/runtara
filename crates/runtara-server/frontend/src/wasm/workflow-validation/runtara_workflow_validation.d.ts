@@ -7,7 +7,7 @@
 export function getAgentJson(agent_id: string): string;
 
 /**
- * Return statically compiled agent summaries without capability schemas.
+ * Return statically compiled agent metadata, including capability schemas.
  */
 export function getAgentsJson(): string;
 
@@ -42,6 +42,8 @@ export interface InitOutput {
   readonly getAgentsJson: () => [number, number];
   readonly getAgentJson: (a: number, b: number) => [number, number];
   readonly getCapabilitySchemaJson: (a: number, b: number, c: number, d: number) => [number, number];
+  readonly __wbindgen_exn_store: (a: number) => void;
+  readonly __externref_table_alloc: () => number;
   readonly __wbindgen_externrefs: WebAssembly.Table;
   readonly __wbindgen_malloc: (a: number, b: number) => number;
   readonly __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;

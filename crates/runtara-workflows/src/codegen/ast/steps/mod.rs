@@ -230,9 +230,10 @@ pub fn emit_breakpoint_check(
                         "inputs": #inputs_expr,
                         "steps_context": serde_json::Value::Object(#steps_context_var.clone()),
                     });
+                    let __bp_payload_bytes = serde_json::to_vec(&__bp_payload).unwrap_or_default();
                     {
                         let __sdk_guard = sdk().lock().unwrap();
-                        let _ = __sdk_guard.custom_event("breakpoint_hit", __bp_payload);
+                        let _ = __sdk_guard.custom_event("breakpoint_hit", __bp_payload_bytes);
                     }
                     return Err(format!("Breakpoint paused at step '{}'", #step_id));
                 }
@@ -348,8 +349,9 @@ pub fn emit_scope_enter_event(
                 "index": #index_expr,
             });
 
+            let __payload_bytes = serde_json::to_vec(&__payload).unwrap_or_default();
             let __sdk_guard = sdk().lock().unwrap();
-            let _ = __sdk_guard.custom_event("scope_enter", __payload);
+            let _ = __sdk_guard.custom_event("scope_enter", __payload_bytes);
         }
     }
 }
@@ -372,8 +374,9 @@ pub fn emit_scope_exit_event(ctx: &EmitContext, scope_id_var: &str) -> TokenStre
                 "scope_id": #scope_id_ident,
             });
 
+            let __payload_bytes = serde_json::to_vec(&__payload).unwrap_or_default();
             let __sdk_guard = sdk().lock().unwrap();
-            let _ = __sdk_guard.custom_event("scope_exit", __payload);
+            let _ = __sdk_guard.custom_event("scope_exit", __payload_bytes);
         }
     }
 }

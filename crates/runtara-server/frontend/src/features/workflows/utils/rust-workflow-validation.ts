@@ -22,14 +22,6 @@ export interface RustWorkflowValidationResult {
   wasmAvailable: boolean;
 }
 
-export interface StaticAgentSummary {
-  id: string;
-  name: string;
-  description: string;
-  supportsConnections?: boolean;
-  integrationIds?: string[];
-}
-
 let initPromise: Promise<unknown> | null = null;
 
 function ensureRustValidatorInitialized(): Promise<unknown> {
@@ -110,14 +102,11 @@ export async function getStaticStepTypeSchemaWithRust(
   return parseRustJson<unknown | null>(getStepTypeSchemaJson(stepType), null);
 }
 
-export async function getStaticAgentsWithRust(): Promise<StaticAgentSummary[]> {
+export async function getStaticAgentsWithRust(): Promise<AgentInfo[]> {
   await ensureRustValidatorInitialized();
-  const response = parseRustJson<{ agents?: StaticAgentSummary[] }>(
-    getAgentsJson(),
-    {
-      agents: [],
-    }
-  );
+  const response = parseRustJson<{ agents?: AgentInfo[] }>(getAgentsJson(), {
+    agents: [],
+  });
   return Array.isArray(response.agents) ? response.agents : [];
 }
 

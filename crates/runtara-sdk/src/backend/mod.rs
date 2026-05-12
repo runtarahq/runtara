@@ -17,7 +17,6 @@ pub mod http;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use serde_json::Value;
 
 use crate::error::Result;
 use crate::types::{CheckpointResult, CustomSignal, Signal, SignalType, StatusResponse};
@@ -68,11 +67,11 @@ pub trait SdkBackend: Send + Sync {
     /// relaunch the instance when the wake time arrives.
     fn sleep_until(&self, checkpoint_id: &str, wake_at: DateTime<Utc>, state: &[u8]) -> Result<()>;
 
-    /// Send a custom event with arbitrary subtype and structured JSON payload.
+    /// Send a custom event with arbitrary subtype and payload.
     ///
-    /// This is a fire-and-forget operation. Core treats the subtype as an
-    /// opaque string, but event payloads are JSON so they can be queried.
-    fn send_custom_event(&self, subtype: &str, payload: Value) -> Result<()>;
+    /// This is a fire-and-forget operation - the event is stored by core
+    /// but no response is expected. Core treats the subtype as an opaque string.
+    fn send_custom_event(&self, subtype: &str, payload: Vec<u8>) -> Result<()>;
 
     /// Record a retry attempt.
     fn record_retry_attempt(

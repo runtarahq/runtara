@@ -15,7 +15,6 @@ use std::time::Duration;
 use base64::Engine;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use tracing::{debug, info, warn};
 
 use crate::backend::SdkBackend;
@@ -259,7 +258,7 @@ struct EventBody {
     #[serde(skip_serializing_if = "Option::is_none")]
     checkpoint_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    payload_json: Option<Value>,
+    payload: Option<String>, // base64
     #[serde(skip_serializing_if = "Option::is_none")]
     subtype: Option<String>,
 }
@@ -491,7 +490,7 @@ impl SdkBackend for HttpBackend {
         let body = EventBody {
             event_type: "heartbeat".to_string(),
             checkpoint_id: None,
-            payload_json: None,
+            payload: None,
             subtype: None,
         };
 
@@ -580,11 +579,11 @@ impl SdkBackend for HttpBackend {
         Ok(None)
     }
 
-    fn send_custom_event(&self, subtype: &str, payload: Value) -> Result<()> {
+    fn send_custom_event(&self, subtype: &str, payload: Vec<u8>) -> Result<()> {
         let body = EventBody {
             event_type: "custom".to_string(),
             checkpoint_id: None,
-            payload_json: Some(payload),
+            payload: Some(encode_b64(&payload)),
             subtype: Some(subtype.to_string()),
         };
 

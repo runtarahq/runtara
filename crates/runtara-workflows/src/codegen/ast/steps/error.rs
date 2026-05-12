@@ -128,8 +128,9 @@ pub fn emit(step: &ErrorStep, ctx: &mut EmitContext) -> Result<TokenStream, Code
                         .unwrap_or(0),
                 });
 
+                let __payload_bytes = serde_json::to_vec(&__error_payload).unwrap_or_default();
                 let __sdk_guard = sdk().lock().unwrap();
-                let _ = __sdk_guard.custom_event("workflow_error", __error_payload);
+                let _ = __sdk_guard.custom_event("workflow_error", __payload_bytes);
             }
 
             // Store step result in context (even though we'll fail after)

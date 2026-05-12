@@ -1874,8 +1874,9 @@ fn emit_wait_for_signal_tool_arm(
                     "call_number": __tool_call_counter
                 });
                 {
+                    let __payload_bytes = serde_json::to_vec(&__signal_event_data).unwrap_or_default();
                     let mut __sdk = sdk().lock().unwrap();
-                    let _ = __sdk.custom_event("external_input_requested", __signal_event_data);
+                    let _ = __sdk.custom_event("external_input_requested", __payload_bytes);
                 }
             }
 

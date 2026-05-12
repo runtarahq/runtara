@@ -322,9 +322,9 @@ impl RuntaraSdk {
         self.backend.sleep_until(checkpoint_id, wake_at, state)
     }
 
-    /// Send a custom event with arbitrary subtype and structured JSON payload.
+    /// Send a custom event with arbitrary subtype and payload.
     #[instrument(skip(self, payload), fields(instance_id = %self.backend.instance_id(), subtype = %subtype))]
-    pub fn custom_event(&self, subtype: &str, payload: serde_json::Value) -> Result<()> {
+    pub fn custom_event(&self, subtype: &str, payload: Vec<u8>) -> Result<()> {
         self.backend.send_custom_event(subtype, payload)
     }
 

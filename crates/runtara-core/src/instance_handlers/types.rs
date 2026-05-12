@@ -199,8 +199,6 @@ pub struct InstanceEvent {
     pub checkpoint_id: Option<String>,
     /// Event-specific data (output, error, etc.).
     pub payload: Vec<u8>,
-    /// Structured event payload to store in the event log.
-    pub payload_json: Option<serde_json::Value>,
     /// Event timestamp in milliseconds since epoch.
     pub timestamp_ms: i64,
     /// Arbitrary subtype for custom events.

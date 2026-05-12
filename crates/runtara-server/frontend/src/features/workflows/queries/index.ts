@@ -15,7 +15,6 @@ import {
   getStaticAgentWithRust,
   getStaticAgentsWithRust,
   getStaticStepTypesWithRust,
-  StaticAgentSummary,
 } from '@/features/workflows/utils/rust-workflow-validation';
 import { RuntimeREST } from '@/shared/queries';
 import { createAuthHeaders, getRuntimeBaseUrl } from '@/shared/queries/utils';
@@ -59,15 +58,10 @@ export interface ExtendedAgent {
   supportedCapabilities: Record<string, CapabilityInfo>;
 }
 
-type AgentMetadata = StaticAgentSummary | AgentInfo;
-
-export function toExtendedAgent(agentInfo: AgentMetadata): ExtendedAgent {
+function toExtendedAgent(agentInfo: AgentInfo): ExtendedAgent {
   const supportedCapabilities: Record<string, CapabilityInfo> = {};
 
-  const capabilities =
-    'capabilities' in agentInfo ? agentInfo.capabilities || [] : [];
-
-  for (const capability of capabilities) {
+  for (const capability of agentInfo.capabilities || []) {
     supportedCapabilities[capability.id] = capability;
   }
 
@@ -75,8 +69,8 @@ export function toExtendedAgent(agentInfo: AgentMetadata): ExtendedAgent {
     id: agentInfo.id,
     name: agentInfo.name,
     description: agentInfo.description,
-    supportsConnections: agentInfo.supportsConnections ?? false,
-    integrationIds: agentInfo.integrationIds ?? [],
+    supportsConnections: agentInfo.supportsConnections,
+    integrationIds: agentInfo.integrationIds,
     supportedCapabilities,
   };
 }
@@ -355,32 +349,77 @@ export async function setCurrentVersion(
 export async function getWorkflowStepTypes(
   token: string
 ): Promise<ListStepTypesResponse> {
-  void token;
-  return getStaticStepTypesWithRust();
+  try {
+    return await getStaticStepTypesWithRust();
+  } catch (error) {
+    console.warn('Static WASM step metadata unavailable; using HTTP', error);
+    const result = await RuntimeREST.api.listStepTypesHandler(
+      createAuthHeaders(token)
+    );
+
+    return result.data;
+  }
+}
+
+// Helper function to fetch agent details using path parameter
+async function fetchAgentDetails(token: string, agentId: string) {
+  const url = `${getRuntimeBaseUrl()}/agents/${encodeURIComponent(agentId)}`;
+  console.log('[fetchAgentDetails] URL:', url, 'agentId:', agentId);
+  const response = await fetch(url, {
+    method: 'GET',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${token}`,
+    },
+  });
+
+  if (!response.ok) {
+    throw new Error(`Failed to fetch agent details: ${response.statusText}`);
+  }
+
+  return response.json();
 }
 
 export async function getAgents(token: string) {
-  void token;
-  const agentSummaries = await getStaticAgentsWithRust();
-  const agents = await Promise.all(
-    agentSummaries.map(async (summary) => {
-      const details = await getStaticAgentWithRust(summary.id);
-      return toExtendedAgent(details ?? summary);
-    })
-  );
-  return { agents };
+  try {
+    const agents = await getStaticAgentsWithRust();
+    return { agents: agents.map(toExtendedAgent) };
+  } catch (error) {
+    console.warn('Static WASM agent metadata unavailable; using HTTP', error);
+    const result = await RuntimeREST.api.listAgentsHandler(
+      createAuthHeaders(token)
+    );
+
+    // Fetch full details for each agent to get capability schemas
+    // Use agent ID (not name) as the API identifier
+    const agentDetailsPromises = result.data.agents.map((agentSummary) =>
+      fetchAgentDetails(token, agentSummary.id)
+    );
+
+    const agentsWithDetails = await Promise.all(agentDetailsPromises);
+
+    return { agents: agentsWithDetails.map(toExtendedAgent) };
+  }
 }
 
 export async function getAgentDetails(
   token: string,
   agentId: string
 ): Promise<AgentInfo | null> {
-  void token;
   if (!agentId) {
     return null;
   }
 
-  return getStaticAgentWithRust(agentId);
+  try {
+    const agent = await getStaticAgentWithRust(agentId);
+    if (agent) {
+      return agent;
+    }
+  } catch (error) {
+    console.warn('Static WASM agent metadata unavailable; using HTTP', error);
+  }
+
+  return fetchAgentDetails(token, agentId);
 }
 
 export async function replayWorkflow(token: string, instanceId: string) {

@@ -454,6 +454,27 @@ fn emit_input_structs() -> TokenStream {
             parent_scope_id: Option<String>,
         }
 
+        /// Truncate a JSON value for debug event payloads to prevent oversized events.
+        /// Defined once globally and called from all debug event emission points.
+        #[allow(dead_code)]
+        fn __truncate_json_value(value: &serde_json::Value, max_size: usize) -> serde_json::Value {
+            let serialized = serde_json::to_string(value).unwrap_or_default();
+            if serialized.len() <= max_size {
+                value.clone()
+            } else {
+                let mut cut = max_size.saturating_sub(20);
+                while cut > 0 && !serialized.is_char_boundary(cut) {
+                    cut -= 1;
+                }
+                let truncated = &serialized[..cut];
+                serde_json::json!({
+                    "_truncated": true,
+                    "_original_size": serialized.len(),
+                    "_preview": truncated
+                })
+            }
+        }
+
         /// Emit a step debug event (start or end). Defined once globally to avoid
         /// duplicating the JSON payload construction at every step site.
         #[allow(dead_code)]
@@ -469,6 +490,8 @@ fn emit_input_structs() -> TokenStream {
             input_mapping_json: Option<&str>,
             duration_ms: Option<u64>,
         ) {
+            let max_size: usize = 10 * 1024;
+            let data_truncated = data.map(|v| __truncate_json_value(&v, max_size));
             let mut payload = serde_json::Map::new();
             payload.insert("step_id".into(), serde_json::Value::String(step_id.to_string()));
             payload.insert(
@@ -499,14 +522,14 @@ fn emit_input_structs() -> TokenStream {
                 )),
             );
             if subtype == "step_debug_start" {
-                payload.insert("inputs".into(), data.unwrap_or(serde_json::Value::Null));
+                payload.insert("inputs".into(), data_truncated.unwrap_or(serde_json::Value::Null));
                 if let Some(mapping_json) = input_mapping_json {
                     let mapping = serde_json::from_str::<serde_json::Value>(mapping_json)
                         .unwrap_or(serde_json::Value::Null);
                     payload.insert("input_mapping".into(), mapping);
                 }
             } else {
-                payload.insert("outputs".into(), data.unwrap_or(serde_json::Value::Null));
+                payload.insert("outputs".into(), data_truncated.unwrap_or(serde_json::Value::Null));
                 if let Some(dur) = duration_ms {
                     payload.insert(
                         "duration_ms".into(),
@@ -514,8 +537,9 @@ fn emit_input_structs() -> TokenStream {
                     );
                 }
             }
+            let __payload_bytes = serde_json::to_vec(&serde_json::Value::Object(payload)).unwrap_or_default();
             let __sdk_guard = sdk().lock().unwrap();
-            let _ = __sdk_guard.custom_event(subtype, serde_json::Value::Object(payload));
+            let _ = __sdk_guard.custom_event(subtype, __payload_bytes);
         }
 
         #[allow(dead_code)]

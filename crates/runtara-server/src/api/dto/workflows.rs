@@ -196,23 +196,6 @@ impl ValidationErrorDto {
                 Some(field_name.clone()),
                 None,
             ),
-            ValidationError::ConditionTypeMismatch {
-                step_id,
-                path,
-                operator,
-                left_type,
-                right_type,
-                message,
-            } => (
-                "E026".to_string(),
-                format!(
-                    "Step '{}': condition {} at {} compares '{}' with '{}': {}",
-                    step_id, operator, path, left_type, right_type, message
-                ),
-                Some(step_id.clone()),
-                Some("condition".to_string()),
-                None,
-            ),
             ValidationError::InvalidChildVersion {
                 step_id,
                 child_workflow_id,

@@ -42,7 +42,6 @@ const inputs = [
   'Cargo.toml',
   'Cargo.lock',
   'crates/runtara-workflow-validation-wasm/Cargo.toml',
-  'crates/runtara-workflow-validation-wasm/build.rs',
   'crates/runtara-workflow-validation-wasm/src',
   'crates/runtara-workflows/Cargo.toml',
   'crates/runtara-workflows/src',

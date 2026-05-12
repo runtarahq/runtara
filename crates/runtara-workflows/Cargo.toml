@@ -10,23 +10,22 @@ categories = ["development-tools"]
 
 [features]
 default = ["compiler", "integrations", "native-agents"]
-compiler = ["builtin-agent-registry", "dep:runtara-ai", "dep:proc-macro2", "dep:quote", "dep:tracing-subscriber"]
-integrations = ["runtara-agents?/integrations"]
-native-agents = ["runtara-agents?/native"]
-wasm-js = ["runtara-agents?/wasm-js"]
-builtin-agent-registry = ["dep:runtara-agents"]
+compiler = []
+integrations = ["runtara-agents/integrations"]
+native-agents = ["runtara-agents/native"]
+wasm-js = ["runtara-agents/wasm-js"]
 
 [dependencies]
-runtara-ai = { path = "../runtara-ai", version = "4.8", optional = true }
-runtara-agents = { path = "../runtara-agents", version = "4.8", default-features = false, optional = true }
-runtara-dsl = { path = "../runtara-dsl", version = "4.8" }
+runtara-ai = { path = "../runtara-ai", version = "4.7" }
+runtara-agents = { path = "../runtara-agents", version = "4.7", default-features = false }
+runtara-dsl = { path = "../runtara-dsl", version = "4.7" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha2 = "0.10"
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = true }
-proc-macro2 = { version = "1.0", optional = true }
-quote = { version = "1.0", optional = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+proc-macro2 = "1.0"
+quote = "1.0"
 minijinja = "2.5"
 
 [[bin]]

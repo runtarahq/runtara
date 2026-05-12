@@ -4,11 +4,7 @@
 
 use serde::Serialize;
 use serde_json::{Value, json};
-use std::sync::OnceLock;
 use wasm_bindgen::prelude::*;
-
-const AGENTS_JSON: &str = include_str!(concat!(env!("OUT_DIR"), "/agents.json"));
-static AGENTS: OnceLock<Vec<runtara_dsl::agent_meta::AgentInfo>> = OnceLock::new();
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -26,16 +22,6 @@ struct StepTypeInfo {
     name: String,
     description: String,
     category: String,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct AgentSummary {
-    id: String,
-    name: String,
-    description: String,
-    supports_connections: bool,
-    integration_ids: Vec<String>,
 }
 
 impl ValidationResponse {
@@ -100,11 +86,11 @@ pub fn get_step_type_schema_json(step_type: &str) -> String {
     ))
 }
 
-/// Return statically compiled agent summaries without capability schemas.
+/// Return statically compiled agent metadata, including capability schemas.
 #[wasm_bindgen(js_name = getAgentsJson)]
 pub fn get_agents_json() -> String {
     to_json_string(&json!({
-        "agents": agent_summaries(agents())
+        "agents": agents()
     }))
 }
 
@@ -112,7 +98,7 @@ pub fn get_agents_json() -> String {
 #[wasm_bindgen(js_name = getAgentJson)]
 pub fn get_agent_json(agent_id: &str) -> String {
     let agent = agents()
-        .iter()
+        .into_iter()
         .find(|agent| agent.id.eq_ignore_ascii_case(agent_id));
     to_json_string(&agent)
 }
@@ -121,12 +107,12 @@ pub fn get_agent_json(agent_id: &str) -> String {
 #[wasm_bindgen(js_name = getCapabilitySchemaJson)]
 pub fn get_capability_schema_json(agent_id: &str, capability_id: &str) -> String {
     let capability = agents()
-        .iter()
+        .into_iter()
         .find(|agent| agent.id.eq_ignore_ascii_case(agent_id))
         .and_then(|agent| {
             agent
                 .capabilities
-                .iter()
+                .into_iter()
                 .find(|capability| capability.id.eq_ignore_ascii_case(capability_id))
         });
     to_json_string(&capability)
@@ -154,10 +140,8 @@ fn validate_execution_graph_json_impl(execution_graph_json: &str) -> ValidationR
         }
     };
 
-    let validation_result = runtara_workflows::validation::validate_workflow_with_agent_metadata(
-        &workflow.execution_graph,
-        agents(),
-    );
+    let validation_result =
+        runtara_workflows::validation::validate_workflow(&workflow.execution_graph);
     let errors = validation_result
         .errors
         .iter()
@@ -203,23 +187,19 @@ fn step_types() -> Vec<StepTypeInfo> {
     step_types
 }
 
-fn agents() -> &'static [runtara_dsl::agent_meta::AgentInfo] {
-    AGENTS
-        .get_or_init(|| {
-            serde_json::from_str(AGENTS_JSON).expect("generated agent metadata must be valid JSON")
-        })
-        .as_slice()
-}
+fn agents() -> Vec<runtara_dsl::agent_meta::AgentInfo> {
+    let http_ids: Vec<String> = runtara_agents::extractors::get_http_extractor_ids()
+        .into_iter()
+        .map(String::from)
+        .collect();
 
-fn agent_summaries(agents: &[runtara_dsl::agent_meta::AgentInfo]) -> Vec<AgentSummary> {
-    agents
-        .iter()
-        .map(|agent| AgentSummary {
-            id: agent.id.clone(),
-            name: agent.name.clone(),
-            description: agent.description.clone(),
-            supports_connections: agent.supports_connections,
-            integration_ids: agent.integration_ids.clone(),
+    runtara_agents::registry::get_agents()
+        .into_iter()
+        .map(|mut agent| {
+            if agent.id == "http" {
+                agent.integration_ids = http_ids.clone();
+            }
+            agent
         })
         .collect()
 }
@@ -247,7 +227,7 @@ mod tests {
     }
 
     #[test]
-    fn returns_static_agent_summaries_without_capability_schemas() {
+    fn returns_static_agent_metadata() {
         let value: Value = serde_json::from_str(&get_agents_json()).unwrap();
         let agents = value["agents"].as_array().unwrap();
 
@@ -255,7 +235,7 @@ mod tests {
             .iter()
             .find(|agent| agent["id"] == "http")
             .expect("http agent should be present");
-        assert!(http.get("capabilities").is_none());
+        assert!(http["capabilities"].as_array().unwrap().len() > 0);
         assert!(
             http["integrationIds"]
                 .as_array()
@@ -266,50 +246,25 @@ mod tests {
     }
 
     #[test]
-    fn generated_metadata_includes_native_proxied_agents() {
-        assert!(
-            agents().iter().any(|agent| agent.id == "compression"),
-            "native-proxied agent metadata should be generated at build time"
-        );
-    }
-
-    #[test]
     fn returns_single_static_capability_metadata() {
-        let full_agent = agents()
-            .iter()
-            .find(|agent| !agent.capabilities.is_empty())
-            .expect("an agent with capabilities should be present");
-        let agent_id = full_agent.id.clone();
-        let capability_id = full_agent.capabilities[0].id.clone();
-
-        let agent_value: Value = serde_json::from_str(&get_agent_json(&agent_id)).unwrap();
-        assert_eq!(agent_value["id"], agent_id);
-        assert!(
-            agent_value["capabilities"]
-                .as_array()
-                .is_some_and(|capabilities| !capabilities.is_empty())
-        );
-
-        let value: Value =
-            serde_json::from_str(&get_capability_schema_json(&agent_id, &capability_id)).unwrap();
-
-        assert_eq!(value["id"], capability_id);
-        assert!(value["inputs"].is_array());
-    }
-
-    #[test]
-    fn returns_full_static_agent_metadata_on_demand() {
-        let summaries_value: Value = serde_json::from_str(&get_agents_json()).unwrap();
-        let first_agent_id = summaries_value["agents"]
+        let agents_value: Value = serde_json::from_str(&get_agents_json()).unwrap();
+        let first_agent = agents_value["agents"]
             .as_array()
             .unwrap()
             .iter()
-            .find_map(|agent| agent["id"].as_str())
-            .expect("an agent summary should be present");
+            .find(|agent| {
+                agent["capabilities"]
+                    .as_array()
+                    .is_some_and(|capabilities| !capabilities.is_empty())
+            })
+            .expect("an agent with capabilities should be present");
+        let agent_id = first_agent["id"].as_str().unwrap();
+        let capability_id = first_agent["capabilities"][0]["id"].as_str().unwrap();
 
-        let agent: Value = serde_json::from_str(&get_agent_json(first_agent_id)).unwrap();
+        let value: Value =
+            serde_json::from_str(&get_capability_schema_json(agent_id, capability_id)).unwrap();
 
-        assert_eq!(agent["id"], first_agent_id);
-        assert!(!agent["capabilities"].as_array().unwrap().is_empty());
+        assert_eq!(value["id"], capability_id);
+        assert!(value["inputs"].is_array());
     }
 }

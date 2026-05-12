@@ -18,7 +18,7 @@ use std::sync::Arc;
 
 use super::object_model::ObjectModelState;
 use crate::api::dto::object_model::{
-    ColumnType, CreateSchemaRequest, FilterRequest, OrderByEntry, Schema, ScoreExpression,
+    CreateSchemaRequest, FilterRequest, OrderByEntry, ScoreExpression,
 };
 use crate::api::services::object_model::{InstanceService, SchemaService, ServiceError};
 
@@ -375,8 +375,6 @@ pub async fn query_instances(
 ) -> Result<(StatusCode, Json<InternalQueryInstancesResponse>), (StatusCode, Json<Value>)> {
     let tenant_id = extract_tenant_id(&headers)?;
     let service = InstanceService::new(state.manager.clone(), state.connections.clone());
-    let omitted_vector_columns =
-        vector_columns_for_schema(&state, &request.schema_name, &tenant_id).await;
 
     // If there are simple filters but no condition, convert simple filters to a condition
     if request.condition.is_some() || request.filters.is_empty() {
@@ -396,15 +394,8 @@ pub async fn query_instances(
             .await
         {
             Ok((instances, total_count)) => {
-                let instance_values: Vec<Value> = instances
-                    .into_iter()
-                    .map(|instance| {
-                        instance_to_flat_value_omitting_properties(
-                            instance,
-                            &omitted_vector_columns,
-                        )
-                    })
-                    .collect();
+                let instance_values: Vec<Value> =
+                    instances.into_iter().map(instance_to_flat_value).collect();
 
                 Ok((
                     StatusCode::OK,
@@ -445,15 +436,8 @@ pub async fn query_instances(
             .await
         {
             Ok((instances, total_count)) => {
-                let instance_values: Vec<Value> = instances
-                    .into_iter()
-                    .map(|instance| {
-                        instance_to_flat_value_omitting_properties(
-                            instance,
-                            &omitted_vector_columns,
-                        )
-                    })
-                    .collect();
+                let instance_values: Vec<Value> =
+                    instances.into_iter().map(instance_to_flat_value).collect();
 
                 Ok((
                     StatusCode::OK,
@@ -1113,14 +1097,6 @@ pub async fn create_schema(
 
 /// Convert an Instance DTO to a flat JSON value (properties merged at top level)
 fn instance_to_flat_value(instance: crate::api::dto::object_model::Instance) -> Value {
-    instance_to_flat_value_omitting_properties(instance, &[])
-}
-
-/// Convert an Instance DTO to a flat JSON value while omitting oversized properties.
-fn instance_to_flat_value_omitting_properties(
-    instance: crate::api::dto::object_model::Instance,
-    omitted_property_names: &[String],
-) -> Value {
     let mut map = serde_json::Map::new();
     map.insert("id".to_string(), Value::String(instance.id));
     map.insert("createdAt".to_string(), Value::String(instance.created_at));
@@ -1131,39 +1107,13 @@ fn instance_to_flat_value_omitting_properties(
     // Merge properties into top level
     if let Value::Object(props) = instance.properties {
         for (k, v) in props {
-            if !omitted_property_names.iter().any(|name| name == &k) {
-                map.insert(k, v);
-            }
+            map.insert(k, v);
         }
     }
     if let Some(computed) = instance.computed {
         map.insert("computed".to_string(), Value::Object(computed));
     }
     Value::Object(map)
-}
-
-async fn vector_columns_for_schema(
-    state: &Arc<ObjectModelState>,
-    schema_name: &str,
-    tenant_id: &str,
-) -> Vec<String> {
-    let schema_service = SchemaService::new(state.manager.clone(), state.connections.clone());
-    schema_service
-        .get_schema_by_name(schema_name, tenant_id, None)
-        .await
-        .map(|schema| vector_column_names(&schema))
-        .unwrap_or_default()
-}
-
-fn vector_column_names(schema: &Schema) -> Vec<String> {
-    schema
-        .columns
-        .iter()
-        .filter_map(|column| match &column.column_type {
-            ColumnType::Vector { .. } => Some(column.name.clone()),
-            _ => None,
-        })
-        .collect()
 }
 
 /// Convert simple key-value filters to an AND condition with EQ operations.
@@ -1207,9 +1157,7 @@ fn simple_filters_to_condition(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api::dto::object_model::{
-        ColumnDefinition, Instance, OrderByTarget, SortDirection, TextIndexKind,
-    };
+    use crate::api::dto::object_model::{Instance, OrderByTarget, SortDirection};
 
     #[test]
     fn query_instances_request_accepts_score_expression_and_order_by() {
@@ -1262,65 +1210,5 @@ mod tests {
 
         assert_eq!(flat["commodityTitle"], "ball bearing");
         assert_eq!(flat["computed"]["distance"], json!(0.125));
-    }
-
-    #[test]
-    fn instance_to_flat_value_omits_vector_properties_for_query_outputs() {
-        let flat = instance_to_flat_value_omitting_properties(
-            Instance {
-                id: "row-1".to_string(),
-                tenant_id: "tenant-1".to_string(),
-                created_at: "2026-05-11T00:00:00Z".to_string(),
-                updated_at: "2026-05-11T00:00:00Z".to_string(),
-                schema_id: None,
-                schema_name: Some("UnspscNode".to_string()),
-                properties: json!({
-                    "commodityTitle": "ball bearing",
-                    "embedding": [0.1, 0.2, 0.3]
-                }),
-                computed: None,
-            },
-            &["embedding".to_string()],
-        );
-
-        assert_eq!(flat["commodityTitle"], "ball bearing");
-        assert!(flat.get("embedding").is_none());
-    }
-
-    #[test]
-    fn vector_column_names_finds_vector_columns() {
-        let schema = Schema {
-            id: "schema-1".to_string(),
-            tenant_id: "tenant-1".to_string(),
-            name: "UnspscNode".to_string(),
-            description: None,
-            table_name: "unspsc_node".to_string(),
-            columns: vec![
-                ColumnDefinition {
-                    name: "commodityTitle".to_string(),
-                    column_type: ColumnType::String,
-                    nullable: true,
-                    unique: false,
-                    default_value: None,
-                    text_index: TextIndexKind::None,
-                },
-                ColumnDefinition {
-                    name: "embedding".to_string(),
-                    column_type: ColumnType::Vector {
-                        dimension: 1536,
-                        index_method: None,
-                    },
-                    nullable: true,
-                    unique: false,
-                    default_value: None,
-                    text_index: TextIndexKind::None,
-                },
-            ],
-            indexes: None,
-            created_at: "2026-05-11T00:00:00Z".to_string(),
-            updated_at: "2026-05-11T00:00:00Z".to_string(),
-        };
-
-        assert_eq!(vector_column_names(&schema), vec!["embedding".to_string()]);
     }
 }

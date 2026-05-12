@@ -7,6 +7,8 @@ export const getStepTypeSchemaJson: (a: number, b: number) => [number, number];
 export const getAgentsJson: () => [number, number];
 export const getAgentJson: (a: number, b: number) => [number, number];
 export const getCapabilitySchemaJson: (a: number, b: number, c: number, d: number) => [number, number];
+export const __wbindgen_exn_store: (a: number) => void;
+export const __externref_table_alloc: () => number;
 export const __wbindgen_externrefs: WebAssembly.Table;
 export const __wbindgen_malloc: (a: number, b: number) => number;
 export const __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;

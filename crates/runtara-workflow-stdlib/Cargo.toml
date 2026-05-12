@@ -46,9 +46,9 @@ telemetry = [
 
 [dependencies]
 # Core dependencies
-runtara-agents = { path = "../runtara-agents", version = "4.8", default-features = false, features = ["integrations"] }
-runtara-ai = { path = "../runtara-ai", version = "4.8" }
-runtara-sdk = { path = "../runtara-sdk", version = "4.8", default-features = false, features = ["http"] }
+runtara-agents = { path = "../runtara-agents", version = "4.7", default-features = false, features = ["integrations"] }
+runtara-ai = { path = "../runtara-ai", version = "4.7" }
+runtara-sdk = { path = "../runtara-sdk", version = "4.7", default-features = false, features = ["http"] }
 
 # Re-exported for workflows
 serde = { workspace = true }

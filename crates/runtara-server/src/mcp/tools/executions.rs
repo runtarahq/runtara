@@ -4,9 +4,7 @@ use serde::Deserialize;
 use serde_json::json;
 
 use super::super::server::SmoMcpServer;
-use super::internal_api::{
-    api_get, api_post, encode_path_param, normalize_json_arg, validate_path_param,
-};
+use super::internal_api::{api_get, api_post, normalize_json_arg, validate_path_param};
 
 const DEBUG_STRING_TRUNCATE_THRESHOLD_BYTES: usize = 4000;
 const DEBUG_STRING_PREVIEW_BYTES: usize = 2000;
@@ -17,12 +15,6 @@ fn json_result(value: serde_json::Value) -> Result<CallToolResult, rmcp::ErrorDa
     Ok(CallToolResult::success(vec![Content::text(
         serde_json::to_string_pretty(&value).unwrap_or_default(),
     )]))
-}
-
-fn validate_payload_path_param(path: &str) -> Result<(), rmcp::ErrorData> {
-    runtara_core::persistence::EventPayloadPath::parse(path)
-        .map(|_| ())
-        .map_err(|message| rmcp::ErrorData::invalid_params(message, None))
 }
 
 // ===== Parameter Structs =====
@@ -70,14 +62,6 @@ pub struct GetStepEventsParams {
     pub root_scopes_only: Option<bool>,
     #[schemars(description = "Sort order: 'asc' or 'desc'")]
     pub sort_order: Option<String>,
-    #[schemars(
-        description = "Return only one JSON value from each event payload. Dot path syntax, e.g. 'outputs.result.id' or 'context.large'."
-    )]
-    pub payload_path: Option<String>,
-    #[schemars(
-        description = "Return an object containing only these event payload paths. Dot path syntax, e.g. ['step_id', 'outputs.result']."
-    )]
-    pub payload_paths: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -219,7 +203,7 @@ pub async fn get_step_events(
     validate_path_param("instance_id", &params.instance_id)?;
     let mut query = Vec::new();
     if let Some(subtype) = &params.subtype {
-        query.push(format!("subtype={}", encode_path_param(subtype)));
+        query.push(format!("subtype={}", subtype));
     }
     if let Some(limit) = params.limit {
         query.push(format!("limit={}", limit));
@@ -228,41 +212,7 @@ pub async fn get_step_events(
         query.push(format!("rootScopesOnly={}", rso));
     }
     if let Some(so) = &params.sort_order {
-        query.push(format!("sortOrder={}", encode_path_param(so)));
-    }
-    match (&params.payload_path, &params.payload_paths) {
-        (Some(_), Some(_)) => {
-            return Err(rmcp::ErrorData::invalid_params(
-                "use either payload_path or payload_paths, not both",
-                None,
-            ));
-        }
-        (Some(path), None) => {
-            validate_payload_path_param(path)?;
-            query.push(format!("payloadPath={}", encode_path_param(path)));
-        }
-        (None, Some(paths)) => {
-            if paths.is_empty() {
-                return Err(rmcp::ErrorData::invalid_params(
-                    "payload_paths must contain at least one path",
-                    None,
-                ));
-            }
-            if paths.len() > 32 {
-                return Err(rmcp::ErrorData::invalid_params(
-                    "payload_paths contains too many paths; maximum is 32",
-                    None,
-                ));
-            }
-            for path in paths {
-                validate_payload_path_param(path)?;
-            }
-            query.push(format!(
-                "payloadPaths={}",
-                encode_path_param(&paths.join(","))
-            ));
-        }
-        (None, None) => {}
+        query.push(format!("sortOrder={}", so));
     }
     let qs = if query.is_empty() {
         String::new()

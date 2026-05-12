@@ -3,9 +3,7 @@
 //! Instance event handlers: generic event ingestion and retry-attempt logging.
 
 use anyhow::Result;
-use base64::Engine;
 use chrono::{DateTime, Utc};
-use serde_json::{Value, json};
 use tracing::{debug, info, instrument, warn};
 
 use super::mappers::map_event_type;
@@ -13,19 +11,6 @@ use super::state::InstanceHandlerState;
 use super::types::{InstanceEvent, InstanceEventResponse, InstanceEventType, RetryAttemptEvent};
 use crate::error::CoreError;
 use crate::persistence::{CompleteInstanceParams, EventRecord};
-
-pub(crate) fn event_json_from_bytes(payload: &[u8]) -> Option<Value> {
-    if payload.is_empty() {
-        return None;
-    }
-
-    serde_json::from_slice(payload).ok().or_else(|| {
-        Some(json!({
-            "encoding": "base64",
-            "data": base64::engine::general_purpose::STANDARD.encode(payload),
-        }))
-    })
-}
 
 /// Handle instance event.
 ///
@@ -76,8 +61,11 @@ pub async fn handle_instance_event(
         instance_id: event.instance_id.clone(),
         event_type: event_type.to_string(),
         checkpoint_id: event.checkpoint_id.clone(),
-        payload: None,
-        payload_json: event.payload_json.clone(),
+        payload: if event.payload.is_empty() {
+            None
+        } else {
+            Some(event.payload.clone())
+        },
         created_at,
         subtype: event.subtype.clone(),
     };
@@ -328,7 +316,6 @@ mod tests {
             event_type: InstanceEventType::EventHeartbeat as i32,
             checkpoint_id: None,
             payload: Vec::new(),
-            payload_json: None,
             timestamp_ms: chrono::Utc::now().timestamp_millis(),
             subtype: None,
         };
@@ -354,7 +341,6 @@ mod tests {
             event_type: InstanceEventType::EventCompleted as i32,
             checkpoint_id: None,
             payload: b"result".to_vec(),
-            payload_json: event_json_from_bytes(b"result"),
             timestamp_ms: chrono::Utc::now().timestamp_millis(),
             subtype: None,
         };
@@ -379,7 +365,6 @@ mod tests {
             event_type: InstanceEventType::EventFailed as i32,
             checkpoint_id: None,
             payload: b"error message".to_vec(),
-            payload_json: Some(json!({ "message": "error message" })),
             timestamp_ms: chrono::Utc::now().timestamp_millis(),
             subtype: None,
         };
@@ -404,7 +389,6 @@ mod tests {
             event_type: InstanceEventType::EventSuspended as i32,
             checkpoint_id: None,
             payload: Vec::new(),
-            payload_json: None,
             timestamp_ms: chrono::Utc::now().timestamp_millis(),
             subtype: None,
         };
@@ -429,7 +413,6 @@ mod tests {
             event_type: InstanceEventType::EventCustom as i32,
             checkpoint_id: None,
             payload: b"custom data".to_vec(),
-            payload_json: Some(json!({ "custom": "data" })),
             timestamp_ms: chrono::Utc::now().timestamp_millis(),
             subtype: Some("my_custom_type".to_string()),
         };
@@ -466,7 +449,6 @@ mod tests {
             event_type: InstanceEventType::EventSuspended as i32,
             checkpoint_id: Some("sleep-cp-1".to_string()),
             payload: payload.to_string().into_bytes(),
-            payload_json: Some(payload),
             timestamp_ms: chrono::Utc::now().timestamp_millis(),
             subtype: None,
         };

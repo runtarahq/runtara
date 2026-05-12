@@ -73,20 +73,13 @@ describe('rust workflow validation WASM', () => {
     );
     expect(agents.length).toBeGreaterThan(0);
 
-    const firstAgent = agents[0];
+    const firstAgent = agents.find((agent) => agent.capabilities.length > 0);
     expect(firstAgent).toBeDefined();
-    expect('capabilities' in firstAgent!).toBe(false);
 
     const agent = await getStaticAgentWithRust(firstAgent!.id);
-    expect(agent).toEqual(
-      expect.objectContaining({
-        id: firstAgent!.id,
-        capabilities: expect.any(Array),
-      })
-    );
-    expect(agent!.capabilities.length).toBeGreaterThan(0);
+    expect(agent).toEqual(expect.objectContaining({ id: firstAgent!.id }));
 
-    const capability = agent!.capabilities[0];
+    const capability = firstAgent!.capabilities[0];
     const capabilitySchema = await getStaticCapabilitySchemaWithRust(
       firstAgent!.id,
       capability.id

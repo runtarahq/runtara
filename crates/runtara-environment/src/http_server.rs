@@ -296,10 +296,6 @@ struct ListEventsQuery {
     #[serde(default)]
     payload_contains: Option<String>,
     #[serde(default)]
-    payload_path: Option<String>,
-    #[serde(default)]
-    payload_paths: Option<String>,
-    #[serde(default)]
     scope_id: Option<String>,
     #[serde(default)]
     parent_scope_id: Option<String>,
@@ -307,36 +303,6 @@ struct ListEventsQuery {
     root_scopes_only: Option<bool>,
     #[serde(default)]
     sort_order: Option<String>,
-}
-
-fn parse_event_payload_projection(
-    payload_path: Option<String>,
-    payload_paths: Option<String>,
-) -> Result<runtara_core::persistence::EventPayloadProjection, String> {
-    use runtara_core::persistence::{EventPayloadPath, EventPayloadProjection};
-
-    match (payload_path, payload_paths) {
-        (Some(path), None) => EventPayloadPath::parse(path).map(EventPayloadProjection::Single),
-        (None, Some(paths)) => {
-            let parsed = paths
-                .split(',')
-                .map(str::trim)
-                .filter(|path| !path.is_empty())
-                .map(EventPayloadPath::parse)
-                .collect::<Result<Vec<_>, _>>()?;
-
-            if parsed.is_empty() {
-                return Err("payload_paths must contain at least one path".to_string());
-            }
-            if parsed.len() > 32 {
-                return Err("payload_paths contains too many paths; maximum is 32".to_string());
-            }
-
-            Ok(EventPayloadProjection::Object(parsed))
-        }
-        (None, None) => Ok(EventPayloadProjection::Full),
-        (Some(_), Some(_)) => Err("use either payload_path or payload_paths, not both".to_string()),
-    }
 }
 
 /// Event summary.
@@ -347,9 +313,9 @@ struct EventSummaryJson {
     event_type: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     checkpoint_id: Option<String>,
-    /// Structured JSON payload.
+    /// Base64-encoded payload.
     #[serde(skip_serializing_if = "Option::is_none")]
-    payload_json: Option<Value>,
+    payload: Option<String>,
     created_at_ms: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
     subtype: Option<String>,
@@ -1576,15 +1542,6 @@ async fn handle_list_events(
         _ => EventSortOrder::Desc,
     };
 
-    let payload_projection =
-        match parse_event_payload_projection(query.payload_path, query.payload_paths) {
-            Ok(projection) => projection,
-            Err(message) => {
-                return error_response("INVALID_REQUEST", &message, StatusCode::BAD_REQUEST)
-                    .into_response();
-            }
-        };
-
     let filter = ListEventsFilter {
         event_type: query.event_type,
         subtype: query.subtype,
@@ -1595,7 +1552,6 @@ async fn handle_list_events(
         parent_scope_id: query.parent_scope_id,
         root_scopes_only: query.root_scopes_only.unwrap_or(false),
         sort_order,
-        payload_projection,
     };
 
     let events = match state
@@ -1624,7 +1580,9 @@ async fn handle_list_events(
             instance_id: ev.instance_id,
             event_type: ev.event_type,
             checkpoint_id: ev.checkpoint_id,
-            payload_json: ev.payload_json,
+            payload: ev
+                .payload
+                .map(|p| base64::engine::general_purpose::STANDARD.encode(&p)),
             created_at_ms: ev.created_at.timestamp_millis(),
             subtype: ev.subtype,
         })
@@ -1765,7 +1723,6 @@ async fn handle_get_scope_ancestors(
         parent_scope_id: None,
         root_scopes_only: false,
         sort_order: EventSortOrder::Asc,
-        payload_projection: Default::default(),
     };
 
     let events = match state
@@ -1790,7 +1747,10 @@ async fn handle_get_scope_ancestors(
         std::collections::HashMap::new();
 
     for event in events {
-        let Some(payload_json) = &event.payload_json else {
+        let Some(payload) = &event.payload else {
+            continue;
+        };
+        let Ok(payload_json) = serde_json::from_slice::<Value>(payload) else {
             continue;
         };
         let Some(sid) = payload_json.get("scope_id").and_then(|v| v.as_str()) else {

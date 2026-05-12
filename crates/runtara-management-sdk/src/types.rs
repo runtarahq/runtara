@@ -950,10 +950,6 @@ pub struct ListEventsOptions {
     pub created_before: Option<DateTime<Utc>>,
     /// Full-text search in JSON payload content.
     pub payload_contains: Option<String>,
-    /// Return only one JSON value at this event payload path.
-    pub payload_path: Option<String>,
-    /// Return an object containing only these event payload paths.
-    pub payload_paths: Vec<String>,
     /// Filter by scope_id in event payload (for hierarchy filtering).
     pub scope_id: Option<String>,
     /// Filter by parent_scope_id in event payload (for hierarchy filtering).
@@ -1019,22 +1015,6 @@ impl ListEventsOptions {
         self
     }
 
-    /// Return only one JSON value at this event payload path.
-    pub fn with_payload_path(mut self, path: impl Into<String>) -> Self {
-        self.payload_path = Some(path.into());
-        self
-    }
-
-    /// Return an object containing only these event payload paths.
-    pub fn with_payload_paths<I, S>(mut self, paths: I) -> Self
-    where
-        I: IntoIterator<Item = S>,
-        S: Into<String>,
-    {
-        self.payload_paths = paths.into_iter().map(Into::into).collect();
-        self
-    }
-
     /// Filter by scope_id in event payload.
     pub fn with_scope_id(mut self, scope_id: impl Into<String>) -> Self {
         self.scope_id = Some(scope_id.into());
@@ -1066,7 +1046,7 @@ pub struct EventSummary {
     pub event_type: String,
     /// Associated checkpoint ID if applicable.
     pub checkpoint_id: Option<String>,
-    /// Event payload as structured JSON.
+    /// Event payload as JSON (parsed from bytes).
     pub payload: Option<serde_json::Value>,
     /// When the event was created.
     pub created_at: DateTime<Utc>,

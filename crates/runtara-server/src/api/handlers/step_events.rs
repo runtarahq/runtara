@@ -36,10 +36,6 @@ pub struct StepEventsQuery {
     pub created_before: Option<DateTime<Utc>>,
     /// Full-text search in event payload JSON
     pub payload_contains: Option<String>,
-    /// Return only the JSON value at this event payload path (e.g. "outputs.result.id")
-    pub payload_path: Option<String>,
-    /// Return an object containing only these comma-separated event payload paths
-    pub payload_paths: Option<String>,
     /// Filter events by scope ID (for hierarchical step events in Split/While/EmbedWorkflow)
     pub scope_id: Option<String>,
     /// Filter events by parent scope ID (use "null" for root-level events)
@@ -91,22 +87,6 @@ pub struct StepEventResponse {
     pub payload: Option<Value>,
     /// When the event was created
     pub created_at: DateTime<Utc>,
-}
-
-fn parse_comma_separated_paths(paths: &str) -> Vec<String> {
-    paths
-        .split(',')
-        .map(str::trim)
-        .filter(|path| !path.is_empty())
-        .map(ToString::to_string)
-        .collect()
-}
-
-fn validate_payload_paths(paths: &[String]) -> Result<(), String> {
-    for path in paths {
-        runtara_core::persistence::EventPayloadPath::parse(path)?;
-    }
-    Ok(())
 }
 
 /// Handler to get step events for a workflow execution
@@ -190,59 +170,6 @@ pub async fn get_step_events(
 
     if let Some(payload_contains) = &query.payload_contains {
         options = options.with_payload_contains(payload_contains);
-    }
-
-    match (&query.payload_path, &query.payload_paths) {
-        (Some(_), Some(_)) => {
-            let error_response = json!({
-                "success": false,
-                "message": "Use either payloadPath or payloadPaths, not both",
-                "data": Value::Null
-            });
-            return (StatusCode::BAD_REQUEST, Json(error_response));
-        }
-        (Some(path), None) => {
-            if let Err(message) =
-                runtara_core::persistence::EventPayloadPath::parse(path).map(|_| ())
-            {
-                let error_response = json!({
-                    "success": false,
-                    "message": message,
-                    "data": Value::Null
-                });
-                return (StatusCode::BAD_REQUEST, Json(error_response));
-            }
-            options = options.with_payload_path(path);
-        }
-        (None, Some(paths)) => {
-            let paths = parse_comma_separated_paths(paths);
-            if paths.is_empty() {
-                let error_response = json!({
-                    "success": false,
-                    "message": "payloadPaths must contain at least one path",
-                    "data": Value::Null
-                });
-                return (StatusCode::BAD_REQUEST, Json(error_response));
-            }
-            if paths.len() > 32 {
-                let error_response = json!({
-                    "success": false,
-                    "message": "payloadPaths contains too many paths; maximum is 32",
-                    "data": Value::Null
-                });
-                return (StatusCode::BAD_REQUEST, Json(error_response));
-            }
-            if let Err(message) = validate_payload_paths(&paths) {
-                let error_response = json!({
-                    "success": false,
-                    "message": message,
-                    "data": Value::Null
-                });
-                return (StatusCode::BAD_REQUEST, Json(error_response));
-            }
-            options = options.with_payload_paths(paths);
-        }
-        (None, None) => {}
     }
 
     // Scope-based hierarchy filters

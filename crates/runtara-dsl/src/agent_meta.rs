@@ -328,7 +328,7 @@ pub struct CapabilityInfo {
     pub compensation_hint: Option<CompensationHintInfo>,
     /// Known errors this capability can return.
     /// Used for tooling hints and documentation.
-    #[serde(rename = "knownErrors", default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(rename = "knownErrors", skip_serializing_if = "Vec::is_empty")]
     pub known_errors: Vec<KnownErrorInfo>,
     /// Semantic tags for capability classification and filtering.
     /// Well-known tags: "memory:read", "memory:write".

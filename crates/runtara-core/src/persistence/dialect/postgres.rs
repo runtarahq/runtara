@@ -3,10 +3,7 @@
 //! Postgres dialect: `$N` placeholders, enum type casts, JSONB operators,
 //! `ILIKE`, `ANY($1)` for batch `IN`, `EXTRACT(MILLISECONDS FROM ...)`.
 
-use crate::{
-    error::CoreError,
-    persistence::{EventPayloadPath, EventPayloadPathSegment, EventPayloadProjection},
-};
+use crate::error::CoreError;
 
 use super::{Dialect, EnumKind, TakeCustomSignalPlan};
 
@@ -15,49 +12,6 @@ use super::{Dialect, EnumKind, TakeCustomSignalPlan};
 pub struct PostgresDialect;
 
 impl PostgresDialect {
-    fn sql_literal(value: &str) -> String {
-        format!("'{}'", value.replace('\'', "''"))
-    }
-
-    fn payload_path_array(path: &EventPayloadPath) -> String {
-        let segments = path
-            .segments()
-            .iter()
-            .map(|segment| match segment {
-                EventPayloadPathSegment::Key(key) => Self::sql_literal(key),
-                EventPayloadPathSegment::Index(index) => Self::sql_literal(&index.to_string()),
-            })
-            .collect::<Vec<_>>()
-            .join(", ");
-        format!("ARRAY[{segments}]::text[]")
-    }
-
-    fn payload_path_expr(path: &EventPayloadPath) -> String {
-        format!("payload_json #> {}", Self::payload_path_array(path))
-    }
-
-    fn payload_projection_expr(projection: &EventPayloadProjection) -> String {
-        match projection {
-            EventPayloadProjection::Full => "payload_json".to_string(),
-            EventPayloadProjection::Single(path) => Self::payload_path_expr(path),
-            EventPayloadProjection::Object(paths) => {
-                let args = paths
-                    .iter()
-                    .flat_map(|path| {
-                        [
-                            Self::sql_literal(path.display()),
-                            Self::payload_path_expr(path),
-                        ]
-                    })
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                format!(
-                    "CASE WHEN payload_json IS NULL THEN NULL ELSE jsonb_build_object({args}) END"
-                )
-            }
-        }
-    }
-
     /// DELETE a batch of instances using PG's native array + `ANY`.
     /// Single bind of `&[String]` — sqlx encodes it as `TEXT[]`.
     ///
@@ -177,13 +131,9 @@ impl Dialect for PostgresDialect {
         "SELECT 1::bigint"
     }
 
-    fn sql_list_events(
-        order_direction: &str,
-        payload_projection: &EventPayloadProjection,
-    ) -> String {
-        let payload_json_expr = Self::payload_projection_expr(payload_projection);
+    fn sql_list_events(order_direction: &str) -> String {
         format!(
-            "SELECT id, instance_id, event_type::text as event_type, checkpoint_id, payload, {payload_json_expr} as payload_json, created_at, subtype \
+            "SELECT id, instance_id, event_type::text as event_type, checkpoint_id, payload, created_at, subtype \
              FROM instance_events \
              WHERE instance_id = $1 \
                AND ($2::TEXT IS NULL OR event_type::text = $2) \
@@ -191,20 +141,20 @@ impl Dialect for PostgresDialect {
                AND ($4::TIMESTAMPTZ IS NULL OR created_at >= $4) \
                AND ($5::TIMESTAMPTZ IS NULL OR created_at < $5) \
                AND ($6::TEXT IS NULL OR ( \
-                   payload_json IS NOT NULL \
-                   AND payload_json::text ILIKE '%' || $6 || '%' \
+                   payload IS NOT NULL \
+                   AND convert_from(payload, 'UTF8') ILIKE '%' || $6 || '%' \
                )) \
                AND ($7::TEXT IS NULL OR ( \
-                   payload_json IS NOT NULL \
-                   AND payload_json->>'scope_id' = $7 \
+                   payload IS NOT NULL \
+                   AND convert_from(payload, 'UTF8')::jsonb->>'scope_id' = $7 \
                )) \
                AND ($8::TEXT IS NULL OR ( \
-                   payload_json IS NOT NULL \
-                   AND payload_json->>'parent_scope_id' = $8 \
+                   payload IS NOT NULL \
+                   AND convert_from(payload, 'UTF8')::jsonb->>'parent_scope_id' = $8 \
                )) \
                AND (NOT $9 OR ( \
-                   payload_json IS NULL \
-                   OR payload_json->>'parent_scope_id' IS NULL \
+                   payload IS NULL \
+                   OR convert_from(payload, 'UTF8')::jsonb->>'parent_scope_id' IS NULL \
                )) \
              ORDER BY created_at {order_direction}, id {order_direction} \
              LIMIT $10 OFFSET $11"
@@ -220,50 +170,52 @@ impl Dialect for PostgresDialect {
            AND ($4::TIMESTAMPTZ IS NULL OR created_at >= $4) \
            AND ($5::TIMESTAMPTZ IS NULL OR created_at < $5) \
            AND ($6::TEXT IS NULL OR ( \
-               payload_json IS NOT NULL \
-               AND payload_json::text ILIKE '%' || $6 || '%' \
+               payload IS NOT NULL \
+               AND convert_from(payload, 'UTF8') ILIKE '%' || $6 || '%' \
            )) \
            AND ($7::TEXT IS NULL OR ( \
-               payload_json IS NOT NULL \
-               AND payload_json->>'scope_id' = $7 \
+               payload IS NOT NULL \
+               AND convert_from(payload, 'UTF8')::jsonb->>'scope_id' = $7 \
            )) \
            AND ($8::TEXT IS NULL OR ( \
-               payload_json IS NOT NULL \
-               AND payload_json->>'parent_scope_id' = $8 \
+               payload IS NOT NULL \
+               AND convert_from(payload, 'UTF8')::jsonb->>'parent_scope_id' = $8 \
            )) \
            AND (NOT $9 OR ( \
-               payload_json IS NULL \
-               OR payload_json->>'parent_scope_id' IS NULL \
+               payload IS NULL \
+               OR convert_from(payload, 'UTF8')::jsonb->>'parent_scope_id' IS NULL \
            ))"
     }
 
     fn sql_list_step_summaries(order_direction: &str) -> String {
         // `inputs`/`outputs`/`error` are cast to TEXT so the shared row
-        // mapper can parse them with `serde_json::from_str`.
+        // mapper can parse them with `serde_json::from_str`. Previously
+        // these were returned as JSONB and decoded directly into
+        // `serde_json::Value`; the TEXT form round-trips identically.
         format!(
             "WITH start_events AS ( \
                 SELECT \
                     id, \
-                    payload_json->>'step_id' as step_id, \
-                    payload_json->>'step_name' as step_name, \
-                    payload_json->>'step_type' as step_type, \
-                    payload_json->>'scope_id' as scope_id, \
-                    payload_json->>'parent_scope_id' as parent_scope_id, \
-                    (payload_json->'inputs')::text as inputs, \
+                    convert_from(payload, 'UTF8')::jsonb->>'step_id' as step_id, \
+                    convert_from(payload, 'UTF8')::jsonb->>'step_name' as step_name, \
+                    convert_from(payload, 'UTF8')::jsonb->>'step_type' as step_type, \
+                    convert_from(payload, 'UTF8')::jsonb->>'scope_id' as scope_id, \
+                    convert_from(payload, 'UTF8')::jsonb->>'parent_scope_id' as parent_scope_id, \
+                    (convert_from(payload, 'UTF8')::jsonb->'inputs')::text as inputs, \
                     created_at \
                 FROM instance_events \
-                WHERE instance_id = $1 AND subtype = 'step_debug_start' AND payload_json IS NOT NULL \
+                WHERE instance_id = $1 AND subtype = 'step_debug_start' \
             ), \
             end_events AS ( \
                 SELECT \
-                    payload_json->>'step_id' as step_id, \
-                    payload_json->>'scope_id' as scope_id, \
-                    (payload_json->'outputs')::text as outputs, \
-                    (payload_json->'error')::text as error, \
-                    payload_json->'outputs'->>'_error' as output_error, \
+                    convert_from(payload, 'UTF8')::jsonb->>'step_id' as step_id, \
+                    convert_from(payload, 'UTF8')::jsonb->>'scope_id' as scope_id, \
+                    (convert_from(payload, 'UTF8')::jsonb->'outputs')::text as outputs, \
+                    (convert_from(payload, 'UTF8')::jsonb->'error')::text as error, \
+                    convert_from(payload, 'UTF8')::jsonb->'outputs'->>'_error' as output_error, \
                     created_at \
                 FROM instance_events \
-                WHERE instance_id = $1 AND subtype = 'step_debug_end' AND payload_json IS NOT NULL \
+                WHERE instance_id = $1 AND subtype = 'step_debug_end' \
             ), \
             paired AS ( \
                 SELECT \
@@ -309,21 +261,21 @@ impl Dialect for PostgresDialect {
     fn sql_count_step_summaries() -> &'static str {
         "WITH start_events AS ( \
             SELECT \
-                payload_json->>'step_id' as step_id, \
-                payload_json->>'step_type' as step_type, \
-                payload_json->>'scope_id' as scope_id, \
-                payload_json->>'parent_scope_id' as parent_scope_id \
+                convert_from(payload, 'UTF8')::jsonb->>'step_id' as step_id, \
+                convert_from(payload, 'UTF8')::jsonb->>'step_type' as step_type, \
+                convert_from(payload, 'UTF8')::jsonb->>'scope_id' as scope_id, \
+                convert_from(payload, 'UTF8')::jsonb->>'parent_scope_id' as parent_scope_id \
             FROM instance_events \
-            WHERE instance_id = $1 AND subtype = 'step_debug_start' AND payload_json IS NOT NULL \
+            WHERE instance_id = $1 AND subtype = 'step_debug_start' \
         ), \
         end_events AS ( \
             SELECT \
-                payload_json->>'step_id' as step_id, \
-                payload_json->>'scope_id' as scope_id, \
-                (payload_json->'error')::text as error, \
-                payload_json->'outputs'->>'_error' as output_error \
+                convert_from(payload, 'UTF8')::jsonb->>'step_id' as step_id, \
+                convert_from(payload, 'UTF8')::jsonb->>'scope_id' as scope_id, \
+                (convert_from(payload, 'UTF8')::jsonb->'error')::text as error, \
+                convert_from(payload, 'UTF8')::jsonb->'outputs'->>'_error' as output_error \
             FROM instance_events \
-            WHERE instance_id = $1 AND subtype = 'step_debug_end' AND payload_json IS NOT NULL \
+            WHERE instance_id = $1 AND subtype = 'step_debug_end' \
         ), \
         paired AS ( \
             SELECT \

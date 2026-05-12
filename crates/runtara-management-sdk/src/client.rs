@@ -199,7 +199,7 @@ struct EventSummaryJson {
     #[serde(default)]
     checkpoint_id: Option<String>,
     #[serde(default)]
-    payload_json: Option<serde_json::Value>,
+    payload: Option<String>,
     created_at_ms: i64,
     #[serde(default)]
     subtype: Option<String>,
@@ -1305,12 +1305,6 @@ impl ManagementSdk {
         if let Some(ref payload_contains) = options.payload_contains {
             query.push(("payload_contains".to_string(), payload_contains.clone()));
         }
-        if let Some(ref payload_path) = options.payload_path {
-            query.push(("payload_path".to_string(), payload_path.clone()));
-        }
-        if !options.payload_paths.is_empty() {
-            query.push(("payload_paths".to_string(), options.payload_paths.join(",")));
-        }
         if let Some(ref scope_id) = options.scope_id {
             query.push(("scope_id".to_string(), scope_id.clone()));
         }
@@ -1340,14 +1334,19 @@ impl ManagementSdk {
         let events = json
             .events
             .into_iter()
-            .map(|ev| EventSummary {
-                id: ev.id,
-                instance_id: ev.instance_id,
-                event_type: ev.event_type,
-                checkpoint_id: ev.checkpoint_id,
-                payload: ev.payload_json,
-                created_at: ms_to_datetime(ev.created_at_ms),
-                subtype: ev.subtype,
+            .map(|ev| {
+                // Decode base64 payload as JSON if present
+                let payload = ev.payload.as_deref().and_then(decode_base64_json);
+
+                EventSummary {
+                    id: ev.id,
+                    instance_id: ev.instance_id,
+                    event_type: ev.event_type,
+                    checkpoint_id: ev.checkpoint_id,
+                    payload,
+                    created_at: ms_to_datetime(ev.created_at_ms),
+                    subtype: ev.subtype,
+                }
             })
             .collect();
 

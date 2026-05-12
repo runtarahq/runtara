@@ -153,7 +153,6 @@ pub async fn handle_register_instance(
         event_type: "started".to_string(),
         checkpoint_id: request.checkpoint_id.clone(),
         payload: None,
-        payload_json: None,
         created_at: started_at,
         subtype: None,
     };

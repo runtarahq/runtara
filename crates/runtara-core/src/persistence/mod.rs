@@ -94,11 +94,8 @@ pub struct EventRecord {
     pub event_type: String,
     /// Associated checkpoint ID if applicable.
     pub checkpoint_id: Option<String>,
-    /// Legacy raw event payload data. New event writes use `payload_json`.
+    /// Optional event payload data.
     pub payload: Option<Vec<u8>>,
-    /// Structured JSON event payload for new events.
-    #[sqlx(default)]
-    pub payload_json: Option<serde_json::Value>,
     /// When the event occurred.
     pub created_at: DateTime<Utc>,
     /// Arbitrary subtype for custom events.
@@ -143,180 +140,6 @@ pub enum EventSortOrder {
     Asc,
 }
 
-/// One segment of an event payload projection path.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum EventPayloadPathSegment {
-    /// Object key segment.
-    Key(String),
-    /// Array index segment.
-    Index(usize),
-}
-
-/// Validated path into an event `payload_json` value.
-///
-/// Supports dot paths such as `outputs.result.id`, bracket array indexes such
-/// as `items[0].name`, and JSON Pointer form such as `/outputs/result/id`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct EventPayloadPath {
-    display: String,
-    segments: Vec<EventPayloadPathSegment>,
-}
-
-impl EventPayloadPath {
-    /// Parse and validate a payload projection path.
-    pub fn parse(raw: impl AsRef<str>) -> Result<Self, String> {
-        let raw = raw.as_ref().trim();
-        if raw.is_empty() {
-            return Err("payload path must not be empty".to_string());
-        }
-        if raw.len() > 512 {
-            return Err("payload path is too long; maximum length is 512 bytes".to_string());
-        }
-
-        let segments = if raw.starts_with('/') {
-            Self::parse_json_pointer(raw)?
-        } else {
-            Self::parse_dot_path(raw)?
-        };
-
-        if segments.is_empty() {
-            return Err("payload path must contain at least one segment".to_string());
-        }
-        if segments.len() > 32 {
-            return Err("payload path has too many segments; maximum is 32".to_string());
-        }
-
-        Ok(Self {
-            display: raw.to_string(),
-            segments,
-        })
-    }
-
-    /// Original path text used as the key in multi-path projections.
-    pub fn display(&self) -> &str {
-        &self.display
-    }
-
-    /// Validated path segments.
-    pub fn segments(&self) -> &[EventPayloadPathSegment] {
-        &self.segments
-    }
-
-    fn parse_json_pointer(raw: &str) -> Result<Vec<EventPayloadPathSegment>, String> {
-        raw.split('/')
-            .skip(1)
-            .map(|part| {
-                let decoded = part.replace("~1", "/").replace("~0", "~");
-                validate_payload_key(&decoded)?;
-                if decoded.chars().all(|c| c.is_ascii_digit()) {
-                    decoded
-                        .parse::<usize>()
-                        .map(EventPayloadPathSegment::Index)
-                        .map_err(|_| {
-                            format!("invalid array index in payload path segment '{decoded}'")
-                        })
-                } else {
-                    Ok(EventPayloadPathSegment::Key(decoded))
-                }
-            })
-            .collect()
-    }
-
-    fn parse_dot_path(raw: &str) -> Result<Vec<EventPayloadPathSegment>, String> {
-        let mut segments = Vec::new();
-        for part in raw.split('.') {
-            if part.is_empty() {
-                return Err(format!("invalid empty segment in payload path '{raw}'"));
-            }
-            parse_dot_path_part(part, &mut segments)?;
-        }
-        Ok(segments)
-    }
-}
-
-/// Event payload projection requested by a list-events call.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub enum EventPayloadProjection {
-    /// Return the full payload JSON.
-    #[default]
-    Full,
-    /// Return one value extracted from the payload.
-    Single(EventPayloadPath),
-    /// Return an object where each key is one requested path.
-    Object(Vec<EventPayloadPath>),
-}
-
-impl EventPayloadProjection {
-    /// True when no projection was requested.
-    pub fn is_full(&self) -> bool {
-        matches!(self, Self::Full)
-    }
-}
-
-fn parse_dot_path_part(
-    part: &str,
-    segments: &mut Vec<EventPayloadPathSegment>,
-) -> Result<(), String> {
-    let mut rest = part;
-
-    if let Some(bracket_idx) = rest.find('[') {
-        let key = &rest[..bracket_idx];
-        if !key.is_empty() {
-            validate_payload_key(key)?;
-            segments.push(EventPayloadPathSegment::Key(key.to_string()));
-        }
-        rest = &rest[bracket_idx..];
-    } else {
-        validate_payload_key(rest)?;
-        segments.push(EventPayloadPathSegment::Key(rest.to_string()));
-        return Ok(());
-    }
-
-    while !rest.is_empty() {
-        if !rest.starts_with('[') {
-            return Err(format!(
-                "invalid array index syntax in payload path segment '{part}'"
-            ));
-        }
-        let close = rest
-            .find(']')
-            .ok_or_else(|| format!("missing closing ']' in payload path segment '{part}'"))?;
-        let index = &rest[1..close];
-        if index.is_empty() || !index.chars().all(|c| c.is_ascii_digit()) {
-            return Err(format!(
-                "invalid array index '{index}' in payload path segment '{part}'"
-            ));
-        }
-        let index = index.parse::<usize>().map_err(|_| {
-            format!("invalid array index '{index}' in payload path segment '{part}'")
-        })?;
-        segments.push(EventPayloadPathSegment::Index(index));
-        rest = &rest[close + 1..];
-    }
-
-    Ok(())
-}
-
-fn validate_payload_key(key: &str) -> Result<(), String> {
-    if key.is_empty() {
-        return Err("payload path key must not be empty".to_string());
-    }
-    if key.len() > 128 {
-        return Err(format!(
-            "payload path key '{key}' is too long; maximum is 128 bytes"
-        ));
-    }
-    if !key
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
-    {
-        return Err(format!(
-            "payload path key '{key}' contains unsupported characters; use letters, numbers, '_' or '-'"
-        ));
-    }
-    Ok(())
-}
-
 /// Filter options for listing events.
 #[derive(Debug, Clone, Default)]
 pub struct ListEventsFilter {
@@ -342,8 +165,6 @@ pub struct ListEventsFilter {
     pub root_scopes_only: bool,
     /// Sort order for events by created_at.
     pub sort_order: EventSortOrder,
-    /// Optional projection for event payloads.
-    pub payload_projection: EventPayloadProjection,
 }
 
 // ============================================================================
@@ -957,46 +778,5 @@ pub trait Persistence: Send + Sync {
     async fn delete_instances_batch(&self, _instance_ids: &[String]) -> Result<u64, CoreError> {
         // Default: no-op (no deletion supported)
         Ok(0)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{EventPayloadPath, EventPayloadPathSegment};
-
-    #[test]
-    fn event_payload_path_parses_dot_paths_and_indexes() {
-        let path = EventPayloadPath::parse("outputs.items[0].name").expect("path parses");
-
-        assert_eq!(
-            path.segments(),
-            &[
-                EventPayloadPathSegment::Key("outputs".to_string()),
-                EventPayloadPathSegment::Key("items".to_string()),
-                EventPayloadPathSegment::Index(0),
-                EventPayloadPathSegment::Key("name".to_string()),
-            ]
-        );
-    }
-
-    #[test]
-    fn event_payload_path_parses_json_pointer_paths() {
-        let path = EventPayloadPath::parse("/outputs/result/0").expect("path parses");
-
-        assert_eq!(
-            path.segments(),
-            &[
-                EventPayloadPathSegment::Key("outputs".to_string()),
-                EventPayloadPathSegment::Key("result".to_string()),
-                EventPayloadPathSegment::Index(0),
-            ]
-        );
-    }
-
-    #[test]
-    fn event_payload_path_rejects_unsafe_segments() {
-        assert!(EventPayloadPath::parse("outputs..result").is_err());
-        assert!(EventPayloadPath::parse("outputs.result;drop").is_err());
-        assert!(EventPayloadPath::parse("outputs.items[]").is_err());
     }
 }

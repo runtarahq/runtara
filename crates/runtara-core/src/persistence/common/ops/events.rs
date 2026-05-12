@@ -36,7 +36,7 @@ macro_rules! impl_event_ops {
                 use $crate::persistence::common::filters::sort_direction_sql;
                 use $crate::persistence::dialect::Dialect;
                 let order_direction = sort_direction_sql(filter.sort_order);
-                let sql = <$Dialect>::sql_list_events(order_direction, &filter.payload_projection);
+                let sql = <$Dialect>::sql_list_events(order_direction);
                 let records = ::sqlx::query_as::<_, $crate::persistence::EventRecord>(&sql)
                     .bind(instance_id)
                     .bind(&filter.event_type)

@@ -157,15 +157,12 @@ VALKEY_PORT="${VALKEY_PORT}" \
 OTEL_SDK_DISABLED=true \
 RUNTARA_SDK_BACKEND=http \
 RUNTARA_COMPILE_TARGET=wasm32-wasip2 \
-ENABLE_OPERATOR_TESTING=false \
 SQLX_OFFLINE="${SQLX_OFFLINE}" \
 "${RUNTARA_SERVER_BIN}" >"${TEST_LOG}" 2>&1 &
 SERVER_PID=$!
 
-# Wait for the public port to listen. Agent testing is disabled above so this
-# does not pay the first-boot dispatcher rustc compile, but keep a generous
-# ceiling for cold migrations / a debug build that's still warming up.
-for i in {1..120}; do
+# Wait for the public port to listen (up to 60s — first boot compiles the dispatcher).
+for i in {1..60}; do
     if curl -sS -o /dev/null -w "%{http_code}" "http://127.0.0.1:${TEST_PORT_PUBLIC}/health" 2>/dev/null | grep -q "^2"; then
         break
     fi
@@ -177,7 +174,7 @@ for i in {1..120}; do
     fi
 done
 if ! curl -sS -o /dev/null -w "%{http_code}" "http://127.0.0.1:${TEST_PORT_PUBLIC}/health" 2>/dev/null | grep -q "^2"; then
-    print_error "Server failed to come up on :${TEST_PORT_PUBLIC} within 120s. Last 30 log lines:"
+    print_error "Server failed to come up on :${TEST_PORT_PUBLIC} within 60s. Last 30 log lines:"
     tail -30 "${TEST_LOG}"
     exit 1
 fi

@@ -117,6 +117,23 @@ export function StepPickerPanel({
     });
   }, [stepTypes, allowFinish, mode]);
 
+  const filteredAgents = useMemo(() => {
+    const allAgents = (agents || []) as ExtendedAgent[];
+    if (mode !== 'memory') return allAgents;
+
+    return allAgents.filter((agent) => {
+      let hasRead = false;
+      let hasWrite = false;
+
+      for (const capability of Object.values(agent.supportedCapabilities)) {
+        if (capability.tags?.includes('memory:read')) hasRead = true;
+        if (capability.tags?.includes('memory:write')) hasWrite = true;
+      }
+
+      return hasRead && hasWrite;
+    });
+  }, [agents, mode]);
+
   const agentIds = useMemo(
     () => ((agents || []) as ExtendedAgent[]).map((agent) => agent.id || ''),
     [agents]
@@ -148,26 +165,6 @@ export function StepPickerPanel({
 
     return map;
   }, [agentDetailsMap]);
-
-  const filteredAgents = useMemo(() => {
-    const allAgents = (agents || []) as ExtendedAgent[];
-    if (mode !== 'memory') return allAgents;
-
-    return allAgents.filter((agent) => {
-      const capabilities =
-        agentCapabilitiesMap.get(agent.id || '')?.capabilities ??
-        Object.values(agent.supportedCapabilities || {});
-      let hasRead = false;
-      let hasWrite = false;
-
-      for (const capability of capabilities) {
-        if (capability.tags?.includes('memory:read')) hasRead = true;
-        if (capability.tags?.includes('memory:write')) hasWrite = true;
-      }
-
-      return hasRead && hasWrite;
-    });
-  }, [agents, agentCapabilitiesMap, mode]);
 
   const selectedAgentData = useMemo(() => {
     if (!selectedAgent) return null;
