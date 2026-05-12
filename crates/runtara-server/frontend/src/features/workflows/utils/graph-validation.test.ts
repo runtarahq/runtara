@@ -4,7 +4,6 @@ import {
   isSelfConnection,
   wouldCreateLoop,
   validateConnection,
-  validateWorkflowStructure,
 } from './graph-validation';
 
 describe('graph-validation', () => {
@@ -148,82 +147,6 @@ describe('graph-validation', () => {
       const result = validateConnection(edges, nodes, 'B', 'B');
       expect(result.isValid).toBe(false);
       expect(result.errorMessage).toBe('A step cannot connect to itself');
-    });
-  });
-
-  describe('validateWorkflowStructure', () => {
-    it('should require at least one step', () => {
-      const nodes: Node[] = [];
-      const edges: Edge[] = [];
-      const result = validateWorkflowStructure(nodes, edges);
-      expect(result.isValid).toBe(false);
-      expect(result.errors).toContain('Workflow should have at least one step');
-    });
-
-    it('should not count note nodes as workflow steps', () => {
-      const nodes: Node[] = [
-        {
-          id: 'note-1',
-          type: 'NOTE_NODE',
-          position: { x: 0, y: 0 },
-          data: { content: 'A note' },
-        },
-      ];
-      const edges: Edge[] = [];
-      const result = validateWorkflowStructure(nodes, edges);
-      expect(result.isValid).toBe(false);
-      expect(result.errors).toContain('Workflow should have at least one step');
-    });
-
-    it('should not count create nodes as workflow steps', () => {
-      const nodes: Node[] = [
-        {
-          id: 'create-1',
-          type: 'CREATE_NODE',
-          position: { x: 0, y: 0 },
-          data: {},
-        },
-      ];
-      const edges: Edge[] = [];
-      const result = validateWorkflowStructure(nodes, edges);
-      expect(result.isValid).toBe(false);
-      expect(result.errors).toContain('Workflow should have at least one step');
-    });
-
-    it('should accept a single workflow step', () => {
-      const nodes: Node[] = [
-        {
-          id: 'step-1',
-          type: 'BASIC_NODE',
-          position: { x: 0, y: 0 },
-          data: { stepType: 'Action', name: 'My Step' },
-        },
-      ];
-      const edges: Edge[] = [];
-      const result = validateWorkflowStructure(nodes, edges);
-      expect(result.isValid).toBe(true);
-      expect(result.errors).toHaveLength(0);
-    });
-
-    it('should accept workflow with notes and steps', () => {
-      const nodes: Node[] = [
-        {
-          id: 'note-1',
-          type: 'NOTE_NODE',
-          position: { x: 0, y: 0 },
-          data: { content: 'A note' },
-        },
-        {
-          id: 'step-1',
-          type: 'BASIC_NODE',
-          position: { x: 100, y: 0 },
-          data: { stepType: 'Action', name: 'My Step' },
-        },
-      ];
-      const edges: Edge[] = [];
-      const result = validateWorkflowStructure(nodes, edges);
-      expect(result.isValid).toBe(true);
-      expect(result.errors).toHaveLength(0);
     });
   });
 });

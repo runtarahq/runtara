@@ -58,7 +58,8 @@ function getStepNameById(stepId: string, nodes: Node[]): string | undefined {
 }
 
 /**
- * Convert client-side validation errors to ValidationMessage format.
+ * Convert frontend-side validation errors to ValidationMessage format.
+ * This includes canonical Rust/WASM validation that runs in the browser.
  */
 export function convertClientErrors(
   errors: string[],
@@ -100,7 +101,8 @@ export function convertClientErrors(
 }
 
 /**
- * Convert client-side validation warnings to ValidationMessage format.
+ * Convert frontend-side validation warnings to ValidationMessage format.
+ * This includes canonical Rust/WASM validation that runs in the browser.
  */
 export function convertClientWarnings(
   warnings: string[],

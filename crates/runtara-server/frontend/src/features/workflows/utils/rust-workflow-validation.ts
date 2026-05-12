@@ -16,10 +16,12 @@ import {
 export interface RustWorkflowValidationResult {
   success: boolean;
   valid: boolean;
+  status: 'valid' | 'invalid' | 'unavailable';
   errors: string[];
   warnings: string[];
   message: string;
   wasmAvailable: boolean;
+  unavailableReason?: string;
 }
 
 let initPromise: Promise<unknown> | null = null;
@@ -27,6 +29,9 @@ let initPromise: Promise<unknown> | null = null;
 function ensureRustValidatorInitialized(): Promise<unknown> {
   initPromise ??= initRustValidation({
     module_or_path: rustValidationWasmUrl,
+  }).catch((error) => {
+    initPromise = null;
+    throw error;
   });
   return initPromise;
 }
@@ -39,9 +44,13 @@ function normalizeValidationResponse(
       ? (value as Partial<RustWorkflowValidationResult>)
       : {};
 
+  const success = response.success === true;
+  const valid = success && response.valid === true;
+
   return {
-    success: response.success === true,
-    valid: response.valid === true,
+    success,
+    valid,
+    status: success ? (valid ? 'valid' : 'invalid') : 'unavailable',
     errors: Array.isArray(response.errors) ? response.errors : [],
     warnings: Array.isArray(response.warnings) ? response.warnings : [],
     message:
@@ -52,6 +61,25 @@ function normalizeValidationResponse(
   };
 }
 
+function unavailableValidationResult(
+  error: unknown
+): RustWorkflowValidationResult {
+  const unavailableReason =
+    error instanceof Error ? error.message : String(error);
+
+  return {
+    success: false,
+    valid: false,
+    status: 'unavailable',
+    errors: [],
+    warnings: [],
+    message:
+      'Rust workflow validation unavailable; server validation remains active',
+    wasmAvailable: false,
+    unavailableReason,
+  };
+}
+
 function parseRustJson<T>(rawValue: string, fallback: T): T {
   const parsed = JSON.parse(rawValue);
   return parsed === null || parsed === undefined ? fallback : (parsed as T);
@@ -59,9 +87,9 @@ function parseRustJson<T>(rawValue: string, fallback: T): T {
 
 /**
  * Validate an execution graph in the browser using the Rust backend validator
- * compiled to WASM. If the browser cannot initialize the WASM module, this
- * deliberately returns a non-blocking result because the server still runs the
- * same validation on save.
+ * compiled to WASM. If the browser cannot initialize or run the WASM module,
+ * report validation as unavailable instead of valid. Save still relies on the
+ * backend validator as the final source of truth.
  */
 export async function validateExecutionGraphWithRust(
   executionGraph: unknown
@@ -76,15 +104,7 @@ export async function validateExecutionGraphWithRust(
     return normalizeValidationResponse(JSON.parse(rawResult));
   } catch (error) {
     console.warn('Rust workflow validation WASM unavailable', error);
-    return {
-      success: false,
-      valid: true,
-      errors: [],
-      warnings: [],
-      message:
-        'Rust workflow validation unavailable; server validation remains active',
-      wasmAvailable: false,
-    };
+    return unavailableValidationResult(error);
   }
 }
 

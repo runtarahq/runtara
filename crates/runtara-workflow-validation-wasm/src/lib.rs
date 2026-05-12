@@ -235,7 +235,7 @@ mod tests {
             .iter()
             .find(|agent| agent["id"] == "http")
             .expect("http agent should be present");
-        assert!(http["capabilities"].as_array().unwrap().len() > 0);
+        assert!(!http["capabilities"].as_array().unwrap().is_empty());
         assert!(
             http["integrationIds"]
                 .as_array()

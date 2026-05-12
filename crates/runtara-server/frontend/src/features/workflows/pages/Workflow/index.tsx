@@ -7,7 +7,6 @@ import { WorkflowEditor } from '@/features/workflows/components/WorkflowEditor';
 import { WorkflowActionsForm } from '@/features/workflows/pages/Workflow/WorkflowActionsForm';
 import { Loader } from '@/shared/components/loader.tsx';
 import { composeExecutionGraph } from '@/features/workflows/components/WorkflowEditor/CustomNodes/utils.tsx';
-import { validateWorkflowStructure } from '@/features/workflows/utils/graph-validation';
 import { validateExecutionGraphWithRust } from '@/features/workflows/utils/rust-workflow-validation';
 import '@xyflow/react/dist/base.css';
 import { queryClient } from '@/main.tsx';
@@ -1180,30 +1179,6 @@ export function Workflow() {
     // Get the updated state after applying staged changes
     const finalState = useWorkflowStore.getState();
 
-    // Validate workflow structure before saving
-    const validation = validateWorkflowStructure(
-      finalState.nodes,
-      finalState.edges
-    );
-
-    // Convert client validation results to ValidationMessage format
-    const clientErrors = convertClientErrors(
-      validation.errors,
-      finalState.nodes
-    );
-    const clientWarnings = convertClientWarnings(
-      validation.warnings,
-      finalState.nodes
-    );
-
-    // If there are errors, show in validation panel and stop
-    if (!validation.isValid) {
-      useValidationStore
-        .getState()
-        .setMessages([...clientErrors, ...clientWarnings]);
-      return;
-    }
-
     // Build variables object for execution graph
     // Use staged changes if available, otherwise use original data
     // Convert from UI format [{ name, value, type }, ...] to API format { varName: { type, value }, ... }
@@ -1260,10 +1235,8 @@ export function Workflow() {
       stagedWorkflowChanges.description ?? data.description ?? '';
 
     // Compose execution graph with name, description, variables, schemas, and timeout included
-    const executionGraph = composeExecutionGraph(
-      finalState.nodes,
-      finalState.edges,
-      {
+    const executionGraph =
+      composeExecutionGraph(finalState.nodes, finalState.edges, {
         name: workflowName,
         description: workflowDescription,
         variables,
@@ -1271,22 +1244,31 @@ export function Workflow() {
         outputSchema,
         executionTimeoutSeconds,
         rateLimitBudgetMs,
-      }
-    );
+      }) ?? {};
 
-    const rustValidation =
-      await validateExecutionGraphWithRust(executionGraph);
-    const rustErrors = convertClientErrors(
-      rustValidation.errors,
-      finalState.nodes
-    );
+    const rustValidation = await validateExecutionGraphWithRust(executionGraph);
+    const rustErrors =
+      rustValidation.status === 'invalid'
+        ? convertClientErrors(
+            rustValidation.errors.length > 0
+              ? rustValidation.errors
+              : [rustValidation.message],
+            finalState.nodes
+          )
+        : [];
     const rustWarnings = convertClientWarnings(
       rustValidation.warnings,
       finalState.nodes
     );
-    const preSaveWarnings = [...clientWarnings, ...rustWarnings];
+    // WASM unavailability is unknown validation state, not success. Surface it
+    // while still letting the backend validator decide the save request.
+    const wasmUnavailableWarnings =
+      rustValidation.status === 'unavailable'
+        ? convertClientWarnings([rustValidation.message], finalState.nodes)
+        : [];
+    const preSaveWarnings = [...rustWarnings, ...wasmUnavailableWarnings];
 
-    if (rustErrors.length > 0) {
+    if (rustValidation.status === 'invalid') {
       useValidationStore
         .getState()
         .setMessages([...rustErrors, ...preSaveWarnings]);
@@ -1312,7 +1294,7 @@ export function Workflow() {
         updateMutation.mutate(
           {
             id: workflowId!,
-            data: executionGraph!,
+            data: executionGraph,
           },
           {
             onSuccess: resolve,

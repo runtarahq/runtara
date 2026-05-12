@@ -39,6 +39,12 @@ impl WasmJsHttpClient {
     }
 }
 
+impl Default for WasmJsHttpClient {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 pub(crate) fn execute(_request: RequestBuilder) -> Result<HttpResponse, HttpError> {
     Err(HttpError::Transport(
         "HTTP execution is not available in browser validation WASM".to_string(),

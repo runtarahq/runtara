@@ -18,31 +18,56 @@ const wasmBytes = readFileSync(
 );
 const originalFetch = globalThis.fetch.bind(globalThis);
 
+function stubWasmFetch() {
+  vi.stubGlobal(
+    'fetch',
+    async (input: RequestInfo | URL, init?: RequestInit) => {
+      const target =
+        typeof input === 'string'
+          ? input
+          : input instanceof URL
+            ? input.href
+            : input.url;
+
+      if (target.endsWith('runtara_workflow_validation_bg.wasm')) {
+        return new Response(wasmBytes, {
+          headers: { 'Content-Type': 'application/wasm' },
+        });
+      }
+
+      return originalFetch(input, init);
+    }
+  );
+}
+
 describe('rust workflow validation WASM', () => {
   beforeAll(() => {
-    vi.stubGlobal(
-      'fetch',
-      async (input: RequestInfo | URL, init?: RequestInit) => {
-        const target =
-          typeof input === 'string'
-            ? input
-            : input instanceof URL
-              ? input.href
-              : input.url;
-
-        if (target.endsWith('runtara_workflow_validation_bg.wasm')) {
-          return new Response(wasmBytes, {
-            headers: { 'Content-Type': 'application/wasm' },
-          });
-        }
-
-        return originalFetch(input, init);
-      }
-    );
+    stubWasmFetch();
   });
 
   afterAll(() => {
     vi.stubGlobal('fetch', originalFetch);
+  });
+
+  it('reports unavailable instead of valid when WASM initialization fails', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.stubGlobal('fetch', async () => {
+      throw new Error('forced WASM init failure');
+    });
+
+    try {
+      const result = await validateExecutionGraphWithRust({});
+
+      expect(result.wasmAvailable).toBe(false);
+      expect(result.success).toBe(false);
+      expect(result.valid).toBe(false);
+      expect(result.status).toBe('unavailable');
+      expect(result.errors).toEqual([]);
+      expect(result.message).toContain('unavailable');
+    } finally {
+      warnSpy.mockRestore();
+      stubWasmFetch();
+    }
   });
 
   it('initializes generated WASM and validates execution graphs', async () => {
@@ -51,6 +76,7 @@ describe('rust workflow validation WASM', () => {
     expect(result.wasmAvailable).toBe(true);
     expect(result.success).toBe(true);
     expect(result.valid).toBe(false);
+    expect(result.status).toBe('invalid');
     expect(result.errors.length).toBeGreaterThan(0);
   });
 
