@@ -819,15 +819,23 @@ pub async fn list_object_instances(
         path.push_str(&query.join("&"));
     }
 
-    let result =
+    let mut result =
         with_payload_too_large_guidance(api_get(server, &path).await, "list_object_instances")?;
+    let omitted_vector_columns =
+        omit_vector_columns_from_instances(server, &params.schema_name, &mut result).await?;
     let guidance = result_size_guidance(
         &result,
         "list_object_instances",
         params.limit,
         &["instances"],
         &["totalCount", "total_count"],
-    );
+    )
+    .into_iter()
+    .chain(vector_omission_guidance(
+        "list_object_instances",
+        omitted_vector_columns,
+    ))
+    .collect();
     json_result_with_guidance(result, guidance)
 }
 
@@ -837,7 +845,7 @@ pub async fn query_object_instances(
 ) -> Result<CallToolResult, rmcp::ErrorData> {
     validate_path_param("schema_name", &params.schema_name)?;
     let body = build_query_object_instances_body(&params)?;
-    let result = with_payload_too_large_guidance(
+    let mut result = with_payload_too_large_guidance(
         api_post(
             server,
             &format!(
@@ -849,14 +857,97 @@ pub async fn query_object_instances(
         .await,
         "query_object_instances",
     )?;
+    let omitted_vector_columns =
+        omit_vector_columns_from_instances(server, &params.schema_name, &mut result).await?;
     let guidance = result_size_guidance(
         &result,
         "query_object_instances",
         params.limit,
         &["instances"],
         &["totalCount", "total_count"],
-    );
+    )
+    .into_iter()
+    .chain(vector_omission_guidance(
+        "query_object_instances",
+        omitted_vector_columns,
+    ))
+    .collect();
     json_result_with_guidance(result, guidance)
+}
+
+async fn omit_vector_columns_from_instances(
+    server: &SmoMcpServer,
+    schema_name: &str,
+    result: &mut Value,
+) -> Result<Vec<String>, rmcp::ErrorData> {
+    let schema = api_get(
+        server,
+        &format!(
+            "/api/runtime/object-model/schemas/name/{}",
+            encode_path_param(schema_name)
+        ),
+    )
+    .await?;
+    let vector_columns = vector_columns_from_schema_response(&schema);
+    if vector_columns.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let Some(instances) = result.get_mut("instances").and_then(Value::as_array_mut) else {
+        return Ok(Vec::new());
+    };
+
+    let mut omitted = false;
+    for instance in instances {
+        if let Some(props) = instance
+            .get_mut("properties")
+            .and_then(Value::as_object_mut)
+        {
+            for column in &vector_columns {
+                omitted |= props.remove(column).is_some();
+            }
+        }
+        if let Some(obj) = instance.as_object_mut() {
+            for column in &vector_columns {
+                omitted |= obj.remove(column).is_some();
+            }
+        }
+    }
+
+    if omitted {
+        Ok(vector_columns)
+    } else {
+        Ok(Vec::new())
+    }
+}
+
+fn vector_columns_from_schema_response(schema: &Value) -> Vec<String> {
+    schema
+        .get("schema")
+        .and_then(|schema| schema.get("columns"))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|column| {
+            let is_vector = column.get("type").and_then(Value::as_str) == Some("vector");
+            is_vector
+                .then(|| column.get("name").and_then(Value::as_str))
+                .flatten()
+                .map(str::to_string)
+        })
+        .collect()
+}
+
+fn vector_omission_guidance(tool_name: &str, columns: Vec<String>) -> Vec<String> {
+    if columns.is_empty() {
+        return Vec::new();
+    }
+
+    vec![format!(
+        "{} omitted vector columns from instance properties to keep MCP responses small: {}.",
+        tool_name,
+        columns.join(", ")
+    )]
 }
 
 fn build_query_object_instances_body(
@@ -1395,6 +1486,24 @@ mod tests {
         assert_eq!(body["scoreExpression"]["alias"], "distance");
         assert_eq!(body["orderBy"][0]["expression"]["name"], "distance");
         assert_eq!(body["limit"], 25);
+    }
+
+    #[test]
+    fn vector_columns_from_schema_response_finds_vector_columns() {
+        let schema = json!({
+            "success": true,
+            "schema": {
+                "columns": [
+                    {"name": "commodityTitle", "type": "string"},
+                    {"name": "embedding", "type": "vector", "dimension": 1536}
+                ]
+            }
+        });
+
+        assert_eq!(
+            vector_columns_from_schema_response(&schema),
+            vec!["embedding".to_string()]
+        );
     }
 
     #[test]
