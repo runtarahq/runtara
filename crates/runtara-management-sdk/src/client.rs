@@ -1305,6 +1305,12 @@ impl ManagementSdk {
         if let Some(ref payload_contains) = options.payload_contains {
             query.push(("payload_contains".to_string(), payload_contains.clone()));
         }
+        if let Some(ref payload_path) = options.payload_path {
+            query.push(("payload_path".to_string(), payload_path.clone()));
+        }
+        if !options.payload_paths.is_empty() {
+            query.push(("payload_paths".to_string(), options.payload_paths.join(",")));
+        }
         if let Some(ref scope_id) = options.scope_id {
             query.push(("scope_id".to_string(), scope_id.clone()));
         }

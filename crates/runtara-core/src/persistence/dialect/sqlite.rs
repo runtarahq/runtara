@@ -4,7 +4,10 @@
 //! `json_extract` + `CAST(... AS TEXT)` for JSON access over BLOB payloads,
 //! plain `LIKE`, fanned-out `IN (?, ?, ...)`, `julianday` for duration math.
 
-use crate::error::CoreError;
+use crate::{
+    error::CoreError,
+    persistence::{EventPayloadPath, EventPayloadPathSegment, EventPayloadProjection},
+};
 
 use super::{Dialect, EnumKind, TakeCustomSignalPlan};
 
@@ -13,6 +16,63 @@ use super::{Dialect, EnumKind, TakeCustomSignalPlan};
 pub struct SqliteDialect;
 
 impl SqliteDialect {
+    fn sql_literal(value: &str) -> String {
+        format!("'{}'", value.replace('\'', "''"))
+    }
+
+    fn json_path_literal(path: &EventPayloadPath) -> String {
+        let mut json_path = String::from("$");
+        for segment in path.segments() {
+            match segment {
+                EventPayloadPathSegment::Key(key) => {
+                    json_path.push_str(".\"");
+                    json_path.push_str(key);
+                    json_path.push('"');
+                }
+                EventPayloadPathSegment::Index(index) => {
+                    json_path.push('[');
+                    json_path.push_str(&index.to_string());
+                    json_path.push(']');
+                }
+            }
+        }
+        Self::sql_literal(&json_path)
+    }
+
+    fn payload_json_value_expr(path: &EventPayloadPath) -> String {
+        let path_literal = Self::json_path_literal(path);
+        format!(
+            "CASE \
+                WHEN json_type(payload_json, {path_literal}) IS NULL THEN NULL \
+                WHEN json_type(payload_json, {path_literal}) = 'object' THEN json_extract(payload_json, {path_literal}) \
+                WHEN json_type(payload_json, {path_literal}) = 'array' THEN json_extract(payload_json, {path_literal}) \
+                WHEN json_type(payload_json, {path_literal}) = 'true' THEN 'true' \
+                WHEN json_type(payload_json, {path_literal}) = 'false' THEN 'false' \
+                ELSE json_quote(json_extract(payload_json, {path_literal})) \
+             END"
+        )
+    }
+
+    fn payload_projection_expr(projection: &EventPayloadProjection) -> String {
+        match projection {
+            EventPayloadProjection::Full => "payload_json".to_string(),
+            EventPayloadProjection::Single(path) => Self::payload_json_value_expr(path),
+            EventPayloadProjection::Object(paths) => {
+                let args = paths
+                    .iter()
+                    .flat_map(|path| {
+                        [
+                            Self::sql_literal(path.display()),
+                            format!("json({})", Self::payload_json_value_expr(path)),
+                        ]
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("CASE WHEN payload_json IS NULL THEN NULL ELSE json_object({args}) END")
+            }
+        }
+    }
+
     /// DELETE a batch of instances using a fanned `IN (?, ?, ...)`.
     /// SQLite can't bind `&[String]` as a single parameter like
     /// Postgres can — one bind per element is required. See
@@ -153,9 +213,13 @@ impl Dialect for SqliteDialect {
         "SELECT 1"
     }
 
-    fn sql_list_events(order_direction: &str) -> String {
+    fn sql_list_events(
+        order_direction: &str,
+        payload_projection: &EventPayloadProjection,
+    ) -> String {
+        let payload_json_expr = Self::payload_projection_expr(payload_projection);
         format!(
-            "SELECT id, instance_id, event_type, checkpoint_id, payload, payload_json, created_at, subtype \
+            "SELECT id, instance_id, event_type, checkpoint_id, payload, {payload_json_expr} as payload_json, created_at, subtype \
              FROM instance_events \
              WHERE instance_id = ?1 \
                AND (?2 IS NULL OR event_type = ?2) \

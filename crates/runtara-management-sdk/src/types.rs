@@ -950,6 +950,10 @@ pub struct ListEventsOptions {
     pub created_before: Option<DateTime<Utc>>,
     /// Full-text search in JSON payload content.
     pub payload_contains: Option<String>,
+    /// Return only one JSON value at this event payload path.
+    pub payload_path: Option<String>,
+    /// Return an object containing only these event payload paths.
+    pub payload_paths: Vec<String>,
     /// Filter by scope_id in event payload (for hierarchy filtering).
     pub scope_id: Option<String>,
     /// Filter by parent_scope_id in event payload (for hierarchy filtering).
@@ -1012,6 +1016,22 @@ impl ListEventsOptions {
     /// Full-text search in JSON payload.
     pub fn with_payload_contains(mut self, search: impl Into<String>) -> Self {
         self.payload_contains = Some(search.into());
+        self
+    }
+
+    /// Return only one JSON value at this event payload path.
+    pub fn with_payload_path(mut self, path: impl Into<String>) -> Self {
+        self.payload_path = Some(path.into());
+        self
+    }
+
+    /// Return an object containing only these event payload paths.
+    pub fn with_payload_paths<I, S>(mut self, paths: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.payload_paths = paths.into_iter().map(Into::into).collect();
         self
     }
 

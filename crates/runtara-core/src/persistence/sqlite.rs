@@ -464,7 +464,9 @@ impl Persistence for SqlitePersistence {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::persistence::{EventSortOrder, StepStatus};
+    use crate::persistence::{
+        EventPayloadPath, EventPayloadProjection, EventSortOrder, StepStatus,
+    };
     use uuid::Uuid;
 
     /// Create an in-memory SQLite pool for testing.
@@ -799,6 +801,96 @@ mod tests {
                 .unwrap();
 
         assert_eq!(count.0, 1);
+    }
+
+    #[tokio::test]
+    async fn test_list_events_projects_payload_json() {
+        let pool = test_pool().await;
+        let persistence = SqlitePersistence::new(pool);
+
+        let instance_id = Uuid::new_v4().to_string();
+        persistence
+            .register_instance(&instance_id, "test-tenant")
+            .await
+            .unwrap();
+
+        let event = EventRecord {
+            id: None,
+            instance_id: instance_id.clone(),
+            event_type: "custom".to_string(),
+            checkpoint_id: None,
+            payload: None,
+            payload_json: Some(serde_json::json!({
+                "outputs": {
+                    "items": [{"name": "alpha"}],
+                    "ok": true,
+                    "count": 3
+                }
+            })),
+            created_at: Utc::now(),
+            subtype: Some("step_debug_end".to_string()),
+        };
+
+        persistence
+            .insert_event(&event)
+            .await
+            .expect("Failed to insert event");
+
+        let single_filter = ListEventsFilter {
+            payload_projection: EventPayloadProjection::Single(
+                EventPayloadPath::parse("outputs.items[0].name").unwrap(),
+            ),
+            ..Default::default()
+        };
+        let events = persistence
+            .list_events(&instance_id, &single_filter, 10, 0)
+            .await
+            .expect("Failed to list events");
+        assert_eq!(events[0].payload_json, Some(serde_json::json!("alpha")));
+
+        let object_filter = ListEventsFilter {
+            payload_projection: EventPayloadProjection::Object(vec![
+                EventPayloadPath::parse("outputs.ok").unwrap(),
+                EventPayloadPath::parse("outputs.count").unwrap(),
+            ]),
+            ..Default::default()
+        };
+        let events = persistence
+            .list_events(&instance_id, &object_filter, 10, 0)
+            .await
+            .expect("Failed to list events");
+        assert_eq!(
+            events[0].payload_json,
+            Some(serde_json::json!({
+                "outputs.ok": true,
+                "outputs.count": 3
+            }))
+        );
+
+        let legacy_instance_id = Uuid::new_v4().to_string();
+        persistence
+            .register_instance(&legacy_instance_id, "test-tenant")
+            .await
+            .unwrap();
+        persistence
+            .insert_event(&EventRecord {
+                id: None,
+                instance_id: legacy_instance_id.clone(),
+                event_type: "custom".to_string(),
+                checkpoint_id: None,
+                payload: Some(br#"{"legacy":true}"#.to_vec()),
+                payload_json: None,
+                created_at: Utc::now(),
+                subtype: None,
+            })
+            .await
+            .expect("Failed to insert legacy event");
+
+        let events = persistence
+            .list_events(&legacy_instance_id, &object_filter, 10, 0)
+            .await
+            .expect("Failed to list legacy events");
+        assert_eq!(events[0].payload_json, None);
     }
 
     #[tokio::test]

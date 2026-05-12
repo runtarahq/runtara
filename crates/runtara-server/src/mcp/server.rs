@@ -192,7 +192,7 @@ impl SmoMcpServer {
     }
 
     #[tool(
-        description = "Get step-level events for a workflow execution. Shows inputs, outputs, and timings per step. Requires track-events mode enabled."
+        description = "Get step-level events for a workflow execution. Shows inputs, outputs, and timings per step. Use payload_path or payload_paths to fetch only specific payload fields. Requires track-events mode enabled."
     )]
     async fn get_step_events(
         &self,
@@ -1025,7 +1025,7 @@ impl ServerHandler for SmoMcpServer {
                 "Runtara Runtime MCP server.\n\n\
                 ## Tool Groups\n\n\
                 **Workflows**: get_workflow_authoring_schema, list_workflows, get_workflow, create_workflow, update_workflow, compile_workflow, deploy_workflow (bulk graph), deploy_latest (after mutations), preflight_compile, set_current_version, diff_workflow_versions, validate_graph, validate_mappings — call get_workflow_authoring_schema before authoring raw workflow JSON\n\
-                **Execution**: execute_workflow, execute_workflow_sync, execute_workflow_wait, list_executions, get_execution, get_step_summaries (supports compact mode), get_step_events, stop_execution, pause_execution, resume_execution\n\
+                **Execution**: execute_workflow, execute_workflow_sync, execute_workflow_wait, list_executions, get_execution, get_step_summaries (supports compact mode), get_step_events (supports payload_path/payload_paths), stop_execution, pause_execution, resume_execution\n\
                 **Debugging**: inspect_step (one-call step debugger), trace_reference (resolve a reference path at runtime), why_execution_failed (one-call failure diagnosis)\n\
                 **Object Model**: list_object_schemas, get_object_schema, create_object_schema, update_object_schema, delete_object_schema, list_object_instances, query_object_instances, query_aggregate, query_sql, query_sql_one, query_sql_raw, execute_sql, create_object_instance, update_object_instance, bulk_create_instances, bulk_update_instances, bulk_delete_instances. SQL tools use SQLx prepared statements with Postgres positional placeholders ($1, $2, ...), not named parameters; params are typed and bound in array order, and execute_sql returns rowsAffected.\n\
                 **Reports**: get_report_authoring_schema, get_report_definition_schema, list_reports, get_report, create_report, update_report, delete_report, validate_report, render_report, get_report_block_data, add_report_block, replace_report_block, patch_report_block, move_report_block, remove_report_block, add_report_layout_node, replace_report_layout_node, patch_report_layout_node, move_report_layout_node, remove_report_layout_node — call get_report_authoring_schema before authoring; use get_report_definition_schema for the generated JSON Schema; report blocks and layout nodes have stable ids; use layout nodes (metric_row, columns, grid, section) instead of Markdown tables for alignment; reports can use Object Model sources, lookup editors for reference fields, or virtual workflow_runtime sources for workflow instance status/actions\n\

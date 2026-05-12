@@ -173,11 +173,15 @@ pub trait Dialect: Send + Sync + 'static {
     fn sql_health_check() -> &'static str;
 
     /// SQL for `list_events` with a dialect-appropriate ORDER BY
-    /// direction substituted (callers pass `"ASC"` or `"DESC"`).
+    /// direction substituted (callers pass `"ASC"` or `"DESC"`), and an
+    /// optional database-side projection over `payload_json`.
     /// Binds: instance_id, event_type, subtype, created_after,
     /// created_before, payload_contains, scope_id, parent_scope_id,
     /// root_scopes_only, limit, offset.
-    fn sql_list_events(order_direction: &str) -> String;
+    fn sql_list_events(
+        order_direction: &str,
+        payload_projection: &crate::persistence::EventPayloadProjection,
+    ) -> String;
 
     /// SQL for `count_events`. Binds: instance_id, event_type, subtype,
     /// created_after, created_before, payload_contains, scope_id,
