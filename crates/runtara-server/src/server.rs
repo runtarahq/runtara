@@ -617,7 +617,10 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
                     Some(m)
                 }
                 Err(e) => {
-                    eprintln!("⚠ Failed to initialize shared Valkey connection manager: {}", e);
+                    eprintln!(
+                        "⚠ Failed to initialize shared Valkey connection manager: {}",
+                        e
+                    );
                     None
                 }
             },
@@ -810,9 +813,9 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
 
     // Create trigger stream publisher backed by the shared manager.
     let trigger_stream: Option<Arc<api::repositories::trigger_stream::TriggerStreamPublisher>> =
-        redis_manager.clone().map(|m| {
-            Arc::new(api::repositories::trigger_stream::TriggerStreamPublisher::new(m))
-        });
+        redis_manager
+            .clone()
+            .map(|m| Arc::new(api::repositories::trigger_stream::TriggerStreamPublisher::new(m)));
 
     if let Some(ref config) = valkey_config {
         println!("Valkey configuration detected, starting workers...");
@@ -872,9 +875,9 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
 
         // Start cron scheduler
         let cron_pool = pool.clone();
-        let cron_trigger_stream = redis_manager.clone().map(|m| {
-            api::repositories::trigger_stream::TriggerStreamPublisher::new(m)
-        });
+        let cron_trigger_stream = redis_manager
+            .clone()
+            .map(|m| api::repositories::trigger_stream::TriggerStreamPublisher::new(m));
         let cron_tenant_id = tenant_id.clone();
         let cron_shutdown = shutdown_signal.clone();
         tokio::spawn(async move {

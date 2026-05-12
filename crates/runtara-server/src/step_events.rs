@@ -55,10 +55,7 @@ impl StepEventReader {
         status_filter: Option<&str>,
         limit: Option<usize>,
     ) -> Result<Vec<StepEvent>, String> {
-        let mut conn = self
-            .manager
-            .clone()
-            .ok_or("Redis client not available")?;
+        let mut conn = self.manager.clone().ok_or("Redis client not available")?;
 
         let key = format!("step_events:{}", self.instance_id);
         let events_data: Vec<(String, String)> = conn
