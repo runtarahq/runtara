@@ -877,7 +877,7 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         let cron_pool = pool.clone();
         let cron_trigger_stream = redis_manager
             .clone()
-            .map(|m| api::repositories::trigger_stream::TriggerStreamPublisher::new(m));
+            .map(api::repositories::trigger_stream::TriggerStreamPublisher::new);
         let cron_tenant_id = tenant_id.clone();
         let cron_shutdown = shutdown_signal.clone();
         tokio::spawn(async move {
