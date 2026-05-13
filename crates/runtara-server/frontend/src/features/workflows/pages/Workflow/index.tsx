@@ -7,7 +7,10 @@ import { WorkflowEditor } from '@/features/workflows/components/WorkflowEditor';
 import { WorkflowActionsForm } from '@/features/workflows/pages/Workflow/WorkflowActionsForm';
 import { Loader } from '@/shared/components/loader.tsx';
 import { composeExecutionGraph } from '@/features/workflows/components/WorkflowEditor/CustomNodes/utils.tsx';
-import { validateExecutionGraphWithRust } from '@/features/workflows/utils/rust-workflow-validation';
+import {
+  validateExecutionGraphWithRust,
+  validateSchemaFieldsWithRust,
+} from '@/features/workflows/utils/rust-workflow-validation';
 import '@xyflow/react/dist/base.css';
 import { queryClient } from '@/main.tsx';
 import { slugify } from '@/shared/utils/string-utils';
@@ -1207,6 +1210,46 @@ export function Workflow() {
       stagedWorkflowChanges.inputSchemaFields ?? data.inputSchemaFields ?? [];
     const outputSchemaFieldsToUse =
       stagedWorkflowChanges.outputSchemaFields ?? data.outputSchemaFields ?? [];
+
+    const [inputSchemaValidation, outputSchemaValidation] = await Promise.all([
+      validateSchemaFieldsWithRust('Input schema', inputSchemaFieldsToUse),
+      validateSchemaFieldsWithRust('Output schema', outputSchemaFieldsToUse),
+    ]);
+    const schemaFieldUnavailableErrors = [
+      inputSchemaValidation,
+      outputSchemaValidation,
+    ]
+      .filter((result) => result.status === 'unavailable')
+      .map((result) => result.message);
+
+    if (schemaFieldUnavailableErrors.length > 0) {
+      useValidationStore
+        .getState()
+        .setMessages(
+          convertClientErrors(schemaFieldUnavailableErrors, finalState.nodes)
+        );
+      return;
+    }
+
+    const schemaFieldErrors = [
+      ...(inputSchemaValidation.status === 'invalid'
+        ? inputSchemaValidation.errors.length > 0
+          ? inputSchemaValidation.errors
+          : [inputSchemaValidation.message]
+        : []),
+      ...(outputSchemaValidation.status === 'invalid'
+        ? outputSchemaValidation.errors.length > 0
+          ? outputSchemaValidation.errors
+          : [outputSchemaValidation.message]
+        : []),
+    ];
+
+    if (schemaFieldErrors.length > 0) {
+      useValidationStore
+        .getState()
+        .setMessages(convertClientErrors(schemaFieldErrors, finalState.nodes));
+      return;
+    }
 
     const inputSchema =
       inputSchemaFieldsToUse.length > 0
