@@ -541,6 +541,66 @@ describe('Backend DSL serialization', () => {
     expect((graph as any).nodes[0].position).toEqual({ x: 24, y: 48 });
   });
 
+  it('does not preserve stale direct Error fields after form values are cleared', () => {
+    const graph = composeExecutionGraph(
+      [
+        {
+          id: 'error',
+          type: NODE_TYPES.BasicNode,
+          position: { x: 0, y: 0 },
+          data: {
+            id: 'error',
+            stepType: 'Error',
+            name: 'Validation Target',
+            code: 'PREVIOUS_CODE',
+            message: 'Previous message',
+            category: 'permanent',
+            severity: 'error',
+            inputMapping: [
+              {
+                type: 'code',
+                value: '',
+                typeHint: 'string',
+                valueType: 'immediate',
+              },
+              {
+                type: 'message',
+                value: '',
+                typeHint: 'string',
+                valueType: 'immediate',
+              },
+              {
+                type: 'category',
+                value: 'permanent',
+                typeHint: 'string',
+                valueType: 'immediate',
+              },
+              {
+                type: 'severity',
+                value: 'error',
+                typeHint: 'string',
+                valueType: 'immediate',
+              },
+            ],
+          },
+        },
+      ] as any,
+      [],
+      { name: 'error-workflow' }
+    );
+
+    const step = (graph!.steps as Record<string, any>).error;
+    expect(step).not.toHaveProperty('code');
+    expect(step).not.toHaveProperty('message');
+    expect(step).toMatchObject({
+      id: 'error',
+      stepType: 'Error',
+      name: 'Validation Target',
+      category: 'permanent',
+      severity: 'error',
+    });
+  });
+
   it('keeps child workflow fields only on EmbedWorkflow steps', () => {
     const graph = composeExecutionGraph(
       [

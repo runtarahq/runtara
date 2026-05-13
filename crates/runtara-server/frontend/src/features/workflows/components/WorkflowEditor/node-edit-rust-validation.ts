@@ -257,7 +257,9 @@ function applyTargetFallback(
   return messages.map((message) => ({
     ...message,
     stepId: message.stepId ?? nodeId,
-    stepName: message.stepName ?? candidateName,
+    stepName: message.stepId
+      ? (message.stepName ?? candidateName)
+      : candidateName,
   }));
 }
 

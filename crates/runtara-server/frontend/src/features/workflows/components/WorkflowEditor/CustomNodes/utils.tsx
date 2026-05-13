@@ -812,6 +812,9 @@ function cleanNodeData(steps: Record<string, any>) {
       if (data.stepType === 'Error') {
         // Extract error fields as direct values to match backend DSL
         const errorFields = ['code', 'message', 'category', 'severity'];
+        errorFields.forEach((field) => {
+          delete filteredRestData[field];
+        });
         filteredMapping.forEach(
           ({ type, value }: { type: string; value: any }) => {
             if (errorFields.includes(type)) {
@@ -824,6 +827,9 @@ function cleanNodeData(steps: Record<string, any>) {
       } else if (data.stepType === 'Log') {
         // Log steps need direct field values (message, level) to match backend DSL
         const logFields = ['message', 'level'];
+        logFields.forEach((field) => {
+          delete filteredRestData[field];
+        });
         filteredMapping.forEach(
           ({ type, value }: { type: string; value: any }) => {
             if (logFields.includes(type)) {
