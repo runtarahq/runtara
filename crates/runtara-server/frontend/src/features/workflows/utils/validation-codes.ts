@@ -41,11 +41,24 @@ const CLIENT_WARNING_CODES = {
   UNKNOWN: 'W000',
 } as const;
 
+function detectPrefixedValidationCode(
+  message: string,
+  prefix: 'E' | 'W'
+): string | null {
+  const match = message.match(new RegExp(`\\[(${prefix}\\d{3})\\]`));
+  return match?.[1] ?? null;
+}
+
 /**
  * Map error message patterns to error codes.
  * Used when converting client validation string errors to structured messages.
  */
 export function detectErrorCode(message: string): string {
+  const explicitCode = detectPrefixedValidationCode(message, 'E');
+  if (explicitCode) {
+    return explicitCode;
+  }
+
   const lowerMessage = message.toLowerCase();
 
   if (lowerMessage.includes('at least one step')) {
@@ -80,6 +93,11 @@ export function detectErrorCode(message: string): string {
  * Map warning message patterns to warning codes.
  */
 export function detectWarningCode(message: string): string {
+  const explicitCode = detectPrefixedValidationCode(message, 'W');
+  if (explicitCode) {
+    return explicitCode;
+  }
+
   const lowerMessage = message.toLowerCase();
 
   if (lowerMessage.includes('no description')) {

@@ -313,6 +313,38 @@ mod tests {
     }
 
     #[test]
+    fn surfaces_template_reference_warnings_from_backend_validator() {
+        let response = validate_execution_graph_json_impl(
+            r#"{
+                "steps": {
+                    "finish": {
+                        "stepType": "Finish",
+                        "id": "finish",
+                        "inputMapping": {
+                            "summary": {
+                                "valueType": "template",
+                                "value": "{{ steps.missing_archive.outputs.file }}"
+                            }
+                        }
+                    }
+                },
+                "entryPoint": "finish"
+            }"#,
+        );
+
+        assert!(response.success);
+        assert!(response.valid);
+        assert!(response.errors.is_empty());
+        assert!(
+            response.warnings.iter().any(|warning| {
+                warning.contains("[W052]") && warning.contains("missing_archive")
+            }),
+            "{:?}",
+            response.warnings
+        );
+    }
+
+    #[test]
     fn returns_static_step_type_metadata() {
         let value: Value = serde_json::from_str(&get_step_types_json()).unwrap();
         let step_types = value["step_types"].as_array().unwrap();
