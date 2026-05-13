@@ -81,6 +81,14 @@ describe('rust workflow validation WASM', () => {
     expect(result.errors.length).toBeGreaterThan(0);
   });
 
+  it('reports Rust graph parse failures as invalid, not unavailable', async () => {
+    const result = await validateExecutionGraphWithRust([]);
+
+    expect(result.wasmAvailable).toBe(true);
+    expect(result.status).toBe('invalid');
+    expect(result.errors.join(' ')).toContain('graph must be a JSON object');
+  });
+
   it('validates workflow start inputs with generated WASM', async () => {
     const result = await validateWorkflowStartInputsWithRust(
       { count: { type: 'integer', required: true } },

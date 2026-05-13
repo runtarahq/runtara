@@ -16,7 +16,10 @@ interface TimelineNodeConfigPanelProps {
   outputSchemaFields?: SchemaField[];
   inputSchemaFields?: SchemaField[];
   variables?: SimpleVariable[];
-  onSave: (nodeId: string, data: form.SchemaType) => void;
+  onSave: (
+    nodeId: string,
+    data: form.SchemaType
+  ) => void | boolean | Promise<void | boolean>;
   onReset?: (nodeId: string) => void;
   onDelete?: (nodeId: string) => void;
   onCancel: () => void;
@@ -40,8 +43,8 @@ export function TimelineNodeConfigPanel({
   const formContainerRef = useRef<HTMLDivElement | null>(null);
 
   const handleSubmit = useCallback(
-    (data: form.SchemaType) => {
-      onSave(nodeId, data);
+    async (data: form.SchemaType) => {
+      await onSave(nodeId, data);
     },
     [nodeId, onSave]
   );

@@ -6,7 +6,6 @@ import { z } from 'zod';
 import { useState, createContext, useContext, useCallback } from 'react';
 import { useFormContext, useWatch } from 'react-hook-form';
 import { InputMappingField } from './InputMappingField';
-import { ExtendedAgent } from '@/features/workflows/queries';
 import { TestAgentInline } from './TestAgentButton/TestAgentInline';
 import { EmbedWorkflowConfigField } from './EmbedWorkflowConfigField';
 import { NameField } from './NameField';
@@ -375,7 +374,7 @@ export const fieldsConfig = [
   ...mainTabFieldsConfig,
 ];
 
-export const schema = (context: { agents: ExtendedAgent[] }) =>
+export const schema = () =>
   z
     .object({
       name: z.string().nonempty(),
@@ -547,49 +546,6 @@ export const schema = (context: { agents: ExtendedAgent[] }) =>
       groupByExpectedKeys: z.array(z.string()).optional(),
     })
     .superRefine((inputs, ctx) => {
-      if (inputs.stepType !== 'Error') return;
-
-      const codeEntry = inputs.inputMapping.find((m) => m.type === 'code');
-      const messageEntry = inputs.inputMapping.find(
-        (m) => m.type === 'message'
-      );
-
-      const isEmptyImmediate = (
-        entry: (typeof inputs.inputMapping)[number] | undefined
-      ) => {
-        if (!entry) return true;
-        // Reference and composite values resolve at runtime — don't validate content
-        if (entry.valueType === 'reference' || entry.valueType === 'composite')
-          return false;
-        if (typeof entry.value === 'string' && entry.value.trim() === '')
-          return true;
-        if (entry.value === undefined || entry.value === null) return true;
-        return false;
-      };
-
-      if (isEmptyImmediate(codeEntry)) {
-        const codeIndex = inputs.inputMapping.findIndex(
-          (m) => m.type === 'code'
-        );
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          path: ['inputMapping', codeIndex >= 0 ? codeIndex : 0, 'value'],
-          message: 'Error Code is required.',
-        });
-      }
-
-      if (isEmptyImmediate(messageEntry)) {
-        const messageIndex = inputs.inputMapping.findIndex(
-          (m) => m.type === 'message'
-        );
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          path: ['inputMapping', messageIndex >= 0 ? messageIndex : 0, 'value'],
-          message: 'Error Message is required.',
-        });
-      }
-    })
-    .superRefine((inputs, ctx) => {
       if (inputs.stepType !== 'Split') return;
       const splitVariables = inputs.splitVariablesFields || [];
       splitVariables.forEach((item, index) => {
@@ -625,157 +581,7 @@ export const schema = (context: { agents: ExtendedAgent[] }) =>
           });
         }
       });
-    })
-    .refine(
-      (inputs) => {
-        const { stepType, agentId } = inputs;
-        if (stepType === 'Agent' && !agentId) return false;
-        return true;
-      },
-      {
-        message: 'Agent is required.',
-        path: ['agentId'],
-      }
-    )
-    .refine(
-      (inputs) => {
-        const { stepType, capabilityId } = inputs;
-        if (stepType === 'Agent' && !capabilityId) return false;
-        return true;
-      },
-      {
-        message: 'Capability is required.',
-        path: ['capabilityId'],
-      }
-    )
-    // Connection is optional - users can provide manual auth in inputs
-    // So we remove the connection validation
-    .refine(
-      (inputs) => {
-        const { stepType, agentId, capabilityId = '', inputMapping } = inputs;
-
-        // Skip inputMapping validation for non-Agent steps (e.g., EmbedWorkflow)
-        if (stepType !== 'Agent') return true;
-
-        const { agents } = context;
-
-        const agent = agents.find((agent) => agent.id === agentId);
-        const capability = agent?.supportedCapabilities?.[capabilityId];
-
-        // If capability is not found, skip validation (allow form to proceed)
-        if (!capability) {
-          return true;
-        }
-
-        // Check if this capability has enhanced metadata (CapabilityField[])
-        const hasEnhancedMetadata =
-          capability &&
-          Array.isArray((capability as any).inputs) &&
-          (capability as any).inputs.length > 0;
-
-        // For capabilities with enhanced metadata, the SimpleInputMappingEditor will auto-populate
-        // the inputMapping array, but validation runs before that happens.
-        // We need to check if there are any required fields in the metadata.
-        if (hasEnhancedMetadata) {
-          const capInputs = (capability as any).inputs || [];
-          const requiredFields = capInputs.filter(
-            (field: any) => field.required
-          );
-
-          // If there are required fields, ensure they have values in inputMapping
-          if (requiredFields.length > 0) {
-            // Check if all required fields have non-empty values
-            const missingFields: string[] = [];
-            requiredFields.forEach((reqField: any) => {
-              const mappingEntry = inputMapping.find(
-                (m) => m.type === reqField.name
-              );
-              // Check for non-empty value - handle both string and other types
-              // Value can be string, number, boolean, array, or object
-              const hasValue =
-                mappingEntry &&
-                mappingEntry.value !== '' &&
-                mappingEntry.value !== undefined &&
-                mappingEntry.value !== null;
-              if (!hasValue) {
-                missingFields.push(reqField.name);
-              }
-            });
-
-            // Store missing fields for error message (attach to context if needed)
-            if (missingFields.length > 0) {
-              // Store for potential use in error message
-              (capInputs as any).__missingFields = missingFields;
-            }
-
-            return missingFields.length === 0;
-          }
-
-          // If no required fields, validation passes
-          return true;
-        }
-
-        // For capabilities with inputs array
-        const capabilityInputs = capability?.inputs;
-
-        // If there are no inputs, the capability doesn't require any inputs
-        if (!capabilityInputs || capabilityInputs.length === 0) {
-          return true;
-        }
-
-        // Check if there are any required inputs
-        const hasRequiredInputs = capabilityInputs.some(
-          (input: { required?: boolean }) => input.required
-        );
-
-        // If no required inputs, validation passes
-        if (!hasRequiredInputs) {
-          return true;
-        }
-
-        // If there are required inputs but no inputMapping, validation fails
-        if (!inputMapping.length) return false;
-
-        return true;
-      },
-      {
-        message: 'Input Mapping is required.',
-        path: ['inputMapping'],
-      }
-    )
-    .refine(
-      (inputs) => {
-        const { stepType, childWorkflowId } = inputs;
-        if (stepType === 'EmbedWorkflow' && !childWorkflowId) return false;
-        return true;
-      },
-      {
-        message: 'Child Workflow is required for EmbedWorkflow step.',
-        path: ['childWorkflowId'],
-      }
-    )
-    .refine(
-      (inputs) => {
-        const { stepType, childVersion } = inputs;
-        if (stepType === 'EmbedWorkflow' && !childVersion) return false;
-        return true;
-      },
-      {
-        message: 'Version selection is required for EmbedWorkflow step.',
-        path: ['childVersion'],
-      }
-    )
-    .refine(
-      (inputs) => {
-        const { stepType, connectionId } = inputs;
-        if (stepType === 'AiAgent' && !connectionId) return false;
-        return true;
-      },
-      {
-        message: 'LLM Connection is required for AI Agent step.',
-        path: ['connectionId'],
-      }
-    );
+    });
 
 export type SchemaType = z.infer<ReturnType<typeof schema>>;
 

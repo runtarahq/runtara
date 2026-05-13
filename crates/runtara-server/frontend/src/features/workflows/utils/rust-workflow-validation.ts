@@ -51,7 +51,7 @@ function normalizeValidationResponse(
   return {
     success,
     valid,
-    status: success ? (valid ? 'valid' : 'invalid') : 'unavailable',
+    status: valid ? 'valid' : 'invalid',
     errors: Array.isArray(response.errors) ? response.errors : [],
     warnings: Array.isArray(response.warnings) ? response.warnings : [],
     message:
@@ -100,7 +100,10 @@ export async function validateWorkflowStartInputsWithRust(
 
     return normalizeValidationResponse(JSON.parse(rawResult));
   } catch (error) {
-    console.warn('Rust workflow start input validation WASM unavailable', error);
+    console.warn(
+      'Rust workflow start input validation WASM unavailable',
+      error
+    );
     return unavailableValidationResult(
       error,
       'Rust workflow start input validation unavailable; server validation remains active'

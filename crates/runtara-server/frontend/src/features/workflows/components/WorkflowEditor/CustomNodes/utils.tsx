@@ -132,7 +132,7 @@ export function composeExecutionGraph(
   options?: {
     name?: string;
     description?: string;
-    variables?: Record<string, { type: string; value: string }>;
+    variables?: Record<string, { type: string; value: unknown }>;
     inputSchema?: Record<string, unknown>;
     outputSchema?: Record<string, unknown>;
     executionTimeoutSeconds?: number;

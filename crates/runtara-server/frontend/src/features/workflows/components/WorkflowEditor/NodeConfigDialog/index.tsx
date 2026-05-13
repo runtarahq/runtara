@@ -32,7 +32,10 @@ interface NodeConfigDialogProps {
   inputSchemaFields?: SchemaField[];
   /** Workflow variables (constants) for variable suggestions */
   variables?: SimpleVariable[];
-  onSave: (nodeId: string, data: form.SchemaType) => void;
+  onSave: (
+    nodeId: string,
+    data: form.SchemaType
+  ) => void | boolean | Promise<void | boolean>;
   onStagedChange?: (nodeId: string, data: form.SchemaType) => void;
   onReset?: (nodeId: string) => void;
   onDelete?: (nodeId: string) => void;
@@ -77,9 +80,11 @@ export function NodeConfigDialog({
   }, [open, nodeData]);
 
   const handleSubmit = useCallback(
-    (data: form.SchemaType) => {
-      onSave(nodeId, data);
-      onOpenChange(false);
+    async (data: form.SchemaType) => {
+      const saved = await onSave(nodeId, data);
+      if (saved !== false) {
+        onOpenChange(false);
+      }
     },
     [nodeId, onSave, onOpenChange]
   );
