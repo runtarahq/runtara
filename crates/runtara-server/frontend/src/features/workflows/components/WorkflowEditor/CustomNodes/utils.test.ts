@@ -520,6 +520,40 @@ describe('Backend DSL serialization', () => {
     });
   });
 
+  it('preserves literal null Finish outputs', () => {
+    const graph = composeExecutionGraph(
+      [
+        {
+          id: 'finish',
+          type: NODE_TYPES.BasicNode,
+          position: { x: 0, y: 0 },
+          data: {
+            id: 'finish',
+            stepType: 'Finish',
+            name: 'Finish',
+            inputMapping: [
+              {
+                type: 'optionalPayload',
+                value: null,
+                typeHint: 'json',
+                valueType: 'immediate',
+              },
+            ],
+          },
+        },
+      ] as any,
+      [],
+      { name: 'finish-output-null-fixture' }
+    );
+
+    const output = (graph!.steps as Record<string, any>).finish.inputMapping
+      .optionalPayload;
+    expect(output).toEqual({
+      valueType: 'immediate',
+      value: null,
+    });
+  });
+
   it('does not leak editor-only form defaults into Agent steps', () => {
     const graph = composeExecutionGraph(
       [

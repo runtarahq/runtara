@@ -263,12 +263,14 @@ type WorkflowEditorProps = {
       type: string;
       required: boolean;
       description: string;
+      nullable?: boolean;
     }>;
     outputSchemaFields?: Array<{
       name: string;
       type: string;
       required: boolean;
       description: string;
+      nullable?: boolean;
     }>;
     executionTimeoutSeconds?: number;
     rateLimitBudgetMs?: number;

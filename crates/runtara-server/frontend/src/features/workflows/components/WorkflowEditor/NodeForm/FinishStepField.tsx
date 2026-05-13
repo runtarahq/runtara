@@ -104,13 +104,19 @@ export function FinishStepField({ name }: FinishStepFieldProps) {
   const schemaFieldMap = useMemo(() => {
     const map = new Map<
       string,
-      { type: string; required: boolean; description: string }
+      {
+        type: string;
+        required: boolean;
+        description?: string;
+        nullable?: boolean;
+      }
     >();
     outputSchemaFields.forEach((field) => {
       map.set(field.name, {
         type: field.type,
         required: field.required,
         description: field.description,
+        nullable: field.nullable,
       });
     });
     return map;
@@ -170,7 +176,7 @@ export function FinishStepField({ name }: FinishStepFieldProps) {
     return null;
   }
 
-  const schemaPreview = inferSchemaFromMapping(fields as any);
+  const schemaPreview = inferSchemaFromMapping(fieldArray as any);
 
   const hasSchemaFields = outputSchemaFields.length > 0;
 
@@ -253,6 +259,8 @@ export function FinishStepField({ name }: FinishStepFieldProps) {
               const isRequired = fieldInfo?.required ?? false;
               const isSchemaField = schemaFieldMap.has(paramName);
               const isCompositeMode = currentValueType === 'composite';
+              const allowsNull =
+                fieldInfo?.nullable ?? (isSchemaField ? false : true);
               // For non-schema fields, type is editable (unless overridden by mode)
               const isTypeEditable =
                 !isSchemaField &&
@@ -359,9 +367,7 @@ export function FinishStepField({ name }: FinishStepFieldProps) {
                                   <>
                                     <MappingValueInput
                                       value={
-                                        isCompositeMode
-                                          ? ''
-                                          : valueField.value || ''
+                                        isCompositeMode ? '' : valueField.value
                                       }
                                       onChange={valueField.onChange}
                                       valueType={
@@ -371,7 +377,12 @@ export function FinishStepField({ name }: FinishStepFieldProps) {
                                       onValueTypeChange={
                                         valueTypeField.onChange
                                       }
-                                      fieldType={fieldInfo?.type || 'string'}
+                                      fieldType={
+                                        fieldInfo?.type ||
+                                        currentTypeHint ||
+                                        'string'
+                                      }
+                                      allowNull={allowsNull}
                                       placeholder="Enter value or select reference..."
                                     />
                                     {isCompositeMode && (
@@ -505,10 +516,11 @@ export function FinishStepField({ name }: FinishStepFieldProps) {
         title="Output schema"
         fields={schemaPreview.map((field) => ({
           ...field,
-          type: 'string',
+          type: schemaFieldMap.get(field.name)?.type ?? field.type,
           required: schemaFieldMap.get(field.name)?.required ?? true,
+          nullable: schemaFieldMap.get(field.name)?.nullable,
         }))}
-        emptyLabel="Outputs map into a string-based schema"
+        emptyLabel="Add outputs to build the schema"
         compact
       />
     </div>

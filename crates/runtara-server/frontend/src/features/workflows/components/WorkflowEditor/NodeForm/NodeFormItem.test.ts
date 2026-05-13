@@ -133,4 +133,21 @@ describe('NodeFormItem schema', () => {
 
     expect(result.success).toBe(true);
   });
+
+  it('allows a Finish output with a literal null source', () => {
+    const result = testSchema.safeParse({
+      ...baseFormData,
+      stepType: 'Finish',
+      inputMapping: [
+        {
+          type: 'optionalPayload',
+          value: null,
+          typeHint: 'json',
+          valueType: 'immediate' as const,
+        },
+      ],
+    });
+
+    expect(result.success).toBe(true);
+  });
 });

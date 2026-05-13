@@ -604,9 +604,11 @@ function cleanNodeData(steps: Record<string, any>) {
         }
 
         const coercedValue =
-          typedVal.valueType === 'immediate' && typedVal.typeHint
+          typedVal.valueType === 'immediate' &&
+          typedVal.typeHint &&
+          typedVal.value !== null
             ? coerceValueToType(typedVal.value, typedVal.typeHint)
-            : typedVal.value === undefined || typedVal.value === null
+            : typedVal.value === undefined
               ? ''
               : typedVal.value;
 
@@ -800,7 +802,7 @@ function cleanNodeData(steps: Record<string, any>) {
           }
           // Filter out empty optional fields
           if (value === undefined || value === null || value === '') {
-            return false;
+            return value === null && valueType === 'immediate';
           }
           return true;
         }

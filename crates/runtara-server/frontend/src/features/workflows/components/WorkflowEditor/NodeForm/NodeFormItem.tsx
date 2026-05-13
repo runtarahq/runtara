@@ -396,6 +396,7 @@ export const schema = () =>
                 z.string(),
                 z.number(),
                 z.boolean(),
+                z.null(),
                 z.array(z.any()),
                 z.object({}).passthrough(),
               ])
@@ -511,7 +512,7 @@ export const schema = () =>
                   : Object.keys(item.value as object).length === 0);
               const hasValue =
                 item.value !== undefined &&
-                item.value !== null &&
+                (item.value !== null || item.valueType === 'immediate') &&
                 !(typeof item.value === 'string' && item.value.trim() === '') &&
                 !isEmptyComposite;
 
@@ -570,7 +571,7 @@ export const schema = () =>
             : Object.keys(item.value as object).length === 0);
         const hasValue =
           item.value !== undefined &&
-          item.value !== null &&
+          (item.value !== null || item.valueType === 'immediate') &&
           !(typeof item.value === 'string' && item.value.trim() === '') &&
           !isEmptyComposite;
 

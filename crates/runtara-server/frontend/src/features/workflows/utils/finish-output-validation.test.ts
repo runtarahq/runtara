@@ -83,4 +83,19 @@ describe('Finish output validation', () => {
       }),
     ]);
   });
+
+  it('allows a literal null as a configured immediate source', () => {
+    expect(
+      getFinishOutputValidationIssues({
+        stepType: 'Finish',
+        inputMapping: [
+          {
+            type: 'optionalPayload',
+            value: null,
+            valueType: 'immediate',
+          },
+        ],
+      })
+    ).toEqual([]);
+  });
 });

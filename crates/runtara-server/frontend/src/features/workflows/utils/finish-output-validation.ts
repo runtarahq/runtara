@@ -30,6 +30,10 @@ function isEmptyCompositeValue(value: unknown) {
 }
 
 function hasMappingValue(item: { value?: unknown; valueType?: unknown }) {
+  if (item.value === null) {
+    return item.valueType === 'immediate';
+  }
+
   if (
     item.valueType === 'composite' &&
     item.value !== undefined &&

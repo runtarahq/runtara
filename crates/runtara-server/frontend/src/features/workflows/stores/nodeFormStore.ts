@@ -72,6 +72,7 @@ export type InputMappingEntry = {
     | string
     | number
     | boolean
+    | null
     | object
     | CompositeObjectValue
     | CompositeArrayValue;

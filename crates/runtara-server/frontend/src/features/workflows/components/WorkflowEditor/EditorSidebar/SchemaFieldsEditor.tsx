@@ -26,6 +26,7 @@ export type SchemaField = {
   required: boolean;
   description: string;
   enum?: string[];
+  nullable?: boolean;
 };
 
 interface SchemaFieldsEditorProps {

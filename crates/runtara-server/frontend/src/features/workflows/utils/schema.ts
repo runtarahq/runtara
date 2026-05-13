@@ -11,6 +11,7 @@ export type SchemaField = {
   description?: string;
   defaultValue?: any;
   enum?: string[];
+  nullable?: boolean;
   // Form rendering extensions
   label?: string;
   placeholder?: string;
@@ -62,6 +63,7 @@ function inferFormatFromName(name: string): string | undefined {
 /** Extract form rendering extensions from a raw field object. */
 function extractExtensions(field: Record<string, any>): Partial<SchemaField> {
   const ext: Partial<SchemaField> = {};
+  if (field.nullable !== undefined) ext.nullable = !!field.nullable;
   if (field.label) ext.label = field.label;
   if (field.placeholder) ext.placeholder = field.placeholder;
   if (field.order != null) ext.order = Number(field.order);
@@ -83,6 +85,23 @@ function extractExtensions(field: Record<string, any>): Partial<SchemaField> {
   return ext;
 }
 
+function normalizeType(rawType: unknown): {
+  type: string;
+  nullable?: boolean;
+} {
+  if (Array.isArray(rawType)) {
+    const nonNullType = rawType.find((item) => item !== 'null');
+    return {
+      type: typeof nonNullType === 'string' ? nonNullType : 'string',
+      nullable: rawType.includes('null'),
+    };
+  }
+
+  return {
+    type: typeof rawType === 'string' ? rawType : 'string',
+  };
+}
+
 export function parseSchema(raw: any): SchemaField[] {
   const schema = safeParseSchema(raw);
 
@@ -101,12 +120,16 @@ export function parseSchema(raw: any): SchemaField[] {
 
     fields = Object.entries(properties).map(([name, value]) => {
       const field = value as Record<string, any>;
+      const normalizedType = normalizeType(field.type);
       return {
         name,
-        type: field.type ?? 'string',
+        type: normalizedType.type,
         required: required.includes(name) || !!field.required,
         description: field.description,
         defaultValue: field.default,
+        ...(normalizedType.nullable !== undefined
+          ? { nullable: normalizedType.nullable }
+          : {}),
         ...(Array.isArray(field.enum) && field.enum.length > 0
           ? { enum: field.enum.map(String) }
           : {}),
@@ -117,12 +140,16 @@ export function parseSchema(raw: any): SchemaField[] {
     // Handle simple map-based schema { fieldName: { type, required, ... } }
     fields = Object.entries(schema).map(([name, value]) => {
       const field = (value as Record<string, any>) || {};
+      const normalizedType = normalizeType(field.type);
       return {
         name,
-        type: field.type ?? 'string',
+        type: normalizedType.type,
         required: !!field.required,
         description: field.description,
         defaultValue: field.default,
+        ...(normalizedType.nullable !== undefined
+          ? { nullable: normalizedType.nullable }
+          : {}),
         ...(Array.isArray(field.enum) && field.enum.length > 0
           ? { enum: field.enum.map(String) }
           : {}),
@@ -177,6 +204,7 @@ export function buildSchemaFromFields(
     if (field.defaultValue !== undefined && field.defaultValue !== '') {
       schemaField.default = field.defaultValue;
     }
+    if (field.nullable !== undefined) schemaField.nullable = field.nullable;
 
     // Form rendering extensions
     if (field.label) schemaField.label = field.label;
@@ -197,18 +225,29 @@ export function buildSchemaFromFields(
 }
 
 export function inferSchemaFromMapping(
-  mappings: { type?: string | null | undefined }[]
+  mappings: {
+    type?: string | null | undefined;
+    typeHint?: string | null | undefined;
+    valueType?: string | null | undefined;
+  }[]
 ): SchemaField[] {
   if (!Array.isArray(mappings)) {
     return [];
   }
 
   return mappings
-    .map((mapping) => mapping?.type)
-    .filter((name): name is string => !!name)
-    .map((name) => ({
-      name,
-      type: 'string',
+    .filter(
+      (mapping): mapping is NonNullable<typeof mapping> & { type: string } =>
+        typeof mapping?.type === 'string' && mapping.type.trim().length > 0
+    )
+    .map((mapping) => ({
+      name: mapping.type,
+      type:
+        mapping.valueType === 'template'
+          ? 'string'
+          : mapping.valueType === 'composite'
+            ? 'object'
+            : mapping.typeHint || 'string',
       required: true,
     }));
 }

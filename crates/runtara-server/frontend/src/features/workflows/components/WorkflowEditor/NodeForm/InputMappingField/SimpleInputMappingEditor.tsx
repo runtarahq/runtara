@@ -222,13 +222,14 @@ function FieldRow({
   const isArray = isArrayType(field.type);
   const isObject = isObjectType(field.type);
   const isUntyped = isUntypedField(field.type);
+  const allowsNull = (field as { nullable?: boolean }).nullable === true;
   // Treat untyped fields as object-like to allow composite mode
   const showObjectEditor = isObject || isUntyped;
 
-  const value = entry?.value ?? '';
+  const value = entry ? entry.value : '';
   const valueType = (entry?.valueType ?? 'immediate') as InputMappingValueType;
 
-  const handleValueChange = (newValue: string) => {
+  const handleValueChange = (newValue: string | null) => {
     setFieldValue(nodeId, field.name, newValue);
     onFieldChange?.();
   };
@@ -364,9 +365,9 @@ function FieldRow({
           <div onFocus={onFieldFocus}>
             <MappingValueInput
               value={
-                typeof value === 'object'
+                typeof value === 'object' && value !== null
                   ? JSON.stringify(value, null, 2)
-                  : String(value)
+                  : value
               }
               onChange={handleValueChange}
               valueType={valueType as ValueMode}
@@ -375,6 +376,7 @@ function FieldRow({
               fieldName={field.name}
               placeholder={placeholder}
               enumOptions={enumOptions}
+              allowNull={allowsNull}
               hideReferenceToggle={hideReferenceToggle}
             />
           </div>
