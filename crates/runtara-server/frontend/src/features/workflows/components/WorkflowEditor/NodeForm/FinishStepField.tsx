@@ -23,6 +23,7 @@ import {
   ValueMode,
 } from './InputMappingField/MappingValueInput';
 import { ObjectMappingEditor } from './InputMappingField/ObjectMappingEditor';
+import { ArrayMappingEditor } from './InputMappingField/ArrayMappingEditor';
 import type {
   CompositeObjectValue,
   CompositeArrayValue,
@@ -64,6 +65,17 @@ function getTypeAbbreviation(type: string | undefined): {
   return { short: type[0].toLowerCase(), full: type };
 }
 
+function isArrayOutputType(type: string | undefined): boolean {
+  if (!type) return false;
+  const lowerType = type.toLowerCase();
+  return (
+    lowerType === 'array' ||
+    lowerType.startsWith('array<') ||
+    lowerType.startsWith('[') ||
+    lowerType.includes('[]')
+  );
+}
+
 /** Get effective type display based on valueType mode */
 function getEffectiveTypeInfo(
   schemaType: string | undefined,
@@ -72,8 +84,12 @@ function getEffectiveTypeInfo(
 ): { short: string; full: string } {
   // Template mode always produces strings
   if (valueType === 'template') return { short: 's', full: 'String' };
-  // Composite mode always produces objects
-  if (valueType === 'composite') return { short: '{}', full: 'Object' };
+  // Composite mode produces either objects or arrays depending on the field type
+  if (valueType === 'composite') {
+    return isArrayOutputType(schemaType || typeHint)
+      ? { short: '[]', full: 'Array' }
+      : { short: '{}', full: 'Object' };
+  }
   // Schema type takes priority
   if (schemaType) return getTypeAbbreviation(schemaType);
   // Fall back to typeHint or default to string
@@ -251,6 +267,8 @@ export function FinishStepField({ name }: FinishStepFieldProps) {
               const fieldInfo = schemaFieldMap.get(paramName);
               const currentValueType = fieldArray[index]?.valueType;
               const currentTypeHint = fieldArray[index]?.typeHint;
+              const outputFieldType =
+                fieldInfo?.type || currentTypeHint || 'string';
               const typeInfo = getEffectiveTypeInfo(
                 fieldInfo?.type,
                 currentValueType,
@@ -259,6 +277,7 @@ export function FinishStepField({ name }: FinishStepFieldProps) {
               const isRequired = fieldInfo?.required ?? false;
               const isSchemaField = schemaFieldMap.has(paramName);
               const isCompositeMode = currentValueType === 'composite';
+              const isArrayOutput = isArrayOutputType(outputFieldType);
               const allowsNull =
                 fieldInfo?.nullable ?? (isSchemaField ? false : true);
               // For non-schema fields, type is editable (unless overridden by mode)
@@ -377,37 +396,57 @@ export function FinishStepField({ name }: FinishStepFieldProps) {
                                       onValueTypeChange={
                                         valueTypeField.onChange
                                       }
-                                      fieldType={
-                                        fieldInfo?.type ||
-                                        currentTypeHint ||
-                                        'string'
-                                      }
+                                      fieldType={outputFieldType}
                                       allowNull={allowsNull}
                                       placeholder="Enter value or select reference..."
                                     />
                                     {isCompositeMode && (
                                       <div className="mt-2 border-t border-primary/20 bg-muted/20 rounded-b-md">
-                                        <ObjectMappingEditor
-                                          value={
-                                            typeof valueField.value ===
-                                              'object' &&
-                                            valueField.value !== null
-                                              ? (valueField.value as
-                                                  | CompositeObjectValue
-                                                  | CompositeArrayValue)
-                                              : {}
-                                          }
-                                          valueType="composite"
-                                          onChange={(val) =>
-                                            valueField.onChange(val)
-                                          }
-                                          onValueTypeChange={(type) =>
-                                            valueTypeField.onChange(type)
-                                          }
-                                          onClose={() =>
-                                            valueTypeField.onChange('immediate')
-                                          }
-                                        />
+                                        {isArrayOutput ? (
+                                          <ArrayMappingEditor
+                                            arrayType={outputFieldType}
+                                            value={
+                                              Array.isArray(valueField.value)
+                                                ? (valueField.value as CompositeArrayValue)
+                                                : []
+                                            }
+                                            valueType="composite"
+                                            onChange={(val) =>
+                                              valueField.onChange(val)
+                                            }
+                                            onValueTypeChange={(type) =>
+                                              valueTypeField.onChange(type)
+                                            }
+                                            onClose={() =>
+                                              valueTypeField.onChange(
+                                                'immediate'
+                                              )
+                                            }
+                                          />
+                                        ) : (
+                                          <ObjectMappingEditor
+                                            value={
+                                              typeof valueField.value ===
+                                                'object' &&
+                                              valueField.value !== null &&
+                                              !Array.isArray(valueField.value)
+                                                ? (valueField.value as CompositeObjectValue)
+                                                : {}
+                                            }
+                                            valueType="composite"
+                                            onChange={(val) =>
+                                              valueField.onChange(val)
+                                            }
+                                            onValueTypeChange={(type) =>
+                                              valueTypeField.onChange(type)
+                                            }
+                                            onClose={() =>
+                                              valueTypeField.onChange(
+                                                'immediate'
+                                              )
+                                            }
+                                          />
+                                        )}
                                       </div>
                                     )}
                                   </>

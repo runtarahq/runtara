@@ -102,6 +102,17 @@ function normalizeType(rawType: unknown): {
   };
 }
 
+function isArraySchemaType(type: string | null | undefined): boolean {
+  if (!type) return false;
+  const lowerType = type.toLowerCase();
+  return (
+    lowerType === 'array' ||
+    lowerType.startsWith('array<') ||
+    lowerType.startsWith('[') ||
+    lowerType.includes('[]')
+  );
+}
+
 export function parseSchema(raw: any): SchemaField[] {
   const schema = safeParseSchema(raw);
 
@@ -246,7 +257,9 @@ export function inferSchemaFromMapping(
         mapping.valueType === 'template'
           ? 'string'
           : mapping.valueType === 'composite'
-            ? 'object'
+            ? isArraySchemaType(mapping.typeHint)
+              ? 'array'
+              : 'object'
             : mapping.typeHint || 'string',
       required: true,
     }));

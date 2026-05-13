@@ -75,6 +75,15 @@ function fieldTypeSupportsNull(fieldType: string): boolean {
   );
 }
 
+function isArrayFieldType(fieldType: string): boolean {
+  return (
+    fieldType === 'array' ||
+    fieldType.startsWith('array<') ||
+    fieldType.startsWith('[') ||
+    fieldType.includes('[]')
+  );
+}
+
 /**
  * Composite input component for mapping values
  * Supports both immediate (literal) values and reference (variable path) values
@@ -214,11 +223,15 @@ export function MappingValueInput({
 
     // Composite mode - show indicator (parent renders the actual editor)
     if (isComposite) {
+      const isArrayComposite = isArrayFieldType(lowerFieldType);
+      const CompositeIcon = isArrayComposite ? Icons.list : Icons.braces;
       return (
         <div className="flex-1 flex items-center min-h-9 px-3 py-1 bg-green-50 dark:bg-green-950/30 rounded-md border border-green-200 dark:border-green-800">
-          <Icons.braces className="h-4 w-4 text-green-600 dark:text-green-400 mr-2 shrink-0" />
+          <CompositeIcon className="h-4 w-4 text-green-600 dark:text-green-400 mr-2 shrink-0" />
           <span className="text-sm text-green-700 dark:text-green-300">
-            Composite object — configure below
+            {isArrayComposite
+              ? 'Composite array - configure below'
+              : 'Composite object - configure below'}
           </span>
         </div>
       );
