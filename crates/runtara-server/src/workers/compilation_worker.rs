@@ -57,21 +57,15 @@ pub async fn run(
         "Starting compilation worker"
     );
 
-    // Use a dedicated manager for the blocking BLPOP consumer. Sharing the
-    // process-wide manager here can put unrelated Redis calls, such as
-    // request-path rate-limit checks, behind the worker's blocking dequeue.
-    let manager = match redis::Client::open(config.redis_url.as_str()) {
-        Ok(client) => match redis::aio::ConnectionManager::new(client).await {
-            Ok(m) => m,
-            Err(e) => {
-                error!(
-                    worker_id = %worker_id,
-                    error = %e,
-                    "Failed to initialize Redis connection manager, worker will not start"
-                );
-                return;
-            }
-        },
+    // Blocking BLPOP consumer — must not ride the shared manager. See
+    // `crate::valkey::dedicated_manager_for_blocking_consumer` for the rule.
+    let manager = match crate::valkey::dedicated_manager_for_blocking_consumer(
+        config.redis_url.as_str(),
+        &worker_id,
+    )
+    .await
+    {
+        Ok(m) => m,
         Err(e) => {
             error!(
                 worker_id = %worker_id,

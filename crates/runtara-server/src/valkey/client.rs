@@ -1,22 +1,30 @@
-use redis::{Client, RedisError, aio::ConnectionManager};
+use redis::{RedisError, aio::ConnectionManager};
 
-use super::ValkeyConfig;
+use super::{ValkeyConfig, dedicated_manager_for_blocking_consumer};
 
-/// Valkey client wrapper with connection management
+/// Valkey client wrapper for the trigger-stream consumer.
+///
+/// The trigger worker issues `XREADGROUP ... BLOCK`, which parks the
+/// underlying connection — so this type intentionally builds its own
+/// dedicated `ConnectionManager` via
+/// [`dedicated_manager_for_blocking_consumer`] rather than cloning the
+/// process-wide `SHARED_MANAGER`. See the rule on
+/// [`super::SHARED_MANAGER`].
 pub struct ValkeyClient {
     config: ValkeyConfig,
     manager: ConnectionManager,
 }
 
 impl ValkeyClient {
-    /// Create a new Valkey client and establish connection
+    /// Create a new Valkey client and establish a dedicated connection
+    /// suitable for blocking commands (`XREADGROUP ... BLOCK`).
     pub async fn new(config: ValkeyConfig) -> Result<Self, RedisError> {
         let url = config.connection_url();
 
         println!("Connecting to Valkey at {}:{}", config.host, config.port);
 
-        let client = Client::open(url)?;
-        let manager = ConnectionManager::new(client).await?;
+        let manager =
+            dedicated_manager_for_blocking_consumer(&url, "valkey-trigger-stream").await?;
 
         println!("✓ Valkey connected successfully");
 
