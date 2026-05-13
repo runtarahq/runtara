@@ -349,59 +349,63 @@ export function FinishStepField({ name }: FinishStepFieldProps) {
                       control={form.control}
                       name={`${name}.${index}.value`}
                       render={({ field: valueField }) => (
-                        <FormField
-                          control={form.control}
-                          name={`${name}.${index}.valueType`}
-                          render={({ field: valueTypeField }) => (
-                            <FormItem className="space-y-0">
-                              <FormControl>
-                                <div>
-                                  <MappingValueInput
-                                    value={
-                                      isCompositeMode
-                                        ? ''
-                                        : valueField.value || ''
-                                    }
-                                    onChange={valueField.onChange}
-                                    valueType={
-                                      (valueTypeField.value as ValueMode) ||
-                                      'immediate'
-                                    }
-                                    onValueTypeChange={valueTypeField.onChange}
-                                    fieldType={fieldInfo?.type || 'string'}
-                                    placeholder="Enter value or select reference..."
-                                  />
-                                  {isCompositeMode && (
-                                    <div className="mt-2 border-t border-primary/20 bg-muted/20 rounded-b-md">
-                                      <ObjectMappingEditor
-                                        value={
-                                          typeof valueField.value ===
-                                            'object' &&
-                                          valueField.value !== null
-                                            ? (valueField.value as
-                                                | CompositeObjectValue
-                                                | CompositeArrayValue)
-                                            : {}
-                                        }
-                                        valueType="composite"
-                                        onChange={(val) =>
-                                          valueField.onChange(val)
-                                        }
-                                        onValueTypeChange={(type) =>
-                                          valueTypeField.onChange(type)
-                                        }
-                                        onClose={() =>
-                                          valueTypeField.onChange('immediate')
-                                        }
-                                      />
-                                    </div>
-                                  )}
-                                </div>
-                              </FormControl>
-                              <FormMessage />
-                            </FormItem>
-                          )}
-                        />
+                        <FormItem className="space-y-0">
+                          <FormControl>
+                            <div>
+                              <FormField
+                                control={form.control}
+                                name={`${name}.${index}.valueType`}
+                                render={({ field: valueTypeField }) => (
+                                  <>
+                                    <MappingValueInput
+                                      value={
+                                        isCompositeMode
+                                          ? ''
+                                          : valueField.value || ''
+                                      }
+                                      onChange={valueField.onChange}
+                                      valueType={
+                                        (valueTypeField.value as ValueMode) ||
+                                        'immediate'
+                                      }
+                                      onValueTypeChange={
+                                        valueTypeField.onChange
+                                      }
+                                      fieldType={fieldInfo?.type || 'string'}
+                                      placeholder="Enter value or select reference..."
+                                    />
+                                    {isCompositeMode && (
+                                      <div className="mt-2 border-t border-primary/20 bg-muted/20 rounded-b-md">
+                                        <ObjectMappingEditor
+                                          value={
+                                            typeof valueField.value ===
+                                              'object' &&
+                                            valueField.value !== null
+                                              ? (valueField.value as
+                                                  | CompositeObjectValue
+                                                  | CompositeArrayValue)
+                                              : {}
+                                          }
+                                          valueType="composite"
+                                          onChange={(val) =>
+                                            valueField.onChange(val)
+                                          }
+                                          onValueTypeChange={(type) =>
+                                            valueTypeField.onChange(type)
+                                          }
+                                          onClose={() =>
+                                            valueTypeField.onChange('immediate')
+                                          }
+                                        />
+                                      </div>
+                                    )}
+                                  </>
+                                )}
+                              />
+                            </div>
+                          </FormControl>
+                          <FormMessage />
+                        </FormItem>
                       )}
                     />
                   </td>
