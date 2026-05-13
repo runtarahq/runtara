@@ -254,7 +254,6 @@ describe('MappingValue round-trip', () => {
         name: {
           valueType: 'immediate',
           value: 'Alice',
-          type: 'string',
         },
       },
     });
@@ -327,7 +326,6 @@ describe('MappingValue round-trip', () => {
       {
         valueType: 'immediate',
         value: 42,
-        type: 'integer',
       },
     ]);
   });
@@ -354,7 +352,7 @@ describe('MappingValue round-trip', () => {
     });
   });
 
-  it('preserves immediate with integer type', () => {
+  it('does not emit backend type hints on immediate values', () => {
     const graph = makeGraph({
       id: 's1',
       stepType: 'Agent',
@@ -374,7 +372,6 @@ describe('MappingValue round-trip', () => {
     expect(step.inputMapping.timeout).toEqual({
       valueType: 'immediate',
       value: 5000,
-      type: 'integer',
     });
   });
 
@@ -445,7 +442,7 @@ describe('Form-input coercion on save', () => {
       valueType: 'immediate',
     });
     expect(out.value).toBe(5);
-    expect(out.type).toBe('integer');
+    expect(out).not.toHaveProperty('type');
   });
 
   it('coerces string "true" to boolean true when typeHint is boolean', () => {
@@ -489,6 +486,40 @@ describe('Form-input coercion on save', () => {
 });
 
 describe('Backend DSL serialization', () => {
+  it('does not emit backend type hints for immediate Finish outputs', () => {
+    const graph = composeExecutionGraph(
+      [
+        {
+          id: 'finish',
+          type: NODE_TYPES.BasicNode,
+          position: { x: 0, y: 0 },
+          data: {
+            id: 'finish',
+            stepType: 'Finish',
+            name: 'Finish',
+            inputMapping: [
+              {
+                type: 'status',
+                value: 'ok',
+                typeHint: 'string',
+                valueType: 'immediate',
+              },
+            ],
+          },
+        },
+      ] as any,
+      [],
+      { name: 'finish-output-fixture' }
+    );
+
+    const output = (graph!.steps as Record<string, any>).finish.inputMapping
+      .status;
+    expect(output).toEqual({
+      valueType: 'immediate',
+      value: 'ok',
+    });
+  });
+
   it('does not leak editor-only form defaults into Agent steps', () => {
     const graph = composeExecutionGraph(
       [
@@ -713,7 +744,7 @@ describe('Backend DSL serialization', () => {
 });
 
 describe('Split variable round-trip', () => {
-  it('preserves numeric immediate variable (no JSON.stringify on load)', () => {
+  it('preserves numeric immediate variable without emitting backend type metadata', () => {
     const graph = makeGraph({
       id: 's1',
       stepType: 'Split',
@@ -737,11 +768,10 @@ describe('Split variable round-trip', () => {
     expect(step.config.variables.counter).toEqual({
       valueType: 'immediate',
       value: 5,
-      type: 'integer',
     });
   });
 
-  it('preserves boolean immediate variable', () => {
+  it('preserves boolean immediate variable without emitting backend type metadata', () => {
     const graph = makeGraph({
       id: 's1',
       stepType: 'Split',
@@ -765,11 +795,10 @@ describe('Split variable round-trip', () => {
     expect(step.config.variables.active).toEqual({
       valueType: 'immediate',
       value: true,
-      type: 'boolean',
     });
   });
 
-  it('preserves composite array variable', () => {
+  it('preserves composite array variable without emitting backend type metadata', () => {
     const graph = makeGraph({
       id: 's1',
       stepType: 'Split',
@@ -799,7 +828,7 @@ describe('Split variable round-trip', () => {
       { valueType: 'immediate', value: 'a' },
       { valueType: 'immediate', value: 'b' },
     ]);
-    expect(step.config.variables.payload.type).toBe('array');
+    expect(step.config.variables.payload).not.toHaveProperty('type');
   });
 
   it('does not synthesize `type: "string"` when backend omitted it', () => {

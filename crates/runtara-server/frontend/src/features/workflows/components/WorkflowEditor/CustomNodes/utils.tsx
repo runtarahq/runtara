@@ -572,7 +572,6 @@ function cleanNodeData(steps: Record<string, any>) {
     ): {
       valueType: 'reference' | 'immediate' | 'composite';
       value: any;
-      type?: string;
     } => {
       const processEntry = (val: any) => {
         if (
@@ -620,7 +619,10 @@ function cleanNodeData(steps: Record<string, any>) {
           valueType: typedVal.valueType || 'immediate',
           value: coercedValue,
         };
-        if (isValidValueType(typedVal.typeHint)) {
+        if (
+          typedVal.valueType === 'reference' &&
+          isValidValueType(typedVal.typeHint)
+        ) {
           out.type = typedVal.typeHint;
         }
         if (
@@ -682,15 +684,10 @@ function cleanNodeData(steps: Record<string, any>) {
         const mappingValue: {
           valueType: 'composite';
           value: any;
-          type?: string;
         } = {
           valueType: 'composite',
           value: processed.value,
         };
-        // Add type if it's a valid ValueType from the spec
-        if (isValidValueType(typeHint)) {
-          mappingValue.type = typeHint;
-        }
         return [type, mappingValue];
       }
 
@@ -755,8 +752,9 @@ function cleanNodeData(steps: Record<string, any>) {
         value: finalValue,
       };
 
-      // Add type if it's a valid ValueType from the spec
-      if (isValidValueType(typeHint)) {
+      // Only reference values carry backend type hints. Immediate, composite,
+      // and template values reject unknown `type` fields.
+      if (resolvedValueType === 'reference' && isValidValueType(typeHint)) {
         mappingValue.type = typeHint;
       }
 
@@ -967,13 +965,15 @@ function cleanNodeData(steps: Record<string, any>) {
             firstMapping.value.trim() === ''
           );
         if (hasSplitSourceValue) {
+          const splitValueType = firstMapping.valueType || 'reference';
           splitConfig.value = {
-            valueType: firstMapping.valueType || 'reference',
+            valueType: splitValueType,
             value: firstMapping.value,
-            ...(isValidValueType(firstMapping.typeHint)
+            ...(splitValueType === 'reference' &&
+            isValidValueType(firstMapping.typeHint)
               ? { type: firstMapping.typeHint }
               : {}),
-            ...(firstMapping.valueType === 'reference' &&
+            ...(splitValueType === 'reference' &&
             firstMapping.defaultValue !== undefined
               ? { default: firstMapping.defaultValue }
               : {}),
@@ -993,16 +993,18 @@ function cleanNodeData(steps: Record<string, any>) {
           existingSplitConfig.value.value.trim() === ''
         )
       ) {
+        const splitValueType =
+          existingSplitConfig.value.valueType === 'immediate'
+            ? 'immediate'
+            : 'reference';
         splitConfig.value = {
-          valueType:
-            existingSplitConfig.value.valueType === 'immediate'
-              ? 'immediate'
-              : 'reference',
+          valueType: splitValueType,
           value: existingSplitConfig.value.value,
-          ...(existingSplitConfig.value.type
+          ...(splitValueType === 'reference' && existingSplitConfig.value.type
             ? { type: existingSplitConfig.value.type }
             : {}),
-          ...(existingSplitConfig.value.default !== undefined
+          ...(splitValueType === 'reference' &&
+          existingSplitConfig.value.default !== undefined
             ? { default: existingSplitConfig.value.default }
             : {}),
         };
@@ -1044,7 +1046,9 @@ function cleanNodeData(steps: Record<string, any>) {
             variables[variableName] = {
               valueType: resolvedValueType,
               value: varField.value,
-              ...(varField.type ? { type: varField.type } : {}),
+              ...(resolvedValueType === 'reference' && varField.type
+                ? { type: varField.type }
+                : {}),
             };
           }
         }
