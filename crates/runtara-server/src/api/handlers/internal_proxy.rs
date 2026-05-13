@@ -125,10 +125,15 @@ pub async fn execute_proxy_request(
                 )
             })?;
 
-        // Record rate limit event for analytics tracking
-        let _ = facade
-            .record_credential_request(connection_id, tenant_id, &RateLimitEventType::Request, None)
-            .await;
+        // Record analytics off the request path. This can hit Redis and
+        // PostgreSQL, and should not delay the upstream call.
+        record_credential_request_async(
+            facade,
+            connection_id,
+            tenant_id,
+            RateLimitEventType::Request,
+            None,
+        );
 
         // Resolve URL against connection base URL
         if let Some(base) = resolved.base_url {
@@ -170,18 +175,16 @@ pub async fn execute_proxy_request(
                 .check_rate_limit(connection_id, &conn.rate_limit_config)
                 .await
         {
-            // Record rate_limited event for analytics
-            let _ = facade
-                .record_credential_request(
-                    connection_id,
-                    tenant_id,
-                    &RateLimitEventType::RateLimited,
-                    Some(json!({
-                        "source": "preflight",
-                        "retry_after_ms": retry_after_ms
-                    })),
-                )
-                .await;
+            record_credential_request_async(
+                facade,
+                connection_id,
+                tenant_id,
+                RateLimitEventType::RateLimited,
+                Some(json!({
+                    "source": "preflight",
+                    "retry_after_ms": retry_after_ms
+                })),
+            );
 
             tracing::info!(
                 target: "proxy",
@@ -333,17 +336,16 @@ pub async fn execute_proxy_request(
             .or_else(|| resp_headers.get("Retry-After"))
             .and_then(|v| v.parse::<u64>().ok());
 
-        let _ = facade
-            .record_credential_request(
-                connection_id,
-                tenant_id,
-                &RateLimitEventType::RateLimited,
-                Some(json!({
-                    "source": "upstream_429",
-                    "retry_after_secs": retry_after
-                })),
-            )
-            .await;
+        record_credential_request_async(
+            facade,
+            connection_id,
+            tenant_id,
+            RateLimitEventType::RateLimited,
+            Some(json!({
+                "source": "upstream_429",
+                "retry_after_secs": retry_after
+            })),
+        );
 
         tracing::warn!(
             target: "proxy",
@@ -384,6 +386,32 @@ fn extract_tenant_id(headers: &axum::http::HeaderMap) -> Result<String, (StatusC
                 Json(json!({"error": "Missing X-Org-Id header"})),
             )
         })
+}
+
+fn record_credential_request_async(
+    facade: &ConnectionsFacade,
+    connection_id: &str,
+    tenant_id: &str,
+    event_type: RateLimitEventType,
+    metadata: Option<Value>,
+) {
+    let facade = facade.clone();
+    let connection_id = connection_id.to_string();
+    let tenant_id = tenant_id.to_string();
+
+    tokio::spawn(async move {
+        if let Err(e) = facade
+            .record_credential_request(&connection_id, &tenant_id, &event_type, metadata)
+            .await
+        {
+            tracing::warn!(
+                connection_id = %connection_id,
+                event_type = %event_type,
+                error = ?e,
+                "Failed to record rate limit event"
+            );
+        }
+    });
 }
 
 /// SSRF protection: reject URLs targeting private/internal IP ranges.
