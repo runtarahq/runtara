@@ -12,9 +12,9 @@ categories = ["development-tools", "wasm"]
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-runtara-agents = { path = "../runtara-agents", version = "4.7", default-features = false, features = ["integrations", "wasm-js"] }
-runtara-dsl = { path = "../runtara-dsl", version = "4.7" }
-runtara-workflows = { path = "../runtara-workflows", version = "4.7", default-features = false, features = ["integrations", "wasm-js"] }
+runtara-agents = { path = "../runtara-agents", version = "4.9", default-features = false, features = ["integrations", "wasm-js"] }
+runtara-dsl = { path = "../runtara-dsl", version = "4.9" }
+runtara-workflows = { path = "../runtara-workflows", version = "4.9", default-features = false, features = ["integrations", "wasm-js"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 wasm-bindgen = "0.2"
