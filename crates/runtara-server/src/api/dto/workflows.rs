@@ -4,6 +4,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use utoipa::ToSchema;
 
+pub use runtara_workflows::input_validation::{
+    WorkflowInputValidationError as InputValidationError, validate_workflow_inputs,
+};
+
 // ============================================================================
 // Validation Error DTOs
 // ============================================================================
@@ -894,82 +898,6 @@ pub struct ExecuteWorkflowRequest {
     /// Use the resume endpoint to continue execution to the next breakpoint.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub debug: Option<bool>,
-}
-
-/// Error returned when workflow inputs don't match the expected format
-#[derive(Debug, Clone, PartialEq)]
-pub struct InputValidationError {
-    pub message: String,
-}
-
-impl std::fmt::Display for InputValidationError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.message)
-    }
-}
-
-impl std::error::Error for InputValidationError {}
-
-/// Validates workflow inputs match the canonical Runtara format:
-/// `{"data": {...}, "variables": {...}}`
-///
-/// This function enforces strict input format at the API boundary.
-/// Callers must provide properly structured inputs - no auto-wrapping is performed.
-///
-/// # Required format:
-/// - Must be a JSON object
-/// - Must have a "data" key (value can be any JSON type)
-/// - "variables" key is optional (defaults to empty object if missing)
-///
-/// # Returns:
-/// - `Ok(Value)` with the validated inputs (with "variables" added if missing)
-/// - `Err(InputValidationError)` if format is invalid
-///
-/// # Example valid inputs:
-/// ```json
-/// {"data": {"foo": "bar"}, "variables": {"x": 1}}
-/// {"data": {"foo": "bar"}}  // variables will be added as {}
-/// {"data": null}            // data can be null
-/// {"data": [1, 2, 3]}       // data can be an array
-/// ```
-///
-/// # Example invalid inputs:
-/// ```json
-/// {"foo": "bar"}            // missing "data" key
-/// [1, 2, 3]                 // not an object
-/// null                      // not an object
-/// ```
-pub fn validate_workflow_inputs(inputs: Value) -> Result<Value, InputValidationError> {
-    // Must be an object
-    let obj = match inputs.as_object() {
-        Some(o) => o,
-        None => {
-            return Err(InputValidationError {
-                message: "inputs must be a JSON object with 'data' key, e.g. {\"data\": {...}, \"variables\": {...}}".to_string(),
-            });
-        }
-    };
-
-    // Must have "data" key
-    if !obj.contains_key("data") {
-        return Err(InputValidationError {
-            message: "inputs must contain 'data' key, e.g. {\"data\": {...}, \"variables\": {...}}"
-                .to_string(),
-        });
-    }
-
-    // Add "variables" if missing
-    let mut result = inputs;
-    if result.get("variables").is_none()
-        && let serde_json::Value::Object(ref mut map) = result
-    {
-        map.insert(
-            "variables".to_string(),
-            serde_json::Value::Object(serde_json::Map::new()),
-        );
-    }
-
-    Ok(result)
 }
 
 #[allow(dead_code)]

@@ -8,6 +8,7 @@ import {
   getStaticStepTypeSchemaWithRust,
   getStaticStepTypesWithRust,
   validateExecutionGraphWithRust,
+  validateWorkflowStartInputsWithRust,
 } from './rust-workflow-validation';
 
 const wasmBytes = readFileSync(
@@ -78,6 +79,32 @@ describe('rust workflow validation WASM', () => {
     expect(result.valid).toBe(false);
     expect(result.status).toBe('invalid');
     expect(result.errors.length).toBeGreaterThan(0);
+  });
+
+  it('validates workflow start inputs with generated WASM', async () => {
+    const result = await validateWorkflowStartInputsWithRust(
+      { count: { type: 'integer', required: true } },
+      { data: { count: 3 }, variables: {} }
+    );
+
+    expect(result.wasmAvailable).toBe(true);
+    expect(result.success).toBe(true);
+    expect(result.valid).toBe(true);
+    expect(result.status).toBe('valid');
+    expect(result.errors).toEqual([]);
+  });
+
+  it('rejects workflow start inputs with backend-equivalent generated WASM', async () => {
+    const result = await validateWorkflowStartInputsWithRust(
+      { count: { type: 'integer', required: true } },
+      { data: { count: 'not-a-number' }, variables: {} }
+    );
+
+    expect(result.wasmAvailable).toBe(true);
+    expect(result.success).toBe(true);
+    expect(result.valid).toBe(false);
+    expect(result.status).toBe('invalid');
+    expect(result.errors.join(' ')).toContain('count');
   });
 
   it('returns statically compiled workflow metadata from generated WASM', async () => {

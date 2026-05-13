@@ -51,6 +51,26 @@ impl ValidationResponse {
             message: "Graph validation failed: invalid workflow format".to_string(),
         }
     }
+
+    fn valid(message: impl Into<String>) -> Self {
+        Self {
+            success: true,
+            valid: true,
+            errors: Vec::new(),
+            warnings: Vec::new(),
+            message: message.into(),
+        }
+    }
+
+    fn invalid(message: impl Into<String>, errors: Vec<String>) -> Self {
+        Self {
+            success: true,
+            valid: false,
+            errors,
+            warnings: Vec::new(),
+            message: message.into(),
+        }
+    }
 }
 
 /// Validate an execution graph JSON string with the same Rust validation path
@@ -65,6 +85,23 @@ pub fn validate_execution_graph_json(execution_graph_json: &str) -> String {
             "errors": [format!("Failed to serialize validation response: {}", e)],
             "warnings": [],
             "message": "Validation failed"
+        })
+        .to_string()
+    })
+}
+
+/// Validate workflow start inputs with the same Rust validation path used by
+/// backend execution.
+#[wasm_bindgen(js_name = validateWorkflowStartInputsJson)]
+pub fn validate_workflow_start_inputs_json(input_schema_json: &str, inputs_json: &str) -> String {
+    let response = validate_workflow_start_inputs_json_impl(input_schema_json, inputs_json);
+    serde_json::to_string(&response).unwrap_or_else(|e| {
+        json!({
+            "success": false,
+            "valid": false,
+            "errors": [format!("Failed to serialize validation response: {}", e)],
+            "warnings": [],
+            "message": "Workflow start input validation failed"
         })
         .to_string()
     })
@@ -156,6 +193,39 @@ fn validate_execution_graph_json_impl(execution_graph_json: &str) -> ValidationR
     ValidationResponse::ok(errors, warnings)
 }
 
+fn validate_workflow_start_inputs_json_impl(
+    input_schema_json: &str,
+    inputs_json: &str,
+) -> ValidationResponse {
+    let input_schema = match serde_json::from_str::<Value>(input_schema_json) {
+        Ok(value) => value,
+        Err(e) => {
+            return ValidationResponse::invalid(
+                "Workflow start input validation failed: invalid input schema JSON",
+                vec![format!("Failed to parse input schema JSON: {}", e)],
+            );
+        }
+    };
+
+    let inputs = match serde_json::from_str::<Value>(inputs_json) {
+        Ok(value) => value,
+        Err(e) => {
+            return ValidationResponse::invalid(
+                "Workflow start input validation failed: invalid inputs JSON",
+                vec![format!("Failed to parse inputs JSON: {}", e)],
+            );
+        }
+    };
+
+    match runtara_workflows::input_validation::validate_workflow_start_inputs(inputs, &input_schema)
+    {
+        Ok(_) => ValidationResponse::valid("Workflow start input validation passed"),
+        Err(e) => {
+            ValidationResponse::invalid("Workflow start input validation failed", vec![e.message])
+        }
+    }
+}
+
 fn to_json_string<T: Serialize>(value: &T) -> String {
     serde_json::to_string(value).unwrap_or_else(|e| {
         json!({
@@ -215,6 +285,31 @@ mod tests {
         assert!(response.success);
         assert!(!response.valid);
         assert!(!response.errors.is_empty());
+    }
+
+    #[test]
+    fn validates_workflow_start_inputs_with_backend_validator() {
+        let response = validate_workflow_start_inputs_json_impl(
+            r#"{"name":{"type":"string","required":true}}"#,
+            r#"{"data":{"name":"Runtara"},"variables":{}}"#,
+        );
+
+        assert!(response.success);
+        assert!(response.valid);
+        assert!(response.errors.is_empty());
+    }
+
+    #[test]
+    fn rejects_invalid_workflow_start_inputs_with_backend_validator() {
+        let response = validate_workflow_start_inputs_json_impl(
+            r#"{"count":{"type":"integer","required":true}}"#,
+            r#"{"data":{"count":"not-a-number"},"variables":{}}"#,
+        );
+
+        assert!(response.success);
+        assert!(!response.valid);
+        assert!(response.message.contains("failed"));
+        assert!(response.errors.iter().any(|error| error.contains("count")));
     }
 
     #[test]

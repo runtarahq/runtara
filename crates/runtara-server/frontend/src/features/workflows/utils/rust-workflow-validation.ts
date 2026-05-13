@@ -5,6 +5,7 @@ import initRustValidation, {
   getStepTypeSchemaJson,
   getStepTypesJson,
   validateExecutionGraphJson,
+  validateWorkflowStartInputsJson,
 } from '@/wasm/workflow-validation/runtara_workflow_validation.js';
 import rustValidationWasmUrl from '@/wasm/workflow-validation/runtara_workflow_validation_bg.wasm?url';
 import {
@@ -62,7 +63,8 @@ function normalizeValidationResponse(
 }
 
 function unavailableValidationResult(
-  error: unknown
+  error: unknown,
+  message = 'Rust workflow validation unavailable; server validation remains active'
 ): RustWorkflowValidationResult {
   const unavailableReason =
     error instanceof Error ? error.message : String(error);
@@ -73,11 +75,37 @@ function unavailableValidationResult(
     status: 'unavailable',
     errors: [],
     warnings: [],
-    message:
-      'Rust workflow validation unavailable; server validation remains active',
+    message,
     wasmAvailable: false,
     unavailableReason,
   };
+}
+
+/**
+ * Validate the exact workflow start envelope sent to the backend using the
+ * shared Rust input-schema validator compiled to WASM. If unavailable, return
+ * an explicit unavailable state and let backend validation remain authoritative.
+ */
+export async function validateWorkflowStartInputsWithRust(
+  inputSchema: unknown,
+  inputs: unknown
+): Promise<RustWorkflowValidationResult> {
+  try {
+    await ensureRustValidatorInitialized();
+
+    const rawResult = validateWorkflowStartInputsJson(
+      JSON.stringify(inputSchema ?? {}),
+      JSON.stringify(inputs ?? {})
+    );
+
+    return normalizeValidationResponse(JSON.parse(rawResult));
+  } catch (error) {
+    console.warn('Rust workflow start input validation WASM unavailable', error);
+    return unavailableValidationResult(
+      error,
+      'Rust workflow start input validation unavailable; server validation remains active'
+    );
+  }
 }
 
 function parseRustJson<T>(rawValue: string, fallback: T): T {

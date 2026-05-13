@@ -32,7 +32,6 @@ use crate::api::dto::workflows::{
 };
 use crate::api::repositories::trigger_stream::TriggerStreamPublisher;
 use crate::api::repositories::workflows::{CompilationStatus, WorkflowRepository};
-use crate::api::services::input_validation::{is_empty_schema, validate_inputs};
 use crate::metrics::MetricsService;
 use crate::runtime_client::RuntimeClient;
 use crate::workers::CancellationHandle;
@@ -41,6 +40,7 @@ use crate::workers::runtara_dto::{
     runtara_info_to_dto, runtara_info_to_execution_with_metadata,
     runtara_instance_to_dto_with_info,
 };
+use runtara_workflows::input_validation::validate_workflow_start_inputs;
 
 /// Result of workflow execution (native path; currently unused by the server).
 #[derive(Debug)]
@@ -365,17 +365,10 @@ impl ExecutionEngine {
                 ))
             })?;
 
-        // 3. Validate inputs.data against input schema
-        if !is_empty_schema(&workflow.input_schema) {
-            let data_to_validate = req
-                .inputs
-                .get("data")
-                .cloned()
-                .unwrap_or(serde_json::json!({}));
-            validate_inputs(&data_to_validate, &workflow.input_schema).map_err(|e| {
-                ExecutionError::ValidationError(format!("Input validation failed: {}", e))
-            })?;
-        }
+        // 3. Validate canonical inputs and inputs.data against input schema
+        let validated_inputs =
+            validate_workflow_start_inputs(req.inputs.clone(), &workflow.input_schema)
+                .map_err(|e| ExecutionError::ValidationError(e.message))?;
 
         // 4. Get track_events (already have it from workflow)
         let track_events = workflow.track_events;
@@ -405,7 +398,7 @@ impl ExecutionEngine {
                 req.tenant_id.to_string(),
                 req.workflow_id.to_string(),
                 Some(version),
-                req.inputs,
+                validated_inputs,
                 track_events,
                 req.correlation_id,
                 req.debug,
@@ -417,7 +410,7 @@ impl ExecutionEngine {
                 req.tenant_id.to_string(),
                 req.workflow_id.to_string(),
                 Some(version),
-                req.inputs,
+                validated_inputs,
                 track_events,
                 original_instance_id,
                 req.debug,
@@ -480,16 +473,9 @@ impl ExecutionEngine {
                 ))
             })?;
 
-        if !is_empty_schema(&workflow.input_schema) {
-            let data_to_validate = req
-                .inputs
-                .get("data")
-                .cloned()
-                .unwrap_or(serde_json::json!({}));
-            validate_inputs(&data_to_validate, &workflow.input_schema).map_err(|e| {
-                ExecutionError::ValidationError(format!("Input validation failed: {}", e))
-            })?;
-        }
+        let validated_inputs =
+            validate_workflow_start_inputs(req.inputs.clone(), &workflow.input_schema)
+                .map_err(|e| ExecutionError::ValidationError(e.message))?;
 
         // 3. Block on compilation readiness (delegated to compilation worker)
         self.wait_for_compilation_blocking(req.tenant_id, req.workflow_id, version)
@@ -526,7 +512,7 @@ impl ExecutionEngine {
                 req.tenant_id,
                 req.workflow_id,
                 None, // auto-generate instance id
-                Some(req.inputs),
+                Some(validated_inputs),
                 execution_timeout.map(|s| s as u32),
                 false,
             )

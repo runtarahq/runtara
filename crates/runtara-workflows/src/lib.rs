@@ -89,6 +89,9 @@ pub mod compile;
 /// Dependency analysis for child workflows.
 pub mod dependency_analysis;
 
+/// Workflow start input validation.
+pub mod input_validation;
+
 /// File path utilities for workflows and data.
 #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
 pub mod paths;
@@ -107,6 +110,10 @@ pub use compile::{
     compile_workflow, translate_workflow, workflow_has_side_effects,
 };
 pub use dependency_analysis::{DependencyGraph, WorkflowReference};
+pub use input_validation::{
+    WorkflowInputValidationError, is_empty_schema, validate_inputs, validate_workflow_inputs,
+    validate_workflow_start_inputs,
+};
 #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
 pub use paths::{get_data_dir, get_workflow_dir, get_workflow_json_path};
 pub use validation::{
