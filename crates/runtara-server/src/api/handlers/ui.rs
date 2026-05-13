@@ -114,7 +114,7 @@ fn build_index_html(base_href: &str) -> (Bytes, String) {
 fn build_html_csp(inline_script_sha256_b64: &str) -> String {
     format!(
         "default-src 'self'; \
-         script-src 'self' https://plausible.io 'sha256-{inline_script_sha256_b64}'; \
+         script-src 'self' https://plausible.io 'wasm-unsafe-eval' 'sha256-{inline_script_sha256_b64}'; \
          style-src 'self' 'unsafe-inline'; \
          img-src 'self' data: blob:; \
          font-src 'self' data:; \
@@ -302,4 +302,17 @@ fn asset_response(path: &str, file: EmbeddedFile, csp: &str) -> Response {
         )
         .body(Body::from(file.data.into_owned()))
         .unwrap()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn csp_allows_wasm_validation_without_general_eval() {
+        let csp = build_html_csp("inline-config-hash");
+
+        assert!(csp.contains("'wasm-unsafe-eval'"));
+        assert!(!csp.contains("'unsafe-eval'"));
+    }
 }
