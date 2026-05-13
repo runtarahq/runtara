@@ -61,7 +61,7 @@ async-trait = "0.1"
 [dev-dependencies]
 tokio = { version = "1", features = ["test-util", "macros", "rt-multi-thread"] }
 tempfile = "3"
-runtara-dsl = { path = "../runtara-dsl", version = "4.9" }
+runtara-dsl = { path = "../runtara-dsl", version = "4.10" }
 # Testcontainers for automatic PostgreSQL setup in tests
 testcontainers = "0.27"
 testcontainers-modules = { version = "0.15", features = ["postgres"] }
