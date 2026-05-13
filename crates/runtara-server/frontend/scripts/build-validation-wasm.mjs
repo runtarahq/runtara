@@ -38,6 +38,11 @@ const requiredOutputs = [
   'runtara_workflow_validation_bg.wasm.d.ts',
 ];
 
+const generatedOutputNames = new Set([
+  ...requiredOutputs,
+  'runtara_workflow_validation.fingerprint',
+]);
+
 const inputs = [
   'Cargo.toml',
   'Cargo.lock',
@@ -105,6 +110,18 @@ function computeFingerprint() {
   return hash.toString(16).padStart(16, '0');
 }
 
+function cleanOutputDir({ keepCurrent }) {
+  mkdirSync(outputDir, { recursive: true });
+
+  for (const entry of readdirSync(outputDir)) {
+    if (keepCurrent && generatedOutputNames.has(entry)) {
+      continue;
+    }
+
+    rmSync(path.join(outputDir, entry), { recursive: true, force: true });
+  }
+}
+
 const fingerprint = computeFingerprint();
 const outputsExist = requiredOutputs.every((name) =>
   existsSync(path.join(outputDir, name))
@@ -114,6 +131,7 @@ const currentFingerprint =
   readFileSync(fingerprintFile, 'utf8').trim() === fingerprint;
 
 if (outputsExist && currentFingerprint) {
+  cleanOutputDir({ keepCurrent: true });
   console.log('Browser validation WASM is up-to-date');
   process.exit(0);
 }
@@ -129,7 +147,7 @@ if (versionCheck.error || versionCheck.status !== 0) {
   process.exit(1);
 }
 
-mkdirSync(outputDir, { recursive: true });
+cleanOutputDir({ keepCurrent: false });
 
 const result = spawnSync(
   'wasm-pack',

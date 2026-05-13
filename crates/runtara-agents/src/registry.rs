@@ -2,10 +2,12 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! Agent registry backed by an explicit statically compiled list.
 
+#[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
+use runtara_dsl::agent_meta::CapabilityExecutor;
 use runtara_dsl::agent_meta::{
-    AgentInfo, AgentModuleConfig, AgentValidationError, BUILTIN_AGENT_MODULES, CapabilityExecutor,
-    CapabilityField, CapabilityMeta, ConnectionTypeMeta, InputTypeMeta, OutputTypeMeta,
-    capability_to_api, input_field_to_api,
+    AgentInfo, AgentModuleConfig, AgentValidationError, BUILTIN_AGENT_MODULES, CapabilityField,
+    CapabilityMeta, ConnectionTypeMeta, InputTypeMeta, OutputTypeMeta, capability_to_api,
+    input_field_to_api,
 };
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
@@ -13,6 +15,7 @@ use std::collections::{HashMap, HashSet};
 use crate::static_registry;
 
 /// Execute an agent capability synchronously.
+#[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
 pub fn execute_capability(
     agent_id: &str,
     capability_id: &str,
@@ -34,6 +37,19 @@ pub fn execute_capability(
     ))
 }
 
+/// Metadata-only builds do not link agent executors.
+#[cfg(all(target_family = "wasm", not(target_os = "wasi")))]
+pub fn execute_capability(
+    agent_id: &str,
+    capability_id: &str,
+    _step_inputs: Value,
+) -> Result<Value, String> {
+    Err(format!(
+        "Agent execution is not available in metadata-only builds: {}:{}",
+        agent_id, capability_id
+    ))
+}
+
 /// Get all statically registered capability metadata.
 pub fn get_all_capabilities() -> impl Iterator<Item = &'static CapabilityMeta> {
     static_registry::CAPABILITY_REGISTRATIONS
@@ -42,6 +58,7 @@ pub fn get_all_capabilities() -> impl Iterator<Item = &'static CapabilityMeta> {
 }
 
 /// Get all statically registered capability executors.
+#[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
 pub fn get_all_executors() -> impl Iterator<Item = &'static CapabilityExecutor> {
     static_registry::CAPABILITY_REGISTRATIONS
         .iter()
@@ -303,6 +320,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
     fn test_static_registry_exposes_capabilities_and_executors() {
         let capability_count = get_all_capabilities().count();
         let executor_count = get_all_executors().count();

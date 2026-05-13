@@ -128,6 +128,7 @@ fn build_workflow_validation_wasm_if_needed(workspace_root: &Path, crate_dir: &P
         .unwrap_or(false);
 
     if outputs_exist && current_fingerprint {
+        clean_workflow_validation_wasm_output(&output_dir, &required_outputs, true);
         println!("cargo:warning=   ✓ Browser validation WASM is up-to-date");
         return false;
     }
@@ -147,6 +148,7 @@ fn build_workflow_validation_wasm_if_needed(workspace_root: &Path, crate_dir: &P
     println!("cargo:warning=╚════════════════════════════════════════════════════════════════╝");
 
     fs::create_dir_all(&output_dir).expect("Failed to create validation WASM output directory");
+    clean_workflow_validation_wasm_output(&output_dir, &required_outputs, false);
 
     let mut cmd = Command::new("wasm-pack");
     cmd.args(["build"])
@@ -184,6 +186,40 @@ fn build_workflow_validation_wasm_if_needed(workspace_root: &Path, crate_dir: &P
     println!("cargo:warning=");
 
     true
+}
+
+fn clean_workflow_validation_wasm_output(
+    output_dir: &Path,
+    required_outputs: &[&str],
+    keep_current: bool,
+) {
+    if !output_dir.exists() {
+        return;
+    }
+
+    for entry in fs::read_dir(output_dir).expect("Failed to read validation WASM output directory")
+    {
+        let entry = entry.expect("Failed to read validation WASM output directory entry");
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        let should_keep = keep_current
+            && (name == "runtara_workflow_validation.fingerprint"
+                || required_outputs
+                    .iter()
+                    .any(|required| *required == name.as_ref()));
+
+        if should_keep {
+            continue;
+        }
+
+        let path = entry.path();
+        if path.is_dir() {
+            fs::remove_dir_all(&path)
+                .expect("Failed to remove stale validation WASM output directory");
+        } else {
+            fs::remove_file(&path).expect("Failed to remove stale validation WASM output file");
+        }
+    }
 }
 
 fn rebuild_frontend_dist(crate_dir: &Path) {

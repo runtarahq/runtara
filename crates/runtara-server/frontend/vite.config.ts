@@ -149,6 +149,7 @@ export default defineConfig({
       },
     },
     chunkSizeWarningLimit: 500,
+    emptyOutDir: true,
     // Optimize for production using esbuild (default)
     minify: 'esbuild',
     reportCompressedSize: false,

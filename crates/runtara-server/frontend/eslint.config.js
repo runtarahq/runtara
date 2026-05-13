@@ -15,6 +15,7 @@ export default tseslint.config(
       'e2e-results',
       'playwright-report',
       'coverage',
+      'src/wasm/workflow-validation',
     ],
   },
   {

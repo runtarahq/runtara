@@ -20,10 +20,11 @@ npm run build      # writes ./dist/
 ```
 
 That's what `cargo build -p runtara-server --features embed-ui` bundles.
-`npm run build` refreshes `src/wasm/workflow-validation/` first. During an
-embedded Cargo build, the server build script also refreshes it if the Rust
-workflow validator changed. A running Vite dev/watch process will pick up those
-generated file changes.
+`npm run build` generates `src/wasm/workflow-validation/` first. That directory
+is ignored by Git and should not be edited or committed. During an embedded
+Cargo build, the server build script also regenerates it if the Rust workflow
+validator changed. A running Vite dev/watch process will pick up those generated
+file changes.
 
 ## Runtime configuration
 

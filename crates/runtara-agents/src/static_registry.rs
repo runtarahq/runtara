@@ -6,15 +6,17 @@
 //! explicit so native and WASM builds see the same metadata for the features
 //! they compile.
 
+#[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
+use runtara_dsl::agent_meta::CapabilityExecutor;
 use runtara_dsl::agent_meta::{
-    AgentModuleConfig, CapabilityExecutor, CapabilityMeta, ConnectionTypeMeta, InputTypeMeta,
-    OutputTypeMeta,
+    AgentModuleConfig, CapabilityMeta, ConnectionTypeMeta, InputTypeMeta, OutputTypeMeta,
 };
 
 #[derive(Clone, Copy)]
 pub struct CapabilityRegistration {
     pub meta: &'static CapabilityMeta,
     pub input_type: &'static InputTypeMeta,
+    #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
     pub executor: &'static CapabilityExecutor,
 }
 
@@ -23,671 +25,787 @@ pub static CAPABILITY_REGISTRATIONS: &[CapabilityRegistration] = &[
     CapabilityRegistration {
         meta: &crate::compression::__CAPABILITY_META_CREATE_ARCHIVE,
         input_type: &crate::compression::__INPUT_META_CreateArchiveInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::compression::__CAPABILITY_EXECUTOR_CREATE_ARCHIVE,
     },
     #[cfg(feature = "native")]
     CapabilityRegistration {
         meta: &crate::compression::__CAPABILITY_META_EXTRACT_ARCHIVE,
         input_type: &crate::compression::__INPUT_META_ExtractArchiveInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::compression::__CAPABILITY_EXECUTOR_EXTRACT_ARCHIVE,
     },
     #[cfg(feature = "native")]
     CapabilityRegistration {
         meta: &crate::compression::__CAPABILITY_META_EXTRACT_FILE,
         input_type: &crate::compression::__INPUT_META_ExtractFileInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::compression::__CAPABILITY_EXECUTOR_EXTRACT_FILE,
     },
     #[cfg(feature = "native")]
     CapabilityRegistration {
         meta: &crate::compression::__CAPABILITY_META_LIST_ARCHIVE,
         input_type: &crate::compression::__INPUT_META_ListArchiveInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::compression::__CAPABILITY_EXECUTOR_LIST_ARCHIVE,
     },
     CapabilityRegistration {
         meta: &crate::crypto::__CAPABILITY_META_HASH,
         input_type: &crate::crypto::__INPUT_META_HashInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::crypto::__CAPABILITY_EXECUTOR_HASH,
     },
     CapabilityRegistration {
         meta: &crate::crypto::__CAPABILITY_META_HMAC,
         input_type: &crate::crypto::__INPUT_META_HmacInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::crypto::__CAPABILITY_EXECUTOR_HMAC,
     },
     CapabilityRegistration {
         meta: &crate::csv::__CAPABILITY_META_FROM_CSV,
         input_type: &crate::csv::__INPUT_META_FromCsvInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::csv::__CAPABILITY_EXECUTOR_FROM_CSV,
     },
     CapabilityRegistration {
         meta: &crate::csv::__CAPABILITY_META_TO_CSV,
         input_type: &crate::csv::__INPUT_META_ToCsvInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::csv::__CAPABILITY_EXECUTOR_TO_CSV,
     },
     CapabilityRegistration {
         meta: &crate::csv::__CAPABILITY_META_GET_HEADER,
         input_type: &crate::csv::__INPUT_META_GetHeaderInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::csv::__CAPABILITY_EXECUTOR_GET_HEADER,
     },
     CapabilityRegistration {
         meta: &crate::datetime::__CAPABILITY_META_GET_CURRENT_DATE,
         input_type: &crate::datetime::__INPUT_META_GetCurrentDateInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::datetime::__CAPABILITY_EXECUTOR_GET_CURRENT_DATE,
     },
     CapabilityRegistration {
         meta: &crate::datetime::__CAPABILITY_META_FORMAT_DATE,
         input_type: &crate::datetime::__INPUT_META_FormatDateInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::datetime::__CAPABILITY_EXECUTOR_FORMAT_DATE,
     },
     CapabilityRegistration {
         meta: &crate::datetime::__CAPABILITY_META_ADD_TO_DATE,
         input_type: &crate::datetime::__INPUT_META_AddToDateInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::datetime::__CAPABILITY_EXECUTOR_ADD_TO_DATE,
     },
     CapabilityRegistration {
         meta: &crate::datetime::__CAPABILITY_META_SUBTRACT_FROM_DATE,
         input_type: &crate::datetime::__INPUT_META_SubtractFromDateInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::datetime::__CAPABILITY_EXECUTOR_SUBTRACT_FROM_DATE,
     },
     CapabilityRegistration {
         meta: &crate::datetime::__CAPABILITY_META_GET_TIME_BETWEEN,
         input_type: &crate::datetime::__INPUT_META_GetTimeBetweenInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::datetime::__CAPABILITY_EXECUTOR_GET_TIME_BETWEEN,
     },
     CapabilityRegistration {
         meta: &crate::datetime::__CAPABILITY_META_EXTRACT_DATE_PART,
         input_type: &crate::datetime::__INPUT_META_ExtractDatePartInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::datetime::__CAPABILITY_EXECUTOR_EXTRACT_DATE_PART,
     },
     CapabilityRegistration {
         meta: &crate::datetime::__CAPABILITY_META_ROUND_DATE,
         input_type: &crate::datetime::__INPUT_META_RoundDateInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::datetime::__CAPABILITY_EXECUTOR_ROUND_DATE,
     },
     CapabilityRegistration {
         meta: &crate::datetime::__CAPABILITY_META_DATE_TO_UNIX,
         input_type: &crate::datetime::__INPUT_META_DateToUnixInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::datetime::__CAPABILITY_EXECUTOR_DATE_TO_UNIX,
     },
     CapabilityRegistration {
         meta: &crate::datetime::__CAPABILITY_META_UNIX_TO_DATE,
         input_type: &crate::datetime::__INPUT_META_UnixToDateInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::datetime::__CAPABILITY_EXECUTOR_UNIX_TO_DATE,
     },
     CapabilityRegistration {
         meta: &crate::file::__CAPABILITY_META_FILE_WRITE_FILE,
         input_type: &crate::file::__INPUT_META_WriteFileInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::file::__CAPABILITY_EXECUTOR_FILE_WRITE_FILE,
     },
     CapabilityRegistration {
         meta: &crate::file::__CAPABILITY_META_FILE_READ_FILE,
         input_type: &crate::file::__INPUT_META_ReadFileInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::file::__CAPABILITY_EXECUTOR_FILE_READ_FILE,
     },
     CapabilityRegistration {
         meta: &crate::file::__CAPABILITY_META_FILE_LIST_FILES,
         input_type: &crate::file::__INPUT_META_ListFilesInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::file::__CAPABILITY_EXECUTOR_FILE_LIST_FILES,
     },
     CapabilityRegistration {
         meta: &crate::file::__CAPABILITY_META_FILE_DELETE_FILE,
         input_type: &crate::file::__INPUT_META_DeleteFileInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::file::__CAPABILITY_EXECUTOR_FILE_DELETE_FILE,
     },
     CapabilityRegistration {
         meta: &crate::file::__CAPABILITY_META_FILE_FILE_EXISTS,
         input_type: &crate::file::__INPUT_META_FileExistsInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::file::__CAPABILITY_EXECUTOR_FILE_FILE_EXISTS,
     },
     CapabilityRegistration {
         meta: &crate::file::__CAPABILITY_META_FILE_COPY_FILE,
         input_type: &crate::file::__INPUT_META_CopyFileInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::file::__CAPABILITY_EXECUTOR_FILE_COPY_FILE,
     },
     CapabilityRegistration {
         meta: &crate::file::__CAPABILITY_META_FILE_MOVE_FILE,
         input_type: &crate::file::__INPUT_META_MoveFileInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::file::__CAPABILITY_EXECUTOR_FILE_MOVE_FILE,
     },
     CapabilityRegistration {
         meta: &crate::file::__CAPABILITY_META_FILE_CREATE_DIRECTORY,
         input_type: &crate::file::__INPUT_META_CreateDirectoryInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::file::__CAPABILITY_EXECUTOR_FILE_CREATE_DIRECTORY,
     },
     CapabilityRegistration {
         meta: &crate::file::__CAPABILITY_META_FILE_GET_FILE_INFO,
         input_type: &crate::file::__INPUT_META_GetFileInfoInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::file::__CAPABILITY_EXECUTOR_FILE_GET_FILE_INFO,
     },
     CapabilityRegistration {
         meta: &crate::file::__CAPABILITY_META_FILE_APPEND_FILE,
         input_type: &crate::file::__INPUT_META_AppendFileInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::file::__CAPABILITY_EXECUTOR_FILE_APPEND_FILE,
     },
     CapabilityRegistration {
         meta: &crate::http::__CAPABILITY_META_HTTP_REQUEST,
         input_type: &crate::http::__INPUT_META_HttpRequestInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::http::__CAPABILITY_EXECUTOR_HTTP_REQUEST,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::ai_tools::__CAPABILITY_META_AI_TEXT_COMPLETION,
         input_type: &crate::integrations::ai_tools::__INPUT_META_AiTextCompletionInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::ai_tools::__CAPABILITY_EXECUTOR_AI_TEXT_COMPLETION,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::ai_tools::__CAPABILITY_META_AI_IMAGE_GENERATION,
         input_type: &crate::integrations::ai_tools::__INPUT_META_AiImageGenerationInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::ai_tools::__CAPABILITY_EXECUTOR_AI_IMAGE_GENERATION,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::ai_tools::__CAPABILITY_META_AI_VISION_TO_TEXT,
         input_type: &crate::integrations::ai_tools::__INPUT_META_AiVisionToTextInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::ai_tools::__CAPABILITY_EXECUTOR_AI_VISION_TO_TEXT,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::ai_tools::__CAPABILITY_META_AI_VISION_TO_IMAGE,
         input_type: &crate::integrations::ai_tools::__INPUT_META_AiVisionToImageInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::ai_tools::__CAPABILITY_EXECUTOR_AI_VISION_TO_IMAGE,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::ai_tools::__CAPABILITY_META_AI_EMBED_TEXT,
         input_type: &crate::integrations::ai_tools::__INPUT_META_AiEmbedTextInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::ai_tools::__CAPABILITY_EXECUTOR_AI_EMBED_TEXT,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::bedrock::__CAPABILITY_META_TEXT_COMPLETION,
         input_type: &crate::integrations::bedrock::__INPUT_META_TextCompletionInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::bedrock::__CAPABILITY_EXECUTOR_TEXT_COMPLETION,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::bedrock::__CAPABILITY_META_IMAGE_GENERATION,
         input_type: &crate::integrations::bedrock::__INPUT_META_ImageGenerationInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::bedrock::__CAPABILITY_EXECUTOR_IMAGE_GENERATION,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::bedrock::__CAPABILITY_META_STRUCTURED_OUTPUT,
         input_type: &crate::integrations::bedrock::__INPUT_META_StructuredOutputInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::bedrock::__CAPABILITY_EXECUTOR_STRUCTURED_OUTPUT,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::bedrock::__CAPABILITY_META_VISION_TO_TEXT,
         input_type: &crate::integrations::bedrock::__INPUT_META_VisionToTextInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::bedrock::__CAPABILITY_EXECUTOR_VISION_TO_TEXT,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::bedrock::__CAPABILITY_META_VISION_TO_IMAGE,
         input_type: &crate::integrations::bedrock::__INPUT_META_VisionToImageInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::bedrock::__CAPABILITY_EXECUTOR_VISION_TO_IMAGE,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::bedrock::__CAPABILITY_META_BEDROCK_INVOKE_MODEL,
         input_type: &crate::integrations::bedrock::__INPUT_META_BedrockInvokeModelInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::bedrock::__CAPABILITY_EXECUTOR_BEDROCK_INVOKE_MODEL,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::bedrock::__CAPABILITY_META_BEDROCK_LIST_MODELS,
         input_type: &crate::integrations::bedrock::__INPUT_META_BedrockListModelsInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::bedrock::__CAPABILITY_EXECUTOR_BEDROCK_LIST_MODELS,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::commerce::__CAPABILITY_META_GET_PRODUCTS,
         input_type: &crate::integrations::commerce::__INPUT_META_CommerceGetProductsInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::commerce::__CAPABILITY_EXECUTOR_GET_PRODUCTS,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::commerce::__CAPABILITY_META_GET_LOCATIONS,
         input_type: &crate::integrations::commerce::__INPUT_META_CommerceGetLocationsInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::commerce::__CAPABILITY_EXECUTOR_GET_LOCATIONS,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::commerce::__CAPABILITY_META_GET_PRODUCT,
         input_type: &crate::integrations::commerce::__INPUT_META_CommerceGetProductInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::commerce::__CAPABILITY_EXECUTOR_GET_PRODUCT,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::commerce::__CAPABILITY_META_CREATE_PRODUCT,
         input_type: &crate::integrations::commerce::__INPUT_META_CommerceCreateProductInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::commerce::__CAPABILITY_EXECUTOR_CREATE_PRODUCT,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::commerce::__CAPABILITY_META_UPDATE_PRODUCT,
         input_type: &crate::integrations::commerce::__INPUT_META_CommerceUpdateProductInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::commerce::__CAPABILITY_EXECUTOR_UPDATE_PRODUCT,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::commerce::__CAPABILITY_META_DELETE_PRODUCT,
         input_type: &crate::integrations::commerce::__INPUT_META_CommerceDeleteProductInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::commerce::__CAPABILITY_EXECUTOR_DELETE_PRODUCT,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::commerce::__CAPABILITY_META_GET_INVENTORY,
         input_type: &crate::integrations::commerce::__INPUT_META_CommerceGetInventoryInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::commerce::__CAPABILITY_EXECUTOR_GET_INVENTORY,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::commerce::__CAPABILITY_META_UPDATE_INVENTORY,
         input_type: &crate::integrations::commerce::__INPUT_META_CommerceUpdateInventoryInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::commerce::__CAPABILITY_EXECUTOR_UPDATE_INVENTORY,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::commerce::__CAPABILITY_META_GET_ORDERS,
         input_type: &crate::integrations::commerce::__INPUT_META_CommerceGetOrdersInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::commerce::__CAPABILITY_EXECUTOR_GET_ORDERS,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::commerce::__CAPABILITY_META_GET_ORDER,
         input_type: &crate::integrations::commerce::__INPUT_META_CommerceGetOrderInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::commerce::__CAPABILITY_EXECUTOR_GET_ORDER,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::hubspot::__CAPABILITY_META_LIST_CONTACTS,
         input_type: &crate::integrations::hubspot::__INPUT_META_ListContactsInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::hubspot::__CAPABILITY_EXECUTOR_LIST_CONTACTS,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::hubspot::__CAPABILITY_META_GET_CONTACT,
         input_type: &crate::integrations::hubspot::__INPUT_META_GetContactInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::hubspot::__CAPABILITY_EXECUTOR_GET_CONTACT,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::hubspot::__CAPABILITY_META_CREATE_CONTACT,
         input_type: &crate::integrations::hubspot::__INPUT_META_CreateContactInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::hubspot::__CAPABILITY_EXECUTOR_CREATE_CONTACT,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::hubspot::__CAPABILITY_META_UPDATE_CONTACT,
         input_type: &crate::integrations::hubspot::__INPUT_META_UpdateContactInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::hubspot::__CAPABILITY_EXECUTOR_UPDATE_CONTACT,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::hubspot::__CAPABILITY_META_DELETE_CONTACT,
         input_type: &crate::integrations::hubspot::__INPUT_META_DeleteContactInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::hubspot::__CAPABILITY_EXECUTOR_DELETE_CONTACT,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::hubspot::__CAPABILITY_META_SEARCH_CONTACTS,
         input_type: &crate::integrations::hubspot::__INPUT_META_SearchContactsInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::hubspot::__CAPABILITY_EXECUTOR_SEARCH_CONTACTS,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::hubspot::__CAPABILITY_META_LIST_COMPANIES,
         input_type: &crate::integrations::hubspot::__INPUT_META_ListCompaniesInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::hubspot::__CAPABILITY_EXECUTOR_LIST_COMPANIES,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::hubspot::__CAPABILITY_META_GET_COMPANY,
         input_type: &crate::integrations::hubspot::__INPUT_META_GetCompanyInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::hubspot::__CAPABILITY_EXECUTOR_GET_COMPANY,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::hubspot::__CAPABILITY_META_CREATE_COMPANY,
         input_type: &crate::integrations::hubspot::__INPUT_META_CreateCompanyInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::hubspot::__CAPABILITY_EXECUTOR_CREATE_COMPANY,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::hubspot::__CAPABILITY_META_UPDATE_COMPANY,
         input_type: &crate::integrations::hubspot::__INPUT_META_UpdateCompanyInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::hubspot::__CAPABILITY_EXECUTOR_UPDATE_COMPANY,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::hubspot::__CAPABILITY_META_DELETE_COMPANY,
         input_type: &crate::integrations::hubspot::__INPUT_META_DeleteCompanyInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::hubspot::__CAPABILITY_EXECUTOR_DELETE_COMPANY,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::hubspot::__CAPABILITY_META_SEARCH_COMPANIES,
         input_type: &crate::integrations::hubspot::__INPUT_META_SearchCompaniesInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::hubspot::__CAPABILITY_EXECUTOR_SEARCH_COMPANIES,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::hubspot::__CAPABILITY_META_LIST_DEALS,
         input_type: &crate::integrations::hubspot::__INPUT_META_ListDealsInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::hubspot::__CAPABILITY_EXECUTOR_LIST_DEALS,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::hubspot::__CAPABILITY_META_GET_DEAL,
         input_type: &crate::integrations::hubspot::__INPUT_META_GetDealInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::hubspot::__CAPABILITY_EXECUTOR_GET_DEAL,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::hubspot::__CAPABILITY_META_CREATE_DEAL,
         input_type: &crate::integrations::hubspot::__INPUT_META_CreateDealInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::hubspot::__CAPABILITY_EXECUTOR_CREATE_DEAL,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::hubspot::__CAPABILITY_META_UPDATE_DEAL,
         input_type: &crate::integrations::hubspot::__INPUT_META_UpdateDealInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::hubspot::__CAPABILITY_EXECUTOR_UPDATE_DEAL,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::hubspot::__CAPABILITY_META_DELETE_DEAL,
         input_type: &crate::integrations::hubspot::__INPUT_META_DeleteDealInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::hubspot::__CAPABILITY_EXECUTOR_DELETE_DEAL,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::hubspot::__CAPABILITY_META_SEARCH_DEALS,
         input_type: &crate::integrations::hubspot::__INPUT_META_SearchDealsInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::hubspot::__CAPABILITY_EXECUTOR_SEARCH_DEALS,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::hubspot::__CAPABILITY_META_LIST_QUOTES,
         input_type: &crate::integrations::hubspot::__INPUT_META_ListQuotesInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::hubspot::__CAPABILITY_EXECUTOR_LIST_QUOTES,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::hubspot::__CAPABILITY_META_GET_QUOTE,
         input_type: &crate::integrations::hubspot::__INPUT_META_GetQuoteInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::hubspot::__CAPABILITY_EXECUTOR_GET_QUOTE,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::hubspot::__CAPABILITY_META_CREATE_QUOTE,
         input_type: &crate::integrations::hubspot::__INPUT_META_CreateQuoteInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::hubspot::__CAPABILITY_EXECUTOR_CREATE_QUOTE,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::hubspot::__CAPABILITY_META_UPDATE_QUOTE,
         input_type: &crate::integrations::hubspot::__INPUT_META_UpdateQuoteInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::hubspot::__CAPABILITY_EXECUTOR_UPDATE_QUOTE,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::hubspot::__CAPABILITY_META_LIST_LINE_ITEMS,
         input_type: &crate::integrations::hubspot::__INPUT_META_ListLineItemsInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::hubspot::__CAPABILITY_EXECUTOR_LIST_LINE_ITEMS,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::hubspot::__CAPABILITY_META_CREATE_LINE_ITEM,
         input_type: &crate::integrations::hubspot::__INPUT_META_CreateLineItemInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::hubspot::__CAPABILITY_EXECUTOR_CREATE_LINE_ITEM,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::hubspot::__CAPABILITY_META_DELETE_LINE_ITEM,
         input_type: &crate::integrations::hubspot::__INPUT_META_DeleteLineItemInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::hubspot::__CAPABILITY_EXECUTOR_DELETE_LINE_ITEM,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::hubspot::__CAPABILITY_META_LIST_OWNERS,
         input_type: &crate::integrations::hubspot::__INPUT_META_ListOwnersInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::hubspot::__CAPABILITY_EXECUTOR_LIST_OWNERS,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::hubspot::__CAPABILITY_META_GET_OWNER,
         input_type: &crate::integrations::hubspot::__INPUT_META_GetOwnerInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::hubspot::__CAPABILITY_EXECUTOR_GET_OWNER,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::hubspot::__CAPABILITY_META_LIST_PIPELINES,
         input_type: &crate::integrations::hubspot::__INPUT_META_ListPipelinesInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::hubspot::__CAPABILITY_EXECUTOR_LIST_PIPELINES,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::hubspot::__CAPABILITY_META_GET_PIPELINE,
         input_type: &crate::integrations::hubspot::__INPUT_META_GetPipelineInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::hubspot::__CAPABILITY_EXECUTOR_GET_PIPELINE,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::hubspot::__CAPABILITY_META_CREATE_ASSOCIATION,
         input_type: &crate::integrations::hubspot::__INPUT_META_CreateAssociationInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::hubspot::__CAPABILITY_EXECUTOR_CREATE_ASSOCIATION,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::hubspot::__CAPABILITY_META_LIST_ASSOCIATIONS,
         input_type: &crate::integrations::hubspot::__INPUT_META_ListAssociationsInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::hubspot::__CAPABILITY_EXECUTOR_LIST_ASSOCIATIONS,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::mailgun::__CAPABILITY_META_SEND_EMAIL,
         input_type: &crate::integrations::mailgun::__INPUT_META_SendEmailInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::mailgun::__CAPABILITY_EXECUTOR_SEND_EMAIL,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::object_model::__CAPABILITY_META_CREATE_INSTANCE,
         input_type: &crate::integrations::object_model::__INPUT_META_CreateInstanceInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::object_model::__CAPABILITY_EXECUTOR_CREATE_INSTANCE,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::object_model::__CAPABILITY_META_QUERY_INSTANCES,
         input_type: &crate::integrations::object_model::__INPUT_META_QueryInstancesInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::object_model::__CAPABILITY_EXECUTOR_QUERY_INSTANCES,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::object_model::__CAPABILITY_META_CHECK_INSTANCE_EXISTS,
         input_type: &crate::integrations::object_model::__INPUT_META_CheckInstanceExistsInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::object_model::__CAPABILITY_EXECUTOR_CHECK_INSTANCE_EXISTS,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::object_model::__CAPABILITY_META_CREATE_IF_NOT_EXISTS,
         input_type: &crate::integrations::object_model::__INPUT_META_CreateIfNotExistsInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::object_model::__CAPABILITY_EXECUTOR_CREATE_IF_NOT_EXISTS,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::object_model::__CAPABILITY_META_UPDATE_INSTANCE,
         input_type: &crate::integrations::object_model::__INPUT_META_UpdateInstanceInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::object_model::__CAPABILITY_EXECUTOR_UPDATE_INSTANCE,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::object_model::__CAPABILITY_META_DELETE_INSTANCE,
         input_type: &crate::integrations::object_model::__INPUT_META_DeleteInstanceInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::object_model::__CAPABILITY_EXECUTOR_DELETE_INSTANCE,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::object_model::__CAPABILITY_META_BULK_CREATE_INSTANCES,
         input_type: &crate::integrations::object_model::__INPUT_META_BulkCreateInstancesInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::object_model::__CAPABILITY_EXECUTOR_BULK_CREATE_INSTANCES,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::object_model::__CAPABILITY_META_BULK_UPDATE_INSTANCES,
         input_type: &crate::integrations::object_model::__INPUT_META_BulkUpdateInstancesInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::object_model::__CAPABILITY_EXECUTOR_BULK_UPDATE_INSTANCES,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::object_model::__CAPABILITY_META_BULK_DELETE_INSTANCES,
         input_type: &crate::integrations::object_model::__INPUT_META_BulkDeleteInstancesInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::object_model::__CAPABILITY_EXECUTOR_BULK_DELETE_INSTANCES,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::object_model::__CAPABILITY_META_QUERY_AGGREGATE,
         input_type: &crate::integrations::object_model::__INPUT_META_QueryAggregateInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::object_model::__CAPABILITY_EXECUTOR_QUERY_AGGREGATE,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::object_model::__CAPABILITY_META_LOAD_MEMORY,
         input_type: &crate::integrations::object_model::__INPUT_META_LoadMemoryInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::object_model::__CAPABILITY_EXECUTOR_LOAD_MEMORY,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::object_model::__CAPABILITY_META_SAVE_MEMORY,
         input_type: &crate::integrations::object_model::__INPUT_META_SaveMemoryInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::object_model::__CAPABILITY_EXECUTOR_SAVE_MEMORY,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::openai::__CAPABILITY_META_TEXT_COMPLETION,
         input_type: &crate::integrations::openai::__INPUT_META_TextCompletionInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::openai::__CAPABILITY_EXECUTOR_TEXT_COMPLETION,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::openai::__CAPABILITY_META_IMAGE_GENERATION,
         input_type: &crate::integrations::openai::__INPUT_META_ImageGenerationInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::openai::__CAPABILITY_EXECUTOR_IMAGE_GENERATION,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::openai::__CAPABILITY_META_STRUCTURED_OUTPUT,
         input_type: &crate::integrations::openai::__INPUT_META_StructuredOutputInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::openai::__CAPABILITY_EXECUTOR_STRUCTURED_OUTPUT,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::openai::__CAPABILITY_META_VISION_TO_TEXT,
         input_type: &crate::integrations::openai::__INPUT_META_VisionToTextInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::openai::__CAPABILITY_EXECUTOR_VISION_TO_TEXT,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::openai::__CAPABILITY_META_VISION_TO_IMAGE,
         input_type: &crate::integrations::openai::__INPUT_META_VisionToImageInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::openai::__CAPABILITY_EXECUTOR_VISION_TO_IMAGE,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::openai::__CAPABILITY_META_OPENAI_CHAT_COMPLETION,
         input_type: &crate::integrations::openai::__INPUT_META_OpenaiChatCompletionInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::openai::__CAPABILITY_EXECUTOR_OPENAI_CHAT_COMPLETION,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::openai::__CAPABILITY_META_OPENAI_CREATE_EMBEDDING,
         input_type: &crate::integrations::openai::__INPUT_META_OpenaiCreateEmbeddingInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::openai::__CAPABILITY_EXECUTOR_OPENAI_CREATE_EMBEDDING,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::openai::__CAPABILITY_META_OPENAI_MODERATE_CONTENT,
         input_type: &crate::integrations::openai::__INPUT_META_OpenaiModerateContentInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::openai::__CAPABILITY_EXECUTOR_OPENAI_MODERATE_CONTENT,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::s3_storage::__CAPABILITY_META_STORAGE_CREATE_BUCKET,
         input_type: &crate::integrations::s3_storage::__INPUT_META_CreateBucketInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::s3_storage::__CAPABILITY_EXECUTOR_STORAGE_CREATE_BUCKET,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::s3_storage::__CAPABILITY_META_STORAGE_LIST_BUCKETS,
         input_type: &crate::integrations::s3_storage::__INPUT_META_ListBucketsInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::s3_storage::__CAPABILITY_EXECUTOR_STORAGE_LIST_BUCKETS,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::s3_storage::__CAPABILITY_META_STORAGE_DELETE_BUCKET,
         input_type: &crate::integrations::s3_storage::__INPUT_META_DeleteBucketInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::s3_storage::__CAPABILITY_EXECUTOR_STORAGE_DELETE_BUCKET,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::s3_storage::__CAPABILITY_META_STORAGE_UPLOAD_FILE,
         input_type: &crate::integrations::s3_storage::__INPUT_META_UploadFileInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::s3_storage::__CAPABILITY_EXECUTOR_STORAGE_UPLOAD_FILE,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::s3_storage::__CAPABILITY_META_STORAGE_DOWNLOAD_FILE,
         input_type: &crate::integrations::s3_storage::__INPUT_META_DownloadFileInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::s3_storage::__CAPABILITY_EXECUTOR_STORAGE_DOWNLOAD_FILE,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::s3_storage::__CAPABILITY_META_STORAGE_LIST_FILES,
         input_type: &crate::integrations::s3_storage::__INPUT_META_ListFilesInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::s3_storage::__CAPABILITY_EXECUTOR_STORAGE_LIST_FILES,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::s3_storage::__CAPABILITY_META_STORAGE_GET_FILE_INFO,
         input_type: &crate::integrations::s3_storage::__INPUT_META_GetFileInfoInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::s3_storage::__CAPABILITY_EXECUTOR_STORAGE_GET_FILE_INFO,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::s3_storage::__CAPABILITY_META_STORAGE_DELETE_FILE,
         input_type: &crate::integrations::s3_storage::__INPUT_META_DeleteFileInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::s3_storage::__CAPABILITY_EXECUTOR_STORAGE_DELETE_FILE,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::s3_storage::__CAPABILITY_META_STORAGE_COPY_FILE,
         input_type: &crate::integrations::s3_storage::__INPUT_META_CopyFileInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::s3_storage::__CAPABILITY_EXECUTOR_STORAGE_COPY_FILE,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::sharepoint::__CAPABILITY_META_SHAREPOINT_LIST_DRIVES,
         input_type: &crate::integrations::sharepoint::__INPUT_META_ListDrivesInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::sharepoint::__CAPABILITY_EXECUTOR_SHAREPOINT_LIST_DRIVES,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::sharepoint::__CAPABILITY_META_SHAREPOINT_LIST_CHILDREN,
         input_type: &crate::integrations::sharepoint::__INPUT_META_ListChildrenInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::sharepoint::__CAPABILITY_EXECUTOR_SHAREPOINT_LIST_CHILDREN,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::sharepoint::__CAPABILITY_META_SHAREPOINT_GET_ITEM,
         input_type: &crate::integrations::sharepoint::__INPUT_META_GetItemInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::sharepoint::__CAPABILITY_EXECUTOR_SHAREPOINT_GET_ITEM,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::sharepoint::__CAPABILITY_META_SHAREPOINT_GET_ITEM_BY_PATH,
         input_type: &crate::integrations::sharepoint::__INPUT_META_GetItemByPathInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor:
             &crate::integrations::sharepoint::__CAPABILITY_EXECUTOR_SHAREPOINT_GET_ITEM_BY_PATH,
     },
@@ -695,18 +813,21 @@ pub static CAPABILITY_REGISTRATIONS: &[CapabilityRegistration] = &[
     CapabilityRegistration {
         meta: &crate::integrations::sharepoint::__CAPABILITY_META_SHAREPOINT_DOWNLOAD_FILE,
         input_type: &crate::integrations::sharepoint::__INPUT_META_DownloadFileInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::sharepoint::__CAPABILITY_EXECUTOR_SHAREPOINT_DOWNLOAD_FILE,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::sharepoint::__CAPABILITY_META_SHAREPOINT_UPLOAD_FILE,
         input_type: &crate::integrations::sharepoint::__INPUT_META_UploadFileInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::sharepoint::__CAPABILITY_EXECUTOR_SHAREPOINT_UPLOAD_FILE,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::sharepoint::__CAPABILITY_META_SHAREPOINT_UPLOAD_FILE_LARGE,
         input_type: &crate::integrations::sharepoint::__INPUT_META_UploadFileLargeInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor:
             &crate::integrations::sharepoint::__CAPABILITY_EXECUTOR_SHAREPOINT_UPLOAD_FILE_LARGE,
     },
@@ -714,30 +835,35 @@ pub static CAPABILITY_REGISTRATIONS: &[CapabilityRegistration] = &[
     CapabilityRegistration {
         meta: &crate::integrations::sharepoint::__CAPABILITY_META_SHAREPOINT_CREATE_FOLDER,
         input_type: &crate::integrations::sharepoint::__INPUT_META_CreateFolderInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::sharepoint::__CAPABILITY_EXECUTOR_SHAREPOINT_CREATE_FOLDER,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::sharepoint::__CAPABILITY_META_SHAREPOINT_DELETE_ITEM,
         input_type: &crate::integrations::sharepoint::__INPUT_META_DeleteItemInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::sharepoint::__CAPABILITY_EXECUTOR_SHAREPOINT_DELETE_ITEM,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::sharepoint::__CAPABILITY_META_SHAREPOINT_MOVE_ITEM,
         input_type: &crate::integrations::sharepoint::__INPUT_META_MoveItemInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::sharepoint::__CAPABILITY_EXECUTOR_SHAREPOINT_MOVE_ITEM,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::sharepoint::__CAPABILITY_META_SHAREPOINT_COPY_ITEM,
         input_type: &crate::integrations::sharepoint::__INPUT_META_CopyItemInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::sharepoint::__CAPABILITY_EXECUTOR_SHAREPOINT_COPY_ITEM,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::sharepoint::__CAPABILITY_META_SHAREPOINT_GET_COPY_STATUS,
         input_type: &crate::integrations::sharepoint::__INPUT_META_GetCopyStatusInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor:
             &crate::integrations::sharepoint::__CAPABILITY_EXECUTOR_SHAREPOINT_GET_COPY_STATUS,
     },
@@ -745,138 +871,161 @@ pub static CAPABILITY_REGISTRATIONS: &[CapabilityRegistration] = &[
     CapabilityRegistration {
         meta: &crate::integrations::sharepoint::__CAPABILITY_META_SHAREPOINT_SEARCH,
         input_type: &crate::integrations::sharepoint::__INPUT_META_SearchInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::sharepoint::__CAPABILITY_EXECUTOR_SHAREPOINT_SEARCH,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::sharepoint::__CAPABILITY_META_SHAREPOINT_SEARCH_GLOBAL,
         input_type: &crate::integrations::sharepoint::__INPUT_META_SearchGlobalInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::sharepoint::__CAPABILITY_EXECUTOR_SHAREPOINT_SEARCH_GLOBAL,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::shopify::__CAPABILITY_META_SET_PRODUCT,
         input_type: &crate::integrations::shopify::__INPUT_META_SetProductInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::shopify::__CAPABILITY_EXECUTOR_SET_PRODUCT,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::shopify::__CAPABILITY_META_UPDATE_PRODUCT,
         input_type: &crate::integrations::shopify::__INPUT_META_UpdateProductInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::shopify::__CAPABILITY_EXECUTOR_UPDATE_PRODUCT,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::shopify::__CAPABILITY_META_DELETE_PRODUCT,
         input_type: &crate::integrations::shopify::__INPUT_META_DeleteProductInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::shopify::__CAPABILITY_EXECUTOR_DELETE_PRODUCT,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::shopify::__CAPABILITY_META_LIST_PRODUCTS,
         input_type: &crate::integrations::shopify::__INPUT_META_ListProductsInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::shopify::__CAPABILITY_EXECUTOR_LIST_PRODUCTS,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::shopify::__CAPABILITY_META_QUERY_PRODUCTS,
         input_type: &crate::integrations::shopify::__INPUT_META_QueryProductsInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::shopify::__CAPABILITY_EXECUTOR_QUERY_PRODUCTS,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::shopify::__CAPABILITY_META_GET_PRODUCT_BY_SKU,
         input_type: &crate::integrations::shopify::__INPUT_META_GetProductBySkuInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::shopify::__CAPABILITY_EXECUTOR_GET_PRODUCT_BY_SKU,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::shopify::__CAPABILITY_META_SET_PRODUCT_TAGS,
         input_type: &crate::integrations::shopify::__INPUT_META_SetProductTagsInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::shopify::__CAPABILITY_EXECUTOR_SET_PRODUCT_TAGS,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::shopify::__CAPABILITY_META_REPLACE_PRODUCT_IMAGES,
         input_type: &crate::integrations::shopify::__INPUT_META_ReplaceProductImagesInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::shopify::__CAPABILITY_EXECUTOR_REPLACE_PRODUCT_IMAGES,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::shopify::__CAPABILITY_META_GET_PRODUCT_OPTIONS,
         input_type: &crate::integrations::shopify::__INPUT_META_GetProductOptionsInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::shopify::__CAPABILITY_EXECUTOR_GET_PRODUCT_OPTIONS,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::shopify::__CAPABILITY_META_RENAME_PRODUCT_OPTION,
         input_type: &crate::integrations::shopify::__INPUT_META_RenameProductOptionInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::shopify::__CAPABILITY_EXECUTOR_RENAME_PRODUCT_OPTION,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::shopify::__CAPABILITY_META_SET_PRODUCT_METAFIELDS,
         input_type: &crate::integrations::shopify::__INPUT_META_SetProductMetafieldsInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::shopify::__CAPABILITY_EXECUTOR_SET_PRODUCT_METAFIELDS,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::shopify::__CAPABILITY_META_GET_PRODUCT_METAFIELDS,
         input_type: &crate::integrations::shopify::__INPUT_META_GetProductMetafieldsInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::shopify::__CAPABILITY_EXECUTOR_GET_PRODUCT_METAFIELDS,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::shopify::__CAPABILITY_META_GET_PRODUCT_VARIANT_BY_SKU,
         input_type: &crate::integrations::shopify::__INPUT_META_GetProductVariantBySkuInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::shopify::__CAPABILITY_EXECUTOR_GET_PRODUCT_VARIANT_BY_SKU,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::shopify::__CAPABILITY_META_CREATE_PRODUCT_VARIANT,
         input_type: &crate::integrations::shopify::__INPUT_META_CreateProductVariantInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::shopify::__CAPABILITY_EXECUTOR_CREATE_PRODUCT_VARIANT,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::shopify::__CAPABILITY_META_UPDATE_PRODUCT_VARIANT,
         input_type: &crate::integrations::shopify::__INPUT_META_UpdateProductVariantInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::shopify::__CAPABILITY_EXECUTOR_UPDATE_PRODUCT_VARIANT,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::shopify::__CAPABILITY_META_UPDATE_PRODUCT_VARIANT_PRICE,
         input_type: &crate::integrations::shopify::__INPUT_META_UpdateProductVariantPriceInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::shopify::__CAPABILITY_EXECUTOR_UPDATE_PRODUCT_VARIANT_PRICE,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::shopify::__CAPABILITY_META_DELETE_PRODUCT_VARIANT,
         input_type: &crate::integrations::shopify::__INPUT_META_DeleteProductVariantInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::shopify::__CAPABILITY_EXECUTOR_DELETE_PRODUCT_VARIANT,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::shopify::__CAPABILITY_META_SET_VARIANT_METAFIELDS,
         input_type: &crate::integrations::shopify::__INPUT_META_SetVariantMetafieldsInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::shopify::__CAPABILITY_EXECUTOR_SET_VARIANT_METAFIELDS,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::shopify::__CAPABILITY_META_SET_PRODUCT_VARIANT_COST,
         input_type: &crate::integrations::shopify::__INPUT_META_SetProductVariantCostInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::shopify::__CAPABILITY_EXECUTOR_SET_PRODUCT_VARIANT_COST,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::shopify::__CAPABILITY_META_SET_PRODUCT_VARIANT_WEIGHT,
         input_type: &crate::integrations::shopify::__INPUT_META_SetProductVariantWeightInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::shopify::__CAPABILITY_EXECUTOR_SET_PRODUCT_VARIANT_WEIGHT,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::shopify::__CAPABILITY_META_GET_INVENTORY_ITEM_ID_BY_VARIANT_ID,
         input_type: &crate::integrations::shopify::__INPUT_META_GetInventoryItemIdByVariantIdInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor:
             &crate::integrations::shopify::__CAPABILITY_EXECUTOR_GET_INVENTORY_ITEM_ID_BY_VARIANT_ID,
     },
@@ -884,90 +1033,105 @@ pub static CAPABILITY_REGISTRATIONS: &[CapabilityRegistration] = &[
     CapabilityRegistration {
         meta: &crate::integrations::shopify::__CAPABILITY_META_SET_INVENTORY,
         input_type: &crate::integrations::shopify::__INPUT_META_SetInventoryInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::shopify::__CAPABILITY_EXECUTOR_SET_INVENTORY,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::shopify::__CAPABILITY_META_SYNC_INVENTORY_LEVELS,
         input_type: &crate::integrations::shopify::__INPUT_META_SyncInventoryLevelsInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::shopify::__CAPABILITY_EXECUTOR_SYNC_INVENTORY_LEVELS,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::shopify::__CAPABILITY_META_GET_ORDER,
         input_type: &crate::integrations::shopify::__INPUT_META_GetOrderInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::shopify::__CAPABILITY_EXECUTOR_GET_ORDER,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::shopify::__CAPABILITY_META_GET_ORDER_LIST,
         input_type: &crate::integrations::shopify::__INPUT_META_GetOrderListInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::shopify::__CAPABILITY_EXECUTOR_GET_ORDER_LIST,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::shopify::__CAPABILITY_META_CREATE_ORDER_NOTE_OR_TAG,
         input_type: &crate::integrations::shopify::__INPUT_META_CreateOrderNoteOrTagInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::shopify::__CAPABILITY_EXECUTOR_CREATE_ORDER_NOTE_OR_TAG,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::shopify::__CAPABILITY_META_CANCEL_ORDER,
         input_type: &crate::integrations::shopify::__INPUT_META_CancelOrderInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::shopify::__CAPABILITY_EXECUTOR_CANCEL_ORDER,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::shopify::__CAPABILITY_META_GET_FULFILLMENT_ORDERS,
         input_type: &crate::integrations::shopify::__INPUT_META_GetFulfillmentOrdersInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::shopify::__CAPABILITY_EXECUTOR_GET_FULFILLMENT_ORDERS,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::shopify::__CAPABILITY_META_FULFILL_ORDER,
         input_type: &crate::integrations::shopify::__INPUT_META_FulfillOrderInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::shopify::__CAPABILITY_EXECUTOR_FULFILL_ORDER,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::shopify::__CAPABILITY_META_FULFILL_ORDER_LINES,
         input_type: &crate::integrations::shopify::__INPUT_META_FulfillOrderLinesInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::shopify::__CAPABILITY_EXECUTOR_FULFILL_ORDER_LINES,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::shopify::__CAPABILITY_META_FULFILL_BY_SKU,
         input_type: &crate::integrations::shopify::__INPUT_META_FulfillBySkuInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::shopify::__CAPABILITY_EXECUTOR_FULFILL_BY_SKU,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::shopify::__CAPABILITY_META_CREATE_DRAFT_ORDER,
         input_type: &crate::integrations::shopify::__INPUT_META_CreateDraftOrderInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::shopify::__CAPABILITY_EXECUTOR_CREATE_DRAFT_ORDER,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::shopify::__CAPABILITY_META_GET_CUSTOMER_BY_EMAIL,
         input_type: &crate::integrations::shopify::__INPUT_META_GetCustomerByEmailInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::shopify::__CAPABILITY_EXECUTOR_GET_CUSTOMER_BY_EMAIL,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::shopify::__CAPABILITY_META_CREATE_COLLECTION,
         input_type: &crate::integrations::shopify::__INPUT_META_CreateCollectionInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::shopify::__CAPABILITY_EXECUTOR_CREATE_COLLECTION,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::shopify::__CAPABILITY_META_ADD_PRODUCTS_TO_COLLECTION,
         input_type: &crate::integrations::shopify::__INPUT_META_AddProductsToCollectionInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::shopify::__CAPABILITY_EXECUTOR_ADD_PRODUCTS_TO_COLLECTION,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::shopify::__CAPABILITY_META_REMOVE_PRODUCTS_FROM_COLLECTION,
         input_type: &crate::integrations::shopify::__INPUT_META_RemoveProductsFromCollectionInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor:
             &crate::integrations::shopify::__CAPABILITY_EXECUTOR_REMOVE_PRODUCTS_FROM_COLLECTION,
     },
@@ -975,578 +1139,684 @@ pub static CAPABILITY_REGISTRATIONS: &[CapabilityRegistration] = &[
     CapabilityRegistration {
         meta: &crate::integrations::shopify::__CAPABILITY_META_GET_LOCATION_BY_NAME,
         input_type: &crate::integrations::shopify::__INPUT_META_GetLocationByNameInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::shopify::__CAPABILITY_EXECUTOR_GET_LOCATION_BY_NAME,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::shopify::__CAPABILITY_META_BULK_CREATE_PRODUCTS,
         input_type: &crate::integrations::shopify::__INPUT_META_BulkCreateProductsInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::shopify::__CAPABILITY_EXECUTOR_BULK_CREATE_PRODUCTS,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::shopify::__CAPABILITY_META_BULK_UPDATE_PRODUCTS,
         input_type: &crate::integrations::shopify::__INPUT_META_BulkUpdateProductsInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::shopify::__CAPABILITY_EXECUTOR_BULK_UPDATE_PRODUCTS,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::shopify::__CAPABILITY_META_BULK_UPDATE_VARIANT_PRICES,
         input_type: &crate::integrations::shopify::__INPUT_META_BulkUpdateVariantPricesInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::shopify::__CAPABILITY_EXECUTOR_BULK_UPDATE_VARIANT_PRICES,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::shopify::__CAPABILITY_META_COMMERCE_GET_PRODUCTS,
         input_type: &crate::integrations::shopify::__INPUT_META_CommerceGetProductsInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::shopify::__CAPABILITY_EXECUTOR_COMMERCE_GET_PRODUCTS,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::shopify::__CAPABILITY_META_COMMERCE_GET_PRODUCT,
         input_type: &crate::integrations::shopify::__INPUT_META_CommerceGetProductInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::shopify::__CAPABILITY_EXECUTOR_COMMERCE_GET_PRODUCT,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::shopify::__CAPABILITY_META_COMMERCE_CREATE_PRODUCT,
         input_type: &crate::integrations::shopify::__INPUT_META_CommerceCreateProductInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::shopify::__CAPABILITY_EXECUTOR_COMMERCE_CREATE_PRODUCT,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::shopify::__CAPABILITY_META_COMMERCE_UPDATE_PRODUCT,
         input_type: &crate::integrations::shopify::__INPUT_META_CommerceUpdateProductInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::shopify::__CAPABILITY_EXECUTOR_COMMERCE_UPDATE_PRODUCT,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::shopify::__CAPABILITY_META_COMMERCE_DELETE_PRODUCT,
         input_type: &crate::integrations::shopify::__INPUT_META_CommerceDeleteProductInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::shopify::__CAPABILITY_EXECUTOR_COMMERCE_DELETE_PRODUCT,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::shopify::__CAPABILITY_META_COMMERCE_GET_INVENTORY,
         input_type: &crate::integrations::shopify::__INPUT_META_CommerceGetInventoryInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::shopify::__CAPABILITY_EXECUTOR_COMMERCE_GET_INVENTORY,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::shopify::__CAPABILITY_META_COMMERCE_UPDATE_INVENTORY,
         input_type: &crate::integrations::shopify::__INPUT_META_CommerceUpdateInventoryInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::shopify::__CAPABILITY_EXECUTOR_COMMERCE_UPDATE_INVENTORY,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::shopify::__CAPABILITY_META_COMMERCE_GET_ORDERS,
         input_type: &crate::integrations::shopify::__INPUT_META_CommerceGetOrdersInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::shopify::__CAPABILITY_EXECUTOR_COMMERCE_GET_ORDERS,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::shopify::__CAPABILITY_META_COMMERCE_GET_ORDER,
         input_type: &crate::integrations::shopify::__INPUT_META_CommerceGetOrderInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::shopify::__CAPABILITY_EXECUTOR_COMMERCE_GET_ORDER,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::shopify::__CAPABILITY_META_COMMERCE_GET_LOCATIONS,
         input_type: &crate::integrations::shopify::__INPUT_META_CommerceGetLocationsInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::shopify::__CAPABILITY_EXECUTOR_COMMERCE_GET_LOCATIONS,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::slack::__CAPABILITY_META_SEND_MESSAGE,
         input_type: &crate::integrations::slack::__INPUT_META_SendMessageInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::slack::__CAPABILITY_EXECUTOR_SEND_MESSAGE,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::slack::__CAPABILITY_META_UPLOAD_FILE,
         input_type: &crate::integrations::slack::__INPUT_META_UploadFileInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::slack::__CAPABILITY_EXECUTOR_UPLOAD_FILE,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::stripe::__CAPABILITY_META_LIST_CUSTOMERS,
         input_type: &crate::integrations::stripe::__INPUT_META_ListCustomersInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::stripe::__CAPABILITY_EXECUTOR_LIST_CUSTOMERS,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::stripe::__CAPABILITY_META_GET_CUSTOMER,
         input_type: &crate::integrations::stripe::__INPUT_META_GetCustomerInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::stripe::__CAPABILITY_EXECUTOR_GET_CUSTOMER,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::stripe::__CAPABILITY_META_CREATE_CUSTOMER,
         input_type: &crate::integrations::stripe::__INPUT_META_CreateCustomerInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::stripe::__CAPABILITY_EXECUTOR_CREATE_CUSTOMER,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::stripe::__CAPABILITY_META_UPDATE_CUSTOMER,
         input_type: &crate::integrations::stripe::__INPUT_META_UpdateCustomerInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::stripe::__CAPABILITY_EXECUTOR_UPDATE_CUSTOMER,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::stripe::__CAPABILITY_META_LIST_PRODUCTS,
         input_type: &crate::integrations::stripe::__INPUT_META_ListProductsInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::stripe::__CAPABILITY_EXECUTOR_LIST_PRODUCTS,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::stripe::__CAPABILITY_META_GET_PRODUCT,
         input_type: &crate::integrations::stripe::__INPUT_META_GetProductInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::stripe::__CAPABILITY_EXECUTOR_GET_PRODUCT,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::stripe::__CAPABILITY_META_CREATE_PRODUCT,
         input_type: &crate::integrations::stripe::__INPUT_META_CreateProductInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::stripe::__CAPABILITY_EXECUTOR_CREATE_PRODUCT,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::stripe::__CAPABILITY_META_LIST_PRICES,
         input_type: &crate::integrations::stripe::__INPUT_META_ListPricesInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::stripe::__CAPABILITY_EXECUTOR_LIST_PRICES,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::stripe::__CAPABILITY_META_CREATE_PRICE,
         input_type: &crate::integrations::stripe::__INPUT_META_CreatePriceInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::stripe::__CAPABILITY_EXECUTOR_CREATE_PRICE,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::stripe::__CAPABILITY_META_CREATE_PAYMENT_INTENT,
         input_type: &crate::integrations::stripe::__INPUT_META_CreatePaymentIntentInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::stripe::__CAPABILITY_EXECUTOR_CREATE_PAYMENT_INTENT,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::stripe::__CAPABILITY_META_GET_PAYMENT_INTENT,
         input_type: &crate::integrations::stripe::__INPUT_META_GetPaymentIntentInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::stripe::__CAPABILITY_EXECUTOR_GET_PAYMENT_INTENT,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::stripe::__CAPABILITY_META_LIST_PAYMENT_INTENTS,
         input_type: &crate::integrations::stripe::__INPUT_META_ListPaymentIntentsInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::stripe::__CAPABILITY_EXECUTOR_LIST_PAYMENT_INTENTS,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::stripe::__CAPABILITY_META_CREATE_INVOICE,
         input_type: &crate::integrations::stripe::__INPUT_META_CreateInvoiceInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::stripe::__CAPABILITY_EXECUTOR_CREATE_INVOICE,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::stripe::__CAPABILITY_META_GET_INVOICE,
         input_type: &crate::integrations::stripe::__INPUT_META_GetInvoiceInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::stripe::__CAPABILITY_EXECUTOR_GET_INVOICE,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::stripe::__CAPABILITY_META_LIST_INVOICES,
         input_type: &crate::integrations::stripe::__INPUT_META_ListInvoicesInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::stripe::__CAPABILITY_EXECUTOR_LIST_INVOICES,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::stripe::__CAPABILITY_META_FINALIZE_INVOICE,
         input_type: &crate::integrations::stripe::__INPUT_META_FinalizeInvoiceInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::stripe::__CAPABILITY_EXECUTOR_FINALIZE_INVOICE,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::stripe::__CAPABILITY_META_SEND_INVOICE,
         input_type: &crate::integrations::stripe::__INPUT_META_SendInvoiceInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::stripe::__CAPABILITY_EXECUTOR_SEND_INVOICE,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::stripe::__CAPABILITY_META_CREATE_SUBSCRIPTION,
         input_type: &crate::integrations::stripe::__INPUT_META_CreateSubscriptionInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::stripe::__CAPABILITY_EXECUTOR_CREATE_SUBSCRIPTION,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::stripe::__CAPABILITY_META_GET_SUBSCRIPTION,
         input_type: &crate::integrations::stripe::__INPUT_META_GetSubscriptionInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::stripe::__CAPABILITY_EXECUTOR_GET_SUBSCRIPTION,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::stripe::__CAPABILITY_META_LIST_SUBSCRIPTIONS,
         input_type: &crate::integrations::stripe::__INPUT_META_ListSubscriptionsInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::stripe::__CAPABILITY_EXECUTOR_LIST_SUBSCRIPTIONS,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::stripe::__CAPABILITY_META_CANCEL_SUBSCRIPTION,
         input_type: &crate::integrations::stripe::__INPUT_META_CancelSubscriptionInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::stripe::__CAPABILITY_EXECUTOR_CANCEL_SUBSCRIPTION,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::stripe::__CAPABILITY_META_CREATE_REFUND,
         input_type: &crate::integrations::stripe::__INPUT_META_CreateRefundInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::stripe::__CAPABILITY_EXECUTOR_CREATE_REFUND,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::stripe::__CAPABILITY_META_GET_REFUND,
         input_type: &crate::integrations::stripe::__INPUT_META_GetRefundInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::stripe::__CAPABILITY_EXECUTOR_GET_REFUND,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::stripe::__CAPABILITY_META_GET_BALANCE,
         input_type: &crate::integrations::stripe::__INPUT_META_GetBalanceInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::stripe::__CAPABILITY_EXECUTOR_GET_BALANCE,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::stripe::__CAPABILITY_META_LIST_CHARGES,
         input_type: &crate::integrations::stripe::__INPUT_META_ListChargesInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::stripe::__CAPABILITY_EXECUTOR_LIST_CHARGES,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
         meta: &crate::integrations::stripe::__CAPABILITY_META_GET_CHARGE,
         input_type: &crate::integrations::stripe::__INPUT_META_GetChargeInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::stripe::__CAPABILITY_EXECUTOR_GET_CHARGE,
     },
     #[cfg(feature = "native")]
     CapabilityRegistration {
         meta: &crate::sftp::__CAPABILITY_META_SFTP_LIST_FILES,
         input_type: &crate::sftp::__INPUT_META_SftpListFilesInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::sftp::__CAPABILITY_EXECUTOR_SFTP_LIST_FILES,
     },
     #[cfg(feature = "native")]
     CapabilityRegistration {
         meta: &crate::sftp::__CAPABILITY_META_SFTP_DOWNLOAD_FILE,
         input_type: &crate::sftp::__INPUT_META_SftpDownloadFileInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::sftp::__CAPABILITY_EXECUTOR_SFTP_DOWNLOAD_FILE,
     },
     #[cfg(feature = "native")]
     CapabilityRegistration {
         meta: &crate::sftp::__CAPABILITY_META_SFTP_UPLOAD_FILE,
         input_type: &crate::sftp::__INPUT_META_SftpUploadFileInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::sftp::__CAPABILITY_EXECUTOR_SFTP_UPLOAD_FILE,
     },
     #[cfg(feature = "native")]
     CapabilityRegistration {
         meta: &crate::sftp::__CAPABILITY_META_SFTP_DELETE_FILE,
         input_type: &crate::sftp::__INPUT_META_SftpDeleteFileInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::sftp::__CAPABILITY_EXECUTOR_SFTP_DELETE_FILE,
     },
     CapabilityRegistration {
         meta: &crate::text::__CAPABILITY_META_RENDER_TEMPLATE,
         input_type: &crate::text::__INPUT_META_TemplateInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::text::__CAPABILITY_EXECUTOR_RENDER_TEMPLATE,
     },
     CapabilityRegistration {
         meta: &crate::text::__CAPABILITY_META_TRIM_NORMALIZE,
         input_type: &crate::text::__INPUT_META_SimpleTextInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::text::__CAPABILITY_EXECUTOR_TRIM_NORMALIZE,
     },
     CapabilityRegistration {
         meta: &crate::text::__CAPABILITY_META_CASE_CONVERSION,
         input_type: &crate::text::__INPUT_META_CaseConversionInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::text::__CAPABILITY_EXECUTOR_CASE_CONVERSION,
     },
     CapabilityRegistration {
         meta: &crate::text::__CAPABILITY_META_FIND_REPLACE,
         input_type: &crate::text::__INPUT_META_FindReplaceInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::text::__CAPABILITY_EXECUTOR_FIND_REPLACE,
     },
     CapabilityRegistration {
         meta: &crate::text::__CAPABILITY_META_EXTRACT_FIRST_LINE,
         input_type: &crate::text::__INPUT_META_SimpleTextInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::text::__CAPABILITY_EXECUTOR_EXTRACT_FIRST_LINE,
     },
     CapabilityRegistration {
         meta: &crate::text::__CAPABILITY_META_EXTRACT_FIRST_WORD,
         input_type: &crate::text::__INPUT_META_SimpleTextInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::text::__CAPABILITY_EXECUTOR_EXTRACT_FIRST_WORD,
     },
     CapabilityRegistration {
         meta: &crate::text::__CAPABILITY_META_SPLIT_JOIN,
         input_type: &crate::text::__INPUT_META_SplitInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::text::__CAPABILITY_EXECUTOR_SPLIT_JOIN,
     },
     CapabilityRegistration {
         meta: &crate::text::__CAPABILITY_META_SPLIT,
         input_type: &crate::text::__INPUT_META_SplitInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::text::__CAPABILITY_EXECUTOR_SPLIT,
     },
     CapabilityRegistration {
         meta: &crate::text::__CAPABILITY_META_REMOVE_CHARACTERS,
         input_type: &crate::text::__INPUT_META_RemoveCharactersInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::text::__CAPABILITY_EXECUTOR_REMOVE_CHARACTERS,
     },
     CapabilityRegistration {
         meta: &crate::text::__CAPABILITY_META_SUBSTRING_EXTRACTION,
         input_type: &crate::text::__INPUT_META_SubstringInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::text::__CAPABILITY_EXECUTOR_SUBSTRING_EXTRACTION,
     },
     CapabilityRegistration {
         meta: &crate::text::__CAPABILITY_META_COLLAPSE_EXPAND_LINES,
         input_type: &crate::text::__INPUT_META_SplitInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::text::__CAPABILITY_EXECUTOR_COLLAPSE_EXPAND_LINES,
     },
     CapabilityRegistration {
         meta: &crate::text::__CAPABILITY_META_SLUGIFY,
         input_type: &crate::text::__INPUT_META_SimpleTextInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::text::__CAPABILITY_EXECUTOR_SLUGIFY,
     },
     CapabilityRegistration {
         meta: &crate::text::__CAPABILITY_META_HASH_TEXT,
         input_type: &crate::text::__INPUT_META_SimpleTextInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::text::__CAPABILITY_EXECUTOR_HASH_TEXT,
     },
     CapabilityRegistration {
         meta: &crate::text::__CAPABILITY_META_AS_BYTE_ARRAY,
         input_type: &crate::text::__INPUT_META_ByteArrayInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::text::__CAPABILITY_EXECUTOR_AS_BYTE_ARRAY,
     },
     CapabilityRegistration {
         meta: &crate::text::__CAPABILITY_META_FROM_BASE64,
         input_type: &crate::text::__INPUT_META_FromBase64Input,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::text::__CAPABILITY_EXECUTOR_FROM_BASE64,
     },
     CapabilityRegistration {
         meta: &crate::text::__CAPABILITY_META_TO_BASE64,
         input_type: &crate::text::__INPUT_META_ToBase64Input,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::text::__CAPABILITY_EXECUTOR_TO_BASE64,
     },
     CapabilityRegistration {
         meta: &crate::text::__CAPABILITY_META_REGEX_REPLACE,
         input_type: &crate::text::__INPUT_META_RegexReplaceInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::text::__CAPABILITY_EXECUTOR_REGEX_REPLACE,
     },
     CapabilityRegistration {
         meta: &crate::text::__CAPABILITY_META_REGEX_MATCH,
         input_type: &crate::text::__INPUT_META_RegexMatchInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::text::__CAPABILITY_EXECUTOR_REGEX_MATCH,
     },
     CapabilityRegistration {
         meta: &crate::text::__CAPABILITY_META_REGEX_TEST,
         input_type: &crate::text::__INPUT_META_RegexTestInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::text::__CAPABILITY_EXECUTOR_REGEX_TEST,
     },
     CapabilityRegistration {
         meta: &crate::text::__CAPABILITY_META_REGEX_SPLIT,
         input_type: &crate::text::__INPUT_META_RegexSplitInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::text::__CAPABILITY_EXECUTOR_REGEX_SPLIT,
     },
     CapabilityRegistration {
         meta: &crate::text::__CAPABILITY_META_PAD_TEXT,
         input_type: &crate::text::__INPUT_META_PadTextInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::text::__CAPABILITY_EXECUTOR_PAD_TEXT,
     },
     CapabilityRegistration {
         meta: &crate::text::__CAPABILITY_META_TRUNCATE_TEXT,
         input_type: &crate::text::__INPUT_META_TruncateTextInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::text::__CAPABILITY_EXECUTOR_TRUNCATE_TEXT,
     },
     CapabilityRegistration {
         meta: &crate::text::__CAPABILITY_META_WRAP_TEXT,
         input_type: &crate::text::__INPUT_META_WrapTextInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::text::__CAPABILITY_EXECUTOR_WRAP_TEXT,
     },
     CapabilityRegistration {
         meta: &crate::text::__CAPABILITY_META_EXTRACT_NUMBERS,
         input_type: &crate::text::__INPUT_META_ExtractNumbersInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::text::__CAPABILITY_EXECUTOR_EXTRACT_NUMBERS,
     },
     CapabilityRegistration {
         meta: &crate::text::__CAPABILITY_META_EXTRACT_EMAILS,
         input_type: &crate::text::__INPUT_META_SimpleTextInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::text::__CAPABILITY_EXECUTOR_EXTRACT_EMAILS,
     },
     CapabilityRegistration {
         meta: &crate::text::__CAPABILITY_META_EXTRACT_URLS,
         input_type: &crate::text::__INPUT_META_SimpleTextInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::text::__CAPABILITY_EXECUTOR_EXTRACT_URLS,
     },
     CapabilityRegistration {
         meta: &crate::text::__CAPABILITY_META_COMPARE_TEXT,
         input_type: &crate::text::__INPUT_META_CompareTextInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::text::__CAPABILITY_EXECUTOR_COMPARE_TEXT,
     },
     CapabilityRegistration {
         meta: &crate::text::__CAPABILITY_META_COUNT_OCCURRENCES,
         input_type: &crate::text::__INPUT_META_CountOccurrencesInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::text::__CAPABILITY_EXECUTOR_COUNT_OCCURRENCES,
     },
     CapabilityRegistration {
         meta: &crate::transform::__CAPABILITY_META_EXTRACT,
         input_type: &crate::transform::__INPUT_META_ExtractInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::transform::__CAPABILITY_EXECUTOR_EXTRACT,
     },
     CapabilityRegistration {
         meta: &crate::transform::__CAPABILITY_META_GET_VALUE_BY_PATH,
         input_type: &crate::transform::__INPUT_META_GetValueByPathInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::transform::__CAPABILITY_EXECUTOR_GET_VALUE_BY_PATH,
     },
     CapabilityRegistration {
         meta: &crate::transform::__CAPABILITY_META_SET_VALUE_BY_PATH,
         input_type: &crate::transform::__INPUT_META_SetValueByPathInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::transform::__CAPABILITY_EXECUTOR_SET_VALUE_BY_PATH,
     },
     CapabilityRegistration {
         meta: &crate::transform::__CAPABILITY_META_FILTER_NON_VALUES,
         input_type: &crate::transform::__INPUT_META_FilterNoValueInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::transform::__CAPABILITY_EXECUTOR_FILTER_NON_VALUES,
     },
     CapabilityRegistration {
         meta: &crate::transform::__CAPABILITY_META_SELECT_FIRST,
         input_type: &crate::transform::__INPUT_META_SelectFirstInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::transform::__CAPABILITY_EXECUTOR_SELECT_FIRST,
     },
     CapabilityRegistration {
         meta: &crate::transform::__CAPABILITY_META_COALESCE,
         input_type: &crate::transform::__INPUT_META_CoalesceInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::transform::__CAPABILITY_EXECUTOR_COALESCE,
     },
     CapabilityRegistration {
         meta: &crate::transform::__CAPABILITY_META_FROM_JSON_STRING,
         input_type: &crate::transform::__INPUT_META_FromJsonStringInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::transform::__CAPABILITY_EXECUTOR_FROM_JSON_STRING,
     },
     CapabilityRegistration {
         meta: &crate::transform::__CAPABILITY_META_TO_JSON_STRING,
         input_type: &crate::transform::__INPUT_META_ToJsonStringInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::transform::__CAPABILITY_EXECUTOR_TO_JSON_STRING,
     },
     CapabilityRegistration {
         meta: &crate::transform::__CAPABILITY_META_FILTER,
         input_type: &crate::transform::__INPUT_META_FilterInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::transform::__CAPABILITY_EXECUTOR_FILTER,
     },
     CapabilityRegistration {
         meta: &crate::transform::__CAPABILITY_META_SORT,
         input_type: &crate::transform::__INPUT_META_SortInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::transform::__CAPABILITY_EXECUTOR_SORT,
     },
     CapabilityRegistration {
         meta: &crate::transform::__CAPABILITY_META_MAP_FIELDS,
         input_type: &crate::transform::__INPUT_META_MapFieldsInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::transform::__CAPABILITY_EXECUTOR_MAP_FIELDS,
     },
     CapabilityRegistration {
         meta: &crate::transform::__CAPABILITY_META_GROUP_BY,
         input_type: &crate::transform::__INPUT_META_GroupByInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::transform::__CAPABILITY_EXECUTOR_GROUP_BY,
     },
     CapabilityRegistration {
         meta: &crate::transform::__CAPABILITY_META_APPEND,
         input_type: &crate::transform::__INPUT_META_AppendInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::transform::__CAPABILITY_EXECUTOR_APPEND,
     },
     CapabilityRegistration {
         meta: &crate::transform::__CAPABILITY_META_FLAT_MAP,
         input_type: &crate::transform::__INPUT_META_FlatMapInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::transform::__CAPABILITY_EXECUTOR_FLAT_MAP,
     },
     CapabilityRegistration {
         meta: &crate::transform::__CAPABILITY_META_ARRAY_LENGTH,
         input_type: &crate::transform::__INPUT_META_ArrayLengthInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::transform::__CAPABILITY_EXECUTOR_ARRAY_LENGTH,
     },
     CapabilityRegistration {
         meta: &crate::transform::__CAPABILITY_META_ENSURE_ARRAY,
         input_type: &crate::transform::__INPUT_META_EnsureArrayInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::transform::__CAPABILITY_EXECUTOR_ENSURE_ARRAY,
     },
     CapabilityRegistration {
         meta: &crate::utils::__CAPABILITY_META_RANDOM_DOUBLE,
         input_type: &crate::utils::__INPUT_META_RandomDoubleInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::utils::__CAPABILITY_EXECUTOR_RANDOM_DOUBLE,
     },
     CapabilityRegistration {
         meta: &crate::utils::__CAPABILITY_META_RANDOM_ARRAY,
         input_type: &crate::utils::__INPUT_META_ReturnRandomArrayInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::utils::__CAPABILITY_EXECUTOR_RANDOM_ARRAY,
     },
     CapabilityRegistration {
         meta: &crate::utils::__CAPABILITY_META_RETURN_INPUT_STRING,
         input_type: &crate::utils::__INPUT_META_ReturnStringInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::utils::__CAPABILITY_EXECUTOR_RETURN_INPUT_STRING,
     },
     CapabilityRegistration {
         meta: &crate::utils::__CAPABILITY_META_RETURN_INPUT,
         input_type: &crate::utils::__INPUT_META_ReturnInputData,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::utils::__CAPABILITY_EXECUTOR_RETURN_INPUT,
     },
     CapabilityRegistration {
         meta: &crate::utils::__CAPABILITY_META_DO_NOTHING,
         input_type: &crate::utils::__INPUT_META_DoNothingInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::utils::__CAPABILITY_EXECUTOR_DO_NOTHING,
     },
     CapabilityRegistration {
         meta: &crate::utils::__CAPABILITY_META_DELAY_IN_MS,
         input_type: &crate::utils::__INPUT_META_DelayInMsInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::utils::__CAPABILITY_EXECUTOR_DELAY_IN_MS,
     },
     CapabilityRegistration {
         meta: &crate::utils::__CAPABILITY_META_CALCULATE,
         input_type: &crate::utils::__INPUT_META_CalculateInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::utils::__CAPABILITY_EXECUTOR_CALCULATE,
     },
     CapabilityRegistration {
         meta: &crate::utils::__CAPABILITY_META_FORMAT_DATE_FROM_ISO,
         input_type: &crate::utils::__INPUT_META_FormatDateFromIsoInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::utils::__CAPABILITY_EXECUTOR_FORMAT_DATE_FROM_ISO,
     },
     CapabilityRegistration {
         meta: &crate::utils::__CAPABILITY_META_ISO_TO_UNIX_TIMESTAMP,
         input_type: &crate::utils::__INPUT_META_IsoToUnixTimestampInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::utils::__CAPABILITY_EXECUTOR_ISO_TO_UNIX_TIMESTAMP,
     },
     CapabilityRegistration {
         meta: &crate::utils::__CAPABILITY_META_GET_CURRENT_UNIX_TIMESTAMP,
         input_type: &crate::utils::__INPUT_META_GetCurrentUnixTimestampInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::utils::__CAPABILITY_EXECUTOR_GET_CURRENT_UNIX_TIMESTAMP,
     },
     CapabilityRegistration {
         meta: &crate::utils::__CAPABILITY_META_GET_CURRENT_ISO_DATETIME,
         input_type: &crate::utils::__INPUT_META_GetCurrentIsoDatetimeInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::utils::__CAPABILITY_EXECUTOR_GET_CURRENT_ISO_DATETIME,
     },
     CapabilityRegistration {
         meta: &crate::utils::__CAPABILITY_META_GET_CURRENT_FORMATTED_DATETIME,
         input_type: &crate::utils::__INPUT_META_GetCurrentFormattedDateTimeInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::utils::__CAPABILITY_EXECUTOR_GET_CURRENT_FORMATTED_DATETIME,
     },
     CapabilityRegistration {
         meta: &crate::utils::__CAPABILITY_META_COUNTRY_NAME_TO_ISO_CODE,
         input_type: &crate::utils::__INPUT_META_CountryNameToIsoCodeInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::utils::__CAPABILITY_EXECUTOR_COUNTRY_NAME_TO_ISO_CODE,
     },
     #[cfg(feature = "native")]
     CapabilityRegistration {
         meta: &crate::xlsx::__CAPABILITY_META_FROM_XLSX,
         input_type: &crate::xlsx::__INPUT_META_FromXlsxInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::xlsx::__CAPABILITY_EXECUTOR_FROM_XLSX,
     },
     #[cfg(feature = "native")]
     CapabilityRegistration {
         meta: &crate::xlsx::__CAPABILITY_META_GET_SHEETS,
         input_type: &crate::xlsx::__INPUT_META_GetSheetsInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::xlsx::__CAPABILITY_EXECUTOR_GET_SHEETS,
     },
     CapabilityRegistration {
         meta: &crate::xml::__CAPABILITY_META_FROM_XML,
         input_type: &crate::xml::__INPUT_META_FromXmlInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::xml::__CAPABILITY_EXECUTOR_FROM_XML,
     },
 ];
@@ -2002,6 +2272,7 @@ pub static INPUT_TYPES: &[&InputTypeMeta] = &[
 ];
 
 pub static OUTPUT_TYPES: &[&OutputTypeMeta] = &[
+    &crate::types::__OUTPUT_META_FileData,
     #[cfg(feature = "native")]
     &crate::compression::__OUTPUT_META_ExtractedFile,
     #[cfg(feature = "native")]
