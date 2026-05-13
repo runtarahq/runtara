@@ -345,6 +345,101 @@ mod tests {
     }
 
     #[test]
+    fn rejects_finish_output_without_name_from_backend_validator() {
+        let response = validate_execution_graph_json_impl(
+            r#"{
+                "steps": {
+                    "finish": {
+                        "stepType": "Finish",
+                        "id": "finish",
+                        "inputMapping": {
+                            "": {
+                                "valueType": "reference",
+                                "value": "data.orderId"
+                            }
+                        }
+                    }
+                },
+                "entryPoint": "finish"
+            }"#,
+        );
+
+        assert!(response.success);
+        assert!(!response.valid);
+        assert!(
+            response.errors.iter().any(|error| {
+                error.contains("[E117]") && error.contains("has an output with no name")
+            }),
+            "{:?}",
+            response.errors
+        );
+    }
+
+    #[test]
+    fn rejects_finish_output_without_source_from_backend_validator() {
+        let response = validate_execution_graph_json_impl(
+            r#"{
+                "steps": {
+                    "finish": {
+                        "stepType": "Finish",
+                        "id": "finish",
+                        "inputMapping": {
+                            "orderId": {
+                                "valueType": "reference",
+                                "value": " "
+                            }
+                        }
+                    }
+                },
+                "entryPoint": "finish"
+            }"#,
+        );
+
+        assert!(response.success);
+        assert!(!response.valid);
+        assert!(
+            response
+                .errors
+                .iter()
+                .any(|error| { error.contains("[E118]") && error.contains("orderId") }),
+            "{:?}",
+            response.errors
+        );
+    }
+
+    #[test]
+    fn rejects_finish_output_without_immediate_source_from_backend_validator() {
+        let response = validate_execution_graph_json_impl(
+            r#"{
+                "steps": {
+                    "finish": {
+                        "stepType": "Finish",
+                        "id": "finish",
+                        "inputMapping": {
+                            "status": {
+                                "valueType": "immediate",
+                                "value": ""
+                            }
+                        }
+                    }
+                },
+                "entryPoint": "finish"
+            }"#,
+        );
+
+        assert!(response.success);
+        assert!(!response.valid);
+        assert!(
+            response
+                .errors
+                .iter()
+                .any(|error| { error.contains("[E118]") && error.contains("status") }),
+            "{:?}",
+            response.errors
+        );
+    }
+
+    #[test]
     fn returns_static_step_type_metadata() {
         let value: Value = serde_json::from_str(&get_step_types_json()).unwrap();
         let step_types = value["step_types"].as_array().unwrap();

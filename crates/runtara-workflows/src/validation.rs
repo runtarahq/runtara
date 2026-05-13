@@ -63,6 +63,8 @@
 //! | E090 | DuplicateStepName | Multiple steps with same name |
 //! | E100 | DuplicateEdgePriority | Edges with duplicate priority |
 //! | E101 | MultipleDefaultEdges | Multiple unconditional edges |
+//! | E117 | FinishOutputMissingName | Finish output has no name |
+//! | E118 | FinishOutputMissingSource | Finish output has no source |
 
 use crate::dependency_analysis::{DependencyGraph, WorkflowReference};
 use runtara_dsl::{
@@ -132,6 +134,13 @@ pub enum ValidationError {
     },
     /// Workflow has no steps defined.
     EmptyWorkflow,
+    /// A Finish output mapping has an empty output name.
+    FinishOutputMissingName { step_id: String },
+    /// A Finish output mapping names an output but has no source value.
+    FinishOutputMissingSource {
+        step_id: String,
+        output_name: String,
+    },
 
     // === Reference Errors ===
     /// A step reference points to a non-existent step.
@@ -375,6 +384,23 @@ impl std::fmt::Display for ValidationError {
             }
             ValidationError::EmptyWorkflow => {
                 write!(f, "[E004] Workflow has no steps defined")
+            }
+            ValidationError::FinishOutputMissingName { step_id } => {
+                write!(
+                    f,
+                    "[E117] Finish step '{}' has an output with no name",
+                    step_id
+                )
+            }
+            ValidationError::FinishOutputMissingSource {
+                step_id,
+                output_name,
+            } => {
+                write!(
+                    f,
+                    "[E118] Finish step '{}' output '{}' is missing a source",
+                    step_id, output_name
+                )
             }
 
             // Reference Errors
@@ -1097,6 +1123,9 @@ pub fn validate_workflow(graph: &ExecutionGraph) -> ValidationResult {
     // Phase 1: Graph structure validation
     validate_graph_structure(graph, &mut result);
 
+    // Phase 1.5: Finish output shape validation
+    validate_finish_outputs(graph, &mut result);
+
     // Phase 2: Reference validation
     validate_references(graph, &mut result);
 
@@ -1468,6 +1497,49 @@ fn compute_reachable_steps(graph: &ExecutionGraph) -> HashSet<String> {
 
 fn validate_references(graph: &ExecutionGraph, result: &mut ValidationResult) {
     validate_references_with_inherited(graph, &HashSet::new(), result);
+}
+
+fn validate_finish_outputs(graph: &ExecutionGraph, result: &mut ValidationResult) {
+    for (step_id, step) in &graph.steps {
+        let Step::Finish(finish_step) = step else {
+            continue;
+        };
+
+        let Some(input_mapping) = finish_step.input_mapping.as_ref() else {
+            continue;
+        };
+
+        for (output_name, value) in input_mapping {
+            if output_name.trim().is_empty() {
+                result
+                    .errors
+                    .push(ValidationError::FinishOutputMissingName {
+                        step_id: step_id.clone(),
+                    });
+            }
+
+            if finish_output_source_is_missing(value) {
+                result
+                    .errors
+                    .push(ValidationError::FinishOutputMissingSource {
+                        step_id: step_id.clone(),
+                        output_name: output_name.clone(),
+                    });
+            }
+        }
+    }
+}
+
+fn finish_output_source_is_missing(value: &MappingValue) -> bool {
+    match value {
+        MappingValue::Reference(reference) => reference.value.trim().is_empty(),
+        MappingValue::Template(template) => template.value.trim().is_empty(),
+        MappingValue::Immediate(immediate) => immediate
+            .value
+            .as_str()
+            .is_some_and(|value| value.trim().is_empty()),
+        MappingValue::Composite(_) => false,
+    }
 }
 
 /// Validates references in a graph, considering inherited variables from parent scope.
@@ -4307,6 +4379,105 @@ mod tests {
             edges: None,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn test_finish_output_missing_name_is_rejected() {
+        let mut mapping = InputMapping::new();
+        mapping.insert("".to_string(), ref_value("data.order_id"));
+
+        let mut steps = HashMap::new();
+        steps.insert(
+            "finish".to_string(),
+            create_finish_step("finish", Some(mapping)),
+        );
+        let graph = create_basic_graph(steps, "finish");
+
+        let result = validate_workflow(&graph);
+
+        assert!(result.errors.iter().any(|error| matches!(
+            error,
+            ValidationError::FinishOutputMissingName { step_id } if step_id == "finish"
+        )));
+    }
+
+    #[test]
+    fn test_finish_output_empty_reference_source_is_rejected() {
+        let mut mapping = InputMapping::new();
+        mapping.insert("orderId".to_string(), ref_value("   "));
+
+        let mut steps = HashMap::new();
+        steps.insert(
+            "finish".to_string(),
+            create_finish_step("finish", Some(mapping)),
+        );
+        let graph = create_basic_graph(steps, "finish");
+
+        let result = validate_workflow(&graph);
+
+        assert!(result.errors.iter().any(|error| matches!(
+            error,
+            ValidationError::FinishOutputMissingSource {
+                step_id,
+                output_name,
+            } if step_id == "finish" && output_name == "orderId"
+        )));
+    }
+
+    #[test]
+    fn test_finish_output_empty_template_source_is_rejected() {
+        let mut mapping = InputMapping::new();
+        mapping.insert(
+            "summary".to_string(),
+            MappingValue::Template(runtara_dsl::TemplateValue {
+                value: " ".to_string(),
+            }),
+        );
+
+        let mut steps = HashMap::new();
+        steps.insert(
+            "finish".to_string(),
+            create_finish_step("finish", Some(mapping)),
+        );
+        let graph = create_basic_graph(steps, "finish");
+
+        let result = validate_workflow(&graph);
+
+        assert!(result.errors.iter().any(|error| matches!(
+            error,
+            ValidationError::FinishOutputMissingSource {
+                step_id,
+                output_name,
+            } if step_id == "finish" && output_name == "summary"
+        )));
+    }
+
+    #[test]
+    fn test_finish_output_empty_immediate_string_source_is_rejected() {
+        let mut mapping = InputMapping::new();
+        mapping.insert(
+            "status".to_string(),
+            MappingValue::Immediate(runtara_dsl::ImmediateValue {
+                value: serde_json::Value::String(" ".to_string()),
+            }),
+        );
+
+        let mut steps = HashMap::new();
+        steps.insert(
+            "finish".to_string(),
+            create_finish_step("finish", Some(mapping)),
+        );
+        let graph = create_basic_graph(steps, "finish");
+
+        let result = validate_workflow(&graph);
+
+        assert!(result.errors.iter().any(|error| matches!(
+            error,
+            ValidationError::FinishOutputMissingSource {
+                step_id,
+                output_name,
+            } if step_id == "finish" && output_name == "status"
+        )));
     }
 
     // === Graph Structure Tests ===

@@ -782,6 +782,8 @@ function cleanNodeData(steps: Record<string, any>) {
     );
 
     if (Array.isArray(inputMapping)) {
+      const preserveInvalidMappingsForRustValidation =
+        data.stepType === 'Finish';
       const filteredMapping = inputMapping.filter(
         ({
           type,
@@ -794,7 +796,7 @@ function cleanNodeData(steps: Record<string, any>) {
         }) => {
           // Filter out entries with empty keys (field names)
           if (!type || type.trim() === '') {
-            return false;
+            return preserveInvalidMappingsForRustValidation;
           }
           // Keep reference/template entries even with empty values — they're resolved at runtime
           if (valueType === 'reference' || valueType === 'template') {
@@ -802,11 +804,19 @@ function cleanNodeData(steps: Record<string, any>) {
           }
           // Filter out empty optional fields
           if (value === undefined || value === null || value === '') {
+            if (preserveInvalidMappingsForRustValidation) {
+              return true;
+            }
             return value === null && valueType === 'immediate';
           }
           return true;
         }
       );
+      const normalizedMapping = preserveInvalidMappingsForRustValidation
+        ? filteredMapping.map((entry: { value?: any }) =>
+            entry.value === undefined ? { ...entry, value: '' } : entry
+          )
+        : filteredMapping;
 
       // Error steps need direct field values, not InputMapping wrapping
       if (data.stepType === 'Error') {
@@ -815,7 +825,7 @@ function cleanNodeData(steps: Record<string, any>) {
         errorFields.forEach((field) => {
           delete filteredRestData[field];
         });
-        filteredMapping.forEach(
+        normalizedMapping.forEach(
           ({ type, value }: { type: string; value: any }) => {
             if (errorFields.includes(type)) {
               filteredRestData[type] = value; // Direct string value
@@ -830,7 +840,7 @@ function cleanNodeData(steps: Record<string, any>) {
         logFields.forEach((field) => {
           delete filteredRestData[field];
         });
-        filteredMapping.forEach(
+        normalizedMapping.forEach(
           ({ type, value }: { type: string; value: any }) => {
             if (logFields.includes(type)) {
               filteredRestData[type] = value;
@@ -842,7 +852,7 @@ function cleanNodeData(steps: Record<string, any>) {
       } else {
         // Regular steps - flat object format with InputMapping wrapping
         const mappingObject = Object.fromEntries(
-          filteredMapping.map(processMappingEntry)
+          normalizedMapping.map(processMappingEntry)
         );
         // Only include inputMapping if it has entries
         cleanedInputMapping =

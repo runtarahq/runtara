@@ -554,6 +554,50 @@ describe('Backend DSL serialization', () => {
     });
   });
 
+  it('preserves invalid Finish outputs so Rust validation can reject them', () => {
+    const graph = composeExecutionGraph(
+      [
+        {
+          id: 'finish',
+          type: NODE_TYPES.BasicNode,
+          position: { x: 0, y: 0 },
+          data: {
+            id: 'finish',
+            stepType: 'Finish',
+            name: 'Finish',
+            inputMapping: [
+              {
+                type: 'orderId',
+                value: '',
+                typeHint: 'string',
+                valueType: 'immediate',
+              },
+              {
+                type: '',
+                value: 'data.orderId',
+                typeHint: 'string',
+                valueType: 'reference',
+              },
+            ],
+          },
+        },
+      ] as any,
+      [],
+      { name: 'finish-output-invalid-fixture' }
+    );
+
+    const output = (graph!.steps as Record<string, any>).finish.inputMapping;
+    expect(output.orderId).toEqual({
+      valueType: 'immediate',
+      value: '',
+    });
+    expect(output['']).toEqual({
+      valueType: 'reference',
+      value: 'data.orderId',
+      type: 'string',
+    });
+  });
+
   it('preserves constructed array Finish outputs', () => {
     const graph = composeExecutionGraph(
       [

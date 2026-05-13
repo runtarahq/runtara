@@ -43,7 +43,6 @@ import {
   convertClientWarnings,
   convertServerErrors,
 } from '@/features/workflows/utils/validation-helpers';
-import { getFinishOutputValidationMessages } from '@/features/workflows/utils/finish-output-validation';
 
 import {
   parseSchema,
@@ -1179,22 +1178,6 @@ export function Workflow() {
 
     // Get the updated state after applying staged changes
     const finalState = useWorkflowStore.getState();
-    const finishOutputErrors = getFinishOutputValidationMessages(
-      finalState.nodes
-    );
-    if (finishOutputErrors.length > 0) {
-      useValidationStore.getState().setMessages(finishOutputErrors);
-
-      const firstErrorStepId = useValidationStore
-        .getState()
-        .getFirstErrorStepId();
-      if (firstErrorStepId) {
-        useWorkflowStore.getState().setSelectedNodeId(firstErrorStepId);
-        useWorkflowStore.getState().setPendingCenterNodeId(firstErrorStepId);
-      }
-      return;
-    }
-
     // Build variables object for execution graph
     // Use staged changes if available, otherwise use original data
     // Convert from UI format [{ name, value, type }, ...] to API format { varName: { type, value }, ... }

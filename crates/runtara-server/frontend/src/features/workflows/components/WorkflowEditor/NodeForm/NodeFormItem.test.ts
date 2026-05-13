@@ -63,7 +63,7 @@ describe('NodeFormItem schema', () => {
     }
   });
 
-  it('requires a source when a Finish output name is configured', () => {
+  it('keeps graph-semantic Finish output source validation out of the local form schema', () => {
     const result = testSchema.safeParse({
       ...baseFormData,
       stepType: 'Finish',
@@ -77,20 +77,10 @@ describe('NodeFormItem schema', () => {
       ],
     });
 
-    expect(result.success).toBe(false);
-    if (!result.success) {
-      expect(result.error.issues).toEqual(
-        expect.arrayContaining([
-          expect.objectContaining({
-            path: ['inputMapping', 0, 'value'],
-            message: 'Source is required',
-          }),
-        ])
-      );
-    }
+    expect(result.success).toBe(true);
   });
 
-  it('requires an output name when a Finish output source is configured', () => {
+  it('keeps graph-semantic Finish output name validation out of the local form schema', () => {
     const result = testSchema.safeParse({
       ...baseFormData,
       stepType: 'Finish',
@@ -104,17 +94,7 @@ describe('NodeFormItem schema', () => {
       ],
     });
 
-    expect(result.success).toBe(false);
-    if (!result.success) {
-      expect(result.error.issues).toEqual(
-        expect.arrayContaining([
-          expect.objectContaining({
-            path: ['inputMapping', 0, 'type'],
-            message: 'Output name is required',
-          }),
-        ])
-      );
-    }
+    expect(result.success).toBe(true);
   });
 
   it('allows a Finish output when both name and source are configured', () => {

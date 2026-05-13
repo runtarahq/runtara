@@ -85,6 +85,26 @@ impl ValidationErrorDto {
                 None,
                 None,
             ),
+            ValidationError::FinishOutputMissingName { step_id } => (
+                "E117".to_string(),
+                format!("Finish step '{}' has an output with no name", step_id),
+                Some(step_id.clone()),
+                Some("inputMapping".to_string()),
+                None,
+            ),
+            ValidationError::FinishOutputMissingSource {
+                step_id,
+                output_name,
+            } => (
+                "E118".to_string(),
+                format!(
+                    "Finish step '{}' output '{}' is missing a source",
+                    step_id, output_name
+                ),
+                Some(step_id.clone()),
+                Some(format!("inputMapping.{}.value", output_name)),
+                None,
+            ),
             ValidationError::InvalidStepReference {
                 step_id,
                 reference_path,

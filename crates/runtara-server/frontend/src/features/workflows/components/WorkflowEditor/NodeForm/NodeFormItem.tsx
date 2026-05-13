@@ -24,7 +24,6 @@ import { AiAgentStepField } from './AiAgentStepField';
 import { WaitForSignalStepField } from './WaitForSignalStepField';
 import { LogStepField } from './LogStepField';
 import { WhileStepField } from './WhileStepField';
-import { getFinishOutputValidationIssues } from '@/features/workflows/utils/finish-output-validation';
 
 // Wrapper component for EmbedWorkflowConfigField that uses react-hook-form
 function EmbedWorkflowFieldRenderer() {
@@ -548,14 +547,6 @@ export const schema = () =>
       groupByExpectedKeys: z.array(z.string()).optional(),
     })
     .superRefine((inputs, ctx) => {
-      getFinishOutputValidationIssues(inputs).forEach((issue) => {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          path: issue.path,
-          message: issue.message,
-        });
-      });
-
       if (inputs.stepType !== 'Split') return;
       const splitVariables = inputs.splitVariablesFields || [];
       splitVariables.forEach((item, index) => {

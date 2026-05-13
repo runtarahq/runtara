@@ -15,7 +15,6 @@ import {
   convertClientErrors,
   convertClientWarnings,
 } from '@/features/workflows/utils/validation-helpers';
-import { getFinishOutputValidationMessages } from '@/features/workflows/utils/finish-output-validation';
 import {
   buildSchemaFromFields,
   type SchemaField,
@@ -291,24 +290,6 @@ export async function validateNodeEditWithRust({
       node.id === nodeId ? buildExistingNodeCandidate(node, nodeId, data) : node
     );
     candidateEdges = edges;
-  }
-
-  const finishOutputErrors = getFinishOutputValidationMessages(candidateNodes);
-  if (finishOutputErrors.length > 0) {
-    const errorMessages = finishOutputErrors.map((message) => message.message);
-    return {
-      canApply: false,
-      messages: applyTargetFallback(finishOutputErrors, candidateNodes, nodeId),
-      rustValidation: {
-        success: false,
-        valid: false,
-        status: 'invalid',
-        errors: errorMessages,
-        warnings: [],
-        message: errorMessages[0] ?? 'Finish output validation failed',
-        wasmAvailable: true,
-      },
-    };
   }
 
   const executionGraph =
