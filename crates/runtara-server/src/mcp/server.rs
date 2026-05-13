@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use axum::Router;
+use dashmap::DashMap;
 use rmcp::handler::server::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{
@@ -28,6 +29,8 @@ pub struct SmoMcpServer {
     /// Internal router for in-process API calls (no network hop).
     /// MCP tools call this via Router::oneshot() with AuthContext pre-injected.
     pub(crate) internal_router: axum::Router,
+    /// Serializes MCP graph read-modify-write mutations per tenant/workflow.
+    pub(crate) workflow_mutation_locks: Arc<DashMap<String, Arc<tokio::sync::Mutex<()>>>>,
 }
 
 #[tool_router]
@@ -46,6 +49,7 @@ impl SmoMcpServer {
             runtime_client,
             tenant_id,
             internal_router,
+            workflow_mutation_locks: Arc::new(DashMap::new()),
         }
     }
 
@@ -712,6 +716,72 @@ impl SmoMcpServer {
     // First mutation on a workflow creates a new version; subsequent mutations update that same version.
 
     #[tool(
+        description = "Summarize a workflow graph without returning full step definitions. Use before focused reads."
+    )]
+    async fn summarize_workflow(
+        &self,
+        params: Parameters<tools::graph_mutations::SummarizeWorkflowParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        tools::graph_mutations::summarize_workflow(self, params.0).await
+    }
+
+    #[tool(
+        description = "Get workflow graph metadata: name, description, entry point, and version state."
+    )]
+    async fn get_workflow_metadata(
+        &self,
+        params: Parameters<tools::graph_mutations::GetWorkflowMetadataParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        tools::graph_mutations::get_workflow_metadata(self, params.0).await
+    }
+
+    #[tool(
+        description = "List workflow steps as compact summaries with pagination and optional stepType/name filters."
+    )]
+    async fn list_steps(
+        &self,
+        params: Parameters<tools::graph_mutations::ListStepsParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        tools::graph_mutations::list_steps(self, params.0).await
+    }
+
+    #[tool(
+        description = "Get one step definition and its incoming/outgoing edges. Compact mode truncates large strings by default."
+    )]
+    async fn get_step(
+        &self,
+        params: Parameters<tools::graph_mutations::GetStepParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        tools::graph_mutations::get_step(self, params.0).await
+    }
+
+    #[tool(description = "List executionPlan edges with optional from/to/label filters.")]
+    async fn list_edges(
+        &self,
+        params: Parameters<tools::graph_mutations::ListEdgesParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        tools::graph_mutations::list_edges(self, params.0).await
+    }
+
+    #[tool(description = "Get incoming and/or outgoing edges for one step.")]
+    async fn get_step_edges(
+        &self,
+        params: Parameters<tools::graph_mutations::GetStepEdgesParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        tools::graph_mutations::get_step_edges(self, params.0).await
+    }
+
+    #[tool(
+        description = "Get only a step's inputMapping plus expected Agent capability inputs when available."
+    )]
+    async fn get_step_mappings(
+        &self,
+        params: Parameters<tools::graph_mutations::GetStepMappingsParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        tools::graph_mutations::get_step_mappings(self, params.0).await
+    }
+
+    #[tool(
         description = "Set workflow name and/or description on the execution graph. Use this with mutation tools so you don't need to pass a raw execution graph."
     )]
     async fn set_workflow_metadata(
@@ -821,6 +891,14 @@ impl SmoMcpServer {
         tools::graph_mutations::remove_mapping(self, params.0).await
     }
 
+    #[tool(description = "Get the input schema (DSL flat-map format) for a workflow graph.")]
+    async fn get_input_schema(
+        &self,
+        params: Parameters<tools::graph_mutations::GetInputSchemaParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        tools::graph_mutations::get_input_schema(self, params.0).await
+    }
+
     #[tool(
         description = "Set the input schema (DSL flat-map format). Updates the latest version in-place."
     )]
@@ -832,6 +910,32 @@ impl SmoMcpServer {
     }
 
     #[tool(
+        description = "Set one input schema field in DSL format. Creates inputSchema if missing and updates the latest version in-place."
+    )]
+    async fn set_input_schema_field(
+        &self,
+        params: Parameters<tools::graph_mutations::SetInputSchemaFieldParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        tools::graph_mutations::set_input_schema_field(self, params.0).await
+    }
+
+    #[tool(description = "Remove one input schema field. Updates the latest version in-place.")]
+    async fn remove_input_schema_field(
+        &self,
+        params: Parameters<tools::graph_mutations::RemoveInputSchemaFieldParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        tools::graph_mutations::remove_input_schema_field(self, params.0).await
+    }
+
+    #[tool(description = "Get the output schema (DSL flat-map format) for a workflow graph.")]
+    async fn get_output_schema(
+        &self,
+        params: Parameters<tools::graph_mutations::GetOutputSchemaParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        tools::graph_mutations::get_output_schema(self, params.0).await
+    }
+
+    #[tool(
         description = "Set the output schema (DSL flat-map format). Updates the latest version in-place."
     )]
     async fn set_output_schema(
@@ -839,6 +943,44 @@ impl SmoMcpServer {
         params: Parameters<tools::graph_mutations::SetOutputSchemaParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         tools::graph_mutations::set_output_schema(self, params.0).await
+    }
+
+    #[tool(description = "List all variables defined on a workflow graph.")]
+    async fn list_variables(
+        &self,
+        params: Parameters<tools::graph_mutations::ListVariablesParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        tools::graph_mutations::list_variables(self, params.0).await
+    }
+
+    #[tool(
+        description = "Get a small graph slice around a center step, including nearby steps and edges."
+    )]
+    async fn get_workflow_slice(
+        &self,
+        params: Parameters<tools::graph_mutations::GetWorkflowSliceParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        tools::graph_mutations::get_workflow_slice(self, params.0).await
+    }
+
+    #[tool(
+        description = "Find workflow graph references to a path such as data.foo, variables.mode, or steps.x.outputs.y."
+    )]
+    async fn find_references(
+        &self,
+        params: Parameters<tools::graph_mutations::FindReferencesParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        tools::graph_mutations::find_references(self, params.0).await
+    }
+
+    #[tool(
+        description = "Report required Agent capability inputs that are not mapped. Can target one step or all Agent steps."
+    )]
+    async fn list_unmapped_inputs(
+        &self,
+        params: Parameters<tools::graph_mutations::ListUnmappedInputsParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        tools::graph_mutations::list_unmapped_inputs(self, params.0).await
     }
 
     #[tool(description = "Set a variable on the graph. Updates the latest version in-place.")]
@@ -865,6 +1007,16 @@ impl SmoMcpServer {
         params: Parameters<tools::graph_mutations::ListReferencesParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         tools::graph_mutations::list_references(self, params.0).await
+    }
+
+    #[tool(
+        description = "Apply multiple low-level graph mutations to the same graph path and save once. Prefer for multi-step edits."
+    )]
+    async fn apply_graph_mutations(
+        &self,
+        params: Parameters<tools::graph_mutations::ApplyGraphMutationsParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        tools::graph_mutations::apply_graph_mutations(self, params.0).await
     }
 
     // ===== Signal / Human-in-the-Loop Tools =====
@@ -1030,7 +1182,7 @@ impl ServerHandler for SmoMcpServer {
                 **Object Model**: list_object_schemas, get_object_schema, create_object_schema, update_object_schema, delete_object_schema, list_object_instances, query_object_instances, query_aggregate, query_sql, query_sql_one, query_sql_raw, execute_sql, create_object_instance, update_object_instance, bulk_create_instances, bulk_update_instances, bulk_delete_instances. SQL tools use SQLx prepared statements with Postgres positional placeholders ($1, $2, ...), not named parameters; params are typed and bound in array order, and execute_sql returns rowsAffected.\n\
                 **Reports**: get_report_authoring_schema, get_report_definition_schema, list_reports, get_report, create_report, update_report, delete_report, validate_report, render_report, get_report_block_data, add_report_block, replace_report_block, patch_report_block, move_report_block, remove_report_block, add_report_layout_node, replace_report_layout_node, patch_report_layout_node, move_report_layout_node, remove_report_layout_node — call get_report_authoring_schema before authoring; use get_report_definition_schema for the generated JSON Schema; report blocks and layout nodes have stable ids; use layout nodes (metric_row, columns, grid, section) instead of Markdown tables for alignment; reports can use Object Model sources, lookup editors for reference fields, or virtual workflow_runtime sources for workflow instance status/actions\n\
                 **Agents & DSL**: list_agents, get_agent, get_capability, test_capability, list_step_types, get_step_type_schema\n\
-                **Graph Mutations**: set_workflow_metadata (name/description), add_agent_step (high-level: validates capability, creates step, connects edges), add_step, remove_step, update_step, connect_steps, disconnect_steps, set_entry_point, set_mapping, remove_mapping, set_input_schema, set_output_schema, set_variable, remove_variable, list_references (returns copy-paste-ready mapping objects) — first call creates a new version, subsequent calls update it in-place. All support nested subgraphs via optional path parameter. Prefer mutation tools over raw graph JSON. Use deploy_latest after mutations to compile and deploy.\n\
+                **Graph Reads/Mutations**: summarize_workflow, get_workflow_metadata, list_steps, get_step, list_edges, get_step_edges, get_step_mappings, get_workflow_slice, find_references, list_unmapped_inputs, get_input_schema, get_output_schema, list_variables, list_references, set_workflow_metadata, add_agent_step, add_step, remove_step, update_step, connect_steps, disconnect_steps, set_entry_point, set_mapping, remove_mapping, set_input_schema (replace all), set_input_schema_field, remove_input_schema_field, set_output_schema, set_variable, remove_variable, apply_graph_mutations (batch, one save) — MCP graph mutations are serialized per tenant/workflow so parallel tool calls do not clobber each other; first mutating call creates a new version, subsequent mutating calls update it in-place. All support nested subgraphs via optional path parameter. Prefer focused graph reads and mutation tools over raw get_workflow/update_workflow JSON. Use deploy_latest after mutations to compile and deploy.\n\
                 **Signals & Actions**: list_pending_signals, get_signal_schema, submit_signal_response, submit_action_response — interact with WaitForSignal / human-in-the-loop steps and open workflow actions in running executions\n\
                 **Connections**: list_connections, list_integrations, get_integration. To wire a connection into an Agent step:\n\
                   1. `list_agents` — each entry carries `supportsConnections` and `integrationIds`. Skip agents where `supportsConnections=false`.\n\

@@ -1,6 +1,7 @@
 use rmcp::model::{CallToolResult, Content};
 use schemars::JsonSchema;
 use serde::Deserialize;
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use super::super::server::SmoMcpServer;
 use super::internal_api::{api_get, api_post, api_put, validate_path_param};
@@ -153,6 +154,30 @@ async fn fetch_latest_graph(
         .ok_or_else(|| err("Workflow has no executionGraph"))?;
 
     Ok((graph, latest_version, current_version))
+}
+
+async fn fetch_latest_graph_locked(
+    server: &SmoMcpServer,
+    workflow_id: &str,
+) -> Result<
+    (
+        tokio::sync::OwnedMutexGuard<()>,
+        serde_json::Value,
+        i64,
+        i64,
+    ),
+    rmcp::ErrorData,
+> {
+    validate_path_param("workflow_id", workflow_id)?;
+    let key = format!("{}:{}", server.tenant_id, workflow_id);
+    let lock = server
+        .workflow_mutation_locks
+        .entry(key)
+        .or_insert_with(|| std::sync::Arc::new(tokio::sync::Mutex::new(())))
+        .clone();
+    let guard = lock.lock_owned().await;
+    let (graph, latest_version, current_version) = fetch_latest_graph(server, workflow_id).await?;
+    Ok((guard, graph, latest_version, current_version))
 }
 
 /// Save the graph — creates a new version if latest == current (first mutation),
@@ -501,6 +526,124 @@ pub struct RemoveMappingParams {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+pub struct SummarizeWorkflowParams {
+    #[schemars(description = "Workflow ID")]
+    pub workflow_id: String,
+    #[schemars(
+        description = "Path to nested subgraph — array of step IDs to traverse. Omit for root graph."
+    )]
+    pub path: Option<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct GetWorkflowMetadataParams {
+    #[schemars(description = "Workflow ID")]
+    pub workflow_id: String,
+    #[schemars(
+        description = "Path to nested subgraph — array of step IDs to traverse. Omit for root graph."
+    )]
+    pub path: Option<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ListStepsParams {
+    #[schemars(description = "Workflow ID")]
+    pub workflow_id: String,
+    #[schemars(description = "Optional stepType filter")]
+    pub step_type: Option<String>,
+    #[schemars(description = "Optional case-insensitive substring filter for step name or id")]
+    pub name_contains: Option<String>,
+    #[schemars(description = "Offset for pagination (default 0)")]
+    pub offset: Option<usize>,
+    #[schemars(description = "Max steps to return (default 100, max 500)")]
+    pub limit: Option<usize>,
+    #[schemars(
+        description = "Path to nested subgraph — array of step IDs to traverse. Omit for root graph."
+    )]
+    pub path: Option<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct GetStepParams {
+    #[schemars(description = "Workflow ID")]
+    pub workflow_id: String,
+    #[schemars(description = "Step ID")]
+    pub step_id: String,
+    #[schemars(
+        description = "If false, return full step definition including large string values. Default: true."
+    )]
+    pub compact: Option<bool>,
+    #[schemars(
+        description = "Path to nested subgraph — array of step IDs to traverse. Omit for root graph."
+    )]
+    pub path: Option<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ListEdgesParams {
+    #[schemars(description = "Workflow ID")]
+    pub workflow_id: String,
+    #[schemars(description = "Optional source step filter")]
+    pub from_step: Option<String>,
+    #[schemars(description = "Optional target step filter")]
+    pub to_step: Option<String>,
+    #[schemars(description = "Optional edge label filter")]
+    pub label: Option<String>,
+    #[schemars(
+        description = "Path to nested subgraph — array of step IDs to traverse. Omit for root graph."
+    )]
+    pub path: Option<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct GetStepEdgesParams {
+    #[schemars(description = "Workflow ID")]
+    pub workflow_id: String,
+    #[schemars(description = "Step ID")]
+    pub step_id: String,
+    #[schemars(description = "Direction filter: incoming, outgoing, or both (default both)")]
+    pub direction: Option<String>,
+    #[schemars(
+        description = "Path to nested subgraph — array of step IDs to traverse. Omit for root graph."
+    )]
+    pub path: Option<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct GetStepMappingsParams {
+    #[schemars(description = "Workflow ID")]
+    pub workflow_id: String,
+    #[schemars(description = "Step ID")]
+    pub step_id: String,
+    #[schemars(
+        description = "Include expected Agent capability inputs when available. Default true."
+    )]
+    pub include_expected_inputs: Option<bool>,
+    #[schemars(
+        description = "Path to nested subgraph — array of step IDs to traverse. Omit for root graph."
+    )]
+    pub path: Option<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct GetInputSchemaParams {
+    #[schemars(description = "Workflow ID")]
+    pub workflow_id: String,
+    #[schemars(
+        description = "Path to nested subgraph — array of step IDs to traverse. Omit for root graph."
+    )]
+    pub path: Option<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct SetInputSchemaParams {
     #[schemars(description = "Workflow ID")]
     pub workflow_id: String,
@@ -516,6 +659,47 @@ pub struct SetInputSchemaParams {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+pub struct SetInputSchemaFieldParams {
+    #[schemars(description = "Workflow ID")]
+    pub workflow_id: String,
+    #[schemars(description = "Input field name")]
+    pub field_name: String,
+    #[schemars(
+        description = "Input field schema definition in DSL format (e.g., {\"type\": \"string\", \"required\": true})"
+    )]
+    pub field: serde_json::Value,
+    #[schemars(
+        description = "Path to nested subgraph — array of step IDs to traverse. Omit for root graph."
+    )]
+    pub path: Option<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RemoveInputSchemaFieldParams {
+    #[schemars(description = "Workflow ID")]
+    pub workflow_id: String,
+    #[schemars(description = "Input field name to remove")]
+    pub field_name: String,
+    #[schemars(
+        description = "Path to nested subgraph — array of step IDs to traverse. Omit for root graph."
+    )]
+    pub path: Option<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct GetOutputSchemaParams {
+    #[schemars(description = "Workflow ID")]
+    pub workflow_id: String,
+    #[schemars(
+        description = "Path to nested subgraph — array of step IDs to traverse. Omit for root graph."
+    )]
+    pub path: Option<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct SetOutputSchemaParams {
     #[schemars(description = "Workflow ID")]
     pub workflow_id: String,
@@ -523,6 +707,70 @@ pub struct SetOutputSchemaParams {
         description = "Output schema fields in DSL flat-map format (e.g., {\"result\": {\"type\": \"string\", \"required\": true}})"
     )]
     pub fields: serde_json::Value,
+    #[schemars(
+        description = "Path to nested subgraph — array of step IDs to traverse. Omit for root graph."
+    )]
+    pub path: Option<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct GetWorkflowSliceParams {
+    #[schemars(description = "Workflow ID")]
+    pub workflow_id: String,
+    #[schemars(description = "Center step ID")]
+    pub step_id: String,
+    #[schemars(description = "Number of graph hops around the center step (default 1, max 5)")]
+    pub hops: Option<usize>,
+    #[schemars(
+        description = "If false, return compact step summaries instead of step definitions. Default true."
+    )]
+    pub include_step_definitions: Option<bool>,
+    #[schemars(
+        description = "If false, return full string values inside step definitions. Default true."
+    )]
+    pub compact: Option<bool>,
+    #[schemars(
+        description = "Path to nested subgraph — array of step IDs to traverse. Omit for root graph."
+    )]
+    pub path: Option<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct FindReferencesParams {
+    #[schemars(description = "Workflow ID")]
+    pub workflow_id: String,
+    #[schemars(
+        description = "Reference to find, e.g. data.orderId, variables.mode, steps.fetch.outputs.item"
+    )]
+    pub reference: String,
+    #[schemars(
+        description = "Path to nested subgraph — array of step IDs to traverse. Omit for root graph."
+    )]
+    pub path: Option<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ListUnmappedInputsParams {
+    #[schemars(description = "Workflow ID")]
+    pub workflow_id: String,
+    #[schemars(description = "Optional step ID. Omit to check all Agent steps.")]
+    pub step_id: Option<String>,
+    #[schemars(description = "Include optional unmapped inputs in the report. Default false.")]
+    pub include_optional: Option<bool>,
+    #[schemars(
+        description = "Path to nested subgraph — array of step IDs to traverse. Omit for root graph."
+    )]
+    pub path: Option<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ListVariablesParams {
+    #[schemars(description = "Workflow ID")]
+    pub workflow_id: String,
     #[schemars(
         description = "Path to nested subgraph — array of step IDs to traverse. Omit for root graph."
     )]
@@ -553,6 +801,47 @@ pub struct RemoveVariableParams {
     pub name: String,
     #[schemars(
         description = "Path to nested subgraph — array of step IDs to traverse. Omit for root graph."
+    )]
+    pub path: Option<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct BatchGraphMutation {
+    #[schemars(
+        description = "Operation name. Supported: set_workflow_metadata, add_step, remove_step, update_step, patch_step, connect_steps, disconnect_steps, set_entry_point, set_mapping, remove_mapping, set_input_schema, set_input_schema_field, remove_input_schema_field, set_output_schema, set_variable, remove_variable"
+    )]
+    pub op: String,
+    pub step_id: Option<String>,
+    pub step: Option<serde_json::Value>,
+    pub patches: Option<Vec<PatchStepOp>>,
+    pub from_step: Option<String>,
+    pub to_step: Option<String>,
+    pub label: Option<String>,
+    pub condition: Option<serde_json::Value>,
+    pub priority: Option<i64>,
+    pub input_name: Option<String>,
+    pub from_output: Option<String>,
+    pub from_input: Option<String>,
+    pub from_variable: Option<String>,
+    pub immediate_value: Option<serde_json::Value>,
+    pub fields: Option<serde_json::Value>,
+    pub field_name: Option<String>,
+    pub field: Option<serde_json::Value>,
+    pub name: Option<String>,
+    pub description: Option<String>,
+    pub variable: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ApplyGraphMutationsParams {
+    #[schemars(description = "Workflow ID")]
+    pub workflow_id: String,
+    #[schemars(description = "Batch of graph operations to apply and save once")]
+    pub operations: Vec<BatchGraphMutation>,
+    #[schemars(
+        description = "Path to nested subgraph — array of step IDs to traverse. Omit for root graph. Applies to all operations in this batch."
     )]
     pub path: Option<Vec<String>>,
 }
@@ -608,7 +897,600 @@ pub struct AddAgentStepParams {
     pub path: Option<Vec<String>>,
 }
 
+fn truncate_large_strings(value: &mut serde_json::Value) {
+    const MAX: usize = 512;
+    const PREVIEW: usize = 256;
+
+    fn walk(value: &mut serde_json::Value) {
+        match value {
+            serde_json::Value::String(s) if s.len() > MAX => {
+                let mut cut = PREVIEW.min(s.len());
+                while cut > 0 && !s.is_char_boundary(cut) {
+                    cut -= 1;
+                }
+                *value = serde_json::json!({
+                    "_truncated": true,
+                    "_originalSize": s.len(),
+                    "_preview": &s[..cut],
+                });
+            }
+            serde_json::Value::Array(items) => {
+                for item in items {
+                    walk(item);
+                }
+            }
+            serde_json::Value::Object(map) => {
+                for child in map.values_mut() {
+                    walk(child);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    walk(value);
+}
+
+fn sorted_object_keys(value: Option<&serde_json::Value>) -> Vec<String> {
+    let mut keys: Vec<String> = value
+        .and_then(|v| v.as_object())
+        .map(|o| o.keys().cloned().collect())
+        .unwrap_or_default();
+    keys.sort();
+    keys
+}
+
+fn step_name(step: &serde_json::Value) -> Option<&str> {
+    step.get("name")
+        .or_else(|| step.get("stepName"))
+        .and_then(|v| v.as_str())
+}
+
+fn step_type(step: &serde_json::Value) -> Option<&str> {
+    step.get("stepType").and_then(|v| v.as_str())
+}
+
+fn edge_from(edge: &serde_json::Value) -> Option<&str> {
+    edge.get("fromStep").and_then(|v| v.as_str())
+}
+
+fn edge_to(edge: &serde_json::Value) -> Option<&str> {
+    edge.get("toStep").and_then(|v| v.as_str())
+}
+
+fn edge_label(edge: &serde_json::Value) -> Option<&str> {
+    edge.get("label").and_then(|v| v.as_str())
+}
+
+fn graph_steps(target: &serde_json::Value) -> Option<&serde_json::Map<String, serde_json::Value>> {
+    target.get("steps").and_then(|s| s.as_object())
+}
+
+fn graph_edges(target: &serde_json::Value) -> Vec<serde_json::Value> {
+    target
+        .get("executionPlan")
+        .and_then(|p| p.as_array())
+        .cloned()
+        .unwrap_or_default()
+}
+
+fn step_edge_counts(
+    edges: &[serde_json::Value],
+    step_id: &str,
+) -> (usize, usize, Vec<String>, Vec<String>) {
+    let mut incoming = Vec::new();
+    let mut outgoing = Vec::new();
+    for edge in edges {
+        if edge_to(edge) == Some(step_id)
+            && let Some(from) = edge_from(edge)
+        {
+            incoming.push(from.to_string());
+        }
+        if edge_from(edge) == Some(step_id)
+            && let Some(to) = edge_to(edge)
+        {
+            outgoing.push(to.to_string());
+        }
+    }
+    incoming.sort();
+    outgoing.sort();
+    (incoming.len(), outgoing.len(), incoming, outgoing)
+}
+
+fn step_summary(
+    step_id: &str,
+    step: &serde_json::Value,
+    edges: &[serde_json::Value],
+) -> serde_json::Value {
+    let (incoming_count, outgoing_count, incoming, outgoing) = step_edge_counts(edges, step_id);
+    serde_json::json!({
+        "id": step_id,
+        "name": step_name(step),
+        "stepType": step_type(step),
+        "agentId": step.get("agentId"),
+        "capabilityId": step.get("capabilityId"),
+        "incomingCount": incoming_count,
+        "outgoingCount": outgoing_count,
+        "connectedFrom": incoming,
+        "connectedTo": outgoing,
+    })
+}
+
+fn edge_matches_filters(
+    edge: &serde_json::Value,
+    from_step: Option<&str>,
+    to_step: Option<&str>,
+    label: Option<&str>,
+) -> bool {
+    if let Some(filter) = from_step
+        && edge_from(edge) != Some(filter)
+    {
+        return false;
+    }
+    if let Some(filter) = to_step
+        && edge_to(edge) != Some(filter)
+    {
+        return false;
+    }
+    if let Some(filter) = label
+        && edge_label(edge) != Some(filter)
+    {
+        return false;
+    }
+    true
+}
+
+fn json_pointer_escape(segment: &str) -> String {
+    segment.replace('~', "~0").replace('/', "~1")
+}
+
+fn collect_reference_locations(
+    value: &serde_json::Value,
+    reference: &str,
+    path: &str,
+    locations: &mut Vec<serde_json::Value>,
+) {
+    match value {
+        serde_json::Value::String(s) => {
+            if s.contains(reference) {
+                locations.push(serde_json::json!({
+                    "path": path,
+                    "value": s,
+                }));
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for (idx, item) in items.iter().enumerate() {
+                collect_reference_locations(
+                    item,
+                    reference,
+                    &format!("{}/{}", path, idx),
+                    locations,
+                );
+            }
+        }
+        serde_json::Value::Object(map) => {
+            for (key, child) in map {
+                collect_reference_locations(
+                    child,
+                    reference,
+                    &format!("{}/{}", path, json_pointer_escape(key)),
+                    locations,
+                );
+            }
+        }
+        _ => {}
+    }
+}
+
+async fn expected_inputs_for_step(
+    server: &SmoMcpServer,
+    step: &serde_json::Value,
+) -> Result<Vec<serde_json::Value>, rmcp::ErrorData> {
+    if step_type(step) != Some("Agent") {
+        return Ok(Vec::new());
+    }
+
+    let Some(agent_id) = step.get("agentId").and_then(|v| v.as_str()) else {
+        return Ok(Vec::new());
+    };
+    let Some(capability_id) = step.get("capabilityId").and_then(|v| v.as_str()) else {
+        return Ok(Vec::new());
+    };
+
+    let cap_result = api_get(
+        server,
+        &format!(
+            "/api/runtime/agents/{}/capabilities/{}",
+            agent_id, capability_id
+        ),
+    )
+    .await?;
+
+    Ok(cap_result
+        .get("inputs")
+        .and_then(|inputs| inputs.as_array())
+        .cloned()
+        .unwrap_or_default())
+}
+
+fn missing_inputs_report(
+    step_id: &str,
+    step: &serde_json::Value,
+    expected_inputs: &[serde_json::Value],
+    include_optional: bool,
+) -> serde_json::Value {
+    let mapping = step.get("inputMapping").and_then(|m| m.as_object());
+    let mut missing = Vec::new();
+    let mut mapped = Vec::new();
+
+    if let Some(mapping) = mapping {
+        mapped = mapping.keys().cloned().collect();
+        mapped.sort();
+    }
+
+    for field in expected_inputs {
+        let Some(name) = field.get("name").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        if name == "_connection" {
+            continue;
+        }
+        let required = field
+            .get("required")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        if !required && !include_optional {
+            continue;
+        }
+        let is_mapped = mapping.is_some_and(|m| m.contains_key(name));
+        if !is_mapped {
+            missing.push(serde_json::json!({
+                "name": name,
+                "required": required,
+                "type": field.get("type"),
+                "description": field.get("description"),
+            }));
+        }
+    }
+
+    serde_json::json!({
+        "stepId": step_id,
+        "stepName": step_name(step),
+        "agentId": step.get("agentId"),
+        "capabilityId": step.get("capabilityId"),
+        "mappedInputs": mapped,
+        "missingInputs": missing,
+        "missingCount": missing.len(),
+    })
+}
+
+fn required_string(
+    value: Option<&String>,
+    field: &str,
+    op: &str,
+) -> Result<String, rmcp::ErrorData> {
+    value
+        .cloned()
+        .filter(|s| !s.trim().is_empty())
+        .ok_or_else(|| err(format!("Operation '{}' requires '{}'", op, field)))
+}
+
+fn required_value(
+    value: Option<&serde_json::Value>,
+    field: &str,
+    op: &str,
+) -> Result<serde_json::Value, rmcp::ErrorData> {
+    value
+        .cloned()
+        .ok_or_else(|| err(format!("Operation '{}' requires '{}'", op, field)))
+}
+
 // ===== Tool Implementations =====
+
+pub async fn summarize_workflow(
+    server: &SmoMcpServer,
+    params: SummarizeWorkflowParams,
+) -> Result<CallToolResult, rmcp::ErrorData> {
+    let (mut graph, latest, current) = fetch_latest_graph(server, &params.workflow_id).await?;
+    let path = params.path.unwrap_or_default();
+    let target = resolve_graph_mut(&mut graph, &path)?;
+
+    let steps = graph_steps(target);
+    let edges = graph_edges(target);
+    let mut step_type_counts: HashMap<String, usize> = HashMap::new();
+    if let Some(steps) = steps {
+        for step in steps.values() {
+            let step_type = step_type(step).unwrap_or("unknown").to_string();
+            *step_type_counts.entry(step_type).or_default() += 1;
+        }
+    }
+
+    let mut step_type_counts: Vec<_> = step_type_counts.into_iter().collect();
+    step_type_counts.sort_by(|a, b| a.0.cmp(&b.0));
+    let step_type_counts: Vec<serde_json::Value> = step_type_counts
+        .into_iter()
+        .map(|(step_type, count)| serde_json::json!({ "stepType": step_type, "count": count }))
+        .collect();
+
+    let step_ids: HashSet<String> = steps
+        .map(|steps| steps.keys().cloned().collect())
+        .unwrap_or_default();
+    let entry_point = target.get("entryPoint").and_then(|v| v.as_str());
+    let mut warnings = Vec::new();
+    if entry_point.is_none() {
+        warnings.push("Missing entryPoint".to_string());
+    } else if let Some(entry) = entry_point
+        && !step_ids.contains(entry)
+    {
+        warnings.push(format!("entryPoint '{}' does not exist in steps", entry));
+    }
+
+    for edge in &edges {
+        if let Some(from) = edge_from(edge)
+            && !step_ids.contains(from)
+        {
+            warnings.push(format!("Edge references missing fromStep '{}'", from));
+        }
+        if let Some(to) = edge_to(edge)
+            && !step_ids.contains(to)
+        {
+            warnings.push(format!("Edge references missing toStep '{}'", to));
+        }
+    }
+
+    json_result(serde_json::json!({
+        "workflowId": params.workflow_id,
+        "version": {
+            "latest": latest,
+            "current": current,
+            "hasDraft": latest != current,
+        },
+        "path": path,
+        "metadata": {
+            "name": target.get("name"),
+            "description": target.get("description"),
+            "entryPoint": entry_point,
+        },
+        "counts": {
+            "steps": step_ids.len(),
+            "edges": edges.len(),
+            "inputFields": sorted_object_keys(target.get("inputSchema")).len(),
+            "outputFields": sorted_object_keys(target.get("outputSchema")).len(),
+            "variables": sorted_object_keys(target.get("variables")).len(),
+        },
+        "stepTypeCounts": step_type_counts,
+        "inputFields": sorted_object_keys(target.get("inputSchema")),
+        "outputFields": sorted_object_keys(target.get("outputSchema")),
+        "variables": sorted_object_keys(target.get("variables")),
+        "warnings": warnings,
+    }))
+}
+
+pub async fn get_workflow_metadata(
+    server: &SmoMcpServer,
+    params: GetWorkflowMetadataParams,
+) -> Result<CallToolResult, rmcp::ErrorData> {
+    let (mut graph, latest, current) = fetch_latest_graph(server, &params.workflow_id).await?;
+    let path = params.path.unwrap_or_default();
+    let target = resolve_graph_mut(&mut graph, &path)?;
+
+    json_result(serde_json::json!({
+        "workflowId": params.workflow_id,
+        "version": {
+            "latest": latest,
+            "current": current,
+            "hasDraft": latest != current,
+        },
+        "path": path,
+        "name": target.get("name"),
+        "description": target.get("description"),
+        "entryPoint": target.get("entryPoint"),
+    }))
+}
+
+pub async fn list_steps(
+    server: &SmoMcpServer,
+    params: ListStepsParams,
+) -> Result<CallToolResult, rmcp::ErrorData> {
+    let (mut graph, _latest, _current) = fetch_latest_graph(server, &params.workflow_id).await?;
+    let path = params.path.unwrap_or_default();
+    let target = resolve_graph_mut(&mut graph, &path)?;
+    let edges = graph_edges(target);
+    let needle = params.name_contains.as_ref().map(|s| s.to_lowercase());
+
+    let mut steps: Vec<serde_json::Value> = graph_steps(target)
+        .map(|steps| {
+            steps
+                .iter()
+                .filter(|(step_id, step)| {
+                    if let Some(ref step_type_filter) = params.step_type
+                        && step_type(step) != Some(step_type_filter.as_str())
+                    {
+                        return false;
+                    }
+                    if let Some(ref needle) = needle {
+                        let id_match = step_id.to_lowercase().contains(needle);
+                        let name_match = step_name(step)
+                            .map(|name| name.to_lowercase().contains(needle))
+                            .unwrap_or(false);
+                        return id_match || name_match;
+                    }
+                    true
+                })
+                .map(|(step_id, step)| step_summary(step_id, step, &edges))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    steps.sort_by(|a, b| {
+        a.get("id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .cmp(b.get("id").and_then(|v| v.as_str()).unwrap_or(""))
+    });
+
+    let total = steps.len();
+    let offset = params.offset.unwrap_or(0);
+    let limit = params.limit.unwrap_or(100).min(500);
+    let page: Vec<_> = steps.into_iter().skip(offset).take(limit).collect();
+
+    json_result(serde_json::json!({
+        "workflowId": params.workflow_id,
+        "path": path,
+        "steps": page,
+        "total": total,
+        "offset": offset,
+        "limit": limit,
+    }))
+}
+
+pub async fn get_step(
+    server: &SmoMcpServer,
+    params: GetStepParams,
+) -> Result<CallToolResult, rmcp::ErrorData> {
+    let (mut graph, _latest, _current) = fetch_latest_graph(server, &params.workflow_id).await?;
+    let path = params.path.unwrap_or_default();
+    let target = resolve_graph_mut(&mut graph, &path)?;
+    let edges = graph_edges(target);
+
+    let mut step = graph_steps(target)
+        .and_then(|steps| steps.get(&params.step_id))
+        .cloned()
+        .ok_or_else(|| err(format!("Step '{}' not found in graph", params.step_id)))?;
+    if params.compact != Some(false) {
+        truncate_large_strings(&mut step);
+    }
+
+    let incoming: Vec<_> = edges
+        .iter()
+        .filter(|edge| edge_to(edge) == Some(params.step_id.as_str()))
+        .cloned()
+        .collect();
+    let outgoing: Vec<_> = edges
+        .iter()
+        .filter(|edge| edge_from(edge) == Some(params.step_id.as_str()))
+        .cloned()
+        .collect();
+
+    json_result(serde_json::json!({
+        "workflowId": params.workflow_id,
+        "path": path,
+        "stepId": params.step_id,
+        "step": step,
+        "incomingEdges": incoming,
+        "outgoingEdges": outgoing,
+    }))
+}
+
+pub async fn list_edges(
+    server: &SmoMcpServer,
+    params: ListEdgesParams,
+) -> Result<CallToolResult, rmcp::ErrorData> {
+    let (mut graph, _latest, _current) = fetch_latest_graph(server, &params.workflow_id).await?;
+    let path = params.path.unwrap_or_default();
+    let target = resolve_graph_mut(&mut graph, &path)?;
+
+    let edges: Vec<_> = graph_edges(target)
+        .into_iter()
+        .filter(|edge| {
+            edge_matches_filters(
+                edge,
+                params.from_step.as_deref(),
+                params.to_step.as_deref(),
+                params.label.as_deref(),
+            )
+        })
+        .collect();
+
+    let count = edges.len();
+    json_result(serde_json::json!({
+        "workflowId": params.workflow_id,
+        "path": path,
+        "edges": edges,
+        "count": count,
+    }))
+}
+
+pub async fn get_step_edges(
+    server: &SmoMcpServer,
+    params: GetStepEdgesParams,
+) -> Result<CallToolResult, rmcp::ErrorData> {
+    let (mut graph, _latest, _current) = fetch_latest_graph(server, &params.workflow_id).await?;
+    let path = params.path.unwrap_or_default();
+    let target = resolve_graph_mut(&mut graph, &path)?;
+    let direction = params.direction.as_deref().unwrap_or("both");
+
+    if !graph_steps(target).is_some_and(|steps| steps.contains_key(&params.step_id)) {
+        return Err(err(format!("Step '{}' not found in graph", params.step_id)));
+    }
+
+    let mut incoming = Vec::new();
+    let mut outgoing = Vec::new();
+    for edge in graph_edges(target) {
+        if edge_to(&edge) == Some(params.step_id.as_str()) {
+            incoming.push(edge.clone());
+        }
+        if edge_from(&edge) == Some(params.step_id.as_str()) {
+            outgoing.push(edge);
+        }
+    }
+
+    match direction {
+        "incoming" => outgoing.clear(),
+        "outgoing" => incoming.clear(),
+        "both" => {}
+        other => {
+            return Err(err(format!(
+                "Invalid direction '{}'. Use incoming, outgoing, or both.",
+                other
+            )));
+        }
+    }
+
+    json_result(serde_json::json!({
+        "workflowId": params.workflow_id,
+        "path": path,
+        "stepId": params.step_id,
+        "incomingEdges": incoming,
+        "outgoingEdges": outgoing,
+    }))
+}
+
+pub async fn get_step_mappings(
+    server: &SmoMcpServer,
+    params: GetStepMappingsParams,
+) -> Result<CallToolResult, rmcp::ErrorData> {
+    let (mut graph, _latest, _current) = fetch_latest_graph(server, &params.workflow_id).await?;
+    let path = params.path.unwrap_or_default();
+    let target = resolve_graph_mut(&mut graph, &path)?;
+
+    let step = graph_steps(target)
+        .and_then(|steps| steps.get(&params.step_id))
+        .cloned()
+        .ok_or_else(|| err(format!("Step '{}' not found in graph", params.step_id)))?;
+    let input_mapping = step
+        .get("inputMapping")
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!({}));
+    let expected_inputs = if params.include_expected_inputs != Some(false) {
+        expected_inputs_for_step(server, &step).await?
+    } else {
+        Vec::new()
+    };
+
+    json_result(serde_json::json!({
+        "workflowId": params.workflow_id,
+        "path": path,
+        "stepId": params.step_id,
+        "stepName": step_name(&step),
+        "stepType": step_type(&step),
+        "agentId": step.get("agentId"),
+        "capabilityId": step.get("capabilityId"),
+        "inputMapping": input_mapping,
+        "expectedInputs": expected_inputs,
+    }))
+}
 
 pub async fn add_step(
     server: &SmoMcpServer,
@@ -631,7 +1513,8 @@ pub async fn add_step(
         return Err(err("Found 'capability' — use 'capabilityId' instead"));
     }
 
-    let (mut graph, latest, current) = fetch_latest_graph(server, &params.workflow_id).await?;
+    let (_guard, mut graph, latest, current) =
+        fetch_latest_graph_locked(server, &params.workflow_id).await?;
     let path = params.path.unwrap_or_default();
     let target = resolve_graph_mut(&mut graph, &path)?;
 
@@ -680,7 +1563,8 @@ pub async fn remove_step(
     server: &SmoMcpServer,
     params: RemoveStepParams,
 ) -> Result<CallToolResult, rmcp::ErrorData> {
-    let (mut graph, latest, current) = fetch_latest_graph(server, &params.workflow_id).await?;
+    let (_guard, mut graph, latest, current) =
+        fetch_latest_graph_locked(server, &params.workflow_id).await?;
     let path = params.path.unwrap_or_default();
     let target = resolve_graph_mut(&mut graph, &path)?;
 
@@ -742,7 +1626,8 @@ pub async fn update_step(
         return Err(err("Step definition must include 'stepType' field"));
     }
 
-    let (mut graph, latest, current) = fetch_latest_graph(server, &params.workflow_id).await?;
+    let (_guard, mut graph, latest, current) =
+        fetch_latest_graph_locked(server, &params.workflow_id).await?;
     let path = params.path.unwrap_or_default();
     let target = resolve_graph_mut(&mut graph, &path)?;
 
@@ -896,7 +1781,8 @@ pub async fn patch_step(
         return Err(err("patches must not be empty"));
     }
 
-    let (mut graph, latest, current) = fetch_latest_graph(server, &params.workflow_id).await?;
+    let (_guard, mut graph, latest, current) =
+        fetch_latest_graph_locked(server, &params.workflow_id).await?;
     let path = params.path.unwrap_or_default();
     let target = resolve_graph_mut(&mut graph, &path)?;
 
@@ -935,7 +1821,8 @@ pub async fn connect_steps(
         }
     }
 
-    let (mut graph, latest, current) = fetch_latest_graph(server, &params.workflow_id).await?;
+    let (_guard, mut graph, latest, current) =
+        fetch_latest_graph_locked(server, &params.workflow_id).await?;
     let path = params.path.unwrap_or_default();
     let target = resolve_graph_mut(&mut graph, &path)?;
 
@@ -1051,7 +1938,8 @@ pub async fn disconnect_steps(
     server: &SmoMcpServer,
     params: DisconnectStepsParams,
 ) -> Result<CallToolResult, rmcp::ErrorData> {
-    let (mut graph, latest, current) = fetch_latest_graph(server, &params.workflow_id).await?;
+    let (_guard, mut graph, latest, current) =
+        fetch_latest_graph_locked(server, &params.workflow_id).await?;
     let path = params.path.unwrap_or_default();
     let target = resolve_graph_mut(&mut graph, &path)?;
 
@@ -1102,7 +1990,8 @@ pub async fn set_entry_point(
     server: &SmoMcpServer,
     params: SetEntryPointParams,
 ) -> Result<CallToolResult, rmcp::ErrorData> {
-    let (mut graph, latest, current) = fetch_latest_graph(server, &params.workflow_id).await?;
+    let (_guard, mut graph, latest, current) =
+        fetch_latest_graph_locked(server, &params.workflow_id).await?;
     let path = params.path.unwrap_or_default();
     let target = resolve_graph_mut(&mut graph, &path)?;
 
@@ -1162,7 +2051,8 @@ pub async fn set_mapping(
         ));
     };
 
-    let (mut graph, latest, current) = fetch_latest_graph(server, &params.workflow_id).await?;
+    let (_guard, mut graph, latest, current) =
+        fetch_latest_graph_locked(server, &params.workflow_id).await?;
     let path = params.path.unwrap_or_default();
     let target = resolve_graph_mut(&mut graph, &path)?;
 
@@ -1264,7 +2154,8 @@ pub async fn remove_mapping(
     server: &SmoMcpServer,
     params: RemoveMappingParams,
 ) -> Result<CallToolResult, rmcp::ErrorData> {
-    let (mut graph, latest, current) = fetch_latest_graph(server, &params.workflow_id).await?;
+    let (_guard, mut graph, latest, current) =
+        fetch_latest_graph_locked(server, &params.workflow_id).await?;
     let path = params.path.unwrap_or_default();
     let target = resolve_graph_mut(&mut graph, &path)?;
 
@@ -1303,11 +2194,37 @@ pub async fn remove_mapping(
     }))
 }
 
+pub async fn get_input_schema(
+    server: &SmoMcpServer,
+    params: GetInputSchemaParams,
+) -> Result<CallToolResult, rmcp::ErrorData> {
+    let (mut graph, _latest, _current) = fetch_latest_graph(server, &params.workflow_id).await?;
+    let path = params.path.unwrap_or_default();
+    let target = resolve_graph_mut(&mut graph, &path)?;
+
+    let input_schema = target
+        .get("inputSchema")
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!({}));
+    let count = input_schema
+        .as_object()
+        .map(|fields| fields.len())
+        .unwrap_or(0);
+
+    json_result(serde_json::json!({
+        "workflowId": params.workflow_id,
+        "path": path,
+        "inputSchema": input_schema,
+        "count": count,
+    }))
+}
+
 pub async fn set_input_schema(
     server: &SmoMcpServer,
     params: SetInputSchemaParams,
 ) -> Result<CallToolResult, rmcp::ErrorData> {
-    let (mut graph, latest, current) = fetch_latest_graph(server, &params.workflow_id).await?;
+    let (_guard, mut graph, latest, current) =
+        fetch_latest_graph_locked(server, &params.workflow_id).await?;
     let path = params.path.unwrap_or_default();
     let target = resolve_graph_mut(&mut graph, &path)?;
 
@@ -1323,11 +2240,99 @@ pub async fn set_input_schema(
     }))
 }
 
+pub async fn set_input_schema_field(
+    server: &SmoMcpServer,
+    params: SetInputSchemaFieldParams,
+) -> Result<CallToolResult, rmcp::ErrorData> {
+    if params.field_name.trim().is_empty() {
+        return Err(err("Input field name must not be empty"));
+    }
+
+    let (_guard, mut graph, latest, current) =
+        fetch_latest_graph_locked(server, &params.workflow_id).await?;
+    let path = params.path.unwrap_or_default();
+    let target = resolve_graph_mut(&mut graph, &path)?;
+
+    if target.get("inputSchema").is_none() || !target["inputSchema"].is_object() {
+        target["inputSchema"] = serde_json::json!({});
+    }
+
+    target["inputSchema"][&params.field_name] = params.field;
+
+    let (version, new_version) =
+        save_graph(server, &params.workflow_id, graph, latest, current).await?;
+    json_result(serde_json::json!({
+        "success": true,
+        "workflowId": params.workflow_id,
+        "version": version,
+        "newVersion": new_version,
+        "field": params.field_name,
+    }))
+}
+
+pub async fn remove_input_schema_field(
+    server: &SmoMcpServer,
+    params: RemoveInputSchemaFieldParams,
+) -> Result<CallToolResult, rmcp::ErrorData> {
+    let (_guard, mut graph, latest, current) =
+        fetch_latest_graph_locked(server, &params.workflow_id).await?;
+    let path = params.path.unwrap_or_default();
+    let target = resolve_graph_mut(&mut graph, &path)?;
+
+    let input_schema = target
+        .get_mut("inputSchema")
+        .and_then(|schema| schema.as_object_mut())
+        .ok_or_else(|| err(format!("Input field '{}' not found", params.field_name)))?;
+
+    if input_schema.remove(&params.field_name).is_none() {
+        return Err(err(format!(
+            "Input field '{}' not found",
+            params.field_name
+        )));
+    }
+
+    let (version, new_version) =
+        save_graph(server, &params.workflow_id, graph, latest, current).await?;
+    json_result(serde_json::json!({
+        "success": true,
+        "workflowId": params.workflow_id,
+        "version": version,
+        "newVersion": new_version,
+        "removedField": params.field_name,
+    }))
+}
+
+pub async fn get_output_schema(
+    server: &SmoMcpServer,
+    params: GetOutputSchemaParams,
+) -> Result<CallToolResult, rmcp::ErrorData> {
+    let (mut graph, _latest, _current) = fetch_latest_graph(server, &params.workflow_id).await?;
+    let path = params.path.unwrap_or_default();
+    let target = resolve_graph_mut(&mut graph, &path)?;
+
+    let output_schema = target
+        .get("outputSchema")
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!({}));
+    let count = output_schema
+        .as_object()
+        .map(|fields| fields.len())
+        .unwrap_or(0);
+
+    json_result(serde_json::json!({
+        "workflowId": params.workflow_id,
+        "path": path,
+        "outputSchema": output_schema,
+        "count": count,
+    }))
+}
+
 pub async fn set_output_schema(
     server: &SmoMcpServer,
     params: SetOutputSchemaParams,
 ) -> Result<CallToolResult, rmcp::ErrorData> {
-    let (mut graph, latest, current) = fetch_latest_graph(server, &params.workflow_id).await?;
+    let (_guard, mut graph, latest, current) =
+        fetch_latest_graph_locked(server, &params.workflow_id).await?;
     let path = params.path.unwrap_or_default();
     let target = resolve_graph_mut(&mut graph, &path)?;
 
@@ -1343,11 +2348,247 @@ pub async fn set_output_schema(
     }))
 }
 
+pub async fn list_variables(
+    server: &SmoMcpServer,
+    params: ListVariablesParams,
+) -> Result<CallToolResult, rmcp::ErrorData> {
+    let (mut graph, _latest, _current) = fetch_latest_graph(server, &params.workflow_id).await?;
+    let path = params.path.unwrap_or_default();
+    let target = resolve_graph_mut(&mut graph, &path)?;
+
+    let variables = target
+        .get("variables")
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!({}));
+    let count = variables
+        .as_object()
+        .map(|fields| fields.len())
+        .unwrap_or(0);
+
+    json_result(serde_json::json!({
+        "workflowId": params.workflow_id,
+        "path": path,
+        "variables": variables,
+        "count": count,
+    }))
+}
+
+pub async fn get_workflow_slice(
+    server: &SmoMcpServer,
+    params: GetWorkflowSliceParams,
+) -> Result<CallToolResult, rmcp::ErrorData> {
+    let (mut graph, _latest, _current) = fetch_latest_graph(server, &params.workflow_id).await?;
+    let path = params.path.unwrap_or_default();
+    let target = resolve_graph_mut(&mut graph, &path)?;
+    let steps = graph_steps(target).ok_or_else(|| err("No steps in graph"))?;
+    if !steps.contains_key(&params.step_id) {
+        return Err(err(format!("Step '{}' not found in graph", params.step_id)));
+    }
+
+    let hops = params.hops.unwrap_or(1).min(5);
+    let edges = graph_edges(target);
+    let mut included: HashSet<String> = HashSet::new();
+    let mut queue = VecDeque::new();
+    included.insert(params.step_id.clone());
+    queue.push_back((params.step_id.clone(), 0usize));
+
+    while let Some((step_id, depth)) = queue.pop_front() {
+        if depth >= hops {
+            continue;
+        }
+        for edge in &edges {
+            let neighbor = if edge_from(edge) == Some(step_id.as_str()) {
+                edge_to(edge)
+            } else if edge_to(edge) == Some(step_id.as_str()) {
+                edge_from(edge)
+            } else {
+                None
+            };
+            if let Some(neighbor) = neighbor
+                && steps.contains_key(neighbor)
+                && included.insert(neighbor.to_string())
+            {
+                queue.push_back((neighbor.to_string(), depth + 1));
+            }
+        }
+    }
+
+    let mut included_ids: Vec<String> = included.iter().cloned().collect();
+    included_ids.sort();
+    let included_edges: Vec<_> = edges
+        .iter()
+        .filter(|edge| {
+            edge_from(edge).is_some_and(|from| included.contains(from))
+                && edge_to(edge).is_some_and(|to| included.contains(to))
+        })
+        .cloned()
+        .collect();
+    let boundary_edges: Vec<_> = edges
+        .iter()
+        .filter(|edge| {
+            let from_in = edge_from(edge).is_some_and(|from| included.contains(from));
+            let to_in = edge_to(edge).is_some_and(|to| included.contains(to));
+            from_in ^ to_in
+        })
+        .cloned()
+        .collect();
+
+    let steps_value = if params.include_step_definitions != Some(false) {
+        let mut step_defs = serde_json::Map::new();
+        for step_id in &included_ids {
+            if let Some(step) = steps.get(step_id) {
+                let mut step = step.clone();
+                if params.compact != Some(false) {
+                    truncate_large_strings(&mut step);
+                }
+                step_defs.insert(step_id.clone(), step);
+            }
+        }
+        serde_json::Value::Object(step_defs)
+    } else {
+        serde_json::Value::Array(
+            included_ids
+                .iter()
+                .filter_map(|step_id| {
+                    steps
+                        .get(step_id)
+                        .map(|step| step_summary(step_id, step, &edges))
+                })
+                .collect(),
+        )
+    };
+
+    json_result(serde_json::json!({
+        "workflowId": params.workflow_id,
+        "path": path,
+        "centerStepId": params.step_id,
+        "hops": hops,
+        "stepIds": included_ids,
+        "steps": steps_value,
+        "edges": included_edges,
+        "boundaryEdges": boundary_edges,
+    }))
+}
+
+pub async fn find_references(
+    server: &SmoMcpServer,
+    params: FindReferencesParams,
+) -> Result<CallToolResult, rmcp::ErrorData> {
+    if params.reference.trim().is_empty() {
+        return Err(err("reference must not be empty"));
+    }
+
+    let (mut graph, _latest, _current) = fetch_latest_graph(server, &params.workflow_id).await?;
+    let path = params.path.unwrap_or_default();
+    let target = resolve_graph_mut(&mut graph, &path)?;
+
+    let mut hits = Vec::new();
+    if let Some(steps) = graph_steps(target) {
+        for (step_id, step) in steps {
+            let mut locations = Vec::new();
+            collect_reference_locations(step, &params.reference, "", &mut locations);
+            if !locations.is_empty() {
+                hits.push(serde_json::json!({
+                    "scope": "step",
+                    "stepId": step_id,
+                    "stepName": step_name(step),
+                    "stepType": step_type(step),
+                    "locations": locations,
+                }));
+            }
+        }
+    }
+
+    for (scope, value) in [
+        ("inputSchema", target.get("inputSchema")),
+        ("outputSchema", target.get("outputSchema")),
+        ("variables", target.get("variables")),
+        ("executionPlan", target.get("executionPlan")),
+    ] {
+        if let Some(value) = value {
+            let mut locations = Vec::new();
+            collect_reference_locations(value, &params.reference, "", &mut locations);
+            if !locations.is_empty() {
+                hits.push(serde_json::json!({
+                    "scope": scope,
+                    "locations": locations,
+                }));
+            }
+        }
+    }
+
+    let count = hits.len();
+    json_result(serde_json::json!({
+        "workflowId": params.workflow_id,
+        "path": path,
+        "reference": params.reference,
+        "hits": hits,
+        "count": count,
+    }))
+}
+
+pub async fn list_unmapped_inputs(
+    server: &SmoMcpServer,
+    params: ListUnmappedInputsParams,
+) -> Result<CallToolResult, rmcp::ErrorData> {
+    let (mut graph, _latest, _current) = fetch_latest_graph(server, &params.workflow_id).await?;
+    let path = params.path.unwrap_or_default();
+    let target = resolve_graph_mut(&mut graph, &path)?;
+    let steps = graph_steps(target).ok_or_else(|| err("No steps in graph"))?;
+    let include_optional = params.include_optional.unwrap_or(false);
+
+    let mut reports = Vec::new();
+    for (step_id, step) in steps {
+        if let Some(filter) = &params.step_id
+            && filter != step_id
+        {
+            continue;
+        }
+        if step_type(step) != Some("Agent") {
+            continue;
+        }
+        let expected = expected_inputs_for_step(server, step).await?;
+        reports.push(missing_inputs_report(
+            step_id,
+            step,
+            &expected,
+            include_optional,
+        ));
+    }
+
+    if let Some(step_id) = &params.step_id
+        && reports.is_empty()
+        && !steps.contains_key(step_id)
+    {
+        return Err(err(format!("Step '{}' not found in graph", step_id)));
+    }
+
+    let missing_count: usize = reports
+        .iter()
+        .map(|report| {
+            report
+                .get("missingCount")
+                .and_then(|count| count.as_u64())
+                .unwrap_or(0) as usize
+        })
+        .sum();
+    let steps_checked = reports.len();
+
+    json_result(serde_json::json!({
+        "workflowId": params.workflow_id,
+        "path": path,
+        "reports": reports,
+        "stepsChecked": steps_checked,
+        "missingCount": missing_count,
+    }))
+}
+
 pub async fn set_variable(
     server: &SmoMcpServer,
     params: SetVariableParams,
 ) -> Result<CallToolResult, rmcp::ErrorData> {
-    let (mut graph, latest, current) = fetch_latest_graph(server, &params.workflow_id).await?;
+    let (_guard, mut graph, latest, current) =
+        fetch_latest_graph_locked(server, &params.workflow_id).await?;
     let path = params.path.unwrap_or_default();
     let target = resolve_graph_mut(&mut graph, &path)?;
 
@@ -1539,7 +2780,8 @@ pub async fn set_workflow_metadata(
         ));
     }
 
-    let (mut graph, latest, current) = fetch_latest_graph(server, &params.workflow_id).await?;
+    let (_guard, mut graph, latest, current) =
+        fetch_latest_graph_locked(server, &params.workflow_id).await?;
     let path = params.path.unwrap_or_default();
     let target = resolve_graph_mut(&mut graph, &path)?;
 
@@ -1677,7 +2919,8 @@ pub async fn add_agent_step(
     }
 
     // Add the step
-    let (mut graph, latest, current) = fetch_latest_graph(server, &params.workflow_id).await?;
+    let (_guard, mut graph, latest, current) =
+        fetch_latest_graph_locked(server, &params.workflow_id).await?;
     let path = params.path.clone().unwrap_or_default();
     let target = resolve_graph_mut(&mut graph, &path)?;
 
@@ -1768,7 +3011,8 @@ pub async fn remove_variable(
     server: &SmoMcpServer,
     params: RemoveVariableParams,
 ) -> Result<CallToolResult, rmcp::ErrorData> {
-    let (mut graph, latest, current) = fetch_latest_graph(server, &params.workflow_id).await?;
+    let (_guard, mut graph, latest, current) =
+        fetch_latest_graph_locked(server, &params.workflow_id).await?;
     let path = params.path.unwrap_or_default();
     let target = resolve_graph_mut(&mut graph, &path)?;
 
@@ -1789,6 +3033,454 @@ pub async fn remove_variable(
         "version": version,
         "newVersion": new_version,
         "removedVariable": params.name,
+    }))
+}
+
+pub async fn apply_graph_mutations(
+    server: &SmoMcpServer,
+    params: ApplyGraphMutationsParams,
+) -> Result<CallToolResult, rmcp::ErrorData> {
+    if params.operations.is_empty() {
+        return Err(err("operations must not be empty"));
+    }
+
+    let (_guard, mut graph, latest, current) =
+        fetch_latest_graph_locked(server, &params.workflow_id).await?;
+    let path = params.path.unwrap_or_default();
+    let applied = {
+        let target = resolve_graph_mut(&mut graph, &path)?;
+        let mut applied = Vec::new();
+
+        for (index, operation) in params.operations.iter().enumerate() {
+            match operation.op.as_str() {
+                "set_workflow_metadata" => {
+                    if operation.name.is_none() && operation.description.is_none() {
+                        return Err(err(format!(
+                            "Operation '{}' at index {} requires name and/or description",
+                            operation.op, index
+                        )));
+                    }
+                    if let Some(name) = &operation.name {
+                        target["name"] = serde_json::Value::String(name.clone());
+                    }
+                    if let Some(description) = &operation.description {
+                        target["description"] = serde_json::Value::String(description.clone());
+                    }
+                }
+                "add_step" => {
+                    let step_id =
+                        required_string(operation.step_id.as_ref(), "step_id", &operation.op)?;
+                    let mut step = required_value(operation.step.as_ref(), "step", &operation.op)?;
+                    if step.get("stepType").is_none() {
+                        return Err(err(format!(
+                            "Operation '{}' at index {} step must include 'stepType'",
+                            operation.op, index
+                        )));
+                    }
+                    if step.get("inputMappings").is_some() {
+                        return Err(err(
+                            "Found 'inputMappings' (plural) — use 'inputMapping' (singular)",
+                        ));
+                    }
+                    if target
+                        .get("steps")
+                        .and_then(|steps| steps.as_object())
+                        .is_some_and(|steps| steps.contains_key(&step_id))
+                    {
+                        return Err(err(format!("Step '{}' already exists in graph", step_id)));
+                    }
+                    if target.get("steps").is_none() || !target["steps"].is_object() {
+                        target["steps"] = serde_json::json!({});
+                    }
+                    step["id"] = serde_json::Value::String(step_id.clone());
+                    target["steps"][&step_id] = step;
+                    if target["steps"].as_object().map(|s| s.len()).unwrap_or(0) == 1 {
+                        target["entryPoint"] = serde_json::Value::String(step_id.clone());
+                    }
+                }
+                "remove_step" => {
+                    let step_id =
+                        required_string(operation.step_id.as_ref(), "step_id", &operation.op)?;
+                    let steps = target
+                        .get_mut("steps")
+                        .and_then(|steps| steps.as_object_mut())
+                        .ok_or_else(|| err(format!("Step '{}' not found in graph", step_id)))?;
+                    if steps.remove(&step_id).is_none() {
+                        return Err(err(format!("Step '{}' not found in graph", step_id)));
+                    }
+                    if let Some(plan) = target
+                        .get_mut("executionPlan")
+                        .and_then(|plan| plan.as_array_mut())
+                    {
+                        plan.retain(|edge| {
+                            edge_from(edge) != Some(step_id.as_str())
+                                && edge_to(edge) != Some(step_id.as_str())
+                        });
+                    }
+                }
+                "update_step" => {
+                    let step_id =
+                        required_string(operation.step_id.as_ref(), "step_id", &operation.op)?;
+                    let mut step = required_value(operation.step.as_ref(), "step", &operation.op)?;
+                    if step.get("stepType").is_none() {
+                        return Err(err(format!(
+                            "Operation '{}' at index {} step must include 'stepType'",
+                            operation.op, index
+                        )));
+                    }
+                    let steps = target
+                        .get_mut("steps")
+                        .and_then(|steps| steps.as_object_mut())
+                        .ok_or_else(|| err(format!("Step '{}' not found in graph", step_id)))?;
+                    if !steps.contains_key(&step_id) {
+                        return Err(err(format!("Step '{}' not found in graph", step_id)));
+                    }
+                    step["id"] = serde_json::Value::String(step_id.clone());
+                    steps.insert(step_id, step);
+                }
+                "patch_step" => {
+                    let step_id =
+                        required_string(operation.step_id.as_ref(), "step_id", &operation.op)?;
+                    let patches = operation
+                        .patches
+                        .as_ref()
+                        .filter(|patches| !patches.is_empty())
+                        .ok_or_else(|| {
+                            err("Operation 'patch_step' requires non-empty 'patches'")
+                        })?;
+                    let step = target
+                        .get_mut("steps")
+                        .and_then(|steps| steps.as_object_mut())
+                        .and_then(|steps| steps.get_mut(&step_id))
+                        .ok_or_else(|| err(format!("Step '{}' not found in graph", step_id)))?;
+                    apply_patches(step, patches)?;
+                }
+                "connect_steps" => {
+                    let from_step =
+                        required_string(operation.from_step.as_ref(), "from_step", &operation.op)?;
+                    let to_step =
+                        required_string(operation.to_step.as_ref(), "to_step", &operation.op)?;
+                    let steps = target
+                        .get("steps")
+                        .and_then(|steps| steps.as_object())
+                        .ok_or_else(|| err("No steps in graph"))?;
+                    if !steps.contains_key(&from_step) {
+                        return Err(err(format!("Step '{}' not found in graph", from_step)));
+                    }
+                    if !steps.contains_key(&to_step) {
+                        return Err(err(format!("Step '{}' not found in graph", to_step)));
+                    }
+                    let from_step_type = steps
+                        .get(&from_step)
+                        .and_then(step_type)
+                        .unwrap_or("")
+                        .to_string();
+                    if from_step_type == "Conditional" {
+                        match operation.label.as_deref() {
+                            Some("true") | Some("false") => {}
+                            _ => {
+                                return Err(err(format!(
+                                    "Conditional step '{}' must connect outgoing branches with label 'true' or 'false'",
+                                    from_step
+                                )));
+                            }
+                        }
+                        if operation.condition.is_some() || operation.priority.is_some() {
+                            return Err(err(format!(
+                                "Conditional step '{}' branches must not set edge condition or priority",
+                                from_step
+                            )));
+                        }
+                    }
+                    if target.get("executionPlan").is_none() || !target["executionPlan"].is_array()
+                    {
+                        target["executionPlan"] = serde_json::json!([]);
+                    }
+                    let plan = target["executionPlan"].as_array().unwrap();
+                    if from_step_type == "Conditional"
+                        && let Some(existing) = plan.iter().find(|edge| {
+                            edge_from(edge) == Some(from_step.as_str())
+                                && edge_label(edge) == operation.label.as_deref()
+                        })
+                    {
+                        let existing_target = edge_to(existing).unwrap_or("(unknown)");
+                        return Err(err(format!(
+                            "Conditional step '{}' already has a '{}' branch to '{}'",
+                            from_step,
+                            operation.label.as_deref().unwrap_or("(default)"),
+                            existing_target
+                        )));
+                    }
+                    if plan.iter().any(|edge| {
+                        edge_from(edge) == Some(from_step.as_str())
+                            && edge_to(edge) == Some(to_step.as_str())
+                            && edge_label(edge) == operation.label.as_deref()
+                    }) {
+                        return Err(err(format!(
+                            "Edge from '{}' to '{}' already exists",
+                            from_step, to_step
+                        )));
+                    }
+                    let mut edge = serde_json::json!({
+                        "fromStep": from_step,
+                        "toStep": to_step,
+                    });
+                    if let Some(label) = &operation.label {
+                        edge["label"] = serde_json::Value::String(label.clone());
+                    }
+                    if let Some(condition) = &operation.condition {
+                        edge["condition"] = condition.clone();
+                    }
+                    if let Some(priority) = operation.priority {
+                        edge["priority"] = serde_json::Value::Number(priority.into());
+                    }
+                    target["executionPlan"].as_array_mut().unwrap().push(edge);
+                }
+                "disconnect_steps" => {
+                    let from_step =
+                        required_string(operation.from_step.as_ref(), "from_step", &operation.op)?;
+                    let to_step =
+                        required_string(operation.to_step.as_ref(), "to_step", &operation.op)?;
+                    let plan = target
+                        .get_mut("executionPlan")
+                        .and_then(|plan| plan.as_array_mut())
+                        .ok_or_else(|| {
+                            err(format!(
+                                "No edges found from '{}' to '{}'",
+                                from_step, to_step
+                            ))
+                        })?;
+                    let before = plan.len();
+                    plan.retain(|edge| {
+                        if edge_from(edge) != Some(from_step.as_str())
+                            || edge_to(edge) != Some(to_step.as_str())
+                        {
+                            return true;
+                        }
+                        if let Some(label) = &operation.label {
+                            return edge_label(edge) != Some(label.as_str());
+                        }
+                        false
+                    });
+                    if before == plan.len() {
+                        return Err(err(format!(
+                            "No edges found from '{}' to '{}'",
+                            from_step, to_step
+                        )));
+                    }
+                }
+                "set_entry_point" => {
+                    let step_id =
+                        required_string(operation.step_id.as_ref(), "step_id", &operation.op)?;
+                    if !target
+                        .get("steps")
+                        .and_then(|steps| steps.as_object())
+                        .is_some_and(|steps| steps.contains_key(&step_id))
+                    {
+                        return Err(err(format!("Step '{}' not found in graph", step_id)));
+                    }
+                    target["entryPoint"] = serde_json::Value::String(step_id);
+                }
+                "set_mapping" => {
+                    let step_id =
+                        required_string(operation.step_id.as_ref(), "step_id", &operation.op)?;
+                    let input_name = required_string(
+                        operation.input_name.as_ref(),
+                        "input_name",
+                        &operation.op,
+                    )?;
+                    let source_count = [
+                        operation.from_step.is_some(),
+                        operation.from_input.is_some(),
+                        operation.from_variable.is_some(),
+                        operation.immediate_value.is_some(),
+                    ]
+                    .into_iter()
+                    .filter(|is_set| *is_set)
+                    .count();
+                    if source_count != 1 {
+                        return Err(err(
+                            "Operation 'set_mapping' requires exactly one of from_step+from_output, from_input, from_variable, or immediate_value",
+                        ));
+                    }
+                    let mapping_value = if let Some(from_step) = &operation.from_step {
+                        let from_output = operation.from_output.as_deref().ok_or_else(|| {
+                            err("Operation 'set_mapping' requires from_output when from_step is set")
+                        })?;
+                        if !target
+                            .get("steps")
+                            .and_then(|steps| steps.as_object())
+                            .is_some_and(|steps| steps.contains_key(from_step))
+                        {
+                            return Err(err(format!(
+                                "Referenced step '{}' not found in graph",
+                                from_step
+                            )));
+                        }
+                        serde_json::json!({
+                            "valueType": "reference",
+                            "value": format!("steps.{}.outputs.{}", from_step, from_output)
+                        })
+                    } else if let Some(from_input) = &operation.from_input {
+                        let root_key = from_input.split('.').next().unwrap_or(from_input);
+                        if !target
+                            .get("inputSchema")
+                            .and_then(|schema| schema.as_object())
+                            .is_some_and(|schema| schema.contains_key(root_key))
+                        {
+                            return Err(err(format!(
+                                "Referenced input '{}' not found in inputSchema",
+                                root_key
+                            )));
+                        }
+                        serde_json::json!({
+                            "valueType": "reference",
+                            "value": format!("data.{}", from_input)
+                        })
+                    } else if let Some(from_variable) = &operation.from_variable {
+                        let root_key = from_variable.split('.').next().unwrap_or(from_variable);
+                        if !target
+                            .get("variables")
+                            .and_then(|variables| variables.as_object())
+                            .is_some_and(|variables| variables.contains_key(root_key))
+                        {
+                            return Err(err(format!(
+                                "Referenced variable '{}' not found in variables",
+                                root_key
+                            )));
+                        }
+                        serde_json::json!({
+                            "valueType": "reference",
+                            "value": format!("variables.{}", from_variable)
+                        })
+                    } else if let Some(value) = &operation.immediate_value {
+                        serde_json::json!({
+                            "valueType": "immediate",
+                            "value": value
+                        })
+                    } else {
+                        return Err(err(
+                            "Operation 'set_mapping' requires one of from_step+from_output, from_input, from_variable, or immediate_value",
+                        ));
+                    };
+                    let step = target
+                        .get_mut("steps")
+                        .and_then(|steps| steps.as_object_mut())
+                        .and_then(|steps| steps.get_mut(&step_id))
+                        .ok_or_else(|| err(format!("Step '{}' not found in graph", step_id)))?;
+                    if step.get("inputMapping").is_none() || !step["inputMapping"].is_object() {
+                        step["inputMapping"] = serde_json::json!({});
+                    }
+                    step["inputMapping"][&input_name] = mapping_value;
+                }
+                "remove_mapping" => {
+                    let step_id =
+                        required_string(operation.step_id.as_ref(), "step_id", &operation.op)?;
+                    let input_name = required_string(
+                        operation.input_name.as_ref(),
+                        "input_name",
+                        &operation.op,
+                    )?;
+                    let mapping = target
+                        .get_mut("steps")
+                        .and_then(|steps| steps.as_object_mut())
+                        .and_then(|steps| steps.get_mut(&step_id))
+                        .and_then(|step| step.get_mut("inputMapping"))
+                        .and_then(|mapping| mapping.as_object_mut())
+                        .ok_or_else(|| {
+                            err(format!(
+                                "Input mapping '{}' not found on step '{}'",
+                                input_name, step_id
+                            ))
+                        })?;
+                    if mapping.remove(&input_name).is_none() {
+                        return Err(err(format!(
+                            "Input mapping '{}' not found on step '{}'",
+                            input_name, step_id
+                        )));
+                    }
+                }
+                "set_input_schema" => {
+                    target["inputSchema"] =
+                        required_value(operation.fields.as_ref(), "fields", &operation.op)?;
+                }
+                "set_input_schema_field" => {
+                    let field_name = required_string(
+                        operation.field_name.as_ref(),
+                        "field_name",
+                        &operation.op,
+                    )?;
+                    let field = required_value(operation.field.as_ref(), "field", &operation.op)?;
+                    if target.get("inputSchema").is_none() || !target["inputSchema"].is_object() {
+                        target["inputSchema"] = serde_json::json!({});
+                    }
+                    target["inputSchema"][&field_name] = field;
+                }
+                "remove_input_schema_field" => {
+                    let field_name = required_string(
+                        operation.field_name.as_ref(),
+                        "field_name",
+                        &operation.op,
+                    )?;
+                    let input_schema = target
+                        .get_mut("inputSchema")
+                        .and_then(|schema| schema.as_object_mut())
+                        .ok_or_else(|| err(format!("Input field '{}' not found", field_name)))?;
+                    if input_schema.remove(&field_name).is_none() {
+                        return Err(err(format!("Input field '{}' not found", field_name)));
+                    }
+                }
+                "set_output_schema" => {
+                    target["outputSchema"] =
+                        required_value(operation.fields.as_ref(), "fields", &operation.op)?;
+                }
+                "set_variable" => {
+                    let name = required_string(operation.name.as_ref(), "name", &operation.op)?;
+                    let variable =
+                        required_value(operation.variable.as_ref(), "variable", &operation.op)?;
+                    if target.get("variables").is_none() || !target["variables"].is_object() {
+                        target["variables"] = serde_json::json!({});
+                    }
+                    target["variables"][&name] = variable;
+                }
+                "remove_variable" => {
+                    let name = required_string(operation.name.as_ref(), "name", &operation.op)?;
+                    let variables = target
+                        .get_mut("variables")
+                        .and_then(|variables| variables.as_object_mut())
+                        .ok_or_else(|| err(format!("Variable '{}' not found", name)))?;
+                    if variables.remove(&name).is_none() {
+                        return Err(err(format!("Variable '{}' not found", name)));
+                    }
+                }
+                other => {
+                    return Err(err(format!(
+                        "Unsupported batch operation '{}' at index {}",
+                        other, index
+                    )));
+                }
+            }
+
+            applied.push(serde_json::json!({
+                "index": index,
+                "op": &operation.op,
+            }));
+        }
+
+        applied
+    };
+
+    let (version, new_version) =
+        save_graph(server, &params.workflow_id, graph, latest, current).await?;
+    let operation_count = applied.len();
+    json_result(serde_json::json!({
+        "success": true,
+        "workflowId": params.workflow_id,
+        "version": version,
+        "newVersion": new_version,
+        "path": path,
+        "applied": applied,
+        "operationCount": operation_count,
     }))
 }
 
