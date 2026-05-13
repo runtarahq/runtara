@@ -1009,6 +1009,10 @@ pub struct ReportTableColumn {
     /// Optional cell alignment hint: "left", "right", or "center".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub align: Option<String>,
+    /// Optional display-only text cutoff. When omitted, the frontend renders
+    /// the full formatted value.
+    #[serde(default, rename = "maxChars", skip_serializing_if = "Option::is_none")]
+    pub max_chars: Option<usize>,
     /// Marks this column as the human-readable label for the row's entity
     /// within this report. Consumed by view `titleFrom: { block }` resolution
     /// and similar entity-label lookups. At most one descriptive column per

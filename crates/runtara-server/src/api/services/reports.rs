@@ -9574,6 +9574,9 @@ fn table_response_column(column: &ReportTableColumn) -> Value {
     {
         output.insert("displayField".to_string(), Value::String(display_field));
     }
+    if let Some(max_chars) = column.max_chars {
+        output.insert("maxChars".to_string(), json!(max_chars));
+    }
 
     Value::Object(output)
 }
@@ -10470,6 +10473,7 @@ mod tests {
             pill_variants: None,
             levels: None,
             align: None,
+            max_chars: None,
             descriptive: false,
             editable: false,
             editor: None,

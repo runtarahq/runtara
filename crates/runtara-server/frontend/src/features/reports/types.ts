@@ -431,6 +431,8 @@ export interface ReportTableColumn {
   levels?: string[];
   /** Cell alignment hint. */
   align?: 'left' | 'right' | 'center';
+  /** Optional display-only text cutoff. Omit to render the full formatted value. */
+  maxChars?: number;
   /** Marks this column as the row's human-readable label for entity-title lookups. */
   descriptive?: boolean;
   /** Opt-in writeback. Honored only when the rendered row carries `id`+`schemaId`. */

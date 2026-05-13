@@ -5,6 +5,7 @@ import {
   isWorkflowActionDisabled,
   isWorkflowActionVisible,
   matchesReportRowCondition,
+  truncateCellText,
 } from './utils';
 import type { ReportDefinition, ReportViewDefinition } from './types';
 
@@ -166,5 +167,30 @@ describe('report view navigation', () => {
     expect(
       getReportViewBreadcrumbs(reportDefinition, view, labelForView)
     ).toEqual(view.breadcrumb);
+  });
+});
+
+describe('truncateCellText', () => {
+  it('keeps full text when maxChars is omitted or non-positive', () => {
+    expect(truncateCellText('Hanes Mens Double Tough Socks')).toEqual({
+      text: 'Hanes Mens Double Tough Socks',
+    });
+    expect(truncateCellText('Hanes Mens Double Tough Socks', 0)).toEqual({
+      text: 'Hanes Mens Double Tough Socks',
+    });
+  });
+
+  it('cuts displayed text after the configured number of characters', () => {
+    expect(truncateCellText('Hanes Mens Double Tough Socks', 12)).toEqual({
+      text: 'Hanes Mens D...',
+      title: 'Hanes Mens Double Tough Socks',
+    });
+  });
+
+  it('counts unicode code points instead of UTF-16 halves', () => {
+    expect(truncateCellText('A😀BC', 2)).toEqual({
+      text: 'A😀...',
+      title: 'A😀BC',
+    });
   });
 });

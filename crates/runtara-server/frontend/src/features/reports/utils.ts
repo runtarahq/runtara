@@ -564,6 +564,28 @@ export function formatCellValue(value: unknown, format?: string): string {
   return String(value);
 }
 
+export function truncateCellText(
+  text: string,
+  maxChars?: number | null
+): { text: string; title?: string } {
+  if (
+    typeof maxChars !== 'number' ||
+    !Number.isFinite(maxChars) ||
+    maxChars <= 0
+  ) {
+    return { text };
+  }
+
+  const limit = Math.trunc(maxChars);
+  const chars = Array.from(text);
+  if (chars.length <= limit) return { text };
+
+  return {
+    text: `${chars.slice(0, limit).join('').trimEnd()}...`,
+    title: text,
+  };
+}
+
 export function humanizeFieldName(field: string): string {
   return field
     .split(/[_-]/)
