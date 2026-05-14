@@ -90,6 +90,13 @@ function wizardBlockToDefinition(block: WizardBlock): ReportBlockDefinition {
     return {
       field,
       label: cfg?.label || humanizeFieldName(field),
+      ...(cfg?.columnType && cfg.columnType !== 'value'
+        ? { type: cfg.columnType }
+        : {}),
+      ...(cfg?.workflowAction ? { workflowAction: cfg.workflowAction } : {}),
+      ...(cfg?.interactionButtons && cfg.interactionButtons.length > 0
+        ? { interactionButtons: cfg.interactionButtons }
+        : {}),
       ...(cfg?.format ? { format: cfg.format } : {}),
       ...(cfg?.pillVariants ? { pillVariants: cfg.pillVariants } : {}),
       ...(cfg?.displayField ? { displayField: cfg.displayField } : {}),

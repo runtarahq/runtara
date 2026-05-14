@@ -157,6 +157,77 @@ describe('table column round-trip', () => {
     });
   });
 
+  it('infers per-row action columns from workflow actions and interaction buttons', () => {
+    const definition: ReportDefinition = {
+      definitionVersion: 1,
+      filters: [],
+      blocks: [
+        {
+          id: 'orders',
+          type: 'table',
+          title: 'Orders',
+          source: { schema: 'orders', mode: 'filter' },
+          table: {
+            columns: [
+              { field: 'id', label: 'Id' },
+              {
+                field: 'run',
+                label: 'Run',
+                workflowAction: {
+                  workflowId: 'workflow_run',
+                  label: 'Run',
+                  context: { mode: 'row' },
+                },
+              },
+              {
+                field: 'open',
+                label: 'Open',
+                interactionButtons: [
+                  {
+                    id: 'open_detail',
+                    label: 'Open',
+                    actions: [
+                      {
+                        type: 'navigate_view',
+                        viewId: 'detail',
+                      },
+                    ],
+                  },
+                ],
+              },
+            ],
+          },
+        },
+      ],
+    };
+
+    const { state, compatibility } = definitionToWizardState(
+      definition,
+      'orders'
+    );
+    expect(compatibility.fullyEditable).toBe(true);
+    expect(state.blocks[0].fieldConfigs?.run).toMatchObject({
+      columnType: 'workflow_button',
+      workflowAction: definition.blocks[0].table?.columns?.[1].workflowAction,
+    });
+    expect(state.blocks[0].fieldConfigs?.open).toMatchObject({
+      columnType: 'interaction_buttons',
+      interactionButtons:
+        definition.blocks[0].table?.columns?.[2].interactionButtons,
+    });
+
+    const round = wizardStateToDefinition(state, SCHEMA_FIELDS, definition);
+    expect(round.blocks[0].table?.columns?.[1]).toMatchObject({
+      type: 'workflow_button',
+      workflowAction: definition.blocks[0].table?.columns?.[1].workflowAction,
+    });
+    expect(round.blocks[0].table?.columns?.[2]).toMatchObject({
+      type: 'interaction_buttons',
+      interactionButtons:
+        definition.blocks[0].table?.columns?.[2].interactionButtons,
+    });
+  });
+
   it('round-trips table pagination and default sort settings', () => {
     const definition: ReportDefinition = {
       definitionVersion: 1,

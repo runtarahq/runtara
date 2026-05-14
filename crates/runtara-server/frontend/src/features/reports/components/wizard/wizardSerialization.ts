@@ -805,6 +805,14 @@ function blockDefinitionToWizard(
 
   if (block.type === 'table') {
     for (const column of block.table?.columns ?? []) {
+      const inferredColumnType =
+        column.type === 'workflow_button' || column.workflowAction
+          ? 'workflow_button'
+          : column.type === 'interaction_buttons' ||
+              (column.interactionButtons &&
+                column.interactionButtons.length > 0)
+            ? 'interaction_buttons'
+            : column.type;
       // Action columns may arrive with an empty `field` — synthesize a stable
       // key so the editor can list them as rows.
       const fieldKey =
@@ -816,17 +824,17 @@ function blockDefinitionToWizard(
       if (column.label && column.label !== humanize(fieldKey)) {
         cfg.label = column.label;
       }
-      if (column.type === 'workflow_button') {
+      if (inferredColumnType === 'workflow_button') {
         cfg.columnType = 'workflow_button';
         if (column.workflowAction) cfg.workflowAction = column.workflowAction;
-      } else if (column.type === 'interaction_buttons') {
+      } else if (inferredColumnType === 'interaction_buttons') {
         cfg.columnType = 'interaction_buttons';
         if (column.interactionButtons) {
           cfg.interactionButtons = column.interactionButtons;
         }
       } else {
-        if (column.type && column.type !== 'value') {
-          unsupported.push(`Column type "${column.type}"`);
+        if (inferredColumnType && inferredColumnType !== 'value') {
+          unsupported.push(`Column type "${inferredColumnType}"`);
         }
         if (column.format && isWizardFormat(column.format)) {
           cfg.format = column.format as WizardColumnFormat;
