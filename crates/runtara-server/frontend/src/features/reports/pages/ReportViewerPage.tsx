@@ -240,7 +240,7 @@ export function ReportViewerPage() {
               reportName={report.name}
               className="h-9 rounded-full sm:px-4"
             />
-            <Link to={`/reports/${report.id}/edit`} className="w-full sm:w-auto">
+            <Link to={`/reports/${report.id}?edit=1`} className="w-full sm:w-auto">
               <Button
                 size="sm"
                 className="h-9 w-full rounded-full sm:w-auto sm:px-4"

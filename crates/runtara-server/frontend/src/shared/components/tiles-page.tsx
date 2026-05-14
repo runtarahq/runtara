@@ -36,7 +36,7 @@ export function TilesPage(props: TilesPageProps) {
       >
         <div className="px-4 md:px-8 py-5">
           <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-            <div className="space-y-1">
+            <div className="min-w-0 flex-1 space-y-1">
               {kicker && (
                 <p className="text-xs font-semibold uppercase tracking-wider text-blue-600 dark:text-blue-400">
                   {kicker}
