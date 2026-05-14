@@ -33,6 +33,7 @@ import {
   ReportFilterOption,
   ReportFilterType,
   ReportOrderBy,
+  ReportSource,
   ReportTableInteractionButtonConfig,
   ReportWorkflowActionConfig,
 } from '../../../types';
@@ -79,6 +80,25 @@ function fieldsOfSchema(
       .find((schema) => schema.name === schemaName)
       ?.columns.map((column) => column.name) ?? []
   );
+}
+
+function fieldsForWizardSource(
+  schemas: Schema[],
+  block: WizardBlock
+): string[] {
+  if (block.sourceKind === 'workflow_runtime') {
+    return (
+      WORKFLOW_RUNTIME_FIELDS[block.sourceEntity ?? 'instances'] ??
+      WORKFLOW_RUNTIME_FIELDS.instances
+    );
+  }
+  if (block.sourceKind === 'system') {
+    return (
+      SYSTEM_FIELDS[block.sourceEntity ?? 'runtime_system_snapshot'] ??
+      SYSTEM_FIELDS.runtime_system_snapshot
+    );
+  }
+  return fieldsOfSchema(schemas, block.schema);
 }
 
 interface BlocksStepProps {
@@ -154,6 +174,143 @@ const EDITOR_KINDS: Array<{ value: ReportEditorKind; label: string }> = [
   { value: 'datetime', label: 'Date + time' },
   { value: 'lookup', label: 'Lookup' },
 ];
+
+type WizardSourceMode = 'schema' | 'dataset' | 'workflow_runtime' | 'system';
+
+const WORKFLOW_RUNTIME_ENTITIES: Array<{
+  value: NonNullable<ReportSource['entity']>;
+  label: string;
+}> = [
+  { value: 'instances', label: 'Instances' },
+  { value: 'actions', label: 'Actions' },
+];
+
+const SYSTEM_ENTITIES: Array<{
+  value: NonNullable<ReportSource['entity']>;
+  label: string;
+}> = [
+  {
+    value: 'runtime_execution_metric_buckets',
+    label: 'Runtime execution metrics',
+  },
+  { value: 'runtime_system_snapshot', label: 'Runtime system snapshot' },
+  { value: 'connection_rate_limit_status', label: 'Rate limit status' },
+  { value: 'connection_rate_limit_events', label: 'Rate limit events' },
+  { value: 'connection_rate_limit_timeline', label: 'Rate limit timeline' },
+];
+
+const WORKFLOW_RUNTIME_FIELDS: Record<string, string[]> = {
+  instances: [
+    'id',
+    'instanceId',
+    'workflowId',
+    'workflowName',
+    'status',
+    'createdAt',
+    'updatedAt',
+    'usedVersion',
+    'durationSeconds',
+    'hasActions',
+    'actionCount',
+  ],
+  actions: [
+    'id',
+    'actionId',
+    'actionKind',
+    'targetKind',
+    'targetId',
+    'workflowId',
+    'instanceId',
+    'signalId',
+    'actionKey',
+    'label',
+    'message',
+    'inputSchema',
+    'schemaFormat',
+    'status',
+    'requestedAt',
+    'correlation',
+    'context',
+    'runtime',
+  ],
+};
+
+const SYSTEM_FIELDS: Record<string, string[]> = {
+  runtime_execution_metric_buckets: [
+    'tenantId',
+    'bucketTime',
+    'granularity',
+    'invocationCount',
+    'successCount',
+    'failureCount',
+    'cancelledCount',
+    'avgDurationSeconds',
+    'minDurationSeconds',
+    'maxDurationSeconds',
+    'avgMemoryBytes',
+    'maxMemoryBytes',
+    'successRatePercent',
+  ],
+  runtime_system_snapshot: [
+    'capturedAt',
+    'cpuArchitecture',
+    'cpuPhysicalCores',
+    'cpuLogicalCores',
+    'memoryTotalBytes',
+    'memoryAvailableBytes',
+    'memoryAvailableForWorkflowsBytes',
+    'memoryUsedBytes',
+    'memoryUsedPercent',
+    'diskPath',
+    'diskTotalBytes',
+    'diskAvailableBytes',
+    'diskUsedBytes',
+    'diskUsedPercent',
+  ],
+  connection_rate_limit_status: [
+    'connectionId',
+    'connectionTitle',
+    'integrationId',
+    'configRequestsPerSecond',
+    'configBurstSize',
+    'configRetryOnLimit',
+    'configMaxRetries',
+    'configMaxWaitMs',
+    'stateAvailable',
+    'stateCurrentTokens',
+    'stateLastRefillMs',
+    'stateLearnedLimit',
+    'stateCallsInWindow',
+    'stateTotalCalls',
+    'stateWindowStartMs',
+    'capacityPercent',
+    'utilizationPercent',
+    'isRateLimited',
+    'retryAfterMs',
+    'periodInterval',
+    'periodTotalRequests',
+    'periodRateLimitedCount',
+    'periodRetryCount',
+    'periodRateLimitedPercent',
+  ],
+  connection_rate_limit_events: [
+    'id',
+    'connectionId',
+    'eventType',
+    'createdAt',
+    'metadata',
+    'tag',
+  ],
+  connection_rate_limit_timeline: [
+    'connectionId',
+    'bucket',
+    'bucketTime',
+    'granularity',
+    'requestCount',
+    'rateLimitedCount',
+    'retryCount',
+  ],
+};
 
 const NO_SORT_FIELD = '__none__';
 const ALWAYS_VISIBLE = '__always__';
@@ -734,8 +891,15 @@ function BlockCard({
   onDragStart: () => void;
   onDragEnd: () => void;
 }) {
-  const schemaFields = fieldsOfSchema(schemas, block.schema);
+  const schemaFields = fieldsForWizardSource(schemas, block);
   const usingDataset = Boolean(block.dataset);
+  const sourceMode: WizardSourceMode = usingDataset
+    ? 'dataset'
+    : block.sourceKind === 'workflow_runtime'
+      ? 'workflow_runtime'
+      : block.sourceKind === 'system'
+        ? 'system'
+        : 'schema';
   const dataset = block.dataset
     ? datasets.find((candidate) => candidate.id === block.dataset?.id)
     : undefined;
@@ -752,16 +916,24 @@ function BlockCard({
   // hide the dataset toggle for them.
   const supportsDataset =
     block.type === 'table' || block.type === 'chart' || block.type === 'metric';
+  const supportsVirtualSources = supportsDataset;
   const supportsFields =
     !usingDataset &&
     (block.type === 'table' || block.type === 'card' || block.type === 'chart');
-  const needsSchema = !usingDataset && block.type !== 'markdown';
+  const needsSchema =
+    !usingDataset && !block.sourceKind && block.type !== 'markdown';
 
   function changeSchema(nextSchema: string) {
     if (nextSchema === block.schema) return;
     // Reset field-related config when the schema changes — the old fields
     // probably don't exist on the new schema.
     onChange({
+      sourceKind: undefined,
+      sourceEntity: undefined,
+      workflowId: undefined,
+      instanceId: undefined,
+      sourceInterval: undefined,
+      sourceGranularity: undefined,
       schema: nextSchema,
       fields: [],
       fieldConfigs: undefined,
@@ -776,6 +948,12 @@ function BlockCard({
     const query = createDefaultDatasetBlockQuery(seed);
     onChange({
       dataset: query,
+      sourceKind: undefined,
+      sourceEntity: undefined,
+      workflowId: undefined,
+      instanceId: undefined,
+      sourceInterval: undefined,
+      sourceGranularity: undefined,
       schema: undefined,
       fields: [],
       fieldConfigs: undefined,
@@ -788,8 +966,72 @@ function BlockCard({
   function switchToSchemaMode() {
     onChange({
       dataset: undefined,
+      sourceKind: undefined,
+      sourceEntity: undefined,
+      workflowId: undefined,
+      instanceId: undefined,
+      sourceInterval: undefined,
+      sourceGranularity: undefined,
       schema: schemas[0]?.name,
       fields: [],
+      fieldConfigs: undefined,
+      chartGroupBy: undefined,
+      metricField: undefined,
+    });
+  }
+
+  function switchToWorkflowRuntimeMode() {
+    onChange({
+      dataset: undefined,
+      sourceKind: 'workflow_runtime',
+      sourceEntity: 'instances',
+      workflowId: block.workflowId ?? '',
+      instanceId: undefined,
+      sourceInterval: undefined,
+      sourceGranularity: undefined,
+      schema: undefined,
+      fields: WORKFLOW_RUNTIME_FIELDS.instances.slice(0, 5),
+      fieldConfigs: undefined,
+      chartGroupBy: undefined,
+      metricField: undefined,
+    });
+  }
+
+  function switchToSystemMode() {
+    onChange({
+      dataset: undefined,
+      sourceKind: 'system',
+      sourceEntity: 'runtime_system_snapshot',
+      workflowId: undefined,
+      instanceId: undefined,
+      sourceInterval: undefined,
+      sourceGranularity: undefined,
+      schema: undefined,
+      fields: SYSTEM_FIELDS.runtime_system_snapshot.slice(0, 5),
+      fieldConfigs: undefined,
+      chartGroupBy: undefined,
+      metricField: undefined,
+    });
+  }
+
+  function changeWorkflowEntity(entity: NonNullable<ReportSource['entity']>) {
+    const fields =
+      WORKFLOW_RUNTIME_FIELDS[entity] ?? WORKFLOW_RUNTIME_FIELDS.instances;
+    onChange({
+      sourceEntity: entity,
+      fields: fields.slice(0, 5),
+      fieldConfigs: undefined,
+      chartGroupBy: undefined,
+      metricField: undefined,
+    });
+  }
+
+  function changeSystemEntity(entity: NonNullable<ReportSource['entity']>) {
+    const fields =
+      SYSTEM_FIELDS[entity] ?? SYSTEM_FIELDS.runtime_system_snapshot;
+    onChange({
+      sourceEntity: entity,
+      fields: fields.slice(0, 5),
       fieldConfigs: undefined,
       chartGroupBy: undefined,
       metricField: undefined,
@@ -929,13 +1171,15 @@ function BlockCard({
               <Label className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
                 Data source
               </Label>
-              <div className="flex gap-1 rounded-md border bg-muted/10 p-0.5">
+              <div className="grid grid-cols-2 gap-1 rounded-md border bg-muted/10 p-0.5 sm:grid-cols-4">
                 <button
                   type="button"
-                  onClick={!usingDataset ? undefined : switchToSchemaMode}
+                  onClick={
+                    sourceMode === 'schema' ? undefined : switchToSchemaMode
+                  }
                   className={cn(
                     'flex-1 rounded px-2 py-1 text-xs font-medium transition-colors',
-                    !usingDataset
+                    sourceMode === 'schema'
                       ? 'bg-background shadow-sm'
                       : 'text-muted-foreground hover:text-foreground'
                   )}
@@ -945,27 +1189,61 @@ function BlockCard({
                 <button
                   type="button"
                   onClick={
-                    usingDataset || datasets.length === 0
+                    sourceMode === 'dataset' || datasets.length === 0
                       ? undefined
                       : switchToDatasetMode
                   }
-                  disabled={!usingDataset && datasets.length === 0}
+                  disabled={sourceMode !== 'dataset' && datasets.length === 0}
                   className={cn(
                     'flex-1 rounded px-2 py-1 text-xs font-medium transition-colors',
-                    usingDataset
+                    sourceMode === 'dataset'
                       ? 'bg-background shadow-sm'
                       : 'text-muted-foreground hover:text-foreground',
-                    !usingDataset &&
+                    sourceMode !== 'dataset' &&
                       datasets.length === 0 &&
                       'cursor-not-allowed opacity-50'
                   )}
                   title={
-                    datasets.length === 0 && !usingDataset
+                    datasets.length === 0 && sourceMode !== 'dataset'
                       ? 'Add a dataset in the Datasets section first'
                       : undefined
                   }
                 >
-                  Use dataset
+                  Dataset
+                </button>
+                <button
+                  type="button"
+                  onClick={
+                    sourceMode === 'workflow_runtime'
+                      ? undefined
+                      : switchToWorkflowRuntimeMode
+                  }
+                  disabled={!supportsVirtualSources}
+                  className={cn(
+                    'flex-1 rounded px-2 py-1 text-xs font-medium transition-colors',
+                    sourceMode === 'workflow_runtime'
+                      ? 'bg-background shadow-sm'
+                      : 'text-muted-foreground hover:text-foreground',
+                    !supportsVirtualSources && 'cursor-not-allowed opacity-50'
+                  )}
+                >
+                  Workflow
+                </button>
+                <button
+                  type="button"
+                  onClick={
+                    sourceMode === 'system' ? undefined : switchToSystemMode
+                  }
+                  disabled={!supportsVirtualSources}
+                  className={cn(
+                    'flex-1 rounded px-2 py-1 text-xs font-medium transition-colors',
+                    sourceMode === 'system'
+                      ? 'bg-background shadow-sm'
+                      : 'text-muted-foreground hover:text-foreground',
+                    !supportsVirtualSources && 'cursor-not-allowed opacity-50'
+                  )}
+                >
+                  System
                 </button>
               </div>
             </div>
@@ -976,6 +1254,22 @@ function BlockCard({
               block={block}
               datasets={datasets}
               onChange={onChange}
+            />
+          ) : null}
+
+          {block.sourceKind === 'workflow_runtime' ? (
+            <WorkflowRuntimeSourceSettings
+              block={block}
+              onChange={onChange}
+              onEntityChange={changeWorkflowEntity}
+            />
+          ) : null}
+
+          {block.sourceKind === 'system' ? (
+            <SystemSourceSettings
+              block={block}
+              onChange={onChange}
+              onEntityChange={changeSystemEntity}
             />
           ) : null}
 
@@ -1763,6 +2057,130 @@ function stringVisibilityValue(value: unknown): string {
   if (value === null || value === undefined) return '';
   if (typeof value === 'string') return value;
   return JSON.stringify(value);
+}
+
+function WorkflowRuntimeSourceSettings({
+  block,
+  onChange,
+  onEntityChange,
+}: {
+  block: WizardBlock;
+  onChange: (patch: Partial<WizardBlock>) => void;
+  onEntityChange: (entity: NonNullable<ReportSource['entity']>) => void;
+}) {
+  return (
+    <div className="grid gap-3 rounded-md border bg-muted/10 p-3 md:grid-cols-3">
+      <div className="grid gap-1.5">
+        <Label className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+          Workflow ID
+        </Label>
+        <Input
+          value={block.workflowId ?? ''}
+          onChange={(event) => onChange({ workflowId: event.target.value })}
+          className="h-8"
+          placeholder="workflow_id"
+        />
+      </div>
+      <div className="grid gap-1.5">
+        <Label className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+          Entity
+        </Label>
+        <Select
+          value={block.sourceEntity ?? 'instances'}
+          onValueChange={(entity) =>
+            onEntityChange(entity as NonNullable<ReportSource['entity']>)
+          }
+        >
+          <SelectTrigger className="h-8">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            {WORKFLOW_RUNTIME_ENTITIES.map((option) => (
+              <SelectItem key={option.value} value={option.value}>
+                {option.label}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      </div>
+      <div className="grid gap-1.5">
+        <Label className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+          Instance ID
+        </Label>
+        <Input
+          value={block.instanceId ?? ''}
+          onChange={(event) =>
+            onChange({ instanceId: event.target.value || undefined })
+          }
+          className="h-8"
+          placeholder="optional"
+        />
+      </div>
+    </div>
+  );
+}
+
+function SystemSourceSettings({
+  block,
+  onChange,
+  onEntityChange,
+}: {
+  block: WizardBlock;
+  onChange: (patch: Partial<WizardBlock>) => void;
+  onEntityChange: (entity: NonNullable<ReportSource['entity']>) => void;
+}) {
+  return (
+    <div className="grid gap-3 rounded-md border bg-muted/10 p-3 md:grid-cols-3">
+      <div className="grid gap-1.5">
+        <Label className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+          System entity
+        </Label>
+        <Select
+          value={block.sourceEntity ?? 'runtime_system_snapshot'}
+          onValueChange={(entity) =>
+            onEntityChange(entity as NonNullable<ReportSource['entity']>)
+          }
+        >
+          <SelectTrigger className="h-8">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            {SYSTEM_ENTITIES.map((option) => (
+              <SelectItem key={option.value} value={option.value}>
+                {option.label}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      </div>
+      <div className="grid gap-1.5">
+        <Label className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+          Interval
+        </Label>
+        <Input
+          value={block.sourceInterval ?? ''}
+          onChange={(event) =>
+            onChange({ sourceInterval: event.target.value || undefined })
+          }
+          className="h-8"
+          placeholder="24h"
+        />
+      </div>
+      <div className="grid gap-1.5">
+        <Label className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+          Granularity
+        </Label>
+        <Input
+          value={block.sourceGranularity ?? ''}
+          onChange={(event) =>
+            onChange({ sourceGranularity: event.target.value || undefined })
+          }
+          className="h-8"
+          placeholder="hourly"
+        />
+      </div>
+    </div>
+  );
 }
 
 function BlockFiltersSettings({

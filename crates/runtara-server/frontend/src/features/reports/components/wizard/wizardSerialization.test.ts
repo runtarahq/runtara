@@ -382,6 +382,88 @@ describe('table column round-trip', () => {
     });
   });
 
+  it('round-trips workflow runtime and system source metadata', () => {
+    const definition: ReportDefinition = {
+      definitionVersion: 1,
+      filters: [],
+      blocks: [
+        {
+          id: 'runs',
+          type: 'table',
+          title: 'Workflow runs',
+          source: {
+            kind: 'workflow_runtime',
+            schema: '',
+            entity: 'instances',
+            workflowId: 'inventory_sync',
+            mode: 'filter',
+          },
+          table: {
+            columns: [
+              { field: 'instanceId', label: 'Instance' },
+              { field: 'status', label: 'Status', format: 'pill' },
+            ],
+          },
+        },
+        {
+          id: 'rate_limit_timeline',
+          type: 'chart',
+          title: 'Rate limit timeline',
+          source: {
+            kind: 'system',
+            schema: '',
+            entity: 'connection_rate_limit_timeline',
+            mode: 'aggregate',
+            granularity: 'hourly',
+            interval: '24h',
+            groupBy: ['bucketTime'],
+            aggregates: [{ alias: 'value', op: 'count' }],
+          },
+          chart: {
+            kind: 'bar',
+            x: 'bucketTime',
+            series: [{ field: 'value' }],
+          },
+        },
+      ],
+    };
+
+    const { state, compatibility } = definitionToWizardState(
+      definition,
+      'orders'
+    );
+    expect(compatibility.fullyEditable).toBe(true);
+    expect(state.blocks[0]).toMatchObject({
+      sourceKind: 'workflow_runtime',
+      sourceEntity: 'instances',
+      workflowId: 'inventory_sync',
+    });
+    expect(state.blocks[1]).toMatchObject({
+      sourceKind: 'system',
+      sourceEntity: 'connection_rate_limit_timeline',
+      sourceGranularity: 'hourly',
+      sourceInterval: '24h',
+    });
+
+    const round = wizardStateToDefinition(state, SCHEMA_FIELDS, definition);
+    expect(round.blocks[0].source).toMatchObject({
+      kind: 'workflow_runtime',
+      schema: '',
+      entity: 'instances',
+      workflowId: 'inventory_sync',
+      mode: 'filter',
+    });
+    expect(round.blocks[1].source).toMatchObject({
+      kind: 'system',
+      schema: '',
+      entity: 'connection_rate_limit_timeline',
+      granularity: 'hourly',
+      interval: '24h',
+      mode: 'aggregate',
+      groupBy: ['bucketTime'],
+    });
+  });
+
   it('round-trips block click interactions', () => {
     const definition: ReportDefinition = {
       definitionVersion: 1,

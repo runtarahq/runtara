@@ -8,6 +8,7 @@ import {
   ReportFilterType,
   ReportInteractionDefinition,
   ReportOrderBy,
+  ReportSource,
   ReportTableActionConfig,
   ReportTableInteractionButtonConfig,
   ReportViewDefinition,
@@ -157,6 +158,18 @@ export interface WizardBlock {
   /** Per-block data source. Schema name from the Object Model.
    *  Markdown blocks don't need a schema. Mutually exclusive with `dataset`. */
   schema?: string;
+  /** Source kind. Undefined/object_model uses the Object Model schema picker. */
+  sourceKind?: ReportSource['kind'];
+  /** Virtual workflow/system source entity. */
+  sourceEntity?: ReportSource['entity'];
+  /** Workflow runtime source workflow id. */
+  workflowId?: string;
+  /** Optional workflow runtime source instance id. */
+  instanceId?: string;
+  /** Optional system source interval. */
+  sourceInterval?: string;
+  /** Optional system source granularity. */
+  sourceGranularity?: string;
   fields: string[];
   fieldConfigs?: Record<string, WizardFieldConfig>;
   placement: WizardBlockPlacement;

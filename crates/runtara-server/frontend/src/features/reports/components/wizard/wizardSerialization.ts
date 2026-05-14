@@ -54,6 +54,41 @@ function fieldConfig(
   return block.fieldConfigs?.[field];
 }
 
+function buildSourceBase(
+  block: WizardBlock
+): Pick<
+  ReportSource,
+  | 'kind'
+  | 'schema'
+  | 'entity'
+  | 'workflowId'
+  | 'instanceId'
+  | 'interval'
+  | 'granularity'
+> {
+  if (block.sourceKind === 'workflow_runtime') {
+    return {
+      kind: 'workflow_runtime',
+      schema: '',
+      entity: block.sourceEntity ?? 'instances',
+      workflowId: block.workflowId ?? '',
+      ...(block.instanceId ? { instanceId: block.instanceId } : {}),
+    };
+  }
+  if (block.sourceKind === 'system') {
+    return {
+      kind: 'system',
+      schema: '',
+      entity: block.sourceEntity ?? 'runtime_system_snapshot',
+      ...(block.sourceInterval ? { interval: block.sourceInterval } : {}),
+      ...(block.sourceGranularity
+        ? { granularity: block.sourceGranularity }
+        : {}),
+    };
+  }
+  return { schema: block.schema ?? '' };
+}
+
 function buildBlockSource(
   block: WizardBlock,
   primaryFields: string[]
@@ -62,14 +97,14 @@ function buildBlockSource(
     return { schema: '', mode: 'filter' };
   }
 
-  const schema = block.schema ?? '';
+  const sourceBase = buildSourceBase(block);
 
   if (block.type === 'metric') {
     const op = block.metricAggregate ?? 'count';
     const field =
       op === 'count' ? undefined : block.metricField || primaryFields[0];
     return {
-      schema,
+      ...sourceBase,
       mode: 'aggregate',
       aggregates: [
         {
@@ -84,7 +119,7 @@ function buildBlockSource(
   if (block.type === 'chart') {
     const groupBy = block.chartGroupBy || primaryFields[0];
     return {
-      schema,
+      ...sourceBase,
       mode: 'aggregate',
       groupBy: [groupBy],
       aggregates: [
@@ -96,7 +131,7 @@ function buildBlockSource(
     };
   }
 
-  return { schema, mode: 'filter' };
+  return { ...sourceBase, mode: 'filter' };
 }
 
 function normalizePageSize(value: number | undefined): number {
@@ -168,8 +203,7 @@ function buildBlockDefinition(
       ...base,
       markdown: {
         content:
-          block.markdownContent ||
-          (block.title ? `# ${block.title}` : ''),
+          block.markdownContent || (block.title ? `# ${block.title}` : ''),
       },
     };
   }
@@ -650,9 +684,6 @@ function blockDefinitionToWizard(
     unsupported.push('Schema joins');
   }
   if (source?.condition) unsupported.push('Custom source conditions');
-  if (source?.kind && source.kind !== 'object_model') {
-    unsupported.push(`Source kind "${source.kind}"`);
-  }
   const fields: string[] = [];
   const fieldConfigs: Record<string, WizardFieldConfig> = {};
 
@@ -752,7 +783,16 @@ function blockDefinitionToWizard(
       ? (block.type as WizardBlockType)
       : 'table',
     title: block.title || humanize(block.id),
-    schema: source?.schema || undefined,
+    schema:
+      source?.kind && source.kind !== 'object_model'
+        ? undefined
+        : source?.schema || undefined,
+    ...(source?.kind ? { sourceKind: source.kind } : {}),
+    ...(source?.entity ? { sourceEntity: source.entity } : {}),
+    ...(source?.workflowId ? { workflowId: source.workflowId } : {}),
+    ...(source?.instanceId ? { instanceId: source.instanceId } : {}),
+    ...(source?.interval ? { sourceInterval: source.interval } : {}),
+    ...(source?.granularity ? { sourceGranularity: source.granularity } : {}),
     fields,
     placement: fallbackPlacement,
     chartKind: block.chart?.kind,
