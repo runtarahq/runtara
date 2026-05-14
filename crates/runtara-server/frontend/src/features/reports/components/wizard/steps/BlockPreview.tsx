@@ -1,6 +1,12 @@
 import { useMemo } from 'react';
 import ReactMarkdown from 'react-markdown';
-import { BarChart3, LineChart, PieChart, AreaChart } from 'lucide-react';
+import {
+  AreaChart,
+  BarChart3,
+  LineChart,
+  PieChart,
+  Wrench,
+} from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { humanizeFieldName, formatCellValue } from '../../../utils';
 import {
@@ -139,6 +145,10 @@ function wizardBlockToDefinition(block: WizardBlock): ReportBlockDefinition {
           }
         : undefined,
     table: block.type === 'table' ? { columns } : undefined,
+    actions:
+      block.type === 'actions' && block.actionSubmitLabel
+        ? { submit: { label: block.actionSubmitLabel } }
+        : undefined,
     card:
       block.type === 'card'
         ? {
@@ -352,6 +362,46 @@ export function BlockPreview({
     );
   }
 
+  if (block.type === 'actions') {
+    const actions = useReal ? extractActions(result) : [];
+    const previewActions =
+      actions.length > 0
+        ? actions.slice(0, 3)
+        : [
+            {
+              label: 'Review pending action',
+              actionKind: 'workflow',
+              status: 'open',
+            },
+          ];
+    return (
+      <div className="grid gap-2 px-3 py-3">
+        {previewActions.map((action, index) => (
+          <div
+            key={`${action.label}-${index}`}
+            className="grid gap-1 rounded-md border bg-background px-3 py-2"
+          >
+            <div className="flex items-center gap-2 text-xs font-medium">
+              <Wrench className="h-3.5 w-3.5 text-muted-foreground" />
+              <span className="truncate">{action.label}</span>
+            </div>
+            <div className="flex flex-wrap gap-1 text-[10px] text-muted-foreground">
+              <span className="rounded-full border px-2 py-0.5">
+                {action.actionKind}
+              </span>
+              <span className="rounded-full border px-2 py-0.5">
+                {action.status}
+              </span>
+              <span className="rounded-full border px-2 py-0.5">
+                {block.actionSubmitLabel || 'Submit Action'}
+              </span>
+            </div>
+          </div>
+        ))}
+      </div>
+    );
+  }
+
   // card
   if (block.fields.length === 0) {
     return (
@@ -424,6 +474,21 @@ function extractCardRow(
   const rows = extractTableRows(result, []);
   if (!rows || rows.length === 0) return undefined;
   return rows[0];
+}
+
+function extractActions(
+  result: ReportBlockResult | undefined
+): Array<{ label: string; actionKind: string; status: string }> {
+  const data = (result?.data ?? {}) as {
+    actions?: Array<Record<string, unknown>>;
+    rows?: Array<Record<string, unknown>>;
+  };
+  const actions = data.actions ?? data.rows ?? [];
+  return actions.map((action) => ({
+    label: String(action.label ?? action.actionId ?? 'Action'),
+    actionKind: String(action.actionKind ?? 'workflow'),
+    status: String(action.status ?? 'open'),
+  }));
 }
 
 function ChartSketch({

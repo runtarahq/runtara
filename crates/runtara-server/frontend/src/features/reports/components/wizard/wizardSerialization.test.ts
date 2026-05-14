@@ -611,6 +611,65 @@ describe('table column round-trip', () => {
     });
   });
 
+  it('round-trips actions blocks without compatibility warning', () => {
+    const definition: ReportDefinition = {
+      definitionVersion: 1,
+      filters: [],
+      blocks: [
+        {
+          id: 'open_actions',
+          type: 'actions',
+          title: 'Open actions',
+          source: {
+            kind: 'workflow_runtime',
+            schema: '',
+            entity: 'actions',
+            workflowId: 'inventory_sync',
+            mode: 'filter',
+          },
+          actions: {
+            submit: {
+              label: 'Resolve action',
+            },
+          },
+        },
+      ],
+    };
+
+    const { state, compatibility } = definitionToWizardState(
+      definition,
+      'orders'
+    );
+    expect(compatibility.fullyEditable).toBe(true);
+    expect(compatibility.reasons).toEqual([]);
+    expect(state.blocks[0]).toMatchObject({
+      id: 'open_actions',
+      type: 'actions',
+      sourceKind: 'workflow_runtime',
+      sourceEntity: 'actions',
+      workflowId: 'inventory_sync',
+      actionSubmitLabel: 'Resolve action',
+    });
+
+    const round = wizardStateToDefinition(state, SCHEMA_FIELDS, definition);
+    expect(round.blocks[0]).toMatchObject({
+      id: 'open_actions',
+      type: 'actions',
+      actions: {
+        submit: {
+          label: 'Resolve action',
+        },
+      },
+    });
+    expect(round.blocks[0].source).toMatchObject({
+      kind: 'workflow_runtime',
+      schema: '',
+      entity: 'actions',
+      workflowId: 'inventory_sync',
+      mode: 'filter',
+    });
+  });
+
   it('round-trips schema joins and custom source conditions', () => {
     const condition = {
       op: 'EQ',

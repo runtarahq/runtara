@@ -23,7 +23,7 @@ import {
 
 export type WizardBlockType = Extract<
   ReportBlockType,
-  'markdown' | 'metric' | 'chart' | 'table' | 'card'
+  'markdown' | 'metric' | 'chart' | 'table' | 'card' | 'actions'
 >;
 
 export const WIZARD_BLOCK_TYPES: Array<{
@@ -55,6 +55,11 @@ export const WIZARD_BLOCK_TYPES: Array<{
     value: 'card',
     label: 'Card',
     description: "Detail view of a single record's fields.",
+  },
+  {
+    value: 'actions',
+    label: 'Actions',
+    description: 'Open workflow actions with inline submit forms.',
   },
 ];
 
@@ -240,6 +245,8 @@ export interface WizardBlock {
   filters?: ReportFilterDefinition[];
   /** Row/cell/point click interactions emitted by the block renderer. */
   interactions?: ReportInteractionDefinition[];
+  /** Actions block submit button label. */
+  actionSubmitLabel?: string;
   /** Pre-aggregated dataset query — when set, the block resolves through
    *  `definition.datasets[dataset.id]` instead of `schema`/`fields`. */
   dataset?: ReportBlockDatasetQuery;

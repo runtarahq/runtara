@@ -981,7 +981,7 @@ function BlockCard({
   // hide the dataset toggle for them.
   const supportsDataset =
     block.type === 'table' || block.type === 'chart' || block.type === 'metric';
-  const supportsVirtualSources = supportsDataset;
+  const supportsVirtualSources = supportsDataset || block.type === 'actions';
   const supportsFields =
     !usingDataset &&
     (block.type === 'table' || block.type === 'card' || block.type === 'chart');
@@ -1059,10 +1059,11 @@ function BlockCard({
   }
 
   function switchToWorkflowRuntimeMode() {
+    const entity = block.type === 'actions' ? 'actions' : 'instances';
     onChange({
       dataset: undefined,
       sourceKind: 'workflow_runtime',
-      sourceEntity: 'instances',
+      sourceEntity: entity,
       workflowId: block.workflowId ?? '',
       instanceId: undefined,
       sourceInterval: undefined,
@@ -1072,7 +1073,7 @@ function BlockCard({
       sourceJoins: undefined,
       sourceCondition: undefined,
       schema: undefined,
-      fields: WORKFLOW_RUNTIME_FIELDS.instances.slice(0, 5),
+      fields: (WORKFLOW_RUNTIME_FIELDS[entity] ?? []).slice(0, 5),
       fieldConfigs: undefined,
       chartGroupBy: undefined,
       metricField: undefined,
@@ -1448,6 +1449,10 @@ function BlockCard({
                 }
               />
             </div>
+          ) : null}
+
+          {block.type === 'actions' ? (
+            <ActionsBlockSettings block={block} onChange={onChange} />
           ) : null}
 
           {!usingDataset && block.type === 'metric' ? (
@@ -2413,6 +2418,32 @@ function SystemSourceSettings({
             ))}
           </SelectContent>
         </Select>
+      </div>
+    </div>
+  );
+}
+
+function ActionsBlockSettings({
+  block,
+  onChange,
+}: {
+  block: WizardBlock;
+  onChange: (patch: Partial<WizardBlock>) => void;
+}) {
+  return (
+    <div className="grid gap-3 rounded-md border bg-muted/10 p-3 md:grid-cols-2">
+      <div className="grid gap-1.5">
+        <Label className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+          Submit label
+        </Label>
+        <Input
+          value={block.actionSubmitLabel ?? ''}
+          onChange={(event) =>
+            onChange({ actionSubmitLabel: event.target.value || undefined })
+          }
+          className="h-8"
+          placeholder="Submit Action"
+        />
       </div>
     </div>
   );

@@ -32,6 +32,7 @@ const WIZARD_SUPPORTED_BLOCK_TYPES: ReadonlySet<WizardBlockType> = new Set([
   'chart',
   'table',
   'card',
+  'actions',
 ]);
 
 export interface WizardCompatibility {
@@ -296,6 +297,19 @@ function buildBlockDefinition(
           };
         }),
       },
+    };
+  }
+
+  if (block.type === 'actions') {
+    return {
+      ...base,
+      ...(block.actionSubmitLabel
+        ? {
+            actions: {
+              submit: { label: block.actionSubmitLabel },
+            },
+          }
+        : {}),
     };
   }
 
@@ -1000,6 +1014,9 @@ function blockDefinitionToWizard(
       : {}),
     ...(block.interactions && block.interactions.length > 0
       ? { interactions: block.interactions }
+      : {}),
+    ...(block.type === 'actions' && block.actions?.submit?.label
+      ? { actionSubmitLabel: block.actions.submit.label }
       : {}),
     ...(Object.keys(fieldConfigs).length > 0 ? { fieldConfigs } : {}),
     ...(block.type === 'table' && block.table?.selectable
