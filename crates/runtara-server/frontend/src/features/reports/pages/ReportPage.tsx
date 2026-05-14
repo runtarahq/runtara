@@ -161,7 +161,18 @@ export function ReportPage() {
     }
   };
 
-  if (isExisting && isFetching) {
+  // Mount the wizard only after the loaded definition has flowed into local
+  // state. Without this the wizard initializes from EMPTY_DEFINITION (because
+  // its `useMemo([])` runs on the first render, before the `setDefinition`
+  // useEffect copies `existingReport.definition`) and existing reports render
+  // as a blank canvas.
+  const awaitingDefinition =
+    isExisting &&
+    (isFetching ||
+      !existingReport ||
+      definition === EMPTY_DEFINITION);
+
+  if (awaitingDefinition) {
     return (
       <TilesPage kicker="Reports" title="Loading report">
         <TileList>
@@ -272,6 +283,10 @@ export function ReportPage() {
       action={actions}
     >
       <ReportBuilderWizard
+        // Force a fresh wizard state when the loaded report changes; the
+        // wizard derives its initial state via useMemo([]) so it would
+        // otherwise keep the previously-loaded report's blocks.
+        key={reportId ?? 'new'}
         definition={definition}
         schemas={schemas}
         blockResults={blockResults}

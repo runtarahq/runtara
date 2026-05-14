@@ -2,6 +2,9 @@ import {
   ReportBlockType,
   ReportChartKind,
   ReportFilterType,
+  ReportTableActionConfig,
+  ReportTableInteractionButtonConfig,
+  ReportWorkflowActionConfig,
 } from '../../types';
 
 export type WizardBlockType = Extract<
@@ -97,10 +100,36 @@ export const WIZARD_PILL_VARIANTS: WizardPillVariant[] = [
   'outline',
 ];
 
+export type WizardTableColumnType =
+  | 'value'
+  | 'workflow_button'
+  | 'interaction_buttons';
+
 export interface WizardFieldConfig {
   format?: WizardColumnFormat;
   label?: string;
   pillVariants?: Record<string, WizardPillVariant>;
+  /** Column variant — only meaningful for table blocks. Defaults to "value". */
+  columnType?: WizardTableColumnType;
+  /** Workflow-button config when `columnType === 'workflow_button'`. */
+  workflowAction?: ReportWorkflowActionConfig;
+  /** Interaction buttons when `columnType === 'interaction_buttons'`. */
+  interactionButtons?: ReportTableInteractionButtonConfig[];
+}
+
+/** Synthetic field key prefix for action/interaction columns that don't bind
+ *  to a row field. The editor renders these as table columns without listing
+ *  them as schema-backed fields. */
+export const WIZARD_ACTION_FIELD_PREFIX = '__action_';
+
+export function makeActionFieldKey(): string {
+  return `${WIZARD_ACTION_FIELD_PREFIX}${Math.random()
+    .toString(36)
+    .slice(2, 9)}`;
+}
+
+export function isActionFieldKey(field: string): boolean {
+  return field.startsWith(WIZARD_ACTION_FIELD_PREFIX);
 }
 
 export interface WizardBlockPlacement {
@@ -125,6 +154,10 @@ export interface WizardBlock {
   metricField?: string;
   metricFormat?: WizardColumnFormat;
   markdownContent?: string;
+  /** Table-block: enables row checkboxes. Forced true while bulk actions exist. */
+  selectable?: boolean;
+  /** Table-block: bulk action buttons rendered above the table. */
+  tableActions?: ReportTableActionConfig[];
 }
 
 export const WIZARD_FILTER_TARGET_ALL = '__all__';

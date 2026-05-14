@@ -22,7 +22,12 @@ import {
 } from '@/shared/components/ui/select';
 import { Textarea } from '@/shared/components/ui/textarea';
 import { Schema } from '@/generated/RuntaraRuntimeApi';
-import { ReportBlockResult } from '../../../types';
+import { Checkbox } from '@/shared/components/ui/checkbox';
+import {
+  ReportBlockResult,
+  ReportTableInteractionButtonConfig,
+  ReportWorkflowActionConfig,
+} from '../../../types';
 import {
   WIZARD_BLOCK_TYPES,
   WIZARD_COLUMN_FORMATS,
@@ -34,10 +39,20 @@ import {
   WizardFieldConfig,
   WizardGrid,
   WizardPillVariant,
+  WizardTableColumnType,
+  isActionFieldKey,
+  makeActionFieldKey,
   makeGridId,
 } from '../wizardTypes';
 import { humanizeFieldName } from '../../../utils';
 import { BlockPreview } from './BlockPreview';
+import {
+  InteractionButtonsEditor,
+  TableBulkActionsEditor,
+  WorkflowActionEditor,
+  createDefaultInteractionButton,
+  createDefaultWorkflowAction,
+} from './tableActionEditors';
 
 function fieldsOfSchema(schemas: Schema[], schemaName: string | undefined): string[] {
   if (!schemaName) return [];
@@ -645,10 +660,39 @@ function BlockCard({
 
   function toggleField(field: string) {
     if (block.fields.includes(field)) {
-      onChange({ fields: block.fields.filter((f) => f !== field) });
+      const nextConfigs = { ...(block.fieldConfigs ?? {}) };
+      delete nextConfigs[field];
+      onChange({
+        fields: block.fields.filter((f) => f !== field),
+        fieldConfigs:
+          Object.keys(nextConfigs).length > 0 ? nextConfigs : undefined,
+      });
     } else {
       onChange({ fields: [...block.fields, field] });
     }
+  }
+
+  function addActionColumn(columnType: WizardTableColumnType) {
+    const field = makeActionFieldKey();
+    const cfg: WizardFieldConfig =
+      columnType === 'workflow_button'
+        ? {
+            columnType,
+            label: 'Run workflow',
+            workflowAction: createDefaultWorkflowAction('row'),
+          }
+        : {
+            columnType,
+            label: 'Actions',
+            interactionButtons: [createDefaultInteractionButton()],
+          };
+    onChange({
+      fields: [...block.fields, field],
+      fieldConfigs: {
+        ...(block.fieldConfigs ?? {}),
+        [field]: cfg,
+      },
+    });
   }
 
   return (
@@ -896,23 +940,43 @@ function BlockCard({
               block={block}
               schemaFields={schemaFields}
               onToggleField={toggleField}
+              onAddActionColumn={
+                block.type === 'table' ? addActionColumn : undefined
+              }
               onUpdateFieldConfig={(field, patch) => {
+                const merged: WizardFieldConfig = {
+                  ...(block.fieldConfigs?.[field] ?? {}),
+                  ...patch,
+                };
                 const next = {
                   ...(block.fieldConfigs ?? {}),
-                  [field]: {
-                    ...(block.fieldConfigs?.[field] ?? {}),
-                    ...patch,
-                  },
+                  [field]: merged,
                 };
                 if (
-                  !next[field].format &&
-                  !next[field].label &&
-                  !next[field].pillVariants
+                  !merged.format &&
+                  !merged.label &&
+                  !merged.pillVariants &&
+                  !merged.columnType &&
+                  !merged.workflowAction &&
+                  (!merged.interactionButtons ||
+                    merged.interactionButtons.length === 0)
                 ) {
                   delete next[field];
                 }
-                onChange({ fieldConfigs: next });
+                onChange({
+                  fieldConfigs:
+                    Object.keys(next).length > 0 ? next : undefined,
+                });
               }}
+            />
+          ) : null}
+          {block.type === 'table' ? (
+            <TableSelectionAndBulkActions
+              block={block}
+              schemaFields={schemaFields.filter(
+                (field) => !isActionFieldKey(field)
+              )}
+              onChange={onChange}
             />
           ) : null}
         </div>
@@ -936,27 +1000,104 @@ function FieldPicker({
   block,
   schemaFields,
   onToggleField,
+  onAddActionColumn,
   onUpdateFieldConfig,
 }: {
   block: WizardBlock;
   schemaFields: string[];
   onToggleField: (field: string) => void;
+  onAddActionColumn?: (columnType: WizardTableColumnType) => void;
   onUpdateFieldConfig: (field: string, patch: Partial<WizardFieldConfig>) => void;
 }) {
   const formatChoices = block.type === 'chart' ? null : WIZARD_COLUMN_FORMATS;
+  const isTable = block.type === 'table';
   const availableFields = schemaFields.filter(
     (field) => !block.fields.includes(field)
+  );
+  // The schema field-list for `valueFrom` selectors etc.
+  const schemaOnlyFields = block.fields.filter(
+    (field) => !isActionFieldKey(field)
   );
 
   return (
     <div className="grid gap-2">
       <Label className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
-        {block.type === 'chart' ? 'Series' : 'Fields'}
+        {block.type === 'chart' ? 'Series' : isTable ? 'Columns' : 'Fields'}
       </Label>
       {block.fields.length === 0 ? (
         <p className="text-xs text-muted-foreground">
           No fields yet. Add one below.
         </p>
+      ) : isTable ? (
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+              <th className="py-1 pr-2 text-left font-semibold">Field</th>
+              <th className="py-1 pr-2 text-left font-semibold">Label</th>
+              <th className="py-1 pr-2 text-left font-semibold">Type</th>
+              <th className="py-1 pr-2 text-left font-semibold">Format</th>
+              <th className="w-8 py-1" />
+            </tr>
+          </thead>
+          <tbody>
+            {block.fields.map((field) => {
+              const cfg = block.fieldConfigs?.[field] ?? {};
+              return (
+                <TableColumnRow
+                  key={field}
+                  field={field}
+                  cfg={cfg}
+                  schemaFields={schemaOnlyFields}
+                  formatChoices={formatChoices}
+                  onLabelChange={(label) =>
+                    onUpdateFieldConfig(field, { label: label || undefined })
+                  }
+                  onFormatChange={(value) =>
+                    onUpdateFieldConfig(field, {
+                      format:
+                        value === 'plain'
+                          ? undefined
+                          : (value as WizardColumnFormat),
+                      pillVariants:
+                        value === 'pill' ? cfg.pillVariants : undefined,
+                    })
+                  }
+                  onPillVariantsChange={(variants) =>
+                    onUpdateFieldConfig(field, { pillVariants: variants })
+                  }
+                  onColumnTypeChange={(columnType) =>
+                    onUpdateFieldConfig(field, {
+                      columnType,
+                      // Seed default config when switching to action columns.
+                      workflowAction:
+                        columnType === 'workflow_button'
+                          ? cfg.workflowAction ??
+                            createDefaultWorkflowAction('row')
+                          : undefined,
+                      interactionButtons:
+                        columnType === 'interaction_buttons'
+                          ? cfg.interactionButtons &&
+                            cfg.interactionButtons.length > 0
+                            ? cfg.interactionButtons
+                            : [createDefaultInteractionButton()]
+                          : undefined,
+                      // Drop value-only config when switching away from value.
+                      format:
+                        columnType === 'value' ? cfg.format : undefined,
+                    })
+                  }
+                  onWorkflowActionChange={(workflowAction) =>
+                    onUpdateFieldConfig(field, { workflowAction })
+                  }
+                  onInteractionButtonsChange={(interactionButtons) =>
+                    onUpdateFieldConfig(field, { interactionButtons })
+                  }
+                  onRemove={() => onToggleField(field)}
+                />
+              );
+            })}
+          </tbody>
+        </table>
       ) : (
         <table className="w-full text-sm">
           <thead>
@@ -1001,8 +1142,8 @@ function FieldPicker({
           </tbody>
         </table>
       )}
-      {availableFields.length > 0 ? (
-        <div>
+      <div className="flex flex-wrap items-center gap-2">
+        {availableFields.length > 0 ? (
           <Select
             value=""
             onValueChange={(value) => {
@@ -1020,7 +1161,220 @@ function FieldPicker({
               ))}
             </SelectContent>
           </Select>
+        ) : null}
+        {isTable && onAddActionColumn ? (
+          <>
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              className="h-8"
+              onClick={() => onAddActionColumn('workflow_button')}
+            >
+              <Plus className="mr-1 h-3 w-3" />
+              Workflow column
+            </Button>
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              className="h-8"
+              onClick={() => onAddActionColumn('interaction_buttons')}
+            >
+              <Plus className="mr-1 h-3 w-3" />
+              Interaction column
+            </Button>
+          </>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+const COLUMN_TYPE_LABELS: Record<WizardTableColumnType, string> = {
+  value: 'Value',
+  workflow_button: 'Workflow button',
+  interaction_buttons: 'Interaction buttons',
+};
+
+function TableColumnRow({
+  field,
+  cfg,
+  schemaFields,
+  formatChoices,
+  onLabelChange,
+  onFormatChange,
+  onPillVariantsChange,
+  onColumnTypeChange,
+  onWorkflowActionChange,
+  onInteractionButtonsChange,
+  onRemove,
+}: {
+  field: string;
+  cfg: WizardFieldConfig;
+  schemaFields: string[];
+  formatChoices: typeof WIZARD_COLUMN_FORMATS | null;
+  onLabelChange: (label: string) => void;
+  onFormatChange: (value: string) => void;
+  onPillVariantsChange: (variants: Record<string, WizardPillVariant>) => void;
+  onColumnTypeChange: (columnType: WizardTableColumnType) => void;
+  onWorkflowActionChange: (action: ReportWorkflowActionConfig) => void;
+  onInteractionButtonsChange: (
+    buttons: ReportTableInteractionButtonConfig[]
+  ) => void;
+  onRemove: () => void;
+}) {
+  const columnType = cfg.columnType ?? 'value';
+  const isAction = isActionFieldKey(field);
+  const showPillVariants = columnType === 'value' && cfg.format === 'pill';
+  const showWorkflowEditor = columnType === 'workflow_button';
+  const showInteractionEditor = columnType === 'interaction_buttons';
+  const expansionRow =
+    showPillVariants || showWorkflowEditor || showInteractionEditor;
+  // For action columns the field cell shows the column-type label instead of
+  // a row-field name; format isn't applicable so we render an em-dash.
+  const fieldLabel = isAction ? COLUMN_TYPE_LABELS[columnType] : field;
+
+  return (
+    <>
+      <tr className="border-t">
+        <td className="py-1.5 pr-2 align-middle">
+          <span className="font-mono text-xs">{fieldLabel}</span>
+        </td>
+        <td className="py-1.5 pr-2 align-middle">
+          <Input
+            placeholder={isAction ? 'Actions' : humanizeFieldName(field)}
+            value={cfg.label ?? ''}
+            onChange={(event) => onLabelChange(event.target.value)}
+            className="h-7"
+          />
+        </td>
+        <td className="py-1.5 pr-2 align-middle">
+          <Select value={columnType} onValueChange={onColumnTypeChange}>
+            <SelectTrigger className="h-7">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="value" disabled={isAction}>
+                Value
+              </SelectItem>
+              <SelectItem value="workflow_button">Workflow button</SelectItem>
+              <SelectItem value="interaction_buttons">
+                Interaction buttons
+              </SelectItem>
+            </SelectContent>
+          </Select>
+        </td>
+        <td className="py-1.5 pr-2 align-middle">
+          {columnType === 'value' && formatChoices ? (
+            <Select
+              value={cfg.format ?? 'plain'}
+              onValueChange={onFormatChange}
+            >
+              <SelectTrigger className="h-7">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {formatChoices.map((option) => (
+                  <SelectItem key={option.value} value={option.value}>
+                    {option.label}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          ) : (
+            <span className="text-xs text-muted-foreground">—</span>
+          )}
+        </td>
+        <td className="py-1.5 text-right align-middle">
+          <Button
+            type="button"
+            size="icon"
+            variant="ghost"
+            className="h-7 w-7"
+            onClick={onRemove}
+            aria-label={`Remove ${field}`}
+          >
+            <Trash2 className="h-3.5 w-3.5" />
+          </Button>
+        </td>
+      </tr>
+      {expansionRow ? (
+        <tr>
+          <td colSpan={5} className="pb-2">
+            {showPillVariants ? (
+              <PillVariantsEditor
+                variants={cfg.pillVariants ?? {}}
+                onChange={onPillVariantsChange}
+              />
+            ) : null}
+            {showWorkflowEditor ? (
+              <WorkflowActionEditor
+                action={
+                  cfg.workflowAction ?? createDefaultWorkflowAction('row')
+                }
+                fields={schemaFields}
+                onChange={onWorkflowActionChange}
+              />
+            ) : null}
+            {showInteractionEditor ? (
+              <InteractionButtonsEditor
+                buttons={cfg.interactionButtons ?? []}
+                fields={schemaFields}
+                onChange={onInteractionButtonsChange}
+              />
+            ) : null}
+          </td>
+        </tr>
+      ) : null}
+    </>
+  );
+}
+
+function TableSelectionAndBulkActions({
+  block,
+  schemaFields,
+  onChange,
+}: {
+  block: WizardBlock;
+  schemaFields: string[];
+  onChange: (patch: Partial<WizardBlock>) => void;
+}) {
+  const tableActions = block.tableActions ?? [];
+  const selectable = Boolean(block.selectable || tableActions.length > 0);
+  return (
+    <div className="grid gap-2 rounded-md border bg-muted/10 p-3">
+      <label className="flex items-start gap-2 text-sm">
+        <Checkbox
+          checked={selectable}
+          // Bulk actions require selectable; only allow disabling when none.
+          disabled={tableActions.length > 0}
+          onCheckedChange={(checked) =>
+            onChange({ selectable: Boolean(checked) })
+          }
+        />
+        <div className="grid gap-0.5">
+          <span className="font-medium">Allow selection</span>
+          <span className="text-xs text-muted-foreground">
+            Show row checkboxes so viewers can pick rows for bulk actions.
+            {tableActions.length > 0
+              ? ' Bulk actions require selection — remove them first to turn this off.'
+              : ''}
+          </span>
         </div>
+      </label>
+      {selectable ? (
+        <TableBulkActionsEditor
+          actions={tableActions}
+          fields={schemaFields}
+          onChange={(next) =>
+            onChange({
+              tableActions: next,
+              // Keep selectable on while bulk actions exist.
+              selectable: next.length > 0 ? true : block.selectable,
+            })
+          }
+        />
       ) : null}
     </div>
   );

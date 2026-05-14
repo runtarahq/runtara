@@ -18,6 +18,8 @@ import {
   WizardGrid,
   WizardPillVariant,
   WizardState,
+  isActionFieldKey,
+  makeActionFieldKey,
   makeGridId,
 } from './wizardTypes';
 
@@ -140,24 +142,45 @@ function buildBlockDefinition(
   }
 
   if (block.type === 'table') {
-    const columns: ReportTableColumn[] = safeFields(block.fields, primaryFields)
-      .slice(0, 12)
-      .map((field) => {
-        const cfg = fieldConfig(block, field);
-        const column: ReportTableColumn = {
-          field,
-          label: cfg?.label || humanize(field),
-        };
-        if (cfg?.format) column.format = cfg.format;
-        if (cfg?.format === 'pill' && cfg.pillVariants) {
-          column.pillVariants = cfg.pillVariants;
+    const rawFields = safeFields(block.fields, primaryFields).slice(0, 12);
+    const columns: ReportTableColumn[] = rawFields.map((field) => {
+      const cfg = fieldConfig(block, field);
+      const columnType = cfg?.columnType ?? 'value';
+      const isAction = isActionFieldKey(field);
+      // Action columns don't bind to a row field — keep field stable for
+      // round-trip but drop format/pill metadata that doesn't apply.
+      const column: ReportTableColumn = {
+        field,
+        label: cfg?.label || (isAction ? '' : humanize(field)),
+      };
+      if (columnType === 'workflow_button') {
+        column.type = 'workflow_button';
+        if (cfg?.workflowAction) column.workflowAction = cfg.workflowAction;
+        return column;
+      }
+      if (columnType === 'interaction_buttons') {
+        column.type = 'interaction_buttons';
+        if (cfg?.interactionButtons && cfg.interactionButtons.length > 0) {
+          column.interactionButtons = cfg.interactionButtons;
         }
         return column;
-      });
+      }
+      if (cfg?.format) column.format = cfg.format;
+      if (cfg?.format === 'pill' && cfg.pillVariants) {
+        column.pillVariants = cfg.pillVariants;
+      }
+      return column;
+    });
+
+    const tableActions = block.tableActions ?? [];
+    const selectable = Boolean(block.selectable || tableActions.length > 0);
+
     return {
       ...base,
       table: {
         columns,
+        ...(selectable ? { selectable: true } : {}),
+        ...(tableActions.length > 0 ? { actions: tableActions } : {}),
         pagination: {
           defaultPageSize: 50,
           allowedPageSizes: [25, 50, 100],
@@ -539,42 +562,50 @@ function blockDefinitionToWizard(
     unsupported.push('Block-level filters');
   }
   if (block.showWhen) unsupported.push('Conditional visibility');
-  if (block.table?.actions && block.table.actions.length > 0) {
-    unsupported.push('Table workflow actions');
-  }
-  if (block.table?.selectable) unsupported.push('Selectable rows');
 
   const fields: string[] = [];
   const fieldConfigs: Record<string, WizardFieldConfig> = {};
 
   if (block.type === 'table') {
     for (const column of block.table?.columns ?? []) {
-      fields.push(column.field);
+      // Action columns may arrive with an empty `field` — synthesize a stable
+      // key so the editor can list them as rows.
+      const fieldKey =
+        column.field && column.field.length > 0
+          ? column.field
+          : makeActionFieldKey();
+      fields.push(fieldKey);
       const cfg: WizardFieldConfig = {};
-      if (column.label && column.label !== humanize(column.field)) {
+      if (column.label && column.label !== humanize(fieldKey)) {
         cfg.label = column.label;
       }
-      if (column.format && isWizardFormat(column.format)) {
-        cfg.format = column.format as WizardColumnFormat;
-      } else if (column.format) {
-        unsupported.push(`Column format "${column.format}"`);
-      }
-      if (column.pillVariants) {
-        cfg.pillVariants = column.pillVariants as Record<
-          string,
-          WizardPillVariant
-        >;
-      }
-      if (column.type && column.type !== 'value') {
-        unsupported.push(`Column type "${column.type}"`);
+      if (column.type === 'workflow_button') {
+        cfg.columnType = 'workflow_button';
+        if (column.workflowAction) cfg.workflowAction = column.workflowAction;
+      } else if (column.type === 'interaction_buttons') {
+        cfg.columnType = 'interaction_buttons';
+        if (column.interactionButtons) {
+          cfg.interactionButtons = column.interactionButtons;
+        }
+      } else {
+        if (column.type && column.type !== 'value') {
+          unsupported.push(`Column type "${column.type}"`);
+        }
+        if (column.format && isWizardFormat(column.format)) {
+          cfg.format = column.format as WizardColumnFormat;
+        } else if (column.format) {
+          unsupported.push(`Column format "${column.format}"`);
+        }
+        if (column.pillVariants) {
+          cfg.pillVariants = column.pillVariants as Record<
+            string,
+            WizardPillVariant
+          >;
+        }
       }
       if (column.editable) unsupported.push('Editable cells');
-      if (column.workflowAction) unsupported.push('Workflow buttons in tables');
-      if (column.interactionButtons && column.interactionButtons.length > 0) {
-        unsupported.push('Row interaction buttons');
-      }
       if (Object.keys(cfg).length > 0) {
-        fieldConfigs[column.field] = cfg;
+        fieldConfigs[fieldKey] = cfg;
       }
     }
   } else if (block.type === 'card') {
@@ -647,6 +678,14 @@ function blockDefinitionToWizard(
       : undefined,
     markdownContent: block.markdown?.content,
     ...(Object.keys(fieldConfigs).length > 0 ? { fieldConfigs } : {}),
+    ...(block.type === 'table' && block.table?.selectable
+      ? { selectable: true }
+      : {}),
+    ...(block.type === 'table' &&
+    block.table?.actions &&
+    block.table.actions.length > 0
+      ? { tableActions: block.table.actions }
+      : {}),
   };
 
   return { block: wizardBlock, unsupported };
