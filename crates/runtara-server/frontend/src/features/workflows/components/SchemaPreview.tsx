@@ -33,6 +33,11 @@ function renderField(field: SchemaField) {
               optional
             </Badge>
           )}
+          {field.nullable && (
+            <Badge variant="secondary" className="h-5 rounded">
+              nullable
+            </Badge>
+          )}
         </div>
         <Badge variant="outline" className="h-5 rounded px-2 text-xs uppercase">
           {field.type || 'string'}

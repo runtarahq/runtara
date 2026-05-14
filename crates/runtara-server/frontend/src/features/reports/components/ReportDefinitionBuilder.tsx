@@ -3173,6 +3173,21 @@ function TableBlockSettings({
                     </SelectContent>
                   </Select>
                 </Field>
+                <Field label="Max chars">
+                  <Input
+                    type="number"
+                    min={1}
+                    value={column.maxChars ?? ''}
+                    placeholder="Full"
+                    onChange={(event) =>
+                      updateColumn(index, {
+                        maxChars: parseOptionalPositiveInteger(
+                          event.target.value
+                        ),
+                      })
+                    }
+                  />
+                </Field>
                 <Field label="Display field">
                   <Select
                     value={column.displayField ?? NONE_VALUE}
@@ -4507,6 +4522,15 @@ function parseConditionLiteral(value: string, op?: string): unknown {
       .filter((part) => part !== '');
   }
   return parseDatasetScalar(trimmed);
+}
+
+function parseOptionalPositiveInteger(value: string): number | undefined {
+  const trimmed = value.trim();
+  if (!trimmed) return undefined;
+
+  const parsed = Number(trimmed);
+  if (!Number.isFinite(parsed) || parsed <= 0) return undefined;
+  return Math.trunc(parsed);
 }
 
 function createDefaultWorkflowAction(): ReportWorkflowActionConfig {

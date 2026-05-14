@@ -17,6 +17,7 @@ import { ListTree, Network } from 'lucide-react';
 import { v4 as uuidv4 } from 'uuid';
 import { useWorkflowStore } from '@/features/workflows/stores/workflowStore.ts';
 import { useExecutionStore } from '@/features/workflows/stores/executionStore';
+import { useValidationStore } from '@/features/workflows/stores/validationStore';
 import { toast } from '@/shared/hooks/useToast';
 import { cn } from '@/lib/utils.ts';
 import {
@@ -71,6 +72,10 @@ import {
   WorkflowTimelineView,
 } from './TimelineView';
 import { TimelineNodeConfigPanel } from './TimelineNodeConfigPanel';
+import {
+  validateNodeEditWithRust,
+  type PendingNodeCandidate,
+} from './node-edit-rust-validation';
 
 // Re-export CreateStepContext type for external use
 export interface CreateStepContext {
@@ -258,14 +263,17 @@ type WorkflowEditorProps = {
       type: string;
       required: boolean;
       description: string;
+      nullable?: boolean;
     }>;
     outputSchemaFields?: Array<{
       name: string;
       type: string;
       required: boolean;
       description: string;
+      nullable?: boolean;
     }>;
     executionTimeoutSeconds?: number;
+    rateLimitBudgetMs?: number;
   };
   stagedNodeChanges?: StagedNodeChanges;
   onStagedNodeChange?: (nodeId: string, data: form.SchemaType) => void;
@@ -1543,14 +1551,75 @@ function WorkflowEditorContent({
     setSelectedNodeId(null);
   }, [closeCreateStep, setPendingNewNode, setSelectedNodeId]);
 
+  const validateNodeEditCandidate = useCallback(
+    async (
+      nodeId: string,
+      data: form.SchemaType,
+      pendingNode?: PendingNodeCandidate | null
+    ) => {
+      const currentState = useWorkflowStore.getState();
+      const nodesWithStagedChanges = currentState.nodes.map((node) => {
+        const stagedData = stagedNodeChanges[node.id];
+        return stagedData
+          ? {
+              ...node,
+              data: {
+                ...node.data,
+                ...stagedData,
+              },
+            }
+          : node;
+      });
+      const validation = await validateNodeEditWithRust({
+        nodes: nodesWithStagedChanges,
+        edges: currentState.edges,
+        nodeId,
+        data,
+        workflow,
+        pendingNode,
+      });
+
+      const validationStore = useValidationStore.getState();
+      validationStore.clearMessages('client');
+      if (validation.messages.length > 0) {
+        validationStore.addMessages(validation.messages);
+      }
+
+      if (!validation.canApply) {
+        toast({
+          title: 'Step validation failed',
+          description:
+            validation.rustValidation.errors[0] ||
+            validation.rustValidation.message,
+          variant: 'destructive',
+        });
+        return false;
+      }
+
+      if (validation.rustValidation.status === 'unavailable') {
+        toast({
+          title: 'Rust validation unavailable',
+          description: validation.rustValidation.message,
+        });
+      }
+
+      return true;
+    },
+    [stagedNodeChanges, workflow]
+  );
+
   // Node config dialog handlers
   const handleNodeSave = useCallback(
-    (nodeId: string, data: form.SchemaType) => {
+    async (nodeId: string, data: form.SchemaType) => {
+      const canApply = await validateNodeEditCandidate(nodeId, data);
+      if (!canApply) return false;
+
       updateNode(nodeId, data as unknown as Partial<ExecutionGraphStepDto>);
       onResetNodeChanges?.(nodeId);
       closeNodeConfig();
+      return true;
     },
-    [updateNode, onResetNodeChanges, closeNodeConfig]
+    [validateNodeEditCandidate, updateNode, onResetNodeChanges, closeNodeConfig]
   );
 
   const handleNodeDelete = useCallback(
@@ -1564,8 +1633,15 @@ function WorkflowEditorContent({
 
   // Pending new node handlers
   const handlePendingNodeSave = useCallback(
-    (nodeId: string, data: form.SchemaType) => {
-      if (!pendingNewNode || pendingNewNode.id !== nodeId) return;
+    async (nodeId: string, data: form.SchemaType) => {
+      if (!pendingNewNode || pendingNewNode.id !== nodeId) return false;
+
+      const canApply = await validateNodeEditCandidate(
+        nodeId,
+        data,
+        pendingNewNode
+      );
+      if (!canApply) return false;
 
       const nodeType = STEP_TYPES[data.stepType] || NODE_TYPES.BasicNode;
       const isConditional =
@@ -1633,9 +1709,11 @@ function WorkflowEditorContent({
       setPendingNodeSurface(null);
       setTimelineAddStepRequest(null);
       setCreateStepSurface(null);
+      return true;
     },
     [
       pendingNewNode,
+      validateNodeEditCandidate,
       addNode,
       addStoreEdge,
       addStoreEdges,

@@ -18,9 +18,11 @@ import {
 } from '../../types';
 import {
   formatCellValue,
+  getReportRowValue,
   humanizeFieldName,
   isWorkflowActionDisabled,
   isWorkflowActionVisible,
+  renderDisplayTemplate,
 } from '../../utils';
 import { FieldEditor } from './editable/FieldEditor';
 import { useReportWriteback } from './editable/useReportWriteback';
@@ -310,7 +312,12 @@ function CardField({
   const span = Math.min(Math.max(field.colSpan ?? 1, 1), maxColumns);
   const label = field.label ?? humanizeFieldName(field.field);
   const value = row[field.field];
-  const displayValue = getDisplayValue(row, field.displayField, value);
+  const displayValue = getDisplayValue(
+    row,
+    field.displayField,
+    field.displayTemplate,
+    value
+  );
   const kind = field.kind ?? 'value';
   const actionKey = `${blockId ?? 'card'}:${String(row.id ?? '')}:${field.field}`;
   const hasWorkflowAction =
@@ -413,19 +420,30 @@ function CardField({
 function getDisplayValue(
   row: Record<string, unknown>,
   displayField: string | undefined,
+  displayTemplate: string | undefined,
   value: unknown
 ) {
-  if (!displayField) return value;
-  const displayValue = row[displayField];
-  if (displayValue === null || displayValue === undefined) return value;
-  if (typeof displayValue === 'string' && displayValue.trim().length === 0) {
-    return value;
+  if (displayTemplate) {
+    const displayValue = renderDisplayTemplate(row, displayTemplate);
+    if (displayValue.trim().length > 0) return displayValue;
   }
-  return displayValue;
+  if (displayField) {
+    const displayValue = getReportRowValue(row, displayField);
+    if (displayValue === null || displayValue === undefined) return value;
+    if (typeof displayValue === 'string' && displayValue.trim().length === 0) {
+      return value;
+    }
+    return displayValue;
+  }
+  return value;
 }
 
 function shouldRefreshAfterWriteback(field: ReportCardField): boolean {
-  return Boolean(field.displayField || field.editor?.kind === 'lookup');
+  return Boolean(
+    field.displayField ||
+      field.displayTemplate ||
+      field.editor?.kind === 'lookup'
+  );
 }
 
 function WorkflowActionButton({

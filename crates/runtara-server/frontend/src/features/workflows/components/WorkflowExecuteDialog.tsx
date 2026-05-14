@@ -14,6 +14,7 @@ import { parseSchema, SchemaField } from '@/features/workflows/utils/schema';
 import { Checkbox } from '@/shared/components/ui/checkbox';
 import { FileInput } from '@/shared/components/ui/file-input';
 import { CompositeValueEditor } from '@/features/workflows/components/WorkflowEditor/NodeForm/InputMappingField/CompositeValueEditor';
+import { validateWorkflowStartInputsWithRust } from '@/features/workflows/utils/rust-workflow-validation';
 import type {
   CompositeArrayValue,
   CompositeObjectValue,
@@ -225,6 +226,10 @@ export function WorkflowExecuteDialog({
   const [validationErrors, setValidationErrors] = useState<
     Record<string, string>
   >({});
+  const [rustValidationError, setRustValidationError] = useState<string | null>(
+    null
+  );
+  const [isRustValidating, setIsRustValidating] = useState(false);
 
   // Reset input data and validation errors when input schema changes
   useEffect(() => {
@@ -249,6 +254,7 @@ export function WorkflowExecuteDialog({
     setCompositeInputData(initialCompositeData);
     setTouchedFields(getInitialTouched(fields));
     setValidationErrors({});
+    setRustValidationError(null);
   }, [fields]);
 
   // Reset input data and validation errors when dialog opens
@@ -274,6 +280,7 @@ export function WorkflowExecuteDialog({
       setCompositeInputData(initialCompositeData);
       setTouchedFields(getInitialTouched(fields));
       setValidationErrors({});
+      setRustValidationError(null);
     }
   }, [open, fields]);
 
@@ -283,6 +290,7 @@ export function WorkflowExecuteDialog({
       [fieldName]: value,
     }));
     setTouchedFields((prev) => new Set(prev).add(fieldName));
+    setRustValidationError(null);
     // Clear validation error for this field when user makes changes
     if (validationErrors[fieldName]) {
       setValidationErrors((prev) => {
@@ -291,6 +299,7 @@ export function WorkflowExecuteDialog({
         return rest;
       });
     }
+    setRustValidationError(null);
   };
 
   const handleFieldClear = (fieldName: string) => {
@@ -335,9 +344,10 @@ export function WorkflowExecuteDialog({
     return errors;
   };
 
-  const handleExecute = () => {
+  const handleExecute = async () => {
     const errors = getValidationErrors();
     setValidationErrors(errors);
+    setRustValidationError(null);
     if (Object.keys(errors).length > 0) {
       return;
     }
@@ -348,6 +358,29 @@ export function WorkflowExecuteDialog({
         filteredData[key] = value;
       }
     }
+
+    const backendInputs = {
+      data: filteredData,
+      variables: {},
+    };
+
+    setIsRustValidating(true);
+    try {
+      const rustValidation = await validateWorkflowStartInputsWithRust(
+        inputSchema ?? {},
+        backendInputs
+      );
+
+      if (rustValidation.status === 'invalid') {
+        setRustValidationError(
+          rustValidation.errors.join('; ') || rustValidation.message
+        );
+        return;
+      }
+    } finally {
+      setIsRustValidating(false);
+    }
+
     onExecute(filteredData);
   };
 
@@ -598,6 +631,11 @@ export function WorkflowExecuteDialog({
               {serverError}
             </div>
           )}
+          {rustValidationError && (
+            <div className="rounded-md bg-destructive/10 p-3 text-sm text-destructive">
+              {rustValidationError}
+            </div>
+          )}
         </div>
 
         <DialogFooter>
@@ -608,8 +646,11 @@ export function WorkflowExecuteDialog({
           >
             Cancel
           </Button>
-          <Button onClick={handleExecute} disabled={isSubmitting}>
-            {isSubmitting ? 'Executing...' : 'Execute'}
+          <Button
+            onClick={handleExecute}
+            disabled={isSubmitting || isRustValidating}
+          >
+            {isSubmitting || isRustValidating ? 'Executing...' : 'Execute'}
           </Button>
         </DialogFooter>
       </DialogContent>

@@ -37,9 +37,11 @@ function extractFieldPathFromPath(path: string): string | null {
 
 export type ValueMode = 'immediate' | 'reference' | 'template' | 'composite';
 
+type MappingInputValue = string | number | boolean | null | undefined;
+
 interface MappingValueInputProps {
-  value: string;
-  onChange: (value: string) => void;
+  value: MappingInputValue;
+  onChange: (value: string | null) => void;
   valueType: ValueMode;
   onValueTypeChange: (type: ValueMode) => void;
   fieldType?: string;
@@ -51,6 +53,35 @@ interface MappingValueInputProps {
   className?: string;
   /** Hide the reference mode toggle button (for testing/immediate-only contexts) */
   hideReferenceToggle?: boolean;
+  /** Allow setting literal null for nullable-compatible immediate values */
+  allowNull?: boolean;
+}
+
+function fieldTypeSupportsNull(fieldType: string): boolean {
+  return (
+    fieldType === 'string' ||
+    fieldType === 'text' ||
+    fieldType === 'str' ||
+    fieldType === 'textarea' ||
+    fieldType === 'json' ||
+    fieldType === 'object' ||
+    fieldType === 'array' ||
+    fieldType === 'any' ||
+    fieldType === 'unknown' ||
+    fieldType.startsWith('array<') ||
+    fieldType.startsWith('[') ||
+    fieldType.includes('[]') ||
+    fieldType.startsWith('{')
+  );
+}
+
+function isArrayFieldType(fieldType: string): boolean {
+  return (
+    fieldType === 'array' ||
+    fieldType.startsWith('array<') ||
+    fieldType.startsWith('[') ||
+    fieldType.includes('[]')
+  );
 }
 
 /**
@@ -69,6 +100,7 @@ export function MappingValueInput({
   enumOptions,
   className,
   hideReferenceToggle = false,
+  allowNull = false,
 }: MappingValueInputProps) {
   const [isPickerOpen, setIsPickerOpen] = useState(false);
   const [isTemplateEditorOpen, setIsTemplateEditorOpen] = useState(false);
@@ -80,6 +112,13 @@ export function MappingValueInput({
 
   const isTemplate = valueType === 'template';
   const isComposite = valueType === 'composite';
+  const stringValue =
+    value === null || value === undefined ? '' : String(value);
+  const isNullValue = value === null;
+  const canSetNull =
+    allowNull &&
+    valueType === 'immediate' &&
+    fieldTypeSupportsNull(lowerFieldType);
 
   // Determine if we should show the template editor expand button
   const showTemplateEditor = useMemo(() => {
@@ -102,19 +141,19 @@ export function MappingValueInput({
 
   // Look up step info from the reference path
   const stepInfo = useMemo(() => {
-    if (!isReference || !value)
+    if (!isReference || !stringValue)
       return { stepName: undefined, stepId: undefined, fieldPath: undefined };
-    const stepId = extractStepIdFromPath(value);
+    const stepId = extractStepIdFromPath(stringValue);
     if (!stepId)
       return { stepName: undefined, stepId: undefined, fieldPath: undefined };
     const step = previousSteps.find((s) => s.id === stepId);
-    const fieldPath = extractFieldPathFromPath(value);
+    const fieldPath = extractFieldPathFromPath(stringValue);
     return {
       stepName: step?.name,
       stepId,
       fieldPath,
     };
-  }, [isReference, value, previousSteps]);
+  }, [isReference, stringValue, previousSteps]);
 
   // Cycle: immediate → template → reference → composite → immediate
   const handleModeToggle = () => {
@@ -150,11 +189,11 @@ export function MappingValueInput({
   const renderInput = () => {
     // Reference mode - show pill or empty state
     if (isReference) {
-      if (value) {
+      if (stringValue) {
         return (
           <div className="flex-1 flex items-center min-h-9 px-2 py-1 bg-muted/30 rounded-md border">
             <ReferencePill
-              path={value}
+              path={stringValue}
               stepName={stepInfo.stepName}
               fieldPath={stepInfo.fieldPath ?? undefined}
               onRemove={handleRemoveReference}
@@ -184,11 +223,15 @@ export function MappingValueInput({
 
     // Composite mode - show indicator (parent renders the actual editor)
     if (isComposite) {
+      const isArrayComposite = isArrayFieldType(lowerFieldType);
+      const CompositeIcon = isArrayComposite ? Icons.list : Icons.braces;
       return (
         <div className="flex-1 flex items-center min-h-9 px-3 py-1 bg-green-50 dark:bg-green-950/30 rounded-md border border-green-200 dark:border-green-800">
-          <Icons.braces className="h-4 w-4 text-green-600 dark:text-green-400 mr-2 shrink-0" />
+          <CompositeIcon className="h-4 w-4 text-green-600 dark:text-green-400 mr-2 shrink-0" />
           <span className="text-sm text-green-700 dark:text-green-300">
-            Composite object — configure below
+            {isArrayComposite
+              ? 'Composite array - configure below'
+              : 'Composite object - configure below'}
           </span>
         </div>
       );
@@ -199,7 +242,7 @@ export function MappingValueInput({
       return (
         <Input
           type="text"
-          value={value || ''}
+          value={stringValue}
           onChange={(e) => onChange(e.target.value)}
           placeholder={
             placeholder ||
@@ -212,10 +255,28 @@ export function MappingValueInput({
     }
 
     // Immediate mode - render based on field type
+    if (isNullValue) {
+      return (
+        <div className="flex-1 flex items-center justify-between min-h-9 px-3">
+          <span className="font-mono text-sm text-muted-foreground">null</span>
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            className="h-7 px-2 text-xs"
+            onClick={() => onChange('')}
+            disabled={disabled}
+            title="Clear null value"
+          >
+            Clear
+          </Button>
+        </div>
+      );
+    }
 
     // Boolean field
     if (lowerFieldType === 'boolean' || lowerFieldType === 'bool') {
-      const boolValue = value === 'true';
+      const boolValue = value === true || stringValue === 'true';
       return (
         <div className="flex-1 flex items-center min-h-9 px-3">
           <Checkbox
@@ -234,7 +295,7 @@ export function MappingValueInput({
     if (enumOptions && enumOptions.length > 0) {
       return (
         <Select
-          value={value || ''}
+          value={stringValue}
           onValueChange={onChange}
           disabled={disabled}
         >
@@ -262,7 +323,7 @@ export function MappingValueInput({
       return (
         <Input
           type="text"
-          value={value || ''}
+          value={stringValue}
           onChange={(e) => onChange(e.target.value)}
           placeholder={placeholder}
           disabled={disabled}
@@ -282,7 +343,7 @@ export function MappingValueInput({
       return (
         <Input
           type="number"
-          value={value || ''}
+          value={stringValue}
           onChange={(e) => onChange(e.target.value)}
           placeholder={placeholder}
           disabled={disabled}
@@ -295,7 +356,7 @@ export function MappingValueInput({
     return (
       <Input
         type="text"
-        value={value || ''}
+        value={stringValue}
         onChange={(e) => onChange(e.target.value)}
         placeholder={placeholder}
         disabled={disabled}
@@ -323,8 +384,21 @@ export function MappingValueInput({
         ) : (
           renderInput()
         )}
+        {canSetNull && !isNullValue && (
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            className="h-9 shrink-0 px-2 font-mono text-xs text-muted-foreground hover:text-foreground"
+            onClick={() => onChange(null)}
+            disabled={disabled}
+            title="Set literal null"
+          >
+            null
+          </Button>
+        )}
         {/* Template editor expand button - shown for template mode or template-capable fields in immediate mode */}
-        {showTemplateEditor && !isReference && !isComposite && (
+        {showTemplateEditor && !isReference && !isComposite && !isNullValue && (
           <Button
             type="button"
             variant="ghost"
@@ -361,8 +435,8 @@ export function MappingValueInput({
         <TemplateEditorModal
           open={isTemplateEditorOpen}
           onOpenChange={setIsTemplateEditorOpen}
-          value={value}
-          onChange={onChange}
+          value={stringValue}
+          onChange={(nextValue) => onChange(nextValue)}
           fieldName={fieldName}
           placeholder={placeholder}
         />

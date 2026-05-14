@@ -28,7 +28,7 @@ export const BaseNode = forwardRef<
     agentName?: string;
     inputMapping?: Array<{
       type: string;
-      value?: string | number | boolean | any[] | object;
+      value?: string | number | boolean | null | any[] | object;
       typeHint?: string;
     }>;
     executionStatus?: NodeExecutionStatus;

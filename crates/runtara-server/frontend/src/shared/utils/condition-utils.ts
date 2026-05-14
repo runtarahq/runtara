@@ -5,7 +5,7 @@
 
 interface InputMappingEntry {
   type: string;
-  value?: string | number | boolean | any[] | object;
+  value?: string | number | boolean | null | any[] | object;
   typeHint?: string;
   valueType?: 'reference' | 'immediate' | 'composite' | 'template';
 }

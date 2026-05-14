@@ -169,10 +169,11 @@ export function ArrayMappingEditor({
             </p>
             <MappingValueInput
               value={typeof value === 'string' ? value : ''}
-              onChange={(v) => onChange(v)}
+              onChange={(v) => onChange(v ?? '')}
               valueType="reference"
               onValueTypeChange={onValueTypeChange}
               fieldType="array"
+              allowNull={false}
               placeholder="Select array reference..."
               hideReferenceToggle
             />

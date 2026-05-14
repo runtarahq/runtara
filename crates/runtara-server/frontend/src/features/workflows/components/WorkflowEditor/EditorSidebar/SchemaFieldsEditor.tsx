@@ -1,8 +1,12 @@
+import { useEffect, useMemo, useState } from 'react';
 import { Button } from '@/shared/components/ui/button';
 import { Checkbox } from '@/shared/components/ui/checkbox';
 import { Input } from '@/shared/components/ui/input';
 import { Label } from '@/shared/components/ui/label';
 import { Plus, Trash2 } from 'lucide-react';
+import { cn } from '@/lib/utils';
+import { validateSchemaFieldsWithRust } from '@/features/workflows/utils/rust-workflow-validation';
+import type { RustSchemaFieldsValidationError } from '@/features/workflows/utils/rust-workflow-validation';
 import {
   Select,
   SelectContent,
@@ -26,6 +30,7 @@ export type SchemaField = {
   required: boolean;
   description: string;
   enum?: string[];
+  nullable?: boolean;
 };
 
 interface SchemaFieldsEditorProps {
@@ -47,6 +52,48 @@ export function SchemaFieldsEditor({
   hideLabel = false,
   showEnum = false,
 }: SchemaFieldsEditorProps) {
+  const [schemaFieldValidationErrors, setSchemaFieldValidationErrors] =
+    useState<RustSchemaFieldsValidationError[]>([]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    validateSchemaFieldsWithRust(label, fields).then((result) => {
+      if (cancelled) {
+        return;
+      }
+
+      setSchemaFieldValidationErrors(
+        result.status === 'invalid' ? result.schemaErrors : []
+      );
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [fields, label]);
+
+  const fieldNameErrorsByIndex = useMemo(() => {
+    const errorsByIndex = new Map<number, string>();
+
+    for (const error of schemaFieldValidationErrors) {
+      if (error.code !== 'E008') {
+        continue;
+      }
+
+      for (const rowIndex of error.rowIndices) {
+        errorsByIndex.set(rowIndex, 'Field name must be unique.');
+      }
+    }
+
+    return errorsByIndex;
+  }, [schemaFieldValidationErrors]);
+  const errorIdPrefix = useMemo(
+    () =>
+      `${label.toLowerCase().replace(/[^a-z0-9]+/g, '-') || 'schema'}-field`,
+    [label]
+  );
+
   const handleAdd = () => {
     onChange([
       ...fields,
@@ -102,99 +149,121 @@ export function SchemaFieldsEditor({
             </tr>
           </thead>
           <tbody>
-            {fields.map((field, index) => (
-              <tr key={index} className="border-b hover:bg-muted/30">
-                <td className="p-2">
-                  <Input
-                    value={field.name}
-                    onChange={(e) =>
-                      handleChange(index, 'name', e.target.value)
-                    }
-                    placeholder="fieldName"
-                    disabled={readOnly}
-                    className="font-mono text-sm border-0 p-1 h-auto focus-visible:ring-0 focus-visible:ring-offset-0"
-                  />
-                </td>
-                <td className="p-2">
-                  <Select
-                    value={field.type || 'string'}
-                    onValueChange={(value) =>
-                      handleChange(index, 'type', value)
-                    }
-                    disabled={readOnly}
-                  >
-                    <SelectTrigger className="h-7 border-0 focus:ring-0 focus:ring-offset-0">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {SUPPORTED_TYPES.map((type) => (
-                        <SelectItem key={type.value} value={type.value}>
-                          {type.label}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                </td>
-                <td className="w-20 text-center p-2">
-                  <Checkbox
-                    checked={field.required}
-                    onCheckedChange={(checked) =>
-                      handleChange(index, 'required', !!checked)
-                    }
-                    disabled={readOnly}
-                  />
-                </td>
-                <td className="p-2">
-                  <Input
-                    value={field.description}
-                    onChange={(e) =>
-                      handleChange(index, 'description', e.target.value)
-                    }
-                    placeholder="Field description"
-                    disabled={readOnly}
-                    className="text-sm border-0 p-1 h-auto focus-visible:ring-0 focus-visible:ring-offset-0"
-                  />
-                </td>
-                {showEnum && (
-                  <td className="p-2">
+            {fields.map((field, index) => {
+              const fieldNameError = fieldNameErrorsByIndex.get(index) ?? null;
+              const fieldNameErrorId = fieldNameError
+                ? `${errorIdPrefix}-${index}-name-error`
+                : undefined;
+
+              return (
+                <tr key={index} className="border-b hover:bg-muted/30">
+                  <td className="p-2 align-top">
                     <Input
-                      value={(field.enum || []).join(', ')}
-                      onChange={(e) => {
-                        const raw = e.target.value;
-                        const enumValues = raw
-                          ? raw
-                              .split(',')
-                              .map((v) => v.trim())
-                              .filter(Boolean)
-                          : [];
-                        const newFields = [...fields];
-                        newFields[index] = {
-                          ...newFields[index],
-                          enum: enumValues.length > 0 ? enumValues : undefined,
-                        };
-                        onChange(newFields);
-                      }}
-                      placeholder="val1, val2, ..."
+                      value={field.name}
+                      onChange={(e) =>
+                        handleChange(index, 'name', e.target.value)
+                      }
+                      placeholder="fieldName"
                       disabled={readOnly}
-                      className="font-mono text-sm border-0 p-1 h-auto focus-visible:ring-0 focus-visible:ring-offset-0"
+                      aria-invalid={!!fieldNameError}
+                      aria-describedby={fieldNameErrorId}
+                      className={cn(
+                        'font-mono text-sm border-0 p-1 h-auto focus-visible:ring-0 focus-visible:ring-offset-0',
+                        fieldNameError &&
+                          'bg-destructive/10 text-destructive focus-visible:ring-destructive'
+                      )}
+                    />
+                    {fieldNameError && (
+                      <p
+                        id={fieldNameErrorId}
+                        className="mt-1 text-xs text-destructive"
+                      >
+                        {fieldNameError}
+                      </p>
+                    )}
+                  </td>
+                  <td className="p-2 align-top">
+                    <Select
+                      value={field.type || 'string'}
+                      onValueChange={(value) =>
+                        handleChange(index, 'type', value)
+                      }
+                      disabled={readOnly}
+                    >
+                      <SelectTrigger className="h-7 border-0 focus:ring-0 focus:ring-offset-0">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {SUPPORTED_TYPES.map((type) => (
+                          <SelectItem key={type.value} value={type.value}>
+                            {type.label}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </td>
+                  <td className="w-20 text-center p-2 align-top">
+                    <Checkbox
+                      checked={field.required}
+                      onCheckedChange={(checked) =>
+                        handleChange(index, 'required', !!checked)
+                      }
+                      disabled={readOnly}
                     />
                   </td>
-                )}
-                {!readOnly && (
-                  <td className="w-16 text-center p-2">
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="sm"
-                      onClick={() => handleRemove(index)}
-                      className="h-6 w-6 p-0"
-                    >
-                      <Trash2 className="h-3 w-3" />
-                    </Button>
+                  <td className="p-2 align-top">
+                    <Input
+                      value={field.description}
+                      onChange={(e) =>
+                        handleChange(index, 'description', e.target.value)
+                      }
+                      placeholder="Field description"
+                      disabled={readOnly}
+                      className="text-sm border-0 p-1 h-auto focus-visible:ring-0 focus-visible:ring-offset-0"
+                    />
                   </td>
-                )}
-              </tr>
-            ))}
+                  {showEnum && (
+                    <td className="p-2 align-top">
+                      <Input
+                        value={(field.enum || []).join(', ')}
+                        onChange={(e) => {
+                          const raw = e.target.value;
+                          const enumValues = raw
+                            ? raw
+                                .split(',')
+                                .map((v) => v.trim())
+                                .filter(Boolean)
+                            : [];
+                          const newFields = [...fields];
+                          newFields[index] = {
+                            ...newFields[index],
+                            enum:
+                              enumValues.length > 0 ? enumValues : undefined,
+                          };
+                          onChange(newFields);
+                        }}
+                        placeholder="val1, val2, ..."
+                        disabled={readOnly}
+                        className="font-mono text-sm border-0 p-1 h-auto focus-visible:ring-0 focus-visible:ring-offset-0"
+                      />
+                    </td>
+                  )}
+                  {!readOnly && (
+                    <td className="w-16 text-center p-2 align-top">
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => handleRemove(index)}
+                        className="h-6 w-6 p-0"
+                      >
+                        <Trash2 className="h-3 w-3" />
+                      </Button>
+                    </td>
+                  )}
+                </tr>
+              );
+            })}
             {fields.length === 0 && (
               <tr>
                 <td

@@ -1023,6 +1023,7 @@ Table blocks should support:
 - visible columns
 - column labels
 - column formatting
+- optional per-column display cutoff with `maxChars`
 - default sort
 - sortable columns
 - server-side pagination

@@ -1305,6 +1305,10 @@ impl ReportService {
                 )?;
                 validate_dataset_block_output(block, &compiled.source)?;
                 if let Some(table) = &block.table {
+                    validate_report_table_display_templates(
+                        table,
+                        &format!("block '{}'", block.id),
+                    )?;
                     validate_report_table_interaction_button_columns(
                         table,
                         &filter_ids,
@@ -1432,6 +1436,7 @@ impl ReportService {
             }
 
             if let Some(table) = &block.table {
+                validate_report_table_display_templates(table, &format!("block '{}'", block.id))?;
                 for column in &table.columns {
                     if column.is_chart() {
                         self.validate_table_chart_column(
@@ -1532,6 +1537,7 @@ impl ReportService {
             }
 
             if let Some(card) = &block.card {
+                validate_report_card_display_templates(card, &format!("block '{}'", block.id))?;
                 for group in &card.groups {
                     for field in &group.fields {
                         let is_workflow_button = field.kind == ReportCardFieldKind::WorkflowButton
@@ -2351,6 +2357,12 @@ impl ReportService {
                 block.id, column.field
             )));
         }
+        if source.kind != ReportSourceKind::ObjectModel {
+            return Err(ReportServiceError::Validation(format!(
+                "Block '{}' chart table column '{}' source.kind must be object_model",
+                block.id, column.field
+            )));
+        }
         if source.schema.trim().is_empty() {
             return Err(ReportServiceError::Validation(format!(
                 "Block '{}' chart table column '{}' must specify an Object Model schema",
@@ -2481,6 +2493,12 @@ impl ReportService {
                 block.id, column.field
             )));
         }
+        if source.kind != ReportSourceKind::ObjectModel {
+            return Err(ReportServiceError::Validation(format!(
+                "Block '{}' value table column '{}' source.kind must be object_model",
+                block.id, column.field
+            )));
+        }
         if !source.group_by.is_empty() || !source.aggregates.is_empty() {
             return Err(ReportServiceError::Validation(format!(
                 "Block '{}' value table column '{}' source must not define groupBy or aggregates",
@@ -2521,7 +2539,7 @@ impl ReportService {
             .map(|field| field.name.clone())
             .collect();
 
-        if !is_schema_field(&nested_schema_fields, select) {
+        if !is_schema_field_or_json_select_path(&nested_schema, &nested_schema_fields, select) {
             return Err(ReportServiceError::Validation(format!(
                 "Block '{}' value table column '{}' source.select '{}' is not a column on '{}'",
                 block.id, column.field, select, source.schema
@@ -4178,7 +4196,7 @@ impl ReportService {
             if value_is_empty(key) {
                 continue;
             }
-            let Some(value) = row.get(select) else {
+            let Some(value) = row_path_value(&row, select) else {
                 continue;
             };
             values_by_key
@@ -5318,6 +5336,7 @@ fn validate_workflow_runtime_block(
         &format!("block '{}'", block.id),
     )?;
     if let Some(table) = &block.table {
+        validate_report_table_display_templates(table, &format!("block '{}'", block.id))?;
         for column in &table.columns {
             if column.is_workflow_button() {
                 let action = column.workflow_action.as_ref().ok_or_else(|| {
@@ -5470,6 +5489,7 @@ fn validate_system_block(
     };
 
     if let Some(table) = &block.table {
+        validate_report_table_display_templates(table, &format!("block '{}'", block.id))?;
         for column in &table.columns {
             if column.is_interaction_buttons() {
                 validate_report_interaction_buttons(
@@ -6216,6 +6236,151 @@ fn validate_report_condition_filter_refs(
         }
     }
     Ok(())
+}
+
+fn validate_report_table_display_templates(
+    table: &ReportTableConfig,
+    context: &str,
+) -> Result<(), ReportServiceError> {
+    for column in &table.columns {
+        if let Some(template) = &column.display_template {
+            validate_report_display_template(
+                template,
+                &format!("{context} table column '{}' displayTemplate", column.field),
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_report_card_display_templates(
+    card: &ReportCardConfig,
+    context: &str,
+) -> Result<(), ReportServiceError> {
+    for group in &card.groups {
+        for field in &group.fields {
+            if let Some(template) = &field.display_template {
+                validate_report_display_template(
+                    template,
+                    &format!("{context} card field '{}' displayTemplate", field.field),
+                )?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_report_display_template(
+    template: &str,
+    context: &str,
+) -> Result<(), ReportServiceError> {
+    validate_safe_display_template(template).map_err(|message| {
+        ReportServiceError::Validation(format!(
+            "{context} is invalid: {message}. Supported syntax is '{{{{field.path}}}}' or '{{{{field.path | format}}}}' only"
+        ))
+    })
+}
+
+fn validate_safe_display_template(template: &str) -> Result<(), &'static str> {
+    let mut cursor = 0;
+    while cursor < template.len() {
+        let open = find_from(template, "{{", cursor);
+        let close = find_from(template, "}}", cursor);
+        if close.is_some_and(|close| open.is_none_or(|open| close < open)) {
+            return Err("unexpected close delimiter");
+        }
+        let Some(open) = open else {
+            return Ok(());
+        };
+        let Some(close) = find_from(template, "}}", open + 2) else {
+            return Err("unclosed variable");
+        };
+
+        let token = template[open + 2..close].trim();
+        validate_display_template_token(token)?;
+        cursor = close + 2;
+    }
+    Ok(())
+}
+
+fn validate_display_template_token(token: &str) -> Result<(), &'static str> {
+    if token.is_empty() {
+        return Err("empty variable");
+    }
+    if token.contains("{{") || token.contains("}}") {
+        return Err("nested variables are not supported");
+    }
+
+    let parts = token.split('|').collect::<Vec<_>>();
+    match parts.as_slice() {
+        [field] => validate_display_template_field(field.trim()),
+        [field, format] => {
+            validate_display_template_field(field.trim())?;
+            validate_display_template_format(format.trim())
+        }
+        _ => Err("only one format pipe is supported"),
+    }
+}
+
+fn validate_display_template_field(field: &str) -> Result<(), &'static str> {
+    let field = field.strip_prefix("row.").unwrap_or(field);
+    let mut parts = field.split('.');
+    let Some(first) = parts.next().filter(|part| !part.is_empty()) else {
+        return Err("field path is empty");
+    };
+    if !is_identifier_part(first) {
+        return Err("field path is invalid");
+    }
+    for part in parts {
+        if part.is_empty() {
+            return Err("field path is invalid");
+        }
+        if part.chars().all(|ch| ch.is_ascii_digit()) {
+            continue;
+        }
+        if !is_identifier_part(part) {
+            return Err("field path is invalid");
+        }
+    }
+    Ok(())
+}
+
+fn validate_display_template_format(format: &str) -> Result<(), &'static str> {
+    if format.is_empty() {
+        return Err("format is empty");
+    }
+    let mut parts = format.split(':');
+    let Some(name) = parts.next() else {
+        return Err("format is invalid");
+    };
+    if !is_identifier_part(name) {
+        return Err("format is invalid");
+    }
+    if let Some(argument) = parts.next()
+        && (argument.is_empty()
+            || !argument
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-'))
+    {
+        return Err("format is invalid");
+    }
+    if parts.next().is_some() {
+        return Err("format is invalid");
+    }
+    Ok(())
+}
+
+fn is_identifier_part(value: &str) -> bool {
+    let mut chars = value.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    (first.is_ascii_alphabetic() || first == '_')
+        && chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+}
+
+fn find_from(value: &str, pattern: &str, cursor: usize) -> Option<usize> {
+    value[cursor..].find(pattern).map(|index| cursor + index)
 }
 
 fn validate_report_condition_field_refs(
@@ -7123,6 +7288,15 @@ fn condition_unsatisfied_strict_filter(
             if value_is_empty(&value) {
                 return Some(reference.filter_id);
             }
+        }
+        if let Ok(Some(subquery)) = parse_report_condition_subquery_operand(argument) {
+            if let Some(child) = subquery.get("condition").and_then(condition_from_value)
+                && let Some(unset) =
+                    condition_unsatisfied_strict_filter(&child, strict_filters, resolved_filters)
+            {
+                return Some(unset);
+            }
+            continue;
         }
         if let Some(child) = condition_from_value(argument)
             && let Some(unset) =
@@ -9574,6 +9748,18 @@ fn table_response_column(column: &ReportTableColumn) -> Value {
     {
         output.insert("displayField".to_string(), Value::String(display_field));
     }
+    if let Some(display_template) = &column.display_template {
+        output.insert(
+            "displayTemplate".to_string(),
+            Value::String(display_template.clone()),
+        );
+    }
+    if let Some(pill_variants) = &column.pill_variants {
+        output.insert("pillVariants".to_string(), json!(pill_variants));
+    }
+    if let Some(max_chars) = column.max_chars {
+        output.insert("maxChars".to_string(), json!(max_chars));
+    }
 
     Value::Object(output)
 }
@@ -9955,6 +10141,31 @@ fn is_schema_field(schema_fields: &HashSet<String>, field: &str) -> bool {
         )
 }
 
+fn is_schema_field_or_json_select_path(
+    schema: &ObjectSchema,
+    schema_fields: &HashSet<String>,
+    field: &str,
+) -> bool {
+    if is_schema_field(schema_fields, field) {
+        return true;
+    }
+
+    let Some((base, path)) = field.split_once('.') else {
+        return false;
+    };
+    if base.trim().is_empty()
+        || path.trim().is_empty()
+        || path.split('.').any(|part| part.trim().is_empty())
+    {
+        return false;
+    }
+
+    schema
+        .columns
+        .iter()
+        .any(|column| column.name == base && matches!(column.column_type, ObjectColumnType::Json))
+}
+
 fn lookup_editor_for_field<'a>(
     block: &'a ReportBlockDefinition,
     field: &str,
@@ -10110,6 +10321,27 @@ fn value_is_empty(value: &Value) -> bool {
         Value::Object(values) => values.is_empty(),
         _ => false,
     }
+}
+
+fn row_path_value<'a>(row: &'a serde_json::Map<String, Value>, field: &str) -> Option<&'a Value> {
+    if let Some(value) = row.get(field) {
+        return Some(value);
+    }
+
+    let mut parts = field.split('.');
+    let first = parts.next()?;
+    let mut current = row.get(first)?;
+    for part in parts {
+        current = match current {
+            Value::Object(object) => object.get(part)?,
+            Value::Array(values) => {
+                let index = part.parse::<usize>().ok()?;
+                values.get(index)?
+            }
+            _ => return None,
+        };
+    }
+    Some(current)
 }
 
 fn ensure_array(value: &Value) -> Value {
@@ -10460,6 +10692,7 @@ mod tests {
             field: field.to_string(),
             label: None,
             display_field: None,
+            display_template: None,
             format: None,
             column_type: None,
             chart: None,
@@ -10470,6 +10703,7 @@ mod tests {
             pill_variants: None,
             levels: None,
             align: None,
+            max_chars: None,
             descriptive: false,
             editable: false,
             editor: None,
@@ -10636,6 +10870,34 @@ mod tests {
         assert_eq!(
             columns[0].get("displayField"),
             Some(&json!("category.name"))
+        );
+    }
+
+    #[test]
+    fn table_response_columns_preserve_display_template_and_pill_variants() {
+        let mut column = table_column("decision");
+        column.display_template = Some("{{first_name}} {{last_name}}".to_string());
+        column.pill_variants = Some(std::collections::BTreeMap::from([
+            ("APPROVED".to_string(), "success".to_string()),
+            ("DECLINED".to_string(), "destructive".to_string()),
+        ]));
+        let table = ReportTableConfig {
+            columns: vec![column],
+            selectable: false,
+            actions: vec![],
+            default_sort: vec![],
+            pagination: None,
+        };
+
+        let columns = table_response_columns(Some(&table));
+
+        assert_eq!(
+            columns[0].get("displayTemplate"),
+            Some(&json!("{{first_name}} {{last_name}}"))
+        );
+        assert_eq!(
+            columns[0].get("pillVariants"),
+            Some(&json!({"APPROVED": "success", "DECLINED": "destructive"}))
         );
     }
 
@@ -10855,6 +11117,42 @@ mod tests {
 
         let err = ReportService::validate_report_definition_json_syntax(&definition).unwrap_err();
         assert!(err.to_string().contains("markdown"), "{}", err);
+    }
+
+    #[test]
+    fn report_definition_json_schema_validation_accepts_table_display_and_value_source_kind() {
+        let definition = json!({
+            "definitionVersion": 1,
+            "filters": [],
+            "blocks": [{
+                "id": "cases",
+                "type": "table",
+                "source": {"schema": "Case", "mode": "filter"},
+                "table": {
+                    "columns": [
+                        {
+                            "field": "decision",
+                            "format": "pill",
+                            "pillVariants": {"APPROVED": "success"},
+                            "displayTemplate": "{{first_name}} {{last_name}}"
+                        },
+                        {
+                            "field": "applicant_name",
+                            "type": "value",
+                            "source": {
+                                "kind": "object_model",
+                                "schema": "ApplicantDossier",
+                                "mode": "filter",
+                                "select": "applicant_summary.full_name",
+                                "join": [{"parentField": "case_id", "field": "case_id"}]
+                            }
+                        }
+                    ]
+                }
+            }]
+        });
+
+        ReportService::validate_report_definition_json_syntax(&definition).unwrap();
     }
 
     #[test]
@@ -11101,6 +11399,7 @@ mod tests {
             "field": "part_number",
             "type": "value",
             "source": {
+                "kind": "object_model",
                 "schema": "TDProduct",
                 "mode": "filter",
                 "select": "part_number",
@@ -11110,8 +11409,92 @@ mod tests {
         .unwrap();
 
         let source = column.source.unwrap();
+        assert_eq!(source.kind, ReportSourceKind::ObjectModel);
         assert_eq!(source.select.as_deref(), Some("part_number"));
         assert_eq!(source.join[0].kind, ReportJoinKind::Left);
+    }
+
+    #[test]
+    fn value_table_column_select_allows_json_dot_path_only_from_json_columns() {
+        let schema = object_schema(vec![
+            object_column(
+                "first_name",
+                crate::api::dto::object_model::ColumnType::String,
+            ),
+            object_column(
+                "applicant_summary",
+                crate::api::dto::object_model::ColumnType::Json,
+            ),
+        ]);
+        let schema_fields: HashSet<_> = schema
+            .columns
+            .iter()
+            .map(|field| field.name.clone())
+            .collect();
+
+        assert!(is_schema_field_or_json_select_path(
+            &schema,
+            &schema_fields,
+            "first_name"
+        ));
+        assert!(is_schema_field_or_json_select_path(
+            &schema,
+            &schema_fields,
+            "applicant_summary.full_name"
+        ));
+        assert!(!is_schema_field_or_json_select_path(
+            &schema,
+            &schema_fields,
+            "first_name.full"
+        ));
+        assert!(!is_schema_field_or_json_select_path(
+            &schema,
+            &schema_fields,
+            "applicant_summary."
+        ));
+    }
+
+    #[test]
+    fn row_path_value_reads_direct_and_nested_json_values() {
+        let row = serde_json::Map::from_iter([
+            ("flat.name".to_string(), json!("direct wins")),
+            (
+                "applicant_summary".to_string(),
+                json!({
+                    "full_name": "Jane Doe",
+                    "aliases": ["JD"]
+                }),
+            ),
+        ]);
+
+        assert_eq!(
+            row_path_value(&row, "flat.name"),
+            Some(&json!("direct wins"))
+        );
+        assert_eq!(
+            row_path_value(&row, "applicant_summary.full_name"),
+            Some(&json!("Jane Doe"))
+        );
+        assert_eq!(
+            row_path_value(&row, "applicant_summary.aliases.0"),
+            Some(&json!("JD"))
+        );
+        assert_eq!(row_path_value(&row, "applicant_summary.aliases.x"), None);
+    }
+
+    #[test]
+    fn display_template_syntax_accepts_safe_interpolation_only() {
+        validate_safe_display_template(
+            "{{first_name}} {{row.requested_loan.amount | number_compact}} AUD",
+        )
+        .unwrap();
+        validate_safe_display_template("Decision: {{decision | string}}").unwrap();
+
+        assert!(validate_safe_display_template("{{#if decision}}").is_err());
+        assert!(validate_safe_display_template("{{first_name + last_name}}").is_err());
+        assert!(validate_safe_display_template("{{first_name | }}").is_err());
+        assert!(validate_safe_display_template("{{first_name").is_err());
+        assert!(validate_safe_display_template("first_name}}").is_err());
     }
 
     #[test]
@@ -11714,6 +12097,50 @@ mod tests {
         assert_eq!(
             arguments[1]["subquery"]["condition"]["arguments"][1],
             json!(["leaf-a", "leaf-b"])
+        );
+    }
+
+    #[test]
+    fn strict_when_referenced_fires_inside_subquery_condition() {
+        let mut case_filter = report_filter("case_id", ReportFilterType::Select, true);
+        case_filter.strict_when_referenced = true;
+        let definition = ReportDefinition {
+            definition_version: 1,
+            layout: vec![],
+            views: vec![],
+            filters: vec![case_filter],
+            datasets: vec![],
+            blocks: vec![],
+        };
+        let mut block = test_block("dossier");
+        block.source.condition = Some(cond(
+            "IN",
+            vec![
+                json!("case_id"),
+                json!({
+                    "subquery": {
+                        "schema": "ApplicantDossier",
+                        "select": "case_id",
+                        "condition": {
+                            "op": "EQ",
+                            "arguments": ["case_id", filter_ref("case_id", "value")]
+                        }
+                    }
+                }),
+            ],
+        ));
+
+        assert_eq!(
+            block_unsatisfied_strict_filter(&definition, &block, &HashMap::new()),
+            Some("case_id".to_string())
+        );
+        assert_eq!(
+            block_unsatisfied_strict_filter(
+                &definition,
+                &block,
+                &HashMap::from([("case_id".to_string(), json!("case-1"))])
+            ),
+            None
         );
     }
 

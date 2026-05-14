@@ -5,6 +5,8 @@ import initRustValidation, {
   getStepTypeSchemaJson,
   getStepTypesJson,
   validateExecutionGraphJson,
+  validateSchemaFieldsJson,
+  validateWorkflowStartInputsJson,
 } from '@/wasm/workflow-validation/runtara_workflow_validation.js';
 import rustValidationWasmUrl from '@/wasm/workflow-validation/runtara_workflow_validation_bg.wasm?url';
 import {
@@ -22,6 +24,18 @@ export interface RustWorkflowValidationResult {
   message: string;
   wasmAvailable: boolean;
   unavailableReason?: string;
+}
+
+export interface RustSchemaFieldsValidationError {
+  code: string;
+  message: string;
+  fieldName: string | null;
+  rowIndices: number[];
+}
+
+export interface RustSchemaFieldsValidationResult
+  extends RustWorkflowValidationResult {
+  schemaErrors: RustSchemaFieldsValidationError[];
 }
 
 let initPromise: Promise<unknown> | null = null;
@@ -50,7 +64,7 @@ function normalizeValidationResponse(
   return {
     success,
     valid,
-    status: success ? (valid ? 'valid' : 'invalid') : 'unavailable',
+    status: valid ? 'valid' : 'invalid',
     errors: Array.isArray(response.errors) ? response.errors : [],
     warnings: Array.isArray(response.warnings) ? response.warnings : [],
     message:
@@ -61,8 +75,47 @@ function normalizeValidationResponse(
   };
 }
 
+function normalizeSchemaFieldsValidationResponse(
+  value: unknown
+): RustSchemaFieldsValidationResult {
+  const baseResult = normalizeValidationResponse(value);
+  const response =
+    value && typeof value === 'object'
+      ? (value as { schemaErrors?: unknown })
+      : {};
+  const rawSchemaErrors = Array.isArray(response.schemaErrors)
+    ? response.schemaErrors
+    : [];
+
+  return {
+    ...baseResult,
+    schemaErrors: rawSchemaErrors.map((rawError) => {
+      const error =
+        rawError && typeof rawError === 'object'
+          ? (rawError as Partial<RustSchemaFieldsValidationError>)
+          : {};
+
+      return {
+        code: typeof error.code === 'string' ? error.code : 'UNKNOWN',
+        message:
+          typeof error.message === 'string'
+            ? error.message
+            : 'Schema field validation failed',
+        fieldName: typeof error.fieldName === 'string' ? error.fieldName : null,
+        rowIndices: Array.isArray(error.rowIndices)
+          ? error.rowIndices.filter(
+              (rowIndex): rowIndex is number =>
+                typeof rowIndex === 'number' && Number.isInteger(rowIndex)
+            )
+          : [],
+      };
+    }),
+  };
+}
+
 function unavailableValidationResult(
-  error: unknown
+  error: unknown,
+  message = 'Rust workflow validation unavailable; server validation remains active'
 ): RustWorkflowValidationResult {
   const unavailableReason =
     error instanceof Error ? error.message : String(error);
@@ -73,11 +126,75 @@ function unavailableValidationResult(
     status: 'unavailable',
     errors: [],
     warnings: [],
-    message:
-      'Rust workflow validation unavailable; server validation remains active',
+    message,
     wasmAvailable: false,
     unavailableReason,
   };
+}
+
+function unavailableSchemaFieldsValidationResult(
+  error: unknown
+): RustSchemaFieldsValidationResult {
+  return {
+    ...unavailableValidationResult(
+      error,
+      'Rust schema field validation unavailable; schema save cannot be validated'
+    ),
+    schemaErrors: [],
+  };
+}
+
+/**
+ * Validate the exact workflow start envelope sent to the backend using the
+ * shared Rust input-schema validator compiled to WASM. If unavailable, return
+ * an explicit unavailable state and let backend validation remain authoritative.
+ */
+export async function validateWorkflowStartInputsWithRust(
+  inputSchema: unknown,
+  inputs: unknown
+): Promise<RustWorkflowValidationResult> {
+  try {
+    await ensureRustValidatorInitialized();
+
+    const rawResult = validateWorkflowStartInputsJson(
+      JSON.stringify(inputSchema ?? {}),
+      JSON.stringify(inputs ?? {})
+    );
+
+    return normalizeValidationResponse(JSON.parse(rawResult));
+  } catch (error) {
+    console.warn(
+      'Rust workflow start input validation WASM unavailable',
+      error
+    );
+    return unavailableValidationResult(
+      error,
+      'Rust workflow start input validation unavailable; server validation remains active'
+    );
+  }
+}
+
+/**
+ * Validate editable schema fields before converting them into map-based schema
+ * JSON, where duplicate names would otherwise collapse.
+ */
+export async function validateSchemaFieldsWithRust(
+  schemaLabel: string,
+  fields: unknown[]
+): Promise<RustSchemaFieldsValidationResult> {
+  try {
+    await ensureRustValidatorInitialized();
+
+    const rawResult = validateSchemaFieldsJson(
+      schemaLabel,
+      JSON.stringify(fields ?? [])
+    );
+
+    return normalizeSchemaFieldsValidationResponse(JSON.parse(rawResult));
+  } catch (error) {
+    console.warn('Rust schema field validation WASM unavailable', error);
+    return unavailableSchemaFieldsValidationResult(error);
+  }
 }
 
 function parseRustJson<T>(rawValue: string, fallback: T): T {

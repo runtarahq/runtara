@@ -132,7 +132,7 @@ export function composeExecutionGraph(
   options?: {
     name?: string;
     description?: string;
-    variables?: Record<string, { type: string; value: string }>;
+    variables?: Record<string, { type: string; value: unknown }>;
     inputSchema?: Record<string, unknown>;
     outputSchema?: Record<string, unknown>;
     executionTimeoutSeconds?: number;
@@ -572,7 +572,6 @@ function cleanNodeData(steps: Record<string, any>) {
     ): {
       valueType: 'reference' | 'immediate' | 'composite';
       value: any;
-      type?: string;
     } => {
       const processEntry = (val: any) => {
         if (
@@ -605,9 +604,11 @@ function cleanNodeData(steps: Record<string, any>) {
         }
 
         const coercedValue =
-          typedVal.valueType === 'immediate' && typedVal.typeHint
+          typedVal.valueType === 'immediate' &&
+          typedVal.typeHint &&
+          typedVal.value !== null
             ? coerceValueToType(typedVal.value, typedVal.typeHint)
-            : typedVal.value === undefined || typedVal.value === null
+            : typedVal.value === undefined
               ? ''
               : typedVal.value;
 
@@ -620,7 +621,10 @@ function cleanNodeData(steps: Record<string, any>) {
           valueType: typedVal.valueType || 'immediate',
           value: coercedValue,
         };
-        if (isValidValueType(typedVal.typeHint)) {
+        if (
+          typedVal.valueType === 'reference' &&
+          isValidValueType(typedVal.typeHint)
+        ) {
           out.type = typedVal.typeHint;
         }
         if (
@@ -682,15 +686,10 @@ function cleanNodeData(steps: Record<string, any>) {
         const mappingValue: {
           valueType: 'composite';
           value: any;
-          type?: string;
         } = {
           valueType: 'composite',
           value: processed.value,
         };
-        // Add type if it's a valid ValueType from the spec
-        if (isValidValueType(typeHint)) {
-          mappingValue.type = typeHint;
-        }
         return [type, mappingValue];
       }
 
@@ -755,8 +754,9 @@ function cleanNodeData(steps: Record<string, any>) {
         value: finalValue,
       };
 
-      // Add type if it's a valid ValueType from the spec
-      if (isValidValueType(typeHint)) {
+      // Only reference values carry backend type hints. Immediate, composite,
+      // and template values reject unknown `type` fields.
+      if (resolvedValueType === 'reference' && isValidValueType(typeHint)) {
         mappingValue.type = typeHint;
       }
 
@@ -782,6 +782,8 @@ function cleanNodeData(steps: Record<string, any>) {
     );
 
     if (Array.isArray(inputMapping)) {
+      const preserveInvalidMappingsForRustValidation =
+        data.stepType === 'Finish';
       const filteredMapping = inputMapping.filter(
         ({
           type,
@@ -794,7 +796,7 @@ function cleanNodeData(steps: Record<string, any>) {
         }) => {
           // Filter out entries with empty keys (field names)
           if (!type || type.trim() === '') {
-            return false;
+            return preserveInvalidMappingsForRustValidation;
           }
           // Keep reference/template entries even with empty values — they're resolved at runtime
           if (valueType === 'reference' || valueType === 'template') {
@@ -802,17 +804,28 @@ function cleanNodeData(steps: Record<string, any>) {
           }
           // Filter out empty optional fields
           if (value === undefined || value === null || value === '') {
-            return false;
+            if (preserveInvalidMappingsForRustValidation) {
+              return true;
+            }
+            return value === null && valueType === 'immediate';
           }
           return true;
         }
       );
+      const normalizedMapping = preserveInvalidMappingsForRustValidation
+        ? filteredMapping.map((entry: { value?: any }) =>
+            entry.value === undefined ? { ...entry, value: '' } : entry
+          )
+        : filteredMapping;
 
       // Error steps need direct field values, not InputMapping wrapping
       if (data.stepType === 'Error') {
         // Extract error fields as direct values to match backend DSL
         const errorFields = ['code', 'message', 'category', 'severity'];
-        filteredMapping.forEach(
+        errorFields.forEach((field) => {
+          delete filteredRestData[field];
+        });
+        normalizedMapping.forEach(
           ({ type, value }: { type: string; value: any }) => {
             if (errorFields.includes(type)) {
               filteredRestData[type] = value; // Direct string value
@@ -824,7 +837,10 @@ function cleanNodeData(steps: Record<string, any>) {
       } else if (data.stepType === 'Log') {
         // Log steps need direct field values (message, level) to match backend DSL
         const logFields = ['message', 'level'];
-        filteredMapping.forEach(
+        logFields.forEach((field) => {
+          delete filteredRestData[field];
+        });
+        normalizedMapping.forEach(
           ({ type, value }: { type: string; value: any }) => {
             if (logFields.includes(type)) {
               filteredRestData[type] = value;
@@ -836,7 +852,7 @@ function cleanNodeData(steps: Record<string, any>) {
       } else {
         // Regular steps - flat object format with InputMapping wrapping
         const mappingObject = Object.fromEntries(
-          filteredMapping.map(processMappingEntry)
+          normalizedMapping.map(processMappingEntry)
         );
         // Only include inputMapping if it has entries
         cleanedInputMapping =
@@ -961,13 +977,15 @@ function cleanNodeData(steps: Record<string, any>) {
             firstMapping.value.trim() === ''
           );
         if (hasSplitSourceValue) {
+          const splitValueType = firstMapping.valueType || 'reference';
           splitConfig.value = {
-            valueType: firstMapping.valueType || 'reference',
+            valueType: splitValueType,
             value: firstMapping.value,
-            ...(isValidValueType(firstMapping.typeHint)
+            ...(splitValueType === 'reference' &&
+            isValidValueType(firstMapping.typeHint)
               ? { type: firstMapping.typeHint }
               : {}),
-            ...(firstMapping.valueType === 'reference' &&
+            ...(splitValueType === 'reference' &&
             firstMapping.defaultValue !== undefined
               ? { default: firstMapping.defaultValue }
               : {}),
@@ -987,16 +1005,18 @@ function cleanNodeData(steps: Record<string, any>) {
           existingSplitConfig.value.value.trim() === ''
         )
       ) {
+        const splitValueType =
+          existingSplitConfig.value.valueType === 'immediate'
+            ? 'immediate'
+            : 'reference';
         splitConfig.value = {
-          valueType:
-            existingSplitConfig.value.valueType === 'immediate'
-              ? 'immediate'
-              : 'reference',
+          valueType: splitValueType,
           value: existingSplitConfig.value.value,
-          ...(existingSplitConfig.value.type
+          ...(splitValueType === 'reference' && existingSplitConfig.value.type
             ? { type: existingSplitConfig.value.type }
             : {}),
-          ...(existingSplitConfig.value.default !== undefined
+          ...(splitValueType === 'reference' &&
+          existingSplitConfig.value.default !== undefined
             ? { default: existingSplitConfig.value.default }
             : {}),
         };
@@ -1038,7 +1058,9 @@ function cleanNodeData(steps: Record<string, any>) {
             variables[variableName] = {
               valueType: resolvedValueType,
               value: varField.value,
-              ...(varField.type ? { type: varField.type } : {}),
+              ...(resolvedValueType === 'reference' && varField.type
+                ? { type: varField.type }
+                : {}),
             };
           }
         }

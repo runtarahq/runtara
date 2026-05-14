@@ -65,10 +65,10 @@ export function CustomFieldRow({
     setEditedName(fieldName);
   }, [fieldName]);
 
-  const value = entry?.value ?? '';
+  const value = entry ? entry.value : '';
   const valueType = (entry?.valueType ?? 'immediate') as ValueMode;
 
-  const handleValueChange = (newValue: string) => {
+  const handleValueChange = (newValue: string | null) => {
     setFieldValue(nodeId, fieldName, newValue);
     onFieldChange();
   };
@@ -210,14 +210,15 @@ export function CustomFieldRow({
         ) : (
           <MappingValueInput
             value={
-              typeof value === 'object'
+              typeof value === 'object' && value !== null
                 ? JSON.stringify(value, null, 2)
-                : String(value)
+                : value
             }
             onChange={handleValueChange}
             valueType={valueType}
             onValueTypeChange={handleValueTypeChange}
             fieldType={getDisplayType()}
+            allowNull
             placeholder="Enter value..."
             hideReferenceToggle={hideReferenceToggle}
           />

@@ -15,7 +15,7 @@ type Props = {
   isEdit?: boolean;
   values: form.SchemaType;
   originalValues?: form.SchemaType;
-  onSubmit: (data: form.SchemaType) => void;
+  onSubmit: (data: form.SchemaType) => void | Promise<void>;
   onChange?: (data: form.SchemaType) => void;
   onReset?: () => void;
   onDelete?: () => void;
@@ -39,7 +39,7 @@ export function NodeForm({
   const formProps = useMemo(() => ({ stepTypes, agents }), [stepTypes, agents]);
 
   const entireForm = useForm<form.SchemaType>({
-    resolver: zodResolver(form.schema(formProps)),
+    resolver: zodResolver(form.schema()),
     defaultValues: (values || form.initialValues) as form.SchemaType,
     mode: 'onChange',
   });
@@ -90,7 +90,7 @@ export function NodeForm({
 
   const handleSubmit = (data: form.SchemaType) => {
     // console.log("[DEBUG] NodeForm handleSubmit - data.inputMapping:', data.inputMapping);
-    onSubmit(data);
+    return onSubmit(data);
   };
 
   const handleReset = () => {

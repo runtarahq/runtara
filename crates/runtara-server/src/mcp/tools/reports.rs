@@ -129,10 +129,12 @@ pub struct RenderReportParams {
     #[schemars(description = "Report id or slug")]
     pub report_id: String,
     #[schemars(description = "Global report filter values keyed by filter id.")]
+    #[schemars(schema_with = "crate::mcp::tools::internal_api::json_object_schema")]
     pub filters: Option<Value>,
     #[schemars(
         description = "Optional array of block data requests: [{id, page?, sort?, search?, blockFilters?}]. Omit to render non-lazy blocks."
     )]
+    #[schemars(schema_with = "crate::mcp::tools::internal_api::json_array_schema")]
     pub blocks: Option<Value>,
     pub timezone: Option<String>,
 }
@@ -145,14 +147,19 @@ pub struct GetReportBlockDataParams {
     #[schemars(description = "Stable block id")]
     pub block_id: String,
     #[schemars(description = "Global report filter values keyed by filter id.")]
+    #[schemars(schema_with = "crate::mcp::tools::internal_api::json_object_schema")]
     pub filters: Option<Value>,
     #[schemars(description = "Pagination request: {offset, size}.")]
+    #[schemars(schema_with = "crate::mcp::tools::internal_api::json_object_schema")]
     pub page: Option<Value>,
     #[schemars(description = "Sort array: [{field, direction}].")]
+    #[schemars(schema_with = "crate::mcp::tools::internal_api::json_array_schema")]
     pub sort: Option<Value>,
     #[schemars(description = "Table search request: {query, fields?}.")]
+    #[schemars(schema_with = "crate::mcp::tools::internal_api::json_object_schema")]
     pub search: Option<Value>,
     #[schemars(description = "Per-block filter values keyed by filter id.")]
+    #[schemars(schema_with = "crate::mcp::tools::internal_api::json_object_schema")]
     pub block_filters: Option<Value>,
     pub timezone: Option<String>,
 }
@@ -509,10 +516,10 @@ pub async fn render_report(
     validate_path_param("report_id", &params.report_id)?;
     let mut body = json!({});
     if let Some(filters) = params.filters {
-        body["filters"] = filters;
+        body["filters"] = normalize_json_object_arg(filters, "filters")?;
     }
     if let Some(blocks) = params.blocks {
-        body["blocks"] = blocks;
+        body["blocks"] = normalize_json_array_arg(blocks, "blocks")?;
     }
     if let Some(timezone) = params.timezone {
         body["timezone"] = Value::String(timezone);
@@ -535,19 +542,19 @@ pub async fn get_report_block_data(
     validate_path_param("block_id", &params.block_id)?;
     let mut body = json!({});
     if let Some(filters) = params.filters {
-        body["filters"] = filters;
+        body["filters"] = normalize_json_object_arg(filters, "filters")?;
     }
     if let Some(page) = params.page {
-        body["page"] = page;
+        body["page"] = normalize_json_object_arg(page, "page")?;
     }
     if let Some(sort) = params.sort {
-        body["sort"] = sort;
+        body["sort"] = normalize_json_array_arg(sort, "sort")?;
     }
     if let Some(search) = params.search {
-        body["search"] = search;
+        body["search"] = normalize_json_object_arg(search, "search")?;
     }
     if let Some(block_filters) = params.block_filters {
-        body["blockFilters"] = block_filters;
+        body["blockFilters"] = normalize_json_object_arg(block_filters, "block_filters")?;
     }
     if let Some(timezone) = params.timezone {
         body["timezone"] = Value::String(timezone);
@@ -1162,6 +1169,36 @@ fn apply_json_merge_patch(target: &mut Value, patch: &Value) {
     }
 }
 
+fn normalize_json_object_arg(value: Value, field: &str) -> Result<Value, rmcp::ErrorData> {
+    let normalized = normalize_json_arg(value, field)?;
+    if normalized.is_object() {
+        Ok(normalized)
+    } else {
+        Err(rmcp::ErrorData::invalid_params(
+            format!(
+                "{} must be a JSON object. If your MCP gateway stringifies arguments, pass a JSON-encoded object string.",
+                field
+            ),
+            None,
+        ))
+    }
+}
+
+fn normalize_json_array_arg(value: Value, field: &str) -> Result<Value, rmcp::ErrorData> {
+    let normalized = normalize_json_arg(value, field)?;
+    if normalized.is_array() {
+        Ok(normalized)
+    } else {
+        Err(rmcp::ErrorData::invalid_params(
+            format!(
+                "{} must be a JSON array. If your MCP gateway stringifies arguments, pass a JSON-encoded array string.",
+                field
+            ),
+            None,
+        ))
+    }
+}
+
 fn position_body(
     index: Option<usize>,
     before_block_id: Option<String>,
@@ -1297,7 +1334,7 @@ fn report_authoring_schema() -> Value {
                 "type": "table",
                 "configKey": "table",
                 "columnsPath": "table.columns",
-                "columns": [{"field": "sku", "label": "SKU", "format": "optional formatter"}, {"field": "stock_trend", "label": "Trend", "type": "chart", "chart": {"kind": "line", "x": "snapshot_date", "series": [{"field": "qty", "label": "Qty"}]}, "source": {"schema": "StockSnapshot", "mode": "aggregate", "groupBy": ["snapshot_date"], "aggregates": [{"alias": "qty", "op": "sum", "field": "qty"}], "join": [{"parentField": "sku", "field": "sku"}]}}],
+                "columns": [{"field": "sku", "label": "SKU", "format": "optional formatter", "maxChars": "Optional positive integer display cutoff; omit to show the full formatted value."}, {"field": "stock_trend", "label": "Trend", "type": "chart", "chart": {"kind": "line", "x": "snapshot_date", "series": [{"field": "qty", "label": "Qty"}]}, "source": {"schema": "StockSnapshot", "mode": "aggregate", "groupBy": ["snapshot_date"], "aggregates": [{"alias": "qty", "op": "sum", "field": "qty"}], "join": [{"parentField": "sku", "field": "sku"}]}}],
                 "defaultSort": [{"field": "sku", "direction": "asc"}],
                 "pagination": {"defaultPageSize": 50, "allowedPageSizes": [25, 50, 100]},
                 "selectable": "Optional boolean. Shows a per-row checkbox selection column. table.actions also enables selection automatically.",
@@ -1305,12 +1342,13 @@ fn report_authoring_schema() -> Value {
                 "writeback": {
                     "editable": "Optional boolean. When true, the table renders an inline editor on the cell and writes the new value back to the underlying Object Model record via PUT /api/runtime/object-model/instances/{schemaId}/{instanceId}. Only honored when source.kind='object_model', source.mode='filter', and source.join is empty/absent (rows must carry a stable id+schemaId). Type='chart' columns and joined lookup columns are never editable.",
                     "displayField": "Optional row field to render while writes still target field. Use this with joined labels, e.g. field='category_id', displayField='category.name'. Lookup-editor columns without an explicit displayField automatically render editor.lookup.labelField for the current value.",
+                    "displayTemplate": "Optional display-only safe-interpolation template rendered from the row while sort/filter/writeback still target field. Only variable paths and optional format pipes compile, e.g. {{first_name}} {{last_name}} or {{requested_loan.amount | number_compact}} AUD. Helpers, blocks, expressions, and partials are not supported.",
                     "editor": "Optional explicit editor config: {kind, lookup?, options?, min?, max?, step?, regex?, placeholder?}. kind is one of text | textarea | number | select | toggle | date | datetime | lookup. For lookup, set editor.lookup={schema, valueField, labelField, searchFields?, connectionId?, condition?, filterMappings?}. The editor searches the lookup schema, automatically using generated tsvector fields when present, displays labelField, and writes valueField into the edited row field. Add an explicit source.join/displayField only when the related label must also participate in table search/sort/filtering.",
                     "note": "Writeback is opt-in per column. Auth + type validation happens on the object-model endpoint, not in the report layer — viewers need write permission on the underlying schema. The 'editable' flag here is a UI hint; it does not relax server-side authorization."
                 },
                 "workflowAction": "Optional table column button: set type='workflow_button' and workflowAction={workflowId, version?, label?, runningLabel?, successMessage?, reloadBlock?, visibleWhen?, hiddenWhen?, disabledWhen?, context?}. context.mode is row | field | value. mode=row passes the whole row as workflow data; mode=field passes context.field or column.field; mode=value passes the cell value. context.inputKey wraps the context as {inputKey: context}. visibleWhen/hiddenWhen/disabledWhen are row-level condition DSL objects evaluated against the rendered row, e.g. disabledWhen={op:'EQ', arguments:['status','processed']}.",
                 "interactionButtons": "Optional row navigation/action buttons: set type='interaction_buttons' and interactionButtons=[{id,label?,icon?,visibleWhen?,hiddenWhen?,disabledWhen?,actions:[...]}]. Button actions use the same set_filter, clear_filter, clear_filters, and navigate_view vocabulary as block.interactions. Use this for rows like SKU | Qty | Price | View 1 | View 2.",
-                "note": "Tables support source.mode='filter' for row data and source.mode='aggregate' for grouped aggregate result sets. Configure visible/searchable/sortable fields in table.columns. A table column may use type='chart' for inline aggregate charts, type='value' with source.select for scalar joined lookups, type='workflow_button' with workflowAction for a row-scoped workflow launcher, type='interaction_buttons' with interactionButtons for row-scoped report navigation/action buttons, or table.actions[] for table-wide selected-row workflow launchers. To enable inline writeback on a column, see writeback.editable."
+                "note": "Tables support source.mode='filter' for row data and source.mode='aggregate' for grouped aggregate result sets. Configure visible/searchable/sortable fields in table.columns. A table column may use maxChars for display-only text cutoff, format='pill' + pillVariants for enum/status coloring, displayTemplate for display-only concatenation/formatting, type='chart' for inline aggregate charts, type='value' with source.select for scalar joined lookups, type='workflow_button' with workflowAction for a row-scoped workflow launcher, type='interaction_buttons' with interactionButtons for row-scoped report navigation/action buttons, or table.actions[] for table-wide selected-row workflow launchers. To enable inline writeback on a column, see writeback.editable."
             },
             "chart": {
                 "type": "chart",
@@ -1358,6 +1396,7 @@ fn report_authoring_schema() -> Value {
                     "field": "Property name on the row to read.",
                     "label": "Optional override for the field label (defaults to humanized field name).",
                     "displayField": "Optional row field to render while writes still target field. Use this with joined labels, e.g. field='category_id', displayField='category.name'.",
+                    "displayTemplate": "Optional display-only safe-interpolation row template such as {{first_name}} {{last_name}}. Only variable paths and optional format pipes compile; field remains the value/writeback target.",
                     "kind": "value (default) | json | markdown | subcard | subtable | workflow_button",
                     "format": "Format hint for kind=value: currency, currency_compact, decimal, percent, datetime, date, number, pill.",
                     "workflowAction": "Optional card field button: set kind='workflow_button' and workflowAction={workflowId, version?, label?, runningLabel?, successMessage?, reloadBlock?, visibleWhen?, hiddenWhen?, disabledWhen?, context?}. context.mode is row | field | value, and context.inputKey can wrap the selected context into an object. visibleWhen/hiddenWhen/disabledWhen are row-level condition DSL objects evaluated against the rendered row.",
@@ -1373,12 +1412,12 @@ fn report_authoring_schema() -> Value {
             }
         },
         "sourceShape": {
-            "kind": "object_model | workflow_runtime | system. Omit for Object Model back compatibility.",
+            "kind": "object_model | workflow_runtime | system. Omit for Object Model back compatibility. Nested table value-column sources may also set kind='object_model'.",
             "schema": "Object Model schema name. Use get_object_schema to inspect valid fields.",
             "entity": "workflow_runtime: instances | actions. system: runtime_execution_metric_buckets | runtime_system_snapshot | connection_rate_limit_status | connection_rate_limit_events | connection_rate_limit_timeline.",
             "workflowId": "Workflow runtime only: workflow id whose instances/actions should be shown.",
             "instanceId": "Workflow runtime actions only: optional workflow instance UUID to scope open actions.",
-            "select": "Table value-column source only: scalar field to copy from the joined schema.",
+            "select": "Table value-column source only: scalar field to copy from the joined schema. May use JSON dot-paths from a JSON column, e.g. applicant_summary.full_name; dot-paths are select-only and are not valid join/order/condition fields.",
             "connectionId": "Optional connection id for connection-scoped schemas.",
             "mode": "filter | aggregate",
             "condition": "Optional condition DSL. Object Model sources can use schema fields and same-store subquery operands. workflow_runtime actions can filter virtual action fields including actionKey, correlation.<key>, and context.<key>. system sources can filter their exposed virtual fields, especially bucketTime/createdAt/connectionId/eventType/tag.",
@@ -1427,6 +1466,7 @@ fn report_authoring_schema() -> Value {
         },
         "fieldRules": [
             "For table.columns, use Object Model row fields when source.mode='filter'.",
+            "For table.columns[].displayTemplate and card fields[].displayTemplate, use presentation-only safe interpolation like {{first_name}} {{last_name}}. Supported tokens are {{field.path}} and {{field.path | format}} only; do not rely on displayTemplate for sort, search, filter, or writeback behavior.",
             "For aggregate table.columns, use source.groupBy fields and source.aggregates aliases, including expr aliases.",
             "For chart table columns, field is a synthetic cell key; configure column.chart and column.source.join.",
             "For scalar value table columns, use type='value' plus column.source.select and one column.source.join entry.",
@@ -1458,6 +1498,7 @@ fn report_authoring_schema() -> Value {
             "Do not call workflow signals 'pendingInput' in report definitions. Use the generic actions abstraction: type='actions' and source.entity='actions'.",
             "Do not put schema, connectionId, joins, groupBy, or aggregates on workflow_runtime sources.",
             "Do not use type='actions' with Object Model sources; actions blocks currently require source.kind='workflow_runtime' and entity='actions'.",
+            "Do not sort, filter, search, or write back against displayTemplate output. Use stored top-level columns for queryable computed values.",
             "Always run validate_report with mode='all' before saving or mutating report blocks.",
             "Do not use type='card' with source.mode='aggregate' or workflow_runtime sources. Cards only support object_model + filter mode and render the first matching row.",
             "Do not put card fields at block.fields or block.card.fields. Use block.card.groups[].fields.",
@@ -3377,10 +3418,19 @@ fn collect_table_issues(path: &str, table: &Value, issues: &mut Vec<AuthoringIss
                     "field",
                     "label",
                     "displayField",
+                    "displayTemplate",
                     "format",
                     "type",
                     "chart",
                     "source",
+                    "secondaryField",
+                    "linkField",
+                    "tooltipField",
+                    "pillVariants",
+                    "levels",
+                    "align",
+                    "maxChars",
+                    "descriptive",
                     "editable",
                     "editor",
                     "workflowAction",
@@ -3394,6 +3444,13 @@ fn collect_table_issues(path: &str, table: &Value, issues: &mut Vec<AuthoringIss
                     "MISSING_TABLE_COLUMN_FIELD",
                     "Each table column must include field.",
                 ));
+            }
+            if let Some(template) = column.get("displayTemplate") {
+                collect_display_template_issues(
+                    &format!("{path}.columns[{index}].displayTemplate"),
+                    template,
+                    issues,
+                );
             }
             let column_type = column.get("type").and_then(Value::as_str);
             if column_type == Some("chart") {
@@ -3568,6 +3625,7 @@ fn collect_table_column_source_issues(
         path,
         source,
         &[
+            "kind",
             "schema",
             "select",
             "connectionId",
@@ -3591,6 +3649,16 @@ fn collect_table_column_source_issues(
         },
         issues,
     );
+
+    if let Some(kind) = source.get("kind")
+        && kind.as_str() != Some("object_model")
+    {
+        issues.push(error(
+            format!("{path}.kind"),
+            "INVALID_TABLE_COLUMN_SOURCE_KIND",
+            "Table column sources only support kind='object_model'.",
+        ));
+    }
 
     if let Some(condition) = source.get("condition") {
         collect_condition_issues(&format!("{path}.condition"), condition, issues);
@@ -3660,6 +3728,129 @@ fn collect_table_column_source_issues(
     }
 }
 
+fn collect_display_template_issues(path: &str, template: &Value, issues: &mut Vec<AuthoringIssue>) {
+    let Some(template) = template.as_str() else {
+        issues.push(error(
+            path,
+            "INVALID_DISPLAY_TEMPLATE",
+            "displayTemplate must be a string.",
+        ));
+        return;
+    };
+
+    if let Err(message) = validate_safe_display_template(template) {
+        issues.push(error(
+            path,
+            "INVALID_DISPLAY_TEMPLATE",
+            format!(
+                "displayTemplate is invalid: {message}. Supported syntax is '{{{{field.path}}}}' or '{{{{field.path | format}}}}' only."
+            ),
+        ));
+    }
+}
+
+fn validate_safe_display_template(template: &str) -> Result<(), &'static str> {
+    let mut cursor = 0;
+    while cursor < template.len() {
+        let open = find_from(template, "{{", cursor);
+        let close = find_from(template, "}}", cursor);
+        if close.is_some_and(|close| open.is_none_or(|open| close < open)) {
+            return Err("unexpected close delimiter");
+        }
+        let Some(open) = open else {
+            return Ok(());
+        };
+        let Some(close) = find_from(template, "}}", open + 2) else {
+            return Err("unclosed variable");
+        };
+
+        let token = template[open + 2..close].trim();
+        validate_display_template_token(token)?;
+        cursor = close + 2;
+    }
+    Ok(())
+}
+
+fn validate_display_template_token(token: &str) -> Result<(), &'static str> {
+    if token.is_empty() {
+        return Err("empty variable");
+    }
+    if token.contains("{{") || token.contains("}}") {
+        return Err("nested variables are not supported");
+    }
+
+    let parts = token.split('|').collect::<Vec<_>>();
+    match parts.as_slice() {
+        [field] => validate_display_template_field(field.trim()),
+        [field, format] => {
+            validate_display_template_field(field.trim())?;
+            validate_display_template_format(format.trim())
+        }
+        _ => Err("only one format pipe is supported"),
+    }
+}
+
+fn validate_display_template_field(field: &str) -> Result<(), &'static str> {
+    let field = field.strip_prefix("row.").unwrap_or(field);
+    let mut parts = field.split('.');
+    let Some(first) = parts.next().filter(|part| !part.is_empty()) else {
+        return Err("field path is empty");
+    };
+    if !is_identifier_part(first) {
+        return Err("field path is invalid");
+    }
+    for part in parts {
+        if part.is_empty() {
+            return Err("field path is invalid");
+        }
+        if part.chars().all(|ch| ch.is_ascii_digit()) {
+            continue;
+        }
+        if !is_identifier_part(part) {
+            return Err("field path is invalid");
+        }
+    }
+    Ok(())
+}
+
+fn validate_display_template_format(format: &str) -> Result<(), &'static str> {
+    if format.is_empty() {
+        return Err("format is empty");
+    }
+    let mut parts = format.split(':');
+    let Some(name) = parts.next() else {
+        return Err("format is invalid");
+    };
+    if !is_identifier_part(name) {
+        return Err("format is invalid");
+    }
+    if let Some(argument) = parts.next()
+        && (argument.is_empty()
+            || !argument
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-'))
+    {
+        return Err("format is invalid");
+    }
+    if parts.next().is_some() {
+        return Err("format is invalid");
+    }
+    Ok(())
+}
+
+fn is_identifier_part(value: &str) -> bool {
+    let mut chars = value.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    (first.is_ascii_alphabetic() || first == '_')
+        && chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+}
+
+fn find_from(value: &str, pattern: &str, cursor: usize) -> Option<usize> {
+    value[cursor..].find(pattern).map(|index| cursor + index)
+}
+
 fn collect_card_issues(path: &str, card: &Value, issues: &mut Vec<AuthoringIssue>) {
     collect_unknown_keys(path, card, &["groups"], issues);
     let Some(groups) = card.get("groups").and_then(Value::as_array) else {
@@ -3713,6 +3904,7 @@ fn collect_card_field_issues(path: &str, field: &Value, issues: &mut Vec<Authori
             "field",
             "label",
             "displayField",
+            "displayTemplate",
             "kind",
             "format",
             "pillVariants",
@@ -3732,6 +3924,9 @@ fn collect_card_field_issues(path: &str, field: &Value, issues: &mut Vec<Authori
             "MISSING_CARD_FIELD",
             "Card fields must include field.",
         ));
+    }
+    if let Some(template) = field.get("displayTemplate") {
+        collect_display_template_issues(&format!("{path}.displayTemplate"), template, issues);
     }
     if let Some(editor) = field.get("editor") {
         collect_editor_issues(&format!("{path}.editor"), editor, issues);
@@ -5515,16 +5710,32 @@ mod tests {
                 "type": "table",
                 "source": {"schema": "StockSnapshot", "mode": "filter"},
                 "table": {
-                    "columns": [{
-                        "field": "part_number",
-                        "type": "value",
-                        "source": {
-                            "schema": "TDProduct",
-                            "mode": "filter",
-                            "select": "part_number",
-                            "join": [{"parentField": "sku", "field": "sku", "kind": "left"}]
+                    "columns": [
+                        {
+                            "field": "status",
+                            "format": "pill",
+                            "pillVariants": {"open": "warning", "closed": "success"},
+                            "displayTemplate": "{{status}}",
+                            "secondaryField": "owner",
+                            "linkField": "url",
+                            "tooltipField": "email",
+                            "levels": ["low", "medium", "high"],
+                            "align": "center",
+                            "maxChars": 20,
+                            "descriptive": true
+                        },
+                        {
+                            "field": "part_number",
+                            "type": "value",
+                            "source": {
+                                "kind": "object_model",
+                                "schema": "TDProduct",
+                                "mode": "filter",
+                                "select": "applicant_summary.full_name",
+                                "join": [{"parentField": "sku", "field": "sku", "kind": "left"}]
+                            }
                         }
-                    }]
+                    ]
                 }
             }]
         });
@@ -5534,6 +5745,68 @@ mod tests {
 
         assert!(!codes.contains(&"MISSING_TABLE_VALUE_SELECT"));
         assert!(!codes.contains(&"UNKNOWN_KEY"));
+    }
+
+    #[test]
+    fn report_authoring_rejects_non_object_model_value_column_source_kind() {
+        let definition = json!({
+            "definitionVersion": 1,
+            "blocks": [{
+                "id": "stock",
+                "type": "table",
+                "source": {"schema": "StockSnapshot", "mode": "filter"},
+                "table": {
+                    "columns": [{
+                        "field": "part_number",
+                        "type": "value",
+                        "source": {
+                            "kind": "workflow_runtime",
+                            "schema": "TDProduct",
+                            "mode": "filter",
+                            "select": "part_number",
+                            "join": [{"parentField": "sku", "field": "sku"}]
+                        }
+                    }]
+                }
+            }]
+        });
+
+        let issues = collect_report_definition_authoring_issues(&definition);
+        let codes = issue_codes(&issues);
+
+        assert!(codes.contains(&"INVALID_TABLE_COLUMN_SOURCE_KIND"));
+    }
+
+    #[test]
+    fn report_authoring_rejects_unsafe_display_template_tokens() {
+        let definition = json!({
+            "definitionVersion": 1,
+            "blocks": [{
+                "id": "stock",
+                "type": "table",
+                "source": {"schema": "StockSnapshot", "mode": "filter"},
+                "table": {
+                    "columns": [{
+                        "field": "status",
+                        "displayTemplate": "{{#if status}}"
+                    }]
+                },
+                "card": {
+                    "groups": [{
+                        "id": "summary",
+                        "fields": [{
+                            "field": "status",
+                            "displayTemplate": "{{first_name + last_name}}"
+                        }]
+                    }]
+                }
+            }]
+        });
+
+        let issues = collect_report_definition_authoring_issues(&definition);
+        let codes = issue_codes(&issues);
+
+        assert!(codes.contains(&"INVALID_DISPLAY_TEMPLATE"));
     }
 
     #[test]
@@ -5892,6 +6165,10 @@ mod tests {
         let create_definition = generated_property_schema::<CreateReportParams>("definition");
         let update_definition = generated_property_schema::<UpdateReportParams>("definition");
         let validate_definition = generated_property_schema::<ValidateReportParams>("definition");
+        let render_filters = generated_property_schema::<RenderReportParams>("filters");
+        let render_blocks = generated_property_schema::<RenderReportParams>("blocks");
+        let block_data_filters = generated_property_schema::<GetReportBlockDataParams>("filters");
+        let block_data_sort = generated_property_schema::<GetReportBlockDataParams>("sort");
         let add_block = generated_property_schema::<AddReportBlockParams>("block");
         let replace_block = generated_property_schema::<ReplaceReportBlockParams>("block");
         let patch_block = generated_property_schema::<PatchReportBlockParams>("patch");
@@ -5903,12 +6180,46 @@ mod tests {
         assert_eq!(create_definition["type"], "object");
         assert_eq!(update_definition["type"], "object");
         assert_eq!(validate_definition["type"], "object");
+        assert_eq!(render_filters["type"], "object");
+        assert_eq!(render_blocks["type"], "array");
+        assert_eq!(block_data_filters["type"], "object");
+        assert_eq!(block_data_sort["type"], "array");
         assert_eq!(add_block["type"], "object");
         assert_eq!(replace_block["type"], "object");
         assert_eq!(patch_block["type"], "object");
         assert_eq!(add_layout_node["type"], "object");
         assert_eq!(replace_layout_node["type"], "object");
         assert_eq!(patch_layout_node["type"], "object");
+    }
+
+    #[test]
+    fn report_render_params_parse_stringified_objects_and_arrays() {
+        let filters = normalize_json_object_arg(
+            Value::String(r#"{"status":["running"],"owner":"ops"}"#.to_string()),
+            "filters",
+        )
+        .unwrap();
+        let blocks = normalize_json_array_arg(
+            Value::String(r#"[{"id":"tasks","page":{"offset":0,"size":20}}]"#.to_string()),
+            "blocks",
+        )
+        .unwrap();
+
+        assert_eq!(filters["owner"], "ops");
+        assert_eq!(blocks[0]["id"], "tasks");
+    }
+
+    #[test]
+    fn report_render_params_reject_wrong_stringified_shape() {
+        let err =
+            normalize_json_array_arg(Value::String(r#"{"id":"tasks"}"#.to_string()), "blocks")
+                .unwrap_err();
+
+        assert!(
+            err.message
+                .to_string()
+                .contains("blocks must be a JSON array")
+        );
     }
 
     #[test]

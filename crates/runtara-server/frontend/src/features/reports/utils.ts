@@ -375,7 +375,10 @@ function rowConditionOperand(
   return argument ?? null;
 }
 
-function rowValue(row: Record<string, unknown>, field: string): unknown {
+export function getReportRowValue(
+  row: Record<string, unknown>,
+  field: string
+): unknown {
   if (Object.prototype.hasOwnProperty.call(row, field)) {
     return row[field];
   }
@@ -393,6 +396,120 @@ function rowValue(row: Record<string, unknown>, field: string): unknown {
     current = (current as Record<string, unknown>)[part];
   }
   return current;
+}
+
+function rowValue(row: Record<string, unknown>, field: string): unknown {
+  return getReportRowValue(row, field);
+}
+
+type DisplayTemplatePart =
+  | { kind: 'literal'; value: string }
+  | { kind: 'placeholder'; field: string; format?: string };
+
+export type CompiledDisplayTemplate = {
+  parts: DisplayTemplatePart[];
+};
+
+const DISPLAY_TEMPLATE_CACHE = new Map<string, CompiledDisplayTemplate>();
+const DISPLAY_TEMPLATE_FIELD_PATTERN =
+  /^(?:row\.)?[A-Za-z_][A-Za-z0-9_]*(?:\.(?:[A-Za-z_][A-Za-z0-9_]*|\d+))*$/;
+const DISPLAY_TEMPLATE_FORMAT_PATTERN =
+  /^[A-Za-z_][A-Za-z0-9_]*(?::[A-Za-z0-9_-]+)?$/;
+
+export function compileDisplayTemplate(
+  template: string
+): CompiledDisplayTemplate {
+  const cached = DISPLAY_TEMPLATE_CACHE.get(template);
+  if (cached) return cached;
+
+  const parts: DisplayTemplatePart[] = [];
+  let cursor = 0;
+  while (cursor < template.length) {
+    const open = template.indexOf('{{', cursor);
+    const danglingClose = template.indexOf('}}', cursor);
+    if (danglingClose !== -1 && (open === -1 || danglingClose < open)) {
+      throw new Error('Unexpected display template close delimiter.');
+    }
+    if (open === -1) {
+      pushLiteralPart(parts, template.slice(cursor));
+      break;
+    }
+
+    pushLiteralPart(parts, template.slice(cursor, open));
+    const close = template.indexOf('}}', open + 2);
+    if (close === -1) {
+      throw new Error('Unclosed display template variable.');
+    }
+
+    const token = template.slice(open + 2, close).trim();
+    parts.push(parseDisplayTemplateToken(token));
+    cursor = close + 2;
+  }
+
+  const compiled = { parts };
+  DISPLAY_TEMPLATE_CACHE.set(template, compiled);
+  return compiled;
+}
+
+function pushLiteralPart(parts: DisplayTemplatePart[], value: string) {
+  if (!value) return;
+  parts.push({ kind: 'literal', value });
+}
+
+export function renderDisplayTemplate(
+  row: Record<string, unknown>,
+  template: string
+): string {
+  let compiled: CompiledDisplayTemplate;
+  try {
+    compiled = compileDisplayTemplate(template);
+  } catch {
+    return '';
+  }
+
+  return compiled.parts
+    .map((part) => {
+      if (part.kind === 'literal') return part.value;
+      return formatCellValue(getReportRowValue(row, part.field), part.format);
+    })
+    .join('');
+}
+
+function parseDisplayTemplateToken(token: string): {
+  kind: 'placeholder';
+  field: string;
+  format?: string;
+} {
+  if (!token) {
+    throw new Error('Display template variables cannot be empty.');
+  }
+  if (token.includes('{{') || token.includes('}}')) {
+    throw new Error('Display template variables cannot be nested.');
+  }
+  const separator = token.indexOf('|');
+  if (separator === -1) {
+    const field = parseDisplayTemplateField(token);
+    return { kind: 'placeholder', field };
+  }
+  if (token.indexOf('|', separator + 1) !== -1) {
+    throw new Error(
+      'Display template variables support at most one format pipe.'
+    );
+  }
+  const field = parseDisplayTemplateField(token.slice(0, separator));
+  const format = token.slice(separator + 1).trim();
+  if (!format || !DISPLAY_TEMPLATE_FORMAT_PATTERN.test(format)) {
+    throw new Error('Display template format is invalid.');
+  }
+  return { kind: 'placeholder', field, format };
+}
+
+function parseDisplayTemplateField(field: string): string {
+  const normalized = field.trim();
+  if (!DISPLAY_TEMPLATE_FIELD_PATTERN.test(normalized)) {
+    throw new Error('Display template field is invalid.');
+  }
+  return normalized.startsWith('row.') ? normalized.slice(4) : normalized;
 }
 
 function compareConditionValues(left: unknown, right: unknown) {
@@ -510,58 +627,108 @@ function isEmptyVisibilityValue(value: unknown): boolean {
 export function formatCellValue(value: unknown, format?: string): string {
   if (value === null || value === undefined) return '';
 
-  if (format === 'currency' && typeof value === 'number') {
+  const { name: formatName, argument: formatArgument } =
+    parseCellFormat(format);
+
+  if (formatName === 'currency' && typeof value === 'number') {
     return new Intl.NumberFormat(undefined, {
       style: 'currency',
-      currency: 'USD',
+      currency: currencyFormatCode(formatArgument),
       maximumFractionDigits: 2,
     }).format(value);
   }
 
-  if (format === 'currency_compact' && typeof value === 'number') {
+  if (formatName === 'currency_compact' && typeof value === 'number') {
     return new Intl.NumberFormat(undefined, {
       style: 'currency',
-      currency: 'USD',
+      currency: currencyFormatCode(formatArgument),
       notation: 'compact',
       maximumFractionDigits: value < 1_000_000 ? 1 : 0,
     }).format(value);
   }
 
-  if (format === 'number' && typeof value === 'number') {
+  if (formatName === 'number' && typeof value === 'number') {
     return new Intl.NumberFormat(undefined, {
       maximumFractionDigits: 0,
     }).format(value);
   }
 
-  if (format === 'decimal' && typeof value === 'number') {
+  if (formatName === 'number_compact' && typeof value === 'number') {
+    return new Intl.NumberFormat(undefined, {
+      notation: 'compact',
+      maximumFractionDigits: value < 1_000_000 ? 1 : 0,
+    }).format(value);
+  }
+
+  if (formatName === 'decimal' && typeof value === 'number') {
     return new Intl.NumberFormat(undefined, {
       maximumFractionDigits: 2,
     }).format(value);
   }
 
-  if (format === 'percent' && typeof value === 'number') {
+  if (formatName === 'percent' && typeof value === 'number') {
     return new Intl.NumberFormat(undefined, {
       style: 'percent',
       maximumFractionDigits: 2,
     }).format(value);
   }
 
-  if (format === 'datetime' && typeof value === 'string') {
+  if (formatName === 'datetime' && typeof value === 'string') {
     const date = new Date(value);
     if (!Number.isNaN(date.getTime())) return date.toLocaleString();
   }
 
-  if (format === 'date' && typeof value === 'string') {
+  if (formatName === 'date' && typeof value === 'string') {
     const date = new Date(value);
     if (!Number.isNaN(date.getTime())) return date.toLocaleDateString();
   }
 
-  if (format === 'string') {
+  if (formatName === 'string') {
     return String(value);
   }
 
   if (typeof value === 'object') return JSON.stringify(value);
   return String(value);
+}
+
+function parseCellFormat(format?: string): {
+  name?: string;
+  argument?: string;
+} {
+  if (!format) return {};
+  const separator = format.indexOf(':');
+  if (separator === -1) return { name: format };
+  const name = format.slice(0, separator).trim();
+  const argument = format.slice(separator + 1).trim();
+  return { name, argument: argument || undefined };
+}
+
+function currencyFormatCode(argument?: string): string {
+  return argument && /^[a-z]{3}$/i.test(argument)
+    ? argument.toUpperCase()
+    : 'USD';
+}
+
+export function truncateCellText(
+  text: string,
+  maxChars?: number | null
+): { text: string; title?: string } {
+  if (
+    typeof maxChars !== 'number' ||
+    !Number.isFinite(maxChars) ||
+    maxChars <= 0
+  ) {
+    return { text };
+  }
+
+  const limit = Math.trunc(maxChars);
+  const chars = Array.from(text);
+  if (chars.length <= limit) return { text };
+
+  return {
+    text: `${chars.slice(0, limit).join('').trimEnd()}...`,
+    title: text,
+  };
 }
 
 export function humanizeFieldName(field: string): string {

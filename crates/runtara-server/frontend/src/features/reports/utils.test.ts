@@ -1,10 +1,13 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  compileDisplayTemplate,
   getReportViewBreadcrumbs,
   isWorkflowActionDisabled,
   isWorkflowActionVisible,
   matchesReportRowCondition,
+  renderDisplayTemplate,
+  truncateCellText,
 } from './utils';
 import type { ReportDefinition, ReportViewDefinition } from './types';
 
@@ -166,5 +169,79 @@ describe('report view navigation', () => {
     expect(
       getReportViewBreadcrumbs(reportDefinition, view, labelForView)
     ).toEqual(view.breadcrumb);
+  });
+});
+
+describe('truncateCellText', () => {
+  it('keeps full text when maxChars is omitted or non-positive', () => {
+    expect(truncateCellText('Hanes Mens Double Tough Socks')).toEqual({
+      text: 'Hanes Mens Double Tough Socks',
+    });
+    expect(truncateCellText('Hanes Mens Double Tough Socks', 0)).toEqual({
+      text: 'Hanes Mens Double Tough Socks',
+    });
+  });
+
+  it('cuts displayed text after the configured number of characters', () => {
+    expect(truncateCellText('Hanes Mens Double Tough Socks', 12)).toEqual({
+      text: 'Hanes Mens D...',
+      title: 'Hanes Mens Double Tough Socks',
+    });
+  });
+
+  it('counts unicode code points instead of UTF-16 halves', () => {
+    expect(truncateCellText('A😀BC', 2)).toEqual({
+      text: 'A😀...',
+      title: 'A😀BC',
+    });
+  });
+});
+
+describe('renderDisplayTemplate', () => {
+  const row = {
+    first_name: 'Jane',
+    last_name: 'Doe',
+    applicant_summary: {
+      full_name: 'Jane Q Doe',
+    },
+    requested_loan: {
+      amount: 120000,
+    },
+  };
+
+  it('concatenates row fields for display-only cells', () => {
+    expect(compileDisplayTemplate('{{first_name}} {{last_name}}')).toEqual({
+      parts: [
+        { kind: 'placeholder', field: 'first_name' },
+        { kind: 'literal', value: ' ' },
+        { kind: 'placeholder', field: 'last_name' },
+      ],
+    });
+    expect(renderDisplayTemplate(row, '{{first_name}} {{last_name}}')).toBe(
+      'Jane Doe'
+    );
+  });
+
+  it('reads nested JSON paths and applies token formats', () => {
+    expect(renderDisplayTemplate(row, '{{applicant_summary.full_name}}')).toBe(
+      'Jane Q Doe'
+    );
+
+    const rendered = renderDisplayTemplate(
+      row,
+      '${{requested_loan.amount | number_compact}} AUD'
+    );
+    expect(rendered).toMatch(/^\$.+ AUD$/);
+    expect(rendered).not.toContain('{{');
+  });
+
+  it('only compiles safe variable interpolation tokens', () => {
+    expect(() => compileDisplayTemplate('{{#if status}}')).toThrow();
+    expect(() =>
+      compileDisplayTemplate('{{first_name + last_name}}')
+    ).toThrow();
+    expect(() => compileDisplayTemplate('{{first_name | }}')).toThrow();
+    expect(() => compileDisplayTemplate('{{first_name')).toThrow();
+    expect(renderDisplayTemplate(row, '{{first_name + last_name}}')).toBe('');
   });
 });

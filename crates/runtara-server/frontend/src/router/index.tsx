@@ -1,7 +1,7 @@
 /* eslint-disable react-refresh/only-export-components */
 // Router config files naturally export route configurations that reference components.
 // Separating would require splitting the routing logic from its component references.
-import { createBrowserRouter, Navigate } from 'react-router';
+import { createBrowserRouter, Navigate, useParams } from 'react-router';
 import { lazy, Suspense } from 'react';
 import { PrivateRoute } from '@/router/PrivateRoute';
 import { Layout } from '@/shared/layouts/layout';
@@ -129,21 +129,23 @@ const ReportsListPage = lazy(() =>
     default: m.ReportsListPage,
   }))
 );
-const ReportViewerPage = lazy(() =>
-  import('@/features/reports/pages/ReportViewerPage').then((m) => ({
-    default: m.ReportViewerPage,
+const ReportPage = lazy(() =>
+  import('@/features/reports/pages/ReportPage').then((m) => ({
+    default: m.ReportPage,
   }))
 );
+
+function ReportEditRedirect() {
+  const { reportId } = useParams();
+  return <Navigate to={`/reports/${reportId}?edit=1`} replace />;
+}
 const ReportExplorePage = lazy(() =>
   import('@/features/reports/pages/ReportExplorePage').then((m) => ({
     default: m.ReportExplorePage,
   }))
 );
-const ReportEditorPage = lazy(() =>
-  import('@/features/reports/pages/ReportEditorPage').then((m) => ({
-    default: m.ReportEditorPage,
-  }))
-);
+// ReportEditorPage / ReportViewerPage are now folded into ReportPage. They
+// remain in the codebase for now but aren't routed directly.
 const Settings = lazy(() =>
   import('@/features/settings/pages/Settings').then((m) => ({
     default: m.Settings,
@@ -447,7 +449,7 @@ export const router = createBrowserRouter(
           element: (
             <PrivateRoute>
               <Suspense fallback={<PageLoader />}>
-                <ReportEditorPage />
+                <ReportPage />
               </Suspense>
             </PrivateRoute>
           ),
@@ -457,7 +459,7 @@ export const router = createBrowserRouter(
           element: (
             <PrivateRoute>
               <Suspense fallback={<PageLoader />}>
-                <ReportViewerPage />
+                <ReportPage />
               </Suspense>
             </PrivateRoute>
           ),
@@ -473,14 +475,10 @@ export const router = createBrowserRouter(
           ),
         },
         {
+          // Legacy /edit route — keep it working but redirect to the
+          // unified ReportPage with ?edit=1 so URL is the only mode toggle.
           path: '/reports/:reportId/edit',
-          element: (
-            <PrivateRoute>
-              <Suspense fallback={<PageLoader />}>
-                <ReportEditorPage />
-              </Suspense>
-            </PrivateRoute>
-          ),
+          element: <ReportEditRedirect />,
         },
         {
           path: '/settings',

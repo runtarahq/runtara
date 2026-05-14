@@ -1141,11 +1141,11 @@ pub async fn execute_workflow_handler(
 )]
 #[instrument(skip(engine), fields(instance_id = %instance_id))]
 pub async fn get_execution_metrics_handler(
-    crate::middleware::tenant_auth::OrgId(_tenant_id): crate::middleware::tenant_auth::OrgId,
+    crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
     State(engine): State<Arc<ExecutionEngine>>,
     Path(instance_id): Path<String>,
 ) -> (StatusCode, Json<Value>) {
-    match engine.get_execution(&instance_id).await {
+    match engine.get_execution(&tenant_id, &instance_id).await {
         Ok(instance) => {
             let response = ApiResponse::success(instance);
             (

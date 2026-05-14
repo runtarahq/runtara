@@ -24,6 +24,26 @@ struct StepTypeInfo {
     category: String,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SchemaFieldsValidationError {
+    code: String,
+    message: String,
+    field_name: Option<String>,
+    row_indices: Vec<usize>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SchemaFieldsValidationResponse {
+    success: bool,
+    valid: bool,
+    errors: Vec<String>,
+    warnings: Vec<String>,
+    message: String,
+    schema_errors: Vec<SchemaFieldsValidationError>,
+}
+
 impl ValidationResponse {
     fn ok(errors: Vec<String>, warnings: Vec<String>) -> Self {
         let valid = errors.is_empty();
@@ -51,6 +71,75 @@ impl ValidationResponse {
             message: "Graph validation failed: invalid workflow format".to_string(),
         }
     }
+
+    fn valid(message: impl Into<String>) -> Self {
+        Self {
+            success: true,
+            valid: true,
+            errors: Vec::new(),
+            warnings: Vec::new(),
+            message: message.into(),
+        }
+    }
+
+    fn invalid(message: impl Into<String>, errors: Vec<String>) -> Self {
+        Self {
+            success: true,
+            valid: false,
+            errors,
+            warnings: Vec::new(),
+            message: message.into(),
+        }
+    }
+}
+
+impl SchemaFieldsValidationResponse {
+    fn ok(schema_errors: Vec<SchemaFieldsValidationError>) -> Self {
+        let errors = schema_errors
+            .iter()
+            .map(|error| error.message.clone())
+            .collect::<Vec<_>>();
+        let valid = errors.is_empty();
+        let message = if valid {
+            "Schema field validation passed".to_string()
+        } else {
+            format!(
+                "Schema field validation failed with {} error(s)",
+                errors.len()
+            )
+        };
+
+        Self {
+            success: true,
+            valid,
+            errors,
+            warnings: Vec::new(),
+            message,
+            schema_errors,
+        }
+    }
+
+    fn parse_error(message: String) -> Self {
+        Self {
+            success: true,
+            valid: false,
+            errors: vec![message],
+            warnings: Vec::new(),
+            message: "Schema field validation failed: invalid schema fields JSON".to_string(),
+            schema_errors: Vec::new(),
+        }
+    }
+}
+
+impl From<runtara_workflows::SchemaFieldValidationIssue> for SchemaFieldsValidationError {
+    fn from(issue: runtara_workflows::SchemaFieldValidationIssue) -> Self {
+        Self {
+            code: issue.code,
+            message: issue.message,
+            field_name: issue.field_name,
+            row_indices: issue.row_indices,
+        }
+    }
 }
 
 /// Validate an execution graph JSON string with the same Rust validation path
@@ -65,6 +154,40 @@ pub fn validate_execution_graph_json(execution_graph_json: &str) -> String {
             "errors": [format!("Failed to serialize validation response: {}", e)],
             "warnings": [],
             "message": "Validation failed"
+        })
+        .to_string()
+    })
+}
+
+/// Validate workflow start inputs with the same Rust validation path used by
+/// backend execution.
+#[wasm_bindgen(js_name = validateWorkflowStartInputsJson)]
+pub fn validate_workflow_start_inputs_json(input_schema_json: &str, inputs_json: &str) -> String {
+    let response = validate_workflow_start_inputs_json_impl(input_schema_json, inputs_json);
+    serde_json::to_string(&response).unwrap_or_else(|e| {
+        json!({
+            "success": false,
+            "valid": false,
+            "errors": [format!("Failed to serialize validation response: {}", e)],
+            "warnings": [],
+            "message": "Workflow start input validation failed"
+        })
+        .to_string()
+    })
+}
+
+/// Validate editable schema field rows before they are collapsed into schema JSON.
+#[wasm_bindgen(js_name = validateSchemaFieldsJson)]
+pub fn validate_schema_fields_json(schema_label: &str, schema_fields_json: &str) -> String {
+    let response = validate_schema_fields_json_impl(schema_label, schema_fields_json);
+    serde_json::to_string(&response).unwrap_or_else(|e| {
+        json!({
+            "success": false,
+            "valid": false,
+            "errors": [format!("Failed to serialize schema field validation response: {}", e)],
+            "warnings": [],
+            "message": "Schema field validation failed",
+            "schemaErrors": []
         })
         .to_string()
     })
@@ -156,6 +279,67 @@ fn validate_execution_graph_json_impl(execution_graph_json: &str) -> ValidationR
     ValidationResponse::ok(errors, warnings)
 }
 
+fn validate_schema_fields_json_impl(
+    schema_label: &str,
+    schema_fields_json: &str,
+) -> SchemaFieldsValidationResponse {
+    let fields = match serde_json::from_str::<Vec<runtara_workflows::EditableSchemaField>>(
+        schema_fields_json,
+    ) {
+        Ok(fields) => fields,
+        Err(e) => {
+            return SchemaFieldsValidationResponse::parse_error(format!(
+                "Failed to parse schema fields JSON: {}",
+                e
+            ));
+        }
+    };
+
+    let label = match schema_label.trim() {
+        "" => "Schema",
+        label => label,
+    };
+    let schema_errors = runtara_workflows::validate_schema_fields(label, &fields)
+        .into_iter()
+        .map(SchemaFieldsValidationError::from)
+        .collect();
+
+    SchemaFieldsValidationResponse::ok(schema_errors)
+}
+
+fn validate_workflow_start_inputs_json_impl(
+    input_schema_json: &str,
+    inputs_json: &str,
+) -> ValidationResponse {
+    let input_schema = match serde_json::from_str::<Value>(input_schema_json) {
+        Ok(value) => value,
+        Err(e) => {
+            return ValidationResponse::invalid(
+                "Workflow start input validation failed: invalid input schema JSON",
+                vec![format!("Failed to parse input schema JSON: {}", e)],
+            );
+        }
+    };
+
+    let inputs = match serde_json::from_str::<Value>(inputs_json) {
+        Ok(value) => value,
+        Err(e) => {
+            return ValidationResponse::invalid(
+                "Workflow start input validation failed: invalid inputs JSON",
+                vec![format!("Failed to parse inputs JSON: {}", e)],
+            );
+        }
+    };
+
+    match runtara_workflows::input_validation::validate_workflow_start_inputs(inputs, &input_schema)
+    {
+        Ok(_) => ValidationResponse::valid("Workflow start input validation passed"),
+        Err(e) => {
+            ValidationResponse::invalid("Workflow start input validation failed", vec![e.message])
+        }
+    }
+}
+
 fn to_json_string<T: Serialize>(value: &T) -> String {
     serde_json::to_string(value).unwrap_or_else(|e| {
         json!({
@@ -215,6 +399,197 @@ mod tests {
         assert!(response.success);
         assert!(!response.valid);
         assert!(!response.errors.is_empty());
+    }
+
+    #[test]
+    fn validates_workflow_start_inputs_with_backend_validator() {
+        let response = validate_workflow_start_inputs_json_impl(
+            r#"{"name":{"type":"string","required":true}}"#,
+            r#"{"data":{"name":"Runtara"},"variables":{}}"#,
+        );
+
+        assert!(response.success);
+        assert!(response.valid);
+        assert!(response.errors.is_empty());
+    }
+
+    #[test]
+    fn validates_editable_schema_fields_with_shared_validator() {
+        let response = validate_schema_fields_json_impl(
+            "Input schema",
+            r#"[
+                {"name":"email","type":"string"},
+                {"name":" email ","type":"string"}
+            ]"#,
+        );
+
+        assert!(response.success);
+        assert!(!response.valid);
+        assert_eq!(response.errors.len(), 1);
+        assert_eq!(response.schema_errors.len(), 1);
+        assert_eq!(response.schema_errors[0].code, "E008");
+        assert_eq!(
+            response.schema_errors[0].field_name.as_deref(),
+            Some("email")
+        );
+        assert_eq!(response.schema_errors[0].row_indices, vec![0, 1]);
+    }
+
+    #[test]
+    fn rejects_invalid_editable_schema_fields_json() {
+        let response = validate_schema_fields_json_impl("Input schema", r#"{"name":"email"}"#);
+
+        assert!(response.success);
+        assert!(!response.valid);
+        assert!(response.schema_errors.is_empty());
+        assert!(
+            response
+                .errors
+                .iter()
+                .any(|error| error.contains("Failed to parse schema fields JSON")),
+            "{:?}",
+            response.errors
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_workflow_start_inputs_with_backend_validator() {
+        let response = validate_workflow_start_inputs_json_impl(
+            r#"{"count":{"type":"integer","required":true}}"#,
+            r#"{"data":{"count":"not-a-number"},"variables":{}}"#,
+        );
+
+        assert!(response.success);
+        assert!(!response.valid);
+        assert!(response.message.contains("failed"));
+        assert!(response.errors.iter().any(|error| error.contains("count")));
+    }
+
+    #[test]
+    fn surfaces_template_reference_warnings_from_backend_validator() {
+        let response = validate_execution_graph_json_impl(
+            r#"{
+                "steps": {
+                    "finish": {
+                        "stepType": "Finish",
+                        "id": "finish",
+                        "inputMapping": {
+                            "summary": {
+                                "valueType": "template",
+                                "value": "{{ steps.missing_archive.outputs.file }}"
+                            }
+                        }
+                    }
+                },
+                "entryPoint": "finish"
+            }"#,
+        );
+
+        assert!(response.success);
+        assert!(response.valid);
+        assert!(response.errors.is_empty());
+        assert!(
+            response.warnings.iter().any(|warning| {
+                warning.contains("[W052]") && warning.contains("missing_archive")
+            }),
+            "{:?}",
+            response.warnings
+        );
+    }
+
+    #[test]
+    fn rejects_finish_output_without_name_from_backend_validator() {
+        let response = validate_execution_graph_json_impl(
+            r#"{
+                "steps": {
+                    "finish": {
+                        "stepType": "Finish",
+                        "id": "finish",
+                        "inputMapping": {
+                            "": {
+                                "valueType": "reference",
+                                "value": "data.orderId"
+                            }
+                        }
+                    }
+                },
+                "entryPoint": "finish"
+            }"#,
+        );
+
+        assert!(response.success);
+        assert!(!response.valid);
+        assert!(
+            response.errors.iter().any(|error| {
+                error.contains("[E117]") && error.contains("has an output with no name")
+            }),
+            "{:?}",
+            response.errors
+        );
+    }
+
+    #[test]
+    fn rejects_finish_output_without_source_from_backend_validator() {
+        let response = validate_execution_graph_json_impl(
+            r#"{
+                "steps": {
+                    "finish": {
+                        "stepType": "Finish",
+                        "id": "finish",
+                        "inputMapping": {
+                            "orderId": {
+                                "valueType": "reference",
+                                "value": " "
+                            }
+                        }
+                    }
+                },
+                "entryPoint": "finish"
+            }"#,
+        );
+
+        assert!(response.success);
+        assert!(!response.valid);
+        assert!(
+            response
+                .errors
+                .iter()
+                .any(|error| { error.contains("[E118]") && error.contains("orderId") }),
+            "{:?}",
+            response.errors
+        );
+    }
+
+    #[test]
+    fn rejects_finish_output_without_immediate_source_from_backend_validator() {
+        let response = validate_execution_graph_json_impl(
+            r#"{
+                "steps": {
+                    "finish": {
+                        "stepType": "Finish",
+                        "id": "finish",
+                        "inputMapping": {
+                            "status": {
+                                "valueType": "immediate",
+                                "value": ""
+                            }
+                        }
+                    }
+                },
+                "entryPoint": "finish"
+            }"#,
+        );
+
+        assert!(response.success);
+        assert!(!response.valid);
+        assert!(
+            response
+                .errors
+                .iter()
+                .any(|error| { error.contains("[E118]") && error.contains("status") }),
+            "{:?}",
+            response.errors
+        );
     }
 
     #[test]

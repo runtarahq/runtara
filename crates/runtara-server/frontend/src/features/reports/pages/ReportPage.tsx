@@ -1,0 +1,301 @@
+import { useEffect, useMemo, useState } from 'react';
+import {
+  Link,
+  useNavigate,
+  useParams,
+  useSearchParams,
+} from 'react-router';
+import { Edit, Eye, Save } from 'lucide-react';
+import { Button } from '@/shared/components/ui/button';
+import { TileList, TilesPage } from '@/shared/components/tiles-page';
+import { usePageTitle } from '@/shared/hooks/usePageTitle';
+import { useObjectSchemaDtos } from '@/features/objects/hooks/useObjectSchemas';
+import {
+  useCreateReport,
+  useReport,
+  useReportPreview,
+  useUpdateReport,
+  useValidateReport,
+} from '../hooks/useReports';
+import { ReportDeleteButton } from '../components/ReportDeleteButton';
+import { ReportFilterBar } from '../components/ReportFilterBar';
+import { ReportBuilderWizard } from '../components/wizard/ReportBuilderWizard';
+import { ReportBlockResult, ReportDefinition } from '../types';
+import {
+  decodeFilterValue,
+  encodeFilterValue,
+  getFilterDefaultValue,
+  slugify,
+} from '../utils';
+
+const EMPTY_DEFINITION: ReportDefinition = {
+  definitionVersion: 1,
+  layout: [],
+  filters: [],
+  blocks: [],
+};
+
+/** Unified report page. Same DOM in view and edit modes — toggling `?edit=1`
+ *  swaps the header chrome and shows/hides editing affordances inside the
+ *  layout, but the report itself (grids, blocks, real-data previews) renders
+ *  identically in both modes. */
+export function ReportPage() {
+  const { reportId } = useParams();
+  const isExisting = Boolean(reportId);
+  const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
+  const editing = searchParams.get('edit') === '1' || !isExisting;
+
+  const { data: existingReport, isFetching } = useReport(reportId);
+  const { data: schemas = [] } = useObjectSchemaDtos();
+  const createReport = useCreateReport();
+  const updateReport = useUpdateReport();
+  const validateReport = useValidateReport();
+
+  usePageTitle(existingReport?.name ?? (isExisting ? 'Report' : 'New report'));
+
+  const [name, setName] = useState('');
+  const [description, setDescription] = useState('');
+  const [definition, setDefinition] =
+    useState<ReportDefinition>(EMPTY_DEFINITION);
+  const [saveError, setSaveError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!existingReport) return;
+    setName(existingReport.name);
+    setDescription(existingReport.description ?? '');
+    setDefinition(existingReport.definition);
+  }, [existingReport]);
+
+  // Filter values come from URL params in view mode; in edit mode we still
+  // honor defaults so the preview reflects what viewers will see.
+  const filterValues = useMemo(() => {
+    return Object.fromEntries(
+      (definition.filters ?? []).map((filter) => [
+        filter.id,
+        decodeFilterValue(filter, searchParams.get(filter.id)),
+      ])
+    );
+  }, [definition.filters, searchParams]);
+
+  // Debounce the definition so the preview API isn't pummelled while typing.
+  const [debouncedDefinition, setDebouncedDefinition] =
+    useState<ReportDefinition>(EMPTY_DEFINITION);
+  useEffect(() => {
+    const handle = setTimeout(() => setDebouncedDefinition(definition), 400);
+    return () => clearTimeout(handle);
+  }, [definition]);
+
+  const canPreview = useMemo(
+    () =>
+      debouncedDefinition.blocks.some(
+        (block) =>
+          block.type === 'markdown' ||
+          (block.source?.schema && block.source.schema.length > 0)
+      ),
+    [debouncedDefinition]
+  );
+
+  const previewRequest = useMemo(
+    () =>
+      canPreview
+        ? { filters: filterValues, definition: debouncedDefinition }
+        : undefined,
+    [canPreview, debouncedDefinition, filterValues]
+  );
+
+  const previewQuery = useReportPreview(previewRequest, canPreview);
+  const blockResults: Record<string, ReportBlockResult> = useMemo(
+    () => previewQuery.data?.blocks ?? {},
+    [previewQuery.data]
+  );
+
+  const canSave =
+    name.trim().length > 0 &&
+    !createReport.isPending &&
+    !updateReport.isPending &&
+    !validateReport.isPending;
+
+  const handleFilterChange = (filterId: string, value: unknown) => {
+    setSearchParams(
+      (current) => {
+        const next = new URLSearchParams(current);
+        const filter = definition.filters.find((f) => f.id === filterId);
+        const defaultValue = filter ? getFilterDefaultValue(filter) : undefined;
+        if (isEmptyFilterValue(value) || isSameFilterValue(value, defaultValue)) {
+          next.delete(filterId);
+        } else {
+          next.set(filterId, encodeFilterValue(value));
+        }
+        return next;
+      },
+      { replace: true }
+    );
+  };
+
+  const handleSave = async () => {
+    setSaveError(null);
+    const validation = await validateReport.mutateAsync({ definition });
+    if (!validation.valid) {
+      setSaveError(validation.errors[0]?.message ?? 'Report is invalid.');
+      return;
+    }
+    const trimmedName = name.trim();
+    const payload = {
+      name: trimmedName,
+      slug: slugify(trimmedName),
+      description: description.trim() || null,
+      tags: [],
+      status: 'published' as const,
+      definition,
+    };
+    if (isExisting && reportId) {
+      const report = await updateReport.mutateAsync({
+        id: reportId,
+        data: payload,
+      });
+      navigate(`/reports/${report.id}?edit=1`);
+    } else {
+      const report = await createReport.mutateAsync(payload);
+      navigate(`/reports/${report.id}?edit=1`);
+    }
+  };
+
+  if (isExisting && isFetching) {
+    return (
+      <TilesPage kicker="Reports" title="Loading report">
+        <TileList>
+          <div className="h-96 animate-pulse rounded-xl bg-muted/30" />
+        </TileList>
+      </TilesPage>
+    );
+  }
+
+  const titleNode = editing ? (
+    <input
+      value={name}
+      placeholder="Untitled report"
+      onChange={(event) => setName(event.target.value)}
+      className="w-full bg-transparent text-xl font-semibold placeholder:text-muted-foreground focus:outline-none"
+      style={{ border: 'none', outline: 'none', boxShadow: 'none', padding: 0 }}
+    />
+  ) : (
+    <span>{name || 'Untitled report'}</span>
+  );
+
+  const toolbar = (
+    <div className="flex flex-col gap-2">
+      {editing ? (
+        <input
+          value={description}
+          placeholder="Optional description shown in the reports list…"
+          onChange={(event) => setDescription(event.target.value)}
+          className="w-full bg-transparent text-sm text-muted-foreground placeholder:text-muted-foreground focus:outline-none"
+          style={{ border: 'none', outline: 'none', boxShadow: 'none', padding: 0 }}
+        />
+      ) : description ? (
+        <p className="text-sm text-muted-foreground">{description}</p>
+      ) : null}
+      {definition.filters.length > 0 && reportId ? (
+        <ReportFilterBar
+          reportId={reportId}
+          definition={definition}
+          values={filterValues}
+          onChange={handleFilterChange}
+        />
+      ) : null}
+    </div>
+  );
+
+  const actions = (
+    <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row">
+      {editing ? (
+        isExisting && reportId ? (
+          <Link to={`/reports/${reportId}`} className="w-full sm:w-auto">
+            <Button
+              variant="outline"
+              className="h-11 w-full rounded-full sm:px-5"
+            >
+              <Eye className="mr-2 h-4 w-4" />
+              View
+            </Button>
+          </Link>
+        ) : (
+          <Link to="/reports" className="w-full sm:w-auto">
+            <Button
+              variant="outline"
+              className="h-11 w-full rounded-full sm:px-5"
+            >
+              Cancel
+            </Button>
+          </Link>
+        )
+      ) : (
+        <Link
+          to={`/reports/${reportId}?edit=1`}
+          className="w-full sm:w-auto"
+        >
+          <Button
+            variant="outline"
+            className="h-11 w-full rounded-full sm:px-5"
+          >
+            <Edit className="mr-2 h-4 w-4" />
+            Edit
+          </Button>
+        </Link>
+      )}
+      {editing && isExisting && reportId && existingReport ? (
+        <ReportDeleteButton
+          reportId={reportId}
+          reportName={existingReport.name}
+          className="h-11 rounded-full sm:px-5"
+        />
+      ) : null}
+      {editing ? (
+        <Button
+          className="h-11 rounded-full sm:px-5"
+          disabled={!canSave}
+          onClick={handleSave}
+        >
+          <Save className="mr-2 h-4 w-4" />
+          Save
+        </Button>
+      ) : null}
+    </div>
+  );
+
+  return (
+    <TilesPage
+      kicker="Reports"
+      title={titleNode}
+      toolbar={toolbar}
+      action={actions}
+    >
+      <ReportBuilderWizard
+        definition={definition}
+        schemas={schemas}
+        blockResults={blockResults}
+        editing={editing}
+        onChange={(nextDefinition) => {
+          setDefinition(nextDefinition);
+          setSaveError(null);
+          validateReport.reset();
+        }}
+      />
+      {saveError ? (
+        <p className="mt-3 text-sm text-destructive">{saveError}</p>
+      ) : null}
+    </TilesPage>
+  );
+}
+
+function isEmptyFilterValue(value: unknown): boolean {
+  if (value === null || value === undefined) return true;
+  if (typeof value === 'string') return value.trim().length === 0;
+  if (Array.isArray(value)) return value.length === 0;
+  return false;
+}
+
+function isSameFilterValue(left: unknown, right: unknown): boolean {
+  return JSON.stringify(left) === JSON.stringify(right);
+}

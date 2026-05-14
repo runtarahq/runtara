@@ -63,6 +63,8 @@
 //! | E090 | DuplicateStepName | Multiple steps with same name |
 //! | E100 | DuplicateEdgePriority | Edges with duplicate priority |
 //! | E101 | MultipleDefaultEdges | Multiple unconditional edges |
+//! | E117 | FinishOutputMissingName | Finish output has no name |
+//! | E118 | FinishOutputMissingSource | Finish output has no source |
 
 use crate::dependency_analysis::{DependencyGraph, WorkflowReference};
 use runtara_dsl::{
@@ -132,6 +134,13 @@ pub enum ValidationError {
     },
     /// Workflow has no steps defined.
     EmptyWorkflow,
+    /// A Finish output mapping has an empty output name.
+    FinishOutputMissingName { step_id: String },
+    /// A Finish output mapping names an output but has no source value.
+    FinishOutputMissingSource {
+        step_id: String,
+        output_name: String,
+    },
 
     // === Reference Errors ===
     /// A step reference points to a non-existent step.
@@ -375,6 +384,23 @@ impl std::fmt::Display for ValidationError {
             }
             ValidationError::EmptyWorkflow => {
                 write!(f, "[E004] Workflow has no steps defined")
+            }
+            ValidationError::FinishOutputMissingName { step_id } => {
+                write!(
+                    f,
+                    "[E117] Finish step '{}' has an output with no name",
+                    step_id
+                )
+            }
+            ValidationError::FinishOutputMissingSource {
+                step_id,
+                output_name,
+            } => {
+                write!(
+                    f,
+                    "[E118] Finish step '{}' output '{}' is missing a source",
+                    step_id, output_name
+                )
             }
 
             // Reference Errors
@@ -890,6 +916,14 @@ pub enum ValidationWarning {
         known_prefix: String,
         unverified_suffix: String,
     },
+    /// A Minijinja template contains an obvious static reference that could not
+    /// be validated. This is a warning because undefined template values render
+    /// at runtime under Minijinja's current behavior.
+    TemplateReferenceIssue {
+        step_id: String,
+        reference: String,
+        reason: String,
+    },
 }
 
 // ============================================================================
@@ -1060,6 +1094,17 @@ impl std::fmt::Display for ValidationWarning {
                     step_id, reference, known_prefix, unverified_suffix
                 )
             }
+            ValidationWarning::TemplateReferenceIssue {
+                step_id,
+                reference,
+                reason,
+            } => {
+                write!(
+                    f,
+                    "[W052] Step '{}' template references '{}': {}. This is a warning because Minijinja resolves missing values at runtime.",
+                    step_id, reference, reason
+                )
+            }
         }
     }
 }
@@ -1078,11 +1123,17 @@ pub fn validate_workflow(graph: &ExecutionGraph) -> ValidationResult {
     // Phase 1: Graph structure validation
     validate_graph_structure(graph, &mut result);
 
+    // Phase 1.5: Finish output shape validation
+    validate_finish_outputs(graph, &mut result);
+
     // Phase 2: Reference validation
     validate_references(graph, &mut result);
 
     // Phase 2.5: Execution order validation
     validate_execution_order(graph, &mut result);
+
+    // Phase 2.6: Static Minijinja template reference validation
+    validate_template_static_references(graph, &mut result);
 
     // Phase 3: Agent/capability validation
     validate_agents(graph, &mut result);
@@ -1448,6 +1499,49 @@ fn validate_references(graph: &ExecutionGraph, result: &mut ValidationResult) {
     validate_references_with_inherited(graph, &HashSet::new(), result);
 }
 
+fn validate_finish_outputs(graph: &ExecutionGraph, result: &mut ValidationResult) {
+    for (step_id, step) in &graph.steps {
+        let Step::Finish(finish_step) = step else {
+            continue;
+        };
+
+        let Some(input_mapping) = finish_step.input_mapping.as_ref() else {
+            continue;
+        };
+
+        for (output_name, value) in input_mapping {
+            if output_name.trim().is_empty() {
+                result
+                    .errors
+                    .push(ValidationError::FinishOutputMissingName {
+                        step_id: step_id.clone(),
+                    });
+            }
+
+            if finish_output_source_is_missing(value) {
+                result
+                    .errors
+                    .push(ValidationError::FinishOutputMissingSource {
+                        step_id: step_id.clone(),
+                        output_name: output_name.clone(),
+                    });
+            }
+        }
+    }
+}
+
+fn finish_output_source_is_missing(value: &MappingValue) -> bool {
+    match value {
+        MappingValue::Reference(reference) => reference.value.trim().is_empty(),
+        MappingValue::Template(template) => template.value.trim().is_empty(),
+        MappingValue::Immediate(immediate) => immediate
+            .value
+            .as_str()
+            .is_some_and(|value| value.trim().is_empty()),
+        MappingValue::Composite(_) => false,
+    }
+}
+
 /// Validates references in a graph, considering inherited variables from parent scope.
 ///
 /// `inherited_variables` contains variable names that are injected from a parent scope
@@ -1720,6 +1814,306 @@ fn validate_execution_order(graph: &ExecutionGraph, result: &mut ValidationResul
             }
             _ => {}
         }
+    }
+}
+
+// ============================================================================
+// Phase 2.6: Static Template Reference Validation
+// ============================================================================
+
+fn validate_template_static_references(graph: &ExecutionGraph, result: &mut ValidationResult) {
+    validate_template_static_references_with_context(graph, &HashSet::new(), false, result);
+}
+
+fn validate_template_static_references_with_context(
+    graph: &ExecutionGraph,
+    inherited_variables: &HashSet<String>,
+    has_implicit_data: bool,
+    result: &mut ValidationResult,
+) {
+    let step_ids: HashSet<String> = graph.steps.keys().cloned().collect();
+    let adjacency = build_adjacency(graph);
+
+    let mut variable_names: HashSet<String> = graph.variables.keys().cloned().collect();
+    variable_names.extend(inherited_variables.iter().cloned());
+    variable_names.insert("_workflow_id".to_string());
+    variable_names.insert("_instance_id".to_string());
+    variable_names.insert("_tenant_id".to_string());
+    let mut available_variables: Vec<String> = variable_names.iter().cloned().collect();
+    available_variables.sort();
+
+    let context = TemplateStaticReferenceContext {
+        graph,
+        step_ids: &step_ids,
+        variable_names: &variable_names,
+        available_variables: &available_variables,
+        has_implicit_data,
+        adjacency: &adjacency,
+    };
+
+    for (step_id, step) in &graph.steps {
+        for reference in collect_template_static_references_from_step(step) {
+            validate_template_static_reference(step_id, &reference, &context, result);
+        }
+    }
+
+    for step in graph.steps.values() {
+        match step {
+            Step::Split(split_step) => {
+                let injected_vars: HashSet<String> = split_step
+                    .config
+                    .as_ref()
+                    .and_then(|c| c.variables.as_ref())
+                    .map(|v| v.keys().cloned().collect())
+                    .unwrap_or_default();
+                validate_template_static_references_with_context(
+                    &split_step.subgraph,
+                    &injected_vars,
+                    true,
+                    result,
+                );
+            }
+            Step::While(while_step) => {
+                validate_template_static_references_with_context(
+                    &while_step.subgraph,
+                    &HashSet::new(),
+                    true,
+                    result,
+                );
+            }
+            Step::WaitForSignal(wait_step) => {
+                if let Some(ref on_wait) = wait_step.on_wait {
+                    validate_template_static_references_with_context(
+                        on_wait,
+                        &HashSet::new(),
+                        false,
+                        result,
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+struct TemplateStaticReferenceContext<'a> {
+    graph: &'a ExecutionGraph,
+    step_ids: &'a HashSet<String>,
+    variable_names: &'a HashSet<String>,
+    available_variables: &'a [String],
+    has_implicit_data: bool,
+    adjacency: &'a HashMap<String, Vec<String>>,
+}
+
+fn validate_template_static_reference(
+    step_id: &str,
+    reference: &str,
+    context: &TemplateStaticReferenceContext<'_>,
+    result: &mut ValidationResult,
+) {
+    if reference.contains("..") {
+        push_template_reference_issue(
+            result,
+            step_id,
+            reference,
+            "empty path segment (consecutive dots)",
+        );
+        return;
+    }
+
+    if let Some(referenced_step_id) = extract_step_id_from_reference(reference) {
+        if referenced_step_id == step_id {
+            result.warnings.push(ValidationWarning::SelfReference {
+                step_id: step_id.to_string(),
+                reference_path: reference.to_string(),
+            });
+        }
+
+        if !context.step_ids.contains(&referenced_step_id) {
+            push_template_reference_issue(
+                result,
+                step_id,
+                reference,
+                format!("step '{}' does not exist", referenced_step_id),
+            );
+        } else if referenced_step_id != step_id
+            && !has_path(context.adjacency, &referenced_step_id, step_id)
+        {
+            push_template_reference_issue(
+                result,
+                step_id,
+                reference,
+                format!(
+                    "step '{}' has not executed before this step",
+                    referenced_step_id
+                ),
+            );
+        }
+    }
+
+    if let Some((root, field_name)) = parse_reference(reference) {
+        match root {
+            "data" => {
+                if context.has_implicit_data {
+                    return;
+                }
+                if context.graph.input_schema.is_empty() {
+                    push_template_reference_issue(
+                        result,
+                        step_id,
+                        reference,
+                        "no inputSchema is defined for data.* references",
+                    );
+                } else {
+                    let mut nested_result = ValidationResult::default();
+                    validate_schema_reference_path(
+                        step_id,
+                        reference,
+                        "data",
+                        &context.graph.input_schema,
+                        &mut nested_result,
+                    );
+                    push_template_nested_issues(result, step_id, reference, nested_result);
+                }
+            }
+            "variables" => {
+                if !context.variable_names.contains(field_name) {
+                    let suggestion = find_similar_name(field_name, context.available_variables);
+                    let suggestion_text = suggestion
+                        .map(|s| format!(". Did you mean '{}'?", s))
+                        .unwrap_or_default();
+                    push_template_reference_issue(
+                        result,
+                        step_id,
+                        reference,
+                        format!(
+                            "variable '{}' is not defined{}",
+                            field_name, suggestion_text
+                        ),
+                    );
+                } else if let Some(variable) = context.graph.variables.get(field_name) {
+                    let mut nested_result = ValidationResult::default();
+                    validate_variable_reference_path(
+                        step_id,
+                        reference,
+                        field_name,
+                        &variable.value,
+                        &mut nested_result,
+                    );
+                    push_template_nested_issues(result, step_id, reference, nested_result);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn push_template_reference_issue(
+    result: &mut ValidationResult,
+    step_id: &str,
+    reference: &str,
+    reason: impl Into<String>,
+) {
+    result
+        .warnings
+        .push(ValidationWarning::TemplateReferenceIssue {
+            step_id: step_id.to_string(),
+            reference: reference.to_string(),
+            reason: reason.into(),
+        });
+}
+
+fn push_template_nested_issues(
+    result: &mut ValidationResult,
+    step_id: &str,
+    reference: &str,
+    nested_result: ValidationResult,
+) {
+    for error in nested_result.errors {
+        push_template_reference_issue(result, step_id, reference, template_error_reason(&error));
+    }
+    for warning in nested_result.warnings {
+        push_template_reference_issue(
+            result,
+            step_id,
+            reference,
+            template_warning_reason(&warning),
+        );
+    }
+}
+
+fn template_error_reason(error: &ValidationError) -> String {
+    match error {
+        ValidationError::UndefinedDataReference {
+            field_name,
+            available_fields,
+            ..
+        } => {
+            let suggestion = find_similar_name(field_name, available_fields);
+            let suggestion_text = suggestion
+                .map(|s| format!(". Did you mean '{}'?", s))
+                .unwrap_or_default();
+            format!(
+                "field '{}' is not defined in inputSchema{}",
+                field_name, suggestion_text
+            )
+        }
+        ValidationError::MissingInputSchema { .. } => {
+            "no inputSchema is defined for data.* references".to_string()
+        }
+        ValidationError::UndefinedVariableReference {
+            variable_name,
+            available_variables,
+            ..
+        } => {
+            let suggestion = find_similar_name(variable_name, available_variables);
+            let suggestion_text = suggestion
+                .map(|s| format!(". Did you mean '{}'?", s))
+                .unwrap_or_default();
+            format!(
+                "variable '{}' is not defined{}",
+                variable_name, suggestion_text
+            )
+        }
+        ValidationError::UndefinedReferenceField {
+            known_prefix,
+            missing_field,
+            available_fields,
+            ..
+        } => {
+            let suggestion = find_similar_name(missing_field, available_fields);
+            let suggestion_text = suggestion
+                .map(|s| format!(". Did you mean '{}'?", s))
+                .unwrap_or_default();
+            format!(
+                "'{}' has no field '{}'{}",
+                known_prefix, missing_field, suggestion_text
+            )
+        }
+        ValidationError::ReferenceNonObjectTraversal {
+            known_prefix,
+            actual_type,
+            attempted_field,
+            ..
+        } => format!(
+            "'{}' is '{}' and cannot be traversed to '{}'",
+            known_prefix, actual_type, attempted_field
+        ),
+        _ => error.to_string(),
+    }
+}
+
+fn template_warning_reason(warning: &ValidationWarning) -> String {
+    match warning {
+        ValidationWarning::PartiallyUnverifiedReference {
+            known_prefix,
+            unverified_suffix,
+            ..
+        } => format!(
+            "path is valid through '{}', but '{}' is inside a dynamic object and cannot be validated statically",
+            known_prefix, unverified_suffix
+        ),
+        _ => warning.to_string(),
     }
 }
 
@@ -3278,6 +3672,63 @@ fn extract_references_from_mapping_value(value: &MappingValue, refs: &mut Vec<St
     }
 }
 
+fn extract_template_static_references(template_str: &str) -> Vec<String> {
+    let mut env = minijinja::Environment::new();
+    if env.add_template("__check", template_str).is_err() {
+        return Vec::new();
+    }
+
+    let Ok(template) = env.get_template("__check") else {
+        return Vec::new();
+    };
+
+    let mut refs: Vec<String> = template
+        .undeclared_variables(true)
+        .into_iter()
+        .filter(|reference| {
+            reference.starts_with("data.")
+                || reference.starts_with("variables.")
+                || reference.starts_with("steps.")
+        })
+        .collect();
+    refs.sort();
+    refs.dedup();
+    refs
+}
+
+fn extract_template_static_references_from_mapping_value(
+    value: &MappingValue,
+    refs: &mut Vec<String>,
+) {
+    match value {
+        MappingValue::Reference(_) | MappingValue::Immediate(_) => {}
+        MappingValue::Composite(composite) => {
+            extract_template_static_references_from_composite(&composite.value, refs);
+        }
+        MappingValue::Template(tmpl_value) => {
+            refs.extend(extract_template_static_references(&tmpl_value.value));
+        }
+    }
+}
+
+fn extract_template_static_references_from_composite(
+    inner: &CompositeInner,
+    refs: &mut Vec<String>,
+) {
+    match inner {
+        CompositeInner::Object(map) => {
+            for value in map.values() {
+                extract_template_static_references_from_mapping_value(value, refs);
+            }
+        }
+        CompositeInner::Array(arr) => {
+            for value in arr {
+                extract_template_static_references_from_mapping_value(value, refs);
+            }
+        }
+    }
+}
+
 /// Extract references from a CompositeInner value recursively.
 fn extract_references_from_composite(inner: &CompositeInner, refs: &mut Vec<String>) {
     match inner {
@@ -3515,6 +3966,115 @@ fn collect_references_from_step(step: &Step) -> Vec<String> {
     refs
 }
 
+fn collect_template_static_references_from_step(step: &Step) -> Vec<String> {
+    let mut refs = Vec::new();
+
+    match step {
+        Step::Agent(agent_step) => {
+            if let Some(ref inputs) = agent_step.input_mapping {
+                extract_template_static_references_from_input_mapping(inputs, &mut refs);
+            }
+        }
+        Step::EmbedWorkflow(start_step) => {
+            if let Some(ref mapping) = start_step.input_mapping {
+                extract_template_static_references_from_input_mapping(mapping, &mut refs);
+            }
+        }
+        Step::Finish(finish_step) => {
+            if let Some(ref outputs) = finish_step.input_mapping {
+                extract_template_static_references_from_input_mapping(outputs, &mut refs);
+            }
+        }
+        Step::Log(log_step) => {
+            if let Some(ref context) = log_step.context {
+                extract_template_static_references_from_input_mapping(context, &mut refs);
+            }
+        }
+        Step::Conditional(cond_step) => {
+            extract_template_static_references_from_condition(&cond_step.condition, &mut refs);
+        }
+        Step::Switch(switch_step) => {
+            if let Some(ref config) = switch_step.config {
+                extract_template_static_references_from_mapping_value(&config.value, &mut refs);
+            }
+        }
+        Step::Filter(filter_step) => {
+            extract_template_static_references_from_mapping_value(
+                &filter_step.config.value,
+                &mut refs,
+            );
+            extract_template_static_references_from_condition(
+                &filter_step.config.condition,
+                &mut refs,
+            );
+        }
+        Step::GroupBy(group_step) => {
+            extract_template_static_references_from_mapping_value(
+                &group_step.config.value,
+                &mut refs,
+            );
+        }
+        Step::Split(split_step) => {
+            if let Some(ref config) = split_step.config {
+                extract_template_static_references_from_mapping_value(&config.value, &mut refs);
+                if let Some(ref variables) = config.variables {
+                    extract_template_static_references_from_input_mapping(variables, &mut refs);
+                }
+            }
+        }
+        Step::While(while_step) => {
+            extract_template_static_references_from_condition(&while_step.condition, &mut refs);
+        }
+        Step::Delay(delay_step) => {
+            extract_template_static_references_from_mapping_value(
+                &delay_step.duration_ms,
+                &mut refs,
+            );
+        }
+        Step::WaitForSignal(wait_step) => {
+            if let Some(ref timeout) = wait_step.timeout_ms {
+                extract_template_static_references_from_mapping_value(timeout, &mut refs);
+            }
+        }
+        Step::Error(error_step) => {
+            if let Some(ref context) = error_step.context {
+                extract_template_static_references_from_input_mapping(context, &mut refs);
+            }
+        }
+        Step::AiAgent(ai_agent_step) => {
+            if let Some(ref config) = ai_agent_step.config {
+                extract_template_static_references_from_mapping_value(
+                    &config.system_prompt,
+                    &mut refs,
+                );
+                extract_template_static_references_from_mapping_value(
+                    &config.user_prompt,
+                    &mut refs,
+                );
+                if let Some(ref memory) = config.memory {
+                    extract_template_static_references_from_mapping_value(
+                        &memory.conversation_id,
+                        &mut refs,
+                    );
+                }
+            }
+        }
+    }
+
+    refs.sort();
+    refs.dedup();
+    refs
+}
+
+fn extract_template_static_references_from_input_mapping(
+    mapping: &InputMapping,
+    refs: &mut Vec<String>,
+) {
+    for value in mapping.values() {
+        extract_template_static_references_from_mapping_value(value, refs);
+    }
+}
+
 /// Extract references from a ConditionExpression.
 fn extract_references_from_condition(
     condition: &runtara_dsl::ConditionExpression,
@@ -3532,6 +4092,22 @@ fn extract_references_from_condition(
     }
 }
 
+fn extract_template_static_references_from_condition(
+    condition: &runtara_dsl::ConditionExpression,
+    refs: &mut Vec<String>,
+) {
+    match condition {
+        runtara_dsl::ConditionExpression::Operation(op) => {
+            for arg in &op.arguments {
+                extract_template_static_references_from_condition_argument(arg, refs);
+            }
+        }
+        runtara_dsl::ConditionExpression::Value(val) => {
+            extract_template_static_references_from_mapping_value(val, refs);
+        }
+    }
+}
+
 /// Extract references from a ConditionArgument.
 fn extract_references_from_condition_argument(
     arg: &runtara_dsl::ConditionArgument,
@@ -3543,6 +4119,20 @@ fn extract_references_from_condition_argument(
         }
         runtara_dsl::ConditionArgument::Value(val) => {
             extract_references_from_mapping_value(val, refs);
+        }
+    }
+}
+
+fn extract_template_static_references_from_condition_argument(
+    arg: &runtara_dsl::ConditionArgument,
+    refs: &mut Vec<String>,
+) {
+    match arg {
+        runtara_dsl::ConditionArgument::Expression(expr) => {
+            extract_template_static_references_from_condition(expr, refs);
+        }
+        runtara_dsl::ConditionArgument::Value(val) => {
+            extract_template_static_references_from_mapping_value(val, refs);
         }
     }
 }
@@ -3789,6 +4379,105 @@ mod tests {
             edges: None,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn test_finish_output_missing_name_is_rejected() {
+        let mut mapping = InputMapping::new();
+        mapping.insert("".to_string(), ref_value("data.order_id"));
+
+        let mut steps = HashMap::new();
+        steps.insert(
+            "finish".to_string(),
+            create_finish_step("finish", Some(mapping)),
+        );
+        let graph = create_basic_graph(steps, "finish");
+
+        let result = validate_workflow(&graph);
+
+        assert!(result.errors.iter().any(|error| matches!(
+            error,
+            ValidationError::FinishOutputMissingName { step_id } if step_id == "finish"
+        )));
+    }
+
+    #[test]
+    fn test_finish_output_empty_reference_source_is_rejected() {
+        let mut mapping = InputMapping::new();
+        mapping.insert("orderId".to_string(), ref_value("   "));
+
+        let mut steps = HashMap::new();
+        steps.insert(
+            "finish".to_string(),
+            create_finish_step("finish", Some(mapping)),
+        );
+        let graph = create_basic_graph(steps, "finish");
+
+        let result = validate_workflow(&graph);
+
+        assert!(result.errors.iter().any(|error| matches!(
+            error,
+            ValidationError::FinishOutputMissingSource {
+                step_id,
+                output_name,
+            } if step_id == "finish" && output_name == "orderId"
+        )));
+    }
+
+    #[test]
+    fn test_finish_output_empty_template_source_is_rejected() {
+        let mut mapping = InputMapping::new();
+        mapping.insert(
+            "summary".to_string(),
+            MappingValue::Template(runtara_dsl::TemplateValue {
+                value: " ".to_string(),
+            }),
+        );
+
+        let mut steps = HashMap::new();
+        steps.insert(
+            "finish".to_string(),
+            create_finish_step("finish", Some(mapping)),
+        );
+        let graph = create_basic_graph(steps, "finish");
+
+        let result = validate_workflow(&graph);
+
+        assert!(result.errors.iter().any(|error| matches!(
+            error,
+            ValidationError::FinishOutputMissingSource {
+                step_id,
+                output_name,
+            } if step_id == "finish" && output_name == "summary"
+        )));
+    }
+
+    #[test]
+    fn test_finish_output_empty_immediate_string_source_is_rejected() {
+        let mut mapping = InputMapping::new();
+        mapping.insert(
+            "status".to_string(),
+            MappingValue::Immediate(runtara_dsl::ImmediateValue {
+                value: serde_json::Value::String(" ".to_string()),
+            }),
+        );
+
+        let mut steps = HashMap::new();
+        steps.insert(
+            "finish".to_string(),
+            create_finish_step("finish", Some(mapping)),
+        );
+        let graph = create_basic_graph(steps, "finish");
+
+        let result = validate_workflow(&graph);
+
+        assert!(result.errors.iter().any(|error| matches!(
+            error,
+            ValidationError::FinishOutputMissingSource {
+                step_id,
+                output_name,
+            } if step_id == "finish" && output_name == "status"
+        )));
     }
 
     // === Graph Structure Tests ===
@@ -7932,6 +8621,142 @@ mod template_validation_tests {
             )),
             "Expected template syntax error, got: {:?}",
             result.errors
+        );
+    }
+
+    #[test]
+    fn test_template_unknown_step_reference_warns_without_error() {
+        let json = r#"{
+            "steps": {
+                "finish": {
+                    "stepType": "Finish",
+                    "id": "finish",
+                    "inputMapping": {
+                        "summary": {
+                            "valueType": "template",
+                            "value": "Archive: {{ steps.missing_archive.outputs.file }}"
+                        }
+                    }
+                }
+            },
+            "entryPoint": "finish"
+        }"#;
+        let graph: ExecutionGraph = serde_json::from_str(json).unwrap();
+        let result = validate_workflow(&graph);
+
+        assert!(
+            !result
+                .errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::InvalidStepReference { .. })),
+            "{:?}",
+            result.errors
+        );
+        assert!(
+            result.warnings.iter().any(|w| matches!(
+                w,
+                ValidationWarning::TemplateReferenceIssue {
+                    reference,
+                    reason,
+                    ..
+                } if reference == "steps.missing_archive.outputs.file"
+                    && reason.contains("does not exist")
+            )),
+            "{:?}",
+            result.warnings
+        );
+    }
+
+    #[test]
+    fn test_template_data_reference_missing_schema_warns_without_error() {
+        let json = r#"{
+            "steps": {
+                "finish": {
+                    "stepType": "Finish",
+                    "id": "finish",
+                    "inputMapping": {
+                        "summary": {
+                            "valueType": "template",
+                            "value": "Customer: {{ data.customer.id }}"
+                        }
+                    }
+                }
+            },
+            "entryPoint": "finish"
+        }"#;
+        let graph: ExecutionGraph = serde_json::from_str(json).unwrap();
+        let result = validate_workflow(&graph);
+
+        assert!(
+            !result
+                .errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::MissingInputSchema { .. })),
+            "{:?}",
+            result.errors
+        );
+        assert!(
+            result.warnings.iter().any(|w| matches!(
+                w,
+                ValidationWarning::TemplateReferenceIssue {
+                    reference,
+                    reason,
+                    ..
+                } if reference == "data.customer.id"
+                    && reason.contains("no inputSchema is defined")
+            )),
+            "{:?}",
+            result.warnings
+        );
+    }
+
+    #[test]
+    fn test_template_static_references_valid_no_warning() {
+        let json = r#"{
+            "steps": {
+                "source": {
+                    "stepType": "Log",
+                    "id": "source",
+                    "message": "ok",
+                    "level": "info"
+                },
+                "finish": {
+                    "stepType": "Finish",
+                    "id": "finish",
+                    "inputMapping": {
+                        "summary": {
+                            "valueType": "template",
+                            "value": "{{ steps.source.outputs.value }} {{ data.customer.id }} {{ variables.token }}"
+                        }
+                    }
+                }
+            },
+            "entryPoint": "source",
+            "executionPlan": [
+                { "fromStep": "source", "toStep": "finish" }
+            ],
+            "inputSchema": {
+                "customer": {
+                    "type": "object",
+                    "properties": {
+                        "id": { "type": "string" }
+                    }
+                }
+            },
+            "variables": {
+                "token": { "type": "string", "value": "abc" }
+            }
+        }"#;
+        let graph: ExecutionGraph = serde_json::from_str(json).unwrap();
+        let result = validate_workflow(&graph);
+
+        assert!(
+            !result
+                .warnings
+                .iter()
+                .any(|w| matches!(w, ValidationWarning::TemplateReferenceIssue { .. })),
+            "{:?}",
+            result.warnings
         );
     }
 }

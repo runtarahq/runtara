@@ -633,6 +633,14 @@ pub struct ReportCardField {
         skip_serializing_if = "Option::is_none"
     )]
     pub display_field: Option<String>,
+    /// Optional display-only template rendered from the row. Does not affect
+    /// filtering, sorting, or writeback; `field` remains the storage target.
+    #[serde(
+        default,
+        rename = "displayTemplate",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub display_template: Option<String>,
     /// How to render this field. `value` runs through the standard cell
     /// formatter (date/currency/pill/etc); `json` shows a collapsible JSON
     /// tree; `markdown` renders the value as markdown; `subcard` renders a
@@ -969,6 +977,14 @@ pub struct ReportTableColumn {
         skip_serializing_if = "Option::is_none"
     )]
     pub display_field: Option<String>,
+    /// Optional display-only template rendered from the row. Does not affect
+    /// filtering, sorting, or writeback; `field` remains the storage target.
+    #[serde(
+        default,
+        rename = "displayTemplate",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub display_template: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub format: Option<String>,
     #[serde(default, rename = "type", skip_serializing_if = "Option::is_none")]
@@ -1009,6 +1025,10 @@ pub struct ReportTableColumn {
     /// Optional cell alignment hint: "left", "right", or "center".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub align: Option<String>,
+    /// Optional display-only text cutoff. When omitted, the frontend renders
+    /// the full formatted value.
+    #[serde(default, rename = "maxChars", skip_serializing_if = "Option::is_none")]
+    pub max_chars: Option<usize>,
     /// Marks this column as the human-readable label for the row's entity
     /// within this report. Consumed by view `titleFrom: { block }` resolution
     /// and similar entity-label lookups. At most one descriptive column per
@@ -1199,6 +1219,11 @@ impl ReportTableColumn {
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema, JsonSchema)]
 pub struct ReportTableColumnSource {
+    #[serde(
+        default = "default_report_source_kind",
+        skip_serializing_if = "is_default_report_source_kind"
+    )]
+    pub kind: ReportSourceKind,
     pub schema: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub select: Option<String>,

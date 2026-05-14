@@ -194,10 +194,11 @@ export function ObjectMappingEditor({
             </p>
             <MappingValueInput
               value={typeof value === 'string' ? value : ''}
-              onChange={(v) => onChange(v)}
+              onChange={(v) => onChange(v ?? '')}
               valueType="reference"
               onValueTypeChange={onValueTypeChange}
               fieldType="object"
+              allowNull={false}
               placeholder="Select object reference..."
               hideReferenceToggle
             />

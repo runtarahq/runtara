@@ -1,4 +1,10 @@
-import { memo, useCallback, useMemo, useState } from 'react';
+import {
+  memo,
+  useCallback,
+  useMemo,
+  useState,
+  type CSSProperties,
+} from 'react';
 import {
   Activity,
   ArrowDown,
@@ -55,10 +61,13 @@ import {
 } from '../../types';
 import {
   formatCellValue,
+  getReportRowValue,
   humanizeFieldName,
   isWorkflowActionDisabled,
   isWorkflowActionVisible,
   matchesReportRowCondition,
+  renderDisplayTemplate,
+  truncateCellText,
 } from '../../utils';
 import { FieldEditor } from './editable/FieldEditor';
 import { useReportWriteback } from './editable/useReportWriteback';
@@ -68,6 +77,7 @@ type TableColumn = {
   key: string;
   label?: string;
   displayField?: string;
+  displayTemplate?: string;
   format?: string | null;
   type?: 'value' | 'chart' | 'workflow_button' | 'interaction_buttons';
   chart?: ReportTableColumn['chart'];
@@ -77,6 +87,7 @@ type TableColumn = {
   pillVariants?: ReportTableColumn['pillVariants'];
   levels?: string[];
   align?: 'left' | 'right' | 'center';
+  maxChars?: number;
   editable?: boolean;
   editor?: ReportEditorConfig;
   workflowAction?: ReportWorkflowActionConfig;
@@ -199,6 +210,15 @@ export function TableBlock({
     () => getPageSizeOptions(block, page.size),
     [block, page.size]
   );
+  const hasSizedColumns = columns.some((column) =>
+    hasPositiveMaxChars(column.maxChars)
+  );
+  const hasFlexibleFillerColumn =
+    hasSizedColumns &&
+    columns.every(
+      (column) => isActionColumn(column) || hasPositiveMaxChars(column.maxChars)
+    );
+  const tableClassName = cn(hasSizedColumns && 'table-fixed');
   const diagnostics = data.diagnostics ?? EMPTY_DIAGNOSTICS;
   const writebackMutate = writeback.mutate;
   const writebackPending = writeback.isPending;
@@ -302,7 +322,21 @@ export function TableBlock({
           workflowAction={workflowAction}
         />
       )}
-      <Table>
+      <Table className={tableClassName || undefined}>
+        {hasSizedColumns && (
+          <colgroup>
+            {selectable && (
+              <col
+                className="report-print-hidden"
+                style={{ width: '2.5rem' }}
+              />
+            )}
+            {columns.map((column) => (
+              <col key={column.key} style={getColumnWidthStyle(column)} />
+            ))}
+            {hasFlexibleFillerColumn && <col aria-hidden="true" />}
+          </colgroup>
+        )}
         <TableHeader>
           <TableRow className="group/header bg-muted/30 hover:bg-muted/30">
             {selectable && (
@@ -328,6 +362,7 @@ export function TableBlock({
                 <TableHead
                   key={column.key}
                   aria-sort={getAriaSort(sortDirection)}
+                  style={getColumnWidthStyle(column)}
                   className={cn(
                     'h-10 whitespace-nowrap',
                     isActionColumn(column) && 'report-print-hidden',
@@ -363,13 +398,20 @@ export function TableBlock({
                 </TableHead>
               );
             })}
+            {hasFlexibleFillerColumn && (
+              <TableHead aria-hidden="true" className="h-10 p-0" />
+            )}
           </TableRow>
         </TableHeader>
         <TableBody>
           {rows.length === 0 ? (
             <TableRow>
               <TableCell
-                colSpan={columns.length + (selectable ? 1 : 0)}
+                colSpan={
+                  columns.length +
+                  (selectable ? 1 : 0) +
+                  (hasFlexibleFillerColumn ? 1 : 0)
+                }
                 className="py-12 text-center text-sm text-muted-foreground"
               >
                 No rows match the current filters.
@@ -386,6 +428,7 @@ export function TableBlock({
                   rowKey={rowKey}
                   rowObject={rowObject}
                   columns={columns}
+                  hasFlexibleFillerColumn={hasFlexibleFillerColumn}
                   selectable={selectable}
                   selected={selectedRowKeys.has(rowKey)}
                   editingField={
@@ -478,6 +521,7 @@ type TableBodyRowProps = {
   rowKey: string;
   rowObject: Record<string, unknown>;
   columns: TableColumn[];
+  hasFlexibleFillerColumn: boolean;
   selectable: boolean;
   selected: boolean;
   editingField: string | null;
@@ -522,6 +566,7 @@ function TableBodyRow({
   rowKey,
   rowObject,
   columns,
+  hasFlexibleFillerColumn,
   selectable,
   selected,
   editingField,
@@ -576,6 +621,7 @@ function TableBodyRow({
         return (
           <TableCell
             key={column.key}
+            style={getColumnWidthStyle(column)}
             className={cn(
               'group/cell relative py-3 align-top',
               column.align === 'right' && 'text-right tabular-nums',
@@ -671,6 +717,9 @@ function TableBodyRow({
           </TableCell>
         );
       })}
+      {hasFlexibleFillerColumn && (
+        <TableCell aria-hidden="true" className="p-0" />
+      )}
     </TableRow>
   );
 }
@@ -692,6 +741,7 @@ function areTableBodyRowPropsEqual(
     previous.row === next.row &&
     previous.rowObject === next.rowObject &&
     previous.columns === next.columns &&
+    previous.hasFlexibleFillerColumn === next.hasFlexibleFillerColumn &&
     previous.selectable === next.selectable &&
     previous.selected === next.selected &&
     editingStateEqual &&
@@ -738,12 +788,14 @@ function normalizeColumns(
     return {
       ...merged,
       displayField: configured?.displayField ?? merged.displayField,
+      displayTemplate: configured?.displayTemplate ?? merged.displayTemplate,
       secondaryField: configured?.secondaryField ?? merged.secondaryField,
       linkField: configured?.linkField ?? merged.linkField,
       tooltipField: configured?.tooltipField ?? merged.tooltipField,
       pillVariants: configured?.pillVariants ?? merged.pillVariants,
       levels: configured?.levels ?? merged.levels,
       align: configured?.align ?? merged.align ?? defaultAlign(merged.format),
+      maxChars: configured?.maxChars ?? merged.maxChars,
       editable: configured?.editable ?? merged.editable,
       editor: configured?.editor ?? merged.editor,
       workflowAction: configured?.workflowAction ?? merged.workflowAction,
@@ -774,14 +826,35 @@ function isActionColumn(column: TableColumn): boolean {
   return isWorkflowButtonColumn(column) || isInteractionButtonsColumn(column);
 }
 
+function hasPositiveMaxChars(maxChars: number | undefined): maxChars is number {
+  return (
+    typeof maxChars === 'number' && Number.isFinite(maxChars) && maxChars > 0
+  );
+}
+
+function getColumnWidthStyle(column: TableColumn): CSSProperties | undefined {
+  const configuredMaxChars = column.maxChars;
+  if (!hasPositiveMaxChars(configuredMaxChars)) return undefined;
+
+  const label = column.label ?? humanizeFieldName(column.key);
+  const maxChars = Math.trunc(configuredMaxChars);
+  const contentChars = maxChars + 3;
+  const headerChars = Array.from(label).length + 4;
+  const widthChars = Math.max(contentChars, headerChars, 6);
+  const width = `calc(${widthChars}ch + 1rem)`;
+  return { width, maxWidth: width };
+}
+
 function defaultAlign(format?: string | null): TableColumn['align'] {
   if (!format) return undefined;
+  const formatName = format.split(':', 1)[0];
   if (
-    format === 'currency' ||
-    format === 'currency_compact' ||
-    format === 'number' ||
-    format === 'decimal' ||
-    format === 'percent'
+    formatName === 'currency' ||
+    formatName === 'currency_compact' ||
+    formatName === 'number' ||
+    formatName === 'number_compact' ||
+    formatName === 'decimal' ||
+    formatName === 'percent'
   ) {
     return 'right';
   }
@@ -804,13 +877,19 @@ function getCellDisplayValue(
   column: TableColumn,
   value: unknown
 ) {
-  if (!column.displayField) return value;
-  const displayValue = row[column.displayField];
-  if (displayValue === null || displayValue === undefined) return value;
-  if (typeof displayValue === 'string' && displayValue.trim().length === 0) {
-    return value;
+  if (column.displayTemplate) {
+    const displayValue = renderDisplayTemplate(row, column.displayTemplate);
+    if (displayValue.trim().length > 0) return displayValue;
   }
-  return displayValue;
+  if (column.displayField) {
+    const displayValue = getReportRowValue(row, column.displayField);
+    if (displayValue === null || displayValue === undefined) return value;
+    if (typeof displayValue === 'string' && displayValue.trim().length === 0) {
+      return value;
+    }
+    return displayValue;
+  }
+  return value;
 }
 
 function getWritebackContext(
@@ -826,7 +905,11 @@ function getWritebackContext(
 }
 
 function shouldRefreshAfterWriteback(column: TableColumn): boolean {
-  return Boolean(column.displayField || column.editor?.kind === 'lookup');
+  return Boolean(
+    column.displayField ||
+      column.displayTemplate ||
+      column.editor?.kind === 'lookup'
+  );
 }
 
 function TableActionsToolbar({
@@ -1091,7 +1174,31 @@ function TableCellValue({
   }
 
   return (
-    <>{formatCellValue(displayValue ?? value, column.format ?? undefined)}</>
+    <TruncatedCellText
+      text={formatCellValue(displayValue ?? value, column.format ?? undefined)}
+      maxChars={column.maxChars}
+    />
+  );
+}
+
+function TruncatedCellText({
+  text,
+  maxChars,
+  className,
+}: {
+  text: string;
+  maxChars?: number;
+  className?: string;
+}) {
+  const display = truncateCellText(text, maxChars);
+  return (
+    <span
+      className={className}
+      title={display.title}
+      aria-label={display.title}
+    >
+      {display.text}
+    </span>
   );
 }
 
@@ -1128,9 +1235,10 @@ function AvatarLabelCell({
 }) {
   const raw = typeof value === 'string' ? value : String(value ?? '');
   const tooltipValue = column.tooltipField
-    ? row[column.tooltipField]
+    ? getReportRowValue(row, column.tooltipField)
     : undefined;
   const display = displayNameFromValue(raw);
+  const displayText = truncateCellText(display, column.maxChars);
   const initials = initialsFromValue(display);
   const colorClass = colorClassForKey(raw);
   return (
@@ -1147,7 +1255,13 @@ function AvatarLabelCell({
       >
         {initials}
       </span>
-      <span className="truncate">{display}</span>
+      <span
+        className="truncate"
+        title={displayText.title}
+        aria-label={displayText.title}
+      >
+        {displayText.text}
+      </span>
     </div>
   );
 }
@@ -1218,7 +1332,11 @@ function BarIndicatorCell({
           );
         })}
       </div>
-      <span className="text-sm">{humanizePillLabel(key)}</span>
+      <TruncatedCellText
+        text={humanizePillLabel(key)}
+        maxChars={column.maxChars}
+        className="text-sm"
+      />
     </div>
   );
 }
@@ -1233,15 +1351,21 @@ function PrimaryWithSecondaryCell({
   row: Record<string, unknown>;
 }) {
   const secondary = column.secondaryField
-    ? formatCellValue(row[column.secondaryField])
+    ? formatCellValue(getReportRowValue(row, column.secondaryField))
     : undefined;
-  const linkRaw = column.linkField ? row[column.linkField] : undefined;
+  const linkRaw = column.linkField
+    ? getReportRowValue(row, column.linkField)
+    : undefined;
   const link = typeof linkRaw === 'string' && linkRaw ? linkRaw : undefined;
   const primary = formatCellValue(value, column.format ?? undefined);
   return (
     <div className="flex flex-col">
       <div className="flex items-center gap-1.5">
-        <span className="font-medium text-foreground">{primary}</span>
+        <TruncatedCellText
+          text={primary}
+          maxChars={column.maxChars}
+          className="font-medium text-foreground"
+        />
         {link && (
           <a
             href={link}

@@ -32,7 +32,6 @@ use crate::api::dto::workflows::{
 };
 use crate::api::repositories::trigger_stream::TriggerStreamPublisher;
 use crate::api::repositories::workflows::{CompilationStatus, WorkflowRepository};
-use crate::api::services::input_validation::{is_empty_schema, validate_inputs};
 use crate::metrics::MetricsService;
 use crate::runtime_client::RuntimeClient;
 use crate::workers::CancellationHandle;
@@ -41,6 +40,7 @@ use crate::workers::runtara_dto::{
     runtara_info_to_dto, runtara_info_to_execution_with_metadata,
     runtara_instance_to_dto_with_info,
 };
+use runtara_workflows::input_validation::validate_workflow_start_inputs;
 
 /// Result of workflow execution (native path; currently unused by the server).
 #[derive(Debug)]
@@ -252,6 +252,11 @@ fn inject_workflow_id(inputs: Value, workflow_id: &str) -> Value {
     inputs
 }
 
+fn is_runtime_instance_not_found(error: &crate::runtime_client::RuntimeError) -> bool {
+    let message = error.to_string();
+    message.to_ascii_lowercase().contains("not found") || message.contains("InstanceNotFound")
+}
+
 /// Execution engine — the single orchestrator for workflow execution.
 pub struct ExecutionEngine {
     pool: PgPool,
@@ -365,17 +370,10 @@ impl ExecutionEngine {
                 ))
             })?;
 
-        // 3. Validate inputs.data against input schema
-        if !is_empty_schema(&workflow.input_schema) {
-            let data_to_validate = req
-                .inputs
-                .get("data")
-                .cloned()
-                .unwrap_or(serde_json::json!({}));
-            validate_inputs(&data_to_validate, &workflow.input_schema).map_err(|e| {
-                ExecutionError::ValidationError(format!("Input validation failed: {}", e))
-            })?;
-        }
+        // 3. Validate canonical inputs and inputs.data against input schema
+        let validated_inputs =
+            validate_workflow_start_inputs(req.inputs.clone(), &workflow.input_schema)
+                .map_err(|e| ExecutionError::ValidationError(e.message))?;
 
         // 4. Get track_events (already have it from workflow)
         let track_events = workflow.track_events;
@@ -405,7 +403,7 @@ impl ExecutionEngine {
                 req.tenant_id.to_string(),
                 req.workflow_id.to_string(),
                 Some(version),
-                req.inputs,
+                validated_inputs,
                 track_events,
                 req.correlation_id,
                 req.debug,
@@ -417,7 +415,7 @@ impl ExecutionEngine {
                 req.tenant_id.to_string(),
                 req.workflow_id.to_string(),
                 Some(version),
-                req.inputs,
+                validated_inputs,
                 track_events,
                 original_instance_id,
                 req.debug,
@@ -480,16 +478,9 @@ impl ExecutionEngine {
                 ))
             })?;
 
-        if !is_empty_schema(&workflow.input_schema) {
-            let data_to_validate = req
-                .inputs
-                .get("data")
-                .cloned()
-                .unwrap_or(serde_json::json!({}));
-            validate_inputs(&data_to_validate, &workflow.input_schema).map_err(|e| {
-                ExecutionError::ValidationError(format!("Input validation failed: {}", e))
-            })?;
-        }
+        let validated_inputs =
+            validate_workflow_start_inputs(req.inputs.clone(), &workflow.input_schema)
+                .map_err(|e| ExecutionError::ValidationError(e.message))?;
 
         // 3. Block on compilation readiness (delegated to compilation worker)
         self.wait_for_compilation_blocking(req.tenant_id, req.workflow_id, version)
@@ -526,7 +517,7 @@ impl ExecutionEngine {
                 req.tenant_id,
                 req.workflow_id,
                 None, // auto-generate instance id
-                Some(req.inputs),
+                Some(validated_inputs),
                 execution_timeout.map(|s| s as u32),
                 false,
             )
@@ -827,19 +818,134 @@ impl ExecutionEngine {
     /// Get execution results by instance ID (proxies to runtara-environment).
     pub async fn get_execution(
         &self,
+        tenant_id: &str,
         instance_id: &str,
     ) -> Result<WorkflowInstanceDto, ExecutionError> {
         let client = self.require_runtime_client()?;
 
-        let info = client.get_instance_info(instance_id).await.map_err(|e| {
-            if e.to_string().contains("not found") {
-                ExecutionError::NotFound(format!("Instance '{}' not found", instance_id))
-            } else {
-                ExecutionError::DatabaseError(format!("Failed to get instance from Runtara: {}", e))
+        let info = match client.get_instance_info(instance_id).await {
+            Ok(info) => info,
+            Err(e) if is_runtime_instance_not_found(&e) => {
+                if let Some(instance) = self
+                    .find_recent_execution_summary(tenant_id, instance_id, None)
+                    .await?
+                {
+                    warn!(
+                        tenant_id = %tenant_id,
+                        instance_id = %instance_id,
+                        "Runtime detail lookup returned not found; returning execution list summary"
+                    );
+                    return Ok(instance);
+                }
+                return Err(ExecutionError::NotFound(format!(
+                    "Instance '{}' not found",
+                    instance_id
+                )));
             }
-        })?;
+            Err(e) => {
+                return Err(ExecutionError::DatabaseError(format!(
+                    "Failed to get instance from Runtara: {}",
+                    e
+                )));
+            }
+        };
+
+        if info.tenant_id != tenant_id {
+            warn!(
+                instance_id = %instance_id,
+                requested_tenant_id = %tenant_id,
+                instance_tenant_id = %info.tenant_id,
+                "Execution lookup denied because instance tenant does not match request tenant"
+            );
+            return Err(ExecutionError::NotFound(format!(
+                "Instance '{}' not found",
+                instance_id
+            )));
+        }
 
         Ok(runtara_info_to_dto(info))
+    }
+
+    async fn find_recent_execution_summary(
+        &self,
+        tenant_id: &str,
+        instance_id: &str,
+        workflow_id: Option<&str>,
+    ) -> Result<Option<WorkflowInstanceDto>, ExecutionError> {
+        const PAGE_SIZE: u32 = 100;
+        const MAX_PAGES: u32 = 10;
+
+        let client = self.require_runtime_client()?;
+
+        for page in 0..MAX_PAGES {
+            let mut options = ListInstancesOptions::new()
+                .with_tenant_id(tenant_id)
+                .with_limit(PAGE_SIZE)
+                .with_offset(page * PAGE_SIZE)
+                .with_order_by(ListInstancesOrder::CreatedAtDesc);
+
+            if let Some(workflow_id) = workflow_id {
+                options = options.with_image_name_prefix(format!("{}:", workflow_id));
+            }
+
+            let result = client
+                .list_instances_with_options(options)
+                .await
+                .map_err(|e| {
+                    ExecutionError::DatabaseError(format!(
+                        "Failed to query Runtara for execution fallback: {}",
+                        e
+                    ))
+                })?;
+
+            let total_count = result.total_count;
+            let page_len = result.instances.len() as u32;
+
+            if let Some(instance) = result
+                .instances
+                .into_iter()
+                .find(|instance| instance.instance_id == instance_id)
+            {
+                let image_ids = vec![instance.image_id.clone()];
+                let workflow_info = self
+                    .workflow_repo
+                    .get_workflow_info_by_image_ids(tenant_id, &image_ids)
+                    .await
+                    .map_err(|e| {
+                        ExecutionError::DatabaseError(format!(
+                            "Failed to fetch workflow info for execution fallback: {}",
+                            e
+                        ))
+                    })?;
+
+                let (resolved_workflow_id, version, workflow_name) = workflow_info
+                    .get(&instance.image_id)
+                    .map(|(sid, version, name)| {
+                        let name = (!name.is_empty()).then_some(name.clone());
+                        (sid.clone(), *version, name)
+                    })
+                    .unwrap_or_else(|| {
+                        (
+                            workflow_id.unwrap_or_default().to_string(),
+                            0,
+                            Option::<String>::None,
+                        )
+                    });
+
+                return Ok(Some(runtara_instance_to_dto_with_info(
+                    instance,
+                    resolved_workflow_id,
+                    version,
+                    workflow_name,
+                )));
+            }
+
+            if page_len == 0 || (page + 1) * PAGE_SIZE >= total_count {
+                break;
+            }
+        }
+
+        Ok(None)
     }
 
     /// Replay a previous instance by queuing the latest version of the same
