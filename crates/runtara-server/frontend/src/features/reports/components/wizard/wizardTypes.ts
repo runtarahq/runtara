@@ -3,6 +3,7 @@ import {
   ReportBlockType,
   ReportChartKind,
   ReportDatasetDefinition,
+  ReportEditorConfig,
   ReportFilterDefinition,
   ReportFilterType,
   ReportInteractionDefinition,
@@ -122,6 +123,10 @@ export interface WizardFieldConfig {
   workflowAction?: ReportWorkflowActionConfig;
   /** Interaction buttons when `columnType === 'interaction_buttons'`. */
   interactionButtons?: ReportTableInteractionButtonConfig[];
+  /** Opts table cells/card fields into Object Model writeback. */
+  editable?: boolean;
+  /** Explicit writeback editor config; omitted to let the renderer infer. */
+  editor?: ReportEditorConfig;
 }
 
 /** Synthetic field key prefix for action/interaction columns that don't bind

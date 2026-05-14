@@ -300,6 +300,88 @@ describe('table column round-trip', () => {
     expect(round.blocks[0].filters).toEqual(definition.blocks[0].filters);
   });
 
+  it('round-trips editable field writeback editor configs', () => {
+    const definition: ReportDefinition = {
+      definitionVersion: 1,
+      filters: [],
+      blocks: [
+        {
+          id: 'orders',
+          type: 'table',
+          title: 'Orders',
+          source: { schema: 'orders', mode: 'filter' },
+          table: {
+            columns: [
+              {
+                field: 'status',
+                label: 'Status',
+                format: 'pill',
+                editable: true,
+                editor: {
+                  kind: 'select',
+                  options: [
+                    { label: 'Open', value: 'open' },
+                    { label: 'Closed', value: 'closed' },
+                  ],
+                },
+              },
+            ],
+          },
+        },
+        {
+          id: 'order_card',
+          type: 'card',
+          title: 'Order',
+          source: { schema: 'orders', mode: 'filter' },
+          card: {
+            groups: [
+              {
+                id: 'main',
+                fields: [
+                  {
+                    field: 'amount',
+                    label: 'Amount',
+                    editable: true,
+                    editor: {
+                      kind: 'number',
+                      min: 0,
+                      step: 0.01,
+                    },
+                  },
+                ],
+              },
+            ],
+          },
+        },
+      ],
+    };
+
+    const { state, compatibility } = definitionToWizardState(
+      definition,
+      'orders'
+    );
+    expect(compatibility.fullyEditable).toBe(true);
+    expect(compatibility.reasons).toEqual([]);
+    expect(state.blocks[0].fieldConfigs?.status).toMatchObject({
+      editable: true,
+      editor: definition.blocks[0].table?.columns?.[0].editor,
+    });
+    expect(state.blocks[1].fieldConfigs?.amount).toMatchObject({
+      editable: true,
+      editor: definition.blocks[1].card?.groups[0].fields[0].editor,
+    });
+
+    const round = wizardStateToDefinition(state, SCHEMA_FIELDS, definition);
+    expect(round.blocks[0].table?.columns?.[0]).toMatchObject({
+      editable: true,
+      editor: definition.blocks[0].table?.columns?.[0].editor,
+    });
+    expect(round.blocks[1].card?.groups[0].fields[0]).toMatchObject({
+      editable: true,
+      editor: definition.blocks[1].card?.groups[0].fields[0].editor,
+    });
+  });
+
   it('round-trips block click interactions', () => {
     const definition: ReportDefinition = {
       definitionVersion: 1,

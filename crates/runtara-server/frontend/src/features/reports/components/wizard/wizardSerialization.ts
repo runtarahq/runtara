@@ -166,7 +166,11 @@ function buildBlockDefinition(
   if (block.type === 'markdown') {
     return {
       ...base,
-      markdown: { content: block.markdownContent || `# ${block.title}` },
+      markdown: {
+        content:
+          block.markdownContent ||
+          (block.title ? `# ${block.title}` : ''),
+      },
     };
   }
 
@@ -224,6 +228,8 @@ function buildBlockDefinition(
         }
         return column;
       }
+      if (cfg?.editable) column.editable = true;
+      if (cfg?.editor) column.editor = cfg.editor;
       if (cfg?.format) column.format = cfg.format;
       if (cfg?.format === 'pill' && cfg.pillVariants) {
         column.pillVariants = cfg.pillVariants;
@@ -273,6 +279,8 @@ function buildBlockDefinition(
               ...(cfg?.format === 'pill' && cfg.pillVariants
                 ? { pillVariants: cfg.pillVariants }
                 : {}),
+              ...(cfg?.editable ? { editable: true } : {}),
+              ...(cfg?.editor ? { editor: cfg.editor } : {}),
             };
           }),
         },
@@ -685,7 +693,8 @@ function blockDefinitionToWizard(
           >;
         }
       }
-      if (column.editable) unsupported.push('Editable cells');
+      if (column.editable) cfg.editable = true;
+      if (column.editor) cfg.editor = column.editor;
       if (Object.keys(cfg).length > 0) {
         fieldConfigs[fieldKey] = cfg;
       }
@@ -712,10 +721,11 @@ function blockDefinitionToWizard(
             WizardPillVariant
           >;
         }
+        if (field.editable) cfg.editable = true;
+        if (field.editor) cfg.editor = field.editor;
         if (field.kind && field.kind !== 'value') {
           unsupported.push(`Card field kind "${field.kind}"`);
         }
-        if (field.editable) unsupported.push('Editable card fields');
         if (field.workflowAction) unsupported.push('Card workflow buttons');
         if (Object.keys(cfg).length > 0) {
           fieldConfigs[field.field] = cfg;

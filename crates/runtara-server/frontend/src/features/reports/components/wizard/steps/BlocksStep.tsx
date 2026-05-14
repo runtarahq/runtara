@@ -26,6 +26,9 @@ import { Checkbox } from '@/shared/components/ui/checkbox';
 import {
   ReportBlockResult,
   ReportDatasetDefinition,
+  ReportEditorConfig,
+  ReportEditorKind,
+  ReportEditorOption,
   ReportFilterDefinition,
   ReportFilterOption,
   ReportFilterType,
@@ -139,6 +142,19 @@ const BLOCK_FILTER_OPERATORS = [
   { value: 'lte', label: 'Less or equal' },
 ];
 
+const EDITOR_AUTO = '__auto__';
+
+const EDITOR_KINDS: Array<{ value: ReportEditorKind; label: string }> = [
+  { value: 'text', label: 'Text' },
+  { value: 'textarea', label: 'Textarea' },
+  { value: 'number', label: 'Number' },
+  { value: 'select', label: 'Select' },
+  { value: 'toggle', label: 'Toggle' },
+  { value: 'date', label: 'Date' },
+  { value: 'datetime', label: 'Date + time' },
+  { value: 'lookup', label: 'Lookup' },
+];
+
 const NO_SORT_FIELD = '__none__';
 const ALWAYS_VISIBLE = '__always__';
 
@@ -241,7 +257,7 @@ export function BlocksStep({
     const seed: WizardBlock = {
       id,
       type: 'table',
-      title: 'New block',
+      title: '',
       schema: seedSchema,
       fields: seedFields,
       placement: { gridId, row, column },
@@ -1022,7 +1038,10 @@ function BlockCard({
               </Label>
               <Textarea
                 rows={3}
-                value={block.markdownContent ?? `# ${block.title}`}
+                value={
+                  block.markdownContent ??
+                  (block.title ? `# ${block.title}` : '')
+                }
                 onChange={(event) =>
                   onChange({ markdownContent: event.target.value })
                 }
@@ -1156,6 +1175,7 @@ function BlockCard({
             <FieldPicker
               block={block}
               schemaFields={schemaFields}
+              schemas={schemas}
               onToggleField={toggleField}
               onAddActionColumn={
                 block.type === 'table' ? addActionColumn : undefined
@@ -1176,7 +1196,9 @@ function BlockCard({
                   !merged.columnType &&
                   !merged.workflowAction &&
                   (!merged.interactionButtons ||
-                    merged.interactionButtons.length === 0)
+                    merged.interactionButtons.length === 0) &&
+                  !merged.editable &&
+                  !merged.editor
                 ) {
                   delete next[field];
                 }
@@ -1215,12 +1237,14 @@ function BlockCard({
 function FieldPicker({
   block,
   schemaFields,
+  schemas,
   onToggleField,
   onAddActionColumn,
   onUpdateFieldConfig,
 }: {
   block: WizardBlock;
   schemaFields: string[];
+  schemas: Schema[];
   onToggleField: (field: string) => void;
   onAddActionColumn?: (columnType: WizardTableColumnType) => void;
   onUpdateFieldConfig: (
@@ -1267,6 +1291,7 @@ function FieldPicker({
                   field={field}
                   cfg={cfg}
                   schemaFields={schemaOnlyFields}
+                  schemas={schemas}
                   formatChoices={formatChoices}
                   onLabelChange={(label) =>
                     onUpdateFieldConfig(field, { label: label || undefined })
@@ -1302,7 +1327,13 @@ function FieldPicker({
                           : undefined,
                       // Drop value-only config when switching away from value.
                       format: columnType === 'value' ? cfg.format : undefined,
+                      editable:
+                        columnType === 'value' ? cfg.editable : undefined,
+                      editor: columnType === 'value' ? cfg.editor : undefined,
                     })
+                  }
+                  onWritebackChange={(patch) =>
+                    onUpdateFieldConfig(field, patch)
                   }
                   onWorkflowActionChange={(workflowAction) =>
                     onUpdateFieldConfig(field, { workflowAction })
@@ -1336,6 +1367,8 @@ function FieldPicker({
                   key={field}
                   field={field}
                   cfg={cfg}
+                  schemaFields={schemaFields}
+                  schemas={schemas}
                   formatChoices={formatChoices}
                   onLabelChange={(label) =>
                     onUpdateFieldConfig(field, { label: label || undefined })
@@ -1352,6 +1385,9 @@ function FieldPicker({
                   }
                   onPillVariantsChange={(variants) =>
                     onUpdateFieldConfig(field, { pillVariants: variants })
+                  }
+                  onWritebackChange={(patch) =>
+                    onUpdateFieldConfig(field, patch)
                   }
                   onRemove={() => onToggleField(field)}
                 />
@@ -1419,11 +1455,13 @@ function TableColumnRow({
   field,
   cfg,
   schemaFields,
+  schemas,
   formatChoices,
   onLabelChange,
   onFormatChange,
   onPillVariantsChange,
   onColumnTypeChange,
+  onWritebackChange,
   onWorkflowActionChange,
   onInteractionButtonsChange,
   onRemove,
@@ -1431,11 +1469,13 @@ function TableColumnRow({
   field: string;
   cfg: WizardFieldConfig;
   schemaFields: string[];
+  schemas: Schema[];
   formatChoices: typeof WIZARD_COLUMN_FORMATS | null;
   onLabelChange: (label: string) => void;
   onFormatChange: (value: string) => void;
   onPillVariantsChange: (variants: Record<string, WizardPillVariant>) => void;
   onColumnTypeChange: (columnType: WizardTableColumnType) => void;
+  onWritebackChange: (patch: Partial<WizardFieldConfig>) => void;
   onWorkflowActionChange: (action: ReportWorkflowActionConfig) => void;
   onInteractionButtonsChange: (
     buttons: ReportTableInteractionButtonConfig[]
@@ -1445,10 +1485,14 @@ function TableColumnRow({
   const columnType = cfg.columnType ?? 'value';
   const isAction = isActionFieldKey(field);
   const showPillVariants = columnType === 'value' && cfg.format === 'pill';
+  const showEditorSettings = columnType === 'value' && !isAction;
   const showWorkflowEditor = columnType === 'workflow_button';
   const showInteractionEditor = columnType === 'interaction_buttons';
   const expansionRow =
-    showPillVariants || showWorkflowEditor || showInteractionEditor;
+    showPillVariants ||
+    showEditorSettings ||
+    showWorkflowEditor ||
+    showInteractionEditor;
   // For action columns the field cell shows the column-type label instead of
   // a row-field name; format isn't applicable so we render an em-dash.
   const fieldLabel = isAction ? COLUMN_TYPE_LABELS[columnType] : field;
@@ -1524,6 +1568,15 @@ function TableColumnRow({
               <PillVariantsEditor
                 variants={cfg.pillVariants ?? {}}
                 onChange={onPillVariantsChange}
+              />
+            ) : null}
+            {showEditorSettings ? (
+              <WritebackEditorSettings
+                cfg={cfg}
+                field={field}
+                schemaFields={schemaFields}
+                schemas={schemas}
+                onChange={onWritebackChange}
               />
             ) : null}
             {showWorkflowEditor ? (
@@ -2464,23 +2517,433 @@ function TableSelectionAndBulkActions({
   );
 }
 
+function WritebackEditorSettings({
+  cfg,
+  field,
+  schemaFields,
+  schemas,
+  onChange,
+}: {
+  cfg: WizardFieldConfig;
+  field: string;
+  schemaFields: string[];
+  schemas: Schema[];
+  onChange: (patch: Partial<WizardFieldConfig>) => void;
+}) {
+  const editor = cfg.editor;
+  const editorKind = editor?.kind ?? EDITOR_AUTO;
+  const isEditable = Boolean(cfg.editable);
+
+  function setEditable(editable: boolean) {
+    onChange({
+      editable: editable ? true : undefined,
+      editor: editable ? cfg.editor : undefined,
+    });
+  }
+
+  function setEditorKind(value: string) {
+    if (value === EDITOR_AUTO) {
+      onChange({ editor: undefined });
+      return;
+    }
+    onChange({
+      editable: true,
+      editor: defaultEditorConfig(
+        value as ReportEditorKind,
+        editor,
+        field,
+        schemaFields,
+        schemas
+      ),
+    });
+  }
+
+  function patchEditor(patch: Partial<ReportEditorConfig>) {
+    const next =
+      editor ??
+      defaultEditorConfig('text', undefined, field, schemaFields, schemas);
+    onChange({ editable: true, editor: { ...next, ...patch } });
+  }
+
+  function patchLookup(
+    patch: Partial<NonNullable<ReportEditorConfig['lookup']>>
+  ) {
+    const next =
+      editor ??
+      defaultEditorConfig('lookup', undefined, field, schemaFields, schemas);
+    const lookup =
+      next.lookup ?? defaultLookupConfig(schemas, schemaFields, field);
+    onChange({
+      editable: true,
+      editor: {
+        ...next,
+        kind: 'lookup',
+        lookup: {
+          ...lookup,
+          ...patch,
+        },
+      },
+    });
+  }
+
+  function setLookupSchema(schema: string) {
+    const lookupFields = fieldsOfSchema(schemas, schema);
+    patchLookup({
+      schema,
+      valueField: preferredField(lookupFields, ['id']) ?? lookupFields[0] ?? '',
+      labelField:
+        preferredField(lookupFields, ['name', 'title', 'label', 'id']) ??
+        lookupFields[0] ??
+        '',
+      searchFields: defaultLookupSearchFields(lookupFields),
+    });
+  }
+
+  const lookup =
+    editor?.kind === 'lookup'
+      ? (editor.lookup ?? defaultLookupConfig(schemas, schemaFields, field))
+      : undefined;
+  const lookupFields = lookup ? fieldsOfSchema(schemas, lookup.schema) : [];
+
+  return (
+    <div className="mt-2 grid gap-2 rounded-md border bg-muted/10 p-2">
+      <label className="flex min-h-8 items-center gap-2 text-sm">
+        <Checkbox
+          checked={isEditable}
+          onCheckedChange={(checked) => setEditable(Boolean(checked))}
+        />
+        Editable
+      </label>
+      {isEditable ? (
+        <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-4">
+          <div className="grid gap-1">
+            <Label className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+              Editor
+            </Label>
+            <Select value={editorKind} onValueChange={setEditorKind}>
+              <SelectTrigger className="h-8">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value={EDITOR_AUTO}>Infer from value</SelectItem>
+                {EDITOR_KINDS.map((option) => (
+                  <SelectItem key={option.value} value={option.value}>
+                    {option.label}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+          {editor ? (
+            <div className="grid gap-1">
+              <Label className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+                Placeholder
+              </Label>
+              <Input
+                value={editor.placeholder ?? ''}
+                className="h-8"
+                onChange={(event) =>
+                  patchEditor({
+                    placeholder: event.target.value || undefined,
+                  })
+                }
+              />
+            </div>
+          ) : null}
+          {editor?.kind === 'number' ? (
+            <>
+              <div className="grid gap-1">
+                <Label className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+                  Min
+                </Label>
+                <Input
+                  type="number"
+                  value={numberInputValue(editor.min)}
+                  className="h-8"
+                  onChange={(event) =>
+                    patchEditor({
+                      min: optionalNumber(event.target.value),
+                    })
+                  }
+                />
+              </div>
+              <div className="grid gap-1">
+                <Label className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+                  Max
+                </Label>
+                <Input
+                  type="number"
+                  value={numberInputValue(editor.max)}
+                  className="h-8"
+                  onChange={(event) =>
+                    patchEditor({
+                      max: optionalNumber(event.target.value),
+                    })
+                  }
+                />
+              </div>
+              <div className="grid gap-1">
+                <Label className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+                  Step
+                </Label>
+                <Input
+                  type="number"
+                  value={numberInputValue(editor.step)}
+                  className="h-8"
+                  onChange={(event) =>
+                    patchEditor({
+                      step: optionalNumber(event.target.value),
+                    })
+                  }
+                />
+              </div>
+            </>
+          ) : null}
+          {editor?.kind === 'select' ? (
+            <div className="grid gap-1 md:col-span-2 xl:col-span-4">
+              <Label className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+                Options
+              </Label>
+              <Textarea
+                rows={2}
+                value={formatEditorOptions(editor.options)}
+                placeholder={'open=Open\nclosed=Closed'}
+                onChange={(event) =>
+                  patchEditor({
+                    options: parseEditorOptions(event.target.value),
+                  })
+                }
+              />
+            </div>
+          ) : null}
+          {editor?.kind === 'lookup' && lookup ? (
+            <div className="grid gap-2 md:col-span-2 xl:col-span-4 md:grid-cols-2 xl:grid-cols-4">
+              <div className="grid gap-1">
+                <Label className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+                  Lookup schema
+                </Label>
+                <Select
+                  value={lookup.schema}
+                  onValueChange={setLookupSchema}
+                  disabled={schemas.length === 0}
+                >
+                  <SelectTrigger className="h-8">
+                    <SelectValue placeholder="Select schema" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {schemas.map((schema) => (
+                      <SelectItem key={schema.id} value={schema.name}>
+                        {schema.name}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="grid gap-1">
+                <Label className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+                  Value field
+                </Label>
+                <Select
+                  value={lookup.valueField}
+                  onValueChange={(valueField) => patchLookup({ valueField })}
+                  disabled={lookupFields.length === 0}
+                >
+                  <SelectTrigger className="h-8">
+                    <SelectValue placeholder="Select field" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {lookupFields.map((candidate) => (
+                      <SelectItem key={candidate} value={candidate}>
+                        {candidate}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="grid gap-1">
+                <Label className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+                  Label field
+                </Label>
+                <Select
+                  value={lookup.labelField}
+                  onValueChange={(labelField) => patchLookup({ labelField })}
+                  disabled={lookupFields.length === 0}
+                >
+                  <SelectTrigger className="h-8">
+                    <SelectValue placeholder="Select field" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {lookupFields.map((candidate) => (
+                      <SelectItem key={candidate} value={candidate}>
+                        {candidate}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="grid gap-1">
+                <Label className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+                  Search fields
+                </Label>
+                <Input
+                  value={(lookup.searchFields ?? []).join(', ')}
+                  className="h-8"
+                  onChange={(event) =>
+                    patchLookup({
+                      searchFields: event.target.value
+                        .split(',')
+                        .map((value) => value.trim())
+                        .filter(Boolean),
+                    })
+                  }
+                  placeholder="name, email"
+                />
+              </div>
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function defaultEditorConfig(
+  kind: ReportEditorKind,
+  current: ReportEditorConfig | undefined,
+  field: string,
+  schemaFields: string[],
+  schemas: Schema[]
+): ReportEditorConfig {
+  if (current?.kind === kind) return current;
+  if (kind === 'select') {
+    return { kind, options: current?.options ?? [] };
+  }
+  if (kind === 'lookup') {
+    return {
+      kind,
+      lookup:
+        current?.lookup ?? defaultLookupConfig(schemas, schemaFields, field),
+    };
+  }
+  if (kind === 'number') {
+    return {
+      kind,
+      min: current?.min,
+      max: current?.max,
+      step: current?.step,
+      placeholder: current?.placeholder,
+    };
+  }
+  return {
+    kind,
+    placeholder: current?.placeholder,
+  };
+}
+
+function defaultLookupConfig(
+  schemas: Schema[],
+  schemaFields: string[],
+  editedField: string
+): NonNullable<ReportEditorConfig['lookup']> {
+  const inferredSchemaName =
+    schemas.find((schema) => schema.name === editedField.replace(/_id$/, ''))
+      ?.name ??
+    schemas[0]?.name ??
+    '';
+  const lookupFields = fieldsOfSchema(schemas, inferredSchemaName);
+  const fields = lookupFields.length > 0 ? lookupFields : schemaFields;
+  const valueField = preferredField(fields, ['id']) ?? fields[0] ?? '';
+  const labelField =
+    preferredField(fields, ['name', 'title', 'label', 'email', 'id']) ??
+    valueField;
+  return {
+    schema: inferredSchemaName,
+    valueField,
+    labelField,
+    searchFields: defaultLookupSearchFields(fields),
+  };
+}
+
+function preferredField(
+  fields: string[],
+  candidates: string[]
+): string | undefined {
+  return candidates.find((candidate) => fields.includes(candidate));
+}
+
+function defaultLookupSearchFields(fields: string[]): string[] {
+  return fields.filter((field) =>
+    ['name', 'title', 'label', 'email'].includes(field)
+  );
+}
+
+function numberInputValue(value: number | undefined): string {
+  return Number.isFinite(value) ? String(value) : '';
+}
+
+function optionalNumber(value: string): number | undefined {
+  if (!value.trim()) return undefined;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function formatEditorOptions(
+  options: ReportEditorOption[] | undefined
+): string {
+  return (
+    options
+      ?.map((option) => {
+        const value = String(option.value);
+        return option.label && option.label !== humanizeFieldName(value)
+          ? `${value}=${option.label}`
+          : value;
+      })
+      .join('\n') ?? ''
+  );
+}
+
+function parseEditorOptions(value: string): ReportEditorOption[] {
+  return value
+    .split(/[\n,]+/)
+    .map((part) => part.trim())
+    .filter(Boolean)
+    .map((part) => {
+      const separator = part.indexOf('=');
+      const rawValue = separator >= 0 ? part.slice(0, separator).trim() : part;
+      const label =
+        separator >= 0 ? part.slice(separator + 1).trim() : undefined;
+      return {
+        value: rawValue,
+        label: label || humanizeFieldName(rawValue),
+      };
+    });
+}
+
 function FieldRow({
   field,
   cfg,
+  schemaFields,
+  schemas,
   formatChoices,
   onLabelChange,
   onFormatChange,
   onPillVariantsChange,
+  onWritebackChange,
   onRemove,
 }: {
   field: string;
   cfg: WizardFieldConfig;
+  schemaFields: string[];
+  schemas: Schema[];
   formatChoices: typeof WIZARD_COLUMN_FORMATS | null;
   onLabelChange: (label: string) => void;
   onFormatChange: (value: string) => void;
   onPillVariantsChange: (variants: Record<string, WizardPillVariant>) => void;
+  onWritebackChange: (patch: Partial<WizardFieldConfig>) => void;
   onRemove: () => void;
 }) {
+  const showPillVariants = cfg.format === 'pill';
+  const showEditorSettings = formatChoices !== null;
   return (
     <>
       <tr className="border-t">
@@ -2527,13 +2990,24 @@ function FieldRow({
           </Button>
         </td>
       </tr>
-      {cfg.format === 'pill' ? (
+      {showPillVariants || showEditorSettings ? (
         <tr>
           <td colSpan={formatChoices ? 4 : 3} className="pb-2 pl-3">
-            <PillVariantsEditor
-              variants={cfg.pillVariants ?? {}}
-              onChange={onPillVariantsChange}
-            />
+            {showPillVariants ? (
+              <PillVariantsEditor
+                variants={cfg.pillVariants ?? {}}
+                onChange={onPillVariantsChange}
+              />
+            ) : null}
+            {showEditorSettings ? (
+              <WritebackEditorSettings
+                cfg={cfg}
+                field={field}
+                schemaFields={schemaFields}
+                schemas={schemas}
+                onChange={onWritebackChange}
+              />
+            ) : null}
           </td>
         </tr>
       ) : null}
