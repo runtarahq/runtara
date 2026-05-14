@@ -304,6 +304,75 @@ describe('table column round-trip', () => {
     );
   });
 
+  it('round-trips views and breadcrumb metadata without compatibility warning', () => {
+    const definition: ReportDefinition = {
+      definitionVersion: 1,
+      filters: [],
+      layout: [
+        {
+          id: 'main',
+          type: 'grid',
+          columns: 1,
+          items: [{ blockId: 'orders' }],
+        },
+      ],
+      views: [
+        {
+          id: 'list',
+          title: 'Orders',
+          layout: [
+            {
+              id: 'list_grid',
+              type: 'grid',
+              columns: 1,
+              items: [{ blockId: 'orders' }],
+            },
+          ],
+        },
+        {
+          id: 'detail',
+          titleFrom: 'filters.order_id',
+          parentViewId: 'list',
+          clearFiltersOnBack: ['order_id'],
+          breadcrumb: [
+            {
+              label: 'Orders',
+              viewId: 'list',
+              clearFilters: ['order_id'],
+            },
+          ],
+          layout: [
+            {
+              id: 'detail_grid',
+              type: 'grid',
+              columns: 1,
+              items: [{ blockId: 'orders' }],
+            },
+          ],
+        },
+      ],
+      blocks: [
+        {
+          id: 'orders',
+          type: 'table',
+          title: 'Orders',
+          source: { schema: 'orders', mode: 'filter' },
+          table: { columns: [{ field: 'id' }] },
+        },
+      ],
+    };
+
+    const { state, compatibility } = definitionToWizardState(
+      definition,
+      'orders'
+    );
+    expect(compatibility.fullyEditable).toBe(true);
+    expect(state.views).toEqual(definition.views);
+
+    const round = wizardStateToDefinition(state, SCHEMA_FIELDS, definition);
+    expect(round.views).toEqual(definition.views);
+  });
+
   it('round-trips datasets and per-block dataset queries without losing them', () => {
     const definition: ReportDefinition = {
       definitionVersion: 1,

@@ -25,6 +25,7 @@ import {
 import { BlocksStep } from './steps/BlocksStep';
 import { ControlsStep } from './steps/ControlsStep';
 import { DatasetsStep } from './steps/DatasetsStep';
+import { ViewsStep } from './steps/ViewsStep';
 
 interface ReportBuilderWizardProps {
   definition: ReportDefinition;
@@ -75,6 +76,7 @@ function readinessChecks(
       Boolean(dataset.source.schema) &&
       dataset.dimensions.length + dataset.measures.length > 0
   );
+  const viewsReady = state.views.every((view) => Boolean(view.id));
 
   return [
     {
@@ -99,6 +101,13 @@ function readinessChecks(
       ok:
         state.filters.length === 0 ||
         state.filters.every((filter) => filter.target !== '__none__'),
+    },
+    {
+      label:
+        state.views.length === 0
+          ? "No named views configured — that's fine"
+          : 'Every view has a stable ID',
+      ok: viewsReady,
     },
   ];
 }
@@ -170,6 +179,10 @@ export function ReportBuilderWizard({
     commit({ ...state, datasets });
   }
 
+  function setViews(views: ReportDefinition['views']) {
+    commit({ ...state, views: views ?? [] });
+  }
+
   const checks = readinessChecks(state);
   const allReady = checks.every((check) => check.ok);
 
@@ -210,6 +223,25 @@ export function ReportBuilderWizard({
           onGridsAndBlocksChange={setGridsAndBlocks}
         />
       </section>
+
+      {editing ? (
+        <section className="mt-6 border-t pt-4">
+          <header className="mb-3">
+            <h2 className="text-sm font-semibold">Views</h2>
+            <p className="text-xs text-muted-foreground">
+              Optional named layouts for drilldowns. Row and chart interactions
+              can navigate to these view IDs.
+            </p>
+          </header>
+          <ViewsStep
+            views={state.views}
+            blocks={state.blocks}
+            grids={state.grids}
+            filters={state.filters}
+            onChange={setViews}
+          />
+        </section>
+      ) : null}
 
       {editing ? (
         <section className="mt-6 border-t pt-4">

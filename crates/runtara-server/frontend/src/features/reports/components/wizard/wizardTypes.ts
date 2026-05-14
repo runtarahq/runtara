@@ -8,6 +8,7 @@ import {
   ReportOrderBy,
   ReportTableActionConfig,
   ReportTableInteractionButtonConfig,
+  ReportViewDefinition,
   ReportVisibilityCondition,
   ReportWorkflowActionConfig,
 } from '../../types';
@@ -222,6 +223,8 @@ export interface WizardState {
   /** Top-level semantic dataset definitions (Cube/LookML-style). Blocks reference
    *  one via `block.dataset.id` instead of querying a schema directly. */
   datasets: ReportDatasetDefinition[];
+  /** Optional named report views with independent layouts and breadcrumbs. */
+  views: ReportViewDefinition[];
 }
 
 /** Logical anchor that readiness checks point at; used to scroll the editor

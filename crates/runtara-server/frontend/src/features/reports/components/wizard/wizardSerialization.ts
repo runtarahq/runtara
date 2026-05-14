@@ -447,7 +447,7 @@ export function wizardStateToDefinition(
     filters,
     blocks,
     datasets: state.datasets.length > 0 ? state.datasets : undefined,
-    views: existing?.views,
+    views: state.views.length > 0 ? state.views : undefined,
   };
 }
 
@@ -813,13 +813,10 @@ export function definitionToWizardState(
         blocks: [],
         filters: [],
         datasets: [],
+        views: [],
       },
       compatibility: { fullyEditable: true, reasons: [] },
     };
-  }
-
-  if (definition.views && definition.views.length > 0) {
-    unsupportedReasons.push('Multiple views');
   }
 
   const primarySchema =
@@ -920,6 +917,7 @@ export function definitionToWizardState(
       blocks,
       filters,
       datasets: definition.datasets ?? [],
+      views: definition.views ?? [],
     },
     compatibility: {
       fullyEditable: unsupportedReasons.length === 0,

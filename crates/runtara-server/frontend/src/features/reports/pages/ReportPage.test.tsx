@@ -56,6 +56,16 @@ vi.mock('../hooks/useReports', () => ({
           : null,
     isFetching: false,
   }),
+  useReportRender: () => ({
+    data: undefined,
+    isFetching: false,
+    refetch: vi.fn(),
+  }),
+  useReportBlockData: () => ({
+    data: undefined,
+    isFetching: false,
+    refetch: vi.fn(),
+  }),
   useReportPreview: () => ({ data: undefined, isFetching: false }),
   useCreateReport: () => ({ isPending: false, mutateAsync: vi.fn() }),
   useUpdateReport: () => ({ isPending: false, mutateAsync: vi.fn() }),
@@ -121,8 +131,6 @@ describe('ReportPage existing-report load', () => {
         screen.getByText('This report has no content yet')
       ).toBeInTheDocument();
     });
-    expect(
-      screen.getByText(/Switch to edit mode/i)
-    ).toBeInTheDocument();
+    expect(screen.getByText(/Switch to edit mode/i)).toBeInTheDocument();
   });
 });
