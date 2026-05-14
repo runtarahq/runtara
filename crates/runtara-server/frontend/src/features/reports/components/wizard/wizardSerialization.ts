@@ -568,17 +568,22 @@ function blockDefinitionToWizard(
   fallbackPlacement: { gridId: string; row: number; column: number }
 ): { block: WizardBlock; unsupported: string[] } {
   const unsupported: string[] = [];
+  const source = getOptionalBlockSource(block);
 
   if (!WIZARD_SUPPORTED_BLOCK_TYPES.has(block.type as WizardBlockType)) {
     unsupported.push(`Block type "${block.type}"`);
   }
 
-  if (block.source.join && block.source.join.length > 0) {
+  if (!source && block.type !== 'markdown') {
+    unsupported.push('Missing data source');
+  }
+
+  if (source?.join && source.join.length > 0) {
     unsupported.push('Schema joins');
   }
-  if (block.source.condition) unsupported.push('Custom source conditions');
-  if (block.source.kind && block.source.kind !== 'object_model') {
-    unsupported.push(`Source kind "${block.source.kind}"`);
+  if (source?.condition) unsupported.push('Custom source conditions');
+  if (source?.kind && source.kind !== 'object_model') {
+    unsupported.push(`Source kind "${source.kind}"`);
   }
   if (block.interactions && block.interactions.length > 0) {
     unsupported.push('Block interactions');
@@ -673,7 +678,7 @@ function blockDefinitionToWizard(
       }
     }
   } else if (block.type === 'metric') {
-    const aggField = (block.source.aggregates ?? [])[0]?.field;
+    const aggField = (source?.aggregates ?? [])[0]?.field;
     if (aggField) fields.push(aggField);
   }
 
@@ -685,19 +690,19 @@ function blockDefinitionToWizard(
       ? (block.type as WizardBlockType)
       : 'table'),
     title: block.title || humanize(block.id),
-    schema: block.source.schema || undefined,
+    schema: source?.schema || undefined,
     fields,
     placement: fallbackPlacement,
     chartKind: block.chart?.kind,
     chartGroupBy: block.chart?.x,
-    metricAggregate: block.source.aggregates?.[0]?.op as
+    metricAggregate: source?.aggregates?.[0]?.op as
       | 'count'
       | 'sum'
       | 'avg'
       | 'min'
       | 'max'
       | undefined,
-    metricField: block.source.aggregates?.[0]?.field,
+    metricField: source?.aggregates?.[0]?.field,
     metricFormat: isWizardFormat(metricFormat)
       ? (metricFormat as WizardColumnFormat)
       : undefined,
@@ -715,6 +720,12 @@ function blockDefinitionToWizard(
   };
 
   return { block: wizardBlock, unsupported };
+}
+
+function getOptionalBlockSource(
+  block: ReportBlockDefinition
+): ReportSource | undefined {
+  return (block as { source?: ReportSource }).source;
 }
 
 export function definitionToWizardState(
@@ -743,8 +754,9 @@ export function definitionToWizardState(
   }
 
   const primarySchema =
-    definition.blocks.find((block) => block.source.schema)?.source.schema ||
-    fallbackSchema;
+    definition.blocks
+      .map((block) => getOptionalBlockSource(block)?.schema)
+      .find((schema): schema is string => Boolean(schema)) || fallbackSchema;
 
   const layoutInfo = flattenLayoutBlocks(definition.layout);
   unsupportedReasons.push(...layoutInfo.unsupported);

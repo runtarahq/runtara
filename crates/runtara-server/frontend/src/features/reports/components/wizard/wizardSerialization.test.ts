@@ -10,6 +10,54 @@ const SCHEMA_FIELDS: Record<string, string[]> = {
 };
 
 describe('table column round-trip', () => {
+  it('loads markdown blocks that omit source', () => {
+    const definition = {
+      definitionVersion: 1,
+      filters: [],
+      layout: [
+        {
+          type: 'section',
+          id: 'overview',
+          children: [
+            { type: 'block', id: 'intro_node', blockId: 'intro' },
+            { type: 'block', id: 'orders_node', blockId: 'orders' },
+          ],
+        },
+      ],
+      blocks: [
+        {
+          id: 'intro',
+          type: 'markdown',
+          markdown: { content: '# Intro' },
+        },
+        {
+          id: 'orders',
+          type: 'table',
+          title: 'Orders',
+          source: { schema: 'orders', mode: 'filter' },
+          table: {
+            columns: [{ field: 'status', label: 'Status' }],
+          },
+        },
+      ],
+    } as unknown as ReportDefinition;
+
+    const { state, compatibility } = definitionToWizardState(
+      definition,
+      'fallback'
+    );
+
+    expect(compatibility.fullyEditable).toBe(true);
+    expect(compatibility.reasons).toEqual([]);
+    expect(state.defaultSchema).toBe('orders');
+    expect(state.blocks[0]).toMatchObject({
+      id: 'intro',
+      type: 'markdown',
+      markdownContent: '# Intro',
+    });
+    expect(state.blocks[0].schema).toBeUndefined();
+  });
+
   it('preserves workflow_button columns, interaction_buttons columns, selectable, and bulk actions', () => {
     const definition: ReportDefinition = {
       definitionVersion: 1,
