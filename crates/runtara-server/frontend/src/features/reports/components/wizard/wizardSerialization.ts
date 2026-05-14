@@ -65,6 +65,8 @@ function buildSourceBase(
   | 'instanceId'
   | 'interval'
   | 'granularity'
+  | 'orderBy'
+  | 'limit'
   | 'join'
   | 'condition'
 > {
@@ -73,6 +75,16 @@ function buildSourceBase(
       ? { join: block.sourceJoins }
       : {}),
     ...(block.sourceCondition ? { condition: block.sourceCondition } : {}),
+    ...(block.sourceOrderBy && block.sourceOrderBy.length > 0
+      ? { orderBy: block.sourceOrderBy }
+      : {}),
+    ...(block.sourceLimit && block.sourceLimit > 0
+      ? { limit: block.sourceLimit }
+      : {}),
+    ...(block.sourceInterval ? { interval: block.sourceInterval } : {}),
+    ...(block.sourceGranularity
+      ? { granularity: block.sourceGranularity }
+      : {}),
   };
   if (block.sourceKind === 'workflow_runtime') {
     return {
@@ -82,6 +94,12 @@ function buildSourceBase(
       workflowId: block.workflowId ?? '',
       ...(block.instanceId ? { instanceId: block.instanceId } : {}),
       ...(block.sourceCondition ? { condition: block.sourceCondition } : {}),
+      ...(block.sourceOrderBy && block.sourceOrderBy.length > 0
+        ? { orderBy: block.sourceOrderBy }
+        : {}),
+      ...(block.sourceLimit && block.sourceLimit > 0
+        ? { limit: block.sourceLimit }
+        : {}),
     };
   }
   if (block.sourceKind === 'system') {
@@ -94,6 +112,12 @@ function buildSourceBase(
         ? { granularity: block.sourceGranularity }
         : {}),
       ...(block.sourceCondition ? { condition: block.sourceCondition } : {}),
+      ...(block.sourceOrderBy && block.sourceOrderBy.length > 0
+        ? { orderBy: block.sourceOrderBy }
+        : {}),
+      ...(block.sourceLimit && block.sourceLimit > 0
+        ? { limit: block.sourceLimit }
+        : {}),
     };
   }
   return { schema: block.schema ?? '', ...extras };
@@ -799,6 +823,10 @@ function blockDefinitionToWizard(
     ...(source?.instanceId ? { instanceId: source.instanceId } : {}),
     ...(source?.interval ? { sourceInterval: source.interval } : {}),
     ...(source?.granularity ? { sourceGranularity: source.granularity } : {}),
+    ...(source?.orderBy && source.orderBy.length > 0
+      ? { sourceOrderBy: source.orderBy }
+      : {}),
+    ...(source?.limit && source.limit > 0 ? { sourceLimit: source.limit } : {}),
     ...(source?.join && source.join.length > 0
       ? { sourceJoins: source.join }
       : {}),

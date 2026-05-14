@@ -523,6 +523,54 @@ describe('table column round-trip', () => {
     expect(round.blocks[0].source.condition).toEqual(condition);
   });
 
+  it('round-trips source order, limit, interval, and granularity', () => {
+    const definition: ReportDefinition = {
+      definitionVersion: 1,
+      filters: [],
+      blocks: [
+        {
+          id: 'orders',
+          type: 'table',
+          title: 'Orders',
+          source: {
+            schema: 'orders',
+            mode: 'filter',
+            orderBy: [{ field: 'amount', direction: 'desc' }],
+            limit: 25,
+            interval: '30d',
+            granularity: 'daily',
+          },
+          table: {
+            columns: [
+              { field: 'id', label: 'ID' },
+              { field: 'amount', label: 'Amount' },
+            ],
+          },
+        },
+      ],
+    };
+
+    const { state, compatibility } = definitionToWizardState(
+      definition,
+      'orders'
+    );
+    expect(compatibility.fullyEditable).toBe(true);
+    expect(state.blocks[0]).toMatchObject({
+      sourceOrderBy: [{ field: 'amount', direction: 'desc' }],
+      sourceLimit: 25,
+      sourceInterval: '30d',
+      sourceGranularity: 'daily',
+    });
+
+    const round = wizardStateToDefinition(state, SCHEMA_FIELDS, definition);
+    expect(round.blocks[0].source).toMatchObject({
+      orderBy: [{ field: 'amount', direction: 'desc' }],
+      limit: 25,
+      interval: '30d',
+      granularity: 'daily',
+    });
+  });
+
   it('round-trips block click interactions', () => {
     const definition: ReportDefinition = {
       definitionVersion: 1,

@@ -948,6 +948,8 @@ function BlockCard({
       instanceId: undefined,
       sourceInterval: undefined,
       sourceGranularity: undefined,
+      sourceOrderBy: undefined,
+      sourceLimit: undefined,
       sourceJoins: undefined,
       sourceCondition: undefined,
       schema: nextSchema,
@@ -970,6 +972,8 @@ function BlockCard({
       instanceId: undefined,
       sourceInterval: undefined,
       sourceGranularity: undefined,
+      sourceOrderBy: undefined,
+      sourceLimit: undefined,
       sourceJoins: undefined,
       sourceCondition: undefined,
       schema: undefined,
@@ -990,6 +994,8 @@ function BlockCard({
       instanceId: undefined,
       sourceInterval: undefined,
       sourceGranularity: undefined,
+      sourceOrderBy: undefined,
+      sourceLimit: undefined,
       sourceJoins: undefined,
       sourceCondition: undefined,
       schema: schemas[0]?.name,
@@ -1009,6 +1015,8 @@ function BlockCard({
       instanceId: undefined,
       sourceInterval: undefined,
       sourceGranularity: undefined,
+      sourceOrderBy: undefined,
+      sourceLimit: undefined,
       sourceJoins: undefined,
       sourceCondition: undefined,
       schema: undefined,
@@ -1028,6 +1036,8 @@ function BlockCard({
       instanceId: undefined,
       sourceInterval: undefined,
       sourceGranularity: undefined,
+      sourceOrderBy: undefined,
+      sourceLimit: undefined,
       sourceJoins: undefined,
       sourceCondition: undefined,
       schema: undefined,
@@ -1292,8 +1302,16 @@ function BlockCard({
           {block.sourceKind === 'system' ? (
             <SystemSourceSettings
               block={block}
-              onChange={onChange}
               onEntityChange={changeSystemEntity}
+            />
+          ) : null}
+
+          {!usingDataset && block.type !== 'markdown' ? (
+            <SourceQuerySettings
+              block={block}
+              fields={schemaFields}
+              showBucketing={block.sourceKind !== 'workflow_runtime'}
+              onChange={onChange}
             />
           ) : null}
 
@@ -2159,11 +2177,9 @@ function WorkflowRuntimeSourceSettings({
 
 function SystemSourceSettings({
   block,
-  onChange,
   onEntityChange,
 }: {
   block: WizardBlock;
-  onChange: (patch: Partial<WizardBlock>) => void;
   onEntityChange: (entity: NonNullable<ReportSource['entity']>) => void;
 }) {
   return (
@@ -2190,31 +2206,150 @@ function SystemSourceSettings({
           </SelectContent>
         </Select>
       </div>
-      <div className="grid gap-1.5">
-        <Label className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
-          Interval
-        </Label>
-        <Input
-          value={block.sourceInterval ?? ''}
-          onChange={(event) =>
-            onChange({ sourceInterval: event.target.value || undefined })
-          }
-          className="h-8"
-          placeholder="24h"
-        />
-      </div>
-      <div className="grid gap-1.5">
-        <Label className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
-          Granularity
-        </Label>
-        <Input
-          value={block.sourceGranularity ?? ''}
-          onChange={(event) =>
-            onChange({ sourceGranularity: event.target.value || undefined })
-          }
-          className="h-8"
-          placeholder="hourly"
-        />
+    </div>
+  );
+}
+
+function SourceQuerySettings({
+  block,
+  fields,
+  showBucketing,
+  onChange,
+}: {
+  block: WizardBlock;
+  fields: string[];
+  showBucketing: boolean;
+  onChange: (patch: Partial<WizardBlock>) => void;
+}) {
+  const primaryOrder = block.sourceOrderBy?.[0];
+  const trailingOrders = block.sourceOrderBy?.slice(1) ?? [];
+  const orderFields =
+    primaryOrder?.field && !fields.includes(primaryOrder.field)
+      ? [primaryOrder.field, ...fields]
+      : fields;
+
+  function updateOrderField(field: string) {
+    if (field === NO_SORT_FIELD) {
+      onChange({ sourceOrderBy: undefined });
+      return;
+    }
+    onChange({
+      sourceOrderBy: [
+        {
+          field,
+          direction: primaryOrder?.direction ?? 'asc',
+        },
+        ...trailingOrders,
+      ],
+    });
+  }
+
+  function updateOrderDirection(direction: ReportOrderBy['direction']) {
+    if (!primaryOrder?.field) return;
+    onChange({
+      sourceOrderBy: [{ ...primaryOrder, direction }, ...trailingOrders],
+    });
+  }
+
+  return (
+    <div className="grid gap-3 rounded-md border bg-muted/10 p-3">
+      <Label className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+        Source query
+      </Label>
+      <div className="grid gap-3 md:grid-cols-4">
+        <div className="grid gap-1.5">
+          <Label className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+            Order by
+          </Label>
+          <Select
+            value={primaryOrder?.field ?? NO_SORT_FIELD}
+            disabled={orderFields.length === 0}
+            onValueChange={updateOrderField}
+          >
+            <SelectTrigger className="h-8">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value={NO_SORT_FIELD}>None</SelectItem>
+              {orderFields.map((field) => (
+                <SelectItem key={field} value={field}>
+                  {field}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+        <div className="grid gap-1.5">
+          <Label className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+            Direction
+          </Label>
+          <Select
+            value={primaryOrder?.direction ?? 'asc'}
+            disabled={!primaryOrder?.field}
+            onValueChange={(direction) =>
+              updateOrderDirection(direction as ReportOrderBy['direction'])
+            }
+          >
+            <SelectTrigger className="h-8">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="asc">Ascending</SelectItem>
+              <SelectItem value="desc">Descending</SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
+        <div className="grid gap-1.5">
+          <Label className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+            Limit
+          </Label>
+          <Input
+            type="number"
+            min={1}
+            value={block.sourceLimit ?? ''}
+            onChange={(event) =>
+              onChange({
+                sourceLimit: optionalPositiveInteger(event.target.value),
+              })
+            }
+            className="h-8"
+            placeholder="No limit"
+          />
+        </div>
+        {showBucketing ? (
+          <>
+            <div className="grid gap-1.5">
+              <Label className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+                Interval
+              </Label>
+              <Input
+                value={block.sourceInterval ?? ''}
+                onChange={(event) =>
+                  onChange({
+                    sourceInterval: event.target.value || undefined,
+                  })
+                }
+                className="h-8"
+                placeholder="24h"
+              />
+            </div>
+            <div className="grid gap-1.5">
+              <Label className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+                Granularity
+              </Label>
+              <Input
+                value={block.sourceGranularity ?? ''}
+                onChange={(event) =>
+                  onChange({
+                    sourceGranularity: event.target.value || undefined,
+                  })
+                }
+                className="h-8"
+                placeholder="hourly"
+              />
+            </div>
+          </>
+        ) : null}
       </div>
     </div>
   );
@@ -3043,6 +3178,11 @@ function TableBehaviorSettings({
 function positiveIntegerOrDefault(value: string, fallback: number): number {
   const parsed = Number.parseInt(value, 10);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function optionalPositiveInteger(value: string): number | undefined {
+  const parsed = Number.parseInt(value, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
 }
 
 function parsePageSizes(value: string): number[] {

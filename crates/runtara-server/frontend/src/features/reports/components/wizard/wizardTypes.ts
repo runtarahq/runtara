@@ -172,6 +172,10 @@ export interface WizardBlock {
   sourceInterval?: string;
   /** Optional system source granularity. */
   sourceGranularity?: string;
+  /** Source-level ordering applied before block rendering. */
+  sourceOrderBy?: ReportOrderBy[];
+  /** Source-level row limit. */
+  sourceLimit?: number;
   /** Optional Object Model joins exposed as alias.field paths. */
   sourceJoins?: ReportSourceJoin[];
   /** Optional source condition DSL. */
