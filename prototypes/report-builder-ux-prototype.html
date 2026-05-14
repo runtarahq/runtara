@@ -9,8 +9,6 @@
       color-scheme: light;
       --bg: #f6f8fb;
       --surface: #ffffff;
-      --surface-soft: #f0f5f7;
-      --surface-warm: #fff8eb;
       --text: #152235;
       --muted: #617086;
       --subtle: #8b98aa;
@@ -55,6 +53,13 @@
       cursor: pointer;
     }
 
+    h1,
+    h2,
+    h3,
+    p {
+      margin: 0;
+    }
+
     .app {
       display: grid;
       min-height: 100vh;
@@ -62,15 +67,15 @@
     }
 
     .sidebar {
-      border-right: 1px solid var(--border);
-      background: #fbfcfe;
-      padding: 24px 16px;
       position: sticky;
       top: 0;
       height: 100vh;
       display: flex;
       flex-direction: column;
       gap: 26px;
+      border-right: 1px solid var(--border);
+      background: #fbfcfe;
+      padding: 24px 16px;
     }
 
     .brand {
@@ -80,7 +85,6 @@
       padding: 0 10px;
       font-size: 22px;
       font-weight: 760;
-      letter-spacing: 0;
     }
 
     .mark {
@@ -88,8 +92,8 @@
       width: 34px;
       height: 34px;
       border: 4px solid #43b5e8;
-      border-right-color: transparent;
       border-top-color: transparent;
+      border-right-color: transparent;
       border-radius: 8px;
     }
 
@@ -97,17 +101,16 @@
     .mark:after {
       content: "";
       position: absolute;
+      top: -4px;
+      right: -4px;
       width: 8px;
       height: 8px;
       border-radius: 2px;
       background: var(--purple);
-      right: -4px;
-      top: -4px;
     }
 
     .mark:after {
       right: 7px;
-      top: -4px;
       background: var(--blue);
     }
 
@@ -127,9 +130,11 @@
       font-weight: 620;
     }
 
-    .nav-item svg {
-      width: 20px;
-      height: 20px;
+    .nav-item svg,
+    .icon {
+      width: 18px;
+      height: 18px;
+      flex: 0 0 auto;
       stroke-width: 2;
     }
 
@@ -147,7 +152,7 @@
 
     .main {
       display: grid;
-      grid-template-rows: auto minmax(0, 1fr);
+      grid-template-rows: auto auto minmax(0, 1fr);
       min-width: 0;
     }
 
@@ -160,14 +165,10 @@
       justify-content: space-between;
       gap: 20px;
       min-height: 90px;
-      padding: 20px 28px;
       border-bottom: 1px solid var(--border);
       background: rgba(246, 248, 251, 0.94);
+      padding: 20px 28px;
       backdrop-filter: blur(14px);
-    }
-
-    .title-wrap {
-      min-width: 0;
     }
 
     .crumb {
@@ -178,18 +179,10 @@
       text-transform: uppercase;
     }
 
-    h1,
-    h2,
-    h3,
-    p {
-      margin: 0;
-    }
-
     h1 {
       margin-top: 4px;
       font-size: clamp(24px, 2vw, 34px);
       line-height: 1.08;
-      letter-spacing: 0;
     }
 
     .top-actions {
@@ -208,11 +201,12 @@
       min-height: 40px;
       border: 1px solid var(--border-strong);
       border-radius: 999px;
-      padding: 0 16px;
       background: var(--surface);
       color: var(--text);
+      padding: 0 16px;
       font-weight: 720;
       text-decoration: none;
+      white-space: nowrap;
       transition:
         transform 140ms ease,
         border-color 140ms ease,
@@ -235,133 +229,76 @@
     .button.ghost {
       border-color: transparent;
       background: transparent;
-      box-shadow: none;
       color: var(--muted);
-    }
-
-    .button.danger {
-      border-color: #f3c6c9;
-      background: #fff1f2;
-      color: var(--red);
-    }
-
-    .button:disabled {
-      cursor: not-allowed;
-      opacity: 0.45;
-      transform: none;
       box-shadow: none;
     }
 
-    .button svg,
-    .icon {
-      width: 17px;
-      height: 17px;
-      flex: 0 0 auto;
-      stroke-width: 2;
-    }
-
-    .workspace {
-      display: grid;
-      grid-template-columns: minmax(260px, 300px) minmax(0, 1fr) minmax(0, 1fr);
-      gap: 18px;
-      padding: 18px;
-      align-items: start;
-    }
-
-    .panel {
-      border: 1px solid var(--border);
-      border-radius: var(--radius);
-      background: var(--surface);
-      box-shadow: 0 1px 0 rgba(20, 38, 64, 0.03);
-      overflow: hidden;
-    }
-
-    .panel.pad {
-      padding: 16px;
-    }
-
-    .panel-body {
-      padding: 16px;
-    }
-
-    .panel-head {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 12px;
-      padding: 16px;
-      border-bottom: 1px solid var(--border);
-    }
-
-    .panel-head h2 {
-      font-size: 15px;
-      font-weight: 760;
-    }
-
-    .panel-sub {
-      color: var(--muted);
-      font-size: 13px;
-      margin-top: 2px;
-    }
-
-    .builder-rail {
+    .progress-wrap {
       position: sticky;
-      top: 108px;
-      display: grid;
-      gap: 14px;
+      top: 90px;
+      z-index: 8;
+      border-bottom: 1px solid var(--border);
+      background: rgba(246, 248, 251, 0.96);
+      padding: 14px 28px;
+      backdrop-filter: blur(14px);
     }
 
-    .step-list {
+    .progress {
       display: grid;
+      grid-template-columns: repeat(5, minmax(0, 1fr));
       gap: 8px;
-      padding: 12px;
+      max-width: 1420px;
     }
 
-    .step-button {
-      width: 100%;
-      border: 1px solid transparent;
-      border-radius: 8px;
-      background: transparent;
-      padding: 11px;
-      text-align: left;
+    .progress-step {
+      position: relative;
       display: grid;
-      grid-template-columns: 28px minmax(0, 1fr) auto;
+      grid-template-columns: 30px minmax(0, 1fr);
       align-items: center;
       gap: 10px;
-      color: var(--text);
+      min-height: 62px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: #ffffff;
+      padding: 10px;
+      text-align: left;
+      color: var(--muted);
     }
 
-    .step-button.active {
-      border-color: #b8d4fd;
+    .progress-step.active {
+      border-color: #9fc2fb;
       background: #edf5ff;
+      color: var(--text);
+      box-shadow: 0 10px 28px rgba(20, 38, 64, 0.07);
     }
 
-    .step-button.done .step-index {
+    .progress-step.done .step-index {
       border-color: var(--green);
       background: var(--green);
       color: #ffffff;
     }
 
-    .step-button:hover {
-      background: #f2f6fa;
-    }
-
     .step-index {
       display: grid;
       place-items: center;
-      width: 28px;
-      height: 28px;
+      width: 30px;
+      height: 30px;
       border: 1px solid var(--border-strong);
       border-radius: 999px;
       color: var(--muted);
       font-size: 12px;
-      font-weight: 760;
+      font-weight: 800;
+    }
+
+    .step-copy {
+      min-width: 0;
     }
 
     .step-title {
       display: block;
-      font-size: 14px;
-      font-weight: 760;
+      color: var(--text);
+      font-size: 13px;
+      font-weight: 800;
       overflow-wrap: anywhere;
     }
 
@@ -372,186 +309,99 @@
       overflow-wrap: anywhere;
     }
 
-    .status-dot {
-      width: 8px;
-      height: 8px;
-      border-radius: 999px;
-      background: var(--border-strong);
-    }
-
-    .step-button.done .status-dot {
-      background: var(--green);
-    }
-
-    .step-button.active .status-dot {
-      background: var(--blue);
-    }
-
-    .readiness {
-      padding: 14px 16px 16px;
+    .workspace {
       display: grid;
-      gap: 10px;
+      gap: 18px;
+      align-items: start;
+      max-width: 1420px;
+      width: 100%;
+      padding: 18px 28px 32px;
     }
 
-    .score-row {
-      display: flex;
-      justify-content: space-between;
-      gap: 10px;
-      align-items: center;
-      font-size: 13px;
-      color: var(--muted);
-    }
-
-    .score-row strong {
-      color: var(--text);
-      font-size: 20px;
-    }
-
-    .meter {
-      height: 9px;
-      border-radius: 999px;
-      background: #e8edf3;
+    .panel {
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      background: var(--surface);
+      box-shadow: 0 1px 0 rgba(20, 38, 64, 0.03);
       overflow: hidden;
     }
 
-    .meter-fill {
-      height: 100%;
-      width: 68%;
-      border-radius: inherit;
-      background: linear-gradient(90deg, var(--teal), var(--blue));
-      transition: width 180ms ease;
+    .panel-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      border-bottom: 1px solid var(--border);
+      padding: 16px;
     }
 
-    .check-list {
-      display: grid;
-      gap: 7px;
+    .panel-head h2 {
+      font-size: 16px;
+      font-weight: 820;
+    }
+
+    .panel-sub {
+      margin-top: 2px;
       color: var(--muted);
       font-size: 13px;
     }
 
-    .check {
-      border: 0;
-      background: transparent;
-      padding: 0;
-      text-align: left;
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      color: inherit;
+    .panel-body {
+      padding: 16px;
     }
 
-    .check span:first-child {
-      display: grid;
-      place-items: center;
-      width: 18px;
-      height: 18px;
-      border-radius: 999px;
-      background: #e8edf3;
-      color: var(--muted);
-      font-size: 12px;
-      font-weight: 760;
-    }
-
-    .check.ok span:first-child {
-      background: #e4f5ec;
-      color: var(--green);
-    }
-
-    .check.warn span:first-child {
-      background: #fff1d9;
-      color: var(--amber);
-    }
-
-    .builder-main {
-      display: grid;
-      gap: 16px;
-      min-width: 0;
-    }
-
-    .section-block {
+    .section-step {
       display: none;
-      gap: 16px;
+      gap: 18px;
     }
 
-    .section-block.active {
+    .section-step.active {
       display: grid;
     }
 
-    .form-grid {
-      display: grid;
-      grid-template-columns: repeat(2, minmax(0, 1fr));
-      gap: 14px;
+    .section-step[data-section="review"].active {
+      grid-template-columns: minmax(0, 0.92fr) minmax(380px, 1.08fr);
     }
 
-    .field {
-      display: grid;
-      gap: 6px;
-    }
-
-    label,
-    .field-label {
-      color: var(--muted);
-      font-size: 12px;
-      font-weight: 760;
-    }
-
-    input,
-    select,
-    textarea {
-      width: 100%;
-      border: 1px solid var(--border-strong);
-      border-radius: 8px;
-      background: #ffffff;
-      color: var(--text);
-      min-height: 40px;
-      padding: 9px 11px;
-      outline: none;
-      transition:
-        border-color 140ms ease,
-        box-shadow 140ms ease;
-    }
-
-    textarea {
-      min-height: 96px;
-      resize: vertical;
-    }
-
-    input:focus,
-    select:focus,
-    textarea:focus {
-      border-color: var(--blue);
-      box-shadow: 0 0 0 3px rgba(52, 120, 246, 0.13);
-    }
-
-    .choice-grid {
+    .choice-grid,
+    .layout-grid {
       display: grid;
       grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
       gap: 12px;
     }
 
-    .choice-card {
+    .layout-grid {
+      grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+    }
+
+    .choice-card,
+    .layout-card {
+      display: grid;
+      align-content: start;
+      gap: 11px;
+      min-height: 150px;
       border: 1px solid var(--border);
       border-radius: 8px;
       background: #ffffff;
       padding: 14px;
       text-align: left;
-      display: grid;
-      gap: 10px;
-      min-height: 126px;
       transition:
         border-color 140ms ease,
-        box-shadow 140ms ease,
-        transform 140ms ease;
+        transform 140ms ease,
+        box-shadow 140ms ease;
     }
 
     .choice-card:hover,
-    .choice-card.selected {
-      border-color: #94baf9;
-      box-shadow: 0 12px 28px rgba(20, 38, 64, 0.08);
+    .choice-card.selected,
+    .layout-card:hover,
+    .layout-card.selected {
+      border-color: #91b6ee;
       transform: translateY(-1px);
+      box-shadow: 0 14px 30px rgba(20, 38, 64, 0.09);
     }
 
-    .choice-card.selected {
+    .choice-card.selected,
+    .layout-card.selected {
       background: #f4f8ff;
     }
 
@@ -564,7 +414,7 @@
 
     .choice-title {
       font-size: 15px;
-      font-weight: 790;
+      font-weight: 820;
     }
 
     .choice-meta {
@@ -572,12 +422,21 @@
       font-size: 13px;
     }
 
+    .layout-card .choice-title,
+    .layout-card .choice-meta {
+      display: block;
+    }
+
+    .layout-card .choice-meta {
+      margin-top: 3px;
+    }
+
     .mini-icon {
+      display: grid;
+      place-items: center;
       width: 36px;
       height: 36px;
       border-radius: 8px;
-      display: grid;
-      place-items: center;
       background: #edf5ff;
       color: var(--blue);
     }
@@ -603,18 +462,20 @@
       gap: 7px;
     }
 
-    .chip {
+    .chip,
+    .badge {
       display: inline-flex;
       align-items: center;
       gap: 6px;
       min-height: 26px;
       border: 1px solid var(--border);
       border-radius: 999px;
-      padding: 0 9px;
       background: #ffffff;
       color: var(--muted);
+      padding: 0 9px;
       font-size: 12px;
-      font-weight: 680;
+      font-weight: 720;
+      white-space: nowrap;
     }
 
     .chip.on {
@@ -623,158 +484,358 @@
       color: #09675f;
     }
 
-    .template-grid {
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-      gap: 12px;
+    .badge.green {
+      border-color: transparent;
+      background: #e4f5ec;
+      color: var(--green);
     }
 
-    .template-card {
-      min-height: 178px;
+    .badge.blue {
+      border-color: transparent;
+      background: #e8f1ff;
+      color: var(--blue-strong);
+    }
+
+    .badge.amber {
+      border-color: transparent;
+      background: #fff1d9;
+      color: var(--amber);
+    }
+
+    .layout-thumb {
+      position: relative;
+      height: 58px;
+      border: 1px solid #e3e9f0;
+      border-radius: 8px;
+      background: #f8fafc;
+      overflow: hidden;
+    }
+
+    .layout-thumb:before,
+    .layout-thumb:after {
+      content: "";
+      position: absolute;
+      border-radius: 5px;
+      background: #dfe8f2;
+    }
+
+    .layout-thumb.stack:before {
+      inset: 10px 12px 31px;
+    }
+
+    .layout-thumb.stack:after {
+      inset: 31px 12px 10px;
+      background: #cbd8e6;
+    }
+
+    .layout-thumb.columns:before {
+      inset: 10px calc(50% + 5px) 10px 12px;
+    }
+
+    .layout-thumb.columns:after {
+      inset: 10px 12px 10px calc(50% + 5px);
+      background: #cbd8e6;
+    }
+
+    .layout-thumb.grid {
+      background:
+        linear-gradient(#dfe8f2 0 0) 10px 10px / calc(50% - 15px) 16px no-repeat,
+        linear-gradient(#cbd8e6 0 0) calc(50% + 5px) 10px / calc(50% - 15px) 16px no-repeat,
+        linear-gradient(#cbd8e6 0 0) 10px 32px / calc(50% - 15px) 16px no-repeat,
+        linear-gradient(#dfe8f2 0 0) calc(50% + 5px) 32px / calc(50% - 15px) 16px no-repeat,
+        #f8fafc;
+    }
+
+    .layout-thumb.header-grid {
+      background:
+        linear-gradient(#dfe8f2 0 0) 10px 10px / calc(100% - 20px) 16px no-repeat,
+        linear-gradient(#cbd8e6 0 0) 10px 34px / calc(50% - 15px) 14px no-repeat,
+        linear-gradient(#dfe8f2 0 0) calc(50% + 5px) 34px / calc(50% - 15px) 14px no-repeat,
+        #f8fafc;
+    }
+
+    .structure-panel {
+      position: sticky;
+      top: 178px;
+    }
+
+    .section-step[data-section="blocks"] .structure-panel {
+      position: static;
+    }
+
+    .panel-actions {
+      display: flex;
+      align-items: center;
+      justify-content: flex-end;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    .toolbar-group {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      min-height: 34px;
       border: 1px solid var(--border);
       border-radius: 8px;
       background: #ffffff;
-      padding: 13px;
-      text-align: left;
+      padding: 3px;
+    }
+
+    .toolbar-label {
+      padding: 0 6px 0 8px;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 760;
+    }
+
+    .toolbar-count {
       display: grid;
-      align-content: start;
-      gap: 11px;
-      transition:
-        border-color 140ms ease,
-        transform 140ms ease,
-        box-shadow 140ms ease;
+      place-items: center;
+      min-width: 24px;
+      height: 24px;
+      border-radius: 999px;
+      background: #edf5ff;
+      color: var(--blue-strong);
+      font-size: 12px;
+      font-weight: 820;
     }
 
-    .template-card:hover,
-    .template-card.selected {
-      border-color: #91b6ee;
-      transform: translateY(-1px);
-      box-shadow: 0 14px 30px rgba(20, 38, 64, 0.09);
+    .structure-meta {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      align-items: center;
+      margin-bottom: 12px;
     }
 
-    .template-thumb {
-      height: 72px;
+    .layout-builder {
+      display: grid;
+      gap: 12px;
+      border: 1px dashed var(--border-strong);
       border-radius: 8px;
-      background:
-        linear-gradient(#dfe8f2 0 0) 10px 11px / 44% 9px no-repeat,
-        linear-gradient(#edf2f7 0 0) 10px 28px / 70% 7px no-repeat,
-        linear-gradient(90deg, #3478f6 30%, #16a69a 0 58%, #f0a10a 0) 10px 52px / 72% 11px no-repeat,
-        #f8fafc;
-      border: 1px solid #e3e9f0;
+      background: #fbfcfe;
+      padding: 14px;
     }
 
-    .template-thumb.metric {
-      background:
-        linear-gradient(#dfe8f2 0 0) 10px 11px / 40% 9px no-repeat,
-        linear-gradient(#3478f6 0 0) 11px 38px / 24% 18px no-repeat,
-        linear-gradient(#16a69a 0 0) 39% 30px / 24% 26px no-repeat,
-        linear-gradient(#f0a10a 0 0) 67% 44px / 20% 12px no-repeat,
-        #f8fafc;
-    }
-
-    .template-thumb.detail {
-      background:
-        linear-gradient(#dfe8f2 0 0) 10px 11px / 50% 9px no-repeat,
-        repeating-linear-gradient(#ffffff 0 13px, #edf2f7 13px 14px) 10px 31px / calc(100% - 20px) 32px no-repeat,
-        linear-gradient(90deg, #e6edf6 20%, transparent 0) 10px 31px / calc(100% - 20px) 32px no-repeat,
-        #f8fafc;
-    }
-
-    .block-list {
-      display: grid;
-      gap: 10px;
-    }
-
-    .block-card {
+    .layout-item {
       border: 1px solid var(--border);
       border-radius: 8px;
       background: #ffffff;
       overflow: hidden;
     }
 
-    .block-summary {
+    .layout-item-head {
       display: grid;
-      grid-template-columns: 34px minmax(0, 1fr) auto;
-      gap: 12px;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 10px;
       align-items: center;
-      padding: 12px;
-      border-bottom: 1px solid transparent;
+      border-bottom: 1px solid var(--border);
+      background: #f8fafc;
+      padding: 10px;
     }
 
-    .block-card.open .block-summary {
-      border-bottom-color: var(--border);
-    }
-
-    .drag {
-      width: 34px;
-      height: 34px;
-      border-radius: 8px;
+    .layout-item-title {
       display: grid;
-      place-items: center;
+      grid-template-columns: minmax(130px, 0.8fr) minmax(120px, 0.45fr);
+      gap: 8px;
+      min-width: 0;
+    }
+
+    .layout-item-title input,
+    .layout-item-title select {
+      min-height: 34px;
+      padding: 6px 9px;
+    }
+
+    .layout-item-actions {
+      display: flex;
+      justify-content: flex-end;
+      gap: 6px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+
+    .layout-item-body {
+      padding: 10px;
+    }
+
+    .layout-grid-cells {
+      display: grid;
+      grid-template-columns: repeat(var(--columns, 2), minmax(150px, 1fr));
+      gap: 10px;
+      align-items: start;
+      overflow-x: auto;
+    }
+
+    .grid-cell {
+      position: relative;
+      display: grid;
+      align-content: start;
+      gap: 8px;
+      min-height: 118px;
+      border: 1px solid #d5dfeb;
+      border-radius: 8px;
+      background:
+        linear-gradient(180deg, #f7fafc, #ffffff);
+      padding: 10px;
+      transition:
+        border-color 140ms ease,
+        background 140ms ease,
+        box-shadow 140ms ease;
+    }
+
+    .grid-cell.empty {
+      align-content: center;
+      justify-items: center;
+      border-style: dashed;
       color: var(--subtle);
-      background: #f3f6f9;
+      font-weight: 760;
     }
 
-    .block-name {
-      font-weight: 790;
-      overflow-wrap: anywhere;
+    .grid-cell.over {
+      border-color: var(--blue);
+      background: #f1f7ff;
+      box-shadow: 0 0 0 3px rgba(52, 120, 246, 0.12);
     }
 
-    .block-desc {
+    .cell-add {
+      min-height: 56px;
+      width: 100%;
+      border: 1px dashed #bfd0e3;
+      border-radius: 8px;
+      background: rgba(255, 255, 255, 0.72);
       color: var(--muted);
-      font-size: 13px;
+      font-weight: 760;
+    }
+
+    .structure-block {
+      display: grid;
+      gap: 8px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: #ffffff;
+      padding: 10px;
+      box-shadow: 0 8px 18px rgba(20, 38, 64, 0.04);
+    }
+
+    [data-draggable="true"] {
+      cursor: grab;
+      user-select: none;
+    }
+
+    .structure-block.dragging {
+      opacity: 0.46;
+    }
+
+    .structure-top {
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+      align-items: flex-start;
+    }
+
+    .structure-title {
+      font-weight: 820;
       overflow-wrap: anywhere;
+    }
+
+    .inline-config {
+      display: grid;
+      gap: 10px;
+      border-top: 1px solid var(--border);
+      padding-top: 10px;
     }
 
     .block-actions {
       display: flex;
       align-items: center;
+      justify-content: flex-end;
       gap: 7px;
       flex-wrap: wrap;
-      justify-content: flex-end;
     }
 
     .icon-button {
+      display: grid;
+      place-items: center;
       width: 34px;
       height: 34px;
       border: 1px solid var(--border);
       border-radius: 8px;
       background: #ffffff;
       color: var(--muted);
-      display: grid;
-      place-items: center;
+    }
+
+    .icon-button:disabled {
+      cursor: not-allowed;
+      opacity: 0.42;
     }
 
     .icon-button:hover {
       border-color: var(--border-strong);
-      color: var(--text);
       background: #f7f9fb;
+      color: var(--text);
     }
 
-    .block-settings {
-      display: none;
-      padding: 14px;
-      background: #fbfcfe;
-    }
-
-    .block-card.open .block-settings {
+    .form-grid {
       display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
       gap: 14px;
+    }
+
+    .field {
+      display: grid;
+      gap: 6px;
+    }
+
+    label,
+    .field-label {
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 760;
+    }
+
+    input,
+    select,
+    textarea {
+      width: 100%;
+      min-height: 40px;
+      border: 1px solid var(--border-strong);
+      border-radius: 8px;
+      background: #ffffff;
+      color: var(--text);
+      padding: 9px 11px;
+      outline: none;
+      transition:
+        border-color 140ms ease,
+        box-shadow 140ms ease;
+    }
+
+    textarea {
+      min-height: 96px;
+      resize: vertical;
+    }
+
+    input:focus,
+    select:focus,
+    textarea:focus {
+      border-color: var(--blue);
+      box-shadow: 0 0 0 3px rgba(52, 120, 246, 0.13);
     }
 
     .field-pick {
       display: grid;
-      grid-template-columns: repeat(4, minmax(0, 1fr));
+      grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
       gap: 8px;
     }
 
     .field-token {
+      min-height: 36px;
       border: 1px solid var(--border);
       border-radius: 8px;
-      min-height: 36px;
-      padding: 7px 9px;
       background: #ffffff;
       color: var(--muted);
+      padding: 7px 9px;
       text-align: left;
       font-size: 13px;
       font-weight: 650;
@@ -785,36 +846,6 @@
       border-color: #9bd1cb;
       background: #e9f8f6;
       color: #09675f;
-    }
-
-    details.advanced {
-      border: 1px solid var(--border);
-      border-radius: 8px;
-      background: #ffffff;
-      overflow: hidden;
-    }
-
-    details.advanced summary {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      min-height: 42px;
-      padding: 0 12px;
-      color: var(--muted);
-      font-weight: 720;
-      list-style: none;
-      cursor: pointer;
-    }
-
-    details.advanced summary::-webkit-details-marker {
-      display: none;
-    }
-
-    .advanced-body {
-      display: grid;
-      gap: 12px;
-      border-top: 1px solid var(--border);
-      padding: 12px;
     }
 
     .filter-builder {
@@ -829,269 +860,77 @@
       align-items: end;
       border: 1px solid var(--border);
       border-radius: 8px;
-      padding: 12px;
       background: #ffffff;
+      padding: 12px;
     }
 
     .inline-note {
       border-left: 3px solid var(--teal);
+      border-radius: 0 8px 8px 0;
       background: #ecf9f7;
       color: #134f4b;
       padding: 10px 12px;
-      border-radius: 0 8px 8px 0;
       font-size: 13px;
     }
 
-    .preview-pane {
-      position: sticky;
-      top: 108px;
-      max-height: calc(100vh - 126px);
-      overflow: auto;
-      background: #ffffff;
+    .check-list {
+      display: grid;
+      gap: 9px;
     }
 
-    .preview-head {
+    .check {
       display: flex;
       align-items: center;
-      justify-content: space-between;
-      gap: 12px;
-      padding: 16px;
-      border-bottom: 1px solid var(--border);
-      background: #ffffff;
-      position: sticky;
-      top: 0;
-      z-index: 2;
-    }
-
-    .preview-title {
-      font-weight: 790;
-    }
-
-    .preview-body {
-      padding: 18px;
-      display: grid;
-      gap: 18px;
-    }
-
-    .report-title {
-      display: grid;
-      gap: 6px;
-    }
-
-    .report-title h2 {
-      font-size: 24px;
-      line-height: 1.15;
-      letter-spacing: 0;
-    }
-
-    .report-title p {
-      color: var(--muted);
-    }
-
-    .filter-bar {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 8px;
-      align-items: center;
-      padding: 10px;
+      gap: 9px;
+      min-height: 36px;
       border: 1px solid var(--border);
       border-radius: 8px;
-      background: #f8fafc;
-    }
-
-    .filter-pill {
-      display: inline-flex;
-      min-height: 30px;
-      align-items: center;
-      gap: 7px;
-      border: 1px solid var(--border);
-      border-radius: 999px;
       background: #ffffff;
       padding: 0 10px;
       color: var(--muted);
-      font-size: 12px;
-      font-weight: 700;
-    }
-
-    .metric-row {
-      display: grid;
-      grid-template-columns: repeat(3, minmax(0, 1fr));
-      gap: 10px;
-    }
-
-    .metric-card {
-      border: 1px solid var(--border);
-      border-radius: 8px;
-      padding: 12px;
-      background: #ffffff;
-      display: grid;
-      gap: 4px;
-      min-width: 0;
-    }
-
-    .metric-label {
-      color: var(--muted);
-      font-size: 12px;
-      font-weight: 720;
-      overflow-wrap: anywhere;
-    }
-
-    .metric-value {
-      font-size: 24px;
-      font-weight: 810;
-      line-height: 1.1;
-    }
-
-    .metric-delta {
-      color: var(--green);
-      font-size: 12px;
-      font-weight: 720;
-    }
-
-    .chart-card,
-    .table-card {
-      border: 1px solid var(--border);
-      border-radius: 8px;
-      background: #ffffff;
-      overflow: hidden;
-    }
-
-    .report-block-head {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 12px;
-      padding: 12px 14px;
-      border-bottom: 1px solid var(--border);
-    }
-
-    .report-block-head h3 {
-      font-size: 15px;
-      font-weight: 790;
-    }
-
-    .bar-chart {
-      display: grid;
-      gap: 10px;
-      padding: 14px;
-    }
-
-    .bar-row {
-      display: grid;
-      grid-template-columns: 88px minmax(0, 1fr) 42px;
-      align-items: center;
-      gap: 10px;
-      color: var(--muted);
-      font-size: 12px;
-    }
-
-    .bar-track {
-      height: 14px;
-      border-radius: 999px;
-      background: #edf2f7;
-      overflow: hidden;
-    }
-
-    .bar-fill {
-      height: 100%;
-      border-radius: inherit;
-      background: var(--blue);
-      width: var(--value);
-    }
-
-    .bar-fill.teal {
-      background: var(--teal);
-    }
-
-    .bar-fill.amber {
-      background: #f0a10a;
-    }
-
-    .data-table {
-      width: 100%;
-      border-collapse: collapse;
-      font-size: 12px;
-    }
-
-    .data-table th,
-    .data-table td {
-      border-bottom: 1px solid var(--border);
-      padding: 10px 12px;
       text-align: left;
-      vertical-align: top;
-      white-space: nowrap;
     }
 
-    .data-table th {
-      color: var(--muted);
-      font-size: 11px;
-      font-weight: 800;
-      text-transform: uppercase;
-      letter-spacing: 0.04em;
-      background: #f8fafc;
-    }
-
-    .badge {
-      display: inline-flex;
-      align-items: center;
-      min-height: 24px;
+    .check-mark {
+      display: grid;
+      place-items: center;
+      width: 20px;
+      height: 20px;
       border-radius: 999px;
-      padding: 0 8px;
-      font-size: 12px;
-      font-weight: 760;
-      background: #edf2f7;
+      background: #e8edf3;
       color: var(--muted);
-      white-space: nowrap;
+      font-size: 12px;
+      font-weight: 800;
     }
 
-    .badge.green {
+    .check.ok .check-mark {
       background: #e4f5ec;
       color: var(--green);
     }
 
-    .badge.amber {
+    .check.warn .check-mark {
       background: #fff1d9;
       color: var(--amber);
     }
 
-    .badge.blue {
-      background: #e8f1ff;
-      color: var(--blue-strong);
+    .review-grid {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+      gap: 18px;
     }
 
-    .empty-state {
+    .summary-card {
       display: grid;
-      place-items: center;
-      gap: 12px;
-      min-height: 220px;
-      border: 1px dashed var(--border-strong);
+      gap: 10px;
+      border: 1px solid var(--border);
       border-radius: 8px;
       background: #fbfcfe;
-      text-align: center;
-      padding: 22px;
-      color: var(--muted);
+      padding: 14px;
     }
 
-    .save-strip {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 12px;
-      border: 1px solid #cce2f5;
-      border-radius: 8px;
-      background: #f1f8ff;
-      padding: 12px 14px;
-    }
-
-    .save-strip strong {
-      display: block;
-      font-size: 14px;
-    }
-
-    .save-strip span {
-      display: block;
-      color: var(--muted);
-      font-size: 13px;
+    .summary-card strong {
+      font-size: 24px;
+      line-height: 1.1;
     }
 
     .toast {
@@ -1138,15 +977,13 @@
       }
     }
 
-    @media (max-width: 1180px) {
-      .workspace {
-        grid-template-columns: 300px minmax(0, 1fr);
+    @media (max-width: 1160px) {
+      .progress {
+        grid-template-columns: repeat(3, minmax(0, 1fr));
       }
 
-      .preview-pane {
-        grid-column: 1 / -1;
+      .structure-panel {
         position: static;
-        max-height: none;
       }
     }
 
@@ -1174,8 +1011,12 @@
         display: none;
       }
 
-      .topbar {
+      .topbar,
+      .progress-wrap {
         position: static;
+      }
+
+      .topbar {
         align-items: flex-start;
         flex-direction: column;
       }
@@ -1185,51 +1026,22 @@
         width: 100%;
       }
 
-      .workspace {
+      .progress {
         grid-template-columns: 1fr;
       }
 
-      .builder-rail {
-        position: static;
+      .workspace {
+        padding: 14px;
       }
 
       .form-grid,
-      .choice-grid,
-      .template-grid,
-      .field-pick,
-      .filter-row {
+      .filter-row,
+      .review-grid,
+      .section-step[data-section="review"].active,
+      .layout-item-head,
+      .layout-item-title,
+      .layout-grid-cells {
         grid-template-columns: 1fr;
-      }
-
-      .metric-row {
-        grid-template-columns: 1fr;
-      }
-    }
-
-    @media (max-width: 560px) {
-      .sidebar {
-        padding: 18px 12px;
-      }
-
-      .workspace {
-        padding: 12px;
-      }
-
-      .topbar {
-        padding: 18px;
-      }
-
-      .block-summary {
-        grid-template-columns: 1fr;
-      }
-
-      .block-actions {
-        justify-content: flex-start;
-      }
-
-      .data-table {
-        display: block;
-        overflow-x: auto;
       }
     }
   </style>
@@ -1269,222 +1081,153 @@
         </div>
       </nav>
 
-      <div class="sidebar-foot">Prototype v0.1</div>
+      <div class="sidebar-foot">Prototype v0.2</div>
     </aside>
 
     <main class="main">
       <header class="topbar">
-        <div class="title-wrap">
+        <div>
           <div class="crumb">Reports</div>
           <h1>Build report</h1>
         </div>
         <div class="top-actions">
           <button class="button ghost" type="button" id="resetBtn">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M3 12a9 9 0 1 0 3-6.7M3 4v6h6"/></svg>
+            <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M3 12a9 9 0 1 0 3-6.7M3 4v6h6"/></svg>
             Reset
           </button>
-          <button class="button" type="button" id="previewBtn">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12Z"/><circle cx="12" cy="12" r="3"/></svg>
-            Preview
+          <button class="button" type="button" id="nextBtn">
+            Continue
+            <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="m9 18 6-6-6-6"/></svg>
           </button>
           <button class="button primary" type="button" id="saveBtn">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2Z"/><path d="M17 21v-8H7v8M7 3v5h8"/></svg>
-            Save draft
+            <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2Z"/><path d="M17 21v-8H7v8M7 3v5h8"/></svg>
+            <span id="primaryActionLabel">Save draft</span>
           </button>
         </div>
       </header>
 
-      <div class="workspace">
-        <aside class="builder-rail">
-          <section class="panel" aria-label="Build steps">
+      <div class="progress-wrap">
+        <div class="progress" id="progressBar" aria-label="Report builder progress"></div>
+      </div>
+
+      <div class="workspace" id="workspace">
+        <section class="section-step active" data-section="start">
+          <div class="panel">
             <div class="panel-head">
               <div>
-                <h2>Builder path</h2>
-                <p class="panel-sub">Move from data to saved report.</p>
+                <h2>Start from data</h2>
+                <p class="panel-sub">Pick the Object Model data this report should explain. Layout comes next.</p>
               </div>
             </div>
-            <div class="step-list">
-              <button class="step-button done active" type="button" data-step="start">
-                <span class="step-index">1</span>
-                <span>
-                  <span class="step-title">Start from data</span>
-                  <span class="step-detail">Pick schema and template</span>
-                </span>
-                <span class="status-dot"></span>
-              </button>
-              <button class="step-button done" type="button" data-step="content">
-                <span class="step-index">2</span>
-                <span>
-                  <span class="step-title">Arrange content</span>
-                  <span class="step-detail">Edit blocks in page order</span>
-                </span>
-                <span class="status-dot"></span>
-              </button>
-              <button class="step-button" type="button" data-step="filters">
-                <span class="step-index">3</span>
-                <span>
-                  <span class="step-title">Add controls</span>
-                  <span class="step-detail">Connect filters to blocks</span>
-                </span>
-                <span class="status-dot"></span>
-              </button>
-              <button class="step-button" type="button" data-step="finish">
-                <span class="step-index">4</span>
-                <span>
-                  <span class="step-title">Review and save</span>
-                  <span class="step-detail">Resolve checks before publish</span>
-                </span>
-                <span class="status-dot"></span>
-              </button>
+            <div class="panel-body">
+              <div class="choice-grid" id="schemaChoices"></div>
             </div>
-          </section>
-
-          <section class="panel">
-            <div class="panel-head">
-              <div>
-                <h2>Readiness</h2>
-                <p class="panel-sub">Inline checks replace guesswork.</p>
-              </div>
-            </div>
-            <div class="readiness">
-              <div class="score-row">
-                <span>Report setup</span>
-                <strong id="readinessScore">68%</strong>
-              </div>
-              <div class="meter" aria-hidden="true">
-                <div class="meter-fill" id="readinessMeter"></div>
-              </div>
-              <div class="check-list" id="checkList"></div>
-            </div>
-          </section>
-        </aside>
-
-        <section class="builder-main" aria-label="Report builder controls">
-          <div class="save-strip">
-            <div>
-              <strong id="draftTitle">Category Performance Breakdown</strong>
-              <span>Draft report, updated locally in this prototype</span>
-            </div>
-            <span class="badge blue" id="sourceBadge">Products schema</span>
           </div>
-
-          <section class="section-block active" data-section="start">
-            <div class="panel">
-              <div class="panel-head">
-                <div>
-                  <h2>Start from data</h2>
-                  <p class="panel-sub">The first decision is the source, not the report definition.</p>
-                </div>
-              </div>
-              <div class="panel-body">
-                <div class="choice-grid" id="schemaChoices"></div>
-              </div>
-            </div>
-
-            <div class="panel">
-              <div class="panel-head">
-                <div>
-                  <h2>Choose report shape</h2>
-                  <p class="panel-sub">Templates create useful blocks and keep advanced setup optional.</p>
-                </div>
-              </div>
-              <div class="panel-body">
-                <div class="template-grid" id="templateChoices"></div>
-              </div>
-            </div>
-          </section>
-
-          <section class="section-block" data-section="content">
-            <div class="panel">
-              <div class="panel-head">
-                <div>
-                  <h2>Report content</h2>
-                  <p class="panel-sub">Blocks appear in the same order viewers will read them.</p>
-                </div>
-                <button class="button" type="button" id="addBlockBtn">
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
-                  Add block
-                </button>
-              </div>
-              <div class="panel-body">
-                <div class="block-list" id="blockList"></div>
-              </div>
-            </div>
-          </section>
-
-          <section class="section-block" data-section="filters">
-            <div class="panel">
-              <div class="panel-head">
-                <div>
-                  <h2>Viewer controls</h2>
-                  <p class="panel-sub">Filters are described by what users need to control.</p>
-                </div>
-                <button class="button" type="button" id="addFilterBtn">
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
-                  Add filter
-                </button>
-              </div>
-              <div class="panel-body filter-builder">
-                <div class="inline-note">
-                  Filters show a warning until they are connected to at least one compatible block.
-                </div>
-                <div id="filterRows"></div>
-              </div>
-            </div>
-          </section>
-
-          <section class="section-block" data-section="finish">
-            <div class="panel">
-              <div class="panel-head">
-                <div>
-                  <h2>Review and save</h2>
-                  <p class="panel-sub">Checks link back to the exact builder area that needs attention.</p>
-                </div>
-              </div>
-              <div class="panel-body">
-                <div class="form-grid">
-                  <div class="field">
-                    <label for="reportName">Report name</label>
-                    <input id="reportName" value="Category Performance Breakdown" />
-                  </div>
-                  <div class="field">
-                    <label for="reportSlug">Slug</label>
-                    <input id="reportSlug" value="category-performance-breakdown" />
-                  </div>
-                  <div class="field">
-                    <label for="reportStatus">Status</label>
-                    <select id="reportStatus">
-                      <option>Draft</option>
-                      <option>Published</option>
-                    </select>
-                  </div>
-                  <div class="field">
-                    <label for="reportOwner">Owner</label>
-                    <input id="reportOwner" value="Operations" />
-                  </div>
-                </div>
-              </div>
-            </div>
-          </section>
         </section>
 
-        <aside class="panel preview-pane" aria-label="Live report preview">
-          <div class="preview-head">
-            <div>
-              <div class="preview-title">Live preview</div>
-              <div class="panel-sub" id="previewMeta">Products, dashboard template</div>
+        <section class="section-step" data-section="layout">
+          <div class="panel">
+            <div class="panel-head">
+              <div>
+                <h2>Layout</h2>
+                <p class="panel-sub">Choose the page structure. Each option shows its own arrangement example.</p>
+              </div>
             </div>
-            <span class="badge green">Autosynced</span>
+            <div class="panel-body">
+              <div class="layout-grid" id="layoutChoices"></div>
+            </div>
           </div>
-          <div class="preview-body" id="previewBody"></div>
-        </aside>
+        </section>
+
+        <section class="section-step" data-section="blocks">
+          <div class="panel structure-panel" aria-label="Report block layout editor">
+            <div class="panel-head">
+              <div>
+                <h2>Blocks</h2>
+                <p class="panel-sub">Build the report from editable layout items.</p>
+              </div>
+              <div class="panel-actions">
+                <button class="button" type="button" id="addLayoutItemBtn">
+                  <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+                  Add layout item
+                </button>
+              </div>
+            </div>
+            <div class="panel-body">
+              <div class="layout-builder" id="blockStructure"></div>
+            </div>
+          </div>
+        </section>
+
+        <section class="section-step" data-section="controls">
+          <div class="panel">
+            <div class="panel-head">
+              <div>
+                <h2>Viewer controls</h2>
+                <p class="panel-sub">Configure filters separately so block setup stays focused.</p>
+              </div>
+              <button class="button" type="button" id="addFilterBtn">
+                <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+                Add filter
+              </button>
+            </div>
+            <div class="panel-body filter-builder">
+              <div class="inline-note">
+                Filters are not mixed into block setup. They warn until connected to compatible blocks.
+              </div>
+              <div id="filterRows"></div>
+            </div>
+          </div>
+        </section>
+
+        <section class="section-step" data-section="review">
+          <div class="panel">
+            <div class="panel-head">
+              <div>
+                <h2>Review</h2>
+                <p class="panel-sub">Confirm the configured report before opening it in the drag-and-drop editor.</p>
+              </div>
+              <button class="button primary" type="button" id="openEditorBtn">
+                Open editor
+                <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="m9 18 6-6-6-6"/></svg>
+              </button>
+            </div>
+            <div class="panel-body">
+              <div class="review-grid">
+                <div class="summary-card">
+                  <span class="choice-meta">Report</span>
+                  <strong id="reviewTitle">Category Performance Breakdown</strong>
+                  <span class="badge blue" id="reviewSource">Products schema</span>
+                </div>
+                <div class="summary-card">
+                  <span class="choice-meta">Structure</span>
+                  <strong id="reviewLayout">Top band + grid</strong>
+                  <span class="choice-meta" id="reviewCounts">3 blocks, 2 filters</span>
+                </div>
+              </div>
+              <div class="check-list" id="checkList" style="margin-top: 16px"></div>
+            </div>
+          </div>
+
+          <aside class="panel structure-panel" aria-label="Final report structure">
+            <div class="panel-head">
+              <div>
+                <h2>Final structure</h2>
+                <p class="panel-sub">This is the report users will edit with drag and drop.</p>
+              </div>
+            </div>
+            <div class="panel-body">
+              <div class="layout-builder" id="reviewStructure"></div>
+            </div>
+          </aside>
+        </section>
       </div>
     </main>
   </div>
 
   <div class="toast" id="toast" role="status" aria-live="polite">
     <span class="badge green">Saved</span>
-    <span>Draft saved in prototype state.</span>
+    <span id="toastMessage">Draft saved in prototype state.</span>
   </div>
 
   <script>
@@ -1497,6 +1240,14 @@
       trash: '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M3 6h18M8 6V4h8v2M6 6l1 15h10l1-15"/></svg>',
       grip: '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M9 5h.01M15 5h.01M9 12h.01M15 12h.01M9 19h.01M15 19h.01"/></svg>'
     };
+
+    const steps = [
+      { id: "start", title: "Start", detail: "Data source" },
+      { id: "layout", title: "Layout", detail: "Structure" },
+      { id: "blocks", title: "Blocks", detail: "Drag and configure" },
+      { id: "controls", title: "Controls", detail: "Filters" },
+      { id: "review", title: "Review", detail: "Open editor" }
+    ];
 
     const schemas = [
       {
@@ -1537,43 +1288,47 @@
       }
     ];
 
-    const templates = [
+    const layouts = [
       {
-        id: "dashboard",
-        name: "Operational dashboard",
-        thumb: "",
-        meta: "Metrics, chart, and detail table",
-        blocks: ["summary", "breakdown", "records"]
+        id: "stack",
+        name: "Single column",
+        meta: "One readable vertical path for narrative reports",
+        rows: 4,
+        columns: 1
       },
       {
-        id: "metrics",
-        name: "Metrics review",
-        thumb: "metric",
-        meta: "KPI row with trend chart",
-        blocks: ["summary", "breakdown"]
+        id: "columns",
+        name: "Two-column split",
+        meta: "Primary content beside supporting context",
+        rows: 2,
+        columns: 2
       },
       {
-        id: "detail",
-        name: "Detail list",
-        thumb: "detail",
-        meta: "Narrative intro and table",
-        blocks: ["intro", "records"]
+        id: "grid",
+        name: "Card grid",
+        meta: "Equal-width regions for repeated views",
+        rows: 2,
+        columns: 2
+      },
+      {
+        id: "header-grid",
+        name: "Top band + grid",
+        meta: "Full-width opening region followed by paired regions",
+        rows: 3,
+        columns: 2
       }
-    ];
-
-    const sampleRows = [
-      ["Networking", "1,720", "$284,100", "Active"],
-      ["Storage", "1,384", "$231,480", "Active"],
-      ["Operations", "1,196", "$198,250", "Review"],
-      ["Power", "980", "$162,900", "Active"],
-      ["Electronics", "812", "$139,420", "Review"]
     ];
 
     const state = {
       step: "start",
       schema: "products",
-      template: "dashboard",
+      layout: "header-grid",
       title: "Category Performance Breakdown",
+      draggedBlockId: null,
+      structure: {
+        rows: 3,
+        columns: 2
+      },
       filters: [
         { name: "Category", field: "category", applies: "All compatible blocks", connected: true },
         { name: "Stock state", field: "inventory_units", applies: "Records table", connected: true }
@@ -1583,19 +1338,21 @@
 
     const $ = (selector) => document.querySelector(selector);
     const $$ = (selector) => Array.from(document.querySelectorAll(selector));
+    let pointerDrag = null;
 
     function currentSchema() {
       return schemas.find((schema) => schema.id === state.schema) || schemas[0];
     }
 
-    function currentTemplate() {
-      return templates.find((template) => template.id === state.template) || templates[0];
+    function currentLayout() {
+      return layouts.find((layout) => layout.id === state.layout) || layouts[0];
     }
 
     function defaultBlocks() {
       const schema = currentSchema();
       const label = schema.name === "Products" ? "SKU" : schema.name.replace(/s$/, "");
       const byField = schema.fields[1] || "status";
+      const placements = defaultPlacements(4);
       return [
         {
           id: "intro",
@@ -1603,6 +1360,7 @@
           title: schema.name + " overview",
           desc: "Plain-language section at the top of the report.",
           fields: [],
+          placement: placements[0],
           open: false
         },
         {
@@ -1611,6 +1369,7 @@
           title: "Summary metrics",
           desc: "Count, total value, and records needing review.",
           fields: [schema.fields[0], schema.fields[2], schema.fields[3]].filter(Boolean),
+          placement: placements[1],
           open: false
         },
         {
@@ -1619,6 +1378,7 @@
           title: "Breakdown by " + humanize(byField),
           desc: "Grouped chart with a visible trend or distribution.",
           fields: [byField, schema.fields[2]].filter(Boolean),
+          placement: placements[2],
           open: false
         },
         {
@@ -1627,15 +1387,163 @@
           title: "Records table",
           desc: "A scannable list of " + label.toLowerCase() + " records.",
           fields: schema.fields.slice(0, 5),
-          open: true
+          placement: placements[3],
+          open: false
         }
-      ].filter((block) => currentTemplate().blocks.includes(block.id));
+      ];
     }
 
     function humanize(value) {
       return String(value || "")
         .replace(/[_-]/g, " ")
         .replace(/\b\w/g, (letter) => letter.toUpperCase());
+    }
+
+    function stepIndex(stepId = state.step) {
+      return steps.findIndex((step) => step.id === stepId);
+    }
+
+    function stepDone(stepId) {
+      if (stepId === "start") return Boolean(state.schema);
+      if (stepId === "layout") return Boolean(state.layout);
+      if (stepId === "blocks") return state.blocks.length > 0 && allBlocksHaveFields();
+      if (stepId === "controls") return state.filters.some((filter) => filter.connected);
+      if (stepId === "review") return readiness().score === 100;
+      return false;
+    }
+
+    function allBlocksHaveFields() {
+      return state.blocks.every((block) => block.type === "text" || block.fields.length > 0);
+    }
+
+    function defaultPlacements(count) {
+      const columns = state.structure?.columns || 2;
+      if (state.structure) {
+        state.structure.rows = Math.max(state.structure.rows, Math.ceil(count / columns));
+      }
+      return Array.from({ length: count }, (_, index) => ({
+        row: Math.floor(index / columns) + 1,
+        column: (index % columns) + 1
+      }));
+    }
+
+    function applyLayoutDefaults(layoutId) {
+      const layout = layouts.find((candidate) => candidate.id === layoutId) || layouts[0];
+      state.layout = layout.id;
+      state.structure.rows = layout.rows;
+      state.structure.columns = layout.columns;
+      const placements = defaultPlacements(state.blocks.length);
+      state.blocks.forEach((block, index) => {
+        block.placement = placements[index];
+      });
+      normalizePlacements();
+    }
+
+    function normalizePlacements() {
+      state.blocks.forEach((block, index) => {
+        if (!block.placement) {
+          block.placement = defaultPlacements(index + 1)[index];
+        }
+        block.placement.row = Math.min(Math.max(Number(block.placement.row) || 1, 1), state.structure.rows);
+        block.placement.column = Math.min(Math.max(Number(block.placement.column) || 1, 1), state.structure.columns);
+      });
+    }
+
+    function nextOpenCell() {
+      normalizePlacements();
+      for (let row = 1; row <= state.structure.rows; row += 1) {
+        for (let column = 1; column <= state.structure.columns; column += 1) {
+          const occupied = state.blocks.some((block) =>
+            block.placement.row === row && block.placement.column === column
+          );
+          if (!occupied) return { row, column };
+        }
+      }
+      state.structure.rows += 1;
+      return { row: state.structure.rows, column: 1 };
+    }
+
+    function placementLabel(block) {
+      const placement = block.placement || { row: 1, column: 1 };
+      return `R${placement.row} C${placement.column}`;
+    }
+
+    function dragTargetBlocked(target) {
+      return Boolean(target.closest("button, input, select, textarea"));
+    }
+
+    function clearCellOver() {
+      $$(".grid-cell.over").forEach((cell) => cell.classList.remove("over"));
+    }
+
+    function cellFromPoint(x, y) {
+      const element = document.elementFromPoint(x, y);
+      return element ? element.closest(".grid-cell") : null;
+    }
+
+    function beginPointerDrag(event, blockId, source) {
+      if (event.button !== 0 || dragTargetBlocked(event.target)) return;
+      event.preventDefault();
+      pointerDrag = { blockId, source };
+      state.draggedBlockId = blockId;
+      source.classList.add("dragging");
+      document.addEventListener("mousemove", trackPointerDrag);
+      document.addEventListener("mouseup", finishPointerDrag, { once: true });
+    }
+
+    function trackPointerDrag(event) {
+      if (!pointerDrag) return;
+      clearCellOver();
+      const cell = cellFromPoint(event.clientX, event.clientY);
+      if (cell) cell.classList.add("over");
+    }
+
+    function finishPointerDrag(event) {
+      if (!pointerDrag) return;
+      const { blockId, source } = pointerDrag;
+      const cell = cellFromPoint(event.clientX, event.clientY);
+      pointerDrag = null;
+      state.draggedBlockId = null;
+      document.removeEventListener("mousemove", trackPointerDrag);
+      source.classList.remove("dragging");
+      clearCellOver();
+      if (cell) {
+        moveBlockToCell(blockId, Number(cell.dataset.row), Number(cell.dataset.column));
+      }
+    }
+
+    function setStep(stepId) {
+      state.step = stepId;
+      renderAll();
+    }
+
+    function updatePrimaryAction() {
+      $("#primaryActionLabel").textContent =
+        state.step === "review" ? "Open editor" : "Save draft";
+    }
+
+    function renderProgress() {
+      $("#progressBar").innerHTML = steps
+        .map((step, index) => `
+          <button class="progress-step ${step.id === state.step ? "active" : ""} ${stepDone(step.id) ? "done" : ""}" type="button" data-step="${step.id}">
+            <span class="step-index">${index + 1}</span>
+            <span class="step-copy">
+              <span class="step-title">${step.title}</span>
+              <span class="step-detail">${step.detail}</span>
+            </span>
+          </button>
+        `)
+        .join("");
+
+      $$("#progressBar [data-step]").forEach((button) => {
+        button.addEventListener("click", () => setStep(button.dataset.step));
+      });
+    }
+
+    function renderSections() {
+      $$(".section-step").forEach((section) => {
+        section.classList.toggle("active", section.dataset.section === state.step);
+      });
     }
 
     function renderSchemaChoices() {
@@ -1661,150 +1569,180 @@
         button.addEventListener("click", () => {
           state.schema = button.dataset.schema;
           state.blocks = defaultBlocks();
-          updateAll();
+          renderAll();
         });
       });
     }
 
-    function renderTemplateChoices() {
-      $("#templateChoices").innerHTML = templates
-        .map((template) => `
-          <button class="template-card ${template.id === state.template ? "selected" : ""}" type="button" data-template="${template.id}">
-            <span class="template-thumb ${template.thumb}"></span>
+    function renderLayoutChoices() {
+      $("#layoutChoices").innerHTML = layouts
+        .map((layout) => `
+          <button class="layout-card ${layout.id === state.layout ? "selected" : ""}" type="button" data-layout="${layout.id}">
+            <span class="layout-thumb ${layout.id}"></span>
             <span>
-              <span class="choice-title">${template.name}</span>
-              <span class="choice-meta">${template.meta}</span>
-            </span>
-            <span class="chip-row">
-              ${template.blocks.map((block) => `<span class="chip on">${humanize(block)}</span>`).join("")}
+              <span class="choice-title">${layout.name}</span>
+              <span class="choice-meta">${layout.meta}</span>
             </span>
           </button>
         `)
         .join("");
 
-      $$("#templateChoices [data-template]").forEach((button) => {
+      $$("#layoutChoices [data-layout]").forEach((button) => {
         button.addEventListener("click", () => {
-          state.template = button.dataset.template;
-          state.blocks = defaultBlocks();
-          updateAll();
+          applyLayoutDefaults(button.dataset.layout);
+          renderAll();
         });
       });
     }
 
-    function renderSteps() {
-      $$(".step-button").forEach((button) => {
-        button.classList.toggle("active", button.dataset.step === state.step);
-        button.classList.toggle("done", stepDone(button.dataset.step));
-      });
-
-      $$(".section-block").forEach((section) => {
-        section.classList.toggle("active", section.dataset.section === state.step);
-      });
+    function renderBlockConfig(block) {
+      return `
+        <div class="inline-config">
+          <div class="form-grid">
+            <div class="field">
+              <label for="title-${block.id}">Title</label>
+              <input id="title-${block.id}" value="${block.title}" data-input="title" />
+            </div>
+            <div class="field">
+              <label for="type-${block.id}">Type</label>
+              <select id="type-${block.id}" data-input="type">
+                ${["text", "metric", "chart", "table"].map((type) => `<option ${type === block.type ? "selected" : ""}>${type}</option>`).join("")}
+              </select>
+            </div>
+          </div>
+          <div class="field">
+            <span class="field-label">Fields</span>
+            <div class="field-pick">
+              ${currentSchema().fields.map((field) => `
+                <button class="field-token ${block.fields.includes(field) ? "on" : ""}" type="button" data-field="${field}">
+                  ${humanize(field)}
+                </button>
+              `).join("")}
+            </div>
+          </div>
+        </div>
+      `;
     }
 
-    function stepDone(step) {
-      if (step === "start") return Boolean(state.schema && state.template);
-      if (step === "content") return state.blocks.length > 0;
-      if (step === "filters") return state.filters.some((filter) => filter.connected);
-      if (step === "finish") return readiness().score >= 85;
-      return false;
+    function renderPlacedBlock(block, editable) {
+      return `
+        <article class="structure-block ${block.type} ${block.open && editable ? "open" : ""}" ${editable ? 'data-draggable="true"' : ""} data-block="${block.id}">
+          <div class="structure-top">
+            <div class="structure-title">${block.title}</div>
+            <div class="block-actions">
+              <span class="badge">${humanize(block.type)}</span>
+              ${editable ? `
+                <button class="icon-button" type="button" data-action="toggle" aria-label="Configure ${block.title}">${icons.settings}</button>
+                <button class="icon-button" type="button" data-action="remove" aria-label="Remove ${block.title}">${icons.trash}</button>
+              ` : ""}
+            </div>
+          </div>
+          ${block.open && editable ? renderBlockConfig(block) : ""}
+        </article>
+      `;
     }
 
-    function renderBlocks() {
-      $("#blockList").innerHTML = state.blocks
-        .map((block, index) => `
-          <article class="block-card ${block.open ? "open" : ""}" data-block="${block.id}">
-            <div class="block-summary">
-              <div class="drag" title="Drag handle">${icons.grip}</div>
-              <div>
-                <div class="block-name">${block.title}</div>
-                <div class="block-desc">${block.desc}</div>
-              </div>
-              <div class="block-actions">
-                <span class="badge">${humanize(block.type)}</span>
-                <button class="icon-button" type="button" data-action="toggle" aria-label="Toggle block settings">${icons.settings}</button>
-                <button class="icon-button" type="button" data-action="remove" aria-label="Remove block">${icons.trash}</button>
-              </div>
-            </div>
-            <div class="block-settings">
-              <div class="form-grid">
-                <div class="field">
-                  <label for="title-${block.id}">Block title</label>
-                  <input id="title-${block.id}" value="${block.title}" data-input="title" />
-                </div>
-                <div class="field">
-                  <label for="type-${block.id}">Block type</label>
-                  <select id="type-${block.id}" data-input="type">
-                    ${["text", "metric", "chart", "table"].map((type) => `<option ${type === block.type ? "selected" : ""}>${type}</option>`).join("")}
-                  </select>
-                </div>
-              </div>
-              <div class="field">
-                <span class="field-label">Visible fields</span>
-                <div class="field-pick">
-                  ${currentSchema().fields.map((field) => `
-                    <button class="field-token ${block.fields.includes(field) ? "on" : ""}" type="button" data-field="${field}">
-                      ${humanize(field)}
-                    </button>
-                  `).join("")}
-                </div>
-              </div>
-              <details class="advanced">
-                <summary>
-                  <span>Advanced source options</span>
-                  <span class="badge">Optional</span>
-                </summary>
-                <div class="advanced-body">
-                  <div class="form-grid">
-                    <div class="field">
-                      <label>Join</label>
-                      <select>
-                        <option>No join</option>
-                        <option>Join to supplier</option>
-                        <option>Join to owner</option>
-                      </select>
-                    </div>
-                    <div class="field">
-                      <label>Source condition</label>
-                      <input value="${currentSchema().fields[0]} is not empty" />
-                    </div>
-                  </div>
-                </div>
-              </details>
-            </div>
-          </article>
-        `)
-        .join("");
+    function renderStructure(targetId) {
+      const container = $("#" + targetId);
+      if (!container) return;
+      const layout = currentLayout();
+      const editable = targetId === "blockStructure";
+      normalizePlacements();
+      container.className = `structure-canvas ${editable ? "editable" : "readonly"}`;
+      container.style.setProperty("--columns", state.structure.columns);
+      container.innerHTML = Array.from({ length: state.structure.rows }, (_, rowIndex) => {
+        const row = rowIndex + 1;
+        return Array.from({ length: state.structure.columns }, (_, columnIndex) => {
+          const column = columnIndex + 1;
+          const blocks = state.blocks.filter((block) =>
+            block.placement.row === row && block.placement.column === column
+          );
+          return `
+            <section class="grid-cell ${blocks.length ? "" : "empty"}" data-row="${row}" data-column="${column}" aria-label="Cell R${row} C${column}">
+              <span class="cell-tag">R${row} C${column}</span>
+              ${blocks.length ? blocks.map((block) => renderPlacedBlock(block, editable)).join("") : `<span class="cell-empty">Drop block</span>`}
+            </section>
+          `;
+        }).join("");
+      }).join("");
 
-      $$("#blockList .block-card").forEach((card) => {
-        const block = state.blocks.find((candidate) => candidate.id === card.dataset.block);
-        card.querySelector('[data-action="toggle"]').addEventListener("click", () => {
+      ["blockLayoutBadge"].forEach((id) => {
+        const badge = $("#" + id);
+        if (badge) badge.textContent = layout.name;
+      });
+
+      if (!editable) return;
+
+      container.querySelectorAll(".structure-block").forEach((card) => {
+        card.addEventListener("mousedown", (event) => beginPointerDrag(event, card.dataset.block, card));
+      });
+      container.querySelectorAll('[data-action="toggle"]').forEach((button) => {
+        button.addEventListener("click", () => {
+          const block = state.blocks.find((candidate) => candidate.id === button.closest(".structure-block").dataset.block);
           block.open = !block.open;
-          renderBlocks();
-        });
-        card.querySelector('[data-action="remove"]').addEventListener("click", () => {
-          state.blocks = state.blocks.filter((candidate) => candidate.id !== block.id);
-          updateAll();
-        });
-        card.querySelector('[data-input="title"]').addEventListener("input", (event) => {
-          block.title = event.target.value;
-          renderPreview();
-          renderReadiness();
-        });
-        card.querySelector('[data-input="type"]').addEventListener("change", (event) => {
-          block.type = event.target.value;
-          updateAll();
-        });
-        card.querySelectorAll("[data-field]").forEach((button) => {
-          button.addEventListener("click", () => {
-            const field = button.dataset.field;
-            block.fields = block.fields.includes(field)
-              ? block.fields.filter((item) => item !== field)
-              : [...block.fields, field];
-            updateAll();
-          });
+          renderAll();
         });
       });
+      container.querySelectorAll('[data-action="remove"]').forEach((button) => {
+        button.addEventListener("click", () => {
+          const blockId = button.closest(".structure-block").dataset.block;
+          state.blocks = state.blocks.filter((candidate) => candidate.id !== blockId);
+          renderAll();
+        });
+      });
+      container.querySelectorAll('[data-input="title"]').forEach((input) => {
+        input.addEventListener("input", (event) => {
+          const block = state.blocks.find((candidate) => candidate.id === event.target.closest(".structure-block").dataset.block);
+          block.title = event.target.value;
+          renderAll();
+        });
+      });
+      container.querySelectorAll('[data-input="type"]').forEach((select) => {
+        select.addEventListener("change", (event) => {
+          const block = state.blocks.find((candidate) => candidate.id === event.target.closest(".structure-block").dataset.block);
+          block.type = event.target.value;
+          renderAll();
+        });
+      });
+      container.querySelectorAll("[data-field]").forEach((button) => {
+        button.addEventListener("click", () => {
+          const block = state.blocks.find((candidate) => candidate.id === button.closest(".structure-block").dataset.block);
+          const field = button.dataset.field;
+          block.fields = block.fields.includes(field)
+            ? block.fields.filter((item) => item !== field)
+            : [...block.fields, field];
+          renderAll();
+        });
+      });
+    }
+
+    function moveBlockToCell(blockId, row, column) {
+      const block = state.blocks.find((candidate) => candidate.id === blockId);
+      if (!block) return;
+      block.placement = { row, column };
+      renderAll();
+    }
+
+    function renderStructureControls() {
+      const rowCount = $("#rowCount");
+      const columnCount = $("#columnCount");
+      if (!rowCount || !columnCount) return;
+      rowCount.textContent = state.structure.rows;
+      columnCount.textContent = state.structure.columns;
+      $("#removeRowBtn").disabled = state.structure.rows <= 1;
+      $("#removeColumnBtn").disabled = state.structure.columns <= 1;
+    }
+
+    function resizeRows(delta) {
+      state.structure.rows = Math.max(1, state.structure.rows + delta);
+      normalizePlacements();
+      renderAll();
+    }
+
+    function resizeColumns(delta) {
+      state.structure.columns = Math.max(1, state.structure.columns + delta);
+      normalizePlacements();
+      renderAll();
     }
 
     function renderFilters() {
@@ -1836,197 +1774,89 @@
         const filter = state.filters[Number(row.dataset.filter)];
         row.querySelector('[data-input="name"]').addEventListener("input", (event) => {
           filter.name = event.target.value;
-          updateAll();
+          renderAll();
         });
         row.querySelector('[data-input="field"]').addEventListener("change", (event) => {
           filter.field = event.target.value;
-          updateAll();
+          renderAll();
         });
         row.querySelector('[data-input="applies"]').addEventListener("change", (event) => {
           filter.applies = event.target.value;
           filter.connected = event.target.value !== "Not connected";
-          updateAll();
+          renderAll();
         });
         row.querySelector('[data-action="remove"]').addEventListener("click", () => {
           state.filters.splice(Number(row.dataset.filter), 1);
-          updateAll();
+          renderAll();
         });
       });
-    }
-
-    function renderPreview() {
-      const schema = currentSchema();
-      const template = currentTemplate();
-      $("#draftTitle").textContent = state.title;
-      $("#sourceBadge").textContent = schema.name + " schema";
-      $("#previewMeta").textContent = schema.name + ", " + template.name.toLowerCase();
-
-      const blocks = state.blocks;
-      $("#previewBody").innerHTML = `
-        <div class="report-title">
-          <h2>${state.title}</h2>
-          <p>${schema.meta}. Built from ${schema.records.toLowerCase()}.</p>
-        </div>
-        ${renderPreviewFilters()}
-        ${blocks.length === 0 ? `
-          <div class="empty-state">
-            <div class="mini-icon">${icons.chart}</div>
-            <p>Add a report block to see the preview.</p>
-          </div>
-        ` : blocks.map(renderPreviewBlock).join("")}
-      `;
-    }
-
-    function renderPreviewFilters() {
-      const connected = state.filters.filter((filter) => filter.connected);
-      if (!connected.length) return "";
-      return `
-        <div class="filter-bar">
-          ${connected.map((filter) => `<span class="filter-pill">${filter.name}: All</span>`).join("")}
-        </div>
-      `;
-    }
-
-    function renderPreviewBlock(block) {
-      if (block.type === "text") {
-        return `
-          <section class="report-title">
-            <h3>${block.title}</h3>
-            <p>This section gives the report a readable opening before the operational data begins.</p>
-          </section>
-        `;
-      }
-      if (block.type === "metric") {
-        return `
-          <section class="metric-row">
-            <div class="metric-card">
-              <span class="metric-label">Total records</span>
-              <span class="metric-value">${currentSchema().records.split(" ")[0]}</span>
-              <span class="metric-delta">Live object data</span>
-            </div>
-            <div class="metric-card">
-              <span class="metric-label">In review</span>
-              <span class="metric-value">18%</span>
-              <span class="metric-delta">3 pts lower</span>
-            </div>
-            <div class="metric-card">
-              <span class="metric-label">Updated this week</span>
-              <span class="metric-value">642</span>
-              <span class="metric-delta">Fresh</span>
-            </div>
-          </section>
-        `;
-      }
-      if (block.type === "chart") {
-        return `
-          <section class="chart-card">
-            <div class="report-block-head">
-              <h3>${block.title}</h3>
-              <span class="badge blue">${block.fields.map(humanize).join(", ") || "Grouped data"}</span>
-            </div>
-            <div class="bar-chart">
-              ${[
-                ["Networking", 92, "blue"],
-                ["Storage", 78, "teal"],
-                ["Operations", 64, "amber"],
-                ["Power", 52, "blue"],
-                ["Electronics", 43, "teal"]
-              ].map(([label, value, tone]) => `
-                <div class="bar-row">
-                  <span>${label}</span>
-                  <span class="bar-track"><span class="bar-fill ${tone}" style="--value:${value}%"></span></span>
-                  <strong>${value}</strong>
-                </div>
-              `).join("")}
-            </div>
-          </section>
-        `;
-      }
-      return `
-        <section class="table-card">
-          <div class="report-block-head">
-            <h3>${block.title}</h3>
-            <span class="badge">${block.fields.length || 0} fields</span>
-          </div>
-          <table class="data-table">
-            <thead>
-              <tr>
-                ${["Category", "Count", "Value", "State"].map((head) => `<th>${head}</th>`).join("")}
-              </tr>
-            </thead>
-            <tbody>
-              ${sampleRows.map((row) => `
-                <tr>
-                  <td>${row[0]}</td>
-                  <td>${row[1]}</td>
-                  <td>${row[2]}</td>
-                  <td><span class="badge ${row[3] === "Active" ? "green" : "amber"}">${row[3]}</span></td>
-                </tr>
-              `).join("")}
-            </tbody>
-          </table>
-        </section>
-      `;
     }
 
     function readiness() {
       const checks = [
         { label: "Data source selected", ok: Boolean(state.schema), step: "start" },
-        { label: "Template creates content", ok: state.blocks.length > 0, step: "content" },
-        { label: "Every block has visible fields", ok: state.blocks.every((block) => block.type === "text" || block.fields.length > 0), step: "content" },
-        { label: "At least one filter is connected", ok: state.filters.some((filter) => filter.connected), step: "filters" }
+        { label: "Layout selected", ok: Boolean(state.layout), step: "layout" },
+        { label: "Blocks configured", ok: state.blocks.length > 0 && allBlocksHaveFields(), step: "blocks" },
+        { label: "At least one filter is connected", ok: state.filters.some((filter) => filter.connected), step: "controls" }
       ];
       const score = Math.round((checks.filter((check) => check.ok).length / checks.length) * 100);
       return { checks, score };
     }
 
-    function renderReadiness() {
+    function renderReview() {
       const result = readiness();
-      $("#readinessScore").textContent = result.score + "%";
-      $("#readinessMeter").style.width = result.score + "%";
+      $("#reviewTitle").textContent = state.title;
+      $("#reviewSource").textContent = currentSchema().name + " schema";
+      $("#reviewLayout").textContent = currentLayout().name;
+      $("#reviewCounts").textContent = `${state.blocks.length} blocks, ${state.filters.length} filters`;
       $("#checkList").innerHTML = result.checks
         .map((check) => `
           <button class="check ${check.ok ? "ok" : "warn"}" type="button" data-jump="${check.step}">
-            <span>${check.ok ? "✓" : "!"}</span>
+            <span class="check-mark">${check.ok ? "✓" : "!"}</span>
             <span>${check.label}</span>
           </button>
         `)
         .join("");
       $$("#checkList [data-jump]").forEach((button) => {
-        button.addEventListener("click", () => {
-          state.step = button.dataset.jump;
-          updateAll();
-        });
+        button.addEventListener("click", () => setStep(button.dataset.jump));
       });
     }
 
-    function updateAll() {
-      renderSteps();
+    function renderAll() {
+      updatePrimaryAction();
+      renderProgress();
+      renderSections();
       renderSchemaChoices();
-      renderTemplateChoices();
-      renderBlocks();
+      renderLayoutChoices();
+      renderStructureControls();
+      renderStructure("blockStructure");
+      renderStructure("reviewStructure");
       renderFilters();
-      renderPreview();
-      renderReadiness();
+      renderReview();
     }
 
-    $$(".step-button").forEach((button) => {
-      button.addEventListener("click", () => {
-        state.step = button.dataset.step;
-        updateAll();
-      });
+    $("#nextBtn").addEventListener("click", () => {
+      const next = steps[Math.min(stepIndex() + 1, steps.length - 1)];
+      setStep(next.id);
     });
 
+    $("#addRowBtn").addEventListener("click", () => resizeRows(1));
+    $("#removeRowBtn").addEventListener("click", () => resizeRows(-1));
+    $("#addColumnBtn").addEventListener("click", () => resizeColumns(1));
+    $("#removeColumnBtn").addEventListener("click", () => resizeColumns(-1));
+
     $("#addBlockBtn").addEventListener("click", () => {
+      const placement = nextOpenCell();
       state.blocks.push({
         id: "block_" + Date.now(),
         type: "table",
         title: "New records block",
         desc: "Select fields and adjust display settings.",
         fields: currentSchema().fields.slice(0, 4),
+        placement,
         open: true
       });
-      updateAll();
+      renderAll();
     });
 
     $("#addFilterBtn").addEventListener("click", () => {
@@ -2036,40 +1866,44 @@
         applies: "Not connected",
         connected: false
       });
-      updateAll();
+      renderAll();
     });
 
-    $("#previewBtn").addEventListener("click", () => {
-      document.querySelector(".preview-pane").scrollIntoView({ behavior: "smooth", block: "start" });
-    });
-
-    $("#saveBtn").addEventListener("click", () => {
+    function showToast(message) {
+      $("#toastMessage").textContent = message;
       $("#toast").classList.add("show");
       window.clearTimeout(window.__toastTimer);
       window.__toastTimer = window.setTimeout(() => $("#toast").classList.remove("show"), 2400);
+    }
+
+    $("#saveBtn").addEventListener("click", () => {
+      showToast(
+        state.step === "review"
+          ? "Report editor opened in prototype state."
+          : "Draft saved in prototype state."
+      );
+    });
+
+    $("#openEditorBtn").addEventListener("click", () => {
+      showToast("Report editor opened in prototype state.");
     });
 
     $("#resetBtn").addEventListener("click", () => {
       state.step = "start";
       state.schema = "products";
-      state.template = "dashboard";
+      state.layout = "header-grid";
+      state.structure = { rows: 3, columns: 2 };
       state.title = "Category Performance Breakdown";
       state.filters = [
         { name: "Category", field: "category", applies: "All compatible blocks", connected: true },
         { name: "Stock state", field: "inventory_units", applies: "Records table", connected: true }
       ];
       state.blocks = defaultBlocks();
-      updateAll();
-    });
-
-    $("#reportName").addEventListener("input", (event) => {
-      state.title = event.target.value || "Untitled report";
-      $("#reportSlug").value = state.title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "");
-      renderPreview();
+      renderAll();
     });
 
     state.blocks = defaultBlocks();
-    updateAll();
+    renderAll();
   </script>
 </body>
 </html>
