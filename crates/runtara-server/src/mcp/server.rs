@@ -1235,3 +1235,50 @@ pub fn create_mcp_router(
 
     Router::new().fallback_service(service)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Regression: MCP clients require `step` to be advertised as `type: "object"`.
+    /// When the schema was just `{description: "..."}`, some clients sent it as
+    /// a stringified JSON or dropped it entirely, which made `add_step` fail with
+    /// "stepType missing" no matter the input.
+    #[test]
+    fn add_step_tool_advertises_step_as_object() {
+        let router = SmoMcpServer::tool_router();
+        let tool = router.get("add_step").expect("add_step tool is registered");
+
+        let step_schema = tool
+            .input_schema
+            .get("properties")
+            .and_then(|p| p.get("step"))
+            .expect("step property exists in input_schema");
+
+        assert_eq!(
+            step_schema.get("type").and_then(|v| v.as_str()),
+            Some("object"),
+            "advertised step schema missing `type: object`: {}",
+            serde_json::to_string_pretty(step_schema).unwrap()
+        );
+    }
+
+    #[test]
+    fn update_step_tool_advertises_step_as_object() {
+        let router = SmoMcpServer::tool_router();
+        let tool = router
+            .get("update_step")
+            .expect("update_step tool is registered");
+
+        let step_schema = tool
+            .input_schema
+            .get("properties")
+            .and_then(|p| p.get("step"))
+            .expect("step property exists in input_schema");
+
+        assert_eq!(
+            step_schema.get("type").and_then(|v| v.as_str()),
+            Some("object"),
+        );
+    }
+}

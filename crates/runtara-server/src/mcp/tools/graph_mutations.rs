@@ -4,7 +4,9 @@ use serde::Deserialize;
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use super::super::server::SmoMcpServer;
-use super::internal_api::{api_get, api_post, api_put, validate_path_param};
+use super::internal_api::{
+    api_get, api_post, api_put, json_object_schema, normalize_json_arg, validate_path_param,
+};
 
 fn json_result(value: serde_json::Value) -> Result<CallToolResult, rmcp::ErrorData> {
     Ok(CallToolResult::success(vec![Content::text(
@@ -338,6 +340,7 @@ pub struct AddStepParams {
     pub workflow_id: String,
     #[schemars(description = "Unique step ID within the graph")]
     pub step_id: String,
+    #[schemars(schema_with = "json_object_schema")]
     #[schemars(
         description = "Step definition JSON. Must include 'stepType'. For Agent steps: {\"stepType\": \"Agent\", \"name\": \"...\", \"agentId\": \"http\", \"capabilityId\": \"http-request\", \"inputMapping\": {\"url\": {\"valueType\": \"immediate\", \"value\": \"...\"}}}. Field is 'inputMapping' (SINGULAR)."
     )]
@@ -368,6 +371,7 @@ pub struct UpdateStepParams {
     pub workflow_id: String,
     #[schemars(description = "Step ID to update")]
     pub step_id: String,
+    #[schemars(schema_with = "json_object_schema")]
     #[schemars(description = "New step definition JSON (must include 'stepType')")]
     pub step: serde_json::Value,
     #[schemars(
@@ -813,6 +817,7 @@ pub struct BatchGraphMutation {
     )]
     pub op: String,
     pub step_id: Option<String>,
+    #[schemars(schema_with = "optional_json_object_schema")]
     pub step: Option<serde_json::Value>,
     pub patches: Option<Vec<PatchStepOp>>,
     pub from_step: Option<String>,
@@ -831,6 +836,13 @@ pub struct BatchGraphMutation {
     pub name: Option<String>,
     pub description: Option<String>,
     pub variable: Option<serde_json::Value>,
+}
+
+fn optional_json_object_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    schemars::json_schema!({
+        "type": ["object", "null"],
+        "additionalProperties": true
+    })
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -1186,6 +1198,24 @@ fn required_value(
         .ok_or_else(|| err(format!("Operation '{}' requires '{}'", op, field)))
 }
 
+/// Some MCP clients deliver object-shaped arguments as JSON-encoded strings.
+/// Recover the parsed object before structural checks like `.get("stepType")`.
+fn required_object_value(
+    value: Option<&serde_json::Value>,
+    field: &str,
+    op: &str,
+) -> Result<serde_json::Value, rmcp::ErrorData> {
+    let raw = required_value(value, field, op)?;
+    let parsed = normalize_json_arg(raw, field)?;
+    if !parsed.is_object() {
+        return Err(err(format!(
+            "Operation '{}' field '{}' must be a JSON object",
+            op, field
+        )));
+    }
+    Ok(parsed)
+}
+
 // ===== Tool Implementations =====
 
 pub async fn summarize_workflow(
@@ -1496,20 +1526,26 @@ pub async fn add_step(
     server: &SmoMcpServer,
     params: AddStepParams,
 ) -> Result<CallToolResult, rmcp::ErrorData> {
-    if params.step.get("stepType").is_none() {
+    let step = normalize_json_arg(params.step, "step")?;
+    if !step.is_object() {
+        return Err(err(
+            "'step' must be a JSON object containing at least a 'stepType' field",
+        ));
+    }
+    if step.get("stepType").is_none() {
         return Err(err("Step definition must include 'stepType' field"));
     }
 
     // Typo linting: catch common field name mistakes
-    if params.step.get("inputMappings").is_some() {
+    if step.get("inputMappings").is_some() {
         return Err(err(
             "Found 'inputMappings' (plural) — use 'inputMapping' (singular)",
         ));
     }
-    if params.step.get("agent").is_some() && params.step.get("agentId").is_none() {
+    if step.get("agent").is_some() && step.get("agentId").is_none() {
         return Err(err("Found 'agent' — use 'agentId' instead"));
     }
-    if params.step.get("capability").is_some() && params.step.get("capabilityId").is_none() {
+    if step.get("capability").is_some() && step.get("capabilityId").is_none() {
         return Err(err("Found 'capability' — use 'capabilityId' instead"));
     }
 
@@ -1536,7 +1572,7 @@ pub async fn add_step(
     }
 
     // Insert step with id field set
-    let mut step = params.step;
+    let mut step = step;
     step["id"] = serde_json::Value::String(params.step_id.clone());
     target["steps"][&params.step_id] = step;
 
@@ -1622,7 +1658,13 @@ pub async fn update_step(
     server: &SmoMcpServer,
     params: UpdateStepParams,
 ) -> Result<CallToolResult, rmcp::ErrorData> {
-    if params.step.get("stepType").is_none() {
+    let step = normalize_json_arg(params.step, "step")?;
+    if !step.is_object() {
+        return Err(err(
+            "'step' must be a JSON object containing at least a 'stepType' field",
+        ));
+    }
+    if step.get("stepType").is_none() {
         return Err(err("Step definition must include 'stepType' field"));
     }
 
@@ -1639,7 +1681,7 @@ pub async fn update_step(
         return Err(err(format!("Step '{}' not found in graph", params.step_id)));
     }
 
-    let mut step = params.step;
+    let mut step = step;
     step["id"] = serde_json::Value::String(params.step_id.clone());
     target["steps"][&params.step_id] = step;
 
@@ -3070,7 +3112,8 @@ pub async fn apply_graph_mutations(
                 "add_step" => {
                     let step_id =
                         required_string(operation.step_id.as_ref(), "step_id", &operation.op)?;
-                    let mut step = required_value(operation.step.as_ref(), "step", &operation.op)?;
+                    let mut step =
+                        required_object_value(operation.step.as_ref(), "step", &operation.op)?;
                     if step.get("stepType").is_none() {
                         return Err(err(format!(
                             "Operation '{}' at index {} step must include 'stepType'",
@@ -3121,7 +3164,8 @@ pub async fn apply_graph_mutations(
                 "update_step" => {
                     let step_id =
                         required_string(operation.step_id.as_ref(), "step_id", &operation.op)?;
-                    let mut step = required_value(operation.step.as_ref(), "step", &operation.op)?;
+                    let mut step =
+                        required_object_value(operation.step.as_ref(), "step", &operation.op)?;
                     if step.get("stepType").is_none() {
                         return Err(err(format!(
                             "Operation '{}' at index {} step must include 'stepType'",
@@ -3596,5 +3640,41 @@ mod patch_tests {
         let e =
             apply_patches(&mut step, &[op("move", "/a", Some(serde_json::json!(1)))]).unwrap_err();
         assert!(e.message.contains("Unsupported op"));
+    }
+
+    #[test]
+    fn add_step_schema_declares_step_as_object() {
+        // Regression: prior schema for `step` was an empty `{description: ...}`,
+        // which left some MCP clients unsure how to encode the value and they
+        // sent it as a stringified JSON (or dropped it). The advertised schema
+        // must now name `step` as an object so clients pass it through intact.
+        let schema = serde_json::to_value(schemars::schema_for!(AddStepParams)).unwrap();
+        let step_schema = schema
+            .pointer("/properties/step")
+            .expect("step property exists");
+        assert_eq!(
+            step_schema.get("type").and_then(|v| v.as_str()),
+            Some("object"),
+            "step schema missing `type: object`: {}",
+            step_schema
+        );
+    }
+
+    /// Some MCP clients deliver object args as a JSON-encoded string. The handler
+    /// normalizes that back into an object before checking `stepType`.
+    #[test]
+    fn add_step_accepts_stringified_step_payload() {
+        let original = serde_json::json!({
+            "stepType": "Conditional",
+            "name": "branch",
+            "condition": {"valueType": "immediate", "value": true}
+        });
+        let stringified = serde_json::Value::String(original.to_string());
+        let normalized = normalize_json_arg(stringified, "step").expect("normalize");
+        assert!(normalized.is_object(), "expected object after normalize");
+        assert_eq!(
+            normalized.get("stepType").and_then(|v| v.as_str()),
+            Some("Conditional")
+        );
     }
 }
