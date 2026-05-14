@@ -7,7 +7,11 @@ import {
   AlertTitle,
 } from '@/shared/components/ui/alert';
 import { Schema } from '@/generated/RuntaraRuntimeApi';
-import { ReportBlockResult, ReportDefinition } from '../../types';
+import {
+  ReportBlockResult,
+  ReportDatasetDefinition,
+  ReportDefinition,
+} from '../../types';
 import {
   WizardBlock,
   WizardFilter,
@@ -20,6 +24,7 @@ import {
 } from './wizardSerialization';
 import { BlocksStep } from './steps/BlocksStep';
 import { ControlsStep } from './steps/ControlsStep';
+import { DatasetsStep } from './steps/DatasetsStep';
 
 interface ReportBuilderWizardProps {
   definition: ReportDefinition;
@@ -44,8 +49,18 @@ function schemaFieldsByName(schemas: Schema[]): Record<string, string[]> {
 function readinessChecks(
   state: WizardState
 ): Array<{ label: string; ok: boolean }> {
+  const datasetIds = new Set(state.datasets.map((d) => d.id));
+
   const allBlocksReady = state.blocks.every((block) => {
     if (block.type === 'markdown') return Boolean(block.markdownContent);
+    if (block.dataset) {
+      const dimensions = block.dataset.dimensions ?? [];
+      const measures = block.dataset.measures ?? [];
+      return (
+        datasetIds.has(block.dataset.id) &&
+        dimensions.length + measures.length > 0
+      );
+    }
     if (!block.schema) return false;
     if (block.type === 'metric') {
       const op = block.metricAggregate ?? 'count';
@@ -55,6 +70,12 @@ function readinessChecks(
     return block.fields.length > 0;
   });
 
+  const datasetsReady = state.datasets.every(
+    (dataset) =>
+      Boolean(dataset.source.schema) &&
+      dataset.dimensions.length + dataset.measures.length > 0
+  );
+
   return [
     {
       label:
@@ -62,6 +83,13 @@ function readinessChecks(
           ? 'Add at least one block'
           : 'Each block has a data source and content',
       ok: state.blocks.length > 0 && allBlocksReady,
+    },
+    {
+      label:
+        state.datasets.length === 0
+          ? 'No datasets configured — that\'s fine'
+          : 'Every dataset has a source and at least one field',
+      ok: datasetsReady,
     },
     {
       label:
@@ -138,6 +166,10 @@ export function ReportBuilderWizard({
     commit({ ...state, filters });
   }
 
+  function setDatasets(datasets: ReportDatasetDefinition[]) {
+    commit({ ...state, datasets });
+  }
+
   const checks = readinessChecks(state);
   const allReady = checks.every((check) => check.ok);
 
@@ -169,6 +201,7 @@ export function ReportBuilderWizard({
           blocks={state.blocks}
           schemas={schemas}
           defaultSchema={state.defaultSchema}
+          datasets={state.datasets}
           blockResults={blockResults}
           editing={editing}
           onGridsChange={setGrids}
@@ -176,6 +209,25 @@ export function ReportBuilderWizard({
           onGridsAndBlocksChange={setGridsAndBlocks}
         />
       </section>
+
+      {editing ? (
+        <section className="mt-6 border-t pt-4">
+          <header className="mb-3">
+            <h2 className="text-sm font-semibold">Datasets</h2>
+            <p className="text-xs text-muted-foreground">
+              Pre-aggregated semantic data sources with named dimensions and
+              measures. Blocks pick a dataset to query instead of going to a
+              schema directly.
+            </p>
+          </header>
+          <DatasetsStep
+            datasets={state.datasets}
+            schemas={schemas}
+            defaultSchema={state.defaultSchema}
+            onChange={setDatasets}
+          />
+        </section>
+      ) : null}
 
       {editing ? (
         <section className="mt-6 border-t pt-4">

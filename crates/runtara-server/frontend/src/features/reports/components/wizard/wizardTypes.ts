@@ -1,6 +1,8 @@
 import {
+  ReportBlockDatasetQuery,
   ReportBlockType,
   ReportChartKind,
+  ReportDatasetDefinition,
   ReportFilterType,
   ReportTableActionConfig,
   ReportTableInteractionButtonConfig,
@@ -143,7 +145,7 @@ export interface WizardBlock {
   type: WizardBlockType;
   title: string;
   /** Per-block data source. Schema name from the Object Model.
-   *  Markdown blocks don't need a schema. */
+   *  Markdown blocks don't need a schema. Mutually exclusive with `dataset`. */
   schema?: string;
   fields: string[];
   fieldConfigs?: Record<string, WizardFieldConfig>;
@@ -158,6 +160,9 @@ export interface WizardBlock {
   selectable?: boolean;
   /** Table-block: bulk action buttons rendered above the table. */
   tableActions?: ReportTableActionConfig[];
+  /** Pre-aggregated dataset query — when set, the block resolves through
+   *  `definition.datasets[dataset.id]` instead of `schema`/`fields`. */
+  dataset?: ReportBlockDatasetQuery;
 }
 
 export const WIZARD_FILTER_TARGET_ALL = '__all__';
@@ -197,12 +202,23 @@ export interface WizardState {
   grids: WizardGrid[];
   blocks: WizardBlock[];
   filters: WizardFilter[];
+  /** Top-level semantic dataset definitions (Cube/LookML-style). Blocks reference
+   *  one via `block.dataset.id` instead of querying a schema directly. */
+  datasets: ReportDatasetDefinition[];
 }
 
 /** Logical anchor that readiness checks point at; used to scroll the editor
  *  to the relevant panel rather than to a step page. */
-export type WizardAnchor = 'details' | 'blocks' | 'filters';
+export type WizardAnchor = 'details' | 'blocks' | 'filters' | 'datasets';
 
 export function makeGridId(): string {
   return `grid_${Math.random().toString(36).slice(2, 9)}`;
+}
+
+export function makeDatasetId(): string {
+  return `dataset_${Math.random().toString(36).slice(2, 9)}`;
+}
+
+export function makeMeasureId(): string {
+  return `measure_${Math.random().toString(36).slice(2, 9)}`;
 }

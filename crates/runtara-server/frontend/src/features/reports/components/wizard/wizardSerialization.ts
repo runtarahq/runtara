@@ -1,5 +1,6 @@
 import {
   ReportBlockDefinition,
+  ReportDatasetDefinition,
   ReportDefinition,
   ReportFilterDefinition,
   ReportFilterOptionsConfig,
@@ -7,6 +8,7 @@ import {
   ReportSource,
   ReportTableColumn,
 } from '../../types';
+import { reconcileDatasetBlock } from '../../datasetBlocks';
 import {
   WIZARD_FILTER_TARGET_ALL,
   WIZARD_FILTER_TARGET_NONE,
@@ -95,8 +97,25 @@ function buildBlockSource(
 
 function buildBlockDefinition(
   block: WizardBlock,
-  primaryFields: string[]
+  primaryFields: string[],
+  datasetsById: Map<string, ReportDatasetDefinition>
 ): ReportBlockDefinition {
+  // Dataset blocks short-circuit: the dataset query drives the table columns /
+  // chart series / metric value field via reconcileDatasetBlock.
+  if (block.dataset) {
+    const dataset = datasetsById.get(block.dataset.id);
+    const stub: ReportBlockDefinition = {
+      id: block.id,
+      type: block.type === 'markdown' || block.type === 'card'
+        ? 'table'
+        : block.type,
+      title: block.title,
+      source: { schema: '' },
+      dataset: block.dataset,
+    };
+    return dataset ? reconcileDatasetBlock(stub, dataset, block.dataset) : stub;
+  }
+
   const base: ReportBlockDefinition = {
     id: block.id,
     type: block.type,
@@ -357,8 +376,15 @@ export function wizardStateToDefinition(
   schemaFieldsByName: Record<string, string[]>,
   existing?: ReportDefinition
 ): ReportDefinition {
+  const datasetsById = new Map(
+    state.datasets.map((dataset) => [dataset.id, dataset])
+  );
   const blocks = state.blocks.map((block) =>
-    buildBlockDefinition(block, schemaFieldsByName[block.schema ?? ''] ?? [])
+    buildBlockDefinition(
+      block,
+      schemaFieldsByName[block.schema ?? ''] ?? [],
+      datasetsById
+    )
   );
   const layout = buildLayout(state);
   const filters = state.filters.map((filter) =>
@@ -371,7 +397,7 @@ export function wizardStateToDefinition(
     layout,
     filters,
     blocks,
-    datasets: existing?.datasets,
+    datasets: state.datasets.length > 0 ? state.datasets : undefined,
     views: existing?.views,
   };
 }
@@ -547,7 +573,6 @@ function blockDefinitionToWizard(
     unsupported.push(`Block type "${block.type}"`);
   }
 
-  if (block.dataset) unsupported.push('Pre-aggregated datasets');
   if (block.source.join && block.source.join.length > 0) {
     unsupported.push('Schema joins');
   }
@@ -686,6 +711,7 @@ function blockDefinitionToWizard(
     block.table.actions.length > 0
       ? { tableActions: block.table.actions }
       : {}),
+    ...(block.dataset ? { dataset: block.dataset } : {}),
   };
 
   return { block: wizardBlock, unsupported };
@@ -706,14 +732,12 @@ export function definitionToWizardState(
         grids: [{ id: seedGridId, rows: 2, columns: 2 }],
         blocks: [],
         filters: [],
+        datasets: [],
       },
       compatibility: { fullyEditable: true, reasons: [] },
     };
   }
 
-  if (definition.datasets && definition.datasets.length > 0) {
-    unsupportedReasons.push('Pre-aggregated datasets');
-  }
   if (definition.views && definition.views.length > 0) {
     unsupportedReasons.push('Multiple views');
   }
@@ -810,6 +834,7 @@ export function definitionToWizardState(
       grids,
       blocks,
       filters,
+      datasets: definition.datasets ?? [],
     },
     compatibility: {
       fullyEditable: unsupportedReasons.length === 0,

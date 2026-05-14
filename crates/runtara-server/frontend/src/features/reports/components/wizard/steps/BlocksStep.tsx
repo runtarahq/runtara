@@ -25,9 +25,11 @@ import { Schema } from '@/generated/RuntaraRuntimeApi';
 import { Checkbox } from '@/shared/components/ui/checkbox';
 import {
   ReportBlockResult,
+  ReportDatasetDefinition,
   ReportTableInteractionButtonConfig,
   ReportWorkflowActionConfig,
 } from '../../../types';
+import { createDefaultDatasetBlockQuery } from '../../../datasetBlocks';
 import {
   WIZARD_BLOCK_TYPES,
   WIZARD_COLUMN_FORMATS,
@@ -46,6 +48,7 @@ import {
 } from '../wizardTypes';
 import { humanizeFieldName } from '../../../utils';
 import { BlockPreview } from './BlockPreview';
+import { BlockDatasetQueryEditor } from './BlockDatasetQueryEditor';
 import {
   InteractionButtonsEditor,
   TableBulkActionsEditor,
@@ -68,6 +71,7 @@ interface BlocksStepProps {
   blocks: WizardBlock[];
   schemas: Schema[];
   defaultSchema?: string;
+  datasets: ReportDatasetDefinition[];
   blockResults?: Record<string, ReportBlockResult>;
   /** When false, all editing affordances are hidden; layout still renders. */
   editing?: boolean;
@@ -107,6 +111,7 @@ export function BlocksStep({
   blocks,
   schemas,
   defaultSchema,
+  datasets,
   blockResults,
   editing = true,
   onGridsChange,
@@ -298,6 +303,7 @@ export function BlocksStep({
           gridCount={grids.length}
           blocks={gridBlocks}
           schemas={schemas}
+          datasets={datasets}
           blockResults={blockResults}
           editing={editing}
           draggedId={draggedId}
@@ -349,6 +355,7 @@ function GridSection({
   gridCount,
   blocks,
   schemas,
+  datasets,
   blockResults,
   editing,
   draggedId,
@@ -376,6 +383,7 @@ function GridSection({
   gridCount: number;
   blocks: WizardBlock[];
   schemas: Schema[];
+  datasets: ReportDatasetDefinition[];
   blockResults?: Record<string, ReportBlockResult>;
   editing: boolean;
   draggedId: string | null;
@@ -612,6 +620,7 @@ function GridSection({
                     key={block.id}
                     block={block}
                     schemas={schemas}
+                    datasets={datasets}
                     result={blockResults?.[block.id]}
                     editing={editing}
                     open={editing && openBlockId === block.id}
@@ -635,6 +644,7 @@ function GridSection({
 function BlockCard({
   block,
   schemas,
+  datasets,
   result,
   editing,
   open,
@@ -647,6 +657,7 @@ function BlockCard({
 }: {
   block: WizardBlock;
   schemas: Schema[];
+  datasets: ReportDatasetDefinition[];
   result?: ReportBlockResult;
   editing: boolean;
   open: boolean;
@@ -658,9 +669,17 @@ function BlockCard({
   onDragEnd: () => void;
 }) {
   const schemaFields = fieldsOfSchema(schemas, block.schema);
+  const usingDataset = Boolean(block.dataset);
+  // Card and markdown blocks don't make sense over pre-aggregated datasets —
+  // hide the dataset toggle for them.
+  const supportsDataset =
+    block.type === 'table' ||
+    block.type === 'chart' ||
+    block.type === 'metric';
   const supportsFields =
-    block.type === 'table' || block.type === 'card' || block.type === 'chart';
-  const needsSchema = block.type !== 'markdown';
+    !usingDataset &&
+    (block.type === 'table' || block.type === 'card' || block.type === 'chart');
+  const needsSchema = !usingDataset && block.type !== 'markdown';
 
   function changeSchema(nextSchema: string) {
     if (nextSchema === block.schema) return;
@@ -668,6 +687,32 @@ function BlockCard({
     // probably don't exist on the new schema.
     onChange({
       schema: nextSchema,
+      fields: [],
+      fieldConfigs: undefined,
+      chartGroupBy: undefined,
+      metricField: undefined,
+    });
+  }
+
+  function switchToDatasetMode() {
+    const seed = datasets[0];
+    if (!seed) return;
+    const query = createDefaultDatasetBlockQuery(seed);
+    onChange({
+      dataset: query,
+      schema: undefined,
+      fields: [],
+      fieldConfigs: undefined,
+      chartGroupBy: undefined,
+      metricField: undefined,
+      metricAggregate: undefined,
+    });
+  }
+
+  function switchToSchemaMode() {
+    onChange({
+      dataset: undefined,
+      schema: schemas[0]?.name,
       fields: [],
       fieldConfigs: undefined,
       chartGroupBy: undefined,
@@ -795,10 +840,65 @@ function BlockCard({
 
       {open ? (
         <div className="grid gap-3 px-3 py-3">
-          {needsSchema ? (
+          {supportsDataset ? (
             <div className="grid gap-1.5">
               <Label className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
                 Data source
+              </Label>
+              <div className="flex gap-1 rounded-md border bg-muted/10 p-0.5">
+                <button
+                  type="button"
+                  onClick={!usingDataset ? undefined : switchToSchemaMode}
+                  className={cn(
+                    'flex-1 rounded px-2 py-1 text-xs font-medium transition-colors',
+                    !usingDataset
+                      ? 'bg-background shadow-sm'
+                      : 'text-muted-foreground hover:text-foreground'
+                  )}
+                >
+                  Schema
+                </button>
+                <button
+                  type="button"
+                  onClick={
+                    usingDataset || datasets.length === 0
+                      ? undefined
+                      : switchToDatasetMode
+                  }
+                  disabled={!usingDataset && datasets.length === 0}
+                  className={cn(
+                    'flex-1 rounded px-2 py-1 text-xs font-medium transition-colors',
+                    usingDataset
+                      ? 'bg-background shadow-sm'
+                      : 'text-muted-foreground hover:text-foreground',
+                    !usingDataset &&
+                      datasets.length === 0 &&
+                      'cursor-not-allowed opacity-50'
+                  )}
+                  title={
+                    datasets.length === 0 && !usingDataset
+                      ? 'Add a dataset in the Datasets section first'
+                      : undefined
+                  }
+                >
+                  Use dataset
+                </button>
+              </div>
+            </div>
+          ) : null}
+
+          {usingDataset ? (
+            <BlockDatasetQueryEditor
+              block={block}
+              datasets={datasets}
+              onChange={onChange}
+            />
+          ) : null}
+
+          {needsSchema ? (
+            <div className="grid gap-1.5">
+              <Label className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+                Schema
               </Label>
               <Select value={block.schema ?? ''} onValueChange={changeSchema}>
                 <SelectTrigger>
@@ -830,7 +930,7 @@ function BlockCard({
             </div>
           ) : null}
 
-          {block.type === 'metric' ? (
+          {!usingDataset && block.type === 'metric' ? (
             <div className="grid gap-2 sm:grid-cols-3">
               <div className="grid gap-1.5">
                 <Label className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
@@ -903,7 +1003,7 @@ function BlockCard({
             </div>
           ) : null}
 
-          {block.type === 'chart' ? (
+          {!usingDataset && block.type === 'chart' ? (
             <div className="grid gap-2 sm:grid-cols-2">
               <div className="grid gap-1.5">
                 <Label className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
@@ -987,7 +1087,7 @@ function BlockCard({
               }}
             />
           ) : null}
-          {block.type === 'table' ? (
+          {!usingDataset && block.type === 'table' ? (
             <TableSelectionAndBulkActions
               block={block}
               schemaFields={schemaFields.filter(
@@ -1004,10 +1104,10 @@ function BlockCard({
           aria-label={`Reconfigure ${block.title || 'block'}`}
           className="group w-full cursor-pointer text-left transition-colors hover:bg-muted/20"
         >
-          <BlockPreview block={block} result={result} />
+          <BlockPreview block={block} result={result} datasets={datasets} />
         </button>
       ) : (
-        <BlockPreview block={block} result={result} />
+        <BlockPreview block={block} result={result} datasets={datasets} />
       )}
     </article>
   );

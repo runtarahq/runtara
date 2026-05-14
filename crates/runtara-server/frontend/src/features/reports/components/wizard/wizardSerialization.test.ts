@@ -108,6 +108,73 @@ describe('table column round-trip', () => {
     });
   });
 
+  it('round-trips datasets and per-block dataset queries without losing them', () => {
+    const definition: ReportDefinition = {
+      definitionVersion: 1,
+      filters: [],
+      datasets: [
+        {
+          id: 'order_totals',
+          label: 'Order totals',
+          source: { schema: 'orders' },
+          dimensions: [
+            { field: 'status', label: 'Status', type: 'string' },
+          ],
+          measures: [
+            {
+              id: 'total_amount',
+              label: 'Total',
+              op: 'sum',
+              field: 'amount',
+              format: 'currency',
+            },
+            {
+              id: 'count',
+              label: 'Count',
+              op: 'count',
+              format: 'number',
+            },
+          ],
+        },
+      ],
+      blocks: [
+        {
+          id: 'totals_table',
+          type: 'table',
+          title: 'Totals',
+          source: { schema: '' },
+          dataset: {
+            id: 'order_totals',
+            dimensions: ['status'],
+            measures: ['total_amount'],
+            orderBy: [{ field: 'total_amount', direction: 'desc' }],
+            limit: 50,
+          },
+        },
+      ],
+    };
+
+    const { state, compatibility } = definitionToWizardState(
+      definition,
+      'orders'
+    );
+    expect(compatibility.fullyEditable).toBe(true);
+    expect(state.datasets).toHaveLength(1);
+    expect(state.blocks[0].dataset?.id).toBe('order_totals');
+
+    const round = wizardStateToDefinition(state, SCHEMA_FIELDS, definition);
+    expect(round.datasets).toHaveLength(1);
+    expect(round.datasets?.[0].measures[0].field).toBe('amount');
+    const block = round.blocks[0];
+    expect(block.dataset?.dimensions).toEqual(['status']);
+    expect(block.dataset?.measures).toEqual(['total_amount']);
+    // reconcileDatasetBlock builds the table columns from the query output.
+    expect(block.table?.columns?.map((c) => c.field)).toEqual([
+      'status',
+      'total_amount',
+    ]);
+  });
+
   it('does not flag the new features as advanced (compatibility banner stays hidden)', () => {
     const definition: ReportDefinition = {
       definitionVersion: 1,

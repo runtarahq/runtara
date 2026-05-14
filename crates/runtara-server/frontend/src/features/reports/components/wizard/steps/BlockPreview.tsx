@@ -6,15 +6,55 @@ import { humanizeFieldName, formatCellValue } from '../../../utils';
 import {
   ReportBlockDefinition,
   ReportBlockResult,
+  ReportDatasetDefinition,
   ReportTableColumn,
 } from '../../../types';
 import { ChartBlock } from '../../blocks/ChartBlock';
 import { MetricBlock } from '../../blocks/MetricBlock';
+import {
+  datasetFieldLabel,
+  datasetQueryOutputFields,
+} from '../../../datasetBlocks';
 import { WizardBlock, WizardColumnFormat } from '../wizardTypes';
 
 interface BlockPreviewProps {
   block: WizardBlock;
   result?: ReportBlockResult;
+  datasets?: ReportDatasetDefinition[];
+}
+
+/** When the block uses a dataset, derive a flat WizardBlock-shaped projection
+ *  the rest of the preview already understands: fields = dim ∪ measures, with
+ *  dataset-supplied labels/formats stuffed into fieldConfigs. */
+function projectDatasetBlock(
+  block: WizardBlock,
+  datasets: ReportDatasetDefinition[] | undefined
+): WizardBlock {
+  const query = block.dataset;
+  if (!query) return block;
+  const dataset = datasets?.find((candidate) => candidate.id === query.id);
+  const fields = datasetQueryOutputFields(query);
+  const fieldConfigs: WizardBlock['fieldConfigs'] = {};
+  for (const field of fields) {
+    const dimension = dataset?.dimensions.find((d) => d.field === field);
+    const measure = dataset?.measures.find((m) => m.id === field);
+    const format = (dimension?.format ?? measure?.format) as
+      | WizardColumnFormat
+      | undefined;
+    fieldConfigs[field] = {
+      label: datasetFieldLabel(dataset, field),
+      ...(format ? { format } : {}),
+    };
+  }
+  const firstDimension = (query.dimensions ?? [])[0];
+  const firstMeasure = (query.measures ?? [])[0];
+  return {
+    ...block,
+    fields,
+    fieldConfigs,
+    chartGroupBy: block.chartGroupBy ?? firstDimension ?? fields[0],
+    metricField: block.metricField ?? firstMeasure,
+  };
 }
 
 const SAMPLE_VALUES: Record<WizardColumnFormat | 'plain', string> = {
@@ -109,7 +149,18 @@ function hasRealData(result: ReportBlockResult | undefined): boolean {
   );
 }
 
-export function BlockPreview({ block, result }: BlockPreviewProps) {
+export function BlockPreview({
+  block: inputBlock,
+  result,
+  datasets,
+}: BlockPreviewProps) {
+  // Dataset-mode blocks store the query on `block.dataset` and leave
+  // `fields`/`fieldConfigs` empty. Project them into the wizard shape the rest
+  // of the preview already understands so columns/series render meaningfully.
+  const block = useMemo(
+    () => projectDatasetBlock(inputBlock, datasets),
+    [inputBlock, datasets]
+  );
   const blockDefinition = useMemo(
     () => wizardBlockToDefinition(block),
     [block]
