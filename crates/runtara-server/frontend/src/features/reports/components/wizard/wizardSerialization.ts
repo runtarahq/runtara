@@ -123,6 +123,10 @@ function buildSourceBase(
   return { schema: block.schema ?? '', ...extras };
 }
 
+function aggregateNeedsField(op: string | undefined): boolean {
+  return Boolean(op && op !== 'count' && op !== 'expr');
+}
+
 function buildBlockSource(
   block: WizardBlock,
   primaryFields: string[]
@@ -135,8 +139,9 @@ function buildBlockSource(
 
   if (block.type === 'metric') {
     const op = block.metricAggregate ?? 'count';
-    const field =
-      op === 'count' ? undefined : block.metricField || primaryFields[0];
+    const field = aggregateNeedsField(op)
+      ? block.metricField || primaryFields[0]
+      : undefined;
     return {
       ...sourceBase,
       mode: 'aggregate',
@@ -145,6 +150,13 @@ function buildBlockSource(
           alias: 'value',
           op,
           ...(field ? { field } : {}),
+          ...(op !== 'expr' && block.metricDistinct ? { distinct: true } : {}),
+          ...(block.metricPercentile !== undefined
+            ? { percentile: block.metricPercentile }
+            : {}),
+          ...(block.metricExpression !== undefined
+            ? { expression: block.metricExpression }
+            : {}),
         },
       ],
     };
@@ -152,6 +164,10 @@ function buildBlockSource(
 
   if (block.type === 'chart') {
     const groupBy = block.chartGroupBy || primaryFields[0];
+    const op = block.chartAggregate ?? 'count';
+    const field = aggregateNeedsField(op)
+      ? block.chartAggregateField || primaryFields[0]
+      : undefined;
     return {
       ...sourceBase,
       mode: 'aggregate',
@@ -159,7 +175,17 @@ function buildBlockSource(
       aggregates: [
         {
           alias: 'value',
-          op: 'count',
+          op,
+          ...(field ? { field } : {}),
+          ...(op !== 'expr' && block.chartAggregateDistinct
+            ? { distinct: true }
+            : {}),
+          ...(block.chartAggregatePercentile !== undefined
+            ? { percentile: block.chartAggregatePercentile }
+            : {}),
+          ...(block.chartAggregateExpression !== undefined
+            ? { expression: block.chartAggregateExpression }
+            : {}),
         },
       ],
     };
@@ -806,6 +832,7 @@ function blockDefinitionToWizard(
   }
 
   const metricFormat = block.metric?.format;
+  const primaryAggregate = source?.aggregates?.[0];
 
   const wizardBlock: WizardBlock = {
     id: block.id,
@@ -835,14 +862,16 @@ function blockDefinitionToWizard(
     placement: fallbackPlacement,
     chartKind: block.chart?.kind,
     chartGroupBy: block.chart?.x,
-    metricAggregate: source?.aggregates?.[0]?.op as
-      | 'count'
-      | 'sum'
-      | 'avg'
-      | 'min'
-      | 'max'
-      | undefined,
-    metricField: source?.aggregates?.[0]?.field,
+    chartAggregate: primaryAggregate?.op,
+    chartAggregateField: primaryAggregate?.field,
+    chartAggregateDistinct: primaryAggregate?.distinct,
+    chartAggregatePercentile: primaryAggregate?.percentile,
+    chartAggregateExpression: primaryAggregate?.expression,
+    metricAggregate: primaryAggregate?.op,
+    metricField: primaryAggregate?.field,
+    metricDistinct: primaryAggregate?.distinct,
+    metricPercentile: primaryAggregate?.percentile,
+    metricExpression: primaryAggregate?.expression,
     metricFormat: isWizardFormat(metricFormat)
       ? (metricFormat as WizardColumnFormat)
       : undefined,

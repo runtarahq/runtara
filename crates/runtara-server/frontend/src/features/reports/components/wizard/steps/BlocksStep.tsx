@@ -25,6 +25,7 @@ import { Schema } from '@/generated/RuntaraRuntimeApi';
 import { Checkbox } from '@/shared/components/ui/checkbox';
 import {
   ReportBlockResult,
+  ReportAggregateFn,
   ReportCondition,
   ReportDatasetDefinition,
   ReportEditorConfig,
@@ -141,15 +142,19 @@ const CHART_KINDS: Array<{
   { value: 'donut', label: 'Donut' },
 ];
 
-const METRIC_AGGREGATES: Array<{
-  value: 'count' | 'sum' | 'avg' | 'min' | 'max';
-  label: string;
-}> = [
+const METRIC_AGGREGATES: Array<{ value: ReportAggregateFn; label: string }> = [
   { value: 'count', label: 'Count' },
   { value: 'sum', label: 'Sum' },
   { value: 'avg', label: 'Average' },
   { value: 'min', label: 'Min' },
   { value: 'max', label: 'Max' },
+  { value: 'first_value', label: 'First value' },
+  { value: 'last_value', label: 'Last value' },
+  { value: 'percentile_cont', label: 'Percentile (continuous)' },
+  { value: 'percentile_disc', label: 'Percentile (discrete)' },
+  { value: 'stddev_samp', label: 'Std. deviation (sample)' },
+  { value: 'var_samp', label: 'Variance (sample)' },
+  { value: 'expr', label: 'Custom expression' },
 ];
 
 const FILTER_TYPES: Array<{ value: ReportFilterType; label: string }> = [
@@ -1399,39 +1404,140 @@ function BlockCard({
           ) : null}
 
           {!usingDataset && block.type === 'metric' ? (
-            <div className="grid gap-2 sm:grid-cols-3">
-              <div className="grid gap-1.5">
-                <Label className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
-                  Aggregate
-                </Label>
-                <Select
-                  value={block.metricAggregate ?? 'count'}
-                  onValueChange={(value) =>
-                    onChange({
-                      metricAggregate: value as WizardBlock['metricAggregate'],
-                    })
-                  }
-                >
-                  <SelectTrigger>
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {METRIC_AGGREGATES.map((option) => (
-                      <SelectItem key={option.value} value={option.value}>
-                        {option.label}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </div>
-              {(block.metricAggregate ?? 'count') !== 'count' ? (
+            <div className="grid gap-2">
+              <div className="grid gap-2 sm:grid-cols-3">
                 <div className="grid gap-1.5">
                   <Label className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
-                    Field
+                    Aggregate
                   </Label>
                   <Select
-                    value={block.metricField ?? schemaFields[0] ?? ''}
-                    onValueChange={(value) => onChange({ metricField: value })}
+                    value={block.metricAggregate ?? 'count'}
+                    onValueChange={(value) => {
+                      const op = value as ReportAggregateFn;
+                      onChange({
+                        metricAggregate: op,
+                        metricField: aggregateOpNeedsField(op)
+                          ? block.metricField
+                          : undefined,
+                        metricDistinct:
+                          op === 'expr' ? undefined : block.metricDistinct,
+                        metricPercentile: aggregateOpIsPercentile(op)
+                          ? block.metricPercentile
+                          : undefined,
+                        metricExpression:
+                          op === 'expr' ? block.metricExpression : undefined,
+                      });
+                    }}
+                  >
+                    <SelectTrigger>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {METRIC_AGGREGATES.map((option) => (
+                        <SelectItem key={option.value} value={option.value}>
+                          {option.label}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+                {aggregateOpNeedsField(block.metricAggregate ?? 'count') ? (
+                  <div className="grid gap-1.5">
+                    <Label className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+                      Field
+                    </Label>
+                    <Select
+                      value={block.metricField ?? schemaFields[0] ?? ''}
+                      onValueChange={(value) =>
+                        onChange({ metricField: value })
+                      }
+                    >
+                      <SelectTrigger>
+                        <SelectValue placeholder="Select field" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {schemaFields.map((field) => (
+                          <SelectItem key={field} value={field}>
+                            {field}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                ) : null}
+                <div className="grid gap-1.5">
+                  <Label className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+                    Format
+                  </Label>
+                  <Select
+                    value={block.metricFormat ?? 'number'}
+                    onValueChange={(value) =>
+                      onChange({ metricFormat: value as WizardColumnFormat })
+                    }
+                  >
+                    <SelectTrigger>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {WIZARD_METRIC_FORMATS.map((option) => (
+                        <SelectItem key={option.value} value={option.value}>
+                          {option.label}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+              </div>
+              <AggregateOptionsSettings
+                op={block.metricAggregate ?? 'count'}
+                distinct={block.metricDistinct}
+                percentile={block.metricPercentile}
+                expression={block.metricExpression}
+                onChange={(patch) =>
+                  onChange({
+                    metricDistinct: patch.distinct,
+                    metricPercentile: patch.percentile,
+                    metricExpression: patch.expression,
+                  })
+                }
+              />
+            </div>
+          ) : null}
+
+          {!usingDataset && block.type === 'chart' ? (
+            <div className="grid gap-2">
+              <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
+                <div className="grid gap-1.5">
+                  <Label className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+                    Chart style
+                  </Label>
+                  <Select
+                    value={block.chartKind ?? 'bar'}
+                    onValueChange={(value) =>
+                      onChange({
+                        chartKind: value as WizardBlock['chartKind'],
+                      })
+                    }
+                  >
+                    <SelectTrigger>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {CHART_KINDS.map((option) => (
+                        <SelectItem key={option.value} value={option.value}>
+                          {option.label}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="grid gap-1.5">
+                  <Label className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+                    Group by
+                  </Label>
+                  <Select
+                    value={block.chartGroupBy ?? schemaFields[0] ?? ''}
+                    onValueChange={(value) => onChange({ chartGroupBy: value })}
                   >
                     <SelectTrigger>
                       <SelectValue placeholder="Select field" />
@@ -1445,78 +1551,83 @@ function BlockCard({
                     </SelectContent>
                   </Select>
                 </div>
-              ) : null}
-              <div className="grid gap-1.5">
-                <Label className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
-                  Format
-                </Label>
-                <Select
-                  value={block.metricFormat ?? 'number'}
-                  onValueChange={(value) =>
-                    onChange({ metricFormat: value as WizardColumnFormat })
-                  }
-                >
-                  <SelectTrigger>
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {WIZARD_METRIC_FORMATS.map((option) => (
-                      <SelectItem key={option.value} value={option.value}>
-                        {option.label}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
+                <div className="grid gap-1.5">
+                  <Label className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+                    Aggregate
+                  </Label>
+                  <Select
+                    value={block.chartAggregate ?? 'count'}
+                    onValueChange={(value) => {
+                      const op = value as ReportAggregateFn;
+                      onChange({
+                        chartAggregate: op,
+                        chartAggregateField: aggregateOpNeedsField(op)
+                          ? block.chartAggregateField
+                          : undefined,
+                        chartAggregateDistinct:
+                          op === 'expr'
+                            ? undefined
+                            : block.chartAggregateDistinct,
+                        chartAggregatePercentile: aggregateOpIsPercentile(op)
+                          ? block.chartAggregatePercentile
+                          : undefined,
+                        chartAggregateExpression:
+                          op === 'expr'
+                            ? block.chartAggregateExpression
+                            : undefined,
+                      });
+                    }}
+                  >
+                    <SelectTrigger>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {METRIC_AGGREGATES.map((option) => (
+                        <SelectItem key={option.value} value={option.value}>
+                          {option.label}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+                {aggregateOpNeedsField(block.chartAggregate ?? 'count') ? (
+                  <div className="grid gap-1.5">
+                    <Label className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+                      Aggregate field
+                    </Label>
+                    <Select
+                      value={block.chartAggregateField ?? schemaFields[0] ?? ''}
+                      onValueChange={(value) =>
+                        onChange({ chartAggregateField: value })
+                      }
+                    >
+                      <SelectTrigger>
+                        <SelectValue placeholder="Select field" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {schemaFields.map((field) => (
+                          <SelectItem key={field} value={field}>
+                            {field}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                ) : null}
               </div>
-            </div>
-          ) : null}
-
-          {!usingDataset && block.type === 'chart' ? (
-            <div className="grid gap-2 sm:grid-cols-2">
-              <div className="grid gap-1.5">
-                <Label className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
-                  Chart style
-                </Label>
-                <Select
-                  value={block.chartKind ?? 'bar'}
-                  onValueChange={(value) =>
-                    onChange({
-                      chartKind: value as WizardBlock['chartKind'],
-                    })
-                  }
-                >
-                  <SelectTrigger>
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {CHART_KINDS.map((option) => (
-                      <SelectItem key={option.value} value={option.value}>
-                        {option.label}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </div>
-              <div className="grid gap-1.5">
-                <Label className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
-                  Group by
-                </Label>
-                <Select
-                  value={block.chartGroupBy ?? schemaFields[0] ?? ''}
-                  onValueChange={(value) => onChange({ chartGroupBy: value })}
-                >
-                  <SelectTrigger>
-                    <SelectValue placeholder="Select field" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {schemaFields.map((field) => (
-                      <SelectItem key={field} value={field}>
-                        {field}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </div>
+              <AggregateOptionsSettings
+                op={block.chartAggregate ?? 'count'}
+                distinct={block.chartAggregateDistinct}
+                percentile={block.chartAggregatePercentile}
+                expression={block.chartAggregateExpression}
+                onChange={(patch) =>
+                  onChange({
+                    chartAggregateDistinct: patch.distinct,
+                    chartAggregatePercentile: patch.percentile,
+                    chartAggregateExpression: patch.expression,
+                  })
+                }
+              />
             </div>
           ) : null}
 
@@ -2610,6 +2721,87 @@ function SourceConditionSettings({
   );
 }
 
+function AggregateOptionsSettings({
+  op,
+  distinct,
+  percentile,
+  expression,
+  onChange,
+}: {
+  op: ReportAggregateFn;
+  distinct?: boolean;
+  percentile?: number;
+  expression?: unknown;
+  onChange: (patch: {
+    distinct?: boolean;
+    percentile?: number;
+    expression?: unknown;
+  }) => void;
+}) {
+  const showDistinct = op !== 'expr';
+  const showPercentile = op === 'percentile_cont' || op === 'percentile_disc';
+  const showExpression = op === 'expr';
+
+  if (!showDistinct && !showPercentile && !showExpression) return null;
+
+  return (
+    <div className="grid gap-2 rounded-md border bg-muted/10 p-2">
+      {showDistinct ? (
+        <label className="flex min-h-8 items-center gap-2 text-sm">
+          <Checkbox
+            checked={Boolean(distinct)}
+            onCheckedChange={(checked) =>
+              onChange({ distinct: Boolean(checked), percentile, expression })
+            }
+          />
+          Distinct values only
+        </label>
+      ) : null}
+      {showPercentile ? (
+        <div className="grid gap-1 sm:max-w-xs">
+          <Label className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+            Percentile (0-1)
+          </Label>
+          <Input
+            type="number"
+            min={0}
+            max={1}
+            step={0.05}
+            value={percentile !== undefined ? String(percentile) : '0.5'}
+            onChange={(event) =>
+              onChange({
+                distinct,
+                percentile: optionalNumber(event.target.value),
+                expression,
+              })
+            }
+            className="h-8"
+          />
+        </div>
+      ) : null}
+      {showExpression ? (
+        <div className="grid gap-1">
+          <Label className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+            Expression (JSON)
+          </Label>
+          <Input
+            value={formatAggregateExpression(expression)}
+            onChange={(event) =>
+              onChange({
+                distinct,
+                percentile,
+                expression: parseAggregateExpression(event.target.value),
+              })
+            }
+            className="h-8 font-mono text-xs"
+            placeholder='{"op":"divide","args":[...]}'
+          />
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 function BlockFiltersSettings({
   block,
   fields,
@@ -3183,6 +3375,29 @@ function positiveIntegerOrDefault(value: string, fallback: number): number {
 function optionalPositiveInteger(value: string): number | undefined {
   const parsed = Number.parseInt(value, 10);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
+}
+
+function aggregateOpNeedsField(op: ReportAggregateFn | undefined): boolean {
+  return Boolean(op && op !== 'count' && op !== 'expr');
+}
+
+function aggregateOpIsPercentile(op: ReportAggregateFn | undefined): boolean {
+  return op === 'percentile_cont' || op === 'percentile_disc';
+}
+
+function formatAggregateExpression(expression: unknown): string {
+  if (expression === undefined || expression === null) return '';
+  if (typeof expression === 'string') return expression;
+  return JSON.stringify(expression);
+}
+
+function parseAggregateExpression(value: string): unknown {
+  if (!value.trim()) return undefined;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return value;
+  }
 }
 
 function parsePageSizes(value: string): number[] {

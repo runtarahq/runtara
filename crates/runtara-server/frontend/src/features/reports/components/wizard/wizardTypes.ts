@@ -5,6 +5,7 @@ import {
   ReportCondition,
   ReportDatasetDefinition,
   ReportEditorConfig,
+  ReportAggregateFn,
   ReportFilterDefinition,
   ReportFilterType,
   ReportInteractionDefinition,
@@ -185,9 +186,17 @@ export interface WizardBlock {
   placement: WizardBlockPlacement;
   chartKind?: ReportChartKind;
   chartGroupBy?: string;
-  metricAggregate?: 'count' | 'sum' | 'avg' | 'min' | 'max';
+  metricAggregate?: ReportAggregateFn;
   metricField?: string;
+  metricDistinct?: boolean;
+  metricPercentile?: number;
+  metricExpression?: unknown;
   metricFormat?: WizardColumnFormat;
+  chartAggregate?: ReportAggregateFn;
+  chartAggregateField?: string;
+  chartAggregateDistinct?: boolean;
+  chartAggregatePercentile?: number;
+  chartAggregateExpression?: unknown;
   markdownContent?: string;
   /** Table-block: enables row checkboxes. Forced true while bulk actions exist. */
   selectable?: boolean;

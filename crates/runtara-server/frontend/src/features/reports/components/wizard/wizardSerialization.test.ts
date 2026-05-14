@@ -571,6 +571,90 @@ describe('table column round-trip', () => {
     });
   });
 
+  it('round-trips advanced metric and chart aggregate specs', () => {
+    const definition: ReportDefinition = {
+      definitionVersion: 1,
+      filters: [],
+      blocks: [
+        {
+          id: 'p90_amount',
+          type: 'metric',
+          title: 'P90 amount',
+          source: {
+            schema: 'orders',
+            mode: 'aggregate',
+            aggregates: [
+              {
+                alias: 'value',
+                op: 'percentile_cont',
+                field: 'amount',
+                percentile: 0.9,
+                distinct: true,
+              },
+            ],
+          },
+          metric: {
+            valueField: 'value',
+            label: 'P90 amount',
+            format: 'currency',
+          },
+        },
+        {
+          id: 'status_total',
+          type: 'chart',
+          title: 'Status total',
+          source: {
+            schema: 'orders',
+            mode: 'aggregate',
+            groupBy: ['status'],
+            aggregates: [
+              {
+                alias: 'value',
+                op: 'sum',
+                field: 'amount',
+              },
+            ],
+          },
+          chart: {
+            kind: 'bar',
+            x: 'status',
+            series: [{ field: 'value', label: 'Total' }],
+          },
+        },
+      ],
+    };
+
+    const { state, compatibility } = definitionToWizardState(
+      definition,
+      'orders'
+    );
+    expect(compatibility.fullyEditable).toBe(true);
+    expect(state.blocks[0]).toMatchObject({
+      metricAggregate: 'percentile_cont',
+      metricField: 'amount',
+      metricPercentile: 0.9,
+      metricDistinct: true,
+    });
+    expect(state.blocks[1]).toMatchObject({
+      chartAggregate: 'sum',
+      chartAggregateField: 'amount',
+    });
+
+    const round = wizardStateToDefinition(state, SCHEMA_FIELDS, definition);
+    expect(round.blocks[0].source.aggregates?.[0]).toMatchObject({
+      alias: 'value',
+      op: 'percentile_cont',
+      field: 'amount',
+      percentile: 0.9,
+      distinct: true,
+    });
+    expect(round.blocks[1].source.aggregates?.[0]).toMatchObject({
+      alias: 'value',
+      op: 'sum',
+      field: 'amount',
+    });
+  });
+
   it('round-trips block click interactions', () => {
     const definition: ReportDefinition = {
       definitionVersion: 1,
