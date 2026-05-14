@@ -464,6 +464,65 @@ describe('table column round-trip', () => {
     });
   });
 
+  it('round-trips schema joins and custom source conditions', () => {
+    const condition = {
+      op: 'EQ',
+      arguments: ['status', 'open'],
+    };
+    const definition: ReportDefinition = {
+      definitionVersion: 1,
+      filters: [],
+      blocks: [
+        {
+          id: 'orders',
+          type: 'table',
+          title: 'Orders',
+          source: {
+            schema: 'orders',
+            mode: 'filter',
+            join: [
+              {
+                schema: 'customers',
+                alias: 'customer',
+                parentField: 'customer_id',
+                field: 'id',
+                op: 'eq',
+                kind: 'left',
+              },
+            ],
+            condition,
+          },
+          table: {
+            columns: [
+              { field: 'id', label: 'ID' },
+              { field: 'customer.name', label: 'Customer' },
+            ],
+          },
+        },
+      ],
+    };
+
+    const { state, compatibility } = definitionToWizardState(
+      definition,
+      'orders'
+    );
+    expect(compatibility.fullyEditable).toBe(true);
+    expect(state.blocks[0].sourceJoins).toEqual(
+      definition.blocks[0].source.join
+    );
+    expect(state.blocks[0].sourceCondition).toEqual(condition);
+
+    const round = wizardStateToDefinition(
+      state,
+      { ...SCHEMA_FIELDS, customers: ['id', 'name'] },
+      definition
+    );
+    expect(round.blocks[0].source.join).toEqual(
+      definition.blocks[0].source.join
+    );
+    expect(round.blocks[0].source.condition).toEqual(condition);
+  });
+
   it('round-trips block click interactions', () => {
     const definition: ReportDefinition = {
       definitionVersion: 1,

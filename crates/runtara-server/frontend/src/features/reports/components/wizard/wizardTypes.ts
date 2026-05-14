@@ -2,6 +2,7 @@ import {
   ReportBlockDatasetQuery,
   ReportBlockType,
   ReportChartKind,
+  ReportCondition,
   ReportDatasetDefinition,
   ReportEditorConfig,
   ReportFilterDefinition,
@@ -9,6 +10,7 @@ import {
   ReportInteractionDefinition,
   ReportOrderBy,
   ReportSource,
+  ReportSourceJoin,
   ReportTableActionConfig,
   ReportTableInteractionButtonConfig,
   ReportViewDefinition,
@@ -170,6 +172,10 @@ export interface WizardBlock {
   sourceInterval?: string;
   /** Optional system source granularity. */
   sourceGranularity?: string;
+  /** Optional Object Model joins exposed as alias.field paths. */
+  sourceJoins?: ReportSourceJoin[];
+  /** Optional source condition DSL. */
+  sourceCondition?: ReportCondition;
   fields: string[];
   fieldConfigs?: Record<string, WizardFieldConfig>;
   placement: WizardBlockPlacement;

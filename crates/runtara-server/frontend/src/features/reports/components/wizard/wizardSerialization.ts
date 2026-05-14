@@ -65,7 +65,15 @@ function buildSourceBase(
   | 'instanceId'
   | 'interval'
   | 'granularity'
+  | 'join'
+  | 'condition'
 > {
+  const extras = {
+    ...(block.sourceJoins && block.sourceJoins.length > 0
+      ? { join: block.sourceJoins }
+      : {}),
+    ...(block.sourceCondition ? { condition: block.sourceCondition } : {}),
+  };
   if (block.sourceKind === 'workflow_runtime') {
     return {
       kind: 'workflow_runtime',
@@ -73,6 +81,7 @@ function buildSourceBase(
       entity: block.sourceEntity ?? 'instances',
       workflowId: block.workflowId ?? '',
       ...(block.instanceId ? { instanceId: block.instanceId } : {}),
+      ...(block.sourceCondition ? { condition: block.sourceCondition } : {}),
     };
   }
   if (block.sourceKind === 'system') {
@@ -84,9 +93,10 @@ function buildSourceBase(
       ...(block.sourceGranularity
         ? { granularity: block.sourceGranularity }
         : {}),
+      ...(block.sourceCondition ? { condition: block.sourceCondition } : {}),
     };
   }
-  return { schema: block.schema ?? '' };
+  return { schema: block.schema ?? '', ...extras };
 }
 
 function buildBlockSource(
@@ -680,10 +690,6 @@ function blockDefinitionToWizard(
     unsupported.push('Missing data source');
   }
 
-  if (source?.join && source.join.length > 0) {
-    unsupported.push('Schema joins');
-  }
-  if (source?.condition) unsupported.push('Custom source conditions');
   const fields: string[] = [];
   const fieldConfigs: Record<string, WizardFieldConfig> = {};
 
@@ -793,6 +799,10 @@ function blockDefinitionToWizard(
     ...(source?.instanceId ? { instanceId: source.instanceId } : {}),
     ...(source?.interval ? { sourceInterval: source.interval } : {}),
     ...(source?.granularity ? { sourceGranularity: source.granularity } : {}),
+    ...(source?.join && source.join.length > 0
+      ? { sourceJoins: source.join }
+      : {}),
+    ...(source?.condition ? { sourceCondition: source.condition } : {}),
     fields,
     placement: fallbackPlacement,
     chartKind: block.chart?.kind,

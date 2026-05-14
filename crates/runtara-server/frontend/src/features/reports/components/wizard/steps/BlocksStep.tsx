@@ -25,6 +25,7 @@ import { Schema } from '@/generated/RuntaraRuntimeApi';
 import { Checkbox } from '@/shared/components/ui/checkbox';
 import {
   ReportBlockResult,
+  ReportCondition,
   ReportDatasetDefinition,
   ReportEditorConfig,
   ReportEditorKind,
@@ -34,6 +35,7 @@ import {
   ReportFilterType,
   ReportOrderBy,
   ReportSource,
+  ReportSourceJoin,
   ReportTableInteractionButtonConfig,
   ReportWorkflowActionConfig,
 } from '../../../types';
@@ -98,7 +100,18 @@ function fieldsForWizardSource(
       SYSTEM_FIELDS.runtime_system_snapshot
     );
   }
-  return fieldsOfSchema(schemas, block.schema);
+  const baseFields = fieldsOfSchema(schemas, block.schema);
+  const joinFields = (block.sourceJoins ?? []).flatMap((join) => {
+    const alias = joinAlias(join);
+    return fieldsOfSchema(schemas, join.schema).map(
+      (field) => `${alias}.${field}`
+    );
+  });
+  return uniqueStrings([...baseFields, ...joinFields]);
+}
+
+function joinAlias(join: Pick<ReportSourceJoin, 'schema' | 'alias'>): string {
+  return join.alias || join.schema;
 }
 
 interface BlocksStepProps {
@@ -922,6 +935,7 @@ function BlockCard({
     (block.type === 'table' || block.type === 'card' || block.type === 'chart');
   const needsSchema =
     !usingDataset && !block.sourceKind && block.type !== 'markdown';
+  const supportsObjectModelSourceTools = needsSchema && Boolean(block.schema);
 
   function changeSchema(nextSchema: string) {
     if (nextSchema === block.schema) return;
@@ -934,6 +948,8 @@ function BlockCard({
       instanceId: undefined,
       sourceInterval: undefined,
       sourceGranularity: undefined,
+      sourceJoins: undefined,
+      sourceCondition: undefined,
       schema: nextSchema,
       fields: [],
       fieldConfigs: undefined,
@@ -954,6 +970,8 @@ function BlockCard({
       instanceId: undefined,
       sourceInterval: undefined,
       sourceGranularity: undefined,
+      sourceJoins: undefined,
+      sourceCondition: undefined,
       schema: undefined,
       fields: [],
       fieldConfigs: undefined,
@@ -972,6 +990,8 @@ function BlockCard({
       instanceId: undefined,
       sourceInterval: undefined,
       sourceGranularity: undefined,
+      sourceJoins: undefined,
+      sourceCondition: undefined,
       schema: schemas[0]?.name,
       fields: [],
       fieldConfigs: undefined,
@@ -989,6 +1009,8 @@ function BlockCard({
       instanceId: undefined,
       sourceInterval: undefined,
       sourceGranularity: undefined,
+      sourceJoins: undefined,
+      sourceCondition: undefined,
       schema: undefined,
       fields: WORKFLOW_RUNTIME_FIELDS.instances.slice(0, 5),
       fieldConfigs: undefined,
@@ -1006,6 +1028,8 @@ function BlockCard({
       instanceId: undefined,
       sourceInterval: undefined,
       sourceGranularity: undefined,
+      sourceJoins: undefined,
+      sourceCondition: undefined,
       schema: undefined,
       fields: SYSTEM_FIELDS.runtime_system_snapshot.slice(0, 5),
       fieldConfigs: undefined,
@@ -1323,6 +1347,19 @@ function BlockCard({
                 </SelectContent>
               </Select>
             </div>
+          ) : null}
+
+          {supportsObjectModelSourceTools ? (
+            <SourceJoinsSettings
+              block={block}
+              schemas={schemas}
+              baseFields={fieldsOfSchema(schemas, block.schema)}
+              onChange={onChange}
+            />
+          ) : null}
+
+          {supportsObjectModelSourceTools ? (
+            <SourceConditionSettings block={block} onChange={onChange} />
           ) : null}
 
           {block.type === 'markdown' ? (
@@ -2183,6 +2220,261 @@ function SystemSourceSettings({
   );
 }
 
+function SourceJoinsSettings({
+  block,
+  schemas,
+  baseFields,
+  onChange,
+}: {
+  block: WizardBlock;
+  schemas: Schema[];
+  baseFields: string[];
+  onChange: (patch: Partial<WizardBlock>) => void;
+}) {
+  const joins = block.sourceJoins ?? [];
+
+  function updateJoin(index: number, patch: Partial<ReportSourceJoin>) {
+    onChange({
+      sourceJoins: joins.map((join, currentIndex) =>
+        currentIndex === index ? { ...join, ...patch } : join
+      ),
+    });
+  }
+
+  function addJoin() {
+    const schema =
+      schemas.find((candidate) => candidate.name !== block.schema)?.name ??
+      schemas[0]?.name ??
+      '';
+    const joinFields = fieldsOfSchema(schemas, schema);
+    const next: ReportSourceJoin = {
+      schema,
+      parentField: baseFields[0] ?? 'id',
+      field: joinFields[0] ?? 'id',
+      op: 'eq',
+      kind: 'left',
+    };
+    onChange({ sourceJoins: [...joins, next] });
+  }
+
+  function removeJoin(index: number) {
+    const next = joins.filter((_, currentIndex) => currentIndex !== index);
+    onChange({ sourceJoins: next.length > 0 ? next : undefined });
+  }
+
+  return (
+    <div className="grid gap-3 rounded-md border bg-muted/10 p-3">
+      <div className="flex items-center justify-between gap-2">
+        <Label className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+          Source joins
+        </Label>
+        <Button
+          type="button"
+          size="sm"
+          variant="outline"
+          className="h-7"
+          onClick={addJoin}
+          disabled={schemas.length === 0 || baseFields.length === 0}
+        >
+          <Plus className="mr-1 h-3 w-3" />
+          Add join
+        </Button>
+      </div>
+      {joins.length === 0 ? (
+        <p className="text-xs text-muted-foreground">No schema joins.</p>
+      ) : (
+        <div className="grid gap-2">
+          {joins.map((join, index) => {
+            const joinFields = fieldsOfSchema(schemas, join.schema);
+            return (
+              <div
+                key={`${join.schema}-${index}`}
+                className="grid gap-2 rounded-md border bg-background p-2 lg:grid-cols-[minmax(0,1fr)_minmax(0,0.8fr)_minmax(0,1fr)_minmax(0,1fr)_80px_80px_auto]"
+              >
+                <div className="grid gap-1">
+                  <Label className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+                    Schema
+                  </Label>
+                  <Select
+                    value={join.schema}
+                    onValueChange={(schema) => {
+                      const fields = fieldsOfSchema(schemas, schema);
+                      updateJoin(index, {
+                        schema,
+                        field: fields[0] ?? join.field,
+                      });
+                    }}
+                  >
+                    <SelectTrigger className="h-8">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {schemas.map((schema) => (
+                        <SelectItem key={schema.id} value={schema.name}>
+                          {schema.name}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="grid gap-1">
+                  <Label className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+                    Alias
+                  </Label>
+                  <Input
+                    value={join.alias ?? ''}
+                    onChange={(event) =>
+                      updateJoin(index, {
+                        alias: event.target.value || undefined,
+                      })
+                    }
+                    className="h-8"
+                    placeholder={join.schema}
+                  />
+                </div>
+                <div className="grid gap-1">
+                  <Label className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+                    Parent field
+                  </Label>
+                  <Select
+                    value={join.parentField}
+                    onValueChange={(parentField) =>
+                      updateJoin(index, { parentField })
+                    }
+                  >
+                    <SelectTrigger className="h-8">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {baseFields.map((field) => (
+                        <SelectItem key={field} value={field}>
+                          {field}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="grid gap-1">
+                  <Label className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+                    Join field
+                  </Label>
+                  <Select
+                    value={join.field}
+                    onValueChange={(field) => updateJoin(index, { field })}
+                  >
+                    <SelectTrigger className="h-8">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {joinFields.map((field) => (
+                        <SelectItem key={field} value={field}>
+                          {field}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="grid gap-1">
+                  <Label className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+                    Op
+                  </Label>
+                  <Input
+                    value={join.op ?? 'eq'}
+                    onChange={(event) =>
+                      updateJoin(index, { op: event.target.value || 'eq' })
+                    }
+                    className="h-8"
+                  />
+                </div>
+                <div className="grid gap-1">
+                  <Label className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+                    Kind
+                  </Label>
+                  <Select
+                    value={join.kind ?? 'left'}
+                    onValueChange={(kind) =>
+                      updateJoin(index, {
+                        kind: kind as NonNullable<ReportSourceJoin['kind']>,
+                      })
+                    }
+                  >
+                    <SelectTrigger className="h-8">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="left">Left</SelectItem>
+                      <SelectItem value="inner">Inner</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+                <Button
+                  type="button"
+                  size="icon"
+                  variant="ghost"
+                  className="mt-5 h-8 w-8"
+                  onClick={() => removeJoin(index)}
+                  aria-label="Remove join"
+                >
+                  <Trash2 className="h-3.5 w-3.5" />
+                </Button>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function SourceConditionSettings({
+  block,
+  onChange,
+}: {
+  block: WizardBlock;
+  onChange: (patch: Partial<WizardBlock>) => void;
+}) {
+  const [text, setText] = useState(() =>
+    formatSourceCondition(block.sourceCondition)
+  );
+  const [error, setError] = useState<string | null>(null);
+
+  function updateText(value: string) {
+    setText(value);
+    if (!value.trim()) {
+      setError(null);
+      onChange({ sourceCondition: undefined });
+      return;
+    }
+    try {
+      const parsed = JSON.parse(value) as unknown;
+      if (!isReportCondition(parsed)) {
+        setError('Condition JSON must be an object with an op string.');
+        return;
+      }
+      setError(null);
+      onChange({ sourceCondition: parsed });
+    } catch {
+      setError('Condition JSON is not valid yet.');
+    }
+  }
+
+  return (
+    <div className="grid gap-2 rounded-md border bg-muted/10 p-3">
+      <Label className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+        Source condition
+      </Label>
+      <Textarea
+        rows={4}
+        value={text}
+        onChange={(event) => updateText(event.target.value)}
+        placeholder='{"op":"EQ","arguments":["status","open"]}'
+        className="font-mono text-xs"
+      />
+      {error ? <p className="text-xs text-destructive">{error}</p> : null}
+    </div>
+  );
+}
+
 function BlockFiltersSettings({
   block,
   fields,
@@ -2884,6 +3176,19 @@ function parseBlockFilterOptions(value: string): ReportFilterOption[] {
         label: label || humanizeFieldName(rawValue),
       };
     });
+}
+
+function formatSourceCondition(condition: ReportCondition | undefined): string {
+  return condition ? JSON.stringify(condition, null, 2) : '';
+}
+
+function isReportCondition(value: unknown): value is ReportCondition {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    !Array.isArray(value) &&
+    typeof (value as { op?: unknown }).op === 'string'
+  );
 }
 
 function TableSelectionAndBulkActions({
