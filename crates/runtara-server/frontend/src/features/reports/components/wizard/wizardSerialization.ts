@@ -137,6 +137,9 @@ function buildBlockDefinition(
       ...(block.lazy ? { lazy: true } : {}),
       ...(block.hideWhenEmpty ? { hideWhenEmpty: true } : {}),
       ...(block.showWhen ? { showWhen: block.showWhen } : {}),
+      ...(block.filters && block.filters.length > 0
+        ? { filters: block.filters }
+        : {}),
       ...(block.interactions && block.interactions.length > 0
         ? { interactions: block.interactions }
         : {}),
@@ -152,6 +155,9 @@ function buildBlockDefinition(
     ...(block.lazy ? { lazy: true } : {}),
     ...(block.hideWhenEmpty ? { hideWhenEmpty: true } : {}),
     ...(block.showWhen ? { showWhen: block.showWhen } : {}),
+    ...(block.filters && block.filters.length > 0
+      ? { filters: block.filters }
+      : {}),
     ...(block.interactions && block.interactions.length > 0
       ? { interactions: block.interactions }
       : {}),
@@ -639,10 +645,6 @@ function blockDefinitionToWizard(
   if (source?.kind && source.kind !== 'object_model') {
     unsupported.push(`Source kind "${source.kind}"`);
   }
-  if (block.filters && block.filters.length > 0) {
-    unsupported.push('Block-level filters');
-  }
-
   const fields: string[] = [];
   const fieldConfigs: Record<string, WizardFieldConfig> = {};
 
@@ -760,6 +762,9 @@ function blockDefinitionToWizard(
     ...(block.lazy ? { lazy: true } : {}),
     ...(block.hideWhenEmpty ? { hideWhenEmpty: true } : {}),
     ...(block.showWhen ? { showWhen: block.showWhen } : {}),
+    ...(block.filters && block.filters.length > 0
+      ? { filters: block.filters }
+      : {}),
     ...(block.interactions && block.interactions.length > 0
       ? { interactions: block.interactions }
       : {}),

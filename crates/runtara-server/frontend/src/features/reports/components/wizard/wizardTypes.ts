@@ -3,6 +3,7 @@ import {
   ReportBlockType,
   ReportChartKind,
   ReportDatasetDefinition,
+  ReportFilterDefinition,
   ReportFilterType,
   ReportInteractionDefinition,
   ReportOrderBy,
@@ -176,6 +177,8 @@ export interface WizardBlock {
   hideWhenEmpty?: boolean;
   /** Optional filter-driven visibility rule for the whole block. */
   showWhen?: ReportVisibilityCondition;
+  /** Filters rendered inside this block and sent as blockFilters data requests. */
+  filters?: ReportFilterDefinition[];
   /** Row/cell/point click interactions emitted by the block renderer. */
   interactions?: ReportInteractionDefinition[];
   /** Pre-aggregated dataset query — when set, the block resolves through

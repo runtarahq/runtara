@@ -26,6 +26,9 @@ import { Checkbox } from '@/shared/components/ui/checkbox';
 import {
   ReportBlockResult,
   ReportDatasetDefinition,
+  ReportFilterDefinition,
+  ReportFilterOption,
+  ReportFilterType,
   ReportOrderBy,
   ReportTableInteractionButtonConfig,
   ReportWorkflowActionConfig,
@@ -111,6 +114,29 @@ const METRIC_AGGREGATES: Array<{
   { value: 'avg', label: 'Average' },
   { value: 'min', label: 'Min' },
   { value: 'max', label: 'Max' },
+];
+
+const FILTER_TYPES: Array<{ value: ReportFilterType; label: string }> = [
+  { value: 'select', label: 'Single select' },
+  { value: 'multi_select', label: 'Multi select' },
+  { value: 'radio', label: 'Radio' },
+  { value: 'checkbox', label: 'Checkbox' },
+  { value: 'time_range', label: 'Time range' },
+  { value: 'number_range', label: 'Number range' },
+  { value: 'text', label: 'Text' },
+  { value: 'search', label: 'Search' },
+];
+
+const BLOCK_FILTER_OPERATORS = [
+  { value: 'eq', label: 'Equals' },
+  { value: 'in', label: 'In list' },
+  { value: 'contains', label: 'Contains' },
+  { value: 'between', label: 'Between' },
+  { value: 'ne', label: 'Not equal' },
+  { value: 'gt', label: 'Greater than' },
+  { value: 'gte', label: 'Greater or equal' },
+  { value: 'lt', label: 'Less than' },
+  { value: 'lte', label: 'Less or equal' },
 ];
 
 const NO_SORT_FIELD = '__none__';
@@ -705,6 +731,7 @@ function BlockCard({
     : block.type === 'chart'
       ? uniqueStrings([block.chartGroupBy, ...block.fields])
       : block.fields.filter((field) => !isActionFieldKey(field));
+  const supportsBlockFilters = !usingDataset && block.type !== 'markdown';
   // Card and markdown blocks don't make sense over pre-aggregated datasets —
   // hide the dataset toggle for them.
   const supportsDataset =
@@ -950,6 +977,14 @@ function BlockCard({
             filters={filters}
             onChange={onChange}
           />
+
+          {supportsBlockFilters ? (
+            <BlockFiltersSettings
+              block={block}
+              fields={schemaFields}
+              onChange={onChange}
+            />
+          ) : null}
 
           {block.type === 'table' || block.type === 'chart' ? (
             <BlockInteractionsSettings
@@ -1677,6 +1712,249 @@ function stringVisibilityValue(value: unknown): string {
   return JSON.stringify(value);
 }
 
+function BlockFiltersSettings({
+  block,
+  fields,
+  onChange,
+}: {
+  block: WizardBlock;
+  fields: string[];
+  onChange: (patch: Partial<WizardBlock>) => void;
+}) {
+  const filters = block.filters ?? [];
+  const fieldOptions = blockFilterFieldOptions(filters, fields);
+  const canAddFilter = fields.length > 0;
+
+  function updateFilter(index: number, filter: ReportFilterDefinition) {
+    const nextFilters = filters.map((current, currentIndex) =>
+      currentIndex === index ? filter : current
+    );
+    onChange({ filters: nextFilters.length > 0 ? nextFilters : undefined });
+  }
+
+  function addFilter() {
+    const field = fieldOptions[0] ?? fields[0] ?? 'id';
+    const filter: ReportFilterDefinition = {
+      id: uniqueBlockFilterId(filters, field),
+      label: humanizeFieldName(field),
+      type: 'select',
+      appliesTo: [
+        {
+          blockId: block.id,
+          field,
+          op: 'eq',
+        },
+      ],
+      options: {
+        source: 'static',
+        values: [],
+      },
+    };
+    onChange({ filters: [...filters, filter] });
+  }
+
+  function removeFilter(index: number) {
+    const nextFilters = filters.filter(
+      (_, currentIndex) => currentIndex !== index
+    );
+    onChange({ filters: nextFilters.length > 0 ? nextFilters : undefined });
+  }
+
+  return (
+    <div className="grid gap-3 rounded-md border bg-muted/10 p-3">
+      <div className="flex items-center justify-between gap-2">
+        <Label className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+          Block filters
+        </Label>
+        <Button
+          type="button"
+          size="sm"
+          variant="outline"
+          className="h-7"
+          onClick={addFilter}
+          disabled={!canAddFilter}
+        >
+          <Plus className="mr-1 h-3 w-3" />
+          Add filter
+        </Button>
+      </div>
+      {filters.length === 0 ? (
+        <p className="text-xs text-muted-foreground">No block-local filters.</p>
+      ) : (
+        <div className="grid gap-2">
+          {filters.map((filter, index) => {
+            const target = firstBlockFilterTarget(
+              filter,
+              block.id,
+              fieldOptions
+            );
+            const operatorOptions = blockFilterOperatorOptions(target.op);
+            return (
+              <div
+                key={`${filter.id}-${index}`}
+                className="grid gap-2 rounded-md border bg-background p-2"
+              >
+                <div className="grid gap-2 lg:grid-cols-[minmax(0,1fr)_minmax(0,0.9fr)_minmax(0,0.9fr)_minmax(0,0.9fr)_auto]">
+                  <div className="grid gap-1">
+                    <Label className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+                      Label
+                    </Label>
+                    <Input
+                      value={filter.label}
+                      className="h-8"
+                      onChange={(event) =>
+                        updateFilter(index, {
+                          ...filter,
+                          label: event.target.value,
+                        })
+                      }
+                    />
+                  </div>
+                  <div className="grid gap-1">
+                    <Label className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+                      Type
+                    </Label>
+                    <Select
+                      value={filter.type}
+                      onValueChange={(value) => {
+                        const type = value as ReportFilterType;
+                        updateFilter(index, {
+                          ...filter,
+                          type,
+                          default: undefined,
+                          appliesTo: updateBlockFilterTarget(
+                            filter,
+                            block.id,
+                            fieldOptions,
+                            {
+                              op: defaultOperatorForBlockFilter(type),
+                            }
+                          ),
+                          options: blockFilterUsesOptions(type)
+                            ? {
+                                source: 'static',
+                                values: filter.options?.values ?? [],
+                              }
+                            : undefined,
+                        });
+                      }}
+                    >
+                      <SelectTrigger className="h-8">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {FILTER_TYPES.map((option) => (
+                          <SelectItem key={option.value} value={option.value}>
+                            {option.label}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div className="grid gap-1">
+                    <Label className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+                      Field
+                    </Label>
+                    <Select
+                      value={target.field}
+                      disabled={fieldOptions.length === 0}
+                      onValueChange={(field) =>
+                        updateFilter(index, {
+                          ...filter,
+                          appliesTo: updateBlockFilterTarget(
+                            filter,
+                            block.id,
+                            fieldOptions,
+                            { field }
+                          ),
+                        })
+                      }
+                    >
+                      <SelectTrigger className="h-8">
+                        <SelectValue placeholder="Select field" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {fieldOptions.map((field) => (
+                          <SelectItem key={field} value={field}>
+                            {field}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div className="grid gap-1">
+                    <Label className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+                      Match
+                    </Label>
+                    <Select
+                      value={
+                        target.op ?? defaultOperatorForBlockFilter(filter.type)
+                      }
+                      onValueChange={(op) =>
+                        updateFilter(index, {
+                          ...filter,
+                          appliesTo: updateBlockFilterTarget(
+                            filter,
+                            block.id,
+                            fieldOptions,
+                            { op }
+                          ),
+                        })
+                      }
+                    >
+                      <SelectTrigger className="h-8">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {operatorOptions.map((option) => (
+                          <SelectItem key={option.value} value={option.value}>
+                            {option.label}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <Button
+                    type="button"
+                    size="icon"
+                    variant="ghost"
+                    className="mt-5 h-8 w-8"
+                    onClick={() => removeFilter(index)}
+                    aria-label={`Remove ${filter.label || filter.id}`}
+                  >
+                    <Trash2 className="h-3.5 w-3.5" />
+                  </Button>
+                </div>
+                {blockFilterUsesOptions(filter.type) ? (
+                  <div className="grid gap-1">
+                    <Label className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+                      Static options
+                    </Label>
+                    <Textarea
+                      rows={2}
+                      value={formatBlockFilterOptions(filter)}
+                      placeholder={'open=Open\nclosed=Closed'}
+                      onChange={(event) =>
+                        updateFilter(index, {
+                          ...filter,
+                          options: {
+                            source: 'static',
+                            values: parseBlockFilterOptions(event.target.value),
+                          },
+                        })
+                      }
+                    />
+                  </div>
+                ) : null}
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function BlockInteractionsSettings({
   block,
   fields,
@@ -2019,6 +2297,122 @@ function uniqueStrings(values: Array<string | undefined>): string[] {
   return Array.from(
     new Set(values.filter((value): value is string => Boolean(value)))
   );
+}
+
+function blockFilterFieldOptions(
+  filters: ReportFilterDefinition[],
+  fields: string[]
+): string[] {
+  return uniqueStrings([
+    ...fields,
+    ...filters.flatMap(
+      (filter) => filter.appliesTo?.map((target) => target.field) ?? []
+    ),
+  ]);
+}
+
+function firstBlockFilterTarget(
+  filter: ReportFilterDefinition,
+  blockId: string,
+  fields: string[]
+): NonNullable<ReportFilterDefinition['appliesTo']>[number] {
+  const target = filter.appliesTo?.[0];
+  return {
+    blockId: target?.blockId ?? blockId,
+    field: target?.field ?? fields[0] ?? 'id',
+    op: target?.op ?? defaultOperatorForBlockFilter(filter.type),
+  };
+}
+
+function updateBlockFilterTarget(
+  filter: ReportFilterDefinition,
+  blockId: string,
+  fields: string[],
+  patch: Partial<NonNullable<ReportFilterDefinition['appliesTo']>[number]>
+): NonNullable<ReportFilterDefinition['appliesTo']> {
+  const current = firstBlockFilterTarget(filter, blockId, fields);
+  return [
+    {
+      ...current,
+      ...patch,
+      blockId,
+    },
+    ...(filter.appliesTo?.slice(1) ?? []),
+  ];
+}
+
+function uniqueBlockFilterId(
+  filters: ReportFilterDefinition[],
+  seed: string
+): string {
+  const existingIds = new Set(filters.map((filter) => filter.id));
+  const base = slugify(seed || 'filter').replace(/-/g, '_') || 'filter';
+  let candidate = `${base}_filter`;
+  let suffix = 1;
+  while (existingIds.has(candidate)) {
+    suffix += 1;
+    candidate = `${base}_filter_${suffix}`;
+  }
+  return candidate;
+}
+
+function blockFilterUsesOptions(type: ReportFilterType): boolean {
+  return type === 'select' || type === 'multi_select' || type === 'radio';
+}
+
+function defaultOperatorForBlockFilter(type: ReportFilterType): string {
+  switch (type) {
+    case 'multi_select':
+      return 'in';
+    case 'time_range':
+    case 'number_range':
+      return 'between';
+    case 'search':
+    case 'text':
+      return 'contains';
+    case 'checkbox':
+    case 'radio':
+    case 'select':
+    default:
+      return 'eq';
+  }
+}
+
+function blockFilterOperatorOptions(op: string | undefined) {
+  if (!op || BLOCK_FILTER_OPERATORS.some((option) => option.value === op)) {
+    return BLOCK_FILTER_OPERATORS;
+  }
+  return [{ value: op, label: op }, ...BLOCK_FILTER_OPERATORS];
+}
+
+function formatBlockFilterOptions(filter: ReportFilterDefinition): string {
+  return (
+    filter.options?.values
+      ?.map((option) => {
+        const value = String(option.value);
+        return option.label && option.label !== humanizeFieldName(value)
+          ? `${value}=${option.label}`
+          : value;
+      })
+      .join('\n') ?? ''
+  );
+}
+
+function parseBlockFilterOptions(value: string): ReportFilterOption[] {
+  return value
+    .split(/[\n,]+/)
+    .map((part) => part.trim())
+    .filter(Boolean)
+    .map((part) => {
+      const separator = part.indexOf('=');
+      const rawValue = separator >= 0 ? part.slice(0, separator).trim() : part;
+      const label =
+        separator >= 0 ? part.slice(separator + 1).trim() : undefined;
+      return {
+        value: rawValue,
+        label: label || humanizeFieldName(rawValue),
+      };
+    });
 }
 
 function TableSelectionAndBulkActions({

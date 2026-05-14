@@ -248,6 +248,58 @@ describe('table column round-trip', () => {
     });
   });
 
+  it('round-trips block-level filters without compatibility warning', () => {
+    const definition: ReportDefinition = {
+      definitionVersion: 1,
+      filters: [],
+      blocks: [
+        {
+          id: 'orders',
+          type: 'table',
+          title: 'Orders',
+          source: { schema: 'orders', mode: 'filter' },
+          table: {
+            columns: [
+              { field: 'id', label: 'ID' },
+              { field: 'status', label: 'Status' },
+            ],
+          },
+          filters: [
+            {
+              id: 'status_filter',
+              label: 'Status',
+              type: 'select',
+              appliesTo: [
+                {
+                  blockId: 'orders',
+                  field: 'status',
+                  op: 'eq',
+                },
+              ],
+              options: {
+                source: 'static',
+                values: [
+                  { label: 'Open', value: 'open' },
+                  { label: 'Closed', value: 'closed' },
+                ],
+              },
+            },
+          ],
+        },
+      ],
+    };
+
+    const { state, compatibility } = definitionToWizardState(
+      definition,
+      'orders'
+    );
+    expect(compatibility.fullyEditable).toBe(true);
+    expect(state.blocks[0].filters).toEqual(definition.blocks[0].filters);
+
+    const round = wizardStateToDefinition(state, SCHEMA_FIELDS, definition);
+    expect(round.blocks[0].filters).toEqual(definition.blocks[0].filters);
+  });
+
   it('round-trips block click interactions', () => {
     const definition: ReportDefinition = {
       definitionVersion: 1,
