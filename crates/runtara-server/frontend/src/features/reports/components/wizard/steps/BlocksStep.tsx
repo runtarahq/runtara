@@ -260,6 +260,23 @@ export function BlocksStep({
     setDraggedId(null);
   }
 
+  // Viewer-side empty state: avoid showing an unstyled blank canvas when a
+  // saved report contains no blocks. Editors still see the grid placeholders
+  // so they can drop blocks in.
+  if (!editing && blocks.length === 0) {
+    return (
+      <div className="grid place-items-center gap-2 rounded-xl border border-dashed bg-muted/10 px-6 py-12 text-center">
+        <p className="text-sm font-medium text-foreground">
+          This report has no content yet
+        </p>
+        <p className="max-w-prose text-xs text-muted-foreground">
+          Switch to edit mode to add a markdown section, metric, chart, table,
+          or card.
+        </p>
+      </div>
+    );
+  }
+
   return (
     <div className="grid gap-4">
 

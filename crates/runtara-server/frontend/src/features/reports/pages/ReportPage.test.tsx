@@ -40,9 +40,20 @@ const sampleReport: ReportDto = {
   },
 };
 
+const emptyReport: ReportDto = {
+  ...sampleReport,
+  id: 'rep_empty',
+  definition: { definitionVersion: 1, filters: [], blocks: [] },
+};
+
 vi.mock('../hooks/useReports', () => ({
   useReport: (reportId: string | undefined) => ({
-    data: reportId === sampleReport.id ? sampleReport : null,
+    data:
+      reportId === sampleReport.id
+        ? sampleReport
+        : reportId === emptyReport.id
+          ? emptyReport
+          : null,
     isFetching: false,
   }),
   useReportPreview: () => ({ data: undefined, isFetching: false }),
@@ -100,5 +111,18 @@ describe('ReportPage existing-report load', () => {
     expect(
       screen.queryByText('Add at least one block')
     ).not.toBeInTheDocument();
+  });
+
+  it('shows a friendly empty-state message when a viewed report has no blocks', async () => {
+    renderAt(`/reports/${emptyReport.id}`);
+
+    await waitFor(() => {
+      expect(
+        screen.getByText('This report has no content yet')
+      ).toBeInTheDocument();
+    });
+    expect(
+      screen.getByText(/Switch to edit mode/i)
+    ).toBeInTheDocument();
   });
 });
