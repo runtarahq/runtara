@@ -1668,6 +1668,9 @@ function BlockCard({
               }}
             />
           ) : null}
+          {!usingDataset && block.type === 'card' ? (
+            <CardConfigSettings block={block} onChange={onChange} />
+          ) : null}
           {!usingDataset && block.type === 'table' ? (
             <TableSelectionAndBulkActions
               block={block}
@@ -2802,6 +2805,92 @@ function AggregateOptionsSettings({
   );
 }
 
+function CardConfigSettings({
+  block,
+  onChange,
+}: {
+  block: WizardBlock;
+  onChange: (patch: Partial<WizardBlock>) => void;
+}) {
+  const [enabled, setEnabled] = useState(Boolean(block.cardConfig));
+  const [text, setText] = useState(() =>
+    block.cardConfig ? JSON.stringify(block.cardConfig, null, 2) : ''
+  );
+  const [error, setError] = useState<string | null>(null);
+
+  function enableAdvanced() {
+    const seed = block.cardConfig ?? simpleCardConfigFromBlock(block);
+    setEnabled(true);
+    setText(JSON.stringify(seed, null, 2));
+    setError(null);
+    onChange({ cardConfig: seed });
+  }
+
+  function disableAdvanced() {
+    setEnabled(false);
+    setText('');
+    setError(null);
+    onChange({ cardConfig: undefined });
+  }
+
+  function updateText(value: string) {
+    setText(value);
+    try {
+      const parsed = JSON.parse(value) as unknown;
+      if (!isCardConfig(parsed)) {
+        setError('Card JSON must include a groups array.');
+        return;
+      }
+      setError(null);
+      onChange({ cardConfig: parsed });
+    } catch {
+      setError('Card JSON is not valid yet.');
+    }
+  }
+
+  return (
+    <div className="grid gap-2 rounded-md border bg-muted/10 p-3">
+      <div className="flex items-center justify-between gap-2">
+        <Label className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+          Advanced card config
+        </Label>
+        {enabled ? (
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            className="h-7"
+            onClick={disableAdvanced}
+          >
+            Use simple fields
+          </Button>
+        ) : (
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            className="h-7"
+            onClick={enableAdvanced}
+          >
+            Edit JSON
+          </Button>
+        )}
+      </div>
+      {enabled ? (
+        <>
+          <Textarea
+            rows={6}
+            value={text}
+            onChange={(event) => updateText(event.target.value)}
+            className="font-mono text-xs"
+          />
+          {error ? <p className="text-xs text-destructive">{error}</p> : null}
+        </>
+      ) : null}
+    </div>
+  );
+}
+
 function BlockFiltersSettings({
   block,
   fields,
@@ -3543,6 +3632,42 @@ function isReportCondition(value: unknown): value is ReportCondition {
     value !== null &&
     !Array.isArray(value) &&
     typeof (value as { op?: unknown }).op === 'string'
+  );
+}
+
+function simpleCardConfigFromBlock(block: WizardBlock) {
+  return {
+    groups: [
+      {
+        id: 'main',
+        fields: block.fields
+          .filter((field) => !isActionFieldKey(field))
+          .map((field) => {
+            const cfg = block.fieldConfigs?.[field] ?? {};
+            return {
+              field,
+              ...(cfg.label ? { label: cfg.label } : {}),
+              ...(cfg.format ? { format: cfg.format } : {}),
+              ...(cfg.format === 'pill' && cfg.pillVariants
+                ? { pillVariants: cfg.pillVariants }
+                : {}),
+              ...(cfg.editable ? { editable: true } : {}),
+              ...(cfg.editor ? { editor: cfg.editor } : {}),
+            };
+          }),
+      },
+    ],
+  };
+}
+
+function isCardConfig(
+  value: unknown
+): value is NonNullable<WizardBlock['cardConfig']> {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    !Array.isArray(value) &&
+    Array.isArray((value as { groups?: unknown }).groups)
   );
 }
 

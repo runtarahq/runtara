@@ -357,6 +357,13 @@ function buildBlockDefinition(
   }
 
   // card
+  if (block.cardConfig) {
+    return {
+      ...base,
+      card: block.cardConfig,
+    };
+  }
+
   const cardFields = safeFields(block.fields, primaryFields).slice(0, 12);
   return {
     ...base,
@@ -575,6 +582,28 @@ function isWizardFormat(
   );
 }
 
+function isAdvancedCardConfig(
+  card: ReportBlockDefinition['card'] | undefined
+): boolean {
+  if (!card) return false;
+  if ((card.groups ?? []).length > 1) return true;
+  return (card.groups ?? []).some((group) =>
+    group.fields.some((field) => {
+      const kind = field.kind ?? 'value';
+      return (
+        kind !== 'value' ||
+        Boolean(field.subcard) ||
+        Boolean(field.subtable) ||
+        Boolean(field.workflowAction) ||
+        Boolean(field.collapsed) ||
+        field.colSpan !== undefined ||
+        field.displayField !== undefined ||
+        field.displayTemplate !== undefined
+      );
+    })
+  );
+}
+
 interface LayoutFlattenResult {
   grids: WizardGrid[];
   placements: Record<string, { gridId: string; row: number; column: number }>;
@@ -787,9 +816,6 @@ function blockDefinitionToWizard(
       }
     }
   } else if (block.type === 'card') {
-    if ((block.card?.groups ?? []).length > 1) {
-      unsupported.push('Multiple card groups');
-    }
     for (const group of block.card?.groups ?? []) {
       for (const field of group.fields) {
         fields.push(field.field);
@@ -810,10 +836,6 @@ function blockDefinitionToWizard(
         }
         if (field.editable) cfg.editable = true;
         if (field.editor) cfg.editor = field.editor;
-        if (field.kind && field.kind !== 'value') {
-          unsupported.push(`Card field kind "${field.kind}"`);
-        }
-        if (field.workflowAction) unsupported.push('Card workflow buttons');
         if (Object.keys(cfg).length > 0) {
           fieldConfigs[field.field] = cfg;
         }
@@ -875,6 +897,9 @@ function blockDefinitionToWizard(
     metricFormat: isWizardFormat(metricFormat)
       ? (metricFormat as WizardColumnFormat)
       : undefined,
+    ...(block.type === 'card' && isAdvancedCardConfig(block.card)
+      ? { cardConfig: block.card }
+      : {}),
     markdownContent: block.markdown?.content,
     ...(block.lazy ? { lazy: true } : {}),
     ...(block.hideWhenEmpty ? { hideWhenEmpty: true } : {}),

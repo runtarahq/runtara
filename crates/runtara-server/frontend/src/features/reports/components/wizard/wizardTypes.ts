@@ -10,6 +10,7 @@ import {
   ReportFilterType,
   ReportInteractionDefinition,
   ReportOrderBy,
+  ReportCardConfig,
   ReportSource,
   ReportSourceJoin,
   ReportTableActionConfig,
@@ -192,6 +193,8 @@ export interface WizardBlock {
   metricPercentile?: number;
   metricExpression?: unknown;
   metricFormat?: WizardColumnFormat;
+  /** Full card config for multi-group, subcard/subtable, or workflow-button cards. */
+  cardConfig?: ReportCardConfig;
   chartAggregate?: ReportAggregateFn;
   chartAggregateField?: string;
   chartAggregateDistinct?: boolean;

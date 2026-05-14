@@ -655,6 +655,65 @@ describe('table column round-trip', () => {
     });
   });
 
+  it('round-trips advanced card configs without compatibility warning', () => {
+    const definition: ReportDefinition = {
+      definitionVersion: 1,
+      filters: [],
+      blocks: [
+        {
+          id: 'order_card',
+          type: 'card',
+          title: 'Order card',
+          source: { schema: 'orders', mode: 'filter' },
+          card: {
+            groups: [
+              {
+                id: 'summary',
+                title: 'Summary',
+                fields: [
+                  { field: 'status', label: 'Status', format: 'pill' },
+                  {
+                    field: 'notes',
+                    label: 'Notes',
+                    kind: 'markdown',
+                    collapsed: true,
+                  },
+                ],
+              },
+              {
+                id: 'lines',
+                title: 'Lines',
+                fields: [
+                  {
+                    field: 'line_items',
+                    label: 'Line items',
+                    kind: 'subtable',
+                    subtable: {
+                      columns: [
+                        { field: 'sku', label: 'SKU' },
+                        { field: 'quantity', label: 'Qty', format: 'number' },
+                      ],
+                    },
+                  },
+                ],
+              },
+            ],
+          },
+        },
+      ],
+    };
+
+    const { state, compatibility } = definitionToWizardState(
+      definition,
+      'orders'
+    );
+    expect(compatibility.fullyEditable).toBe(true);
+    expect(state.blocks[0].cardConfig).toEqual(definition.blocks[0].card);
+
+    const round = wizardStateToDefinition(state, SCHEMA_FIELDS, definition);
+    expect(round.blocks[0].card).toEqual(definition.blocks[0].card);
+  });
+
   it('round-trips block click interactions', () => {
     const definition: ReportDefinition = {
       definitionVersion: 1,
