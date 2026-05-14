@@ -17,6 +17,10 @@ fn json_result(value: serde_json::Value) -> Result<CallToolResult, rmcp::ErrorDa
     )]))
 }
 
+fn push_query_param(query: &mut Vec<String>, key: &str, value: &str) {
+    query.push(format!("{}={}", key, urlencoding::encode(value)));
+}
+
 // ===== Parameter Structs =====
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -112,30 +116,7 @@ pub async fn list_executions(
     server: &SmoMcpServer,
     params: ListExecutionsParams,
 ) -> Result<CallToolResult, rmcp::ErrorData> {
-    let mut query = Vec::new();
-    if let Some(sid) = &params.workflow_id {
-        query.push(format!("workflow_id={}", sid));
-    }
-    if let Some(status) = &params.status {
-        query.push(format!("status={}", status));
-    }
-    if let Some(p) = params.page {
-        query.push(format!("page={}", p));
-    }
-    if let Some(s) = params.size {
-        query.push(format!("size={}", s));
-    }
-    if let Some(sb) = &params.sort_by {
-        query.push(format!("sort_by={}", sb));
-    }
-    if let Some(so) = &params.sort_order {
-        query.push(format!("sort_order={}", so));
-    }
-    let qs = if query.is_empty() {
-        String::new()
-    } else {
-        format!("?{}", query.join("&"))
-    };
+    let qs = list_executions_query_string(&params);
     let mut result = api_get(server, &format!("/api/runtime/executions{}", qs)).await?;
 
     // Strip verbose fields from execution listings to keep responses compact.
@@ -154,6 +135,33 @@ pub async fn list_executions(
     }
 
     json_result(result)
+}
+
+fn list_executions_query_string(params: &ListExecutionsParams) -> String {
+    let mut query = Vec::new();
+    if let Some(sid) = &params.workflow_id {
+        push_query_param(&mut query, "workflowId", sid);
+    }
+    if let Some(status) = &params.status {
+        push_query_param(&mut query, "status", status);
+    }
+    if let Some(p) = params.page {
+        query.push(format!("page={}", p));
+    }
+    if let Some(s) = params.size {
+        query.push(format!("size={}", s));
+    }
+    if let Some(sb) = &params.sort_by {
+        push_query_param(&mut query, "sortBy", sb);
+    }
+    if let Some(so) = &params.sort_order {
+        push_query_param(&mut query, "sortOrder", so);
+    }
+    if query.is_empty() {
+        String::new()
+    } else {
+        format!("?{}", query.join("&"))
+    }
 }
 
 pub async fn get_execution(
@@ -1284,6 +1292,27 @@ mod tests {
         assert_eq!(inputs["type"], "object");
         assert_eq!(inputs["required"], serde_json::json!(["data"]));
         assert_eq!(inputs["properties"]["variables"]["type"], "object");
+    }
+
+    #[test]
+    fn list_executions_query_uses_api_parameter_names() {
+        let query = list_executions_query_string(&ListExecutionsParams {
+            workflow_id: Some("workflow/needs encoding".to_string()),
+            status: Some("running,queued".to_string()),
+            page: Some(2),
+            size: Some(50),
+            sort_by: Some("createdAt".to_string()),
+            sort_order: Some("desc".to_string()),
+        });
+
+        assert!(query.contains("workflowId=workflow%2Fneeds%20encoding"));
+        assert!(query.contains("status=running%2Cqueued"));
+        assert!(query.contains("page=2"));
+        assert!(query.contains("size=50"));
+        assert!(query.contains("sortBy=createdAt"));
+        assert!(query.contains("sortOrder=desc"));
+        assert!(!query.contains("workflow_id="));
+        assert!(!query.contains("sort_by="));
     }
 
     #[test]

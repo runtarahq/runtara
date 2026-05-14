@@ -25,6 +25,15 @@ pub fn json_object_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema
     })
 }
 
+/// JSON Schema for arbitrary array-shaped MCP arguments that are stored as
+/// `serde_json::Value` at runtime so stringified client payloads can be recovered.
+pub fn json_array_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    schemars::json_schema!({
+        "type": "array",
+        "items": {}
+    })
+}
+
 /// JSON Schema for canonical workflow execution inputs.
 pub fn workflow_inputs_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
     schemars::json_schema!({

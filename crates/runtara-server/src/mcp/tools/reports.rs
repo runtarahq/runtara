@@ -129,10 +129,12 @@ pub struct RenderReportParams {
     #[schemars(description = "Report id or slug")]
     pub report_id: String,
     #[schemars(description = "Global report filter values keyed by filter id.")]
+    #[schemars(schema_with = "crate::mcp::tools::internal_api::json_object_schema")]
     pub filters: Option<Value>,
     #[schemars(
         description = "Optional array of block data requests: [{id, page?, sort?, search?, blockFilters?}]. Omit to render non-lazy blocks."
     )]
+    #[schemars(schema_with = "crate::mcp::tools::internal_api::json_array_schema")]
     pub blocks: Option<Value>,
     pub timezone: Option<String>,
 }
@@ -145,14 +147,19 @@ pub struct GetReportBlockDataParams {
     #[schemars(description = "Stable block id")]
     pub block_id: String,
     #[schemars(description = "Global report filter values keyed by filter id.")]
+    #[schemars(schema_with = "crate::mcp::tools::internal_api::json_object_schema")]
     pub filters: Option<Value>,
     #[schemars(description = "Pagination request: {offset, size}.")]
+    #[schemars(schema_with = "crate::mcp::tools::internal_api::json_object_schema")]
     pub page: Option<Value>,
     #[schemars(description = "Sort array: [{field, direction}].")]
+    #[schemars(schema_with = "crate::mcp::tools::internal_api::json_array_schema")]
     pub sort: Option<Value>,
     #[schemars(description = "Table search request: {query, fields?}.")]
+    #[schemars(schema_with = "crate::mcp::tools::internal_api::json_object_schema")]
     pub search: Option<Value>,
     #[schemars(description = "Per-block filter values keyed by filter id.")]
+    #[schemars(schema_with = "crate::mcp::tools::internal_api::json_object_schema")]
     pub block_filters: Option<Value>,
     pub timezone: Option<String>,
 }
@@ -509,10 +516,10 @@ pub async fn render_report(
     validate_path_param("report_id", &params.report_id)?;
     let mut body = json!({});
     if let Some(filters) = params.filters {
-        body["filters"] = filters;
+        body["filters"] = normalize_json_object_arg(filters, "filters")?;
     }
     if let Some(blocks) = params.blocks {
-        body["blocks"] = blocks;
+        body["blocks"] = normalize_json_array_arg(blocks, "blocks")?;
     }
     if let Some(timezone) = params.timezone {
         body["timezone"] = Value::String(timezone);
@@ -535,19 +542,19 @@ pub async fn get_report_block_data(
     validate_path_param("block_id", &params.block_id)?;
     let mut body = json!({});
     if let Some(filters) = params.filters {
-        body["filters"] = filters;
+        body["filters"] = normalize_json_object_arg(filters, "filters")?;
     }
     if let Some(page) = params.page {
-        body["page"] = page;
+        body["page"] = normalize_json_object_arg(page, "page")?;
     }
     if let Some(sort) = params.sort {
-        body["sort"] = sort;
+        body["sort"] = normalize_json_array_arg(sort, "sort")?;
     }
     if let Some(search) = params.search {
-        body["search"] = search;
+        body["search"] = normalize_json_object_arg(search, "search")?;
     }
     if let Some(block_filters) = params.block_filters {
-        body["blockFilters"] = block_filters;
+        body["blockFilters"] = normalize_json_object_arg(block_filters, "block_filters")?;
     }
     if let Some(timezone) = params.timezone {
         body["timezone"] = Value::String(timezone);
@@ -1159,6 +1166,36 @@ fn apply_json_merge_patch(target: &mut Value, patch: &Value) {
         (target, patch) => {
             *target = patch.clone();
         }
+    }
+}
+
+fn normalize_json_object_arg(value: Value, field: &str) -> Result<Value, rmcp::ErrorData> {
+    let normalized = normalize_json_arg(value, field)?;
+    if normalized.is_object() {
+        Ok(normalized)
+    } else {
+        Err(rmcp::ErrorData::invalid_params(
+            format!(
+                "{} must be a JSON object. If your MCP gateway stringifies arguments, pass a JSON-encoded object string.",
+                field
+            ),
+            None,
+        ))
+    }
+}
+
+fn normalize_json_array_arg(value: Value, field: &str) -> Result<Value, rmcp::ErrorData> {
+    let normalized = normalize_json_arg(value, field)?;
+    if normalized.is_array() {
+        Ok(normalized)
+    } else {
+        Err(rmcp::ErrorData::invalid_params(
+            format!(
+                "{} must be a JSON array. If your MCP gateway stringifies arguments, pass a JSON-encoded array string.",
+                field
+            ),
+            None,
+        ))
     }
 }
 
@@ -6128,6 +6165,10 @@ mod tests {
         let create_definition = generated_property_schema::<CreateReportParams>("definition");
         let update_definition = generated_property_schema::<UpdateReportParams>("definition");
         let validate_definition = generated_property_schema::<ValidateReportParams>("definition");
+        let render_filters = generated_property_schema::<RenderReportParams>("filters");
+        let render_blocks = generated_property_schema::<RenderReportParams>("blocks");
+        let block_data_filters = generated_property_schema::<GetReportBlockDataParams>("filters");
+        let block_data_sort = generated_property_schema::<GetReportBlockDataParams>("sort");
         let add_block = generated_property_schema::<AddReportBlockParams>("block");
         let replace_block = generated_property_schema::<ReplaceReportBlockParams>("block");
         let patch_block = generated_property_schema::<PatchReportBlockParams>("patch");
@@ -6139,12 +6180,46 @@ mod tests {
         assert_eq!(create_definition["type"], "object");
         assert_eq!(update_definition["type"], "object");
         assert_eq!(validate_definition["type"], "object");
+        assert_eq!(render_filters["type"], "object");
+        assert_eq!(render_blocks["type"], "array");
+        assert_eq!(block_data_filters["type"], "object");
+        assert_eq!(block_data_sort["type"], "array");
         assert_eq!(add_block["type"], "object");
         assert_eq!(replace_block["type"], "object");
         assert_eq!(patch_block["type"], "object");
         assert_eq!(add_layout_node["type"], "object");
         assert_eq!(replace_layout_node["type"], "object");
         assert_eq!(patch_layout_node["type"], "object");
+    }
+
+    #[test]
+    fn report_render_params_parse_stringified_objects_and_arrays() {
+        let filters = normalize_json_object_arg(
+            Value::String(r#"{"status":["running"],"owner":"ops"}"#.to_string()),
+            "filters",
+        )
+        .unwrap();
+        let blocks = normalize_json_array_arg(
+            Value::String(r#"[{"id":"tasks","page":{"offset":0,"size":20}}]"#.to_string()),
+            "blocks",
+        )
+        .unwrap();
+
+        assert_eq!(filters["owner"], "ops");
+        assert_eq!(blocks[0]["id"], "tasks");
+    }
+
+    #[test]
+    fn report_render_params_reject_wrong_stringified_shape() {
+        let err =
+            normalize_json_array_arg(Value::String(r#"{"id":"tasks"}"#.to_string()), "blocks")
+                .unwrap_err();
+
+        assert!(
+            err.message
+                .to_string()
+                .contains("blocks must be a JSON array")
+        );
     }
 
     #[test]
