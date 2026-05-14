@@ -383,6 +383,81 @@ describe('table column round-trip', () => {
     });
   });
 
+  it('round-trips table column display modifiers', () => {
+    const definition: ReportDefinition = {
+      definitionVersion: 1,
+      filters: [],
+      blocks: [
+        {
+          id: 'orders',
+          type: 'table',
+          title: 'Orders',
+          source: { schema: 'orders', mode: 'filter' },
+          table: {
+            columns: [
+              {
+                field: 'customer_id',
+                label: 'Customer',
+                displayField: 'customer_name',
+                displayTemplate: '{{customer_name}} (#{{customer_id}})',
+                secondaryField: 'customer_email',
+                linkField: 'customer_url',
+                tooltipField: 'customer_email',
+                align: 'center',
+                maxChars: 24,
+                descriptive: true,
+              },
+              {
+                field: 'status',
+                label: 'Status',
+                format: 'bar_indicator',
+                levels: ['queued', 'open', 'closed'],
+              },
+            ],
+          },
+        },
+      ],
+    };
+
+    const { state, compatibility } = definitionToWizardState(
+      definition,
+      'orders'
+    );
+    expect(compatibility.fullyEditable).toBe(true);
+    expect(state.blocks[0].fieldConfigs?.customer_id).toMatchObject({
+      displayField: 'customer_name',
+      displayTemplate: '{{customer_name}} (#{{customer_id}})',
+      secondaryField: 'customer_email',
+      linkField: 'customer_url',
+      tooltipField: 'customer_email',
+      align: 'center',
+      maxChars: 24,
+      descriptive: true,
+    });
+    expect(state.blocks[0].fieldConfigs?.status?.levels).toEqual([
+      'queued',
+      'open',
+      'closed',
+    ]);
+
+    const round = wizardStateToDefinition(state, SCHEMA_FIELDS, definition);
+    expect(round.blocks[0].table?.columns?.[0]).toMatchObject({
+      displayField: 'customer_name',
+      displayTemplate: '{{customer_name}} (#{{customer_id}})',
+      secondaryField: 'customer_email',
+      linkField: 'customer_url',
+      tooltipField: 'customer_email',
+      align: 'center',
+      maxChars: 24,
+      descriptive: true,
+    });
+    expect(round.blocks[0].table?.columns?.[1].levels).toEqual([
+      'queued',
+      'open',
+      'closed',
+    ]);
+  });
+
   it('round-trips workflow runtime and system source metadata', () => {
     const definition: ReportDefinition = {
       definitionVersion: 1,

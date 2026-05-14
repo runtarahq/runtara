@@ -331,7 +331,17 @@ const SYSTEM_FIELDS: Record<string, string[]> = {
 };
 
 const NO_SORT_FIELD = '__none__';
+const NO_DISPLAY_FIELD = '__none_field__';
 const ALWAYS_VISIBLE = '__always__';
+
+const ALIGN_OPTIONS: Array<{
+  value: NonNullable<WizardFieldConfig['align']>;
+  label: string;
+}> = [
+  { value: 'left', label: 'Left' },
+  { value: 'center', label: 'Center' },
+  { value: 'right', label: 'Right' },
+];
 
 export function BlocksStep({
   grids,
@@ -1658,7 +1668,16 @@ function BlockCard({
                   (!merged.interactionButtons ||
                     merged.interactionButtons.length === 0) &&
                   !merged.editable &&
-                  !merged.editor
+                  !merged.editor &&
+                  !merged.displayField &&
+                  !merged.displayTemplate &&
+                  !merged.secondaryField &&
+                  !merged.linkField &&
+                  !merged.tooltipField &&
+                  (!merged.levels || merged.levels.length === 0) &&
+                  !merged.align &&
+                  merged.maxChars === undefined &&
+                  !merged.descriptive
                 ) {
                   delete next[field];
                 }
@@ -1724,6 +1743,9 @@ function FieldPicker({
   const schemaOnlyFields = block.fields.filter(
     (field) => !isActionFieldKey(field)
   );
+  const displayFields = schemaFields.filter(
+    (field) => !isActionFieldKey(field)
+  );
 
   return (
     <div className="grid gap-2">
@@ -1754,6 +1776,7 @@ function FieldPicker({
                   field={field}
                   cfg={cfg}
                   schemaFields={schemaOnlyFields}
+                  displayFields={displayFields}
                   schemas={schemas}
                   formatChoices={formatChoices}
                   onLabelChange={(label) =>
@@ -1793,9 +1816,30 @@ function FieldPicker({
                       editable:
                         columnType === 'value' ? cfg.editable : undefined,
                       editor: columnType === 'value' ? cfg.editor : undefined,
+                      displayField:
+                        columnType === 'value' ? cfg.displayField : undefined,
+                      displayTemplate:
+                        columnType === 'value'
+                          ? cfg.displayTemplate
+                          : undefined,
+                      secondaryField:
+                        columnType === 'value' ? cfg.secondaryField : undefined,
+                      linkField:
+                        columnType === 'value' ? cfg.linkField : undefined,
+                      tooltipField:
+                        columnType === 'value' ? cfg.tooltipField : undefined,
+                      levels: columnType === 'value' ? cfg.levels : undefined,
+                      align: columnType === 'value' ? cfg.align : undefined,
+                      maxChars:
+                        columnType === 'value' ? cfg.maxChars : undefined,
+                      descriptive:
+                        columnType === 'value' ? cfg.descriptive : undefined,
                     })
                   }
                   onWritebackChange={(patch) =>
+                    onUpdateFieldConfig(field, patch)
+                  }
+                  onDisplayModifiersChange={(patch) =>
                     onUpdateFieldConfig(field, patch)
                   }
                   onWorkflowActionChange={(workflowAction) =>
@@ -1918,6 +1962,7 @@ function TableColumnRow({
   field,
   cfg,
   schemaFields,
+  displayFields,
   schemas,
   formatChoices,
   onLabelChange,
@@ -1925,6 +1970,7 @@ function TableColumnRow({
   onPillVariantsChange,
   onColumnTypeChange,
   onWritebackChange,
+  onDisplayModifiersChange,
   onWorkflowActionChange,
   onInteractionButtonsChange,
   onRemove,
@@ -1932,6 +1978,7 @@ function TableColumnRow({
   field: string;
   cfg: WizardFieldConfig;
   schemaFields: string[];
+  displayFields: string[];
   schemas: Schema[];
   formatChoices: typeof WIZARD_COLUMN_FORMATS | null;
   onLabelChange: (label: string) => void;
@@ -1939,6 +1986,7 @@ function TableColumnRow({
   onPillVariantsChange: (variants: Record<string, WizardPillVariant>) => void;
   onColumnTypeChange: (columnType: WizardTableColumnType) => void;
   onWritebackChange: (patch: Partial<WizardFieldConfig>) => void;
+  onDisplayModifiersChange: (patch: Partial<WizardFieldConfig>) => void;
   onWorkflowActionChange: (action: ReportWorkflowActionConfig) => void;
   onInteractionButtonsChange: (
     buttons: ReportTableInteractionButtonConfig[]
@@ -1949,10 +1997,12 @@ function TableColumnRow({
   const isAction = isActionFieldKey(field);
   const showPillVariants = columnType === 'value' && cfg.format === 'pill';
   const showEditorSettings = columnType === 'value' && !isAction;
+  const showDisplayModifiers = columnType === 'value' && !isAction;
   const showWorkflowEditor = columnType === 'workflow_button';
   const showInteractionEditor = columnType === 'interaction_buttons';
   const expansionRow =
     showPillVariants ||
+    showDisplayModifiers ||
     showEditorSettings ||
     showWorkflowEditor ||
     showInteractionEditor;
@@ -2031,6 +2081,13 @@ function TableColumnRow({
               <PillVariantsEditor
                 variants={cfg.pillVariants ?? {}}
                 onChange={onPillVariantsChange}
+              />
+            ) : null}
+            {showDisplayModifiers ? (
+              <DisplayModifiersEditor
+                cfg={cfg}
+                fields={displayFields}
+                onChange={onDisplayModifiersChange}
               />
             ) : null}
             {showEditorSettings ? (
@@ -3718,6 +3775,195 @@ function TableSelectionAndBulkActions({
       ) : null}
     </div>
   );
+}
+
+function DisplayModifiersEditor({
+  cfg,
+  fields,
+  onChange,
+}: {
+  cfg: WizardFieldConfig;
+  fields: string[];
+  onChange: (patch: Partial<WizardFieldConfig>) => void;
+}) {
+  return (
+    <div className="mt-2 grid gap-2 rounded-md border bg-muted/10 p-2">
+      <span className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+        Display modifiers
+      </span>
+      <div className="grid gap-2 md:grid-cols-3 xl:grid-cols-4">
+        <div className="grid gap-1">
+          <Label className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+            Display field
+          </Label>
+          <OptionalFieldSelect
+            value={cfg.displayField}
+            fields={fields}
+            noneLabel="Same as field"
+            onChange={(displayField) => onChange({ displayField })}
+          />
+        </div>
+        <div className="grid gap-1">
+          <Label className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+            Secondary field
+          </Label>
+          <OptionalFieldSelect
+            value={cfg.secondaryField}
+            fields={fields}
+            noneLabel="None"
+            onChange={(secondaryField) => onChange({ secondaryField })}
+          />
+        </div>
+        <div className="grid gap-1">
+          <Label className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+            Link field
+          </Label>
+          <OptionalFieldSelect
+            value={cfg.linkField}
+            fields={fields}
+            noneLabel="None"
+            onChange={(linkField) => onChange({ linkField })}
+          />
+        </div>
+        <div className="grid gap-1">
+          <Label className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+            Tooltip field
+          </Label>
+          <OptionalFieldSelect
+            value={cfg.tooltipField}
+            fields={fields}
+            noneLabel="None"
+            onChange={(tooltipField) => onChange({ tooltipField })}
+          />
+        </div>
+        <div className="grid gap-1">
+          <Label className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+            Align
+          </Label>
+          <Select
+            value={cfg.align ?? 'left'}
+            onValueChange={(align) =>
+              onChange({
+                align: align as NonNullable<WizardFieldConfig['align']>,
+              })
+            }
+          >
+            <SelectTrigger className="h-8">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {ALIGN_OPTIONS.map((option) => (
+                <SelectItem key={option.value} value={option.value}>
+                  {option.label}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+        <div className="grid gap-1">
+          <Label className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+            Max chars
+          </Label>
+          <Input
+            type="number"
+            min={1}
+            value={cfg.maxChars ?? ''}
+            placeholder="Full"
+            onChange={(event) =>
+              onChange({
+                maxChars: optionalPositiveInteger(event.target.value),
+              })
+            }
+            className="h-8"
+          />
+        </div>
+        <div className="grid gap-1">
+          <Label className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+            Levels
+          </Label>
+          <Input
+            value={formatLevels(cfg.levels)}
+            placeholder="low, medium, high"
+            disabled={cfg.format !== 'bar_indicator'}
+            onChange={(event) =>
+              onChange({ levels: parseLevels(event.target.value) })
+            }
+            className="h-8"
+          />
+        </div>
+        <label className="flex min-h-8 items-center gap-2 rounded-md border bg-background px-2 text-sm">
+          <Checkbox
+            checked={Boolean(cfg.descriptive)}
+            onCheckedChange={(checked) =>
+              onChange({ descriptive: Boolean(checked) || undefined })
+            }
+          />
+          Descriptive label
+        </label>
+        <div className="grid gap-1 md:col-span-3 xl:col-span-4">
+          <Label className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+            Display template
+          </Label>
+          <Input
+            value={cfg.displayTemplate ?? ''}
+            placeholder="{{first_name}} {{last_name}}"
+            onChange={(event) =>
+              onChange({
+                displayTemplate: event.target.value || undefined,
+              })
+            }
+            className="h-8 font-mono text-xs"
+          />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function OptionalFieldSelect({
+  value,
+  fields,
+  noneLabel,
+  onChange,
+}: {
+  value: string | undefined;
+  fields: string[];
+  noneLabel: string;
+  onChange: (value: string | undefined) => void;
+}) {
+  const options = uniqueStrings([value, ...fields]);
+  return (
+    <Select
+      value={value ?? NO_DISPLAY_FIELD}
+      onValueChange={(field) =>
+        onChange(field === NO_DISPLAY_FIELD ? undefined : field)
+      }
+    >
+      <SelectTrigger className="h-8">
+        <SelectValue />
+      </SelectTrigger>
+      <SelectContent>
+        <SelectItem value={NO_DISPLAY_FIELD}>{noneLabel}</SelectItem>
+        {options.map((field) => (
+          <SelectItem key={field} value={field}>
+            {field}
+          </SelectItem>
+        ))}
+      </SelectContent>
+    </Select>
+  );
+}
+
+function formatLevels(levels: string[] | undefined): string {
+  return levels?.join(', ') ?? '';
+}
+
+function parseLevels(value: string): string[] | undefined {
+  const levels = value
+    .split(',')
+    .map((part) => part.trim())
+    .filter(Boolean);
+  return levels.length > 0 ? levels : undefined;
 }
 
 function WritebackEditorSettings({

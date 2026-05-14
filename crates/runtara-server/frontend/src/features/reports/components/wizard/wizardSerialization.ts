@@ -329,6 +329,15 @@ function buildBlockDefinition(
       if (cfg?.format === 'pill' && cfg.pillVariants) {
         column.pillVariants = cfg.pillVariants;
       }
+      if (cfg?.displayField) column.displayField = cfg.displayField;
+      if (cfg?.displayTemplate) column.displayTemplate = cfg.displayTemplate;
+      if (cfg?.secondaryField) column.secondaryField = cfg.secondaryField;
+      if (cfg?.linkField) column.linkField = cfg.linkField;
+      if (cfg?.tooltipField) column.tooltipField = cfg.tooltipField;
+      if (cfg?.levels && cfg.levels.length > 0) column.levels = cfg.levels;
+      if (cfg?.align) column.align = cfg.align;
+      if (cfg?.maxChars !== undefined) column.maxChars = cfg.maxChars;
+      if (cfg?.descriptive) column.descriptive = true;
       return column;
     });
 
@@ -830,6 +839,19 @@ function blockDefinitionToWizard(
             WizardPillVariant
           >;
         }
+        if (column.displayField) cfg.displayField = column.displayField;
+        if (column.displayTemplate) {
+          cfg.displayTemplate = column.displayTemplate;
+        }
+        if (column.secondaryField) cfg.secondaryField = column.secondaryField;
+        if (column.linkField) cfg.linkField = column.linkField;
+        if (column.tooltipField) cfg.tooltipField = column.tooltipField;
+        if (column.levels && column.levels.length > 0) {
+          cfg.levels = column.levels;
+        }
+        if (column.align) cfg.align = column.align;
+        if (column.maxChars !== undefined) cfg.maxChars = column.maxChars;
+        if (column.descriptive) cfg.descriptive = true;
       }
       if (column.editable) cfg.editable = true;
       if (column.editor) cfg.editor = column.editor;

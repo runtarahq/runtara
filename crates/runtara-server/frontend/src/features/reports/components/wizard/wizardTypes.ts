@@ -13,6 +13,7 @@ import {
   ReportCardConfig,
   ReportSource,
   ReportSourceJoin,
+  ReportTableColumn,
   ReportTableActionConfig,
   ReportTableInteractionButtonConfig,
   ReportViewDefinition,
@@ -132,6 +133,24 @@ export interface WizardFieldConfig {
   editable?: boolean;
   /** Explicit writeback editor config; omitted to let the renderer infer. */
   editor?: ReportEditorConfig;
+  /** Row field rendered instead of the storage field. */
+  displayField?: ReportTableColumn['displayField'];
+  /** Display-only template rendered from row values. */
+  displayTemplate?: ReportTableColumn['displayTemplate'];
+  /** Subdued secondary line below the primary cell value. */
+  secondaryField?: ReportTableColumn['secondaryField'];
+  /** Row field treated as a URL for an external-link affordance. */
+  linkField?: ReportTableColumn['linkField'];
+  /** Row field shown as the cell tooltip. */
+  tooltipField?: ReportTableColumn['tooltipField'];
+  /** Ordered levels for bar-indicator columns. */
+  levels?: ReportTableColumn['levels'];
+  /** Cell alignment hint. */
+  align?: ReportTableColumn['align'];
+  /** Display-only text cutoff. */
+  maxChars?: ReportTableColumn['maxChars'];
+  /** Marks the column as the row's human-readable label. */
+  descriptive?: ReportTableColumn['descriptive'];
 }
 
 /** Synthetic field key prefix for action/interaction columns that don't bind

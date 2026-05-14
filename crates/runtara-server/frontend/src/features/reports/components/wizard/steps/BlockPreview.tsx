@@ -92,6 +92,15 @@ function wizardBlockToDefinition(block: WizardBlock): ReportBlockDefinition {
       label: cfg?.label || humanizeFieldName(field),
       ...(cfg?.format ? { format: cfg.format } : {}),
       ...(cfg?.pillVariants ? { pillVariants: cfg.pillVariants } : {}),
+      ...(cfg?.displayField ? { displayField: cfg.displayField } : {}),
+      ...(cfg?.displayTemplate ? { displayTemplate: cfg.displayTemplate } : {}),
+      ...(cfg?.secondaryField ? { secondaryField: cfg.secondaryField } : {}),
+      ...(cfg?.linkField ? { linkField: cfg.linkField } : {}),
+      ...(cfg?.tooltipField ? { tooltipField: cfg.tooltipField } : {}),
+      ...(cfg?.levels && cfg.levels.length > 0 ? { levels: cfg.levels } : {}),
+      ...(cfg?.align ? { align: cfg.align } : {}),
+      ...(cfg?.maxChars !== undefined ? { maxChars: cfg.maxChars } : {}),
+      ...(cfg?.descriptive ? { descriptive: true } : {}),
     };
   });
 
@@ -117,7 +126,8 @@ function wizardBlockToDefinition(block: WizardBlock): ReportBlockDefinition {
             x: block.chartGroupBy || seriesFields[0],
             series: seriesFields.map((field) => ({
               field,
-              label: block.fieldConfigs?.[field]?.label || humanizeFieldName(field),
+              label:
+                block.fieldConfigs?.[field]?.label || humanizeFieldName(field),
             })),
           }
         : undefined,
