@@ -80,6 +80,8 @@ export interface ReportCardField {
   label?: string;
   /** Row field rendered instead of `field` while writeback still targets `field`. */
   displayField?: string;
+  /** Display-only template rendered from row values. */
+  displayTemplate?: string;
   /** Renderer for this field. Defaults to `value`. */
   kind?: ReportCardFieldKind;
   /** Format hint for `kind=value` (currency, datetime, pill, etc). */
@@ -397,10 +399,11 @@ export interface ReportTableColumnSource extends Omit<ReportSource, 'join'> {
 
 export type ReportPillVariant =
   | 'success'
-  | 'info'
   | 'warning'
-  | 'danger'
   | 'muted'
+  | 'secondary'
+  | 'destructive'
+  | 'outline'
   | 'default';
 
 export interface ReportTableColumn {
@@ -408,6 +411,8 @@ export interface ReportTableColumn {
   label?: string;
   /** Row field rendered instead of `field` while sort/writeback still target `field`. */
   displayField?: string;
+  /** Display-only template rendered from row values. */
+  displayTemplate?: string;
   format?: string;
   type?: 'value' | 'chart' | 'workflow_button' | 'interaction_buttons';
   chart?: {

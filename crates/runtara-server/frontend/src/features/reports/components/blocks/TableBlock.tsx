@@ -61,10 +61,12 @@ import {
 } from '../../types';
 import {
   formatCellValue,
+  getReportRowValue,
   humanizeFieldName,
   isWorkflowActionDisabled,
   isWorkflowActionVisible,
   matchesReportRowCondition,
+  renderDisplayTemplate,
   truncateCellText,
 } from '../../utils';
 import { FieldEditor } from './editable/FieldEditor';
@@ -75,6 +77,7 @@ type TableColumn = {
   key: string;
   label?: string;
   displayField?: string;
+  displayTemplate?: string;
   format?: string | null;
   type?: 'value' | 'chart' | 'workflow_button' | 'interaction_buttons';
   chart?: ReportTableColumn['chart'];
@@ -785,6 +788,7 @@ function normalizeColumns(
     return {
       ...merged,
       displayField: configured?.displayField ?? merged.displayField,
+      displayTemplate: configured?.displayTemplate ?? merged.displayTemplate,
       secondaryField: configured?.secondaryField ?? merged.secondaryField,
       linkField: configured?.linkField ?? merged.linkField,
       tooltipField: configured?.tooltipField ?? merged.tooltipField,
@@ -843,12 +847,14 @@ function getColumnWidthStyle(column: TableColumn): CSSProperties | undefined {
 
 function defaultAlign(format?: string | null): TableColumn['align'] {
   if (!format) return undefined;
+  const formatName = format.split(':', 1)[0];
   if (
-    format === 'currency' ||
-    format === 'currency_compact' ||
-    format === 'number' ||
-    format === 'decimal' ||
-    format === 'percent'
+    formatName === 'currency' ||
+    formatName === 'currency_compact' ||
+    formatName === 'number' ||
+    formatName === 'number_compact' ||
+    formatName === 'decimal' ||
+    formatName === 'percent'
   ) {
     return 'right';
   }
@@ -871,13 +877,19 @@ function getCellDisplayValue(
   column: TableColumn,
   value: unknown
 ) {
-  if (!column.displayField) return value;
-  const displayValue = row[column.displayField];
-  if (displayValue === null || displayValue === undefined) return value;
-  if (typeof displayValue === 'string' && displayValue.trim().length === 0) {
-    return value;
+  if (column.displayTemplate) {
+    const displayValue = renderDisplayTemplate(row, column.displayTemplate);
+    if (displayValue.trim().length > 0) return displayValue;
   }
-  return displayValue;
+  if (column.displayField) {
+    const displayValue = getReportRowValue(row, column.displayField);
+    if (displayValue === null || displayValue === undefined) return value;
+    if (typeof displayValue === 'string' && displayValue.trim().length === 0) {
+      return value;
+    }
+    return displayValue;
+  }
+  return value;
 }
 
 function getWritebackContext(
@@ -893,7 +905,11 @@ function getWritebackContext(
 }
 
 function shouldRefreshAfterWriteback(column: TableColumn): boolean {
-  return Boolean(column.displayField || column.editor?.kind === 'lookup');
+  return Boolean(
+    column.displayField ||
+      column.displayTemplate ||
+      column.editor?.kind === 'lookup'
+  );
 }
 
 function TableActionsToolbar({
@@ -1219,7 +1235,7 @@ function AvatarLabelCell({
 }) {
   const raw = typeof value === 'string' ? value : String(value ?? '');
   const tooltipValue = column.tooltipField
-    ? row[column.tooltipField]
+    ? getReportRowValue(row, column.tooltipField)
     : undefined;
   const display = displayNameFromValue(raw);
   const displayText = truncateCellText(display, column.maxChars);
@@ -1335,9 +1351,11 @@ function PrimaryWithSecondaryCell({
   row: Record<string, unknown>;
 }) {
   const secondary = column.secondaryField
-    ? formatCellValue(row[column.secondaryField])
+    ? formatCellValue(getReportRowValue(row, column.secondaryField))
     : undefined;
-  const linkRaw = column.linkField ? row[column.linkField] : undefined;
+  const linkRaw = column.linkField
+    ? getReportRowValue(row, column.linkField)
+    : undefined;
   const link = typeof linkRaw === 'string' && linkRaw ? linkRaw : undefined;
   const primary = formatCellValue(value, column.format ?? undefined);
   return (

@@ -1,10 +1,12 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  compileDisplayTemplate,
   getReportViewBreadcrumbs,
   isWorkflowActionDisabled,
   isWorkflowActionVisible,
   matchesReportRowCondition,
+  renderDisplayTemplate,
   truncateCellText,
 } from './utils';
 import type { ReportDefinition, ReportViewDefinition } from './types';
@@ -192,5 +194,54 @@ describe('truncateCellText', () => {
       text: 'A😀...',
       title: 'A😀BC',
     });
+  });
+});
+
+describe('renderDisplayTemplate', () => {
+  const row = {
+    first_name: 'Jane',
+    last_name: 'Doe',
+    applicant_summary: {
+      full_name: 'Jane Q Doe',
+    },
+    requested_loan: {
+      amount: 120000,
+    },
+  };
+
+  it('concatenates row fields for display-only cells', () => {
+    expect(compileDisplayTemplate('{{first_name}} {{last_name}}')).toEqual({
+      parts: [
+        { kind: 'placeholder', field: 'first_name' },
+        { kind: 'literal', value: ' ' },
+        { kind: 'placeholder', field: 'last_name' },
+      ],
+    });
+    expect(renderDisplayTemplate(row, '{{first_name}} {{last_name}}')).toBe(
+      'Jane Doe'
+    );
+  });
+
+  it('reads nested JSON paths and applies token formats', () => {
+    expect(renderDisplayTemplate(row, '{{applicant_summary.full_name}}')).toBe(
+      'Jane Q Doe'
+    );
+
+    const rendered = renderDisplayTemplate(
+      row,
+      '${{requested_loan.amount | number_compact}} AUD'
+    );
+    expect(rendered).toMatch(/^\$.+ AUD$/);
+    expect(rendered).not.toContain('{{');
+  });
+
+  it('only compiles safe variable interpolation tokens', () => {
+    expect(() => compileDisplayTemplate('{{#if status}}')).toThrow();
+    expect(() =>
+      compileDisplayTemplate('{{first_name + last_name}}')
+    ).toThrow();
+    expect(() => compileDisplayTemplate('{{first_name | }}')).toThrow();
+    expect(() => compileDisplayTemplate('{{first_name')).toThrow();
+    expect(renderDisplayTemplate(row, '{{first_name + last_name}}')).toBe('');
   });
 });
