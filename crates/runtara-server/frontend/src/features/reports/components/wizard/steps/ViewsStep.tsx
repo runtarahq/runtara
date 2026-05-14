@@ -534,6 +534,38 @@ function layoutForSelectedBlocks(
       );
     if (gridBlocks.length === 0) continue;
 
+    if (grid.layoutKind === 'metric_row') {
+      layout.push({
+        id: `${grid.id}_view`,
+        type: 'metric_row',
+        ...(grid.title ? { title: grid.title } : {}),
+        blocks: gridBlocks.map((block) => block.id),
+      });
+      continue;
+    }
+
+    if (grid.layoutKind === 'columns') {
+      layout.push({
+        id: `${grid.id}_view`,
+        type: 'columns',
+        columns: Array.from({ length: grid.columns }, (_, index) => {
+          const column = index + 1;
+          return {
+            id: `${grid.id}_view_column_${column}`,
+            children: gridBlocks
+              .filter((block) => block.placement.column === column)
+              .sort((a, b) => a.placement.row - b.placement.row)
+              .map((block) => ({
+                id: `node_${block.id}`,
+                type: 'block' as const,
+                blockId: block.id,
+              })),
+          };
+        }),
+      });
+      continue;
+    }
+
     const gridNode: Extract<ReportLayoutNode, { type: 'grid' }> = {
       id: `${grid.id}_view_grid`,
       type: 'grid',

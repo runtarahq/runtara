@@ -1135,6 +1135,132 @@ describe('table column round-trip', () => {
     expect(round.views).toEqual(definition.views);
   });
 
+  it('round-trips metric_row and columns layout primitives', () => {
+    const definition: ReportDefinition = {
+      definitionVersion: 1,
+      filters: [],
+      layout: [
+        {
+          id: 'metrics',
+          type: 'metric_row',
+          title: 'Metrics',
+          blocks: ['order_count', 'total_amount'],
+        },
+        {
+          id: 'split',
+          type: 'columns',
+          columns: [
+            {
+              id: 'left',
+              children: [
+                { id: 'orders_node', type: 'block', blockId: 'orders' },
+              ],
+            },
+            {
+              id: 'right',
+              children: [
+                { id: 'status_node', type: 'block', blockId: 'status_chart' },
+              ],
+            },
+          ],
+        },
+      ],
+      blocks: [
+        {
+          id: 'order_count',
+          type: 'metric',
+          title: 'Orders',
+          source: {
+            schema: 'orders',
+            mode: 'aggregate',
+            aggregates: [{ alias: 'value', op: 'count' }],
+          },
+          metric: { valueField: 'value', label: 'Orders' },
+        },
+        {
+          id: 'total_amount',
+          type: 'metric',
+          title: 'Total',
+          source: {
+            schema: 'orders',
+            mode: 'aggregate',
+            aggregates: [{ alias: 'value', op: 'sum', field: 'amount' }],
+          },
+          metric: { valueField: 'value', label: 'Total' },
+        },
+        {
+          id: 'orders',
+          type: 'table',
+          title: 'Orders',
+          source: { schema: 'orders', mode: 'filter' },
+          table: { columns: [{ field: 'id', label: 'ID' }] },
+        },
+        {
+          id: 'status_chart',
+          type: 'chart',
+          title: 'Status',
+          source: {
+            schema: 'orders',
+            mode: 'aggregate',
+            groupBy: ['status'],
+            aggregates: [{ alias: 'value', op: 'count' }],
+          },
+          chart: {
+            kind: 'bar',
+            x: 'status',
+            series: [{ field: 'value' }],
+          },
+        },
+      ],
+    };
+
+    const { state, compatibility } = definitionToWizardState(
+      definition,
+      'orders'
+    );
+    expect(compatibility.fullyEditable).toBe(true);
+    expect(state.grids[0]).toMatchObject({
+      id: 'metrics',
+      layoutKind: 'metric_row',
+      title: 'Metrics',
+      rows: 1,
+      columns: 2,
+    });
+    expect(state.grids[1]).toMatchObject({
+      id: 'split',
+      layoutKind: 'columns',
+      columns: 2,
+    });
+
+    const round = wizardStateToDefinition(state, SCHEMA_FIELDS, definition);
+    expect(round.layout?.[0]).toMatchObject({
+      id: 'metrics',
+      type: 'metric_row',
+      title: 'Metrics',
+      blocks: ['order_count', 'total_amount'],
+    });
+    expect(round.layout?.[1]).toMatchObject({
+      id: 'split',
+      type: 'columns',
+      columns: [
+        {
+          id: 'split_column_1',
+          children: [{ id: 'node_orders', type: 'block', blockId: 'orders' }],
+        },
+        {
+          id: 'split_column_2',
+          children: [
+            {
+              id: 'node_status_chart',
+              type: 'block',
+              blockId: 'status_chart',
+            },
+          ],
+        },
+      ],
+    });
+  });
+
   it('round-trips datasets and per-block dataset queries without losing them', () => {
     const definition: ReportDefinition = {
       definitionVersion: 1,

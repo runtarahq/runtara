@@ -423,6 +423,34 @@ function buildLayout(state: WizardState): ReportLayoutNode[] {
         a.placement.row - b.placement.row ||
         a.placement.column - b.placement.column
     );
+    if (grid.layoutKind === 'metric_row') {
+      return {
+        id: grid.id,
+        type: 'metric_row',
+        ...(grid.title ? { title: grid.title } : {}),
+        blocks: blocks.map((block) => block.id),
+      };
+    }
+    if (grid.layoutKind === 'columns') {
+      return {
+        id: grid.id,
+        type: 'columns',
+        columns: Array.from({ length: grid.columns }, (_, index) => {
+          const column = index + 1;
+          return {
+            id: `${grid.id}_column_${column}`,
+            children: blocks
+              .filter((block) => block.placement.column === column)
+              .sort((a, b) => a.placement.row - b.placement.row)
+              .map((block) => ({
+                id: `node_${block.id}`,
+                type: 'block' as const,
+                blockId: block.id,
+              })),
+          };
+        }),
+      };
+    }
     const gridNode: Extract<ReportLayoutNode, { type: 'grid' }> = {
       id: `${grid.id}_grid`,
       type: 'grid',
@@ -743,7 +771,13 @@ function flattenLayoutBlocks(
     if (node.type === 'metric_row') {
       const id = node.id || makeGridId();
       appendGrid(
-        { id, rows: 1, columns: Math.max(1, node.blocks.length) },
+        {
+          id,
+          layoutKind: 'metric_row',
+          title: node.title,
+          rows: 1,
+          columns: Math.max(1, node.blocks.length),
+        },
         node.blocks.map((blockId) => ({ blockId }))
       );
       continue;
@@ -769,7 +803,12 @@ function flattenLayoutBlocks(
           }
         }
       }
-      grids.push({ id, rows: maxRowsInColumn, columns: columnCount });
+      grids.push({
+        id,
+        layoutKind: 'columns',
+        rows: maxRowsInColumn,
+        columns: columnCount,
+      });
       flat.forEach((item, index) => {
         if (!item.blockId) return;
         const row = Math.floor(index / columnCount) + 1;

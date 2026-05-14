@@ -343,6 +343,15 @@ const ALIGN_OPTIONS: Array<{
   { value: 'right', label: 'Right' },
 ];
 
+const LAYOUT_KIND_OPTIONS: Array<{
+  value: NonNullable<WizardGrid['layoutKind']>;
+  label: string;
+}> = [
+  { value: 'grid', label: 'Grid' },
+  { value: 'metric_row', label: 'Metric row' },
+  { value: 'columns', label: 'Columns' },
+];
+
 export function BlocksStep({
   grids,
   blocks,
@@ -551,6 +560,11 @@ export function BlocksStep({
             onDescriptionChange={(description) =>
               updateGrid(grid.id, { description })
             }
+            onLayoutKindChange={(layoutKind) =>
+              updateGrid(grid.id, {
+                layoutKind: layoutKind === 'grid' ? undefined : layoutKind,
+              })
+            }
             onResize={(deltaRows, deltaColumns) =>
               resizeGrid(grid.id, deltaRows, deltaColumns)
             }
@@ -604,6 +618,7 @@ function GridSection({
   canDecreaseColumns,
   onTitleChange,
   onDescriptionChange,
+  onLayoutKindChange,
   onResize,
   onAddBlockAtCell,
   onRemove,
@@ -633,6 +648,9 @@ function GridSection({
   canDecreaseColumns: boolean;
   onTitleChange: (title: string) => void;
   onDescriptionChange: (description: string) => void;
+  onLayoutKindChange: (
+    layoutKind: NonNullable<WizardGrid['layoutKind']>
+  ) => void;
   onResize: (deltaRows: number, deltaColumns: number) => void;
   onAddBlockAtCell: (row: number, column: number) => void;
   onRemove: () => void;
@@ -694,6 +712,25 @@ function GridSection({
         </div>
         {editing ? (
           <div className="flex items-center gap-1.5">
+            <Select
+              value={grid.layoutKind ?? 'grid'}
+              onValueChange={(layoutKind) =>
+                onLayoutKindChange(
+                  layoutKind as NonNullable<WizardGrid['layoutKind']>
+                )
+              }
+            >
+              <SelectTrigger className="h-8 w-32">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {LAYOUT_KIND_OPTIONS.map((option) => (
+                  <SelectItem key={option.value} value={option.value}>
+                    {option.label}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
             <div className="flex items-center gap-1 rounded-md border bg-background px-2 py-1 text-xs">
               <span className="text-muted-foreground">Rows</span>
               <Button

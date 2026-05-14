@@ -279,6 +279,8 @@ export interface WizardFilter {
 /** A single grid layout section. Stack multiple grids to compose the report. */
 export interface WizardGrid {
   id: string;
+  /** DSL layout primitive emitted for this section. Defaults to grid. */
+  layoutKind?: 'grid' | 'metric_row' | 'columns';
   /** Optional section title; when set, the grid renders inside a titled section. */
   title?: string;
   /** Optional section description shown beneath the title. */
