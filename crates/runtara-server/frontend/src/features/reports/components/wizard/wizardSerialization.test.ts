@@ -3,6 +3,7 @@ import {
   definitionToWizardState,
   wizardStateToDefinition,
 } from './wizardSerialization';
+import { WIZARD_FILTER_TARGET_CUSTOM } from './wizardTypes';
 import type { ReportDefinition } from '../../types';
 
 const SCHEMA_FIELDS: Record<string, string[]> = {
@@ -800,6 +801,67 @@ describe('table column round-trip', () => {
     });
     expect(round.filters[1].options?.filterMappings).toEqual(filterMappings);
     expect(round.filters[1].options?.condition).toEqual(optionsCondition);
+  });
+
+  it('round-trips filters with multiple target mappings', () => {
+    const appliesTo = [
+      { blockId: 'orders', field: 'status', op: 'eq' },
+      { blockId: 'order_summary', field: 'status', op: 'eq' },
+    ];
+    const definition: ReportDefinition = {
+      definitionVersion: 1,
+      filters: [
+        {
+          id: 'status_filter',
+          label: 'Status',
+          type: 'select',
+          appliesTo,
+        },
+      ],
+      blocks: [
+        {
+          id: 'orders',
+          type: 'table',
+          title: 'Orders',
+          source: { schema: 'orders', mode: 'filter' },
+          table: {
+            columns: [
+              { field: 'id', label: 'ID' },
+              { field: 'status', label: 'Status' },
+            ],
+          },
+        },
+        {
+          id: 'order_summary',
+          type: 'table',
+          title: 'Order summary',
+          source: { schema: 'orders', mode: 'filter' },
+          table: {
+            columns: [
+              { field: 'status', label: 'Status' },
+              { field: 'amount', label: 'Amount' },
+            ],
+          },
+        },
+      ],
+    };
+
+    const { state, compatibility } = definitionToWizardState(
+      definition,
+      'orders'
+    );
+    expect(compatibility.fullyEditable).toBe(true);
+    expect(compatibility.reasons).not.toContain(
+      'Filter with multiple target mappings'
+    );
+    expect(state.filters[0]).toMatchObject({
+      target: WIZARD_FILTER_TARGET_CUSTOM,
+      targetMappings: appliesTo,
+      field: 'status',
+    });
+
+    const round = wizardStateToDefinition(state, SCHEMA_FIELDS, definition);
+    expect(round.filters[0].appliesTo).toEqual(appliesTo);
   });
 
   it('round-trips block click interactions', () => {

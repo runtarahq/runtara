@@ -227,6 +227,7 @@ export interface WizardBlock {
 }
 
 export const WIZARD_FILTER_TARGET_ALL = '__all__';
+export const WIZARD_FILTER_TARGET_CUSTOM = '__custom__';
 export const WIZARD_FILTER_TARGET_NONE = '__none__';
 
 export type WizardFilterOptionsSource = 'static' | 'object_model';
@@ -237,6 +238,7 @@ export interface WizardFilter {
   field: string;
   type: ReportFilterType;
   target: string;
+  targetMappings?: NonNullable<ReportFilterDefinition['appliesTo']>;
   optionsSource?: WizardFilterOptionsSource;
   staticOptions?: string;
   optionsField?: string;

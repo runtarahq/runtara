@@ -11,6 +11,7 @@ import {
 import { reconcileDatasetBlock } from '../../datasetBlocks';
 import {
   WIZARD_FILTER_TARGET_ALL,
+  WIZARD_FILTER_TARGET_CUSTOM,
   WIZARD_FILTER_TARGET_NONE,
   WizardBlock,
   WizardBlockType,
@@ -494,24 +495,26 @@ function buildFilterDefinition(
   blocks: WizardBlock[]
 ): ReportFilterDefinition {
   const appliesTo =
-    filter.target === WIZARD_FILTER_TARGET_NONE
-      ? []
-      : filter.target === WIZARD_FILTER_TARGET_ALL
-        ? [{ field: filter.field, op: defaultOperatorFor(filter.type) }]
-        : (() => {
-            const targetBlock = blocks.find(
-              (block) => block.id === filter.target
-            );
-            return targetBlock
-              ? [
-                  {
-                    blockId: targetBlock.id,
-                    field: filter.field,
-                    op: defaultOperatorFor(filter.type),
-                  },
-                ]
-              : [];
-          })();
+    filter.target === WIZARD_FILTER_TARGET_CUSTOM
+      ? (filter.targetMappings ?? [])
+      : filter.target === WIZARD_FILTER_TARGET_NONE
+        ? []
+        : filter.target === WIZARD_FILTER_TARGET_ALL
+          ? [{ field: filter.field, op: defaultOperatorFor(filter.type) }]
+          : (() => {
+              const targetBlock = blocks.find(
+                (block) => block.id === filter.target
+              );
+              return targetBlock
+                ? [
+                    {
+                      blockId: targetBlock.id,
+                      field: filter.field,
+                      op: defaultOperatorFor(filter.type),
+                    },
+                  ]
+                : [];
+            })();
 
   const options = buildFilterOptions(filter, blocks);
 
@@ -1031,8 +1034,7 @@ export function definitionToWizardState(
     } else if (mappings.length === 1) {
       target = mappings[0].blockId ?? WIZARD_FILTER_TARGET_ALL;
     } else {
-      target = WIZARD_FILTER_TARGET_ALL;
-      unsupportedReasons.push('Filter with multiple target mappings');
+      target = WIZARD_FILTER_TARGET_CUSTOM;
     }
     const field =
       mappings[0]?.field ||
@@ -1058,6 +1060,7 @@ export function definitionToWizardState(
       type: filter.type,
       field,
       target,
+      targetMappings: mappings.length > 1 ? mappings : undefined,
       optionsSource,
       staticOptions,
       optionsField: opts?.field || opts?.valueField,

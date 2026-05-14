@@ -17,6 +17,7 @@ import { ReportFilterType } from '../../../types';
 import { TIME_RANGE_PRESETS } from '../../../utils';
 import {
   WIZARD_FILTER_TARGET_ALL,
+  WIZARD_FILTER_TARGET_CUSTOM,
   WIZARD_FILTER_TARGET_NONE,
   WizardBlock,
   WizardFilter,
@@ -54,6 +55,24 @@ function filterUsesOptions(type: ReportFilterType): boolean {
   return type === 'select' || type === 'multi_select' || type === 'radio';
 }
 
+function defaultOperatorFor(type: ReportFilterType): string {
+  switch (type) {
+    case 'multi_select':
+      return 'in';
+    case 'time_range':
+    case 'number_range':
+      return 'between';
+    case 'search':
+    case 'text':
+      return 'contains';
+    case 'checkbox':
+    case 'radio':
+    case 'select':
+    default:
+      return 'eq';
+  }
+}
+
 function formatCommaList(values: string[] | undefined): string {
   return values?.join(', ') ?? '';
 }
@@ -67,6 +86,30 @@ function parseCommaList(value: string): string[] {
 
 function formatJson(value: unknown): string {
   return value === undefined ? '' : JSON.stringify(value, null, 2);
+}
+
+function isFilterTargetMappings(
+  value: unknown
+): value is NonNullable<WizardFilter['targetMappings']> {
+  return (
+    Array.isArray(value) &&
+    value.every((entry) => {
+      if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) {
+        return false;
+      }
+      const mapping = entry as {
+        blockId?: unknown;
+        field?: unknown;
+        op?: unknown;
+      };
+      return (
+        (mapping.blockId === undefined ||
+          typeof mapping.blockId === 'string') &&
+        typeof mapping.field === 'string' &&
+        (mapping.op === undefined || typeof mapping.op === 'string')
+      );
+    })
+  );
 }
 
 function isFilterMappings(
@@ -180,7 +223,8 @@ export function ControlsStep({
           {filters.map((filter, index) => {
             const fieldsForThisFilter =
               filter.target === WIZARD_FILTER_TARGET_ALL ||
-              filter.target === WIZARD_FILTER_TARGET_NONE
+              filter.target === WIZARD_FILTER_TARGET_NONE ||
+              filter.target === WIZARD_FILTER_TARGET_CUSTOM
                 ? allBlockFields
                 : (fieldsByBlockId[filter.target] ?? allBlockFields);
             return (
@@ -251,6 +295,41 @@ function FilterRow({
     });
   }
 
+  function defaultTargetMappings(): NonNullable<
+    WizardFilter['targetMappings']
+  > {
+    if (filter.target === WIZARD_FILTER_TARGET_NONE) return [];
+    if (filter.target === WIZARD_FILTER_TARGET_ALL) {
+      return [{ field: filter.field, op: defaultOperatorFor(filter.type) }];
+    }
+    const targetBlock = filterableBlocks.find(
+      (block) => block.id === filter.target
+    );
+    return targetBlock
+      ? [
+          {
+            blockId: targetBlock.id,
+            field: filter.field,
+            op: defaultOperatorFor(filter.type),
+          },
+        ]
+      : [{ field: filter.field, op: defaultOperatorFor(filter.type) }];
+  }
+
+  function updateTarget(value: string) {
+    if (value === WIZARD_FILTER_TARGET_CUSTOM) {
+      onChange({
+        target: value,
+        targetMappings:
+          filter.targetMappings && filter.targetMappings.length > 0
+            ? filter.targetMappings
+            : defaultTargetMappings(),
+      });
+      return;
+    }
+    onChange({ target: value, targetMappings: undefined });
+  }
+
   return (
     <div className="grid gap-3 rounded-md border bg-background p-3">
       <div className="grid gap-3 lg:grid-cols-[minmax(0,1.2fr)_minmax(0,1fr)_minmax(0,1fr)_minmax(0,1.2fr)_auto]">
@@ -312,10 +391,7 @@ function FilterRow({
           <Label className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
             Applies to
           </Label>
-          <Select
-            value={filter.target}
-            onValueChange={(value) => onChange({ target: value })}
-          >
+          <Select value={filter.target} onValueChange={updateTarget}>
             <SelectTrigger>
               <SelectValue />
             </SelectTrigger>
@@ -325,6 +401,9 @@ function FilterRow({
               </SelectItem>
               <SelectItem value={WIZARD_FILTER_TARGET_NONE}>
                 Not connected
+              </SelectItem>
+              <SelectItem value={WIZARD_FILTER_TARGET_CUSTOM}>
+                Custom mappings
               </SelectItem>
               {filterableBlocks.map((block) => (
                 <SelectItem key={block.id} value={block.id}>
@@ -345,6 +424,20 @@ function FilterRow({
           <Trash2 className="h-4 w-4" />
         </Button>
       </div>
+
+      {filter.target === WIZARD_FILTER_TARGET_CUSTOM ? (
+        <div className="rounded-md border bg-muted/10 p-3">
+          <FilterJsonField
+            label="Target mappings"
+            value={filter.targetMappings}
+            placeholder='[{"blockId":"orders","field":"status","op":"eq"},{"blockId":"summary","field":"status","op":"eq"}]'
+            validate={isFilterTargetMappings}
+            errorText="Target mappings must be an array of field mappings."
+            rows={4}
+            onChange={(targetMappings) => onChange({ targetMappings })}
+          />
+        </div>
+      ) : null}
 
       {showOptions ? (
         <div className="grid gap-3 rounded-md border bg-muted/10 p-3 sm:grid-cols-[minmax(0,1fr)_minmax(0,2fr)]">
@@ -527,6 +620,7 @@ function FilterJsonField<T>({
   placeholder,
   validate,
   errorText,
+  rows = 3,
   onChange,
 }: {
   label: string;
@@ -534,6 +628,7 @@ function FilterJsonField<T>({
   placeholder: string;
   validate: (value: unknown) => value is T;
   errorText: string;
+  rows?: number;
   onChange: (value: T | undefined) => void;
 }) {
   const [text, setText] = useState(() => formatJson(value));
@@ -571,7 +666,7 @@ function FilterJsonField<T>({
         {label}
       </Label>
       <Textarea
-        rows={3}
+        rows={rows}
         value={text}
         onChange={(event) => updateText(event.target.value)}
         placeholder={placeholder}
