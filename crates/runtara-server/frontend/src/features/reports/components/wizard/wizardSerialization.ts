@@ -439,16 +439,35 @@ function buildLayout(state: WizardState): ReportLayoutNode[] {
 }
 
 function buildFilterOptions(
-  filter: WizardFilter
+  filter: WizardFilter,
+  blocks: WizardBlock[]
 ): ReportFilterOptionsConfig | undefined {
   if (!filterUsesOptions(filter.type)) return undefined;
   if (filter.optionsSource === 'object_model') {
+    const schema =
+      filter.optionsSchema ||
+      blocks.find((block) => block.id === filter.target)?.schema ||
+      blocks.find((block) => block.schema)?.schema;
+    const valueField =
+      filter.optionsValueField || filter.optionsField || filter.field;
+    const labelField =
+      filter.optionsLabelField || filter.optionsField || filter.field;
     return {
       source: 'object_model',
-      field: filter.optionsField || filter.field,
-      valueField: filter.optionsField || filter.field,
-      labelField: filter.optionsField || filter.field,
+      ...(schema ? { schema } : {}),
+      field: valueField,
+      valueField,
+      labelField,
       search: true,
+      ...(filter.dependsOn && filter.dependsOn.length > 0
+        ? { dependsOn: filter.dependsOn }
+        : {}),
+      ...(filter.filterMappings && filter.filterMappings.length > 0
+        ? { filterMappings: filter.filterMappings }
+        : {}),
+      ...(filter.optionsCondition
+        ? { condition: filter.optionsCondition }
+        : {}),
     };
   }
   const values = parseStaticOptions(filter.staticOptions ?? '');
@@ -494,7 +513,7 @@ function buildFilterDefinition(
               : [];
           })();
 
-  const options = buildFilterOptions(filter);
+  const options = buildFilterOptions(filter, blocks);
 
   return {
     id: filter.id,
@@ -1042,6 +1061,12 @@ export function definitionToWizardState(
       optionsSource,
       staticOptions,
       optionsField: opts?.field || opts?.valueField,
+      optionsSchema: opts?.schema,
+      optionsValueField: opts?.valueField || opts?.field,
+      optionsLabelField: opts?.labelField || opts?.valueField || opts?.field,
+      dependsOn: opts?.dependsOn,
+      filterMappings: opts?.filterMappings,
+      optionsCondition: opts?.condition,
       required: filter.required,
       defaultValue: filter.default,
       strictWhenReferenced: filter.strictWhenReferenced,

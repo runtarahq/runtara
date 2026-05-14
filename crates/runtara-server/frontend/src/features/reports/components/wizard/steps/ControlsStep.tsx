@@ -1,3 +1,4 @@
+import { useEffect, useState } from 'react';
 import { Plus, Trash2 } from 'lucide-react';
 import { Button } from '@/shared/components/ui/button';
 import { Checkbox } from '@/shared/components/ui/checkbox';
@@ -32,9 +33,9 @@ interface ControlsStepProps {
 function fieldsOf(schemas: Schema[], schemaName: string | undefined): string[] {
   if (!schemaName) return [];
   return (
-    schemas.find((schema) => schema.name === schemaName)?.columns.map(
-      (column) => column.name
-    ) ?? []
+    schemas
+      .find((schema) => schema.name === schemaName)
+      ?.columns.map((column) => column.name) ?? []
   );
 }
 
@@ -51,6 +52,55 @@ const FILTER_TYPES: Array<{ value: ReportFilterType; label: string }> = [
 
 function filterUsesOptions(type: ReportFilterType): boolean {
   return type === 'select' || type === 'multi_select' || type === 'radio';
+}
+
+function formatCommaList(values: string[] | undefined): string {
+  return values?.join(', ') ?? '';
+}
+
+function parseCommaList(value: string): string[] {
+  return value
+    .split(',')
+    .map((part) => part.trim())
+    .filter(Boolean);
+}
+
+function formatJson(value: unknown): string {
+  return value === undefined ? '' : JSON.stringify(value, null, 2);
+}
+
+function isFilterMappings(
+  value: unknown
+): value is NonNullable<WizardFilter['filterMappings']> {
+  return (
+    Array.isArray(value) &&
+    value.every((entry) => {
+      if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) {
+        return false;
+      }
+      const mapping = entry as {
+        filterId?: unknown;
+        field?: unknown;
+        op?: unknown;
+      };
+      return (
+        typeof mapping.filterId === 'string' &&
+        typeof mapping.field === 'string' &&
+        (mapping.op === undefined || typeof mapping.op === 'string')
+      );
+    })
+  );
+}
+
+function isReportCondition(
+  value: unknown
+): value is NonNullable<WizardFilter['optionsCondition']> {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    !Array.isArray(value) &&
+    typeof (value as { op?: unknown }).op === 'string'
+  );
 }
 
 export function ControlsStep({
@@ -132,12 +182,13 @@ export function ControlsStep({
               filter.target === WIZARD_FILTER_TARGET_ALL ||
               filter.target === WIZARD_FILTER_TARGET_NONE
                 ? allBlockFields
-                : fieldsByBlockId[filter.target] ?? allBlockFields;
+                : (fieldsByBlockId[filter.target] ?? allBlockFields);
             return (
               <FilterRow
                 key={filter.id || index}
                 filter={filter}
                 schemaFields={fieldsForThisFilter}
+                schemas={schemas}
                 filterableBlocks={filterableBlocks}
                 onChange={(patch) => updateFilter(index, patch)}
                 onRemove={() => removeFilter(index)}
@@ -153,17 +204,53 @@ export function ControlsStep({
 function FilterRow({
   filter,
   schemaFields,
+  schemas,
   filterableBlocks,
   onChange,
   onRemove,
 }: {
   filter: WizardFilter;
   schemaFields: string[];
+  schemas: Schema[];
   filterableBlocks: WizardBlock[];
   onChange: (patch: Partial<WizardFilter>) => void;
   onRemove: () => void;
 }) {
   const showOptions = filterUsesOptions(filter.type);
+  const targetSchema = filterableBlocks.find(
+    (block) => block.id === filter.target
+  )?.schema;
+  const selectedOptionsSchema =
+    filter.optionsSchema || targetSchema || schemas[0]?.name || '';
+  const optionSchemaFields = fieldsOf(schemas, selectedOptionsSchema);
+  const selectedValueField =
+    filter.optionsValueField ||
+    filter.optionsField ||
+    filter.field ||
+    optionSchemaFields[0] ||
+    '';
+  const selectedLabelField =
+    filter.optionsLabelField ||
+    selectedValueField ||
+    optionSchemaFields[0] ||
+    '';
+
+  function updateOptionsSchema(schemaName: string) {
+    const nextFields = fieldsOf(schemas, schemaName);
+    const nextValueField = nextFields.includes(selectedValueField)
+      ? selectedValueField
+      : nextFields[0];
+    const nextLabelField = nextFields.includes(selectedLabelField)
+      ? selectedLabelField
+      : nextValueField;
+    onChange({
+      optionsSchema: schemaName,
+      optionsValueField: nextValueField,
+      optionsLabelField: nextLabelField,
+      optionsField: nextValueField,
+    });
+  }
+
   return (
     <div className="grid gap-3 rounded-md border bg-background p-3">
       <div className="grid gap-3 lg:grid-cols-[minmax(0,1.2fr)_minmax(0,1fr)_minmax(0,1fr)_minmax(0,1.2fr)_auto]">
@@ -285,27 +372,111 @@ function FilterRow({
             </Select>
           </div>
           {(filter.optionsSource ?? 'object_model') === 'object_model' ? (
-            <div className="grid gap-1.5">
-              <Label className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
-                Schema field to look up
-              </Label>
-              <Select
-                value={filter.optionsField || filter.field || schemaFields[0]}
-                onValueChange={(value) =>
-                  onChange({ optionsField: value })
-                }
-              >
-                <SelectTrigger>
-                  <SelectValue placeholder="Select field" />
-                </SelectTrigger>
-                <SelectContent>
-                  {schemaFields.map((field) => (
-                    <SelectItem key={field} value={field}>
-                      {field}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
+            <div className="grid gap-3">
+              <div className="grid gap-3 md:grid-cols-3">
+                <div className="grid gap-1.5">
+                  <Label className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+                    Options schema
+                  </Label>
+                  <Select
+                    value={selectedOptionsSchema}
+                    onValueChange={updateOptionsSchema}
+                  >
+                    <SelectTrigger>
+                      <SelectValue placeholder="Select schema" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {schemas.map((schema) => (
+                        <SelectItem key={schema.name} value={schema.name}>
+                          {schema.name}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="grid gap-1.5">
+                  <Label className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+                    Value field
+                  </Label>
+                  <Select
+                    value={selectedValueField}
+                    onValueChange={(value) =>
+                      onChange({
+                        optionsValueField: value,
+                        optionsField: value,
+                      })
+                    }
+                  >
+                    <SelectTrigger>
+                      <SelectValue placeholder="Select field" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {optionSchemaFields.map((field) => (
+                        <SelectItem key={field} value={field}>
+                          {field}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="grid gap-1.5">
+                  <Label className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+                    Label field
+                  </Label>
+                  <Select
+                    value={selectedLabelField}
+                    onValueChange={(value) =>
+                      onChange({ optionsLabelField: value })
+                    }
+                  >
+                    <SelectTrigger>
+                      <SelectValue placeholder="Select field" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {optionSchemaFields.map((field) => (
+                        <SelectItem key={field} value={field}>
+                          {field}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+              </div>
+              <div className="grid gap-3 lg:grid-cols-3">
+                <div className="grid gap-1.5">
+                  <Label className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+                    Depends on
+                  </Label>
+                  <Input
+                    value={formatCommaList(filter.dependsOn)}
+                    onChange={(event) => {
+                      const dependsOn = parseCommaList(event.target.value);
+                      onChange({
+                        dependsOn: dependsOn.length > 0 ? dependsOn : undefined,
+                      });
+                    }}
+                    placeholder="country_filter, region_filter"
+                  />
+                </div>
+                <FilterJsonField
+                  label="Filter mappings"
+                  value={filter.filterMappings}
+                  placeholder='[{"filterId":"country_filter","field":"country_id","op":"eq"}]'
+                  validate={isFilterMappings}
+                  errorText="Mappings must be an array of filterId/field objects."
+                  onChange={(filterMappings) => onChange({ filterMappings })}
+                />
+                <FilterJsonField
+                  label="Options condition"
+                  value={filter.optionsCondition}
+                  placeholder='{"op":"EQ","arguments":["active",true]}'
+                  validate={isReportCondition}
+                  errorText="Condition must be an object with an op string."
+                  onChange={(optionsCondition) =>
+                    onChange({ optionsCondition })
+                  }
+                />
+              </div>
             </div>
           ) : (
             <div className="grid gap-1.5">
@@ -346,6 +517,67 @@ function FilterRow({
           Hide dependent blocks until set
         </label>
       </div>
+    </div>
+  );
+}
+
+function FilterJsonField<T>({
+  label,
+  value,
+  placeholder,
+  validate,
+  errorText,
+  onChange,
+}: {
+  label: string;
+  value: T | undefined;
+  placeholder: string;
+  validate: (value: unknown) => value is T;
+  errorText: string;
+  onChange: (value: T | undefined) => void;
+}) {
+  const [text, setText] = useState(() => formatJson(value));
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    setText(formatJson(value));
+    setError(null);
+  }, [value]);
+
+  function updateText(nextText: string) {
+    setText(nextText);
+    const trimmed = nextText.trim();
+    if (!trimmed) {
+      setError(null);
+      onChange(undefined);
+      return;
+    }
+    try {
+      const parsed = JSON.parse(trimmed) as unknown;
+      if (!validate(parsed)) {
+        setError(errorText);
+        return;
+      }
+      setError(null);
+      onChange(parsed);
+    } catch {
+      setError('JSON is not valid yet.');
+    }
+  }
+
+  return (
+    <div className="grid gap-1.5">
+      <Label className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+        {label}
+      </Label>
+      <Textarea
+        rows={3}
+        value={text}
+        onChange={(event) => updateText(event.target.value)}
+        placeholder={placeholder}
+        className="font-mono text-xs"
+      />
+      {error ? <p className="text-xs text-destructive">{error}</p> : null}
     </div>
   );
 }

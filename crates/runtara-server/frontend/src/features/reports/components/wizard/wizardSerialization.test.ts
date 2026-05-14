@@ -714,6 +714,94 @@ describe('table column round-trip', () => {
     expect(round.blocks[0].card).toEqual(definition.blocks[0].card);
   });
 
+  it('round-trips advanced filter option metadata', () => {
+    const filterMappings = [
+      { filterId: 'country_filter', field: 'country_id', op: 'eq' },
+    ];
+    const optionsCondition = {
+      op: 'EQ',
+      arguments: ['active', true],
+    };
+    const definition: ReportDefinition = {
+      definitionVersion: 1,
+      filters: [
+        {
+          id: 'country_filter',
+          label: 'Country',
+          type: 'select',
+          appliesTo: [{ field: 'country_id', op: 'eq' }],
+        },
+        {
+          id: 'customer_filter',
+          label: 'Customer',
+          type: 'select',
+          appliesTo: [{ blockId: 'orders', field: 'customer_id', op: 'eq' }],
+          options: {
+            source: 'object_model',
+            schema: 'customers',
+            field: 'id',
+            valueField: 'id',
+            labelField: 'name',
+            dependsOn: ['country_filter'],
+            filterMappings,
+            condition: optionsCondition,
+          },
+        },
+      ],
+      blocks: [
+        {
+          id: 'orders',
+          type: 'table',
+          title: 'Orders',
+          source: { schema: 'orders', mode: 'filter' },
+          table: {
+            columns: [
+              { field: 'id', label: 'ID' },
+              { field: 'customer_id', label: 'Customer' },
+            ],
+          },
+        },
+      ],
+    };
+
+    const { state, compatibility } = definitionToWizardState(
+      definition,
+      'orders'
+    );
+    expect(compatibility.fullyEditable).toBe(true);
+    expect(state.filters[1]).toMatchObject({
+      target: 'orders',
+      field: 'customer_id',
+      optionsSchema: 'customers',
+      optionsField: 'id',
+      optionsValueField: 'id',
+      optionsLabelField: 'name',
+      dependsOn: ['country_filter'],
+      filterMappings,
+      optionsCondition,
+    });
+
+    const round = wizardStateToDefinition(
+      state,
+      {
+        ...SCHEMA_FIELDS,
+        customers: ['id', 'name', 'country_id'],
+      },
+      definition
+    );
+    expect(round.filters[1].options).toMatchObject({
+      source: 'object_model',
+      schema: 'customers',
+      field: 'id',
+      valueField: 'id',
+      labelField: 'name',
+      search: true,
+      dependsOn: ['country_filter'],
+    });
+    expect(round.filters[1].options?.filterMappings).toEqual(filterMappings);
+    expect(round.filters[1].options?.condition).toEqual(optionsCondition);
+  });
+
   it('round-trips block click interactions', () => {
     const definition: ReportDefinition = {
       definitionVersion: 1,

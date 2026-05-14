@@ -240,6 +240,16 @@ export interface WizardFilter {
   optionsSource?: WizardFilterOptionsSource;
   staticOptions?: string;
   optionsField?: string;
+  optionsSchema?: string;
+  optionsValueField?: string;
+  optionsLabelField?: string;
+  dependsOn?: string[];
+  filterMappings?: NonNullable<
+    ReportFilterDefinition['options']
+  >['filterMappings'];
+  optionsCondition?: NonNullable<
+    ReportFilterDefinition['options']
+  >['condition'];
   required?: boolean;
   defaultValue?: unknown;
   strictWhenReferenced?: boolean;
