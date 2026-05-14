@@ -26,10 +26,14 @@ import { Checkbox } from '@/shared/components/ui/checkbox';
 import {
   ReportBlockResult,
   ReportDatasetDefinition,
+  ReportOrderBy,
   ReportTableInteractionButtonConfig,
   ReportWorkflowActionConfig,
 } from '../../../types';
-import { createDefaultDatasetBlockQuery } from '../../../datasetBlocks';
+import {
+  createDefaultDatasetBlockQuery,
+  datasetQueryOutputFields,
+} from '../../../datasetBlocks';
 import {
   WIZARD_BLOCK_TYPES,
   WIZARD_COLUMN_FORMATS,
@@ -39,6 +43,7 @@ import {
   WizardBlockType,
   WizardColumnFormat,
   WizardFieldConfig,
+  WizardFilter,
   WizardGrid,
   WizardPillVariant,
   WizardTableColumnType,
@@ -46,10 +51,11 @@ import {
   makeActionFieldKey,
   makeGridId,
 } from '../wizardTypes';
-import { humanizeFieldName } from '../../../utils';
+import { humanizeFieldName, slugify } from '../../../utils';
 import { BlockPreview } from './BlockPreview';
 import { BlockDatasetQueryEditor } from './BlockDatasetQueryEditor';
 import {
+  InteractionActionsList,
   InteractionButtonsEditor,
   TableBulkActionsEditor,
   WorkflowActionEditor,
@@ -57,12 +63,15 @@ import {
   createDefaultWorkflowAction,
 } from './tableActionEditors';
 
-function fieldsOfSchema(schemas: Schema[], schemaName: string | undefined): string[] {
+function fieldsOfSchema(
+  schemas: Schema[],
+  schemaName: string | undefined
+): string[] {
   if (!schemaName) return [];
   return (
-    schemas.find((schema) => schema.name === schemaName)?.columns.map(
-      (column) => column.name
-    ) ?? []
+    schemas
+      .find((schema) => schema.name === schemaName)
+      ?.columns.map((column) => column.name) ?? []
   );
 }
 
@@ -72,16 +81,14 @@ interface BlocksStepProps {
   schemas: Schema[];
   defaultSchema?: string;
   datasets: ReportDatasetDefinition[];
+  filters: WizardFilter[];
   blockResults?: Record<string, ReportBlockResult>;
   /** When false, all editing affordances are hidden; layout still renders. */
   editing?: boolean;
   onGridsChange: (next: WizardGrid[]) => void;
   onBlocksChange: (next: WizardBlock[]) => void;
   /** Atomic update for ops that touch both grids and blocks at once. */
-  onGridsAndBlocksChange: (
-    grids: WizardGrid[],
-    blocks: WizardBlock[]
-  ) => void;
+  onGridsAndBlocksChange: (grids: WizardGrid[], blocks: WizardBlock[]) => void;
 }
 
 const CHART_KINDS: Array<{
@@ -106,12 +113,16 @@ const METRIC_AGGREGATES: Array<{
   { value: 'max', label: 'Max' },
 ];
 
+const NO_SORT_FIELD = '__none__';
+const ALWAYS_VISIBLE = '__always__';
+
 export function BlocksStep({
   grids,
   blocks,
   schemas,
   defaultSchema,
   datasets,
+  filters,
   blockResults,
   editing = true,
   onGridsChange,
@@ -284,11 +295,8 @@ export function BlocksStep({
 
   return (
     <div className="grid gap-4">
-
       {grids.map((grid, gridIndex) => {
-        const gridBlocks = blocks.filter(
-          (b) => b.placement.gridId === grid.id
-        );
+        const gridBlocks = blocks.filter((b) => b.placement.gridId === grid.id);
         const hasBlocksInLastRow = gridBlocks.some(
           (b) => b.placement.row === grid.rows
         );
@@ -296,42 +304,45 @@ export function BlocksStep({
           (b) => b.placement.column === grid.columns
         );
         return (
-        <GridSection
-          key={grid.id}
-          grid={grid}
-          index={gridIndex}
-          gridCount={grids.length}
-          blocks={gridBlocks}
-          schemas={schemas}
-          datasets={datasets}
-          blockResults={blockResults}
-          editing={editing}
-          draggedId={draggedId}
-          hoverCell={hoverCell}
-          openBlockId={openBlockId}
-          canDecreaseRows={!hasBlocksInLastRow && grid.rows > 1}
-          canDecreaseColumns={!hasBlocksInLastColumn && grid.columns > 1}
-          onTitleChange={(title) => updateGrid(grid.id, { title })}
-          onDescriptionChange={(description) =>
-            updateGrid(grid.id, { description })
-          }
-          onResize={(deltaRows, deltaColumns) =>
-            resizeGrid(grid.id, deltaRows, deltaColumns)
-          }
-          onAddBlockAtCell={(row, column) => addBlockAtCell(grid.id, row, column)}
-          onRemove={() => removeGrid(grid.id)}
-          onMoveUp={() => moveGrid(grid.id, -1)}
-          onMoveDown={() => moveGrid(grid.id, 1)}
-          onSetHoverCell={setHoverCell}
-          onDropCell={onDropOnCell}
-          onBlockUpdate={updateBlock}
-          onBlockRemove={removeBlock}
-          onBlockToggleOpen={(id) =>
-            setOpenBlockId(openBlockId === id ? null : id)
-          }
-          onBlockDragStart={onDragStart}
-          onBlockDragEnd={onDragEnd}
-        />
+          <GridSection
+            key={grid.id}
+            grid={grid}
+            index={gridIndex}
+            gridCount={grids.length}
+            blocks={gridBlocks}
+            schemas={schemas}
+            datasets={datasets}
+            filters={filters}
+            blockResults={blockResults}
+            editing={editing}
+            draggedId={draggedId}
+            hoverCell={hoverCell}
+            openBlockId={openBlockId}
+            canDecreaseRows={!hasBlocksInLastRow && grid.rows > 1}
+            canDecreaseColumns={!hasBlocksInLastColumn && grid.columns > 1}
+            onTitleChange={(title) => updateGrid(grid.id, { title })}
+            onDescriptionChange={(description) =>
+              updateGrid(grid.id, { description })
+            }
+            onResize={(deltaRows, deltaColumns) =>
+              resizeGrid(grid.id, deltaRows, deltaColumns)
+            }
+            onAddBlockAtCell={(row, column) =>
+              addBlockAtCell(grid.id, row, column)
+            }
+            onRemove={() => removeGrid(grid.id)}
+            onMoveUp={() => moveGrid(grid.id, -1)}
+            onMoveDown={() => moveGrid(grid.id, 1)}
+            onSetHoverCell={setHoverCell}
+            onDropCell={onDropOnCell}
+            onBlockUpdate={updateBlock}
+            onBlockRemove={removeBlock}
+            onBlockToggleOpen={(id) =>
+              setOpenBlockId(openBlockId === id ? null : id)
+            }
+            onBlockDragStart={onDragStart}
+            onBlockDragEnd={onDragEnd}
+          />
         );
       })}
 
@@ -356,6 +367,7 @@ function GridSection({
   blocks,
   schemas,
   datasets,
+  filters,
   blockResults,
   editing,
   draggedId,
@@ -384,6 +396,7 @@ function GridSection({
   blocks: WizardBlock[];
   schemas: Schema[];
   datasets: ReportDatasetDefinition[];
+  filters: WizardFilter[];
   blockResults?: Record<string, ReportBlockResult>;
   editing: boolean;
   draggedId: string | null;
@@ -401,11 +414,7 @@ function GridSection({
   onSetHoverCell: (
     cell: { gridId: string; row: number; column: number } | null
   ) => void;
-  onDropCell: (target: {
-    gridId: string;
-    row: number;
-    column: number;
-  }) => void;
+  onDropCell: (target: { gridId: string; row: number; column: number }) => void;
   onBlockUpdate: (id: string, patch: Partial<WizardBlock>) => void;
   onBlockRemove: (id: string) => void;
   onBlockToggleOpen: (id: string) => void;
@@ -423,14 +432,24 @@ function GridSection({
                 placeholder={`Section ${index + 1} title (optional)`}
                 onChange={(event) => onTitleChange(event.target.value)}
                 className="w-full bg-transparent text-base font-semibold placeholder:text-muted-foreground focus:outline-none"
-                style={{ border: 'none', outline: 'none', boxShadow: 'none', padding: 0 }}
+                style={{
+                  border: 'none',
+                  outline: 'none',
+                  boxShadow: 'none',
+                  padding: 0,
+                }}
               />
               <input
                 value={grid.description ?? ''}
                 placeholder="Optional description shown beneath the title"
                 onChange={(event) => onDescriptionChange(event.target.value)}
                 className="w-full bg-transparent text-xs text-muted-foreground placeholder:text-muted-foreground focus:outline-none"
-                style={{ border: 'none', outline: 'none', boxShadow: 'none', padding: 0 }}
+                style={{
+                  border: 'none',
+                  outline: 'none',
+                  boxShadow: 'none',
+                  padding: 0,
+                }}
               />
             </>
           ) : grid.title || grid.description ? (
@@ -447,113 +466,115 @@ function GridSection({
           ) : null}
         </div>
         {editing ? (
-        <div className="flex items-center gap-1.5">
-          <div className="flex items-center gap-1 rounded-md border bg-background px-2 py-1 text-xs">
-            <span className="text-muted-foreground">Rows</span>
-            <Button
-              type="button"
-              size="icon"
-              variant="ghost"
-              className="h-6 w-6"
-              disabled={!canDecreaseRows}
-              title={
-                !canDecreaseRows && grid.rows > 1
-                  ? 'Last row still has a block — move or remove it first'
-                  : undefined
-              }
-              onClick={() => onResize(-1, 0)}
-              aria-label="Remove row"
-            >
-              <Minus className="h-3 w-3" />
-            </Button>
-            <span className="min-w-4 text-center text-sm font-semibold">
-              {grid.rows}
-            </span>
-            <Button
-              type="button"
-              size="icon"
-              variant="ghost"
-              className="h-6 w-6"
-              onClick={() => onResize(1, 0)}
-              aria-label="Add row"
-            >
-              <Plus className="h-3 w-3" />
-            </Button>
+          <div className="flex items-center gap-1.5">
+            <div className="flex items-center gap-1 rounded-md border bg-background px-2 py-1 text-xs">
+              <span className="text-muted-foreground">Rows</span>
+              <Button
+                type="button"
+                size="icon"
+                variant="ghost"
+                className="h-6 w-6"
+                disabled={!canDecreaseRows}
+                title={
+                  !canDecreaseRows && grid.rows > 1
+                    ? 'Last row still has a block — move or remove it first'
+                    : undefined
+                }
+                onClick={() => onResize(-1, 0)}
+                aria-label="Remove row"
+              >
+                <Minus className="h-3 w-3" />
+              </Button>
+              <span className="min-w-4 text-center text-sm font-semibold">
+                {grid.rows}
+              </span>
+              <Button
+                type="button"
+                size="icon"
+                variant="ghost"
+                className="h-6 w-6"
+                onClick={() => onResize(1, 0)}
+                aria-label="Add row"
+              >
+                <Plus className="h-3 w-3" />
+              </Button>
+            </div>
+            <div className="flex items-center gap-1 rounded-md border bg-background px-2 py-1 text-xs">
+              <span className="text-muted-foreground">Cols</span>
+              <Button
+                type="button"
+                size="icon"
+                variant="ghost"
+                className="h-6 w-6"
+                disabled={!canDecreaseColumns}
+                title={
+                  !canDecreaseColumns && grid.columns > 1
+                    ? 'Last column still has a block — move or remove it first'
+                    : undefined
+                }
+                onClick={() => onResize(0, -1)}
+                aria-label="Remove column"
+              >
+                <Minus className="h-3 w-3" />
+              </Button>
+              <span className="min-w-4 text-center text-sm font-semibold">
+                {grid.columns}
+              </span>
+              <Button
+                type="button"
+                size="icon"
+                variant="ghost"
+                className="h-6 w-6"
+                onClick={() => onResize(0, 1)}
+                aria-label="Add column"
+              >
+                <Plus className="h-3 w-3" />
+              </Button>
+            </div>
+            <div className="flex items-center gap-0.5">
+              <Button
+                type="button"
+                size="icon"
+                variant="ghost"
+                className="h-7 w-7"
+                disabled={index === 0}
+                onClick={onMoveUp}
+                aria-label="Move section up"
+              >
+                <ArrowUp className="h-3.5 w-3.5" />
+              </Button>
+              <Button
+                type="button"
+                size="icon"
+                variant="ghost"
+                className="h-7 w-7"
+                disabled={index === gridCount - 1}
+                onClick={onMoveDown}
+                aria-label="Move section down"
+              >
+                <ArrowDown className="h-3.5 w-3.5" />
+              </Button>
+              <Button
+                type="button"
+                size="icon"
+                variant="ghost"
+                className="h-7 w-7"
+                disabled={gridCount <= 1}
+                onClick={onRemove}
+                aria-label="Remove section"
+              >
+                <Trash2 className="h-3.5 w-3.5" />
+              </Button>
+            </div>
           </div>
-          <div className="flex items-center gap-1 rounded-md border bg-background px-2 py-1 text-xs">
-            <span className="text-muted-foreground">Cols</span>
-            <Button
-              type="button"
-              size="icon"
-              variant="ghost"
-              className="h-6 w-6"
-              disabled={!canDecreaseColumns}
-              title={
-                !canDecreaseColumns && grid.columns > 1
-                  ? 'Last column still has a block — move or remove it first'
-                  : undefined
-              }
-              onClick={() => onResize(0, -1)}
-              aria-label="Remove column"
-            >
-              <Minus className="h-3 w-3" />
-            </Button>
-            <span className="min-w-4 text-center text-sm font-semibold">
-              {grid.columns}
-            </span>
-            <Button
-              type="button"
-              size="icon"
-              variant="ghost"
-              className="h-6 w-6"
-              onClick={() => onResize(0, 1)}
-              aria-label="Add column"
-            >
-              <Plus className="h-3 w-3" />
-            </Button>
-          </div>
-          <div className="flex items-center gap-0.5">
-            <Button
-              type="button"
-              size="icon"
-              variant="ghost"
-              className="h-7 w-7"
-              disabled={index === 0}
-              onClick={onMoveUp}
-              aria-label="Move section up"
-            >
-              <ArrowUp className="h-3.5 w-3.5" />
-            </Button>
-            <Button
-              type="button"
-              size="icon"
-              variant="ghost"
-              className="h-7 w-7"
-              disabled={index === gridCount - 1}
-              onClick={onMoveDown}
-              aria-label="Move section down"
-            >
-              <ArrowDown className="h-3.5 w-3.5" />
-            </Button>
-            <Button
-              type="button"
-              size="icon"
-              variant="ghost"
-              className="h-7 w-7"
-              disabled={gridCount <= 1}
-              onClick={onRemove}
-              aria-label="Remove section"
-            >
-              <Trash2 className="h-3.5 w-3.5" />
-            </Button>
-          </div>
-        </div>
         ) : null}
       </div>
 
       <div
         className="grid gap-3"
-        style={{ gridTemplateColumns: `repeat(${grid.columns}, minmax(0, 1fr))` }}
+        style={{
+          gridTemplateColumns: `repeat(${grid.columns}, minmax(0, 1fr))`,
+        }}
       >
         {Array.from({ length: grid.rows * grid.columns }, (_, cellIndex) => {
           const row = Math.floor(cellIndex / grid.columns) + 1;
@@ -621,6 +642,7 @@ function GridSection({
                     block={block}
                     schemas={schemas}
                     datasets={datasets}
+                    filters={filters}
                     result={blockResults?.[block.id]}
                     editing={editing}
                     open={editing && openBlockId === block.id}
@@ -645,6 +667,7 @@ function BlockCard({
   block,
   schemas,
   datasets,
+  filters,
   result,
   editing,
   open,
@@ -658,6 +681,7 @@ function BlockCard({
   block: WizardBlock;
   schemas: Schema[];
   datasets: ReportDatasetDefinition[];
+  filters: WizardFilter[];
   result?: ReportBlockResult;
   editing: boolean;
   open: boolean;
@@ -670,12 +694,21 @@ function BlockCard({
 }) {
   const schemaFields = fieldsOfSchema(schemas, block.schema);
   const usingDataset = Boolean(block.dataset);
+  const dataset = block.dataset
+    ? datasets.find((candidate) => candidate.id === block.dataset?.id)
+    : undefined;
+  const tableSortFields = block.dataset
+    ? datasetQueryOutputFields(block.dataset)
+    : schemaFields;
+  const interactionFields = block.dataset
+    ? tableSortFields
+    : block.type === 'chart'
+      ? uniqueStrings([block.chartGroupBy, ...block.fields])
+      : block.fields.filter((field) => !isActionFieldKey(field));
   // Card and markdown blocks don't make sense over pre-aggregated datasets —
   // hide the dataset toggle for them.
   const supportsDataset =
-    block.type === 'table' ||
-    block.type === 'chart' ||
-    block.type === 'metric';
+    block.type === 'table' || block.type === 'chart' || block.type === 'metric';
   const supportsFields =
     !usingDataset &&
     (block.type === 'table' || block.type === 'card' || block.type === 'chart');
@@ -781,7 +814,15 @@ function BlockCard({
                 onDragStart={(event) => event.preventDefault()}
                 draggable={false}
                 className="w-full bg-transparent text-sm font-semibold placeholder:text-muted-foreground focus:outline-none"
-                style={{ border: 'none', outline: 'none', boxShadow: 'none', paddingLeft: 4, paddingRight: 4, paddingTop: 2, paddingBottom: 2 }}
+                style={{
+                  border: 'none',
+                  outline: 'none',
+                  boxShadow: 'none',
+                  paddingLeft: 4,
+                  paddingRight: 4,
+                  paddingTop: 2,
+                  paddingBottom: 2,
+                }}
               />
               <Select
                 value={block.type}
@@ -891,6 +932,30 @@ function BlockCard({
             <BlockDatasetQueryEditor
               block={block}
               datasets={datasets}
+              onChange={onChange}
+            />
+          ) : null}
+
+          {block.type === 'table' ? (
+            <TableBehaviorSettings
+              block={block}
+              fields={tableSortFields}
+              disabled={usingDataset && !dataset}
+              onChange={onChange}
+            />
+          ) : null}
+
+          <BlockVisibilitySettings
+            block={block}
+            filters={filters}
+            onChange={onChange}
+          />
+
+          {block.type === 'table' || block.type === 'chart' ? (
+            <BlockInteractionsSettings
+              block={block}
+              fields={interactionFields}
+              filters={filters}
               onChange={onChange}
             />
           ) : null}
@@ -1081,8 +1146,7 @@ function BlockCard({
                   delete next[field];
                 }
                 onChange({
-                  fieldConfigs:
-                    Object.keys(next).length > 0 ? next : undefined,
+                  fieldConfigs: Object.keys(next).length > 0 ? next : undefined,
                 });
               }}
             />
@@ -1124,7 +1188,10 @@ function FieldPicker({
   schemaFields: string[];
   onToggleField: (field: string) => void;
   onAddActionColumn?: (columnType: WizardTableColumnType) => void;
-  onUpdateFieldConfig: (field: string, patch: Partial<WizardFieldConfig>) => void;
+  onUpdateFieldConfig: (
+    field: string,
+    patch: Partial<WizardFieldConfig>
+  ) => void;
 }) {
   const formatChoices = block.type === 'chart' ? null : WIZARD_COLUMN_FORMATS;
   const isTable = block.type === 'table';
@@ -1188,8 +1255,8 @@ function FieldPicker({
                       // Seed default config when switching to action columns.
                       workflowAction:
                         columnType === 'workflow_button'
-                          ? cfg.workflowAction ??
-                            createDefaultWorkflowAction('row')
+                          ? (cfg.workflowAction ??
+                            createDefaultWorkflowAction('row'))
                           : undefined,
                       interactionButtons:
                         columnType === 'interaction_buttons'
@@ -1199,8 +1266,7 @@ function FieldPicker({
                             : [createDefaultInteractionButton()]
                           : undefined,
                       // Drop value-only config when switching away from value.
-                      format:
-                        columnType === 'value' ? cfg.format : undefined,
+                      format: columnType === 'value' ? cfg.format : undefined,
                     })
                   }
                   onWorkflowActionChange={(workflowAction) =>
@@ -1448,6 +1514,513 @@ function TableColumnRow({
   );
 }
 
+function BlockVisibilitySettings({
+  block,
+  filters,
+  onChange,
+}: {
+  block: WizardBlock;
+  filters: WizardFilter[];
+  onChange: (patch: Partial<WizardBlock>) => void;
+}) {
+  const conditionMode = visibilityConditionMode(block.showWhen);
+  const compareValue =
+    conditionMode === 'equals'
+      ? block.showWhen?.equals
+      : conditionMode === 'not_equals'
+        ? block.showWhen?.notEquals
+        : undefined;
+
+  function updateFilter(filterId: string) {
+    if (filterId === ALWAYS_VISIBLE) {
+      onChange({ showWhen: undefined });
+      return;
+    }
+    onChange({ showWhen: { filter: filterId, exists: true } });
+  }
+
+  function updateConditionMode(mode: string) {
+    if (!block.showWhen?.filter) return;
+    if (mode === 'exists') {
+      onChange({ showWhen: { filter: block.showWhen.filter, exists: true } });
+      return;
+    }
+    if (mode === 'missing') {
+      onChange({ showWhen: { filter: block.showWhen.filter, exists: false } });
+      return;
+    }
+    if (mode === 'equals') {
+      onChange({
+        showWhen: {
+          filter: block.showWhen.filter,
+          equals: stringVisibilityValue(compareValue),
+        },
+      });
+      return;
+    }
+    if (mode === 'not_equals') {
+      onChange({
+        showWhen: {
+          filter: block.showWhen.filter,
+          notEquals: stringVisibilityValue(compareValue),
+        },
+      });
+    }
+  }
+
+  function updateCompareValue(value: string) {
+    if (!block.showWhen?.filter) return;
+    if (conditionMode === 'equals') {
+      onChange({ showWhen: { filter: block.showWhen.filter, equals: value } });
+    } else if (conditionMode === 'not_equals') {
+      onChange({
+        showWhen: { filter: block.showWhen.filter, notEquals: value },
+      });
+    }
+  }
+
+  return (
+    <div className="grid gap-3 rounded-md border bg-muted/10 p-3">
+      <Label className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+        Block behavior
+      </Label>
+      <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_minmax(0,1fr)]">
+        <label className="flex min-h-10 items-center gap-2 rounded-md border bg-background px-3 text-sm">
+          <Checkbox
+            checked={Boolean(block.lazy)}
+            onCheckedChange={(checked) => onChange({ lazy: Boolean(checked) })}
+          />
+          Lazy load
+        </label>
+        <label className="flex min-h-10 items-center gap-2 rounded-md border bg-background px-3 text-sm">
+          <Checkbox
+            checked={Boolean(block.hideWhenEmpty)}
+            onCheckedChange={(checked) =>
+              onChange({ hideWhenEmpty: Boolean(checked) })
+            }
+          />
+          Hide when empty
+        </label>
+        <div className="grid gap-1.5">
+          <Label className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+            Visibility filter
+          </Label>
+          <Select
+            value={block.showWhen?.filter ?? ALWAYS_VISIBLE}
+            onValueChange={updateFilter}
+          >
+            <SelectTrigger className="h-8">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value={ALWAYS_VISIBLE}>Always visible</SelectItem>
+              {filters.map((filter) => (
+                <SelectItem key={filter.id} value={filter.id}>
+                  {filter.label || filter.id}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+      </div>
+      {block.showWhen?.filter ? (
+        <div className="grid gap-3 md:grid-cols-2">
+          <div className="grid gap-1.5">
+            <Label className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+              Show when
+            </Label>
+            <Select value={conditionMode} onValueChange={updateConditionMode}>
+              <SelectTrigger className="h-8">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="exists">Filter has a value</SelectItem>
+                <SelectItem value="missing">Filter is empty</SelectItem>
+                <SelectItem value="equals">Filter equals</SelectItem>
+                <SelectItem value="not_equals">
+                  Filter does not equal
+                </SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+          {conditionMode === 'equals' || conditionMode === 'not_equals' ? (
+            <div className="grid gap-1.5">
+              <Label className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+                Compare value
+              </Label>
+              <Input
+                value={stringVisibilityValue(compareValue)}
+                onChange={(event) => updateCompareValue(event.target.value)}
+                className="h-8"
+              />
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function visibilityConditionMode(
+  showWhen: WizardBlock['showWhen']
+): 'exists' | 'missing' | 'equals' | 'not_equals' {
+  if (!showWhen) return 'exists';
+  if (showWhen.equals !== undefined) return 'equals';
+  if (showWhen.notEquals !== undefined) return 'not_equals';
+  if (showWhen.exists === false) return 'missing';
+  return 'exists';
+}
+
+function stringVisibilityValue(value: unknown): string {
+  if (value === null || value === undefined) return '';
+  if (typeof value === 'string') return value;
+  return JSON.stringify(value);
+}
+
+function BlockInteractionsSettings({
+  block,
+  fields,
+  filters,
+  onChange,
+}: {
+  block: WizardBlock;
+  fields: string[];
+  filters: WizardFilter[];
+  onChange: (patch: Partial<WizardBlock>) => void;
+}) {
+  const interactions = block.interactions ?? [];
+  const triggerOptions =
+    block.type === 'chart'
+      ? [{ value: 'point_click', label: 'Point click' }]
+      : [
+          { value: 'row_click', label: 'Row click' },
+          { value: 'cell_click', label: 'Cell click' },
+        ];
+
+  function updateInteraction(
+    index: number,
+    patch: Partial<NonNullable<WizardBlock['interactions']>[number]>
+  ) {
+    onChange({
+      interactions: interactions.map((interaction, currentIndex) =>
+        currentIndex === index ? { ...interaction, ...patch } : interaction
+      ),
+    });
+  }
+
+  function addInteraction() {
+    onChange({
+      interactions: [
+        ...interactions,
+        createDefaultBlockInteraction(
+          triggerOptions[0]?.value ?? 'row_click',
+          filters,
+          fields
+        ),
+      ],
+    });
+  }
+
+  return (
+    <div className="grid gap-3 rounded-md border bg-muted/10 p-3">
+      <div className="flex items-center justify-between gap-2">
+        <Label className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+          Block interactions
+        </Label>
+        <Button
+          type="button"
+          size="sm"
+          variant="outline"
+          className="h-7"
+          onClick={addInteraction}
+        >
+          <Plus className="mr-1 h-3 w-3" />
+          Add interaction
+        </Button>
+      </div>
+      {interactions.length === 0 ? (
+        <p className="text-xs text-muted-foreground">
+          No row, cell, or chart click interactions.
+        </p>
+      ) : (
+        <div className="grid gap-2">
+          {interactions.map((interaction, index) => (
+            <div
+              key={`${interaction.id}-${index}`}
+              className="grid gap-2 rounded-md border bg-background p-2"
+            >
+              <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_minmax(0,1fr)_auto]">
+                <div className="grid gap-1">
+                  <Label className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+                    ID
+                  </Label>
+                  <Input
+                    value={interaction.id}
+                    className="h-8"
+                    onChange={(event) =>
+                      updateInteraction(index, {
+                        id: slugify(event.target.value).replace(/-/g, '_'),
+                      })
+                    }
+                  />
+                </div>
+                <div className="grid gap-1">
+                  <Label className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+                    Trigger
+                  </Label>
+                  <Select
+                    value={interaction.trigger.event}
+                    onValueChange={(event) =>
+                      updateInteraction(index, {
+                        trigger: {
+                          ...interaction.trigger,
+                          event,
+                        },
+                      })
+                    }
+                  >
+                    <SelectTrigger className="h-8">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {triggerOptions.map((option) => (
+                        <SelectItem key={option.value} value={option.value}>
+                          {option.label}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="grid gap-1">
+                  <Label className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+                    Field
+                  </Label>
+                  <Select
+                    value={interaction.trigger.field ?? '__any__'}
+                    disabled={fields.length === 0}
+                    onValueChange={(field) =>
+                      updateInteraction(index, {
+                        trigger: {
+                          ...interaction.trigger,
+                          field: field === '__any__' ? undefined : field,
+                        },
+                      })
+                    }
+                  >
+                    <SelectTrigger className="h-8">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="__any__">Any field</SelectItem>
+                      {fields.map((field) => (
+                        <SelectItem key={field} value={field}>
+                          {field}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+                <Button
+                  type="button"
+                  size="icon"
+                  variant="ghost"
+                  className="mt-5 h-8 w-8"
+                  onClick={() =>
+                    onChange({
+                      interactions: interactions.filter(
+                        (_, currentIndex) => currentIndex !== index
+                      ),
+                    })
+                  }
+                  aria-label={`Remove ${interaction.id}`}
+                >
+                  <Trash2 className="h-3.5 w-3.5" />
+                </Button>
+              </div>
+              <InteractionActionsList
+                actions={interaction.actions}
+                fields={fields}
+                onChange={(actions) => updateInteraction(index, { actions })}
+              />
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function createDefaultBlockInteraction(
+  event: string,
+  filters: WizardFilter[],
+  fields: string[]
+): NonNullable<WizardBlock['interactions']>[number] {
+  const field = fields[0] ?? 'id';
+  return {
+    id: `interaction_${Math.random().toString(36).slice(2, 7)}`,
+    trigger: { event },
+    actions: [
+      {
+        type: 'set_filter',
+        filterId: filters[0]?.id,
+        valueFrom: `datum.${field}`,
+      },
+    ],
+  };
+}
+
+function TableBehaviorSettings({
+  block,
+  fields,
+  disabled,
+  onChange,
+}: {
+  block: WizardBlock;
+  fields: string[];
+  disabled?: boolean;
+  onChange: (patch: Partial<WizardBlock>) => void;
+}) {
+  const defaultSort = block.defaultSort?.[0];
+  const trailingSorts = block.defaultSort?.slice(1) ?? [];
+  const sortFieldOptions =
+    defaultSort?.field && !fields.includes(defaultSort.field)
+      ? [defaultSort.field, ...fields]
+      : fields;
+
+  function updateDefaultSort(field: string) {
+    if (field === NO_SORT_FIELD) {
+      onChange({ defaultSort: undefined });
+      return;
+    }
+    onChange({
+      defaultSort: [
+        {
+          field,
+          direction: defaultSort?.direction ?? 'asc',
+        },
+        ...trailingSorts,
+      ],
+    });
+  }
+
+  function updateDefaultSortDirection(direction: ReportOrderBy['direction']) {
+    if (!defaultSort?.field) return;
+    onChange({
+      defaultSort: [{ ...defaultSort, direction }, ...trailingSorts],
+    });
+  }
+
+  return (
+    <div className="grid gap-3 rounded-md border bg-muted/10 p-3">
+      <Label className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+        Table behavior
+      </Label>
+      <div className="grid gap-3 md:grid-cols-4">
+        <div className="grid gap-1.5">
+          <Label className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+            Default page size
+          </Label>
+          <Input
+            type="number"
+            min={1}
+            value={block.defaultPageSize ?? 50}
+            onChange={(event) =>
+              onChange({
+                defaultPageSize: positiveIntegerOrDefault(
+                  event.target.value,
+                  50
+                ),
+              })
+            }
+            className="h-8"
+          />
+        </div>
+        <div className="grid gap-1.5">
+          <Label className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+            Allowed page sizes
+          </Label>
+          <Input
+            value={(block.allowedPageSizes ?? [25, 50, 100]).join(', ')}
+            onChange={(event) =>
+              onChange({
+                allowedPageSizes: parsePageSizes(event.target.value),
+              })
+            }
+            placeholder="25, 50, 100"
+            className="h-8"
+          />
+        </div>
+        <div className="grid gap-1.5">
+          <Label className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+            Default sort
+          </Label>
+          <Select
+            value={defaultSort?.field ?? NO_SORT_FIELD}
+            disabled={disabled || sortFieldOptions.length === 0}
+            onValueChange={updateDefaultSort}
+          >
+            <SelectTrigger className="h-8">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value={NO_SORT_FIELD}>None</SelectItem>
+              {sortFieldOptions.map((field) => (
+                <SelectItem key={field} value={field}>
+                  {field}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+        <div className="grid gap-1.5">
+          <Label className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+            Sort direction
+          </Label>
+          <Select
+            value={defaultSort?.direction ?? 'asc'}
+            disabled={disabled || !defaultSort?.field}
+            onValueChange={(direction) =>
+              updateDefaultSortDirection(
+                direction as ReportOrderBy['direction']
+              )
+            }
+          >
+            <SelectTrigger className="h-8">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="asc">Ascending</SelectItem>
+              <SelectItem value="desc">Descending</SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function positiveIntegerOrDefault(value: string, fallback: number): number {
+  const parsed = Number.parseInt(value, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function parsePageSizes(value: string): number[] {
+  return Array.from(
+    new Set(
+      value
+        .split(',')
+        .map((part) => Number.parseInt(part.trim(), 10))
+        .filter((size) => Number.isFinite(size) && size > 0)
+    )
+  );
+}
+
+function uniqueStrings(values: Array<string | undefined>): string[] {
+  return Array.from(
+    new Set(values.filter((value): value is string => Boolean(value)))
+  );
+}
+
 function TableSelectionAndBulkActions({
   block,
   schemaFields,
@@ -1530,7 +2103,10 @@ function FieldRow({
         </td>
         {formatChoices ? (
           <td className="py-1.5 pr-3 align-middle">
-            <Select value={cfg.format ?? 'plain'} onValueChange={onFormatChange}>
+            <Select
+              value={cfg.format ?? 'plain'}
+              onValueChange={onFormatChange}
+            >
               <SelectTrigger className="h-7">
                 <SelectValue />
               </SelectTrigger>

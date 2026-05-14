@@ -38,7 +38,10 @@ export interface WizardCompatibility {
   reasons: string[];
 }
 
-function safeFields(fields: string[] | undefined, fallback: string[]): string[] {
+function safeFields(
+  fields: string[] | undefined,
+  fallback: string[]
+): string[] {
   const filtered = (fields ?? []).filter(Boolean);
   if (filtered.length > 0) return filtered;
   return fallback;
@@ -63,7 +66,8 @@ function buildBlockSource(
 
   if (block.type === 'metric') {
     const op = block.metricAggregate ?? 'count';
-    const field = op === 'count' ? undefined : block.metricField || primaryFields[0];
+    const field =
+      op === 'count' ? undefined : block.metricField || primaryFields[0];
     return {
       schema,
       mode: 'aggregate',
@@ -95,6 +99,23 @@ function buildBlockSource(
   return { schema, mode: 'filter' };
 }
 
+function normalizePageSize(value: number | undefined): number {
+  return Number.isFinite(value) && value !== undefined && value > 0
+    ? Math.floor(value)
+    : 50;
+}
+
+function normalizeAllowedPageSizes(
+  values: number[] | undefined,
+  defaultPageSize: number
+): number[] {
+  const sizes = values && values.length > 0 ? values : [25, 50, 100];
+  return Array.from(new Set([...sizes, defaultPageSize]))
+    .filter((size) => Number.isFinite(size) && size > 0)
+    .map((size) => Math.floor(size))
+    .sort((left, right) => left - right);
+}
+
 function buildBlockDefinition(
   block: WizardBlock,
   primaryFields: string[],
@@ -106,12 +127,19 @@ function buildBlockDefinition(
     const dataset = datasetsById.get(block.dataset.id);
     const stub: ReportBlockDefinition = {
       id: block.id,
-      type: block.type === 'markdown' || block.type === 'card'
-        ? 'table'
-        : block.type,
+      type:
+        block.type === 'markdown' || block.type === 'card'
+          ? 'table'
+          : block.type,
       title: block.title,
       source: { schema: '' },
       dataset: block.dataset,
+      ...(block.lazy ? { lazy: true } : {}),
+      ...(block.hideWhenEmpty ? { hideWhenEmpty: true } : {}),
+      ...(block.showWhen ? { showWhen: block.showWhen } : {}),
+      ...(block.interactions && block.interactions.length > 0
+        ? { interactions: block.interactions }
+        : {}),
     };
     return dataset ? reconcileDatasetBlock(stub, dataset, block.dataset) : stub;
   }
@@ -121,6 +149,12 @@ function buildBlockDefinition(
     type: block.type,
     title: block.title,
     source: buildBlockSource(block, primaryFields),
+    ...(block.lazy ? { lazy: true } : {}),
+    ...(block.hideWhenEmpty ? { hideWhenEmpty: true } : {}),
+    ...(block.showWhen ? { showWhen: block.showWhen } : {}),
+    ...(block.interactions && block.interactions.length > 0
+      ? { interactions: block.interactions }
+      : {}),
   };
 
   if (block.type === 'markdown') {
@@ -193,6 +227,11 @@ function buildBlockDefinition(
 
     const tableActions = block.tableActions ?? [];
     const selectable = Boolean(block.selectable || tableActions.length > 0);
+    const defaultPageSize = normalizePageSize(block.defaultPageSize);
+    const allowedPageSizes = normalizeAllowedPageSizes(
+      block.allowedPageSizes,
+      defaultPageSize
+    );
 
     return {
       ...base,
@@ -200,9 +239,12 @@ function buildBlockDefinition(
         columns,
         ...(selectable ? { selectable: true } : {}),
         ...(tableActions.length > 0 ? { actions: tableActions } : {}),
+        ...(block.defaultSort && block.defaultSort.length > 0
+          ? { defaultSort: block.defaultSort }
+          : {}),
         pagination: {
-          defaultPageSize: 50,
-          allowedPageSizes: [25, 50, 100],
+          defaultPageSize,
+          allowedPageSizes,
         },
       },
     };
@@ -323,7 +365,9 @@ function buildFilterDefinition(
       : filter.target === WIZARD_FILTER_TARGET_ALL
         ? [{ field: filter.field, op: defaultOperatorFor(filter.type) }]
         : (() => {
-            const targetBlock = blocks.find((block) => block.id === filter.target);
+            const targetBlock = blocks.find(
+              (block) => block.id === filter.target
+            );
             return targetBlock
               ? [
                   {
@@ -392,7 +436,12 @@ export function wizardStateToDefinition(
   );
 
   return {
-    ...(existing ?? { definitionVersion: 1, layout: [], filters: [], blocks: [] }),
+    ...(existing ?? {
+      definitionVersion: 1,
+      layout: [],
+      filters: [],
+      blocks: [],
+    }),
     definitionVersion: existing?.definitionVersion ?? 1,
     layout,
     filters,
@@ -402,7 +451,9 @@ export function wizardStateToDefinition(
   };
 }
 
-function isWizardFormat(value: string | undefined): value is WizardColumnFormat {
+function isWizardFormat(
+  value: string | undefined
+): value is WizardColumnFormat {
   return (
     value === 'number' ||
     value === 'decimal' ||
@@ -456,10 +507,7 @@ function flattenLayoutBlocks(
     return grids[grids.length - 1];
   }
 
-  function appendGrid(
-    grid: WizardGrid,
-    items: Array<{ blockId: string }>
-  ) {
+  function appendGrid(grid: WizardGrid, items: Array<{ blockId: string }>) {
     grids.push(grid);
     placeIntoGrid(grid.id, grid.columns, items);
   }
@@ -493,7 +541,13 @@ function flattenLayoutBlocks(
           Math.ceil(innerGrid.items.length / Math.max(columns, 1))
         );
         appendGrid(
-          { id, title: node.title, description: node.description, rows, columns },
+          {
+            id,
+            title: node.title,
+            description: node.description,
+            rows,
+            columns,
+          },
           innerGrid.items
         );
       } else if ((node.children ?? []).every((c) => c.type === 'block')) {
@@ -585,13 +639,9 @@ function blockDefinitionToWizard(
   if (source?.kind && source.kind !== 'object_model') {
     unsupported.push(`Source kind "${source.kind}"`);
   }
-  if (block.interactions && block.interactions.length > 0) {
-    unsupported.push('Block interactions');
-  }
   if (block.filters && block.filters.length > 0) {
     unsupported.push('Block-level filters');
   }
-  if (block.showWhen) unsupported.push('Conditional visibility');
 
   const fields: string[] = [];
   const fieldConfigs: Record<string, WizardFieldConfig> = {};
@@ -686,9 +736,9 @@ function blockDefinitionToWizard(
 
   const wizardBlock: WizardBlock = {
     id: block.id,
-    type: (WIZARD_SUPPORTED_BLOCK_TYPES.has(block.type as WizardBlockType)
+    type: WIZARD_SUPPORTED_BLOCK_TYPES.has(block.type as WizardBlockType)
       ? (block.type as WizardBlockType)
-      : 'table'),
+      : 'table',
     title: block.title || humanize(block.id),
     schema: source?.schema || undefined,
     fields,
@@ -707,6 +757,12 @@ function blockDefinitionToWizard(
       ? (metricFormat as WizardColumnFormat)
       : undefined,
     markdownContent: block.markdown?.content,
+    ...(block.lazy ? { lazy: true } : {}),
+    ...(block.hideWhenEmpty ? { hideWhenEmpty: true } : {}),
+    ...(block.showWhen ? { showWhen: block.showWhen } : {}),
+    ...(block.interactions && block.interactions.length > 0
+      ? { interactions: block.interactions }
+      : {}),
     ...(Object.keys(fieldConfigs).length > 0 ? { fieldConfigs } : {}),
     ...(block.type === 'table' && block.table?.selectable
       ? { selectable: true }
@@ -715,6 +771,19 @@ function blockDefinitionToWizard(
     block.table?.actions &&
     block.table.actions.length > 0
       ? { tableActions: block.table.actions }
+      : {}),
+    ...(block.type === 'table' &&
+    block.table?.defaultSort &&
+    block.table.defaultSort.length > 0
+      ? { defaultSort: block.table.defaultSort }
+      : {}),
+    ...(block.type === 'table' && block.table?.pagination?.defaultPageSize
+      ? { defaultPageSize: block.table.pagination.defaultPageSize }
+      : {}),
+    ...(block.type === 'table' &&
+    block.table?.pagination?.allowedPageSizes &&
+    block.table.pagination.allowedPageSizes.length > 0
+      ? { allowedPageSizes: block.table.pagination.allowedPageSizes }
       : {}),
     ...(block.dataset ? { dataset: block.dataset } : {}),
   };
@@ -774,7 +843,11 @@ export function definitionToWizardState(
     let placement = layoutInfo.placements[block.id];
     if (!placement) {
       const cursor = fillCursor[fallbackGridId] ?? { row: 1, column: 1 };
-      placement = { gridId: fallbackGridId, row: cursor.row, column: cursor.column };
+      placement = {
+        gridId: fallbackGridId,
+        row: cursor.row,
+        column: cursor.column,
+      };
       const grid = grids.find((g) => g.id === fallbackGridId)!;
       const nextColumn = cursor.column + 1;
       fillCursor[fallbackGridId] =

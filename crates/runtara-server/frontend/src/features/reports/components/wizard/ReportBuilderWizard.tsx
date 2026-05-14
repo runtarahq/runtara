@@ -87,14 +87,14 @@ function readinessChecks(
     {
       label:
         state.datasets.length === 0
-          ? 'No datasets configured — that\'s fine'
+          ? "No datasets configured — that's fine"
           : 'Every dataset has a source and at least one field',
       ok: datasetsReady,
     },
     {
       label:
         state.filters.length === 0
-          ? 'No filters configured — that\'s fine'
+          ? "No filters configured — that's fine"
           : 'Every filter is connected',
       ok:
         state.filters.length === 0 ||
@@ -202,6 +202,7 @@ export function ReportBuilderWizard({
           schemas={schemas}
           defaultSchema={state.defaultSchema}
           datasets={state.datasets}
+          filters={state.filters}
           blockResults={blockResults}
           editing={editing}
           onGridsChange={setGrids}

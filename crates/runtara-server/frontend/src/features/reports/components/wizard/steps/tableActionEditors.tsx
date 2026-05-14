@@ -326,9 +326,7 @@ function RowConditionRow({
               <SelectValue placeholder="Field" />
             </SelectTrigger>
             <SelectContent>
-              <SelectItem value={ROW_CONDITION_FIELD_NONE}>
-                — none —
-              </SelectItem>
+              <SelectItem value={ROW_CONDITION_FIELD_NONE}>— none —</SelectItem>
               {fieldOptions.map((option) => (
                 <SelectItem key={option} value={option}>
                   {option}
@@ -429,7 +427,9 @@ export function InteractionButtonsEditor({
           variant="outline"
           size="sm"
           className="h-7"
-          onClick={() => onChange([...buttons, createDefaultInteractionButton()])}
+          onClick={() =>
+            onChange([...buttons, createDefaultInteractionButton()])
+          }
         >
           <Plus className="mr-1 h-3 w-3" />
           Add button
@@ -442,7 +442,10 @@ export function InteractionButtonsEditor({
       ) : (
         <div className="grid gap-2">
           {buttons.map((button, index) => (
-            <div key={`${button.id}-${index}`} className="rounded-md border bg-background p-2">
+            <div
+              key={`${button.id}-${index}`}
+              className="rounded-md border bg-background p-2"
+            >
               <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_140px_auto]">
                 <div className="grid gap-1">
                   <Label className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
@@ -525,7 +528,7 @@ export function InteractionButtonsEditor({
   );
 }
 
-function InteractionActionsList({
+export function InteractionActionsList({
   actions,
   fields,
   onChange,
@@ -559,7 +562,10 @@ function InteractionActionsList({
           onClick={() =>
             onChange([
               ...actions,
-              { type: 'set_filter', valueFrom: 'datum.id' } as ReportInteractionAction,
+              {
+                type: 'set_filter',
+                valueFrom: 'datum.id',
+              } as ReportInteractionAction,
             ])
           }
         >
@@ -586,7 +592,10 @@ function InteractionActionsList({
                     ...action,
                     type,
                     ...(type === 'set_filter'
-                      ? { valueFrom: action.valueFrom ?? `datum.${fields[0] ?? 'id'}` }
+                      ? {
+                          valueFrom:
+                            action.valueFrom ?? `datum.${fields[0] ?? 'id'}`,
+                        }
                       : {}),
                   })
                 }
@@ -780,9 +789,7 @@ export function TableBulkActionsEditor({
                 className="mt-5 h-8 w-8"
                 onClick={() =>
                   onChange(
-                    actions.filter(
-                      (_, currentIndex) => currentIndex !== index
-                    )
+                    actions.filter((_, currentIndex) => currentIndex !== index)
                   )
                 }
                 aria-label={`Remove ${action.label || 'bulk action'}`}

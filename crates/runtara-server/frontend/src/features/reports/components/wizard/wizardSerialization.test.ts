@@ -156,6 +156,154 @@ describe('table column round-trip', () => {
     });
   });
 
+  it('round-trips table pagination and default sort settings', () => {
+    const definition: ReportDefinition = {
+      definitionVersion: 1,
+      filters: [],
+      blocks: [
+        {
+          id: 'orders',
+          type: 'table',
+          title: 'Orders',
+          source: { schema: 'orders', mode: 'filter' },
+          table: {
+            columns: [
+              { field: 'status', label: 'Status' },
+              { field: 'amount', label: 'Amount', format: 'currency' },
+            ],
+            defaultSort: [{ field: 'amount', direction: 'desc' }],
+            pagination: {
+              defaultPageSize: 25,
+              allowedPageSizes: [10, 25, 100],
+            },
+          },
+        },
+      ],
+    };
+
+    const { state, compatibility } = definitionToWizardState(
+      definition,
+      'orders'
+    );
+    expect(compatibility.fullyEditable).toBe(true);
+    expect(state.blocks[0].defaultSort).toEqual([
+      { field: 'amount', direction: 'desc' },
+    ]);
+    expect(state.blocks[0].defaultPageSize).toBe(25);
+    expect(state.blocks[0].allowedPageSizes).toEqual([10, 25, 100]);
+
+    const round = wizardStateToDefinition(state, SCHEMA_FIELDS, definition);
+    expect(round.blocks[0].table?.defaultSort).toEqual([
+      { field: 'amount', direction: 'desc' },
+    ]);
+    expect(round.blocks[0].table?.pagination).toEqual({
+      defaultPageSize: 25,
+      allowedPageSizes: [10, 25, 100],
+    });
+  });
+
+  it('round-trips block visibility and lazy loading settings', () => {
+    const definition: ReportDefinition = {
+      definitionVersion: 1,
+      filters: [
+        {
+          id: 'status_filter',
+          label: 'Status',
+          type: 'select',
+          appliesTo: [{ field: 'status', op: 'eq' }],
+        },
+      ],
+      blocks: [
+        {
+          id: 'orders',
+          type: 'table',
+          title: 'Orders',
+          lazy: true,
+          hideWhenEmpty: true,
+          showWhen: { filter: 'status_filter', equals: 'open' },
+          source: { schema: 'orders', mode: 'filter' },
+          table: {
+            columns: [{ field: 'status', label: 'Status' }],
+          },
+        },
+      ],
+    };
+
+    const { state, compatibility } = definitionToWizardState(
+      definition,
+      'orders'
+    );
+    expect(compatibility.fullyEditable).toBe(true);
+    expect(state.blocks[0]).toMatchObject({
+      lazy: true,
+      hideWhenEmpty: true,
+      showWhen: { filter: 'status_filter', equals: 'open' },
+    });
+
+    const round = wizardStateToDefinition(state, SCHEMA_FIELDS, definition);
+    expect(round.blocks[0]).toMatchObject({
+      lazy: true,
+      hideWhenEmpty: true,
+      showWhen: { filter: 'status_filter', equals: 'open' },
+    });
+  });
+
+  it('round-trips block click interactions', () => {
+    const definition: ReportDefinition = {
+      definitionVersion: 1,
+      filters: [
+        {
+          id: 'order_id',
+          label: 'Order',
+          type: 'select',
+          appliesTo: [{ field: 'id', op: 'eq' }],
+        },
+      ],
+      blocks: [
+        {
+          id: 'orders',
+          type: 'table',
+          title: 'Orders',
+          source: { schema: 'orders', mode: 'filter' },
+          table: {
+            columns: [{ field: 'id', label: 'ID' }],
+          },
+          interactions: [
+            {
+              id: 'open_order',
+              trigger: { event: 'row_click' },
+              actions: [
+                {
+                  type: 'set_filter',
+                  filterId: 'order_id',
+                  valueFrom: 'datum.id',
+                },
+                {
+                  type: 'navigate_view',
+                  viewId: 'detail',
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    };
+
+    const { state, compatibility } = definitionToWizardState(
+      definition,
+      'orders'
+    );
+    expect(compatibility.fullyEditable).toBe(true);
+    expect(state.blocks[0].interactions).toEqual(
+      definition.blocks[0].interactions
+    );
+
+    const round = wizardStateToDefinition(state, SCHEMA_FIELDS, definition);
+    expect(round.blocks[0].interactions).toEqual(
+      definition.blocks[0].interactions
+    );
+  });
+
   it('round-trips datasets and per-block dataset queries without losing them', () => {
     const definition: ReportDefinition = {
       definitionVersion: 1,
@@ -165,9 +313,7 @@ describe('table column round-trip', () => {
           id: 'order_totals',
           label: 'Order totals',
           source: { schema: 'orders' },
-          dimensions: [
-            { field: 'status', label: 'Status', type: 'string' },
-          ],
+          dimensions: [{ field: 'status', label: 'Status', type: 'string' }],
           measures: [
             {
               id: 'total_amount',

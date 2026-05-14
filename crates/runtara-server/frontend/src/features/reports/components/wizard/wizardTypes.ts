@@ -4,8 +4,11 @@ import {
   ReportChartKind,
   ReportDatasetDefinition,
   ReportFilterType,
+  ReportInteractionDefinition,
+  ReportOrderBy,
   ReportTableActionConfig,
   ReportTableInteractionButtonConfig,
+  ReportVisibilityCondition,
   ReportWorkflowActionConfig,
 } from '../../types';
 
@@ -42,7 +45,7 @@ export const WIZARD_BLOCK_TYPES: Array<{
   {
     value: 'card',
     label: 'Card',
-    description: 'Detail view of a single record\'s fields.',
+    description: "Detail view of a single record's fields.",
   },
 ];
 
@@ -160,6 +163,20 @@ export interface WizardBlock {
   selectable?: boolean;
   /** Table-block: bulk action buttons rendered above the table. */
   tableActions?: ReportTableActionConfig[];
+  /** Table-block: default sort applied before viewers interact with columns. */
+  defaultSort?: ReportOrderBy[];
+  /** Table-block: initial page size. */
+  defaultPageSize?: number;
+  /** Table-block: page-size choices exposed to viewers. */
+  allowedPageSizes?: number[];
+  /** Defers block data loading until the viewer scrolls near it. */
+  lazy?: boolean;
+  /** Drops the whole block if render data is empty. */
+  hideWhenEmpty?: boolean;
+  /** Optional filter-driven visibility rule for the whole block. */
+  showWhen?: ReportVisibilityCondition;
+  /** Row/cell/point click interactions emitted by the block renderer. */
+  interactions?: ReportInteractionDefinition[];
   /** Pre-aggregated dataset query — when set, the block resolves through
    *  `definition.datasets[dataset.id]` instead of `schema`/`fields`. */
   dataset?: ReportBlockDatasetQuery;
