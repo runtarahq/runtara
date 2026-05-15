@@ -65,12 +65,16 @@ fn main() {
     // and commit that produced it.
     let version = resolve_build_version();
     let commit = resolve_build_commit(workspace_root);
+    let build_number = resolve_build_number();
     println!("cargo:rustc-env=BUILD_VERSION={}", version);
     println!("cargo:rustc-env=BUILD_COMMIT={}", commit);
+    println!("cargo:rustc-env=BUILD_NUMBER={}", build_number);
     println!("cargo:rerun-if-env-changed=BUILD_VERSION");
     println!("cargo:rerun-if-env-changed=SMO_BUILD_VERSION");
     println!("cargo:rerun-if-env-changed=BUILD_COMMIT");
     println!("cargo:rerun-if-env-changed=GITHUB_SHA");
+    println!("cargo:rerun-if-env-changed=BUILD_NUMBER");
+    println!("cargo:rerun-if-env-changed=GITHUB_RUN_NUMBER");
     let git_head = workspace_root.join(".git/HEAD");
     if git_head.exists() {
         println!("cargo:rerun-if-changed={}", git_head.display());
@@ -344,6 +348,12 @@ impl Fnv1a64 {
     fn finish(&self) -> u64 {
         self.0
     }
+}
+
+fn resolve_build_number() -> String {
+    std::env::var("BUILD_NUMBER")
+        .or_else(|_| std::env::var("GITHUB_RUN_NUMBER"))
+        .unwrap_or_default()
 }
 
 fn resolve_build_version() -> String {
