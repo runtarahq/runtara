@@ -112,9 +112,28 @@ fn build_index_html(base_href: &str) -> (Bytes, String) {
 /// Operators tightening for production should front the server with a reverse
 /// proxy that overrides this header.
 fn build_html_csp(inline_script_sha256_b64: &str) -> String {
+    build_html_csp_with_plausible_source(
+        inline_script_sha256_b64,
+        plausible_script_src_from_env().as_deref(),
+    )
+}
+
+fn build_html_csp_with_plausible_source(
+    inline_script_sha256_b64: &str,
+    plausible_script_src: Option<&str>,
+) -> String {
+    let mut script_sources = vec!["'self'".to_string(), "https://plausible.io".to_string()];
+    if let Some(source) = plausible_script_src
+        && !script_sources.iter().any(|existing| existing == source)
+    {
+        script_sources.push(source.to_string());
+    }
+    script_sources.push("'wasm-unsafe-eval'".to_string());
+    script_sources.push(format!("'sha256-{inline_script_sha256_b64}'"));
+
     format!(
         "default-src 'self'; \
-         script-src 'self' https://plausible.io 'wasm-unsafe-eval' 'sha256-{inline_script_sha256_b64}'; \
+         script-src {}; \
          style-src 'self' 'unsafe-inline'; \
          img-src 'self' data: blob:; \
          font-src 'self' data:; \
@@ -123,8 +142,39 @@ fn build_html_csp(inline_script_sha256_b64: &str) -> String {
          worker-src 'self' blob:; \
          frame-ancestors 'none'; \
          object-src 'none'; \
-         base-uri 'self'"
+         base-uri 'self'",
+        script_sources.join(" ")
     )
+}
+
+fn plausible_script_src_from_env() -> Option<String> {
+    std::env::var("RUNTARA_UI_PLAUSIBLE_HOST")
+        .ok()
+        .and_then(|host| normalize_plausible_script_src(&host))
+}
+
+fn normalize_plausible_script_src(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let url = if trimmed.starts_with("//") {
+        format!("https:{trimmed}")
+    } else if trimmed.contains("://") {
+        trimmed.to_string()
+    } else if trimmed.starts_with('/') {
+        return None;
+    } else {
+        format!("https://{trimmed}")
+    };
+
+    let parsed = url::Url::parse(&url).ok()?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return None;
+    }
+
+    Some(parsed.origin().ascii_serialization())
 }
 
 /// Serialize the runtime config as a JSON object literal. Only keys with a
@@ -318,5 +368,44 @@ mod tests {
 
         assert!(csp.contains("'wasm-unsafe-eval'"));
         assert!(!csp.contains("'unsafe-eval'"));
+    }
+
+    #[test]
+    fn csp_allows_custom_plausible_host() {
+        let csp = build_html_csp_with_plausible_source(
+            "inline-config-hash",
+            Some("https://metrics.syncmyorders.com"),
+        );
+
+        assert!(csp.contains("https://metrics.syncmyorders.com"));
+    }
+
+    #[test]
+    fn plausible_script_source_normalizes_scheme_less_host() {
+        assert_eq!(
+            normalize_plausible_script_src("metrics.syncmyorders.com"),
+            Some("https://metrics.syncmyorders.com".to_string())
+        );
+    }
+
+    #[test]
+    fn plausible_script_source_uses_origin_only() {
+        assert_eq!(
+            normalize_plausible_script_src("https://metrics.syncmyorders.com/proxy/"),
+            Some("https://metrics.syncmyorders.com".to_string())
+        );
+    }
+
+    #[test]
+    fn plausible_script_source_handles_protocol_relative_host() {
+        assert_eq!(
+            normalize_plausible_script_src("//metrics.syncmyorders.com/"),
+            Some("https://metrics.syncmyorders.com".to_string())
+        );
+    }
+
+    #[test]
+    fn plausible_script_source_ignores_same_origin_path() {
+        assert_eq!(normalize_plausible_script_src("/plausible/"), None);
     }
 }

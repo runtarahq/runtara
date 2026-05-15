@@ -13,11 +13,33 @@ declare global {
   }
 }
 
+export function normalizePlausibleHost(host: string | undefined): string {
+  const trimmed = host?.trim();
+  if (!trimmed) return 'https://plausible.io';
+
+  const withoutTrailingSlash = trimmed.replace(/\/+$/, '');
+  if (!withoutTrailingSlash) return '';
+
+  if (withoutTrailingSlash.startsWith('//')) {
+    return `https:${withoutTrailingSlash}`;
+  }
+
+  if (/^[a-z][a-z\d+\-.]*:\/\//i.test(withoutTrailingSlash)) {
+    return withoutTrailingSlash;
+  }
+
+  if (withoutTrailingSlash.startsWith('/')) {
+    return withoutTrailingSlash;
+  }
+
+  return `https://${withoutTrailingSlash}`;
+}
+
 export function initAnalytics(): void {
   const domain = config.plausible.domain;
   if (!domain) return;
 
-  const host = config.plausible.host || 'https://plausible.io';
+  const host = normalizePlausibleHost(config.plausible.host);
 
   // Queue early events until the script loads.
   if (!window.plausible) {
@@ -32,7 +54,7 @@ export function initAnalytics(): void {
   script.setAttribute('data-domain', domain);
   // script.manual.js: we fire pageviews ourselves (React Router uses history.pushState,
   // which the default Plausible script doesn't intercept).
-  script.src = `${host.replace(/\/$/, '')}/js/script.manual.js`;
+  script.src = `${host}/js/script.manual.js`;
   document.head.appendChild(script);
 
   const firePageview = () => window.plausible?.('pageview');
