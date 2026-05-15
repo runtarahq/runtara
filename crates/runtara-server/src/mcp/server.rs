@@ -7,7 +7,7 @@ use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{
     CallToolResult, Implementation, ProtocolVersion, ServerCapabilities, ServerInfo,
 };
-use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
+use rmcp::transport::streamable_http_server::session::{SessionStore, local::LocalSessionManager};
 use rmcp::transport::streamable_http_server::{StreamableHttpServerConfig, StreamableHttpService};
 use rmcp::{ServerHandler, tool, tool_handler, tool_router};
 use sqlx::PgPool;
@@ -1212,12 +1212,14 @@ pub fn create_mcp_router(
     tenant_id: String,
     internal_router: axum::Router,
     mcp_allowed_hosts: Vec<String>,
+    session_store: Option<Arc<dyn SessionStore>>,
 ) -> Router {
-    let config = if mcp_allowed_hosts.is_empty() {
+    let mut config = if mcp_allowed_hosts.is_empty() {
         StreamableHttpServerConfig::default()
     } else {
         StreamableHttpServerConfig::default().with_allowed_hosts(mcp_allowed_hosts)
     };
+    config.session_store = session_store;
 
     let service = StreamableHttpService::new(
         move || {

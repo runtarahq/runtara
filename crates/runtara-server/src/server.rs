@@ -6,6 +6,7 @@ use axum::{
     routing::{delete, get, patch, post, put},
 };
 use dashmap::DashMap;
+use rmcp::transport::streamable_http_server::session::SessionStore;
 use serde::Serialize;
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use std::sync::Arc;
@@ -621,23 +622,65 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
     // stream publisher, compilation worker, cron scheduler, MCP/handler
     // utility calls — clones this manager instead of opening its own TCP
     // connection per call.
-    let redis_manager: Option<redis::aio::ConnectionManager> =
-        match crate::valkey::build_redis_url() {
-            Some(url) => match crate::valkey::init_shared_manager(&url).await {
-                Ok(m) => {
-                    println!("✓ Shared Valkey connection manager initialized");
-                    Some(m)
-                }
-                Err(e) => {
+    let redis_url = crate::valkey::build_redis_url();
+    let redis_manager: Option<redis::aio::ConnectionManager> = match redis_url {
+        Some(url) => match crate::valkey::init_shared_manager(&url).await {
+            Ok(m) => {
+                println!("✓ Shared Valkey connection manager initialized");
+                Some(m)
+            }
+            Err(e) => {
+                if config::mcp_session_store() == config::McpSessionStore::Valkey {
                     eprintln!(
-                        "⚠ Failed to initialize shared Valkey connection manager: {}",
+                        "❌ Configuration error: failed to initialize shared Valkey connection manager: {}",
                         e
                     );
-                    None
+                    eprintln!(
+                        "   RUNTARA_MCP_SESSION_STORE=valkey requires a working Valkey connection."
+                    );
+                    std::process::exit(1);
                 }
-            },
-            None => None,
-        };
+                eprintln!(
+                    "⚠ Failed to initialize shared Valkey connection manager: {}",
+                    e
+                );
+                None
+            }
+        },
+        None => {
+            if config::mcp_session_store() == config::McpSessionStore::Valkey {
+                eprintln!(
+                    "❌ Configuration error: RUNTARA_MCP_SESSION_STORE=valkey requires VALKEY_HOST."
+                );
+                std::process::exit(1);
+            }
+            None
+        }
+    };
+
+    let mcp_session_store: Option<Arc<dyn SessionStore>> = match config::mcp_session_store() {
+        config::McpSessionStore::Local => {
+            println!("✓ MCP session recovery store: local");
+            None
+        }
+        config::McpSessionStore::Valkey => {
+            let Some(manager) = redis_manager.clone() else {
+                eprintln!(
+                    "❌ Configuration error: RUNTARA_MCP_SESSION_STORE=valkey requires a shared Valkey connection manager."
+                );
+                std::process::exit(1);
+            };
+            println!(
+                "✓ MCP session recovery store: valkey (ttl={}s)",
+                config::mcp_session_ttl_seconds()
+            );
+            Some(Arc::new(mcp::ValkeyMcpSessionStore::new(
+                manager,
+                tenant_id.clone(),
+                config::mcp_session_ttl_seconds(),
+            )))
+        }
+    };
 
     // Construct connections crate config and facade.
     // Cipher is built from RUNTARA_CONNECTIONS_ENCRYPTION_KEY env var — falls
@@ -1741,6 +1784,7 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         tenant_id.clone(),
         internal_router,
         config::mcp_allowed_hosts().to_vec(),
+        mcp_session_store,
     )
     .layer(from_fn_with_state(
         mcp_auth_state,
