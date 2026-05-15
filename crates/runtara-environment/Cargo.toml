@@ -24,11 +24,11 @@ tokio = { version = "1", features = ["full"] }
 sqlx = { version = "0.8", features = ["runtime-tokio", "tls-rustls-ring-webpki", "postgres", "uuid", "chrono", "macros", "migrate"] }
 
 # Core persistence layer (for shared database access)
-runtara-core = { path = "../runtara-core", version = "4.12" }
+runtara-core = { path = "../runtara-core", version = "4.13" }
 
 # DSL types for agent metadata (list_agents, get_capability)
-runtara-dsl = { path = "../runtara-dsl", version = "4.12" }
-runtara-agents = { path = "../runtara-agents", version = "4.12", default-features = false, features = ["integrations"] }
+runtara-dsl = { path = "../runtara-dsl", version = "4.13" }
+runtara-agents = { path = "../runtara-agents", version = "4.13", default-features = false, features = ["integrations"] }
 
 # Configuration
 dotenvy = "0.15"
@@ -62,7 +62,7 @@ async-trait = "0.1"
 [dev-dependencies]
 tokio = { version = "1", features = ["test-util", "macros", "rt-multi-thread"] }
 tempfile = "3"
-runtara-workflows = { path = "../runtara-workflows", version = "4.12" }
+runtara-workflows = { path = "../runtara-workflows", version = "4.13" }
 futures = "0.3"
 # Testcontainers for automatic PostgreSQL setup in tests
 testcontainers = "0.27"

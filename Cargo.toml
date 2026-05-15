@@ -30,7 +30,7 @@ default-members = ["crates/runtara-core"]
 
 [workspace.package]
 edition = "2024"
-version = "4.12.0"
+version = "4.13.0"
 license = "AGPL-3.0-or-later"
 repository = "https://github.com/runtarahq/runtara"
 homepage = "https://runtara.com"
@@ -38,7 +38,7 @@ keywords = ["durable", "workflow", "checkpoint", "execution"]
 categories = ["asynchronous", "development-tools"]
 
 [workspace.dependencies]
-runtara-http = { path = "crates/runtara-http", version = "4.12" }
+runtara-http = { path = "crates/runtara-http", version = "4.13" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 chrono = { version = "0.4", features = ["serde"] }
