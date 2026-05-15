@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router';
-import { Edit, Eye, Save } from 'lucide-react';
+import { Compass, Edit, Eye, Printer, RefreshCw, Save } from 'lucide-react';
 import { Button } from '@/shared/components/ui/button';
 import { TileList, TilesPage } from '@/shared/components/tiles-page';
 import { usePageTitle } from '@/shared/hooks/usePageTitle';
@@ -224,6 +224,10 @@ export function ReportPage() {
     }
   };
 
+  const handlePrint = () => {
+    window.requestAnimationFrame(() => window.print());
+  };
+
   // Mount the wizard only after the loaded definition has flowed into local
   // state. Without this the wizard initializes from EMPTY_DEFINITION (because
   // its `useMemo([])` runs on the first render, before the `setDefinition`
@@ -284,6 +288,12 @@ export function ReportPage() {
     </div>
   );
 
+  const exploreSearch = searchParams.toString();
+  const explorePath =
+    isExisting && reportId
+      ? `/reports/${reportId}/explore${exploreSearch ? `?${exploreSearch}` : ''}`
+      : null;
+
   const actions = (
     <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row">
       {editing ? (
@@ -308,15 +318,46 @@ export function ReportPage() {
           </Link>
         )
       ) : (
-        <Link to={`/reports/${reportId}?edit=1`} className="w-full sm:w-auto">
+        <>
+          {explorePath ? (
+            <Link to={explorePath} className="w-full sm:w-auto">
+              <Button
+                variant="outline"
+                className="h-11 w-full rounded-full sm:px-5"
+              >
+                <Compass className="mr-2 h-4 w-4" />
+                Explore
+              </Button>
+            </Link>
+          ) : null}
           <Button
             variant="outline"
-            className="h-11 w-full rounded-full sm:px-5"
+            className="h-11 rounded-full sm:px-5"
+            disabled={renderQuery.isFetching}
+            onClick={handlePrint}
           >
-            <Edit className="mr-2 h-4 w-4" />
-            Edit
+            <Printer className="mr-2 h-4 w-4" />
+            Print
           </Button>
-        </Link>
+          <Button
+            variant="outline"
+            className="h-11 rounded-full sm:px-5"
+            disabled={renderQuery.isFetching}
+            onClick={() => renderQuery.refetch()}
+          >
+            <RefreshCw className="mr-2 h-4 w-4" />
+            Refresh
+          </Button>
+          <Link to={`/reports/${reportId}?edit=1`} className="w-full sm:w-auto">
+            <Button
+              variant="outline"
+              className="h-11 w-full rounded-full sm:px-5"
+            >
+              <Edit className="mr-2 h-4 w-4" />
+              Edit
+            </Button>
+          </Link>
+        </>
       )}
       {editing && isExisting && reportId && existingReport ? (
         <ReportDeleteButton
@@ -344,6 +385,8 @@ export function ReportPage() {
       title={titleNode}
       toolbar={toolbar}
       action={actions}
+      className={!editing ? 'report-print-root' : undefined}
+      contentClassName={!editing ? 'report-print-content pb-16' : undefined}
     >
       {editing ? (
         <ReportBuilderWizard
