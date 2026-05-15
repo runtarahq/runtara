@@ -454,6 +454,72 @@ describe('table column round-trip', () => {
     });
   });
 
+  it('round-trips card workflow actions through first-class field configs', () => {
+    const workflowAction = {
+      workflowId: 'workflow_escalate',
+      label: 'Escalate',
+      runningLabel: 'Escalating...',
+      successMessage: 'Escalation started',
+      reloadBlock: true,
+      context: {
+        mode: 'field' as const,
+        field: 'status',
+        inputKey: 'statusValue',
+      },
+      visibleWhen: { op: 'EQ', arguments: ['priority', 'high'] },
+      hiddenWhen: { op: 'EQ', arguments: ['status', 'archived'] },
+      disabledWhen: { op: 'EQ', arguments: ['status', 'pending'] },
+    };
+    const definition: ReportDefinition = {
+      definitionVersion: 1,
+      filters: [],
+      blocks: [
+        {
+          id: 'order_card',
+          type: 'card',
+          title: 'Order',
+          source: { schema: 'orders', mode: 'filter' },
+          card: {
+            groups: [
+              {
+                id: 'main',
+                fields: [
+                  {
+                    field: 'status',
+                    label: 'Escalate',
+                    kind: 'workflow_button',
+                    workflowAction,
+                  },
+                ],
+              },
+            ],
+          },
+        },
+      ],
+    };
+
+    const { state, compatibility } = definitionToWizardState(
+      definition,
+      'orders'
+    );
+
+    expect(compatibility.fullyEditable).toBe(true);
+    expect(compatibility.reasons).toEqual([]);
+    expect(state.blocks[0].cardConfig).toBeUndefined();
+    expect(state.blocks[0].fieldConfigs?.status).toMatchObject({
+      label: 'Escalate',
+      workflowAction,
+    });
+
+    const round = wizardStateToDefinition(state, SCHEMA_FIELDS, definition);
+    expect(round.blocks[0].card?.groups[0].fields[0]).toMatchObject({
+      field: 'status',
+      label: 'Escalate',
+      kind: 'workflow_button',
+      workflowAction,
+    });
+  });
+
   it('round-trips table column display modifiers', () => {
     const definition: ReportDefinition = {
       definitionVersion: 1,

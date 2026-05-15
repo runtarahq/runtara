@@ -1202,7 +1202,68 @@ test.describe('SYN-410 report builder DSL parity (mocked)', () => {
     });
   });
 
-  test('18 renders viewer Print, Refresh, Explore, and full pagination', async ({
+  test('18 saves card workflow actions with advanced context modes', async ({
+    page,
+    mockApi,
+  }) => {
+    const workflowAction = {
+      workflowId: 'workflow_escalate',
+      label: 'Escalate',
+      runningLabel: 'Escalating...',
+      successMessage: 'Escalation started',
+      reloadBlock: true,
+      context: {
+        mode: 'field' as const,
+        field: 'status',
+        inputKey: 'statusValue',
+      },
+      visibleWhen: { op: 'EQ', arguments: ['priority', 'high'] },
+      hiddenWhen: { op: 'EQ', arguments: ['status', 'archived'] },
+      disabledWhen: { op: 'EQ', arguments: ['status', 'pending'] },
+    };
+    const definition = baseDefinition([
+      {
+        id: 'order_card',
+        type: 'card',
+        title: 'Order card',
+        source: { schema: 'orders', mode: 'filter' },
+        card: {
+          groups: [
+            {
+              id: 'main',
+              fields: [
+                {
+                  field: 'status',
+                  label: 'Escalate',
+                  kind: 'workflow_button',
+                  workflowAction,
+                },
+              ],
+            },
+          ],
+        },
+      },
+    ]);
+
+    const { getSaved } = await openReportEditor({
+      page,
+      mockApi,
+      id: 'card_workflow_actions',
+      definition,
+    });
+    const saved = await saveThroughWizard(page, getSaved);
+    const savedField = block(saved, 'order_card').card?.groups[0].fields[0];
+
+    expect(savedField).toMatchObject({
+      field: 'status',
+      label: 'Escalate',
+      kind: 'workflow_button',
+      workflowAction,
+    });
+    expect(savedField?.workflowAction).toEqual(workflowAction);
+  });
+
+  test('19 renders viewer Print, Refresh, Explore, and full pagination', async ({
     page,
     mockApi,
   }) => {
@@ -1338,7 +1399,7 @@ test.describe('SYN-410 report builder DSL parity (mocked)', () => {
       .toEqual({ offset: 100, size: 25 });
   });
 
-  test('19 saves metric_row and columns layout primitives', async ({
+  test('20 saves metric_row and columns layout primitives', async ({
     page,
     mockApi,
   }) => {
@@ -1440,7 +1501,7 @@ test.describe('SYN-410 report builder DSL parity (mocked)', () => {
     ).toEqual(['orders', 'status_chart']);
   });
 
-  test('20 saves actions block type', async ({ page, mockApi }) => {
+  test('21 saves actions block type', async ({ page, mockApi }) => {
     const definition = baseDefinition([
       {
         id: 'open_actions',

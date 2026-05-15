@@ -397,6 +397,7 @@ function buildBlockDefinition(
           id: 'main',
           fields: cardFields.map((field) => {
             const cfg = fieldConfig(block, field);
+            const workflowAction = cfg?.workflowAction;
             return {
               field,
               label: cfg?.label || humanize(field),
@@ -404,8 +405,14 @@ function buildBlockDefinition(
               ...(cfg?.format === 'pill' && cfg.pillVariants
                 ? { pillVariants: cfg.pillVariants }
                 : {}),
-              ...(cfg?.editable ? { editable: true } : {}),
-              ...(cfg?.editor ? { editor: cfg.editor } : {}),
+              ...(workflowAction
+                ? {
+                    kind: 'workflow_button' as const,
+                    workflowAction,
+                  }
+                : {}),
+              ...(!workflowAction && cfg?.editable ? { editable: true } : {}),
+              ...(!workflowAction && cfg?.editor ? { editor: cfg.editor } : {}),
             };
           }),
         },
@@ -663,11 +670,12 @@ function isAdvancedCardConfig(
   return (card.groups ?? []).some((group) =>
     group.fields.some((field) => {
       const kind = field.kind ?? 'value';
+      const simpleWorkflowButton =
+        kind === 'workflow_button' && Boolean(field.workflowAction);
       return (
-        kind !== 'value' ||
+        (kind !== 'value' && !simpleWorkflowButton) ||
         Boolean(field.subcard) ||
         Boolean(field.subtable) ||
-        Boolean(field.workflowAction) ||
         Boolean(field.collapsed) ||
         field.colSpan !== undefined ||
         field.displayField !== undefined ||
@@ -939,6 +947,7 @@ function blockDefinitionToWizard(
             WizardPillVariant
           >;
         }
+        if (field.workflowAction) cfg.workflowAction = field.workflowAction;
         if (field.editable) cfg.editable = true;
         if (field.editor) cfg.editor = field.editor;
         if (Object.keys(cfg).length > 0) {

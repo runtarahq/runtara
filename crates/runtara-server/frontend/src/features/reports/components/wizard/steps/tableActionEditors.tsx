@@ -62,7 +62,6 @@ function useWorkflowOptions() {
   return useCustomQuery({
     queryKey: queryKeys.workflows.all,
     queryFn: getWorkflows,
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     select: (response: any): WorkflowOption[] => {
       const content: WorkflowDto[] = response?.data?.content ?? [];
       return content.map((workflow) => ({
@@ -70,13 +69,13 @@ function useWorkflowOptions() {
         name: workflow.name || workflow.id,
       }));
     },
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
   }) as unknown as { data?: WorkflowOption[]; isFetching: boolean } & Record<
     string,
     any
   >;
 }
 
+// eslint-disable-next-line react-refresh/only-export-components
 export function createDefaultWorkflowAction(
   mode: ReportWorkflowActionContextMode = 'row'
 ): ReportWorkflowActionConfig {
@@ -88,6 +87,7 @@ export function createDefaultWorkflowAction(
   };
 }
 
+// eslint-disable-next-line react-refresh/only-export-components
 export function createDefaultInteractionButton(): ReportTableInteractionButtonConfig {
   return {
     id: `btn_${Math.random().toString(36).slice(2, 7)}`,
@@ -97,6 +97,7 @@ export function createDefaultInteractionButton(): ReportTableInteractionButtonCo
   };
 }
 
+// eslint-disable-next-line react-refresh/only-export-components
 export function createDefaultTableAction(): ReportTableActionConfig {
   return {
     id: `bulk_${Math.random().toString(36).slice(2, 7)}`,
@@ -121,8 +122,21 @@ export function WorkflowActionEditor({
 }) {
   const workflows = useWorkflowOptions();
   const context = action.context ?? {};
+  const contextMode = context.mode ?? 'row';
   const update = (patch: Partial<ReportWorkflowActionConfig>) =>
     onChange({ ...action, ...patch });
+  const updateContext = (
+    patch: Partial<NonNullable<ReportWorkflowActionConfig['context']>>
+  ) =>
+    update({
+      context: compactContext({
+        ...context,
+        ...patch,
+      }),
+    });
+  const fieldOptions = uniqueStrings(
+    [context.field, ...fields].filter(Boolean) as string[]
+  );
 
   return (
     <div className="grid gap-2 rounded-md border bg-muted/10 p-3">
@@ -157,13 +171,11 @@ export function WorkflowActionEditor({
             Context mode
           </Label>
           <Select
-            value={context.mode ?? 'row'}
+            value={contextMode}
             onValueChange={(mode) =>
-              update({
-                context: {
-                  ...context,
-                  mode: mode as ReportWorkflowActionContextMode,
-                },
+              updateContext({
+                mode: mode as ReportWorkflowActionContextMode,
+                field: mode === 'field' ? context.field : undefined,
               })
             }
           >
@@ -178,6 +190,54 @@ export function WorkflowActionEditor({
               ))}
             </SelectContent>
           </Select>
+        </div>
+      </div>
+      <div className="grid gap-2 sm:grid-cols-2">
+        {contextMode === 'field' ? (
+          <div className="grid gap-1">
+            <Label className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+              Context field
+            </Label>
+            {fieldOptions.length > 0 ? (
+              <Select
+                value={context.field ?? fieldOptions[0] ?? ''}
+                onValueChange={(field) => updateContext({ field })}
+              >
+                <SelectTrigger className="h-8">
+                  <SelectValue placeholder="Select field" />
+                </SelectTrigger>
+                <SelectContent>
+                  {fieldOptions.map((field) => (
+                    <SelectItem key={field} value={field}>
+                      {field}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            ) : (
+              <Input
+                value={context.field ?? ''}
+                placeholder="field"
+                className="h-8"
+                onChange={(event) =>
+                  updateContext({ field: event.target.value || undefined })
+                }
+              />
+            )}
+          </div>
+        ) : null}
+        <div className="grid gap-1">
+          <Label className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+            Input key
+          </Label>
+          <Input
+            value={context.inputKey ?? ''}
+            placeholder="Use raw context"
+            className="h-8"
+            onChange={(event) =>
+              updateContext({ inputKey: event.target.value || undefined })
+            }
+          />
         </div>
       </div>
       <div className="grid gap-2 sm:grid-cols-3">
@@ -235,6 +295,12 @@ export function WorkflowActionEditor({
         onChange={(visibleWhen) => update({ visibleWhen })}
       />
       <RowConditionRow
+        label="Hidden when"
+        value={action.hiddenWhen}
+        fields={fields}
+        onChange={(hiddenWhen) => update({ hiddenWhen })}
+      />
+      <RowConditionRow
         label="Disabled when"
         value={action.disabledWhen}
         fields={fields}
@@ -242,6 +308,20 @@ export function WorkflowActionEditor({
       />
     </div>
   );
+}
+
+function compactContext(
+  context: NonNullable<ReportWorkflowActionConfig['context']>
+): NonNullable<ReportWorkflowActionConfig['context']> {
+  return {
+    ...(context.mode ? { mode: context.mode } : {}),
+    ...(context.field ? { field: context.field } : {}),
+    ...(context.inputKey ? { inputKey: context.inputKey } : {}),
+  };
+}
+
+function uniqueStrings(values: string[]): string[] {
+  return Array.from(new Set(values.filter(Boolean)));
 }
 
 const ROW_CONDITION_FIELD_NONE = '__none__';

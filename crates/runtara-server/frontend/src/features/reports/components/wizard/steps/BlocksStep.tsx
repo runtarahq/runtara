@@ -1938,6 +1938,10 @@ function FieldPicker({
                   onWritebackChange={(patch) =>
                     onUpdateFieldConfig(field, patch)
                   }
+                  supportsWorkflowAction={block.type === 'card'}
+                  onWorkflowActionChange={(workflowAction) =>
+                    onUpdateFieldConfig(field, { workflowAction })
+                  }
                   onRemove={() => onToggleField(field)}
                 />
               );
@@ -3776,8 +3780,18 @@ function simpleCardConfigFromBlock(block: WizardBlock) {
               ...(cfg.format === 'pill' && cfg.pillVariants
                 ? { pillVariants: cfg.pillVariants }
                 : {}),
-              ...(cfg.editable ? { editable: true } : {}),
-              ...(cfg.editor ? { editor: cfg.editor } : {}),
+              ...(cfg.workflowAction
+                ? {
+                    kind: 'workflow_button' as const,
+                    workflowAction: cfg.workflowAction,
+                  }
+                : {}),
+              ...(!cfg.workflowAction && cfg.editable
+                ? { editable: true }
+                : {}),
+              ...(!cfg.workflowAction && cfg.editor
+                ? { editor: cfg.editor }
+                : {}),
             };
           }),
       },
@@ -4446,6 +4460,8 @@ function FieldRow({
   onFormatChange,
   onPillVariantsChange,
   onWritebackChange,
+  supportsWorkflowAction = false,
+  onWorkflowActionChange,
   onRemove,
 }: {
   field: string;
@@ -4457,10 +4473,17 @@ function FieldRow({
   onFormatChange: (value: string) => void;
   onPillVariantsChange: (variants: Record<string, WizardPillVariant>) => void;
   onWritebackChange: (patch: Partial<WizardFieldConfig>) => void;
+  supportsWorkflowAction?: boolean;
+  onWorkflowActionChange?: (
+    action: ReportWorkflowActionConfig | undefined
+  ) => void;
   onRemove: () => void;
 }) {
+  const hasWorkflowAction = Boolean(cfg.workflowAction);
   const showPillVariants = cfg.format === 'pill';
-  const showEditorSettings = formatChoices !== null;
+  const showEditorSettings = formatChoices !== null && !hasWorkflowAction;
+  const showWorkflowSettings =
+    supportsWorkflowAction && Boolean(onWorkflowActionChange);
   return (
     <>
       <tr className="border-t">
@@ -4507,7 +4530,7 @@ function FieldRow({
           </Button>
         </td>
       </tr>
-      {showPillVariants || showEditorSettings ? (
+      {showPillVariants || showEditorSettings || showWorkflowSettings ? (
         <tr>
           <td colSpan={formatChoices ? 4 : 3} className="pb-2 pl-3">
             {showPillVariants ? (
@@ -4525,10 +4548,59 @@ function FieldRow({
                 onChange={onWritebackChange}
               />
             ) : null}
+            {showWorkflowSettings && onWorkflowActionChange ? (
+              <CardFieldWorkflowActionSettings
+                field={field}
+                cfg={cfg}
+                fields={schemaFields}
+                onChange={onWorkflowActionChange}
+              />
+            ) : null}
           </td>
         </tr>
       ) : null}
     </>
+  );
+}
+
+function defaultCardWorkflowAction(field: string): ReportWorkflowActionConfig {
+  return {
+    ...createDefaultWorkflowAction('field'),
+    context: { mode: 'field', field },
+  };
+}
+
+function CardFieldWorkflowActionSettings({
+  field,
+  cfg,
+  fields,
+  onChange,
+}: {
+  field: string;
+  cfg: WizardFieldConfig;
+  fields: string[];
+  onChange: (action: ReportWorkflowActionConfig | undefined) => void;
+}) {
+  const enabled = Boolean(cfg.workflowAction);
+  const action = cfg.workflowAction ?? defaultCardWorkflowAction(field);
+
+  return (
+    <div className="mt-2 grid gap-2 rounded-md border bg-muted/10 p-2">
+      <label className="flex items-center gap-2 text-sm">
+        <Checkbox
+          checked={enabled}
+          onCheckedChange={(checked) => onChange(checked ? action : undefined)}
+        />
+        Workflow action
+      </label>
+      {enabled ? (
+        <WorkflowActionEditor
+          action={action}
+          fields={fields}
+          onChange={onChange}
+        />
+      ) : null}
+    </div>
   );
 }
 

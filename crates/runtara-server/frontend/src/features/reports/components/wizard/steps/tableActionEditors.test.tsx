@@ -27,7 +27,7 @@ function renderEditor(
   );
 }
 
-describe('WorkflowActionEditor visibleWhen/disabledWhen field picker', () => {
+describe('WorkflowActionEditor condition and context controls', () => {
   it('renders a Select populated by row fields when fields are provided', () => {
     renderEditor(
       {
@@ -58,5 +58,27 @@ describe('WorkflowActionEditor visibleWhen/disabledWhen field picker', () => {
     // With no fields known, the field input is an <Input placeholder="field">.
     const fieldInputs = screen.getAllByPlaceholderText('field');
     expect(fieldInputs.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it('renders field-mode input mapping and hiddenWhen controls', () => {
+    renderEditor(
+      {
+        workflowId: 'workflow_x',
+        context: {
+          mode: 'field',
+          field: 'status',
+          inputKey: 'statusValue',
+        },
+        hiddenWhen: { op: 'EQ', arguments: ['status', 'archived'] },
+      },
+      ['status', 'owner', 'priority']
+    );
+
+    expect(screen.getByText('Context field')).toBeInTheDocument();
+    expect(screen.getByText('Input key')).toBeInTheDocument();
+    expect(screen.getByDisplayValue('statusValue')).toBeInTheDocument();
+    expect(screen.getByText('Hidden when')).toBeInTheDocument();
+    expect(screen.getByDisplayValue('archived')).toBeInTheDocument();
+    expect(screen.getAllByText('status').length).toBeGreaterThan(0);
   });
 });

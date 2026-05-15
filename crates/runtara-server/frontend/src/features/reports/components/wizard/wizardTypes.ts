@@ -217,7 +217,7 @@ export interface WizardBlock {
   metricPercentile?: number;
   metricExpression?: unknown;
   metricFormat?: WizardColumnFormat;
-  /** Full card config for multi-group, subcard/subtable, or workflow-button cards. */
+  /** Full card config for multi-group, subcard/subtable, or other advanced cards. */
   cardConfig?: ReportCardConfig;
   chartAggregate?: ReportAggregateFn;
   chartAggregateField?: string;
