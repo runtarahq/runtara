@@ -86,6 +86,7 @@ resolve_versions() {
     # Runtara version: override or from workspace Cargo.toml
     RUNTARA_VERSION="${RUNTARA_VERSION_OVERRIDE:-$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')}"
     RUNTARA_COMMIT="${BUILD_COMMIT:-$(git rev-parse --short=12 HEAD 2>/dev/null || echo unknown)}"
+    RUNTARA_BUILD_NUMBER="${BUILD_NUMBER:-${GITHUB_RUN_NUMBER:-}}"
 
     # Rust version from the active toolchain (pinned by rust-toolchain.toml)
     RUSTC_VERSION="$(rustc --version | cut -d' ' -f2)"
@@ -138,7 +139,7 @@ build_server() {
     fi
 
     step "Building runtara-server (release, with embed-ui)"
-    BUILD_VERSION="$RUNTARA_VERSION" BUILD_COMMIT="$RUNTARA_COMMIT" \
+    BUILD_VERSION="$RUNTARA_VERSION" BUILD_COMMIT="$RUNTARA_COMMIT" BUILD_NUMBER="$RUNTARA_BUILD_NUMBER" \
         cargo build --release -p runtara-server --features embed-ui
 }
 
