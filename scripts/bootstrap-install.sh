@@ -51,22 +51,9 @@ done
 
 # ─── Resolve version ───────────────────────────────────────────────────────
 
-# Map version to git tag: "dev" -> latest runtara-dev-* prerelease, anything else -> "v1.2.3"
+# Map version to git tag: "dev" -> "dev", anything else -> "v1.2.3"
 version_to_tag() {
-    if [ "$1" = "dev" ]; then
-        local tag
-        tag="$(curl -fsSL "https://api.github.com/repos/${GITHUB_REPO}/releases?per_page=20" \
-            | grep -o '"tag_name": "runtara-dev-[^"]*"' \
-            | head -1 \
-            | grep -o 'runtara-dev-[^"]*')"
-        if [ -z "$tag" ]; then
-            err "Could not resolve latest runtara-dev-* release from GitHub API"
-            exit 1
-        fi
-        echo "$tag"
-    else
-        echo "v$1"
-    fi
+    if [ "$1" = "dev" ]; then echo "dev"; else echo "v$1"; fi
 }
 
 if [ -z "$VERSION" ]; then

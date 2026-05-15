@@ -264,15 +264,7 @@ resolve_bundle() {
     fi
 
     local tag
-    if [ "$RUNTARA_VERSION" = "dev" ]; then
-        tag="$(curl -fsSL "https://api.github.com/repos/${GITHUB_REPO}/releases?per_page=20" \
-            | grep -o '"tag_name": "runtara-dev-[^"]*"' \
-            | head -1 \
-            | grep -o 'runtara-dev-[^"]*')"
-        [ -z "$tag" ] && die $EXIT_DOWNLOAD "Could not resolve latest runtara-dev-* release from GitHub API"
-    else
-        tag="v${RUNTARA_VERSION}"
-    fi
+    if [ "$RUNTARA_VERSION" = "dev" ]; then tag="dev"; else tag="v${RUNTARA_VERSION}"; fi
 
     local tarball="runtara-${RUNTARA_VERSION}-${ARCH}-${OS}.tar.gz"
     local base_url="https://github.com/${GITHUB_REPO}/releases/download/${tag}"
