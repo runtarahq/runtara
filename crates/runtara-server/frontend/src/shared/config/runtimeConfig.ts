@@ -17,6 +17,7 @@ type RuntimeConfig = {
   plausibleHost?: string;
   version?: string;
   commit?: string;
+  buildNumber?: string;
   /** Selected server-side auth provider. Defaults to "oidc" when unset. */
   authMode?: AuthMode;
   /** Configured tenant — injected when the server runs without an IdP that
@@ -86,6 +87,10 @@ export const config = {
     version:
       pick(runtime.version, import.meta.env.VITE_RUNTARA_VERSION) ?? 'dev',
     commit: pick(runtime.commit, import.meta.env.VITE_RUNTARA_COMMIT),
+    buildNumber: pick(
+      runtime.buildNumber,
+      import.meta.env.VITE_RUNTARA_BUILD_NUMBER
+    ),
   },
 };
 

@@ -155,6 +155,10 @@ fn runtime_config_json() -> String {
 
     entries.push(("version".to_string(), env!("BUILD_VERSION").to_string()));
     entries.push(("commit".to_string(), env!("BUILD_COMMIT").to_string()));
+    let build_number = env!("BUILD_NUMBER");
+    if !build_number.is_empty() {
+        entries.push(("buildNumber".to_string(), build_number.to_string()));
+    }
 
     // Normalize the provider name to the three values the SPA branches on.
     // Anything unrecognized degrades to "oidc" so the SPA behaves like before.
