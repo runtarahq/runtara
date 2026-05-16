@@ -1,0 +1,36 @@
+---
+source: crates/runtara-server/tests/reports_render_corpus.rs
+expression: snapshot_body
+---
+{
+  "blocks": {
+    "revenue_by_day": {
+      "error": {
+        "blockId": "revenue_by_day",
+        "code": "BLOCK_RENDER_FAILED",
+        "message": "Schema not found: Order"
+      },
+      "status": "error",
+      "title": "Revenue by day",
+      "type": "chart"
+    }
+  },
+  "errors": [
+    {
+      "blockId": "revenue_by_day",
+      "code": "BLOCK_RENDER_FAILED",
+      "message": "Schema not found: Order"
+    }
+  ],
+  "report": {
+    "definitionVersion": 1,
+    "id": "rep_03_chart_aggregate_object_model"
+  },
+  "resolvedFilters": {
+    "date_range": {
+      "from": "[ts]",
+      "to": "[ts]"
+    }
+  },
+  "success": true
+}

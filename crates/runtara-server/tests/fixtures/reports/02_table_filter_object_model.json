@@ -1,0 +1,83 @@
+{
+  "definitionVersion": 1,
+  "layout": [
+    {
+      "id": "n_section",
+      "type": "section",
+      "title": "Recent orders",
+      "children": [
+        { "id": "n_orders", "type": "block", "blockId": "recent_orders" }
+      ]
+    }
+  ],
+  "filters": [
+    {
+      "id": "date_range",
+      "label": "Period",
+      "type": "time_range",
+      "default": { "preset": "last_30_days" },
+      "required": true,
+      "appliesTo": [
+        { "blockId": "recent_orders", "field": "created_at", "op": "between" }
+      ]
+    },
+    {
+      "id": "status",
+      "label": "Status",
+      "type": "multi_select",
+      "default": ["active"],
+      "options": {
+        "source": "static",
+        "values": [
+          { "label": "Active", "value": "active" },
+          { "label": "Paused", "value": "paused" },
+          { "label": "Cancelled", "value": "cancelled" }
+        ]
+      },
+      "appliesTo": [
+        { "blockId": "recent_orders", "field": "status", "op": "in" }
+      ]
+    }
+  ],
+  "blocks": [
+    {
+      "id": "recent_orders",
+      "type": "table",
+      "title": "Recent orders",
+      "source": {
+        "schema": "Order",
+        "mode": "filter"
+      },
+      "table": {
+        "columns": [
+          { "field": "order_id", "label": "Order", "descriptive": true },
+          {
+            "field": "customer_name",
+            "label": "Customer",
+            "displayTemplate": "{{ customer_name }} ({{ customer_email }})",
+            "secondaryField": "customer_email"
+          },
+          {
+            "field": "status",
+            "label": "Status",
+            "format": "pill",
+            "pillVariants": {
+              "active": "success",
+              "paused": "warning",
+              "cancelled": "destructive"
+            }
+          },
+          { "field": "total_amount", "label": "Total", "format": "currency", "align": "right" },
+          { "field": "created_at", "label": "Created", "format": "datetime" }
+        ],
+        "defaultSort": [
+          { "field": "created_at", "direction": "desc" }
+        ],
+        "pagination": {
+          "defaultPageSize": 50,
+          "allowedPageSizes": [25, 50, 100]
+        }
+      }
+    }
+  ]
+}

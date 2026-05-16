@@ -1,0 +1,47 @@
+{
+  "definitionVersion": 1,
+  "layout": [
+    { "id": "n_revenue", "type": "block", "blockId": "revenue_by_day" }
+  ],
+  "filters": [
+    {
+      "id": "date_range",
+      "label": "Period",
+      "type": "time_range",
+      "default": { "preset": "last_30_days" },
+      "required": true,
+      "appliesTo": [
+        { "blockId": "revenue_by_day", "field": "created_at", "op": "between" }
+      ]
+    }
+  ],
+  "blocks": [
+    {
+      "id": "revenue_by_day",
+      "type": "chart",
+      "title": "Revenue by day",
+      "source": {
+        "schema": "Order",
+        "mode": "aggregate",
+        "groupBy": ["created_at"],
+        "aggregates": [
+          { "alias": "revenue", "op": "sum", "field": "total_amount" },
+          { "alias": "orders", "op": "count" }
+        ],
+        "granularity": "day",
+        "orderBy": [
+          { "field": "created_at", "direction": "asc" }
+        ],
+        "limit": 500
+      },
+      "chart": {
+        "kind": "line",
+        "x": "created_at",
+        "series": [
+          { "field": "revenue", "label": "Revenue" },
+          { "field": "orders", "label": "Orders" }
+        ]
+      }
+    }
+  ]
+}

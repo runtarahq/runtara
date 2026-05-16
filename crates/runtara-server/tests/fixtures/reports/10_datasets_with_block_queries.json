@@ -1,0 +1,100 @@
+{
+  "definitionVersion": 1,
+  "layout": [
+    {
+      "id": "n_metrics",
+      "type": "metric_row",
+      "title": "Top-level KPIs",
+      "blocks": ["kpi_total_revenue", "kpi_order_count"]
+    },
+    { "id": "n_revenue", "type": "block", "blockId": "revenue_chart" },
+    { "id": "n_top_products", "type": "block", "blockId": "top_products_table" }
+  ],
+  "filters": [
+    {
+      "id": "date_range",
+      "label": "Period",
+      "type": "time_range",
+      "default": { "preset": "last_30_days" },
+      "required": true
+    }
+  ],
+  "datasets": [
+    {
+      "id": "orders",
+      "label": "Orders",
+      "source": { "schema": "Order" },
+      "timeDimension": "created_at",
+      "dimensions": [
+        { "field": "created_at", "label": "Day", "type": "datetime", "format": "date" },
+        { "field": "status", "label": "Status", "type": "string" },
+        { "field": "product_id", "label": "Product", "type": "string" }
+      ],
+      "measures": [
+        { "id": "revenue", "label": "Revenue", "op": "sum", "field": "total_amount", "format": "currency" },
+        { "id": "order_count", "label": "Orders", "op": "count", "format": "number" },
+        { "id": "avg_order_value", "label": "AOV", "op": "avg", "field": "total_amount", "format": "currency" }
+      ]
+    }
+  ],
+  "blocks": [
+    {
+      "id": "kpi_total_revenue",
+      "type": "metric",
+      "title": "Revenue",
+      "dataset": {
+        "id": "orders",
+        "dimensions": [],
+        "measures": ["revenue"]
+      },
+      "metric": { "valueField": "revenue", "format": "currency" }
+    },
+    {
+      "id": "kpi_order_count",
+      "type": "metric",
+      "title": "Orders",
+      "dataset": {
+        "id": "orders",
+        "dimensions": [],
+        "measures": ["order_count"]
+      },
+      "metric": { "valueField": "order_count", "format": "number" }
+    },
+    {
+      "id": "revenue_chart",
+      "type": "chart",
+      "title": "Revenue by day",
+      "dataset": {
+        "id": "orders",
+        "dimensions": ["created_at"],
+        "measures": ["revenue"],
+        "orderBy": [{ "field": "created_at", "direction": "asc" }]
+      },
+      "chart": {
+        "kind": "area",
+        "x": "created_at",
+        "series": [{ "field": "revenue", "label": "Revenue" }]
+      }
+    },
+    {
+      "id": "top_products_table",
+      "type": "table",
+      "title": "Top products",
+      "dataset": {
+        "id": "orders",
+        "dimensions": ["product_id"],
+        "measures": ["revenue", "order_count", "avg_order_value"],
+        "orderBy": [{ "field": "revenue", "direction": "desc" }],
+        "limit": 20
+      },
+      "table": {
+        "columns": [
+          { "field": "product_id", "label": "Product", "descriptive": true },
+          { "field": "revenue", "label": "Revenue", "format": "currency", "align": "right" },
+          { "field": "order_count", "label": "Orders", "format": "number", "align": "right" },
+          { "field": "avg_order_value", "label": "AOV", "format": "currency", "align": "right" }
+        ]
+      }
+    }
+  ]
+}

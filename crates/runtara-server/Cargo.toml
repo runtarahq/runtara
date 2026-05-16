@@ -21,6 +21,11 @@ path = "src/main.rs"
 # Run `npm run build` inside ./frontend before building with this feature enabled.
 embed-ui = ["dep:rust-embed"]
 
+# Activates the dual-run harness for the reports refactor (docs/reports-refactoring-plan.md).
+# When enabled, render/validate paths execute both the legacy and new implementations
+# and assert equality. No-op until Phase 1 introduces a new path to compare against.
+dual-run-reports = []
+
 [dependencies]
 # Runtara crates
 runtara-workflows = { path = "../runtara-workflows" }
@@ -145,3 +150,5 @@ tokio = { version = "1", features = ["full", "test-util"] }
 rsa = { version = "0.9", features = ["sha2"] }
 testcontainers = "0.27"
 testcontainers-modules = { version = "0.15", features = ["postgres"] }
+insta = { version = "1", features = ["json", "filters"] }
+proptest = "1"

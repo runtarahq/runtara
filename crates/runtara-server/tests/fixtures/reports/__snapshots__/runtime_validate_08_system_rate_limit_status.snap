@@ -1,0 +1,16 @@
+---
+source: crates/runtara-server/tests/reports_runtime_corpus.rs
+expression: response
+---
+{
+  "valid": false,
+  "errors": [
+    {
+      "path": "$",
+      "code": "VALIDATION_ERROR",
+      "message": "Block 'rate_limit_status' references unknown system table field 'connection_id'",
+      "hint": "Use validate_report with mode='all' for syntax plus semantic checks."
+    }
+  ],
+  "warnings": []
+}

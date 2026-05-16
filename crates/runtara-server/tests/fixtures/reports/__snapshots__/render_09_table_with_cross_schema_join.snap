@@ -1,0 +1,37 @@
+---
+source: crates/runtara-server/tests/reports_render_corpus.rs
+expression: snapshot_body
+---
+{
+  "blocks": {
+    "orders_with_customers": {
+      "error": {
+        "blockId": "orders_with_customers",
+        "code": "BLOCK_RENDER_FAILED",
+        "message": "Schema not found: Order"
+      },
+      "status": "error",
+      "title": "Orders with customer info",
+      "type": "table"
+    }
+  },
+  "errors": [
+    {
+      "blockId": "orders_with_customers",
+      "code": "BLOCK_RENDER_FAILED",
+      "message": "Schema not found: Order"
+    }
+  ],
+  "report": {
+    "definitionVersion": 1,
+    "id": "rep_09_table_with_cross_schema_join"
+  },
+  "resolvedFilters": {
+    "customer_tier": "gold",
+    "date_range": {
+      "from": "[ts]",
+      "to": "[ts]"
+    }
+  },
+  "success": true
+}

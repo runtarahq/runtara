@@ -1,0 +1,36 @@
+---
+source: crates/runtara-server/tests/reports_render_corpus.rs
+expression: snapshot_body
+---
+{
+  "blocks": {
+    "running_instances": {
+      "error": {
+        "blockId": "running_instances",
+        "code": "BLOCK_RENDER_FAILED",
+        "message": "Workflow runtime report sources require the execution engine"
+      },
+      "status": "error",
+      "title": "Workflow instances",
+      "type": "table"
+    }
+  },
+  "errors": [
+    {
+      "blockId": "running_instances",
+      "code": "BLOCK_RENDER_FAILED",
+      "message": "Workflow runtime report sources require the execution engine"
+    }
+  ],
+  "report": {
+    "definitionVersion": 1,
+    "id": "rep_07_workflow_runtime_instances"
+  },
+  "resolvedFilters": {
+    "status": [
+      "active"
+    ],
+    "workflow": "wf_test"
+  },
+  "success": true
+}

@@ -1,0 +1,69 @@
+{
+  "definitionVersion": 1,
+  "layout": [
+    { "id": "n_instances", "type": "block", "blockId": "running_instances" }
+  ],
+  "filters": [
+    {
+      "id": "status",
+      "label": "Status",
+      "type": "multi_select",
+      "default": ["running"],
+      "options": {
+        "source": "static",
+        "values": [
+          { "label": "Running", "value": "running" },
+          { "label": "Completed", "value": "completed" },
+          { "label": "Failed", "value": "failed" },
+          { "label": "Cancelled", "value": "cancelled" }
+        ]
+      },
+      "appliesTo": [
+        { "blockId": "running_instances", "field": "status", "op": "in" }
+      ]
+    },
+    {
+      "id": "workflow",
+      "label": "Workflow",
+      "type": "text",
+      "appliesTo": [
+        { "blockId": "running_instances", "field": "workflow_id", "op": "eq" }
+      ]
+    }
+  ],
+  "blocks": [
+    {
+      "id": "running_instances",
+      "type": "table",
+      "title": "Workflow instances",
+      "source": {
+        "kind": "workflow_runtime",
+        "entity": "instances",
+        "mode": "filter"
+      },
+      "table": {
+        "columns": [
+          { "field": "id", "label": "Instance", "descriptive": true },
+          { "field": "workflow_id", "label": "Workflow" },
+          {
+            "field": "status",
+            "label": "Status",
+            "format": "pill",
+            "pillVariants": {
+              "running": "default",
+              "completed": "success",
+              "failed": "destructive",
+              "cancelled": "muted"
+            }
+          },
+          { "field": "started_at", "label": "Started", "format": "datetime" },
+          { "field": "duration_ms", "label": "Duration", "format": "duration", "align": "right" }
+        ],
+        "defaultSort": [
+          { "field": "started_at", "direction": "desc" }
+        ],
+        "pagination": { "defaultPageSize": 50 }
+      }
+    }
+  ]
+}

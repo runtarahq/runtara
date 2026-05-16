@@ -1,0 +1,9 @@
+---
+source: crates/runtara-server/tests/reports_runtime_corpus.rs
+expression: response
+---
+{
+  "valid": true,
+  "errors": [],
+  "warnings": []
+}

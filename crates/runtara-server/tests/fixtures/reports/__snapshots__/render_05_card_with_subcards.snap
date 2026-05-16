@@ -1,0 +1,33 @@
+---
+source: crates/runtara-server/tests/reports_render_corpus.rs
+expression: snapshot_body
+---
+{
+  "blocks": {
+    "customer_card": {
+      "error": {
+        "blockId": "customer_card",
+        "code": "BLOCK_RENDER_FAILED",
+        "message": "Schema not found: Customer"
+      },
+      "status": "error",
+      "title": "Customer details",
+      "type": "card"
+    }
+  },
+  "errors": [
+    {
+      "blockId": "customer_card",
+      "code": "BLOCK_RENDER_FAILED",
+      "message": "Schema not found: Customer"
+    }
+  ],
+  "report": {
+    "definitionVersion": 1,
+    "id": "rep_05_card_with_subcards"
+  },
+  "resolvedFilters": {
+    "customer_id": "cust_001"
+  },
+  "success": true
+}

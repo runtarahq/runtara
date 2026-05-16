@@ -1,0 +1,22 @@
+---
+source: crates/runtara-server/tests/reports_render_corpus.rs
+expression: snapshot_body
+---
+{
+  "blocks": {
+    "intro": {
+      "data": {
+        "content": "# Welcome\n\nThis is a minimal markdown-only report. It has no data sources."
+      },
+      "status": "ready",
+      "type": "markdown"
+    }
+  },
+  "errors": [],
+  "report": {
+    "definitionVersion": 1,
+    "id": "rep_01_markdown_minimal"
+  },
+  "resolvedFilters": {},
+  "success": true
+}

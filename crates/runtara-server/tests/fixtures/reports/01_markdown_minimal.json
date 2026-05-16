@@ -1,0 +1,16 @@
+{
+  "definitionVersion": 1,
+  "layout": [
+    { "id": "n_intro", "type": "block", "blockId": "intro" }
+  ],
+  "filters": [],
+  "blocks": [
+    {
+      "id": "intro",
+      "type": "markdown",
+      "markdown": {
+        "content": "# Welcome\n\nThis is a minimal markdown-only report. It has no data sources."
+      }
+    }
+  ]
+}

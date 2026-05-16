@@ -1,0 +1,51 @@
+---
+source: crates/runtara-server/tests/reports_render_corpus.rs
+expression: snapshot_body
+---
+{
+  "blocks": {
+    "order_count": {
+      "error": {
+        "blockId": "order_count",
+        "code": "BLOCK_RENDER_FAILED",
+        "message": "Schema not found: Order"
+      },
+      "status": "error",
+      "title": "Orders",
+      "type": "metric"
+    },
+    "total_revenue": {
+      "error": {
+        "blockId": "total_revenue",
+        "code": "BLOCK_RENDER_FAILED",
+        "message": "Schema not found: Order"
+      },
+      "status": "error",
+      "title": "Total revenue",
+      "type": "metric"
+    }
+  },
+  "errors": [
+    {
+      "blockId": "total_revenue",
+      "code": "BLOCK_RENDER_FAILED",
+      "message": "Schema not found: Order"
+    },
+    {
+      "blockId": "order_count",
+      "code": "BLOCK_RENDER_FAILED",
+      "message": "Schema not found: Order"
+    }
+  ],
+  "report": {
+    "definitionVersion": 1,
+    "id": "rep_04_metric_aggregate_object_model"
+  },
+  "resolvedFilters": {
+    "date_range": {
+      "from": "[ts]",
+      "to": "[ts]"
+    }
+  },
+  "success": true
+}

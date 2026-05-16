@@ -1,0 +1,60 @@
+{
+  "definitionVersion": 1,
+  "layout": [
+    {
+      "id": "n_metrics",
+      "type": "metric_row",
+      "title": "Key metrics",
+      "blocks": ["total_revenue", "order_count"]
+    }
+  ],
+  "filters": [
+    {
+      "id": "date_range",
+      "label": "Period",
+      "type": "time_range",
+      "default": { "preset": "last_30_days" },
+      "required": true,
+      "appliesTo": [
+        { "blockId": "total_revenue", "field": "created_at", "op": "between" },
+        { "blockId": "order_count", "field": "created_at", "op": "between" }
+      ]
+    }
+  ],
+  "blocks": [
+    {
+      "id": "total_revenue",
+      "type": "metric",
+      "title": "Total revenue",
+      "source": {
+        "schema": "Order",
+        "mode": "aggregate",
+        "aggregates": [
+          { "alias": "value", "op": "sum", "field": "total_amount" }
+        ]
+      },
+      "metric": {
+        "valueField": "value",
+        "label": "Revenue",
+        "format": "currency"
+      }
+    },
+    {
+      "id": "order_count",
+      "type": "metric",
+      "title": "Orders",
+      "source": {
+        "schema": "Order",
+        "mode": "aggregate",
+        "aggregates": [
+          { "alias": "value", "op": "count" }
+        ]
+      },
+      "metric": {
+        "valueField": "value",
+        "label": "Orders",
+        "format": "number"
+      }
+    }
+  ]
+}
