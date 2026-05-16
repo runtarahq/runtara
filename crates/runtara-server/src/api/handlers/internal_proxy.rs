@@ -468,6 +468,13 @@ fn record_credential_request_async(
 ///
 /// Blocks: loopback (127.0.0.0/8), private (10/8, 172.16/12, 192.168/16),
 /// link-local (169.254/16), and IPv6 equivalents (::1, fc00::/7, fe80::/10).
+///
+/// **Escape hatch for dev/test environments only:** the
+/// `RUNTARA_PROXY_ALLOWED_HOSTS` env var accepts a comma-separated list of
+/// `host` or `host:port` entries that bypass the SSRF guard. The list is read
+/// once at process start and is intended for local Azurite/MinIO-style
+/// emulators reachable on loopback. **Do not set this in production** — it
+/// re-opens the SSRF surface for every connection routed through the proxy.
 fn reject_private_url(url: &str) -> Result<(), (StatusCode, Json<Value>)> {
     let parsed = url::Url::parse(url).map_err(|_| {
         (
@@ -475,6 +482,15 @@ fn reject_private_url(url: &str) -> Result<(), (StatusCode, Json<Value>)> {
             Json(json!({"error": "Invalid URL"})),
         )
     })?;
+
+    if is_explicitly_allowed_host(&parsed) {
+        tracing::warn!(
+            target: "proxy",
+            url = %parsed,
+            "SSRF guard bypassed by RUNTARA_PROXY_ALLOWED_HOSTS — dev/test only"
+        );
+        return Ok(());
+    }
 
     let host = parsed.host_str().unwrap_or("");
 
@@ -502,6 +518,42 @@ fn reject_private_url(url: &str) -> Result<(), (StatusCode, Json<Value>)> {
     }
 
     Ok(())
+}
+
+/// Read and cache the `RUNTARA_PROXY_ALLOWED_HOSTS` allowlist.
+///
+/// Entries are case-insensitive and may be either bare hosts (matches any port)
+/// or `host:port` pairs (matches only that port). Empty entries are ignored.
+fn allowed_private_hosts() -> &'static [String] {
+    static HOSTS: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    HOSTS
+        .get_or_init(|| {
+            std::env::var("RUNTARA_PROXY_ALLOWED_HOSTS")
+                .unwrap_or_default()
+                .split(',')
+                .map(|s| s.trim().to_ascii_lowercase())
+                .filter(|s| !s.is_empty())
+                .collect()
+        })
+        .as_slice()
+}
+
+fn is_explicitly_allowed_host(url: &url::Url) -> bool {
+    let allowed = allowed_private_hosts();
+    if allowed.is_empty() {
+        return false;
+    }
+    let host = url.host_str().unwrap_or("").to_ascii_lowercase();
+    if host.is_empty() {
+        return false;
+    }
+    let host_with_port = match url.port_or_known_default() {
+        Some(p) => format!("{}:{}", host, p),
+        None => host.clone(),
+    };
+    allowed
+        .iter()
+        .any(|entry| entry == &host || entry == &host_with_port)
 }
 
 fn is_private_ip(ip: &std::net::IpAddr) -> bool {

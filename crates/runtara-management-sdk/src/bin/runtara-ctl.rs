@@ -146,6 +146,7 @@ enum Command {
         input: Option<String>,
         instance_id: Option<String>,
         timeout: Option<u32>,
+        env: Vec<(String, String)>,
     },
     Status {
         instance_id: String,
@@ -286,6 +287,7 @@ fn parse_args_from_vec(args: &[String]) -> Result<Command, String> {
             let mut input: Option<String> = None;
             let mut instance_id: Option<String> = None;
             let mut timeout: Option<u32> = None;
+            let mut env: Vec<(String, String)> = Vec::new();
 
             let mut i = 2;
             while i < args.len() {
@@ -316,6 +318,14 @@ fn parse_args_from_vec(args: &[String]) -> Result<Command, String> {
                                 .map_err(|_| "Invalid timeout")?,
                         );
                     }
+                    "--env" => {
+                        i += 1;
+                        let kv = args.get(i).ok_or("--env requires KEY=VALUE")?;
+                        let (k, v) = kv
+                            .split_once('=')
+                            .ok_or_else(|| format!("--env value must be KEY=VALUE: {}", kv))?;
+                        env.push((k.to_string(), v.to_string()));
+                    }
                     arg => return Err(format!("Unknown argument: {}", arg)),
                 }
                 i += 1;
@@ -327,6 +337,7 @@ fn parse_args_from_vec(args: &[String]) -> Result<Command, String> {
                 input,
                 instance_id,
                 timeout,
+                env,
             })
         }
         "status" => {
@@ -587,6 +598,7 @@ async fn execute_command(sdk: &ManagementSdk, cmd: Command) -> Result<(), String
             input,
             instance_id,
             timeout,
+            env,
         } => {
             let mut options = StartInstanceOptions::new(&image_id, &tenant_id);
 
@@ -602,6 +614,10 @@ async fn execute_command(sdk: &ManagementSdk, cmd: Command) -> Result<(), String
 
             if let Some(t) = timeout {
                 options = options.with_timeout(t);
+            }
+
+            for (key, value) in env {
+                options = options.with_env_var(key, value);
             }
 
             let result = sdk
@@ -1106,6 +1122,7 @@ mod tests {
                 input,
                 instance_id,
                 timeout,
+                env: _,
             } => {
                 assert_eq!(image_id, "img_123");
                 assert_eq!(tenant_id, "acme");
@@ -1141,6 +1158,7 @@ mod tests {
                 input,
                 instance_id,
                 timeout,
+                env: _,
             } => {
                 assert_eq!(image_id, "img_123");
                 assert_eq!(tenant_id, "acme");
