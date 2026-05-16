@@ -1,0 +1,2 @@
+# wasm-pack output; built on demand by `wasm-pack build --target web --out-dir pkg --features wasm --no-default-features`
+/pkg/

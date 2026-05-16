@@ -1,0 +1,37 @@
+[package]
+name = "runtara-report-dsl"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Schema, validators, template engine, and row-condition evaluator for the runtara reports DSL"
+keywords = ["runtara", "reports", "dsl"]
+categories = ["development-tools"]
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = []
+# Enables `ToSchema` derives so the crate's types appear in the server OpenAPI doc.
+utoipa = ["dep:utoipa"]
+# Enables wasm-bindgen JS bindings for the FE bundle.
+wasm = ["dep:wasm-bindgen", "dep:serde-wasm-bindgen"]
+
+[dependencies]
+runtara-dsl = { path = "../runtara-dsl", features = ["utoipa"] }
+
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+schemars = "1"
+utoipa = { version = "5", features = ["chrono"], optional = true }
+chrono = { version = "0.4", features = ["serde"] }
+thiserror = "1.0"
+minijinja = "2.5"
+
+# WASM-only deps. cdylib + wasm-bindgen produce the bundle Phase 2 ships to the FE.
+wasm-bindgen = { version = "0.2", optional = true }
+serde-wasm-bindgen = { version = "0.6", optional = true }
+
+[dev-dependencies]
+insta = { version = "1", features = ["json"] }

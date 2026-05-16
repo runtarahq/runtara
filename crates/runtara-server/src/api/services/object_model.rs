@@ -504,7 +504,7 @@ impl InstanceService {
         let store = get_store(&self.manager, Some(&self.facade), connection_id, tenant_id).await?;
 
         let store_filter = runtara_object_store::FilterRequest {
-            condition: filter_request.condition.map(|c| c.into()),
+            condition: filter_request.condition.map(condition_to_store),
             offset: filter_request.offset,
             limit: filter_request.limit,
             sort_by: filter_request.sort_by,
@@ -827,7 +827,7 @@ impl InstanceService {
             .ok_or_else(|| ServiceError::NotFound("Schema not found".to_string()))?;
 
         store
-            .update_instances(&schema.name, properties, condition.into())
+            .update_instances(&schema.name, properties, condition_to_store(condition))
             .await
             .map_err(|e| {
                 if e.to_string().contains("validation") || e.to_string().contains("Invalid") {

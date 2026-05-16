@@ -25,6 +25,8 @@ members = [
     "crates/runtara-server",
     # Object model storage
     "crates/runtara-object-store",
+    # Reports DSL: schema + minijinja + condition evaluator (server-side, also compiled to WASM)
+    "crates/runtara-report-dsl",
 ]
 default-members = ["crates/runtara-core"]
 

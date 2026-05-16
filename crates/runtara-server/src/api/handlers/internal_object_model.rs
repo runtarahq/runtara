@@ -18,7 +18,7 @@ use std::sync::Arc;
 
 use super::object_model::ObjectModelState;
 use crate::api::dto::object_model::{
-    CreateSchemaRequest, FilterRequest, OrderByEntry, ScoreExpression,
+    CreateSchemaRequest, FilterRequest, OrderByEntry, ScoreExpression, condition_to_store,
 };
 use crate::api::services::object_model::{InstanceService, SchemaService, ServiceError};
 
@@ -944,7 +944,11 @@ pub async fn bulk_update_instances(
             condition,
         } => {
             store
-                .update_instances(&request.schema_name, properties, condition.into())
+                .update_instances(
+                    &request.schema_name,
+                    properties,
+                    condition_to_store(condition),
+                )
                 .await
         }
         InternalBulkUpdateMode::ByIds { updates } => {
@@ -1003,7 +1007,7 @@ pub async fn bulk_delete_instances(
             let id_values: Vec<Value> = ids.into_iter().map(Value::String).collect();
             runtara_object_store::Condition::r#in("id", id_values)
         }
-        (_, Some(cond)) => cond.into(),
+        (_, Some(cond)) => condition_to_store(cond),
         _ => {
             return Ok((
                 StatusCode::OK,
