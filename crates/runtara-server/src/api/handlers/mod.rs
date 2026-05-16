@@ -14,6 +14,7 @@ pub mod executions;
 pub mod file_storage;
 pub mod internal_agents;
 pub mod internal_object_model;
+pub mod internal_presign;
 pub mod internal_proxy;
 pub mod metrics;
 pub mod object_model;

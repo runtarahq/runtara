@@ -782,6 +782,83 @@ pub static CAPABILITY_REGISTRATIONS: &[CapabilityRegistration] = &[
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
+        meta: &crate::integrations::s3_storage::__CAPABILITY_META_STORAGE_GENERATE_PRESIGNED_URL,
+        input_type: &crate::integrations::s3_storage::__INPUT_META_GeneratePresignedUrlInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
+        executor: &crate::integrations::s3_storage::__CAPABILITY_EXECUTOR_STORAGE_GENERATE_PRESIGNED_URL,
+    },
+    #[cfg(feature = "integrations")]
+    CapabilityRegistration {
+        meta: &crate::integrations::azure_blob_storage::__CAPABILITY_META_STORAGE_CREATE_BUCKET,
+        input_type: &crate::integrations::azure_blob_storage::__INPUT_META_CreateBucketInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
+        executor: &crate::integrations::azure_blob_storage::__CAPABILITY_EXECUTOR_STORAGE_CREATE_BUCKET,
+    },
+    #[cfg(feature = "integrations")]
+    CapabilityRegistration {
+        meta: &crate::integrations::azure_blob_storage::__CAPABILITY_META_STORAGE_LIST_BUCKETS,
+        input_type: &crate::integrations::azure_blob_storage::__INPUT_META_ListBucketsInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
+        executor: &crate::integrations::azure_blob_storage::__CAPABILITY_EXECUTOR_STORAGE_LIST_BUCKETS,
+    },
+    #[cfg(feature = "integrations")]
+    CapabilityRegistration {
+        meta: &crate::integrations::azure_blob_storage::__CAPABILITY_META_STORAGE_DELETE_BUCKET,
+        input_type: &crate::integrations::azure_blob_storage::__INPUT_META_DeleteBucketInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
+        executor: &crate::integrations::azure_blob_storage::__CAPABILITY_EXECUTOR_STORAGE_DELETE_BUCKET,
+    },
+    #[cfg(feature = "integrations")]
+    CapabilityRegistration {
+        meta: &crate::integrations::azure_blob_storage::__CAPABILITY_META_STORAGE_UPLOAD_FILE,
+        input_type: &crate::integrations::azure_blob_storage::__INPUT_META_UploadFileInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
+        executor: &crate::integrations::azure_blob_storage::__CAPABILITY_EXECUTOR_STORAGE_UPLOAD_FILE,
+    },
+    #[cfg(feature = "integrations")]
+    CapabilityRegistration {
+        meta: &crate::integrations::azure_blob_storage::__CAPABILITY_META_STORAGE_DOWNLOAD_FILE,
+        input_type: &crate::integrations::azure_blob_storage::__INPUT_META_DownloadFileInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
+        executor: &crate::integrations::azure_blob_storage::__CAPABILITY_EXECUTOR_STORAGE_DOWNLOAD_FILE,
+    },
+    #[cfg(feature = "integrations")]
+    CapabilityRegistration {
+        meta: &crate::integrations::azure_blob_storage::__CAPABILITY_META_STORAGE_LIST_FILES,
+        input_type: &crate::integrations::azure_blob_storage::__INPUT_META_ListFilesInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
+        executor: &crate::integrations::azure_blob_storage::__CAPABILITY_EXECUTOR_STORAGE_LIST_FILES,
+    },
+    #[cfg(feature = "integrations")]
+    CapabilityRegistration {
+        meta: &crate::integrations::azure_blob_storage::__CAPABILITY_META_STORAGE_GET_FILE_INFO,
+        input_type: &crate::integrations::azure_blob_storage::__INPUT_META_GetFileInfoInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
+        executor: &crate::integrations::azure_blob_storage::__CAPABILITY_EXECUTOR_STORAGE_GET_FILE_INFO,
+    },
+    #[cfg(feature = "integrations")]
+    CapabilityRegistration {
+        meta: &crate::integrations::azure_blob_storage::__CAPABILITY_META_STORAGE_DELETE_FILE,
+        input_type: &crate::integrations::azure_blob_storage::__INPUT_META_DeleteFileInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
+        executor: &crate::integrations::azure_blob_storage::__CAPABILITY_EXECUTOR_STORAGE_DELETE_FILE,
+    },
+    #[cfg(feature = "integrations")]
+    CapabilityRegistration {
+        meta: &crate::integrations::azure_blob_storage::__CAPABILITY_META_STORAGE_COPY_FILE,
+        input_type: &crate::integrations::azure_blob_storage::__INPUT_META_CopyFileInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
+        executor: &crate::integrations::azure_blob_storage::__CAPABILITY_EXECUTOR_STORAGE_COPY_FILE,
+    },
+    #[cfg(feature = "integrations")]
+    CapabilityRegistration {
+        meta: &crate::integrations::azure_blob_storage::__CAPABILITY_META_STORAGE_GENERATE_PRESIGNED_URL,
+        input_type: &crate::integrations::azure_blob_storage::__INPUT_META_GeneratePresignedUrlInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
+        executor: &crate::integrations::azure_blob_storage::__CAPABILITY_EXECUTOR_STORAGE_GENERATE_PRESIGNED_URL,
+    },
+    #[cfg(feature = "integrations")]
+    CapabilityRegistration {
         meta: &crate::integrations::sharepoint::__CAPABILITY_META_SHAREPOINT_LIST_DRIVES,
         input_type: &crate::integrations::sharepoint::__INPUT_META_ListDrivesInput,
         #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
@@ -2024,6 +2101,28 @@ pub static INPUT_TYPES: &[&InputTypeMeta] = &[
     #[cfg(feature = "integrations")]
     &crate::integrations::s3_storage::__INPUT_META_CopyFileInput,
     #[cfg(feature = "integrations")]
+    &crate::integrations::s3_storage::__INPUT_META_GeneratePresignedUrlInput,
+    #[cfg(feature = "integrations")]
+    &crate::integrations::azure_blob_storage::__INPUT_META_CreateBucketInput,
+    #[cfg(feature = "integrations")]
+    &crate::integrations::azure_blob_storage::__INPUT_META_ListBucketsInput,
+    #[cfg(feature = "integrations")]
+    &crate::integrations::azure_blob_storage::__INPUT_META_DeleteBucketInput,
+    #[cfg(feature = "integrations")]
+    &crate::integrations::azure_blob_storage::__INPUT_META_UploadFileInput,
+    #[cfg(feature = "integrations")]
+    &crate::integrations::azure_blob_storage::__INPUT_META_DownloadFileInput,
+    #[cfg(feature = "integrations")]
+    &crate::integrations::azure_blob_storage::__INPUT_META_ListFilesInput,
+    #[cfg(feature = "integrations")]
+    &crate::integrations::azure_blob_storage::__INPUT_META_GetFileInfoInput,
+    #[cfg(feature = "integrations")]
+    &crate::integrations::azure_blob_storage::__INPUT_META_DeleteFileInput,
+    #[cfg(feature = "integrations")]
+    &crate::integrations::azure_blob_storage::__INPUT_META_CopyFileInput,
+    #[cfg(feature = "integrations")]
+    &crate::integrations::azure_blob_storage::__INPUT_META_GeneratePresignedUrlInput,
+    #[cfg(feature = "integrations")]
     &crate::integrations::sharepoint::__INPUT_META_ListDrivesInput,
     #[cfg(feature = "integrations")]
     &crate::integrations::sharepoint::__INPUT_META_ListChildrenInput,
@@ -2457,6 +2556,28 @@ pub static OUTPUT_TYPES: &[&OutputTypeMeta] = &[
     #[cfg(feature = "integrations")]
     &crate::integrations::s3_storage::__OUTPUT_META_CopyFileOutput,
     #[cfg(feature = "integrations")]
+    &crate::integrations::s3_storage::__OUTPUT_META_GeneratePresignedUrlOutput,
+    #[cfg(feature = "integrations")]
+    &crate::integrations::azure_blob_storage::__OUTPUT_META_CreateBucketOutput,
+    #[cfg(feature = "integrations")]
+    &crate::integrations::azure_blob_storage::__OUTPUT_META_ListBucketsOutput,
+    #[cfg(feature = "integrations")]
+    &crate::integrations::azure_blob_storage::__OUTPUT_META_DeleteBucketOutput,
+    #[cfg(feature = "integrations")]
+    &crate::integrations::azure_blob_storage::__OUTPUT_META_UploadFileOutput,
+    #[cfg(feature = "integrations")]
+    &crate::integrations::azure_blob_storage::__OUTPUT_META_DownloadFileOutput,
+    #[cfg(feature = "integrations")]
+    &crate::integrations::azure_blob_storage::__OUTPUT_META_ListFilesOutput,
+    #[cfg(feature = "integrations")]
+    &crate::integrations::azure_blob_storage::__OUTPUT_META_GetFileInfoOutput,
+    #[cfg(feature = "integrations")]
+    &crate::integrations::azure_blob_storage::__OUTPUT_META_DeleteFileOutput,
+    #[cfg(feature = "integrations")]
+    &crate::integrations::azure_blob_storage::__OUTPUT_META_CopyFileOutput,
+    #[cfg(feature = "integrations")]
+    &crate::integrations::azure_blob_storage::__OUTPUT_META_GeneratePresignedUrlOutput,
+    #[cfg(feature = "integrations")]
     &crate::integrations::sharepoint::__OUTPUT_META_ListDrivesOutput,
     #[cfg(feature = "integrations")]
     &crate::integrations::sharepoint::__OUTPUT_META_ListChildrenOutput,
@@ -2595,6 +2716,8 @@ pub static CONNECTION_TYPES: &[&ConnectionTypeMeta] = &[
     #[cfg(feature = "integrations")]
     &crate::integrations::connection_types::__CONNECTION_META_S3CompatibleParams,
     #[cfg(feature = "integrations")]
+    &crate::integrations::connection_types::__CONNECTION_META_AzureBlobStorageParams,
+    #[cfg(feature = "integrations")]
     &crate::integrations::connection_types::__CONNECTION_META_StripeApiKeyParams,
 ];
 
@@ -2687,6 +2810,17 @@ const AGENT_MODULE_S3_STORAGE: AgentModuleConfig = AgentModuleConfig {
 };
 
 #[cfg(feature = "integrations")]
+const AGENT_MODULE_AZURE_BLOB_STORAGE: AgentModuleConfig = AgentModuleConfig {
+    id: "azure_blob_storage",
+    name: "Azure Blob Storage",
+    description: "Azure Blob Storage for blob upload, download, listing, and container operations",
+    has_side_effects: true,
+    supports_connections: true,
+    integration_ids: &["azure_blob_storage"],
+    secure: true,
+};
+
+#[cfg(feature = "integrations")]
 const AGENT_MODULE_SHAREPOINT: AgentModuleConfig = AgentModuleConfig {
     id: "sharepoint",
     name: "Microsoft SharePoint",
@@ -2747,6 +2881,8 @@ pub static EXTRA_AGENT_MODULES: &[&AgentModuleConfig] = &[
     &AGENT_MODULE_OPENAI,
     #[cfg(feature = "integrations")]
     &AGENT_MODULE_S3_STORAGE,
+    #[cfg(feature = "integrations")]
+    &AGENT_MODULE_AZURE_BLOB_STORAGE,
     #[cfg(feature = "integrations")]
     &AGENT_MODULE_SHAREPOINT,
     #[cfg(feature = "integrations")]

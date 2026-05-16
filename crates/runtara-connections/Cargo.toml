@@ -61,3 +61,4 @@ utoipa = { version = "5", optional = true }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+testcontainers = "0.27"

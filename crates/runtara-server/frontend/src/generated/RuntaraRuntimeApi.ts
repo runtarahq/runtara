@@ -358,11 +358,24 @@ export interface AgentStep {
   timeout?: number | null;
 }
 
-/** Simplified agent info without capabilities (for list endpoint) */
+/**
+ * Simplified agent info without capabilities (for list endpoint).
+ *
+ * Includes `integrationIds` and `supportsConnections` so callers (and MCP
+ * agents) can identify which agents need a connection without an extra
+ * `get_agent` round-trip per agent.
+ */
 export interface AgentSummary {
   description: string;
   id: string;
+  /**
+   * Connection types this agent can use (e.g. "shopify_access_token",
+   * "openai_api_key"). Pass any of these to `list_connections` as the
+   * `integration_id` filter to find usable connections.
+   */
+  integrationIds: string[];
   name: string;
+  supportsConnections: boolean;
 }
 
 export interface AggregateOrderBy {
@@ -1188,7 +1201,14 @@ export interface ConditionOperation {
   op: ConditionOperator;
 }
 
-/** Evaluates conditions and branches execution */
+/**
+ * Evaluates a condition and branches execution.
+ *
+ * Runtime stores the evaluated boolean as `steps.<id>.outputs.result` for
+ * inspection and later mappings. Branch routing still uses executionPlan edges
+ * labeled `"true"` and `"false"`; do not route Conditional branches with
+ * edge-level conditions.
+ */
 export interface ConditionalStep {
   /** When true, execution pauses before this step in debug mode */
   breakpoint?: boolean | null;
@@ -1492,8 +1512,9 @@ export interface CsvValidationError {
  * This is a **durable** delay: if the workflow crashes during the delay,
  * it will resume from where it left off rather than restarting the delay.
  *
- * For native platforms, this uses `sdk.durable_sleep()` which stores
- * the wake time in the database. For WASI/embedded, it uses blocking sleep.
+ * For native platforms, this uses `sdk.sleep()` (which forwards to
+ * `backend.durable_sleep()`) and stores the wake time in the database.
+ * For WASI/embedded, it uses blocking sleep.
  *
  * Example:
  * ```json
@@ -1519,7 +1540,7 @@ export interface DelayStep {
   breakpoint?: boolean | null;
   /**
    * Disable durability for this step when `Some(false)`. Uses
-   * `std::thread::sleep` instead of `sdk.durable_sleep` — the delay is
+   * `std::thread::sleep` instead of `sdk.sleep` — the delay is
    * not suspendable or resumable across crashes.
    */
   durable?: boolean | null;
@@ -1806,13 +1827,15 @@ export interface ExecutionGraph {
  * 3. **Parallel edges** (without conditions OR labels): Multiple unlabeled, condition-less
  *    edges can exist - they execute in parallel (e.g., fan-out patterns).
  *
- * 4. **Conditional step exception**: `true`/`false` labeled edges from a Conditional step
- *    are mutually exclusive based on the condition result, not evaluated via edge conditions.
+ * 4. **Conditional step exception**: Outgoing edges from a Conditional step must use
+ *    `true`/`false` labels. The step's own `condition` chooses the branch; edge-level
+ *    `condition` and `priority` fields are not evaluated for Conditional branches.
  *
  * # Validation Rules
  *
  * - Multiple conditional edges from the same step with the same label must have unique priorities
  * - At most one default (condition-less) edge per (from_step, label) pair
+ * - Conditional step outgoing edges must be unconditioned `true`/`false` branches
  * - If no condition matches and no default exists, the workflow fails (for onError) or continues normally
  */
 export interface ExecutionPlanEdge {
@@ -1821,6 +1844,8 @@ export interface ExecutionPlanEdge {
    *
    * Uses the same format as `Conditional` step conditions, supporting
    * operators like EQ, AND, OR, STARTS_WITH, CONTAINS, etc.
+   * Do not set this on outgoing edges from a `Conditional` step; use the
+   * `Conditional.condition` field plus `true`/`false` edge labels instead.
    *
    * Available context for conditions:
    * - `data.*` - Input data
@@ -3075,6 +3100,69 @@ export interface SplitStep {
   subgraph: ExecutionGraph;
 }
 
+export interface SqlExecuteRequest {
+  params?: SqlParam[];
+  /**
+   * SQL command using native Postgres / SQLx positional placeholders.
+   * Example: `UPDATE customers SET status = $1 WHERE id = $2`.
+   */
+  sql: string;
+}
+
+export interface SqlExecuteResponse {
+  /**
+   * @format int64
+   * @min 0
+   */
+  rowsAffected: number;
+  success: boolean;
+}
+
+/**
+ * Typed positional SQL parameter. Parameters are bound in array order:
+ * first item = `$1`, second item = `$2`, etc.
+ */
+export type SqlParam = ColumnType & {
+  value: any;
+};
+
+export interface SqlQueryOneResponse {
+  row: any;
+  success: boolean;
+}
+
+export interface SqlQueryRequest {
+  params?: SqlParam[];
+  resultSchema: SqlResultColumn[];
+  /**
+   * SQL string using native Postgres / SQLx positional placeholders.
+   * Example: `SELECT * FROM customers WHERE email = $1`.
+   */
+  sql: string;
+}
+
+export interface SqlQueryResponse {
+  /** @min 0 */
+  rowCount: number;
+  rows: any[];
+  success: boolean;
+}
+
+export interface SqlRawQueryRequest {
+  params?: SqlParam[];
+  /**
+   * SQL string using native Postgres / SQLx positional placeholders.
+   * Example: `SELECT * FROM customers WHERE email = $1`.
+   */
+  sql: string;
+}
+
+/** Expected column for typed SQL query responses. */
+export type SqlResultColumn = ColumnType & {
+  name: string;
+  nullable?: boolean;
+};
+
 /** Union of all step types, discriminated by stepType field */
 export type Step =
   | (FinishStep & {
@@ -3669,6 +3757,18 @@ export interface VisibleWhen {
   notEquals?: any;
 }
 
+export interface WaitForSignalActionConfig {
+  /** Optional non-authoritative display/query context. */
+  context?: Partial<Record<string, MappingValue>>;
+  /**
+   * Platform-level correlation fields used by virtual workflow_runtime
+   * report sources, e.g. {"case_id": {"valueType": "reference", "value": "data.case_id"}}.
+   */
+  correlation?: Partial<Record<string, MappingValue>>;
+  /** Stable action key for report filtering, e.g. case_review_decision. */
+  key?: string | null;
+}
+
 /**
  * Wait for an external signal before continuing execution.
  *
@@ -3715,6 +3815,12 @@ export interface VisibleWhen {
  * ```
  */
 export interface WaitForSignalStep {
+  /**
+   * Optional platform action metadata exposed to reports and other runtime
+   * action consumers. Correlation and context values are evaluated when the
+   * workflow reaches the wait step.
+   */
+  action?: null | WaitForSignalActionConfig;
   /** When true, execution pauses before this step in debug mode */
   breakpoint?: boolean | null;
   /** Unique step identifier */
@@ -3796,7 +3902,7 @@ export interface WhileStep {
 export interface Workflow {
   /**
    * Disable durability for this workflow when `false`. Compiled code contains
-   * no checkpoint reads/writes, no `sdk.durable_sleep`, and no breakpoint
+   * no checkpoint reads/writes, no `sdk.sleep`, and no breakpoint
    * checkpoints. When this field is `Some(false)`, the setting propagates
    * into `ExecutionGraph.durable` (via `parse_workflow`) and then to every
    * nested subgraph and embedded child workflow at codegen time. Default: durable.
@@ -5812,6 +5918,110 @@ export class Api<
       }),
 
     /**
+     * No description
+     *
+     * @tags object-model
+     * @name ExecuteSql
+     * @summary Execute a positional SQL command and return rows affected.
+     * @request POST:/api/runtime/object-model/sql/execute
+     */
+    executeSql: (
+      data: SqlExecuteRequest,
+      query?: {
+        /** Optional connection ID for database selection */
+        connectionId?: string;
+      },
+      params: RequestParams = {},
+    ) =>
+      this.request<SqlExecuteResponse, any>({
+        path: `/api/runtime/object-model/sql/execute`,
+        method: "POST",
+        query: query,
+        body: data,
+        type: ContentType.Json,
+        format: "json",
+        ...params,
+      }),
+
+    /**
+     * @description SQL uses native Postgres / SQLx placeholders (`$1`, `$2`, ...). Parameters are bound in array order and result rows are validated against `resultSchema`.
+     *
+     * @tags object-model
+     * @name QuerySql
+     * @summary Execute a typed positional SQL query.
+     * @request POST:/api/runtime/object-model/sql/query
+     */
+    querySql: (
+      data: SqlQueryRequest,
+      query?: {
+        /** Optional connection ID for database selection */
+        connectionId?: string;
+      },
+      params: RequestParams = {},
+    ) =>
+      this.request<SqlQueryResponse, any>({
+        path: `/api/runtime/object-model/sql/query`,
+        method: "POST",
+        query: query,
+        body: data,
+        type: ContentType.Json,
+        format: "json",
+        ...params,
+      }),
+
+    /**
+     * No description
+     *
+     * @tags object-model
+     * @name QuerySqlOne
+     * @summary Execute a typed positional SQL query that must return exactly one row.
+     * @request POST:/api/runtime/object-model/sql/query-one
+     */
+    querySqlOne: (
+      data: SqlQueryRequest,
+      query?: {
+        /** Optional connection ID for database selection */
+        connectionId?: string;
+      },
+      params: RequestParams = {},
+    ) =>
+      this.request<SqlQueryOneResponse, any>({
+        path: `/api/runtime/object-model/sql/query-one`,
+        method: "POST",
+        query: query,
+        body: data,
+        type: ContentType.Json,
+        format: "json",
+        ...params,
+      }),
+
+    /**
+     * No description
+     *
+     * @tags object-model
+     * @name QuerySqlRaw
+     * @summary Execute a positional SQL query and return raw rows without result-schema validation.
+     * @request POST:/api/runtime/object-model/sql/query-raw
+     */
+    querySqlRaw: (
+      data: SqlRawQueryRequest,
+      query?: {
+        /** Optional connection ID for database selection */
+        connectionId?: string;
+      },
+      params: RequestParams = {},
+    ) =>
+      this.request<SqlQueryResponse, any>({
+        path: `/api/runtime/object-model/sql/query-raw`,
+        method: "POST",
+        query: query,
+        body: data,
+        type: ContentType.Json,
+        format: "json",
+        ...params,
+      }),
+
+    /**
      * @description Returns real-time rate limit state from Redis combined with configuration from PostgreSQL for all connections. Optionally includes aggregated period stats based on the interval parameter.
      *
      * @tags rate-limits-controller
@@ -5915,7 +6125,7 @@ export class Api<
       }),
 
     /**
-     * @description Returns a list of all available step types with full JSON Schema for each. This is generated dynamically from the inventory-registered step metadata.
+     * @description Returns a list of all available step types with full JSON Schema for each. This is generated dynamically from static step metadata.
      *
      * @tags Specifications
      * @name ListStepTypes
@@ -6232,15 +6442,18 @@ export class Api<
       }),
 
     /**
+     * No description
+     *
      * @tags workflow-controller
      * @name ReplayInstanceHandler
      * @summary Replay a workflow instance with the same inputs
      * @request POST:/api/runtime/workflows/instances/{instance_id}/replay
      */
     replayInstanceHandler: (instanceId: string, params: RequestParams = {}) =>
-      this.request<any, ErrorResponse>({
+      this.request<ExecuteWorkflowResponse, ErrorResponse>({
         path: `/api/runtime/workflows/instances/${instanceId}/replay`,
         method: "POST",
+        format: "json",
         ...params,
       }),
 

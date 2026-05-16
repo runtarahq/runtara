@@ -183,7 +183,9 @@ pub const DISPATCHER_WORKFLOW_ID: &str = "__agent_dispatcher__";
 /// v29: Add SharePoint integration agent (file CRUD via Microsoft Graph) and percent-encode the search query path
 /// v30: Add sharepoint_search_global capability using Microsoft Search API for app-only-friendly search
 /// v31: Make sharepoint_search query optional (empty = list everything via Graph's q='' semantic)
-pub const DISPATCHER_VERSION: u32 = 31;
+/// v32: Add azure_blob_storage integration agent (Shared Key auth + container/blob CRUD)
+/// v33: Add storage_generate_presigned_url capability to s3_storage and azure_blob_storage
+pub const DISPATCHER_VERSION: u32 = 33;
 
 /// Service for managing the agent dispatcher binary
 pub struct DispatcherService {

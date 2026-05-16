@@ -321,6 +321,98 @@ fn headers_to_map(headers: &[(String, String)]) -> HashMap<String, String> {
     headers.iter().cloned().collect()
 }
 
+/// Result of a [`presign`] call.
+pub struct PresignResult {
+    pub url: String,
+    pub expires_in_seconds: u64,
+}
+
+/// Ask the runtara proxy to generate a presigned URL for a connection.
+///
+/// This calls `POST /api/internal/presign` (derived from `RUNTARA_HTTP_PROXY_URL`).
+/// The proxy looks up the connection's credentials, signs an absolute URL
+/// using the appropriate scheme (AWS SigV4 query string, Azure SAS, …), and
+/// returns it. The signed URL is intended to be returned to the workflow
+/// caller and consumed outside of the proxy.
+pub fn presign(
+    connection_id: &str,
+    method: &str,
+    path: &str,
+    expires_in_seconds: u64,
+    content_type: Option<&str>,
+) -> Result<PresignResult, HttpError> {
+    static PROXY_URL: OnceLock<Option<String>> = OnceLock::new();
+    let proxy_url = PROXY_URL
+        .get_or_init(|| std::env::var("RUNTARA_HTTP_PROXY_URL").ok())
+        .as_deref()
+        .ok_or_else(|| {
+            HttpError::Transport("RUNTARA_HTTP_PROXY_URL is not configured".to_string())
+        })?;
+
+    let presign_url = derive_presign_url(proxy_url);
+
+    let body = serde_json::json!({
+        "connection_id": connection_id,
+        "method": method,
+        "path": path,
+        "expires_in_seconds": expires_in_seconds,
+        "content_type": content_type,
+    });
+
+    let mut request = RequestBuilder::new("POST", &presign_url);
+    request.body = Some(Body::Json(body));
+    request
+        .headers
+        .push(("Content-Type".to_string(), "application/json".to_string()));
+
+    static TENANT_ID: OnceLock<Option<String>> = OnceLock::new();
+    if let Some(tenant_id) = TENANT_ID.get_or_init(|| std::env::var("RUNTARA_TENANT_ID").ok()) {
+        request
+            .headers
+            .push(("X-Org-Id".to_string(), tenant_id.clone()));
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    let response = native::execute(request)?;
+    #[cfg(all(target_family = "wasm", target_os = "wasi"))]
+    let response = wasi_backend::execute(request)?;
+    #[cfg(all(target_family = "wasm", not(target_os = "wasi")))]
+    let response = wasm_js_backend::execute(request)?;
+
+    if !(200..300).contains(&response.status) {
+        let body = String::from_utf8_lossy(&response.body).to_string();
+        return Err(HttpError::Status {
+            status: response.status,
+            body,
+        });
+    }
+
+    let parsed: serde_json::Value = serde_json::from_slice(&response.body)
+        .map_err(|e| HttpError::Transport(format!("Failed to parse presign response: {}", e)))?;
+
+    let url = parsed["url"]
+        .as_str()
+        .ok_or_else(|| HttpError::Transport("Presign response missing `url`".to_string()))?
+        .to_string();
+    let expires_in_seconds = parsed["expires_in_seconds"].as_u64().unwrap_or(0);
+
+    Ok(PresignResult {
+        url,
+        expires_in_seconds,
+    })
+}
+
+fn derive_presign_url(proxy_url: &str) -> String {
+    if let Some(stripped) = proxy_url.strip_suffix("/api/internal/proxy") {
+        format!("{}/api/internal/presign", stripped)
+    } else if let Some(stripped) = proxy_url.strip_suffix("/api/internal/proxy/") {
+        format!("{}/api/internal/presign", stripped)
+    } else {
+        // Fallback: append; assumes the configured URL points at the proxy root.
+        format!("{}/presign", proxy_url.trim_end_matches('/'))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

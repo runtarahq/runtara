@@ -9,7 +9,9 @@
 use axum::{extract::State, http::StatusCode, response::Json};
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
-use runtara_connections::{AwsSigningParams, ConnectionsFacade, RateLimitEventType};
+use runtara_connections::{
+    AwsSigningParams, AzureSigningParams, ConnectionsFacade, RateLimitEventType,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::HashMap;
@@ -89,6 +91,7 @@ pub async fn execute_proxy_request(
     let mut final_headers = request.headers.clone();
     let mut final_url = request.url.clone();
     let mut aws_signing: Option<AwsSigningParams> = None;
+    let mut azure_signing: Option<AzureSigningParams> = None;
 
     // ── Connection credential injection ──────────────────────────────────
     if let Some(ref connection_id) = request.connection_id {
@@ -164,6 +167,7 @@ pub async fn execute_proxy_request(
         }
 
         aws_signing = resolved.aws_signing;
+        azure_signing = resolved.azure_signing;
 
         // ── Pre-flight rate limit check ────────────────────────────────────
         // If adaptive rate limiting is enabled, check the token bucket before
@@ -271,6 +275,52 @@ pub async fn execute_proxy_request(
             &aws.service,
             aws.session_token.as_deref(),
         );
+    }
+
+    // ── Azure Storage Shared Key signing (if needed) ────────────────────
+    if let Some(ref azure) = azure_signing {
+        let parsed_url = url::Url::parse(&final_url).map_err(|e| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": format!("Invalid URL for Azure signing: {}", e)})),
+            )
+        })?;
+
+        // Rewrite a relative x-ms-copy-source header to an absolute URL on the
+        // same storage account before signing, so the canonical resource and the
+        // header value stay in sync.
+        let copy_source_key = final_headers
+            .keys()
+            .find(|k| k.eq_ignore_ascii_case("x-ms-copy-source"))
+            .cloned();
+        if let Some(key) = copy_source_key
+            && let Some(value) = final_headers.get(&key).cloned()
+            && value.starts_with('/')
+        {
+            let scheme = parsed_url.scheme();
+            let host = parsed_url.host_str().unwrap_or("");
+            let absolute = match parsed_url.port() {
+                Some(port) => format!("{}://{}:{}{}", scheme, host, port, value),
+                None => format!("{}://{}{}", scheme, host, value),
+            };
+            final_headers.insert(key, absolute);
+        }
+
+        let payload = body_bytes.as_deref().unwrap_or(b"");
+        runtara_connections::auth::azure_signing::sign_request_shared_key(
+            &method,
+            &parsed_url,
+            &mut final_headers,
+            payload,
+            &azure.account_name,
+            &azure.account_key,
+        )
+        .map_err(|e| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": format!("Azure Shared Key signing failed: {}", e)})),
+            )
+        })?;
     }
 
     let mut req_builder = client.request(reqwest_method, &final_url).timeout(timeout);

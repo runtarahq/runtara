@@ -3771,6 +3771,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "sqlx",
+ "testcontainers",
  "thiserror 2.0.17",
  "tokio",
  "tracing",
