@@ -7,7 +7,7 @@
 //! Mounted at `/api/internal/object-model/*` on the main runtara server.
 
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     response::Json,
 };
@@ -42,6 +42,8 @@ fn extract_tenant_id(headers: &axum::http::HeaderMap) -> Result<String, (StatusC
 
 #[derive(Debug, Deserialize)]
 pub struct InternalCreateInstanceRequest {
+    #[serde(rename = "connectionId", alias = "connection_id", default)]
+    pub connection_id: Option<String>,
     /// Schema name (required — workflows always know the schema name)
     pub schema_name: String,
     /// Properties to store
@@ -59,6 +61,8 @@ pub struct InternalCreateInstanceResponse {
 
 #[derive(Debug, Deserialize)]
 pub struct InternalQueryInstancesRequest {
+    #[serde(rename = "connectionId", alias = "connection_id", default)]
+    pub connection_id: Option<String>,
     pub schema_name: String,
     #[serde(default)]
     pub filters: HashMap<String, Value>,
@@ -106,6 +110,8 @@ pub struct InternalQueryInstancesResponse {
 
 #[derive(Debug, Deserialize)]
 pub struct InternalCheckExistsRequest {
+    #[serde(rename = "connectionId", alias = "connection_id", default)]
+    pub connection_id: Option<String>,
     pub schema_name: String,
     pub filters: HashMap<String, Value>,
 }
@@ -121,6 +127,8 @@ pub struct InternalCheckExistsResponse {
 
 #[derive(Debug, Deserialize)]
 pub struct InternalCreateIfNotExistsRequest {
+    #[serde(rename = "connectionId", alias = "connection_id", default)]
+    pub connection_id: Option<String>,
     pub schema_name: String,
     pub match_filters: HashMap<String, Value>,
     pub data: Value,
@@ -139,6 +147,8 @@ pub struct InternalCreateIfNotExistsResponse {
 
 #[derive(Debug, Deserialize)]
 pub struct InternalUpdateInstanceRequest {
+    #[serde(rename = "connectionId", alias = "connection_id", default)]
+    pub connection_id: Option<String>,
     pub data: Value,
 }
 
@@ -153,6 +163,8 @@ pub struct InternalUpdateInstanceResponse {
 
 #[derive(Debug, Deserialize)]
 pub struct InternalDeleteInstanceRequest {
+    #[serde(rename = "connectionId", alias = "connection_id", default)]
+    pub connection_id: Option<String>,
     pub schema_name: String,
     pub instance_id: String,
 }
@@ -183,6 +195,8 @@ pub enum InternalBulkValidationMode {
 
 #[derive(Debug, Deserialize)]
 pub struct InternalBulkCreateRequest {
+    #[serde(rename = "connectionId", alias = "connection_id", default)]
+    pub connection_id: Option<String>,
     pub schema_name: String,
 
     /// Object form — array of JSON objects, one per record.
@@ -251,6 +265,8 @@ pub struct InternalBulkUpdateByIdEntry {
 
 #[derive(Debug, Deserialize)]
 pub struct InternalBulkUpdateRequest {
+    #[serde(rename = "connectionId", alias = "connection_id", default)]
+    pub connection_id: Option<String>,
     pub schema_name: String,
     #[serde(flatten)]
     pub mode: InternalBulkUpdateMode,
@@ -266,6 +282,8 @@ pub struct InternalBulkUpdateResponse {
 
 #[derive(Debug, Deserialize)]
 pub struct InternalBulkDeleteRequest {
+    #[serde(rename = "connectionId", alias = "connection_id", default)]
+    pub connection_id: Option<String>,
     pub schema_name: String,
     #[serde(default)]
     pub ids: Option<Vec<String>>,
@@ -283,6 +301,8 @@ pub struct InternalBulkDeleteResponse {
 
 #[derive(Debug, Deserialize)]
 pub struct InternalAggregateRequest {
+    #[serde(rename = "connectionId", alias = "connection_id", default)]
+    pub connection_id: Option<String>,
     pub schema_name: String,
     #[serde(default)]
     pub condition: Option<crate::api::dto::object_model::Condition>,
@@ -325,6 +345,12 @@ pub struct InternalCreateSchemaResponse {
     pub error: Option<String>,
 }
 
+#[derive(Debug, Deserialize, Default)]
+pub struct InternalConnectionQuery {
+    #[serde(rename = "connectionId", alias = "connection_id", default)]
+    pub connection_id: Option<String>,
+}
+
 // ============================================================================
 // Handlers
 // ============================================================================
@@ -337,6 +363,7 @@ pub async fn create_instance(
 ) -> Result<(StatusCode, Json<InternalCreateInstanceResponse>), (StatusCode, Json<Value>)> {
     let tenant_id = extract_tenant_id(&headers)?;
     let service = InstanceService::new(state.manager.clone(), state.connections.clone());
+    let connection_id = request.connection_id.clone();
 
     let create_request = crate::api::dto::object_model::CreateInstanceRequest {
         schema_id: None,
@@ -345,7 +372,7 @@ pub async fn create_instance(
     };
 
     match service
-        .create_instance(create_request, &tenant_id, None)
+        .create_instance(create_request, &tenant_id, connection_id.as_deref())
         .await
     {
         Ok(instance_id) => Ok((
@@ -375,6 +402,7 @@ pub async fn query_instances(
 ) -> Result<(StatusCode, Json<InternalQueryInstancesResponse>), (StatusCode, Json<Value>)> {
     let tenant_id = extract_tenant_id(&headers)?;
     let service = InstanceService::new(state.manager.clone(), state.connections.clone());
+    let connection_id = request.connection_id.clone();
 
     // If there are simple filters but no condition, convert simple filters to a condition
     if request.condition.is_some() || request.filters.is_empty() {
@@ -390,7 +418,12 @@ pub async fn query_instances(
         };
 
         match service
-            .filter_instances_by_schema(&tenant_id, &request.schema_name, filter_request, None)
+            .filter_instances_by_schema(
+                &tenant_id,
+                &request.schema_name,
+                filter_request,
+                connection_id.as_deref(),
+            )
             .await
         {
             Ok((instances, total_count)) => {
@@ -432,7 +465,12 @@ pub async fn query_instances(
         };
 
         match service
-            .filter_instances_by_schema(&tenant_id, &request.schema_name, filter_request, None)
+            .filter_instances_by_schema(
+                &tenant_id,
+                &request.schema_name,
+                filter_request,
+                connection_id.as_deref(),
+            )
             .await
         {
             Ok((instances, total_count)) => {
@@ -470,6 +508,7 @@ pub async fn check_instance_exists(
 ) -> Result<(StatusCode, Json<InternalCheckExistsResponse>), (StatusCode, Json<Value>)> {
     let tenant_id = extract_tenant_id(&headers)?;
     let service = InstanceService::new(state.manager.clone(), state.connections.clone());
+    let connection_id = request.connection_id.clone();
 
     let condition = simple_filters_to_condition(&request.filters);
     let filter_request = FilterRequest {
@@ -483,7 +522,12 @@ pub async fn check_instance_exists(
     };
 
     match service
-        .filter_instances_by_schema(&tenant_id, &request.schema_name, filter_request, None)
+        .filter_instances_by_schema(
+            &tenant_id,
+            &request.schema_name,
+            filter_request,
+            connection_id.as_deref(),
+        )
         .await
     {
         Ok((instances, _)) => {
@@ -524,6 +568,7 @@ pub async fn create_if_not_exists(
 ) -> Result<(StatusCode, Json<InternalCreateIfNotExistsResponse>), (StatusCode, Json<Value>)> {
     let tenant_id = extract_tenant_id(&headers)?;
     let service = InstanceService::new(state.manager.clone(), state.connections.clone());
+    let connection_id = request.connection_id.clone();
 
     // First check existence
     let condition = simple_filters_to_condition(&request.match_filters);
@@ -538,7 +583,12 @@ pub async fn create_if_not_exists(
     };
 
     let exists_result = service
-        .filter_instances_by_schema(&tenant_id, &request.schema_name, filter_request, None)
+        .filter_instances_by_schema(
+            &tenant_id,
+            &request.schema_name,
+            filter_request,
+            connection_id.as_deref(),
+        )
         .await;
 
     match exists_result {
@@ -565,7 +615,7 @@ pub async fn create_if_not_exists(
                 };
 
                 match service
-                    .create_instance(create_request, &tenant_id, None)
+                    .create_instance(create_request, &tenant_id, connection_id.as_deref())
                     .await
                 {
                     Ok(instance_id) => Ok((
@@ -614,15 +664,19 @@ pub async fn update_instance(
     let tenant_id = extract_tenant_id(&headers)?;
 
     // Use the object store directly via the manager (by schema name, not schema ID)
-    let store =
-        crate::api::services::object_model::get_store(&state.manager, None, None, &tenant_id)
-            .await
-            .map_err(|e| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": e.to_string()})),
-                )
-            })?;
+    let store = crate::api::services::object_model::get_store(
+        &state.manager,
+        Some(state.connections.as_ref()),
+        request.connection_id.as_deref(),
+        &tenant_id,
+    )
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": e.to_string()})),
+        )
+    })?;
 
     match store
         .update_instance(&schema_name, &instance_id, request.data)
@@ -658,15 +712,19 @@ pub async fn delete_instance(
 ) -> Result<(StatusCode, Json<InternalDeleteInstanceResponse>), (StatusCode, Json<Value>)> {
     let tenant_id = extract_tenant_id(&headers)?;
 
-    let store =
-        crate::api::services::object_model::get_store(&state.manager, None, None, &tenant_id)
-            .await
-            .map_err(|e| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": e.to_string()})),
-                )
-            })?;
+    let store = crate::api::services::object_model::get_store(
+        &state.manager,
+        Some(state.connections.as_ref()),
+        request.connection_id.as_deref(),
+        &tenant_id,
+    )
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": e.to_string()})),
+        )
+    })?;
 
     match store
         .delete_instance(&request.schema_name, &request.instance_id)
@@ -697,15 +755,19 @@ pub async fn bulk_create_instances(
 ) -> Result<(StatusCode, Json<InternalBulkCreateResponse>), (StatusCode, Json<Value>)> {
     let tenant_id = extract_tenant_id(&headers)?;
 
-    let store =
-        crate::api::services::object_model::get_store(&state.manager, None, None, &tenant_id)
-            .await
-            .map_err(|e| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": e.to_string()})),
-                )
-            })?;
+    let store = crate::api::services::object_model::get_store(
+        &state.manager,
+        Some(state.connections.as_ref()),
+        request.connection_id.as_deref(),
+        &tenant_id,
+    )
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": e.to_string()})),
+        )
+    })?;
 
     use runtara_object_store::{
         BulkCreateOptions, ConflictMode as StoreConflictMode, ValidationMode,
@@ -862,15 +924,19 @@ pub async fn bulk_update_instances(
 ) -> Result<(StatusCode, Json<InternalBulkUpdateResponse>), (StatusCode, Json<Value>)> {
     let tenant_id = extract_tenant_id(&headers)?;
 
-    let store =
-        crate::api::services::object_model::get_store(&state.manager, None, None, &tenant_id)
-            .await
-            .map_err(|e| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": e.to_string()})),
-                )
-            })?;
+    let store = crate::api::services::object_model::get_store(
+        &state.manager,
+        Some(state.connections.as_ref()),
+        request.connection_id.as_deref(),
+        &tenant_id,
+    )
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": e.to_string()})),
+        )
+    })?;
 
     let result = match request.mode {
         InternalBulkUpdateMode::ByCondition {
@@ -918,15 +984,19 @@ pub async fn bulk_delete_instances(
 ) -> Result<(StatusCode, Json<InternalBulkDeleteResponse>), (StatusCode, Json<Value>)> {
     let tenant_id = extract_tenant_id(&headers)?;
 
-    let store =
-        crate::api::services::object_model::get_store(&state.manager, None, None, &tenant_id)
-            .await
-            .map_err(|e| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": e.to_string()})),
-                )
-            })?;
+    let store = crate::api::services::object_model::get_store(
+        &state.manager,
+        Some(state.connections.as_ref()),
+        request.connection_id.as_deref(),
+        &tenant_id,
+    )
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": e.to_string()})),
+        )
+    })?;
 
     let condition = match (request.ids, request.condition) {
         (Some(ids), _) if !ids.is_empty() => {
@@ -977,6 +1047,7 @@ pub async fn aggregate_instances(
 ) -> Result<(StatusCode, Json<InternalAggregateResponse>), (StatusCode, Json<Value>)> {
     let tenant_id = extract_tenant_id(&headers)?;
     let service = InstanceService::new(state.manager.clone(), state.connections.clone());
+    let connection_id = request.connection_id.clone();
 
     let api_req = crate::api::dto::object_model::AggregateRequest {
         condition: request.condition,
@@ -988,7 +1059,12 @@ pub async fn aggregate_instances(
     };
 
     match service
-        .aggregate_instances_by_schema(&tenant_id, &request.schema_name, api_req, None)
+        .aggregate_instances_by_schema(
+            &tenant_id,
+            &request.schema_name,
+            api_req,
+            connection_id.as_deref(),
+        )
         .await
     {
         Ok(result) => Ok((
@@ -1019,11 +1095,15 @@ pub async fn get_schema(
     headers: axum::http::HeaderMap,
     State(state): State<Arc<ObjectModelState>>,
     Path(name): Path<String>,
+    Query(query): Query<InternalConnectionQuery>,
 ) -> Result<(StatusCode, Json<InternalGetSchemaResponse>), (StatusCode, Json<Value>)> {
     let tenant_id = extract_tenant_id(&headers)?;
     let service = SchemaService::new(state.manager.clone(), state.connections.clone());
 
-    match service.get_schema_by_name(&name, &tenant_id, None).await {
+    match service
+        .get_schema_by_name(&name, &tenant_id, query.connection_id.as_deref())
+        .await
+    {
         Ok(schema) => Ok((
             StatusCode::OK,
             Json(InternalGetSchemaResponse {
@@ -1055,12 +1135,16 @@ pub async fn get_schema(
 pub async fn create_schema(
     headers: axum::http::HeaderMap,
     State(state): State<Arc<ObjectModelState>>,
+    Query(query): Query<InternalConnectionQuery>,
     Json(request): Json<CreateSchemaRequest>,
 ) -> Result<(StatusCode, Json<InternalCreateSchemaResponse>), (StatusCode, Json<Value>)> {
     let tenant_id = extract_tenant_id(&headers)?;
     let service = SchemaService::new(state.manager.clone(), state.connections.clone());
 
-    match service.create_schema(request, &tenant_id, None).await {
+    match service
+        .create_schema(request, &tenant_id, query.connection_id.as_deref())
+        .await
+    {
         Ok(schema_id) => Ok((
             StatusCode::CREATED,
             Json(InternalCreateSchemaResponse {

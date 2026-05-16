@@ -801,7 +801,8 @@ impl ReportService {
         let label_field = option_string(options_config, "labelField")
             .unwrap_or(&field)
             .to_string();
-        let connection_id = option_string(options_config, "connectionId");
+        let connection_id = option_string(options_config, "connectionId")
+            .or_else(|| infer_filter_option_connection_id(&report.definition, filter));
         let resolved_filters = resolve_filters(&report.definition, &request.filters);
         let condition_filter_defs = report_filter_definitions_by_id(&report.definition.filters);
         let mut conditions = Vec::new();
@@ -1189,7 +1190,7 @@ impl ReportService {
         }
         let report_condition_filter_defs = report_filter_definitions_by_id(&definition.filters);
         for filter in &definition.filters {
-            self.validate_filter_options(tenant_id, filter, &filter_ids)
+            self.validate_filter_options(tenant_id, definition, filter, &filter_ids)
                 .await?;
             validate_filter_option_condition_filter_refs(filter, &report_condition_filter_defs)?;
         }
@@ -2028,6 +2029,7 @@ impl ReportService {
     async fn validate_filter_options(
         &self,
         tenant_id: &str,
+        definition: &ReportDefinition,
         filter: &ReportFilterDefinition,
         filter_ids: &HashSet<String>,
     ) -> Result<(), ReportServiceError> {
@@ -2058,7 +2060,8 @@ impl ReportService {
                 ))
             })?;
         let label_field = option_string(options, "labelField").unwrap_or(value_field);
-        let connection_id = option_string(options, "connectionId");
+        let connection_id = option_string(options, "connectionId")
+            .or_else(|| infer_filter_option_connection_id(definition, filter));
         let schema = self
             .schema_service
             .get_schema_by_name(schema_name, tenant_id, connection_id)
@@ -7153,6 +7156,42 @@ fn filter_option_label(value: &Value) -> String {
     }
 }
 
+fn infer_filter_option_connection_id<'a>(
+    definition: &'a ReportDefinition,
+    filter: &ReportFilterDefinition,
+) -> Option<&'a str> {
+    let target = match filter.applies_to.as_slice() {
+        [target] => target,
+        _ => return None,
+    };
+    let block_id = target.block_id.as_deref()?;
+    let block = definition
+        .blocks
+        .iter()
+        .find(|candidate| candidate.id == block_id)?;
+
+    if let Some(dataset_query) = &block.dataset {
+        return definition
+            .datasets
+            .iter()
+            .find(|dataset| dataset.id == dataset_query.id)
+            .and_then(|dataset| dataset.source.connection_id.as_deref())
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+    }
+
+    if block.source.kind == ReportSourceKind::ObjectModel {
+        return block
+            .source
+            .connection_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+    }
+
+    None
+}
+
 fn option_string<'a>(options: &'a serde_json::Map<String, Value>, key: &str) -> Option<&'a str> {
     options
         .get(key)
@@ -10685,6 +10724,83 @@ mod tests {
             format: None,
         });
         block
+    }
+
+    fn test_filter_for_block(filter_id: &str, block_id: &str) -> ReportFilterDefinition {
+        ReportFilterDefinition {
+            id: filter_id.to_string(),
+            label: filter_id.to_string(),
+            filter_type: ReportFilterType::Select,
+            default: None,
+            required: false,
+            strict_when_referenced: false,
+            options: None,
+            applies_to: vec![ReportFilterTarget {
+                filter_id: None,
+                block_id: Some(block_id.to_string()),
+                field: "status".to_string(),
+                op: "eq".to_string(),
+            }],
+        }
+    }
+
+    fn test_definition(
+        filters: Vec<ReportFilterDefinition>,
+        datasets: Vec<ReportDatasetDefinition>,
+        blocks: Vec<ReportBlockDefinition>,
+    ) -> ReportDefinition {
+        ReportDefinition {
+            definition_version: 1,
+            layout: vec![],
+            views: vec![],
+            filters,
+            datasets,
+            blocks,
+        }
+    }
+
+    #[test]
+    fn infer_filter_option_connection_id_uses_target_block_source() {
+        let mut block = test_block("orders");
+        block.source.connection_id = Some("conn_orders".to_string());
+        let filter = test_filter_for_block("status_filter", "orders");
+        let definition = test_definition(vec![filter.clone()], vec![], vec![block]);
+
+        assert_eq!(
+            infer_filter_option_connection_id(&definition, &filter),
+            Some("conn_orders")
+        );
+    }
+
+    #[test]
+    fn infer_filter_option_connection_id_uses_target_dataset_source() {
+        let mut block = test_block("orders");
+        block.dataset = Some(ReportBlockDatasetQuery {
+            id: "orders_dataset".to_string(),
+            dimensions: vec![],
+            measures: vec![],
+            order_by: vec![],
+            dataset_filters: vec![],
+            limit: None,
+        });
+        let dataset = ReportDatasetDefinition {
+            id: "orders_dataset".to_string(),
+            label: "Orders".to_string(),
+            source: ReportDatasetSource {
+                schema: "Order".to_string(),
+                connection_id: Some("conn_dataset".to_string()),
+            },
+            time_dimension: None,
+            dimensions: vec![],
+            measures: vec![],
+        };
+        let filter = test_filter_for_block("status_filter", "orders");
+        let definition = test_definition(vec![filter.clone()], vec![dataset], vec![block]);
+
+        assert_eq!(
+            infer_filter_option_connection_id(&definition, &filter),
+            Some("conn_dataset")
+        );
     }
 
     fn table_column(field: &str) -> ReportTableColumn {

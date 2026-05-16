@@ -71,8 +71,12 @@ function buildSourceBase(
   | 'limit'
   | 'join'
   | 'condition'
+  | 'connectionId'
 > {
   const extras = {
+    ...(block.sourceConnectionId
+      ? { connectionId: block.sourceConnectionId }
+      : {}),
     ...(block.sourceJoins && block.sourceJoins.length > 0
       ? { join: block.sourceJoins }
       : {}),
@@ -497,16 +501,34 @@ function buildLayout(state: WizardState): ReportLayoutNode[] {
   });
 }
 
+function sourceSchemaForBlock(
+  block: WizardBlock | undefined,
+  datasetsById: Map<string, ReportDatasetDefinition>
+): string | undefined {
+  if (!block) return undefined;
+  if (block.dataset) {
+    return datasetsById.get(block.dataset.id)?.source.schema;
+  }
+  return block.schema;
+}
+
 function buildFilterOptions(
   filter: WizardFilter,
-  blocks: WizardBlock[]
+  blocks: WizardBlock[],
+  datasetsById: Map<string, ReportDatasetDefinition>
 ): ReportFilterOptionsConfig | undefined {
   if (!filterUsesOptions(filter.type)) return undefined;
   if (filter.optionsSource === 'object_model') {
     const schema =
       filter.optionsSchema ||
-      blocks.find((block) => block.id === filter.target)?.schema ||
-      blocks.find((block) => block.schema)?.schema;
+      sourceSchemaForBlock(
+        blocks.find((block) => block.id === filter.target),
+        datasetsById
+      ) ||
+      sourceSchemaForBlock(
+        blocks.find((block) => sourceSchemaForBlock(block, datasetsById)),
+        datasetsById
+      );
     const valueField =
       filter.optionsValueField || filter.optionsField || filter.field;
     const labelField =
@@ -514,6 +536,12 @@ function buildFilterOptions(
     return {
       source: 'object_model',
       ...(schema ? { schema } : {}),
+      // Only preserve an explicit options lookup override here. Otherwise the
+      // backend resolves Object Model option lookups through the target block /
+      // dataset source connection.
+      ...(filter.optionsConnectionId
+        ? { connectionId: filter.optionsConnectionId }
+        : {}),
       field: valueField,
       valueField,
       labelField,
@@ -550,7 +578,8 @@ function parseStaticOptions(raw: string) {
 
 function buildFilterDefinition(
   filter: WizardFilter,
-  blocks: WizardBlock[]
+  blocks: WizardBlock[],
+  datasetsById: Map<string, ReportDatasetDefinition>
 ): ReportFilterDefinition {
   const appliesTo =
     filter.target === WIZARD_FILTER_TARGET_CUSTOM
@@ -574,7 +603,7 @@ function buildFilterDefinition(
                 : [];
             })();
 
-  const options = buildFilterOptions(filter, blocks);
+  const options = buildFilterOptions(filter, blocks, datasetsById);
 
   return {
     id: filter.id,
@@ -613,7 +642,8 @@ function defaultOperatorFor(type: WizardFilter['type']): string {
 export function wizardStateToDefinition(
   state: WizardState,
   schemaFieldsByName: Record<string, string[]>,
-  existing?: ReportDefinition
+  existing?: ReportDefinition,
+  resolveSchemaFields?: (block: WizardBlock) => string[]
 ): ReportDefinition {
   const datasetsById = new Map(
     state.datasets.map((dataset) => [dataset.id, dataset])
@@ -621,13 +651,15 @@ export function wizardStateToDefinition(
   const blocks = state.blocks.map((block) =>
     buildBlockDefinition(
       block,
-      schemaFieldsByName[block.schema ?? ''] ?? [],
+      resolveSchemaFields?.(block) ??
+        schemaFieldsByName[block.schema ?? ''] ??
+        [],
       datasetsById
     )
   );
   const layout = buildLayout(state);
   const filters = state.filters.map((filter) =>
-    buildFilterDefinition(filter, state.blocks)
+    buildFilterDefinition(filter, state.blocks, datasetsById)
   );
 
   return {
@@ -984,6 +1016,9 @@ function blockDefinitionToWizard(
     ...(source?.entity ? { sourceEntity: source.entity } : {}),
     ...(source?.workflowId ? { workflowId: source.workflowId } : {}),
     ...(source?.instanceId ? { instanceId: source.instanceId } : {}),
+    ...(source?.connectionId
+      ? { sourceConnectionId: source.connectionId }
+      : {}),
     ...(source?.interval ? { sourceInterval: source.interval } : {}),
     ...(source?.granularity ? { sourceGranularity: source.granularity } : {}),
     ...(source?.orderBy && source.orderBy.length > 0
@@ -1160,6 +1195,7 @@ export function definitionToWizardState(
       staticOptions,
       optionsField: opts?.field || opts?.valueField,
       optionsSchema: opts?.schema,
+      optionsConnectionId: opts?.connectionId,
       optionsValueField: opts?.valueField || opts?.field,
       optionsLabelField: opts?.labelField || opts?.valueField || opts?.field,
       dependsOn: opts?.dependsOn,

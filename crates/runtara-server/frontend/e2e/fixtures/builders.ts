@@ -36,6 +36,17 @@ export function buildConnection(
   } as ConnectionDto;
 }
 
+export function buildObjectModelConnection(
+  overrides: DeepPartial<ConnectionDto> = {}
+): ConnectionDto {
+  return buildConnection({
+    title: 'Object Model Postgres',
+    integrationId: 'postgres',
+    defaultFor: ['object_model'],
+    ...overrides,
+  });
+}
+
 export function buildConnectionType(
   overrides: DeepPartial<ConnectionTypeDto> = {}
 ): ConnectionTypeDto {

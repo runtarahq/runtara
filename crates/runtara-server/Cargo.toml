@@ -143,3 +143,5 @@ serde_json = "1.0"
 wiremock = "0.6"
 tokio = { version = "1", features = ["full", "test-util"] }
 rsa = { version = "0.9", features = ["sha2"] }
+testcontainers = "0.27"
+testcontainers-modules = { version = "0.15", features = ["postgres"] }

@@ -81,10 +81,12 @@ AddRowButton.displayName = 'AddRowButton';
 
 interface ObjectInstanceDtosTableProps {
   objectSchemaDto: Schema;
+  connectionId?: string | null;
 }
 
 export function ObjectInstanceDtosTable({
   objectSchemaDto,
+  connectionId,
 }: ObjectInstanceDtosTableProps) {
   const [isFilterOpen, setIsFilterOpen] = useState(false);
   const [filterCondition, setFilterCondition] = useState<Condition | null>(
@@ -130,6 +132,7 @@ export function ObjectInstanceDtosTable({
   const { data, isLoading, isError, error } = useObjectInstanceDtos(
     objectSchemaDto.id,
     objectSchemaDto.name || undefined,
+    connectionId,
     filterCondition,
     page,
     pageSize,
@@ -195,9 +198,9 @@ export function ObjectInstanceDtosTable({
 
   const [showImportDialog, setShowImportDialog] = useState(false);
 
-  const bulkDeleteMutation = useBulkDeleteObjectInstances();
-  const bulkUpdateMutation = useBulkUpdateObjectInstances();
-  const bulkCreateMutation = useBulkCreateObjectInstances();
+  const bulkDeleteMutation = useBulkDeleteObjectInstances(connectionId);
+  const bulkUpdateMutation = useBulkUpdateObjectInstances(connectionId);
+  const bulkCreateMutation = useBulkCreateObjectInstances(connectionId);
 
   const handleBulkInsert = useCallback(
     async (
@@ -234,9 +237,9 @@ export function ObjectInstanceDtosTable({
     },
     [bulkCreateMutation, objectSchemaDto.id]
   );
-  const updateRecord = useUpdateObjectInstanceDto();
-  const createRecord = useCreateObjectInstanceDto();
-  const exportCsvMutation = useExportCsv();
+  const updateRecord = useUpdateObjectInstanceDto(connectionId);
+  const createRecord = useCreateObjectInstanceDto(connectionId);
+  const exportCsvMutation = useExportCsv(connectionId);
 
   const handleExportCsv = useCallback(async () => {
     if (!objectSchemaDto.name) {
@@ -771,6 +774,7 @@ export function ObjectInstanceDtosTable({
         open={showImportDialog}
         onOpenChange={setShowImportDialog}
         objectSchemaDto={objectSchemaDto}
+        connectionId={connectionId}
       />
     </div>
   );

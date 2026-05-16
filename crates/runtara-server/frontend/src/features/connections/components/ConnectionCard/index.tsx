@@ -57,6 +57,9 @@ export function ConnectionCard({
       </span>
     );
   }
+  if (connection.defaultFor?.length) {
+    metadata.push(`Default for ${connection.defaultFor.join(', ')}`);
+  }
   if (connectionType?.category) {
     metadata.push(connectionType.category);
   }

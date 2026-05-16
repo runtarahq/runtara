@@ -1247,6 +1247,8 @@ export interface ConnectionCategoryDto {
 export interface ConnectionDto {
   connectionSubtype?: string | null;
   createdAt: string;
+  /** Agent/operator ids this connection is configured as the default for */
+  defaultFor?: string[];
   id: string;
   /** Connection type identifier that maps to a connection schema (e.g., shopify_access_token, bearer, sftp) */
   integrationId?: string | null;
@@ -1358,6 +1360,8 @@ export interface CreateBucketResponse {
 export interface CreateConnectionRequest {
   connectionParameters?: any;
   connectionSubtype?: string | null;
+  /** Agent/operator ids this connection should be the default for */
+  defaultFor?: string[] | null;
   /** Connection type identifier that maps to a connection schema (e.g., shopify_access_token, bearer, sftp) */
   integrationId?: string | null;
   isDefaultFileStorage?: boolean | null;
@@ -3569,6 +3573,8 @@ export interface TestAgentResponse {
 export interface UpdateConnectionRequest {
   connectionParameters?: any;
   connectionSubtype?: string | null;
+  /** Agent/operator ids this connection should be the default for */
+  defaultFor?: string[] | null;
   /** Connection type identifier that maps to a connection schema (e.g., shopify_access_token, bearer, sftp) */
   integrationId?: string | null;
   isDefaultFileStorage?: boolean | null;

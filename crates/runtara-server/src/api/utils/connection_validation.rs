@@ -99,6 +99,10 @@ fn integration_ids_for_agent(agent_id: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
+fn agent_requires_connection(agent_id: &str) -> bool {
+    agent_id.eq_ignore_ascii_case("object_model")
+}
+
 /// Render up to 5 candidate connections as a human-readable list.
 fn format_candidates(candidates: &[&ConnectionRef]) -> String {
     const MAX: usize = 5;
@@ -129,6 +133,27 @@ fn validate_graph_connections(
     for step in graph.steps.values() {
         match step {
             Step::Agent(agent_step) => {
+                if agent_requires_connection(&agent_step.agent_id)
+                    && agent_step
+                        .connection_id
+                        .as_ref()
+                        .map(|conn_id| conn_id.trim().is_empty())
+                        .unwrap_or(true)
+                {
+                    issues.push(
+                        ValidationIssue::error(
+                            IssueCategory::MissingConnection,
+                            &agent_step.id,
+                            format!(
+                                "Agent '{}' requires a connection for step '{}'",
+                                agent_step.agent_id, agent_step.id
+                            ),
+                        )
+                        .with_field("connection_id"),
+                    );
+                    continue;
+                }
+
                 if let Some(ref conn_id) = agent_step.connection_id
                     && !conn_id.is_empty()
                     && !existing_connections.contains(conn_id)

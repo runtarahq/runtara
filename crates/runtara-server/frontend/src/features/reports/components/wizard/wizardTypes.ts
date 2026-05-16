@@ -194,6 +194,8 @@ export interface WizardBlock {
   workflowId?: string;
   /** Optional workflow runtime source instance id. */
   instanceId?: string;
+  /** Explicit Object Model connection for this block source. */
+  sourceConnectionId?: string | null;
   /** Optional system source interval. */
   sourceInterval?: string;
   /** Optional system source granularity. */
@@ -269,6 +271,7 @@ export interface WizardFilter {
   staticOptions?: string;
   optionsField?: string;
   optionsSchema?: string;
+  optionsConnectionId?: string | null;
   optionsValueField?: string;
   optionsLabelField?: string;
   dependsOn?: string[];

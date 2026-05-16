@@ -748,6 +748,32 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
 
     println!("✓ Object model database connected successfully");
 
+    match connections_facade
+        .ensure_default_connection(
+            &tenant_id,
+            "object_model",
+            format!("Default Object Model Database ({})", tenant_id),
+            "postgres".to_string(),
+            serde_json::json!({ "database_url": object_model_database_url }),
+        )
+        .await
+    {
+        Ok(connection_id) => {
+            tracing::info!(
+                tenant_id = %tenant_id,
+                connection_id = %connection_id,
+                "Default object_model connection is configured"
+            );
+        }
+        Err(error) => {
+            tracing::warn!(
+                tenant_id = %tenant_id,
+                error = ?error,
+                "Failed to auto-populate default object_model connection"
+            );
+        }
+    }
+
     // NOTE: State sync with runtara happens after RuntimeClient is initialized (below)
 
     // NOTE: Compilation records are now preserved across restarts.

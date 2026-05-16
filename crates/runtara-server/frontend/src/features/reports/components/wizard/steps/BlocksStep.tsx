@@ -21,7 +21,7 @@ import {
   SelectValue,
 } from '@/shared/components/ui/select';
 import { Textarea } from '@/shared/components/ui/textarea';
-import { Schema } from '@/generated/RuntaraRuntimeApi';
+import { ConnectionDto, Schema } from '@/generated/RuntaraRuntimeApi';
 import { Checkbox } from '@/shared/components/ui/checkbox';
 import {
   ReportBlockResult,
@@ -61,6 +61,11 @@ import {
   makeActionFieldKey,
   makeGridId,
 } from '../wizardTypes';
+import {
+  SchemasByConnectionId,
+  fieldsOfSchema,
+  schemasForConnection,
+} from '../schemaConnections';
 import { humanizeFieldName, slugify } from '../../../utils';
 import { BlockPreview } from './BlockPreview';
 import { BlockDatasetQueryEditor } from './BlockDatasetQueryEditor';
@@ -72,22 +77,13 @@ import {
   createDefaultInteractionButton,
   createDefaultWorkflowAction,
 } from './tableActionEditors';
-
-function fieldsOfSchema(
-  schemas: Schema[],
-  schemaName: string | undefined
-): string[] {
-  if (!schemaName) return [];
-  return (
-    schemas
-      .find((schema) => schema.name === schemaName)
-      ?.columns.map((column) => column.name) ?? []
-  );
-}
+import { ObjectModelConnectionSelect } from './ObjectModelConnectionSelect';
 
 function fieldsForWizardSource(
   schemas: Schema[],
-  block: WizardBlock
+  block: WizardBlock,
+  schemasByConnectionId?: SchemasByConnectionId,
+  defaultObjectModelConnectionId?: string | null
 ): string[] {
   if (block.sourceKind === 'workflow_runtime') {
     return (
@@ -101,10 +97,22 @@ function fieldsForWizardSource(
       SYSTEM_FIELDS.runtime_system_snapshot
     );
   }
-  const baseFields = fieldsOfSchema(schemas, block.schema);
+  const blockSchemas = schemasForConnection(
+    schemas,
+    schemasByConnectionId,
+    block.sourceConnectionId,
+    defaultObjectModelConnectionId
+  );
+  const baseFields = fieldsOfSchema(blockSchemas, block.schema);
   const joinFields = (block.sourceJoins ?? []).flatMap((join) => {
     const alias = joinAlias(join);
-    return fieldsOfSchema(schemas, join.schema).map(
+    const joinSchemas = schemasForConnection(
+      schemas,
+      schemasByConnectionId,
+      join.connectionId,
+      defaultObjectModelConnectionId
+    );
+    return fieldsOfSchema(joinSchemas, join.schema).map(
       (field) => `${alias}.${field}`
     );
   });
@@ -119,9 +127,12 @@ interface BlocksStepProps {
   grids: WizardGrid[];
   blocks: WizardBlock[];
   schemas: Schema[];
+  schemasByConnectionId?: SchemasByConnectionId;
   defaultSchema?: string;
   datasets: ReportDatasetDefinition[];
   filters: WizardFilter[];
+  objectModelConnections: ConnectionDto[];
+  defaultObjectModelConnectionId?: string | null;
   blockResults?: Record<string, ReportBlockResult>;
   /** When false, all editing affordances are hidden; layout still renders. */
   editing?: boolean;
@@ -356,9 +367,12 @@ export function BlocksStep({
   grids,
   blocks,
   schemas,
+  schemasByConnectionId,
   defaultSchema,
   datasets,
   filters,
+  objectModelConnections,
+  defaultObjectModelConnectionId,
   blockResults,
   editing = true,
   onGridsChange,
@@ -547,8 +561,11 @@ export function BlocksStep({
             gridCount={grids.length}
             blocks={gridBlocks}
             schemas={schemas}
+            schemasByConnectionId={schemasByConnectionId}
             datasets={datasets}
             filters={filters}
+            objectModelConnections={objectModelConnections}
+            defaultObjectModelConnectionId={defaultObjectModelConnectionId}
             blockResults={blockResults}
             editing={editing}
             draggedId={draggedId}
@@ -607,8 +624,11 @@ function GridSection({
   gridCount,
   blocks,
   schemas,
+  schemasByConnectionId,
   datasets,
   filters,
+  objectModelConnections,
+  defaultObjectModelConnectionId,
   blockResults,
   editing,
   draggedId,
@@ -637,8 +657,11 @@ function GridSection({
   gridCount: number;
   blocks: WizardBlock[];
   schemas: Schema[];
+  schemasByConnectionId?: SchemasByConnectionId;
   datasets: ReportDatasetDefinition[];
   filters: WizardFilter[];
+  objectModelConnections: ConnectionDto[];
+  defaultObjectModelConnectionId?: string | null;
   blockResults?: Record<string, ReportBlockResult>;
   editing: boolean;
   draggedId: string | null;
@@ -905,8 +928,13 @@ function GridSection({
                     key={block.id}
                     block={block}
                     schemas={schemas}
+                    schemasByConnectionId={schemasByConnectionId}
                     datasets={datasets}
                     filters={filters}
+                    objectModelConnections={objectModelConnections}
+                    defaultObjectModelConnectionId={
+                      defaultObjectModelConnectionId
+                    }
                     result={blockResults?.[block.id]}
                     editing={editing}
                     open={editing && openBlockId === block.id}
@@ -930,8 +958,11 @@ function GridSection({
 function BlockCard({
   block,
   schemas,
+  schemasByConnectionId,
   datasets,
   filters,
+  objectModelConnections,
+  defaultObjectModelConnectionId,
   result,
   editing,
   open,
@@ -944,8 +975,11 @@ function BlockCard({
 }: {
   block: WizardBlock;
   schemas: Schema[];
+  schemasByConnectionId?: SchemasByConnectionId;
   datasets: ReportDatasetDefinition[];
   filters: WizardFilter[];
+  objectModelConnections: ConnectionDto[];
+  defaultObjectModelConnectionId?: string | null;
   result?: ReportBlockResult;
   editing: boolean;
   open: boolean;
@@ -956,7 +990,18 @@ function BlockCard({
   onDragStart: () => void;
   onDragEnd: () => void;
 }) {
-  const schemaFields = fieldsForWizardSource(schemas, block);
+  const blockSchemas = schemasForConnection(
+    schemas,
+    schemasByConnectionId,
+    block.sourceConnectionId,
+    defaultObjectModelConnectionId
+  );
+  const schemaFields = fieldsForWizardSource(
+    schemas,
+    block,
+    schemasByConnectionId,
+    defaultObjectModelConnectionId
+  );
   const usingDataset = Boolean(block.dataset);
   const sourceMode: WizardSourceMode = usingDataset
     ? 'dataset'
@@ -1002,6 +1047,31 @@ function BlockCard({
       sourceGranularity: undefined,
       sourceOrderBy: undefined,
       sourceLimit: undefined,
+      sourceConnectionId: undefined,
+      sourceJoins: undefined,
+      sourceCondition: undefined,
+      schema: nextSchema,
+      fields: [],
+      fieldConfigs: undefined,
+      chartGroupBy: undefined,
+      metricField: undefined,
+    });
+  }
+
+  function changeSourceConnection(sourceConnectionId: string | undefined) {
+    const nextSchemas = schemasForConnection(
+      schemas,
+      schemasByConnectionId,
+      sourceConnectionId,
+      defaultObjectModelConnectionId
+    );
+    const nextSchema = nextSchemas.some(
+      (schema) => schema.name === block.schema
+    )
+      ? block.schema
+      : nextSchemas[0]?.name;
+    onChange({
+      sourceConnectionId,
       sourceJoins: undefined,
       sourceCondition: undefined,
       schema: nextSchema,
@@ -1026,6 +1096,7 @@ function BlockCard({
       sourceGranularity: undefined,
       sourceOrderBy: undefined,
       sourceLimit: undefined,
+      sourceConnectionId: undefined,
       sourceJoins: undefined,
       sourceCondition: undefined,
       schema: undefined,
@@ -1048,6 +1119,7 @@ function BlockCard({
       sourceGranularity: undefined,
       sourceOrderBy: undefined,
       sourceLimit: undefined,
+      sourceConnectionId: undefined,
       sourceJoins: undefined,
       sourceCondition: undefined,
       schema: schemas[0]?.name,
@@ -1070,6 +1142,7 @@ function BlockCard({
       sourceGranularity: undefined,
       sourceOrderBy: undefined,
       sourceLimit: undefined,
+      sourceConnectionId: undefined,
       sourceJoins: undefined,
       sourceCondition: undefined,
       schema: undefined,
@@ -1401,22 +1474,30 @@ function BlockCard({
           ) : null}
 
           {needsSchema ? (
-            <div className="grid gap-1.5">
-              <Label className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
-                Schema
-              </Label>
-              <Select value={block.schema ?? ''} onValueChange={changeSchema}>
-                <SelectTrigger>
-                  <SelectValue placeholder="Select schema" />
-                </SelectTrigger>
-                <SelectContent>
-                  {schemas.map((schema) => (
-                    <SelectItem key={schema.id} value={schema.name}>
-                      {schema.name}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
+            <div className="grid gap-3 sm:grid-cols-2">
+              <ObjectModelConnectionSelect
+                value={block.sourceConnectionId}
+                connections={objectModelConnections}
+                defaultConnectionId={defaultObjectModelConnectionId}
+                onChange={changeSourceConnection}
+              />
+              <div className="grid gap-1.5">
+                <Label className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+                  Schema
+                </Label>
+                <Select value={block.schema ?? ''} onValueChange={changeSchema}>
+                  <SelectTrigger>
+                    <SelectValue placeholder="Select schema" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {blockSchemas.map((schema) => (
+                      <SelectItem key={schema.id} value={schema.name}>
+                        {schema.name}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
             </div>
           ) : null}
 
@@ -1424,7 +1505,10 @@ function BlockCard({
             <SourceJoinsSettings
               block={block}
               schemas={schemas}
-              baseFields={fieldsOfSchema(schemas, block.schema)}
+              schemasByConnectionId={schemasByConnectionId}
+              objectModelConnections={objectModelConnections}
+              defaultObjectModelConnectionId={defaultObjectModelConnectionId}
+              baseFields={fieldsOfSchema(blockSchemas, block.schema)}
               onChange={onChange}
             />
           ) : null}
@@ -1687,7 +1771,7 @@ function BlockCard({
             <FieldPicker
               block={block}
               schemaFields={schemaFields}
-              schemas={schemas}
+              schemas={blockSchemas}
               onToggleField={toggleField}
               onAddActionColumn={
                 block.type === 'table' ? addActionColumn : undefined
@@ -2601,11 +2685,17 @@ function SourceQuerySettings({
 function SourceJoinsSettings({
   block,
   schemas,
+  schemasByConnectionId,
+  objectModelConnections,
+  defaultObjectModelConnectionId,
   baseFields,
   onChange,
 }: {
   block: WizardBlock;
   schemas: Schema[];
+  schemasByConnectionId?: SchemasByConnectionId;
+  objectModelConnections: ConnectionDto[];
+  defaultObjectModelConnectionId?: string | null;
   baseFields: string[];
   onChange: (patch: Partial<WizardBlock>) => void;
 }) {
@@ -2620,11 +2710,18 @@ function SourceJoinsSettings({
   }
 
   function addJoin() {
+    const defaultJoinSchemas = schemasForConnection(
+      schemas,
+      schemasByConnectionId,
+      block.sourceConnectionId,
+      defaultObjectModelConnectionId
+    );
     const schema =
-      schemas.find((candidate) => candidate.name !== block.schema)?.name ??
-      schemas[0]?.name ??
+      defaultJoinSchemas.find((candidate) => candidate.name !== block.schema)
+        ?.name ??
+      defaultJoinSchemas[0]?.name ??
       '';
-    const joinFields = fieldsOfSchema(schemas, schema);
+    const joinFields = fieldsOfSchema(defaultJoinSchemas, schema);
     const next: ReportSourceJoin = {
       schema,
       parentField: baseFields[0] ?? 'id',
@@ -2638,6 +2735,33 @@ function SourceJoinsSettings({
   function removeJoin(index: number) {
     const next = joins.filter((_, currentIndex) => currentIndex !== index);
     onChange({ sourceJoins: next.length > 0 ? next : undefined });
+  }
+
+  function updateJoinConnection(
+    index: number,
+    connectionId: string | undefined
+  ) {
+    const join = joins[index];
+    if (!join) return;
+    const joinSchemas = schemasForConnection(
+      schemas,
+      schemasByConnectionId,
+      connectionId,
+      defaultObjectModelConnectionId
+    );
+    const schema = joinSchemas.some(
+      (candidate) => candidate.name === join.schema
+    )
+      ? join.schema
+      : joinSchemas[0]?.name || join.schema;
+    const joinFields = fieldsOfSchema(joinSchemas, schema);
+    updateJoin(index, {
+      connectionId,
+      schema,
+      field: joinFields.includes(join.field)
+        ? join.field
+        : joinFields[0] || join.field,
+    });
   }
 
   return (
@@ -2663,12 +2787,27 @@ function SourceJoinsSettings({
       ) : (
         <div className="grid gap-2">
           {joins.map((join, index) => {
-            const joinFields = fieldsOfSchema(schemas, join.schema);
+            const joinSchemas = schemasForConnection(
+              schemas,
+              schemasByConnectionId,
+              join.connectionId,
+              defaultObjectModelConnectionId
+            );
+            const joinFields = fieldsOfSchema(joinSchemas, join.schema);
             return (
               <div
                 key={`${join.schema}-${index}`}
-                className="grid gap-2 rounded-md border bg-background p-2 lg:grid-cols-[minmax(0,1fr)_minmax(0,0.8fr)_minmax(0,1fr)_minmax(0,1fr)_80px_80px_auto]"
+                className="grid gap-2 rounded-md border bg-background p-2 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_minmax(0,0.8fr)_minmax(0,1fr)_minmax(0,1fr)_80px_80px_auto]"
               >
+                <ObjectModelConnectionSelect
+                  label="Connection"
+                  value={join.connectionId}
+                  connections={objectModelConnections}
+                  defaultConnectionId={defaultObjectModelConnectionId}
+                  onChange={(connectionId) =>
+                    updateJoinConnection(index, connectionId)
+                  }
+                />
                 <div className="grid gap-1">
                   <Label className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
                     Schema
@@ -2676,7 +2815,7 @@ function SourceJoinsSettings({
                   <Select
                     value={join.schema}
                     onValueChange={(schema) => {
-                      const fields = fieldsOfSchema(schemas, schema);
+                      const fields = fieldsOfSchema(joinSchemas, schema);
                       updateJoin(index, {
                         schema,
                         field: fields[0] ?? join.field,
@@ -2687,7 +2826,7 @@ function SourceJoinsSettings({
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
-                      {schemas.map((schema) => (
+                      {joinSchemas.map((schema) => (
                         <SelectItem key={schema.id} value={schema.name}>
                           {schema.name}
                         </SelectItem>

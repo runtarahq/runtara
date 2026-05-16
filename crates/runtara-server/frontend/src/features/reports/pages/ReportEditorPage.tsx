@@ -4,7 +4,9 @@ import { Eye, Save } from 'lucide-react';
 import { Button } from '@/shared/components/ui/button';
 import { TileList, TilesPage } from '@/shared/components/tiles-page';
 import { usePageTitle } from '@/shared/hooks/usePageTitle';
-import { useObjectSchemaDtos } from '@/features/objects/hooks/useObjectSchemas';
+import { useObjectSchemaDtosByConnectionIds } from '@/features/objects/hooks/useObjectSchemas';
+import { ObjectModelConnectionSelector } from '@/features/objects/components/ObjectModelConnectionSelector';
+import { useObjectModelConnectionSelection } from '@/features/objects/hooks/useObjectModelConnectionSelection';
 import {
   useCreateReport,
   useReport,
@@ -16,6 +18,7 @@ import { ReportDeleteButton } from '../components/ReportDeleteButton';
 import { ReportBuilderWizard } from '../components/wizard/ReportBuilderWizard';
 import { ReportBlockResult, ReportDefinition } from '../types';
 import { slugify } from '../utils';
+import { withDefaultObjectModelConnection } from '../connectionDefaults';
 
 const EMPTY_DEFINITION: ReportDefinition = {
   definitionVersion: 1,
@@ -28,8 +31,27 @@ export function ReportEditorPage() {
   const { reportId } = useParams();
   const isEditing = Boolean(reportId);
   const navigate = useNavigate();
+  const { selectedConnectionId, connections: objectModelConnections } =
+    useObjectModelConnectionSelection();
+  const objectModelSchemaConnectionIds = useMemo(
+    () =>
+      Array.from(
+        new Set(
+          [
+            selectedConnectionId,
+            ...objectModelConnections.map((connection) => connection.id),
+          ].filter((id): id is string => Boolean(id))
+        )
+      ),
+    [objectModelConnections, selectedConnectionId]
+  );
+  const { schemasByConnectionId } = useObjectSchemaDtosByConnectionIds(
+    objectModelSchemaConnectionIds
+  );
   const { data: existingReport, isFetching } = useReport(reportId);
-  const { data: schemas = [] } = useObjectSchemaDtos();
+  const schemas = selectedConnectionId
+    ? (schemasByConnectionId[selectedConnectionId] ?? [])
+    : [];
   const createReport = useCreateReport();
   const updateReport = useUpdateReport();
   const validateReport = useValidateReport();
@@ -50,6 +72,15 @@ export function ReportEditorPage() {
     return () => clearTimeout(handle);
   }, [definition]);
 
+  const debouncedDefinitionWithConnection = useMemo(
+    () =>
+      withDefaultObjectModelConnection(
+        debouncedDefinition,
+        selectedConnectionId
+      ),
+    [debouncedDefinition, selectedConnectionId]
+  );
+
   // Skip the preview call until at least one block looks queryable. Markdown
   // blocks are fine on their own; data blocks need a schema.
   const canPreview = useMemo(
@@ -65,9 +96,9 @@ export function ReportEditorPage() {
   const previewRequest = useMemo(
     () =>
       canPreview
-        ? { filters: {}, definition: debouncedDefinition }
+        ? { filters: {}, definition: debouncedDefinitionWithConnection }
         : undefined,
-    [canPreview, debouncedDefinition]
+    [canPreview, debouncedDefinitionWithConnection]
   );
 
   const previewQuery = useReportPreview(previewRequest, canPreview);
@@ -91,7 +122,13 @@ export function ReportEditorPage() {
 
   const handleSave = async () => {
     setSaveError(null);
-    const validation = await validateReport.mutateAsync({ definition });
+    const definitionForSave = withDefaultObjectModelConnection(
+      definition,
+      selectedConnectionId
+    );
+    const validation = await validateReport.mutateAsync({
+      definition: definitionForSave,
+    });
     if (!validation.valid) {
       setSaveError(validation.errors[0]?.message ?? 'Report is invalid.');
       return;
@@ -104,7 +141,7 @@ export function ReportEditorPage() {
       description: description.trim() || null,
       tags: [],
       status: 'published' as const,
-      definition,
+      definition: definitionForSave,
     };
 
     if (isEditing && reportId) {
@@ -202,9 +239,15 @@ export function ReportEditorPage() {
         </div>
       }
     >
+      <div className="mb-4 flex justify-end">
+        <ObjectModelConnectionSelector />
+      </div>
       <ReportBuilderWizard
         definition={definition}
         schemas={schemas}
+        schemasByConnectionId={schemasByConnectionId}
+        objectModelConnections={objectModelConnections}
+        defaultObjectModelConnectionId={selectedConnectionId}
         blockResults={blockResults}
         onChange={(nextDefinition) => {
           setDefinition(nextDefinition);

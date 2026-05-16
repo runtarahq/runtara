@@ -13,7 +13,8 @@ import {
 } from '@/shared/components/ui/select';
 import { Textarea } from '@/shared/components/ui/textarea';
 import { Schema } from '@/generated/RuntaraRuntimeApi';
-import { ReportFilterType } from '../../../types';
+import { ReportDatasetDefinition, ReportFilterType } from '../../../types';
+import { datasetQueryOutputFields } from '../../../datasetBlocks';
 import { TIME_RANGE_PRESETS } from '../../../utils';
 import {
   WIZARD_FILTER_TARGET_ALL,
@@ -23,21 +24,20 @@ import {
   WizardFilter,
   WizardFilterOptionsSource,
 } from '../wizardTypes';
+import {
+  SchemasByConnectionId,
+  fieldsOfSchema,
+  schemasForConnection,
+} from '../schemaConnections';
 
 interface ControlsStepProps {
   filters: WizardFilter[];
   blocks: WizardBlock[];
+  datasets: ReportDatasetDefinition[];
   schemas: Schema[];
+  schemasByConnectionId?: SchemasByConnectionId;
+  defaultObjectModelConnectionId?: string | null;
   onChange: (next: WizardFilter[]) => void;
-}
-
-function fieldsOf(schemas: Schema[], schemaName: string | undefined): string[] {
-  if (!schemaName) return [];
-  return (
-    schemas
-      .find((schema) => schema.name === schemaName)
-      ?.columns.map((column) => column.name) ?? []
-  );
 }
 
 const FILTER_TYPES: Array<{ value: ReportFilterType; label: string }> = [
@@ -146,20 +146,87 @@ function isReportCondition(
   );
 }
 
+function datasetForBlock(
+  block: WizardBlock,
+  datasets: ReportDatasetDefinition[]
+): ReportDatasetDefinition | undefined {
+  if (!block.dataset) return undefined;
+  return datasets.find((dataset) => dataset.id === block.dataset?.id);
+}
+
+function connectionIdForBlock(
+  block: WizardBlock | undefined,
+  datasets: ReportDatasetDefinition[]
+): string | null | undefined {
+  if (!block) return undefined;
+  const dataset = datasetForBlock(block, datasets);
+  return dataset?.source.connectionId ?? block.sourceConnectionId;
+}
+
+function schemaNameForBlock(
+  block: WizardBlock | undefined,
+  datasets: ReportDatasetDefinition[]
+): string | undefined {
+  if (!block) return undefined;
+  const dataset = datasetForBlock(block, datasets);
+  return dataset?.source.schema ?? block.schema;
+}
+
+function fieldsForBlock(
+  block: WizardBlock,
+  datasets: ReportDatasetDefinition[],
+  schemas: Schema[],
+  schemasByConnectionId: SchemasByConnectionId | undefined,
+  defaultObjectModelConnectionId: string | null | undefined
+): string[] {
+  if (block.dataset) return datasetQueryOutputFields(block.dataset);
+  return fieldsOfSchema(
+    schemasForConnection(
+      schemas,
+      schemasByConnectionId,
+      connectionIdForBlock(block, datasets),
+      defaultObjectModelConnectionId
+    ),
+    schemaNameForBlock(block, datasets)
+  );
+}
+
 export function ControlsStep({
   filters,
   blocks,
+  datasets,
   schemas,
+  schemasByConnectionId,
+  defaultObjectModelConnectionId,
   onChange,
 }: ControlsStepProps) {
   // A filter's field options depend on which block it targets. When targeting
   // "all compatible", we fall back to the union of fields across blocks with a
   // schema. When targeting a specific block, we use that block's schema.
   const fieldsByBlockId = Object.fromEntries(
-    blocks.map((block) => [block.id, fieldsOf(schemas, block.schema)])
+    blocks.map((block) => [
+      block.id,
+      fieldsForBlock(
+        block,
+        datasets,
+        schemas,
+        schemasByConnectionId,
+        defaultObjectModelConnectionId
+      ),
+    ])
   );
   const allBlockFields = Array.from(
-    new Set(blocks.flatMap((block) => fieldsOf(schemas, block.schema)))
+    new Set(
+      blocks.flatMap((block) =>
+        fieldsForBlock(
+          block,
+          datasets,
+          schemas,
+          schemasByConnectionId,
+          defaultObjectModelConnectionId
+        )
+      )
+    )
   );
   const initialField = allBlockFields[0] ?? 'id';
 
@@ -233,6 +300,9 @@ export function ControlsStep({
                 filter={filter}
                 schemaFields={fieldsForThisFilter}
                 schemas={schemas}
+                schemasByConnectionId={schemasByConnectionId}
+                datasets={datasets}
+                defaultObjectModelConnectionId={defaultObjectModelConnectionId}
                 filterableBlocks={filterableBlocks}
                 onChange={(patch) => updateFilter(index, patch)}
                 onRemove={() => removeFilter(index)}
@@ -249,6 +319,9 @@ function FilterRow({
   filter,
   schemaFields,
   schemas,
+  schemasByConnectionId,
+  datasets,
+  defaultObjectModelConnectionId,
   filterableBlocks,
   onChange,
   onRemove,
@@ -256,17 +329,39 @@ function FilterRow({
   filter: WizardFilter;
   schemaFields: string[];
   schemas: Schema[];
+  schemasByConnectionId?: SchemasByConnectionId;
+  datasets: ReportDatasetDefinition[];
+  defaultObjectModelConnectionId?: string | null;
   filterableBlocks: WizardBlock[];
   onChange: (patch: Partial<WizardFilter>) => void;
   onRemove: () => void;
 }) {
   const showOptions = filterUsesOptions(filter.type);
-  const targetSchema = filterableBlocks.find(
+  const targetBlock = filterableBlocks.find(
     (block) => block.id === filter.target
-  )?.schema;
+  );
+  const targetSchema = schemaNameForBlock(targetBlock, datasets);
+  const optionsConnectionId =
+    filter.optionsConnectionId ??
+    connectionIdForBlock(targetBlock, datasets) ??
+    defaultObjectModelConnectionId;
+  const optionSchemas = schemasForConnection(
+    schemas,
+    schemasByConnectionId,
+    optionsConnectionId,
+    defaultObjectModelConnectionId
+  );
   const selectedOptionsSchema =
-    filter.optionsSchema || targetSchema || schemas[0]?.name || '';
-  const optionSchemaFields = fieldsOf(schemas, selectedOptionsSchema);
+    filter.optionsSchema ||
+    (targetSchema &&
+    optionSchemas.some((schema) => schema.name === targetSchema)
+      ? targetSchema
+      : optionSchemas[0]?.name) ||
+    '';
+  const optionSchemaFields = fieldsOfSchema(
+    optionSchemas,
+    selectedOptionsSchema
+  );
   const selectedValueField =
     filter.optionsValueField ||
     filter.optionsField ||
@@ -280,7 +375,7 @@ function FilterRow({
     '';
 
   function updateOptionsSchema(schemaName: string) {
-    const nextFields = fieldsOf(schemas, schemaName);
+    const nextFields = fieldsOfSchema(optionSchemas, schemaName);
     const nextValueField = nextFields.includes(selectedValueField)
       ? selectedValueField
       : nextFields[0];
@@ -479,7 +574,7 @@ function FilterRow({
                       <SelectValue placeholder="Select schema" />
                     </SelectTrigger>
                     <SelectContent>
-                      {schemas.map((schema) => (
+                      {optionSchemas.map((schema) => (
                         <SelectItem key={schema.name} value={schema.name}>
                           {schema.name}
                         </SelectItem>

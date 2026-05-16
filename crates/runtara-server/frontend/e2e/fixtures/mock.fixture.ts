@@ -9,7 +9,11 @@ import type {
   WorkflowDto,
   Schema,
 } from '@/generated/RuntaraRuntimeApi';
-import { paginated } from './builders';
+import {
+  buildConnectionType,
+  buildObjectModelConnection,
+  paginated,
+} from './builders';
 
 type JsonBody = Record<string, unknown> | Array<unknown>;
 
@@ -381,6 +385,16 @@ const factory: MockApi = {
     await page.route(runtimeUrl('metrics/tenant'), (route) =>
       fulfill(route, { workflowsCount: 0, connectionsCount: 0 })
     );
+    // Object Model pages need a selected database before they query schemas.
+    await page.route(runtimeUrl('connections'), (route) =>
+      fulfill(route, {
+        connections: [
+          buildObjectModelConnection({ id: 'conn_object_model_default' }),
+        ],
+        count: 1,
+        success: true,
+      })
+    );
     // Connection categories/types are fetched by several pages
     await page.route(runtimeUrl('connections/categories'), (route) =>
       fulfill(route, { categories: [] })
@@ -389,7 +403,14 @@ const factory: MockApi = {
       fulfill(route, { authTypes: [] })
     );
     await page.route(runtimeUrl('connections/types'), (route) =>
-      fulfill(route, { connectionTypes: [] })
+      fulfill(route, {
+        connectionTypes: [
+          buildConnectionType({
+            integrationId: 'postgres',
+            displayName: 'PostgreSQL',
+          }),
+        ],
+      })
     );
   },
   raw: (page, url, body, opts) =>

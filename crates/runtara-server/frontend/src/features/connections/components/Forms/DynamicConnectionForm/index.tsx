@@ -15,6 +15,7 @@ import {
 } from '@/generated/RuntaraRuntimeApi';
 import { RateLimitSection } from '../RateLimitSection';
 import { DefaultFileStorageSection } from '../DefaultFileStorageSection';
+import { DefaultForSection } from '../DefaultForSection';
 
 type FieldConfig = {
   type: string;
@@ -43,6 +44,7 @@ const MULTILINE_FIELD_NAMES = [
   'sshkey',
   'ssh_key',
 ];
+const FILE_STORAGE_CATEGORIES = new Set(['file_storage', 'storage']);
 
 /**
  * Maps ConnectionFieldDto.typeName to form field type
@@ -377,7 +379,9 @@ export function DynamicConnectionForm({
   onDelete,
   isDeleting,
 }: DynamicConnectionFormProps) {
-  const isFileStorage = connectionType.category === 'file_storage';
+  const isFileStorage = FILE_STORAGE_CATEGORIES.has(
+    connectionType.category ?? ''
+  );
 
   const { schema, fieldsConfig, initialValues, groupedFields } = useMemo(() => {
     const fields = connectionType.fields || [];
@@ -391,6 +395,7 @@ export function DynamicConnectionForm({
       maxRetries: z.coerce.number().min(0).optional(),
       maxWaitMs: z.coerce.number().min(0).optional(),
       retryOnLimit: z.boolean(),
+      defaultFor: z.array(z.string()).optional(),
     });
     const fileStorageFields = z.object({
       isDefaultFileStorage: z.boolean(),
@@ -439,6 +444,11 @@ export function DynamicConnectionForm({
   const fileStorageDefaults = isFileStorage
     ? { isDefaultFileStorage: !!(initValues as any)?.isDefaultFileStorage }
     : {};
+  const defaultForDefaults = {
+    defaultFor: Array.isArray((initValues as any)?.defaultFor)
+      ? ((initValues as any).defaultFor as string[])
+      : [],
+  };
 
   const form = useForm({
     resolver: zodResolver(schema),
@@ -446,9 +456,15 @@ export function DynamicConnectionForm({
       ...initialValues,
       ...rateLimitDefaults,
       ...fileStorageDefaults,
+      ...defaultForDefaults,
     },
     values: initValues
-      ? { ...initValues, ...rateLimitDefaults, ...fileStorageDefaults }
+      ? {
+          ...initValues,
+          ...rateLimitDefaults,
+          ...fileStorageDefaults,
+          ...defaultForDefaults,
+        }
       : undefined,
   });
 
@@ -514,6 +530,8 @@ export function DynamicConnectionForm({
 
         {/* Default File Storage Section (S3-compatible only) */}
         {isFileStorage && <DefaultFileStorageSection />}
+
+        <DefaultForSection connectionType={connectionType} />
 
         {/* Rate Limiting Section */}
         <RateLimitSection

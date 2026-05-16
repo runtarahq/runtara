@@ -9,10 +9,16 @@ import { ObjectInstanceDtosTable } from '../../components/ObjectInstancesTable';
 import { useObjectSchemaDto } from '../../hooks/useObjectSchema';
 import { usePageTitle } from '@/shared/hooks/usePageTitle';
 import { TileList, TilesPage } from '@/shared/components/tiles-page';
+import { ObjectModelConnectionSelector } from '../../components/ObjectModelConnectionSelector';
+import { useObjectModelConnectionSelection } from '../../hooks/useObjectModelConnectionSelection';
 
 export function ManageInstances() {
   const { typeName } = useParams<{ typeName: string }>();
-  const { data: objectSchemaDto, isLoading } = useObjectSchemaDto(typeName);
+  const { selectedConnectionId } = useObjectModelConnectionSelection();
+  const { data: objectSchemaDto, isLoading } = useObjectSchemaDto(
+    typeName,
+    selectedConnectionId
+  );
 
   // Set page title with object type name
   usePageTitle(
@@ -28,6 +34,9 @@ export function ManageInstances() {
       className="py-6 lg:px-10"
       contentClassName="gap-6"
     >
+      <div className="flex justify-end">
+        <ObjectModelConnectionSelector />
+      </div>
       {isLoading ? (
         <div className="flex min-h-[40vh] items-center justify-center text-muted-foreground">
           <Loader2 className="mr-2 h-4 w-4 animate-spin" />
@@ -46,7 +55,10 @@ export function ManageInstances() {
         </div>
       ) : (
         <TileList>
-          <ObjectInstanceDtosTable objectSchemaDto={objectSchemaDto} />
+          <ObjectInstanceDtosTable
+            objectSchemaDto={objectSchemaDto}
+            connectionId={selectedConnectionId}
+          />
         </TileList>
       )}
     </TilesPage>

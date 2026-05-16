@@ -544,8 +544,8 @@ pub const BUILTIN_AGENT_MODULES: &[AgentModuleConfig] = &[
         name: "Object Model",
         description: "Object Model capabilities for database CRUD operations - create, query, and check instances in object model schemas (has side effects)",
         has_side_effects: true,
-        supports_connections: false,
-        integration_ids: &[],
+        supports_connections: true,
+        integration_ids: &["postgres"],
         secure: false,
     },
 ];

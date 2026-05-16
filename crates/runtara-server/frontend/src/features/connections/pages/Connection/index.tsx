@@ -81,6 +81,7 @@ export function Connection() {
       maxWaitMs,
       retryOnLimit,
       isDefaultFileStorage,
+      defaultFor,
       ...parameters
     } = data;
 
@@ -103,6 +104,7 @@ export function Connection() {
         isDefaultFileStorage !== undefined
           ? Boolean(isDefaultFileStorage)
           : undefined,
+      defaultFor: Array.isArray(defaultFor) ? (defaultFor as string[]) : [],
     });
   };
 

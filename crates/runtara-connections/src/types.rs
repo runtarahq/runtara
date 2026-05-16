@@ -410,6 +410,9 @@ pub struct ConnectionDto {
     /// When true, this connection is the default S3 storage for webhook attachments
     #[serde(rename = "isDefaultFileStorage")]
     pub is_default_file_storage: bool,
+    /// Agent/operator ids this connection is the tenant default for.
+    #[serde(default, rename = "defaultFor")]
+    pub default_for: Vec<String>,
     // NOTE: connection_parameters is intentionally NOT included for security
 }
 
@@ -439,6 +442,9 @@ pub struct CreateConnectionRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(rename = "isDefaultFileStorage")]
     pub is_default_file_storage: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "defaultFor")]
+    pub default_for: Option<Vec<String>>,
 }
 
 /// Update connection request - all fields optional
@@ -468,6 +474,9 @@ pub struct UpdateConnectionRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(rename = "isDefaultFileStorage")]
     pub is_default_file_storage: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "defaultFor")]
+    pub default_for: Option<Vec<String>>,
 }
 
 /// Response for listing connections

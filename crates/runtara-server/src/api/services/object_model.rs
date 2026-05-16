@@ -9,6 +9,8 @@ use runtara_connections::ConnectionsFacade;
 use runtara_object_store::ObjectStore;
 use std::sync::Arc;
 
+const OBJECT_MODEL_DEFAULT_FOR: &str = "object_model";
+
 // ============================================================================
 // Connection Resolution Helper
 // ============================================================================
@@ -64,7 +66,53 @@ pub(crate) async fn resolve_database_url(
 
             Ok(Some(db_url.to_string()))
         }
-        None => Ok(None), // Use default database
+        None => {
+            let Some(facade) = facade else {
+                return Ok(None);
+            };
+            let Some(conn) = facade
+                .get_default_with_parameters(tenant_id, OBJECT_MODEL_DEFAULT_FOR)
+                .await
+                .map_err(|e| {
+                    ServiceError::DatabaseError(format!(
+                        "Default object model connection lookup failed: {:?}",
+                        e
+                    ))
+                })?
+            else {
+                tracing::warn!(
+                    tenant_id = %tenant_id,
+                    "No default object_model connection configured; using legacy OBJECT_MODEL_DATABASE_URL store"
+                );
+                return Ok(None);
+            };
+
+            let integration_id = conn.integration_id.as_deref().unwrap_or("");
+            if integration_id != "postgres" {
+                return Err(ServiceError::ValidationError(format!(
+                    "Default object_model connection has type '{}', expected 'postgres'",
+                    integration_id
+                )));
+            }
+
+            let params = conn.connection_parameters.as_ref().ok_or_else(|| {
+                ServiceError::ValidationError(
+                    "Default object_model connection has no parameters".to_string(),
+                )
+            })?;
+
+            let db_url = params
+                .get("database_url")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| {
+                    ServiceError::ValidationError(
+                        "Default object_model connection missing 'database_url' parameter"
+                            .to_string(),
+                    )
+                })?;
+
+            Ok(Some(db_url.to_string()))
+        }
     }
 }
 

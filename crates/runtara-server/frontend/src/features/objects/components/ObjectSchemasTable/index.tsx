@@ -10,33 +10,42 @@ import {
   useDeleteObjectSchema,
 } from '@/features/objects/hooks/useObjectSchemas.ts';
 
-export function ObjectSchemaDtosTable() {
+interface ObjectSchemaDtosTableProps {
+  connectionId?: string | null;
+}
+
+export function ObjectSchemaDtosTable({
+  connectionId,
+}: ObjectSchemaDtosTableProps) {
   const navigate = useNavigate();
   const {
     data: objectSchemaDtos = [],
     isLoading,
     isError,
     error,
-  } = useObjectSchemaDtos();
+  } = useObjectSchemaDtos(connectionId);
 
-  const deleteObjectSchemaMutation = useDeleteObjectSchema();
+  const deleteObjectSchemaMutation = useDeleteObjectSchema(connectionId);
+  const connectionQuery = connectionId
+    ? `?connectionId=${encodeURIComponent(connectionId)}`
+    : '';
 
   const handleViewInstances = useCallback(
     (objectSchemaDto: Schema) => {
       if (objectSchemaDto.name) {
-        navigate(`/objects/${objectSchemaDto.name}`);
+        navigate(`/objects/${objectSchemaDto.name}${connectionQuery}`);
       }
     },
-    [navigate]
+    [connectionQuery, navigate]
   );
 
   const handleEdit = useCallback(
     (objectSchemaDto: Schema) => {
       if (objectSchemaDto.id) {
-        navigate(`/objects/types/${objectSchemaDto.id}`);
+        navigate(`/objects/types/${objectSchemaDto.id}${connectionQuery}`);
       }
     },
-    [navigate]
+    [connectionQuery, navigate]
   );
 
   const handleDelete = useCallback(
@@ -108,6 +117,17 @@ export function ObjectSchemaDtosTable() {
             <div className="mt-3 h-5 w-48 rounded bg-muted/60" />
           </div>
         ))}
+      </div>
+    );
+  }
+
+  if (!connectionId) {
+    return (
+      <div className="flex flex-col items-center justify-center rounded-2xl bg-muted/20 px-6 py-12 text-center">
+        <Icons.warning className="mb-4 h-12 w-12 text-muted-foreground" />
+        <p className="text-base font-semibold text-foreground">
+          No database connection selected
+        </p>
       </div>
     );
   }

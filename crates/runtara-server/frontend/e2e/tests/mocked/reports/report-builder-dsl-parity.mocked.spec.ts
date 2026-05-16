@@ -1,7 +1,15 @@
 import type { Page, Route } from '@playwright/test';
-import { expect, test, type MockApi } from '../../../fixtures';
+import {
+  buildObjectModelConnection,
+  expect,
+  test,
+  type MockApi,
+} from '../../../fixtures';
 import { appPath } from '../../../utils/app-path';
-import type { Schema } from '../../../../src/generated/RuntaraRuntimeApi';
+import type {
+  ConnectionDto,
+  Schema,
+} from '../../../../src/generated/RuntaraRuntimeApi';
 import type {
   ReportBlockDefinition,
   ReportBlockResult,
@@ -58,6 +66,7 @@ const SCHEMAS = [
   schema('customers', ['id', 'name', 'country_id', 'email', 'active']),
   schema('countries', ['id', 'name']),
 ];
+const DEFAULT_OBJECT_MODEL_CONNECTION_ID = 'conn_object_model_default';
 
 function reportFor(id: string, definition: ReportDefinition): ReportDto {
   return {
@@ -104,16 +113,44 @@ async function openReportEditor({
   mockApi,
   id,
   definition,
+  connections,
+  schemasByConnectionId,
   previewBlocks = {},
 }: {
   page: Page;
   mockApi: MockApi;
   id: string;
   definition: ReportDefinition;
+  connections?: ConnectionDto[];
+  schemasByConnectionId?: Record<string, Schema[]>;
   previewBlocks?: Record<string, ReportBlockResult>;
 }) {
   await mockApi.bootstrap(page);
-  await mockApi.objects.schemas.list(page, SCHEMAS);
+  const schemaConnectionRequests: string[] = [];
+  await mockApi.connections.list(page, [
+    buildObjectModelConnection({ id: DEFAULT_OBJECT_MODEL_CONNECTION_ID }),
+    ...(connections ?? []),
+  ]);
+  if (schemasByConnectionId) {
+    await mockApi.raw(
+      page,
+      runtimeUrl('object-model/schemas'),
+      async (route) => {
+        const url = new URL(route.request().url());
+        const connectionId =
+          url.searchParams.get('connectionId') ??
+          DEFAULT_OBJECT_MODEL_CONNECTION_ID;
+        schemaConnectionRequests.push(connectionId);
+        const schemas =
+          schemasByConnectionId[connectionId] ??
+          schemasByConnectionId[DEFAULT_OBJECT_MODEL_CONNECTION_ID] ??
+          SCHEMAS;
+        await fulfill(route, { schemas, totalCount: schemas.length });
+      }
+    );
+  } else {
+    await mockApi.objects.schemas.list(page, SCHEMAS);
+  }
 
   const report = reportFor(id, definition);
   let saved: UpdateReportRequest | null = null;
@@ -157,6 +194,7 @@ async function openReportEditor({
 
   return {
     getSaved: () => saved,
+    schemaConnectionRequests,
   };
 }
 
@@ -815,7 +853,12 @@ test.describe('SYN-410 report builder DSL parity (mocked)', () => {
     });
     const saved = await saveThroughWizard(page, getSaved);
 
-    expect(block(saved, 'orders').source.join).toEqual(join);
+    expect(block(saved, 'orders').source.join).toEqual(
+      join.map((item) => ({
+        ...item,
+        connectionId: DEFAULT_OBJECT_MODEL_CONNECTION_ID,
+      }))
+    );
     expect(block(saved, 'orders').source.condition).toEqual(condition);
   });
 
@@ -1548,5 +1591,85 @@ test.describe('SYN-410 report builder DSL parity (mocked)', () => {
       workflowId: 'inventory_sync',
       mode: 'filter',
     });
+  });
+
+  test('22 saves explicit Object Model source connections', async ({
+    page,
+    mockApi,
+  }) => {
+    const archiveConnection = buildObjectModelConnection({
+      id: 'conn_archive_db',
+      title: 'Archive database',
+      defaultFor: [],
+    });
+    const archiveSchemas = [
+      schema('archived_orders', ['id', 'archived_at', 'status']),
+    ];
+    const definition = baseDefinition(
+      [
+        tableBlock('archive_orders', {
+          source: {
+            schema: 'archived_orders',
+            mode: 'filter',
+            connectionId: archiveConnection.id,
+          },
+          table: {
+            columns: [
+              { field: 'id', label: 'ID' },
+              { field: 'archived_at', label: 'Archived' },
+            ],
+          },
+        }),
+      ],
+      {
+        filters: [
+          {
+            id: 'archive_status',
+            label: 'Status',
+            type: 'select',
+            appliesTo: [
+              { blockId: 'archive_orders', field: 'status', op: 'eq' },
+            ],
+            options: {
+              source: 'object_model',
+              schema: 'archived_orders',
+              field: 'status',
+              valueField: 'status',
+              labelField: 'status',
+            },
+          },
+        ],
+      }
+    );
+
+    const { getSaved, schemaConnectionRequests } = await openReportEditor({
+      page,
+      mockApi,
+      id: 'source_connection',
+      definition,
+      connections: [archiveConnection],
+      schemasByConnectionId: {
+        [DEFAULT_OBJECT_MODEL_CONNECTION_ID]: SCHEMAS,
+        [archiveConnection.id]: archiveSchemas,
+      },
+    });
+    const saved = await saveThroughWizard(page, getSaved);
+
+    expect(schemaConnectionRequests).toContain(archiveConnection.id);
+    expect(block(saved, 'archive_orders').source).toMatchObject({
+      schema: 'archived_orders',
+      connectionId: archiveConnection.id,
+    });
+    expect(
+      saved.filters.find((filter) => filter.id === 'archive_status')?.options
+    ).toMatchObject({
+      source: 'object_model',
+      schema: 'archived_orders',
+      field: 'status',
+    });
+    expect(
+      saved.filters.find((filter) => filter.id === 'archive_status')?.options
+        ?.connectionId
+    ).toBeUndefined();
   });
 });

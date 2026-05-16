@@ -6,7 +6,7 @@ import {
   AlertDescription,
   AlertTitle,
 } from '@/shared/components/ui/alert';
-import { Schema } from '@/generated/RuntaraRuntimeApi';
+import { ConnectionDto, Schema } from '@/generated/RuntaraRuntimeApi';
 import {
   ReportBlockResult,
   ReportDatasetDefinition,
@@ -22,6 +22,12 @@ import {
   definitionToWizardState,
   wizardStateToDefinition,
 } from './wizardSerialization';
+import {
+  SchemasByConnectionId,
+  fieldsOfSchema,
+  schemaFieldsByName,
+  schemasForConnection,
+} from './schemaConnections';
 import { BlocksStep } from './steps/BlocksStep';
 import { ControlsStep } from './steps/ControlsStep';
 import { DatasetsStep } from './steps/DatasetsStep';
@@ -30,21 +36,15 @@ import { ViewsStep } from './steps/ViewsStep';
 interface ReportBuilderWizardProps {
   definition: ReportDefinition;
   schemas: Schema[];
+  schemasByConnectionId?: SchemasByConnectionId;
+  objectModelConnections?: ConnectionDto[];
+  defaultObjectModelConnectionId?: string | null;
   /** Per-block live results, keyed by block id. Empty while preview hasn't returned yet. */
   blockResults?: Record<string, ReportBlockResult>;
   /** When false, hides every editing control — sections still render with real data
    *  so the same DOM is reused for view mode. Defaults to true. */
   editing?: boolean;
   onChange: (definition: ReportDefinition) => void;
-}
-
-function schemaFieldsByName(schemas: Schema[]): Record<string, string[]> {
-  return Object.fromEntries(
-    schemas.map((schema) => [
-      schema.name,
-      schema.columns.map((column) => column.name),
-    ])
-  );
 }
 
 function readinessChecks(
@@ -115,6 +115,9 @@ function readinessChecks(
 export function ReportBuilderWizard({
   definition,
   schemas,
+  schemasByConnectionId,
+  objectModelConnections = [],
+  defaultObjectModelConnectionId,
   blockResults,
   editing = true,
   onChange,
@@ -134,10 +137,16 @@ export function ReportBuilderWizard({
   const onChangeRef = useRef(onChange);
   const definitionRef = useRef(definition);
   const schemasRef = useRef(schemas);
+  const schemasByConnectionIdRef = useRef(schemasByConnectionId);
+  const defaultObjectModelConnectionIdRef = useRef(
+    defaultObjectModelConnectionId
+  );
   useEffect(() => {
     onChangeRef.current = onChange;
     definitionRef.current = definition;
     schemasRef.current = schemas;
+    schemasByConnectionIdRef.current = schemasByConnectionId;
+    defaultObjectModelConnectionIdRef.current = defaultObjectModelConnectionId;
   });
 
   const commit = useCallback((nextState: WizardState) => {
@@ -146,7 +155,17 @@ export function ReportBuilderWizard({
     const nextDefinition = wizardStateToDefinition(
       nextState,
       fieldsByName,
-      definitionRef.current
+      definitionRef.current,
+      (block) =>
+        fieldsOfSchema(
+          schemasForConnection(
+            schemasRef.current,
+            schemasByConnectionIdRef.current,
+            block.sourceConnectionId,
+            defaultObjectModelConnectionIdRef.current
+          ),
+          block.schema
+        )
     );
     onChangeRef.current(nextDefinition);
   }, []);
@@ -213,9 +232,12 @@ export function ReportBuilderWizard({
           grids={state.grids}
           blocks={state.blocks}
           schemas={schemas}
+          schemasByConnectionId={schemasByConnectionId}
           defaultSchema={state.defaultSchema}
           datasets={state.datasets}
           filters={state.filters}
+          objectModelConnections={objectModelConnections}
+          defaultObjectModelConnectionId={defaultObjectModelConnectionId}
           blockResults={blockResults}
           editing={editing}
           onGridsChange={setGrids}
@@ -256,7 +278,10 @@ export function ReportBuilderWizard({
           <DatasetsStep
             datasets={state.datasets}
             schemas={schemas}
+            schemasByConnectionId={schemasByConnectionId}
             defaultSchema={state.defaultSchema}
+            objectModelConnections={objectModelConnections}
+            defaultObjectModelConnectionId={defaultObjectModelConnectionId}
             onChange={setDatasets}
           />
         </section>
@@ -274,7 +299,10 @@ export function ReportBuilderWizard({
           <ControlsStep
             filters={state.filters}
             blocks={state.blocks}
+            datasets={state.datasets}
             schemas={schemas}
+            schemasByConnectionId={schemasByConnectionId}
+            defaultObjectModelConnectionId={defaultObjectModelConnectionId}
             onChange={setFilters}
           />
         </section>

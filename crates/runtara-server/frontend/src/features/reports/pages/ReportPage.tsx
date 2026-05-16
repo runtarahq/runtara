@@ -4,7 +4,9 @@ import { Compass, Edit, Eye, Printer, RefreshCw, Save } from 'lucide-react';
 import { Button } from '@/shared/components/ui/button';
 import { TileList, TilesPage } from '@/shared/components/tiles-page';
 import { usePageTitle } from '@/shared/hooks/usePageTitle';
-import { useObjectSchemaDtos } from '@/features/objects/hooks/useObjectSchemas';
+import { useObjectSchemaDtosByConnectionIds } from '@/features/objects/hooks/useObjectSchemas';
+import { ObjectModelConnectionSelector } from '@/features/objects/components/ObjectModelConnectionSelector';
+import { useObjectModelConnectionSelection } from '@/features/objects/hooks/useObjectModelConnectionSelection';
 import {
   useCreateReport,
   useReport,
@@ -29,6 +31,7 @@ import {
   getDefaultReportViewId,
   slugify,
 } from '../utils';
+import { withDefaultObjectModelConnection } from '../connectionDefaults';
 
 const EMPTY_DEFINITION: ReportDefinition = {
   definitionVersion: 1,
@@ -47,9 +50,28 @@ export function ReportPage() {
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   const editing = searchParams.get('edit') === '1' || !isExisting;
+  const { selectedConnectionId, connections: objectModelConnections } =
+    useObjectModelConnectionSelection();
+  const objectModelSchemaConnectionIds = useMemo(
+    () =>
+      Array.from(
+        new Set(
+          [
+            selectedConnectionId,
+            ...objectModelConnections.map((connection) => connection.id),
+          ].filter((id): id is string => Boolean(id))
+        )
+      ),
+    [objectModelConnections, selectedConnectionId]
+  );
+  const { schemasByConnectionId } = useObjectSchemaDtosByConnectionIds(
+    objectModelSchemaConnectionIds
+  );
 
   const { data: existingReport, isFetching } = useReport(reportId);
-  const { data: schemas = [] } = useObjectSchemaDtos();
+  const schemas = selectedConnectionId
+    ? (schemasByConnectionId[selectedConnectionId] ?? [])
+    : [];
   const createReport = useCreateReport();
   const updateReport = useUpdateReport();
   const validateReport = useValidateReport();
@@ -89,23 +111,35 @@ export function ReportPage() {
     return () => clearTimeout(handle);
   }, [definition]);
 
+  const debouncedDefinitionWithConnection = useMemo(
+    () =>
+      withDefaultObjectModelConnection(
+        debouncedDefinition,
+        selectedConnectionId
+      ),
+    [debouncedDefinition, selectedConnectionId]
+  );
+
   const canPreview = useMemo(
     () =>
       editing &&
-      debouncedDefinition.blocks.some(
+      debouncedDefinitionWithConnection.blocks.some(
         (block) =>
           block.type === 'markdown' ||
           (block.source?.schema && block.source.schema.length > 0)
       ),
-    [debouncedDefinition, editing]
+    [debouncedDefinitionWithConnection, editing]
   );
 
   const previewRequest = useMemo(
     () =>
       canPreview
-        ? { filters: filterValues, definition: debouncedDefinition }
+        ? {
+            filters: filterValues,
+            definition: debouncedDefinitionWithConnection,
+          }
         : undefined,
-    [canPreview, debouncedDefinition, filterValues]
+    [canPreview, debouncedDefinitionWithConnection, filterValues]
   );
 
   const previewQuery = useReportPreview(previewRequest, canPreview);
@@ -198,7 +232,13 @@ export function ReportPage() {
 
   const handleSave = async () => {
     setSaveError(null);
-    const validation = await validateReport.mutateAsync({ definition });
+    const definitionForSave = withDefaultObjectModelConnection(
+      definition,
+      selectedConnectionId
+    );
+    const validation = await validateReport.mutateAsync({
+      definition: definitionForSave,
+    });
     if (!validation.valid) {
       setSaveError(validation.errors[0]?.message ?? 'Report is invalid.');
       return;
@@ -210,7 +250,7 @@ export function ReportPage() {
       description: description.trim() || null,
       tags: [],
       status: 'published' as const,
-      definition,
+      definition: definitionForSave,
     };
     if (isExisting && reportId) {
       const report = await updateReport.mutateAsync({
@@ -284,6 +324,11 @@ export function ReportPage() {
           values={filterValues}
           onChange={handleFilterChange}
         />
+      ) : null}
+      {editing ? (
+        <div className="mt-2">
+          <ObjectModelConnectionSelector />
+        </div>
       ) : null}
     </div>
   );
@@ -396,6 +441,9 @@ export function ReportPage() {
           key={reportId ?? 'new'}
           definition={definition}
           schemas={schemas}
+          schemasByConnectionId={schemasByConnectionId}
+          objectModelConnections={objectModelConnections}
+          defaultObjectModelConnectionId={selectedConnectionId}
           blockResults={blockResults}
           editing={editing}
           onChange={(nextDefinition) => {

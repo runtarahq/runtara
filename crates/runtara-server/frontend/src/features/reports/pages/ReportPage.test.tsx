@@ -77,18 +77,49 @@ vi.mock('../hooks/useReports', () => ({
 }));
 
 vi.mock('@/features/objects/hooks/useObjectSchemas', () => ({
-  useObjectSchemaDtos: () => ({
-    data: [
+  useObjectSchemaDtosByConnectionIds: () => ({
+    schemasByConnectionId: {
+      conn_object_model_default: [
+        {
+          id: 'sch_orders',
+          name: 'orders',
+          columns: [
+            { name: 'id', type: 'string' },
+            { name: 'status', type: 'string' },
+          ],
+        },
+      ],
+    },
+  }),
+}));
+
+vi.mock('@/features/objects/hooks/useObjectModelConnectionSelection', () => ({
+  useObjectModelConnectionSelection: () => ({
+    selectedConnectionId: 'conn_object_model_default',
+    selectedConnection: {
+      id: 'conn_object_model_default',
+      title: 'Object Model Postgres',
+      integrationId: 'postgres',
+      defaultFor: ['object_model'],
+    },
+    connections: [
       {
-        id: 'sch_orders',
-        name: 'orders',
-        columns: [
-          { name: 'id', type: 'string' },
-          { name: 'status', type: 'string' },
-        ],
+        id: 'conn_object_model_default',
+        title: 'Object Model Postgres',
+        integrationId: 'postgres',
+        defaultFor: ['object_model'],
       },
     ],
+    isLoading: false,
+    setSelectedConnectionId: vi.fn(),
+    connectionQuery: '?connectionId=conn_object_model_default',
   }),
+}));
+
+vi.mock('@/features/objects/components/ObjectModelConnectionSelector', () => ({
+  ObjectModelConnectionSelector: () => (
+    <div data-testid="object-model-connection-selector" />
+  ),
 }));
 
 function renderAt(path: string) {

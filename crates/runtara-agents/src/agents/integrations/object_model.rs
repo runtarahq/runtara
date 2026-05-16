@@ -10,6 +10,7 @@
 //! The tenant ID is read from `RUNTARA_TENANT_ID` env var.
 
 use crate::connections::RawConnection;
+use crate::integrations::integration_utils::connection::require_connection;
 use crate::types::AgentError;
 use runtara_agent_macro::{CapabilityInput, CapabilityOutput, capability};
 use runtara_dsl::{ConditionExpression, ConditionOperator, MappingValue};
@@ -22,9 +23,60 @@ use std::collections::HashMap;
 // HTTP Client Helpers
 // ============================================================================
 
+fn require_connection_id(connection: &Option<RawConnection>) -> Result<&str, AgentError> {
+    let connection = require_connection("OBJECT_MODEL", connection)?;
+    if connection.connection_id.is_empty() {
+        return Err(AgentError::permanent(
+            "OBJECT_MODEL_NO_CONNECTION_ID",
+            "Object model capability invoked with a connection that has no connection_id",
+        )
+        .with_attrs(json!({})));
+    }
+    Ok(connection.connection_id.as_str())
+}
+
+fn with_connection_in_body(
+    mut body: Value,
+    connection: &Option<RawConnection>,
+) -> Result<Value, AgentError> {
+    let connection_id = require_connection_id(connection)?;
+    let Some(map) = body.as_object_mut() else {
+        return Err(AgentError::permanent(
+            "OBJECT_MODEL_INVALID_REQUEST",
+            "Object model request body must be a JSON object",
+        )
+        .with_attrs(json!({})));
+    };
+    map.insert(
+        "connectionId".to_string(),
+        Value::String(connection_id.to_string()),
+    );
+    Ok(body)
+}
+
+fn path_with_connection(
+    path: &str,
+    connection: &Option<RawConnection>,
+) -> Result<String, AgentError> {
+    let connection_id = require_connection_id(connection)?;
+    let separator = if path.contains('?') { '&' } else { '?' };
+    Ok(format!(
+        "{}{}connectionId={}",
+        path,
+        separator,
+        urlencoding::encode(connection_id)
+    ))
+}
+
 /// Make a POST request to the internal API and parse the JSON response.
-fn http_post(path: &str, body: Value) -> Result<Value, AgentError> {
+fn http_post(
+    path: &str,
+    body: Value,
+    connection: &Option<RawConnection>,
+) -> Result<Value, AgentError> {
     use crate::integrations::integration_utils::env;
+    let path = path_with_connection(path, connection)?;
+    let body = with_connection_in_body(body, connection)?;
     let url = format!("{}{}", env::object_model_base_url(), path);
     let tid = env::tenant_id();
     let client = runtara_http::HttpClient::new();
@@ -53,8 +105,14 @@ fn http_post(path: &str, body: Value) -> Result<Value, AgentError> {
 }
 
 /// Make a PUT request to the internal API and parse the JSON response.
-fn http_put(path: &str, body: Value) -> Result<Value, AgentError> {
+fn http_put(
+    path: &str,
+    body: Value,
+    connection: &Option<RawConnection>,
+) -> Result<Value, AgentError> {
     use crate::integrations::integration_utils::env;
+    let path = path_with_connection(path, connection)?;
+    let body = with_connection_in_body(body, connection)?;
     let url = format!("{}{}", env::object_model_base_url(), path);
     let tid = env::tenant_id();
     let client = runtara_http::HttpClient::new();
@@ -83,8 +141,9 @@ fn http_put(path: &str, body: Value) -> Result<Value, AgentError> {
 }
 
 /// Make a GET request to the internal API and parse the JSON response.
-fn http_get(path: &str) -> Result<Value, AgentError> {
+fn http_get(path: &str, connection: &Option<RawConnection>) -> Result<Value, AgentError> {
     use crate::integrations::integration_utils::env;
+    let path = path_with_connection(path, connection)?;
     let url = format!("{}{}", env::object_model_base_url(), path);
     let tid = env::tenant_id();
     let client = runtara_http::HttpClient::new();
@@ -504,12 +563,14 @@ pub struct UpdateInstanceOutput {
     side_effects = true
 )]
 pub fn create_instance(input: CreateInstanceInput) -> Result<CreateInstanceOutput, AgentError> {
+    let connection = input._connection;
     let resp = http_post(
         "/instances",
         json!({
             "schema_name": input.schema_name,
             "properties": input.data,
         }),
+        &connection,
     )?;
 
     Ok(CreateInstanceOutput {
@@ -529,6 +590,7 @@ pub fn create_instance(input: CreateInstanceInput) -> Result<CreateInstanceOutpu
     side_effects = false
 )]
 pub fn query_instances(input: QueryInstancesInput) -> Result<QueryInstancesOutput, AgentError> {
+    let connection = input._connection;
     // Build request body — use condition if provided, otherwise use simple filters
     let condition_json = input.condition.as_ref().map(condition_expr_to_json);
 
@@ -543,6 +605,7 @@ pub fn query_instances(input: QueryInstancesInput) -> Result<QueryInstancesOutpu
             "limit": input.limit as i64,
             "offset": input.offset as i64,
         }),
+        &connection,
     )?;
 
     let instances = resp["instances"].as_array().cloned().unwrap_or_default();
@@ -567,12 +630,14 @@ pub fn query_instances(input: QueryInstancesInput) -> Result<QueryInstancesOutpu
 pub fn check_instance_exists(
     input: CheckInstanceExistsInput,
 ) -> Result<CheckInstanceExistsOutput, AgentError> {
+    let connection = input._connection;
     let resp = http_post(
         "/instances/exists",
         json!({
             "schema_name": input.schema_name,
             "filters": input.filters,
         }),
+        &connection,
     )?;
 
     Ok(CheckInstanceExistsOutput {
@@ -594,6 +659,7 @@ pub fn check_instance_exists(
 pub fn create_if_not_exists(
     input: CreateIfNotExistsInput,
 ) -> Result<CreateIfNotExistsOutput, AgentError> {
+    let connection = input._connection;
     let resp = http_post(
         "/instances/create-if-not-exists",
         json!({
@@ -601,6 +667,7 @@ pub fn create_if_not_exists(
             "match_filters": input.match_filters,
             "data": input.data,
         }),
+        &connection,
     )?;
 
     Ok(CreateIfNotExistsOutput {
@@ -622,6 +689,7 @@ pub fn create_if_not_exists(
     side_effects = true
 )]
 pub fn update_instance(input: UpdateInstanceInput) -> Result<UpdateInstanceOutput, AgentError> {
+    let connection = input._connection;
     let properties = Value::Object(input.data.into_iter().collect());
 
     let resp = http_put(
@@ -633,6 +701,7 @@ pub fn update_instance(input: UpdateInstanceInput) -> Result<UpdateInstanceOutpu
         json!({
             "data": properties,
         }),
+        &connection,
     )?;
 
     Ok(UpdateInstanceOutput {
@@ -945,12 +1014,14 @@ pub struct BulkDeleteInstancesOutput {
     side_effects = true
 )]
 pub fn delete_instance(input: DeleteInstanceInput) -> Result<DeleteInstanceOutput, AgentError> {
+    let connection = input._connection;
     let resp = http_post(
         "/instances/delete",
         json!({
             "schema_name": input.schema_name,
             "instance_id": input.instance_id,
         }),
+        &connection,
     )?;
 
     Ok(DeleteInstanceOutput {
@@ -971,6 +1042,7 @@ pub fn delete_instance(input: DeleteInstanceInput) -> Result<DeleteInstanceOutpu
 pub fn bulk_create_instances(
     input: BulkCreateInstancesInput,
 ) -> Result<BulkCreateInstancesOutput, AgentError> {
+    let connection = input._connection;
     let mut body = json!({ "schema_name": input.schema_name });
 
     // Pass through whichever shape the caller supplied. The server enforces
@@ -1004,7 +1076,7 @@ pub fn bulk_create_instances(
         body["conflict_columns"] = json!(cols);
     }
 
-    let resp = http_post("/instances/bulk-create", body)?;
+    let resp = http_post("/instances/bulk-create", body, &connection)?;
 
     let errors: Vec<AgentBulkRowError> = resp
         .get("errors")
@@ -1041,6 +1113,7 @@ pub fn bulk_create_instances(
 pub fn bulk_update_instances(
     input: BulkUpdateInstancesInput,
 ) -> Result<BulkUpdateInstancesOutput, AgentError> {
+    let connection = input._connection;
     let body = if let (Some(cond), Some(props)) = (input.condition.as_ref(), input.properties) {
         json!({
             "schema_name": input.schema_name,
@@ -1073,7 +1146,7 @@ pub fn bulk_update_instances(
         });
     };
 
-    let resp = http_post("/instances/bulk-update", body)?;
+    let resp = http_post("/instances/bulk-update", body, &connection)?;
 
     Ok(BulkUpdateInstancesOutput {
         success: resp["success"].as_bool().unwrap_or(false),
@@ -1094,6 +1167,7 @@ pub fn bulk_update_instances(
 pub fn bulk_delete_instances(
     input: BulkDeleteInstancesInput,
 ) -> Result<BulkDeleteInstancesOutput, AgentError> {
+    let connection = input._connection;
     let body = match (input.ids, input.condition) {
         (Some(ids), _) if !ids.is_empty() => json!({
             "schema_name": input.schema_name,
@@ -1112,7 +1186,7 @@ pub fn bulk_delete_instances(
         }
     };
 
-    let resp = http_post("/instances/bulk-delete", body)?;
+    let resp = http_post("/instances/bulk-delete", body, &connection)?;
 
     Ok(BulkDeleteInstancesOutput {
         success: resp["success"].as_bool().unwrap_or(false),
@@ -1298,6 +1372,7 @@ pub struct QueryAggregateOutput {
     side_effects = false
 )]
 pub fn query_aggregate(input: QueryAggregateInput) -> Result<QueryAggregateOutput, AgentError> {
+    let connection = input._connection;
     let condition_json = input.condition.as_ref().map(condition_expr_to_json);
 
     let resp = http_post(
@@ -1311,6 +1386,7 @@ pub fn query_aggregate(input: QueryAggregateInput) -> Result<QueryAggregateOutpu
             "limit": input.limit,
             "offset": input.offset,
         }),
+        &connection,
     )?;
 
     let columns = resp
@@ -1413,9 +1489,9 @@ const MEMORY_SCHEMA_NAME: &str = "_ai_conversation_memory";
 const MEMORY_TABLE_NAME: &str = "_ai_conversation_memory";
 
 /// Ensure the conversation memory schema exists, creating it if needed.
-fn ensure_memory_schema() -> Result<(), AgentError> {
+fn ensure_memory_schema(connection: &Option<RawConnection>) -> Result<(), AgentError> {
     // Check if schema already exists
-    let resp = http_get(&format!("/schemas/{}", MEMORY_SCHEMA_NAME))?;
+    let resp = http_get(&format!("/schemas/{}", MEMORY_SCHEMA_NAME), connection)?;
 
     if resp["success"].as_bool().unwrap_or(false)
         && resp.get("schema").is_some()
@@ -1456,6 +1532,7 @@ fn ensure_memory_schema() -> Result<(), AgentError> {
                 }
             ]
         }),
+        connection,
     )?;
 
     if create_resp["success"].as_bool().unwrap_or(false) {
@@ -1529,7 +1606,8 @@ pub struct LoadMemoryOutput {
     tags = "memory:read"
 )]
 pub fn load_memory(input: LoadMemoryInput) -> Result<LoadMemoryOutput, AgentError> {
-    ensure_memory_schema()?;
+    let connection = input._connection;
+    ensure_memory_schema(&connection)?;
 
     let mut filters = HashMap::new();
     filters.insert(
@@ -1545,6 +1623,7 @@ pub fn load_memory(input: LoadMemoryInput) -> Result<LoadMemoryOutput, AgentErro
             "limit": 1,
             "offset": 0,
         }),
+        &connection,
     )?;
 
     if resp["success"].as_bool().unwrap_or(false) {
@@ -1643,7 +1722,8 @@ pub struct SaveMemoryOutput {
     tags = "memory:write"
 )]
 pub fn save_memory(input: SaveMemoryInput) -> Result<SaveMemoryOutput, AgentError> {
-    ensure_memory_schema()?;
+    let connection = input._connection;
+    ensure_memory_schema(&connection)?;
 
     let message_count = input.messages.len() as i64;
     let messages_json = Value::Array(input.messages);
@@ -1663,6 +1743,7 @@ pub fn save_memory(input: SaveMemoryInput) -> Result<SaveMemoryOutput, AgentErro
             "limit": 1,
             "offset": 0,
         }),
+        &connection,
     )?;
 
     if query_resp["success"].as_bool().unwrap_or(false) {
@@ -1684,6 +1765,7 @@ pub fn save_memory(input: SaveMemoryInput) -> Result<SaveMemoryOutput, AgentErro
                         "message_count": message_count,
                     }
                 }),
+                &connection,
             )?;
 
             if !update_resp["success"].as_bool().unwrap_or(false) {
@@ -1708,6 +1790,7 @@ pub fn save_memory(input: SaveMemoryInput) -> Result<SaveMemoryOutput, AgentErro
                         "message_count": message_count,
                     }
                 }),
+                &connection,
             )?;
 
             if !create_resp["success"].as_bool().unwrap_or(false) {

@@ -11,7 +11,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/shared/components/ui/select';
-import { Schema } from '@/generated/RuntaraRuntimeApi';
+import { ConnectionDto, Schema } from '@/generated/RuntaraRuntimeApi';
 import { Checkbox } from '@/shared/components/ui/checkbox';
 import {
   ReportAggregateFn,
@@ -21,11 +21,19 @@ import {
 } from '../../../types';
 import { humanizeFieldName, slugify } from '../../../utils';
 import { makeDatasetId, makeMeasureId } from '../wizardTypes';
+import {
+  SchemasByConnectionId,
+  schemasForConnection,
+} from '../schemaConnections';
+import { ObjectModelConnectionSelect } from './ObjectModelConnectionSelect';
 
 interface DatasetsStepProps {
   datasets: ReportDatasetDefinition[];
   schemas: Schema[];
+  schemasByConnectionId?: SchemasByConnectionId;
   defaultSchema?: string;
+  objectModelConnections: ConnectionDto[];
+  defaultObjectModelConnectionId?: string | null;
   onChange: (next: ReportDatasetDefinition[]) => void;
 }
 
@@ -39,16 +47,17 @@ const FIELD_TYPES: Array<{ value: ReportDatasetFieldType; label: string }> = [
   { value: 'json', label: 'JSON' },
 ];
 
-const VALUE_FORMATS: Array<{ value: ReportDatasetValueFormat; label: string }> = [
-  { value: 'string', label: 'String' },
-  { value: 'number', label: 'Number' },
-  { value: 'decimal', label: 'Decimal' },
-  { value: 'currency', label: 'Currency' },
-  { value: 'percent', label: 'Percent' },
-  { value: 'boolean', label: 'Boolean' },
-  { value: 'date', label: 'Date' },
-  { value: 'datetime', label: 'Date + time' },
-];
+const VALUE_FORMATS: Array<{ value: ReportDatasetValueFormat; label: string }> =
+  [
+    { value: 'string', label: 'String' },
+    { value: 'number', label: 'Number' },
+    { value: 'decimal', label: 'Decimal' },
+    { value: 'currency', label: 'Currency' },
+    { value: 'percent', label: 'Percent' },
+    { value: 'boolean', label: 'Boolean' },
+    { value: 'date', label: 'Date' },
+    { value: 'datetime', label: 'Date + time' },
+  ];
 
 const MEASURE_OPS: Array<{ value: ReportAggregateFn; label: string }> = [
   { value: 'count', label: 'Count' },
@@ -109,8 +118,7 @@ function seedDataset(
   schemas: Schema[],
   defaultSchema: string | undefined
 ): ReportDatasetDefinition {
-  const schema =
-    schemas.find((s) => s.name === defaultSchema) ?? schemas[0];
+  const schema = schemas.find((s) => s.name === defaultSchema) ?? schemas[0];
   const schemaName = schema?.name ?? '';
   const firstField = schema?.columns[0]?.name;
   return {
@@ -140,7 +148,10 @@ function seedDataset(
 export function DatasetsStep({
   datasets,
   schemas,
+  schemasByConnectionId,
   defaultSchema,
+  objectModelConnections,
+  defaultObjectModelConnectionId,
   onChange,
 }: DatasetsStepProps) {
   const [openId, setOpenId] = useState<string | null>(null);
@@ -194,10 +205,11 @@ export function DatasetsStep({
           key={dataset.id}
           dataset={dataset}
           schemas={schemas}
+          schemasByConnectionId={schemasByConnectionId}
+          objectModelConnections={objectModelConnections}
+          defaultObjectModelConnectionId={defaultObjectModelConnectionId}
           open={openId === dataset.id}
-          onToggle={() =>
-            setOpenId(openId === dataset.id ? null : dataset.id)
-          }
+          onToggle={() => setOpenId(openId === dataset.id ? null : dataset.id)}
           onRename={(label) => renameDataset(dataset.id, label)}
           onChange={(patch) => updateDataset(dataset.id, patch)}
           onRemove={() => removeDataset(dataset.id)}
@@ -220,6 +232,9 @@ export function DatasetsStep({
 function DatasetCard({
   dataset,
   schemas,
+  schemasByConnectionId,
+  objectModelConnections,
+  defaultObjectModelConnectionId,
   open,
   onToggle,
   onRename,
@@ -228,15 +243,56 @@ function DatasetCard({
 }: {
   dataset: ReportDatasetDefinition;
   schemas: Schema[];
+  schemasByConnectionId?: SchemasByConnectionId;
+  objectModelConnections: ConnectionDto[];
+  defaultObjectModelConnectionId?: string | null;
   open: boolean;
   onToggle: () => void;
   onRename: (label: string) => void;
   onChange: (patch: Partial<ReportDatasetDefinition>) => void;
   onRemove: () => void;
 }) {
-  const schema = schemas.find((s) => s.name === dataset.source.schema);
+  const datasetSchemas = schemasForConnection(
+    schemas,
+    schemasByConnectionId,
+    dataset.source.connectionId,
+    defaultObjectModelConnectionId
+  );
+  const schema = datasetSchemas.find((s) => s.name === dataset.source.schema);
   const schemaFields = schema?.columns.map((c) => c.name) ?? [];
   const summary = `${dataset.dimensions.length} dim · ${dataset.measures.length} measure${dataset.measures.length === 1 ? '' : 's'}`;
+
+  function updateSourceConnection(connectionId: string | undefined) {
+    const nextSchemas = schemasForConnection(
+      schemas,
+      schemasByConnectionId,
+      connectionId,
+      defaultObjectModelConnectionId
+    );
+    const nextSchema = nextSchemas.some(
+      (candidate) => candidate.name === dataset.source.schema
+    )
+      ? dataset.source.schema
+      : nextSchemas[0]?.name || dataset.source.schema;
+    const nextFields = new Set(
+      nextSchemas
+        .find((candidate) => candidate.name === nextSchema)
+        ?.columns.map((column) => column.name) ?? []
+    );
+    onChange({
+      source: {
+        ...dataset.source,
+        connectionId,
+        schema: nextSchema,
+      },
+      dimensions: dataset.dimensions.filter((dimension) =>
+        nextFields.has(dimension.field)
+      ),
+      measures: dataset.measures.filter(
+        (measure) => !measure.field || nextFields.has(measure.field)
+      ),
+    });
+  }
 
   return (
     <article
@@ -303,14 +359,14 @@ function DatasetCard({
                     source: { ...dataset.source, schema: value },
                     // Drop dimensions/measures whose field no longer exists.
                     dimensions: dataset.dimensions.filter((d) =>
-                      schemas
+                      datasetSchemas
                         .find((s) => s.name === value)
                         ?.columns.some((c) => c.name === d.field)
                     ),
                     measures: dataset.measures.filter(
                       (m) =>
                         !m.field ||
-                        schemas
+                        datasetSchemas
                           .find((s) => s.name === value)
                           ?.columns.some((c) => c.name === m.field)
                     ),
@@ -321,7 +377,7 @@ function DatasetCard({
                   <SelectValue placeholder="Select schema" />
                 </SelectTrigger>
                 <SelectContent>
-                  {schemas.map((s) => (
+                  {datasetSchemas.map((s) => (
                     <SelectItem key={s.id} value={s.name}>
                       {s.name}
                     </SelectItem>
@@ -329,23 +385,12 @@ function DatasetCard({
                 </SelectContent>
               </Select>
             </div>
-            <div className="grid gap-1.5">
-              <Label className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
-                Connection (optional)
-              </Label>
-              <Input
-                placeholder="Connection ID — leave empty for default"
-                value={dataset.source.connectionId ?? ''}
-                onChange={(event) =>
-                  onChange({
-                    source: {
-                      ...dataset.source,
-                      connectionId: event.target.value || null,
-                    },
-                  })
-                }
-              />
-            </div>
+            <ObjectModelConnectionSelect
+              value={dataset.source.connectionId}
+              connections={objectModelConnections}
+              defaultConnectionId={defaultObjectModelConnectionId}
+              onChange={updateSourceConnection}
+            />
             <div className="grid gap-1.5 sm:col-span-2">
               <Label className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
                 Time dimension (optional)
@@ -364,9 +409,7 @@ function DatasetCard({
                 <SelectContent>
                   <SelectItem value="__none__">No time dimension</SelectItem>
                   {dataset.dimensions
-                    .filter(
-                      (d) => d.type === 'date' || d.type === 'datetime'
-                    )
+                    .filter((d) => d.type === 'date' || d.type === 'datetime')
                     .map((d) => (
                       <SelectItem key={d.field} value={d.field}>
                         {d.label}
@@ -413,10 +456,7 @@ function DimensionsEditor({
 
   function addDimension(field: string) {
     const type = inferFieldType(schema, field);
-    onChange([
-      ...dimensions,
-      { field, label: humanizeFieldName(field), type },
-    ]);
+    onChange([...dimensions, { field, label: humanizeFieldName(field), type }]);
   }
 
   function updatePatch(
@@ -716,7 +756,10 @@ function MeasuresEditor({
                     measure.op === 'count' ||
                     measure.op === 'avg' ||
                     measure.op === 'min' ||
-                    measure.op === 'max') && measure.op !== 'count' ? null : null}
+                    measure.op === 'max') &&
+                  measure.op !== 'count'
+                    ? null
+                    : null}
                   {measure.op === 'count' || opRequiresField ? (
                     <label className="flex items-end gap-2 text-xs">
                       <Checkbox

@@ -37,6 +37,7 @@ interface ImportCsvDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   objectSchemaDto: Schema;
+  connectionId?: string | null;
 }
 
 const SKIP_COLUMN = '__skip__';
@@ -45,6 +46,7 @@ export function ImportCsvDialog({
   open,
   onOpenChange,
   objectSchemaDto,
+  connectionId,
 }: ImportCsvDialogProps) {
   const [step, setStep] = useState<ImportStep>('upload');
   const [csvBase64, setCsvBase64] = useState<string>('');
@@ -61,8 +63,8 @@ export function ImportCsvDialog({
   );
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  const previewMutation = useImportCsvPreview();
-  const importMutation = useImportCsv();
+  const previewMutation = useImportCsvPreview(connectionId);
+  const importMutation = useImportCsv(connectionId);
 
   const schemaName = objectSchemaDto.name || '';
 
