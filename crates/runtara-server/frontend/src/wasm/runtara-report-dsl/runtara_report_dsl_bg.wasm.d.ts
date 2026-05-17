@@ -2,7 +2,8 @@
 /* eslint-disable */
 export const memory: WebAssembly.Memory;
 export const version: () => [number, number];
-export const renderTemplate: (a: number, b: number, c: any) => [number, number, number, number];
+export const renderTemplate: (a: number, b: number, c: any, d: any) => [number, number, number, number];
+export const formatValue: (a: any, b: number, c: number, d: any) => [number, number, number, number];
 export const validateTemplate: (a: number, b: number) => [number, number];
 export const evaluateRowCondition: (a: any, b: any) => [number, number, number];
 export const __wbindgen_malloc: (a: number, b: number) => number;

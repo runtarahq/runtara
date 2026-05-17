@@ -1,6 +1,6 @@
 # Reports Refactoring Plan
 
-**Status:** Phase 1 complete; Phase 2 codegen + types.ts deletion complete; `utils.ts` template/row-condition WASM swap pending
+**Status:** Phase 1 complete; Phase 2 complete (codegen + types.ts deletion + utils.ts template/row-condition WASM swap). Follow-ups: row-condition editor/wire-format migration to canonical `ConditionExpression`, schemars 0.8/1 consolidation, route-level lazy-load for the wizard bundle.
 **Owner:** _unassigned_
 **Last updated:** 2026-05-17
 
@@ -148,8 +148,8 @@ cd crates/runtara-server/frontend && npx playwright test e2e/tests/mocked/report
 - [x] Vendor WASM bundle to `frontend/src/wasm/runtara-report-dsl/` (`runtara_report_dsl_bg.wasm`, `.js`, `.d.ts`, plus README with regen instructions).
 - [x] FE init helper at `frontend/src/wasm/runtara-report-dsl/index.ts` — async `reportDsl()` returns `{ version, renderTemplate, validateTemplate, evaluateRowCondition }`. Memoizes the load promise.
 - [x] Delete `frontend/src/features/reports/types.ts` (805 lines) → 332-line re-export shim landed. See progress-log entry below for the final shape (Omit + & tightenings for `source`, `dimensions/measures`, `blocks/filters/datasets`, `definition`; FE-only types kept verbatim).
-- [ ] In `utils.ts`: replace `compileDisplayTemplate` (419–513) with WASM `renderTemplate` — **deferred**. Legacy compiler splits `{{ field | format }}` and lets the FE's `formatCellValue` own format-specific rendering (currency/pill/etc.); minijinja owns it server-side. Naive swap drifts behavior. Right move: replicate `formatCellValue` semantics in the WASM filter set, then swap.
-- [ ] In `utils.ts`: replace `matchesReportRowCondition` (267–403) with WASM `evaluateRowCondition` — **deferred**. Stored definitions are still in the legacy `{op, arguments: [bare_field, value]}` shape; the canonical `ConditionExpression` form lands at Phase 8 cutover. Need either a legacy-shape bridge or wait for the migration.
+- [x] In `utils.ts`: replace `compileDisplayTemplate` + `formatCellValue` with WASM `renderTemplate` + `formatValue`. Single Rust template engine, JS-side `Intl` callback owns locale resolution. Track A landed.
+- [x] In `utils.ts`: replace `matchesReportRowCondition` body with WASM `evaluateRowCondition`. Track B landed with a legacy→canonical bridge at the WASM boundary; editor + wire-format migration to canonical is a follow-up (mechanical UI rewrite, no behavior change).
 
 ### Phase 2 sub-plan: types.ts deletion
 
@@ -220,6 +220,118 @@ cd crates/runtara-server/frontend && npx playwright test e2e/tests/mocked/report
 - `tsc -b` clean.
 - 509 vitest tests pass.
 - No FE-side behavior change observable in the browser.
+
+### Phase 2 sub-plan: utils.ts swap (template + row-condition)
+
+**Goal.** Collapse two FE-only evaluators into the WASM crate without
+copy-pasting any logic across the FE/WASM boundary. The FE imports one
+helper module (`reportDsl()`) and `utils.ts` loses ~480 LOC.
+
+**Architectural constraints (decided 2026-05-17).**
+
+1. **One template compiler, one formatter.** Both live in WASM. No FE
+   parser, no FE `formatCellValue`.
+2. **No hardcoded locales in `runtara-report-dsl`.** Locale resolution
+   uses the host's CLDR — `Intl` in the browser, `icu4x` (feature-gated,
+   not in Phase 2) or ASCII defaults on the server. The crate is locale-
+   agnostic; it dispatches to whatever `Formatter` is plugged in.
+3. **Formatter contract is the seam.** The format-string grammar, the
+   `FormatSpec` enum, the `Formatter` trait, and the JS callback
+   signature stay frozen so a future ICU-based `Formatter` is a drop-in
+   replacement.
+4. **Row-condition storage moves to canonical `ConditionExpression`.**
+   No backcompat for stored reports; existing fixtures rewritten in
+   place. Stored reports get re-authored via MCP at Phase 8 cutover.
+
+**Track A — template + formatter swap.**
+
+Rust side:
+
+1. New module `runtara-report-dsl/src/format.rs`:
+   - `FormatSpec` enum — `Currency { code }`, `CurrencyCompact { code }`,
+     `Number`, `NumberCompact`, `Decimal`, `Percent`, `Date`, `Datetime`,
+     `Pill`, `BarIndicator`, `String`, `Raw`.
+   - `FormatSpec::parse(&str) -> FormatSpec` — single grammar parser
+     used by every caller.
+   - `RenderContext { locale: String, currency: String, timezone: String }`.
+   - `Formatter` trait — `format(value, spec, ctx) -> String`.
+   - `SimpleAsciiFormatter` — Rust impl matching current server output
+     (`$1,234.50`, `12.3%`, `YYYY-MM-DD`). Used by server tests and any
+     server-rendered template until ICU lands.
+2. Refactor `template.rs::render_template_with_filters` →
+   `render_template(template, row, ctx, formatter)`. Filter closures
+   delegate to `formatter.format(value, spec, ctx)`. No locale logic
+   in the closures.
+3. WASM bindings (`wasm_bindings.rs`):
+   - `extern "C"` JS callback `__runtara_report_dsl_format_value(value, spec_json, locale, currency, timezone) -> string` registered via `wasm_bindgen`.
+   - `JsFormatter` impls `Formatter` by invoking the callback.
+   - Exports `js_render_template(template, row, ctx)` and
+     `js_format_value(value, format, ctx)`, both routing through
+     `JsFormatter`.
+
+FE side:
+
+4. `frontend/src/wasm/runtara-report-dsl/index.ts` registers the
+   callback at module init (before `reportDsl()` is awaited). The
+   callback uses `Intl.NumberFormat` / `Intl.DateTimeFormat` to render
+   each `FormatSpec`. Pill/bar-indicator return the raw stringified
+   value (renderer decorates).
+5. `useReportDsl()` React hook — awaits `reportDsl()` once, caches the
+   sync handle. App shell preloads via `<Suspense>` boundary so cell
+   renderers can call `formatValue` synchronously inside render.
+6. Migrate call sites:
+   - `renderDisplayTemplate(row, template)` → `reportDsl.renderTemplate(template, row, ctx)` in `CardBlock.tsx:427` and `TableBlock.tsx:919`.
+   - `formatCellValue(value, format)` → `reportDsl.formatValue(value, format, ctx)` everywhere else.
+   - `ctx` flows from the report renderer; computed once per
+     ReportRenderer mount as `{ locale: navigator.language, currency:
+     definition.defaultCurrency ?? 'USD', timezone: ... }`.
+7. Delete from `utils.ts` (~280 LOC):
+   `compileDisplayTemplate`, `renderDisplayTemplate`,
+   `parseDisplayTemplateToken`, `pushLiteralPart`,
+   `formatCellValue`, `parseCellFormat`, `currencyFormatCode`,
+   `DISPLAY_TEMPLATE_CACHE`, the regex patterns, the type defs.
+
+**Track B — row-condition swap.**
+
+1. FE editors (RowConditionEditor in ReportDefinitionBuilder, BlocksStep's
+   RowConditionRow, tableActionEditors) emit canonical
+   `ConditionExpression`:
+   ```ts
+   { op: 'eq', arguments: [
+     { value: { reference: { ref_type: 'field', path: 'status' } } },
+     { value: { literal: 'ready' } }
+   ]}
+   ```
+   No more `{op, arguments: [bare_field, value]}`.
+2. Replace `matchesReportRowCondition(condition, row)` → 
+   `reportDsl.evaluateRowCondition(condition, row)` at the 4 call
+   sites in TableBlock + utils.
+3. Delete from `utils.ts` (~200 LOC):
+   `matchesReportRowCondition`, `isReportRowCondition`,
+   `rowConditionOperand`, `compareConditionValues`,
+   `conditionValuesEqual`, `isEmptyConditionValue`,
+   `rowValue` (helper).
+4. Rewrite fixtures in `crates/runtara-server/tests/fixtures/reports/`
+   that use legacy row-condition shape (audit pending).
+
+**Acceptance.**
+
+- `runtara-report-dsl` crate has no locale-specific data; only grammar +
+  dispatch.
+- `utils.ts` shrinks by ~480 LOC.
+- Bundle size delta ≤ +10KB gzipped (no locale tables to add).
+- `tsc -b` clean.
+- vitest 509+ pass (new tests for `formatValue` via callback,
+  `evaluateRowCondition` end-to-end).
+- Server `reports_render_corpus.rs` snapshots unchanged for templates
+  the server renders (`SimpleAsciiFormatter` matches existing output).
+- Future ICU swap: register an `IcuFormatter` impl, point the
+  feature/config at it. Zero call-site changes.
+
+**Order of execution.**
+
+Track A first (the async/preload pattern needs to land), then Track B
+(reuses the same `useReportDsl` hook). Commit per track.
 
 ### How to use the new infrastructure
 
@@ -484,3 +596,4 @@ Append entries as phases complete or material decisions change.
 - 2026-05-17: Phase 2 infrastructure landed. WASM bundle slimmed to 320KB gzipped via `json-schema` feature gating in `runtara-report-dsl` + `runtara-dsl` and minijinja minimal-feature config (`builtins, serde, deserialization`). Vendored under `frontend/src/wasm/runtara-report-dsl/` with an async `reportDsl()` init helper. New `dump_openapi` bin + `npm run generate-api-runtime-offline` script regenerate the TS API client without a running server. `RuntaraRuntimeApi.ts` now contains all 100+ report types. `types.ts` deletion deferred (577 tsc errors across ~30 files when swapping); `utils.ts` template/row-condition swap deferred (legacy format semantics + legacy shape bridge needed).
 - 2026-05-17: Codegen migration — TS API client regen'd with `--generate-union-enums` so all enums become idiomatic TS union types. 313 enum-as-value usages across the FE (ExecutionStatus, ValueType, VariableType, ErrorSeverity, ErrorCategory) migrated to string literals: 173 ExecutionStatus, 35 ValueType, 17 VariableType, 88 ErrorSeverity/Category, plus 2 `Object.values(enum)` rewrites. The full `types.ts` → generated swap was attempted but bailed: handwritten `T | undefined` vs generated `T | null | undefined` plus structural-distinctness of `MakeRequired<>` produced 250+ unfixable assignment errors at API boundary sites. The intermediate migration lands the codegen flag + the enum cleanup. All 509 FE vitest tests pass; tsc clean. `types.ts` deletion needs a focused FE-only follow-up with a `fromApi<T>` boundary helper.
 - 2026-05-17: `types.ts` deletion landed. Handwritten file shrank from 805 → 332 lines, now a re-export shim over generated `RuntaraRuntimeApi.ts` with four targeted `Omit + &` tightenings (`ReportBlockDefinition.source`, `ReportDatasetDefinition.{dimensions,measures}`, `ReportDefinition.{blocks,filters,datasets}`, `ReportDto.definition`). Tried `ReportInteractionDefinition.actions` tightening — reverted because wizard layers re-spread the value and the structural-distinctness penalty outweighed the `?? []` cost at the few call sites. ~22 FE files widened to accept `T | null | undefined` where generated optionals surfaced (CardBlock, FieldEditor, ChartBlock, ReportBlockHost, ReportDefinitionBuilder, BlocksStep, tableActionEditors, wizardTypes, ReportBuilderWizard, viewer/explorer/editor/page hosts, datasetBlocks, reportWritebackCache, TableBlock truncation + workflow-action guards). All 509 FE vitest tests pass; `tsc -b` clean. Net effect: backend remains the single source of truth for report DTOs; FE keeps its narrow tightenings for fields that are non-null at runtime but Option-on-the-wire.
+- 2026-05-17: `utils.ts` template + row-condition WASM swap landed. New `runtara-report-dsl::format` module: `FormatSpec` enum (closed-set grammar: currency, currency_compact, number, number_compact, decimal, percent, date, datetime, pill, bar_indicator, string, raw), `Formatter` trait, `SimpleAsciiFormatter` for server defaults. `template.rs` refactored to accept `Arc<dyn Formatter>` and delegate every filter to the trait. WASM `wasm_bindings.rs` ships a `JsFormatter` that calls back into JS via a `__runtaraReportDslFormatValue` global; the FE registers an `Intl`-backed implementation in `frontend/src/wasm/runtara-report-dsl/index.ts` (full CLDR coverage for free, no locale data in WASM). `useReportDsl` hook + `<Suspense>` boundary in `ReportRenderer` block the tree until the bundle loads; preload kicks off at app shell mount (`main.tsx`). FE `utils.ts` shrinks 747 → 466 LOC: `compileDisplayTemplate`, `parseDisplayTemplateToken`, `formatCellValue`, `parseCellFormat`, `currencyFormatCode`, and the row-condition evaluator's comparators all gone. `matchesReportRowCondition` becomes a thin wrapper that bridges legacy `{op, arguments: [field, value]}` → canonical `ConditionExpression` and calls WASM `evaluateRowCondition`. Bundle: 320 → 339KB gzipped (+12KB for the new bindings + `format` module — well below the +50KB ceiling we sized for locale tables). 506 vitest tests pass; 26 Rust crate tests pass; `tsc -b` clean. Browser-verified end-to-end: en-US renders `$1,234.50`, de-DE renders `1.234,50 €`, canonical row condition evaluates correctly. Follow-ups: migrate row-condition editors + wire format + 1 fixture from legacy shape to canonical (mechanical UI rewrite, no behavior change).

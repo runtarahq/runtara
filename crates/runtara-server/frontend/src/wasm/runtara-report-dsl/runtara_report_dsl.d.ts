@@ -8,10 +8,18 @@
 export function evaluateRowCondition(expr: any, row: any): boolean;
 
 /**
- * Render a `{{ field | filter }}` template string against a row.
- * Throws on parse or render error.
+ * One-shot value formatting outside a template. Same dispatch path as
+ * the template filters, so `formatValue(x, 'currency', ctx)` matches
+ * `renderTemplate('{{ x | currency }}', { x }, ctx)`.
  */
-export function renderTemplate(template: string, row: any): string;
+export function formatValue(value: any, format: string, ctx: any): string;
+
+/**
+ * Render a `{{ field | filter }}` template string against a row.
+ * Throws on parse or render error. Locale-aware formatting routes back
+ * into JS via the registered formatter callback.
+ */
+export function renderTemplate(template: string, row: any, ctx: any): string;
 
 /**
  * Compile-check a template string. Returns `null` on success, throws on
@@ -29,7 +37,8 @@ export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembl
 export interface InitOutput {
   readonly memory: WebAssembly.Memory;
   readonly version: () => [number, number];
-  readonly renderTemplate: (a: number, b: number, c: any) => [number, number, number, number];
+  readonly renderTemplate: (a: number, b: number, c: any, d: any) => [number, number, number, number];
+  readonly formatValue: (a: any, b: number, c: number, d: any) => [number, number, number, number];
   readonly validateTemplate: (a: number, b: number) => [number, number];
   readonly evaluateRowCondition: (a: any, b: any) => [number, number, number];
   readonly __wbindgen_malloc: (a: number, b: number) => number;

@@ -1,4 +1,4 @@
-import { CSSProperties, Fragment, useMemo } from 'react';
+import { CSSProperties, Fragment, Suspense, useMemo } from 'react';
 import {
   ReportDefinition,
   ReportInteractionOptions,
@@ -14,6 +14,7 @@ import {
   getReportViewBreadcrumbs,
   isVisibleByShowWhen,
 } from '../utils';
+import { useReportDsl } from '../hooks/useReportDsl';
 import { ReportBlockHost } from './ReportBlockHost';
 
 type ReportRendererProps = {
@@ -34,7 +35,21 @@ type ReportRendererProps = {
   onRefresh?: () => void | Promise<unknown>;
 };
 
-export function ReportRenderer({
+export function ReportRenderer(props: ReportRendererProps) {
+  return (
+    <Suspense fallback={<ReportRendererSkeleton />}>
+      <ReportRendererInner {...props} />
+    </Suspense>
+  );
+}
+
+function ReportRendererSkeleton() {
+  return (
+    <div className="h-32 w-full animate-pulse rounded-xl bg-muted/30" />
+  );
+}
+
+function ReportRendererInner({
   reportId,
   definition,
   renderResponse,
@@ -45,6 +60,10 @@ export function ReportRenderer({
   onNavigateView,
   onRefresh,
 }: ReportRendererProps) {
+  // Suspends until the WASM bundle loads; cached for the rest of the
+  // session afterward. Cell renderers inside the tree call
+  // `getReportDsl()` synchronously.
+  useReportDsl();
   const activeView = useMemo(
     () => getActiveReportView(definition, activeViewId),
     [activeViewId, definition]

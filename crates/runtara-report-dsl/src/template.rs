@@ -1,12 +1,21 @@
 //! Display-template and viewer-template rendering, backed by `minijinja`.
 //!
-//! Replaces the three hand-rolled `{{ field | format:arg }}` parsers in the
-//! old server (`services/reports.rs:6244-6395`, `mcp/tools/reports.rs:3752-3839`,
-//! and the FE's `utils.ts:419-513`). All three callers now share one grammar.
+//! Replaces the three hand-rolled `{{ field | format:arg }}` parsers across
+//! the old server (`services/reports.rs`), the MCP authoring tools
+//! (`mcp/tools/reports.rs`), and the FE's `utils.ts`.
+//!
+//! The crate stays locale-agnostic: filters dispatch to whatever
+//! [`Formatter`] is plugged in. The browser supplies a JS-backed
+//! formatter (uses `Intl`); the server supplies [`SimpleAsciiFormatter`]
+//! or any future locale-aware impl. See `format.rs` for the contract.
+
+use std::sync::Arc;
 
 use minijinja::{Environment, Value as MJValue, value::ViaDeserialize};
 use serde_json::Value;
 use thiserror::Error;
+
+use crate::format::{FormatSpec, Formatter, RenderContext, SimpleAsciiFormatter};
 
 #[derive(Debug, Error)]
 pub enum TemplateError {
@@ -16,48 +25,33 @@ pub enum TemplateError {
     Render(String),
 }
 
-/// Build a minijinja environment with the report-DSL filter set registered.
-/// The environment is sandboxed — no `include`, no `extends`, no `import`.
-pub fn make_environment() -> Environment<'static> {
-    let mut env = Environment::new();
-    register_report_filters(&mut env);
-    env
-}
-
-/// Register the report-DSL format filters (`currency`, `pill`, `datetime`,
-/// `bar_indicator`, `percent`, `number`, `decimal`, `date`) on a minijinja
-/// environment. Use this on caller-managed environments (e.g. when caching
-/// a pre-built env across renders).
-pub fn register_report_filters(env: &mut Environment<'static>) {
-    env.add_filter("currency", filter_currency);
-    env.add_filter("number", filter_number);
-    env.add_filter("decimal", filter_decimal);
-    env.add_filter("percent", filter_percent);
-    env.add_filter("date", filter_date);
-    env.add_filter("datetime", filter_datetime);
-    env.add_filter("pill", filter_pill);
-    env.add_filter("bar_indicator", filter_bar_indicator);
-}
-
-/// Render a template string against a row's fields. Convenience wrapper
-/// around minijinja for the common case where the caller doesn't need to
-/// hold the `Environment` between renders.
-pub fn render_template(template: &str, row: &Value) -> Result<String, TemplateError> {
-    render_template_with_filters(template, row, |_| {})
-}
-
-/// Render a template with the report filters plus a caller-supplied filter
-/// closure. Useful when a caller needs to add a request-scoped filter
-/// (e.g. timezone) that the standard filter set doesn't cover.
-pub fn render_template_with_filters<F>(
+/// Render a template string against a row, using the supplied formatter
+/// for any `{{ field | format }}` placeholders.
+///
+/// The `ctx` carries locale + currency + timezone for the formatter.
+pub fn render_template(
     template: &str,
     row: &Value,
+    ctx: &RenderContext,
+    formatter: Arc<dyn Formatter>,
+) -> Result<String, TemplateError> {
+    render_template_with_extras(template, row, ctx, formatter, |_| {})
+}
+
+/// Render with the report filters plus a caller-supplied filter closure.
+/// Useful when a caller needs to add a request-scoped filter (e.g. a
+/// timezone-aware date renderer) without rebuilding the whole filter set.
+pub fn render_template_with_extras<F>(
+    template: &str,
+    row: &Value,
+    ctx: &RenderContext,
+    formatter: Arc<dyn Formatter>,
     extra: F,
 ) -> Result<String, TemplateError>
 where
     F: FnOnce(&mut Environment<'static>),
 {
-    let mut env = make_environment();
+    let mut env = make_environment(ctx.clone(), formatter);
     extra(&mut env);
     let tmpl = env
         .template_from_str(template)
@@ -66,133 +60,181 @@ where
         .map_err(|e| TemplateError::Render(e.to_string()))
 }
 
-// ---------------------------------------------------------------------------
-// Filters
-// ---------------------------------------------------------------------------
-
-fn filter_currency(value: ViaDeserialize<Option<f64>>) -> String {
-    match value.0 {
-        Some(n) => format_currency(n),
-        None => String::new(),
-    }
+/// Build a minijinja environment with the report filter set registered
+/// and the supplied formatter bound to each filter. The environment is
+/// sandboxed — no `include`, no `extends`, no `import`.
+pub fn make_environment(ctx: RenderContext, formatter: Arc<dyn Formatter>) -> Environment<'static> {
+    let mut env = Environment::new();
+    register_report_filters(&mut env, ctx, formatter);
+    env
 }
 
-fn filter_number(value: ViaDeserialize<Option<f64>>) -> String {
-    match value.0 {
-        Some(n) if n.fract() == 0.0 => format_with_thousands(n as i64),
-        Some(n) => format!("{:.2}", n),
-        None => String::new(),
-    }
+/// A no-op `Environment` for save-time validation that doesn't render
+/// anything. Filters are registered but use the simple ASCII formatter
+/// — sufficient for parse-time validation since the parser doesn't
+/// invoke filters.
+pub fn make_validation_environment() -> Environment<'static> {
+    make_environment(RenderContext::default(), Arc::new(SimpleAsciiFormatter))
 }
 
-fn filter_decimal(value: ViaDeserialize<Option<f64>>) -> String {
-    value.0.map(|n| format!("{:.2}", n)).unwrap_or_default()
+/// Register the report-DSL format filters on a minijinja environment.
+/// Each filter delegates to `formatter.format(value, spec, ctx)` so
+/// host-provided locale-aware formatters take effect.
+pub fn register_report_filters(
+    env: &mut Environment<'static>,
+    ctx: RenderContext,
+    formatter: Arc<dyn Formatter>,
+) {
+    register_filter(env, "currency", ctx.clone(), formatter.clone(), |arg| {
+        FormatSpec::Currency { code: arg }
+    });
+    register_filter(
+        env,
+        "currency_compact",
+        ctx.clone(),
+        formatter.clone(),
+        |arg| FormatSpec::CurrencyCompact { code: arg },
+    );
+    register_filter(env, "number", ctx.clone(), formatter.clone(), |_| {
+        FormatSpec::Number
+    });
+    register_filter(
+        env,
+        "number_compact",
+        ctx.clone(),
+        formatter.clone(),
+        |_| FormatSpec::NumberCompact,
+    );
+    register_filter(env, "decimal", ctx.clone(), formatter.clone(), |_| {
+        FormatSpec::Decimal
+    });
+    register_filter(env, "percent", ctx.clone(), formatter.clone(), |_| {
+        FormatSpec::Percent
+    });
+    register_filter(env, "date", ctx.clone(), formatter.clone(), |_| {
+        FormatSpec::Date
+    });
+    register_filter(env, "datetime", ctx.clone(), formatter.clone(), |_| {
+        FormatSpec::Datetime
+    });
+    register_filter(env, "pill", ctx.clone(), formatter.clone(), |_| {
+        FormatSpec::Pill
+    });
+    register_filter(env, "bar_indicator", ctx, formatter, |_| {
+        FormatSpec::BarIndicator
+    });
 }
 
-fn filter_percent(value: ViaDeserialize<Option<f64>>) -> String {
-    match value.0 {
-        Some(n) => format!("{:.1}%", n * 100.0),
-        None => String::new(),
-    }
+/// Helper: register a one-or-two-arg filter that delegates to the
+/// configured formatter. The `spec_from_arg` closure picks the
+/// `FormatSpec` variant given the optional filter argument (e.g.
+/// `currency:eur` → `FormatSpec::Currency { code: Some("eur") }`).
+fn register_filter(
+    env: &mut Environment<'static>,
+    name: &'static str,
+    ctx: RenderContext,
+    formatter: Arc<dyn Formatter>,
+    spec_from_arg: fn(Option<String>) -> FormatSpec,
+) {
+    let filter_closure = move |value: ViaDeserialize<Value>, arg: Option<String>| -> String {
+        let spec = spec_from_arg(arg);
+        formatter.format(&value.0, &spec, &ctx)
+    };
+    env.add_filter(name, filter_closure);
 }
 
-fn filter_date(value: ViaDeserialize<Option<String>>) -> String {
-    // Render YYYY-MM-DDTHH:MM:SS as YYYY-MM-DD without timezone math; locale
-    // conversion is the renderer's job, not the template's.
-    value
-        .0
-        .map(|s| s.split('T').next().unwrap_or(&s).to_string())
-        .unwrap_or_default()
+/// One-shot value formatting outside a template — same dispatch path as
+/// the template filters, so output is consistent between
+/// `{{ x | currency }}` placeholders and raw `format: 'currency'` cell
+/// renderers.
+pub fn format_value(
+    value: &Value,
+    format: &str,
+    ctx: &RenderContext,
+    formatter: &dyn Formatter,
+) -> String {
+    let spec = FormatSpec::parse(format);
+    formatter.format(value, &spec, ctx)
 }
 
-fn filter_datetime(value: ViaDeserialize<Option<String>>) -> String {
-    // Mirror the FE: strip trailing Z + fractional seconds for compactness.
-    value
-        .0
-        .map(|s| {
-            let trimmed = s.strip_suffix('Z').unwrap_or(&s);
-            trimmed
-                .split_once('.')
-                .map(|(head, _)| head.to_string())
-                .unwrap_or_else(|| trimmed.to_string())
-        })
-        .unwrap_or_default()
+/// Convenience wrapper for save-time validation. Returns `Ok(())` on
+/// successful parse; `Err(TemplateError::Parse)` otherwise. Does not
+/// require a formatter — parse errors surface before any filter is
+/// invoked.
+pub fn validate_template(template: &str) -> Result<(), TemplateError> {
+    let env = make_validation_environment();
+    env.template_from_str(template)
+        .map(|_| ())
+        .map_err(|e| TemplateError::Parse(e.to_string()))
 }
 
-fn filter_pill(value: MJValue) -> String {
-    // Pill is a passthrough at template time — the colorization happens in
-    // the renderer, not the string output.
-    value.to_string()
-}
-
-fn filter_bar_indicator(value: MJValue) -> String {
-    // Same as pill: rendering decoration happens in the FE.
-    value.to_string()
-}
-
-// ---------------------------------------------------------------------------
-// Format helpers
-// ---------------------------------------------------------------------------
-
-fn format_currency(n: f64) -> String {
-    let sign = if n < 0.0 { "-" } else { "" };
-    let abs = n.abs();
-    let whole = abs.trunc() as i64;
-    let cents = ((abs.fract() * 100.0).round()) as i64;
-    format!("{}${}.{:02}", sign, format_with_thousands(whole), cents)
-}
-
-fn format_with_thousands(n: i64) -> String {
-    let sign = if n < 0 { "-" } else { "" };
-    let s = n.abs().to_string();
-    let bytes = s.as_bytes();
-    let mut out = String::with_capacity(s.len() + s.len() / 3);
-    for (i, c) in bytes.iter().enumerate() {
-        if i > 0 && (bytes.len() - i).is_multiple_of(3) {
-            out.push(',');
-        }
-        out.push(*c as char);
-    }
-    format!("{sign}{out}")
-}
+// Keep `MJValue` referenced so future filters can use it without a
+// stale-import lint. Today only `ViaDeserialize<Value>` is used.
+#[allow(dead_code)]
+fn _mjvalue_anchor(_: &MJValue) {}
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
 
+    fn render(template: &str, row: &Value) -> String {
+        render_template(
+            template,
+            row,
+            &RenderContext {
+                locale: "en-US".into(),
+                currency: "USD".into(),
+                timezone: "UTC".into(),
+            },
+            Arc::new(SimpleAsciiFormatter),
+        )
+        .unwrap()
+    }
+
     #[test]
     fn render_plain_field() {
-        let out = render_template("Hello {{ name }}", &json!({ "name": "world" })).unwrap();
-        assert_eq!(out, "Hello world");
+        assert_eq!(
+            render("Hello {{ name }}", &json!({ "name": "world" })),
+            "Hello world"
+        );
     }
 
     #[test]
     fn render_currency_filter() {
-        let out = render_template(
-            "Total: {{ amount | currency }}",
-            &json!({ "amount": 1234.5 }),
-        )
-        .unwrap();
-        assert_eq!(out, "Total: $1,234.50");
+        assert_eq!(
+            render(
+                "Total: {{ amount | currency }}",
+                &json!({ "amount": 1234.5 })
+            ),
+            "Total: $1,234.50"
+        );
+    }
+
+    #[test]
+    fn render_currency_filter_with_arg() {
+        assert_eq!(
+            render(
+                "Total: {{ amount | currency('eur') }}",
+                &json!({ "amount": 50.0 })
+            ),
+            "Total: €50.00"
+        );
     }
 
     #[test]
     fn render_number_filter() {
         assert_eq!(
-            render_template("{{ n | number }}", &json!({ "n": 1234567 })).unwrap(),
+            render("{{ n | number }}", &json!({ "n": 1234567 })),
             "1,234,567"
         );
-        assert_eq!(
-            render_template("{{ n | number }}", &json!({ "n": 1.5 })).unwrap(),
-            "1.50"
-        );
+        assert_eq!(render("{{ n | number }}", &json!({ "n": 1.5 })), "1.50");
     }
 
     #[test]
     fn render_percent_filter() {
         assert_eq!(
-            render_template("{{ ratio | percent }}", &json!({ "ratio": 0.123 })).unwrap(),
+            render("{{ ratio | percent }}", &json!({ "ratio": 0.123 })),
             "12.3%"
         );
     }
@@ -200,7 +242,7 @@ mod tests {
     #[test]
     fn render_date_filter() {
         assert_eq!(
-            render_template("{{ d | date }}", &json!({ "d": "2026-01-15T08:30:00Z" })).unwrap(),
+            render("{{ d | date }}", &json!({ "d": "2026-01-15T08:30:00Z" })),
             "2026-01-15"
         );
     }
@@ -208,26 +250,46 @@ mod tests {
     #[test]
     fn render_datetime_filter() {
         assert_eq!(
-            render_template(
+            render(
                 "{{ d | datetime }}",
                 &json!({ "d": "2026-01-15T08:30:00.123Z" })
-            )
-            .unwrap(),
+            ),
             "2026-01-15T08:30:00"
         );
     }
 
     #[test]
     fn render_undefined_field_is_empty() {
-        // Minijinja default: undefined → empty string. Matches the old
-        // hand-rolled parser's behavior.
-        let out = render_template("Hello {{ missing }}", &json!({})).unwrap();
-        assert_eq!(out, "Hello ");
+        assert_eq!(render("Hello {{ missing }}", &json!({})), "Hello ");
     }
 
     #[test]
     fn parse_error_is_reported_as_parse() {
-        let err = render_template("Unclosed {{ field", &json!({})).unwrap_err();
+        let err = render_template(
+            "Unclosed {{ field",
+            &json!({}),
+            &RenderContext::default(),
+            Arc::new(SimpleAsciiFormatter),
+        )
+        .unwrap_err();
         assert!(matches!(err, TemplateError::Parse(_)));
+    }
+
+    #[test]
+    fn format_value_matches_template_output() {
+        let fmt = SimpleAsciiFormatter;
+        let ctx = RenderContext {
+            locale: "en-US".into(),
+            currency: "USD".into(),
+            timezone: "UTC".into(),
+        };
+        assert_eq!(
+            format_value(&json!(1234.5), "currency", &ctx, &fmt),
+            "$1,234.50"
+        );
+        assert_eq!(
+            render("{{ x | currency }}", &json!({ "x": 1234.5 })),
+            "$1,234.50"
+        );
     }
 }

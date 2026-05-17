@@ -7,6 +7,7 @@
 //! WASM build to the frontend so FE and BE share one validation truth.
 
 pub mod condition;
+pub mod format;
 pub mod row_condition;
 pub mod template;
 pub mod types;
@@ -15,8 +16,12 @@ pub mod types;
 mod wasm_bindings;
 
 pub use condition::Condition;
+pub use format::{FormatSpec, Formatter, RenderContext, SimpleAsciiFormatter};
 pub use row_condition::{RowConditionError, evaluate_row_condition};
-pub use template::{TemplateError, render_template, render_template_with_filters};
+pub use template::{
+    TemplateError, format_value, make_environment, register_report_filters, render_template,
+    render_template_with_extras, validate_template,
+};
 pub use types::*;
 
 /// Library version, set from the workspace `Cargo.toml`. Useful for FE↔BE

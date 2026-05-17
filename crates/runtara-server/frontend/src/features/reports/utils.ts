@@ -9,6 +9,10 @@ import {
   ReportVisibilityCondition,
   ReportWorkflowActionConfig,
 } from './types';
+import {
+  defaultRenderContext,
+  reportDsl,
+} from '@/wasm/runtara-report-dsl';
 
 export const TIME_RANGE_PRESETS = [
   { label: 'Today', value: 'today' },
@@ -264,98 +268,121 @@ export function isWorkflowActionDisabled(
     : false;
 }
 
+/**
+ * Evaluate a row visibility/disability condition against a row.
+ *
+ * Delegates to the WASM `evaluateRowCondition` (single source of truth
+ * shared with the server). The condition shape stored in report
+ * definitions today is legacy — `{op, arguments: [bare_field, value]}`
+ * — so this wrapper converts to canonical `ConditionExpression`
+ * before invoking the WASM evaluator. The wire-format migration to
+ * canonical lives in a follow-up.
+ *
+ * Returns false on any conversion or WASM error (e.g. before the
+ * bundle has loaded).
+ */
 export function matchesReportRowCondition(
   condition: ReportRowCondition,
   row: Record<string, unknown>
 ): boolean {
-  const op = condition.op.toUpperCase();
-  const args = condition.arguments ?? [];
-
-  switch (op) {
-    case 'AND':
-      return args.every((argument) =>
-        isReportRowCondition(argument)
-          ? matchesReportRowCondition(argument, row)
-          : false
-      );
-    case 'OR':
-      return args.some((argument) =>
-        isReportRowCondition(argument)
-          ? matchesReportRowCondition(argument, row)
-          : false
-      );
-    case 'NOT':
-      return isReportRowCondition(args[0])
-        ? !matchesReportRowCondition(args[0], row)
-        : false;
-    case 'EQ':
-      return compareConditionValues(
-        rowConditionOperand(args[0], row, true),
-        rowConditionOperand(args[1], row, false)
-      ).equal;
-    case 'NE':
-      return !compareConditionValues(
-        rowConditionOperand(args[0], row, true),
-        rowConditionOperand(args[1], row, false)
-      ).equal;
-    case 'GT':
-      return (
-        compareConditionValues(
-          rowConditionOperand(args[0], row, true),
-          rowConditionOperand(args[1], row, false)
-        ).ordering === 1
-      );
-    case 'GTE': {
-      const comparison = compareConditionValues(
-        rowConditionOperand(args[0], row, true),
-        rowConditionOperand(args[1], row, false)
-      );
-      return comparison.equal || comparison.ordering === 1;
-    }
-    case 'LT':
-      return (
-        compareConditionValues(
-          rowConditionOperand(args[0], row, true),
-          rowConditionOperand(args[1], row, false)
-        ).ordering === -1
-      );
-    case 'LTE': {
-      const comparison = compareConditionValues(
-        rowConditionOperand(args[0], row, true),
-        rowConditionOperand(args[1], row, false)
-      );
-      return comparison.equal || comparison.ordering === -1;
-    }
-    case 'IN': {
-      const value = rowConditionOperand(args[0], row, true);
-      return Array.isArray(args[1])
-        ? args[1].some((candidate) => conditionValuesEqual(value, candidate))
-        : false;
-    }
-    case 'NOT_IN': {
-      const value = rowConditionOperand(args[0], row, true);
-      return Array.isArray(args[1])
-        ? !args[1].some((candidate) => conditionValuesEqual(value, candidate))
-        : false;
-    }
-    case 'CONTAINS': {
-      const value = rowConditionOperand(args[0], row, true);
-      return typeof value === 'string' && typeof args[1] === 'string'
-        ? value.includes(args[1])
-        : false;
-    }
-    case 'IS_DEFINED':
-      return rowConditionOperand(args[0], row, true) !== null;
-    case 'IS_EMPTY':
-      return isEmptyConditionValue(rowConditionOperand(args[0], row, true));
-    case 'IS_NOT_EMPTY':
-      return !isEmptyConditionValue(rowConditionOperand(args[0], row, true));
-    default:
-      return false;
+  if (!condition) return false;
+  try {
+    const canonical = toCanonicalCondition(condition);
+    if (!canonical) return false;
+    return reportDsl().evaluateRowCondition(canonical, row);
+  } catch {
+    return false;
   }
 }
 
-function isReportRowCondition(value: unknown): value is ReportRowCondition {
+type LegacyRowCondition = {
+  op: string;
+  arguments?: unknown[] | null;
+};
+
+type CanonicalExpression =
+  | {
+      type: 'operation';
+      op: string;
+      arguments: CanonicalArgument[];
+    }
+  | CanonicalValueArgument;
+
+type CanonicalArgument = CanonicalExpression | CanonicalValueArgument;
+
+type CanonicalValueArgument =
+  | { type: 'value'; valueType: 'reference'; value: string }
+  | { type: 'value'; valueType: 'immediate'; value: unknown };
+
+/**
+ * Bridge legacy `{op, arguments: [bare_field, value]}` conditions to the
+ * canonical `ConditionExpression` shape the WASM evaluator consumes.
+ * The first argument is treated as a field reference when it's a string;
+ * subsequent arguments are immediate values unless they're nested
+ * legacy operations (e.g. AND/OR/NOT).
+ */
+function toCanonicalCondition(
+  condition: LegacyRowCondition | null | undefined
+): CanonicalExpression | null {
+  if (!condition || typeof condition !== 'object' || !condition.op) {
+    return null;
+  }
+  const op = condition.op.toUpperCase();
+  const args = condition.arguments ?? [];
+
+  if (op === 'AND' || op === 'OR') {
+    return {
+      type: 'operation',
+      op,
+      arguments: args
+        .map(toCanonicalArgument)
+        .filter((arg): arg is CanonicalArgument => arg !== null),
+    };
+  }
+  if (op === 'NOT') {
+    const inner = toCanonicalArgument(args[0]);
+    return inner
+      ? { type: 'operation', op: 'NOT', arguments: [inner] }
+      : null;
+  }
+  if (op === 'IN' || op === 'NOT_IN') {
+    const fieldArg = legacyFieldArg(args[0]);
+    if (!fieldArg) return null;
+    return {
+      type: 'operation',
+      op,
+      arguments: [
+        fieldArg,
+        immediateArg(args[1]),
+      ],
+    };
+  }
+  if (op === 'IS_DEFINED' || op === 'IS_EMPTY' || op === 'IS_NOT_EMPTY') {
+    const fieldArg = legacyFieldArg(args[0]);
+    return fieldArg
+      ? { type: 'operation', op, arguments: [fieldArg] }
+      : null;
+  }
+  // Binary comparison operators (EQ, NE, GT, GTE, LT, LTE, CONTAINS, etc.):
+  // first arg is a field reference, second is an immediate value.
+  const fieldArg = legacyFieldArg(args[0]);
+  if (!fieldArg) return null;
+  return {
+    type: 'operation',
+    op,
+    arguments: [fieldArg, immediateArg(args[1])],
+  };
+}
+
+function toCanonicalArgument(arg: unknown): CanonicalArgument | null {
+  if (isLegacyOperation(arg)) {
+    return toCanonicalCondition(arg);
+  }
+  if (typeof arg === 'string') return referenceArg(arg);
+  return immediateArg(arg);
+}
+
+function isLegacyOperation(value: unknown): value is LegacyRowCondition {
   return (
     typeof value === 'object' &&
     value !== null &&
@@ -364,15 +391,17 @@ function isReportRowCondition(value: unknown): value is ReportRowCondition {
   );
 }
 
-function rowConditionOperand(
-  argument: unknown,
-  row: Record<string, unknown>,
-  fieldRef: boolean
-) {
-  if (fieldRef && typeof argument === 'string') {
-    return rowValue(row, argument) ?? null;
-  }
-  return argument ?? null;
+function legacyFieldArg(arg: unknown): CanonicalValueArgument | null {
+  if (typeof arg !== 'string') return null;
+  return referenceArg(arg);
+}
+
+function referenceArg(path: string): CanonicalValueArgument {
+  return { type: 'value', valueType: 'reference', value: path };
+}
+
+function immediateArg(value: unknown): CanonicalValueArgument {
+  return { type: 'value', valueType: 'immediate', value };
 }
 
 export function getReportRowValue(
@@ -398,179 +427,21 @@ export function getReportRowValue(
   return current;
 }
 
-function rowValue(row: Record<string, unknown>, field: string): unknown {
-  return getReportRowValue(row, field);
-}
-
-type DisplayTemplatePart =
-  | { kind: 'literal'; value: string }
-  | { kind: 'placeholder'; field: string; format?: string };
-
-export type CompiledDisplayTemplate = {
-  parts: DisplayTemplatePart[];
-};
-
-const DISPLAY_TEMPLATE_CACHE = new Map<string, CompiledDisplayTemplate>();
-const DISPLAY_TEMPLATE_FIELD_PATTERN =
-  /^(?:row\.)?[A-Za-z_][A-Za-z0-9_]*(?:\.(?:[A-Za-z_][A-Za-z0-9_]*|\d+))*$/;
-const DISPLAY_TEMPLATE_FORMAT_PATTERN =
-  /^[A-Za-z_][A-Za-z0-9_]*(?::[A-Za-z0-9_-]+)?$/;
-
-export function compileDisplayTemplate(
-  template: string
-): CompiledDisplayTemplate {
-  const cached = DISPLAY_TEMPLATE_CACHE.get(template);
-  if (cached) return cached;
-
-  const parts: DisplayTemplatePart[] = [];
-  let cursor = 0;
-  while (cursor < template.length) {
-    const open = template.indexOf('{{', cursor);
-    const danglingClose = template.indexOf('}}', cursor);
-    if (danglingClose !== -1 && (open === -1 || danglingClose < open)) {
-      throw new Error('Unexpected display template close delimiter.');
-    }
-    if (open === -1) {
-      pushLiteralPart(parts, template.slice(cursor));
-      break;
-    }
-
-    pushLiteralPart(parts, template.slice(cursor, open));
-    const close = template.indexOf('}}', open + 2);
-    if (close === -1) {
-      throw new Error('Unclosed display template variable.');
-    }
-
-    const token = template.slice(open + 2, close).trim();
-    parts.push(parseDisplayTemplateToken(token));
-    cursor = close + 2;
-  }
-
-  const compiled = { parts };
-  DISPLAY_TEMPLATE_CACHE.set(template, compiled);
-  return compiled;
-}
-
-function pushLiteralPart(parts: DisplayTemplatePart[], value: string) {
-  if (!value) return;
-  parts.push({ kind: 'literal', value });
-}
-
+/**
+ * Render a `{{ field | format }}` template string against a row using
+ * the WASM-backed minijinja engine. Returns an empty string if the
+ * WASM bundle hasn't finished loading yet (the app preloads it at
+ * shell mount; this fallback only fires before the first render).
+ */
 export function renderDisplayTemplate(
   row: Record<string, unknown>,
   template: string
 ): string {
-  let compiled: CompiledDisplayTemplate;
   try {
-    compiled = compileDisplayTemplate(template);
+    return reportDsl().renderTemplate(template, row, defaultRenderContext());
   } catch {
     return '';
   }
-
-  return compiled.parts
-    .map((part) => {
-      if (part.kind === 'literal') return part.value;
-      return formatCellValue(getReportRowValue(row, part.field), part.format);
-    })
-    .join('');
-}
-
-function parseDisplayTemplateToken(token: string): {
-  kind: 'placeholder';
-  field: string;
-  format?: string;
-} {
-  if (!token) {
-    throw new Error('Display template variables cannot be empty.');
-  }
-  if (token.includes('{{') || token.includes('}}')) {
-    throw new Error('Display template variables cannot be nested.');
-  }
-  const separator = token.indexOf('|');
-  if (separator === -1) {
-    const field = parseDisplayTemplateField(token);
-    return { kind: 'placeholder', field };
-  }
-  if (token.indexOf('|', separator + 1) !== -1) {
-    throw new Error(
-      'Display template variables support at most one format pipe.'
-    );
-  }
-  const field = parseDisplayTemplateField(token.slice(0, separator));
-  const format = token.slice(separator + 1).trim();
-  if (!format || !DISPLAY_TEMPLATE_FORMAT_PATTERN.test(format)) {
-    throw new Error('Display template format is invalid.');
-  }
-  return { kind: 'placeholder', field, format };
-}
-
-function parseDisplayTemplateField(field: string): string {
-  const normalized = field.trim();
-  if (!DISPLAY_TEMPLATE_FIELD_PATTERN.test(normalized)) {
-    throw new Error('Display template field is invalid.');
-  }
-  return normalized.startsWith('row.') ? normalized.slice(4) : normalized;
-}
-
-function compareConditionValues(left: unknown, right: unknown) {
-  return {
-    equal: conditionValuesEqual(left, right),
-    ordering: conditionValueOrdering(left, right),
-  };
-}
-
-function conditionValuesEqual(left: unknown, right: unknown): boolean {
-  if (typeof left === 'number' && typeof right === 'number') {
-    return left === right;
-  }
-  return JSON.stringify(left) === JSON.stringify(right);
-}
-
-function conditionValueOrdering(
-  left: unknown,
-  right: unknown
-): -1 | 0 | 1 | null {
-  if (left === null && right === null) return 0;
-  if (left === null) return 1;
-  if (right === null) return -1;
-  if (typeof left === 'number' && typeof right === 'number') {
-    if (left === right) return 0;
-    return left > right ? 1 : -1;
-  }
-  if (typeof left === 'string' && typeof right === 'string') {
-    return compareStrings(left, right);
-  }
-  if (typeof left === 'boolean' && typeof right === 'boolean') {
-    if (left === right) return 0;
-    return left ? 1 : -1;
-  }
-  return compareStrings(
-    conditionValueSortKey(left),
-    conditionValueSortKey(right)
-  );
-}
-
-function compareStrings(left: string, right: string): -1 | 0 | 1 {
-  const result = left.localeCompare(right);
-  if (result === 0) return 0;
-  return result > 0 ? 1 : -1;
-}
-
-function conditionValueSortKey(value: unknown): string {
-  if (value === null || value === undefined) return '';
-  if (typeof value === 'string') return value;
-  if (typeof value === 'number' || typeof value === 'boolean') {
-    return String(value);
-  }
-  return JSON.stringify(value);
-}
-
-function isEmptyConditionValue(value: unknown): boolean {
-  if (value === null || value === undefined) return true;
-  if (typeof value === 'string') return value.trim().length === 0;
-  if (Array.isArray(value)) return value.length === 0;
-  if (typeof value === 'object') return Object.keys(value).length === 0;
-  return false;
 }
 
 function extractVisibleLayoutBlockReferences(
@@ -624,89 +495,33 @@ function isEmptyVisibilityValue(value: unknown): boolean {
   return false;
 }
 
-export function formatCellValue(value: unknown, format?: string): string {
+/**
+ * Format a raw cell value using the WASM-backed formatter (delegates to
+ * the FE-side `Intl` callback for locale-aware output). The WASM bundle
+ * is preloaded at app shell mount; this passthrough fallback only fires
+ * if the bundle hasn't finished loading yet.
+ */
+export function formatCellValue(
+  value: unknown,
+  format?: string | null
+): string {
   if (value === null || value === undefined) return '';
-
-  const { name: formatName, argument: formatArgument } =
-    parseCellFormat(format);
-
-  if (formatName === 'currency' && typeof value === 'number') {
-    return new Intl.NumberFormat(undefined, {
-      style: 'currency',
-      currency: currencyFormatCode(formatArgument),
-      maximumFractionDigits: 2,
-    }).format(value);
-  }
-
-  if (formatName === 'currency_compact' && typeof value === 'number') {
-    return new Intl.NumberFormat(undefined, {
-      style: 'currency',
-      currency: currencyFormatCode(formatArgument),
-      notation: 'compact',
-      maximumFractionDigits: value < 1_000_000 ? 1 : 0,
-    }).format(value);
-  }
-
-  if (formatName === 'number' && typeof value === 'number') {
-    return new Intl.NumberFormat(undefined, {
-      maximumFractionDigits: 0,
-    }).format(value);
-  }
-
-  if (formatName === 'number_compact' && typeof value === 'number') {
-    return new Intl.NumberFormat(undefined, {
-      notation: 'compact',
-      maximumFractionDigits: value < 1_000_000 ? 1 : 0,
-    }).format(value);
-  }
-
-  if (formatName === 'decimal' && typeof value === 'number') {
-    return new Intl.NumberFormat(undefined, {
-      maximumFractionDigits: 2,
-    }).format(value);
-  }
-
-  if (formatName === 'percent' && typeof value === 'number') {
-    return new Intl.NumberFormat(undefined, {
-      style: 'percent',
-      maximumFractionDigits: 2,
-    }).format(value);
-  }
-
-  if (formatName === 'datetime' && typeof value === 'string') {
-    const date = new Date(value);
-    if (!Number.isNaN(date.getTime())) return date.toLocaleString();
-  }
-
-  if (formatName === 'date' && typeof value === 'string') {
-    const date = new Date(value);
-    if (!Number.isNaN(date.getTime())) return date.toLocaleDateString();
-  }
-
-  if (formatName === 'string') {
+  try {
+    return reportDsl().formatValue(
+      value,
+      format ?? '',
+      defaultRenderContext()
+    );
+  } catch {
+    if (typeof value === 'object') {
+      try {
+        return JSON.stringify(value);
+      } catch {
+        return String(value);
+      }
+    }
     return String(value);
   }
-
-  if (typeof value === 'object') return JSON.stringify(value);
-  return String(value);
-}
-
-function parseCellFormat(format?: string): {
-  name?: string;
-  argument?: string;
-} {
-  if (!format) return {};
-  const separator = format.indexOf(':');
-  if (separator === -1) return { name: format };
-  const name = format.slice(0, separator).trim();
-  const argument = format.slice(separator + 1).trim();
-  return { name, argument: argument || undefined };
-}
-
-function currencyFormatCode(argument?: string): string {
-  return argument && /^[a-z]{3}$/i.test(argument)
-    ? argument.toUpperCase()
-    : 'USD';
 }
 
 export function truncateCellText(

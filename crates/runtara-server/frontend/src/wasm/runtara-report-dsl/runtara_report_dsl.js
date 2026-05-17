@@ -198,19 +198,51 @@ export function evaluateRowCondition(expr, row) {
 }
 
 /**
- * Render a `{{ field | filter }}` template string against a row.
- * Throws on parse or render error.
- * @param {string} template
- * @param {any} row
+ * One-shot value formatting outside a template. Same dispatch path as
+ * the template filters, so `formatValue(x, 'currency', ctx)` matches
+ * `renderTemplate('{{ x | currency }}', { x }, ctx)`.
+ * @param {any} value
+ * @param {string} format
+ * @param {any} ctx
  * @returns {string}
  */
-export function renderTemplate(template, row) {
+export function formatValue(value, format, ctx) {
+    let deferred3_0;
+    let deferred3_1;
+    try {
+        const ptr0 = passStringToWasm0(format, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.formatValue(value, ptr0, len0, ctx);
+        var ptr2 = ret[0];
+        var len2 = ret[1];
+        if (ret[3]) {
+            ptr2 = 0; len2 = 0;
+            throw takeFromExternrefTable0(ret[2]);
+        }
+        deferred3_0 = ptr2;
+        deferred3_1 = len2;
+        return getStringFromWasm0(ptr2, len2);
+    } finally {
+        wasm.__wbindgen_free(deferred3_0, deferred3_1, 1);
+    }
+}
+
+/**
+ * Render a `{{ field | filter }}` template string against a row.
+ * Throws on parse or render error. Locale-aware formatting routes back
+ * into JS via the registered formatter callback.
+ * @param {string} template
+ * @param {any} row
+ * @param {any} ctx
+ * @returns {string}
+ */
+export function renderTemplate(template, row, ctx) {
     let deferred3_0;
     let deferred3_1;
     try {
         const ptr0 = passStringToWasm0(template, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
         const len0 = WASM_VECTOR_LEN;
-        const ret = wasm.renderTemplate(ptr0, len0, row);
+        const ret = wasm.renderTemplate(ptr0, len0, row, ctx);
         var ptr2 = ret[0];
         var len2 = ret[1];
         if (ret[3]) {
@@ -302,6 +334,13 @@ function __wbg_get_imports() {
         getDataViewMemory0().setInt32(arg0 + 4 * 1, len1, true);
         getDataViewMemory0().setInt32(arg0 + 4 * 0, ptr1, true);
     };
+    imports.wbg.__wbg___runtaraReportDslFormatValue_fa0b0580c3cbf2d1 = function(arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8, arg9) {
+        const ret = window.__runtaraReportDslFormatValue(arg1, getStringFromWasm0(arg2, arg3), getStringFromWasm0(arg4, arg5), getStringFromWasm0(arg6, arg7), getStringFromWasm0(arg8, arg9));
+        const ptr1 = passStringToWasm0(ret, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len1 = WASM_VECTOR_LEN;
+        getDataViewMemory0().setInt32(arg0 + 4 * 1, len1, true);
+        getDataViewMemory0().setInt32(arg0 + 4 * 0, ptr1, true);
+    };
     imports.wbg.__wbg___wbindgen_bigint_get_as_i64_6e32f5e6aff02e1d = function(arg0, arg1) {
         const v = arg1;
         const ret = typeof(v) === 'bigint' ? v : undefined;
@@ -332,9 +371,21 @@ function __wbg_get_imports() {
         const ret = typeof(arg0) === 'function';
         return ret;
     };
+    imports.wbg.__wbg___wbindgen_is_null_dfda7d66506c95b5 = function(arg0) {
+        const ret = arg0 === null;
+        return ret;
+    };
     imports.wbg.__wbg___wbindgen_is_object_ce774f3490692386 = function(arg0) {
         const val = arg0;
         const ret = typeof(val) === 'object' && val !== null;
+        return ret;
+    };
+    imports.wbg.__wbg___wbindgen_is_string_704ef9c8fc131030 = function(arg0) {
+        const ret = typeof(arg0) === 'string';
+        return ret;
+    };
+    imports.wbg.__wbg___wbindgen_is_undefined_f6b95eab589e0269 = function(arg0) {
+        const ret = arg0 === undefined;
         return ret;
     };
     imports.wbg.__wbg___wbindgen_jsval_eq_b6101cc9cef1fe36 = function(arg0, arg1) {
@@ -382,6 +433,10 @@ function __wbg_get_imports() {
         const ret = Reflect.get(arg0, arg1);
         return ret;
     }, arguments) };
+    imports.wbg.__wbg_get_with_ref_key_1dc361bd10053bfe = function(arg0, arg1) {
+        const ret = arg0[arg1];
+        return ret;
+    };
     imports.wbg.__wbg_instanceof_ArrayBuffer_f3320d2419cd0355 = function(arg0) {
         let result;
         try {
@@ -432,8 +487,20 @@ function __wbg_get_imports() {
         const ret = arg0.length;
         return ret;
     };
+    imports.wbg.__wbg_new_1ba21ce319a06297 = function() {
+        const ret = new Object();
+        return ret;
+    };
+    imports.wbg.__wbg_new_25f239778d6112b9 = function() {
+        const ret = new Array();
+        return ret;
+    };
     imports.wbg.__wbg_new_6421f6084cc5bc5a = function(arg0) {
         const ret = new Uint8Array(arg0);
+        return ret;
+    };
+    imports.wbg.__wbg_new_b546ae120718850e = function() {
+        const ret = new Map();
         return ret;
     };
     imports.wbg.__wbg_next_138a17bbf04e926c = function(arg0) {
@@ -447,8 +514,23 @@ function __wbg_get_imports() {
     imports.wbg.__wbg_prototypesetcall_dfe9b766cdc1f1fd = function(arg0, arg1, arg2) {
         Uint8Array.prototype.set.call(getArrayU8FromWasm0(arg0, arg1), arg2);
     };
+    imports.wbg.__wbg_set_3f1d0b984ed272ed = function(arg0, arg1, arg2) {
+        arg0[arg1] = arg2;
+    };
+    imports.wbg.__wbg_set_7df433eea03a5c14 = function(arg0, arg1, arg2) {
+        arg0[arg1 >>> 0] = arg2;
+    };
+    imports.wbg.__wbg_set_efaaf145b9377369 = function(arg0, arg1, arg2) {
+        const ret = arg0.set(arg1, arg2);
+        return ret;
+    };
     imports.wbg.__wbg_value_57b7b035e117f7ee = function(arg0) {
         const ret = arg0.value;
+        return ret;
+    };
+    imports.wbg.__wbindgen_cast_2241b6af4c4b2941 = function(arg0, arg1) {
+        // Cast intrinsic for `Ref(String) -> Externref`.
+        const ret = getStringFromWasm0(arg0, arg1);
         return ret;
     };
     imports.wbg.__wbindgen_cast_4625c577ab2ec9ee = function(arg0) {
@@ -458,6 +540,11 @@ function __wbg_get_imports() {
     };
     imports.wbg.__wbindgen_cast_9ae0607507abb057 = function(arg0) {
         // Cast intrinsic for `I64 -> Externref`.
+        const ret = arg0;
+        return ret;
+    };
+    imports.wbg.__wbindgen_cast_d6cd19b81560fd6e = function(arg0) {
+        // Cast intrinsic for `F64 -> Externref`.
         const ret = arg0;
         return ret;
     };
