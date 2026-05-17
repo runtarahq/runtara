@@ -53,7 +53,11 @@ export function ReportBuilderWizardV2({
             blocks it should constrain.
           </p>
         </header>
-        <FiltersEditorV2 definition={definition} onChange={onChange} />
+        <FiltersEditorV2
+          definition={definition}
+          schemas={schemas}
+          onChange={onChange}
+        />
       </section>
 
       <section className="border-t pt-4">

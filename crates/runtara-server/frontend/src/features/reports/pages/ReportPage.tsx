@@ -10,7 +10,6 @@ import { useObjectModelConnectionSelection } from '@/features/objects/hooks/useO
 import {
   useCreateReport,
   useReport,
-  useReportPreview,
   useReportRender,
   useUpdateReport,
   useValidateReport,
@@ -18,29 +17,7 @@ import {
 import { ReportDeleteButton } from '../components/ReportDeleteButton';
 import { ReportFilterBar } from '../components/ReportFilterBar';
 import { ReportRenderer } from '../components/ReportRenderer';
-
-// The wizard tree (BlocksStep + ReportDefinitionBuilder + supporting editors)
-// is the heaviest component in the reports feature. Defer it until the user
-// actually enters edit mode so view-only sessions don't pay the parse cost.
-const ReportBuilderWizard = lazy(() =>
-  import('../components/wizard/ReportBuilderWizard').then((m) => ({
-    default: m.ReportBuilderWizard,
-  }))
-);
-// Wizard v2 — operates on ReportDefinition directly, no WizardState
-// intermediate model. Behind a `?wizard=v2` URL flag while it gains parity
-// with the legacy wizard. Phase 8 cuts the legacy wizard once v2 covers
-// every authoring flow.
-const ReportBuilderWizardV2 = lazy(() =>
-  import('../components/wizard-v2/ReportBuilderWizardV2').then((m) => ({
-    default: m.ReportBuilderWizardV2,
-  }))
-);
-import {
-  ReportBlockResult,
-  ReportDefinition,
-  ReportInteractionOptions,
-} from '../types';
+import { ReportDefinition, ReportInteractionOptions } from '../types';
 import {
   decodeFilterValue,
   encodeFilterValue,
@@ -48,7 +25,15 @@ import {
   getDefaultReportViewId,
   slugify,
 } from '../utils';
-import { withDefaultObjectModelConnection } from '../connectionDefaults';
+
+// Wizard v2 — operates on ReportDefinition directly, no WizardState
+// intermediate model. Default authoring surface as of Phase 7 cutover.
+// Lazy-loaded so view-only sessions don't pay the parse cost.
+const ReportBuilderWizardV2 = lazy(() =>
+  import('../components/wizard-v2/ReportBuilderWizardV2').then((m) => ({
+    default: m.ReportBuilderWizardV2,
+  }))
+);
 
 const EMPTY_DEFINITION: ReportDefinition = {
   definitionVersion: 1,
@@ -67,7 +52,6 @@ export function ReportPage() {
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   const editing = searchParams.get('edit') === '1' || !isExisting;
-  const useWizardV2 = searchParams.get('wizard') === 'v2';
   const { selectedConnectionId, connections: objectModelConnections } =
     useObjectModelConnectionSelection();
   const objectModelSchemaConnectionIds = useMemo(
@@ -121,50 +105,6 @@ export function ReportPage() {
     );
   }, [definition.filters, searchParams]);
 
-  // Debounce the definition so the preview API isn't pummelled while typing.
-  const [debouncedDefinition, setDebouncedDefinition] =
-    useState<ReportDefinition>(EMPTY_DEFINITION);
-  useEffect(() => {
-    const handle = setTimeout(() => setDebouncedDefinition(definition), 400);
-    return () => clearTimeout(handle);
-  }, [definition]);
-
-  const debouncedDefinitionWithConnection = useMemo(
-    () =>
-      withDefaultObjectModelConnection(
-        debouncedDefinition,
-        selectedConnectionId
-      ),
-    [debouncedDefinition, selectedConnectionId]
-  );
-
-  const canPreview = useMemo(
-    () =>
-      editing &&
-      debouncedDefinitionWithConnection.blocks.some(
-        (block) =>
-          block.type === 'markdown' ||
-          (block.source?.schema && block.source.schema.length > 0)
-      ),
-    [debouncedDefinitionWithConnection, editing]
-  );
-
-  const previewRequest = useMemo(
-    () =>
-      canPreview
-        ? {
-            filters: filterValues,
-            definition: debouncedDefinitionWithConnection,
-          }
-        : undefined,
-    [canPreview, debouncedDefinitionWithConnection, filterValues]
-  );
-
-  const previewQuery = useReportPreview(previewRequest, canPreview);
-  const blockResults: Partial<Record<string, ReportBlockResult>> = useMemo(
-    () => previewQuery.data?.blocks ?? {},
-    [previewQuery.data]
-  );
   const renderRequest = useMemo(
     () =>
       !editing && isExisting
@@ -250,12 +190,8 @@ export function ReportPage() {
 
   const handleSave = async () => {
     setSaveError(null);
-    const definitionForSave = withDefaultObjectModelConnection(
-      definition,
-      selectedConnectionId
-    );
     const validation = await validateReport.mutateAsync({
-      definition: definitionForSave,
+      definition,
     });
     if (!validation.valid) {
       setSaveError(validation.errors?.[0]?.message ?? 'Report is invalid.');
@@ -268,7 +204,7 @@ export function ReportPage() {
       description: description.trim() || null,
       tags: [],
       status: 'published' as const,
-      definition: definitionForSave,
+      definition,
     };
     if (isExisting && reportId) {
       const report = await updateReport.mutateAsync({
@@ -457,38 +393,17 @@ export function ReportPage() {
             <div className="h-96 animate-pulse rounded-xl bg-muted/30" />
           }
         >
-          {useWizardV2 ? (
-            <ReportBuilderWizardV2
-              key={reportId ?? 'new'}
-              definition={definition}
-              schemas={schemas}
-              editing={editing}
-              onChange={(nextDefinition) => {
-                setDefinition(nextDefinition);
-                setSaveError(null);
-                validateReport.reset();
-              }}
-            />
-          ) : (
-            <ReportBuilderWizard
-              // Force a fresh wizard state when the loaded report changes; the
-              // wizard derives its initial state via useMemo([]) so it would
-              // otherwise keep the previously-loaded report's blocks.
-              key={reportId ?? 'new'}
-              definition={definition}
-              schemas={schemas}
-              schemasByConnectionId={schemasByConnectionId}
-              objectModelConnections={objectModelConnections}
-              defaultObjectModelConnectionId={selectedConnectionId}
-              blockResults={blockResults}
-              editing={editing}
-              onChange={(nextDefinition) => {
-                setDefinition(nextDefinition);
-                setSaveError(null);
-                validateReport.reset();
-              }}
-            />
-          )}
+          <ReportBuilderWizardV2
+            key={reportId ?? 'new'}
+            definition={definition}
+            schemas={schemas}
+            editing={editing}
+            onChange={(nextDefinition) => {
+              setDefinition(nextDefinition);
+              setSaveError(null);
+              validateReport.reset();
+            }}
+          />
         </Suspense>
       ) : reportId ? (
         <ReportRenderer

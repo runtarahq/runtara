@@ -5,6 +5,13 @@
 //
 // The functions are immutable (shallow clones along the path of change); the
 // caller passes the new value to React state.
+//
+// Layout node types this module recognizes (every type from the wire format):
+//   - block:      {type: "block", blockId}
+//   - metric_row: {type: "metric_row", blocks: string[]}
+//   - section:    {type: "section", children: ReportLayoutNode[]}
+//   - columns:    {type: "columns", columns: [{children: ReportLayoutNode[]}]}
+//   - grid:       {type: "grid", items: [{blockId, ...}]}
 
 import {
   ReportBlockDefinition,
@@ -12,14 +19,21 @@ import {
   ReportLayoutNode,
 } from '../../types';
 
-/** Returns the ordered list of block ids that appear under any `block` node
- * anywhere in the layout tree. */
+type GridNode = Extract<ReportLayoutNode, { type: 'grid' }>;
+type MetricRowNode = Extract<ReportLayoutNode, { type: 'metric_row' }>;
+
+/** Returns the ordered list of block ids that appear under any block-bearing
+ * node anywhere in the layout tree. */
 export function collectLayoutBlockIds(
   layout: ReportLayoutNode[] | undefined
 ): string[] {
   const ids: string[] = [];
   walkLayout(layout, (node) => {
     if (node.type === 'block') ids.push(node.blockId);
+    else if (node.type === 'metric_row') ids.push(...(node.blocks ?? []));
+    else if (node.type === 'grid') {
+      for (const item of node.items ?? []) ids.push(item.blockId);
+    }
   });
   return ids;
 }
@@ -40,8 +54,8 @@ export function walkLayout(
   }
 }
 
-/** Removes any `block` nodes referencing `blockId` from the layout tree.
- * Preserves all surrounding structure (sections, columns, other blocks). */
+/** Removes any references to `blockId` from the layout tree (block nodes,
+ * metric_row entries, grid items). Preserves all surrounding structure. */
 export function removeBlockFromLayout(
   layout: ReportLayoutNode[] | undefined,
   blockId: string
@@ -57,6 +71,18 @@ function stripBlockFromNode(
 ): ReportLayoutNode | null {
   if (node.type === 'block') {
     return node.blockId === blockId ? null : node;
+  }
+  if (node.type === 'metric_row') {
+    return {
+      ...node,
+      blocks: (node.blocks ?? []).filter((id) => id !== blockId),
+    };
+  }
+  if (node.type === 'grid') {
+    return {
+      ...node,
+      items: (node.items ?? []).filter((item) => item.blockId !== blockId),
+    };
   }
   if (node.type === 'section') {
     return {
@@ -94,14 +120,11 @@ export function appendBlockToLayout(
   return [...(layout ?? []), node];
 }
 
-/** Maps `layout`'s block-nodes to point at `nextOrder` instead of the current
- * one, preserving every non-block node and the surrounding structure.
- *
- * Used by reorder operations: callers pass the same set of block ids in a
- * new order. If the set differs (the layout had blocks that aren't in
- * `nextOrder` or vice versa) the function falls back to: removing surplus
- * block nodes from the layout, then appending missing ones as top-level
- * block nodes. */
+/** Maps block-references in the layout tree to point at `nextOrder` in
+ * occurrence order, preserving every non-block node and the surrounding
+ * structure. Handles block-bearing nodes (block / metric_row entries /
+ * grid items). When the set differs (some ids missing or extra), falls
+ * back to drop-surplus-then-append-missing.  */
 export function reorderLayoutBlocks(
   layout: ReportLayoutNode[] | undefined,
   nextOrder: string[]
@@ -131,14 +154,22 @@ function remapBlockNodes(
   return layout.map((node) => remapNode(node, queue));
 }
 
-function remapNode(
-  node: ReportLayoutNode,
-  queue: string[]
-): ReportLayoutNode {
+function remapNode(node: ReportLayoutNode, queue: string[]): ReportLayoutNode {
   if (node.type === 'block') {
     const nextId = queue.shift();
     if (!nextId) return node;
     return { ...node, blockId: nextId, id: node.id || `n_${nextId}` };
+  }
+  if (node.type === 'metric_row') {
+    const blocks = (node.blocks ?? []).map(() => queue.shift() ?? '');
+    return { ...node, blocks } as MetricRowNode;
+  }
+  if (node.type === 'grid') {
+    const items = (node.items ?? []).map((item) => {
+      const nextId = queue.shift();
+      return nextId ? { ...item, blockId: nextId } : item;
+    });
+    return { ...node, items } as GridNode;
   }
   if (node.type === 'section') {
     return {

@@ -12,7 +12,9 @@ import { Plus, Trash2 } from 'lucide-react';
 import { Schema } from '@/generated/RuntaraRuntimeApi';
 import {
   ReportBlockDefinition,
+  ReportCardConfig,
   ReportCardField,
+  ReportCardFieldKind,
   ReportCardGroup,
 } from '../../../types';
 
@@ -22,16 +24,43 @@ interface CardBlockEditorProps {
   onChange: (block: ReportBlockDefinition) => void;
 }
 
-/** Editor for the simple case: one group with a flat list of fields. Cards
- *  with multiple groups, subcards, or subtables preserve their shape but the
- *  editor flags them as "complex card" and surfaces a "switch to legacy
- *  wizard" hint at the parent level. */
+const FIELD_KINDS: Array<{ value: ReportCardFieldKind; label: string }> = [
+  { value: 'value', label: 'Value' },
+  { value: 'json', label: 'JSON' },
+  { value: 'markdown', label: 'Markdown' },
+  { value: 'subcard', label: 'Subcard' },
+  { value: 'subtable', label: 'Subtable' },
+  { value: 'workflow_button', label: 'Workflow button' },
+];
+
+const FORMAT_PLAIN = '__plain__';
+const FORMATS = [
+  { value: 'number', label: 'Number' },
+  { value: 'decimal', label: 'Decimal' },
+  { value: 'currency', label: 'Currency' },
+  { value: 'percent', label: 'Percent' },
+  { value: 'date', label: 'Date' },
+  { value: 'datetime', label: 'Date + time' },
+  { value: 'pill', label: 'Pill' },
+];
+
+function newGroup(): ReportCardGroup {
+  return {
+    id: `group_${Math.random().toString(36).slice(2, 7)}`,
+    fields: [],
+  };
+}
+
+function newField(field: string): ReportCardField {
+  return { field, kind: 'value' };
+}
+
 export function CardBlockEditor({
   block,
   schemas,
   onChange,
 }: CardBlockEditorProps) {
-  const card = block.card ?? { groups: [] };
+  const card: ReportCardConfig = block.card ?? { groups: [] };
   const groups: ReportCardGroup[] = card.groups ?? [];
   const schema = schemas.find((s) => s.name === block.source?.schema);
   const availableFields = schema?.columns.map((c) => c.name) ?? [];
@@ -39,31 +68,108 @@ export function CardBlockEditor({
   const updateGroups = (next: ReportCardGroup[]) =>
     onChange({ ...block, card: { ...card, groups: next } });
 
-  const ensurePrimaryGroup = (): ReportCardGroup =>
-    groups[0] ?? { id: `group_${block.id}`, fields: [] };
-
-  const updatePrimaryFields = (fields: ReportCardField[]) => {
-    const primary = { ...ensurePrimaryGroup(), fields };
-    const next = groups.length === 0 ? [primary] : [primary, ...groups.slice(1)];
-    updateGroups(next);
-  };
-
-  const isComplex =
-    groups.length > 1 ||
-    groups[0]?.fields?.some((f) => f.kind === 'subcard' || f.kind === 'subtable');
-
-  const fields = groups[0]?.fields ?? [];
-
   return (
     <div className="grid gap-3">
-      {isComplex ? (
-        <p className="text-xs text-amber-700 dark:text-amber-300">
-          This card uses multiple groups, subcards, or subtables. Edit those in
-          the legacy wizard; the simple field list below shows the first
-          group's fields.
+      {groups.length === 0 ? (
+        <p className="text-xs text-muted-foreground">
+          No groups yet. A card has one or more groups, each with its own
+          column layout and fields.
         </p>
-      ) : null}
+      ) : (
+        <div className="grid gap-3">
+          {groups.map((group, gIndex) => (
+            <GroupEditor
+              key={group.id}
+              group={group}
+              availableFields={availableFields}
+              onChange={(updated) =>
+                updateGroups(
+                  groups.map((g, i) => (i === gIndex ? updated : g))
+                )
+              }
+              onDelete={() =>
+                updateGroups(groups.filter((_, i) => i !== gIndex))
+              }
+            />
+          ))}
+        </div>
+      )}
+      <div>
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          className="h-7"
+          onClick={() => updateGroups([...groups, newGroup()])}
+        >
+          <Plus className="mr-1 h-3 w-3" /> Add group
+        </Button>
+      </div>
+    </div>
+  );
+}
 
+interface GroupEditorProps {
+  group: ReportCardGroup;
+  availableFields: string[];
+  onChange: (group: ReportCardGroup) => void;
+  onDelete: () => void;
+}
+
+function GroupEditor({
+  group,
+  availableFields,
+  onChange,
+  onDelete,
+}: GroupEditorProps) {
+  const fields = group.fields ?? [];
+
+  const updateFields = (next: ReportCardField[]) =>
+    onChange({ ...group, fields: next });
+
+  return (
+    <div className="grid gap-2 rounded border p-2">
+      <div className="grid grid-cols-[1fr_120px_minmax(0,auto)] items-center gap-2">
+        <Input
+          value={group.title ?? ''}
+          placeholder="Group title (optional)"
+          className="h-8 text-xs"
+          onChange={(event) =>
+            onChange({ ...group, title: event.target.value || null })
+          }
+        />
+        <Input
+          type="number"
+          min={1}
+          max={4}
+          value={group.columns ?? ''}
+          placeholder="Cols"
+          className="h-8 text-xs"
+          onChange={(event) => {
+            const next = event.target.value
+              ? Math.max(1, parseInt(event.target.value, 10))
+              : undefined;
+            onChange({ ...group, columns: next });
+          }}
+        />
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon"
+          className="h-8 w-8 text-destructive"
+          onClick={onDelete}
+        >
+          <Trash2 className="h-3.5 w-3.5" />
+        </Button>
+      </div>
+      <Input
+        value={group.description ?? ''}
+        placeholder="Group description (optional)"
+        className="h-8 text-xs"
+        onChange={(event) =>
+          onChange({ ...group, description: event.target.value || null })
+        }
+      />
       <div className="grid gap-1.5">
         <div className="flex items-center justify-between">
           <Label className="text-xs">Fields</Label>
@@ -73,88 +179,141 @@ export function CardBlockEditor({
             size="sm"
             className="h-7"
             onClick={() => {
-              const field = availableFields.find(
-                (f) => !fields.some((existing) => existing.field === f)
-              );
-              if (!field) return;
-              updatePrimaryFields([
-                ...fields,
-                { field, kind: 'value' as const },
-              ]);
+              const used = new Set(fields.map((f) => f.field));
+              const field = availableFields.find((f) => !used.has(f)) ?? '';
+              updateFields([...fields, newField(field)]);
             }}
-            disabled={availableFields.length === 0}
           >
             <Plus className="mr-1 h-3 w-3" /> Add field
           </Button>
         </div>
-
         {fields.length === 0 ? (
-          <p className="text-xs text-muted-foreground">
-            No fields yet. Pick a schema, then add fields.
-          </p>
+          <p className="text-xs text-muted-foreground">No fields yet.</p>
         ) : (
-          <div className="grid gap-2">
+          <div className="grid gap-1.5">
             {fields.map((field, index) => (
-              <div
-                key={`${field.field ?? index}_${index}`}
-                className="grid grid-cols-[1fr_1fr_minmax(0,auto)] items-center gap-2 rounded border p-2"
-              >
-                <Select
-                  value={field.field || ''}
-                  onValueChange={(value) =>
-                    updatePrimaryFields(
-                      fields.map((f, i) =>
-                        i === index ? { ...f, field: value } : f
-                      )
-                    )
-                  }
-                >
-                  <SelectTrigger className="h-8 text-xs">
-                    <SelectValue placeholder="Field" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {field.field && !availableFields.includes(field.field) ? (
-                      <SelectItem disabled value={field.field}>
-                        {field.field}
-                      </SelectItem>
-                    ) : null}
-                    {availableFields.map((option) => (
-                      <SelectItem key={option} value={option}>
-                        {option}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-                <Input
-                  value={field.label ?? ''}
-                  placeholder="Label"
-                  className="h-8 text-xs"
-                  onChange={(event) =>
-                    updatePrimaryFields(
-                      fields.map((f, i) =>
-                        i === index
-                          ? { ...f, label: event.target.value || null }
-                          : f
-                      )
-                    )
-                  }
-                />
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="icon"
-                  className="h-8 w-8"
-                  onClick={() =>
-                    updatePrimaryFields(fields.filter((_, i) => i !== index))
-                  }
-                >
-                  <Trash2 className="h-3.5 w-3.5" />
-                </Button>
-              </div>
+              <FieldEditor
+                key={index}
+                field={field}
+                availableFields={availableFields}
+                onChange={(updated) =>
+                  updateFields(
+                    fields.map((f, i) => (i === index ? updated : f))
+                  )
+                }
+                onDelete={() =>
+                  updateFields(fields.filter((_, i) => i !== index))
+                }
+              />
             ))}
           </div>
         )}
       </div>
+    </div>
+  );
+}
+
+interface FieldEditorProps {
+  field: ReportCardField;
+  availableFields: string[];
+  onChange: (field: ReportCardField) => void;
+  onDelete: () => void;
+}
+
+function FieldEditor({
+  field,
+  availableFields,
+  onChange,
+  onDelete,
+}: FieldEditorProps) {
+  const kind: ReportCardFieldKind = field.kind ?? 'value';
+  const hasNested = kind === 'subcard' || kind === 'subtable';
+
+  return (
+    <div className="grid gap-1.5 rounded border bg-muted/20 p-2">
+      <div className="grid grid-cols-[1fr_1fr_120px_120px_minmax(0,auto)] items-center gap-2">
+        <Select
+          value={field.field || ''}
+          onValueChange={(value) => onChange({ ...field, field: value })}
+        >
+          <SelectTrigger className="h-7 text-xs">
+            <SelectValue placeholder="Field" />
+          </SelectTrigger>
+          <SelectContent>
+            {field.field && !availableFields.includes(field.field) ? (
+              <SelectItem disabled value={field.field}>
+                {field.field}
+              </SelectItem>
+            ) : null}
+            {availableFields.map((option) => (
+              <SelectItem key={option} value={option}>
+                {option}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+        <Input
+          value={field.label ?? ''}
+          placeholder="Label"
+          className="h-7 text-xs"
+          onChange={(event) =>
+            onChange({ ...field, label: event.target.value || null })
+          }
+        />
+        <Select
+          value={kind}
+          onValueChange={(value) =>
+            onChange({ ...field, kind: value as ReportCardFieldKind })
+          }
+        >
+          <SelectTrigger className="h-7 text-xs">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            {FIELD_KINDS.map((option) => (
+              <SelectItem key={option.value} value={option.value}>
+                {option.label}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+        <Select
+          value={field.format ?? FORMAT_PLAIN}
+          onValueChange={(value) =>
+            onChange({
+              ...field,
+              format: value === FORMAT_PLAIN ? null : value,
+            })
+          }
+        >
+          <SelectTrigger className="h-7 text-xs">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value={FORMAT_PLAIN}>Plain</SelectItem>
+            {FORMATS.map((option) => (
+              <SelectItem key={option.value} value={option.value}>
+                {option.label}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon"
+          className="h-7 w-7 text-destructive"
+          onClick={onDelete}
+        >
+          <Trash2 className="h-3.5 w-3.5" />
+        </Button>
+      </div>
+      {hasNested ? (
+        <p className="text-xs text-amber-700 dark:text-amber-300">
+          Subcard / subtable nested config is preserved on save; edit advanced
+          structure via the legacy wizard until v2 exposes the recursive form.
+        </p>
+      ) : null}
     </div>
   );
 }
