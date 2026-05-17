@@ -27,13 +27,21 @@ pub mod agent_meta;
 // Type coercion utilities for agent inputs
 pub mod coercion;
 
-// Specification generation (DSL schema, OpenAPI, compatibility)
+// Specification generation (DSL schema, OpenAPI, compatibility). Gated
+// behind `json-schema` because the schema generators inside use
+// `schemars::schema_for!`. The server keeps this on; WASM consumers
+// opt out via `default-features = false`.
+#[cfg(feature = "json-schema")]
 pub mod spec;
 
 // DSL flat-map schema → JSON Schema conversion
 pub mod schema_convert;
 
-// Step type metadata registry.
+// Step type metadata registry. Gated behind `json-schema` because it
+// generates `schemars::RootSchema` for each step type. WASM consumers
+// of `runtara-dsl` (e.g. `runtara-report-dsl`) opt out of this feature
+// to keep `schemars` out of their tree.
+#[cfg(feature = "json-schema")]
 mod step_registration;
 
 // ============================================================================
@@ -73,7 +81,10 @@ pub struct StepTypeInfo {
 ///
 /// This function returns step type metadata that is automatically derived from
 /// the actual step struct definitions, ensuring the DSL schema is always in sync
-/// with the implementation.
+/// with the implementation. Requires the `json-schema` feature because step
+/// metadata carries a schemars schema generator; WASM consumers (which build
+/// with `default-features = false`) don't need this.
+#[cfg(feature = "json-schema")]
 pub fn get_step_types() -> Vec<StepTypeInfo> {
     // Start step is a virtual step (not a struct), add it manually
     let mut steps = vec![StepTypeInfo {

@@ -24,12 +24,10 @@ utoipa = ["dep:utoipa"]
 wasm = ["dep:wasm-bindgen", "dep:serde-wasm-bindgen"]
 
 [dependencies]
-# NOTE: runtara-dsl ships with `json-schema` in its default features. To drop
-# schemars 0.8 from the WASM tree we'd need to also cfg-gate
-# `runtara-dsl::step_registration` and the `SchemaGeneratorFn` family in
-# `agent_meta` (both currently use schemars unconditionally). Until that lands
-# we keep default features on; the current WASM bundle is 320 KB gzipped.
-runtara-dsl = { path = "../runtara-dsl", features = ["utoipa"] }
+# `default-features = false` drops `runtara-dsl::{spec, step_registration}`
+# and the schemars-using surface in `agent_meta` — none of which the WASM
+# bundle needs. This is what keeps schemars 0.8 out of the WASM tree.
+runtara-dsl = { path = "../runtara-dsl", default-features = false, features = ["utoipa"] }
 
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
