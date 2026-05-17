@@ -271,6 +271,7 @@ async fn render_report_snapshots() {
             status: ReportStatus::Published,
             definition_version: definition.definition_version,
             definition,
+            needs_re_authoring: None,
             created_at: now,
             updated_at: now,
         };

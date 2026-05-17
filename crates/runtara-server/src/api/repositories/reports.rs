@@ -156,22 +156,8 @@ fn row_to_report(row: PgRow) -> Result<ReportDto, sqlx::Error> {
 
     let definition_value: Value = row.try_get("definition")?;
     let definition_version = row.try_get("definition_version").unwrap_or(1);
-    let definition: ReportDefinition =
-        serde_json::from_value(sanitize_unsupported_report_definition(definition_value))
-            .unwrap_or_else(|error| {
-                tracing::warn!(
-                    error = %error,
-                    "Stored report definition could not be read after compatibility sanitization"
-                );
-                ReportDefinition {
-                    definition_version,
-                    layout: vec![],
-                    views: vec![],
-                    filters: vec![],
-                    datasets: vec![],
-                    blocks: vec![],
-                }
-            });
+    let (definition, needs_re_authoring) =
+        parse_stored_definition(definition_value, definition_version);
 
     let status: String = row.try_get("status")?;
 
@@ -184,9 +170,42 @@ fn row_to_report(row: PgRow) -> Result<ReportDto, sqlx::Error> {
         status: ReportStatus::from_db(&status),
         definition_version: row.try_get("definition_version")?,
         definition,
+        needs_re_authoring,
         created_at: row.try_get::<DateTime<Utc>, _>("created_at")?,
         updated_at: row.try_get::<DateTime<Utc>, _>("updated_at")?,
     })
+}
+
+/// Parse a stored definition JSON into a `ReportDefinition`. When the
+/// stored shape no longer matches the current `ReportDefinition` (e.g.
+/// after a schema-breaking cutover landed in Phases 1-7), returns an
+/// empty stub plus the parser error in `Option<String>` so callers can
+/// surface a "needs re-authoring" state instead of crashing.
+fn parse_stored_definition(
+    value: Value,
+    definition_version: i32,
+) -> (ReportDefinition, Option<String>) {
+    match serde_json::from_value::<ReportDefinition>(sanitize_unsupported_report_definition(value))
+    {
+        Ok(definition) => (definition, None),
+        Err(error) => {
+            tracing::warn!(
+                error = %error,
+                "Stored report definition could not be read after compatibility sanitization"
+            );
+            (
+                ReportDefinition {
+                    definition_version,
+                    layout: vec![],
+                    views: vec![],
+                    filters: vec![],
+                    datasets: vec![],
+                    blocks: vec![],
+                },
+                Some(error.to_string()),
+            )
+        }
+    }
 }
 
 fn sanitize_unsupported_report_definition(mut value: Value) -> Value {
@@ -290,5 +309,44 @@ mod tests {
             }
             other => panic!("expected block layout node, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn parse_stored_definition_marks_unparseable_legacy_shape_as_needs_re_authoring() {
+        // A shape with an unknown root-level "weirdField" plus an
+        // unknown block type that the strict schema rejects.
+        let value = json!({
+            "definitionVersion": 1,
+            "weirdField": { "removed": "in-cutover" },
+            "blocks": [
+                {
+                    "id": "first",
+                    "type": "totallyMadeUpBlockType",
+                    "weirdField": true
+                }
+            ]
+        });
+
+        let (definition, error) = parse_stored_definition(value, 1);
+        assert!(error.is_some(), "expected re-authoring error to be set");
+        assert!(definition.blocks.is_empty());
+        assert!(definition.layout.is_empty());
+    }
+
+    #[test]
+    fn parse_stored_definition_accepts_current_shape_without_flag() {
+        let value = json!({
+            "definitionVersion": 1,
+            "blocks": [
+                {
+                    "id": "intro",
+                    "type": "markdown",
+                    "markdown": { "content": "# Hi" }
+                }
+            ]
+        });
+        let (definition, error) = parse_stored_definition(value, 1);
+        assert!(error.is_none());
+        assert_eq!(definition.blocks.len(), 1);
     }
 }

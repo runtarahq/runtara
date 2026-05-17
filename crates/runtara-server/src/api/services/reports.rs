@@ -18,10 +18,11 @@ use crate::api::repositories::workflows::WorkflowRepository;
 use crate::api::services::object_model::{
     InstanceService, SchemaService, ServiceError as ObjectModelServiceError,
 };
-use crate::api::services::workflow_runtime::submit_workflow_action;
+use crate::api::services::workflow_runtime::{WorkflowRuntimeError, submit_workflow_action};
 use crate::auth::{AuthContext, AuthMethod};
 use crate::runtime_client::RuntimeClient;
 use crate::workers::execution_engine::ExecutionEngine;
+use crate::workers::execution_engine::ExecutionError;
 
 mod providers;
 pub(crate) mod query_plan;
@@ -56,6 +57,75 @@ pub enum ReportServiceError {
     Conflict(String),
     #[error("{0}")]
     Database(String),
+}
+
+impl From<sqlx::Error> for ReportServiceError {
+    fn from(error: sqlx::Error) -> Self {
+        if let sqlx::Error::Database(db_error) = &error
+            && db_error
+                .constraint()
+                .is_some_and(|c| c == "idx_report_definitions_tenant_slug_active")
+        {
+            return ReportServiceError::Conflict(
+                "A report with this slug already exists".to_string(),
+            );
+        }
+        ReportServiceError::Database(error.to_string())
+    }
+}
+
+impl From<ObjectModelServiceError> for ReportServiceError {
+    fn from(error: ObjectModelServiceError) -> Self {
+        match error {
+            ObjectModelServiceError::ValidationError(message)
+            | ObjectModelServiceError::NotFound(message) => ReportServiceError::Validation(message),
+            ObjectModelServiceError::Conflict(message) => ReportServiceError::Conflict(message),
+            ObjectModelServiceError::DatabaseError(message) => {
+                ReportServiceError::Database(message)
+            }
+        }
+    }
+}
+
+impl From<runtara_connections::service::rate_limits::ServiceError> for ReportServiceError {
+    fn from(error: runtara_connections::service::rate_limits::ServiceError) -> Self {
+        use runtara_connections::service::rate_limits::ServiceError;
+        match error {
+            ServiceError::NotFound(message) => ReportServiceError::Validation(message),
+            ServiceError::DatabaseError(message) | ServiceError::RedisError(message) => {
+                ReportServiceError::Database(message)
+            }
+        }
+    }
+}
+
+impl From<WorkflowRuntimeError> for ReportServiceError {
+    fn from(error: WorkflowRuntimeError) -> Self {
+        match error {
+            WorkflowRuntimeError::InvalidRequest(message)
+            | WorkflowRuntimeError::NotFound(message) => ReportServiceError::Validation(message),
+            WorkflowRuntimeError::Conflict(message) => ReportServiceError::Conflict(message),
+            WorkflowRuntimeError::RuntimeUnavailable => ReportServiceError::Validation(
+                "Workflow runtime report sources require a configured runtime client".to_string(),
+            ),
+            WorkflowRuntimeError::Runtime(message) => ReportServiceError::Database(message),
+        }
+    }
+}
+
+impl From<ExecutionError> for ReportServiceError {
+    fn from(error: ExecutionError) -> Self {
+        match error {
+            ExecutionError::ValidationError(message) => ReportServiceError::Validation(message),
+            ExecutionError::NotFound(message) | ExecutionError::WorkflowNotFound(message) => {
+                ReportServiceError::Validation(message)
+            }
+            ExecutionError::NotConnected(_) => ReportServiceError::Validation(
+                "Workflow runtime report sources require a configured runtime client".to_string(),
+            ),
+            other => ReportServiceError::Database(other.to_string()),
+        }
+    }
 }
 
 pub struct ReportService {
@@ -237,7 +307,7 @@ impl ReportService {
         &self,
         tenant_id: &str,
     ) -> Result<Vec<ReportSummary>, ReportServiceError> {
-        let reports = self.repo.list(tenant_id).await.map_err(map_sqlx_error)?;
+        let reports = self.repo.list(tenant_id).await?;
 
         Ok(reports.iter().map(ReportSummary::from).collect())
     }
@@ -250,8 +320,7 @@ impl ReportService {
         let mut report = self
             .repo
             .get(tenant_id, id_or_slug)
-            .await
-            .map_err(map_sqlx_error)?
+            .await?
             .ok_or(ReportServiceError::NotFound)?;
         self.normalize_definition_connections(tenant_id, &mut report.definition)
             .await;
@@ -313,6 +382,7 @@ impl ReportService {
             status: request.status,
             definition_version: request.definition.definition_version,
             definition: request.definition,
+            needs_re_authoring: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         };
@@ -320,7 +390,7 @@ impl ReportService {
         self.repo
             .create(tenant_id, &report)
             .await
-            .map_err(map_sqlx_error)
+            .map_err(Into::into)
     }
 
     pub async fn update_report(
@@ -345,14 +415,14 @@ impl ReportService {
             status: request.status,
             definition_version: request.definition.definition_version,
             definition: request.definition,
+            needs_re_authoring: None,
             created_at: existing.created_at,
             updated_at: Utc::now(),
         };
 
         self.repo
             .update(tenant_id, id_or_slug, &report)
-            .await
-            .map_err(map_sqlx_error)?
+            .await?
             .ok_or(ReportServiceError::NotFound)
     }
 
@@ -361,11 +431,7 @@ impl ReportService {
         tenant_id: &str,
         id_or_slug: &str,
     ) -> Result<(), ReportServiceError> {
-        let affected = self
-            .repo
-            .delete(tenant_id, id_or_slug)
-            .await
-            .map_err(map_sqlx_error)?;
+        let affected = self.repo.delete(tenant_id, id_or_slug).await?;
 
         if affected == 0 {
             Err(ReportServiceError::NotFound)
@@ -374,155 +440,12 @@ impl ReportService {
         }
     }
 
-    pub async fn add_report_block(
-        &self,
-        tenant_id: &str,
-        id_or_slug: &str,
-        request: AddReportBlockRequest,
-    ) -> Result<ReportBlockMutationResponse, ReportServiceError> {
-        let block_id = request.block.id.clone();
-        let report = self
-            .edit_report(
-                tenant_id,
-                id_or_slug,
-                &[runtara_report_dsl::edit_ops::ReportEditOp::AddBlock {
-                    block: request.block,
-                    position: to_dsl_position(request.position.unwrap_or_default()),
-                }],
-            )
-            .await?;
-        let block = report
-            .definition
-            .blocks
-            .iter()
-            .find(|b| b.id == block_id)
-            .cloned();
-        Ok(ReportBlockMutationResponse {
-            success: true,
-            report,
-            block,
-            message: format!("Report block '{}' added", block_id),
-        })
-    }
-
-    pub async fn replace_report_block(
-        &self,
-        tenant_id: &str,
-        id_or_slug: &str,
-        block_id: &str,
-        request: ReplaceReportBlockRequest,
-    ) -> Result<ReportBlockMutationResponse, ReportServiceError> {
-        let block_clone = request.block.clone();
-        let report = self
-            .edit_report(
-                tenant_id,
-                id_or_slug,
-                &[runtara_report_dsl::edit_ops::ReportEditOp::ReplaceBlock {
-                    block_id: block_id.to_string(),
-                    block: request.block,
-                }],
-            )
-            .await?;
-        Ok(ReportBlockMutationResponse {
-            success: true,
-            report,
-            block: Some(block_clone),
-            message: format!("Report block '{}' replaced", block_id),
-        })
-    }
-
-    pub async fn patch_report_block(
-        &self,
-        tenant_id: &str,
-        id_or_slug: &str,
-        block_id: &str,
-        request: PatchReportBlockRequest,
-    ) -> Result<ReportBlockMutationResponse, ReportServiceError> {
-        let report = self
-            .edit_report(
-                tenant_id,
-                id_or_slug,
-                &[runtara_report_dsl::edit_ops::ReportEditOp::PatchBlock {
-                    block_id: block_id.to_string(),
-                    patch: request.patch,
-                }],
-            )
-            .await?;
-        let block = report
-            .definition
-            .blocks
-            .iter()
-            .find(|b| b.id == block_id)
-            .cloned();
-        Ok(ReportBlockMutationResponse {
-            success: true,
-            report,
-            block,
-            message: format!("Report block '{}' updated", block_id),
-        })
-    }
-
-    pub async fn move_report_block(
-        &self,
-        tenant_id: &str,
-        id_or_slug: &str,
-        block_id: &str,
-        request: MoveReportBlockRequest,
-    ) -> Result<ReportBlockMutationResponse, ReportServiceError> {
-        let report = self
-            .edit_report(
-                tenant_id,
-                id_or_slug,
-                &[runtara_report_dsl::edit_ops::ReportEditOp::MoveBlock {
-                    block_id: block_id.to_string(),
-                    position: to_dsl_position(request.position),
-                }],
-            )
-            .await?;
-        let block = report
-            .definition
-            .blocks
-            .iter()
-            .find(|b| b.id == block_id)
-            .cloned();
-        Ok(ReportBlockMutationResponse {
-            success: true,
-            report,
-            block,
-            message: format!("Report block '{}' moved", block_id),
-        })
-    }
-
-    pub async fn remove_report_block(
-        &self,
-        tenant_id: &str,
-        id_or_slug: &str,
-        block_id: &str,
-        _request: RemoveReportBlockRequest,
-    ) -> Result<ReportBlockMutationResponse, ReportServiceError> {
-        let report = self
-            .edit_report(
-                tenant_id,
-                id_or_slug,
-                &[runtara_report_dsl::edit_ops::ReportEditOp::RemoveBlock {
-                    block_id: block_id.to_string(),
-                }],
-            )
-            .await?;
-        Ok(ReportBlockMutationResponse {
-            success: true,
-            report,
-            block: None,
-            message: format!("Report block '{}' removed", block_id),
-        })
-    }
-
     /// Apply a batch of [`runtara_report_dsl::edit_ops::ReportEditOp`]
     /// atomically: load the report, apply ops via the dsl helper (clones
     /// internally so failures don't mutate intermediate state), validate
-    /// the result, and persist. Returns the updated report. Phase 6's
-    /// canonical mutation entry point — REST per-op handlers + MCP layout
-    /// walkers fan in through this method.
+    /// the result, and persist. Returns the updated report. The canonical
+    /// mutation entry point — REST `/edit` + MCP `edit_report` both fan in
+    /// through this method.
     pub async fn edit_report(
         &self,
         tenant_id: &str,
@@ -789,7 +712,7 @@ impl ReportService {
             &payload,
         )
         .await
-        .map_err(providers::workflow_runtime::map_workflow_runtime_error_to_report)?;
+        .map_err(ReportServiceError::from)?;
 
         Ok(json!({
             "success": true,
@@ -1019,8 +942,7 @@ impl ReportService {
             let schema = self
                 .schema_service
                 .get_schema_by_name(&query.schema, tenant_id, query.connection_id)
-                .await
-                .map_err(map_object_model_error)?;
+                .await?;
             if let Some(search_condition) =
                 option_search_condition(&schema, &query.search_fields, search_query)
             {
@@ -1054,24 +976,21 @@ impl ReportService {
             offset: Some(offset),
         };
 
-        let result = self
-            .instance_service
-            .aggregate_instances_by_schema(
-                tenant_id,
-                &query.schema,
-                aggregate_request,
-                query.connection_id,
-            )
-            .await
-            .map_err(|error| {
-                let mapped = map_object_model_error(error);
-                match mapped {
+        let result =
+            self.instance_service
+                .aggregate_instances_by_schema(
+                    tenant_id,
+                    &query.schema,
+                    aggregate_request,
+                    query.connection_id,
+                )
+                .await
+                .map_err(|error| match ReportServiceError::from(error) {
                     ReportServiceError::Validation(message) => ReportServiceError::Validation(
                         format!("{} options query is invalid: {}", query.context, message),
                     ),
                     other => other,
-                }
-            })?;
+                })?;
         let value_index = result
             .columns
             .iter()
@@ -1190,8 +1109,7 @@ impl ReportService {
                 aggregate_request,
                 compiled.source.connection_id.as_deref(),
             )
-            .await
-            .map_err(map_object_model_error)?;
+            .await?;
 
         Ok(ReportDatasetQueryResponse {
             success: true,
@@ -1226,8 +1144,7 @@ impl ReportService {
 
         self.repo
             .update(tenant_id, &report.id, &report)
-            .await
-            .map_err(map_sqlx_error)?
+            .await?
             .ok_or(ReportServiceError::NotFound)
     }
 
@@ -1439,8 +1356,7 @@ impl ReportService {
                     tenant_id,
                     block.source.connection_id.as_deref(),
                 )
-                .await
-                .map_err(map_object_model_error)?;
+                .await?;
 
             let schema_fields: HashSet<_> = schema
                 .columns
@@ -1463,8 +1379,7 @@ impl ReportService {
                 let dim_schema = self
                     .schema_service
                     .get_schema_by_name(&join.schema, tenant_id, join.connection_id.as_deref())
-                    .await
-                    .map_err(map_object_model_error)?;
+                    .await?;
                 let dim_fields: HashSet<String> =
                     dim_schema.columns.iter().map(|c| c.name.clone()).collect();
                 if !is_schema_field(&dim_fields, &join.field) {
@@ -1896,11 +1811,7 @@ impl ReportService {
         workflow_id: &str,
         context: &str,
     ) -> Result<(), ReportServiceError> {
-        let exists = self
-            .workflow_repo
-            .exists(tenant_id, workflow_id)
-            .await
-            .map_err(map_sqlx_error)?;
+        let exists = self.workflow_repo.exists(tenant_id, workflow_id).await?;
         if !exists {
             return Err(report_validation_error(
                 "$",
@@ -1935,8 +1846,7 @@ impl ReportService {
             let exists = self
                 .workflow_repo
                 .version_exists(tenant_id, &action.workflow_id, version)
-                .await
-                .map_err(map_sqlx_error)?;
+                .await?;
             if !exists {
                 return Err(report_validation_error(
                     "$",
@@ -1977,8 +1887,7 @@ impl ReportService {
                 tenant_id,
                 dataset.source.connection_id.as_deref(),
             )
-            .await
-            .map_err(map_object_model_error)?;
+            .await?;
         let schema_fields: HashSet<_> = schema
             .columns
             .iter()
@@ -2139,8 +2048,7 @@ impl ReportService {
         let schema = self
             .schema_service
             .get_schema_by_name(schema_name, tenant_id, connection_id)
-            .await
-            .map_err(map_object_model_error)?;
+            .await?;
         let schema_fields: HashSet<_> = schema
             .columns
             .iter()
@@ -2253,8 +2161,7 @@ impl ReportService {
         let schema = self
             .schema_service
             .get_schema_by_name(&lookup.schema, tenant_id, lookup.connection_id.as_deref())
-            .await
-            .map_err(map_object_model_error)?;
+            .await?;
         let schema_fields: HashSet<_> = schema
             .columns
             .iter()
@@ -2374,8 +2281,7 @@ impl ReportService {
                     let schema = self
                         .schema_service
                         .get_schema_by_name(schema_name, tenant_id, parent_connection_id)
-                        .await
-                        .map_err(map_object_model_error)?;
+                        .await?;
                     let schema_fields: HashSet<_> = schema
                         .columns
                         .iter()
@@ -2450,8 +2356,7 @@ impl ReportService {
         let nested_schema = self
             .schema_service
             .get_schema_by_name(&source.schema, tenant_id, source.connection_id.as_deref())
-            .await
-            .map_err(map_object_model_error)?;
+            .await?;
         let nested_schema_fields: HashSet<_> = nested_schema
             .columns
             .iter()
@@ -2608,8 +2513,7 @@ impl ReportService {
         let nested_schema = self
             .schema_service
             .get_schema_by_name(&source.schema, tenant_id, source.connection_id.as_deref())
-            .await
-            .map_err(map_object_model_error)?;
+            .await?;
         let nested_schema_fields: HashSet<_> = nested_schema
             .columns
             .iter()
@@ -2954,8 +2858,7 @@ impl ReportService {
                 filter_request,
                 block.source.connection_id.as_deref(),
             )
-            .await
-            .map_err(map_object_model_error)?;
+            .await?;
 
         if total_candidates > MAX_JOIN_POST_FILTER_ROWS {
             return Err(ReportServiceError::Validation(format!(
@@ -3433,8 +3336,7 @@ impl ReportService {
         let (instances, total) = self
             .instance_service
             .filter_instances_by_schema(tenant_id, schema, request, connection_id)
-            .await
-            .map_err(map_object_model_error)?;
+            .await?;
 
         if total > MAX_BROADCAST_JOIN_DIM_ROWS {
             return Err(ReportServiceError::Validation(format!(
@@ -3511,8 +3413,7 @@ impl ReportService {
                 request,
                 source.connection_id.as_deref(),
             )
-            .await
-            .map_err(map_object_model_error)?;
+            .await?;
 
         if total > MAX_BROADCAST_JOIN_DIM_ROWS {
             return Err(ReportServiceError::Validation(format!(
@@ -3563,8 +3464,7 @@ impl ReportService {
                 request,
                 source.connection_id.as_deref(),
             )
-            .await
-            .map_err(map_object_model_error)?;
+            .await?;
 
         Ok(json!({
             "columns": result.columns,
@@ -3678,8 +3578,7 @@ impl ReportService {
                     filter,
                     join.connection_id.as_deref(),
                 )
-                .await
-                .map_err(map_object_model_error)?;
+                .await?;
 
             if total > MAX_BROADCAST_JOIN_DIM_ROWS {
                 return Err(ReportServiceError::Validation(format!(
@@ -3760,19 +3659,10 @@ impl ReportService {
         block: &ReportBlockDefinition,
         resolved_filters: &HashMap<String, Value>,
     ) -> Result<Value, ReportServiceError> {
-        if block.source.kind != ReportSourceKind::ObjectModel {
-            return Err(ReportServiceError::Validation(format!(
-                "Block '{}' card blocks only support object_model sources",
-                block.id
-            )));
-        }
-        if block.source.mode != ReportSourceMode::Filter {
-            return Err(ReportServiceError::Validation(format!(
-                "Block '{}' card blocks only support filter-mode sources",
-                block.id
-            )));
-        }
-
+        // Source-kind + source-mode are enforced by the validator
+        // (`SystemProvider::validate_block` rejects system+card, and
+        // `ObjectModelProvider::validate_block` rejects card+aggregate).
+        // No runtime fallback needed.
         let filter_request = FilterRequest {
             offset: 0,
             limit: 1,
@@ -3813,8 +3703,7 @@ impl ReportService {
                 filter_request,
                 block.source.connection_id.as_deref(),
             )
-            .await
-            .map_err(map_object_model_error)?;
+            .await?;
 
         let row = instances.into_iter().next().map(flatten_instance);
         let missing = row.is_none();
@@ -7502,19 +7391,6 @@ pub(crate) fn humanize_label(value: &str) -> String {
         .join(" ")
 }
 
-/// Convert the legacy wire `ReportBlockPosition`
-/// (`beforeBlockId`/`afterBlockId`) to the dsl's `BlockPosition`
-/// (`beforeId`/`afterId`). The shim REST handlers + service methods
-/// translate at the boundary so external callers keep their existing
-/// wire format until the next cutover.
-fn to_dsl_position(position: ReportBlockPosition) -> runtara_report_dsl::edit_ops::BlockPosition {
-    runtara_report_dsl::edit_ops::BlockPosition {
-        index: position.index,
-        before_id: position.before_block_id,
-        after_id: position.after_block_id,
-    }
-}
-
 fn normalize_source_connection(source: &mut ReportSource, default_id: &str) {
     let is_object_model = matches!(source.kind, ReportSourceKind::ObjectModel);
     if is_object_model && source.connection_id.is_none() && !source.schema.trim().is_empty() {
@@ -7524,29 +7400,6 @@ fn normalize_source_connection(source: &mut ReportSource, default_id: &str) {
         if join.connection_id.is_none() {
             join.connection_id = Some(default_id.to_string());
         }
-    }
-}
-
-fn map_sqlx_error(error: sqlx::Error) -> ReportServiceError {
-    if let sqlx::Error::Database(db_error) = &error
-        && db_error
-            .constraint()
-            .is_some_and(|constraint| constraint == "idx_report_definitions_tenant_slug_active")
-    {
-        return ReportServiceError::Conflict("A report with this slug already exists".to_string());
-    }
-
-    ReportServiceError::Database(error.to_string())
-}
-
-pub(crate) fn map_object_model_error(error: ObjectModelServiceError) -> ReportServiceError {
-    match error {
-        ObjectModelServiceError::ValidationError(message) => {
-            ReportServiceError::Validation(message)
-        }
-        ObjectModelServiceError::NotFound(message) => ReportServiceError::Validation(message),
-        ObjectModelServiceError::Conflict(message) => ReportServiceError::Conflict(message),
-        ObjectModelServiceError::DatabaseError(message) => ReportServiceError::Database(message),
     }
 }
 

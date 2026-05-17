@@ -147,178 +147,6 @@ pub struct GetReportBlockDataParams {
     pub timezone: Option<String>,
 }
 
-#[derive(Debug, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct AddReportBlockParams {
-    #[schemars(description = "Report id or slug")]
-    pub report_id: String,
-    #[schemars(description = "Full block definition. The block must include a unique stable id.")]
-    #[schemars(schema_with = "crate::mcp::tools::internal_api::json_object_schema")]
-    pub block: Value,
-    #[schemars(
-        description = "Insert at zero-based block index. Mutually exclusive with before_block_id and after_block_id."
-    )]
-    pub index: Option<usize>,
-    #[schemars(
-        description = "Insert before this block id. Mutually exclusive with index and after_block_id."
-    )]
-    pub before_block_id: Option<String>,
-    #[schemars(
-        description = "Insert after this block id. Mutually exclusive with index and before_block_id."
-    )]
-    pub after_block_id: Option<String>,
-}
-
-#[derive(Debug, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct ReplaceReportBlockParams {
-    #[schemars(description = "Report id or slug")]
-    pub report_id: String,
-    #[schemars(description = "Stable block id to replace. The replacement block id must match.")]
-    pub block_id: String,
-    #[schemars(description = "Full replacement block definition.")]
-    #[schemars(schema_with = "crate::mcp::tools::internal_api::json_object_schema")]
-    pub block: Value,
-}
-
-#[derive(Debug, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct PatchReportBlockParams {
-    #[schemars(description = "Report id or slug")]
-    pub report_id: String,
-    #[schemars(description = "Stable block id to update.")]
-    pub block_id: String,
-    #[schemars(
-        description = "RFC 7386-style JSON merge patch applied to the block definition. The id field cannot be changed."
-    )]
-    #[schemars(schema_with = "crate::mcp::tools::internal_api::json_object_schema")]
-    pub patch: Value,
-}
-
-#[derive(Debug, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct MoveReportBlockParams {
-    #[schemars(description = "Report id or slug")]
-    pub report_id: String,
-    #[schemars(description = "Stable block id to move.")]
-    pub block_id: String,
-    #[schemars(
-        description = "Move to zero-based block index. Mutually exclusive with before_block_id and after_block_id."
-    )]
-    pub index: Option<usize>,
-    #[schemars(
-        description = "Move before this block id. Mutually exclusive with index and after_block_id."
-    )]
-    pub before_block_id: Option<String>,
-    #[schemars(
-        description = "Move after this block id. Mutually exclusive with index and before_block_id."
-    )]
-    pub after_block_id: Option<String>,
-}
-
-#[derive(Debug, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct RemoveReportBlockParams {
-    #[schemars(description = "Report id or slug")]
-    pub report_id: String,
-    #[schemars(description = "Stable block id to remove.")]
-    pub block_id: String,
-}
-
-#[derive(Debug, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct AddReportLayoutNodeParams {
-    #[schemars(description = "Report id or slug")]
-    pub report_id: String,
-    #[schemars(description = "Full layout node. Must include stable id and type.")]
-    #[schemars(schema_with = "crate::mcp::tools::internal_api::json_object_schema")]
-    pub node: Value,
-    #[schemars(
-        description = "Optional container layout node id. Omit to insert at the root layout array. Sections accept children; columns require column_id."
-    )]
-    pub parent_node_id: Option<String>,
-    #[schemars(
-        description = "Target column id when parent_node_id points at a columns layout node."
-    )]
-    pub column_id: Option<String>,
-    #[schemars(
-        description = "Insert at zero-based sibling index. Mutually exclusive with before_node_id and after_node_id."
-    )]
-    pub index: Option<usize>,
-    #[schemars(
-        description = "Insert before this sibling layout node id. Mutually exclusive with index and after_node_id."
-    )]
-    pub before_node_id: Option<String>,
-    #[schemars(
-        description = "Insert after this sibling layout node id. Mutually exclusive with index and before_node_id."
-    )]
-    pub after_node_id: Option<String>,
-}
-
-#[derive(Debug, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct ReplaceReportLayoutNodeParams {
-    #[schemars(description = "Report id or slug")]
-    pub report_id: String,
-    #[schemars(description = "Stable layout node id to replace.")]
-    pub node_id: String,
-    #[schemars(description = "Full replacement layout node. Its id must match node_id.")]
-    #[schemars(schema_with = "crate::mcp::tools::internal_api::json_object_schema")]
-    pub node: Value,
-}
-
-#[derive(Debug, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct PatchReportLayoutNodeParams {
-    #[schemars(description = "Report id or slug")]
-    pub report_id: String,
-    #[schemars(description = "Stable layout node id to update.")]
-    pub node_id: String,
-    #[schemars(
-        description = "RFC 7386-style JSON merge patch applied to the layout node. The id field cannot be changed."
-    )]
-    #[schemars(schema_with = "crate::mcp::tools::internal_api::json_object_schema")]
-    pub patch: Value,
-}
-
-#[derive(Debug, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct MoveReportLayoutNodeParams {
-    #[schemars(description = "Report id or slug")]
-    pub report_id: String,
-    #[schemars(description = "Stable layout node id to move.")]
-    pub node_id: String,
-    #[schemars(
-        description = "Optional destination container layout node id. Omit to move to the root layout array. Sections accept children; columns require column_id."
-    )]
-    pub parent_node_id: Option<String>,
-    #[schemars(
-        description = "Target column id when parent_node_id points at a columns layout node."
-    )]
-    pub column_id: Option<String>,
-    #[schemars(
-        description = "Move to zero-based sibling index. Mutually exclusive with before_node_id and after_node_id."
-    )]
-    pub index: Option<usize>,
-    #[schemars(
-        description = "Move before this sibling layout node id. Mutually exclusive with index and after_node_id."
-    )]
-    pub before_node_id: Option<String>,
-    #[schemars(
-        description = "Move after this sibling layout node id. Mutually exclusive with index and before_node_id."
-    )]
-    pub after_node_id: Option<String>,
-}
-
-#[derive(Debug, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct RemoveReportLayoutNodeParams {
-    #[schemars(description = "Report id or slug")]
-    pub report_id: String,
-    #[schemars(description = "Stable layout node id to remove.")]
-    pub node_id: String,
-}
-
 // ===== Tool Implementations =====
 
 pub async fn get_report_authoring_schema(
@@ -358,6 +186,41 @@ pub async fn list_reports(
 ) -> Result<CallToolResult, rmcp::ErrorData> {
     let result = api_get(server, "/api/runtime/reports").await?;
     json_result(result)
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ListReportsNeedingReAuthoringParams {}
+
+/// Returns only reports whose stored definition failed to deserialize
+/// into the current `ReportDefinition` shape. Each entry includes the
+/// repo's reported parse error in `needsReAuthoring` so the operator
+/// can decide whether to delete or re-author through MCP.
+pub async fn list_reports_needing_re_authoring(
+    server: &SmoMcpServer,
+    _params: ListReportsNeedingReAuthoringParams,
+) -> Result<CallToolResult, rmcp::ErrorData> {
+    let result = api_get(server, "/api/runtime/reports").await?;
+    let reports = result
+        .get("reports")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let unsupported: Vec<Value> = reports
+        .into_iter()
+        .filter(|report| {
+            report
+                .get("needsReAuthoring")
+                .map(|value| !value.is_null())
+                .unwrap_or(false)
+        })
+        .collect();
+    json_result(json!({
+        "success": true,
+        "count": unsupported.len(),
+        "reports": unsupported,
+        "hint": "Each entry's `needsReAuthoring` field carries the parser error. Use get_report to fetch the raw stored JSON, then call create_report or update_report with a re-authored ReportDefinition."
+    }))
 }
 
 pub async fn get_report(
@@ -560,226 +423,6 @@ pub async fn get_report_block_data(
     json_result(result)
 }
 
-pub async fn add_report_block(
-    server: &SmoMcpServer,
-    params: AddReportBlockParams,
-) -> Result<CallToolResult, rmcp::ErrorData> {
-    validate_path_param("report_id", &params.report_id)?;
-    let block = normalize_json_arg(params.block, "block")?;
-    post_edit_op(
-        server,
-        &params.report_id,
-        json!({
-            "kind": "add_block",
-            "block": block,
-            "position": block_position_body(
-                params.index,
-                params.before_block_id.as_deref(),
-                params.after_block_id.as_deref(),
-            ),
-        }),
-    )
-    .await
-}
-
-pub async fn replace_report_block(
-    server: &SmoMcpServer,
-    params: ReplaceReportBlockParams,
-) -> Result<CallToolResult, rmcp::ErrorData> {
-    validate_path_param("report_id", &params.report_id)?;
-    validate_path_param("block_id", &params.block_id)?;
-    let block = normalize_json_arg(params.block, "block")?;
-    post_edit_op(
-        server,
-        &params.report_id,
-        json!({
-            "kind": "replace_block",
-            "blockId": params.block_id,
-            "block": block,
-        }),
-    )
-    .await
-}
-
-pub async fn patch_report_block(
-    server: &SmoMcpServer,
-    params: PatchReportBlockParams,
-) -> Result<CallToolResult, rmcp::ErrorData> {
-    validate_path_param("report_id", &params.report_id)?;
-    validate_path_param("block_id", &params.block_id)?;
-    let patch = normalize_json_arg(params.patch, "patch")?;
-    post_edit_op(
-        server,
-        &params.report_id,
-        json!({
-            "kind": "patch_block",
-            "blockId": params.block_id,
-            "patch": patch,
-        }),
-    )
-    .await
-}
-
-pub async fn move_report_block(
-    server: &SmoMcpServer,
-    params: MoveReportBlockParams,
-) -> Result<CallToolResult, rmcp::ErrorData> {
-    validate_path_param("report_id", &params.report_id)?;
-    validate_path_param("block_id", &params.block_id)?;
-    post_edit_op(
-        server,
-        &params.report_id,
-        json!({
-            "kind": "move_block",
-            "blockId": params.block_id,
-            "position": block_position_body(
-                params.index,
-                params.before_block_id.as_deref(),
-                params.after_block_id.as_deref(),
-            ),
-        }),
-    )
-    .await
-}
-
-pub async fn remove_report_block(
-    server: &SmoMcpServer,
-    params: RemoveReportBlockParams,
-) -> Result<CallToolResult, rmcp::ErrorData> {
-    validate_path_param("report_id", &params.report_id)?;
-    validate_path_param("block_id", &params.block_id)?;
-    post_edit_op(
-        server,
-        &params.report_id,
-        json!({
-            "kind": "remove_block",
-            "blockId": params.block_id,
-        }),
-    )
-    .await
-}
-
-fn block_position_body(
-    index: Option<usize>,
-    before_id: Option<&str>,
-    after_id: Option<&str>,
-) -> Value {
-    let mut position = serde_json::Map::new();
-    if let Some(v) = index {
-        position.insert("index".to_string(), json!(v));
-    }
-    if let Some(v) = before_id {
-        position.insert("beforeId".to_string(), Value::String(v.to_string()));
-    }
-    if let Some(v) = after_id {
-        position.insert("afterId".to_string(), Value::String(v.to_string()));
-    }
-    Value::Object(position)
-}
-
-pub async fn add_report_layout_node(
-    server: &SmoMcpServer,
-    params: AddReportLayoutNodeParams,
-) -> Result<CallToolResult, rmcp::ErrorData> {
-    validate_path_param("report_id", &params.report_id)?;
-    let node = normalize_json_arg(params.node, "node")?;
-    post_edit_op(
-        server,
-        &params.report_id,
-        json!({
-            "kind": "add_layout_node",
-            "node": node,
-            "target": layout_target_body(
-                params.parent_node_id.as_deref(),
-                params.column_id.as_deref(),
-                params.index,
-                params.before_node_id.as_deref(),
-                params.after_node_id.as_deref(),
-            ),
-        }),
-    )
-    .await
-}
-
-pub async fn replace_report_layout_node(
-    server: &SmoMcpServer,
-    params: ReplaceReportLayoutNodeParams,
-) -> Result<CallToolResult, rmcp::ErrorData> {
-    validate_path_param("report_id", &params.report_id)?;
-    validate_path_param("node_id", &params.node_id)?;
-    let node = normalize_json_arg(params.node, "node")?;
-    post_edit_op(
-        server,
-        &params.report_id,
-        json!({
-            "kind": "replace_layout_node",
-            "nodeId": params.node_id,
-            "node": node,
-        }),
-    )
-    .await
-}
-
-pub async fn patch_report_layout_node(
-    server: &SmoMcpServer,
-    params: PatchReportLayoutNodeParams,
-) -> Result<CallToolResult, rmcp::ErrorData> {
-    validate_path_param("report_id", &params.report_id)?;
-    validate_path_param("node_id", &params.node_id)?;
-    let patch = normalize_json_arg(params.patch, "patch")?;
-    post_edit_op(
-        server,
-        &params.report_id,
-        json!({
-            "kind": "patch_layout_node",
-            "nodeId": params.node_id,
-            "patch": patch,
-        }),
-    )
-    .await
-}
-
-pub async fn move_report_layout_node(
-    server: &SmoMcpServer,
-    params: MoveReportLayoutNodeParams,
-) -> Result<CallToolResult, rmcp::ErrorData> {
-    validate_path_param("report_id", &params.report_id)?;
-    validate_path_param("node_id", &params.node_id)?;
-    post_edit_op(
-        server,
-        &params.report_id,
-        json!({
-            "kind": "move_layout_node",
-            "nodeId": params.node_id,
-            "target": layout_target_body(
-                params.parent_node_id.as_deref(),
-                params.column_id.as_deref(),
-                params.index,
-                params.before_node_id.as_deref(),
-                params.after_node_id.as_deref(),
-            ),
-        }),
-    )
-    .await
-}
-
-pub async fn remove_report_layout_node(
-    server: &SmoMcpServer,
-    params: RemoveReportLayoutNodeParams,
-) -> Result<CallToolResult, rmcp::ErrorData> {
-    validate_path_param("report_id", &params.report_id)?;
-    validate_path_param("node_id", &params.node_id)?;
-    post_edit_op(
-        server,
-        &params.report_id,
-        json!({
-            "kind": "remove_layout_node",
-            "nodeId": params.node_id,
-        }),
-    )
-    .await
-}
-
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct EditReportParams {
@@ -813,46 +456,6 @@ pub async fn edit_report(
     )
     .await?;
     json_result(result)
-}
-
-async fn post_edit_op(
-    server: &SmoMcpServer,
-    report_id: &str,
-    op: Value,
-) -> Result<CallToolResult, rmcp::ErrorData> {
-    let result = api_post(
-        server,
-        &format!("/api/runtime/reports/{}/edit", report_id),
-        Some(json!({ "ops": [op] })),
-    )
-    .await?;
-    json_result(result)
-}
-
-fn layout_target_body(
-    parent_node_id: Option<&str>,
-    column_id: Option<&str>,
-    index: Option<usize>,
-    before_id: Option<&str>,
-    after_id: Option<&str>,
-) -> Value {
-    let mut target = serde_json::Map::new();
-    if let Some(v) = parent_node_id {
-        target.insert("parentNodeId".to_string(), Value::String(v.to_string()));
-    }
-    if let Some(v) = column_id {
-        target.insert("columnId".to_string(), Value::String(v.to_string()));
-    }
-    if let Some(v) = index {
-        target.insert("index".to_string(), json!(v));
-    }
-    if let Some(v) = before_id {
-        target.insert("beforeId".to_string(), Value::String(v.to_string()));
-    }
-    if let Some(v) = after_id {
-        target.insert("afterId".to_string(), Value::String(v.to_string()));
-    }
-    Value::Object(target)
 }
 
 fn normalize_json_object_arg(value: Value, field: &str) -> Result<Value, rmcp::ErrorData> {

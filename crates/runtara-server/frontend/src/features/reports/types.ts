@@ -65,8 +65,6 @@ export type {
   ReportBlockError,
   ReportBlockDataRequest,
   ReportBlockOnlyDataRequest,
-  ReportBlockMutationResponse,
-  ReportBlockPosition,
   ReportBlockDatasetQuery,
   // Block configs
   ReportMarkdownConfig,
@@ -137,11 +135,6 @@ export type {
   // Mutations
   CreateReportRequest,
   UpdateReportRequest,
-  AddReportBlockRequest,
-  ReplaceReportBlockRequest,
-  PatchReportBlockRequest,
-  MoveReportBlockRequest,
-  RemoveReportBlockRequest,
   DeleteReportResponse,
   // Lists
   ListReportsResponse,

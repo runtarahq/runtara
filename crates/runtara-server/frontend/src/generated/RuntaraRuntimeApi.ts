@@ -340,11 +340,6 @@ export type AggregateFn =
   | "VAR_SAMP"
   | "EXPR";
 
-export interface AddReportBlockRequest {
-  block: ReportBlockDefinition;
-  position?: null | ReportBlockPosition;
-}
-
 /** API-compatible agent info */
 export interface AgentInfo {
   capabilities: CapabilityInfo[];
@@ -2547,10 +2542,6 @@ export interface MetricsResponse {
   success: boolean;
 }
 
-export interface MoveReportBlockRequest {
-  position: ReportBlockPosition;
-}
-
 /** Request to move a workflow to a different folder */
 export interface MoveWorkflowRequest {
   /**
@@ -2680,14 +2671,6 @@ export interface PageWorkflowInstanceHistoryDto {
   totalElements: number;
   /** @format int32 */
   totalPages: number;
-}
-
-export interface PatchReportBlockRequest {
-  /**
-   * RFC 7386-style JSON merge patch applied to the block definition.
-   * The block id cannot be changed through this operation.
-   */
-  patch: any;
 }
 
 /** Aggregated rate limit stats for a time period */
@@ -2944,8 +2927,6 @@ export interface ReferenceValue {
   value: string;
 }
 
-export type RemoveReportBlockRequest = object;
-
 /** Request to rename a folder (updates all workflows in that folder and subfolders) */
 export interface RenameFolderRequest {
   /** New folder path (e.g., "/Revenue/") */
@@ -2965,10 +2946,6 @@ export interface RenameFolderResponse {
    * @min 0
    */
   workflowsUpdated: number;
-}
-
-export interface ReplaceReportBlockRequest {
-  block: ReportBlockDefinition;
 }
 
 export interface ReportActionSubmitConfig {
@@ -3051,13 +3028,6 @@ export interface ReportBlockLayoutNode {
   showWhen?: any;
 }
 
-export interface ReportBlockMutationResponse {
-  block?: null | ReportBlockDefinition;
-  message: string;
-  report: ReportDto;
-  success: boolean;
-}
-
 export interface ReportBlockOnlyDataRequest {
   blockFilters?: Partial<Record<string, any>>;
   filters?: Partial<Record<string, any>>;
@@ -3065,13 +3035,6 @@ export interface ReportBlockOnlyDataRequest {
   search?: null | ReportTableSearchRequest;
   sort?: ReportOrderBy[];
   timezone?: string | null;
-}
-
-export interface ReportBlockPosition {
-  afterBlockId?: string | null;
-  beforeBlockId?: string | null;
-  /** @min 0 */
-  index?: number | null;
 }
 
 export interface ReportBlockRenderResult {
@@ -3294,6 +3257,13 @@ export interface ReportDto {
   description?: string | null;
   id: string;
   name: string;
+  /**
+   * Set when the stored JSON failed to deserialize into the current
+   * `ReportDefinition` shape (post-Phase 8 cutover). The returned
+   * `definition` is the empty stub; the FE should render a
+   * "needs re-authoring" state instead of trying to view/edit.
+   */
+  needsReAuthoring?: string | null;
   slug: string;
   status: ReportStatus;
   tags?: string[];

@@ -20,10 +20,10 @@ use crate::api::services::reports::{
     validate_report_workflow_action_context_field, validate_report_workflow_action_row_conditions,
 };
 use crate::api::services::workflow_runtime::{
-    WorkflowRuntimeAction, WorkflowRuntimeError, list_instance_actions, list_workflow_actions,
+    WorkflowRuntimeAction, list_instance_actions, list_workflow_actions,
 };
 use crate::runtime_client::RuntimeClient;
-use crate::workers::execution_engine::{ExecutionEngine, ExecutionError};
+use crate::workers::execution_engine::ExecutionEngine;
 
 use super::{FetchAggregateOutput, FetchParams, FetchRowsOutput, ReportSourceProvider};
 
@@ -103,14 +103,13 @@ impl WorkflowRuntimeProvider {
         {
             let execution = engine
                 .get_execution_with_metadata(workflow_id, instance_id, tenant_id)
-                .await
-                .map_err(map_execution_error_to_report)?;
+                .await?;
             if !should_check_instance_actions(&execution.instance) {
                 return Ok(Vec::new());
             }
             return list_instance_actions(runtime_client, workflow_id, instance_id)
                 .await
-                .map_err(map_workflow_runtime_error_to_report);
+                .map_err(Into::into);
         }
 
         Ok(list_workflow_actions(
@@ -121,8 +120,7 @@ impl WorkflowRuntimeProvider {
             Some(0),
             Some(100),
         )
-        .await
-        .map_err(map_workflow_runtime_error_to_report)?
+        .await?
         .actions)
     }
 }
@@ -150,15 +148,12 @@ impl ReportSourceProvider for WorkflowRuntimeProvider {
                         Some(0),
                         Some(MAX_TABLE_PAGE_SIZE as i32),
                     )
-                    .await
-                    .map_err(map_execution_error_to_report)?;
+                    .await?;
 
                 let mut rows = Vec::with_capacity(result.content.len());
                 for instance in result.content {
                     let actions = if should_check_instance_actions(&instance) {
-                        list_instance_actions(runtime_client, workflow_id, &instance.id)
-                            .await
-                            .map_err(map_workflow_runtime_error_to_report)?
+                        list_instance_actions(runtime_client, workflow_id, &instance.id).await?
                     } else {
                         Vec::new()
                     };
@@ -656,37 +651,6 @@ fn validate_workflow_runtime_block(
         }
     }
     validate_block_interactions(block, filter_ids, view_ids)
-}
-
-// ============================================================================
-// Error mapping
-// ============================================================================
-
-pub(crate) fn map_workflow_runtime_error_to_report(
-    error: WorkflowRuntimeError,
-) -> ReportServiceError {
-    match error {
-        WorkflowRuntimeError::InvalidRequest(message) => ReportServiceError::Validation(message),
-        WorkflowRuntimeError::NotFound(message) => ReportServiceError::Validation(message),
-        WorkflowRuntimeError::Conflict(message) => ReportServiceError::Conflict(message),
-        WorkflowRuntimeError::RuntimeUnavailable => ReportServiceError::Validation(
-            "Workflow runtime report sources require a configured runtime client".to_string(),
-        ),
-        WorkflowRuntimeError::Runtime(message) => ReportServiceError::Database(message),
-    }
-}
-
-pub(crate) fn map_execution_error_to_report(error: ExecutionError) -> ReportServiceError {
-    match error {
-        ExecutionError::ValidationError(message) => ReportServiceError::Validation(message),
-        ExecutionError::NotFound(message) | ExecutionError::WorkflowNotFound(message) => {
-            ReportServiceError::Validation(message)
-        }
-        ExecutionError::NotConnected(_) => ReportServiceError::Validation(
-            "Workflow runtime report sources require a configured runtime client".to_string(),
-        ),
-        _ => ReportServiceError::Database(error.to_string()),
-    }
 }
 
 // ============================================================================

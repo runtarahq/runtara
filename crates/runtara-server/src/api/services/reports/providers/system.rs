@@ -270,8 +270,7 @@ async fn connection_rate_limit_status_rows(
     let service = provider.connections.rate_limit_service();
     let statuses = service
         .list_all_rate_limits(tenant_id, Some(interval))
-        .await
-        .map_err(map_rate_limit_error)?;
+        .await?;
     Ok(statuses.into_iter().map(rate_limit_status_row).collect())
 }
 
@@ -302,14 +301,10 @@ async fn connection_rate_limit_event_rows(
                     to,
                 },
             )
-            .await
-            .map_err(map_rate_limit_error)?;
+            .await?;
         events.extend(response.data);
     } else {
-        let statuses = service
-            .list_all_rate_limits(tenant_id, Some("24h"))
-            .await
-            .map_err(map_rate_limit_error)?;
+        let statuses = service.list_all_rate_limits(tenant_id, Some("24h")).await?;
         for status in statuses {
             let response = service
                 .get_rate_limit_history(
@@ -323,8 +318,7 @@ async fn connection_rate_limit_event_rows(
                         to,
                     },
                 )
-                .await
-                .map_err(map_rate_limit_error)?;
+                .await?;
             events.extend(response.data);
         }
     }
@@ -368,8 +362,7 @@ async fn connection_rate_limit_timeline_rows(
                 tag,
             },
         )
-        .await
-        .map_err(map_rate_limit_error)?;
+        .await?;
 
     Ok(response
         .data
@@ -1096,20 +1089,6 @@ fn infer_rate_limit_timeline_granularity(
         "hourly".to_string()
     } else {
         "daily".to_string()
-    }
-}
-
-fn map_rate_limit_error(
-    error: runtara_connections::service::rate_limits::ServiceError,
-) -> ReportServiceError {
-    match error {
-        runtara_connections::service::rate_limits::ServiceError::NotFound(message) => {
-            ReportServiceError::Validation(message)
-        }
-        runtara_connections::service::rate_limits::ServiceError::DatabaseError(message)
-        | runtara_connections::service::rate_limits::ServiceError::RedisError(message) => {
-            ReportServiceError::Database(message)
-        }
     }
 }
 

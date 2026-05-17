@@ -7,65 +7,6 @@ use crate::api::dto::reports::{ReportOrderBy, ReportSourceJoin};
 
 use super::{ReportServiceError, combine_conditions};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code)]
-pub(super) enum ReportDiagnosticSeverity {
-    Warning,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code)]
-pub(super) struct ReportDiagnostic {
-    pub severity: ReportDiagnosticSeverity,
-    pub block_id: String,
-    pub code: String,
-    pub message: String,
-}
-
-#[derive(Debug, Clone)]
-#[allow(dead_code)]
-pub(super) struct ReportQueryPlan {
-    pub source: ReportSourcePlan,
-    pub projections: Vec<ProjectionPlan>,
-    pub diagnostics: Vec<ReportDiagnostic>,
-}
-
-#[derive(Debug, Clone)]
-#[allow(dead_code)]
-pub(super) struct ReportSourcePlan {
-    pub schema: String,
-    pub joins: Vec<JoinPlan>,
-}
-
-#[derive(Debug, Clone)]
-#[allow(dead_code)]
-pub(super) struct JoinPlan {
-    pub schema: String,
-    pub alias: String,
-    pub parent_field: String,
-    pub field: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code)]
-pub(super) struct ProjectionPlan {
-    pub field: String,
-}
-
-impl ReportQueryPlan {
-    #[cfg(test)]
-    fn for_source(schema: impl Into<String>) -> Self {
-        Self {
-            source: ReportSourcePlan {
-                schema: schema.into(),
-                joins: Vec::new(),
-            },
-            projections: Vec::new(),
-            diagnostics: Vec::new(),
-        }
-    }
-}
-
 /// Resolved dimension data for a single block-level join. Held in memory
 /// during a single aggregate render; sized by `MAX_BROADCAST_JOIN_DIM_ROWS`.
 pub(crate) struct JoinResolution {
@@ -745,37 +686,6 @@ mod tests {
             op: "eq".to_string(),
             kind: ReportJoinKind::Inner,
         }
-    }
-
-    #[test]
-    fn planner_structs_hold_source_projection_and_diagnostics() {
-        let mut plan = ReportQueryPlan::for_source("StockSnapshot");
-        plan.source.joins.push(JoinPlan {
-            schema: "TDProduct".to_string(),
-            alias: "p".to_string(),
-            parent_field: "sku".to_string(),
-            field: "sku".to_string(),
-        });
-        plan.projections.push(ProjectionPlan {
-            field: "p.part_number".to_string(),
-        });
-        plan.diagnostics.push(ReportDiagnostic {
-            severity: ReportDiagnosticSeverity::Warning,
-            block_id: "stock".to_string(),
-            code: "JOIN_BROADCAST".to_string(),
-            message: "Using bounded broadcast join".to_string(),
-        });
-
-        assert_eq!(plan.source.schema, "StockSnapshot");
-        assert_eq!(plan.source.joins[0].schema, "TDProduct");
-        assert_eq!(plan.source.joins[0].alias, "p");
-        assert_eq!(plan.source.joins[0].parent_field, "sku");
-        assert_eq!(plan.source.joins[0].field, "sku");
-        assert_eq!(plan.projections[0].field, "p.part_number");
-        assert_eq!(
-            plan.diagnostics[0].severity,
-            ReportDiagnosticSeverity::Warning
-        );
     }
 
     #[test]

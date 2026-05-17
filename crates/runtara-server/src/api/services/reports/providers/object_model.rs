@@ -22,7 +22,7 @@ use crate::api::services::reports::query_plan::{
 };
 use crate::api::services::reports::{
     MAX_BROADCAST_JOIN_DIM_ROWS, ReportServiceError, combine_conditions, flatten_instance,
-    map_object_model_error, normalize_sort_direction, table_response_columns,
+    normalize_sort_direction, table_response_columns,
 };
 
 use super::{FetchAggregateOutput, FetchParams, FetchRowsOutput, ReportSourceProvider};
@@ -81,11 +81,19 @@ impl ReportSourceProvider for ObjectModelProvider {
 
     fn validate_block(
         &self,
-        _block: &ReportBlockDefinition,
+        block: &ReportBlockDefinition,
         _filter_ids: &HashSet<String>,
         _view_ids: &HashSet<String>,
         _filter_defs: &HashMap<String, &ReportFilterDefinition>,
     ) -> Result<(), ReportServiceError> {
+        if block.block_type == ReportBlockType::Card
+            && block.source.mode != ReportSourceMode::Filter
+        {
+            return Err(ReportServiceError::Validation(format!(
+                "Block '{}' card blocks only support filter-mode sources",
+                block.id
+            )));
+        }
         Ok(())
     }
 
@@ -144,8 +152,7 @@ async fn fetch_rows_inner(
             filter_request,
             block.source.connection_id.as_deref(),
         )
-        .await
-        .map_err(map_object_model_error)?;
+        .await?;
 
     let rows = instances
         .into_iter()
@@ -184,7 +191,7 @@ async fn aggregate_with_optional_joins(
                 block.source.connection_id.as_deref(),
             )
             .await
-            .map_err(map_object_model_error);
+            .map_err(Into::into);
     }
 
     let alias_to_join = build_alias_index(joins, &block.id)?;
@@ -258,8 +265,7 @@ async fn aggregate_with_optional_joins(
             primary_request,
             block.source.connection_id.as_deref(),
         )
-        .await
-        .map_err(map_object_model_error)?;
+        .await?;
 
     Ok(enrich_aggregate_result(
         primary_result,
@@ -302,8 +308,7 @@ async fn resolve_join(
             filter,
             join.connection_id.as_deref(),
         )
-        .await
-        .map_err(map_object_model_error)?;
+        .await?;
 
     if total > MAX_BROADCAST_JOIN_DIM_ROWS {
         return Err(ReportServiceError::Validation(format!(

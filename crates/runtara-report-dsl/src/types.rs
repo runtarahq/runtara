@@ -1503,6 +1503,16 @@ pub struct ReportDto {
     #[serde(rename = "definitionVersion")]
     pub definition_version: i32,
     pub definition: ReportDefinition,
+    /// Set when the stored JSON failed to deserialize into the current
+    /// `ReportDefinition` shape (post-Phase 8 cutover). The returned
+    /// `definition` is the empty stub; the FE should render a
+    /// "needs re-authoring" state instead of trying to view/edit.
+    #[serde(
+        default,
+        rename = "needsReAuthoring",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub needs_re_authoring: Option<String>,
     #[serde(rename = "createdAt")]
     pub created_at: DateTime<Utc>,
     #[serde(rename = "updatedAt")]
@@ -1909,63 +1919,9 @@ pub struct DeleteReportResponse {
     pub message: String,
 }
 
-#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct ReportBlockPosition {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub index: Option<usize>,
-    #[serde(
-        default,
-        rename = "beforeBlockId",
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub before_block_id: Option<String>,
-    #[serde(
-        default,
-        rename = "afterBlockId",
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub after_block_id: Option<String>,
-}
-
-#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[derive(Debug, Serialize, Deserialize)]
-pub struct AddReportBlockRequest {
-    pub block: ReportBlockDefinition,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub position: Option<ReportBlockPosition>,
-}
-
-#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[derive(Debug, Serialize, Deserialize)]
-pub struct ReplaceReportBlockRequest {
-    pub block: ReportBlockDefinition,
-}
-
-#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[derive(Debug, Serialize, Deserialize)]
-pub struct PatchReportBlockRequest {
-    /// RFC 7386-style JSON merge patch applied to the block definition.
-    /// The block id cannot be changed through this operation.
-    pub patch: Value,
-}
-
-#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[derive(Debug, Serialize, Deserialize)]
-pub struct MoveReportBlockRequest {
-    pub position: ReportBlockPosition,
-}
-
-#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[derive(Debug, Serialize, Deserialize)]
-pub struct RemoveReportBlockRequest {}
-
-#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[derive(Debug, Serialize, Deserialize)]
-pub struct ReportBlockMutationResponse {
-    pub success: bool,
-    pub report: ReportDto,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub block: Option<ReportBlockDefinition>,
-    pub message: String,
-}
+// Legacy per-op block mutation request/response types
+// (ReportBlockPosition, Add/Replace/Patch/Move/RemoveReportBlockRequest,
+// ReportBlockMutationResponse) were deleted in Phase 8 alongside the
+// per-op REST + MCP shims. All block edits now flow through
+// `runtara_report_dsl::edit_ops::ReportEditOp` via the canonical
+// `POST /api/runtime/reports/{id}/edit` endpoint.

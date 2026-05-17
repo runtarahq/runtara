@@ -548,6 +548,16 @@ impl SmoMcpServer {
     }
 
     #[tool(
+        description = "List reports whose stored definition failed to deserialize into the current schema (Phase 8 cutover). Each entry carries the parser error in `needsReAuthoring`. Use this to find reports to re-author via MCP after a schema change."
+    )]
+    async fn list_reports_needing_re_authoring(
+        &self,
+        params: Parameters<tools::reports::ListReportsNeedingReAuthoringParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        tools::reports::list_reports_needing_re_authoring(self, params.0).await
+    }
+
+    #[tool(
         description = "Get a report by id or slug, including layout, filters, datasets, and blocks."
     )]
     async fn get_report(
@@ -568,7 +578,7 @@ impl SmoMcpServer {
     }
 
     #[tool(
-        description = "Replace a report with a full definition. Call get_report_authoring_schema first. Prefer add_report_block, replace_report_block, patch_report_block, move_report_block, and remove_report_block for atomic block edits."
+        description = "Replace a report with a full definition. Call get_report_authoring_schema first. Prefer edit_report for atomic block + layout edits."
     )]
     async fn update_report(
         &self,
@@ -613,102 +623,6 @@ impl SmoMcpServer {
         params: Parameters<tools::reports::GetReportBlockDataParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         tools::reports::get_report_block_data(self, params.0).await
-    }
-
-    #[tool(
-        description = "Atomically add one report block by stable id. Position with index, before_block_id, or after_block_id."
-    )]
-    async fn add_report_block(
-        &self,
-        params: Parameters<tools::reports::AddReportBlockParams>,
-    ) -> Result<CallToolResult, rmcp::ErrorData> {
-        tools::reports::add_report_block(self, params.0).await
-    }
-
-    #[tool(
-        description = "Atomically replace one report block by stable id. The replacement block id must match the path block id."
-    )]
-    async fn replace_report_block(
-        &self,
-        params: Parameters<tools::reports::ReplaceReportBlockParams>,
-    ) -> Result<CallToolResult, rmcp::ErrorData> {
-        tools::reports::replace_report_block(self, params.0).await
-    }
-
-    #[tool(
-        description = "Atomically update one report block by stable id using an RFC 7386 JSON merge patch. The block id cannot be changed."
-    )]
-    async fn patch_report_block(
-        &self,
-        params: Parameters<tools::reports::PatchReportBlockParams>,
-    ) -> Result<CallToolResult, rmcp::ErrorData> {
-        tools::reports::patch_report_block(self, params.0).await
-    }
-
-    #[tool(
-        description = "Atomically move one report block by stable id. Position with index, before_block_id, or after_block_id."
-    )]
-    async fn move_report_block(
-        &self,
-        params: Parameters<tools::reports::MoveReportBlockParams>,
-    ) -> Result<CallToolResult, rmcp::ErrorData> {
-        tools::reports::move_report_block(self, params.0).await
-    }
-
-    #[tool(description = "Atomically remove one report block by stable id.")]
-    async fn remove_report_block(
-        &self,
-        params: Parameters<tools::reports::RemoveReportBlockParams>,
-    ) -> Result<CallToolResult, rmcp::ErrorData> {
-        tools::reports::remove_report_block(self, params.0).await
-    }
-
-    #[tool(
-        description = "Atomically add one structured report layout node by stable id. Prefer layout nodes over Markdown tables for report arrangement. Insert at the root or inside a section/columns node."
-    )]
-    async fn add_report_layout_node(
-        &self,
-        params: Parameters<tools::reports::AddReportLayoutNodeParams>,
-    ) -> Result<CallToolResult, rmcp::ErrorData> {
-        tools::reports::add_report_layout_node(self, params.0).await
-    }
-
-    #[tool(
-        description = "Atomically replace one structured report layout node by stable id. The replacement node id must match."
-    )]
-    async fn replace_report_layout_node(
-        &self,
-        params: Parameters<tools::reports::ReplaceReportLayoutNodeParams>,
-    ) -> Result<CallToolResult, rmcp::ErrorData> {
-        tools::reports::replace_report_layout_node(self, params.0).await
-    }
-
-    #[tool(
-        description = "Atomically update one structured report layout node using an RFC 7386 JSON merge patch. The layout node id cannot be changed."
-    )]
-    async fn patch_report_layout_node(
-        &self,
-        params: Parameters<tools::reports::PatchReportLayoutNodeParams>,
-    ) -> Result<CallToolResult, rmcp::ErrorData> {
-        tools::reports::patch_report_layout_node(self, params.0).await
-    }
-
-    #[tool(
-        description = "Atomically move one structured report layout node by stable id. Position with index, before_node_id, or after_node_id at the root or inside a section/columns node."
-    )]
-    async fn move_report_layout_node(
-        &self,
-        params: Parameters<tools::reports::MoveReportLayoutNodeParams>,
-    ) -> Result<CallToolResult, rmcp::ErrorData> {
-        tools::reports::move_report_layout_node(self, params.0).await
-    }
-
-    #[tool(description = "Atomically remove one structured report layout node by stable id.")]
-    async fn remove_report_layout_node(
-        &self,
-        params: Parameters<tools::reports::RemoveReportLayoutNodeParams>,
-    ) -> Result<CallToolResult, rmcp::ErrorData> {
-        tools::reports::remove_report_layout_node(self, params.0).await
     }
 
     #[tool(

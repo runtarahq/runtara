@@ -475,13 +475,6 @@ use runtime_client::RuntimeClient;
             runtara_report_dsl::ReportBlockStatus,
             runtara_report_dsl::ReportBlockError,
             runtara_report_dsl::DeleteReportResponse,
-            runtara_report_dsl::ReportBlockPosition,
-            runtara_report_dsl::AddReportBlockRequest,
-            runtara_report_dsl::ReplaceReportBlockRequest,
-            runtara_report_dsl::PatchReportBlockRequest,
-            runtara_report_dsl::MoveReportBlockRequest,
-            runtara_report_dsl::RemoveReportBlockRequest,
-            runtara_report_dsl::ReportBlockMutationResponse,
         )
     ),
     tags(
@@ -1426,20 +1419,6 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         .route(
             "/api/runtime/reports/{report_id}/datasets/{dataset_id}/query",
             post(api::handlers::reports::query_report_dataset),
-        )
-        .route(
-            "/api/runtime/reports/{report_id}/blocks",
-            post(api::handlers::reports::add_report_block),
-        )
-        .route(
-            "/api/runtime/reports/{report_id}/blocks/{block_id}",
-            put(api::handlers::reports::replace_report_block)
-                .patch(api::handlers::reports::patch_report_block)
-                .delete(api::handlers::reports::remove_report_block),
-        )
-        .route(
-            "/api/runtime/reports/{report_id}/blocks/{block_id}/move",
-            post(api::handlers::reports::move_report_block),
         )
         .route(
             "/api/runtime/reports/{report_id}/edit",
