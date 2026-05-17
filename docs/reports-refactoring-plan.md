@@ -13,6 +13,7 @@
 | 6 — Edit-operation symmetry | [x] Done. `ReportEditOp` + `apply_edit_ops` in `runtara-report-dsl::edit_ops` with 10 variants applied atomically. New `POST /api/runtime/reports/{id}/edit` + `ReportService::edit_report`. New MCP `edit_report` tool. All 10 legacy per-op handlers (5 REST per-block + 5 MCP per-block + 5 MCP per-layout-node) are now single-op `edit_report`/`/edit` shims. 350+ LOC of in-process walker helpers deleted. Integration test asserts per-op and batched flows produce identical persisted state. |
 | 7 — Wizard rewrite | [x] Done. Wizard v2 is the only authoring surface — legacy wizard tree (`components/wizard/`, `wizardSerialization.{ts,test.ts}`, `wizardTypes.ts`, `connectionDefaults.ts`, `ReportEditorPage.tsx`, `ReportDefinitionBuilder.tsx`) deleted. Per-block editors cover all six block types incl. table workflow buttons / interaction buttons / bulk actions; multi-group cards with subcard/subtable placeholders; dataset dim/measure forms with aggregate ops + percentile; filter options (static values + object_model lookups + dependsOn + filterMappings + appliesTo). Server `normalize_definition_connections` injects default object-model connection on get/create/update/preview/validate; FE `withDefaultObjectModelConnection` deleted. Lossless round-trip on all 11 corpus fixtures + identity-edit round-trip + move-and-back + add-then-remove are all byte-identical assertions. Playwright author-flow spec written; Phase 8 verifies once mocked-test infra is healthy in CI. |
 | 8 — Cutover + cleanup | [x] Done. Legacy per-op REST endpoints + MCP block/layout tools deleted; their service shims replaced by direct `edit_report` calls. Five `map_*_error` functions converted to idiomatic `From<E> for ReportServiceError` impls; ~70 call sites collapsed to `?` / `Into::into`. Dead `ReportQueryPlan` / `ReportSourcePlan` / `JoinPlan` / `ProjectionPlan` / `ReportDiagnostic` / `ReportDiagnosticSeverity` structs deleted from `query_plan.rs`. Card render-time kind/mode check moved into `ObjectModelProvider::validate_block`. `dual-run-reports` Cargo feature removed. Repository deserialize falls back to an empty stub + sets `needs_re_authoring: Option<String>` on `ReportDto` so legacy-shape definitions surface as a clean state rather than 500. New MCP `list_reports_needing_re_authoring` tool filters the report list for the cutover use case. |
+| 9 — Restore visual layout editor + in-place editing | [ ] Not started. Closes the regressions Phase 7's wizard rewrite introduced: visual grid / columns / metric-row layout authoring and editing blocks against their rendered output. Wire format unchanged; FE-only work. |
 
 **Owner:** _unassigned_
 **Last updated:** 2026-05-17
@@ -569,6 +570,119 @@ No data migration. Existing reports will be re-authored via MCP after cutover. T
 
 ---
 
+## Phase 9 — Restore visual layout editor + in-place editing
+
+**Status:** [ ] Not started
+
+The wizard v2 from Phase 7 ships a simpler flat block-list editor. Two legacy capabilities did not make the cut and are tracked as deferred regressions:
+
+- **Grid / columns / metric_row layout authoring.** The legacy wizard had a `WizardGrid` model (`rows × columns`, `layoutKind: 'grid' | 'metric_row' | 'columns'`) and `WizardBlock.placement: { gridId, row, column }`. `BlocksStep` rendered each grid as a CSS grid with blocks placed by 2D coordinates. v2's `BlockListV2` is a flat vertical list. Existing reports with non-trivial layouts still **render** correctly (the wire format is preserved on round-trip and `layoutOps.ts` walks every layout-node type), but they cannot be **edited** visually.
+- **In-place editing.** The legacy `BlockPreview` rendered the actual block (table rows, chart, card fields) inside the wizard with hover-revealed editing affordances overlaid on the rendered output. v2 ships a form-style editor below a collapsed block summary instead — blocks aren't previewed live, and users can't click a column header to jump to that column's settings.
+
+This phase is FE-only. The DSL, server, REST endpoints, and MCP tools are all unchanged. The wire format already supports every layout structure being authored (`section`, `columns { columns: [{ id, width?, children }] }`, `metric_row { blocks }`, `grid { columns?, items: [{ blockId, colSpan?, rowSpan? }] }`, `block`); Phase 9 adds the FE surface for editing them.
+
+### Goal
+
+Reach feature parity with the legacy wizard's grid + in-place authoring, on top of the wizard v2 architecture (operates on `ReportDefinition` directly, React-local state, immutable updates via `layoutOps.ts`).
+
+### Work
+
+**Track A — visual layout editor:**
+
+- [ ] **A1: Layout-tree-aware block list.** Replace `BlockListV2` with `LayoutTreeEditor` that walks `definition.layout` recursively and renders each container type as a nested editor surface:
+  - `section` → titled card with `children` rendered inside
+  - `columns` → horizontal flex/grid container with one nested editor per `column.children`
+  - `metric_row` → horizontal row of compact metric-block editors
+  - `grid` → CSS grid with `grid-template-columns: repeat({columns}, 1fr)`; items positioned with `colSpan` / `rowSpan` honored
+  - `block` → today's collapsible card editor
+
+- [ ] **A2: layoutOps extension.** Add to `wizard-v2/layoutOps.ts`:
+  - `addLayoutNode(definition, node, target: LayoutTarget): ReportDefinition` — mirrors `runtara_report_dsl::edit_ops::ReportEditOp::AddLayoutNode` semantics (root / inside section.children / inside columns.columns[].children)
+  - `removeLayoutNode(definition, nodeId): ReportDefinition` — removes the node by id wherever it appears; preserves siblings + any blocks referenced by removed nodes (orphaned blocks stay on `definition.blocks` until the user deletes them explicitly)
+  - `moveLayoutNode(definition, nodeId, target): ReportDefinition`
+  - `updateLayoutNode(definition, nodeId, updater): ReportDefinition` — patch a node in-place
+  - `pathToLayoutNode(definition, nodeId): LayoutPath | null` — returns `{ parentId, columnId?, index }` for the matching node, used by drag-and-drop targets
+  - Unit tests: each new helper × every layout node type, plus deeply-nested cases
+
+- [ ] **A3: Add-layout-node affordances.** Each container has an "+" button (or dropdown) with `Add section | Add columns | Add metric row | Add grid | Add block` options. Selecting one inserts the chosen node type at the appropriate target. New containers ship with sensible defaults:
+  - section: empty `children` + placeholder title input
+  - columns: two equal-width columns, each with empty `children`
+  - metric_row: empty `blocks` array
+  - grid: `columns: 2`, empty `items`
+- [ ] **A4: Per-layout-node settings panels.** Each container has a settings gear that expands a panel:
+  - `section`: title, description, `showWhen` (canonical condition via `VisibilityEditor`)
+  - `columns`: per-column `width` (number 0-1 or undefined for equal split), `showWhen`
+  - `metric_row`: title, `showWhen`
+  - `grid`: `columns` count (1-12), `showWhen`
+  - Per-grid-item: `colSpan` (1-12), `rowSpan` (1-12). Surfaced in the block's own settings when its parent layout node is a `grid`.
+- [ ] **A5: Drag-and-drop reordering.** Use `@dnd-kit/core` + `@dnd-kit/sortable` (add as deps). Drag handles on every block + container header. Drop targets:
+  - Between siblings in a section's `children`
+  - Between siblings in a column's `children`
+  - Between siblings in a metric_row's `blocks`
+  - Into a different grid cell (with `colSpan`/`rowSpan` preserved unless the destination already has a conflicting item)
+  - Hover-state visual cues: drop-line between siblings, container outline on hover
+  - Failed drops snap back; successful drops emit a single layout-tree mutation through `moveLayoutNode`
+- [ ] **A6: Layout-node deletion.** Container header has a delete button. Confirm if `children` is non-empty; deleting a container with blocks inside leaves the blocks on `definition.blocks` (orphans surfaced in an "Unplaced" section at the bottom of the editor).
+
+**Track B — in-place block editing:**
+
+- [ ] **B1: Restore preview wiring.** Re-add (carefully) the `useReportPreview` hook + `previewQuery` + `blockResults` map in `ReportPage` (deleted in the Phase 7 cutover). Debounced from the live `definition` like before. The query runs only in `editing` mode.
+- [ ] **B2: In-place block rendering.** Replace each block's form-style editor with `<BlockHostInEdit>` — a thin wrapper around the existing `ReportBlockHost`:
+  - Renders the block exactly as the viewer would (`ReportBlockHost` already handles every block type)
+  - Receives the matching `blockResults[block.id]` as `initialResult`
+  - Wraps the rendered output in an "editing chrome" container with hover-revealed action buttons
+  - Falls back to a placeholder ("Preview unavailable — configure the source") when the preview API hasn't returned data for this block yet
+- [ ] **B3: Hover-revealed action buttons.** Top-right corner of each rendered block:
+  - **Configure** → opens the existing v2 form panel as a side-sheet or modal (current `BlockEditor` reused unchanged)
+  - **Duplicate** → adds a copy of the block with a new id; placed as a sibling
+  - **Delete** → confirm + remove
+  - **Drag** grip (rendered as a handle, picked up by `@dnd-kit`)
+- [ ] **B4: Inline title editing.** Click block title → swaps to an `<input>` focused at cursor; blur or enter commits via `updateBlock`.
+- [ ] **B5: Click-to-edit on rendered output (optional, lower priority).** Make specific elements deep-link into the form panel:
+  - Table column header click → form opens with that column's settings scrolled into view + focused
+  - Chart axis label click → form opens with that axis field highlighted
+  - Card field label click → form opens with that field
+  - Metric value click → form opens with the metric config
+  This is a deep UX integration; ship A1–A6 + B1–B4 first, then revisit.
+- [ ] **B6: "+" insert-between-blocks affordance.** Hover gap between two blocks → "+" button appears; click → mini-menu (`Add block | Add columns | Add metric row | Add grid`) to insert at that index.
+
+**Track C — supporting work:**
+
+- [ ] **C1: ReportPage preview path.** Restore the debounced preview-API call wiring that was deleted in the Phase 7 cutover (`useReportPreview`, `blockResults`, the debounce-state pair). Pass `blockResults` to the wizard.
+- [ ] **C2: Wizard wraps `ReportBuilderWizardV2`** to accept `blockResults` prop and pass it down to `LayoutTreeEditor` and per-block `BlockHostInEdit`.
+- [ ] **C3: Drag-and-drop dependency.** Add `@dnd-kit/core` + `@dnd-kit/sortable` to `frontend/package.json`. Verify bundle-size impact (target +<30KB gzipped).
+
+### Tests
+
+- [ ] **Unit (TS): `wizard-v2/__tests__/layoutOps.test.ts` extension** — every new helper (`addLayoutNode`, `removeLayoutNode`, `moveLayoutNode`, `updateLayoutNode`, `pathToLayoutNode`) tested against every layout-node target type. Each test asserts the resulting layout tree byte-identical to the expected shape.
+- [ ] **Unit (TS): `LayoutTreeEditor`** rendering snapshot per corpus fixture. Mount with each fixture; serialize the editor's structural DOM (section headers, column slots, metric-row slots, grid cells, block cards). 11 snapshots.
+- [ ] **Unit (TS): per-container settings panel** — `SectionSettings`, `ColumnsSettings`, `MetricRowSettings`, `GridSettings`. Each: open with a fixture node, edit one field, assert the emitted layout-node patch is correct.
+- [ ] **Unit (TS): hover affordances** — `BlockHostInEdit` shows action buttons on hover-state, fires correct callbacks on click.
+- [ ] **Integration (TS): drag-and-drop reorder** — simulate a drag from slot A to slot B; assert the resulting `definition.layout` matches what `moveLayoutNode` would produce directly.
+- [ ] **Integration (TS): lossless round-trip extended** — `losslessRoundTrip.test.tsx` adds a suite that mounts the layout editor against every corpus fixture, immediately commits without user interaction, asserts byte-identical persisted definition.
+- [ ] **E2E (Playwright): `wizard-v2-layout-editor.mocked.spec.ts`** — create a new report, add a 2-column layout, drop a markdown block in each column, save, reload, verify the persisted layout has the matching `columns` node + two `block` children. Covers Tracks A1+A2+A3+A5+B1+B3 end-to-end.
+
+### Acceptance
+
+- [ ] Every layout node type (`section` / `columns` / `metric_row` / `grid` / `block`) is creatable, editable, and deletable through the wizard UI. No round-trip via the JSON API required.
+- [ ] Each block renders in-place with its preview data while being edited (markdown shows content, table shows rows, chart shows the rendered chart, metric shows the value).
+- [ ] Drag-and-drop reorders blocks between siblings + between containers + into grid cells.
+- [ ] Old reports created in the legacy wizard with grid / multi-column / metric-row layouts can be edited without losing structure on save. Corpus lossless round-trip still passes.
+- [ ] Wizard bundle gzip size delta < 50KB (target < 30KB).
+
+### Out of scope
+
+- B5 (click-to-edit on rendered output) ships as a follow-up if A1–A6 + B1–B4 + B6 land cleanly.
+- Resize-handle drag for column widths (typed-in number suffices for now).
+- Grid-cell drag-resize for `colSpan` / `rowSpan` (typed-in numbers in settings panel suffice).
+- New DSL primitives (the wire format already covers everything Phase 9 authors).
+
+### Estimated effort
+
+5–7 days of focused FE work. Track A is the bigger lift (drag-and-drop, layout-tree mutations, settings panels). Track B reuses `ReportBlockHost` so adding the chrome wrapper + restoring the preview path is mostly plumbing.
+
+---
+
 ## Cross-cutting test infrastructure
 
 Set up once in Phase 0:
@@ -593,6 +707,7 @@ Set up once in Phase 0:
 | 6 | per-EditOp apply/revert | batched-vs-per-op equivalence | UI edit flow regression |
 | 7 | per-step wizard; condition builder reuse | lossless round-trip on corpus | full author workflow |
 | 8 | legacy-shape error path | list/viewer empty-state for unsupported reports | cutover regression; re-authoring state visible |
+| 9 | layoutOps mutations × layout-node types; per-container settings; hover affordances | drag-and-drop reorder produces correct tree; layout-editor lossless round-trip on corpus | 2-column layout author flow (create + save + reload) |
 
 ## Risks
 
