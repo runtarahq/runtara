@@ -13,7 +13,10 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::types::{ReportBlockDefinition, ReportDefinition, ReportLayoutNode};
+use crate::types::{
+    ReportBlockDefinition, ReportDefinition, ReportGridLayoutItem, ReportGridLayoutNode,
+    ReportLayoutNode,
+};
 
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
@@ -27,6 +30,17 @@ pub struct BlockPosition {
     pub after_id: Option<String>,
 }
 
+/// Destination for a layout-node insert / move.
+///
+/// `parent_node_id == None` targets the root `definition.layout` array.
+/// When set, it must reference a `Grid` node and the operation targets
+/// that grid's `items` array. The position fields are mutually
+/// exclusive — pick one of index / before_id / after_id (or none, in
+/// which case the node is appended at the end).
+///
+/// Phase 9 collapse: previous versions carried a `columnId` field for
+/// the legacy `columns` layout type. With grid-only containers there is
+/// no second-level indirection — items live directly on a Grid.
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -37,8 +51,6 @@ pub struct LayoutTarget {
         skip_serializing_if = "Option::is_none"
     )]
     pub parent_node_id: Option<String>,
-    #[serde(default, rename = "columnId", skip_serializing_if = "Option::is_none")]
-    pub column_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub index: Option<usize>,
     #[serde(default, rename = "beforeId", skip_serializing_if = "Option::is_none")]
@@ -429,9 +441,6 @@ fn remove_layout_node(def: &mut ReportDefinition, node_id: &str) -> Result<(), E
 fn layout_node_id(node: &ReportLayoutNode) -> &str {
     match node {
         ReportLayoutNode::Block(n) => &n.id,
-        ReportLayoutNode::MetricRow(n) => &n.id,
-        ReportLayoutNode::Section(n) => &n.id,
-        ReportLayoutNode::Columns(n) => &n.id,
         ReportLayoutNode::Grid(n) => &n.id,
     }
 }
@@ -450,16 +459,12 @@ fn layout_node_exists(nodes: &[ReportLayoutNode], node_id: &str) -> bool {
         if layout_node_id(node) == node_id {
             return true;
         }
-        let in_children = match node {
-            ReportLayoutNode::Section(s) => layout_node_exists(&s.children, node_id),
-            ReportLayoutNode::Columns(c) => c
-                .columns
-                .iter()
-                .any(|col| layout_node_exists(&col.children, node_id)),
-            _ => false,
-        };
-        if in_children {
-            return true;
+        if let ReportLayoutNode::Grid(g) = node {
+            for item in &g.items {
+                if layout_node_exists(std::slice::from_ref(item.child.as_ref()), node_id) {
+                    return true;
+                }
+            }
         }
     }
     false
@@ -473,16 +478,13 @@ fn find_in_tree_mut<'a>(
         if layout_node_id(node) == node_id {
             return Some(node);
         }
-        let recurse = match node {
-            ReportLayoutNode::Section(s) => find_in_tree_mut(&mut s.children, node_id),
-            ReportLayoutNode::Columns(c) => c
-                .columns
-                .iter_mut()
-                .find_map(|col| find_in_tree_mut(&mut col.children, node_id)),
-            _ => None,
-        };
-        if recurse.is_some() {
-            return recurse;
+        if let ReportLayoutNode::Grid(g) = node {
+            for item in g.items.iter_mut() {
+                let child_slice = std::slice::from_mut(item.child.as_mut());
+                if let Some(found) = find_in_tree_mut(child_slice, node_id) {
+                    return Some(found);
+                }
+            }
         }
     }
     None
@@ -499,20 +501,14 @@ fn replace_in_tree(
             return true;
         }
     }
-    // Recurse into child containers.
     for node in nodes.iter_mut() {
-        let replaced = match node {
-            ReportLayoutNode::Section(s) => {
-                replace_in_tree(&mut s.children, node_id, replacement.clone())
+        if let ReportLayoutNode::Grid(g) = node {
+            for item in g.items.iter_mut() {
+                let child_slice = std::slice::from_mut(item.child.as_mut());
+                if replace_in_tree(child_slice, node_id, replacement.clone()) {
+                    return true;
+                }
             }
-            ReportLayoutNode::Columns(c) => c
-                .columns
-                .iter_mut()
-                .any(|col| replace_in_tree(&mut col.children, node_id, replacement.clone())),
-            _ => false,
-        };
-        if replaced {
-            return true;
         }
     }
     false
@@ -524,83 +520,85 @@ fn remove_from_tree(nodes: &mut Vec<ReportLayoutNode>, node_id: &str) -> Option<
         return Some(nodes.remove(index));
     }
     for node in nodes.iter_mut() {
-        let removed = match node {
-            ReportLayoutNode::Section(s) => remove_from_tree(&mut s.children, node_id),
-            ReportLayoutNode::Columns(c) => c
-                .columns
-                .iter_mut()
-                .find_map(|col| remove_from_tree(&mut col.children, node_id)),
-            _ => None,
-        };
-        if removed.is_some() {
-            return removed;
+        if let ReportLayoutNode::Grid(g) = node {
+            // First try removing the node as a direct grid item — items wrap
+            // a single child layout node, so removing the matching item is
+            // equivalent to removing the child.
+            if let Some(item_index) = g
+                .items
+                .iter()
+                .position(|item| layout_node_id(&item.child) == node_id)
+            {
+                let removed_item = g.items.remove(item_index);
+                return Some(*removed_item.child);
+            }
+            // Otherwise recurse deeper.
+            for item in g.items.iter_mut() {
+                let mut child_vec = vec![std::mem::replace(
+                    item.child.as_mut(),
+                    placeholder_block_layout(),
+                )];
+                let removed = remove_from_tree(&mut child_vec, node_id);
+                let replaced = child_vec.into_iter().next().expect("vec had one element");
+                *item.child.as_mut() = replaced;
+                if removed.is_some() {
+                    return removed;
+                }
+            }
         }
     }
     None
 }
 
+/// Sentinel used during in-place mutation of a `Box<ReportLayoutNode>`
+/// — the boxed value is temporarily swapped out, the recursive helper
+/// works against a `Vec`, and the (possibly modified) value swaps back
+/// before the function returns. The sentinel is never observed by
+/// callers.
+fn placeholder_block_layout() -> ReportLayoutNode {
+    use crate::types::ReportBlockLayoutNode;
+    ReportLayoutNode::Block(ReportBlockLayoutNode {
+        id: String::new(),
+        block_id: String::new(),
+        show_when: None,
+    })
+}
+
 /// Resolve the destination container for [`AddLayoutNode`]/[`MoveLayoutNode`]
-/// and insert.
+/// and insert. Wraps the new node in a `ReportGridLayoutItem` when the
+/// target is a grid; appends directly to the root `Vec<ReportLayoutNode>`
+/// when `parent_node_id` is None.
 fn insert_into_target(
     root: &mut Vec<ReportLayoutNode>,
     target: &LayoutTarget,
     node: ReportLayoutNode,
 ) -> Result<(), EditOpError> {
-    let dest = resolve_container_mut(root, target)?;
-    let index = resolve_layout_index(dest, target)?;
-    dest.insert(index, node);
+    if let Some(parent_id) = &target.parent_node_id {
+        let parent =
+            find_in_tree_mut(root, parent_id).ok_or_else(|| layout_not_found(parent_id))?;
+        let ReportLayoutNode::Grid(grid) = parent else {
+            return Err(err(
+                "INVALID_LAYOUT_TARGET",
+                "parentNodeId must reference a grid layout node",
+            ));
+        };
+        let index = resolve_grid_item_index(&grid.items, target)?;
+        let item = wrap_in_grid_item(node);
+        grid.items.insert(index, item);
+    } else {
+        let index = resolve_layout_index(root, target)?;
+        root.insert(index, node);
+    }
     Ok(())
 }
 
-fn resolve_container_mut<'a>(
-    root: &'a mut Vec<ReportLayoutNode>,
-    target: &LayoutTarget,
-) -> Result<&'a mut Vec<ReportLayoutNode>, EditOpError> {
-    let Some(parent_id) = &target.parent_node_id else {
-        if target.column_id.is_some() {
-            return Err(err(
-                "INVALID_LAYOUT_TARGET",
-                "columnId requires parentNodeId pointing at a columns layout node",
-            ));
-        }
-        return Ok(root);
-    };
-    let Some(node) = find_in_tree_mut(root, parent_id) else {
-        return Err(layout_not_found(parent_id));
-    };
-    match node {
-        ReportLayoutNode::Section(s) => {
-            if target.column_id.is_some() {
-                return Err(err(
-                    "INVALID_LAYOUT_TARGET",
-                    "columnId is only valid for columns layout nodes",
-                ));
-            }
-            Ok(&mut s.children)
-        }
-        ReportLayoutNode::Columns(c) => {
-            let column_id = target.column_id.as_deref().ok_or_else(|| {
-                err(
-                    "INVALID_LAYOUT_TARGET",
-                    "columns layout node requires columnId for child placement",
-                )
-            })?;
-            let column = c
-                .columns
-                .iter_mut()
-                .find(|col| col.id == column_id)
-                .ok_or_else(|| {
-                    err(
-                        "LAYOUT_COLUMN_NOT_FOUND",
-                        format!("Layout column '{}' not found", column_id),
-                    )
-                })?;
-            Ok(&mut column.children)
-        }
-        _ => Err(err(
-            "INVALID_LAYOUT_TARGET",
-            "parentNodeId must reference a container (section or columns) layout node",
-        )),
+fn wrap_in_grid_item(node: ReportLayoutNode) -> ReportGridLayoutItem {
+    let id = format!("item_{}", layout_node_id(&node));
+    ReportGridLayoutItem {
+        id,
+        col_span: None,
+        row_span: None,
+        child: Box::new(node),
     }
 }
 
@@ -638,6 +636,54 @@ fn resolve_layout_index(
                 )
             }),
         (None, None, None) => Ok(siblings.len()),
+    }
+}
+
+/// Same as [`resolve_layout_index`] but anchors against a grid's items
+/// — `before_id` / `after_id` reference the child layout-node id, not
+/// the grid item id (callers identify nodes, not item wrappers).
+fn resolve_grid_item_index(
+    items: &[ReportGridLayoutItem],
+    target: &LayoutTarget,
+) -> Result<usize, EditOpError> {
+    match (
+        target.index,
+        target.before_id.as_deref(),
+        target.after_id.as_deref(),
+    ) {
+        (Some(_), Some(_), _) | (Some(_), _, Some(_)) | (_, Some(_), Some(_)) => Err(err(
+            "INVALID_POSITION",
+            "Position fields index/beforeId/afterId are mutually exclusive",
+        )),
+        (Some(i), _, _) => Ok(i.min(items.len())),
+        (_, Some(before), _) => items
+            .iter()
+            .position(|item| layout_node_id(&item.child) == before)
+            .ok_or_else(|| {
+                err(
+                    "LAYOUT_ANCHOR_NOT_FOUND",
+                    format!("Position anchor layout node '{}' not found", before),
+                )
+            }),
+        (_, _, Some(after)) => items
+            .iter()
+            .position(|item| layout_node_id(&item.child) == after)
+            .map(|i| i + 1)
+            .ok_or_else(|| {
+                err(
+                    "LAYOUT_ANCHOR_NOT_FOUND",
+                    format!("Position anchor layout node '{}' not found", after),
+                )
+            }),
+        (None, None, None) => Ok(items.len()),
+    }
+}
+
+#[allow(dead_code)]
+fn grid_node(node: &ReportLayoutNode) -> Option<&ReportGridLayoutNode> {
+    match node {
+        ReportLayoutNode::Grid(g) => Some(g),
+        _ => None,
     }
 }
 
@@ -785,11 +831,11 @@ mod tests {
     }
 
     #[test]
-    fn add_layout_node_to_section_via_parent_id() {
+    fn add_layout_node_to_grid_via_parent_id() {
         let mut def: ReportDefinition = serde_json::from_value(json!({
             "definitionVersion": 1,
             "blocks": [{"id": "b1", "type": "markdown", "markdown": {"content": "x"}}],
-            "layout": [{"type": "section", "id": "s1", "children": []}]
+            "layout": [{"type": "grid", "id": "g1", "items": []}]
         }))
         .unwrap();
         apply_edit_ops(
@@ -802,15 +848,18 @@ mod tests {
                 }))
                 .unwrap(),
                 target: LayoutTarget {
-                    parent_node_id: Some("s1".to_string()),
+                    parent_node_id: Some("g1".to_string()),
                     ..Default::default()
                 },
             }],
         )
         .unwrap();
         match &def.layout[0] {
-            ReportLayoutNode::Section(s) => assert_eq!(s.children.len(), 1),
-            _ => panic!("expected Section at root"),
+            ReportLayoutNode::Grid(g) => {
+                assert_eq!(g.items.len(), 1);
+                assert_eq!(layout_node_id(&g.items[0].child), "ln1");
+            }
+            _ => panic!("expected Grid at root"),
         }
     }
 
@@ -858,9 +907,12 @@ mod tests {
             "definitionVersion": 1,
             "blocks": [{"id": "b1", "type": "markdown", "markdown": {"content": "x"}}],
             "layout": [{
-                "type": "section",
-                "id": "s1",
-                "children": [{"type": "block", "id": "ln1", "blockId": "b1"}]
+                "type": "grid",
+                "id": "g1",
+                "items": [{
+                    "id": "item_ln1",
+                    "child": {"type": "block", "id": "ln1", "blockId": "b1"}
+                }]
             }]
         }))
         .unwrap();
@@ -872,8 +924,53 @@ mod tests {
         )
         .unwrap();
         match &def.layout[0] {
-            ReportLayoutNode::Section(s) => assert!(s.children.is_empty()),
-            _ => panic!("expected Section at root"),
+            ReportLayoutNode::Grid(g) => assert!(g.items.is_empty()),
+            _ => panic!("expected Grid at root"),
         }
+    }
+
+    #[test]
+    fn add_layout_node_to_nested_grid() {
+        let mut def: ReportDefinition = serde_json::from_value(json!({
+            "definitionVersion": 1,
+            "blocks": [
+                {"id": "b1", "type": "markdown", "markdown": {"content": "x"}},
+                {"id": "b2", "type": "markdown", "markdown": {"content": "y"}}
+            ],
+            "layout": [{
+                "type": "grid",
+                "id": "outer",
+                "columns": 2,
+                "items": [{
+                    "id": "item_inner",
+                    "child": {"type": "grid", "id": "inner", "columns": 1, "items": []}
+                }]
+            }]
+        }))
+        .unwrap();
+        apply_edit_ops(
+            &mut def,
+            &[ReportEditOp::AddLayoutNode {
+                node: serde_json::from_value(json!({
+                    "type": "block", "id": "ln1", "blockId": "b2"
+                }))
+                .unwrap(),
+                target: LayoutTarget {
+                    parent_node_id: Some("inner".to_string()),
+                    ..Default::default()
+                },
+            }],
+        )
+        .unwrap();
+        let outer = match &def.layout[0] {
+            ReportLayoutNode::Grid(g) => g,
+            _ => panic!("expected outer Grid"),
+        };
+        let inner = match outer.items[0].child.as_ref() {
+            ReportLayoutNode::Grid(g) => g,
+            _ => panic!("expected nested Grid"),
+        };
+        assert_eq!(inner.items.len(), 1);
+        assert_eq!(layout_node_id(&inner.items[0].child), "ln1");
     }
 }

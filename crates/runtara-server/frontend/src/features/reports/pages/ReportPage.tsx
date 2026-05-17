@@ -10,6 +10,7 @@ import { useObjectModelConnectionSelection } from '@/features/objects/hooks/useO
 import {
   useCreateReport,
   useReport,
+  useReportPreview,
   useReportRender,
   useUpdateReport,
   useValidateReport,
@@ -17,7 +18,7 @@ import {
 import { ReportDeleteButton } from '../components/ReportDeleteButton';
 import { ReportFilterBar } from '../components/ReportFilterBar';
 import { ReportRenderer } from '../components/ReportRenderer';
-import { ReportDefinition, ReportInteractionOptions } from '../types';
+import { ReportBlockResult, ReportDefinition, ReportInteractionOptions } from '../types';
 import {
   decodeFilterValue,
   encodeFilterValue,
@@ -119,6 +120,40 @@ export function ReportPage() {
     reportId,
     renderRequest,
     Boolean(renderRequest)
+  );
+
+  // Phase 9: in-place block preview for the wizard. Debounced from the
+  // live definition so live edits don't pummel the preview API.
+  const [debouncedDefinition, setDebouncedDefinition] =
+    useState<ReportDefinition>(EMPTY_DEFINITION);
+  useEffect(() => {
+    const handle = setTimeout(() => setDebouncedDefinition(definition), 400);
+    return () => clearTimeout(handle);
+  }, [definition]);
+  const canPreview = useMemo(
+    () =>
+      editing &&
+      debouncedDefinition.blocks.some(
+        (block) =>
+          block.type === 'markdown' ||
+          (block.source?.schema && block.source.schema.length > 0)
+      ),
+    [debouncedDefinition, editing]
+  );
+  const previewRequest = useMemo(
+    () =>
+      canPreview
+        ? {
+            filters: filterValues,
+            definition: debouncedDefinition,
+          }
+        : undefined,
+    [canPreview, debouncedDefinition, filterValues]
+  );
+  const previewQuery = useReportPreview(previewRequest, canPreview);
+  const blockResults: Partial<Record<string, ReportBlockResult>> = useMemo(
+    () => previewQuery.data?.blocks ?? {},
+    [previewQuery.data]
   );
 
   const canSave =
@@ -398,6 +433,9 @@ export function ReportPage() {
             definition={definition}
             schemas={schemas}
             editing={editing}
+            blockResults={blockResults}
+            filters={filterValues}
+            reportId={reportId}
             onChange={(nextDefinition) => {
               setDefinition(nextDefinition);
               setSaveError(null);

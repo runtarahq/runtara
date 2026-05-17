@@ -7,6 +7,9 @@ repository.workspace = true
 description = "Complete HTTP API server for runtara — workflows, connections, channels, workers"
 keywords = ["durable", "workflow", "server", "runtime"]
 categories = ["web-programming"]
+# Multiple binaries (server + dump_openapi codegen helper). Pin the
+# default so `cargo run -p runtara-server` resolves without `--bin`.
+default-run = "runtara-server"
 
 [lib]
 name = "runtara_server"

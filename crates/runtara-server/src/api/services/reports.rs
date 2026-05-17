@@ -3758,91 +3758,9 @@ fn validate_layout_node(
                     ))
                 })?;
             validate_layout_block_ref(block_id, block_ids, "layout block")?;
-        }
-        "metric_row" => {
-            let blocks = object
-                .get("blocks")
-                .and_then(Value::as_array)
-                .ok_or_else(|| {
-                    ReportServiceError::Validation(format!(
-                        "Metric row layout node '{}' must include blocks",
-                        node_id
-                    ))
-                })?;
-            if blocks.is_empty() {
-                return Err(ReportServiceError::Validation(format!(
-                    "Metric row layout node '{}' must include at least one block",
-                    node_id
-                )));
-            }
-            for block in blocks {
-                let Some(block_id) = block.as_str() else {
-                    return Err(ReportServiceError::Validation(format!(
-                        "Metric row layout node '{}' blocks entries must be block IDs",
-                        node_id
-                    )));
-                };
-                validate_layout_block_ref(block_id, block_ids, "metric row")?;
-                if block_types.get(block_id) != Some(&ReportBlockType::Metric) {
-                    return Err(ReportServiceError::Validation(format!(
-                        "Metric row layout node '{}' references non-metric block '{}'",
-                        node_id, block_id
-                    )));
-                }
-            }
-        }
-        "section" => {
-            if let Some(children) = object.get("children") {
-                validate_layout_children(
-                    children,
-                    &format!("{path}.children"),
-                    block_ids,
-                    block_types,
-                    filter_ids,
-                    layout_node_ids,
-                )?;
-            }
-        }
-        "columns" => {
-            let columns = object
-                .get("columns")
-                .and_then(Value::as_array)
-                .ok_or_else(|| {
-                    ReportServiceError::Validation(format!(
-                        "Columns layout node '{}' must include columns",
-                        node_id
-                    ))
-                })?;
-            if columns.is_empty() {
-                return Err(ReportServiceError::Validation(format!(
-                    "Columns layout node '{}' must include at least one column",
-                    node_id
-                )));
-            }
-            for (column_index, column) in columns.iter().enumerate() {
-                let Some(column_object) = column.as_object() else {
-                    return Err(ReportServiceError::Validation(format!(
-                        "Columns layout node '{}' column {} must be an object",
-                        node_id, column_index
-                    )));
-                };
-                if column_object.get("id").and_then(Value::as_str).is_none() {
-                    return Err(ReportServiceError::Validation(format!(
-                        "Columns layout node '{}' column {} must include id",
-                        node_id, column_index
-                    )));
-                }
-                if let Some(children) = column_object.get("children") {
-                    validate_layout_children(
-                        children,
-                        &format!("{path}.columns[{column_index}].children"),
-                        block_ids,
-                        block_types,
-                        filter_ids,
-                        layout_node_ids,
-                    )?;
-                }
-            }
+            // Block types reserved for future per-type validation; reference
+            // suppresses the unused-variable warning until that lands.
+            let _ = block_types;
         }
         "grid" => {
             if let Some(columns) = object.get("columns").and_then(Value::as_i64)
@@ -3852,6 +3770,26 @@ fn validate_layout_node(
                     "Grid layout node '{}' columns must be positive",
                     node_id
                 )));
+            }
+            if let Some(widths) = object.get("columnWidths").and_then(Value::as_array) {
+                let columns_count = object
+                    .get("columns")
+                    .and_then(Value::as_i64)
+                    .unwrap_or(widths.len() as i64);
+                if columns_count as usize != widths.len() {
+                    return Err(ReportServiceError::Validation(format!(
+                        "Grid layout node '{}' columnWidths length must match columns",
+                        node_id
+                    )));
+                }
+                for (i, width) in widths.iter().enumerate() {
+                    if width.as_f64().filter(|w| *w > 0.0).is_none() {
+                        return Err(ReportServiceError::Validation(format!(
+                            "Grid layout node '{}' columnWidths[{}] must be a positive number",
+                            node_id, i
+                        )));
+                    }
+                }
             }
             let items = object
                 .get("items")
@@ -3869,16 +3807,12 @@ fn validate_layout_node(
                         node_id, item_index
                     )));
                 };
-                let block_id = item_object
-                    .get("blockId")
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| {
-                        ReportServiceError::Validation(format!(
-                            "Grid layout node '{}' item {} must include blockId",
-                            node_id, item_index
-                        ))
-                    })?;
-                validate_layout_block_ref(block_id, block_ids, "grid")?;
+                if item_object.get("id").and_then(Value::as_str).is_none() {
+                    return Err(ReportServiceError::Validation(format!(
+                        "Grid layout node '{}' item {} must include id",
+                        node_id, item_index
+                    )));
+                }
                 for field in ["colSpan", "rowSpan"] {
                     if let Some(value) = item_object.get(field).and_then(Value::as_i64)
                         && value <= 0
@@ -3889,11 +3823,25 @@ fn validate_layout_node(
                         )));
                     }
                 }
+                let child = item_object.get("child").ok_or_else(|| {
+                    ReportServiceError::Validation(format!(
+                        "Grid layout node '{}' item {} must include child",
+                        node_id, item_index
+                    ))
+                })?;
+                validate_layout_node(
+                    child,
+                    &format!("{path}.items[{item_index}].child"),
+                    block_ids,
+                    block_types,
+                    filter_ids,
+                    layout_node_ids,
+                )?;
             }
         }
         _ => {
             return Err(ReportServiceError::Validation(format!(
-                "Report layout node '{}' has unsupported type '{}'",
+                "Report layout node '{}' has unsupported type '{}' (only 'block' and 'grid' are supported post-Phase 9)",
                 node_id, node_type
             )));
         }
@@ -4622,32 +4570,6 @@ fn validate_show_when_value(
         return Err(ReportServiceError::Validation(format!(
             "Report {context} showWhen.exists must be boolean"
         )));
-    }
-    Ok(())
-}
-
-fn validate_layout_children(
-    children: &Value,
-    path: &str,
-    block_ids: &HashSet<String>,
-    block_types: &HashMap<String, ReportBlockType>,
-    filter_ids: &HashSet<String>,
-    layout_node_ids: &mut HashSet<String>,
-) -> Result<(), ReportServiceError> {
-    let Some(children) = children.as_array() else {
-        return Err(ReportServiceError::Validation(format!(
-            "Report layout children at {path} must be an array"
-        )));
-    };
-    for (index, child) in children.iter().enumerate() {
-        validate_layout_node(
-            child,
-            &format!("{path}[{index}]"),
-            block_ids,
-            block_types,
-            filter_ids,
-            layout_node_ids,
-        )?;
     }
     Ok(())
 }
@@ -8763,7 +8685,7 @@ mod tests {
     }
 
     #[test]
-    fn layout_validation_accepts_nested_layout_nodes() {
+    fn layout_validation_accepts_nested_grid_layout_nodes() {
         let blocks = [test_metric_block("snapshots"), test_block("records")];
         let block_ids = blocks
             .iter()
@@ -8776,14 +8698,32 @@ mod tests {
         let filter_ids = HashSet::new();
         let mut layout_node_ids = HashSet::new();
 
+        // A grid containing a nested grid (one column) with a block plus a
+        // sibling block. Mirrors the post-Phase-9 wire shape for what was
+        // previously a `section` wrapping a `metric_row` + a block.
         validate_layout_node(
             &json!({
                 "id": "summary",
-                "type": "section",
+                "type": "grid",
                 "title": "Summary",
-                "children": [
-                    {"id": "summary_metrics", "type": "metric_row", "blocks": ["snapshots"]},
-                    {"id": "records_block", "type": "block", "blockId": "records"}
+                "columns": 1,
+                "items": [
+                    {
+                        "id": "summary_i0",
+                        "child": {
+                            "id": "summary_metrics",
+                            "type": "grid",
+                            "columns": 1,
+                            "items": [{
+                                "id": "summary_metrics_i0",
+                                "child": {"id": "snapshots_block", "type": "block", "blockId": "snapshots"}
+                            }]
+                        }
+                    },
+                    {
+                        "id": "summary_i1",
+                        "child": {"id": "records_block", "type": "block", "blockId": "records"}
+                    }
                 ]
             }),
             "$.layout[0]",

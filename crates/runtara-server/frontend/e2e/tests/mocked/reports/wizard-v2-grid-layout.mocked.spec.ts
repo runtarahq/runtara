@@ -1,12 +1,8 @@
-// Phase 7 cutover regression: drive the wizard v2 through an author
-// flow (open an existing empty report in edit mode → add a markdown
-// block → edit content → save) and assert the persisted
-// `ReportDefinition` captures every edit. Also asserts the wizard v2 is
-// wired as the default authoring surface — the legacy wizard was
-// deleted in this same phase, so this test would fail loudly if v2
-// regressed.
-//
-// All API calls are intercepted; no real backend.
+// Phase 9 acceptance E2E: drive the grid-only layout editor through a
+// realistic author flow — open an existing empty report in edit mode,
+// add a 2-column grid, add a block inside the grid, save, assert the
+// persisted definition contains exactly one top-level grid with one
+// block child plus a matching block on the blocks array.
 import type { Page, Route } from '@playwright/test';
 import {
   buildObjectModelConnection,
@@ -21,8 +17,8 @@ import type {
   UpdateReportRequest,
 } from '../../../../src/features/reports/types';
 
-const TENANT = 'tenant_wizard_v2';
-const REPORT_ID = 'rep_wizard_v2_test';
+const TENANT = 'tenant_wizard_v2_grid';
+const REPORT_ID = 'rep_wizard_v2_grid';
 
 function runtimeUrl(suffix: string): RegExp {
   const escaped = suffix.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -59,15 +55,14 @@ const SCHEMA: Schema = {
   columns: [
     { name: 'order_id', type: 'string' },
     { name: 'status', type: 'string' },
-    { name: 'total_amount', type: 'number' },
   ],
 } as Schema;
 
 function emptyReport(): ReportDto {
   return {
     id: REPORT_ID,
-    slug: 'wizard-v2-test',
-    name: 'Wizard v2 test',
+    slug: 'grid-flow',
+    name: 'Grid flow',
     description: null,
     tags: [],
     status: 'published',
@@ -83,11 +78,9 @@ function emptyReport(): ReportDto {
   };
 }
 
-async function setupWizardEditing(
+async function setupGridEditing(
   page: Page,
-  mockApi: typeof import('../../../fixtures')['test']['_mockApi'] extends never
-    ? never
-    : import('../../../fixtures/mock.fixture').MockApi
+  mockApi: import('../../../fixtures/mock.fixture').MockApi
 ): Promise<{ getSaved: () => UpdateReportRequest | null }> {
   await mockApi.bootstrap(page);
   await mockApi.connections.list(page, [
@@ -123,6 +116,15 @@ async function setupWizardEditing(
     errors: [],
     warnings: [],
   });
+  // Preview API is debounced 400ms; fulfill with an empty preview so the
+  // editor's BlockHostInEdit renders the placeholder rather than hanging.
+  await mockApi.raw(page, runtimeUrl('reports/preview'), {
+    success: true,
+    report: { id: REPORT_ID, definitionVersion: 1 },
+    resolvedFilters: {},
+    blocks: {},
+    errors: [],
+  });
 
   await gotoAppRoute(page, `/reports/${REPORT_ID}?edit=1`);
   await expect(page.getByRole('button', { name: /^Save$/ })).toBeVisible();
@@ -130,44 +132,46 @@ async function setupWizardEditing(
   return { getSaved: () => saved };
 }
 
-test.describe('wizard v2 author flow (mocked)', () => {
-  test('default surface is wizard v2 — Layout section header renders (grid-only model)', async ({
+test.describe('wizard v2 grid layout author flow (mocked)', () => {
+  test('Layout section header renders + has the canonical grid-only copy', async ({
     page,
     mockApi,
   }) => {
-    await setupWizardEditing(
+    await setupGridEditing(
       page,
-      mockApi as unknown as Parameters<typeof setupWizardEditing>[1]
+      mockApi as unknown as import('../../../fixtures/mock.fixture').MockApi
     );
-
     await expect(
       page.getByRole('heading', { name: 'Layout', level: 2 })
     ).toBeVisible();
     await expect(page.getByText(/everything is a grid/)).toBeVisible();
-    // No legacy compatibility warning anywhere on the page.
-    await expect(
-      page.getByText(/This report uses advanced features/)
-    ).toHaveCount(0);
   });
 
-  test('add a top-level markdown block, save → PUT captures the structure', async ({
+  test('add a 2-column grid + one block inside → save persists the structure', async ({
     page,
     mockApi,
   }) => {
-    const { getSaved } = await setupWizardEditing(
+    const { getSaved } = await setupGridEditing(
       page,
-      mockApi as unknown as Parameters<typeof setupWizardEditing>[1]
+      mockApi as unknown as import('../../../fixtures/mock.fixture').MockApi
     );
 
-    // Phase 9: the empty-layout state offers root-level "Add block" /
-    // "Add grid" affordances. Clicking "Add block" pushes a fresh
-    // markdown block onto `definition.blocks` and a matching `block`
-    // layout node onto the root layout array.
+    // Empty state — root-level "Add grid" dropdown.
+    await page
+      .getByRole('button', { name: /^Add grid$/i })
+      .first()
+      .click();
+    await page.getByText('2 equal columns').click();
+
+    // The new grid container now shows up with its own "Add block".
+    // The grid-scoped affordance renders before the root-level dock, so
+    // `.first()` reliably targets it.
     await page
       .getByRole('button', { name: /^Add block$/i })
       .first()
       .click();
 
+    // Save.
     await page.getByRole('button', { name: /^Save$/ }).click();
 
     await expect(async () => {
@@ -176,13 +180,23 @@ test.describe('wizard v2 author flow (mocked)', () => {
 
     const saved = getSaved()!;
     const definition: ReportDefinition = saved.definition;
-    expect(definition.blocks).toHaveLength(1);
-    const block = definition.blocks[0];
-    expect(block.type).toBe('markdown');
-    expect(
-      (definition.layout ?? []).some(
-        (node) => node.type === 'block' && node.blockId === block.id
-      )
-    ).toBe(true);
+
+    // Exactly one top-level grid node.
+    expect(definition.layout).toHaveLength(1);
+    const root = definition.layout?.[0];
+    expect(root?.type).toBe('grid');
+    if (root?.type !== 'grid') return;
+    expect(root.columns).toBe(2);
+    // One block sitting inside the grid.
+    expect(root.items).toHaveLength(1);
+    const item = root.items[0];
+    expect(item.child.type).toBe('block');
+    if (item.child.type !== 'block') return;
+    // The block reference resolves to a real block on the blocks array.
+    const matchingBlock = definition.blocks.find(
+      (b) => b.id === item.child.blockId
+    );
+    expect(matchingBlock).toBeDefined();
+    expect(matchingBlock?.type).toBe('markdown');
   });
 });

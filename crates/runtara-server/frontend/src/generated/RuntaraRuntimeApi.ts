@@ -3150,12 +3150,6 @@ export interface ReportChartSeries {
   label?: string | null;
 }
 
-export interface ReportColumnsLayoutNode {
-  columns: ReportLayoutColumn[];
-  id: string;
-  showWhen?: any;
-}
-
 export interface ReportDatasetDefinition {
   dimensions?: ReportDatasetDimension[];
   id: string;
@@ -3379,20 +3373,47 @@ export interface ReportFilterTarget {
 }
 
 export interface ReportGridLayoutItem {
-  blockId: string;
+  /**
+   * Layout primitive. Two variants only — `block` (leaf reference to
+   * `definition.blocks[i]`) and `grid` (recursive container). The legacy
+   * `section` / `columns` / `metric_row` types collapsed into `grid` in
+   * Phase 9; the repository's `parse_stored_definition` translates them
+   * transparently on read.
+   */
+  child: ReportLayoutNode;
   /** @format int64 */
   colSpan?: number | null;
-  id?: string | null;
+  id: string;
   /** @format int64 */
   rowSpan?: number | null;
 }
 
+/**
+ * Grid container with optional title/description and a list of items.
+ * Every layout container — single-column section, multi-column row,
+ * metric-block row, arbitrary 2D grid — is expressed as a `Grid` with
+ * different `columns` + `column_widths` + per-item `col_span` /
+ * `row_span`. Items can be blocks or nested grids.
+ */
 export interface ReportGridLayoutNode {
-  /** @format int64 */
+  /**
+   * Optional fractional column widths. Length must match `columns`
+   * when set. Defaults to equal split.
+   */
+  columnWidths?: number[] | null;
+  /**
+   * Column count for the grid. Defaults to 1 (single-column = legacy
+   * "section" shape).
+   * @format int64
+   */
   columns?: number | null;
+  /** Optional secondary text rendered beneath the title. */
+  description?: string | null;
   id: string;
   items: ReportGridLayoutItem[];
   showWhen?: any;
+  /** Optional section-style heading rendered above the grid contents. */
+  title?: string | null;
 }
 
 export interface ReportInteractionAction {
@@ -3415,25 +3436,16 @@ export interface ReportInteractionTrigger {
   field?: string | null;
 }
 
-export interface ReportLayoutColumn {
-  children?: ReportLayoutNode[];
-  id: string;
-  /** @format double */
-  width?: number | null;
-}
-
+/**
+ * Layout primitive. Two variants only — `block` (leaf reference to
+ * `definition.blocks[i]`) and `grid` (recursive container). The legacy
+ * `section` / `columns` / `metric_row` types collapsed into `grid` in
+ * Phase 9; the repository's `parse_stored_definition` translates them
+ * transparently on read.
+ */
 export type ReportLayoutNode =
   | (ReportBlockLayoutNode & {
       type: "block";
-    })
-  | (ReportMetricRowLayoutNode & {
-      type: "metric_row";
-    })
-  | (ReportSectionLayoutNode & {
-      type: "section";
-    })
-  | (ReportColumnsLayoutNode & {
-      type: "columns";
     })
   | (ReportGridLayoutNode & {
       type: "grid";
@@ -3497,13 +3509,6 @@ export interface ReportMetricConfig {
   valueField: string;
 }
 
-export interface ReportMetricRowLayoutNode {
-  blocks: string[];
-  id: string;
-  showWhen?: any;
-  title?: string | null;
-}
-
 export interface ReportOrderBy {
   direction?: string;
   field: string;
@@ -3547,14 +3552,6 @@ export interface ReportRenderResponse {
   report: ReportRenderMetadata;
   resolvedFilters: Partial<Record<string, any>>;
   success: boolean;
-}
-
-export interface ReportSectionLayoutNode {
-  children?: ReportLayoutNode[];
-  description?: string | null;
-  id: string;
-  showWhen?: any;
-  title?: string | null;
 }
 
 export interface ReportSource {

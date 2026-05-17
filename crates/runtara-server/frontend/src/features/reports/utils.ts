@@ -97,26 +97,10 @@ function collectLayoutBlockReferences(node: ReportLayoutNode, ids: string[]) {
     ids.push(node.blockId);
     return;
   }
-  if (node.type === 'metric_row') {
-    ids.push(...node.blocks);
-    return;
-  }
-  if (node.type === 'section') {
-    for (const child of node.children ?? []) {
-      collectLayoutBlockReferences(child, ids);
-    }
-    return;
-  }
-  if (node.type === 'columns') {
-    for (const column of node.columns) {
-      for (const child of column.children ?? []) {
-        collectLayoutBlockReferences(child, ids);
-      }
-    }
-    return;
-  }
   if (node.type === 'grid') {
-    ids.push(...node.items.map((item) => item.blockId));
+    for (const item of node.items ?? []) {
+      collectLayoutBlockReferences(item.child, ids);
+    }
   }
 }
 
@@ -496,26 +480,10 @@ function collectVisibleLayoutBlockReferences(
     ids.push(node.blockId);
     return;
   }
-  if (node.type === 'metric_row') {
-    ids.push(...node.blocks);
-    return;
-  }
-  if (node.type === 'section') {
-    for (const child of node.children ?? []) {
-      collectVisibleLayoutBlockReferences(child, filters, ids);
-    }
-    return;
-  }
-  if (node.type === 'columns') {
-    for (const column of node.columns) {
-      for (const child of column.children ?? []) {
-        collectVisibleLayoutBlockReferences(child, filters, ids);
-      }
-    }
-    return;
-  }
   if (node.type === 'grid') {
-    ids.push(...node.items.map((item) => item.blockId));
+    for (const item of node.items ?? []) {
+      collectVisibleLayoutBlockReferences(item.child, filters, ids);
+    }
   }
 }
 

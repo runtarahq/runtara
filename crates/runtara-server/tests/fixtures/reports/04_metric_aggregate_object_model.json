@@ -3,9 +3,19 @@
   "layout": [
     {
       "id": "n_metrics",
-      "type": "metric_row",
+      "type": "grid",
       "title": "Key metrics",
-      "blocks": ["total_revenue", "order_count"]
+      "columns": 2,
+      "items": [
+        {
+          "id": "n_metrics_i0",
+          "child": { "id": "n_metrics_b0", "type": "block", "blockId": "total_revenue" }
+        },
+        {
+          "id": "n_metrics_i1",
+          "child": { "id": "n_metrics_b1", "type": "block", "blockId": "order_count" }
+        }
+      ]
     }
   ],
   "filters": [

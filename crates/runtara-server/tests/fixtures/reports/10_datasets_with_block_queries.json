@@ -3,9 +3,19 @@
   "layout": [
     {
       "id": "n_metrics",
-      "type": "metric_row",
+      "type": "grid",
       "title": "Top-level KPIs",
-      "blocks": ["kpi_total_revenue", "kpi_order_count"]
+      "columns": 2,
+      "items": [
+        {
+          "id": "n_metrics_i0",
+          "child": { "id": "n_metrics_b0", "type": "block", "blockId": "kpi_total_revenue" }
+        },
+        {
+          "id": "n_metrics_i1",
+          "child": { "id": "n_metrics_b1", "type": "block", "blockId": "kpi_order_count" }
+        }
+      ]
     },
     { "id": "n_revenue", "type": "block", "blockId": "revenue_chart" },
     { "id": "n_top_products", "type": "block", "blockId": "top_products_table" }

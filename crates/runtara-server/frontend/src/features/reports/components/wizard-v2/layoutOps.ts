@@ -3,198 +3,64 @@
 // an intermediate WizardState model — every editing operation is a direct
 // transformation on ReportDefinition.
 //
-// The functions are immutable (shallow clones along the path of change); the
-// caller passes the new value to React state.
+// Phase 9 collapse: the legacy `section` / `columns` / `metric_row` layout
+// node types are gone. Two variants only:
+//   - block: `{ type: "block", id, blockId, showWhen? }`
+//   - grid:  `{ type: "grid", id, title?, description?, columns?,
+//                columnWidths?, items: GridItem[], showWhen? }`
+// where `GridItem = { id, colSpan?, rowSpan?, child: ReportLayoutNode }`
+// (recursive — grids nest via `child`).
 //
-// Layout node types this module recognizes (every type from the wire format):
-//   - block:      {type: "block", blockId}
-//   - metric_row: {type: "metric_row", blocks: string[]}
-//   - section:    {type: "section", children: ReportLayoutNode[]}
-//   - columns:    {type: "columns", columns: [{children: ReportLayoutNode[]}]}
-//   - grid:       {type: "grid", items: [{blockId, ...}]}
+// Functions are immutable (shallow clones along the path of change); the
+// caller passes the new value to React state.
 
 import {
   ReportBlockDefinition,
   ReportDefinition,
+  ReportGridLayoutItem,
+  ReportGridLayoutNode,
   ReportLayoutNode,
 } from '../../types';
 
-type GridNode = Extract<ReportLayoutNode, { type: 'grid' }>;
-type MetricRowNode = Extract<ReportLayoutNode, { type: 'metric_row' }>;
+// ============================================================================
+// Walkers
+// ============================================================================
 
-/** Returns the ordered list of block ids that appear under any block-bearing
- * node anywhere in the layout tree. */
+/** Returns the ordered list of block ids that appear anywhere in the
+ *  layout tree. Recurses into every grid item's child. */
 export function collectLayoutBlockIds(
   layout: ReportLayoutNode[] | undefined
 ): string[] {
   const ids: string[] = [];
   walkLayout(layout, (node) => {
     if (node.type === 'block') ids.push(node.blockId);
-    else if (node.type === 'metric_row') ids.push(...(node.blocks ?? []));
-    else if (node.type === 'grid') {
-      for (const item of node.items ?? []) ids.push(item.blockId);
-    }
   });
   return ids;
 }
 
-/** Calls `visit` on every node in the layout tree, depth-first. */
+/** Visits every layout node depth-first, including each grid item's child. */
 export function walkLayout(
   layout: ReportLayoutNode[] | undefined,
   visit: (node: ReportLayoutNode) => void
 ): void {
   for (const node of layout ?? []) {
     visit(node);
-    if (node.type === 'section') walkLayout(node.children, visit);
-    if (node.type === 'columns') {
-      for (const column of node.columns ?? []) {
-        walkLayout(column.children, visit);
+    if (node.type === 'grid') {
+      for (const item of node.items ?? []) {
+        walkLayout([item.child], visit);
       }
     }
   }
 }
 
-/** Removes any references to `blockId` from the layout tree (block nodes,
- * metric_row entries, grid items). Preserves all surrounding structure. */
-export function removeBlockFromLayout(
-  layout: ReportLayoutNode[] | undefined,
-  blockId: string
-): ReportLayoutNode[] {
-  return (layout ?? [])
-    .map((node) => stripBlockFromNode(node, blockId))
-    .filter((node): node is ReportLayoutNode => node !== null);
-}
-
-function stripBlockFromNode(
-  node: ReportLayoutNode,
-  blockId: string
-): ReportLayoutNode | null {
-  if (node.type === 'block') {
-    return node.blockId === blockId ? null : node;
-  }
-  if (node.type === 'metric_row') {
-    return {
-      ...node,
-      blocks: (node.blocks ?? []).filter((id) => id !== blockId),
-    };
-  }
-  if (node.type === 'grid') {
-    return {
-      ...node,
-      items: (node.items ?? []).filter((item) => item.blockId !== blockId),
-    };
-  }
-  if (node.type === 'section') {
-    return {
-      ...node,
-      children: (node.children ?? [])
-        .map((child) => stripBlockFromNode(child, blockId))
-        .filter((child): child is ReportLayoutNode => child !== null),
-    };
-  }
-  if (node.type === 'columns') {
-    return {
-      ...node,
-      columns: (node.columns ?? []).map((column) => ({
-        ...column,
-        children: (column.children ?? [])
-          .map((child) => stripBlockFromNode(child, blockId))
-          .filter((child): child is ReportLayoutNode => child !== null),
-      })),
-    };
-  }
-  return node;
-}
-
-/** Appends a top-level `block` layout node so a freshly-added block has a
- * place to render. Unknown id collisions are caller's responsibility. */
-export function appendBlockToLayout(
-  layout: ReportLayoutNode[] | undefined,
-  blockId: string
-): ReportLayoutNode[] {
-  const node: ReportLayoutNode = {
-    id: `n_${blockId}`,
-    type: 'block',
-    blockId,
-  };
-  return [...(layout ?? []), node];
-}
-
-/** Maps block-references in the layout tree to point at `nextOrder` in
- * occurrence order, preserving every non-block node and the surrounding
- * structure. Handles block-bearing nodes (block / metric_row entries /
- * grid items). When the set differs (some ids missing or extra), falls
- * back to drop-surplus-then-append-missing.  */
-export function reorderLayoutBlocks(
-  layout: ReportLayoutNode[] | undefined,
-  nextOrder: string[]
-): ReportLayoutNode[] {
-  const current = collectLayoutBlockIds(layout);
-  const sameSet =
-    current.length === nextOrder.length &&
-    current.every((id) => nextOrder.includes(id));
-  if (!sameSet) {
-    let next = layout ?? [];
-    for (const id of current) {
-      if (!nextOrder.includes(id)) next = removeBlockFromLayout(next, id);
-    }
-    for (const id of nextOrder) {
-      if (!current.includes(id)) next = appendBlockToLayout(next, id);
-    }
-    return remapBlockNodes(next, nextOrder);
-  }
-  return remapBlockNodes(layout ?? [], nextOrder);
-}
-
-function remapBlockNodes(
-  layout: ReportLayoutNode[],
-  nextOrder: string[]
-): ReportLayoutNode[] {
-  const queue = [...nextOrder];
-  return layout.map((node) => remapNode(node, queue));
-}
-
-function remapNode(node: ReportLayoutNode, queue: string[]): ReportLayoutNode {
-  if (node.type === 'block') {
-    const nextId = queue.shift();
-    if (!nextId) return node;
-    return { ...node, blockId: nextId, id: node.id || `n_${nextId}` };
-  }
-  if (node.type === 'metric_row') {
-    const blocks = (node.blocks ?? []).map(() => queue.shift() ?? '');
-    return { ...node, blocks } as MetricRowNode;
-  }
-  if (node.type === 'grid') {
-    const items = (node.items ?? []).map((item) => {
-      const nextId = queue.shift();
-      return nextId ? { ...item, blockId: nextId } : item;
-    });
-    return { ...node, items } as GridNode;
-  }
-  if (node.type === 'section') {
-    return {
-      ...node,
-      children: (node.children ?? []).map((child) => remapNode(child, queue)),
-    };
-  }
-  if (node.type === 'columns') {
-    return {
-      ...node,
-      columns: (node.columns ?? []).map((column) => ({
-        ...column,
-        children: (column.children ?? []).map((child) =>
-          remapNode(child, queue)
-        ),
-      })),
-    };
-  }
-  return node;
-}
+// ============================================================================
+// Block-side operations
+// ============================================================================
 
 /** Returns the visible-to-editor ordered list of blocks: each block from
- * `definition.blocks` is listed in the order they appear in the layout tree.
- * Blocks present in `blocks` but missing from `layout` are appended at the
- * end (the wizard surfaces them as "unplaced"). */
+ *  `definition.blocks` is listed in the order they appear in the layout tree.
+ *  Blocks present in `blocks` but missing from `layout` are appended at the
+ *  end (the wizard surfaces them as "unplaced"). */
 export function orderedBlocksFromDefinition(
   definition: ReportDefinition
 ): ReportBlockDefinition[] {
@@ -230,19 +96,26 @@ export function updateBlock(
 }
 
 /** Appends `block` to `definition.blocks` and adds a top-level layout
- * node pointing at it. Returns the updated definition. */
+ *  node pointing at it. Returns the updated definition. */
 export function addBlock(
   definition: ReportDefinition,
   block: ReportBlockDefinition
 ): ReportDefinition {
+  const layoutNode: ReportLayoutNode = {
+    id: `n_${block.id}`,
+    type: 'block',
+    blockId: block.id,
+  };
   return {
     ...definition,
     blocks: [...definition.blocks, block],
-    layout: appendBlockToLayout(definition.layout, block.id),
+    layout: [...(definition.layout ?? []), layoutNode],
   };
 }
 
-/** Removes the block with `blockId` from both `blocks` and `layout`. */
+/** Removes the block with `blockId` from both `blocks` and `layout`. The
+ *  layout entry can be either a top-level `block` node or a `block` child
+ *  of any grid item — both are stripped. */
 export function removeBlock(
   definition: ReportDefinition,
   blockId: string
@@ -250,28 +123,308 @@ export function removeBlock(
   return {
     ...definition,
     blocks: definition.blocks.filter((block) => block.id !== blockId),
-    layout: removeBlockFromLayout(definition.layout, blockId),
+    layout: stripBlockReferences(definition.layout, blockId),
   };
 }
 
-/** Moves the block with `blockId` to a new index in the editor's ordered
- * block list. The layout tree is updated to reflect the new order. */
+/** Moves the block with `blockId` to a new index in the editor's flat
+ *  ordered block list. Works only when the block lives at the top level
+ *  of the layout — nested blocks need `moveLayoutNode` with an explicit
+ *  target. */
 export function moveBlock(
   definition: ReportDefinition,
   blockId: string,
   toIndex: number
 ): ReportDefinition {
-  const order = orderedBlocksFromDefinition(definition).map((b) => b.id);
-  const fromIndex = order.indexOf(blockId);
-  if (fromIndex < 0) return definition;
-  const clamped = Math.max(0, Math.min(toIndex, order.length - 1));
-  if (clamped === fromIndex) return definition;
-  const [picked] = order.splice(fromIndex, 1);
-  order.splice(clamped, 0, picked);
+  const layout = definition.layout ?? [];
+  type BlockEntry = { node: ReportLayoutNode; layoutIndex: number };
+  const topLevelBlocks: BlockEntry[] = [];
+  layout.forEach((node, i) => {
+    if (node.type === 'block' && node.blockId === blockId) {
+      topLevelBlocks.push({ node, layoutIndex: i });
+    } else if (node.type === 'block') {
+      topLevelBlocks.push({ node, layoutIndex: i });
+    }
+  });
+  const subjectIndex = topLevelBlocks.findIndex(
+    (entry) =>
+      entry.node.type === 'block' && entry.node.blockId === blockId
+  );
+  if (subjectIndex < 0) return definition;
+  const clamped = Math.max(0, Math.min(toIndex, topLevelBlocks.length - 1));
+  if (clamped === subjectIndex) return definition;
+  const [picked] = topLevelBlocks.splice(subjectIndex, 1);
+  topLevelBlocks.splice(clamped, 0, picked);
+  const nextLayout = [...layout];
+  for (let i = 0; i < topLevelBlocks.length; i++) {
+    nextLayout[topLevelBlocks[i].layoutIndex] = topLevelBlocks[i].node;
+  }
+  // Note: layoutIndex preserves the *slot* of each top-level block; we
+  // just rewrite which block sits in each slot, leaving non-block
+  // siblings (grids) untouched.
+  void layout;
+  // Reassign in occurrence order against the slot positions.
+  const slotIndices = layout
+    .map((node, i) => (node.type === 'block' ? i : -1))
+    .filter((v) => v >= 0);
+  for (let i = 0; i < slotIndices.length; i++) {
+    nextLayout[slotIndices[i]] = topLevelBlocks[i].node;
+  }
+  return { ...definition, layout: nextLayout };
+}
+
+function stripBlockReferences(
+  layout: ReportLayoutNode[] | undefined,
+  blockId: string
+): ReportLayoutNode[] {
+  return (layout ?? [])
+    .map((node) => stripBlockFromNode(node, blockId))
+    .filter((node): node is ReportLayoutNode => node !== null);
+}
+
+function stripBlockFromNode(
+  node: ReportLayoutNode,
+  blockId: string
+): ReportLayoutNode | null {
+  if (node.type === 'block') {
+    return node.blockId === blockId ? null : node;
+  }
+  if (node.type === 'grid') {
+    const items = (node.items ?? [])
+      .map((item) => stripBlockFromItem(item, blockId))
+      .filter((item): item is ReportGridLayoutItem => item !== null);
+    return { ...node, items };
+  }
+  return node;
+}
+
+function stripBlockFromItem(
+  item: ReportGridLayoutItem,
+  blockId: string
+): ReportGridLayoutItem | null {
+  if (item.child.type === 'block') {
+    return item.child.blockId === blockId ? null : item;
+  }
+  const stripped = stripBlockFromNode(item.child, blockId);
+  if (!stripped) return null;
+  return { ...item, child: stripped };
+}
+
+// ============================================================================
+// Grid (layout-node) operations
+// ============================================================================
+
+/** Returns a path from the root layout array to the node with `nodeId`.
+ *  The path's `parentGridId` is `null` when the node lives at the root.
+ *  Returns `null` if no node with that id exists. */
+export interface LayoutPath {
+  parentGridId: string | null;
+  itemIndex: number | null; // index in parentGrid.items, or null at root
+  rootIndex: number | null; // index in definition.layout, or null when nested
+}
+
+export function pathToLayoutNode(
+  definition: ReportDefinition,
+  nodeId: string
+): LayoutPath | null {
+  const layout = definition.layout ?? [];
+  for (let i = 0; i < layout.length; i++) {
+    const node = layout[i];
+    if (layoutNodeId(node) === nodeId) {
+      return { parentGridId: null, itemIndex: null, rootIndex: i };
+    }
+    if (node.type === 'grid') {
+      const found = findInGrid(node, nodeId);
+      if (found) return found;
+    }
+  }
+  return null;
+}
+
+function findInGrid(grid: ReportGridLayoutNode, nodeId: string): LayoutPath | null {
+  for (let i = 0; i < (grid.items ?? []).length; i++) {
+    const item = grid.items[i];
+    if (layoutNodeId(item.child) === nodeId) {
+      return { parentGridId: grid.id, itemIndex: i, rootIndex: null };
+    }
+    if (item.child.type === 'grid') {
+      const nested = findInGrid(item.child, nodeId);
+      if (nested) return nested;
+    }
+  }
+  return null;
+}
+
+function layoutNodeId(node: ReportLayoutNode): string {
+  return node.id;
+}
+
+/** Inserts `node` at the given target slot. Target shapes:
+ *   - `{ parentGridId: null, index }` → insert at root layout array
+ *   - `{ parentGridId: "g1", index }` → wrap in a grid item, insert into g1.items
+ */
+export interface LayoutTarget {
+  parentGridId: string | null;
+  index?: number;
+}
+
+export function addLayoutNode(
+  definition: ReportDefinition,
+  node: ReportLayoutNode,
+  target: LayoutTarget
+): ReportDefinition {
+  if (target.parentGridId === null) {
+    const layout = [...(definition.layout ?? [])];
+    const index = target.index ?? layout.length;
+    layout.splice(Math.max(0, Math.min(index, layout.length)), 0, node);
+    return { ...definition, layout };
+  }
+  const item: ReportGridLayoutItem = {
+    id: `item_${layoutNodeId(node)}_${Math.random().toString(36).slice(2, 6)}`,
+    child: node,
+  };
+  return updateGrid(definition, target.parentGridId, (grid) => {
+    const items = [...(grid.items ?? [])];
+    const index = target.index ?? items.length;
+    items.splice(Math.max(0, Math.min(index, items.length)), 0, item);
+    return { ...grid, items };
+  });
+}
+
+/** Removes the layout node with `nodeId` from wherever it appears.
+ *  Returns the updated definition; no-op when the id is missing. */
+export function removeLayoutNode(
+  definition: ReportDefinition,
+  nodeId: string
+): ReportDefinition {
   return {
     ...definition,
-    layout: reorderLayoutBlocks(definition.layout, order),
+    layout: removeNodeFromTree(definition.layout, nodeId),
   };
+}
+
+function removeNodeFromTree(
+  layout: ReportLayoutNode[] | undefined,
+  nodeId: string
+): ReportLayoutNode[] {
+  return (layout ?? [])
+    .filter((node) => layoutNodeId(node) !== nodeId)
+    .map((node): ReportLayoutNode => {
+      if (node.type !== 'grid') return node;
+      const items: ReportGridLayoutItem[] = (node.items ?? [])
+        .filter((item) => layoutNodeId(item.child) !== nodeId)
+        .map((item): ReportGridLayoutItem => {
+          if (item.child.type === 'grid') {
+            return {
+              ...item,
+              child: removeNodeFromGrid(item.child, nodeId),
+            };
+          }
+          return item;
+        });
+      return { ...node, type: 'grid', items };
+    });
+}
+
+function removeNodeFromGrid(
+  grid: ReportGridLayoutNode & { type: 'grid' },
+  nodeId: string
+): ReportLayoutNode {
+  const items: ReportGridLayoutItem[] = (grid.items ?? [])
+    .filter((item) => layoutNodeId(item.child) !== nodeId)
+    .map((item): ReportGridLayoutItem => {
+      if (item.child.type === 'grid') {
+        return {
+          ...item,
+          child: removeNodeFromGrid(item.child, nodeId),
+        };
+      }
+      return item;
+    });
+  return { ...grid, type: 'grid', items };
+}
+
+/** Moves the node with `nodeId` to `target`. Convenience wrapper around
+ *  `removeLayoutNode` + `addLayoutNode`. */
+export function moveLayoutNode(
+  definition: ReportDefinition,
+  nodeId: string,
+  target: LayoutTarget
+): ReportDefinition {
+  const path = pathToLayoutNode(definition, nodeId);
+  if (!path) return definition;
+  // Find the actual node value before removing.
+  const captured: { node: ReportLayoutNode | null } = { node: null };
+  walkLayout(definition.layout, (visited) => {
+    if (layoutNodeId(visited) === nodeId) captured.node = visited;
+  });
+  if (!captured.node) return definition;
+  const removed = removeLayoutNode(definition, nodeId);
+  return addLayoutNode(removed, captured.node, target);
+}
+
+/** Patches the grid with `gridId` via `updater(prev)`. Walks every nesting
+ *  level. No-op when the id is missing. */
+export function updateGrid(
+  definition: ReportDefinition,
+  gridId: string,
+  updater: (grid: ReportGridLayoutNode) => ReportGridLayoutNode
+): ReportDefinition {
+  return {
+    ...definition,
+    layout: updateGridInTree(definition.layout, gridId, updater),
+  };
+}
+
+function updateGridInTree(
+  layout: ReportLayoutNode[] | undefined,
+  gridId: string,
+  updater: (grid: ReportGridLayoutNode) => ReportGridLayoutNode
+): ReportLayoutNode[] {
+  return (layout ?? []).map((node): ReportLayoutNode => {
+    if (node.type !== 'grid') return node;
+    if (node.id === gridId) {
+      return { ...updater(node), type: 'grid' };
+    }
+    const items: ReportGridLayoutItem[] = (node.items ?? []).map((item) => {
+      if (item.child.type !== 'grid') return item;
+      const replaced = updateGridInTree([item.child], gridId, updater)[0];
+      return { ...item, child: replaced };
+    });
+    return { ...node, type: 'grid', items };
+  });
+}
+
+/** Patches a single grid item (col_span / row_span) inside any grid.
+ *  Useful when a block's grid-cell sizing changes. */
+export function updateGridItem(
+  definition: ReportDefinition,
+  itemId: string,
+  updater: (item: ReportGridLayoutItem) => ReportGridLayoutItem
+): ReportDefinition {
+  return {
+    ...definition,
+    layout: updateGridItemInTree(definition.layout, itemId, updater),
+  };
+}
+
+function updateGridItemInTree(
+  layout: ReportLayoutNode[] | undefined,
+  itemId: string,
+  updater: (item: ReportGridLayoutItem) => ReportGridLayoutItem
+): ReportLayoutNode[] {
+  return (layout ?? []).map((node): ReportLayoutNode => {
+    if (node.type !== 'grid') return node;
+    const items: ReportGridLayoutItem[] = (node.items ?? []).map((item) => {
+      if (item.id === itemId) return updater(item);
+      if (item.child.type === 'grid') {
+        const replaced = updateGridItemInTree([item.child], itemId, updater)[0];
+        return { ...item, child: replaced };
+      }
+      return item;
+    });
+    return { ...node, type: 'grid', items };
+  });
 }
 
 /** Generates a stable-ish block id from a human title or counter. */
@@ -282,4 +435,29 @@ export function makeBlockId(seed: string): string {
     .replace(/^_+|_+$/g, '');
   const suffix = Math.random().toString(36).slice(2, 6);
   return cleaned ? `${cleaned}_${suffix}` : `block_${suffix}`;
+}
+
+/** Generates a unique grid id. */
+export function makeGridId(): string {
+  return `grid_${Math.random().toString(36).slice(2, 7)}`;
+}
+
+/** Builds a fresh grid container with the given preset shape. Returned
+ *  type is the discriminated-union variant so it can be passed directly
+ *  to `addLayoutNode`. */
+export function newGrid(opts: {
+  columns?: number;
+  columnWidths?: number[];
+  title?: string;
+  description?: string;
+}): ReportLayoutNode {
+  return {
+    id: makeGridId(),
+    type: 'grid',
+    columns: opts.columns,
+    columnWidths: opts.columnWidths,
+    title: opts.title,
+    description: opts.description,
+    items: [],
+  };
 }

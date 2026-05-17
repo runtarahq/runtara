@@ -34,13 +34,9 @@ export type {
   ReportStatus,
   ReportBlockType,
   ReportSummary,
-  // Layout
+  // Layout — Phase 9 collapse: only Block + Grid (recursive) remain.
   ReportLayoutNode,
   ReportBlockLayoutNode,
-  ReportMetricRowLayoutNode,
-  ReportSectionLayoutNode,
-  ReportColumnsLayoutNode,
-  ReportLayoutColumn,
   ReportGridLayoutNode,
   ReportGridLayoutItem,
   // Views

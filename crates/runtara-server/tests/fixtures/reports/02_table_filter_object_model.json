@@ -3,10 +3,14 @@
   "layout": [
     {
       "id": "n_section",
-      "type": "section",
+      "type": "grid",
       "title": "Recent orders",
-      "children": [
-        { "id": "n_orders", "type": "block", "blockId": "recent_orders" }
+      "columns": 1,
+      "items": [
+        {
+          "id": "n_section_i0",
+          "child": { "id": "n_orders", "type": "block", "blockId": "recent_orders" }
+        }
       ]
     }
   ],

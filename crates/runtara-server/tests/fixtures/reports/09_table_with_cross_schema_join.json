@@ -2,7 +2,10 @@
   "definitionVersion": 1,
   "layout": [
     { "id": "n_grid", "type": "grid", "columns": 2, "items": [
-      { "id": "g_orders", "blockId": "orders_with_customers" }
+      {
+        "id": "g_orders",
+        "child": { "id": "n_grid_b0", "type": "block", "blockId": "orders_with_customers" }
+      }
     ]}
   ],
   "filters": [

@@ -164,15 +164,17 @@ pub struct ReportViewBreadcrumb {
     pub clear_filters: Vec<String>,
 }
 
+/// Layout primitive. Two variants only — `block` (leaf reference to
+/// `definition.blocks[i]`) and `grid` (recursive container). The legacy
+/// `section` / `columns` / `metric_row` types collapsed into `grid` in
+/// Phase 9; the repository's `parse_stored_definition` translates them
+/// transparently on read.
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ReportLayoutNode {
     Block(ReportBlockLayoutNode),
-    MetricRow(ReportMetricRowLayoutNode),
-    Section(ReportSectionLayoutNode),
-    Columns(ReportColumnsLayoutNode),
     Grid(ReportGridLayoutNode),
 }
 
@@ -188,68 +190,35 @@ pub struct ReportBlockLayoutNode {
     pub show_when: Option<Value>,
 }
 
-#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ReportMetricRowLayoutNode {
-    pub id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub title: Option<String>,
-    pub blocks: Vec<String>,
-    #[serde(default, rename = "showWhen", skip_serializing_if = "Option::is_none")]
-    pub show_when: Option<Value>,
-}
-
-#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ReportSectionLayoutNode {
-    pub id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub title: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    #[cfg_attr(feature = "utoipa", schema(no_recursion))]
-    pub children: Vec<ReportLayoutNode>,
-    #[serde(default, rename = "showWhen", skip_serializing_if = "Option::is_none")]
-    pub show_when: Option<Value>,
-}
-
-#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ReportColumnsLayoutNode {
-    pub id: String,
-    pub columns: Vec<ReportLayoutColumn>,
-    #[serde(default, rename = "showWhen", skip_serializing_if = "Option::is_none")]
-    pub show_when: Option<Value>,
-}
-
-#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ReportLayoutColumn {
-    pub id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub width: Option<f64>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    #[cfg_attr(feature = "utoipa", schema(no_recursion))]
-    pub children: Vec<ReportLayoutNode>,
-}
-
+/// Grid container with optional title/description and a list of items.
+/// Every layout container — single-column section, multi-column row,
+/// metric-block row, arbitrary 2D grid — is expressed as a `Grid` with
+/// different `columns` + `column_widths` + per-item `col_span` /
+/// `row_span`. Items can be blocks or nested grids.
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ReportGridLayoutNode {
     pub id: String,
+    /// Optional section-style heading rendered above the grid contents.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    /// Optional secondary text rendered beneath the title.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// Column count for the grid. Defaults to 1 (single-column = legacy
+    /// "section" shape).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub columns: Option<i64>,
+    /// Optional fractional column widths. Length must match `columns`
+    /// when set. Defaults to equal split.
+    #[serde(
+        default,
+        rename = "columnWidths",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub column_widths: Option<Vec<f64>>,
     pub items: Vec<ReportGridLayoutItem>,
     #[serde(default, rename = "showWhen", skip_serializing_if = "Option::is_none")]
     pub show_when: Option<Value>,
@@ -260,14 +229,13 @@ pub struct ReportGridLayoutNode {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ReportGridLayoutItem {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub id: Option<String>,
-    #[serde(rename = "blockId")]
-    pub block_id: String,
+    pub id: String,
     #[serde(default, rename = "colSpan", skip_serializing_if = "Option::is_none")]
     pub col_span: Option<i64>,
     #[serde(default, rename = "rowSpan", skip_serializing_if = "Option::is_none")]
     pub row_span: Option<i64>,
+    #[cfg_attr(feature = "utoipa", schema(no_recursion))]
+    pub child: Box<ReportLayoutNode>,
 }
 
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
