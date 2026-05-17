@@ -1,6 +1,19 @@
 # Reports Refactoring Plan
 
-**Status:** Phase 1 complete; Phase 2 complete (codegen + types.ts deletion + utils.ts template/row-condition WASM swap + lazy-load wizard route + schemars consolidation + canonical row-condition wire format). No deferred follow-ups remain.
+**Status (2026-05-17):**
+
+| Phase | State |
+|---|---|
+| 0 — Safety net | [x] Done. Dual-run harness body + CI gate intentionally out of scope. |
+| 1 — `runtara-report-dsl` crate | [x] Done. Legacy validator deletion explicitly deferred to Phase 5. |
+| 2 — Codegen + delete handwritten FE types | [x] Done. Bundle <250KB target missed (339KB actual); mitigated by lazy-loaded wizard route. |
+| 3 — Source provider trait | [ ] Not started. |
+| 4 — Single render pipeline | [ ] Not started. |
+| 5 — Strict-mode validator + Phase 1 legacy-deletion finishers | [ ] Not started. |
+| 6 — Edit-operation symmetry | [ ] Not started. |
+| 7 — Wizard rewrite | [ ] Not started. |
+| 8 — Cutover + cleanup | [ ] Not started. |
+
 **Owner:** _unassigned_
 **Last updated:** 2026-05-17
 
@@ -101,7 +114,12 @@ cd crates/runtara-server/frontend && npx playwright test e2e/tests/mocked/report
 
 ## Phase 1 — `runtara-report-dsl` crate
 
-**Status:** [x] Complete. Crate exists with types + minijinja + ConditionExpression evaluator + WASM target. Server uses the crate via re-exports. Old server validators kept in place (deletion deferred to Phase 5 by design — safer migration).
+**Status:** [x] Complete. Crate exists with types + minijinja + ConditionExpression evaluator + WASM target. Server uses the crate via re-exports.
+
+**Carried into Phase 5** (by design — old and new coexist for one phase before deletion):
+- `validate_safe_display_template` family in `services/reports.rs`
+- Row-condition validator in `services/reports.rs` (the canonical `ConditionExpression` validator landed alongside it, but the legacy code path remains until Phase 5)
+- Parallel template parser in `mcp/tools/reports.rs`
 
 ### Work
 
@@ -136,7 +154,7 @@ cd crates/runtara-server/frontend && npx playwright test e2e/tests/mocked/report
 
 ## Phase 2 — Codegen + delete handwritten FE types
 
-**Status:** [x] Codegen + types.ts deletion complete. Schemas registered, WASM slimmed and vendored in FE, codegen pipeline (online + offline) works. `types.ts` is now a 332-line re-export shim. `utils.ts` template/row-condition swap remains deferred (semantics work).
+**Status:** [x] Complete. All four originally-planned outcomes landed: codegen pipeline (online + offline) emits 100+ report types into `RuntaraRuntimeApi.ts`; handwritten `types.ts` shrank 805 → 332 lines (re-export shim with `Omit + &` tightenings); single template engine via `runtara-report-dsl::template` + WASM `JsFormatter` callback; single row-condition evaluator via WASM `evaluateRowCondition` (canonical `ConditionExpression` on the wire). Bundle <250KB target missed (339KB actual) but mitigated by lazy-loaded wizard route. Schemars 0.8 → 1 consolidation also landed here (was originally a fine-tuning item — see acceptance + progress log).
 
 ### Work
 
@@ -151,7 +169,7 @@ cd crates/runtara-server/frontend && npx playwright test e2e/tests/mocked/report
 - [x] In `utils.ts`: replace `compileDisplayTemplate` + `formatCellValue` with WASM `renderTemplate` + `formatValue`. Single Rust template engine, JS-side `Intl` callback owns locale resolution. Track A landed.
 - [x] In `utils.ts`: replace `matchesReportRowCondition` body with WASM `evaluateRowCondition`. Track B landed with a legacy→canonical bridge at the WASM boundary; editor + wire-format migration to canonical is a follow-up (mechanical UI rewrite, no behavior change).
 
-### Phase 2 sub-plan: types.ts deletion
+### Phase 2 sub-plan: types.ts deletion [implemented]
 
 **Problem.** Two type-system blockers stopped the first attempt:
 
@@ -221,7 +239,7 @@ cd crates/runtara-server/frontend && npx playwright test e2e/tests/mocked/report
 - 509 vitest tests pass.
 - No FE-side behavior change observable in the browser.
 
-### Phase 2 sub-plan: utils.ts swap (template + row-condition)
+### Phase 2 sub-plan: utils.ts swap (template + row-condition) [implemented]
 
 **Goal.** Collapse two FE-only evaluators into the WASM crate without
 copy-pasting any logic across the FE/WASM boundary. The FE imports one
@@ -598,7 +616,6 @@ Append entries as phases complete or material decisions change.
 - 2026-05-17: `types.ts` deletion landed. Handwritten file shrank from 805 → 332 lines, now a re-export shim over generated `RuntaraRuntimeApi.ts` with four targeted `Omit + &` tightenings (`ReportBlockDefinition.source`, `ReportDatasetDefinition.{dimensions,measures}`, `ReportDefinition.{blocks,filters,datasets}`, `ReportDto.definition`). Tried `ReportInteractionDefinition.actions` tightening — reverted because wizard layers re-spread the value and the structural-distinctness penalty outweighed the `?? []` cost at the few call sites. ~22 FE files widened to accept `T | null | undefined` where generated optionals surfaced (CardBlock, FieldEditor, ChartBlock, ReportBlockHost, ReportDefinitionBuilder, BlocksStep, tableActionEditors, wizardTypes, ReportBuilderWizard, viewer/explorer/editor/page hosts, datasetBlocks, reportWritebackCache, TableBlock truncation + workflow-action guards). All 509 FE vitest tests pass; `tsc -b` clean. Net effect: backend remains the single source of truth for report DTOs; FE keeps its narrow tightenings for fields that are non-null at runtime but Option-on-the-wire.
 - 2026-05-17: `utils.ts` template + row-condition WASM swap landed. New `runtara-report-dsl::format` module: `FormatSpec` enum (closed-set grammar: currency, currency_compact, number, number_compact, decimal, percent, date, datetime, pill, bar_indicator, string, raw), `Formatter` trait, `SimpleAsciiFormatter` for server defaults. `template.rs` refactored to accept `Arc<dyn Formatter>` and delegate every filter to the trait. WASM `wasm_bindings.rs` ships a `JsFormatter` that calls back into JS via a `__runtaraReportDslFormatValue` global; the FE registers an `Intl`-backed implementation in `frontend/src/wasm/runtara-report-dsl/index.ts` (full CLDR coverage for free, no locale data in WASM). `useReportDsl` hook + `<Suspense>` boundary in `ReportRenderer` block the tree until the bundle loads; preload kicks off at app shell mount (`main.tsx`). FE `utils.ts` shrinks 747 → 466 LOC: `compileDisplayTemplate`, `parseDisplayTemplateToken`, `formatCellValue`, `parseCellFormat`, `currencyFormatCode`, and the row-condition evaluator's comparators all gone. `matchesReportRowCondition` becomes a thin wrapper that bridges legacy `{op, arguments: [field, value]}` → canonical `ConditionExpression` and calls WASM `evaluateRowCondition`. Bundle: 320 → 339KB gzipped (+12KB for the new bindings + `format` module — well below the +50KB ceiling we sized for locale tables). 506 vitest tests pass; 26 Rust crate tests pass; `tsc -b` clean. Browser-verified end-to-end: en-US renders `$1,234.50`, de-DE renders `1.234,50 €`, canonical row condition evaluates correctly. Follow-ups: migrate row-condition editors + wire format + 1 fixture from legacy shape to canonical (mechanical UI rewrite, no behavior change).
 - 2026-05-17: Lazy-loaded the wizard bundle. `ReportPage.tsx` now `lazy(() => import(...))`s `ReportBuilderWizard` and wraps it in `<Suspense>`, so view-only sessions don't pay the wizard's parse cost. Vite build now emits `ReportBuilderWizard-*.js` as a 163KB chunk; `ReportPage` itself drops to 35.69KB. Wizard chunk is parsed only when entering `?edit=1`. Browser-verified: `ReportPage` module exports just `ReportPage` (no wizard reference), dev server starts clean with no console errors.
-- 2026-05-17: Two Phase 2 follow-ups remain deferred — both require dedicated work beyond what fits in the current commit cadence:
-    - **Canonical row-condition migration** (replace legacy `{op, arguments: [field, value]}` wire shape with canonical `ConditionExpression`): touches 6 Rust DTO fields (`visible_when`/`hidden_when`/`disabled_when` × 2 button configs), the server-side `validate_report_workflow_action_row_condition` validator (~140 LOC), 2 FE editors (`ReportDefinitionBuilder::RowConditionEditor`, `tableActionEditors`), 1 fixture, 3 test files, plus drops the legacy bridge from `utils.ts` (~80 LOC). The bridge is well-localized and not duplicated, so the value of the migration is canonical wire format consistency, not bug-fix or performance. Estimate ~500-800 LOC across Rust + TS.
-    - **Schemars 0.8/1 consolidation** (drop schemars 0.8 from the WASM tree to hit the 250KB bundle target): requires cfg-gating the `runtara_dsl::step_registration` mod, the `SchemaGeneratorFn`/`StepTypeMeta::schema_fn`/`get_all_step_types`/`find_step_type` block in `agent_meta.rs`, the `schema_for!(ConditionExpression)` call, the 3 `JsonSchema` derives on `CapabilityField`/`FieldTypeInfo`/`OutputField`, AND updating `runtara-agent-macro` to emit the `schema_fn` field conditionally. Current WASM bundle is 339KB; the target was 250KB. Acceptable as-is for now; revisit when bundle size becomes user-visible.
+- 2026-05-17: Two Phase 2 follow-ups (canonical row-condition migration + schemars consolidation) initially scoped as deferred — both landed in the next entry below.
 - 2026-05-17: Schemars 0.8 → 1 consolidation + canonical row-condition wire format landed together (the second blocked on the first). **Schemars work:** `runtara_dsl::step_registration` mod, `agent_meta::{SchemaGeneratorFn, StepTypeMeta::schema_fn, get_all_step_types, find_step_type}`, the 3 `JsonSchema` derives on `CapabilityField`/`FieldTypeInfo`/`OutputField`, the `schema_for!(ConditionExpression)` call, the `spec` module, and the top-level `get_step_types()` are now `#[cfg(feature = "json-schema")]`. `runtara-dsl` bumped to schemars 1; ~25 mechanical `schemars::schema::RootSchema` → `schemars::Schema` renames. `runtara-report-dsl/json-schema` now propagates to `runtara-dsl/json-schema` so types like `ConditionExpression` are derive-available in both crates. `runtara-report-dsl` uses `default-features = false` for runtara-dsl, keeping the WASM tree free of `spec`/`step_registration` weight. Bundle: still 339KB gzipped — schemars 0.8 was already excluded via `cfg_attr` on `schema_types.rs` derives, so the gating is architectural ("no future regression") rather than size-cutting. The 250KB target remains aspirational; further cuts would require minijinja sub-feature trimming or splitting the canonical-condition evaluator from the schema export pipeline. **Canonical wire format:** the 6 `Option<Condition>` fields on `ReportWorkflowActionConfig` and `ReportTableInteractionButtonConfig` (`visible_when`/`hidden_when`/`disabled_when` × 2) are now `Option<ConditionExpression>`. The server validator at `crates/runtara-server/src/api/services/reports.rs::validate_report_workflow_action_row_condition` was rewritten to match on `ConditionExpression`/`MappingValue::{Reference,Immediate}`/`ConditionArgument` instead of the legacy `{op, arguments: [field, value]}` shape (~120 LOC). `seal_json_schema_objects` was taught to skip three new cases that break under schemars 1's internally-tagged enum emission: variants in `oneOf`/`anyOf` compositions, objects carrying a `$ref` (the `$ref + discriminator-property` merge shape), and `$defs` definitions referenced from those discriminator variants (so `additionalProperties: false` doesn't conflict with the merged shape). Fixture `06_workflow_actions_with_row_conditions.json` rewritten; FE `ReportRowCondition` aliased to generated `ConditionExpression`; FE editor (`ReportDefinitionBuilder::RowConditionEditor`, `tableActionEditors.tsx::RowConditionRow`) wrapped at the boundary with `canonicalToLegacyCondition`/`legacyToCanonicalCondition` helpers in `utils.ts` (so the editor UI keeps its flat rules-row form while the wire format goes canonical). FE `matchesReportRowCondition` simplified — no more bridge inside utils.ts, just direct WASM call. All 506 vitest tests + ~74 server report tests + 26 report-dsl crate tests + 3 corpus tests pass; `tsc -b` clean; workspace builds. Browser-verified: WASM evaluates canonical row condition, `legacyToCanonicalCondition`/`canonicalToLegacyCondition` round-trip cleanly.
+- 2026-05-17: Phase 2 close-out + plan reconciled. Status banner rewritten as a per-phase table covering all of Phase 0–8. Phase 1 status clarified — three legacy validator deletions (`validate_safe_display_template`, `services/reports.rs` row-condition validator, `mcp/tools/reports.rs` template parser) are explicit Phase 5 work, not unscheduled debt. Phase 2 status banner says complete (was "Codegen + types.ts deletion complete"). Both Phase 2 sub-plans (types.ts deletion, utils.ts swap) tagged `[implemented]` so readers don't mistake them for pending work. Verbose 2026-05-17 entry that listed schemars consolidation + canonical row-condition as deferred follow-ups collapsed to a one-line pointer to the entry where they landed.
