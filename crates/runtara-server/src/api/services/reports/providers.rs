@@ -106,6 +106,15 @@ pub trait ReportSourceProvider: Send + Sync {
     /// returns `true` for fields the storage layer will resolve.
     fn field_is_known(&self, block: &ReportBlockDefinition, field: &str) -> bool;
 
+    /// The full set of known top-level fields for this block's entity, when
+    /// it can be enumerated statically. `None` for object-model (schema is
+    /// dynamic and per-tenant — use [`Self::field_is_known`] instead).
+    /// Renderers that need the set for markdown-placeholder validation
+    /// fall back to `field_is_known` when this returns `None`.
+    fn field_set(&self, _block: &ReportBlockDefinition) -> Option<HashSet<&'static str>> {
+        None
+    }
+
     /// Whether the provider pushes aggregates down to storage. Object-model
     /// returns `true` (SQL); system/workflow_runtime return `false`.
     fn supports_aggregate_pushdown(&self) -> bool {
@@ -122,33 +131,62 @@ pub trait ReportSourceProvider: Send + Sync {
 }
 
 /// Dispatch table from [`ReportSourceKind`] to its provider.
+///
+/// Holds both the trait-object view (`get(kind)` — for renderer dispatch)
+/// and the concrete provider handles (`workflow_runtime()` etc. — for
+/// callers that need provider-specific methods like
+/// [`WorkflowRuntimeProvider::actions_for_block_context`]).
 pub struct ProviderRegistry {
-    object_model: Arc<dyn ReportSourceProvider>,
-    workflow_runtime: Arc<dyn ReportSourceProvider>,
-    system: Arc<dyn ReportSourceProvider>,
+    object_model: Arc<ObjectModelProvider>,
+    workflow_runtime: Arc<WorkflowRuntimeProvider>,
+    system: Arc<SystemProvider>,
+    object_model_dyn: Arc<dyn ReportSourceProvider>,
+    workflow_runtime_dyn: Arc<dyn ReportSourceProvider>,
+    system_dyn: Arc<dyn ReportSourceProvider>,
 }
 
 impl ProviderRegistry {
     pub fn new(
-        object_model: Arc<dyn ReportSourceProvider>,
-        workflow_runtime: Arc<dyn ReportSourceProvider>,
-        system: Arc<dyn ReportSourceProvider>,
+        object_model: Arc<ObjectModelProvider>,
+        workflow_runtime: Arc<WorkflowRuntimeProvider>,
+        system: Arc<SystemProvider>,
     ) -> Self {
-        debug_assert_eq!(object_model.kind(), ReportSourceKind::ObjectModel);
-        debug_assert_eq!(workflow_runtime.kind(), ReportSourceKind::WorkflowRuntime);
-        debug_assert_eq!(system.kind(), ReportSourceKind::System);
+        let object_model_dyn = object_model.clone() as Arc<dyn ReportSourceProvider>;
+        let workflow_runtime_dyn = workflow_runtime.clone() as Arc<dyn ReportSourceProvider>;
+        let system_dyn = system.clone() as Arc<dyn ReportSourceProvider>;
+        debug_assert_eq!(object_model_dyn.kind(), ReportSourceKind::ObjectModel);
+        debug_assert_eq!(
+            workflow_runtime_dyn.kind(),
+            ReportSourceKind::WorkflowRuntime
+        );
+        debug_assert_eq!(system_dyn.kind(), ReportSourceKind::System);
         Self {
             object_model,
             workflow_runtime,
             system,
+            object_model_dyn,
+            workflow_runtime_dyn,
+            system_dyn,
         }
     }
 
     pub fn get(&self, kind: ReportSourceKind) -> &Arc<dyn ReportSourceProvider> {
         match kind {
-            ReportSourceKind::ObjectModel => &self.object_model,
-            ReportSourceKind::WorkflowRuntime => &self.workflow_runtime,
-            ReportSourceKind::System => &self.system,
+            ReportSourceKind::ObjectModel => &self.object_model_dyn,
+            ReportSourceKind::WorkflowRuntime => &self.workflow_runtime_dyn,
+            ReportSourceKind::System => &self.system_dyn,
         }
+    }
+
+    pub fn object_model(&self) -> &Arc<ObjectModelProvider> {
+        &self.object_model
+    }
+
+    pub fn workflow_runtime(&self) -> &Arc<WorkflowRuntimeProvider> {
+        &self.workflow_runtime
+    }
+
+    pub fn system(&self) -> &Arc<SystemProvider> {
+        &self.system
     }
 }
