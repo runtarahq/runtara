@@ -63,12 +63,20 @@
               "successMessage": "Order approved",
               "reloadBlock": true,
               "visibleWhen": {
-                "op": "eq",
-                "arguments": ["status", "pending_review"]
+                "type": "operation",
+                "op": "EQ",
+                "arguments": [
+                  { "valueType": "reference", "value": "status" },
+                  { "valueType": "immediate", "value": "pending_review" }
+                ]
               },
               "disabledWhen": {
-                "op": "lt",
-                "arguments": ["total_amount", 0]
+                "type": "operation",
+                "op": "LT",
+                "arguments": [
+                  { "valueType": "reference", "value": "total_amount" },
+                  { "valueType": "immediate", "value": 0 }
+                ]
               },
               "context": {
                 "mode": "row"
@@ -83,8 +91,12 @@
               "workflowId": "wf_hold_order",
               "label": "Hold",
               "hiddenWhen": {
-                "op": "eq",
-                "arguments": ["status", "on_hold"]
+                "type": "operation",
+                "op": "EQ",
+                "arguments": [
+                  { "valueType": "reference", "value": "status" },
+                  { "valueType": "immediate", "value": "on_hold" }
+                ]
               },
               "context": {
                 "mode": "field",

@@ -18,43 +18,48 @@ describe('report row conditions', () => {
     tags: ['urgent'],
   };
 
+  // Helpers for building canonical `ConditionExpression` shapes in tests.
+  const ref = (path: string) =>
+    ({ type: 'value', valueType: 'reference', value: path }) as const;
+  const imm = (value: unknown) =>
+    ({ type: 'value', valueType: 'immediate', value }) as const;
+  const cond = (op: string, args: unknown[]) =>
+    ({ type: 'operation', op, arguments: args }) as const;
+
   it('matches scalar and nested row fields', () => {
     expect(
       matchesReportRowCondition(
-        { op: 'EQ', arguments: ['status', 'ready'] },
+        cond('EQ', [ref('status'), imm('ready')]) as never,
         row
       )
     ).toBe(true);
     expect(
       matchesReportRowCondition(
-        { op: 'EQ', arguments: ['owner.team', 'risk'] },
+        cond('EQ', [ref('owner.team'), imm('risk')]) as never,
         row
       )
     ).toBe(true);
     expect(
-      matchesReportRowCondition({ op: 'GT', arguments: ['priority', 1] }, row)
+      matchesReportRowCondition(
+        cond('GT', [ref('priority'), imm(1)]) as never,
+        row
+      )
     ).toBe(true);
   });
 
   it('supports logical row conditions', () => {
     expect(
       matchesReportRowCondition(
-        {
-          op: 'AND',
-          arguments: [
-            { op: 'EQ', arguments: ['status', 'ready'] },
-            { op: 'IN', arguments: ['priority', [1, 2, 3]] },
-          ],
-        },
+        cond('AND', [
+          cond('EQ', [ref('status'), imm('ready')]),
+          cond('IN', [ref('priority'), imm([1, 2, 3])]),
+        ]) as never,
         row
       )
     ).toBe(true);
     expect(
       matchesReportRowCondition(
-        {
-          op: 'NOT',
-          arguments: [{ op: 'EQ', arguments: ['status', 'processed'] }],
-        },
+        cond('NOT', [cond('EQ', [ref('status'), imm('processed')])]) as never,
         row
       )
     ).toBe(true);
@@ -65,8 +70,8 @@ describe('report row conditions', () => {
       isWorkflowActionVisible(
         {
           workflowId: 'workflow_1',
-          visibleWhen: { op: 'EQ', arguments: ['status', 'ready'] },
-          hiddenWhen: { op: 'EQ', arguments: ['priority', 5] },
+          visibleWhen: cond('EQ', [ref('status'), imm('ready')]) as never,
+          hiddenWhen: cond('EQ', [ref('priority'), imm(5)]) as never,
         },
         row
       )
@@ -75,7 +80,7 @@ describe('report row conditions', () => {
       isWorkflowActionVisible(
         {
           workflowId: 'workflow_1',
-          visibleWhen: { op: 'EQ', arguments: ['status', 'processed'] },
+          visibleWhen: cond('EQ', [ref('status'), imm('processed')]) as never,
         },
         row
       )
@@ -84,7 +89,7 @@ describe('report row conditions', () => {
       isWorkflowActionVisible(
         {
           workflowId: 'workflow_1',
-          hiddenWhen: { op: 'EQ', arguments: ['status', 'ready'] },
+          hiddenWhen: cond('EQ', [ref('status'), imm('ready')]) as never,
         },
         row
       )
@@ -94,7 +99,7 @@ describe('report row conditions', () => {
   it('evaluates workflow action disabledWhen independently from visibility', () => {
     const action = {
       workflowId: 'workflow_1',
-      disabledWhen: { op: 'EQ', arguments: ['status', 'ready'] },
+      disabledWhen: cond('EQ', [ref('status'), imm('ready')]) as never,
     };
 
     expect(isWorkflowActionVisible(action, row)).toBe(true);

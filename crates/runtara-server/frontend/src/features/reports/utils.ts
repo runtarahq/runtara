@@ -1,5 +1,6 @@
 import {
   ReportBlockDefinition,
+  ReportCondition,
   ReportDefinition,
   ReportFilterDefinition,
   ReportLayoutNode,
@@ -269,17 +270,10 @@ export function isWorkflowActionDisabled(
 }
 
 /**
- * Evaluate a row visibility/disability condition against a row.
- *
- * Delegates to the WASM `evaluateRowCondition` (single source of truth
- * shared with the server). The condition shape stored in report
- * definitions today is legacy — `{op, arguments: [bare_field, value]}`
- * — so this wrapper converts to canonical `ConditionExpression`
- * before invoking the WASM evaluator. The wire-format migration to
- * canonical lives in a follow-up.
- *
- * Returns false on any conversion or WASM error (e.g. before the
- * bundle has loaded).
+ * Evaluate a canonical `ConditionExpression` row visibility/disability
+ * condition against a row. Delegates to the WASM `evaluateRowCondition`
+ * — the same evaluator the server uses. Returns false on any error
+ * (e.g. before the bundle has loaded).
  */
 export function matchesReportRowCondition(
   condition: ReportRowCondition,
@@ -287,120 +281,157 @@ export function matchesReportRowCondition(
 ): boolean {
   if (!condition) return false;
   try {
-    const canonical = toCanonicalCondition(condition);
-    if (!canonical) return false;
-    return reportDsl().evaluateRowCondition(canonical, row);
+    return reportDsl().evaluateRowCondition(condition, row);
   } catch {
     return false;
   }
 }
 
-type LegacyRowCondition = {
-  op: string;
-  arguments?: unknown[] | null;
-};
+// ---------------------------------------------------------------------------
+// Legacy ⇄ canonical row-condition bridges. The FE row-condition editor UI
+// is built around the flat legacy shape `{op, arguments: [field, value]}`;
+// the wire format and the WASM evaluator both use the canonical
+// `ConditionExpression` shape. These helpers convert at the editor
+// boundary so the UI doesn't have to know about the canonical form.
+//
+// Both forms are loose at this layer: legacy is the existing
+// `ReportCondition`; canonical is treated as opaque structured data so we
+// don't drag the full schemars-emitted union types through every helper.
+// ---------------------------------------------------------------------------
 
-type CanonicalExpression =
-  | {
-      type: 'operation';
-      op: string;
-      arguments: CanonicalArgument[];
-    }
-  | CanonicalValueArgument;
+type AnyJson = Record<string, unknown>;
 
-type CanonicalArgument = CanonicalExpression | CanonicalValueArgument;
-
-type CanonicalValueArgument =
-  | { type: 'value'; valueType: 'reference'; value: string }
-  | { type: 'value'; valueType: 'immediate'; value: unknown };
+function asObject(value: unknown): AnyJson | null {
+  return typeof value === 'object' && value !== null
+    ? (value as AnyJson)
+    : null;
+}
 
 /**
- * Bridge legacy `{op, arguments: [bare_field, value]}` conditions to the
- * canonical `ConditionExpression` shape the WASM evaluator consumes.
- * The first argument is treated as a field reference when it's a string;
- * subsequent arguments are immediate values unless they're nested
- * legacy operations (e.g. AND/OR/NOT).
+ * Convert a canonical `ConditionExpression` into the legacy
+ * `{op, arguments: [field, value]}` shape used by the rules editor.
+ * Returns undefined for canonical shapes that don't fit the rules UI
+ * (e.g. nested expressions in non-AND/OR positions).
  */
-function toCanonicalCondition(
-  condition: LegacyRowCondition | null | undefined
-): CanonicalExpression | null {
+export function canonicalToLegacyCondition(
+  expr: ReportRowCondition | null | undefined
+): ReportCondition | undefined {
+  const operation = asObject(expr);
+  if (!operation || operation.type !== 'operation') return undefined;
+  const op =
+    typeof operation.op === 'string' ? operation.op.toUpperCase() : '';
+  if (!op) return undefined;
+  const args = Array.isArray(operation.arguments) ? operation.arguments : [];
+
+  if (op === 'AND' || op === 'OR') {
+    const legacyArgs = args
+      .map((arg) => canonicalToLegacyCondition(arg as ReportRowCondition))
+      .filter((arg): arg is ReportCondition => Boolean(arg));
+    return { op, arguments: legacyArgs };
+  }
+  if (op === 'NOT') {
+    const inner = args[0];
+    const legacyInner = canonicalToLegacyCondition(inner as ReportRowCondition);
+    return legacyInner ? { op, arguments: [legacyInner] } : undefined;
+  }
+  if (op === 'IN' || op === 'NOT_IN') {
+    const field = readReferencePath(args[0]);
+    if (!field) return undefined;
+    return { op, arguments: [field, readImmediateValue(args[1])] };
+  }
+  if (op === 'IS_DEFINED' || op === 'IS_EMPTY' || op === 'IS_NOT_EMPTY') {
+    const field = readReferencePath(args[0]);
+    return field ? { op, arguments: [field] } : undefined;
+  }
+  // Binary comparison: EQ, NE, GT, GTE, LT, LTE, CONTAINS, STARTS_WITH, ...
+  const field = readReferencePath(args[0]);
+  if (!field) return undefined;
+  return { op, arguments: [field, readImmediateValue(args[1])] };
+}
+
+/**
+ * Convert a legacy `{op, arguments: [field, value]}` condition into
+ * canonical `ConditionExpression`. Returns undefined when the condition
+ * is empty or malformed.
+ */
+export function legacyToCanonicalCondition(
+  condition: ReportCondition | null | undefined
+): ReportRowCondition | undefined {
   if (!condition || typeof condition !== 'object' || !condition.op) {
-    return null;
+    return undefined;
   }
   const op = condition.op.toUpperCase();
   const args = condition.arguments ?? [];
 
   if (op === 'AND' || op === 'OR') {
-    return {
-      type: 'operation',
-      op,
-      arguments: args
-        .map(toCanonicalArgument)
-        .filter((arg): arg is CanonicalArgument => arg !== null),
-    };
+    const canonicalArgs = args
+      .filter(
+        (arg): arg is ReportCondition =>
+          typeof arg === 'object' &&
+          arg !== null &&
+          'op' in (arg as object) &&
+          typeof (arg as { op?: unknown }).op === 'string'
+      )
+      .map((arg) => legacyToCanonicalCondition(arg))
+      .filter((arg): arg is ReportRowCondition => Boolean(arg));
+    return makeOperation(op, canonicalArgs);
   }
   if (op === 'NOT') {
-    const inner = toCanonicalArgument(args[0]);
-    return inner
-      ? { type: 'operation', op: 'NOT', arguments: [inner] }
-      : null;
+    const inner = args[0];
+    if (!inner || typeof inner !== 'object' || !('op' in (inner as object))) {
+      return undefined;
+    }
+    const canonicalInner = legacyToCanonicalCondition(inner as ReportCondition);
+    if (!canonicalInner) return undefined;
+    return makeOperation(op, [canonicalInner]);
   }
   if (op === 'IN' || op === 'NOT_IN') {
-    const fieldArg = legacyFieldArg(args[0]);
-    if (!fieldArg) return null;
-    return {
-      type: 'operation',
-      op,
-      arguments: [
-        fieldArg,
-        immediateArg(args[1]),
-      ],
-    };
+    if (typeof args[0] !== 'string') return undefined;
+    return makeOperation(op, [
+      makeReferenceArg(args[0]),
+      makeImmediateArg(args[1]),
+    ]);
   }
   if (op === 'IS_DEFINED' || op === 'IS_EMPTY' || op === 'IS_NOT_EMPTY') {
-    const fieldArg = legacyFieldArg(args[0]);
-    return fieldArg
-      ? { type: 'operation', op, arguments: [fieldArg] }
-      : null;
+    if (typeof args[0] !== 'string') return undefined;
+    return makeOperation(op, [makeReferenceArg(args[0])]);
   }
-  // Binary comparison operators (EQ, NE, GT, GTE, LT, LTE, CONTAINS, etc.):
-  // first arg is a field reference, second is an immediate value.
-  const fieldArg = legacyFieldArg(args[0]);
-  if (!fieldArg) return null;
+  // Binary comparison: first arg = field, second = literal.
+  if (typeof args[0] !== 'string') return undefined;
+  return makeOperation(op, [
+    makeReferenceArg(args[0]),
+    makeImmediateArg(args[1]),
+  ]);
+}
+
+function readReferencePath(arg: unknown): string | undefined {
+  const o = asObject(arg);
+  if (!o) return undefined;
+  if (o.type !== 'value' && o.valueType === undefined) return undefined;
+  if (o.valueType !== 'reference') return undefined;
+  return typeof o.value === 'string' ? o.value : undefined;
+}
+
+function readImmediateValue(arg: unknown): unknown {
+  const o = asObject(arg);
+  if (!o) return '';
+  if (o.valueType !== 'immediate') return '';
+  return o.value ?? '';
+}
+
+function makeOperation(op: string, args: unknown[]): ReportRowCondition {
   return {
     type: 'operation',
     op,
-    arguments: [fieldArg, immediateArg(args[1])],
-  };
+    arguments: args,
+  } as unknown as ReportRowCondition;
 }
 
-function toCanonicalArgument(arg: unknown): CanonicalArgument | null {
-  if (isLegacyOperation(arg)) {
-    return toCanonicalCondition(arg);
-  }
-  if (typeof arg === 'string') return referenceArg(arg);
-  return immediateArg(arg);
-}
-
-function isLegacyOperation(value: unknown): value is LegacyRowCondition {
-  return (
-    typeof value === 'object' &&
-    value !== null &&
-    'op' in value &&
-    typeof (value as { op?: unknown }).op === 'string'
-  );
-}
-
-function legacyFieldArg(arg: unknown): CanonicalValueArgument | null {
-  if (typeof arg !== 'string') return null;
-  return referenceArg(arg);
-}
-
-function referenceArg(path: string): CanonicalValueArgument {
+function makeReferenceArg(path: string): unknown {
   return { type: 'value', valueType: 'reference', value: path };
 }
 
-function immediateArg(value: unknown): CanonicalValueArgument {
+function makeImmediateArg(value: unknown): unknown {
   return { type: 'value', valueType: 'immediate', value };
 }
 

@@ -570,13 +570,13 @@ pub fn find_agent_module(id: &str) -> Option<&'static AgentModuleConfig> {
 // ============================================================================
 //
 // The whole block is gated behind `json-schema` because `SchemaGeneratorFn`
-// returns `schemars::schema::RootSchema`. WASM consumers (e.g.
+// returns `schemars::Schema`. WASM consumers (e.g.
 // `runtara-report-dsl`) build with `default-features = false` to keep
 // `schemars` out of their tree.
 
 /// Function pointer type for generating JSON schema
 #[cfg(feature = "json-schema")]
-pub type SchemaGeneratorFn = fn() -> schemars::schema::RootSchema;
+pub type SchemaGeneratorFn = fn() -> schemars::Schema;
 
 /// Metadata for a step type.
 #[cfg(feature = "json-schema")]

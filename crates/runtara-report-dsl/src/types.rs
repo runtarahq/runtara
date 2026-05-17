@@ -11,6 +11,7 @@ use std::collections::HashMap;
 use std::fmt;
 
 use crate::condition::Condition;
+use runtara_dsl::ConditionExpression;
 
 fn default_definition_version() -> i32 {
     1
@@ -566,7 +567,7 @@ pub struct ReportWorkflowActionConfig {
         rename = "visibleWhen",
         skip_serializing_if = "Option::is_none"
     )]
-    pub visible_when: Option<Condition>,
+    pub visible_when: Option<ConditionExpression>,
     /// Optional row-level condition. When set, the frontend hides the button
     /// for rows that match this condition.
     #[serde(
@@ -574,7 +575,7 @@ pub struct ReportWorkflowActionConfig {
         rename = "hiddenWhen",
         skip_serializing_if = "Option::is_none"
     )]
-    pub hidden_when: Option<Condition>,
+    pub hidden_when: Option<ConditionExpression>,
     /// Optional row-level condition. When set, the frontend renders the button
     /// disabled for rows that match this condition.
     #[serde(
@@ -582,7 +583,7 @@ pub struct ReportWorkflowActionConfig {
         rename = "disabledWhen",
         skip_serializing_if = "Option::is_none"
     )]
-    pub disabled_when: Option<Condition>,
+    pub disabled_when: Option<ConditionExpression>,
     #[serde(default)]
     pub context: ReportWorkflowActionContext,
 }
@@ -1173,19 +1174,19 @@ pub struct ReportTableInteractionButtonConfig {
         rename = "visibleWhen",
         skip_serializing_if = "Option::is_none"
     )]
-    pub visible_when: Option<Condition>,
+    pub visible_when: Option<ConditionExpression>,
     #[serde(
         default,
         rename = "hiddenWhen",
         skip_serializing_if = "Option::is_none"
     )]
-    pub hidden_when: Option<Condition>,
+    pub hidden_when: Option<ConditionExpression>,
     #[serde(
         default,
         rename = "disabledWhen",
         skip_serializing_if = "Option::is_none"
     )]
-    pub disabled_when: Option<Condition>,
+    pub disabled_when: Option<ConditionExpression>,
     #[serde(default)]
     pub actions: Vec<ReportInteractionAction>,
 }

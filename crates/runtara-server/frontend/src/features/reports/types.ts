@@ -205,9 +205,15 @@ export type ReportDto = Omit<
 // FE-only types — not present in the wire format.
 // ---------------------------------------------------------------------------
 
-/** Filter-targeting alias used by FE state. Identical shape to `Condition`. */
+/** Filter/source condition (legacy shape — `{op, arguments: [field, value]}`). */
 export type ReportCondition = GenCondition;
-export type ReportRowCondition = GenCondition;
+
+/**
+ * Row visibility/disability condition. Canonical `ConditionExpression`
+ * shape — the same evaluator used for workflow steps.
+ */
+export type ReportRowCondition =
+  import('../../generated/RuntaraRuntimeApi').ConditionExpression;
 
 /** Reference operand used inside FE-resolved condition argument lists. */
 export interface ReportConditionFilterRef {

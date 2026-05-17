@@ -55,8 +55,10 @@ import {
   reconcileDatasetBlock,
 } from '../datasetBlocks';
 import {
+  canonicalToLegacyCondition,
   extractLayoutBlockReferences,
   humanizeFieldName,
+  legacyToCanonicalCondition,
   slugify,
 } from '../utils';
 
@@ -2324,21 +2326,27 @@ function WorkflowActionEditor({
       <div className="grid gap-3 xl:grid-cols-3">
         <RowConditionEditor
           title="Visible when"
-          condition={current.visibleWhen}
+          condition={canonicalToLegacyCondition(current.visibleWhen)}
           fields={fields}
-          onChange={(visibleWhen) => update({ visibleWhen })}
+          onChange={(visibleWhen) =>
+            update({ visibleWhen: legacyToCanonicalCondition(visibleWhen) })
+          }
         />
         <RowConditionEditor
           title="Hidden when"
-          condition={current.hiddenWhen}
+          condition={canonicalToLegacyCondition(current.hiddenWhen)}
           fields={fields}
-          onChange={(hiddenWhen) => update({ hiddenWhen })}
+          onChange={(hiddenWhen) =>
+            update({ hiddenWhen: legacyToCanonicalCondition(hiddenWhen) })
+          }
         />
         <RowConditionEditor
           title="Disabled when"
-          condition={current.disabledWhen}
+          condition={canonicalToLegacyCondition(current.disabledWhen)}
           fields={fields}
-          onChange={(disabledWhen) => update({ disabledWhen })}
+          onChange={(disabledWhen) =>
+            update({ disabledWhen: legacyToCanonicalCondition(disabledWhen) })
+          }
         />
       </div>
     </div>

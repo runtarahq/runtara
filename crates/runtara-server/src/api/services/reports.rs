@@ -136,7 +136,14 @@ impl ReportService {
     pub fn report_definition_json_schema() -> Value {
         let mut schema = serde_json::to_value(schemars::schema_for!(ReportDefinition))
             .unwrap_or_else(|_| json!({}));
-        seal_json_schema_objects(&mut schema);
+        // schemars 1 emits internally-tagged enums (`#[serde(tag = "type")]`)
+        // as `oneOf` variants that combine a `$ref` to the inner struct with
+        // an extra discriminator property. The $ref'd struct doesn't expect
+        // the discriminator field, so if we seal it with
+        // `additionalProperties: false` the merge fails validation. Skip
+        // sealing those $ref targets.
+        let unsealable = collect_discriminator_ref_targets(&schema);
+        seal_json_schema_objects(&mut schema, &unsealable, &Vec::new());
         schema
     }
 
@@ -5752,141 +5759,125 @@ fn validate_report_workflow_action_row_conditions(
 }
 
 fn validate_report_workflow_action_row_condition(
-    condition: &Condition,
+    condition: &runtara_dsl::ConditionExpression,
     is_known_field: &dyn Fn(&str) -> bool,
     context: &str,
     condition_path: &str,
 ) -> Result<(), ReportServiceError> {
-    let op = condition.op.trim().to_ascii_uppercase();
-    if op.is_empty() {
-        return Err(ReportServiceError::Validation(format!(
-            "{context} {condition_path}.op must not be empty"
-        )));
-    }
+    use runtara_dsl::{ConditionArgument, ConditionExpression, ConditionOperator, MappingValue};
 
-    let args = condition.arguments.as_deref().unwrap_or(&[]);
-    match op.as_str() {
-        "AND" | "OR" => {
+    let operation = match condition {
+        ConditionExpression::Operation(op) => op,
+        ConditionExpression::Value(_) => {
+            return Err(ReportServiceError::Validation(format!(
+                "{context} {condition_path} must be a condition operation, not a bare value"
+            )));
+        }
+    };
+
+    let op = &operation.op;
+    let args = &operation.arguments;
+
+    let recurse_child = |index: usize,
+                         argument: &ConditionArgument|
+     -> Result<(), ReportServiceError> {
+        let path = format!("{condition_path}.arguments[{index}]");
+        match argument {
+            ConditionArgument::Expression(expr) => {
+                validate_report_workflow_action_row_condition(expr, is_known_field, context, &path)
+            }
+            ConditionArgument::Value(_) => Err(ReportServiceError::Validation(format!(
+                "{context} {path} must be a nested condition expression"
+            ))),
+        }
+    };
+
+    let check_field =
+        |argument: &ConditionArgument, path: &str| -> Result<(), ReportServiceError> {
+            let reference = match argument {
+                ConditionArgument::Value(MappingValue::Reference(reference)) => reference,
+                _ => {
+                    return Err(ReportServiceError::Validation(format!(
+                        "{context} {path} must be a row field reference"
+                    )));
+                }
+            };
+            let field = reference.value.trim();
+            if field.is_empty() {
+                return Err(ReportServiceError::Validation(format!(
+                    "{context} {path} must be a non-empty row field reference"
+                )));
+            }
+            if !is_known_field(field) {
+                return Err(ReportServiceError::Validation(format!(
+                    "{context} references unknown workflowAction row condition field '{field}'"
+                )));
+            }
+            Ok(())
+        };
+
+    match op {
+        ConditionOperator::And | ConditionOperator::Or => {
             for (index, argument) in args.iter().enumerate() {
-                let child = workflow_action_row_condition_child(
-                    argument,
-                    context,
-                    &format!("{condition_path}.arguments[{index}]"),
-                )?;
-                validate_report_workflow_action_row_condition(
-                    &child,
-                    is_known_field,
-                    context,
-                    &format!("{condition_path}.arguments[{index}]"),
-                )?;
+                recurse_child(index, argument)?;
             }
         }
-        "NOT" => {
+        ConditionOperator::Not => {
             if args.len() != 1 {
                 return Err(ReportServiceError::Validation(format!(
                     "{context} {condition_path} NOT condition requires one argument"
                 )));
             }
-            let child = workflow_action_row_condition_child(
-                &args[0],
-                context,
-                &format!("{condition_path}.arguments[0]"),
-            )?;
-            validate_report_workflow_action_row_condition(
-                &child,
-                is_known_field,
-                context,
-                &format!("{condition_path}.arguments[0]"),
-            )?;
+            recurse_child(0, &args[0])?;
         }
-        "EQ" | "NE" | "GT" | "GTE" | "LT" | "LTE" | "CONTAINS" => {
+        ConditionOperator::Eq
+        | ConditionOperator::Ne
+        | ConditionOperator::Gt
+        | ConditionOperator::Gte
+        | ConditionOperator::Lt
+        | ConditionOperator::Lte
+        | ConditionOperator::Contains
+        | ConditionOperator::StartsWith
+        | ConditionOperator::EndsWith => {
             if args.len() != 2 {
                 return Err(ReportServiceError::Validation(format!(
-                    "{context} {condition_path} {op} condition requires two arguments"
+                    "{context} {condition_path} {op:?} condition requires two arguments"
                 )));
             }
-            validate_report_workflow_action_condition_field(
-                &args[0],
-                is_known_field,
-                context,
-                &format!("{condition_path}.arguments[0]"),
-            )?;
+            check_field(&args[0], &format!("{condition_path}.arguments[0]"))?;
         }
-        "IN" | "NOT_IN" => {
+        ConditionOperator::In | ConditionOperator::NotIn => {
             if args.len() != 2 {
                 return Err(ReportServiceError::Validation(format!(
-                    "{context} {condition_path} {op} condition requires two arguments"
+                    "{context} {condition_path} {op:?} condition requires two arguments"
                 )));
             }
-            validate_report_workflow_action_condition_field(
-                &args[0],
-                is_known_field,
-                context,
-                &format!("{condition_path}.arguments[0]"),
-            )?;
-            if !args[1].is_array() {
+            check_field(&args[0], &format!("{condition_path}.arguments[0]"))?;
+            // The second argument should be an immediate array literal.
+            if !matches!(&args[1], ConditionArgument::Value(MappingValue::Immediate(value)) if value.value.is_array())
+            {
                 return Err(ReportServiceError::Validation(format!(
-                    "{context} {condition_path}.arguments[1] must be an array for {op}"
+                    "{context} {condition_path}.arguments[1] must be an immediate array for {op:?}"
                 )));
             }
         }
-        "IS_DEFINED" | "IS_EMPTY" | "IS_NOT_EMPTY" => {
+        ConditionOperator::IsDefined
+        | ConditionOperator::IsEmpty
+        | ConditionOperator::IsNotEmpty => {
             if args.len() != 1 {
                 return Err(ReportServiceError::Validation(format!(
-                    "{context} {condition_path} {op} condition requires one argument"
+                    "{context} {condition_path} {op:?} condition requires one argument"
                 )));
             }
-            validate_report_workflow_action_condition_field(
-                &args[0],
-                is_known_field,
-                context,
-                &format!("{condition_path}.arguments[0]"),
-            )?;
+            check_field(&args[0], &format!("{condition_path}.arguments[0]"))?;
         }
-        _ => {
+        other => {
             return Err(ReportServiceError::Validation(format!(
-                "{context} {condition_path} uses unsupported row condition op '{}'",
-                condition.op
+                "{context} {condition_path} uses unsupported row condition op '{other:?}'"
             )));
         }
     }
 
-    Ok(())
-}
-
-fn workflow_action_row_condition_child(
-    argument: &Value,
-    context: &str,
-    path: &str,
-) -> Result<Condition, ReportServiceError> {
-    serde_json::from_value::<Condition>(argument.clone()).map_err(|err| {
-        ReportServiceError::Validation(format!(
-            "{context} {path} must be a condition object: {err}"
-        ))
-    })
-}
-
-fn validate_report_workflow_action_condition_field(
-    argument: &Value,
-    is_known_field: &dyn Fn(&str) -> bool,
-    context: &str,
-    path: &str,
-) -> Result<(), ReportServiceError> {
-    let Some(field) = argument
-        .as_str()
-        .map(str::trim)
-        .filter(|field| !field.is_empty())
-    else {
-        return Err(ReportServiceError::Validation(format!(
-            "{context} {path} must be a non-empty row field name"
-        )));
-    };
-    if !is_known_field(field) {
-        return Err(ReportServiceError::Validation(format!(
-            "{context} references unknown workflowAction row condition field '{}'",
-            field
-        )));
-    }
     Ok(())
 }
 
@@ -10614,19 +10605,97 @@ fn map_object_model_error(error: ObjectModelServiceError) -> ReportServiceError 
     }
 }
 
-fn seal_json_schema_objects(schema: &mut Value) {
+fn seal_json_schema_objects(
+    schema: &mut Value,
+    unsealable_defs: &std::collections::HashSet<String>,
+    path: &[String],
+) {
     match schema {
         Value::Object(object) => {
-            if object.contains_key("properties") && !object.contains_key("additionalProperties") {
+            // Skip sealing when this object:
+            // - participates in a composition (`allOf`/`oneOf`/`anyOf`) — each
+            //   variant only declares a subset of fields; sealing the partial
+            //   variants would contradict the merged shape;
+            // - carries a `$ref` — it implicitly inherits `properties` from
+            //   the referenced schema; OR
+            // - is a `$defs` definition referenced from a discriminator
+            //   variant (schemars 1's internally-tagged enum shape merges
+            //   the $ref's properties with an extra discriminator field).
+            let in_composition = object.contains_key("allOf")
+                || object.contains_key("oneOf")
+                || object.contains_key("anyOf");
+            let has_ref = object.contains_key("$ref");
+            let unsealable_def = matches!(path, [ns, name] if (ns == "$defs" || ns == "definitions") && unsealable_defs.contains(name));
+
+            if !in_composition
+                && !has_ref
+                && !unsealable_def
+                && object.contains_key("properties")
+                && !object.contains_key("additionalProperties")
+            {
                 object.insert("additionalProperties".to_string(), Value::Bool(false));
             }
-            for value in object.values_mut() {
-                seal_json_schema_objects(value);
+            let keys: Vec<String> = object.keys().cloned().collect();
+            for key in keys {
+                if let Some(value) = object.get_mut(&key) {
+                    let mut child_path: Vec<String> = path.to_vec();
+                    child_path.push(key);
+                    seal_json_schema_objects(value, unsealable_defs, &child_path);
+                }
             }
         }
         Value::Array(values) => {
             for value in values {
-                seal_json_schema_objects(value);
+                seal_json_schema_objects(value, unsealable_defs, path);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Walk the schema looking for `$ref` references that appear inside a
+/// `oneOf`/`anyOf` variant alongside `properties` + `required` (the shape
+/// schemars 1 emits for internally-tagged enum variants). The $ref'd
+/// `$defs` entry must remain unsealed so the discriminator merge works.
+fn collect_discriminator_ref_targets(schema: &Value) -> std::collections::HashSet<String> {
+    let mut targets = std::collections::HashSet::new();
+    walk_for_discriminator_refs(schema, &mut targets);
+    targets
+}
+
+fn walk_for_discriminator_refs(value: &Value, targets: &mut std::collections::HashSet<String>) {
+    if let Some(array) = value
+        .get("oneOf")
+        .or_else(|| value.get("anyOf"))
+        .and_then(Value::as_array)
+    {
+        for variant in array {
+            let Some(object) = variant.as_object() else {
+                continue;
+            };
+            if !(object.contains_key("$ref") && object.contains_key("properties")) {
+                continue;
+            }
+            let Some(reference) = object.get("$ref").and_then(Value::as_str) else {
+                continue;
+            };
+            if let Some(name) = reference
+                .strip_prefix("#/$defs/")
+                .or_else(|| reference.strip_prefix("#/definitions/"))
+            {
+                targets.insert(name.to_string());
+            }
+        }
+    }
+    match value {
+        Value::Object(map) => {
+            for child in map.values() {
+                walk_for_discriminator_refs(child, targets);
+            }
+        }
+        Value::Array(array) => {
+            for child in array {
+                walk_for_discriminator_refs(child, targets);
             }
         }
         _ => {}

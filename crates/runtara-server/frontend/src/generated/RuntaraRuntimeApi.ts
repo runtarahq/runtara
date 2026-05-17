@@ -3808,12 +3808,12 @@ export interface ReportTableConfig {
 
 export interface ReportTableInteractionButtonConfig {
   actions?: ReportInteractionAction[];
-  disabledWhen?: null | Condition;
-  hiddenWhen?: null | Condition;
+  disabledWhen?: null | ConditionExpression;
+  hiddenWhen?: null | ConditionExpression;
   icon?: string | null;
   id: string;
   label?: string | null;
-  visibleWhen?: null | Condition;
+  visibleWhen?: null | ConditionExpression;
 }
 
 export interface ReportTableSearchRequest {
@@ -3861,12 +3861,12 @@ export interface ReportWorkflowActionConfig {
    * Optional row-level condition. When set, the frontend renders the button
    * disabled for rows that match this condition.
    */
-  disabledWhen?: null | Condition;
+  disabledWhen?: null | ConditionExpression;
   /**
    * Optional row-level condition. When set, the frontend hides the button
    * for rows that match this condition.
    */
-  hiddenWhen?: null | Condition;
+  hiddenWhen?: null | ConditionExpression;
   label?: string | null;
   reloadBlock?: boolean;
   runningLabel?: string | null;
@@ -3877,7 +3877,7 @@ export interface ReportWorkflowActionConfig {
    * Optional row-level condition. When set, the frontend renders the button
    * only for rows that match this condition.
    */
-  visibleWhen?: null | Condition;
+  visibleWhen?: null | ConditionExpression;
   workflowId: string;
 }
 

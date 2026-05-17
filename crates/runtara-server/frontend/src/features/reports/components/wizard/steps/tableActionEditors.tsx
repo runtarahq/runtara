@@ -15,13 +15,18 @@ import { queryKeys } from '@/shared/queries/query-keys';
 import { getWorkflows } from '@/features/workflows/queries';
 import { WorkflowDto } from '@/generated/RuntaraRuntimeApi';
 import {
+  ReportCondition,
   ReportInteractionAction,
   ReportTableActionConfig,
   ReportTableInteractionButtonConfig,
   ReportWorkflowActionConfig,
   ReportWorkflowActionContextMode,
 } from '../../../types';
-import { slugify } from '../../../utils';
+import {
+  canonicalToLegacyCondition,
+  legacyToCanonicalCondition,
+  slugify,
+} from '../../../utils';
 
 const WORKFLOW_CONTEXT_MODES: Array<{
   value: ReportWorkflowActionContextMode;
@@ -290,21 +295,27 @@ export function WorkflowActionEditor({
       </label>
       <RowConditionRow
         label="Visible when"
-        value={action.visibleWhen}
+        value={canonicalToLegacyCondition(action.visibleWhen)}
         fields={fields}
-        onChange={(visibleWhen) => update({ visibleWhen })}
+        onChange={(visibleWhen) =>
+          update({ visibleWhen: legacyToCanonicalCondition(visibleWhen) })
+        }
       />
       <RowConditionRow
         label="Hidden when"
-        value={action.hiddenWhen}
+        value={canonicalToLegacyCondition(action.hiddenWhen)}
         fields={fields}
-        onChange={(hiddenWhen) => update({ hiddenWhen })}
+        onChange={(hiddenWhen) =>
+          update({ hiddenWhen: legacyToCanonicalCondition(hiddenWhen) })
+        }
       />
       <RowConditionRow
         label="Disabled when"
-        value={action.disabledWhen}
+        value={canonicalToLegacyCondition(action.disabledWhen)}
         fields={fields}
-        onChange={(disabledWhen) => update({ disabledWhen })}
+        onChange={(disabledWhen) =>
+          update({ disabledWhen: legacyToCanonicalCondition(disabledWhen) })
+        }
       />
     </div>
   );
@@ -336,11 +347,9 @@ function RowConditionRow({
   onChange,
 }: {
   label: string;
-  value: ReportWorkflowActionConfig['visibleWhen'] | null | undefined;
+  value: ReportCondition | null | undefined;
   fields: string[];
-  onChange: (
-    value: NonNullable<ReportWorkflowActionConfig['visibleWhen']> | undefined
-  ) => void;
+  onChange: (value: ReportCondition | undefined) => void;
 }) {
   const isSimple =
     !!value &&
@@ -465,9 +474,7 @@ function isObjectArg(value: unknown): boolean {
   return typeof value === 'object' && value !== null;
 }
 
-function summarizeCondition(
-  condition: NonNullable<ReportWorkflowActionConfig['visibleWhen']>
-): string {
+function summarizeCondition(condition: ReportCondition): string {
   try {
     return JSON.stringify(condition);
   } catch {

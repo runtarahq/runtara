@@ -492,13 +492,17 @@ mod tests {
 
     #[test]
     fn test_step_type_schema_generation() {
-        // Verify that schema generation functions work
+        // Verify that schema generation functions work. In schemars 1
+        // `Schema` is opaque; round-trip through JSON and confirm the
+        // serialized form is a non-empty object.
         for meta in agent_meta::get_all_step_types() {
             let schema = (meta.schema_fn)();
-            // Just verify it doesn't panic and returns something
+            let value: serde_json::Value =
+                serde_json::to_value(&schema).expect("schema serializes");
+            let object = value.as_object().expect("schema is a JSON object");
             assert!(
-                schema.schema.metadata.is_some() || !schema.definitions.is_empty(),
-                "Schema for {} should have metadata or definitions",
+                !object.is_empty(),
+                "Schema for {} should not be empty",
                 meta.id
             );
         }

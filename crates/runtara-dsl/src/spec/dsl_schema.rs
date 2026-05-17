@@ -25,12 +25,12 @@ pub fn generate_dsl_schema() -> Value {
     {
         definitions.insert(
             "ConditionOperator".to_string(),
-            serde_json::to_value(&condition_operator_schema.schema)
+            serde_json::to_value(&condition_operator_schema)
                 .expect("Failed to serialize ConditionOperator schema"),
         );
         definitions.insert(
             "SwitchMatchType".to_string(),
-            serde_json::to_value(&switch_match_type_schema.schema)
+            serde_json::to_value(&switch_match_type_schema)
                 .expect("Failed to serialize SwitchMatchType schema"),
         );
     }

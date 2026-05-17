@@ -14,10 +14,9 @@ crate-type = ["cdylib", "rlib"]
 [features]
 default = ["json-schema"]
 # Enables `JsonSchema` derives for the server's JSON Schema export pipeline.
-# Optional so the WASM build can opt out (saves ~150KB gzipped — schemars 0.8
-# from `runtara-dsl` and schemars 1 here would otherwise both end up in the
-# WASM tree).
-json-schema = ["dep:schemars"]
+# Pulls `runtara-dsl/json-schema` too so types like `ConditionExpression`
+# implement `JsonSchema`. Optional so the WASM build can opt out.
+json-schema = ["dep:schemars", "runtara-dsl/json-schema"]
 # Enables `ToSchema` derives so the crate's types appear in the server OpenAPI doc.
 utoipa = ["dep:utoipa"]
 # Enables wasm-bindgen JS bindings for the FE bundle.

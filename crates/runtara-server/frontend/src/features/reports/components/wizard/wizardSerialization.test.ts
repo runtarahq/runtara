@@ -466,9 +466,30 @@ describe('table column round-trip', () => {
         field: 'status',
         inputKey: 'statusValue',
       },
-      visibleWhen: { op: 'EQ', arguments: ['priority', 'high'] },
-      hiddenWhen: { op: 'EQ', arguments: ['status', 'archived'] },
-      disabledWhen: { op: 'EQ', arguments: ['status', 'pending'] },
+      visibleWhen: {
+        type: 'operation',
+        op: 'EQ',
+        arguments: [
+          { type: 'value', valueType: 'reference', value: 'priority' },
+          { type: 'value', valueType: 'immediate', value: 'high' },
+        ],
+      } as never,
+      hiddenWhen: {
+        type: 'operation',
+        op: 'EQ',
+        arguments: [
+          { type: 'value', valueType: 'reference', value: 'status' },
+          { type: 'value', valueType: 'immediate', value: 'archived' },
+        ],
+      } as never,
+      disabledWhen: {
+        type: 'operation',
+        op: 'EQ',
+        arguments: [
+          { type: 'value', valueType: 'reference', value: 'status' },
+          { type: 'value', valueType: 'immediate', value: 'pending' },
+        ],
+      } as never,
     };
     const definition: ReportDefinition = {
       definitionVersion: 1,

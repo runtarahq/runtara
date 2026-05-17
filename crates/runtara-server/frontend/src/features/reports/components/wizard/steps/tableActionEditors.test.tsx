@@ -32,7 +32,14 @@ describe('WorkflowActionEditor condition and context controls', () => {
     renderEditor(
       {
         workflowId: 'workflow_x',
-        visibleWhen: { op: 'EQ', arguments: ['status', 'ready'] },
+        visibleWhen: {
+          type: 'operation',
+          op: 'EQ',
+          arguments: [
+            { type: 'value', valueType: 'reference', value: 'status' },
+            { type: 'value', valueType: 'immediate', value: 'ready' },
+          ],
+        } as never,
       },
       ['status', 'owner', 'priority']
     );
@@ -50,7 +57,14 @@ describe('WorkflowActionEditor condition and context controls', () => {
     renderEditor(
       {
         workflowId: 'workflow_x',
-        visibleWhen: { op: 'EQ', arguments: ['custom_field', 'ready'] },
+        visibleWhen: {
+          type: 'operation',
+          op: 'EQ',
+          arguments: [
+            { type: 'value', valueType: 'reference', value: 'custom_field' },
+            { type: 'value', valueType: 'immediate', value: 'ready' },
+          ],
+        } as never,
       },
       []
     );
@@ -69,7 +83,14 @@ describe('WorkflowActionEditor condition and context controls', () => {
           field: 'status',
           inputKey: 'statusValue',
         },
-        hiddenWhen: { op: 'EQ', arguments: ['status', 'archived'] },
+        hiddenWhen: {
+          type: 'operation',
+          op: 'EQ',
+          arguments: [
+            { type: 'value', valueType: 'reference', value: 'status' },
+            { type: 'value', valueType: 'immediate', value: 'archived' },
+          ],
+        } as never,
       },
       ['status', 'owner', 'priority']
     );

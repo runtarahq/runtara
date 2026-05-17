@@ -1205,7 +1205,7 @@ pub fn derive_step_meta(input: TokenStream) -> TokenStream {
 
     let expanded = quote! {
         #[doc(hidden)]
-        fn #schema_fn_ident() -> schemars::schema::RootSchema {
+        fn #schema_fn_ident() -> schemars::Schema {
             schemars::schema_for!(#struct_name)
         }
 
