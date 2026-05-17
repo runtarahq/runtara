@@ -1,8 +1,26 @@
 // Phase 9: single layout-editor primitive. Walks `definition.layout`
 // recursively, rendering each `grid` as a CSS grid with the configured
 // `columns` / `columnWidths`. Each item slot hosts either a block
-// editor (`BlockHostInEdit`) or a nested `GridContainer`.
+// editor (`BlockHostInEdit`) or a nested `GridContainer`. Drag-and-drop
+// between slots is powered by `@dnd-kit/core` + `@dnd-kit/sortable`
+// with cross-grid moves dispatched through `moveLayoutNode`.
 
+import {
+  DndContext,
+  DragEndEvent,
+  KeyboardSensor,
+  PointerSensor,
+  closestCenter,
+  useSensor,
+  useSensors,
+} from '@dnd-kit/core';
+import {
+  SortableContext,
+  sortableKeyboardCoordinates,
+  useSortable,
+  verticalListSortingStrategy,
+} from '@dnd-kit/sortable';
+import { CSS } from '@dnd-kit/utilities';
 import { Schema } from '@/generated/RuntaraRuntimeApi';
 import { Button } from '@/shared/components/ui/button';
 import {
@@ -11,7 +29,7 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from '@/shared/components/ui/dropdown-menu';
-import { Plus, Settings2, Trash2 } from 'lucide-react';
+import { GripVertical, Plus, Settings2, Trash2 } from 'lucide-react';
 import { CSSProperties, useState } from 'react';
 import {
   ReportBlockResult,
@@ -22,11 +40,13 @@ import {
 import { BlockEditor } from './blocks/BlockEditor';
 import { BlockHostInEdit } from './BlockHostInEdit';
 import { GridSettingsPanel } from './GridSettingsPanel';
+import { resolveDrop } from './dndResolve';
 import {
   LayoutTarget,
   addBlock,
   addLayoutNode,
   makeBlockId,
+  moveLayoutNode,
   newGrid,
   pathToLayoutNode,
   removeLayoutNode,
@@ -61,6 +81,12 @@ export function GridContainer({
   onChange,
 }: GridContainerProps) {
   const layout = definition.layout ?? [];
+  const sensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 4 } }),
+    useSensor(KeyboardSensor, {
+      coordinateGetter: sortableKeyboardCoordinates,
+    })
+  );
 
   const handleAddRootGrid = (columns: number) => {
     const grid = newGrid({ columns });
@@ -80,54 +106,84 @@ export function GridContainer({
     );
   };
 
+  const handleDragEnd = (event: DragEndEvent) => {
+    const { active, over } = event;
+    if (!over) return;
+    const sourceId = String(active.id);
+    const overId = String(over.id);
+    const result = resolveDrop(definition, { sourceId, overId });
+    if (!result.apply) return;
+    onChange(moveLayoutNode(definition, sourceId, result.target));
+  };
+
+  const rootIds = layout.map((node) => node.id);
+
   return (
-    <div className="grid gap-4">
-      {layout.length === 0 ? (
-        <p className="text-sm text-muted-foreground">
-          No layout yet. Add a block or a grid below to start arranging your
-          report.
-        </p>
-      ) : (
-        layout.map((node) => (
-          <LayoutNodeEditor
-            key={node.id}
-            node={node}
-            definition={definition}
-            schemas={schemas}
-            blockResults={blockResults}
-            reportId={reportId}
-            filters={filters}
-            onChange={onChange}
-          />
-        ))
-      )}
-      <div className="flex flex-wrap items-center gap-2 rounded-lg border bg-muted/30 p-3">
-        <Button type="button" variant="outline" size="sm" onClick={handleAddRootBlock}>
-          <Plus className="mr-1 h-3.5 w-3.5" /> Add block
-        </Button>
-        <DropdownMenu>
-          <DropdownMenuTrigger asChild>
-            <Button type="button" variant="outline" size="sm">
-              <Plus className="mr-1 h-3.5 w-3.5" /> Add grid
-            </Button>
-          </DropdownMenuTrigger>
-          <DropdownMenuContent align="start">
-            {PRESETS.map((preset) => (
-              <DropdownMenuItem
-                key={preset.columns}
-                onClick={() => handleAddRootGrid(preset.columns)}
-              >
-                {preset.label}
-              </DropdownMenuItem>
-            ))}
-          </DropdownMenuContent>
-        </DropdownMenu>
+    <DndContext
+      sensors={sensors}
+      collisionDetection={closestCenter}
+      onDragEnd={handleDragEnd}
+    >
+      <div className="grid gap-4" data-testid="grid-container-root">
+        {layout.length === 0 ? (
+          <p className="text-sm text-muted-foreground">
+            No layout yet. Add a block or a grid below to start arranging your
+            report.
+          </p>
+        ) : (
+          <SortableContext
+            items={rootIds}
+            strategy={verticalListSortingStrategy}
+          >
+            <div className="grid gap-3">
+              {layout.map((node) => (
+                <SortableLayoutNode
+                  key={node.id}
+                  node={node}
+                  definition={definition}
+                  schemas={schemas}
+                  blockResults={blockResults}
+                  reportId={reportId}
+                  filters={filters}
+                  onChange={onChange}
+                />
+              ))}
+            </div>
+          </SortableContext>
+        )}
+        <div className="flex flex-wrap items-center gap-2 rounded-lg border bg-muted/30 p-3">
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={handleAddRootBlock}
+          >
+            <Plus className="mr-1 h-3.5 w-3.5" /> Add block
+          </Button>
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button type="button" variant="outline" size="sm">
+                <Plus className="mr-1 h-3.5 w-3.5" /> Add grid
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="start">
+              {PRESETS.map((preset) => (
+                <DropdownMenuItem
+                  key={preset.columns}
+                  onClick={() => handleAddRootGrid(preset.columns)}
+                >
+                  {preset.label}
+                </DropdownMenuItem>
+              ))}
+            </DropdownMenuContent>
+          </DropdownMenu>
+        </div>
       </div>
-    </div>
+    </DndContext>
   );
 }
 
-interface LayoutNodeEditorProps {
+interface SortableLayoutNodeProps {
   node: ReportLayoutNode;
   definition: ReportDefinition;
   schemas: Schema[];
@@ -135,6 +191,33 @@ interface LayoutNodeEditorProps {
   reportId?: string;
   filters: Record<string, unknown>;
   onChange: (definition: ReportDefinition) => void;
+}
+
+/** Wraps a layout node in a `useSortable` context so dnd-kit can drive
+ *  drag + drop. The grip handle is forwarded to the editor's hover
+ *  affordance row. */
+function SortableLayoutNode(props: SortableLayoutNodeProps) {
+  const sortable = useSortable({ id: props.node.id });
+  const style: CSSProperties = {
+    transform: CSS.Transform.toString(sortable.transform),
+    transition: sortable.transition,
+    opacity: sortable.isDragging ? 0.4 : 1,
+  };
+  return (
+    <div ref={sortable.setNodeRef} style={style}>
+      <LayoutNodeEditor
+        {...props}
+        dragHandleProps={{
+          ...sortable.attributes,
+          ...sortable.listeners,
+        }}
+      />
+    </div>
+  );
+}
+
+interface LayoutNodeEditorProps extends SortableLayoutNodeProps {
+  dragHandleProps?: Record<string, unknown>;
 }
 
 function LayoutNodeEditor(props: LayoutNodeEditorProps) {
@@ -155,6 +238,7 @@ function BlockNodeEditor({
   blockResults,
   reportId,
   filters,
+  dragHandleProps,
   onChange,
 }: BlockNodeEditorProps) {
   const [expanded, setExpanded] = useState(false);
@@ -174,6 +258,7 @@ function BlockNodeEditor({
         blockResult={blockResults?.[block.id]}
         reportId={reportId}
         filters={filters}
+        dragHandleProps={dragHandleProps}
         onConfigure={() => setExpanded((v) => !v)}
         onDelete={() => onChange(removeLayoutNode(definition, node.id))}
       />
@@ -204,6 +289,7 @@ function GridNodeEditor({
   blockResults,
   reportId,
   filters,
+  dragHandleProps,
   onChange,
 }: GridNodeEditorProps) {
   const [showSettings, setShowSettings] = useState(false);
@@ -242,24 +328,43 @@ function GridNodeEditor({
     onChange(addLayoutNode(definition, sub, { parentGridId: node.id }));
   };
 
+  const itemChildIds = node.items.map((item) => item.child.id);
+
   return (
-    <section className="rounded-lg border bg-card p-3">
+    <section
+      className="rounded-lg border bg-card p-3"
+      data-testid={`grid-${node.id}`}
+      data-grid-id={node.id}
+    >
       <header className="mb-3 flex items-center justify-between gap-2">
-        <div className="min-w-0">
-          {node.title ? (
-            <h3 className="truncate text-sm font-semibold text-foreground">
-              {node.title}
-            </h3>
-          ) : (
-            <span className="text-xs uppercase tracking-wider text-muted-foreground">
-              Grid · {columns} {columns === 1 ? 'column' : 'columns'}
-            </span>
-          )}
-          {node.description ? (
-            <p className="mt-1 text-xs text-muted-foreground">
-              {node.description}
-            </p>
+        <div className="flex min-w-0 items-center gap-2">
+          {dragHandleProps ? (
+            <button
+              type="button"
+              className="cursor-grab rounded p-0.5 text-muted-foreground hover:bg-muted active:cursor-grabbing"
+              title="Drag to reorder"
+              aria-label="Drag grid"
+              {...dragHandleProps}
+            >
+              <GripVertical className="h-3.5 w-3.5" />
+            </button>
           ) : null}
+          <div className="min-w-0">
+            {node.title ? (
+              <h3 className="truncate text-sm font-semibold text-foreground">
+                {node.title}
+              </h3>
+            ) : (
+              <span className="text-xs uppercase tracking-wider text-muted-foreground">
+                Grid · {columns} {columns === 1 ? 'column' : 'columns'}
+              </span>
+            )}
+            {node.description ? (
+              <p className="mt-1 text-xs text-muted-foreground">
+                {node.description}
+              </p>
+            ) : null}
+          </div>
         </div>
         <div className="flex items-center gap-1">
           <Button
@@ -294,47 +399,52 @@ function GridNodeEditor({
           />
         </div>
       ) : null}
-      <div
-        className="grid w-full gap-3 [grid-template-columns:var(--report-grid-edit-cols)]"
-        style={
-          { '--report-grid-edit-cols': template } as CSSProperties
-        }
+      <SortableContext
+        items={itemChildIds}
+        strategy={verticalListSortingStrategy}
       >
-        {node.items.map((item) => {
-          const colSpan =
-            item.colSpan && item.colSpan > 1
-              ? Math.min(item.colSpan, columns)
-              : undefined;
-          const rowSpan =
-            item.rowSpan && item.rowSpan > 1 ? item.rowSpan : undefined;
-          return (
-            <div
-              key={item.id}
-              className="min-w-0 [grid-column:var(--report-grid-edit-col)] [grid-row:var(--report-grid-edit-row)]"
-              style={
-                {
-                  '--report-grid-edit-col': colSpan
-                    ? `span ${colSpan} / span ${colSpan}`
-                    : 'auto',
-                  '--report-grid-edit-row': rowSpan
-                    ? `span ${rowSpan} / span ${rowSpan}`
-                    : 'auto',
-                } as CSSProperties
-              }
-            >
-              <LayoutNodeEditor
-                node={item.child}
-                definition={definition}
-                schemas={schemas}
-                blockResults={blockResults}
-                reportId={reportId}
-                filters={filters}
-                onChange={onChange}
-              />
-            </div>
-          );
-        })}
-      </div>
+        <div
+          className="grid w-full gap-3 [grid-template-columns:var(--report-grid-edit-cols)]"
+          style={
+            { '--report-grid-edit-cols': template } as CSSProperties
+          }
+        >
+          {node.items.map((item) => {
+            const colSpan =
+              item.colSpan && item.colSpan > 1
+                ? Math.min(item.colSpan, columns)
+                : undefined;
+            const rowSpan =
+              item.rowSpan && item.rowSpan > 1 ? item.rowSpan : undefined;
+            return (
+              <div
+                key={item.id}
+                className="min-w-0 [grid-column:var(--report-grid-edit-col)] [grid-row:var(--report-grid-edit-row)]"
+                style={
+                  {
+                    '--report-grid-edit-col': colSpan
+                      ? `span ${colSpan} / span ${colSpan}`
+                      : 'auto',
+                    '--report-grid-edit-row': rowSpan
+                      ? `span ${rowSpan} / span ${rowSpan}`
+                      : 'auto',
+                  } as CSSProperties
+                }
+              >
+                <SortableLayoutNode
+                  node={item.child}
+                  definition={definition}
+                  schemas={schemas}
+                  blockResults={blockResults}
+                  reportId={reportId}
+                  filters={filters}
+                  onChange={onChange}
+                />
+              </div>
+            );
+          })}
+        </div>
+      </SortableContext>
       <div className="mt-3 flex flex-wrap items-center gap-2 border-t pt-3">
         <Button
           type="button"
@@ -367,6 +477,6 @@ function GridNodeEditor({
   );
 }
 
-// Exported for direct programmatic use (tests + drag-and-drop).
+// Exported for direct programmatic use (tests + future drag-and-drop).
 export type { LayoutTarget };
 export { pathToLayoutNode };

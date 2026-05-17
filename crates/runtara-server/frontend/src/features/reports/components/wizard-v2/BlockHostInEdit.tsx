@@ -1,9 +1,10 @@
 // In-place block rendering for the wizard's edit mode. Wraps the
 // existing viewer `ReportBlockHost` and overlays edit-chrome: title
-// label, hover-revealed action buttons (configure, delete, drag handle).
+// label, hover-revealed action buttons (configure, delete), and a
+// drag handle wired up by the dnd-kit Sortable wrapper.
 
 import { Button } from '@/shared/components/ui/button';
-import { Pencil, Trash2 } from 'lucide-react';
+import { GripVertical, Pencil, Trash2 } from 'lucide-react';
 import { ReportBlockDefinition, ReportBlockResult } from '../../types';
 import { ReportBlockHost } from '../ReportBlockHost';
 
@@ -14,6 +15,9 @@ interface BlockHostInEditProps {
   filters: Record<string, unknown>;
   onConfigure: () => void;
   onDelete: () => void;
+  /** Forwarded `useSortable` attributes + listeners. When provided, a
+   *  grip handle becomes a draggable surface for dnd-kit's `PointerSensor`. */
+  dragHandleProps?: Record<string, unknown>;
 }
 
 /** Renders the block exactly as the viewer would, plus hover-revealed
@@ -27,17 +31,34 @@ export function BlockHostInEdit({
   filters,
   onConfigure,
   onDelete,
+  dragHandleProps,
 }: BlockHostInEditProps) {
   return (
-    <div className="group/wizard-block relative rounded-md border bg-card p-2 transition-shadow hover:shadow-sm">
+    <div
+      className="group/wizard-block relative rounded-md border bg-card p-2 transition-shadow hover:shadow-sm"
+      data-block-id={block.id}
+    >
       <div className="mb-2 flex items-center justify-between gap-2">
-        <div className="min-w-0">
-          <p className="truncate text-xs font-medium text-muted-foreground">
-            {block.title || block.id}
-          </p>
-          <p className="text-[10px] uppercase tracking-wider text-muted-foreground/70">
-            {block.type}
-          </p>
+        <div className="flex min-w-0 items-center gap-2">
+          {dragHandleProps ? (
+            <button
+              type="button"
+              className="cursor-grab rounded p-0.5 text-muted-foreground hover:bg-muted active:cursor-grabbing"
+              title="Drag to reorder"
+              aria-label="Drag block"
+              {...dragHandleProps}
+            >
+              <GripVertical className="h-3.5 w-3.5" />
+            </button>
+          ) : null}
+          <div className="min-w-0">
+            <p className="truncate text-xs font-medium text-muted-foreground">
+              {block.title || block.id}
+            </p>
+            <p className="text-[10px] uppercase tracking-wider text-muted-foreground/70">
+              {block.type}
+            </p>
+          </div>
         </div>
         <div className="flex items-center gap-1 opacity-0 transition-opacity group-hover/wizard-block:opacity-100 focus-within:opacity-100">
           <Button
