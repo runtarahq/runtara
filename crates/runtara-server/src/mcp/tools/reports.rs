@@ -670,23 +670,22 @@ pub async fn add_report_layout_node(
 ) -> Result<CallToolResult, rmcp::ErrorData> {
     validate_path_param("report_id", &params.report_id)?;
     let node = normalize_json_arg(params.node, "node")?;
-    let mut report = get_report_value(server, &params.report_id).await?;
-    let definition = report_definition_mut(&mut report)?;
-    let layout = layout_array_mut(definition)?;
-
-    insert_layout_node(
-        layout,
-        params.parent_node_id.as_deref(),
-        params.column_id.as_deref(),
-        node,
-        LayoutPosition {
-            index: params.index,
-            before_node_id: params.before_node_id.as_deref(),
-            after_node_id: params.after_node_id.as_deref(),
-        },
-    )?;
-
-    save_report_value(server, &params.report_id, report).await
+    post_edit_op(
+        server,
+        &params.report_id,
+        json!({
+            "kind": "add_layout_node",
+            "node": node,
+            "target": layout_target_body(
+                params.parent_node_id.as_deref(),
+                params.column_id.as_deref(),
+                params.index,
+                params.before_node_id.as_deref(),
+                params.after_node_id.as_deref(),
+            ),
+        }),
+    )
+    .await
 }
 
 pub async fn replace_report_layout_node(
@@ -696,21 +695,16 @@ pub async fn replace_report_layout_node(
     validate_path_param("report_id", &params.report_id)?;
     validate_path_param("node_id", &params.node_id)?;
     let node = normalize_json_arg(params.node, "node")?;
-    if node.get("id").and_then(Value::as_str) != Some(params.node_id.as_str()) {
-        return Err(rmcp::ErrorData::invalid_params(
-            "Replacement layout node id must match node_id.",
-            None,
-        ));
-    }
-
-    let mut report = get_report_value(server, &params.report_id).await?;
-    let definition = report_definition_mut(&mut report)?;
-    let layout = layout_array_mut(definition)?;
-    if !replace_layout_node(layout, &params.node_id, node) {
-        return Err(layout_node_not_found(&params.node_id));
-    }
-
-    save_report_value(server, &params.report_id, report).await
+    post_edit_op(
+        server,
+        &params.report_id,
+        json!({
+            "kind": "replace_layout_node",
+            "nodeId": params.node_id,
+            "node": node,
+        }),
+    )
+    .await
 }
 
 pub async fn patch_report_layout_node(
@@ -720,27 +714,16 @@ pub async fn patch_report_layout_node(
     validate_path_param("report_id", &params.report_id)?;
     validate_path_param("node_id", &params.node_id)?;
     let patch = normalize_json_arg(params.patch, "patch")?;
-    if !patch.is_object() {
-        return Err(rmcp::ErrorData::invalid_params(
-            "Report layout node patch must be a JSON object.",
-            None,
-        ));
-    }
-    if patch.get("id").is_some() {
-        return Err(rmcp::ErrorData::invalid_params(
-            "Report layout node id cannot be changed with patch_report_layout_node.",
-            None,
-        ));
-    }
-
-    let mut report = get_report_value(server, &params.report_id).await?;
-    let definition = report_definition_mut(&mut report)?;
-    let layout = layout_array_mut(definition)?;
-    if !patch_layout_node(layout, &params.node_id, &patch) {
-        return Err(layout_node_not_found(&params.node_id));
-    }
-
-    save_report_value(server, &params.report_id, report).await
+    post_edit_op(
+        server,
+        &params.report_id,
+        json!({
+            "kind": "patch_layout_node",
+            "nodeId": params.node_id,
+            "patch": patch,
+        }),
+    )
+    .await
 }
 
 pub async fn move_report_layout_node(
@@ -749,26 +732,22 @@ pub async fn move_report_layout_node(
 ) -> Result<CallToolResult, rmcp::ErrorData> {
     validate_path_param("report_id", &params.report_id)?;
     validate_path_param("node_id", &params.node_id)?;
-
-    let mut report = get_report_value(server, &params.report_id).await?;
-    let definition = report_definition_mut(&mut report)?;
-    let layout = layout_array_mut(definition)?;
-    let Some(node) = remove_layout_node(layout, &params.node_id) else {
-        return Err(layout_node_not_found(&params.node_id));
-    };
-    insert_layout_node(
-        layout,
-        params.parent_node_id.as_deref(),
-        params.column_id.as_deref(),
-        node,
-        LayoutPosition {
-            index: params.index,
-            before_node_id: params.before_node_id.as_deref(),
-            after_node_id: params.after_node_id.as_deref(),
-        },
-    )?;
-
-    save_report_value(server, &params.report_id, report).await
+    post_edit_op(
+        server,
+        &params.report_id,
+        json!({
+            "kind": "move_layout_node",
+            "nodeId": params.node_id,
+            "target": layout_target_body(
+                params.parent_node_id.as_deref(),
+                params.column_id.as_deref(),
+                params.index,
+                params.before_node_id.as_deref(),
+                params.after_node_id.as_deref(),
+            ),
+        }),
+    )
+    .await
 }
 
 pub async fn remove_report_layout_node(
@@ -777,366 +756,90 @@ pub async fn remove_report_layout_node(
 ) -> Result<CallToolResult, rmcp::ErrorData> {
     validate_path_param("report_id", &params.report_id)?;
     validate_path_param("node_id", &params.node_id)?;
-
-    let mut report = get_report_value(server, &params.report_id).await?;
-    let definition = report_definition_mut(&mut report)?;
-    let layout = layout_array_mut(definition)?;
-    if remove_layout_node(layout, &params.node_id).is_none() {
-        return Err(layout_node_not_found(&params.node_id));
-    }
-
-    save_report_value(server, &params.report_id, report).await
-}
-
-#[derive(Clone, Copy)]
-struct LayoutPosition<'a> {
-    index: Option<usize>,
-    before_node_id: Option<&'a str>,
-    after_node_id: Option<&'a str>,
-}
-
-async fn get_report_value(
-    server: &SmoMcpServer,
-    report_id: &str,
-) -> Result<Value, rmcp::ErrorData> {
-    let result = api_get(server, &format!("/api/runtime/reports/{}", report_id)).await?;
-    result
-        .get("report")
-        .cloned()
-        .ok_or_else(|| rmcp::ErrorData::internal_error("Report API response missing report.", None))
-}
-
-async fn save_report_value(
-    server: &SmoMcpServer,
-    report_id: &str,
-    report: Value,
-) -> Result<CallToolResult, rmcp::ErrorData> {
-    let definition = report
-        .get("definition")
-        .cloned()
-        .ok_or_else(|| rmcp::ErrorData::invalid_params("Report is missing definition.", None))?;
-
-    let body = json!({
-        "name": report.get("name").cloned().unwrap_or(Value::String("Report".to_string())),
-        "slug": report.get("slug").cloned().unwrap_or(Value::String("report".to_string())),
-        "description": report.get("description").cloned().unwrap_or(Value::Null),
-        "tags": report.get("tags").cloned().unwrap_or_else(|| json!([])),
-        "status": report.get("status").cloned().unwrap_or(Value::String("published".to_string())),
-        "definition": definition,
-    });
-
-    let result = api_put(
+    post_edit_op(
         server,
-        &format!("/api/runtime/reports/{}", report_id),
-        Some(body),
+        &params.report_id,
+        json!({
+            "kind": "remove_layout_node",
+            "nodeId": params.node_id,
+        }),
+    )
+    .await
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct EditReportParams {
+    #[schemars(description = "Report id or slug")]
+    pub report_id: String,
+    #[schemars(
+        description = "Batch of ReportEditOp objects applied atomically. Each op is \
+                       `{ kind: add_block | replace_block | patch_block | move_block | \
+                       remove_block | add_layout_node | replace_layout_node | \
+                       patch_layout_node | move_layout_node | remove_layout_node, ... }`. \
+                       See get_report_authoring_schema for the op shapes."
+    )]
+    #[schemars(schema_with = "crate::mcp::tools::internal_api::json_array_schema")]
+    pub ops: Value,
+}
+
+/// Phase 6 canonical edit-report MCP tool — accepts a batch of edit ops
+/// and POSTs them to `/api/runtime/reports/{id}/edit`. The five
+/// per-layout-node tools (`add_report_layout_node`, …) are thin wrappers
+/// that build a single-op batch and call the same endpoint.
+pub async fn edit_report(
+    server: &SmoMcpServer,
+    params: EditReportParams,
+) -> Result<CallToolResult, rmcp::ErrorData> {
+    validate_path_param("report_id", &params.report_id)?;
+    let ops = normalize_json_array_arg(params.ops, "ops")?;
+    let result = api_post(
+        server,
+        &format!("/api/runtime/reports/{}/edit", params.report_id),
+        Some(json!({ "ops": ops })),
     )
     .await?;
     json_result(result)
 }
 
-fn report_definition_mut(report: &mut Value) -> Result<&mut Value, rmcp::ErrorData> {
-    report
-        .get_mut("definition")
-        .ok_or_else(|| rmcp::ErrorData::invalid_params("Report is missing definition.", None))
+async fn post_edit_op(
+    server: &SmoMcpServer,
+    report_id: &str,
+    op: Value,
+) -> Result<CallToolResult, rmcp::ErrorData> {
+    let result = api_post(
+        server,
+        &format!("/api/runtime/reports/{}/edit", report_id),
+        Some(json!({ "ops": [op] })),
+    )
+    .await?;
+    json_result(result)
 }
 
-fn layout_array_mut(definition: &mut Value) -> Result<&mut Vec<Value>, rmcp::ErrorData> {
-    if definition.get("layout").is_none() {
-        definition["layout"] = json!([]);
-    }
-    definition
-        .get_mut("layout")
-        .and_then(Value::as_array_mut)
-        .ok_or_else(|| {
-            rmcp::ErrorData::invalid_params("Report definition.layout must be an array.", None)
-        })
-}
-
-fn insert_layout_node(
-    nodes: &mut Vec<Value>,
+fn layout_target_body(
     parent_node_id: Option<&str>,
     column_id: Option<&str>,
-    node: Value,
-    position: LayoutPosition<'_>,
-) -> Result<(), rmcp::ErrorData> {
-    match parent_node_id {
-        None => insert_layout_node_into(nodes, node, position),
-        Some(parent_node_id) => {
-            if insert_layout_node_in_container(nodes, parent_node_id, column_id, node, position)? {
-                Ok(())
-            } else {
-                Err(layout_node_not_found(parent_node_id))
-            }
-        }
+    index: Option<usize>,
+    before_id: Option<&str>,
+    after_id: Option<&str>,
+) -> Value {
+    let mut target = serde_json::Map::new();
+    if let Some(v) = parent_node_id {
+        target.insert("parentNodeId".to_string(), Value::String(v.to_string()));
     }
-}
-
-fn insert_layout_node_in_container(
-    nodes: &mut [Value],
-    parent_node_id: &str,
-    column_id: Option<&str>,
-    node: Value,
-    position: LayoutPosition<'_>,
-) -> Result<bool, rmcp::ErrorData> {
-    for current in nodes {
-        if layout_node_id(current) == Some(parent_node_id) {
-            insert_layout_node_into_container(current, column_id, node, position)?;
-            return Ok(true);
-        }
-
-        if let Some(children) = current.get_mut("children").and_then(Value::as_array_mut)
-            && insert_layout_node_in_container(
-                children,
-                parent_node_id,
-                column_id,
-                node.clone(),
-                position,
-            )?
-        {
-            return Ok(true);
-        }
-
-        if let Some(columns) = current.get_mut("columns").and_then(Value::as_array_mut) {
-            for column in columns {
-                if let Some(children) = column.get_mut("children").and_then(Value::as_array_mut)
-                    && insert_layout_node_in_container(
-                        children,
-                        parent_node_id,
-                        column_id,
-                        node.clone(),
-                        position,
-                    )?
-                {
-                    return Ok(true);
-                }
-            }
-        }
+    if let Some(v) = column_id {
+        target.insert("columnId".to_string(), Value::String(v.to_string()));
     }
-    Ok(false)
-}
-
-fn insert_layout_node_into_container(
-    container: &mut Value,
-    column_id: Option<&str>,
-    node: Value,
-    position: LayoutPosition<'_>,
-) -> Result<(), rmcp::ErrorData> {
-    match container.get("type").and_then(Value::as_str) {
-        Some("section") => {
-            if column_id.is_some() {
-                return Err(rmcp::ErrorData::invalid_params(
-                    "column_id can only be used with columns layout nodes.",
-                    None,
-                ));
-            }
-            if container.get("children").is_none() {
-                container["children"] = json!([]);
-            }
-            let children = container
-                .get_mut("children")
-                .and_then(Value::as_array_mut)
-                .ok_or_else(|| {
-                    rmcp::ErrorData::invalid_params(
-                        "Section layout node children must be an array.",
-                        None,
-                    )
-                })?;
-            insert_layout_node_into(children, node, position)
-        }
-        Some("columns") => {
-            let column_id = column_id.ok_or_else(|| {
-                rmcp::ErrorData::invalid_params(
-                    "column_id is required when inserting into a columns layout node.",
-                    None,
-                )
-            })?;
-            let columns = container
-                .get_mut("columns")
-                .and_then(Value::as_array_mut)
-                .ok_or_else(|| {
-                    rmcp::ErrorData::invalid_params(
-                        "Columns layout node columns must be an array.",
-                        None,
-                    )
-                })?;
-            for column in columns {
-                if column.get("id").and_then(Value::as_str) == Some(column_id) {
-                    if column.get("children").is_none() {
-                        column["children"] = json!([]);
-                    }
-                    let children = column
-                        .get_mut("children")
-                        .and_then(Value::as_array_mut)
-                        .ok_or_else(|| {
-                            rmcp::ErrorData::invalid_params(
-                                "Column children must be an array.",
-                                None,
-                            )
-                        })?;
-                    return insert_layout_node_into(children, node, position);
-                }
-            }
-            Err(rmcp::ErrorData::invalid_params(
-                format!("Unknown report layout column '{}'.", column_id),
-                None,
-            ))
-        }
-        Some(other) => Err(rmcp::ErrorData::invalid_params(
-            format!(
-                "Layout node type '{}' cannot contain child layout nodes.",
-                other
-            ),
-            None,
-        )),
-        None => Err(rmcp::ErrorData::invalid_params(
-            "Layout container node must include type.",
-            None,
-        )),
+    if let Some(v) = index {
+        target.insert("index".to_string(), json!(v));
     }
-}
-
-fn insert_layout_node_into(
-    nodes: &mut Vec<Value>,
-    node: Value,
-    position: LayoutPosition<'_>,
-) -> Result<(), rmcp::ErrorData> {
-    let index = resolve_layout_position(nodes, position)?;
-    nodes.insert(index, node);
-    Ok(())
-}
-
-fn resolve_layout_position(
-    nodes: &[Value],
-    position: LayoutPosition<'_>,
-) -> Result<usize, rmcp::ErrorData> {
-    let selector_count = usize::from(position.index.is_some())
-        + usize::from(position.before_node_id.is_some())
-        + usize::from(position.after_node_id.is_some());
-    if selector_count > 1 {
-        return Err(rmcp::ErrorData::invalid_params(
-            "Layout position must use only one of index, before_node_id, or after_node_id.",
-            None,
-        ));
+    if let Some(v) = before_id {
+        target.insert("beforeId".to_string(), Value::String(v.to_string()));
     }
-    if let Some(index) = position.index {
-        return Ok(index.min(nodes.len()));
+    if let Some(v) = after_id {
+        target.insert("afterId".to_string(), Value::String(v.to_string()));
     }
-    if let Some(before_node_id) = position.before_node_id {
-        return nodes
-            .iter()
-            .position(|node| layout_node_id(node) == Some(before_node_id))
-            .ok_or_else(|| layout_node_not_found(before_node_id));
-    }
-    if let Some(after_node_id) = position.after_node_id {
-        return nodes
-            .iter()
-            .position(|node| layout_node_id(node) == Some(after_node_id))
-            .map(|index| index + 1)
-            .ok_or_else(|| layout_node_not_found(after_node_id));
-    }
-    Ok(nodes.len())
-}
-
-fn patch_layout_node(nodes: &mut [Value], node_id: &str, patch: &Value) -> bool {
-    for node in nodes {
-        if layout_node_id(node) == Some(node_id) {
-            apply_json_merge_patch(node, patch);
-            return true;
-        }
-        if let Some(children) = node.get_mut("children").and_then(Value::as_array_mut)
-            && patch_layout_node(children, node_id, patch)
-        {
-            return true;
-        }
-        if let Some(columns) = node.get_mut("columns").and_then(Value::as_array_mut) {
-            for column in columns {
-                if let Some(children) = column.get_mut("children").and_then(Value::as_array_mut)
-                    && patch_layout_node(children, node_id, patch)
-                {
-                    return true;
-                }
-            }
-        }
-    }
-    false
-}
-
-fn replace_layout_node(nodes: &mut [Value], node_id: &str, replacement: Value) -> bool {
-    for node in nodes {
-        if layout_node_id(node) == Some(node_id) {
-            *node = replacement;
-            return true;
-        }
-        if let Some(children) = node.get_mut("children").and_then(Value::as_array_mut)
-            && replace_layout_node(children, node_id, replacement.clone())
-        {
-            return true;
-        }
-        if let Some(columns) = node.get_mut("columns").and_then(Value::as_array_mut) {
-            for column in columns {
-                if let Some(children) = column.get_mut("children").and_then(Value::as_array_mut)
-                    && replace_layout_node(children, node_id, replacement.clone())
-                {
-                    return true;
-                }
-            }
-        }
-    }
-    false
-}
-
-fn remove_layout_node(nodes: &mut Vec<Value>, node_id: &str) -> Option<Value> {
-    if let Some(index) = nodes
-        .iter()
-        .position(|node| layout_node_id(node) == Some(node_id))
-    {
-        return Some(nodes.remove(index));
-    }
-    for node in nodes {
-        if let Some(children) = node.get_mut("children").and_then(Value::as_array_mut)
-            && let Some(removed) = remove_layout_node(children, node_id)
-        {
-            return Some(removed);
-        }
-        if let Some(columns) = node.get_mut("columns").and_then(Value::as_array_mut) {
-            for column in columns {
-                if let Some(children) = column.get_mut("children").and_then(Value::as_array_mut)
-                    && let Some(removed) = remove_layout_node(children, node_id)
-                {
-                    return Some(removed);
-                }
-            }
-        }
-    }
-    None
-}
-
-fn layout_node_id(node: &Value) -> Option<&str> {
-    node.get("id").and_then(Value::as_str)
-}
-
-fn layout_node_not_found(node_id: &str) -> rmcp::ErrorData {
-    rmcp::ErrorData::invalid_params(format!("Unknown report layout node '{}'.", node_id), None)
-}
-
-fn apply_json_merge_patch(target: &mut Value, patch: &Value) {
-    match (target, patch) {
-        (Value::Object(target), Value::Object(patch)) => {
-            for (key, patch_value) in patch {
-                if patch_value.is_null() {
-                    target.remove(key);
-                } else {
-                    apply_json_merge_patch(
-                        target.entry(key.clone()).or_insert(Value::Null),
-                        patch_value,
-                    );
-                }
-            }
-        }
-        (target, patch) => {
-            *target = patch.clone();
-        }
-    }
+    Value::Object(target)
 }
 
 fn normalize_json_object_arg(value: Value, field: &str) -> Result<Value, rmcp::ErrorData> {

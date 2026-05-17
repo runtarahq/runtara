@@ -461,6 +461,47 @@ pub async fn remove_report_block(
     }
 }
 
+#[derive(Debug, serde::Deserialize)]
+pub struct EditReportRequest {
+    #[serde(default)]
+    pub ops: Vec<runtara_report_dsl::edit_ops::ReportEditOp>,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct EditReportResponse {
+    pub success: bool,
+    pub report: ReportDto,
+}
+
+/// Phase 6 canonical edit endpoint. Accepts a batch of `ReportEditOp`s
+/// and applies them atomically. The legacy per-op handlers
+/// (`add_report_block`, `replace_report_block`, etc.) keep working
+/// alongside this — they're slated to become single-op shims around
+/// `edit_report` in a follow-up.
+pub async fn edit_report(
+    crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
+    State(pool): State<PgPool>,
+    State(manager): State<Arc<ObjectStoreManager>>,
+    State(connections): State<Arc<runtara_connections::ConnectionsFacade>>,
+    Path(report_id): Path<String>,
+    Json(request): Json<EditReportRequest>,
+) -> Result<(StatusCode, Json<EditReportResponse>), (StatusCode, Json<Value>)> {
+    let service = ReportService::new(pool, manager, connections);
+    match service
+        .edit_report(&tenant_id, &report_id, &request.ops)
+        .await
+    {
+        Ok(report) => Ok((
+            StatusCode::OK,
+            Json(EditReportResponse {
+                success: true,
+                report,
+            }),
+        )),
+        Err(error) => Err(error_response(error)),
+    }
+}
+
 fn error_response(error: ReportServiceError) -> (StatusCode, Json<Value>) {
     match error {
         ReportServiceError::NotFound => (

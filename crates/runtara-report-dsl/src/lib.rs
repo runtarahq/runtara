@@ -7,6 +7,7 @@
 //! WASM build to the frontend so FE and BE share one validation truth.
 
 pub mod condition;
+pub mod edit_ops;
 pub mod format;
 pub mod lint;
 pub mod row_condition;

@@ -711,6 +711,16 @@ impl SmoMcpServer {
         tools::reports::remove_report_layout_node(self, params.0).await
     }
 
+    #[tool(
+        description = "Apply a batch of report edit operations atomically. Each op is { kind: add_block | replace_block | patch_block | move_block | remove_block | add_layout_node | replace_layout_node | patch_layout_node | move_layout_node | remove_layout_node, ... }. The whole batch succeeds or fails together — partial application is impossible. The single-op layout/block tools fan into this endpoint."
+    )]
+    async fn edit_report(
+        &self,
+        params: Parameters<tools::reports::EditReportParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        tools::reports::edit_report(self, params.0).await
+    }
+
     // ===== Graph Mutation Tools =====
     // Each mutation: fetches latest graph → mutates → saves in-place via PUT .../versions/{v}/graph.
     // First mutation on a workflow creates a new version; subsequent mutations update that same version.

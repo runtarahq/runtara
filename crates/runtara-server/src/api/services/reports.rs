@@ -481,6 +481,33 @@ impl ReportService {
         })
     }
 
+    /// Apply a batch of [`runtara_report_dsl::edit_ops::ReportEditOp`]
+    /// atomically: load the report, apply ops via the dsl helper (clones
+    /// internally so failures don't mutate intermediate state), validate
+    /// the result, and persist. Returns the updated report. Phase 6's
+    /// canonical mutation entry point — REST per-op handlers + MCP layout
+    /// walkers fan in through this method.
+    pub async fn edit_report(
+        &self,
+        tenant_id: &str,
+        id_or_slug: &str,
+        ops: &[runtara_report_dsl::edit_ops::ReportEditOp],
+    ) -> Result<ReportDto, ReportServiceError> {
+        let mut report = self.get_report(tenant_id, id_or_slug).await?;
+        runtara_report_dsl::edit_ops::apply_edit_ops(&mut report.definition, ops).map_err(
+            |err| match err.code {
+                "BLOCK_NOT_FOUND" | "LAYOUT_NODE_NOT_FOUND" => {
+                    ReportServiceError::Validation(err.message)
+                }
+                "DUPLICATE_BLOCK_ID" | "DUPLICATE_LAYOUT_NODE_ID" => {
+                    ReportServiceError::Conflict(err.message)
+                }
+                _ => ReportServiceError::Validation(err.message),
+            },
+        )?;
+        self.save_report_definition(tenant_id, report).await
+    }
+
     pub async fn validate_report(
         &self,
         tenant_id: &str,

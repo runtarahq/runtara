@@ -1441,6 +1441,10 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
             "/api/runtime/reports/{report_id}/blocks/{block_id}/move",
             post(api::handlers::reports::move_report_block),
         )
+        .route(
+            "/api/runtime/reports/{report_id}/edit",
+            post(api::handlers::reports::edit_report),
+        )
         // NOTE: Rate limit analytics routes are now served by runtara-connections crate.
         // Invocation Trigger endpoints
         .route(
