@@ -4955,205 +4955,20 @@ fn validate_report_display_template(
     })
 }
 
+/// Thin wrapper over [`runtara_report_dsl::validate_condition_field_refs`]
+/// that wraps the dsl error into a [`ReportServiceError`]. The validator
+/// itself lives in the dsl crate now so both server and FE can call it.
 pub(crate) fn validate_report_condition_field_refs(
     condition: Option<&Condition>,
     is_known_field: &dyn Fn(&str) -> bool,
     context: &str,
 ) -> Result<(), ReportServiceError> {
-    if let Some(condition) = condition {
-        validate_report_condition_field_refs_at(condition, is_known_field, context, "condition")?;
-    }
-    Ok(())
-}
-
-fn validate_report_condition_field_refs_at(
-    condition: &Condition,
-    is_known_field: &dyn Fn(&str) -> bool,
-    context: &str,
-    path: &str,
-) -> Result<(), ReportServiceError> {
-    let op = condition.op.to_ascii_uppercase();
-    let args = condition.arguments.as_deref().ok_or_else(|| {
-        report_validation_error(
-            "$",
-            "INVALID_CONDITION_ARGUMENTS",
-            format!(
-            "{} {} operator '{}' requires arguments",
-            context, path, condition.op
-            ),
-            Some("Conditions must use { op, arguments } with the field name as the first operand for comparison operators.".to_string()),
-        )
-    })?;
-
-    match op.as_str() {
-        "AND" | "OR" => {
-            if args.is_empty() {
-                return Err(report_validation_error(
-                    "$",
-                    "INVALID_CONDITION_ARGUMENTS",
-                    format!(
-                        "{} {} operator '{}' requires at least one condition argument",
-                        context, path, condition.op
-                    ),
-                    Some("AND/OR arguments must be condition objects.".to_string()),
-                ));
-            }
-            for (index, argument) in args.iter().enumerate() {
-                let child = condition_from_value(argument).ok_or_else(|| {
-                    report_validation_error(
-                        "$",
-                        "INVALID_CONDITION_ARGUMENTS",
-                        format!(
-                            "{} {} operator '{}' argument {} must be a condition object",
-                            context, path, condition.op, index
-                        ),
-                        Some("Use nested condition objects inside logical operators.".to_string()),
-                    )
-                })?;
-                validate_report_condition_field_refs_at(
-                    &child,
-                    is_known_field,
-                    context,
-                    &format!("{path}.arguments[{index}]"),
-                )?;
-            }
-        }
-        "NOT" => {
-            if args.len() != 1 {
-                return Err(report_validation_error(
-                    "$",
-                    "INVALID_CONDITION_ARGUMENTS",
-                    format!(
-                        "{} {} operator '{}' requires exactly one condition argument",
-                        context, path, condition.op
-                    ),
-                    Some("NOT must wrap exactly one condition object.".to_string()),
-                ));
-            }
-            let child = condition_from_value(&args[0]).ok_or_else(|| {
-                report_validation_error(
-                    "$",
-                    "INVALID_CONDITION_ARGUMENTS",
-                    format!(
-                        "{} {} operator '{}' argument 0 must be a condition object",
-                        context, path, condition.op
-                    ),
-                    Some("NOT must wrap exactly one condition object.".to_string()),
-                )
-            })?;
-            validate_report_condition_field_refs_at(
-                &child,
-                is_known_field,
-                context,
-                &format!("{path}.arguments[0]"),
-            )?;
-        }
-        "EQ" | "NE" | "GT" | "LT" | "GTE" | "LTE" | "CONTAINS" | "IN" | "NOT_IN" => {
-            validate_report_condition_arg_count(context, path, &condition.op, args, 2)?;
-            validate_report_condition_field_arg(
-                context,
-                path,
-                &condition.op,
-                args,
-                is_known_field,
-            )?;
-        }
-        "IS_EMPTY" | "IS_NOT_EMPTY" | "IS_DEFINED" => {
-            validate_report_condition_arg_count(context, path, &condition.op, args, 1)?;
-            validate_report_condition_field_arg(
-                context,
-                path,
-                &condition.op,
-                args,
-                is_known_field,
-            )?;
-        }
-        "SIMILARITY_GTE" | "COSINE_DISTANCE_LTE" | "L2_DISTANCE_LTE" => {
-            validate_report_condition_arg_count(context, path, &condition.op, args, 3)?;
-            validate_report_condition_field_arg(
-                context,
-                path,
-                &condition.op,
-                args,
-                is_known_field,
-            )?;
-        }
-        _ => {
-            return Err(report_validation_error(
-                "$",
-                "UNSUPPORTED_CONDITION_OPERATOR",
-                format!(
-                    "{} {} uses unsupported condition operator '{}'",
-                    context, path, condition.op
-                ),
-                Some("Use Object Model condition operators such as EQ, NE, GT, GTE, LT, LTE, IN, NOT_IN, CONTAINS, IS_DEFINED, IS_EMPTY, or IS_NOT_EMPTY.".to_string()),
-            ));
-        }
-    }
-
-    Ok(())
-}
-
-fn validate_report_condition_arg_count(
-    context: &str,
-    path: &str,
-    op: &str,
-    args: &[Value],
-    expected: usize,
-) -> Result<(), ReportServiceError> {
-    if args.len() != expected {
-        return Err(report_validation_error(
-            "$",
-            "INVALID_CONDITION_ARGUMENTS",
-            format!(
-                "{} {} operator '{}' requires exactly {} argument{}",
-                context,
-                path,
-                op,
-                expected,
-                if expected == 1 { "" } else { "s" }
-            ),
-            Some("Check the condition operator arity and operand order.".to_string()),
-        ));
-    }
-    Ok(())
-}
-
-fn validate_report_condition_field_arg(
-    context: &str,
-    path: &str,
-    op: &str,
-    args: &[Value],
-    is_known_field: &dyn Fn(&str) -> bool,
-) -> Result<(), ReportServiceError> {
-    let field = args
-        .first()
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|field| !field.is_empty())
-        .ok_or_else(|| {
-            report_validation_error(
-                "$",
-                "INVALID_CONDITION_FIELD",
-                format!(
-                    "{} {} operator '{}' first argument must be a non-empty field name",
-                    context, path, op
-                ),
-                Some(
-                    "The first operand must be a field available from the report source."
-                        .to_string(),
-                ),
-            )
-        })?;
-    if !is_known_field(field) {
-        return Err(report_validation_error(
-            "$",
-            "UNKNOWN_CONDITION_FIELD",
-            format!("{} {} references unknown field '{}'", context, path, field),
-            Some("Use a field from the source schema, joined schema alias, dataset output, workflow runtime entity, or system entity for this condition.".to_string()),
-        ));
-    }
-    Ok(())
+    let Some(condition) = condition else {
+        return Ok(());
+    };
+    runtara_report_dsl::validate_condition_field_refs(condition, is_known_field, context).map_err(
+        |err| report_validation_error("$", err.code, err.message, err.hint.map(|h| h.to_string())),
+    )
 }
 
 pub(crate) fn validate_report_source_filter_mappings(
@@ -5639,13 +5454,7 @@ fn is_known_condition_filter_ref_path(path: &str) -> bool {
     matches!(path, "value" | "values" | "from" | "to" | "min" | "max")
 }
 
-pub(crate) fn condition_from_value(value: &Value) -> Option<Condition> {
-    let object = value.as_object()?;
-    if !(object.contains_key("op") || object.contains_key("arguments")) {
-        return None;
-    }
-    serde_json::from_value(value.clone()).ok()
-}
+pub(crate) use runtara_report_dsl::condition_from_value;
 
 fn static_filter_options_response(
     filter: &ReportFilterDefinition,

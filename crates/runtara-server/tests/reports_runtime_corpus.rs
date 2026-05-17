@@ -263,3 +263,179 @@ async fn validate_report_snapshots() {
         panic!("one or more runtime validate snapshots diverged");
     }
 }
+
+/// Phase 5 E2E: drive `validate_report` through the MCP tool layer end to
+/// end. Builds an axum router with the real REST handler on top of the
+/// test DB, wraps it in a [`SmoMcpServer`], and calls
+/// `tools::reports::validate_report`. The expected MCP response is
+/// `{ valid, mode, errors, warnings, ... }` where `errors` matches what
+/// the REST handler returns directly and `warnings` contains any
+/// `runtara_report_dsl::lint::lint` output.
+///
+/// Run together with the other tests in this file because both need the
+/// same throwaway tenant DB and migrations.
+#[tokio::test]
+async fn mcp_validate_report_proxies_rest_and_emits_lint() {
+    use axum::Router;
+    use axum::routing::post;
+    use runtara_server::auth::{AuthContext, AuthMethod};
+    use runtara_server::mcp::tools::reports::{
+        ReportValidationMode, ValidateReportParams, validate_report as mcp_validate_report,
+    };
+
+    let Some(fixture) = DbFixture::start().await else {
+        eprintln!("Skipping MCP validate E2E: no test database configured");
+        return;
+    };
+
+    ensure_config(&fixture.object_url);
+
+    let connections = Arc::new(ConnectionsFacade::new(ConnectionsState::from_config(
+        ConnectionsConfig {
+            db_pool: fixture.server_pool.clone(),
+            redis_manager: None,
+            public_base_url: "http://localhost".to_string(),
+            http_client: reqwest::Client::new(),
+            cipher: Arc::new(NoOpCipher),
+        },
+    )));
+
+    let manager = Arc::new(ObjectStoreManager::new(fixture.object_url.clone()));
+
+    // Combined state that the validate handler's three `State<...>`
+    // extractors resolve from via the `FromRef` impls below.
+    #[derive(Clone)]
+    struct TestState {
+        pool: PgPool,
+        manager: Arc<ObjectStoreManager>,
+        connections: Arc<ConnectionsFacade>,
+    }
+    impl axum::extract::FromRef<TestState> for PgPool {
+        fn from_ref(state: &TestState) -> PgPool {
+            state.pool.clone()
+        }
+    }
+    impl axum::extract::FromRef<TestState> for Arc<ObjectStoreManager> {
+        fn from_ref(state: &TestState) -> Arc<ObjectStoreManager> {
+            state.manager.clone()
+        }
+    }
+    impl axum::extract::FromRef<TestState> for Arc<ConnectionsFacade> {
+        fn from_ref(state: &TestState) -> Arc<ConnectionsFacade> {
+            state.connections.clone()
+        }
+    }
+
+    let test_state = TestState {
+        pool: fixture.server_pool.clone(),
+        manager: manager.clone(),
+        connections: connections.clone(),
+    };
+
+    // Build a minimal internal router that mounts just the validate route
+    // on the test state. Real server merges this with many other routers;
+    // we only need the one path the MCP tool talks to.
+    let internal_router = Router::new()
+        .route(
+            "/api/runtime/reports/validate",
+            post(runtara_server::api::handlers::reports::validate_report),
+        )
+        .with_state(test_state)
+        // Inject an AuthContext on every request so the `OrgId` extractor in
+        // the handler resolves the tenant — the production internal router
+        // gets this from MCP's `build_request` helper, which we bypass here
+        // since `tools::reports::validate_report` calls `api_post` itself.
+        .layer(axum::middleware::from_fn(
+            |mut request: axum::extract::Request, next: axum::middleware::Next| async move {
+                request.extensions_mut().insert(AuthContext {
+                    org_id: TENANT_ID.to_string(),
+                    user_id: "test-mcp-validate".to_string(),
+                    auth_method: AuthMethod::Jwt,
+                });
+                next.run(request).await
+            },
+        ));
+
+    let server = runtara_server::mcp::server::SmoMcpServer::new(
+        fixture.server_pool.clone(),
+        manager.clone(),
+        None,
+        TENANT_ID.to_string(),
+        internal_router,
+    );
+
+    // Markdown-only fixture has no schema dependency — passes validation
+    // cleanly so we can assert `errors: []` from the REST side and `valid: true`.
+    let markdown = serde_json::json!({
+        "definitionVersion": 1,
+        "blocks": [{
+            "id": "intro",
+            "type": "markdown",
+            "markdown": { "content": "# Hello" }
+        }]
+    });
+
+    // mode=all → REST validation + lint pass merged. We expect `valid: true`
+    // and `errors: []` because the fixture is canonical-shape.
+    let mut params_all = ValidateReportParams {
+        definition: markdown.clone(),
+        mode: Some(ReportValidationMode::All),
+    };
+    let response_all = mcp_validate_report(&server, params_all)
+        .await
+        .expect("MCP validate_report (mode=all) succeeded");
+    let body_all: serde_json::Value =
+        serde_json::from_str(extract_text(&response_all)).expect("MCP response JSON");
+    assert_eq!(body_all.get("valid"), Some(&serde_json::json!(true)));
+    assert_eq!(
+        body_all.get("errors"),
+        Some(&serde_json::json!([])),
+        "MCP errors must match REST errors (both empty for a canonical fixture); got: {body_all}"
+    );
+
+    // Definition with an unknown root key triggers the new lint warning.
+    let mut definition_lint = markdown.clone();
+    definition_lint["filterz"] = serde_json::json!([]);
+    params_all = ValidateReportParams {
+        definition: definition_lint.clone(),
+        mode: Some(ReportValidationMode::All),
+    };
+    let response_lint = mcp_validate_report(&server, params_all)
+        .await
+        .expect("MCP validate_report (mode=all) with lint succeeded");
+    let body_lint: serde_json::Value =
+        serde_json::from_str(extract_text(&response_lint)).expect("MCP response JSON");
+    let warnings = body_lint
+        .get("warnings")
+        .and_then(serde_json::Value::as_array)
+        .expect("warnings array");
+    assert!(
+        warnings
+            .iter()
+            .any(|w| w.get("code") == Some(&serde_json::json!("UNKNOWN_REPORT_FIELD"))),
+        "lint must surface UNKNOWN_REPORT_FIELD for the bogus 'filterz' key; got: {body_lint}"
+    );
+
+    // mode=syntax → static JSON-Schema-only path; should not hit REST.
+    let params_syntax = ValidateReportParams {
+        definition: markdown.clone(),
+        mode: Some(ReportValidationMode::Syntax),
+    };
+    let response_syntax = mcp_validate_report(&server, params_syntax)
+        .await
+        .expect("MCP validate_report (mode=syntax) succeeded");
+    let body_syntax: serde_json::Value =
+        serde_json::from_str(extract_text(&response_syntax)).expect("MCP response JSON");
+    assert_eq!(body_syntax.get("mode"), Some(&serde_json::json!("syntax")));
+    assert_eq!(body_syntax.get("valid"), Some(&serde_json::json!(true)));
+
+    fixture.cleanup().await;
+}
+
+/// Pull the JSON text out of an MCP `CallToolResult`. The first content
+/// item is the JSON-serialized response.
+fn extract_text(result: &rmcp::model::CallToolResult) -> &str {
+    let first = result.content.first().expect("at least one content item");
+    let raw = first.as_text().expect("content is text");
+    &raw.text
+}

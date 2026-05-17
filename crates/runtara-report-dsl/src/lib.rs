@@ -18,7 +18,9 @@ pub mod virtual_aggregate;
 #[cfg(feature = "wasm")]
 mod wasm_bindings;
 
-pub use condition::Condition;
+pub use condition::{
+    Condition, ConditionValidationError, condition_from_value, validate_condition_field_refs,
+};
 pub use format::{FormatSpec, Formatter, RenderContext, SimpleAsciiFormatter};
 pub use row_condition::{RowConditionError, evaluate_row_condition};
 pub use template::{
