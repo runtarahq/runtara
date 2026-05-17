@@ -508,7 +508,7 @@ use runtime_client::RuntimeClient;
         description = "API for managing workflow definitions with versioning support",
     )
 )]
-struct ApiDoc;
+pub struct ApiDoc;
 
 /// Application state shared across all handlers
 #[derive(Clone)]

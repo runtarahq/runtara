@@ -6,11 +6,11 @@
 //! re-exports from here once the server takes a dependency on this crate,
 //! so there is one definition.
 
-use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Condition {
     pub op: String,
     #[serde(skip_serializing_if = "Option::is_none")]

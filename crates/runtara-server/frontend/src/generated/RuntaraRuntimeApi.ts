@@ -115,6 +115,143 @@ export enum SchemaFieldType {
   File = "file",
 }
 
+export enum ReportWorkflowRuntimeEntity {
+  Instances = "instances",
+  Actions = "actions",
+  RuntimeExecutionMetricBuckets = "runtime_execution_metric_buckets",
+  RuntimeSystemSnapshot = "runtime_system_snapshot",
+  ConnectionRateLimitStatus = "connection_rate_limit_status",
+  ConnectionRateLimitEvents = "connection_rate_limit_events",
+  ConnectionRateLimitTimeline = "connection_rate_limit_timeline",
+}
+
+export enum ReportWorkflowActionContextMode {
+  Row = "row",
+  Field = "field",
+  Value = "value",
+  Selection = "selection",
+}
+
+export enum ReportTableColumnType {
+  Value = "value",
+  Chart = "chart",
+  WorkflowButton = "workflow_button",
+  InteractionButtons = "interaction_buttons",
+}
+
+export enum ReportStatus {
+  Draft = "draft",
+  Published = "published",
+  Archived = "archived",
+}
+
+export enum ReportSourceMode {
+  Filter = "filter",
+  Aggregate = "aggregate",
+}
+
+export enum ReportSourceKind {
+  ObjectModel = "object_model",
+  WorkflowRuntime = "workflow_runtime",
+  System = "system",
+}
+
+export enum ReportJoinKind {
+  Inner = "inner",
+  Left = "left",
+}
+
+export enum ReportFilterType {
+  Select = "select",
+  MultiSelect = "multi_select",
+  Radio = "radio",
+  Checkbox = "checkbox",
+  TimeRange = "time_range",
+  NumberRange = "number_range",
+  Text = "text",
+  Search = "search",
+}
+
+export enum ReportEditorKind {
+  Text = "text",
+  Textarea = "textarea",
+  Number = "number",
+  Select = "select",
+  Toggle = "toggle",
+  Date = "date",
+  Datetime = "datetime",
+  Lookup = "lookup",
+}
+
+export enum ReportDatasetValueFormat {
+  String = "string",
+  Number = "number",
+  Decimal = "decimal",
+  Currency = "currency",
+  Percent = "percent",
+  Boolean = "boolean",
+  Date = "date",
+  Datetime = "datetime",
+}
+
+export enum ReportDatasetFieldType {
+  String = "string",
+  Number = "number",
+  Decimal = "decimal",
+  Boolean = "boolean",
+  Date = "date",
+  Datetime = "datetime",
+  Json = "json",
+}
+
+export enum ReportChartKind {
+  Line = "line",
+  Bar = "bar",
+  Area = "area",
+  Pie = "pie",
+  Donut = "donut",
+}
+
+export enum ReportCardFieldKind {
+  Value = "value",
+  Json = "json",
+  Markdown = "markdown",
+  Subcard = "subcard",
+  Subtable = "subtable",
+  WorkflowButton = "workflow_button",
+}
+
+export enum ReportBlockType {
+  Table = "table",
+  Chart = "chart",
+  Metric = "metric",
+  Actions = "actions",
+  Markdown = "markdown",
+  Card = "card",
+}
+
+export enum ReportBlockStatus {
+  Ready = "ready",
+  Loading = "loading",
+  Empty = "empty",
+  Error = "error",
+}
+
+export enum ReportAggregateFn {
+  Count = "count",
+  Sum = "sum",
+  Avg = "avg",
+  Min = "min",
+  Max = "max",
+  FirstValue = "first_value",
+  LastValue = "last_value",
+  PercentileCont = "percentile_cont",
+  PercentileDisc = "percentile_disc",
+  StddevSamp = "stddev_samp",
+  VarSamp = "var_samp",
+  Expr = "expr",
+}
+
 /** Rate limit event types */
 export enum RateLimitEventType {
   Request = "request",
@@ -298,6 +435,11 @@ export enum AggregateFn {
   STDDEV_SAMP = "STDDEV_SAMP",
   VAR_SAMP = "VAR_SAMP",
   EXPR = "EXPR",
+}
+
+export interface AddReportBlockRequest {
+  block: ReportBlockDefinition;
+  position?: null | ReportBlockPosition;
 }
 
 /** API-compatible agent info */
@@ -1247,7 +1389,7 @@ export interface ConnectionCategoryDto {
 export interface ConnectionDto {
   connectionSubtype?: string | null;
   createdAt: string;
-  /** Agent/operator ids this connection is configured as the default for */
+  /** Agent/operator ids this connection is the tenant default for. */
   defaultFor?: string[];
   id: string;
   /** Connection type identifier that maps to a connection schema (e.g., shopify_access_token, bearer, sftp) */
@@ -1360,7 +1502,6 @@ export interface CreateBucketResponse {
 export interface CreateConnectionRequest {
   connectionParameters?: any;
   connectionSubtype?: string | null;
-  /** Agent/operator ids this connection should be the default for */
   defaultFor?: string[] | null;
   /** Connection type identifier that maps to a connection schema (e.g., shopify_access_token, bearer, sftp) */
   integrationId?: string | null;
@@ -1418,6 +1559,15 @@ export interface CreateInvocationTriggerRequest {
    * @example "workflow-456"
    */
   workflow_id: string;
+}
+
+export interface CreateReportRequest {
+  definition: ReportDefinition;
+  description?: string | null;
+  name: string;
+  slug?: string | null;
+  status?: ReportStatus;
+  tags?: string[];
 }
 
 export interface CreateSchemaRequest {
@@ -1561,6 +1711,11 @@ export interface DelayStep {
 
 /** Response for delete operation */
 export interface DeleteConnectionResponse {
+  message: string;
+  success: boolean;
+}
+
+export interface DeleteReportResponse {
   message: string;
   success: boolean;
 }
@@ -2078,6 +2233,11 @@ export interface GetRateLimitStatusResponse {
   success: boolean;
 }
 
+export interface GetReportResponse {
+  report: ReportDto;
+  success: boolean;
+}
+
 export interface GetSchemaResponse {
   schema: Schema;
   success: boolean;
@@ -2380,6 +2540,11 @@ export interface ListRateLimitsResponse {
   success: boolean;
 }
 
+export interface ListReportsResponse {
+  reports: ReportSummary[];
+  success: boolean;
+}
+
 export interface ListSchemasResponse {
   /** @format int64 */
   limit: number;
@@ -2477,6 +2642,10 @@ export interface MetricsResponse {
   data: any;
   message: string;
   success: boolean;
+}
+
+export interface MoveReportBlockRequest {
+  position: ReportBlockPosition;
 }
 
 /** Request to move a workflow to a different folder */
@@ -2608,6 +2777,14 @@ export interface PageWorkflowInstanceHistoryDto {
   totalElements: number;
   /** @format int32 */
   totalPages: number;
+}
+
+export interface PatchReportBlockRequest {
+  /**
+   * RFC 7386-style JSON merge patch applied to the block definition.
+   * The block id cannot be changed through this operation.
+   */
+  patch: any;
 }
 
 /** Aggregated rate limit stats for a time period */
@@ -2864,6 +3041,8 @@ export interface ReferenceValue {
   value: string;
 }
 
+export type RemoveReportBlockRequest = object;
+
 /** Request to rename a folder (updates all workflows in that folder and subfolders) */
 export interface RenameFolderRequest {
   /** New folder path (e.g., "/Revenue/") */
@@ -2883,6 +3062,926 @@ export interface RenameFolderResponse {
    * @min 0
    */
   workflowsUpdated: number;
+}
+
+export interface ReplaceReportBlockRequest {
+  block: ReportBlockDefinition;
+}
+
+export interface ReportActionSubmitConfig {
+  implicitPayload?: Partial<Record<string, any>>;
+  label?: string | null;
+}
+
+export interface ReportActionsConfig {
+  submit?: null | ReportActionSubmitConfig;
+}
+
+export interface ReportAggregateSpec {
+  alias: string;
+  distinct?: boolean;
+  expression?: any;
+  field?: string | null;
+  op: ReportAggregateFn;
+  orderBy?: ReportOrderBy[];
+  /**
+   * Fraction in `[0.0, 1.0]` for `percentile_cont` / `percentile_disc`
+   * aggregates. Required for those ops, rejected otherwise.
+   * @format double
+   */
+  percentile?: number | null;
+}
+
+export interface ReportBlockDataRequest {
+  blockFilters?: Partial<Record<string, any>>;
+  id: string;
+  page?: null | ReportPageRequest;
+  search?: null | ReportTableSearchRequest;
+  sort?: ReportOrderBy[];
+}
+
+export interface ReportBlockDatasetQuery {
+  datasetFilters?: ReportDatasetFilter[];
+  dimensions?: string[];
+  id: string;
+  /** @format int64 */
+  limit?: number | null;
+  measures?: string[];
+  orderBy?: ReportOrderBy[];
+}
+
+export interface ReportBlockDefinition {
+  actions?: null | ReportActionsConfig;
+  card?: null | ReportCardConfig;
+  chart?: null | ReportChartConfig;
+  dataset?: null | ReportBlockDatasetQuery;
+  filters?: ReportFilterDefinition[];
+  /**
+   * When true, the renderer drops the entire block (title bar included) if
+   * its data is empty (e.g. zero table rows or zero open actions). Useful
+   * for action lists or "open issues" tables that should disappear once
+   * there's nothing to show, rather than rendering a stub "No items"
+   * state.
+   */
+  hideWhenEmpty?: boolean;
+  id: string;
+  interactions?: ReportInteractionDefinition[];
+  lazy?: boolean;
+  markdown?: null | ReportMarkdownConfig;
+  metric?: null | ReportMetricConfig;
+  showWhen?: any;
+  source?: ReportSource;
+  table?: null | ReportTableConfig;
+  title?: string | null;
+  type: ReportBlockType;
+}
+
+export interface ReportBlockError {
+  blockId?: string | null;
+  code: string;
+  message: string;
+}
+
+export interface ReportBlockLayoutNode {
+  blockId: string;
+  id: string;
+  showWhen?: any;
+}
+
+export interface ReportBlockMutationResponse {
+  block?: null | ReportBlockDefinition;
+  message: string;
+  report: ReportDto;
+  success: boolean;
+}
+
+export interface ReportBlockOnlyDataRequest {
+  blockFilters?: Partial<Record<string, any>>;
+  filters?: Partial<Record<string, any>>;
+  page?: null | ReportPageRequest;
+  search?: null | ReportTableSearchRequest;
+  sort?: ReportOrderBy[];
+  timezone?: string | null;
+}
+
+export interface ReportBlockPosition {
+  afterBlockId?: string | null;
+  beforeBlockId?: string | null;
+  /** @min 0 */
+  index?: number | null;
+}
+
+export interface ReportBlockRenderResult {
+  data?: any;
+  error?: null | ReportBlockError;
+  status?: ReportBlockStatus;
+  title?: string | null;
+  type: ReportBlockType;
+}
+
+/**
+ * Card block configuration. A card renders a single record (the first row of
+ * a filter-mode source) as a vertical key→value layout, optionally split into
+ * titled groups with multi-column inner grids and per-field formatting.
+ */
+export interface ReportCardConfig {
+  groups?: ReportCardGroup[];
+}
+
+export interface ReportCardField {
+  /**
+   * Span in inner-grid columns. Default 1; use 2+ for fields that should
+   * occupy a wider slot than their siblings (e.g. long descriptions).
+   * @format int32
+   * @min 0
+   */
+  colSpan?: number;
+  /**
+   * Whether the field starts collapsed. Only meaningful for `kind=json` /
+   * `kind=markdown` / `kind=subcard` / `kind=subtable`.
+   */
+  collapsed?: boolean;
+  /**
+   * Optional row property to display instead of `field` while preserving
+   * `field` as the writeback target. Useful for lookup/reference fields
+   * where the row stores an id but a joined label should be shown.
+   */
+  displayField?: string | null;
+  /**
+   * Optional display-only template rendered from the row. Does not affect
+   * filtering, sorting, or writeback; `field` remains the storage target.
+   */
+  displayTemplate?: string | null;
+  /**
+   * Opt-in writeback for this field. Only honored when the rendered row
+   * carries `id` and `schemaId` (filter-mode object-model sources). The
+   * renderer doesn't enforce this on the server — the FE shows an editor
+   * that calls the object-model PUT endpoint directly, which performs its
+   * own auth + type validation.
+   */
+  editable?: boolean;
+  /**
+   * Optional explicit editor configuration. When set, takes precedence
+   * over the default control inferred from `format` / `pillVariants`.
+   */
+  editor?: null | ReportEditorConfig;
+  field: string;
+  format?: string | null;
+  /**
+   * How to render this field. `value` runs through the standard cell
+   * formatter (date/currency/pill/etc); `json` shows a collapsible JSON
+   * tree; `markdown` renders the value as markdown; `subcard` renders a
+   * nested object as a card with its own `groups`; `subtable` renders an
+   * array of objects as a small inline table with its own `columns`.
+   */
+  kind?: ReportCardFieldKind;
+  label?: string | null;
+  /**
+   * Pill variants for `kind=value` + `format=pill`. Maps the cell value to
+   * a badge variant (`success`, `warning`, `destructive`, `default`, …) so
+   * enum/status fields can be color-coded.
+   */
+  pillVariants?: Partial<Record<string, string>> | null;
+  /**
+   * Recursive card config used when `kind=subcard`. The value at `field`
+   * must be a JSON object; the inner groups read keys off that object.
+   */
+  subcard?: null | ReportCardConfig;
+  /**
+   * Inline-table config used when `kind=subtable`. The value at `field`
+   * must be a JSON array of objects.
+   */
+  subtable?: null | ReportSubtableConfig;
+  /**
+   * Optional workflow launcher rendered as a button for this card field.
+   * The frontend executes the referenced workflow with either the whole row,
+   * this field value, or a configured row field as the workflow input context.
+   */
+  workflowAction?: null | ReportWorkflowActionConfig;
+}
+
+export interface ReportCardGroup {
+  /**
+   * Number of columns to lay fields out in within this group (1–4).
+   * @format int32
+   * @min 0
+   */
+  columns?: number;
+  description?: string | null;
+  fields: ReportCardField[];
+  id: string;
+  title?: string | null;
+}
+
+export interface ReportChartConfig {
+  kind: ReportChartKind;
+  series?: ReportChartSeries[];
+  x: string;
+}
+
+export interface ReportChartSeries {
+  field: string;
+  label?: string | null;
+}
+
+export interface ReportColumnsLayoutNode {
+  columns: ReportLayoutColumn[];
+  id: string;
+  showWhen?: any;
+}
+
+export interface ReportDatasetDefinition {
+  dimensions?: ReportDatasetDimension[];
+  id: string;
+  label: string;
+  measures?: ReportDatasetMeasure[];
+  source: ReportDatasetSource;
+  timeDimension?: string | null;
+}
+
+export interface ReportDatasetDimension {
+  field: string;
+  format?: null | ReportDatasetValueFormat;
+  label: string;
+  type: ReportDatasetFieldType;
+}
+
+export interface ReportDatasetFilter {
+  field: string;
+  op?: string;
+  value: any;
+}
+
+export interface ReportDatasetMeasure {
+  distinct?: boolean;
+  expression?: any;
+  field?: string | null;
+  format: ReportDatasetValueFormat;
+  id: string;
+  label: string;
+  op: ReportAggregateFn;
+  orderBy?: ReportOrderBy[];
+  /** @format double */
+  percentile?: number | null;
+}
+
+export interface ReportDatasetQueryColumn {
+  format?: null | ReportDatasetValueFormat;
+  key: string;
+  label: string;
+  type: string;
+}
+
+export interface ReportDatasetQueryMetadata {
+  id: string;
+}
+
+export interface ReportDatasetQueryPage {
+  hasNextPage: boolean;
+  /** @format int64 */
+  offset: number;
+  /** @format int64 */
+  size: number;
+  /** @format int64 */
+  totalCount: number;
+}
+
+export interface ReportDatasetQueryRequest {
+  datasetFilters?: ReportDatasetFilter[];
+  dimensions?: string[];
+  filters?: Partial<Record<string, any>>;
+  /** @format int64 */
+  limit?: number | null;
+  measures?: string[];
+  orderBy?: ReportOrderBy[];
+  page?: null | ReportPageRequest;
+  search?: null | ReportTableSearchRequest;
+  timezone?: string | null;
+}
+
+export interface ReportDatasetQueryResponse {
+  columns: ReportDatasetQueryColumn[];
+  dataset: ReportDatasetQueryMetadata;
+  page: ReportDatasetQueryPage;
+  rows: any[][];
+  success: boolean;
+}
+
+export interface ReportDatasetSource {
+  connectionId?: string | null;
+  schema: string;
+}
+
+export interface ReportDefinition {
+  blocks?: ReportBlockDefinition[];
+  datasets?: ReportDatasetDefinition[];
+  /** @format int32 */
+  definitionVersion?: number;
+  filters?: ReportFilterDefinition[];
+  layout?: ReportLayoutNode[];
+  views?: ReportViewDefinition[];
+}
+
+export interface ReportDto {
+  /** @format date-time */
+  createdAt: string;
+  definition: ReportDefinition;
+  /** @format int32 */
+  definitionVersion: number;
+  description?: string | null;
+  id: string;
+  name: string;
+  slug: string;
+  status: ReportStatus;
+  tags?: string[];
+  /** @format date-time */
+  updatedAt: string;
+}
+
+/**
+ * Explicit editor configuration for an editable column or card field.
+ *
+ * When omitted, the FE infers a control from the column's `format` /
+ * `pillVariants` (number for currency/decimal/percent, date for date,
+ * select for pill with variants, toggle for booleans, text otherwise).
+ * When set, the explicit `kind` wins.
+ */
+export interface ReportEditorConfig {
+  kind: ReportEditorKind;
+  /**
+   * Dynamic object-model lookup configuration for `kind=lookup`.
+   * The editor displays labels from the lookup schema but commits the
+   * selected value back to the edited row field.
+   */
+  lookup?: null | ReportLookupConfig;
+  /**
+   * Max value for `kind=number`.
+   * @format double
+   */
+  max?: number | null;
+  /**
+   * Min value for `kind=number`.
+   * @format double
+   */
+  min?: number | null;
+  /** Static option list for `kind=select`. */
+  options?: ReportEditorOption[];
+  /** Placeholder shown in empty inputs. */
+  placeholder?: string | null;
+  /** Validation regex for `kind=text` / `kind=textarea`. */
+  regex?: string | null;
+  /**
+   * Step / precision for `kind=number`.
+   * @format double
+   */
+  step?: number | null;
+}
+
+export interface ReportEditorOption {
+  label: string;
+  value: any;
+}
+
+export interface ReportFilterDefinition {
+  appliesTo?: ReportFilterTarget[];
+  default?: any;
+  id: string;
+  label: string;
+  options?: any;
+  required?: boolean;
+  /**
+   * When true, any block whose source `condition` references this filter
+   * will short-circuit to an empty result if the filter has no value at
+   * render time. Use this for navigation-driven filters (e.g. populated by
+   * row-click + navigate_view) so the block never silently falls back to an
+   * unfiltered query when the filter is missing from the URL/state.
+   */
+  strictWhenReferenced?: boolean;
+  type: ReportFilterType;
+}
+
+export interface ReportFilterOption {
+  /** @format int64 */
+  count?: number | null;
+  label: string;
+  value: any;
+}
+
+export interface ReportFilterOptionsMetadata {
+  id: string;
+}
+
+export interface ReportFilterOptionsPage {
+  hasNextPage: boolean;
+  /** @format int64 */
+  offset: number;
+  /** @format int64 */
+  size: number;
+  /** @format int64 */
+  totalCount: number;
+}
+
+export interface ReportFilterOptionsRequest {
+  filters?: Partial<Record<string, any>>;
+  /** @format int64 */
+  limit?: number;
+  /** @format int64 */
+  offset?: number;
+  query?: string | null;
+  timezone?: string | null;
+}
+
+export interface ReportFilterOptionsResponse {
+  filter: ReportFilterOptionsMetadata;
+  options: ReportFilterOption[];
+  page: ReportFilterOptionsPage;
+  success: boolean;
+}
+
+export interface ReportFilterTarget {
+  blockId?: string | null;
+  field: string;
+  filterId?: string | null;
+  op?: string;
+}
+
+export interface ReportGridLayoutItem {
+  blockId: string;
+  /** @format int64 */
+  colSpan?: number | null;
+  id?: string | null;
+  /** @format int64 */
+  rowSpan?: number | null;
+}
+
+export interface ReportGridLayoutNode {
+  /** @format int64 */
+  columns?: number | null;
+  id: string;
+  items: ReportGridLayoutItem[];
+  showWhen?: any;
+}
+
+export interface ReportInteractionAction {
+  filterId?: string | null;
+  filterIds?: string[];
+  type: string;
+  value?: any;
+  valueFrom?: string | null;
+  viewId?: string | null;
+}
+
+export interface ReportInteractionDefinition {
+  actions?: ReportInteractionAction[];
+  id: string;
+  trigger: ReportInteractionTrigger;
+}
+
+export interface ReportInteractionTrigger {
+  event: string;
+  field?: string | null;
+}
+
+export interface ReportLayoutColumn {
+  children?: ReportLayoutNode[];
+  id: string;
+  /** @format double */
+  width?: number | null;
+}
+
+export type ReportLayoutNode =
+  | (ReportBlockLayoutNode & {
+      type: "block";
+    })
+  | (ReportMetricRowLayoutNode & {
+      type: "metric_row";
+    })
+  | (ReportSectionLayoutNode & {
+      type: "section";
+    })
+  | (ReportColumnsLayoutNode & {
+      type: "columns";
+    })
+  | (ReportGridLayoutNode & {
+      type: "grid";
+    });
+
+export interface ReportLookupBlockMetadata {
+  id: string;
+}
+
+export interface ReportLookupConfig {
+  /** Optional Object Model condition applied to the lookup option query. */
+  condition?: null | Condition;
+  /** Optional connection ID for connection-scoped lookup schemas. */
+  connectionId?: string | null;
+  /** Optional mappings from report/block filters into lookup schema fields. */
+  filterMappings?: ReportFilterTarget[];
+  /** Field shown to users in the searchable option list. */
+  labelField: string;
+  /** Object Model schema to search for options. */
+  schema: string;
+  /**
+   * Fields searched when the user types. If the lookup schema has generated
+   * `tsvector` columns, the backend uses MATCH against those columns;
+   * otherwise it falls back to CONTAINS on these fields. Defaults to
+   * `labelField` when omitted.
+   */
+  searchFields?: string[];
+  /**
+   * Field whose value is written to the edited row. `field` is accepted as
+   * a compatibility alias.
+   */
+  valueField: string;
+}
+
+export interface ReportLookupOptionsRequest {
+  blockFilters?: Partial<Record<string, any>>;
+  filters?: Partial<Record<string, any>>;
+  /** @format int64 */
+  limit?: number;
+  /** @format int64 */
+  offset?: number;
+  query?: string | null;
+  timezone?: string | null;
+}
+
+export interface ReportLookupOptionsResponse {
+  block: ReportLookupBlockMetadata;
+  field: string;
+  options: ReportFilterOption[];
+  page: ReportFilterOptionsPage;
+  success: boolean;
+}
+
+export interface ReportMarkdownConfig {
+  content: string;
+}
+
+export interface ReportMetricConfig {
+  format?: string | null;
+  label?: string | null;
+  valueField: string;
+}
+
+export interface ReportMetricRowLayoutNode {
+  blocks: string[];
+  id: string;
+  showWhen?: any;
+  title?: string | null;
+}
+
+export interface ReportOrderBy {
+  direction?: string;
+  field: string;
+}
+
+export interface ReportPageRequest {
+  /** @format int64 */
+  offset?: number;
+  /** @format int64 */
+  size?: number;
+}
+
+export interface ReportPaginationConfig {
+  allowedPageSizes?: number[];
+  /** @format int64 */
+  defaultPageSize?: number;
+}
+
+export interface ReportPreviewRequest {
+  blocks?: ReportBlockDataRequest[] | null;
+  definition: ReportDefinition;
+  filters?: Partial<Record<string, any>>;
+  timezone?: string | null;
+}
+
+export interface ReportRenderMetadata {
+  /** @format int32 */
+  definitionVersion: number;
+  id: string;
+}
+
+export interface ReportRenderRequest {
+  blocks?: ReportBlockDataRequest[] | null;
+  filters?: Partial<Record<string, any>>;
+  timezone?: string | null;
+}
+
+export interface ReportRenderResponse {
+  blocks: Partial<Record<string, ReportBlockRenderResult>>;
+  errors?: ReportBlockError[];
+  report: ReportRenderMetadata;
+  resolvedFilters: Partial<Record<string, any>>;
+  success: boolean;
+}
+
+export interface ReportSectionLayoutNode {
+  children?: ReportLayoutNode[];
+  description?: string | null;
+  id: string;
+  showWhen?: any;
+  title?: string | null;
+}
+
+export interface ReportSource {
+  aggregates?: ReportAggregateSpec[];
+  condition?: null | Condition;
+  connectionId?: string | null;
+  entity?: null | ReportWorkflowRuntimeEntity;
+  filterMappings?: ReportFilterTarget[];
+  /**
+   * Optional virtual-source granularity. Used by system sources such as
+   * execution metric buckets (`hourly`/`daily`) and rate-limit timelines
+   * (`minute`/`hourly`/`daily`).
+   */
+  granularity?: string | null;
+  groupBy?: string[];
+  instanceId?: string | null;
+  /**
+   * Optional virtual-source period. Used by rate-limit status period stats
+   * (`1h`/`24h`/`7d`/`30d`).
+   */
+  interval?: string | null;
+  /**
+   * Cross-schema joins. When non-empty, fields prefixed with `<alias>.`
+   * resolve against the joined dimension schema. Currently supported on
+   * aggregate-mode blocks; v1 implementation uses broadcast-hash join
+   * (dim resolved client-side, primary query pushed down with the resolved
+   * keys, rows enriched after).
+   */
+  join?: ReportSourceJoin[];
+  kind?: ReportSourceKind;
+  /** @format int64 */
+  limit?: number | null;
+  mode?: ReportSourceMode;
+  orderBy?: ReportOrderBy[];
+  schema?: string;
+  workflowId?: string | null;
+}
+
+/**
+ * Cross-schema join declared on a block-level source. Mirrors the per-cell
+ * `ReportTableColumnJoin` but adds `schema`, `alias`, and `kind` since the
+ * primary schema is the block's source rather than the column's.
+ */
+export interface ReportSourceJoin {
+  /**
+   * Optional alias for qualified field references in `groupBy`,
+   * `condition`, `aggregates[].field`, and `orderBy`. Defaults to `schema`.
+   */
+  alias?: string | null;
+  /** Optional connection ID for the dimension schema. */
+  connectionId?: string | null;
+  /** Field on the joined (dimension) schema. */
+  field: string;
+  /**
+   * Inner or left join. Default: inner. Inner drops fact rows with no
+   * matching dim row; left keeps them with null dim columns.
+   */
+  kind?: ReportJoinKind;
+  /**
+   * Comparison op — eq | ne | gt | gte | lt | lte | in | contains | search.
+   * Default: eq. Mirrors `ReportTableColumnJoin.op`.
+   */
+  op?: string;
+  /** Field on the parent (block-source) schema. */
+  parentField: string;
+  /** Joined (dimension) schema name. */
+  schema: string;
+}
+
+export interface ReportSubtableColumn {
+  /** Cell alignment hint: `left`, `right`, `center`. */
+  align?: string | null;
+  /** Property name on each array element to read for this cell. */
+  field: string;
+  /**
+   * Cell format hint. Same vocabulary as table columns
+   * (`currency`, `datetime`, `pill`, `decimal`, …).
+   */
+  format?: string | null;
+  label?: string | null;
+  /** Pill variant map for `format=pill`. */
+  pillVariants?: Partial<Record<string, string>> | null;
+}
+
+/** Inline-table rendering for an array-of-objects card field. */
+export interface ReportSubtableConfig {
+  columns?: ReportSubtableColumn[];
+  /** Optional message shown when the array is empty (defaults to "No items"). */
+  emptyLabel?: string | null;
+}
+
+export interface ReportSummary {
+  /** @format date-time */
+  createdAt: string;
+  /** @format int32 */
+  definitionVersion: number;
+  description?: string | null;
+  id: string;
+  name: string;
+  slug: string;
+  status: ReportStatus;
+  tags?: string[];
+  /** @format date-time */
+  updatedAt: string;
+}
+
+export interface ReportTableActionConfig {
+  id: string;
+  label?: string | null;
+  workflowAction: ReportWorkflowActionConfig;
+}
+
+export interface ReportTableColumn {
+  /** Optional cell alignment hint: "left", "right", or "center". */
+  align?: string | null;
+  chart?: null | ReportChartConfig;
+  /**
+   * Marks this column as the human-readable label for the row's entity
+   * within this report. Consumed by view `titleFrom: { block }` resolution
+   * and similar entity-label lookups. At most one descriptive column per
+   * table is meaningful; the first encountered wins if multiple are flagged.
+   */
+  descriptive?: boolean;
+  /**
+   * Optional row property to display instead of `field` while preserving
+   * `field` as the sort/writeback key. For example, a Product row can store
+   * `category_id` while displaying a joined `category.name`.
+   */
+  displayField?: string | null;
+  /**
+   * Optional display-only template rendered from the row. Does not affect
+   * filtering, sorting, or writeback; `field` remains the storage target.
+   */
+  displayTemplate?: string | null;
+  /**
+   * Opt-in writeback for this column. Only honored when the rendered row
+   * carries `id` and `schemaId` (filter-mode object-model sources without
+   * joins or aggregates). The renderer doesn't enforce this on the server —
+   * the FE shows an editor that calls the object-model PUT endpoint
+   * directly, which performs its own auth + type validation.
+   */
+  editable?: boolean;
+  /**
+   * Optional explicit editor configuration. When set, takes precedence
+   * over the default control inferred from `format` / `pillVariants`.
+   */
+  editor?: null | ReportEditorConfig;
+  field: string;
+  format?: string | null;
+  /**
+   * Optional row-scoped report interaction buttons rendered in this table
+   * column. Each button executes the same interaction action vocabulary used
+   * by block interactions, such as set_filter followed by navigate_view.
+   */
+  interactionButtons?: ReportTableInteractionButtonConfig[];
+  label?: string | null;
+  /**
+   * Ordered level list for `format: "bar_indicator"` columns; the value's
+   * position determines how many bars are filled.
+   */
+  levels?: string[] | null;
+  /** Optional row field whose value is treated as a URL and rendered as an external-link icon. */
+  linkField?: string | null;
+  /**
+   * Optional display-only text cutoff. When omitted, the frontend renders
+   * the full formatted value.
+   * @min 0
+   */
+  maxChars?: number | null;
+  /**
+   * Mapping from cell value to pill variant for `format: "pill"` columns
+   * (e.g. `{ "active_customer": "success", "churned": "muted" }`).
+   */
+  pillVariants?: Partial<Record<string, string>> | null;
+  /** Optional row field rendered as a subdued line below the primary value. */
+  secondaryField?: string | null;
+  source?: null | ReportTableColumnSource;
+  /** Optional row field whose value is shown in a tooltip on hover (e.g. full email behind an avatar). */
+  tooltipField?: string | null;
+  type?: null | ReportTableColumnType;
+  /**
+   * Optional workflow launcher rendered as a button in this table column.
+   * The frontend executes the referenced workflow with either the whole row,
+   * this cell value, or a configured row field as the workflow input context.
+   */
+  workflowAction?: null | ReportWorkflowActionConfig;
+}
+
+export interface ReportTableColumnJoin {
+  field: string;
+  kind?: ReportJoinKind;
+  op?: string;
+  parentField: string;
+}
+
+export interface ReportTableColumnSource {
+  aggregates?: ReportAggregateSpec[];
+  condition?: null | Condition;
+  connectionId?: string | null;
+  filterMappings?: ReportFilterTarget[];
+  groupBy?: string[];
+  join?: ReportTableColumnJoin[];
+  kind?: ReportSourceKind;
+  /** @format int64 */
+  limit?: number | null;
+  mode?: ReportSourceMode;
+  orderBy?: ReportOrderBy[];
+  schema: string;
+  select?: string | null;
+}
+
+export interface ReportTableConfig {
+  /** Optional table-wide workflow actions executed with selected rows. */
+  actions?: ReportTableActionConfig[];
+  columns?: ReportTableColumn[];
+  defaultSort?: ReportOrderBy[];
+  pagination?: null | ReportPaginationConfig;
+  /** Enables row selection controls even when no table-wide actions are configured. */
+  selectable?: boolean;
+}
+
+export interface ReportTableInteractionButtonConfig {
+  actions?: ReportInteractionAction[];
+  disabledWhen?: null | Condition;
+  hiddenWhen?: null | Condition;
+  icon?: string | null;
+  id: string;
+  label?: string | null;
+  visibleWhen?: null | Condition;
+}
+
+export interface ReportTableSearchRequest {
+  fields?: string[];
+  query: string;
+}
+
+export interface ReportTitleFromBlock {
+  block: string;
+  field?: string | null;
+}
+
+export interface ReportValidationIssue {
+  code: string;
+  hint?: string | null;
+  message: string;
+  path: string;
+}
+
+export interface ReportViewBreadcrumb {
+  clearFilters?: string[];
+  label: string;
+  viewId?: string | null;
+}
+
+export interface ReportViewDefinition {
+  breadcrumb?: ReportViewBreadcrumb[];
+  clearFiltersOnBack?: string[];
+  id: string;
+  layout?: ReportLayoutNode[];
+  parentViewId?: string | null;
+  title?: string | null;
+  titleFrom?: string | null;
+  /**
+   * Resolves the view title from a rendered block's row. The first row of
+   * the referenced block is used; the value comes from `field` if given,
+   * otherwise from the block column flagged `descriptive: true`.
+   */
+  titleFromBlock?: null | ReportTitleFromBlock;
+}
+
+export interface ReportWorkflowActionConfig {
+  context?: ReportWorkflowActionContext;
+  /**
+   * Optional row-level condition. When set, the frontend renders the button
+   * disabled for rows that match this condition.
+   */
+  disabledWhen?: null | Condition;
+  /**
+   * Optional row-level condition. When set, the frontend hides the button
+   * for rows that match this condition.
+   */
+  hiddenWhen?: null | Condition;
+  label?: string | null;
+  reloadBlock?: boolean;
+  runningLabel?: string | null;
+  successMessage?: string | null;
+  /** @format int32 */
+  version?: number | null;
+  /**
+   * Optional row-level condition. When set, the frontend renders the button
+   * only for rows that match this condition.
+   */
+  visibleWhen?: null | Condition;
+  workflowId: string;
+}
+
+export interface ReportWorkflowActionContext {
+  field?: string | null;
+  inputKey?: string | null;
+  mode?: ReportWorkflowActionContextMode;
 }
 
 export interface Schema {
@@ -3411,6 +4510,12 @@ export interface StepTypeInfo {
   name: string;
 }
 
+export interface SubmitReportWorkflowActionRequest {
+  blockFilters?: Partial<Record<string, any>>;
+  filters?: Partial<Record<string, any>>;
+  payload?: any;
+}
+
 /**
  * A single case in a Switch step.
  * Defines a match condition and the output to produce if matched.
@@ -3573,7 +4678,6 @@ export interface TestAgentResponse {
 export interface UpdateConnectionRequest {
   connectionParameters?: any;
   connectionSubtype?: string | null;
-  /** Agent/operator ids this connection should be the default for */
   defaultFor?: string[] | null;
   /** Connection type identifier that maps to a connection schema (e.g., shopify_access_token, bearer, sftp) */
   integrationId?: string | null;
@@ -3619,6 +4723,15 @@ export interface UpdateInvocationTriggerRequest {
    * @example "workflow-456"
    */
   workflow_id: string;
+}
+
+export interface UpdateReportRequest {
+  definition: ReportDefinition;
+  description?: string | null;
+  name: string;
+  slug: string;
+  status?: ReportStatus;
+  tags?: string[];
 }
 
 export interface UpdateSchemaRequest {
@@ -3671,6 +4784,16 @@ export interface ValidateMappingsResponse {
   /** @min 0 */
   warningCount: number;
   workflowId: string;
+}
+
+export interface ValidateReportRequest {
+  definition: ReportDefinition;
+}
+
+export interface ValidateReportResponse {
+  errors?: ReportValidationIssue[];
+  valid: boolean;
+  warnings?: ReportValidationIssue[];
 }
 
 /** Structured validation error with step context for frontend highlighting */

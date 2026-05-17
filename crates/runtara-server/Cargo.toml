@@ -16,6 +16,10 @@ path = "src/lib.rs"
 name = "runtara-server"
 path = "src/main.rs"
 
+[[bin]]
+name = "dump_openapi"
+path = "src/bin/dump_openapi.rs"
+
 [features]
 # Embed the pre-built frontend (frontend/dist/) and serve it at the UI mount prefix.
 # Run `npm run build` inside ./frontend before building with this feature enabled.

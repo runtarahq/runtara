@@ -9,8 +9,9 @@
 //!
 //! Changes to these types automatically update `specs/dsl/v{VERSION}/schema.json` on rebuild.
 
-// Provide imports needed by schema_types.rs
-use schemars::JsonSchema;
+// Provide imports needed by schema_types.rs. Derives use the fully-qualified
+// `schemars::JsonSchema` path (gated behind the `json-schema` feature), so no
+// top-level `use schemars` import is needed here.
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 

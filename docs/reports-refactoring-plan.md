@@ -1,6 +1,6 @@
 # Reports Refactoring Plan
 
-**Status:** Phase 1 complete; Phase 2 server-side complete, FE swap pending
+**Status:** Phase 1 complete; Phase 2 infrastructure complete (codegen + WASM); consumer migration (types.ts deletion + utils.ts swap) pending
 **Owner:** _unassigned_
 **Last updated:** 2026-05-17
 
@@ -136,19 +136,35 @@ cd crates/runtara-server/frontend && npx playwright test e2e/tests/mocked/report
 
 ## Phase 2 — Codegen + delete handwritten FE types
 
-**Status:** [ ] In progress — server-side registration done; FE swap (utils.ts + types.ts) pending. WASM bundle builds but is over the 250KB target (currently 363KB gzipped) and needs slimming before shipping to FE.
+**Status:** [ ] Infrastructure complete; consumer migration pending. Schemas registered, WASM slimmed and vendored in FE, codegen pipeline (online + offline) works. `types.ts` deletion + `utils.ts` swap deferred (each needs ~hundreds of small typing fixes across the FE).
 
 ### Work
 
-- [x] Register 100+ report DTOs in the server's `components(schemas(...))` block at `server.rs`. Available to `swagger-typescript-api` codegen the next time a developer runs `npm run generate-api-runtime-local` against a live server.
-- [ ] Run `npm run generate-api-runtime-local` (requires running server) — produces updated `RuntaraRuntimeApi.ts` with report types.
-- [ ] Delete `frontend/src/features/reports/types.ts` (805 lines) — pending the codegen regen + FE compilation verification.
-- [x] WASM bundle build pipeline verified: `wasm-pack build --target web --out-dir pkg --features wasm --no-default-features` produces a working `pkg/` with TypeScript bindings.
-- [ ] Slim the WASM bundle to <250KB gzipped (currently 363KB; see Phase 1 acceptance notes for drivers).
-- [ ] Publish WASM bundle to FE (file: dep in package.json or vendored under `frontend/src/wasm/`).
-- [ ] In `utils.ts`: replace `compileDisplayTemplate` (419–513) with `renderTemplate(template, row)` from WASM.
-- [ ] In `utils.ts`: replace custom row-condition evaluator (`matchesReportRowCondition`, 267–403) with `evaluateRowCondition(expr, row)` from WASM.
-- [ ] In `utils.ts`: delete `compareConditionValues`, `conditionValueOrdering`, and related helpers once the WASM swap lands.
+- [x] Register 100+ report DTOs in `components(schemas(...))` at `server.rs`.
+- [x] `dump_openapi` bin in `crates/runtara-server/src/bin/dump_openapi.rs` — emits the OpenAPI doc to stdout without a running server. `npm run generate-api-runtime-offline` runs it + the codegen in one shot.
+- [x] Regenerate `frontend/src/generated/RuntaraRuntimeApi.ts` — now contains all 100+ report types as TypeScript enums.
+- [x] WASM bundle: `runtara-report-dsl` exposes a `json-schema` feature (default-on); ToSchema + JsonSchema derives are `cfg_attr`-gated. minijinja switched to minimal features (`builtins`, `serde`, `deserialization` only). Workspace `[profile.release.package.runtara-report-dsl]` tuned for size (`opt-level = "z"`, `codegen-units = 1`).
+- [x] Bundle size: **320KB gzipped** (down from 363KB). Above the 250KB target. Further slimming requires cfg-gating `runtara-dsl::step_registration` and `agent_meta::{SchemaGeneratorFn, get_all_step_types}` to drop schemars 0.8 entirely — out of Phase 2 scope.
+- [x] Vendor WASM bundle to `frontend/src/wasm/runtara-report-dsl/` (`runtara_report_dsl_bg.wasm`, `.js`, `.d.ts`, plus README with regen instructions).
+- [x] FE init helper at `frontend/src/wasm/runtara-report-dsl/index.ts` — async `reportDsl()` returns `{ version, renderTemplate, validateTemplate, evaluateRowCondition }`. Memoizes the load promise.
+- [ ] Delete `frontend/src/features/reports/types.ts` (805 lines) — **deferred**. The handwritten file's `string | undefined` modeling clashes with the generated `string | null | undefined`; the strictness diff surfaces 577 tsc errors across ~30 FE files. Migration is real work — best done as a focused commit that fixes each callsite, not piggybacked on the infra commit.
+- [ ] In `utils.ts`: replace `compileDisplayTemplate` (419–513) with WASM `renderTemplate` — **deferred**. Legacy compiler splits `{{ field | format }}` and lets the FE's `formatCellValue` own format-specific rendering (currency/pill/etc.); minijinja owns it server-side. Naive swap drifts behavior. Right move: replicate `formatCellValue` semantics in the WASM filter set, then swap.
+- [ ] In `utils.ts`: replace `matchesReportRowCondition` (267–403) with WASM `evaluateRowCondition` — **deferred**. Stored definitions are still in the legacy `{op, arguments: [bare_field, value]}` shape; the canonical `ConditionExpression` form lands at Phase 8 cutover. Need either a legacy-shape bridge or wait for the migration.
+
+### How to use the new infrastructure
+
+```sh
+# Regenerate the WASM bundle after editing runtara-report-dsl
+cd crates/runtara-report-dsl
+wasm-pack build --target web --out-dir pkg --features wasm --no-default-features
+cp pkg/runtara_report_dsl_bg.wasm pkg/runtara_report_dsl.js \
+   pkg/runtara_report_dsl.d.ts   pkg/runtara_report_dsl_bg.wasm.d.ts \
+   ../runtara-server/frontend/src/wasm/runtara-report-dsl/
+
+# Regenerate the TS API client (offline; uses the dump_openapi bin)
+cd crates/runtara-server/frontend
+npm run generate-api-runtime-offline
+```
 
 ### Tests
 
@@ -395,3 +411,4 @@ Append entries as phases complete or material decisions change.
 - 2026-05-17: Phase 0 runtime snapshots — added `reports_runtime_corpus.rs` that boots a UUID-suffixed temp DB on `TEST_REPORTS_DATABASE_URL`/`RUNTARA_DATABASE_URL`, applies server migrations, runs every fixture through `validate_report`, and snapshots the response. Markdown fixture is `valid: true`; the rest snapshot the current "Schema not found" path. These are now load-bearing for drift detection during the refactor. proptest + render_report snapshots + Playwright still pending.
 - 2026-05-17: Phase 0 complete. Landed: (a) `reports_proptest.rs` — proptest harness with 3 properties × 256 cases each (validator no-panic, deserializer no-panic, fixed-point round-trip); (b) `reports_render_corpus.rs` — render_report snapshots for all 11 fixtures with canonicalized HashMap order + UUID/timestamp masking; (c) `report-corpus-block-loading.mocked.spec.ts` — 6 Playwright tests covering each block type plus the block-error path in the viewer. Two items remain deferred: dual-run harness body (needs Phase 1's new path) and CI wiring (out of scope per project decision). Total: 4 backend test suites + 1 FE spec form the safety net.
 - 2026-05-17: Phase 1 complete + Phase 2 server-side done. New `runtara-report-dsl` crate at `crates/runtara-report-dsl/` with: report types (moved from server), local `Condition` re-exported by `api::dto::object_model::Condition`, minijinja-backed template rendering with the report filter set, `evaluate_row_condition` over `runtara_dsl::ConditionExpression`, and a `wasm32-unknown-unknown` build via `wasm-pack`. Server's `api/dto/reports.rs` is a 9-line shim. All 4 Phase 0 corpus test suites green. Server registers 100+ report schemas in OpenAPI for `swagger-typescript-api`. Open: bundle is 363KB gzipped (target 250KB), FE utils.ts swap, types.ts deletion, schemars 0.8/1 consolidation.
+- 2026-05-17: Phase 2 infrastructure landed. WASM bundle slimmed to 320KB gzipped via `json-schema` feature gating in `runtara-report-dsl` + `runtara-dsl` and minijinja minimal-feature config (`builtins, serde, deserialization`). Vendored under `frontend/src/wasm/runtara-report-dsl/` with an async `reportDsl()` init helper. New `dump_openapi` bin + `npm run generate-api-runtime-offline` script regenerate the TS API client without a running server. `RuntaraRuntimeApi.ts` now contains all 100+ report types. `types.ts` deletion deferred (577 tsc errors across ~30 files when swapping); `utils.ts` template/row-condition swap deferred (legacy format semantics + legacy shape bridge needed).

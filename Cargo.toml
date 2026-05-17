@@ -49,3 +49,11 @@ sha2 = "0.10"
 hmac = "0.12"
 # Vendored OpenSSL for musl static builds
 openssl = { version = "0.10", features = ["vendored"] }
+
+# Size-tuned profile for `wasm-pack build --release` outputs (Phase 2 of the
+# reports refactor — see docs/reports-refactoring-plan.md). `runtara-report-dsl`
+# compiles to WASM and ships to the frontend; size matters more than build
+# speed.
+[profile.release.package.runtara-report-dsl]
+opt-level = "z"
+codegen-units = 1

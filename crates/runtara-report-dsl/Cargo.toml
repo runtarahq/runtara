@@ -12,22 +12,36 @@ categories = ["development-tools"]
 crate-type = ["cdylib", "rlib"]
 
 [features]
-default = []
+default = ["json-schema"]
+# Enables `JsonSchema` derives for the server's JSON Schema export pipeline.
+# Optional so the WASM build can opt out (saves ~150KB gzipped — schemars 0.8
+# from `runtara-dsl` and schemars 1 here would otherwise both end up in the
+# WASM tree).
+json-schema = ["dep:schemars"]
 # Enables `ToSchema` derives so the crate's types appear in the server OpenAPI doc.
 utoipa = ["dep:utoipa"]
 # Enables wasm-bindgen JS bindings for the FE bundle.
 wasm = ["dep:wasm-bindgen", "dep:serde-wasm-bindgen"]
 
 [dependencies]
+# NOTE: runtara-dsl ships with `json-schema` in its default features. To drop
+# schemars 0.8 from the WASM tree we'd need to also cfg-gate
+# `runtara-dsl::step_registration` and the `SchemaGeneratorFn` family in
+# `agent_meta` (both currently use schemars unconditionally). Until that lands
+# we keep default features on; the current WASM bundle is 320 KB gzipped.
 runtara-dsl = { path = "../runtara-dsl", features = ["utoipa"] }
 
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-schemars = "1"
+schemars = { version = "1", optional = true }
 utoipa = { version = "5", features = ["chrono"], optional = true }
 chrono = { version = "0.4", features = ["serde"] }
 thiserror = "1.0"
-minijinja = "2.5"
+# default-features = false drops `multi_template`, `macros`, `debug`,
+# `adjacent_loop_items` — none of which we need. We keep `builtins`
+# (default filters), `serde` (pass rows via serde_json::Value), and
+# `deserialization` (`ViaDeserialize` for our custom filter signatures).
+minijinja = { version = "2.5", default-features = false, features = ["builtins", "serde", "deserialization"] }
 
 # WASM-only deps. cdylib + wasm-bindgen produce the bundle Phase 2 ships to the FE.
 wasm-bindgen = { version = "0.2", optional = true }
