@@ -25,6 +25,7 @@ use crate::workers::execution_engine::ExecutionEngine;
 
 mod providers;
 pub(crate) mod query_plan;
+mod renderers;
 
 pub use self::providers::{
     FetchAggregateOutput, FetchParams, FetchRowsOutput, ObjectModelProvider, ProviderRegistry,
@@ -506,65 +507,18 @@ impl ReportService {
         request: ReportRenderRequest,
     ) -> Result<ReportRenderResponse, ReportServiceError> {
         let report = self.get_report(tenant_id, id_or_slug).await?;
-        let resolved_filters = resolve_filters(&report.definition, &request.filters);
-        let requested_blocks = requested_blocks(&report.definition, request.blocks.as_deref());
-        let request_by_id: HashMap<_, _> = request
-            .blocks
-            .unwrap_or_default()
-            .into_iter()
-            .map(|block| (block.id.clone(), block))
-            .collect();
-
-        let mut blocks = HashMap::new();
-        let mut errors = Vec::new();
-
-        for block in requested_blocks {
-            let block_request = request_by_id.get(&block.id);
-            let result = self
-                .render_block(
-                    tenant_id,
-                    &report.definition,
-                    block,
-                    &resolved_filters,
-                    block_request,
-                )
-                .await;
-
-            match result {
-                Ok(rendered) => {
-                    blocks.insert(block.id.clone(), rendered);
-                }
-                Err(error) => {
-                    let block_error = ReportBlockError {
-                        code: "BLOCK_RENDER_FAILED".to_string(),
-                        message: error.to_string(),
-                        block_id: Some(block.id.clone()),
-                    };
-                    errors.push(block_error.clone());
-                    blocks.insert(
-                        block.id.clone(),
-                        ReportBlockRenderResult {
-                            block_type: block.block_type,
-                            status: ReportBlockStatus::Error,
-                            title: block.title.clone(),
-                            data: None,
-                            error: Some(block_error),
-                        },
-                    );
-                }
-            }
-        }
-
-        Ok(ReportRenderResponse {
-            success: true,
-            report: ReportRenderMetadata {
-                id: report.id,
-                definition_version: report.definition_version,
-            },
-            resolved_filters,
-            blocks,
-            errors,
-        })
+        let metadata = ReportRenderMetadata {
+            id: report.id,
+            definition_version: report.definition_version,
+        };
+        self.render_blocks(
+            tenant_id,
+            &report.definition,
+            request.filters,
+            request.blocks,
+            metadata,
+        )
+        .await
     }
 
     pub async fn preview_report(
@@ -574,11 +528,36 @@ impl ReportService {
     ) -> Result<ReportRenderResponse, ReportServiceError> {
         self.validate_definition(tenant_id, &request.definition)
             .await?;
+        let metadata = ReportRenderMetadata {
+            id: "preview".to_string(),
+            definition_version: request.definition.definition_version,
+        };
+        self.render_blocks(
+            tenant_id,
+            &request.definition,
+            request.filters,
+            request.blocks,
+            metadata,
+        )
+        .await
+    }
 
-        let resolved_filters = resolve_filters(&request.definition, &request.filters);
-        let requested_blocks = requested_blocks(&request.definition, request.blocks.as_deref());
-        let request_by_id: HashMap<_, _> = request
-            .blocks
+    /// Single render pipeline shared by `render_report` (persisted definition)
+    /// and `preview_report` (in-flight definition). Resolves filters, iterates
+    /// over the requested blocks, dispatches each through `render_block`, and
+    /// collects per-block errors into the response envelope instead of
+    /// failing the whole request.
+    async fn render_blocks(
+        &self,
+        tenant_id: &str,
+        definition: &ReportDefinition,
+        filters: HashMap<String, Value>,
+        block_requests: Option<Vec<ReportBlockDataRequest>>,
+        metadata: ReportRenderMetadata,
+    ) -> Result<ReportRenderResponse, ReportServiceError> {
+        let resolved_filters = resolve_filters(definition, &filters);
+        let requested_blocks = requested_blocks(definition, block_requests.as_deref());
+        let request_by_id: HashMap<_, _> = block_requests
             .unwrap_or_default()
             .into_iter()
             .map(|block| (block.id.clone(), block))
@@ -592,7 +571,7 @@ impl ReportService {
             let result = self
                 .render_block(
                     tenant_id,
-                    &request.definition,
+                    definition,
                     block,
                     &resolved_filters,
                     block_request,
@@ -626,10 +605,7 @@ impl ReportService {
 
         Ok(ReportRenderResponse {
             success: true,
-            report: ReportRenderMetadata {
-                id: "preview".to_string(),
-                definition_version: request.definition.definition_version,
-            },
+            report: metadata,
             resolved_filters,
             blocks,
             errors,
@@ -2647,50 +2623,16 @@ impl ReportService {
             });
         }
 
-        let data = match block.block_type {
-            ReportBlockType::Table => {
-                self.render_table_block(
-                    tenant_id,
-                    definition,
-                    block,
-                    resolved_filters,
-                    block_request,
-                )
-                .await?
-            }
-            ReportBlockType::Chart => {
-                self.render_aggregate_block(tenant_id, definition, block, resolved_filters)
-                    .await?
-            }
-            ReportBlockType::Metric => {
-                self.render_metric_block(tenant_id, definition, block, resolved_filters)
-                    .await?
-            }
-            ReportBlockType::Actions => {
-                self.render_actions_block(
-                    tenant_id,
-                    definition,
-                    block,
-                    resolved_filters,
-                    block_request,
-                )
-                .await?
-            }
-            ReportBlockType::Markdown => {
-                self.render_markdown_block(
-                    tenant_id,
-                    definition,
-                    block,
-                    resolved_filters,
-                    block_request,
-                )
-                .await?
-            }
-            ReportBlockType::Card => {
-                self.render_card_block(tenant_id, definition, block, resolved_filters)
-                    .await?
-            }
-        };
+        let data = renderers::renderer_for(block.block_type)
+            .render(
+                self,
+                tenant_id,
+                definition,
+                block,
+                resolved_filters,
+                block_request,
+            )
+            .await?;
 
         let status = if is_empty_data(&data) {
             ReportBlockStatus::Empty
@@ -2707,7 +2649,7 @@ impl ReportService {
         })
     }
 
-    async fn render_table_block(
+    pub(super) async fn render_table_block(
         &self,
         tenant_id: &str,
         definition: &ReportDefinition,
@@ -2739,29 +2681,11 @@ impl ReportService {
         }
 
         let table = block.table.as_ref();
-        let page_size = clamp_page_size(
-            block_request
-                .and_then(|request| request.page.as_ref().map(|page| page.size))
-                .or_else(|| {
-                    table
-                        .and_then(|table| table.pagination.as_ref())
-                        .map(|p| p.default_page_size)
-                })
-                .unwrap_or(50),
-        );
-        let offset = block_request
-            .and_then(|request| request.page.as_ref().map(|page| page.offset))
-            .unwrap_or(0)
-            .max(0);
-        let sort_owned = block_request
-            .map(|request| request.sort.clone())
-            .filter(|sort| !sort.is_empty())
-            .or_else(|| {
-                table
-                    .map(|table| table.default_sort.clone())
-                    .filter(|sort| !sort.is_empty())
-            })
-            .unwrap_or_else(|| block.source.order_by.clone());
+        let ResolvedTablePage {
+            page_size,
+            offset,
+            sort: sort_owned,
+        } = resolve_table_page(block, block_request);
 
         let condition = build_block_condition(definition, block, resolved_filters, block_request)?;
         let provider = self.providers.get(block.source.kind).clone();
@@ -2832,7 +2756,7 @@ impl ReportService {
         }))
     }
 
-    async fn render_actions_block(
+    pub(super) async fn render_actions_block(
         &self,
         tenant_id: &str,
         definition: &ReportDefinition,
@@ -2872,7 +2796,7 @@ impl ReportService {
         }))
     }
 
-    async fn render_markdown_block(
+    pub(super) async fn render_markdown_block(
         &self,
         tenant_id: &str,
         definition: &ReportDefinition,
@@ -2932,29 +2856,11 @@ impl ReportService {
         block_request: Option<&ReportBlockDataRequest>,
     ) -> Result<Value, ReportServiceError> {
         let table = block.table.as_ref();
-        let page_size = clamp_page_size(
-            block_request
-                .and_then(|request| request.page.as_ref().map(|page| page.size))
-                .or_else(|| {
-                    table
-                        .and_then(|table| table.pagination.as_ref())
-                        .map(|p| p.default_page_size)
-                })
-                .unwrap_or(50),
-        );
-        let offset = block_request
-            .and_then(|request| request.page.as_ref().map(|page| page.offset))
-            .unwrap_or(0)
-            .max(0);
-        let sort = block_request
-            .map(|request| request.sort.clone())
-            .filter(|sort| !sort.is_empty())
-            .or_else(|| {
-                table
-                    .map(|table| table.default_sort.clone())
-                    .filter(|sort| !sort.is_empty())
-            })
-            .unwrap_or_else(|| block.source.order_by.clone());
+        let ResolvedTablePage {
+            page_size,
+            offset,
+            sort,
+        } = resolve_table_page(block, block_request);
 
         let condition = build_block_condition(definition, block, resolved_filters, block_request)?;
         let alias_to_join = build_alias_index(&block.source.join, &block.id)?;
@@ -3061,29 +2967,11 @@ impl ReportService {
         block_request: Option<&ReportBlockDataRequest>,
     ) -> Result<Value, ReportServiceError> {
         let table = block.table.as_ref();
-        let page_size = clamp_page_size(
-            block_request
-                .and_then(|request| request.page.as_ref().map(|page| page.size))
-                .or_else(|| {
-                    table
-                        .and_then(|table| table.pagination.as_ref())
-                        .map(|p| p.default_page_size)
-                })
-                .unwrap_or(50),
-        );
-        let offset = block_request
-            .and_then(|request| request.page.as_ref().map(|page| page.offset))
-            .unwrap_or(0)
-            .max(0);
-        let sort = block_request
-            .map(|request| request.sort.clone())
-            .filter(|sort| !sort.is_empty())
-            .or_else(|| {
-                table
-                    .map(|table| table.default_sort.clone())
-                    .filter(|sort| !sort.is_empty())
-            })
-            .unwrap_or_else(|| block.source.order_by.clone());
+        let ResolvedTablePage {
+            page_size,
+            offset,
+            sort,
+        } = resolve_table_page(block, block_request);
 
         let request = build_table_aggregate_request(
             definition,
@@ -3616,38 +3504,51 @@ impl ReportService {
         }))
     }
 
-    async fn render_aggregate_block(
+    pub(super) async fn render_aggregate_block(
         &self,
         tenant_id: &str,
         definition: &ReportDefinition,
         block: &ReportBlockDefinition,
         resolved_filters: &HashMap<String, Value>,
     ) -> Result<Value, ReportServiceError> {
-        let request = build_aggregate_request(definition, block, resolved_filters)?;
-        let result = {
-            let condition = request.condition.clone();
-            let provider = self.providers.get(block.source.kind).clone();
-            let params = FetchParams {
-                tenant_id,
-                block,
-                condition: condition.as_ref(),
-                sort: &[],
-                offset: 0,
-                limit: MAX_AGGREGATE_ROWS,
-            };
-            let output = provider.fetch_aggregate(params, request).await?;
-            runtara_object_store::AggregateResult {
-                columns: output.columns,
-                rows: output.rows,
-                group_count: output.group_count,
-            }
-        };
-
+        let result = self
+            .fetch_block_aggregate(tenant_id, definition, block, resolved_filters)
+            .await?;
         Ok(json!({
             "columns": result.columns,
             "rows": result.rows,
             "groupCount": result.group_count,
         }))
+    }
+
+    /// Shared aggregate fetch for chart + metric blocks. Routes through the
+    /// `ReportSourceProvider` trait so object_model gets SQL pushdown (with
+    /// joins) and system/workflow_runtime get the virtual engine, returning
+    /// a typed [`runtara_object_store::AggregateResult`] either way.
+    async fn fetch_block_aggregate(
+        &self,
+        tenant_id: &str,
+        definition: &ReportDefinition,
+        block: &ReportBlockDefinition,
+        resolved_filters: &HashMap<String, Value>,
+    ) -> Result<runtara_object_store::AggregateResult, ReportServiceError> {
+        let request = build_aggregate_request(definition, block, resolved_filters)?;
+        let condition = request.condition.clone();
+        let provider = self.providers.get(block.source.kind).clone();
+        let params = FetchParams {
+            tenant_id,
+            block,
+            condition: condition.as_ref(),
+            sort: &[],
+            offset: 0,
+            limit: MAX_AGGREGATE_ROWS,
+        };
+        let output = provider.fetch_aggregate(params, request).await?;
+        Ok(runtara_object_store::AggregateResult {
+            columns: output.columns,
+            rows: output.rows,
+            group_count: output.group_count,
+        })
     }
 
     async fn resolve_filter_join_data(
@@ -3746,35 +3647,26 @@ impl ReportService {
         Ok(join_data)
     }
 
-    async fn render_metric_block(
+    pub(super) async fn render_metric_block(
         &self,
         tenant_id: &str,
         definition: &ReportDefinition,
         block: &ReportBlockDefinition,
         resolved_filters: &HashMap<String, Value>,
     ) -> Result<Value, ReportServiceError> {
-        let aggregate_data = self
-            .render_aggregate_block(tenant_id, definition, block, resolved_filters)
+        let result = self
+            .fetch_block_aggregate(tenant_id, definition, block, resolved_filters)
             .await?;
         let metric = block.metric.as_ref();
         let value_field = metric.map(|m| m.value_field.as_str()).unwrap_or("value");
-        let columns = aggregate_data
-            .get("columns")
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default();
-        let rows = aggregate_data
-            .get("rows")
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default();
-        let value_index = columns
+        let value_index = result
+            .columns
             .iter()
-            .position(|column| column.as_str() == Some(value_field))
+            .position(|column| column == value_field)
             .unwrap_or(0);
-        let value = rows
+        let value = result
+            .rows
             .first()
-            .and_then(Value::as_array)
             .and_then(|row| row.get(value_index))
             .cloned()
             .unwrap_or(Value::Null);
@@ -3784,8 +3676,8 @@ impl ReportService {
             "valueField": value_field,
             "label": metric.and_then(|m| m.label.clone()),
             "format": metric.and_then(|m| m.format.clone()),
-            "columns": columns,
-            "rows": rows,
+            "columns": result.columns,
+            "rows": result.rows,
         }))
     }
 
@@ -3793,7 +3685,7 @@ impl ReportService {
     /// vertical key→value layout. The shape returned mirrors a one-row table
     /// (`columns` + first-row `row`), with `missing: true` when the filter
     /// matches no rows so the frontend can show an empty-card placeholder.
-    async fn render_card_block(
+    pub(super) async fn render_card_block(
         &self,
         tenant_id: &str,
         definition: &ReportDefinition,
@@ -7732,6 +7624,58 @@ fn is_empty_data(data: &Value) -> bool {
 
 fn clamp_page_size(size: i64) -> i64 {
     size.clamp(1, MAX_TABLE_PAGE_SIZE)
+}
+
+/// Pre-resolved pagination + sort for a table-shaped render path.
+///
+/// Replaces three near-identical copies that used to live inline in
+/// `render_table_block`, `render_aggregate_table_block`, and
+/// `render_joined_filter_table_block`. Resolution order:
+///
+/// - `page_size`: request override → table-config default → 50, clamped to
+///   `[1, MAX_TABLE_PAGE_SIZE]`.
+/// - `offset`: request override → 0, clamped to `>= 0`.
+/// - `sort`: request override (if non-empty) → table-config default sort
+///   (if non-empty) → block `source.order_by`.
+struct ResolvedTablePage {
+    page_size: i64,
+    offset: i64,
+    sort: Vec<ReportOrderBy>,
+}
+
+fn resolve_table_page(
+    block: &ReportBlockDefinition,
+    block_request: Option<&ReportBlockDataRequest>,
+) -> ResolvedTablePage {
+    let table = block.table.as_ref();
+    let page_size = clamp_page_size(
+        block_request
+            .and_then(|request| request.page.as_ref().map(|page| page.size))
+            .or_else(|| {
+                table
+                    .and_then(|table| table.pagination.as_ref())
+                    .map(|p| p.default_page_size)
+            })
+            .unwrap_or(50),
+    );
+    let offset = block_request
+        .and_then(|request| request.page.as_ref().map(|page| page.offset))
+        .unwrap_or(0)
+        .max(0);
+    let sort = block_request
+        .map(|request| request.sort.clone())
+        .filter(|sort| !sort.is_empty())
+        .or_else(|| {
+            table
+                .map(|table| table.default_sort.clone())
+                .filter(|sort| !sort.is_empty())
+        })
+        .unwrap_or_else(|| block.source.order_by.clone());
+    ResolvedTablePage {
+        page_size,
+        offset,
+        sort,
+    }
 }
 
 fn slugify(value: &str) -> String {
