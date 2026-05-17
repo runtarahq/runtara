@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { lazy, Suspense, useEffect, useMemo, useState } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router';
 import { Compass, Edit, Eye, Printer, RefreshCw, Save } from 'lucide-react';
 import { Button } from '@/shared/components/ui/button';
@@ -17,8 +17,16 @@ import {
 } from '../hooks/useReports';
 import { ReportDeleteButton } from '../components/ReportDeleteButton';
 import { ReportFilterBar } from '../components/ReportFilterBar';
-import { ReportBuilderWizard } from '../components/wizard/ReportBuilderWizard';
 import { ReportRenderer } from '../components/ReportRenderer';
+
+// The wizard tree (BlocksStep + ReportDefinitionBuilder + supporting editors)
+// is the heaviest component in the reports feature. Defer it until the user
+// actually enters edit mode so view-only sessions don't pay the parse cost.
+const ReportBuilderWizard = lazy(() =>
+  import('../components/wizard/ReportBuilderWizard').then((m) => ({
+    default: m.ReportBuilderWizard,
+  }))
+);
 import {
   ReportBlockResult,
   ReportDefinition,
@@ -434,24 +442,30 @@ export function ReportPage() {
       contentClassName={!editing ? 'report-print-content pb-16' : undefined}
     >
       {editing ? (
-        <ReportBuilderWizard
-          // Force a fresh wizard state when the loaded report changes; the
-          // wizard derives its initial state via useMemo([]) so it would
-          // otherwise keep the previously-loaded report's blocks.
-          key={reportId ?? 'new'}
-          definition={definition}
-          schemas={schemas}
-          schemasByConnectionId={schemasByConnectionId}
-          objectModelConnections={objectModelConnections}
-          defaultObjectModelConnectionId={selectedConnectionId}
-          blockResults={blockResults}
-          editing={editing}
-          onChange={(nextDefinition) => {
-            setDefinition(nextDefinition);
-            setSaveError(null);
-            validateReport.reset();
-          }}
-        />
+        <Suspense
+          fallback={
+            <div className="h-96 animate-pulse rounded-xl bg-muted/30" />
+          }
+        >
+          <ReportBuilderWizard
+            // Force a fresh wizard state when the loaded report changes; the
+            // wizard derives its initial state via useMemo([]) so it would
+            // otherwise keep the previously-loaded report's blocks.
+            key={reportId ?? 'new'}
+            definition={definition}
+            schemas={schemas}
+            schemasByConnectionId={schemasByConnectionId}
+            objectModelConnections={objectModelConnections}
+            defaultObjectModelConnectionId={selectedConnectionId}
+            blockResults={blockResults}
+            editing={editing}
+            onChange={(nextDefinition) => {
+              setDefinition(nextDefinition);
+              setSaveError(null);
+              validateReport.reset();
+            }}
+          />
+        </Suspense>
       ) : reportId ? (
         <ReportRenderer
           reportId={reportId}
