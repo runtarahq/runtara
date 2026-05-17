@@ -3965,6 +3965,7 @@ dependencies = [
  "insta",
  "minijinja",
  "runtara-dsl",
+ "runtara-object-store",
  "schemars 1.2.1",
  "serde",
  "serde-wasm-bindgen",

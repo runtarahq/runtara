@@ -11,6 +11,8 @@ pub mod format;
 pub mod row_condition;
 pub mod template;
 pub mod types;
+#[cfg(feature = "aggregate")]
+pub mod virtual_aggregate;
 
 #[cfg(feature = "wasm")]
 mod wasm_bindings;

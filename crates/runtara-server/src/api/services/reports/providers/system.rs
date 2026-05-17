@@ -13,12 +13,12 @@ use std::sync::Arc;
 use crate::api::dto::object_model::{AggregateRequest, Condition};
 use crate::api::dto::reports::*;
 use crate::api::services::reports::{
-    ReportServiceError, aggregate_output_fields, aggregate_virtual_rows, condition_from_value,
-    condition_matches_row, f64_value, humanize_label, option_f64_value,
-    validate_block_interactions, validate_report_aggregate_specs,
-    validate_report_condition_field_refs, validate_report_condition_filter_refs,
-    validate_report_interaction_buttons, validate_report_source_filter_mappings,
-    validate_report_table_action_config, validate_report_table_display_templates,
+    ReportServiceError, aggregate_output_fields, condition_from_value, condition_matches_row,
+    f64_value, humanize_label, option_f64_value, validate_block_interactions,
+    validate_report_aggregate_specs, validate_report_condition_field_refs,
+    validate_report_condition_filter_refs, validate_report_interaction_buttons,
+    validate_report_source_filter_mappings, validate_report_table_action_config,
+    validate_report_table_display_templates,
 };
 use crate::runtime_client::{GetTenantMetricsOptions, MetricsGranularity, RuntimeClient};
 
@@ -64,7 +64,16 @@ impl ReportSourceProvider for SystemProvider {
         request: AggregateRequest,
     ) -> Result<FetchAggregateOutput, ReportServiceError> {
         let rows = fetch_rows_inner(self, params.tenant_id, params.block, params.condition).await?;
-        let result = aggregate_virtual_rows(&params.block.id, &rows, request)?;
+        let result = runtara_report_dsl::virtual_aggregate::aggregate_virtual_rows(
+            &params.block.id,
+            &rows,
+            request.into(),
+            |condition, row, block_id| {
+                let local = local_condition_from_store(condition);
+                condition_matches_row(&local, row, block_id).map_err(|err| err.to_string())
+            },
+        )
+        .map_err(|err| ReportServiceError::Validation(err.0))?;
         Ok(FetchAggregateOutput::from(result))
     }
 
@@ -102,6 +111,17 @@ impl ReportSourceProvider for SystemProvider {
 // ============================================================================
 // Row acquisition
 // ============================================================================
+
+/// Bridge `runtara_object_store::Condition` (used by the
+/// `runtara_report_dsl::virtual_aggregate` engine) back to the local
+/// `Condition` flavour that the server's `condition_matches_row` accepts.
+/// Field-identical wire shape — cheap clone.
+fn local_condition_from_store(condition: &runtara_object_store::Condition) -> Condition {
+    Condition {
+        op: condition.op.clone(),
+        arguments: condition.arguments.clone(),
+    }
+}
 
 async fn fetch_rows_inner(
     provider: &SystemProvider,

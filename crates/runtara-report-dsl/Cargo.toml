@@ -12,11 +12,17 @@ categories = ["development-tools"]
 crate-type = ["cdylib", "rlib"]
 
 [features]
-default = ["json-schema"]
+default = ["json-schema", "aggregate"]
 # Enables `JsonSchema` derives for the server's JSON Schema export pipeline.
 # Pulls `runtara-dsl/json-schema` too so types like `ConditionExpression`
 # implement `JsonSchema`. Optional so the WASM build can opt out.
 json-schema = ["dep:schemars", "runtara-dsl/json-schema"]
+# Enables the in-memory aggregate engine (`virtual_aggregate` module).
+# Pulls `runtara-object-store` for the canonical `AggregateRequest` /
+# `AggregateSpec` / `AggregateFn` / `AggregateResult` types so the engine
+# and the SQL pushdown path agree on shapes. Optional because
+# `runtara-object-store` itself pulls sqlx + tokio and isn't WASM-friendly.
+aggregate = ["dep:runtara-object-store"]
 # Enables `ToSchema` derives so the crate's types appear in the server OpenAPI doc.
 utoipa = ["dep:utoipa"]
 # Enables wasm-bindgen JS bindings for the FE bundle.
@@ -40,6 +46,9 @@ thiserror = "1.0"
 # (default filters), `serde` (pass rows via serde_json::Value), and
 # `deserialization` (`ViaDeserialize` for our custom filter signatures).
 minijinja = { version = "2.5", default-features = false, features = ["builtins", "serde", "deserialization"] }
+
+# Optional: the virtual-aggregate engine consumes these shape types.
+runtara-object-store = { path = "../runtara-object-store", optional = true }
 
 # WASM-only deps. cdylib + wasm-bindgen produce the bundle Phase 2 ships to the FE.
 wasm-bindgen = { version = "0.2", optional = true }
