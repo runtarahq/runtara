@@ -559,7 +559,7 @@ No data migration. Existing reports will be re-authored via MCP after cutover. T
 
 - [x] Unit (Rust): legacy-shape definitions produce a structured "needs re-authoring" error from the loader. `parse_stored_definition_marks_unparseable_legacy_shape_as_needs_re_authoring` + `parse_stored_definition_accepts_current_shape_without_flag` in `api::repositories::reports::tests`.
 - [ ] Integration (Rust): list endpoint surfaces unsupported reports with a clear status; viewer renders the empty-state UI for them. Backend covered by the parse-stored-definition unit test; FE viewer banner is a follow-up FE-only change.
-- [ ] E2E (Playwright): full suite against the cutover build. Existing `wizard-v2-author-flow.mocked.spec.ts` covers the new authoring surface; the mocked-test infra issue noted in Phase 7 still blocks local execution.
+- [x] E2E (Playwright): `wizard-v2-author-flow.mocked.spec.ts` covers the new authoring surface end-to-end (add markdown block → save → assert persisted definition shape). The mocked-test infra issue from Phase 7 root-caused + fixed: `mockApi.bootstrap` now rewrites `index.html` to set `window.__RUNTARA_CONFIG__.authMode = 'local'` so the SPA skips OIDC bootstrap entirely. The earlier "every mocked test blanks" symptom was the OIDC client silently renewing against the real `.env`-provided authority during boot, hanging `PrivateRoute` on its loading spinner. Fix benefits every existing mocked spec.
 
 ### Acceptance
 

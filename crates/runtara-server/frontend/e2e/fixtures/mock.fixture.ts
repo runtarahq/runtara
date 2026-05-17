@@ -369,6 +369,30 @@ const factory: MockApi = {
   fallthrough: (page) =>
     page.route(/\/api\/runtime\//, (route) => fulfill(route, {})),
   bootstrap: async (page) => {
+    // Force the SPA into `local` auth mode so it doesn't try to silently
+    // renew an OIDC token against the real authority during boot. Without
+    // this the dev server's `.env`-provided VITE_OIDC_AUTHORITY makes the
+    // OIDC client hang on a network request that never resolves, leaving
+    // PrivateRoute stuck on its loading spinner — the symptom that
+    // showed up as a blank screenshot in every mocked spec.
+    //
+    // `index.html` carries an inline `<script id="runtara-runtime-config">`
+    // that sets `window.__RUNTARA_CONFIG__ = {}` — it always runs AFTER
+    // any `addInitScript`, so we have to rewrite the HTML itself to
+    // bake in the local-auth config.
+    await page.route(/localhost:8081\/(ui\/[^/]+\/)?(index\.html)?(\?.*)?$/, async (route) => {
+      const response = await route.fetch();
+      const html = await response.text();
+      const patched = html.replace(
+        /window\.__RUNTARA_CONFIG__\s*=\s*\{\s*\}\s*;/,
+        `window.__RUNTARA_CONFIG__={"authMode":"local","tenantId":"org_mocked_e2e","apiBaseUrl":""};`
+      );
+      await route.fulfill({
+        response,
+        body: patched,
+        headers: { ...response.headers(), 'content-type': 'text/html; charset=utf-8' },
+      });
+    });
     // Register the catch-all FIRST so later handlers (specific endpoints + spec-level
     // overrides) take precedence (Playwright matches page.route handlers LIFO).
     await page.route(/\/api\/runtime\//, (route) => fulfill(route, {}));
