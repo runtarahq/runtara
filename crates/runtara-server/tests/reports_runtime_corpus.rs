@@ -439,3 +439,242 @@ fn extract_text(result: &rmcp::model::CallToolResult) -> &str {
     let raw = first.as_text().expect("content is text");
     &raw.text
 }
+
+/// Phase 6 acceptance: the five legacy per-block REST/service handlers
+/// (add/replace/patch/move/remove) must produce the same persisted
+/// state as the equivalent single-op `/edit` batch — they're now
+/// `apply_edit_ops`-backed shims. Sequence two flows over the same
+/// base definition and assert the resulting definitions are identical.
+#[tokio::test]
+async fn per_op_handlers_match_edit_batched_equivalent() {
+    use runtara_report_dsl::edit_ops::{BlockPosition, ReportEditOp};
+    use runtara_server::api::dto::reports::{
+        AddReportBlockRequest, CreateReportRequest, MoveReportBlockRequest,
+        PatchReportBlockRequest, RemoveReportBlockRequest, ReplaceReportBlockRequest,
+        ReportBlockDefinition, ReportBlockPosition,
+    };
+
+    let Some(fixture) = DbFixture::start().await else {
+        eprintln!("Skipping per-op vs edit equivalence: no test database configured");
+        return;
+    };
+
+    ensure_config(&fixture.object_url);
+
+    let connections = Arc::new(ConnectionsFacade::new(ConnectionsState::from_config(
+        ConnectionsConfig {
+            db_pool: fixture.server_pool.clone(),
+            redis_manager: None,
+            public_base_url: "http://localhost".to_string(),
+            http_client: reqwest::Client::new(),
+            cipher: Arc::new(NoOpCipher),
+        },
+    )));
+    let manager = Arc::new(ObjectStoreManager::new(fixture.object_url.clone()));
+    let service = ReportService::new(
+        fixture.server_pool.clone(),
+        manager.clone(),
+        connections.clone(),
+    );
+
+    // Base definition: a single markdown block. Schema lookups not
+    // required so we can compare apples to apples without seeding object
+    // model schemas.
+    let base_definition: ReportDefinition = serde_json::from_value(json!({
+        "definitionVersion": 1,
+        "blocks": [
+            { "id": "first", "type": "markdown", "markdown": { "content": "hello" } }
+        ]
+    }))
+    .unwrap();
+
+    let new_block_a = serde_json::from_value(json!({
+        "id": "second",
+        "type": "markdown",
+        "markdown": { "content": "added" }
+    }))
+    .unwrap();
+    let new_block_b = serde_json::from_value(json!({
+        "id": "third",
+        "type": "markdown",
+        "markdown": { "content": "third" }
+    }))
+    .unwrap();
+    let replacement = serde_json::from_value::<ReportBlockDefinition>(json!({
+        "id": "first",
+        "type": "markdown",
+        "markdown": { "content": "replaced" }
+    }))
+    .unwrap();
+
+    // -------- Per-op path --------
+    let per_op_report = service
+        .create_report(
+            TENANT_ID,
+            CreateReportRequest {
+                name: "Per-op".to_string(),
+                slug: Some("per-op".to_string()),
+                description: None,
+                tags: vec![],
+                status: runtara_server::api::dto::reports::ReportStatus::Draft,
+                definition: base_definition.clone(),
+            },
+        )
+        .await
+        .expect("create per-op report");
+
+    service
+        .add_report_block(
+            TENANT_ID,
+            &per_op_report.id,
+            AddReportBlockRequest {
+                block: serde_json::from_value(new_block_a).unwrap(),
+                position: Some(ReportBlockPosition {
+                    after_block_id: Some("first".to_string()),
+                    ..Default::default()
+                }),
+            },
+        )
+        .await
+        .expect("add second");
+    service
+        .add_report_block(
+            TENANT_ID,
+            &per_op_report.id,
+            AddReportBlockRequest {
+                block: serde_json::from_value(new_block_b).unwrap(),
+                position: None,
+            },
+        )
+        .await
+        .expect("add third");
+    service
+        .replace_report_block(
+            TENANT_ID,
+            &per_op_report.id,
+            "first",
+            ReplaceReportBlockRequest {
+                block: replacement.clone(),
+            },
+        )
+        .await
+        .expect("replace first");
+    service
+        .patch_report_block(
+            TENANT_ID,
+            &per_op_report.id,
+            "first",
+            PatchReportBlockRequest {
+                patch: json!({ "title": "Heading" }),
+            },
+        )
+        .await
+        .expect("patch first");
+    service
+        .move_report_block(
+            TENANT_ID,
+            &per_op_report.id,
+            "third",
+            MoveReportBlockRequest {
+                position: ReportBlockPosition {
+                    index: Some(0),
+                    ..Default::default()
+                },
+            },
+        )
+        .await
+        .expect("move third");
+    service
+        .remove_report_block(
+            TENANT_ID,
+            &per_op_report.id,
+            "second",
+            RemoveReportBlockRequest {},
+        )
+        .await
+        .expect("remove second");
+    let per_op_final = service
+        .get_report(TENANT_ID, &per_op_report.id)
+        .await
+        .expect("reload per-op");
+
+    // -------- Batched edit path --------
+    let batched_report = service
+        .create_report(
+            TENANT_ID,
+            CreateReportRequest {
+                name: "Batched".to_string(),
+                slug: Some("batched".to_string()),
+                description: None,
+                tags: vec![],
+                status: runtara_server::api::dto::reports::ReportStatus::Draft,
+                definition: base_definition.clone(),
+            },
+        )
+        .await
+        .expect("create batched report");
+
+    let new_block_a = serde_json::from_value(json!({
+        "id": "second",
+        "type": "markdown",
+        "markdown": { "content": "added" }
+    }))
+    .unwrap();
+    let new_block_b = serde_json::from_value(json!({
+        "id": "third",
+        "type": "markdown",
+        "markdown": { "content": "third" }
+    }))
+    .unwrap();
+
+    service
+        .edit_report(
+            TENANT_ID,
+            &batched_report.id,
+            &[
+                ReportEditOp::AddBlock {
+                    block: serde_json::from_value(new_block_a).unwrap(),
+                    position: BlockPosition {
+                        after_id: Some("first".to_string()),
+                        ..Default::default()
+                    },
+                },
+                ReportEditOp::AddBlock {
+                    block: serde_json::from_value(new_block_b).unwrap(),
+                    position: BlockPosition::default(),
+                },
+                ReportEditOp::ReplaceBlock {
+                    block_id: "first".to_string(),
+                    block: replacement,
+                },
+                ReportEditOp::PatchBlock {
+                    block_id: "first".to_string(),
+                    patch: json!({ "title": "Heading" }),
+                },
+                ReportEditOp::MoveBlock {
+                    block_id: "third".to_string(),
+                    position: BlockPosition {
+                        index: Some(0),
+                        ..Default::default()
+                    },
+                },
+                ReportEditOp::RemoveBlock {
+                    block_id: "second".to_string(),
+                },
+            ],
+        )
+        .await
+        .expect("batched edit");
+    let batched_final = service
+        .get_report(TENANT_ID, &batched_report.id)
+        .await
+        .expect("reload batched");
+
+    assert_eq!(
+        serde_json::to_value(&per_op_final.definition).unwrap(),
+        serde_json::to_value(&batched_final.definition).unwrap(),
+        "per-op and batched edit must produce identical definitions"
+    );
+
+    fixture.cleanup().await;
+}

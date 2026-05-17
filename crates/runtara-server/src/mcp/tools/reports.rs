@@ -7,8 +7,7 @@ use crate::api::services::reports::ReportService;
 
 use super::super::server::SmoMcpServer;
 use super::internal_api::{
-    api_delete, api_delete_with_body, api_get, api_patch, api_post, api_put, normalize_json_arg,
-    validate_path_param,
+    api_delete, api_get, api_post, api_put, normalize_json_arg, validate_path_param,
 };
 
 fn json_result(value: Value) -> Result<CallToolResult, rmcp::ErrorData> {
@@ -567,19 +566,20 @@ pub async fn add_report_block(
 ) -> Result<CallToolResult, rmcp::ErrorData> {
     validate_path_param("report_id", &params.report_id)?;
     let block = normalize_json_arg(params.block, "block")?;
-
-    let body = json!({
-        "block": block,
-        "position": position_body(params.index, params.before_block_id, params.after_block_id),
-    });
-
-    let result = api_post(
+    post_edit_op(
         server,
-        &format!("/api/runtime/reports/{}/blocks", params.report_id),
-        Some(body),
+        &params.report_id,
+        json!({
+            "kind": "add_block",
+            "block": block,
+            "position": block_position_body(
+                params.index,
+                params.before_block_id.as_deref(),
+                params.after_block_id.as_deref(),
+            ),
+        }),
     )
-    .await?;
-    json_result(result)
+    .await
 }
 
 pub async fn replace_report_block(
@@ -589,17 +589,16 @@ pub async fn replace_report_block(
     validate_path_param("report_id", &params.report_id)?;
     validate_path_param("block_id", &params.block_id)?;
     let block = normalize_json_arg(params.block, "block")?;
-
-    let result = api_put(
+    post_edit_op(
         server,
-        &format!(
-            "/api/runtime/reports/{}/blocks/{}",
-            params.report_id, params.block_id
-        ),
-        Some(json!({ "block": block })),
+        &params.report_id,
+        json!({
+            "kind": "replace_block",
+            "blockId": params.block_id,
+            "block": block,
+        }),
     )
-    .await?;
-    json_result(result)
+    .await
 }
 
 pub async fn patch_report_block(
@@ -609,17 +608,16 @@ pub async fn patch_report_block(
     validate_path_param("report_id", &params.report_id)?;
     validate_path_param("block_id", &params.block_id)?;
     let patch = normalize_json_arg(params.patch, "patch")?;
-
-    let result = api_patch(
+    post_edit_op(
         server,
-        &format!(
-            "/api/runtime/reports/{}/blocks/{}",
-            params.report_id, params.block_id
-        ),
-        Some(json!({ "patch": patch })),
+        &params.report_id,
+        json!({
+            "kind": "patch_block",
+            "blockId": params.block_id,
+            "patch": patch,
+        }),
     )
-    .await?;
-    json_result(result)
+    .await
 }
 
 pub async fn move_report_block(
@@ -628,20 +626,20 @@ pub async fn move_report_block(
 ) -> Result<CallToolResult, rmcp::ErrorData> {
     validate_path_param("report_id", &params.report_id)?;
     validate_path_param("block_id", &params.block_id)?;
-    let body = json!({
-        "position": position_body(params.index, params.before_block_id, params.after_block_id),
-    });
-
-    let result = api_post(
+    post_edit_op(
         server,
-        &format!(
-            "/api/runtime/reports/{}/blocks/{}/move",
-            params.report_id, params.block_id
-        ),
-        Some(body),
+        &params.report_id,
+        json!({
+            "kind": "move_block",
+            "blockId": params.block_id,
+            "position": block_position_body(
+                params.index,
+                params.before_block_id.as_deref(),
+                params.after_block_id.as_deref(),
+            ),
+        }),
     )
-    .await?;
-    json_result(result)
+    .await
 }
 
 pub async fn remove_report_block(
@@ -650,18 +648,33 @@ pub async fn remove_report_block(
 ) -> Result<CallToolResult, rmcp::ErrorData> {
     validate_path_param("report_id", &params.report_id)?;
     validate_path_param("block_id", &params.block_id)?;
-    let body = json!({});
-
-    let result = api_delete_with_body(
+    post_edit_op(
         server,
-        &format!(
-            "/api/runtime/reports/{}/blocks/{}",
-            params.report_id, params.block_id
-        ),
-        Some(body),
+        &params.report_id,
+        json!({
+            "kind": "remove_block",
+            "blockId": params.block_id,
+        }),
     )
-    .await?;
-    json_result(result)
+    .await
+}
+
+fn block_position_body(
+    index: Option<usize>,
+    before_id: Option<&str>,
+    after_id: Option<&str>,
+) -> Value {
+    let mut position = serde_json::Map::new();
+    if let Some(v) = index {
+        position.insert("index".to_string(), json!(v));
+    }
+    if let Some(v) = before_id {
+        position.insert("beforeId".to_string(), Value::String(v.to_string()));
+    }
+    if let Some(v) = after_id {
+        position.insert("afterId".to_string(), Value::String(v.to_string()));
+    }
+    Value::Object(position)
 }
 
 pub async fn add_report_layout_node(
@@ -870,24 +883,6 @@ fn normalize_json_array_arg(value: Value, field: &str) -> Result<Value, rmcp::Er
             None,
         ))
     }
-}
-
-fn position_body(
-    index: Option<usize>,
-    before_block_id: Option<String>,
-    after_block_id: Option<String>,
-) -> Value {
-    let mut position = serde_json::Map::new();
-    if let Some(index) = index {
-        position.insert("index".to_string(), json!(index));
-    }
-    if let Some(before_block_id) = before_block_id {
-        position.insert("beforeBlockId".to_string(), Value::String(before_block_id));
-    }
-    if let Some(after_block_id) = after_block_id {
-        position.insert("afterBlockId".to_string(), Value::String(after_block_id));
-    }
-    Value::Object(position)
 }
 
 fn report_authoring_schema() -> Value {

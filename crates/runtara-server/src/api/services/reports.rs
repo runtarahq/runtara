@@ -343,31 +343,27 @@ impl ReportService {
         id_or_slug: &str,
         request: AddReportBlockRequest,
     ) -> Result<ReportBlockMutationResponse, ReportServiceError> {
-        let mut report = self.get_report(tenant_id, id_or_slug).await?;
-        if report
+        let block_id = request.block.id.clone();
+        let report = self
+            .edit_report(
+                tenant_id,
+                id_or_slug,
+                &[runtara_report_dsl::edit_ops::ReportEditOp::AddBlock {
+                    block: request.block,
+                    position: to_dsl_position(request.position.unwrap_or_default()),
+                }],
+            )
+            .await?;
+        let block = report
             .definition
             .blocks
             .iter()
-            .any(|block| block.id == request.block.id)
-        {
-            return Err(ReportServiceError::Conflict(format!(
-                "Report block '{}' already exists",
-                request.block.id
-            )));
-        }
-
-        let position = request.position.unwrap_or_default();
-        let insert_index = resolve_position_index(&report.definition.blocks, &position)?;
-        let block = request.block;
-        let block_id = block.id.clone();
-
-        report.definition.blocks.insert(insert_index, block.clone());
-
-        let report = self.save_report_definition(tenant_id, report).await?;
+            .find(|b| b.id == block_id)
+            .cloned();
         Ok(ReportBlockMutationResponse {
             success: true,
             report,
-            block: Some(block),
+            block,
             message: format!("Report block '{}' added", block_id),
         })
     }
@@ -379,21 +375,21 @@ impl ReportService {
         block_id: &str,
         request: ReplaceReportBlockRequest,
     ) -> Result<ReportBlockMutationResponse, ReportServiceError> {
-        if request.block.id != block_id {
-            return Err(ReportServiceError::Validation(
-                "Replacement block id must match the path block id".to_string(),
-            ));
-        }
-
-        let mut report = self.get_report(tenant_id, id_or_slug).await?;
-        let index = find_block_index(&report.definition.blocks, block_id)?;
-        report.definition.blocks[index] = request.block.clone();
-
-        let report = self.save_report_definition(tenant_id, report).await?;
+        let block_clone = request.block.clone();
+        let report = self
+            .edit_report(
+                tenant_id,
+                id_or_slug,
+                &[runtara_report_dsl::edit_ops::ReportEditOp::ReplaceBlock {
+                    block_id: block_id.to_string(),
+                    block: request.block,
+                }],
+            )
+            .await?;
         Ok(ReportBlockMutationResponse {
             success: true,
             report,
-            block: Some(request.block),
+            block: Some(block_clone),
             message: format!("Report block '{}' replaced", block_id),
         })
     }
@@ -405,36 +401,26 @@ impl ReportService {
         block_id: &str,
         request: PatchReportBlockRequest,
     ) -> Result<ReportBlockMutationResponse, ReportServiceError> {
-        if !request.patch.is_object() {
-            return Err(ReportServiceError::Validation(
-                "Report block patch must be a JSON object".to_string(),
-            ));
-        }
-        if request.patch.get("id").is_some() {
-            return Err(ReportServiceError::Validation(
-                "Report block id cannot be changed with patch_report_block".to_string(),
-            ));
-        }
-
-        let mut report = self.get_report(tenant_id, id_or_slug).await?;
-        let index = find_block_index(&report.definition.blocks, block_id)?;
-        let mut block_value = serde_json::to_value(&report.definition.blocks[index])
-            .map_err(|e| ReportServiceError::Validation(e.to_string()))?;
-        apply_json_merge_patch(&mut block_value, &request.patch);
-        let patched_block: ReportBlockDefinition = serde_json::from_value(block_value)
-            .map_err(|e| ReportServiceError::Validation(format!("Invalid block patch: {}", e)))?;
-        if patched_block.id != block_id {
-            return Err(ReportServiceError::Validation(
-                "Report block id cannot be changed with patch_report_block".to_string(),
-            ));
-        }
-
-        report.definition.blocks[index] = patched_block.clone();
-        let report = self.save_report_definition(tenant_id, report).await?;
+        let report = self
+            .edit_report(
+                tenant_id,
+                id_or_slug,
+                &[runtara_report_dsl::edit_ops::ReportEditOp::PatchBlock {
+                    block_id: block_id.to_string(),
+                    patch: request.patch,
+                }],
+            )
+            .await?;
+        let block = report
+            .definition
+            .blocks
+            .iter()
+            .find(|b| b.id == block_id)
+            .cloned();
         Ok(ReportBlockMutationResponse {
             success: true,
             report,
-            block: Some(patched_block),
+            block,
             message: format!("Report block '{}' updated", block_id),
         })
     }
@@ -446,17 +432,26 @@ impl ReportService {
         block_id: &str,
         request: MoveReportBlockRequest,
     ) -> Result<ReportBlockMutationResponse, ReportServiceError> {
-        let mut report = self.get_report(tenant_id, id_or_slug).await?;
-        let current_index = find_block_index(&report.definition.blocks, block_id)?;
-        let block = report.definition.blocks.remove(current_index);
-        let new_index = resolve_position_index(&report.definition.blocks, &request.position)?;
-        report.definition.blocks.insert(new_index, block.clone());
-
-        let report = self.save_report_definition(tenant_id, report).await?;
+        let report = self
+            .edit_report(
+                tenant_id,
+                id_or_slug,
+                &[runtara_report_dsl::edit_ops::ReportEditOp::MoveBlock {
+                    block_id: block_id.to_string(),
+                    position: to_dsl_position(request.position),
+                }],
+            )
+            .await?;
+        let block = report
+            .definition
+            .blocks
+            .iter()
+            .find(|b| b.id == block_id)
+            .cloned();
         Ok(ReportBlockMutationResponse {
             success: true,
             report,
-            block: Some(block),
+            block,
             message: format!("Report block '{}' moved", block_id),
         })
     }
@@ -468,11 +463,15 @@ impl ReportService {
         block_id: &str,
         _request: RemoveReportBlockRequest,
     ) -> Result<ReportBlockMutationResponse, ReportServiceError> {
-        let mut report = self.get_report(tenant_id, id_or_slug).await?;
-        let index = find_block_index(&report.definition.blocks, block_id)?;
-        report.definition.blocks.remove(index);
-
-        let report = self.save_report_definition(tenant_id, report).await?;
+        let report = self
+            .edit_report(
+                tenant_id,
+                id_or_slug,
+                &[runtara_report_dsl::edit_ops::ReportEditOp::RemoveBlock {
+                    block_id: block_id.to_string(),
+                }],
+            )
+            .await?;
         Ok(ReportBlockMutationResponse {
             success: true,
             report,
@@ -7461,87 +7460,16 @@ pub(crate) fn humanize_label(value: &str) -> String {
         .join(" ")
 }
 
-fn find_block_index(
-    blocks: &[ReportBlockDefinition],
-    block_id: &str,
-) -> Result<usize, ReportServiceError> {
-    blocks
-        .iter()
-        .position(|block| block.id == block_id)
-        .ok_or_else(|| ReportServiceError::Validation(format!("Unknown block '{}'", block_id)))
-}
-
-fn resolve_position_index(
-    blocks: &[ReportBlockDefinition],
-    position: &ReportBlockPosition,
-) -> Result<usize, ReportServiceError> {
-    let selector_count = usize::from(position.index.is_some())
-        + usize::from(position.before_block_id.is_some())
-        + usize::from(position.after_block_id.is_some());
-
-    if selector_count > 1 {
-        return Err(ReportServiceError::Validation(
-            "Report block position must use only one of index, beforeBlockId, or afterBlockId"
-                .to_string(),
-        ));
-    }
-
-    if let Some(index) = position.index {
-        return Ok(index.min(blocks.len()));
-    }
-
-    if let Some(before_block_id) = &position.before_block_id {
-        if before_block_id.trim().is_empty() {
-            return Err(ReportServiceError::Validation(
-                "beforeBlockId cannot be empty".to_string(),
-            ));
-        }
-        return blocks
-            .iter()
-            .position(|block| block.id == *before_block_id)
-            .ok_or_else(|| {
-                ReportServiceError::Validation(format!(
-                    "Unknown beforeBlockId '{}'",
-                    before_block_id
-                ))
-            });
-    }
-
-    if let Some(after_block_id) = &position.after_block_id {
-        if after_block_id.trim().is_empty() {
-            return Err(ReportServiceError::Validation(
-                "afterBlockId cannot be empty".to_string(),
-            ));
-        }
-        return blocks
-            .iter()
-            .position(|block| block.id == *after_block_id)
-            .map(|index| index + 1)
-            .ok_or_else(|| {
-                ReportServiceError::Validation(format!("Unknown afterBlockId '{}'", after_block_id))
-            });
-    }
-
-    Ok(blocks.len())
-}
-
-fn apply_json_merge_patch(target: &mut Value, patch: &Value) {
-    match (target, patch) {
-        (Value::Object(target), Value::Object(patch)) => {
-            for (key, patch_value) in patch {
-                if patch_value.is_null() {
-                    target.remove(key);
-                } else {
-                    apply_json_merge_patch(
-                        target.entry(key.clone()).or_insert(Value::Null),
-                        patch_value,
-                    );
-                }
-            }
-        }
-        (target, patch) => {
-            *target = patch.clone();
-        }
+/// Convert the legacy wire `ReportBlockPosition`
+/// (`beforeBlockId`/`afterBlockId`) to the dsl's `BlockPosition`
+/// (`beforeId`/`afterId`). The shim REST handlers + service methods
+/// translate at the boundary so external callers keep their existing
+/// wire format until the next cutover.
+fn to_dsl_position(position: ReportBlockPosition) -> runtara_report_dsl::edit_ops::BlockPosition {
+    runtara_report_dsl::edit_ops::BlockPosition {
+        index: position.index,
+        before_id: position.before_block_id,
+        after_id: position.after_block_id,
     }
 }
 
@@ -8381,44 +8309,11 @@ mod tests {
         assert!(err.to_string().contains("cycle"));
     }
 
-    #[test]
-    fn resolves_report_block_positions() {
-        let blocks = vec![test_block("a"), test_block("b"), test_block("c")];
-
-        assert_eq!(
-            resolve_position_index(
-                &blocks,
-                &ReportBlockPosition {
-                    index: Some(1),
-                    ..Default::default()
-                }
-            )
-            .unwrap(),
-            1
-        );
-        assert_eq!(
-            resolve_position_index(
-                &blocks,
-                &ReportBlockPosition {
-                    before_block_id: Some("b".to_string()),
-                    ..Default::default()
-                }
-            )
-            .unwrap(),
-            1
-        );
-        assert_eq!(
-            resolve_position_index(
-                &blocks,
-                &ReportBlockPosition {
-                    after_block_id: Some("b".to_string()),
-                    ..Default::default()
-                }
-            )
-            .unwrap(),
-            2
-        );
-    }
+    // Position-index resolution lives in `runtara-report-dsl::edit_ops`
+    // now and has its own coverage there
+    // (`add_block_appends_when_no_position`, `move_block_by_after_id`).
+    // The server-side `to_dsl_position` is a 4-line wire-shape converter
+    // and is exercised by every REST per-op shim test below.
 
     #[test]
     fn table_search_condition_uses_configured_columns() {
@@ -9165,7 +9060,7 @@ mod tests {
             "table": { "columns": [{ "field": "id" }], "defaultSort": [] }
         });
 
-        apply_json_merge_patch(
+        runtara_report_dsl::edit_ops::apply_json_merge_patch(
             &mut value,
             &json!({
                 "title": "Recent orders",

@@ -815,6 +815,44 @@ mod tests {
     }
 
     #[test]
+    fn batched_ops_equivalent_to_sequential_application() {
+        // Apply [add b1, add b2, patch b1 title, remove b2] both ways and
+        // confirm the result is identical. This proves apply_edit_ops
+        // composes sequentially within one call the same way it would
+        // across separate calls.
+        let ops = vec![
+            ReportEditOp::AddBlock {
+                block: block("b1"),
+                position: BlockPosition::default(),
+            },
+            ReportEditOp::AddBlock {
+                block: block("b2"),
+                position: BlockPosition::default(),
+            },
+            ReportEditOp::PatchBlock {
+                block_id: "b1".to_string(),
+                patch: json!({ "title": "First" }),
+            },
+            ReportEditOp::RemoveBlock {
+                block_id: "b2".to_string(),
+            },
+        ];
+
+        let mut batched = empty_def();
+        apply_edit_ops(&mut batched, &ops).unwrap();
+
+        let mut sequential = empty_def();
+        for op in &ops {
+            apply_edit_ops(&mut sequential, std::slice::from_ref(op)).unwrap();
+        }
+
+        assert_eq!(
+            serde_json::to_value(&batched).unwrap(),
+            serde_json::to_value(&sequential).unwrap()
+        );
+    }
+
+    #[test]
     fn remove_layout_node_finds_nested_match() {
         let mut def: ReportDefinition = serde_json::from_value(json!({
             "definitionVersion": 1,
