@@ -4948,113 +4948,11 @@ fn validate_report_display_template(
     template: &str,
     context: &str,
 ) -> Result<(), ReportServiceError> {
-    validate_safe_display_template(template).map_err(|message| {
+    runtara_report_dsl::validate_safe_display_template(template).map_err(|message| {
         ReportServiceError::Validation(format!(
             "{context} is invalid: {message}. Supported syntax is '{{{{field.path}}}}' or '{{{{field.path | format}}}}' only"
         ))
     })
-}
-
-fn validate_safe_display_template(template: &str) -> Result<(), &'static str> {
-    let mut cursor = 0;
-    while cursor < template.len() {
-        let open = find_from(template, "{{", cursor);
-        let close = find_from(template, "}}", cursor);
-        if close.is_some_and(|close| open.is_none_or(|open| close < open)) {
-            return Err("unexpected close delimiter");
-        }
-        let Some(open) = open else {
-            return Ok(());
-        };
-        let Some(close) = find_from(template, "}}", open + 2) else {
-            return Err("unclosed variable");
-        };
-
-        let token = template[open + 2..close].trim();
-        validate_display_template_token(token)?;
-        cursor = close + 2;
-    }
-    Ok(())
-}
-
-fn validate_display_template_token(token: &str) -> Result<(), &'static str> {
-    if token.is_empty() {
-        return Err("empty variable");
-    }
-    if token.contains("{{") || token.contains("}}") {
-        return Err("nested variables are not supported");
-    }
-
-    let parts = token.split('|').collect::<Vec<_>>();
-    match parts.as_slice() {
-        [field] => validate_display_template_field(field.trim()),
-        [field, format] => {
-            validate_display_template_field(field.trim())?;
-            validate_display_template_format(format.trim())
-        }
-        _ => Err("only one format pipe is supported"),
-    }
-}
-
-fn validate_display_template_field(field: &str) -> Result<(), &'static str> {
-    let field = field.strip_prefix("row.").unwrap_or(field);
-    let mut parts = field.split('.');
-    let Some(first) = parts.next().filter(|part| !part.is_empty()) else {
-        return Err("field path is empty");
-    };
-    if !is_identifier_part(first) {
-        return Err("field path is invalid");
-    }
-    for part in parts {
-        if part.is_empty() {
-            return Err("field path is invalid");
-        }
-        if part.chars().all(|ch| ch.is_ascii_digit()) {
-            continue;
-        }
-        if !is_identifier_part(part) {
-            return Err("field path is invalid");
-        }
-    }
-    Ok(())
-}
-
-fn validate_display_template_format(format: &str) -> Result<(), &'static str> {
-    if format.is_empty() {
-        return Err("format is empty");
-    }
-    let mut parts = format.split(':');
-    let Some(name) = parts.next() else {
-        return Err("format is invalid");
-    };
-    if !is_identifier_part(name) {
-        return Err("format is invalid");
-    }
-    if let Some(argument) = parts.next()
-        && (argument.is_empty()
-            || !argument
-                .chars()
-                .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-'))
-    {
-        return Err("format is invalid");
-    }
-    if parts.next().is_some() {
-        return Err("format is invalid");
-    }
-    Ok(())
-}
-
-fn is_identifier_part(value: &str) -> bool {
-    let mut chars = value.chars();
-    let Some(first) = chars.next() else {
-        return false;
-    };
-    (first.is_ascii_alphabetic() || first == '_')
-        && chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
-}
-
-fn find_from(value: &str, pattern: &str, cursor: usize) -> Option<usize> {
-    value[cursor..].find(pattern).map(|index| cursor + index)
 }
 
 pub(crate) fn validate_report_condition_field_refs(
@@ -8949,6 +8847,7 @@ mod tests {
 
     #[test]
     fn display_template_syntax_accepts_safe_interpolation_only() {
+        use runtara_report_dsl::validate_safe_display_template;
         validate_safe_display_template(
             "{{first_name}} {{row.requested_loan.amount | number_compact}} AUD",
         )

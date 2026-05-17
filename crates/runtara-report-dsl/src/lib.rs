@@ -8,6 +8,7 @@
 
 pub mod condition;
 pub mod format;
+pub mod lint;
 pub mod row_condition;
 pub mod template;
 pub mod types;
@@ -22,7 +23,7 @@ pub use format::{FormatSpec, Formatter, RenderContext, SimpleAsciiFormatter};
 pub use row_condition::{RowConditionError, evaluate_row_condition};
 pub use template::{
     TemplateError, format_value, make_environment, register_report_filters, render_template,
-    render_template_with_extras, validate_template,
+    render_template_with_extras, validate_safe_display_template, validate_template,
 };
 pub use types::*;
 

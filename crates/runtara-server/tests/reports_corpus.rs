@@ -88,3 +88,17 @@ fn corpus_is_not_empty() {
         fixtures_dir().display()
     );
 }
+
+/// Phase 5: every fixture must lint cleanly. The corpus is the canonical
+/// shape; if `runtara_report_dsl::lint::lint` emits anything against a
+/// fixture, either the fixture is wrong or the lint is overreaching.
+#[test]
+fn fixtures_have_no_lint_warnings() {
+    for (name, value) in collect_fixtures() {
+        let issues = runtara_report_dsl::lint::lint(&value);
+        assert!(
+            issues.is_empty(),
+            "{name}: expected no lint issues, got: {issues:?}"
+        );
+    }
+}
