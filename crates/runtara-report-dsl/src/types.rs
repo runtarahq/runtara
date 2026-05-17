@@ -211,6 +211,13 @@ pub struct ReportGridLayoutNode {
     /// "section" shape).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub columns: Option<i64>,
+    /// Optional row count. Authoring affordance — when set, the editor
+    /// renders `rows × columns` cells so empty slots are visible before
+    /// content is added. The viewer renders rows implicitly from items
+    /// regardless. When `rows` is less than the rows needed to fit
+    /// `items`, the viewer/editor grows to fit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rows: Option<i64>,
     /// Optional fractional column widths. Length must match `columns`
     /// when set. Defaults to equal split.
     #[serde(

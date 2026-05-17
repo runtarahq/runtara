@@ -3411,6 +3411,15 @@ export interface ReportGridLayoutNode {
   description?: string | null;
   id: string;
   items: ReportGridLayoutItem[];
+  /**
+   * Optional row count. Authoring affordance — when set, the editor
+   * renders `rows × columns` cells so empty slots are visible before
+   * content is added. The viewer renders rows implicitly from items
+   * regardless. When `rows` is less than the rows needed to fit
+   * `items`, the viewer/editor grows to fit.
+   * @format int64
+   */
+  rows?: number | null;
   showWhen?: any;
   /** Optional section-style heading rendered above the grid contents. */
   title?: string | null;

@@ -29,7 +29,14 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from '@/shared/components/ui/dropdown-menu';
-import { GripVertical, Plus, Settings2, Trash2 } from 'lucide-react';
+import {
+  ChevronDown,
+  GripVertical,
+  Minus,
+  Plus,
+  Settings2,
+  Trash2,
+} from 'lucide-react';
 import { CSSProperties, useState } from 'react';
 import {
   ReportBlockResult,
@@ -300,6 +307,18 @@ function GridNodeEditor({
       ? widths.map((w) => `${Math.max(w, 0.0001)}fr`).join(' ')
       : `repeat(${columns}, minmax(0, 1fr))`;
 
+  // How many rows the skeleton renders. The viewer renders rows
+  // implicitly from items; the editor shows enough rows to fit
+  // `items` *and* the user's explicit `rows` hint, never going below 1.
+  const itemCellCount = node.items.reduce((sum, item) => {
+    const cs = Math.max(1, Math.min(item.colSpan ?? 1, columns));
+    const rs = Math.max(1, item.rowSpan ?? 1);
+    return sum + cs * rs;
+  }, 0);
+  const naturalRows = Math.max(1, Math.ceil(itemCellCount / columns));
+  const rows = Math.max(node.rows ?? naturalRows, naturalRows);
+  const emptySlots = Math.max(0, columns * rows - itemCellCount);
+
   const handleDelete = () => {
     onChange(removeLayoutNode(definition, node.id));
   };
@@ -328,6 +347,29 @@ function GridNodeEditor({
     onChange(addLayoutNode(definition, sub, { parentGridId: node.id }));
   };
 
+  const setColumns = (next: number) => {
+    const clamped = Math.max(1, Math.min(12, next));
+    onChange(
+      updateGrid(definition, node.id, (g) => ({
+        ...g,
+        columns: clamped,
+        // Drop columnWidths when count changes — they would no longer
+        // align with the new column count.
+        columnWidths: undefined,
+      }))
+    );
+  };
+
+  const setRows = (next: number) => {
+    const clamped = Math.max(naturalRows, Math.min(12, next));
+    onChange(
+      updateGrid(definition, node.id, (g) => ({
+        ...g,
+        rows: clamped,
+      }))
+    );
+  };
+
   const itemChildIds = node.items.map((item) => item.child.id);
 
   return (
@@ -336,7 +378,7 @@ function GridNodeEditor({
       data-testid={`grid-${node.id}`}
       data-grid-id={node.id}
     >
-      <header className="mb-3 flex items-center justify-between gap-2">
+      <header className="mb-3 flex flex-wrap items-center justify-between gap-2">
         <div className="flex min-w-0 items-center gap-2">
           {dragHandleProps ? (
             <button
@@ -356,7 +398,7 @@ function GridNodeEditor({
               </h3>
             ) : (
               <span className="text-xs uppercase tracking-wider text-muted-foreground">
-                Grid · {columns} {columns === 1 ? 'column' : 'columns'}
+                Grid · {columns}×{rows}
               </span>
             )}
             {node.description ? (
@@ -366,13 +408,36 @@ function GridNodeEditor({
             ) : null}
           </div>
         </div>
-        <div className="flex items-center gap-1">
+        <div className="flex items-center gap-2">
+          <DimensionStepper
+            label="Columns"
+            value={columns}
+            min={1}
+            max={12}
+            onChange={setColumns}
+            decrementDisabledReason={
+              columns <= 1 ? 'A grid needs at least one column' : undefined
+            }
+          />
+          <DimensionStepper
+            label="Rows"
+            value={rows}
+            min={naturalRows}
+            max={12}
+            onChange={setRows}
+            decrementDisabledReason={
+              rows <= naturalRows
+                ? 'Can’t remove rows that still contain items'
+                : undefined
+            }
+          />
           <Button
             type="button"
             variant="ghost"
             size="icon"
             className="h-7 w-7"
-            title="Grid settings"
+            title="More grid settings"
+            aria-label="Grid settings"
             onClick={() => setShowSettings((v) => !v)}
           >
             <Settings2 className="h-3.5 w-3.5" />
@@ -383,6 +448,7 @@ function GridNodeEditor({
             size="icon"
             className="h-7 w-7 text-destructive"
             title="Remove grid"
+            aria-label="Remove grid"
             onClick={handleDelete}
           >
             <Trash2 className="h-3.5 w-3.5" />
@@ -404,7 +470,7 @@ function GridNodeEditor({
         strategy={verticalListSortingStrategy}
       >
         <div
-          className="grid w-full gap-3 [grid-template-columns:var(--report-grid-edit-cols)]"
+          className="grid w-full gap-3 rounded-md border border-dashed border-muted-foreground/20 bg-muted/10 p-2 [grid-template-columns:var(--report-grid-edit-cols)]"
           style={
             { '--report-grid-edit-cols': template } as CSSProperties
           }
@@ -443,37 +509,124 @@ function GridNodeEditor({
               </div>
             );
           })}
+          {Array.from({ length: emptySlots }).map((_, i) => (
+            <EmptyCellPlaceholder
+              key={`empty-${node.id}-${i}`}
+              gridId={node.id}
+              onAddBlock={handleAddBlockToGrid}
+              onAddGrid={handleAddGridToGrid}
+            />
+          ))}
         </div>
       </SortableContext>
-      <div className="mt-3 flex flex-wrap items-center gap-2 border-t pt-3">
+      <p className="mt-2 text-[11px] text-muted-foreground">
+        Tip: drag the <GripVertical className="inline h-3 w-3 align-text-bottom" /> grip on any block to reorder.
+      </p>
+    </section>
+  );
+}
+
+interface DimensionStepperProps {
+  label: string;
+  value: number;
+  min: number;
+  max: number;
+  onChange: (next: number) => void;
+  decrementDisabledReason?: string;
+}
+
+function DimensionStepper({
+  label,
+  value,
+  min,
+  max,
+  onChange,
+  decrementDisabledReason,
+}: DimensionStepperProps) {
+  const canDecrement = value > min;
+  const canIncrement = value < max;
+  return (
+    <div className="inline-flex items-center gap-1 rounded-md border bg-background px-1 py-0.5 text-xs">
+      <span className="px-1 text-muted-foreground">{label}</span>
+      <button
+        type="button"
+        aria-label={`Remove ${label.toLowerCase()}`}
+        title={decrementDisabledReason ?? `Remove ${label.toLowerCase()}`}
+        disabled={!canDecrement}
+        onClick={() => canDecrement && onChange(value - 1)}
+        className="rounded p-0.5 text-muted-foreground hover:bg-muted disabled:cursor-not-allowed disabled:opacity-30"
+      >
+        <Minus className="h-3 w-3" />
+      </button>
+      <span className="min-w-[1ch] text-center font-medium tabular-nums">
+        {value}
+      </span>
+      <button
+        type="button"
+        aria-label={`Add ${label.toLowerCase()}`}
+        title={`Add ${label.toLowerCase()}`}
+        disabled={!canIncrement}
+        onClick={() => canIncrement && onChange(value + 1)}
+        className="rounded p-0.5 text-muted-foreground hover:bg-muted disabled:cursor-not-allowed disabled:opacity-30"
+      >
+        <Plus className="h-3 w-3" />
+      </button>
+    </div>
+  );
+}
+
+interface EmptyCellPlaceholderProps {
+  gridId: string;
+  onAddBlock: () => void;
+  onAddGrid: (columns: number) => void;
+}
+
+function EmptyCellPlaceholder({
+  gridId,
+  onAddBlock,
+  onAddGrid,
+}: EmptyCellPlaceholderProps) {
+  return (
+    <div
+      data-testid={`empty-cell-${gridId}`}
+      className="flex min-h-[80px] items-center justify-center rounded-md border border-dashed border-muted-foreground/30 bg-background/30 p-2 transition-colors hover:border-muted-foreground/60 hover:bg-muted/30"
+    >
+      <div className="flex items-center gap-1">
         <Button
           type="button"
-          variant="outline"
+          variant="ghost"
           size="sm"
-          className="h-7"
-          onClick={handleAddBlockToGrid}
+          className="h-7 text-xs"
+          onClick={onAddBlock}
         >
           <Plus className="mr-1 h-3 w-3" /> Add block
         </Button>
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
-            <Button type="button" variant="outline" size="sm" className="h-7">
-              <Plus className="mr-1 h-3 w-3" /> Add nested grid
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              className="h-7 px-1.5 text-muted-foreground"
+              title="Add nested grid"
+              aria-label="Add nested grid"
+            >
+              <ChevronDown className="h-3 w-3" />
             </Button>
           </DropdownMenuTrigger>
-          <DropdownMenuContent align="start">
+          <DropdownMenuContent align="center">
             {PRESETS.map((preset) => (
               <DropdownMenuItem
                 key={preset.columns}
-                onClick={() => handleAddGridToGrid(preset.columns)}
+                onClick={() => onAddGrid(preset.columns)}
               >
-                {preset.label}
+                Nested {preset.label.toLowerCase()}
               </DropdownMenuItem>
             ))}
           </DropdownMenuContent>
         </DropdownMenu>
       </div>
-    </section>
+    </div>
   );
 }
 

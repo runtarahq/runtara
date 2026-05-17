@@ -199,4 +199,51 @@ test.describe('wizard v2 grid layout author flow (mocked)', () => {
     expect(matchingBlock).toBeDefined();
     expect(matchingBlock?.type).toBe('markdown');
   });
+
+  test('inline columns/rows steppers grow the grid skeleton + persist on save', async ({
+    page,
+    mockApi,
+  }) => {
+    const { getSaved } = await setupGridEditing(
+      page,
+      mockApi as unknown as import('../../../fixtures/mock.fixture').MockApi
+    );
+
+    // Start from a fresh 1-column grid.
+    await page
+      .getByRole('button', { name: /^Add grid$/i })
+      .first()
+      .click();
+    await page.getByText('Section (1 column)').click();
+
+    // Visible "Grid · 1×1" label confirms the skeleton renders even for
+    // an empty grid.
+    await expect(page.getByText(/Grid · 1×1/)).toBeVisible();
+
+    // Bump columns to 3 via the inline stepper.
+    await page.getByLabel('Add columns').click();
+    await page.getByLabel('Add columns').click();
+    await expect(page.getByText(/Grid · 3×1/)).toBeVisible();
+
+    // Bump rows to 2.
+    await page.getByLabel('Add rows').click();
+    await expect(page.getByText(/Grid · 3×2/)).toBeVisible();
+
+    // 6 empty cells should be visible (3 cols × 2 rows, no items yet).
+    const emptyCells = page.getByTestId(/^empty-cell-/);
+    await expect(emptyCells).toHaveCount(6);
+
+    // Save.
+    await page.getByRole('button', { name: /^Save$/ }).click();
+    await expect(async () => {
+      expect(getSaved()).not.toBeNull();
+    }).toPass({ timeout: 5000 });
+
+    const saved = getSaved()!;
+    const grid = saved.definition.layout?.[0];
+    expect(grid?.type).toBe('grid');
+    if (grid?.type !== 'grid') return;
+    expect(grid.columns).toBe(3);
+    expect(grid.rows).toBe(2);
+  });
 });

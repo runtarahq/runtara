@@ -3771,6 +3771,14 @@ fn validate_layout_node(
                     node_id
                 )));
             }
+            if let Some(rows) = object.get("rows").and_then(Value::as_i64)
+                && rows <= 0
+            {
+                return Err(ReportServiceError::Validation(format!(
+                    "Grid layout node '{}' rows must be positive",
+                    node_id
+                )));
+            }
             if let Some(widths) = object.get("columnWidths").and_then(Value::as_array) {
                 let columns_count = object
                     .get("columns")
