@@ -59,7 +59,7 @@ export function useReportWorkflowAction({
         );
         const scheduled = await runReportWorkflow(token ?? '', {
           workflowId: action.workflowId,
-          version: action.version,
+          version: action.version ?? undefined,
           context,
         });
         const finalStatus = isTerminalStatus(scheduled.status)

@@ -150,7 +150,7 @@ describe('table column round-trip', () => {
     expect(wfCol.workflowAction?.workflowId).toBe('workflow_process');
     expect(wfCol.workflowAction?.context?.mode).toBe('row');
     const ixCol = cols.find((c) => c.type === 'interaction_buttons')!;
-    expect(ixCol.interactionButtons?.[0].actions[0]).toMatchObject({
+    expect(ixCol.interactionButtons?.[0]?.actions?.[0]).toMatchObject({
       type: 'set_filter',
       filterId: 'order_id',
       valueFrom: 'datum.id',
@@ -440,7 +440,7 @@ describe('table column round-trip', () => {
     });
     expect(state.blocks[1].fieldConfigs?.amount).toMatchObject({
       editable: true,
-      editor: definition.blocks[1].card?.groups[0].fields[0].editor,
+      editor: definition.blocks[1].card?.groups?.[0]?.fields[0].editor,
     });
 
     const round = wizardStateToDefinition(state, SCHEMA_FIELDS, definition);
@@ -448,9 +448,9 @@ describe('table column round-trip', () => {
       editable: true,
       editor: definition.blocks[0].table?.columns?.[0].editor,
     });
-    expect(round.blocks[1].card?.groups[0].fields[0]).toMatchObject({
+    expect(round.blocks[1].card?.groups?.[0]?.fields[0]).toMatchObject({
       editable: true,
-      editor: definition.blocks[1].card?.groups[0].fields[0].editor,
+      editor: definition.blocks[1].card?.groups?.[0]?.fields[0].editor,
     });
   });
 
@@ -512,7 +512,7 @@ describe('table column round-trip', () => {
     });
 
     const round = wizardStateToDefinition(state, SCHEMA_FIELDS, definition);
-    expect(round.blocks[0].card?.groups[0].fields[0]).toMatchObject({
+    expect(round.blocks[0].card?.groups?.[0]?.fields[0]).toMatchObject({
       field: 'status',
       label: 'Escalate',
       kind: 'workflow_button',

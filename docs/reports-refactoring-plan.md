@@ -1,6 +1,6 @@
 # Reports Refactoring Plan
 
-**Status:** Phase 1 complete; Phase 2 infrastructure complete (codegen + WASM); consumer migration (types.ts deletion + utils.ts swap) pending
+**Status:** Phase 1 complete; Phase 2 codegen + types.ts deletion complete; `utils.ts` template/row-condition WASM swap pending
 **Owner:** _unassigned_
 **Last updated:** 2026-05-17
 
@@ -136,7 +136,7 @@ cd crates/runtara-server/frontend && npx playwright test e2e/tests/mocked/report
 
 ## Phase 2 — Codegen + delete handwritten FE types
 
-**Status:** [ ] Infrastructure complete; consumer migration pending. Schemas registered, WASM slimmed and vendored in FE, codegen pipeline (online + offline) works. `types.ts` deletion + `utils.ts` swap deferred (each needs ~hundreds of small typing fixes across the FE).
+**Status:** [x] Codegen + types.ts deletion complete. Schemas registered, WASM slimmed and vendored in FE, codegen pipeline (online + offline) works. `types.ts` is now a 332-line re-export shim. `utils.ts` template/row-condition swap remains deferred (semantics work).
 
 ### Work
 
@@ -147,9 +147,79 @@ cd crates/runtara-server/frontend && npx playwright test e2e/tests/mocked/report
 - [x] Bundle size: **320KB gzipped** (down from 363KB). Above the 250KB target. Further slimming requires cfg-gating `runtara-dsl::step_registration` and `agent_meta::{SchemaGeneratorFn, get_all_step_types}` to drop schemars 0.8 entirely — out of Phase 2 scope.
 - [x] Vendor WASM bundle to `frontend/src/wasm/runtara-report-dsl/` (`runtara_report_dsl_bg.wasm`, `.js`, `.d.ts`, plus README with regen instructions).
 - [x] FE init helper at `frontend/src/wasm/runtara-report-dsl/index.ts` — async `reportDsl()` returns `{ version, renderTemplate, validateTemplate, evaluateRowCondition }`. Memoizes the load promise.
-- [ ] Delete `frontend/src/features/reports/types.ts` (805 lines) — **deferred after a serious attempt**. Two type-system blockers surfaced: (1) handwritten `T | undefined` vs generated `T | null | undefined` (Rust `Option<T>` serializes as `null`); (2) `MakeRequired<>` / `StripNulls<>` mapped types produce structurally-distinct (not assignable) types from the source. The right fix is one `fromApi<T>(value): FeShape<T>` boundary helper + audit of each API call site — separate FE-only commit. The intermediate progress that *did* land: codegen produces TS union types, and the 313 enum-as-value usages across the FE (ExecutionStatus / VariableType / ValueType / ErrorSeverity / ErrorCategory) are migrated to string literals.
+- [x] Delete `frontend/src/features/reports/types.ts` (805 lines) → 332-line re-export shim landed. See progress-log entry below for the final shape (Omit + & tightenings for `source`, `dimensions/measures`, `blocks/filters/datasets`, `definition`; FE-only types kept verbatim).
 - [ ] In `utils.ts`: replace `compileDisplayTemplate` (419–513) with WASM `renderTemplate` — **deferred**. Legacy compiler splits `{{ field | format }}` and lets the FE's `formatCellValue` own format-specific rendering (currency/pill/etc.); minijinja owns it server-side. Naive swap drifts behavior. Right move: replicate `formatCellValue` semantics in the WASM filter set, then swap.
 - [ ] In `utils.ts`: replace `matchesReportRowCondition` (267–403) with WASM `evaluateRowCondition` — **deferred**. Stored definitions are still in the legacy `{op, arguments: [bare_field, value]}` shape; the canonical `ConditionExpression` form lands at Phase 8 cutover. Need either a legacy-shape bridge or wait for the migration.
+
+### Phase 2 sub-plan: types.ts deletion
+
+**Problem.** Two type-system blockers stopped the first attempt:
+
+1. **Null vs undefined.** Rust `Option<T>` serializes as `null` rather than
+   omission, so generated TS has `T | null | undefined` everywhere the
+   handwritten file has `T | undefined`. Internal FE call sites pass values
+   typed `T | null | undefined` into functions whose signatures expect
+   `string | undefined`. Hundreds of tsc errors.
+2. **Mapped-type structural distinctness.** Wrapping the generated type
+   (`StripNulls<Gen.X>` or `MakeRequired<Gen.X, K>`) creates a *new* type
+   that TS treats as structurally distinct from `Gen.X`. API responses
+   typed as `Gen.X` no longer assign to the FE alias. ~250 boundary errors.
+
+**Approach.**
+
+1. `types.ts` uses `Omit + &` to tighten specific fields where the FE
+   assumes presence at runtime. Example:
+   ```ts
+   export type ReportDefinition =
+     Omit<Gen.ReportDefinition, 'blocks' | 'filters'> & {
+       blocks: ReportBlockDefinition[];
+       filters: ReportFilterDefinition[];
+     };
+   ```
+   Backed by the runtime contract — server always populates these (Rust
+   default = `[]`). Tests already provide them.
+
+2. **No `StripNulls`.** The wire shape carries `null` through. Where the
+   FE needs `T | undefined`, the call site coerces explicitly with
+   `?? undefined`. This is a one-line fix per site, surgical.
+
+3. **One boundary helper, no mapped types.**
+   ```ts
+   // queries/index.ts
+   const asReport = (v: Gen.ReportDto): ReportDto => v as ReportDto;
+   const asDefinition = (v: Gen.ReportDefinition): ReportDefinition =>
+     v as ReportDefinition;
+   // ... a few more for the half-dozen surfaces we ingest
+   ```
+   API query functions call `asReport(...)` before returning. Single
+   point of unsafe cast, justified by the runtime contract.
+
+4. **FE-only types** (visibility conditions, pill variants, block render
+   state wrapper, workflow polling state) stay defined locally in
+   `types.ts` — they aren't on the wire.
+
+**Order of operations.**
+
+1. Write new `types.ts` with `Omit + &` tightening.
+2. Add boundary helpers in `queries/index.ts`, call them from each
+   query function before returning.
+3. Run `tsc -b` — expect 100–200 remaining errors split between:
+   - `string | null` → `string | undefined` mismatches in function calls
+     and assignments (fix at call sites with `?? undefined`)
+   - "possibly undefined" on optional fields that the FE assumes present
+     (fix at call sites with `?? []` / `?? ''` / `??` defaults; if a
+     field is truly always-present, add it to the `Omit + &` list)
+4. Run vitest. Expect no runtime regressions because the changes are
+   type-level only.
+5. Commit.
+
+**Acceptance.**
+
+- `frontend/src/features/reports/types.ts` is ≤200 lines (only the
+  FE-only types remain locally; the rest re-exports + tightens).
+- `tsc -b` clean.
+- 509 vitest tests pass.
+- No FE-side behavior change observable in the browser.
 
 ### How to use the new infrastructure
 
@@ -413,3 +483,4 @@ Append entries as phases complete or material decisions change.
 - 2026-05-17: Phase 1 complete + Phase 2 server-side done. New `runtara-report-dsl` crate at `crates/runtara-report-dsl/` with: report types (moved from server), local `Condition` re-exported by `api::dto::object_model::Condition`, minijinja-backed template rendering with the report filter set, `evaluate_row_condition` over `runtara_dsl::ConditionExpression`, and a `wasm32-unknown-unknown` build via `wasm-pack`. Server's `api/dto/reports.rs` is a 9-line shim. All 4 Phase 0 corpus test suites green. Server registers 100+ report schemas in OpenAPI for `swagger-typescript-api`. Open: bundle is 363KB gzipped (target 250KB), FE utils.ts swap, types.ts deletion, schemars 0.8/1 consolidation.
 - 2026-05-17: Phase 2 infrastructure landed. WASM bundle slimmed to 320KB gzipped via `json-schema` feature gating in `runtara-report-dsl` + `runtara-dsl` and minijinja minimal-feature config (`builtins, serde, deserialization`). Vendored under `frontend/src/wasm/runtara-report-dsl/` with an async `reportDsl()` init helper. New `dump_openapi` bin + `npm run generate-api-runtime-offline` script regenerate the TS API client without a running server. `RuntaraRuntimeApi.ts` now contains all 100+ report types. `types.ts` deletion deferred (577 tsc errors across ~30 files when swapping); `utils.ts` template/row-condition swap deferred (legacy format semantics + legacy shape bridge needed).
 - 2026-05-17: Codegen migration — TS API client regen'd with `--generate-union-enums` so all enums become idiomatic TS union types. 313 enum-as-value usages across the FE (ExecutionStatus, ValueType, VariableType, ErrorSeverity, ErrorCategory) migrated to string literals: 173 ExecutionStatus, 35 ValueType, 17 VariableType, 88 ErrorSeverity/Category, plus 2 `Object.values(enum)` rewrites. The full `types.ts` → generated swap was attempted but bailed: handwritten `T | undefined` vs generated `T | null | undefined` plus structural-distinctness of `MakeRequired<>` produced 250+ unfixable assignment errors at API boundary sites. The intermediate migration lands the codegen flag + the enum cleanup. All 509 FE vitest tests pass; tsc clean. `types.ts` deletion needs a focused FE-only follow-up with a `fromApi<T>` boundary helper.
+- 2026-05-17: `types.ts` deletion landed. Handwritten file shrank from 805 → 332 lines, now a re-export shim over generated `RuntaraRuntimeApi.ts` with four targeted `Omit + &` tightenings (`ReportBlockDefinition.source`, `ReportDatasetDefinition.{dimensions,measures}`, `ReportDefinition.{blocks,filters,datasets}`, `ReportDto.definition`). Tried `ReportInteractionDefinition.actions` tightening — reverted because wizard layers re-spread the value and the structural-distinctness penalty outweighed the `?? []` cost at the few call sites. ~22 FE files widened to accept `T | null | undefined` where generated optionals surfaced (CardBlock, FieldEditor, ChartBlock, ReportBlockHost, ReportDefinitionBuilder, BlocksStep, tableActionEditors, wizardTypes, ReportBuilderWizard, viewer/explorer/editor/page hosts, datasetBlocks, reportWritebackCache, TableBlock truncation + workflow-action guards). All 509 FE vitest tests pass; `tsc -b` clean. Net effect: backend remains the single source of truth for report DTOs; FE keeps its narrow tightenings for fields that are non-null at runtime but Option-on-the-wire.

@@ -336,7 +336,7 @@ function RowConditionRow({
   onChange,
 }: {
   label: string;
-  value: NonNullable<ReportWorkflowActionConfig['visibleWhen']> | undefined;
+  value: ReportWorkflowActionConfig['visibleWhen'] | null | undefined;
   fields: string[];
   onChange: (
     value: NonNullable<ReportWorkflowActionConfig['visibleWhen']> | undefined
@@ -596,7 +596,7 @@ export function InteractionButtonsEditor({
                 </Button>
               </div>
               <InteractionActionsList
-                actions={button.actions}
+                actions={button.actions ?? []}
                 fields={fields}
                 onChange={(actions) => updateButton(index, { actions })}
               />

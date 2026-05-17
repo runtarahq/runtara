@@ -1761,7 +1761,7 @@ function SourceConditionEditor({
   onChange,
 }: {
   title: string;
-  condition: ReportCondition | undefined;
+  condition: ReportCondition | null | undefined;
   fields: string[];
   schemas: Schema[];
   reportFilters: ReportFilterDefinition[];
@@ -2195,7 +2195,7 @@ function WorkflowActionEditor({
   onChange,
 }: {
   title: string;
-  action: ReportWorkflowActionConfig | undefined;
+  action: ReportWorkflowActionConfig | null | undefined;
   fields: string[];
   onChange: (action: ReportWorkflowActionConfig) => void;
 }) {
@@ -2352,7 +2352,7 @@ function RowConditionEditor({
   onChange,
 }: {
   title: string;
-  condition: ReportCondition | undefined;
+  condition: ReportCondition | null | undefined;
   fields: string[];
   onChange: (condition: ReportCondition | undefined) => void;
 }) {
@@ -2479,7 +2479,7 @@ function InteractionButtonsEditor({
                 </Button>
               </div>
               <InteractionActionsEditor
-                actions={button.actions}
+                actions={button.actions ?? []}
                 fields={fields}
                 reportFilters={reportFilters}
                 views={views}
@@ -2628,7 +2628,7 @@ function BlockInteractionsEditor({
                 </Button>
               </div>
               <InteractionActionsEditor
-                actions={interaction.actions}
+                actions={interaction.actions ?? []}
                 fields={fields}
                 reportFilters={reportFilters}
                 views={views}
@@ -3535,7 +3535,7 @@ function ChartBlockSettings({
     kind = block.chart?.kind ?? 'bar',
     x = xField,
     aggregatePatch = {},
-    seriesLabel = series.label,
+    seriesLabel = series.label ?? undefined,
     limit = block.source.limit ?? 100,
   }: {
     kind?: ReportChartKind;
@@ -4219,7 +4219,7 @@ function layoutNodeToEditorNode(
       kind: 'metric_row',
       nodeId: `layout-${node.id}`,
       layoutId: node.id,
-      title: node.title,
+      title: node.title ?? undefined,
       blocks: node.blocks,
     };
   }
@@ -4436,7 +4436,7 @@ function isLogicalCondition(condition: ReportCondition | undefined): boolean {
 }
 
 function conditionToRules(
-  condition: ReportCondition | undefined
+  condition: ReportCondition | null | undefined
 ): ReportCondition[] {
   if (!condition) return [];
   if (!isLogicalCondition(condition)) return [condition];
@@ -4500,7 +4500,9 @@ function createSubqueryOperand(schema: Schema | undefined): {
   };
 }
 
-function formatConditionJson(condition: ReportCondition | undefined): string {
+function formatConditionJson(
+  condition: ReportCondition | null | undefined
+): string {
   return condition ? JSON.stringify(condition, null, 2) : '';
 }
 
@@ -4641,7 +4643,9 @@ function normalizeInteractionAction(
   };
 }
 
-function stripDatumPrefix(valueFrom: string | undefined): string | undefined {
+function stripDatumPrefix(
+  valueFrom: string | null | undefined
+): string | undefined {
   if (!valueFrom) return undefined;
   return valueFrom.startsWith('datum.')
     ? valueFrom.slice('datum.'.length)
@@ -5041,8 +5045,9 @@ function usesStaticOptions(type: ReportFilterType): boolean {
 
 function formatFilterOptions(filter: ReportFilterDefinition): string {
   return (
-    filter.options?.values?.map((option) => String(option.value)).join(', ') ??
-    ''
+    filter.options?.values
+      ?.map((option: { value: unknown }) => String(option.value))
+      .join(', ') ?? ''
   );
 }
 
@@ -5054,7 +5059,9 @@ function parseFilterOptions(value: string) {
     .map((part) => ({ label: humanizeFieldName(part), value: part }));
 }
 
-function formatPillVariants(variants: Record<string, string> | undefined) {
+function formatPillVariants(
+  variants: Partial<Record<string, string>> | null | undefined
+) {
   if (!variants) return '';
   return Object.entries(variants)
     .map(([value, variant]) => `${value}:${variant}`)

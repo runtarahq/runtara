@@ -102,7 +102,7 @@ export function ReportEditorPage() {
   );
 
   const previewQuery = useReportPreview(previewRequest, canPreview);
-  const blockResults: Record<string, ReportBlockResult> = useMemo(
+  const blockResults: Partial<Record<string, ReportBlockResult>> = useMemo(
     () => previewQuery.data?.blocks ?? {},
     [previewQuery.data]
   );
@@ -130,7 +130,7 @@ export function ReportEditorPage() {
       definition: definitionForSave,
     });
     if (!validation.valid) {
-      setSaveError(validation.errors[0]?.message ?? 'Report is invalid.');
+      setSaveError(validation.errors?.[0]?.message ?? 'Report is invalid.');
       return;
     }
 

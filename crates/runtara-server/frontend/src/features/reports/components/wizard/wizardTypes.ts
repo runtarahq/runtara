@@ -212,19 +212,19 @@ export interface WizardBlock {
   fieldConfigs?: Record<string, WizardFieldConfig>;
   placement: WizardBlockPlacement;
   chartKind?: ReportChartKind;
-  chartGroupBy?: string;
+  chartGroupBy?: string | null;
   metricAggregate?: ReportAggregateFn;
-  metricField?: string;
-  metricDistinct?: boolean;
-  metricPercentile?: number;
+  metricField?: string | null;
+  metricDistinct?: boolean | null;
+  metricPercentile?: number | null;
   metricExpression?: unknown;
   metricFormat?: WizardColumnFormat;
   /** Full card config for multi-group, subcard/subtable, or other advanced cards. */
   cardConfig?: ReportCardConfig;
   chartAggregate?: ReportAggregateFn;
-  chartAggregateField?: string;
-  chartAggregateDistinct?: boolean;
-  chartAggregatePercentile?: number;
+  chartAggregateField?: string | null;
+  chartAggregateDistinct?: boolean | null;
+  chartAggregatePercentile?: number | null;
   chartAggregateExpression?: unknown;
   markdownContent?: string;
   /** Table-block: enables row checkboxes. Forced true while bulk actions exist. */
@@ -292,9 +292,9 @@ export interface WizardGrid {
   /** DSL layout primitive emitted for this section. Defaults to grid. */
   layoutKind?: 'grid' | 'metric_row' | 'columns';
   /** Optional section title; when set, the grid renders inside a titled section. */
-  title?: string;
+  title?: string | null;
   /** Optional section description shown beneath the title. */
-  description?: string;
+  description?: string | null;
   rows: number;
   columns: number;
 }

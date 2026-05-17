@@ -77,22 +77,22 @@ import { useReportWorkflowAction } from './useReportWorkflowAction';
 
 type TableColumn = {
   key: string;
-  label?: string;
-  displayField?: string;
-  displayTemplate?: string;
+  label?: string | null;
+  displayField?: string | null;
+  displayTemplate?: string | null;
   format?: string | null;
-  type?: 'value' | 'chart' | 'workflow_button' | 'interaction_buttons';
+  type?: 'value' | 'chart' | 'workflow_button' | 'interaction_buttons' | null;
   chart?: ReportTableColumn['chart'];
-  secondaryField?: string;
-  linkField?: string;
-  tooltipField?: string;
+  secondaryField?: string | null;
+  linkField?: string | null;
+  tooltipField?: string | null;
   pillVariants?: ReportTableColumn['pillVariants'];
-  levels?: string[];
-  align?: 'left' | 'right' | 'center';
-  maxChars?: number;
-  editable?: boolean;
-  editor?: ReportEditorConfig;
-  workflowAction?: ReportWorkflowActionConfig;
+  levels?: string[] | null;
+  align?: 'left' | 'right' | 'center' | string | null;
+  maxChars?: number | null;
+  editable?: boolean | null;
+  editor?: ReportEditorConfig | null;
+  workflowAction?: ReportWorkflowActionConfig | null;
   interactionButtons?: ReportTableInteractionButtonConfig[];
 };
 
@@ -644,13 +644,13 @@ function TableBodyRow({
         const writebackContext = getWritebackContext(column, rowObject);
         const workflowActionKey = `${blockId}:${rowKey}:${column.key}`;
         const isWorkflowActionRunning =
-          column.workflowAction !== undefined &&
+          column.workflowAction != null &&
           isWorkflowRunning(workflowActionKey);
         const shouldRenderWorkflowAction =
-          column.workflowAction !== undefined &&
+          column.workflowAction != null &&
           isWorkflowActionVisible(column.workflowAction, rowObject);
         const isWorkflowDisabled =
-          column.workflowAction !== undefined &&
+          column.workflowAction != null &&
           isWorkflowActionDisabled(column.workflowAction, rowObject);
         const isEditing = editingField === column.key;
 
@@ -862,7 +862,9 @@ function isActionColumn(column: TableColumn): boolean {
   return isWorkflowButtonColumn(column) || isInteractionButtonsColumn(column);
 }
 
-function hasPositiveMaxChars(maxChars: number | undefined): maxChars is number {
+function hasPositiveMaxChars(
+  maxChars: number | null | undefined
+): maxChars is number {
   return (
     typeof maxChars === 'number' && Number.isFinite(maxChars) && maxChars > 0
   );
@@ -1095,7 +1097,7 @@ function InteractionButtonsCell({
             onClick={(event) => {
               event.stopPropagation();
               if (disabled) return;
-              onRun?.(button.actions, row);
+              onRun?.(button.actions ?? [], row);
             }}
           >
             <Icon className="h-3.5 w-3.5" />
@@ -1223,7 +1225,7 @@ function TruncatedCellText({
   className,
 }: {
   text: string;
-  maxChars?: number;
+  maxChars?: number | null;
   className?: string;
 }) {
   const display = truncateCellText(text, maxChars);

@@ -40,7 +40,7 @@ interface ReportBuilderWizardProps {
   objectModelConnections?: ConnectionDto[];
   defaultObjectModelConnectionId?: string | null;
   /** Per-block live results, keyed by block id. Empty while preview hasn't returned yet. */
-  blockResults?: Record<string, ReportBlockResult>;
+  blockResults?: Partial<Record<string, ReportBlockResult>>;
   /** When false, hides every editing control — sections still render with real data
    *  so the same DOM is reused for view mode. Defaults to true. */
   editing?: boolean;

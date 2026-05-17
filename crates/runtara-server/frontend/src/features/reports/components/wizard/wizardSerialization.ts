@@ -679,7 +679,7 @@ export function wizardStateToDefinition(
 }
 
 function isWizardFormat(
-  value: string | undefined
+  value: string | null | undefined
 ): value is WizardColumnFormat {
   return (
     value === 'number' ||
@@ -1046,7 +1046,7 @@ function blockDefinitionToWizard(
     metricFormat: isWizardFormat(metricFormat)
       ? (metricFormat as WizardColumnFormat)
       : undefined,
-    ...(block.type === 'card' && isAdvancedCardConfig(block.card)
+    ...(block.type === 'card' && block.card && isAdvancedCardConfig(block.card)
       ? { cardConfig: block.card }
       : {}),
     markdownContent: block.markdown?.content,
@@ -1171,7 +1171,7 @@ export function definitionToWizardState(
       filter.options?.field ||
       filter.options?.valueField ||
       '';
-    const opts = filter.options;
+    const opts = filter.options as ReportFilterOptionsConfig | undefined;
     const optionsSource: WizardFilter['optionsSource'] =
       opts?.source === 'object_model' ? 'object_model' : 'static';
     const staticOptions =

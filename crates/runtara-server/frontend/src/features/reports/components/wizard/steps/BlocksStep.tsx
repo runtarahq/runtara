@@ -133,7 +133,7 @@ interface BlocksStepProps {
   filters: WizardFilter[];
   objectModelConnections: ConnectionDto[];
   defaultObjectModelConnectionId?: string | null;
-  blockResults?: Record<string, ReportBlockResult>;
+  blockResults?: Partial<Record<string, ReportBlockResult>>;
   /** When false, all editing affordances are hidden; layout still renders. */
   editing?: boolean;
   onGridsChange: (next: WizardGrid[]) => void;
@@ -662,7 +662,7 @@ function GridSection({
   filters: WizardFilter[];
   objectModelConnections: ConnectionDto[];
   defaultObjectModelConnectionId?: string | null;
-  blockResults?: Record<string, ReportBlockResult>;
+  blockResults?: Partial<Record<string, ReportBlockResult>>;
   editing: boolean;
   draggedId: string | null;
   hoverCell: { gridId: string; row: number; column: number } | null;
@@ -3000,8 +3000,8 @@ function AggregateOptionsSettings({
   onChange,
 }: {
   op: ReportAggregateFn;
-  distinct?: boolean;
-  percentile?: number;
+  distinct?: boolean | null;
+  percentile?: number | null;
   expression?: unknown;
   onChange: (patch: {
     distinct?: boolean;
@@ -3022,7 +3022,11 @@ function AggregateOptionsSettings({
           <Checkbox
             checked={Boolean(distinct)}
             onCheckedChange={(checked) =>
-              onChange({ distinct: Boolean(checked), percentile, expression })
+              onChange({
+                distinct: Boolean(checked),
+                percentile: percentile ?? undefined,
+                expression,
+              })
             }
           />
           Distinct values only
@@ -3038,10 +3042,14 @@ function AggregateOptionsSettings({
             min={0}
             max={1}
             step={0.05}
-            value={percentile !== undefined ? String(percentile) : '0.5'}
+            value={
+              percentile !== undefined && percentile !== null
+                ? String(percentile)
+                : '0.5'
+            }
             onChange={(event) =>
               onChange({
-                distinct,
+                distinct: distinct ?? undefined,
                 percentile: optionalNumber(event.target.value),
                 expression,
               })
@@ -3059,8 +3067,8 @@ function AggregateOptionsSettings({
             value={formatAggregateExpression(expression)}
             onChange={(event) =>
               onChange({
-                distinct,
-                percentile,
+                distinct: distinct ?? undefined,
+                percentile: percentile ?? undefined,
                 expression: parseAggregateExpression(event.target.value),
               })
             }
@@ -3563,7 +3571,7 @@ function BlockInteractionsSettings({
                 </Button>
               </div>
               <InteractionActionsList
-                actions={interaction.actions}
+                actions={interaction.actions ?? []}
                 fields={fields}
                 onChange={(actions) => updateInteraction(index, { actions })}
               />
@@ -3768,7 +3776,7 @@ function parsePageSizes(value: string): number[] {
   );
 }
 
-function uniqueStrings(values: Array<string | undefined>): string[] {
+function uniqueStrings(values: Array<string | null | undefined>): string[] {
   return Array.from(
     new Set(values.filter((value): value is string => Boolean(value)))
   );
@@ -3863,7 +3871,7 @@ function blockFilterOperatorOptions(op: string | undefined) {
 function formatBlockFilterOptions(filter: ReportFilterDefinition): string {
   return (
     filter.options?.values
-      ?.map((option) => {
+      ?.map((option: ReportFilterOption) => {
         const value = String(option.value);
         return option.label && option.label !== humanizeFieldName(value)
           ? `${value}=${option.label}`
@@ -4147,7 +4155,7 @@ function OptionalFieldSelect({
   noneLabel,
   onChange,
 }: {
-  value: string | undefined;
+  value: string | null | undefined;
   fields: string[];
   noneLabel: string;
   onChange: (value: string | undefined) => void;
@@ -4175,7 +4183,7 @@ function OptionalFieldSelect({
   );
 }
 
-function formatLevels(levels: string[] | undefined): string {
+function formatLevels(levels: string[] | null | undefined): string {
   return levels?.join(', ') ?? '';
 }
 
@@ -4547,7 +4555,7 @@ function defaultLookupSearchFields(fields: string[]): string[] {
   );
 }
 
-function numberInputValue(value: number | undefined): string {
+function numberInputValue(value: number | null | undefined): string {
   return Number.isFinite(value) ? String(value) : '';
 }
 
