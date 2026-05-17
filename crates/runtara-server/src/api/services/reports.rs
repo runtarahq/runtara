@@ -247,18 +247,53 @@ impl ReportService {
         tenant_id: &str,
         id_or_slug: &str,
     ) -> Result<ReportDto, ReportServiceError> {
-        self.repo
+        let mut report = self
+            .repo
             .get(tenant_id, id_or_slug)
             .await
             .map_err(map_sqlx_error)?
-            .ok_or(ReportServiceError::NotFound)
+            .ok_or(ReportServiceError::NotFound)?;
+        self.normalize_definition_connections(tenant_id, &mut report.definition)
+            .await;
+        Ok(report)
+    }
+
+    /// Fills in `source.connection_id` on every object_model block + dataset
+    /// when it's missing and the tenant has exactly one active `postgres`
+    /// connection. With zero or multiple connections the function is a no-op
+    /// (the report stays as-is; the user must supply an explicit id). Moved
+    /// from the FE `withDefaultObjectModelConnection` helper as part of the
+    /// Phase 7 wizard rewrite.
+    async fn normalize_definition_connections(
+        &self,
+        tenant_id: &str,
+        definition: &mut ReportDefinition,
+    ) {
+        let default_id = match self
+            .connections
+            .list_connections(tenant_id, Some("postgres"), Some("active"))
+            .await
+        {
+            Ok(conns) if conns.len() == 1 => conns[0].id.clone(),
+            _ => return,
+        };
+        for block in &mut definition.blocks {
+            normalize_source_connection(&mut block.source, &default_id);
+        }
+        for dataset in &mut definition.datasets {
+            if dataset.source.connection_id.is_none() && !dataset.source.schema.trim().is_empty() {
+                dataset.source.connection_id = Some(default_id.clone());
+            }
+        }
     }
 
     pub async fn create_report(
         &self,
         tenant_id: &str,
-        request: CreateReportRequest,
+        mut request: CreateReportRequest,
     ) -> Result<ReportDto, ReportServiceError> {
+        self.normalize_definition_connections(tenant_id, &mut request.definition)
+            .await;
         self.validate_definition(tenant_id, &request.definition)
             .await?;
 
@@ -292,8 +327,10 @@ impl ReportService {
         &self,
         tenant_id: &str,
         id_or_slug: &str,
-        request: UpdateReportRequest,
+        mut request: UpdateReportRequest,
     ) -> Result<ReportDto, ReportServiceError> {
+        self.normalize_definition_connections(tenant_id, &mut request.definition)
+            .await;
         self.validate_definition(tenant_id, &request.definition)
             .await?;
         validate_slug(&request.slug)?;
@@ -512,7 +549,10 @@ impl ReportService {
         tenant_id: &str,
         definition: &ReportDefinition,
     ) -> ValidateReportResponse {
-        match self.validate_definition(tenant_id, definition).await {
+        let mut normalized = definition.clone();
+        self.normalize_definition_connections(tenant_id, &mut normalized)
+            .await;
+        match self.validate_definition(tenant_id, &normalized).await {
             Ok(()) => ValidateReportResponse {
                 valid: true,
                 errors: vec![],
@@ -550,8 +590,10 @@ impl ReportService {
     pub async fn preview_report(
         &self,
         tenant_id: &str,
-        request: ReportPreviewRequest,
+        mut request: ReportPreviewRequest,
     ) -> Result<ReportRenderResponse, ReportServiceError> {
+        self.normalize_definition_connections(tenant_id, &mut request.definition)
+            .await;
         self.validate_definition(tenant_id, &request.definition)
             .await?;
         let metadata = ReportRenderMetadata {
@@ -7470,6 +7512,18 @@ fn to_dsl_position(position: ReportBlockPosition) -> runtara_report_dsl::edit_op
         index: position.index,
         before_id: position.before_block_id,
         after_id: position.after_block_id,
+    }
+}
+
+fn normalize_source_connection(source: &mut ReportSource, default_id: &str) {
+    let is_object_model = matches!(source.kind, ReportSourceKind::ObjectModel);
+    if is_object_model && source.connection_id.is_none() && !source.schema.trim().is_empty() {
+        source.connection_id = Some(default_id.to_string());
+    }
+    for join in &mut source.join {
+        if join.connection_id.is_none() {
+            join.connection_id = Some(default_id.to_string());
+        }
     }
 }
 

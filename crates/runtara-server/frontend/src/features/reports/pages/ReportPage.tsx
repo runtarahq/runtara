@@ -27,6 +27,15 @@ const ReportBuilderWizard = lazy(() =>
     default: m.ReportBuilderWizard,
   }))
 );
+// Wizard v2 — operates on ReportDefinition directly, no WizardState
+// intermediate model. Behind a `?wizard=v2` URL flag while it gains parity
+// with the legacy wizard. Phase 8 cuts the legacy wizard once v2 covers
+// every authoring flow.
+const ReportBuilderWizardV2 = lazy(() =>
+  import('../components/wizard-v2/ReportBuilderWizardV2').then((m) => ({
+    default: m.ReportBuilderWizardV2,
+  }))
+);
 import {
   ReportBlockResult,
   ReportDefinition,
@@ -58,6 +67,7 @@ export function ReportPage() {
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   const editing = searchParams.get('edit') === '1' || !isExisting;
+  const useWizardV2 = searchParams.get('wizard') === 'v2';
   const { selectedConnectionId, connections: objectModelConnections } =
     useObjectModelConnectionSelection();
   const objectModelSchemaConnectionIds = useMemo(
@@ -447,24 +457,38 @@ export function ReportPage() {
             <div className="h-96 animate-pulse rounded-xl bg-muted/30" />
           }
         >
-          <ReportBuilderWizard
-            // Force a fresh wizard state when the loaded report changes; the
-            // wizard derives its initial state via useMemo([]) so it would
-            // otherwise keep the previously-loaded report's blocks.
-            key={reportId ?? 'new'}
-            definition={definition}
-            schemas={schemas}
-            schemasByConnectionId={schemasByConnectionId}
-            objectModelConnections={objectModelConnections}
-            defaultObjectModelConnectionId={selectedConnectionId}
-            blockResults={blockResults}
-            editing={editing}
-            onChange={(nextDefinition) => {
-              setDefinition(nextDefinition);
-              setSaveError(null);
-              validateReport.reset();
-            }}
-          />
+          {useWizardV2 ? (
+            <ReportBuilderWizardV2
+              key={reportId ?? 'new'}
+              definition={definition}
+              schemas={schemas}
+              editing={editing}
+              onChange={(nextDefinition) => {
+                setDefinition(nextDefinition);
+                setSaveError(null);
+                validateReport.reset();
+              }}
+            />
+          ) : (
+            <ReportBuilderWizard
+              // Force a fresh wizard state when the loaded report changes; the
+              // wizard derives its initial state via useMemo([]) so it would
+              // otherwise keep the previously-loaded report's blocks.
+              key={reportId ?? 'new'}
+              definition={definition}
+              schemas={schemas}
+              schemasByConnectionId={schemasByConnectionId}
+              objectModelConnections={objectModelConnections}
+              defaultObjectModelConnectionId={selectedConnectionId}
+              blockResults={blockResults}
+              editing={editing}
+              onChange={(nextDefinition) => {
+                setDefinition(nextDefinition);
+                setSaveError(null);
+                validateReport.reset();
+              }}
+            />
+          )}
         </Suspense>
       ) : reportId ? (
         <ReportRenderer
