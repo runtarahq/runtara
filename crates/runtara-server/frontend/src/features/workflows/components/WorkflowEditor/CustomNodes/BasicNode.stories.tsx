@@ -10,7 +10,6 @@ import {
   setNodeExecutionStatus,
   setExecuting,
 } from './storybook';
-import { ExecutionStatus } from '@/generated/RuntaraRuntimeApi';
 import { NODE_TYPES } from '@/features/workflows/config/workflow';
 
 const NODE_ID = 'basic-1';
@@ -183,7 +182,7 @@ export const ExecutionRunning: Story = {
   decorators: [
     (Story) => {
       resetStores();
-      setNodeExecutionStatus(NODE_ID, ExecutionStatus.Running);
+      setNodeExecutionStatus(NODE_ID, 'running');
       return <Story />;
     },
   ],
@@ -198,7 +197,7 @@ export const ExecutionCompleted: Story = {
   decorators: [
     (Story) => {
       resetStores();
-      setNodeExecutionStatus(NODE_ID, ExecutionStatus.Completed, {
+      setNodeExecutionStatus(NODE_ID, 'completed', {
         executionTime: 532,
       });
       return <Story />;
@@ -215,7 +214,7 @@ export const ExecutionFailed: Story = {
   decorators: [
     (Story) => {
       resetStores();
-      setNodeExecutionStatus(NODE_ID, ExecutionStatus.Failed, {
+      setNodeExecutionStatus(NODE_ID, 'failed', {
         error: 'Connection timeout to external API',
       });
       return <Story />;
@@ -232,7 +231,7 @@ export const ExecutionQueued: Story = {
   decorators: [
     (Story) => {
       resetStores();
-      setNodeExecutionStatus(NODE_ID, ExecutionStatus.Queued);
+      setNodeExecutionStatus(NODE_ID, 'queued');
       return <Story />;
     },
   ],
@@ -337,14 +336,14 @@ export const AllStates: Story = {
       resetStores();
       setNodeUnsaved('basic-unsaved');
       setNodeValidationError('basic-error');
-      setNodeExecutionStatus('basic-running', ExecutionStatus.Running);
-      setNodeExecutionStatus('basic-completed', ExecutionStatus.Completed, {
+      setNodeExecutionStatus('basic-running', 'running');
+      setNodeExecutionStatus('basic-completed', 'completed', {
         executionTime: 532,
       });
-      setNodeExecutionStatus('basic-failed', ExecutionStatus.Failed, {
+      setNodeExecutionStatus('basic-failed', 'failed', {
         error: 'Error message',
       });
-      setNodeExecutionStatus('basic-queued', ExecutionStatus.Queued);
+      setNodeExecutionStatus('basic-queued', 'queued');
       return <Story />;
     },
   ],

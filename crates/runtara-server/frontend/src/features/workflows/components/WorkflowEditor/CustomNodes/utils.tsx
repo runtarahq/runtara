@@ -460,20 +460,27 @@ function addStarts(executionGraph: ExecutionGraphDto) {
 }
 
 // Valid ValueType values from the spec
-const VALID_VALUE_TYPES = new Set(Object.values(ValueType));
+const VALID_VALUE_TYPES: ReadonlySet<ValueType> = new Set<ValueType>([
+  'string',
+  'integer',
+  'number',
+  'boolean',
+  'json',
+  'file',
+]);
 
 /**
  * Coerces a value to match the given type hint (using API ValueType convention).
  * e.g., "150" with type "integer" becomes 150
  */
 function coerceValueToType(value: any, typeHint?: string): any {
-  if (typeHint === ValueType.Integer || typeHint === ValueType.Number) {
+  if (typeHint === 'integer' || typeHint === 'number') {
     const numValue = Number(value);
     if (!isNaN(numValue)) {
-      return typeHint === ValueType.Integer ? Math.trunc(numValue) : numValue;
+      return typeHint === 'integer' ? Math.trunc(numValue) : numValue;
     }
   }
-  if (typeHint === ValueType.Boolean && typeof value === 'string') {
+  if (typeHint === 'boolean' && typeof value === 'string') {
     const lower = value.toLowerCase();
     if (lower === 'true' || lower === '1') return true;
     if (lower === 'false' || lower === '0') return false;
@@ -703,7 +710,7 @@ function cleanNodeData(steps: Record<string, any>) {
         if (!isTemplate) {
           // For non-template strings, only parse as JSON if typeHint is explicitly 'json'
           // No auto-detection - explicit typeHint required
-          if (typeHint === ValueType.Json) {
+          if (typeHint === 'json') {
             try {
               finalValue = JSON.parse(value);
             } catch {
@@ -713,19 +720,19 @@ function cleanNodeData(steps: Record<string, any>) {
           }
 
           // Convert numeric strings to actual numbers for integer/number type hints
-          if (typeHint === ValueType.Integer || typeHint === ValueType.Number) {
+          if (typeHint === 'integer' || typeHint === 'number') {
             const numValue = Number(value);
             if (!isNaN(numValue)) {
               // For integers, ensure we get a whole number
               finalValue =
-                typeHint === ValueType.Integer
+                typeHint === 'integer'
                   ? Math.trunc(numValue)
                   : numValue;
             }
           }
 
           // Convert boolean strings to actual booleans for boolean type hint
-          if (typeHint === ValueType.Boolean) {
+          if (typeHint === 'boolean') {
             const lowerValue = value.toLowerCase();
             if (lowerValue === 'true' || lowerValue === '1') {
               finalValue = true;
@@ -1817,14 +1824,14 @@ function normalizeNodesAndEdges(
                 switchInputMapping.push({
                   type: 'value',
                   value: config.value.value,
-                  typeHint: config.value.type || ValueType.String,
+                  typeHint: config.value.type || 'string',
                   valueType: config.value.valueType || 'reference',
                 });
               } else {
                 switchInputMapping.push({
                   type: 'value',
                   value: '',
-                  typeHint: ValueType.String,
+                  typeHint: 'string',
                 });
               }
 
@@ -1838,14 +1845,14 @@ function normalizeNodesAndEdges(
               switchInputMapping.push({
                 type: 'cases',
                 value: uiCases,
-                typeHint: ValueType.Json,
+                typeHint: 'json',
               });
 
               // Convert config.default
               switchInputMapping.push({
                 type: 'default',
                 value: config?.default ?? {},
-                typeHint: ValueType.Json,
+                typeHint: 'json',
               });
 
               // Detect routing mode: any case with a route field

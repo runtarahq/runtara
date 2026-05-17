@@ -544,14 +544,14 @@ export function Workflow() {
         const isActive =
           status &&
           [
-            ExecutionStatus.Queued,
-            ExecutionStatus.Compiling,
-            ExecutionStatus.Running,
+            'queued',
+            'compiling',
+            'running',
           ].includes(status);
         // Also keep polling (slower) when suspended to detect resume completion
         return isActive
           ? 2000
-          : status === ExecutionStatus.Suspended
+          : status === 'suspended'
             ? 3000
             : false;
       },
@@ -573,12 +573,12 @@ export function Workflow() {
         const isActive =
           status &&
           [
-            ExecutionStatus.Queued,
-            ExecutionStatus.Compiling,
-            ExecutionStatus.Running,
+            'queued',
+            'compiling',
+            'running',
           ].includes(status);
         // Poll more frequently (500ms) in debug mode to catch intermediate states
-        return isActive || status === ExecutionStatus.Suspended ? 500 : false;
+        return isActive || status === 'suspended' ? 500 : false;
       },
     });
 
@@ -592,7 +592,7 @@ export function Workflow() {
     nodes.forEach((node) => {
       if (node.id !== 'start' && node.type !== 'CreateNode') {
         updateNodeStatus(node.id, {
-          status: ExecutionStatus.Queued,
+          status: 'queued',
         });
       }
     });
@@ -659,10 +659,10 @@ export function Workflow() {
     if (!executionInstanceData?.status || !executingInstanceId) return;
 
     const terminalStates = [
-      ExecutionStatus.Completed,
-      ExecutionStatus.Failed,
-      ExecutionStatus.Timeout,
-      ExecutionStatus.Cancelled,
+      'completed',
+      'failed',
+      'timeout',
+      'cancelled',
     ];
 
     // If execution just finished and we haven't done final refetch for this instance yet
@@ -725,7 +725,7 @@ export function Workflow() {
     // Detect suspended state (breakpoint hit in debug execution)
     // NOTE: this block must NOT early-return — the node status mapping below must always run.
     if (
-      executionInstanceData.status === ExecutionStatus.Suspended &&
+      executionInstanceData.status === 'suspended' &&
       !justResumedRef.current
     ) {
       // Look for the LATEST breakpoint_hit event
@@ -761,7 +761,7 @@ export function Workflow() {
         setSuspended(true, null);
         refetchStepEvents();
       }
-    } else if (executionInstanceData.status !== ExecutionStatus.Suspended) {
+    } else if (executionInstanceData.status !== 'suspended') {
       // Status is not suspended — clear the justResumed guard and suspended state
       if (justResumedRef.current) {
         justResumedRef.current = false;
@@ -801,7 +801,7 @@ export function Workflow() {
             ? new Date(event.payload.timestamp_ms).toISOString()
             : undefined;
           processedSteps.set(event.payload.step_id, {
-            status: ExecutionStatus.Running,
+            status: 'running',
             startedAt: timestamp,
           });
 
@@ -824,8 +824,8 @@ export function Workflow() {
           // Determine status from end event payload
           const hasError = !!event.payload.error;
           const status = hasError
-            ? ExecutionStatus.Failed
-            : ExecutionStatus.Completed;
+            ? 'failed'
+            : 'completed';
 
           processedSteps.set(event.payload.step_id, {
             status,
@@ -854,16 +854,16 @@ export function Workflow() {
       const currentBp = useExecutionStore.getState().breakpointHit;
       if (isSuspended && currentBp?.stepId) {
         updateNodeStatus(currentBp.stepId, {
-          status: ExecutionStatus.Suspended,
+          status: 'suspended',
         });
       }
 
       // If execution is finished, clear status for nodes that weren't executed (skipped)
       const isExecutionTerminal = [
-        ExecutionStatus.Completed,
-        ExecutionStatus.Failed,
-        ExecutionStatus.Timeout,
-        ExecutionStatus.Cancelled,
+        'completed',
+        'failed',
+        'timeout',
+        'cancelled',
       ].includes(executionInstanceData.status);
 
       if (isExecutionTerminal) {
@@ -876,7 +876,7 @@ export function Workflow() {
 
           const currentStatus = currentStore.nodeExecutionStatus.get(node.id);
           if (
-            currentStatus?.status === ExecutionStatus.Queued &&
+            currentStatus?.status === 'queued' &&
             !executedStepIds.has(node.id)
           ) {
             skippedNodeIds.push(node.id);
@@ -899,10 +899,10 @@ export function Workflow() {
     ) {
       // Non-debug mode with step details available
       const isExecutionTerminal = [
-        ExecutionStatus.Completed,
-        ExecutionStatus.Failed,
-        ExecutionStatus.Timeout,
-        ExecutionStatus.Cancelled,
+        'completed',
+        'failed',
+        'timeout',
+        'cancelled',
       ].includes(executionInstanceData.status);
 
       // Get all step IDs that were actually executed
@@ -912,12 +912,12 @@ export function Workflow() {
 
       executionInstanceData.steps.forEach((step: any) => {
         const status = step.finished
-          ? ExecutionStatus.Completed
+          ? 'completed'
           : step.started
-            ? ExecutionStatus.Running
+            ? 'running'
             : isExecutionTerminal
               ? executionInstanceData.status
-              : ExecutionStatus.Queued;
+              : 'queued';
 
         updateNodeStatus(step.id, {
           status,
@@ -941,7 +941,7 @@ export function Workflow() {
           // If node has queued status but wasn't in the executed steps, it was skipped
           const currentStatus = currentStore.nodeExecutionStatus.get(node.id);
           if (
-            currentStatus?.status === ExecutionStatus.Queued &&
+            currentStatus?.status === 'queued' &&
             !executedStepIds.has(node.id)
           ) {
             skippedNodeIds.push(node.id);
@@ -1836,10 +1836,10 @@ export function Workflow() {
               isExecutionActive={
                 executionInstanceData?.status &&
                 [
-                  ExecutionStatus.Queued,
-                  ExecutionStatus.Compiling,
-                  ExecutionStatus.Running,
-                  ExecutionStatus.Suspended,
+                  'queued',
+                  'compiling',
+                  'running',
+                  'suspended',
                 ].includes(executionInstanceData.status)
               }
               isDirty={hasStructuralUnsavedChanges}

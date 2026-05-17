@@ -8,7 +8,6 @@ import {
   setNodeExecutionStatus,
   setExecuting,
 } from './storybook';
-import { ExecutionStatus } from '@/generated/RuntaraRuntimeApi';
 import { NODE_TYPES } from '@/features/workflows/config/workflow';
 
 const NODE_ID = 'container-1';
@@ -129,7 +128,7 @@ export const ExecutionRunning: Story = {
   decorators: [
     (Story) => {
       resetStores();
-      setNodeExecutionStatus(NODE_ID, ExecutionStatus.Running);
+      setNodeExecutionStatus(NODE_ID, 'running');
       return <Story />;
     },
   ],
@@ -148,7 +147,7 @@ export const ExecutionCompleted: Story = {
   decorators: [
     (Story) => {
       resetStores();
-      setNodeExecutionStatus(NODE_ID, ExecutionStatus.Completed, {
+      setNodeExecutionStatus(NODE_ID, 'completed', {
         executionTime: 3450,
       });
       return <Story />;
@@ -211,8 +210,8 @@ export const AllStates: Story = {
     (Story) => {
       resetStores();
       setNodeValidationError('container-error');
-      setNodeExecutionStatus('container-running', ExecutionStatus.Running);
-      setNodeExecutionStatus('container-completed', ExecutionStatus.Completed, {
+      setNodeExecutionStatus('container-running', 'running');
+      setNodeExecutionStatus('container-completed', 'completed', {
         executionTime: 3450,
       });
       return <Story />;

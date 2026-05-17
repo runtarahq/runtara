@@ -8,7 +8,6 @@ import {
   ExecutionHistoryFilters,
   ExecutionHistoryItem,
 } from '@/features/invocation-history/types';
-import { ExecutionStatus } from '@/generated/RuntaraRuntimeApi';
 import { formatDate } from '@/lib/utils';
 import { cn } from '@/lib/utils';
 import { Icons } from '@/shared/components/icons';
@@ -228,7 +227,7 @@ export function HistoryPanelContent({ workflowId }: HistoryPanelContentProps) {
                 </div>
 
                 <div className="flex items-center gap-1 flex-shrink-0">
-                  {instance.status === ExecutionStatus.Suspended && (
+                  {instance.status === 'suspended' && (
                     <button
                       type="button"
                       className="inline-flex h-5 w-5 items-center justify-center rounded text-orange-600 hover:bg-orange-100 hover:text-orange-700"

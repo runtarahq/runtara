@@ -10,7 +10,6 @@ import {
   setNodeExecutionStatus,
   setExecuting,
 } from './storybook';
-import { ExecutionStatus } from '@/generated/RuntaraRuntimeApi';
 import { NODE_TYPES } from '@/features/workflows/config/workflow';
 
 const NODE_ID = 'conditional-1';
@@ -148,7 +147,7 @@ export const ExecutionRunning: Story = {
   decorators: [
     (Story) => {
       resetStores();
-      setNodeExecutionStatus(NODE_ID, ExecutionStatus.Running);
+      setNodeExecutionStatus(NODE_ID, 'running');
       return <Story />;
     },
   ],
@@ -163,7 +162,7 @@ export const ExecutionCompleted: Story = {
   decorators: [
     (Story) => {
       resetStores();
-      setNodeExecutionStatus(NODE_ID, ExecutionStatus.Completed, {
+      setNodeExecutionStatus(NODE_ID, 'completed', {
         executionTime: 15,
       });
       return <Story />;
@@ -180,7 +179,7 @@ export const ExecutionFailed: Story = {
   decorators: [
     (Story) => {
       resetStores();
-      setNodeExecutionStatus(NODE_ID, ExecutionStatus.Failed, {
+      setNodeExecutionStatus(NODE_ID, 'failed', {
         error: 'Condition evaluation failed: undefined variable',
       });
       return <Story />;
@@ -305,11 +304,11 @@ export const AllStates: Story = {
       resetStores();
       setNodeUnsaved('cond-unsaved');
       setNodeValidationError('cond-error');
-      setNodeExecutionStatus('cond-running', ExecutionStatus.Running);
-      setNodeExecutionStatus('cond-completed', ExecutionStatus.Completed, {
+      setNodeExecutionStatus('cond-running', 'running');
+      setNodeExecutionStatus('cond-completed', 'completed', {
         executionTime: 15,
       });
-      setNodeExecutionStatus('cond-failed', ExecutionStatus.Failed, {
+      setNodeExecutionStatus('cond-failed', 'failed', {
         error: 'Error',
       });
       return <Story />;

@@ -65,13 +65,13 @@ export function isStructuredError(value: unknown): value is StructuredError {
     'message' in value &&
     typeof value.message === 'string' &&
     'category' in value &&
-    (value.category === ErrorCategory.Transient ||
-      value.category === ErrorCategory.Permanent) &&
+    (value.category === 'transient' ||
+      value.category === 'permanent') &&
     'severity' in value &&
-    (value.severity === ErrorSeverity.Info ||
-      value.severity === ErrorSeverity.Warning ||
-      value.severity === ErrorSeverity.Error ||
-      value.severity === ErrorSeverity.Critical)
+    (value.severity === 'info' ||
+      value.severity === 'warning' ||
+      value.severity === 'error' ||
+      value.severity === 'critical')
   );
 }
 
@@ -97,12 +97,12 @@ export function isStructuredError(value: unknown): value is StructuredError {
  * ```
  */
 export function getErrorType(error: StructuredError): ErrorType {
-  if (error.category === ErrorCategory.Transient) {
+  if (error.category === 'transient') {
     return 'transient';
   }
 
   // Permanent errors: distinguish technical vs business by severity
-  if (error.severity === ErrorSeverity.Warning) {
+  if (error.severity === 'warning') {
     return 'business';
   }
 
@@ -126,7 +126,7 @@ export function shouldShowRetryButton(
   errorString: string | null | undefined
 ): boolean {
   const structured = parseStructuredError(errorString);
-  return structured?.category === ErrorCategory.Transient;
+  return structured?.category === 'transient';
 }
 
 /**
@@ -154,7 +154,7 @@ export function getRetryDelay(
 ): number | null {
   const structured = parseStructuredError(errorString);
 
-  if (!structured || structured.category !== ErrorCategory.Transient) {
+  if (!structured || structured.category !== 'transient') {
     return null;
   }
 
@@ -202,9 +202,9 @@ export function getErrorBadgeVariant(
  */
 export function getErrorCategoryLabel(category: ErrorCategory): string {
   switch (category) {
-    case ErrorCategory.Transient:
+    case 'transient':
       return 'Transient';
-    case ErrorCategory.Permanent:
+    case 'permanent':
       return 'Permanent';
     default:
       return 'Unknown';
@@ -219,13 +219,13 @@ export function getErrorCategoryLabel(category: ErrorCategory): string {
  */
 export function getErrorSeverityLabel(severity: ErrorSeverity): string {
   switch (severity) {
-    case ErrorSeverity.Info:
+    case 'info':
       return 'Info';
-    case ErrorSeverity.Warning:
+    case 'warning':
       return 'Warning';
-    case ErrorSeverity.Error:
+    case 'error':
       return 'Error';
-    case ErrorSeverity.Critical:
+    case 'critical':
       return 'Critical';
     default:
       return 'Unknown';

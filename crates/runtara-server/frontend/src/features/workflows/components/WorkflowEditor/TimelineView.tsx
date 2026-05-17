@@ -264,7 +264,7 @@ function getExecutionBadge(executionStatus?: NodeExecutionStatus) {
   const status = executionStatus.status;
 
   switch (status) {
-    case ExecutionStatus.Completed:
+    case 'completed':
       return {
         label: executionStatus.executionTime
           ? formatExecutionTime(executionStatus.executionTime)
@@ -272,34 +272,34 @@ function getExecutionBadge(executionStatus?: NodeExecutionStatus) {
         variant: 'success' as const,
         icon: CheckCircle2,
       };
-    case ExecutionStatus.Running:
-    case ExecutionStatus.Compiling:
+    case 'running':
+    case 'compiling':
       return {
-        label: status === ExecutionStatus.Running ? 'Running' : 'Compiling',
+        label: status === 'running' ? 'Running' : 'Compiling',
         variant: 'default' as const,
         icon: Loader2,
         iconClassName: 'animate-spin',
       };
-    case ExecutionStatus.Queued:
+    case 'queued':
       return {
         label: 'Queued',
         variant: 'warning' as const,
         icon: Pause,
       };
-    case ExecutionStatus.Failed:
-    case ExecutionStatus.Timeout:
+    case 'failed':
+    case 'timeout':
       return {
-        label: status === ExecutionStatus.Timeout ? 'Timeout' : 'Failed',
+        label: status === 'timeout' ? 'Timeout' : 'Failed',
         variant: 'destructive' as const,
         icon: AlertCircle,
       };
-    case ExecutionStatus.Cancelled:
+    case 'cancelled':
       return {
         label: 'Cancelled',
         variant: 'muted' as const,
         icon: XCircle,
       };
-    case ExecutionStatus.Suspended:
+    case 'suspended':
       return {
         label: 'Suspended',
         variant: 'warning' as const,
@@ -312,19 +312,19 @@ function getExecutionBadge(executionStatus?: NodeExecutionStatus) {
 
 function getExecutionBorderClass(status?: ExecutionStatus) {
   switch (status) {
-    case ExecutionStatus.Running:
-    case ExecutionStatus.Compiling:
+    case 'running':
+    case 'compiling':
       return 'border-blue-500';
-    case ExecutionStatus.Completed:
+    case 'completed':
       return 'border-green-500';
-    case ExecutionStatus.Failed:
-    case ExecutionStatus.Timeout:
+    case 'failed':
+    case 'timeout':
       return 'border-red-500';
-    case ExecutionStatus.Queued:
+    case 'queued':
       return 'border-yellow-500';
-    case ExecutionStatus.Suspended:
+    case 'suspended':
       return 'border-blue-400';
-    case ExecutionStatus.Cancelled:
+    case 'cancelled':
       return 'border-gray-400';
     default:
       return '';
@@ -338,19 +338,19 @@ function getExecutionIconClass(
   if (hasValidationError) return 'border-destructive text-destructive';
 
   switch (status) {
-    case ExecutionStatus.Running:
-    case ExecutionStatus.Compiling:
+    case 'running':
+    case 'compiling':
       return 'border-blue-500 bg-blue-50 text-blue-700 dark:bg-blue-950 dark:text-blue-300';
-    case ExecutionStatus.Completed:
+    case 'completed':
       return 'border-green-500 bg-green-50 text-green-700 dark:bg-green-950 dark:text-green-300';
-    case ExecutionStatus.Failed:
-    case ExecutionStatus.Timeout:
+    case 'failed':
+    case 'timeout':
       return 'border-red-500 bg-red-50 text-red-700 dark:bg-red-950 dark:text-red-300';
-    case ExecutionStatus.Queued:
+    case 'queued':
       return 'border-yellow-500 bg-yellow-50 text-yellow-700 dark:bg-yellow-950 dark:text-yellow-300';
-    case ExecutionStatus.Suspended:
+    case 'suspended':
       return 'border-blue-400 bg-slate-50 text-slate-700 dark:bg-slate-900 dark:text-slate-300';
-    case ExecutionStatus.Cancelled:
+    case 'cancelled':
       return 'border-gray-400 bg-gray-50 text-gray-600 dark:bg-gray-900 dark:text-gray-300';
     default:
       return '';
@@ -601,10 +601,10 @@ function LaneContinuationNode({ node }: { node: Node }) {
       className={cn(
         'flex min-w-0 items-center gap-2 rounded-md border border-dashed bg-muted/30 px-3 py-2 text-sm transition-colors',
         executionStatus && getExecutionBorderClass(executionStatus.status),
-        executionStatus?.status === ExecutionStatus.Suspended &&
+        executionStatus?.status === 'suspended' &&
           'border-2 animate-glow-pulse',
         isSuspendedExecution &&
-          executionStatus?.status === ExecutionStatus.Queued &&
+          executionStatus?.status === 'queued' &&
           'opacity-25'
       )}
     >
@@ -1651,11 +1651,11 @@ function WorkflowTimelineItem({
               ? getExecutionBorderClass(executionStatus.status)
               : (isSelected || isEditingInline) &&
                 'border-primary bg-primary/5',
-          executionStatus?.status === ExecutionStatus.Suspended &&
+          executionStatus?.status === 'suspended' &&
             'border-2 animate-glow-pulse',
           !canInspectInDebug && 'opacity-60',
           isSuspendedExecution &&
-            executionStatus?.status === ExecutionStatus.Queued &&
+            executionStatus?.status === 'queued' &&
             'opacity-25 pointer-events-none',
           isDragging && 'opacity-50'
         )}

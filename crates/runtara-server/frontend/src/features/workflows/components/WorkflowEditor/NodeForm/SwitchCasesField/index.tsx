@@ -190,7 +190,7 @@ export function SwitchCasesField(props: any) {
   const switchValueType: ValueMode =
     (valueField?.valueType as ValueMode) || 'immediate';
   const switchValueTypeHint =
-    (valueField?.typeHint as ValueType) || ValueType.String;
+    (valueField?.typeHint as ValueType) || 'string';
   const casesArray = Array.isArray(casesField?.value) ? casesField.value : [];
   const defaultOutput = defaultField?.value || {};
   const isRoutingMode = routingModeField?.value === true;
@@ -200,28 +200,28 @@ export function SwitchCasesField(props: any) {
     // Only initialize if we're creating a new node (no nodeId) and the array is empty
     if (!nodeId && fieldArray.length === 0) {
       setValue(name, [
-        { type: 'value', value: '', typeHint: ValueType.String },
-        { type: 'cases', value: [], typeHint: ValueType.Json },
-        { type: 'default', value: {}, typeHint: ValueType.Json },
+        { type: 'value', value: '', typeHint: 'string' },
+        { type: 'cases', value: [], typeHint: 'json' },
+        { type: 'default', value: {}, typeHint: 'json' },
       ]);
     }
   }, [fieldArray.length, name, setValue, nodeId]);
 
   // Convert string value to typed value based on valueType
   const convertToType = (value: string, valueType: ValueType): any => {
-    if (!value || valueType === ValueType.String) {
+    if (!value || valueType === 'string') {
       return value;
     }
 
     try {
       switch (valueType) {
-        case ValueType.Integer:
+        case 'integer':
           return parseInt(value, 10);
-        case ValueType.Number:
+        case 'number':
           return parseFloat(value);
-        case ValueType.Boolean:
+        case 'boolean':
           return value.toLowerCase() === 'true';
-        case ValueType.Json:
+        case 'json':
           return JSON.parse(value);
         default:
           return value;
@@ -241,7 +241,7 @@ export function SwitchCasesField(props: any) {
 
     // Get the current value type
     const currentValueType =
-      valueIndex >= 0 ? newArray[valueIndex].typeHint : ValueType.String;
+      valueIndex >= 0 ? newArray[valueIndex].typeHint : 'string';
 
     // Convert the value based on value type
     const typedValue = convertToType(newValue, currentValueType);
@@ -252,7 +252,7 @@ export function SwitchCasesField(props: any) {
       newArray.push({
         type: 'value',
         value: typedValue,
-        typeHint: ValueType.String,
+        typeHint: 'string',
       });
     }
     setValue(name, newArray);
@@ -267,7 +267,7 @@ export function SwitchCasesField(props: any) {
       newArray.push({
         type: 'cases',
         value: newCases,
-        typeHint: ValueType.Json,
+        typeHint: 'json',
       });
     }
     setValue(name, newArray);

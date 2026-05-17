@@ -14,15 +14,14 @@
  * Data types for variables.
  * Matches the operator field types for consistency.
  */
-export enum VariableType {
-  String = "string",
-  Number = "number",
-  Integer = "integer",
-  Boolean = "boolean",
-  Array = "array",
-  Object = "object",
-  File = "file",
-}
+export type VariableType =
+  | "string"
+  | "number"
+  | "integer"
+  | "boolean"
+  | "array"
+  | "object"
+  | "file";
 
 /**
  * Type hints for reference values.
@@ -34,23 +33,16 @@ export enum VariableType {
  * - `boolean` for true/false
  * - `json` for pass-through JSON (distinct from `object`/`array` in VariableType)
  */
-export enum ValueType {
-  String = "string",
-  Integer = "integer",
-  Number = "number",
-  Boolean = "boolean",
-  Json = "json",
-  File = "file",
-}
+export type ValueType =
+  | "string"
+  | "integer"
+  | "number"
+  | "boolean"
+  | "json"
+  | "file";
 
 /** Trigger type for invocation triggers */
-export enum TriggerType {
-  HTTP = "HTTP",
-  CRON = "CRON",
-  EMAIL = "EMAIL",
-  APPLICATION = "APPLICATION",
-  CHANNEL = "CHANNEL",
-}
+export type TriggerType = "HTTP" | "CRON" | "EMAIL" | "APPLICATION" | "CHANNEL";
 
 /**
  * Optional secondary text-index annotation for string-typed columns.
@@ -58,256 +50,188 @@ export enum TriggerType {
  * `Trigram` causes a `gin_trgm_ops` GIN index to be created alongside the
  * table, which speeds up `SIMILARITY_GTE` and `similarity()` scoring.
  */
-export enum TextIndexKind {
-  None = "none",
-  Trigram = "trigram",
-}
+export type TextIndexKind = "none" | "trigram";
 
 /** Termination type providing context for why an execution terminated */
-export enum TerminationType {
-  NormalCompletion = "normal_completion",
-  UserInitiated = "user_initiated",
-  QueueTimeout = "queue_timeout",
-  ExecutionTimeout = "execution_timeout",
-  SystemError = "system_error",
-}
+export type TerminationType =
+  | "normal_completion"
+  | "user_initiated"
+  | "queue_timeout"
+  | "execution_timeout"
+  | "system_error";
 
 /**
  * Match type for switch cases.
  * Supports all ConditionOperator values plus compound match types.
  */
-export enum SwitchMatchType {
-  GT = "GT",
-  GTE = "GTE",
-  LT = "LT",
-  LTE = "LTE",
-  EQ = "EQ",
-  NE = "NE",
-  STARTS_WITH = "STARTS_WITH",
-  ENDS_WITH = "ENDS_WITH",
-  CONTAINS = "CONTAINS",
-  IN = "IN",
-  NOT_IN = "NOT_IN",
-  IS_DEFINED = "IS_DEFINED",
-  IS_EMPTY = "IS_EMPTY",
-  IS_NOT_EMPTY = "IS_NOT_EMPTY",
-  BETWEEN = "BETWEEN",
-  RANGE = "RANGE",
-}
+export type SwitchMatchType =
+  | "GT"
+  | "GTE"
+  | "LT"
+  | "LTE"
+  | "EQ"
+  | "NE"
+  | "STARTS_WITH"
+  | "ENDS_WITH"
+  | "CONTAINS"
+  | "IN"
+  | "NOT_IN"
+  | "IS_DEFINED"
+  | "IS_EMPTY"
+  | "IS_NOT_EMPTY"
+  | "BETWEEN"
+  | "RANGE";
 
 /** Sort direction. JSON encoding is UPPERCASE (`"ASC"` / `"DESC"`). */
-export enum SortDirection {
-  ASC = "ASC",
-  DESC = "DESC",
-}
+export type SortDirection = "ASC" | "DESC";
 
 /**
  * Data types for schema fields.
  * Used in input/output schema definitions.
  */
-export enum SchemaFieldType {
-  String = "string",
-  Integer = "integer",
-  Number = "number",
-  Boolean = "boolean",
-  Array = "array",
-  Object = "object",
-  File = "file",
-}
+export type SchemaFieldType =
+  | "string"
+  | "integer"
+  | "number"
+  | "boolean"
+  | "array"
+  | "object"
+  | "file";
 
-export enum ReportWorkflowRuntimeEntity {
-  Instances = "instances",
-  Actions = "actions",
-  RuntimeExecutionMetricBuckets = "runtime_execution_metric_buckets",
-  RuntimeSystemSnapshot = "runtime_system_snapshot",
-  ConnectionRateLimitStatus = "connection_rate_limit_status",
-  ConnectionRateLimitEvents = "connection_rate_limit_events",
-  ConnectionRateLimitTimeline = "connection_rate_limit_timeline",
-}
+export type ReportWorkflowRuntimeEntity =
+  | "instances"
+  | "actions"
+  | "runtime_execution_metric_buckets"
+  | "runtime_system_snapshot"
+  | "connection_rate_limit_status"
+  | "connection_rate_limit_events"
+  | "connection_rate_limit_timeline";
 
-export enum ReportWorkflowActionContextMode {
-  Row = "row",
-  Field = "field",
-  Value = "value",
-  Selection = "selection",
-}
+export type ReportWorkflowActionContextMode =
+  | "row"
+  | "field"
+  | "value"
+  | "selection";
 
-export enum ReportTableColumnType {
-  Value = "value",
-  Chart = "chart",
-  WorkflowButton = "workflow_button",
-  InteractionButtons = "interaction_buttons",
-}
+export type ReportTableColumnType =
+  | "value"
+  | "chart"
+  | "workflow_button"
+  | "interaction_buttons";
 
-export enum ReportStatus {
-  Draft = "draft",
-  Published = "published",
-  Archived = "archived",
-}
+export type ReportStatus = "draft" | "published" | "archived";
 
-export enum ReportSourceMode {
-  Filter = "filter",
-  Aggregate = "aggregate",
-}
+export type ReportSourceMode = "filter" | "aggregate";
 
-export enum ReportSourceKind {
-  ObjectModel = "object_model",
-  WorkflowRuntime = "workflow_runtime",
-  System = "system",
-}
+export type ReportSourceKind = "object_model" | "workflow_runtime" | "system";
 
-export enum ReportJoinKind {
-  Inner = "inner",
-  Left = "left",
-}
+export type ReportJoinKind = "inner" | "left";
 
-export enum ReportFilterType {
-  Select = "select",
-  MultiSelect = "multi_select",
-  Radio = "radio",
-  Checkbox = "checkbox",
-  TimeRange = "time_range",
-  NumberRange = "number_range",
-  Text = "text",
-  Search = "search",
-}
+export type ReportFilterType =
+  | "select"
+  | "multi_select"
+  | "radio"
+  | "checkbox"
+  | "time_range"
+  | "number_range"
+  | "text"
+  | "search";
 
-export enum ReportEditorKind {
-  Text = "text",
-  Textarea = "textarea",
-  Number = "number",
-  Select = "select",
-  Toggle = "toggle",
-  Date = "date",
-  Datetime = "datetime",
-  Lookup = "lookup",
-}
+export type ReportEditorKind =
+  | "text"
+  | "textarea"
+  | "number"
+  | "select"
+  | "toggle"
+  | "date"
+  | "datetime"
+  | "lookup";
 
-export enum ReportDatasetValueFormat {
-  String = "string",
-  Number = "number",
-  Decimal = "decimal",
-  Currency = "currency",
-  Percent = "percent",
-  Boolean = "boolean",
-  Date = "date",
-  Datetime = "datetime",
-}
+export type ReportDatasetValueFormat =
+  | "string"
+  | "number"
+  | "decimal"
+  | "currency"
+  | "percent"
+  | "boolean"
+  | "date"
+  | "datetime";
 
-export enum ReportDatasetFieldType {
-  String = "string",
-  Number = "number",
-  Decimal = "decimal",
-  Boolean = "boolean",
-  Date = "date",
-  Datetime = "datetime",
-  Json = "json",
-}
+export type ReportDatasetFieldType =
+  | "string"
+  | "number"
+  | "decimal"
+  | "boolean"
+  | "date"
+  | "datetime"
+  | "json";
 
-export enum ReportChartKind {
-  Line = "line",
-  Bar = "bar",
-  Area = "area",
-  Pie = "pie",
-  Donut = "donut",
-}
+export type ReportChartKind = "line" | "bar" | "area" | "pie" | "donut";
 
-export enum ReportCardFieldKind {
-  Value = "value",
-  Json = "json",
-  Markdown = "markdown",
-  Subcard = "subcard",
-  Subtable = "subtable",
-  WorkflowButton = "workflow_button",
-}
+export type ReportCardFieldKind =
+  | "value"
+  | "json"
+  | "markdown"
+  | "subcard"
+  | "subtable"
+  | "workflow_button";
 
-export enum ReportBlockType {
-  Table = "table",
-  Chart = "chart",
-  Metric = "metric",
-  Actions = "actions",
-  Markdown = "markdown",
-  Card = "card",
-}
+export type ReportBlockType =
+  | "table"
+  | "chart"
+  | "metric"
+  | "actions"
+  | "markdown"
+  | "card";
 
-export enum ReportBlockStatus {
-  Ready = "ready",
-  Loading = "loading",
-  Empty = "empty",
-  Error = "error",
-}
+export type ReportBlockStatus = "ready" | "loading" | "empty" | "error";
 
-export enum ReportAggregateFn {
-  Count = "count",
-  Sum = "sum",
-  Avg = "avg",
-  Min = "min",
-  Max = "max",
-  FirstValue = "first_value",
-  LastValue = "last_value",
-  PercentileCont = "percentile_cont",
-  PercentileDisc = "percentile_disc",
-  StddevSamp = "stddev_samp",
-  VarSamp = "var_samp",
-  Expr = "expr",
-}
+export type ReportAggregateFn =
+  | "count"
+  | "sum"
+  | "avg"
+  | "min"
+  | "max"
+  | "first_value"
+  | "last_value"
+  | "percentile_cont"
+  | "percentile_disc"
+  | "stddev_samp"
+  | "var_samp"
+  | "expr";
 
 /** Rate limit event types */
-export enum RateLimitEventType {
-  Request = "request",
-  RateLimited = "rate_limited",
-  Retry = "retry",
-}
+export type RateLimitEventType = "request" | "rate_limited" | "retry";
 
 /** Memory allocation tier for workflow execution */
-export enum MemoryTier {
-  S = "S",
-  M = "M",
-  L = "L",
-  XL = "XL",
-}
+export type MemoryTier = "S" | "M" | "L" | "XL";
 
 /** Log level for Log steps */
-export enum LogLevel {
-  Debug = "debug",
-  Info = "info",
-  Warn = "warn",
-  Error = "error",
-}
+export type LogLevel = "debug" | "info" | "warn" | "error";
 
 /** Severity of a validation issue */
-export enum IssueSeverity {
-  Error = "error",
-  Warning = "warning",
-}
+export type IssueSeverity = "error" | "warning";
 
 /** Category of validation issue */
-export enum IssueCategory {
-  MissingStep = "missing_step",
-  UnknownFieldPath = "unknown_field_path",
-  InvalidReferencePath = "invalid_reference_path",
-  MissingConnection = "missing_connection",
-}
+export type IssueCategory =
+  | "missing_step"
+  | "unknown_field_path"
+  | "invalid_reference_path"
+  | "missing_connection";
 
 /** Execution status representing the current state of a workflow execution */
-export enum ExecutionStatus {
-  Queued = "queued",
-  Compiling = "compiling",
-  Running = "running",
-  Suspended = "suspended",
-  Completed = "completed",
-  Failed = "failed",
-  Timeout = "timeout",
-  Cancelled = "cancelled",
-}
+export type ExecutionStatus =
+  | "queued"
+  | "compiling"
+  | "running"
+  | "suspended"
+  | "completed"
+  | "failed"
+  | "timeout"
+  | "cancelled";
 
 /** Error severity for logging and alerting. */
-export enum ErrorSeverity {
-  Info = "info",
-  Warning = "warning",
-  Error = "error",
-  Critical = "critical",
-}
+export type ErrorSeverity = "info" | "warning" | "error" | "critical";
 
 /**
  * Error category for structured errors.
@@ -321,17 +245,13 @@ export enum ErrorSeverity {
  * - `code`: e.g., `VALIDATION_*` vs `BUSINESS_*` or `CREDIT_LIMIT_EXCEEDED`
  * - `severity`: `error` for technical, `warning` for expected business outcomes
  */
-export enum ErrorCategory {
-  Transient = "transient",
-  Permanent = "permanent",
-}
+export type ErrorCategory = "transient" | "permanent";
 
-export enum ConnectionStatus {
-  UNKNOWN = "UNKNOWN",
-  ACTIVE = "ACTIVE",
-  REQUIRES_RECONNECTION = "REQUIRES_RECONNECTION",
-  INVALID_CREDENTIALS = "INVALID_CREDENTIALS",
-}
+export type ConnectionStatus =
+  | "UNKNOWN"
+  | "ACTIVE"
+  | "REQUIRES_RECONNECTION"
+  | "INVALID_CREDENTIALS";
 
 /**
  * Canonical list of connection categories.
@@ -339,19 +259,18 @@ export enum ConnectionStatus {
  * Used for grouping connection types in the UI and API responses.
  * When adding a new integration, pick the most specific category that fits.
  */
-export enum ConnectionCategory {
-  Ecommerce = "ecommerce",
-  FileStorage = "file_storage",
-  Llm = "llm",
-  Crm = "crm",
-  Erp = "erp",
-  Database = "database",
-  Email = "email",
-  Messaging = "messaging",
-  Payment = "payment",
-  Cloud = "cloud",
-  Api = "api",
-}
+export type ConnectionCategory =
+  | "ecommerce"
+  | "file_storage"
+  | "llm"
+  | "crm"
+  | "erp"
+  | "database"
+  | "email"
+  | "messaging"
+  | "payment"
+  | "cloud"
+  | "api";
 
 /**
  * Canonical list of authentication / credential types for connections.
@@ -359,83 +278,67 @@ export enum ConnectionCategory {
  * Describes **what credentials** are used to authenticate, not how they are
  * transported (e.g. bearer header is a delivery mechanism, not a credential type).
  */
-export enum ConnectionAuthType {
-  ApiKey = "api_key",
-  Oauth2AuthorizationCode = "oauth2_authorization_code",
-  Oauth2ClientCredentials = "oauth2_client_credentials",
-  UsernamePassword = "username_password",
-  SshKey = "ssh_key",
-  AccessKey = "access_key",
-  ConnectionString = "connection_string",
-  Custom = "custom",
-}
+export type ConnectionAuthType =
+  | "api_key"
+  | "oauth2_authorization_code"
+  | "oauth2_client_credentials"
+  | "username_password"
+  | "ssh_key"
+  | "access_key"
+  | "connection_string"
+  | "custom";
 
 /** Condition expression operators */
-export enum ConditionOperator {
-  AND = "AND",
-  OR = "OR",
-  NOT = "NOT",
-  GT = "GT",
-  GTE = "GTE",
-  LT = "LT",
-  LTE = "LTE",
-  EQ = "EQ",
-  NE = "NE",
-  STARTS_WITH = "STARTS_WITH",
-  ENDS_WITH = "ENDS_WITH",
-  CONTAINS = "CONTAINS",
-  IN = "IN",
-  NOT_IN = "NOT_IN",
-  LENGTH = "LENGTH",
-  IS_DEFINED = "IS_DEFINED",
-  IS_EMPTY = "IS_EMPTY",
-  IS_NOT_EMPTY = "IS_NOT_EMPTY",
-  SIMILARITY_GTE = "SIMILARITY_GTE",
-  MATCH = "MATCH",
-  COSINE_DISTANCE_LTE = "COSINE_DISTANCE_LTE",
-  L2_DISTANCE_LTE = "L2_DISTANCE_LTE",
-}
+export type ConditionOperator =
+  | "AND"
+  | "OR"
+  | "NOT"
+  | "GT"
+  | "GTE"
+  | "LT"
+  | "LTE"
+  | "EQ"
+  | "NE"
+  | "STARTS_WITH"
+  | "ENDS_WITH"
+  | "CONTAINS"
+  | "IN"
+  | "NOT_IN"
+  | "LENGTH"
+  | "IS_DEFINED"
+  | "IS_EMPTY"
+  | "IS_NOT_EMPTY"
+  | "SIMILARITY_GTE"
+  | "MATCH"
+  | "COSINE_DISTANCE_LTE"
+  | "L2_DISTANCE_LTE";
 
 /** Strategy for compacting conversation memory. */
-export enum CompactionStrategy {
-  Summarize = "summarize",
-  SlidingWindow = "slidingWindow",
-}
+export type CompactionStrategy = "summarize" | "slidingWindow";
 
 /** Behavior on per-row validation failure for bulk-create. */
-export enum BulkValidationMode {
-  Stop = "stop",
-  Skip = "skip",
-}
+export type BulkValidationMode = "stop" | "skip";
 
 /** Behavior on unique-key conflict for bulk-create. */
-export enum BulkConflictMode {
-  Error = "error",
-  Skip = "skip",
-  Upsert = "upsert",
-}
+export type BulkConflictMode = "error" | "skip" | "upsert";
 
 /** LLM provider used by an AI Agent step. */
-export enum AiAgentProvider {
-  Openai = "openai",
-  Bedrock = "bedrock",
-}
+export type AiAgentProvider = "openai" | "bedrock";
 
 /** Aggregate function. JSON encoding is SCREAMING_SNAKE_CASE. */
-export enum AggregateFn {
-  COUNT = "COUNT",
-  SUM = "SUM",
-  AVG = "AVG",
-  MIN = "MIN",
-  MAX = "MAX",
-  FIRST_VALUE = "FIRST_VALUE",
-  LAST_VALUE = "LAST_VALUE",
-  PERCENTILE_CONT = "PERCENTILE_CONT",
-  PERCENTILE_DISC = "PERCENTILE_DISC",
-  STDDEV_SAMP = "STDDEV_SAMP",
-  VAR_SAMP = "VAR_SAMP",
-  EXPR = "EXPR",
-}
+export type AggregateFn =
+  | "COUNT"
+  | "SUM"
+  | "AVG"
+  | "MIN"
+  | "MAX"
+  | "FIRST_VALUE"
+  | "LAST_VALUE"
+  | "PERCENTILE_CONT"
+  | "PERCENTILE_DISC"
+  | "STDDEV_SAMP"
+  | "VAR_SAMP"
+  | "EXPR";
 
 export interface AddReportBlockRequest {
   block: ReportBlockDefinition;

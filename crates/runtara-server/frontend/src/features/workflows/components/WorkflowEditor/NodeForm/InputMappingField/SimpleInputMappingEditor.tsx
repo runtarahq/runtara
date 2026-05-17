@@ -122,7 +122,7 @@ function getTypeHintFromFieldType(fieldType: string | undefined): string {
   if (lowerType === 'boolean' || lowerType === 'bool') return 'boolean';
 
   // Integer types - handle various naming conventions from different APIs
-  // Returns 'integer' to match ValueType.Integer for proper type conversion
+  // Returns 'integer' to match 'integer' for proper type conversion
   // Includes 'auto' since Auto column type is auto-incrementing integer
   if (
     lowerType === 'integer' ||
@@ -138,7 +138,7 @@ function getTypeHintFromFieldType(fieldType: string | undefined): string {
     return 'integer';
 
   // Float/double types
-  // Returns 'number' to match ValueType.Number for proper type conversion
+  // Returns 'number' to match 'number' for proper type conversion
   if (
     lowerType === 'number' ||
     lowerType === 'float' ||

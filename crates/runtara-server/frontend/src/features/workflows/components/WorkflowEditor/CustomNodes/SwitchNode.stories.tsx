@@ -10,7 +10,6 @@ import {
   setNodeExecutionStatus,
   setExecuting,
 } from './storybook';
-import { ExecutionStatus } from '@/generated/RuntaraRuntimeApi';
 import { NODE_TYPES } from '@/features/workflows/config/workflow';
 
 const NODE_ID = 'switch-1';
@@ -241,7 +240,7 @@ export const ExecutionRunning: Story = {
   decorators: [
     (Story) => {
       resetStores();
-      setNodeExecutionStatus(NODE_ID, ExecutionStatus.Running);
+      setNodeExecutionStatus(NODE_ID, 'running');
       return <Story />;
     },
   ],
@@ -266,7 +265,7 @@ export const ExecutionCompleted: Story = {
   decorators: [
     (Story) => {
       resetStores();
-      setNodeExecutionStatus(NODE_ID, ExecutionStatus.Completed, {
+      setNodeExecutionStatus(NODE_ID, 'completed', {
         executionTime: 1250,
       });
       return <Story />;
@@ -293,7 +292,7 @@ export const ExecutionFailed: Story = {
   decorators: [
     (Story) => {
       resetStores();
-      setNodeExecutionStatus(NODE_ID, ExecutionStatus.Failed, {
+      setNodeExecutionStatus(NODE_ID, 'failed', {
         error: 'No matching case found for value: UNKNOWN',
       });
       return <Story />;
@@ -457,11 +456,11 @@ export const AllStates: Story = {
       resetStores();
       setNodeUnsaved('switch-unsaved');
       setNodeValidationError('switch-error');
-      setNodeExecutionStatus('switch-running', ExecutionStatus.Running);
-      setNodeExecutionStatus('switch-completed', ExecutionStatus.Completed, {
+      setNodeExecutionStatus('switch-running', 'running');
+      setNodeExecutionStatus('switch-completed', 'completed', {
         executionTime: 1250,
       });
-      setNodeExecutionStatus('switch-failed', ExecutionStatus.Failed, {
+      setNodeExecutionStatus('switch-failed', 'failed', {
         error: 'Error message',
       });
       return <Story />;

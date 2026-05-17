@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/react';
 import { StructuredErrorDisplay } from './StructuredErrorDisplay';
-import { ErrorCategory, ErrorSeverity } from '@/generated/RuntaraRuntimeApi';
 
 describe('StructuredErrorDisplay', () => {
   describe('with structured errors', () => {
@@ -9,8 +8,8 @@ describe('StructuredErrorDisplay', () => {
       const structuredError = JSON.stringify({
         code: 'OPENAI_RATE_LIMITED',
         message: 'Rate limit exceeded',
-        category: ErrorCategory.Transient,
-        severity: ErrorSeverity.Error,
+        category: 'transient',
+        severity: 'error',
         attributes: { status_code: 429 },
       });
 
@@ -25,8 +24,8 @@ describe('StructuredErrorDisplay', () => {
       const structuredError = JSON.stringify({
         code: 'SHOPIFY_VALIDATION_ERROR',
         message: 'Validation failed',
-        category: ErrorCategory.Permanent,
-        severity: ErrorSeverity.Error,
+        category: 'permanent',
+        severity: 'error',
         attributes: { errors: ['Invalid field'] },
       });
 
@@ -43,8 +42,8 @@ describe('StructuredErrorDisplay', () => {
       const structuredError = JSON.stringify({
         code: 'OPENAI_UNAUTHORIZED',
         message: 'Auth failed',
-        category: ErrorCategory.Permanent,
-        severity: ErrorSeverity.Error,
+        category: 'permanent',
+        severity: 'error',
         attributes: { status_code: 401 },
       });
 
@@ -59,8 +58,8 @@ describe('StructuredErrorDisplay', () => {
       const structuredError = JSON.stringify({
         code: 'TEST_ERROR',
         message: 'Test',
-        category: ErrorCategory.Permanent,
-        severity: ErrorSeverity.Error,
+        category: 'permanent',
+        severity: 'error',
         attributes: { status_code: 500 },
       });
 
@@ -85,8 +84,8 @@ describe('StructuredErrorDisplay', () => {
       const structuredError = JSON.stringify({
         code: 'OPENAI_RATE_LIMITED',
         message: 'Rate limited',
-        category: ErrorCategory.Transient,
-        severity: ErrorSeverity.Error,
+        category: 'transient',
+        severity: 'error',
         attributes: {},
       });
 
@@ -106,8 +105,8 @@ describe('StructuredErrorDisplay', () => {
       const structuredError = JSON.stringify({
         code: 'OPENAI_RATE_LIMITED',
         message: 'Rate limited',
-        category: ErrorCategory.Transient,
-        severity: ErrorSeverity.Error,
+        category: 'transient',
+        severity: 'error',
         attributes: {},
       });
 
@@ -126,8 +125,8 @@ describe('StructuredErrorDisplay', () => {
       const structuredError = JSON.stringify({
         code: 'SHOPIFY_NOT_FOUND',
         message: 'Resource not found',
-        category: ErrorCategory.Permanent,
-        severity: ErrorSeverity.Error,
+        category: 'permanent',
+        severity: 'error',
         attributes: {},
       });
 
@@ -143,8 +142,8 @@ describe('StructuredErrorDisplay', () => {
       const structuredError = JSON.stringify({
         code: 'RATE_LIMITED',
         message: 'Rate limited',
-        category: ErrorCategory.Transient,
-        severity: ErrorSeverity.Error,
+        category: 'transient',
+        severity: 'error',
         attributes: {},
       });
 
@@ -161,8 +160,8 @@ describe('StructuredErrorDisplay', () => {
       const structuredError = JSON.stringify({
         code: 'INVALID_KEY',
         message: 'Invalid key',
-        category: ErrorCategory.Permanent,
-        severity: ErrorSeverity.Error,
+        category: 'permanent',
+        severity: 'error',
         attributes: {},
       });
 
@@ -179,8 +178,8 @@ describe('StructuredErrorDisplay', () => {
       const structuredError = JSON.stringify({
         code: 'CREDIT_LIMIT',
         message: 'Credit limit exceeded',
-        category: ErrorCategory.Permanent,
-        severity: ErrorSeverity.Warning,
+        category: 'permanent',
+        severity: 'warning',
         attributes: {},
       });
 
@@ -242,8 +241,8 @@ describe('StructuredErrorDisplay', () => {
       const structuredError = JSON.stringify({
         code: 'TEST_ERROR',
         message: 'Test',
-        category: ErrorCategory.Permanent,
-        severity: ErrorSeverity.Error,
+        category: 'permanent',
+        severity: 'error',
         attributes: {},
       });
 
@@ -262,8 +261,8 @@ describe('StructuredErrorDisplay', () => {
       const structuredError = JSON.stringify({
         code: 'TEST_ERROR',
         message: 'Test',
-        category: ErrorCategory.Permanent,
-        severity: ErrorSeverity.Error,
+        category: 'permanent',
+        severity: 'error',
         attributes: {},
       });
 
@@ -282,8 +281,8 @@ describe('StructuredErrorDisplay', () => {
       const structuredError = JSON.stringify({
         code: 'TEST_ERROR',
         message: 'Test',
-        category: ErrorCategory.Permanent,
-        severity: ErrorSeverity.Error,
+        category: 'permanent',
+        severity: 'error',
         attributes: { status_code: 500 },
       });
 
@@ -302,8 +301,8 @@ describe('StructuredErrorDisplay', () => {
       const structuredError = JSON.stringify({
         code: 'TEST_ERROR',
         message: 'Test',
-        category: ErrorCategory.Permanent,
-        severity: ErrorSeverity.Error,
+        category: 'permanent',
+        severity: 'error',
         attributes: {},
       });
 
