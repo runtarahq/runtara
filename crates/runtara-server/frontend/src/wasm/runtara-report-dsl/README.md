@@ -17,9 +17,13 @@ cp pkg/runtara_report_dsl_bg.wasm pkg/runtara_report_dsl.js \
 
 ## Size
 
-~900 KB raw, ~320 KB gzipped. Above the Phase 2 plan target of <250 KB.
-Further slimming requires cfg-gating `runtara-dsl::step_registration` and
-the `SchemaGeneratorFn` family in `agent_meta` so the WASM tree can
-drop schemars 0.8 entirely. Tracked in
-`docs/reports-refactoring-plan.md` as Phase 2 follow-up; mitigation is
-lazy-loading on the report-builder route.
+~950 KB raw, ~339 KB gzipped. Above the Phase 2 plan target of <250 KB
+but acceptable since the report-builder route is lazy-loaded
+(`ReportPage` defers `ReportBuilderWizard` import until edit mode).
+
+The runtara-dsl `spec` and `step_registration` modules plus the
+`SchemaGeneratorFn` family in `agent_meta` are now `#[cfg(feature =
+"json-schema")]` and this crate consumes runtara-dsl with
+`default-features = false`, so schemars + the schema-generation surface
+stay out of the WASM tree. Remaining size comes from minijinja
+(~150 KB) and the canonical condition / format machinery.

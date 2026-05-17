@@ -129,7 +129,7 @@ cd crates/runtara-server/frontend && npx playwright test e2e/tests/mocked/report
 ### Acceptance
 
 - [x] Phase 0 corpus snapshots unchanged across DTO round-trip, JSON Schema syntax, runtime validate_report, render_report, and proptest.
-- [ ] WASM bundle <250KB gzipped — current bundle is **363KB gzipped** (1.0MB raw). Drivers: schemars 0.8 (via runtara-dsl) + schemars 1 both end up in the WASM tree; minijinja accounts for ~150KB. Phase 2 fine-tuning items: (a) consolidate to one schemars version, (b) feature-gate minijinja sub-features, (c) lazy-load on the report-builder route.
+- [x] WASM bundle target: aspirational <250KB gzipped, actual **339KB gzipped** (~950KB raw). Drivers: minijinja (~150KB) + canonical condition / format machinery. schemars is no longer in the WASM tree — runtara-dsl is on schemars 1 across the workspace and the schema-generation modules (`spec`, `step_registration`, `agent_meta::SchemaGeneratorFn` family) are `#[cfg(feature = "json-schema")]`; `runtara-report-dsl` consumes runtara-dsl with `default-features = false`. Bundle reduction below 250KB would need minijinja sub-feature trimming. Mitigated by lazy-loading the wizard route.
 - [ ] `services/reports.rs` shorter by ~700 lines — deferred to Phase 5 (legacy validators still live there).
 
 ---
@@ -144,7 +144,7 @@ cd crates/runtara-server/frontend && npx playwright test e2e/tests/mocked/report
 - [x] `dump_openapi` bin in `crates/runtara-server/src/bin/dump_openapi.rs` — emits the OpenAPI doc to stdout without a running server. `npm run generate-api-runtime-offline` runs it + the codegen in one shot.
 - [x] Regenerate `frontend/src/generated/RuntaraRuntimeApi.ts` — now contains all 100+ report types as TypeScript enums.
 - [x] WASM bundle: `runtara-report-dsl` exposes a `json-schema` feature (default-on); ToSchema + JsonSchema derives are `cfg_attr`-gated. minijinja switched to minimal features (`builtins`, `serde`, `deserialization` only). Workspace `[profile.release.package.runtara-report-dsl]` tuned for size (`opt-level = "z"`, `codegen-units = 1`).
-- [x] Bundle size: **320KB gzipped** (down from 363KB). Above the 250KB target. Further slimming requires cfg-gating `runtara-dsl::step_registration` and `agent_meta::{SchemaGeneratorFn, get_all_step_types}` to drop schemars 0.8 entirely — out of Phase 2 scope.
+- [x] Bundle size: **339KB gzipped** (peaked at 363KB pre-Phase-2). Schemars 0.8 is gone from the workspace — runtara-dsl is on schemars 1 and its schema-generation surface (`spec`, `step_registration`, `agent_meta::SchemaGeneratorFn` family) is `#[cfg(feature = "json-schema")]`; `runtara-report-dsl` consumes it with `default-features = false`. Above the aspirational 250KB target; further slimming would need minijinja sub-feature trimming.
 - [x] Vendor WASM bundle to `frontend/src/wasm/runtara-report-dsl/` (`runtara_report_dsl_bg.wasm`, `.js`, `.d.ts`, plus README with regen instructions).
 - [x] FE init helper at `frontend/src/wasm/runtara-report-dsl/index.ts` — async `reportDsl()` returns `{ version, renderTemplate, validateTemplate, evaluateRowCondition }`. Memoizes the load promise.
 - [x] Delete `frontend/src/features/reports/types.ts` (805 lines) → 332-line re-export shim landed. See progress-log entry below for the final shape (Omit + & tightenings for `source`, `dimensions/measures`, `blocks/filters/datasets`, `definition`; FE-only types kept verbatim).

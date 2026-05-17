@@ -12,8 +12,9 @@ categories = ["development-tools"]
 default = ["json-schema"]
 # `JsonSchema` derives drive the JSON Schema export pipeline at
 # `crates/runtara-server/build.rs`. Default-on so all current consumers
-# keep working; optional so the WASM build for `runtara-report-dsl` (Phase
-# 2 of the reports refactor) can drop schemars 0.8 from its tree.
+# keep working; optional so the WASM build for `runtara-report-dsl` can
+# drop the `spec` + `step_registration` schema-generation surface from
+# its tree.
 json-schema = ["dep:schemars"]
 utoipa = ["dep:utoipa"]
 
