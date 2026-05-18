@@ -48,6 +48,8 @@ members = [
     "crates/runtara-agent-azure-blob-storage",
     "crates/runtara-agent-sharepoint",
     "crates/runtara-agent-stripe",
+    "crates/runtara-agent-hubspot",
+    "crates/runtara-agent-shopify",
 ]
 default-members = ["crates/runtara-core"]
 
