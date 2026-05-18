@@ -1863,7 +1863,14 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
             ),
             connections: connections_facade.clone(),
             engine: execution_engine.clone(),
-        });
+        })
+        // Defense in depth: cap the request body on these public,
+        // unauthenticated webhook ingest routes. events.rs also enforces this
+        // explicitly (it reads the raw body and bypasses extractor limits);
+        // this layer covers the Bytes-extractor sync handler.
+        .layer(DefaultBodyLimit::max(
+            api::handlers::events::webhook_max_body_bytes(),
+        ));
 
     // Initialize channel router for conversational triggers (Telegram, Slack, Teams).
     // The router is always available — it looks up connection + trigger from DB per request.
