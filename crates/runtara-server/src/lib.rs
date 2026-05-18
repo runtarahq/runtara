@@ -4,6 +4,7 @@ pub mod bind;
 pub mod channels;
 pub mod compiler;
 pub mod config;
+pub mod conn_limit;
 pub mod dsl;
 pub mod embedded_runtara;
 pub mod mcp;

@@ -1909,19 +1909,32 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         std::process::exit(1);
     }
 
+    // Cap concurrent TCP connections per listener so a slow-loris attack or a
+    // connection storm can't exhaust file descriptors and take the whole
+    // server down. Configurable via MAX_CONNECTIONS; see `conn_limit`.
+    let max_connections = crate::conn_limit::max_connections_from_env();
+
     // Start public API server
-    let public_listener = tokio::net::TcpListener::bind(&public_addr).await?;
+    let public_listener = crate::conn_limit::LimitedListener::new(
+        tokio::net::TcpListener::bind(&public_addr).await?,
+        max_connections,
+    );
     tracing::info!(
         port = port,
         address = %public_addr,
+        max_connections = max_connections,
         "Public API server started"
     );
 
     // Start internal API server (localhost only)
-    let internal_listener = tokio::net::TcpListener::bind(&internal_addr).await?;
+    let internal_listener = crate::conn_limit::LimitedListener::new(
+        tokio::net::TcpListener::bind(&internal_addr).await?,
+        max_connections,
+    );
     tracing::info!(
         port = internal_port,
         address = %internal_addr,
+        max_connections = max_connections,
         "Internal API server started"
     );
 
