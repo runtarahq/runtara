@@ -1,8 +1,15 @@
 {
   "definitionVersion": 1,
-  "layout": [
-    { "id": "n_customer", "type": "block", "blockId": "customer_card" }
-  ],
+  "layout": {
+    "id": "root",
+    "columns": 1,
+    "items": [
+      {
+        "id": "root_i0",
+        "child": { "id": "n_customer", "type": "block", "blockId": "customer_card" }
+      }
+    ]
+  },
   "filters": [
     {
       "id": "customer_id",

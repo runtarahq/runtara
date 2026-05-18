@@ -74,8 +74,24 @@ function baseDefinition(
   blocks: ReportBlockDefinition[],
   extras: Partial<ReportDefinition> = {}
 ): ReportDefinition {
+  // Phase 10: every block must live in the root grid for the viewer's
+  // layout walker to find it. Auto-place each declared block as a
+  // root-grid item.
+  const autoLayout = {
+    id: 'root',
+    columns: 1,
+    items: blocks.map((block, i) => ({
+      id: `root_i${i}`,
+      child: {
+        id: `n_${block.id}`,
+        type: 'block' as const,
+        blockId: block.id,
+      },
+    })),
+  };
   return {
     definitionVersion: 1,
+    layout: autoLayout,
     filters: [],
     blocks,
     ...extras,

@@ -851,6 +851,13 @@ export interface ApiResponseWorkflowDto {
   success: boolean;
 }
 
+export interface BlockPosition {
+  afterId?: string | null;
+  beforeId?: string | null;
+  /** @min 0 */
+  index?: number | null;
+}
+
 export interface BucketDto {
   /** Creation date (ISO 8601) */
   creationDate: string;
@@ -1640,6 +1647,19 @@ export interface DiskInfo {
   totalBytes: number;
 }
 
+export interface EditReportRequest {
+  /**
+   * Atomic batch of edit operations applied in order; if any op
+   * fails the entire batch is rolled back.
+   */
+  ops?: ReportEditOp[];
+}
+
+export interface EditReportResponse {
+  report: ReportDto;
+  success: boolean;
+}
+
 /** Executes a nested child workflow */
 export interface EmbedWorkflowStep {
   /** When true, execution pauses before this step in debug mode */
@@ -2338,6 +2358,32 @@ export interface KnownErrorInfo {
   description: string;
   /** Error kind: "transient" or "permanent" */
   kind: string;
+}
+
+/**
+ * Destination for a layout-node insert / move.
+ *
+ * `parent_node_id` must reference a `Grid` node and the operation
+ * targets that grid's `items` array. When `None`, the operation targets
+ * the report's mandatory root grid (`definition.layout`) — that's the
+ * only valid container outside an explicit `parent_node_id`. The
+ * position fields are mutually exclusive — pick one of
+ * index / before_id / after_id (or none, in which case the node is
+ * appended at the end).
+ *
+ * Phase 9 collapse: previous versions carried a `columnId` field for
+ * the legacy `columns` layout type. With grid-only containers there is
+ * no second-level indirection — items live directly on a Grid.
+ * Phase 10 collapse: `parent_node_id == None` used to mean "root Vec
+ * of layout nodes"; the root is now a single grid, so `None` resolves
+ * to that root grid's items.
+ */
+export interface LayoutTarget {
+  afterId?: string | null;
+  beforeId?: string | null;
+  /** @min 0 */
+  index?: number | null;
+  parentNodeId?: string | null;
 }
 
 /** Response for listing all agents */
@@ -3238,7 +3284,14 @@ export interface ReportDefinition {
   /** @format int32 */
   definitionVersion?: number;
   filters?: ReportFilterDefinition[];
-  layout?: ReportLayoutNode[];
+  /**
+   * The report's layout is a single mandatory root grid. Authors drop
+   * blocks (and nested grids for sub-sections) into its `items[]`. The
+   * `default_root_grid` fallback handles wire payloads that omit the
+   * field — repository migration converts legacy `layout: [...]`
+   * arrays into a wrapping root grid before deserialization.
+   */
+  layout?: ReportGridLayoutNode;
   views?: ReportViewDefinition[];
 }
 
@@ -3264,6 +3317,106 @@ export interface ReportDto {
   /** @format date-time */
   updatedAt: string;
 }
+
+export type ReportEditOp =
+  | {
+      block: ReportBlockDefinition;
+      kind: "add_block";
+      position?: BlockPosition;
+    }
+  | {
+      block: ReportBlockDefinition;
+      blockId: string;
+      kind: "replace_block";
+    }
+  | {
+      blockId: string;
+      kind: "patch_block";
+      patch: any;
+    }
+  | {
+      blockId: string;
+      kind: "move_block";
+      position?: BlockPosition;
+    }
+  | {
+      blockId: string;
+      kind: "remove_block";
+    }
+  | {
+      kind: "add_layout_node";
+      /**
+       * Layout primitive. Two variants only — `block` (leaf reference to
+       * `definition.blocks[i]`) and `grid` (recursive container). The legacy
+       * `section` / `columns` / `metric_row` types collapsed into `grid` in
+       * Phase 9; the repository's `parse_stored_definition` translates them
+       * transparently on read.
+       */
+      node: ReportLayoutNode;
+      /**
+       * Destination for a layout-node insert / move.
+       *
+       * `parent_node_id` must reference a `Grid` node and the operation
+       * targets that grid's `items` array. When `None`, the operation targets
+       * the report's mandatory root grid (`definition.layout`) — that's the
+       * only valid container outside an explicit `parent_node_id`. The
+       * position fields are mutually exclusive — pick one of
+       * index / before_id / after_id (or none, in which case the node is
+       * appended at the end).
+       *
+       * Phase 9 collapse: previous versions carried a `columnId` field for
+       * the legacy `columns` layout type. With grid-only containers there is
+       * no second-level indirection — items live directly on a Grid.
+       * Phase 10 collapse: `parent_node_id == None` used to mean "root Vec
+       * of layout nodes"; the root is now a single grid, so `None` resolves
+       * to that root grid's items.
+       */
+      target?: LayoutTarget;
+    }
+  | {
+      kind: "replace_layout_node";
+      /**
+       * Layout primitive. Two variants only — `block` (leaf reference to
+       * `definition.blocks[i]`) and `grid` (recursive container). The legacy
+       * `section` / `columns` / `metric_row` types collapsed into `grid` in
+       * Phase 9; the repository's `parse_stored_definition` translates them
+       * transparently on read.
+       */
+      node: ReportLayoutNode;
+      nodeId: string;
+    }
+  | {
+      kind: "patch_layout_node";
+      nodeId: string;
+      patch: any;
+    }
+  | {
+      kind: "move_layout_node";
+      nodeId: string;
+      /**
+       * Destination for a layout-node insert / move.
+       *
+       * `parent_node_id` must reference a `Grid` node and the operation
+       * targets that grid's `items` array. When `None`, the operation targets
+       * the report's mandatory root grid (`definition.layout`) — that's the
+       * only valid container outside an explicit `parent_node_id`. The
+       * position fields are mutually exclusive — pick one of
+       * index / before_id / after_id (or none, in which case the node is
+       * appended at the end).
+       *
+       * Phase 9 collapse: previous versions carried a `columnId` field for
+       * the legacy `columns` layout type. With grid-only containers there is
+       * no second-level indirection — items live directly on a Grid.
+       * Phase 10 collapse: `parent_node_id == None` used to mean "root Vec
+       * of layout nodes"; the root is now a single grid, so `None` resolves
+       * to that root grid's items.
+       */
+      target?: LayoutTarget;
+    }
+  | {
+      kind: "remove_layout_node";
+      nodeId: string;
+    };
 
 /**
  * Explicit editor configuration for an editable column or card field.
@@ -3660,6 +3813,13 @@ export interface ReportSummary {
   description?: string | null;
   id: string;
   name: string;
+  /**
+   * Mirrors `ReportDto.needs_re_authoring`. Propagated onto the
+   * summary so callers of `GET /api/runtime/reports` (including the
+   * MCP `list_reports_needing_re_authoring` tool) can filter
+   * without doing a second per-report fetch.
+   */
+  needsReAuthoring?: string | null;
   slug: string;
   status: ReportStatus;
   tags?: string[];
@@ -3819,7 +3979,12 @@ export interface ReportViewDefinition {
   breadcrumb?: ReportViewBreadcrumb[];
   clearFiltersOnBack?: string[];
   id: string;
-  layout?: ReportLayoutNode[];
+  /**
+   * Like `ReportDefinition.layout` — a single mandatory root grid for
+   * this view. Detail views typically populate it via the same wizard
+   * flow as the main report.
+   */
+  layout?: ReportGridLayoutNode;
   parentViewId?: string | null;
   title?: string | null;
   titleFrom?: string | null;
@@ -7048,6 +7213,28 @@ export class Api<
         path: `/api/runtime/rate-limits`,
         method: "GET",
         query: query,
+        format: "json",
+        ...params,
+      }),
+
+    /**
+     * No description
+     *
+     * @tags reports-controller
+     * @name EditReport
+     * @summary Phase 6 canonical edit endpoint. Accepts a batch of `ReportEditOp`s and applies them atomically. The legacy per-op REST + MCP handlers have all been deleted (Phase 8) so this is the only mutation entry point for layout + block changes.
+     * @request POST:/api/runtime/reports/{report_id}/edit
+     */
+    editReport: (
+      reportId: string,
+      data: EditReportRequest,
+      params: RequestParams = {},
+    ) =>
+      this.request<EditReportResponse, void>({
+        path: `/api/runtime/reports/${reportId}/edit`,
+        method: "POST",
+        body: data,
+        type: ContentType.Json,
         format: "json",
         ...params,
       }),

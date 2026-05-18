@@ -32,15 +32,20 @@ pub struct BlockPosition {
 
 /// Destination for a layout-node insert / move.
 ///
-/// `parent_node_id == None` targets the root `definition.layout` array.
-/// When set, it must reference a `Grid` node and the operation targets
-/// that grid's `items` array. The position fields are mutually
-/// exclusive — pick one of index / before_id / after_id (or none, in
-/// which case the node is appended at the end).
+/// `parent_node_id` must reference a `Grid` node and the operation
+/// targets that grid's `items` array. When `None`, the operation targets
+/// the report's mandatory root grid (`definition.layout`) — that's the
+/// only valid container outside an explicit `parent_node_id`. The
+/// position fields are mutually exclusive — pick one of
+/// index / before_id / after_id (or none, in which case the node is
+/// appended at the end).
 ///
 /// Phase 9 collapse: previous versions carried a `columnId` field for
 /// the legacy `columns` layout type. With grid-only containers there is
 /// no second-level indirection — items live directly on a Grid.
+/// Phase 10 collapse: `parent_node_id == None` used to mean "root Vec
+/// of layout nodes"; the root is now a single grid, so `None` resolves
+/// to that root grid's items.
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -344,7 +349,7 @@ fn add_layout_node(
     target: &LayoutTarget,
 ) -> Result<(), EditOpError> {
     let node_id = layout_node_id(&node).to_string();
-    if layout_node_exists(&def.layout, &node_id) {
+    if node_id == def.layout.id || layout_node_exists_in_grid(&def.layout, &node_id) {
         return Err(err(
             "DUPLICATE_LAYOUT_NODE_ID",
             format!("Layout node '{}' already exists", node_id),
@@ -368,7 +373,18 @@ fn replace_layout_node(
             ),
         ));
     }
-    if !replace_in_tree(&mut def.layout, node_id, node) {
+    if node_id == def.layout.id {
+        // Replacing the root: must remain a grid (it's the layout type).
+        let ReportLayoutNode::Grid(grid) = node else {
+            return Err(err(
+                "ROOT_LAYOUT_MUST_BE_GRID",
+                "The root layout node must be a grid; cannot replace with a block",
+            ));
+        };
+        def.layout = grid;
+        return Ok(());
+    }
+    if !replace_in_grid(&mut def.layout, node_id, node) {
         return Err(layout_not_found(node_id));
     }
     Ok(())
@@ -391,7 +407,42 @@ fn patch_layout_node(
             "Layout node id cannot be changed with patch_layout_node",
         ));
     }
-    let Some(node) = find_in_tree_mut(&mut def.layout, node_id) else {
+    if patch.get("type").is_some() && node_id == def.layout.id {
+        return Err(err(
+            "ROOT_LAYOUT_MUST_BE_GRID",
+            "The root layout node's type cannot be changed; root must remain a grid",
+        ));
+    }
+    // Special case: patching the root grid in-place.
+    if node_id == def.layout.id {
+        let mut node_value =
+            serde_json::to_value(&def.layout).map_err(|e| err("INVALID_PATCH", e.to_string()))?;
+        // Treat the root grid's wire form as `{type: "grid", ...}` for
+        // patch purposes so callers can write the same patches they'd
+        // use against any other grid. We add `type` only if absent so
+        // we don't conflict with the explicit-rejection above.
+        if let Value::Object(map) = &mut node_value {
+            map.entry("type".to_string())
+                .or_insert(Value::String("grid".to_string()));
+        }
+        apply_json_merge_patch(&mut node_value, patch);
+        // Drop the synthetic `type` field if it survived the patch — the
+        // serialized `ReportGridLayoutNode` doesn't carry one.
+        if let Value::Object(map) = &mut node_value {
+            map.remove("type");
+        }
+        let patched: ReportGridLayoutNode = serde_json::from_value(node_value)
+            .map_err(|e| err("INVALID_PATCH", format!("Invalid root grid patch: {}", e)))?;
+        if patched.id != node_id {
+            return Err(err(
+                "LAYOUT_NODE_ID_IMMUTABLE",
+                "Layout node id cannot be changed with patch_layout_node",
+            ));
+        }
+        def.layout = patched;
+        return Ok(());
+    }
+    let Some(node) = find_in_grid_mut(&mut def.layout, node_id) else {
         return Err(layout_not_found(node_id));
     };
     let mut node_value =
@@ -414,23 +465,26 @@ fn move_layout_node(
     node_id: &str,
     target: &LayoutTarget,
 ) -> Result<(), EditOpError> {
-    let Some(node) = remove_from_tree(&mut def.layout, node_id) else {
+    if node_id == def.layout.id {
+        return Err(err(
+            "CANNOT_MOVE_ROOT_GRID",
+            "The root layout grid cannot be moved",
+        ));
+    }
+    let Some(node) = remove_from_grid(&mut def.layout, node_id) else {
         return Err(layout_not_found(node_id));
     };
-    match insert_into_target(&mut def.layout, target, node) {
-        Ok(()) => Ok(()),
-        Err(e) => {
-            // Reattach at the end of root so we don't drop the node on
-            // target-resolution failure. Caller still sees the original
-            // pre-clone state because the wrapping `apply_edit_ops`
-            // operates on a clone.
-            Err(e)
-        }
-    }
+    insert_into_target(&mut def.layout, target, node)
 }
 
 fn remove_layout_node(def: &mut ReportDefinition, node_id: &str) -> Result<(), EditOpError> {
-    if remove_from_tree(&mut def.layout, node_id).is_none() {
+    if node_id == def.layout.id {
+        return Err(err(
+            "CANNOT_REMOVE_ROOT_GRID",
+            "The root layout grid cannot be removed",
+        ));
+    }
+    if remove_from_grid(&mut def.layout, node_id).is_none() {
         return Err(layout_not_found(node_id));
     }
     Ok(())
@@ -452,144 +506,120 @@ fn layout_not_found(node_id: &str) -> EditOpError {
     )
 }
 
-/// `true` if a layout node with `node_id` is anywhere in the tree.
-/// Used to reject `AddLayoutNode` of a duplicate id.
-fn layout_node_exists(nodes: &[ReportLayoutNode], node_id: &str) -> bool {
-    for node in nodes {
-        if layout_node_id(node) == node_id {
+/// `true` if a layout node with `node_id` is anywhere under `grid`'s
+/// items (excluding `grid` itself). Used to reject `AddLayoutNode` of a
+/// duplicate id.
+fn layout_node_exists_in_grid(grid: &ReportGridLayoutNode, node_id: &str) -> bool {
+    for item in &grid.items {
+        if layout_node_id(&item.child) == node_id {
             return true;
         }
-        if let ReportLayoutNode::Grid(g) = node {
-            for item in &g.items {
-                if layout_node_exists(std::slice::from_ref(item.child.as_ref()), node_id) {
-                    return true;
-                }
-            }
+        if let ReportLayoutNode::Grid(nested) = item.child.as_ref()
+            && (nested.id == node_id || layout_node_exists_in_grid(nested, node_id))
+        {
+            return true;
         }
     }
     false
 }
 
-fn find_in_tree_mut<'a>(
-    nodes: &'a mut [ReportLayoutNode],
+/// Walk the root grid's tree looking for a non-root layout node with
+/// `node_id`. The root grid itself is intentionally not reachable here
+/// — callers handle the root-grid case before calling.
+fn find_in_grid_mut<'a>(
+    grid: &'a mut ReportGridLayoutNode,
     node_id: &str,
 ) -> Option<&'a mut ReportLayoutNode> {
-    for node in nodes.iter_mut() {
-        if layout_node_id(node) == node_id {
-            return Some(node);
+    for item in grid.items.iter_mut() {
+        if layout_node_id(&item.child) == node_id {
+            return Some(item.child.as_mut());
         }
-        if let ReportLayoutNode::Grid(g) = node {
-            for item in g.items.iter_mut() {
-                let child_slice = std::slice::from_mut(item.child.as_mut());
-                if let Some(found) = find_in_tree_mut(child_slice, node_id) {
-                    return Some(found);
-                }
-            }
+        if let ReportLayoutNode::Grid(nested) = item.child.as_mut()
+            && let Some(found) = find_in_grid_mut(nested, node_id)
+        {
+            return Some(found);
         }
     }
     None
 }
 
-fn replace_in_tree(
-    nodes: &mut [ReportLayoutNode],
+fn replace_in_grid(
+    grid: &mut ReportGridLayoutNode,
     node_id: &str,
     replacement: ReportLayoutNode,
 ) -> bool {
-    for node in nodes.iter_mut() {
-        if layout_node_id(node) == node_id {
-            *node = replacement;
+    for item in grid.items.iter_mut() {
+        if layout_node_id(&item.child) == node_id {
+            *item.child.as_mut() = replacement;
             return true;
         }
-    }
-    for node in nodes.iter_mut() {
-        if let ReportLayoutNode::Grid(g) = node {
-            for item in g.items.iter_mut() {
-                let child_slice = std::slice::from_mut(item.child.as_mut());
-                if replace_in_tree(child_slice, node_id, replacement.clone()) {
-                    return true;
-                }
-            }
+        if let ReportLayoutNode::Grid(nested) = item.child.as_mut()
+            && replace_in_grid(nested, node_id, replacement.clone())
+        {
+            return true;
         }
     }
     false
 }
 
-#[allow(clippy::ptr_arg)] // Vec::remove requires &mut Vec, not &mut [_].
-fn remove_from_tree(nodes: &mut Vec<ReportLayoutNode>, node_id: &str) -> Option<ReportLayoutNode> {
-    if let Some(index) = nodes.iter().position(|n| layout_node_id(n) == node_id) {
-        return Some(nodes.remove(index));
+fn remove_from_grid(grid: &mut ReportGridLayoutNode, node_id: &str) -> Option<ReportLayoutNode> {
+    if let Some(index) = grid
+        .items
+        .iter()
+        .position(|item| layout_node_id(&item.child) == node_id)
+    {
+        let removed_item = grid.items.remove(index);
+        return Some(*removed_item.child);
     }
-    for node in nodes.iter_mut() {
-        if let ReportLayoutNode::Grid(g) = node {
-            // First try removing the node as a direct grid item — items wrap
-            // a single child layout node, so removing the matching item is
-            // equivalent to removing the child.
-            if let Some(item_index) = g
-                .items
-                .iter()
-                .position(|item| layout_node_id(&item.child) == node_id)
-            {
-                let removed_item = g.items.remove(item_index);
-                return Some(*removed_item.child);
-            }
-            // Otherwise recurse deeper.
-            for item in g.items.iter_mut() {
-                let mut child_vec = vec![std::mem::replace(
-                    item.child.as_mut(),
-                    placeholder_block_layout(),
-                )];
-                let removed = remove_from_tree(&mut child_vec, node_id);
-                let replaced = child_vec.into_iter().next().expect("vec had one element");
-                *item.child.as_mut() = replaced;
-                if removed.is_some() {
-                    return removed;
-                }
-            }
+    for item in grid.items.iter_mut() {
+        if let ReportLayoutNode::Grid(nested) = item.child.as_mut()
+            && let Some(removed) = remove_from_grid(nested, node_id)
+        {
+            return Some(removed);
         }
     }
     None
 }
 
-/// Sentinel used during in-place mutation of a `Box<ReportLayoutNode>`
-/// — the boxed value is temporarily swapped out, the recursive helper
-/// works against a `Vec`, and the (possibly modified) value swaps back
-/// before the function returns. The sentinel is never observed by
-/// callers.
-fn placeholder_block_layout() -> ReportLayoutNode {
-    use crate::types::ReportBlockLayoutNode;
-    ReportLayoutNode::Block(ReportBlockLayoutNode {
-        id: String::new(),
-        block_id: String::new(),
-        show_when: None,
-    })
-}
-
 /// Resolve the destination container for [`AddLayoutNode`]/[`MoveLayoutNode`]
-/// and insert. Wraps the new node in a `ReportGridLayoutItem` when the
-/// target is a grid; appends directly to the root `Vec<ReportLayoutNode>`
-/// when `parent_node_id` is None.
+/// and insert. With the root being a single grid, `parent_node_id` either
+/// references that root grid (or `None` → root grid implicit) or an
+/// inner nested grid.
 fn insert_into_target(
-    root: &mut Vec<ReportLayoutNode>,
+    root: &mut ReportGridLayoutNode,
     target: &LayoutTarget,
     node: ReportLayoutNode,
 ) -> Result<(), EditOpError> {
-    if let Some(parent_id) = &target.parent_node_id {
-        let parent =
-            find_in_tree_mut(root, parent_id).ok_or_else(|| layout_not_found(parent_id))?;
-        let ReportLayoutNode::Grid(grid) = parent else {
-            return Err(err(
-                "INVALID_LAYOUT_TARGET",
-                "parentNodeId must reference a grid layout node",
-            ));
-        };
-        let index = resolve_grid_item_index(&grid.items, target)?;
-        let item = wrap_in_grid_item(node);
-        grid.items.insert(index, item);
-    } else {
-        let index = resolve_layout_index(root, target)?;
-        root.insert(index, node);
-    }
+    let target_grid = resolve_target_grid(root, target.parent_node_id.as_deref())?;
+    let index = resolve_grid_item_index(&target_grid.items, target)?;
+    let item = wrap_in_grid_item(node);
+    target_grid.items.insert(index, item);
     Ok(())
+}
+
+/// Pick the grid that an `AddLayoutNode`/`MoveLayoutNode` target points
+/// at. `None` resolves to the root grid; a `Some(parent_id)` resolves
+/// to that node in the tree and rejects non-grid targets.
+fn resolve_target_grid<'a>(
+    root: &'a mut ReportGridLayoutNode,
+    parent_node_id: Option<&str>,
+) -> Result<&'a mut ReportGridLayoutNode, EditOpError> {
+    let Some(parent_id) = parent_node_id else {
+        return Ok(root);
+    };
+    if parent_id == root.id {
+        return Ok(root);
+    }
+    let Some(parent) = find_in_grid_mut(root, parent_id) else {
+        return Err(layout_not_found(parent_id));
+    };
+    let ReportLayoutNode::Grid(grid) = parent else {
+        return Err(err(
+            "INVALID_LAYOUT_TARGET",
+            "parentNodeId must reference a grid layout node",
+        ));
+    };
+    Ok(grid)
 }
 
 fn wrap_in_grid_item(node: ReportLayoutNode) -> ReportGridLayoutItem {
@@ -602,46 +632,9 @@ fn wrap_in_grid_item(node: ReportLayoutNode) -> ReportGridLayoutItem {
     }
 }
 
-fn resolve_layout_index(
-    siblings: &[ReportLayoutNode],
-    target: &LayoutTarget,
-) -> Result<usize, EditOpError> {
-    match (
-        target.index,
-        target.before_id.as_deref(),
-        target.after_id.as_deref(),
-    ) {
-        (Some(_), Some(_), _) | (Some(_), _, Some(_)) | (_, Some(_), Some(_)) => Err(err(
-            "INVALID_POSITION",
-            "Position fields index/beforeId/afterId are mutually exclusive",
-        )),
-        (Some(i), _, _) => Ok(i.min(siblings.len())),
-        (_, Some(before), _) => siblings
-            .iter()
-            .position(|n| layout_node_id(n) == before)
-            .ok_or_else(|| {
-                err(
-                    "LAYOUT_ANCHOR_NOT_FOUND",
-                    format!("Position anchor layout node '{}' not found", before),
-                )
-            }),
-        (_, _, Some(after)) => siblings
-            .iter()
-            .position(|n| layout_node_id(n) == after)
-            .map(|i| i + 1)
-            .ok_or_else(|| {
-                err(
-                    "LAYOUT_ANCHOR_NOT_FOUND",
-                    format!("Position anchor layout node '{}' not found", after),
-                )
-            }),
-        (None, None, None) => Ok(siblings.len()),
-    }
-}
-
-/// Same as [`resolve_layout_index`] but anchors against a grid's items
-/// — `before_id` / `after_id` reference the child layout-node id, not
-/// the grid item id (callers identify nodes, not item wrappers).
+/// Resolve a position into a grid's `items` array. `before_id` /
+/// `after_id` reference the child layout-node id (not the grid item id),
+/// since callers identify nodes, not item wrappers.
 fn resolve_grid_item_index(
     items: &[ReportGridLayoutItem],
     target: &LayoutTarget,
@@ -676,14 +669,6 @@ fn resolve_grid_item_index(
                 )
             }),
         (None, None, None) => Ok(items.len()),
-    }
-}
-
-#[allow(dead_code)]
-fn grid_node(node: &ReportLayoutNode) -> Option<&ReportGridLayoutNode> {
-    match node {
-        ReportLayoutNode::Grid(g) => Some(g),
-        _ => None,
     }
 }
 
@@ -831,11 +816,11 @@ mod tests {
     }
 
     #[test]
-    fn add_layout_node_to_grid_via_parent_id() {
+    fn add_layout_node_to_root_grid_via_parent_id() {
         let mut def: ReportDefinition = serde_json::from_value(json!({
             "definitionVersion": 1,
             "blocks": [{"id": "b1", "type": "markdown", "markdown": {"content": "x"}}],
-            "layout": [{"type": "grid", "id": "g1", "items": []}]
+            "layout": {"id": "root", "items": []}
         }))
         .unwrap();
         apply_edit_ops(
@@ -848,19 +833,101 @@ mod tests {
                 }))
                 .unwrap(),
                 target: LayoutTarget {
-                    parent_node_id: Some("g1".to_string()),
+                    parent_node_id: Some("root".to_string()),
                     ..Default::default()
                 },
             }],
         )
         .unwrap();
-        match &def.layout[0] {
-            ReportLayoutNode::Grid(g) => {
-                assert_eq!(g.items.len(), 1);
-                assert_eq!(layout_node_id(&g.items[0].child), "ln1");
-            }
-            _ => panic!("expected Grid at root"),
-        }
+        assert_eq!(def.layout.items.len(), 1);
+        assert_eq!(layout_node_id(&def.layout.items[0].child), "ln1");
+    }
+
+    #[test]
+    fn add_layout_node_with_none_target_appends_to_root_grid() {
+        let mut def: ReportDefinition = serde_json::from_value(json!({
+            "definitionVersion": 1,
+            "blocks": [{"id": "b1", "type": "markdown", "markdown": {"content": "x"}}],
+            "layout": {"id": "root", "items": []}
+        }))
+        .unwrap();
+        apply_edit_ops(
+            &mut def,
+            &[ReportEditOp::AddLayoutNode {
+                node: serde_json::from_value(json!({
+                    "type": "block",
+                    "id": "ln1",
+                    "blockId": "b1"
+                }))
+                .unwrap(),
+                target: LayoutTarget::default(),
+            }],
+        )
+        .unwrap();
+        assert_eq!(def.layout.items.len(), 1);
+        assert_eq!(layout_node_id(&def.layout.items[0].child), "ln1");
+    }
+
+    #[test]
+    fn remove_layout_node_rejects_root_grid() {
+        let mut def: ReportDefinition = serde_json::from_value(json!({
+            "definitionVersion": 1,
+            "blocks": [],
+            "layout": {"id": "root", "items": []}
+        }))
+        .unwrap();
+        let e = apply_edit_ops(
+            &mut def,
+            &[ReportEditOp::RemoveLayoutNode {
+                node_id: "root".to_string(),
+            }],
+        )
+        .unwrap_err();
+        assert_eq!(e.code, "CANNOT_REMOVE_ROOT_GRID");
+    }
+
+    #[test]
+    fn replace_layout_node_rejects_replacing_root_with_block() {
+        let mut def: ReportDefinition = serde_json::from_value(json!({
+            "definitionVersion": 1,
+            "blocks": [{"id": "b1", "type": "markdown", "markdown": {"content": "x"}}],
+            "layout": {"id": "root", "items": []}
+        }))
+        .unwrap();
+        let e = apply_edit_ops(
+            &mut def,
+            &[ReportEditOp::ReplaceLayoutNode {
+                node_id: "root".to_string(),
+                node: serde_json::from_value(json!({
+                    "type": "block",
+                    "id": "root",
+                    "blockId": "b1"
+                }))
+                .unwrap(),
+            }],
+        )
+        .unwrap_err();
+        assert_eq!(e.code, "ROOT_LAYOUT_MUST_BE_GRID");
+    }
+
+    #[test]
+    fn patch_layout_node_can_update_root_grid_columns() {
+        let mut def: ReportDefinition = serde_json::from_value(json!({
+            "definitionVersion": 1,
+            "blocks": [],
+            "layout": {"id": "root", "items": [], "columns": 1}
+        }))
+        .unwrap();
+        apply_edit_ops(
+            &mut def,
+            &[ReportEditOp::PatchLayoutNode {
+                node_id: "root".to_string(),
+                patch: json!({"columns": 3, "title": "Dashboard"}),
+            }],
+        )
+        .unwrap();
+        assert_eq!(def.layout.columns, Some(3));
+        assert_eq!(def.layout.title.as_deref(), Some("Dashboard"));
     }
 
     #[test]
@@ -906,14 +973,13 @@ mod tests {
         let mut def: ReportDefinition = serde_json::from_value(json!({
             "definitionVersion": 1,
             "blocks": [{"id": "b1", "type": "markdown", "markdown": {"content": "x"}}],
-            "layout": [{
-                "type": "grid",
-                "id": "g1",
+            "layout": {
+                "id": "root",
                 "items": [{
                     "id": "item_ln1",
                     "child": {"type": "block", "id": "ln1", "blockId": "b1"}
                 }]
-            }]
+            }
         }))
         .unwrap();
         apply_edit_ops(
@@ -923,10 +989,7 @@ mod tests {
             }],
         )
         .unwrap();
-        match &def.layout[0] {
-            ReportLayoutNode::Grid(g) => assert!(g.items.is_empty()),
-            _ => panic!("expected Grid at root"),
-        }
+        assert!(def.layout.items.is_empty());
     }
 
     #[test]
@@ -937,15 +1000,14 @@ mod tests {
                 {"id": "b1", "type": "markdown", "markdown": {"content": "x"}},
                 {"id": "b2", "type": "markdown", "markdown": {"content": "y"}}
             ],
-            "layout": [{
-                "type": "grid",
+            "layout": {
                 "id": "outer",
                 "columns": 2,
                 "items": [{
                     "id": "item_inner",
                     "child": {"type": "grid", "id": "inner", "columns": 1, "items": []}
                 }]
-            }]
+            }
         }))
         .unwrap();
         apply_edit_ops(
@@ -962,15 +1024,26 @@ mod tests {
             }],
         )
         .unwrap();
-        let outer = match &def.layout[0] {
-            ReportLayoutNode::Grid(g) => g,
-            _ => panic!("expected outer Grid"),
-        };
-        let inner = match outer.items[0].child.as_ref() {
+        let inner = match def.layout.items[0].child.as_ref() {
             ReportLayoutNode::Grid(g) => g,
             _ => panic!("expected nested Grid"),
         };
         assert_eq!(inner.items.len(), 1);
         assert_eq!(layout_node_id(&inner.items[0].child), "ln1");
+    }
+
+    #[test]
+    fn default_root_grid_used_when_layout_omitted() {
+        let def: ReportDefinition = serde_json::from_value(json!({
+            "definitionVersion": 1,
+            "blocks": []
+        }))
+        .unwrap();
+        // The default root grid should be present even when callers omit
+        // the field — Phase 10 made `layout` mandatory in the type
+        // system, but `#[serde(default = default_root_grid)]` keeps
+        // legacy/minimal JSON payloads usable.
+        assert!(def.layout.items.is_empty());
+        assert_eq!(def.layout.columns, Some(1));
     }
 }

@@ -1,8 +1,15 @@
 {
   "definitionVersion": 1,
-  "layout": [
-    { "id": "n_instances", "type": "block", "blockId": "running_instances" }
-  ],
+  "layout": {
+    "id": "root",
+    "columns": 1,
+    "items": [
+      {
+        "id": "root_i0",
+        "child": { "id": "n_instances", "type": "block", "blockId": "running_instances" }
+      }
+    ]
+  },
   "filters": [
     {
       "id": "status",

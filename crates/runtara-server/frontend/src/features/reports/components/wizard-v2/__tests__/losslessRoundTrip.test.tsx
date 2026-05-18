@@ -10,9 +10,11 @@ import {
 import {
   addBlock,
   collectLayoutBlockIds,
-  moveBlock,
+  moveLayoutNode,
+  pathToLayoutNode,
   removeBlock,
   updateBlock,
+  walkLayout,
 } from '../layoutOps';
 
 const FIXTURE_DIR = path.resolve(
@@ -79,16 +81,27 @@ describe('wizard v2 identity-edit round-trip', () => {
       );
     });
 
-    it(`${fixture.name}: move a block forward+back is a no-op`, () => {
-      const ids = collectLayoutBlockIds(fixture.definition.layout);
-      if (ids.length < 2) return; // Single-block fixtures have nothing to swap.
-      const [first] = ids;
-      const moved = moveBlock(fixture.definition, first, ids.length - 1);
-      const back = moveBlock(moved, first, 0);
-      expect(JSON.stringify(back.layout)).toBe(
+    it(`${fixture.name}: moveLayoutNode in-place is a no-op`, () => {
+      // Find the first leaf block layout-node; ask moveLayoutNode to keep
+      // it in its current parent grid at its current index — the result
+      // should round-trip byte-for-byte.
+      let firstBlockNodeId: string | null = null;
+      walkLayout(fixture.definition.layout, (node) => {
+        if (firstBlockNodeId == null && node.type === 'block') {
+          firstBlockNodeId = node.id;
+        }
+      });
+      if (firstBlockNodeId == null) return;
+      const path = pathToLayoutNode(fixture.definition, firstBlockNodeId);
+      if (!path || path.parentGridId == null || path.itemIndex == null) return;
+      const next = moveLayoutNode(fixture.definition, firstBlockNodeId, {
+        parentGridId: path.parentGridId,
+        index: path.itemIndex,
+      });
+      expect(JSON.stringify(next.layout)).toBe(
         JSON.stringify(fixture.definition.layout)
       );
-      expect(JSON.stringify(back.blocks)).toBe(
+      expect(JSON.stringify(next.blocks)).toBe(
         JSON.stringify(fixture.definition.blocks)
       );
     });

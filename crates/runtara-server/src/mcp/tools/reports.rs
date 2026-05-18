@@ -440,9 +440,11 @@ pub struct EditReportParams {
 }
 
 /// Phase 6 canonical edit-report MCP tool — accepts a batch of edit ops
-/// and POSTs them to `/api/runtime/reports/{id}/edit`. The five
-/// per-layout-node tools (`add_report_layout_node`, …) are thin wrappers
-/// that build a single-op batch and call the same endpoint.
+/// and POSTs them to `/api/runtime/reports/{id}/edit`. This is the only
+/// authoring path for targeted block + layout mutations; the per-op
+/// wrapper tools (add_report_block, add_report_layout_node, …) were
+/// removed in the Phase 6/8 collapse. Callers compose multi-op batches
+/// directly.
 pub async fn edit_report(
     server: &SmoMcpServer,
     params: EditReportParams,
@@ -491,7 +493,7 @@ fn normalize_json_array_arg(value: Value, field: &str) -> Result<Value, rmcp::Er
 fn report_authoring_schema() -> Value {
     let mut result: Value = serde_json::from_str(r###"{
         "definitionVersion": 1,
-        "purpose": "Canonical MCP contract for authoring Runtara reports. Call this before create_report, update_report, add_report_block, replace_report_block, patch_report_block, or report layout mutations.",
+        "purpose": "Canonical MCP contract for authoring Runtara reports. Call this before create_report, update_report, or edit_report (for targeted block + layout mutations).",
         "relatedTools": [
             "get_report_definition_schema",
             "list_workflows",
@@ -503,16 +505,12 @@ fn report_authoring_schema() -> Value {
             "validate_report",
             "render_report",
             "get_report_block_data",
-            "add_report_layout_node",
-            "replace_report_layout_node",
-            "patch_report_layout_node",
-            "move_report_layout_node",
-            "remove_report_layout_node"
+            "edit_report"
         ],
         "definitionShape": {
             "definitionVersion": 1,
-            "layout": "Optional structured layout tree. Layout arranges blocks only. Every layout node must include a stable id and type.",
-            "views": "Optional named report views for master/detail navigation. Each view has an id, optional title/titleFrom/titleFromBlock, parentViewId + clearFiltersOnBack for generated breadcrumbs, optional manual breadcrumb override, and its own layout.",
+            "layout": "Mandatory single root grid (Phase 10). Every block must live inside its items[]. The root grid has a stable id (default 'root'), optional title/description, and required columns/items. Nested grids carry the legacy 'grid' type tag; the root grid omits it because the field is typed directly.",
+            "views": "Optional named report views for master/detail navigation. Each view has an id, optional title/titleFrom/titleFromBlock, parentViewId + clearFiltersOnBack for generated breadcrumbs, optional manual breadcrumb override, and its own root-grid layout.",
             "filters": "Optional global filter presets. Each filter can apply to one or more block/source fields.",
             "datasets": "Optional semantic BI datasets. Prefer defining datasets for aggregate BI reports so blocks reference named dimensions/measures instead of raw aggregate specs.",
             "blocks": "Array of typed block definitions. Every block must have a stable id for MCP block mutations."
@@ -566,27 +564,77 @@ fn report_authoring_schema() -> Value {
             "masterDetailNavigationExample": {
                 "filters": [{"id": "case_id", "label": "Case", "type": "text", "strictWhenReferenced": true}],
                 "views": [
-                    {"id": "list", "title": "Review cases", "layout": [{"id": "cases_node", "type": "block", "blockId": "cases"}]},
-                    {"id": "detail", "titleFrom": "filters.case_id", "parentViewId": "list", "clearFiltersOnBack": ["case_id"], "layout": [{"id": "case_summary_node", "type": "block", "blockId": "case_summary"}]}
+                    {"id": "list", "title": "Review cases", "layout": {"id": "view_list_root", "columns": 1, "items": [{"id": "view_list_root_i0", "child": {"id": "cases_node", "type": "block", "blockId": "cases"}}]}},
+                    {"id": "detail", "titleFrom": "filters.case_id", "parentViewId": "list", "clearFiltersOnBack": ["case_id"], "layout": {"id": "view_detail_root", "columns": 1, "items": [{"id": "view_detail_root_i0", "child": {"id": "case_summary_node", "type": "block", "blockId": "case_summary"}}]}}
                 ],
                 "interaction": {"id": "open_case", "trigger": {"event": "row_click"}, "actions": [{"type": "set_filter", "filterId": "case_id", "valueFrom": "datum.case_id"}, {"type": "navigate_view", "viewId": "detail"}]}
             }
         },
         "layoutGuidance": {
             "currentContract": [
-                "Use definition.layout for visual arrangement.",
-                "Supported layout node types are block, metric_row, section, columns, and grid.",
-                "Every layout node has a stable id so MCP can add, replace, patch, move, or remove one layout node at a time.",
-                "Use type='markdown' blocks for narrative text. Layout references them with normal block layout nodes.",
-                "Do not put Markdown content directly in layout nodes."
+                "definition.layout is a single mandatory root grid (Phase 10). All blocks must live inside its items[] (directly, or via nested grids).",
+                "The root grid has a stable id (default 'root') and carries optional title/description and columns/rows/columnWidths. It cannot be removed or replaced with a block.",
+                "Phase 9 collapsed the layout vocabulary to two node types: 'block' (leaf reference to a block by id) and 'grid' (recursive container with columns/rows + items).",
+                "Every container (single-column section, multi-column row, metric strip, 2D dashboard) is expressed as a grid with different columns/columnWidths/colSpan/rowSpan. Single column = section, columns=N = side-by-side, columns=4 with metric-blocks inside = metric row.",
+                "Every layout node has a stable id. Use edit_report with add_layout_node / replace_layout_node / patch_layout_node / move_layout_node / remove_layout_node ops for targeted edits. LayoutTarget.parentNodeId picks the destination grid; null resolves to the root grid.",
+                "Grid items wrap their child as { id, colSpan?, rowSpan?, child: <ReportLayoutNode> } — child is itself a block or nested grid.",
+                "Use type='block' layout nodes to reference blocks (markdown / table / chart / metric / card / actions). Do not put Markdown content directly in layout nodes."
             ],
+            "rootShape": {
+                "definition.layout": {
+                    "id": "root",
+                    "columns": 1,
+                    "rows": 1,
+                    "items": [
+                        {"id": "root_i0", "child": {"id": "intro_node", "type": "block", "blockId": "intro"}}
+                    ]
+                },
+                "note": "The root grid wire form omits the `type` field — it is implicitly a grid. Nested layout nodes inside `items[].child` must carry `type: 'block' | 'grid'`."
+            },
             "layoutNodes": {
-                "markdownBlockReference": {"id": "intro_node", "type": "block", "blockId": "intro"},
-                "block": {"id": "records_node", "type": "block", "blockId": "records"},
-                "metric_row": {"id": "summary_metrics", "type": "metric_row", "blocks": ["total_records", "open_records"]},
-                "section": {"id": "summary_section", "type": "section", "title": "Summary", "description": "Optional context.", "children": [{"id": "summary_metrics", "type": "metric_row", "blocks": ["total_records"]}]},
-                "columns": {"id": "comparison", "type": "columns", "columns": [{"id": "left", "width": 1, "children": [{"id": "left_chart_node", "type": "block", "blockId": "left_chart"}]}, {"id": "right", "width": 1, "children": [{"id": "right_table_node", "type": "block", "blockId": "right_table"}]}]},
-                "grid": {"id": "dashboard_grid", "type": "grid", "columns": 12, "items": [{"blockId": "trend", "colSpan": 8}, {"blockId": "records", "colSpan": 4}]}
+                "blockLeaf": {"id": "records_node", "type": "block", "blockId": "records"},
+                "sectionAsSingleColumnNestedGrid": {
+                    "id": "summary_section",
+                    "type": "grid",
+                    "title": "Summary",
+                    "description": "Optional context.",
+                    "columns": 1,
+                    "items": [
+                        {"id": "summary_metrics_item", "child": {"id": "summary_metrics", "type": "grid", "columns": 3, "items": [
+                            {"id": "m1_item", "child": {"id": "m1_node", "type": "block", "blockId": "total_records"}},
+                            {"id": "m2_item", "child": {"id": "m2_node", "type": "block", "blockId": "open_records"}},
+                            {"id": "m3_item", "child": {"id": "m3_node", "type": "block", "blockId": "closed_records"}}
+                        ]}}
+                    ]
+                },
+                "twoColumnComparison": {
+                    "id": "comparison",
+                    "type": "grid",
+                    "columns": 2,
+                    "columnWidths": [1, 1],
+                    "items": [
+                        {"id": "left_item", "child": {"id": "left_chart_node", "type": "block", "blockId": "left_chart"}},
+                        {"id": "right_item", "child": {"id": "right_table_node", "type": "block", "blockId": "right_table"}}
+                    ]
+                },
+                "dashboardGridInsideRoot": {
+                    "note": "When the root grid is just a holder, drop a 12-column nested grid inside it for dashboard-style layouts.",
+                    "rootSnippet": {
+                        "id": "root",
+                        "columns": 1,
+                        "items": [
+                            {"id": "root_i0", "child": {
+                                "id": "dashboard_grid",
+                                "type": "grid",
+                                "columns": 12,
+                                "items": [
+                                    {"id": "trend_item", "colSpan": 8, "child": {"id": "trend_node", "type": "block", "blockId": "trend"}},
+                                    {"id": "records_item", "colSpan": 4, "child": {"id": "records_node", "type": "block", "blockId": "records"}}
+                                ]
+                            }}
+                        ]
+                    }
+                }
             }
         },
         "blockShape": {
@@ -617,7 +665,7 @@ fn report_authoring_schema() -> Value {
                     "editor": "Optional explicit editor config: {kind, lookup?, options?, min?, max?, step?, regex?, placeholder?}. kind is one of text | textarea | number | select | toggle | date | datetime | lookup. For lookup, set editor.lookup={schema, valueField, labelField, searchFields?, connectionId?, condition?, filterMappings?}. The editor searches the lookup schema, automatically using generated tsvector fields when present, displays labelField, and writes valueField into the edited row field. Add an explicit source.join/displayField only when the related label must also participate in table search/sort/filtering.",
                     "note": "Writeback is opt-in per column. Auth + type validation happens on the object-model endpoint, not in the report layer — viewers need write permission on the underlying schema. The 'editable' flag here is a UI hint; it does not relax server-side authorization."
                 },
-                "workflowAction": "Optional table column button: set type='workflow_button' and workflowAction={workflowId, version?, label?, runningLabel?, successMessage?, reloadBlock?, visibleWhen?, hiddenWhen?, disabledWhen?, context?}. context.mode is row | field | value. mode=row passes the whole row as workflow data; mode=field passes context.field or column.field; mode=value passes the cell value. context.inputKey wraps the context as {inputKey: context}. visibleWhen/hiddenWhen/disabledWhen are row-level condition DSL objects evaluated against the rendered row, e.g. disabledWhen={op:'EQ', arguments:['status','processed']}.",
+                "workflowAction": "Optional table column button: set type='workflow_button' and workflowAction={workflowId, version?, label?, runningLabel?, successMessage?, reloadBlock?, visibleWhen?, hiddenWhen?, disabledWhen?, context?}. context.mode is row | field | value. mode=row passes the whole row as workflow data; mode=field passes context.field or column.field; mode=value passes the cell value. context.inputKey wraps the context as {inputKey: context}. visibleWhen/hiddenWhen/disabledWhen are ConditionExpression objects evaluated against the rendered row, e.g. disabledWhen={type:'operation', op:'EQ', arguments:[{valueType:'reference', value:'status'}, {valueType:'immediate', value:'processed'}]}.",
                 "interactionButtons": "Optional row navigation/action buttons: set type='interaction_buttons' and interactionButtons=[{id,label?,icon?,visibleWhen?,hiddenWhen?,disabledWhen?,actions:[...]}]. Button actions use the same set_filter, clear_filter, clear_filters, and navigate_view vocabulary as block.interactions. Use this for rows like SKU | Qty | Price | View 1 | View 2.",
                 "note": "Tables support source.mode='filter' for row data and source.mode='aggregate' for grouped aggregate result sets. Configure visible/searchable/sortable fields in table.columns. A table column may use maxChars for display-only text cutoff, format='pill' + pillVariants for enum/status coloring, displayTemplate for display-only concatenation/formatting, type='chart' for inline aggregate charts, type='value' with source.select for scalar joined lookups, type='workflow_button' with workflowAction for a row-scoped workflow launcher, type='interaction_buttons' with interactionButtons for row-scoped report navigation/action buttons, or table.actions[] for table-wide selected-row workflow launchers. To enable inline writeback on a column, see writeback.editable."
             },
@@ -670,7 +718,7 @@ fn report_authoring_schema() -> Value {
                     "displayTemplate": "Optional display-only safe-interpolation row template such as {{first_name}} {{last_name}}. Only variable paths and optional format pipes compile; field remains the value/writeback target.",
                     "kind": "value (default) | json | markdown | subcard | subtable | workflow_button",
                     "format": "Format hint for kind=value: currency, currency_compact, decimal, percent, datetime, date, number, pill.",
-                    "workflowAction": "Optional card field button: set kind='workflow_button' and workflowAction={workflowId, version?, label?, runningLabel?, successMessage?, reloadBlock?, visibleWhen?, hiddenWhen?, disabledWhen?, context?}. context.mode is row | field | value, and context.inputKey can wrap the selected context into an object. visibleWhen/hiddenWhen/disabledWhen are row-level condition DSL objects evaluated against the rendered row.",
+                    "workflowAction": "Optional card field button: set kind='workflow_button' and workflowAction={workflowId, version?, label?, runningLabel?, successMessage?, reloadBlock?, visibleWhen?, hiddenWhen?, disabledWhen?, context?}. context.mode is row | field | value, and context.inputKey can wrap the selected context into an object. visibleWhen/hiddenWhen/disabledWhen are ConditionExpression objects (same shape used for workflow step conditions) evaluated against the rendered row.",
                     "pillVariants": "{value: variant} map for color-coding enum/status fields. variant is one of default, secondary, destructive, outline, muted, success, warning. Use this on enum columns like status/severity/decision.",
                     "collapsed": "Optional. For json/markdown/subcard/subtable: start collapsed behind a Show/Hide toggle.",
                     "colSpan": "Optional 1–4 grid column span within the parent group.",
@@ -750,7 +798,7 @@ fn report_authoring_schema() -> Value {
             "For workflow_runtime entity='actions', table.columns and orderBy use action fields such as actionId, actionKey, label, status, instanceId, requestedAt. Conditions can additionally use nested metadata fields such as correlation.case_id or context.purpose.",
             "For type='actions', do not configure table columns; the block renders forms from each action.inputSchema and submits through the report-scoped workflow action endpoint.",
             "For type='card', use card.groups[].fields. Each field references a row property by name. Use kind='subtable' (with subtable.columns) for arrays-of-objects and kind='subcard' (with subcard.groups) for nested objects. Use format='pill' + pillVariants to color-code enum/status fields.",
-            "For workflow launch buttons, use table.columns[].type='workflow_button' or card.groups[].fields[].kind='workflow_button' with workflowAction.workflowId. Set workflowAction.context.mode='row' to pass the whole row, 'field' to pass a row field, or 'value' to pass the cell/field value. Use workflowAction.visibleWhen or hiddenWhen for row-level visibility, and disabledWhen for visible-but-disabled buttons, e.g. disabledWhen={op:'EQ', arguments:['status','processed']}. For table-wide bulk workflow buttons, use table.actions[] with workflowAction.context.mode='selection'; buttons remain visible but disabled until one or more current table rows are selected.",
+            "For workflow launch buttons, use table.columns[].type='workflow_button' or card.groups[].fields[].kind='workflow_button' with workflowAction.workflowId. Set workflowAction.context.mode='row' to pass the whole row, 'field' to pass a row field, or 'value' to pass the cell/field value. Use workflowAction.visibleWhen or hiddenWhen for row-level visibility, and disabledWhen for visible-but-disabled buttons. These are ConditionExpression objects, e.g. disabledWhen={type:'operation', op:'EQ', arguments:[{valueType:'reference', value:'status'}, {valueType:'immediate', value:'processed'}]}. For table-wide bulk workflow buttons, use table.actions[] with workflowAction.context.mode='selection'; buttons remain visible but disabled until one or more current table rows are selected.",
             "For row-scoped report navigation buttons, use table.columns[].type='interaction_buttons' with interactionButtons. Each button can set row-derived filters and navigate to a named view, e.g. actions=[{type:'set_filter', filterId:'sku', valueFrom:'datum.sku'}, {type:'navigate_view', viewId:'inventory_detail'}].",
             "For editable lookup/reference fields, keep the stored id in field, optionally render a joined label with displayField, and set editor.kind='lookup' with editor.lookup={schema, valueField, labelField, searchFields?}. Lookup search automatically uses generated tsvector fields when the lookup schema has them."
         ],
@@ -762,8 +810,8 @@ fn report_authoring_schema() -> Value {
             "Do not use metric.valueAlias or top-level valueAlias. Use block.metric.valueField.",
             "Do not copy query_aggregate specs directly: report aggregates use op/field while query_aggregate uses fn/column.",
             "Do not use source.mode='aggregate' with table.columns pointing at ungrouped raw schema fields; use groupBy fields or aggregate aliases.",
-            "Do not put layout structure inside markdown.content. Use definition.layout with metric_row, columns, or grid.",
-            "Do not omit layout node ids. MCP layout mutation tools address layout nodes by id.",
+            "Do not put layout structure inside markdown.content. Use definition.layout with block + grid layout nodes.",
+            "Do not omit layout node ids. edit_report addresses layout nodes by id for add/replace/patch/move/remove ops.",
             "Do not hardcode large select option lists when the values live in Object Model data. Use filter.options.source='object_model'.",
             "Do not hardcode lookup editor option lists when the values live in another Object Model. Use editor.kind='lookup' and editor.lookup instead.",
             "Do not call workflow signals 'pendingInput' in report definitions. Use the generic actions abstraction: type='actions' and source.entity='actions'.",
@@ -798,11 +846,21 @@ fn report_authoring_schema() -> Value {
                     "table": {"columns": [{"field": "vendor", "label": "Vendor"}, {"field": "snapshot_count", "label": "Snapshots", "format": "number"}, {"field": "qty_total", "label": "Total quantity", "format": "number"}]}
                 }
             },
-            "layout": [
-                {"id": "intro_node", "type": "block", "blockId": "intro"},
-                {"id": "summary", "type": "metric_row", "blocks": ["total_snaps", "unique_skus"]},
-                {"id": "main_grid", "type": "grid", "columns": 12, "items": [{"blockId": "daily_qty", "colSpan": 8}, {"blockId": "top_vendors", "colSpan": 4}]}
-            ],
+            "layout": {
+                "id": "root",
+                "columns": 1,
+                "items": [
+                    {"id": "root_i0", "child": {"id": "intro_node", "type": "block", "blockId": "intro"}},
+                    {"id": "root_i1", "child": {"id": "summary", "type": "grid", "columns": 2, "items": [
+                        {"id": "summary_a", "child": {"id": "summary_a_node", "type": "block", "blockId": "total_snaps"}},
+                        {"id": "summary_b", "child": {"id": "summary_b_node", "type": "block", "blockId": "unique_skus"}}
+                    ]}},
+                    {"id": "root_i2", "child": {"id": "main_grid", "type": "grid", "columns": 12, "items": [
+                        {"id": "main_a", "colSpan": 8, "child": {"id": "main_a_node", "type": "block", "blockId": "daily_qty"}},
+                        {"id": "main_b", "colSpan": 4, "child": {"id": "main_b_node", "type": "block", "blockId": "top_vendors"}}
+                    ]}}
+                ]
+            },
             "markdownBlock": {
                 "id": "intro",
                 "type": "markdown",

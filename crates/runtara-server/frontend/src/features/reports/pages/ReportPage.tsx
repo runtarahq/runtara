@@ -1,6 +1,19 @@
 import { lazy, Suspense, useEffect, useMemo, useState } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router';
-import { Compass, Edit, Eye, Printer, RefreshCw, Save } from 'lucide-react';
+import {
+  AlertTriangle,
+  Compass,
+  Edit,
+  Eye,
+  Printer,
+  RefreshCw,
+  Save,
+} from 'lucide-react';
+import {
+  Alert,
+  AlertDescription,
+  AlertTitle,
+} from '@/shared/components/ui/alert';
 import { Button } from '@/shared/components/ui/button';
 import { TileList, TilesPage } from '@/shared/components/tiles-page';
 import { usePageTitle } from '@/shared/hooks/usePageTitle';
@@ -38,7 +51,7 @@ const ReportBuilderWizardV2 = lazy(() =>
 
 const EMPTY_DEFINITION: ReportDefinition = {
   definitionVersion: 1,
-  layout: [],
+  layout: { id: 'root', columns: 1, rows: 1, items: [] },
   filters: [],
   blocks: [],
 };
@@ -87,12 +100,23 @@ export function ReportPage() {
   const [definition, setDefinition] =
     useState<ReportDefinition>(EMPTY_DEFINITION);
   const [saveError, setSaveError] = useState<string | null>(null);
+  // The server flags reports whose stored JSON no longer fits the
+  // current `ReportDefinition` shape. We hold that flag in local state
+  // (a) so the banner stays sticky after the user opts into
+  // re-authoring; (b) so the wizard never starts from the empty stub
+  // until the operator explicitly chooses to.
+  const [needsReAuthoring, setNeedsReAuthoring] = useState<string | null>(
+    null
+  );
+  const [reAuthoringAccepted, setReAuthoringAccepted] = useState(false);
 
   useEffect(() => {
     if (!existingReport) return;
     setName(existingReport.name);
     setDescription(existingReport.description ?? '');
     setDefinition(existingReport.definition);
+    setNeedsReAuthoring(existingReport.needsReAuthoring ?? null);
+    setReAuthoringAccepted(false);
   }, [existingReport]);
 
   // Filter values come from URL params in view mode; in edit mode we still
@@ -160,7 +184,8 @@ export function ReportPage() {
     name.trim().length > 0 &&
     !createReport.isPending &&
     !updateReport.isPending &&
-    !validateReport.isPending;
+    !validateReport.isPending &&
+    (!needsReAuthoring || reAuthoringAccepted);
 
   const handleFilterChange = (filterId: string, value: unknown) => {
     setSearchParams(
@@ -422,27 +447,77 @@ export function ReportPage() {
       className={!editing ? 'report-print-root' : undefined}
       contentClassName={!editing ? 'report-print-content pb-16' : undefined}
     >
+      {needsReAuthoring ? (
+        <Alert className="mb-4 border-amber-400/60 bg-amber-50 dark:bg-amber-950/30">
+          <AlertTriangle className="h-4 w-4 text-amber-600" />
+          <AlertTitle>This report needs re-authoring</AlertTitle>
+          <AlertDescription>
+            <p className="mb-2 text-sm">
+              The stored definition no longer fits the current schema and
+              has been replaced with an empty stub. Saving now will
+              <strong> overwrite the stored JSON</strong> — the previous
+              content is preserved on the server until you do.
+            </p>
+            <p className="mb-3 text-xs text-muted-foreground">
+              Reason: <code>{needsReAuthoring}</code>
+            </p>
+            {editing ? (
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={() => setReAuthoringAccepted(true)}
+                disabled={reAuthoringAccepted}
+                data-testid="confirm-reauthor"
+              >
+                {reAuthoringAccepted
+                  ? 'Re-authoring confirmed — Save is enabled'
+                  : 'Re-author from scratch'}
+              </Button>
+            ) : null}
+          </AlertDescription>
+        </Alert>
+      ) : null}
       {editing ? (
-        <Suspense
-          fallback={
-            <div className="h-96 animate-pulse rounded-xl bg-muted/30" />
-          }
+        needsReAuthoring && !reAuthoringAccepted ? (
+          <div
+            className="rounded-md border border-dashed bg-muted/20 p-6 text-sm text-muted-foreground"
+            data-testid="reauthoring-editor-locked"
+          >
+            Editing is disabled until you click "Re-author from scratch"
+            above. This protects the stored definition from being
+            overwritten by the empty stub the loader fell back to.
+          </div>
+        ) : (
+          <Suspense
+            fallback={
+              <div className="h-96 animate-pulse rounded-xl bg-muted/30" />
+            }
+          >
+            <ReportBuilderWizardV2
+              key={reportId ?? 'new'}
+              definition={definition}
+              schemas={schemas}
+              editing={editing}
+              blockResults={blockResults}
+              filters={filterValues}
+              reportId={reportId}
+              onChange={(nextDefinition) => {
+                setDefinition(nextDefinition);
+                setSaveError(null);
+                validateReport.reset();
+              }}
+            />
+          </Suspense>
+        )
+      ) : needsReAuthoring ? (
+        <div
+          className="rounded-md border border-dashed bg-muted/20 p-6 text-sm text-muted-foreground"
+          data-testid="reauthoring-viewer-locked"
         >
-          <ReportBuilderWizardV2
-            key={reportId ?? 'new'}
-            definition={definition}
-            schemas={schemas}
-            editing={editing}
-            blockResults={blockResults}
-            filters={filterValues}
-            reportId={reportId}
-            onChange={(nextDefinition) => {
-              setDefinition(nextDefinition);
-              setSaveError(null);
-              validateReport.reset();
-            }}
-          />
-        </Suspense>
+          The report can't be rendered until it's re-authored. Open it in
+          edit mode to start.
+        </div>
       ) : reportId ? (
         <ReportRenderer
           reportId={reportId}

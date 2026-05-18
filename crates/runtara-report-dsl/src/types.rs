@@ -33,6 +33,23 @@ fn default_report_source_kind() -> ReportSourceKind {
     ReportSourceKind::ObjectModel
 }
 
+/// A report's `layout` is always a single root [`ReportGridLayoutNode`].
+/// When the wire payload omits it (e.g. legacy or hand-built JSON), this
+/// helper provides an empty 1-column root grid so the rest of the system
+/// always works against a present grid.
+pub fn default_root_grid() -> ReportGridLayoutNode {
+    ReportGridLayoutNode {
+        id: "root".to_string(),
+        title: None,
+        description: None,
+        columns: Some(1),
+        rows: None,
+        column_widths: None,
+        items: vec![],
+        show_when: None,
+    }
+}
+
 fn is_default_report_source_kind(kind: &ReportSourceKind) -> bool {
     *kind == ReportSourceKind::ObjectModel
 }
@@ -92,8 +109,13 @@ impl ReportStatus {
 pub struct ReportDefinition {
     #[serde(default = "default_definition_version", rename = "definitionVersion")]
     pub definition_version: i32,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub layout: Vec<ReportLayoutNode>,
+    /// The report's layout is a single mandatory root grid. Authors drop
+    /// blocks (and nested grids for sub-sections) into its `items[]`. The
+    /// `default_root_grid` fallback handles wire payloads that omit the
+    /// field — repository migration converts legacy `layout: [...]`
+    /// arrays into a wrapping root grid before deserialization.
+    #[serde(default = "default_root_grid")]
+    pub layout: ReportGridLayoutNode,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub views: Vec<ReportViewDefinition>,
     #[serde(default)]
@@ -136,8 +158,11 @@ pub struct ReportViewDefinition {
     pub clear_filters_on_back: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub breadcrumb: Vec<ReportViewBreadcrumb>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub layout: Vec<ReportLayoutNode>,
+    /// Like `ReportDefinition.layout` — a single mandatory root grid for
+    /// this view. Detail views typically populate it via the same wizard
+    /// flow as the main report.
+    #[serde(default = "default_root_grid")]
+    pub layout: ReportGridLayoutNode,
 }
 
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
@@ -1458,6 +1483,16 @@ pub struct ReportSummary {
     pub status: ReportStatus,
     #[serde(rename = "definitionVersion")]
     pub definition_version: i32,
+    /// Mirrors `ReportDto.needs_re_authoring`. Propagated onto the
+    /// summary so callers of `GET /api/runtime/reports` (including the
+    /// MCP `list_reports_needing_re_authoring` tool) can filter
+    /// without doing a second per-report fetch.
+    #[serde(
+        default,
+        rename = "needsReAuthoring",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub needs_re_authoring: Option<String>,
     #[serde(rename = "createdAt")]
     pub created_at: DateTime<Utc>,
     #[serde(rename = "updatedAt")]
@@ -1504,6 +1539,7 @@ impl From<&ReportDto> for ReportSummary {
             tags: report.tags.clone(),
             status: report.status,
             definition_version: report.definition_version,
+            needs_re_authoring: report.needs_re_authoring.clone(),
             created_at: report.created_at,
             updated_at: report.updated_at,
         }

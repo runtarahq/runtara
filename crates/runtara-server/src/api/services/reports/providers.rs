@@ -115,6 +115,16 @@ pub trait ReportSourceProvider: Send + Sync {
         None
     }
 
+    /// `true` if `field_path` is reachable for markdown-placeholder resolution.
+    /// Handles dotted-path resolution and (for providers that override) mode-
+    /// dependent aggregate output aliases. Default implementation considers
+    /// only the provider's row fields via [`Self::field_is_known`].
+    fn markdown_field_known(&self, block: &ReportBlockDefinition, field_path: &str) -> bool {
+        dotted_field_known(field_path, &|candidate| {
+            self.field_is_known(block, candidate)
+        })
+    }
+
     /// Whether the provider pushes aggregates down to storage. Object-model
     /// returns `true` (SQL); system/workflow_runtime return `false`.
     fn supports_aggregate_pushdown(&self) -> bool {
@@ -189,4 +199,17 @@ impl ProviderRegistry {
     pub fn system(&self) -> &Arc<SystemProvider> {
         &self.system
     }
+}
+
+/// Shared dotted-path resolution helper for provider markdown-placeholder
+/// checks: a field is reachable if either the full path or its leading
+/// segment satisfies the inner row-field predicate. Used by the default
+/// [`ReportSourceProvider::markdown_field_known`] body and by per-provider
+/// overrides that vary the predicate (e.g. system's aggregate mode).
+pub(crate) fn dotted_field_known(field_path: &str, is_known: &dyn Fn(&str) -> bool) -> bool {
+    is_known(field_path)
+        || field_path
+            .split_once('.')
+            .map(|(first, _)| is_known(first))
+            .unwrap_or(false)
 }

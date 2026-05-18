@@ -1,43 +1,50 @@
 {
   "definitionVersion": 1,
-  "layout": [
-    {
-      "id": "n_columns",
-      "type": "grid",
-      "columns": 2,
-      "columnWidths": [0.4, 0.6],
-      "items": [
-        {
-          "id": "n_columns_item_col_metrics",
-          "child": {
-            "id": "col_metrics",
-            "type": "grid",
-            "columns": 1,
-            "items": [
-              {
-                "id": "col_metrics_i0",
-                "child": { "id": "n_metric", "type": "block", "blockId": "rate_limit_usage" }
+  "layout": {
+    "id": "root",
+    "columns": 1,
+    "items": [
+      {
+        "id": "root_i0",
+        "child": {
+          "id": "n_columns",
+          "type": "grid",
+          "columns": 2,
+          "columnWidths": [0.4, 0.6],
+          "items": [
+            {
+              "id": "n_columns_item_col_metrics",
+              "child": {
+                "id": "col_metrics",
+                "type": "grid",
+                "columns": 1,
+                "items": [
+                  {
+                    "id": "col_metrics_i0",
+                    "child": { "id": "n_metric", "type": "block", "blockId": "rate_limit_usage" }
+                  }
+                ]
               }
-            ]
-          }
-        },
-        {
-          "id": "n_columns_item_col_table",
-          "child": {
-            "id": "col_table",
-            "type": "grid",
-            "columns": 1,
-            "items": [
-              {
-                "id": "col_table_i0",
-                "child": { "id": "n_status", "type": "block", "blockId": "rate_limit_status" }
+            },
+            {
+              "id": "n_columns_item_col_table",
+              "child": {
+                "id": "col_table",
+                "type": "grid",
+                "columns": 1,
+                "items": [
+                  {
+                    "id": "col_table_i0",
+                    "child": { "id": "n_status", "type": "block", "blockId": "rate_limit_status" }
+                  }
+                ]
               }
-            ]
-          }
+            }
+          ]
         }
-      ]
-    }
-  ],
+      }
+    ]
+  },
   "filters": [
     {
       "id": "interval",

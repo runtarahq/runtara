@@ -363,23 +363,38 @@ pub async fn query_report_dataset(
     }
 }
 
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, serde::Deserialize, utoipa::ToSchema)]
 pub struct EditReportRequest {
+    /// Atomic batch of edit operations applied in order; if any op
+    /// fails the entire batch is rolled back.
     #[serde(default)]
     pub ops: Vec<runtara_report_dsl::edit_ops::ReportEditOp>,
 }
 
-#[derive(Debug, serde::Serialize)]
+#[derive(Debug, serde::Serialize, utoipa::ToSchema)]
 pub struct EditReportResponse {
     pub success: bool,
     pub report: ReportDto,
 }
 
 /// Phase 6 canonical edit endpoint. Accepts a batch of `ReportEditOp`s
-/// and applies them atomically. The legacy per-op handlers
-/// (`add_report_block`, `replace_report_block`, etc.) keep working
-/// alongside this — they're slated to become single-op shims around
-/// `edit_report` in a follow-up.
+/// and applies them atomically. The legacy per-op REST + MCP handlers
+/// have all been deleted (Phase 8) so this is the only mutation entry
+/// point for layout + block changes.
+#[utoipa::path(
+    post,
+    path = "/api/runtime/reports/{report_id}/edit",
+    tag = "reports-controller",
+    params(
+        ("report_id" = String, Path, description = "Report id or slug"),
+    ),
+    request_body = EditReportRequest,
+    responses(
+        (status = 200, description = "Batch applied", body = EditReportResponse),
+        (status = 400, description = "Validation error"),
+        (status = 404, description = "Report not found"),
+    )
+)]
 pub async fn edit_report(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
     State(pool): State<PgPool>,

@@ -3,12 +3,11 @@
 // `definition.layout` tree, and returns the `moveLayoutNode` target
 // the wizard should commit. Extracted so unit tests can exercise the
 // drop logic without React or dnd-kit.
+//
+// Phase 10: `definition.layout` is a single mandatory root grid; the
+// walker descends from that root rather than iterating an array.
 
-import {
-  ReportDefinition,
-  ReportGridLayoutNode,
-  ReportLayoutNode,
-} from '../../types';
+import { ReportDefinition, ReportGridLayoutNode } from '../../types';
 import { LayoutTarget } from './layoutOps';
 
 export interface ResolveDropArgs {
@@ -35,16 +34,13 @@ export function resolveDrop(
 ): ResolveDropResult {
   if (args.sourceId === args.overId) return { apply: false };
 
-  const overContainer = findContainerById(definition.layout ?? [], args.overId);
+  const overContainer = findContainerById(definition.layout, args.overId);
   if (overContainer) {
     // Drop landed on a grid container — append into its items.
     return { apply: true, target: { parentGridId: args.overId } };
   }
 
-  const siblingLocation = findSiblingLocation(
-    definition.layout ?? [],
-    args.overId
-  );
+  const siblingLocation = findSiblingLocation(definition.layout, args.overId);
   if (!siblingLocation) return { apply: false };
 
   // `moveLayoutNode` is remove-then-add. Passing the over-sibling's
@@ -63,39 +59,22 @@ export function resolveDrop(
 }
 
 interface SiblingLocation {
-  parentGridId: string | null;
+  parentGridId: string;
   index: number;
 }
 
 function findSiblingLocation(
-  layout: ReportLayoutNode[],
+  grid: ReportGridLayoutNode,
   nodeId: string
 ): SiblingLocation | null {
-  for (let i = 0; i < layout.length; i++) {
-    if (layout[i].id === nodeId) {
-      return { parentGridId: null, index: i };
-    }
-  }
-  for (const node of layout) {
-    if (node.type !== 'grid') continue;
-    const nested = findInGrid(node, nodeId);
-    if (nested) return nested;
-  }
-  return null;
-}
-
-function findInGrid(
-  grid: ReportGridLayoutNode & { type: 'grid' },
-  nodeId: string
-): SiblingLocation | null {
-  for (let i = 0; i < grid.items.length; i++) {
+  for (let i = 0; i < (grid.items ?? []).length; i++) {
     if (grid.items[i].child.id === nodeId) {
       return { parentGridId: grid.id, index: i };
     }
   }
-  for (const item of grid.items) {
+  for (const item of grid.items ?? []) {
     if (item.child.type === 'grid') {
-      const nested = findInGrid(item.child, nodeId);
+      const nested = findSiblingLocation(item.child, nodeId);
       if (nested) return nested;
     }
   }
@@ -103,18 +82,14 @@ function findInGrid(
 }
 
 function findContainerById(
-  layout: ReportLayoutNode[],
+  grid: ReportGridLayoutNode,
   nodeId: string
-): ReportLayoutNode | null {
-  for (const node of layout) {
-    if (node.id === nodeId && node.type === 'grid') return node;
-    if (node.type === 'grid') {
-      for (const item of node.items) {
-        if (item.child.type === 'grid') {
-          const found = findContainerById([item.child], nodeId);
-          if (found) return found;
-        }
-      }
+): ReportGridLayoutNode | null {
+  if (grid.id === nodeId) return grid;
+  for (const item of grid.items ?? []) {
+    if (item.child.type === 'grid') {
+      const found = findContainerById(item.child, nodeId);
+      if (found) return found;
     }
   }
   return null;

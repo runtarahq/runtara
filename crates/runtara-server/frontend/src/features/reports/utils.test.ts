@@ -110,21 +110,24 @@ describe('report row conditions', () => {
 describe('report view navigation', () => {
   const reportDefinition: ReportDefinition = {
     definitionVersion: 1,
+    layout: { id: 'root', columns: 1, items: [] },
     filters: [],
     blocks: [],
     views: [
-      { id: 'a', title: 'Accounts' },
+      { id: 'a', title: 'Accounts', layout: { id: 'view_a_root', columns: 1, items: [] } },
       {
         id: 'b',
         title: 'Branches',
         parentViewId: 'a',
         clearFiltersOnBack: ['b_id'],
+        layout: { id: 'view_b_root', columns: 1, items: [] },
       },
       {
         id: 'c',
         title: 'Cases',
         parentViewId: 'b',
         clearFiltersOnBack: ['c_id'],
+        layout: { id: 'view_c_root', columns: 1, items: [] },
       },
     ],
   };

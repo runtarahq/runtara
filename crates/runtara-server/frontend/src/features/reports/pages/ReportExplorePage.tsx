@@ -1519,17 +1519,21 @@ function appendBlockToDefinition(
   block: ReportBlockDefinition
 ): ReportDefinition {
   const blocks = [...definition.blocks, block];
+  const items = [
+    ...(definition.layout.items ?? []),
+    {
+      id: `item_${block.id}_${Math.random().toString(36).slice(2, 6)}`,
+      child: {
+        id: `${block.id}_node`,
+        type: 'block' as const,
+        blockId: block.id,
+      },
+    },
+  ];
   return {
     ...definition,
     blocks,
-    layout: [
-      ...(definition.layout ?? []),
-      {
-        id: `${block.id}_node`,
-        type: 'block',
-        blockId: block.id,
-      },
-    ],
+    layout: { ...definition.layout, items },
   };
 }
 

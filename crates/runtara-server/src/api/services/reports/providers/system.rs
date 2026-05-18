@@ -22,7 +22,9 @@ use crate::api::services::reports::{
 };
 use crate::runtime_client::{GetTenantMetricsOptions, MetricsGranularity, RuntimeClient};
 
-use super::{FetchAggregateOutput, FetchParams, FetchRowsOutput, ReportSourceProvider};
+use super::{
+    FetchAggregateOutput, FetchParams, FetchRowsOutput, ReportSourceProvider, dotted_field_known,
+};
 
 pub struct SystemProvider {
     runtime_client: Option<Arc<RuntimeClient>>,
@@ -97,6 +99,18 @@ impl ReportSourceProvider for SystemProvider {
 
     fn field_set(&self, block: &ReportBlockDefinition) -> Option<HashSet<&'static str>> {
         system_entity(block).ok().map(system_fields)
+    }
+
+    fn markdown_field_known(&self, block: &ReportBlockDefinition, field_path: &str) -> bool {
+        match block.source.mode {
+            ReportSourceMode::Filter => dotted_field_known(field_path, &|candidate| {
+                self.field_is_known(block, candidate)
+            }),
+            ReportSourceMode::Aggregate => {
+                let output = aggregate_output_fields(block);
+                dotted_field_known(field_path, &|candidate| output.contains(candidate))
+            }
+        }
     }
 
     fn table_columns(

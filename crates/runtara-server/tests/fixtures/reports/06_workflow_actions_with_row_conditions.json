@@ -1,8 +1,15 @@
 {
   "definitionVersion": 1,
-  "layout": [
-    { "id": "n_pending", "type": "block", "blockId": "pending_orders" }
-  ],
+  "layout": {
+    "id": "root",
+    "columns": 1,
+    "items": [
+      {
+        "id": "root_i0",
+        "child": { "id": "n_pending", "type": "block", "blockId": "pending_orders" }
+      }
+    ]
+  },
   "filters": [
     {
       "id": "status",

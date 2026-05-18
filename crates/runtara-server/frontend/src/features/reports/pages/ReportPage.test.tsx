@@ -22,6 +22,16 @@ const sampleReport: ReportDto = {
   updatedAt: '2026-05-14T00:00:00Z',
   definition: {
     definitionVersion: 1,
+    layout: {
+      id: 'root',
+      columns: 1,
+      items: [
+        {
+          id: 'root_i0',
+          child: { id: 'n_orders', type: 'block', blockId: 'orders' },
+        },
+      ],
+    },
     filters: [],
     blocks: [
       {
@@ -43,7 +53,12 @@ const sampleReport: ReportDto = {
 const emptyReport: ReportDto = {
   ...sampleReport,
   id: 'rep_empty',
-  definition: { definitionVersion: 1, filters: [], blocks: [] },
+  definition: {
+    definitionVersion: 1,
+    layout: { id: 'root', columns: 1, items: [] },
+    filters: [],
+    blocks: [],
+  },
 };
 
 vi.mock('../hooks/useReports', () => ({

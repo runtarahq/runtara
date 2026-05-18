@@ -1,25 +1,38 @@
 {
   "definitionVersion": 1,
-  "layout": [
-    {
-      "id": "n_metrics",
-      "type": "grid",
-      "title": "Top-level KPIs",
-      "columns": 2,
-      "items": [
-        {
-          "id": "n_metrics_i0",
-          "child": { "id": "n_metrics_b0", "type": "block", "blockId": "kpi_total_revenue" }
-        },
-        {
-          "id": "n_metrics_i1",
-          "child": { "id": "n_metrics_b1", "type": "block", "blockId": "kpi_order_count" }
+  "layout": {
+    "id": "root",
+    "columns": 1,
+    "items": [
+      {
+        "id": "root_i0",
+        "child": {
+          "id": "n_metrics",
+          "type": "grid",
+          "title": "Top-level KPIs",
+          "columns": 2,
+          "items": [
+            {
+              "id": "n_metrics_i0",
+              "child": { "id": "n_metrics_b0", "type": "block", "blockId": "kpi_total_revenue" }
+            },
+            {
+              "id": "n_metrics_i1",
+              "child": { "id": "n_metrics_b1", "type": "block", "blockId": "kpi_order_count" }
+            }
+          ]
         }
-      ]
-    },
-    { "id": "n_revenue", "type": "block", "blockId": "revenue_chart" },
-    { "id": "n_top_products", "type": "block", "blockId": "top_products_table" }
-  ],
+      },
+      {
+        "id": "root_i1",
+        "child": { "id": "n_revenue", "type": "block", "blockId": "revenue_chart" }
+      },
+      {
+        "id": "root_i2",
+        "child": { "id": "n_top_products", "type": "block", "blockId": "top_products_table" }
+      }
+    ]
+  },
   "filters": [
     {
       "id": "date_range",

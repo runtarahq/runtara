@@ -99,6 +99,25 @@ fn lint_root(definition: &Value, issues: &mut Vec<ReportLintIssue>) {
             lint_block(&format!("$.blocks[{index}]"), block, issues);
         }
     }
+    if let Some(layout) = object.get("layout")
+        && layout.is_array()
+    {
+        // Phase 10 made `layout` a single root grid; arrays are the
+        // pre-Phase-10 wire form. The repository migrates them
+        // transparently, but flag for visibility so authors know to
+        // emit the new shape.
+        issues.push(ReportLintIssue {
+            severity: LintSeverity::Warning,
+            code: "LEGACY_LAYOUT_ARRAY_SHAPE".to_string(),
+            path: "$.layout".to_string(),
+            message: "definition.layout is a single root grid object; the array form is legacy."
+                .to_string(),
+            hint: Some(
+                "Wrap your top-level layout nodes inside { id: 'root', columns: N, items: [...] }."
+                    .to_string(),
+            ),
+        });
+    }
 }
 
 fn lint_block(path: &str, block: &Value, issues: &mut Vec<ReportLintIssue>) {

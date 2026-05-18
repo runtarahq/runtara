@@ -1,12 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import {
+  ROOT_GRID_ID,
   addBlock,
   addLayoutNode,
   collectLayoutBlockIds,
   makeBlockId,
   makeGridId,
-  moveBlock,
   moveLayoutNode,
+  newDefaultLayout,
   newGrid,
   orderedBlocksFromDefinition,
   pathToLayoutNode,
@@ -24,38 +25,57 @@ import {
   ReportLayoutNode,
 } from '../../../types';
 
+/**
+ * The root grid carries:
+ *   root
+ *     ├── block(n_a → "a")
+ *     └── grid(g_outer, "Section", columns=1)
+ *           ├── block(n_b → "b")
+ *           └── grid(g_inner, columns=1)
+ *                 └── block(n_c → "c")
+ */
 function baseDefinition(): ReportDefinition {
   return {
     definitionVersion: 1,
-    layout: [
-      { id: 'n_a', type: 'block', blockId: 'a' },
-      {
-        id: 'g_outer',
-        type: 'grid',
-        title: 'Section',
-        columns: 1,
-        items: [
-          {
-            id: 'g_outer_i0',
-            child: { id: 'n_b', type: 'block', blockId: 'b' },
-          },
-          {
-            id: 'g_outer_i1',
-            child: {
-              id: 'g_inner',
-              type: 'grid',
-              columns: 1,
-              items: [
-                {
-                  id: 'g_inner_i0',
-                  child: { id: 'n_c', type: 'block', blockId: 'c' },
-                },
-              ],
-            } as ReportLayoutNode,
-          },
-        ],
-      } as ReportLayoutNode,
-    ],
+    layout: {
+      id: 'root',
+      columns: 1,
+      items: [
+        {
+          id: 'root_i0',
+          child: { id: 'n_a', type: 'block', blockId: 'a' },
+        },
+        {
+          id: 'root_i1',
+          child: {
+            id: 'g_outer',
+            type: 'grid',
+            title: 'Section',
+            columns: 1,
+            items: [
+              {
+                id: 'g_outer_i0',
+                child: { id: 'n_b', type: 'block', blockId: 'b' },
+              },
+              {
+                id: 'g_outer_i1',
+                child: {
+                  id: 'g_inner',
+                  type: 'grid',
+                  columns: 1,
+                  items: [
+                    {
+                      id: 'g_inner_i0',
+                      child: { id: 'n_c', type: 'block', blockId: 'c' },
+                    },
+                  ],
+                } as ReportLayoutNode,
+              },
+            ],
+          } as ReportLayoutNode,
+        },
+      ],
+    },
     filters: [],
     blocks: [
       { id: 'a', type: 'markdown', source: { schema: '' } },
@@ -90,21 +110,25 @@ describe('layoutOps walkers', () => {
     ]);
   });
 
-  it('walkLayout visits every grid item child', () => {
+  it('walkLayout visits every node under the root grid (root itself excluded)', () => {
     const visited: string[] = [];
     walkLayout(baseDefinition().layout, (node) => visited.push(node.id));
-    expect(visited).toEqual([
-      'n_a',
-      'g_outer',
-      'n_b',
-      'g_inner',
-      'n_c',
-    ]);
+    expect(visited).toEqual(['n_a', 'g_outer', 'n_b', 'g_inner', 'n_c']);
+  });
+});
+
+describe('defaults', () => {
+  it('newDefaultLayout returns an empty 1x1 root grid', () => {
+    const root = newDefaultLayout();
+    expect(root.id).toBe(ROOT_GRID_ID);
+    expect(root.columns).toBe(1);
+    expect(root.rows).toBe(1);
+    expect(root.items).toEqual([]);
   });
 });
 
 describe('block-side operations', () => {
-  it('removeBlock strips block + matching layout entries (top-level + grid items)', () => {
+  it('removeBlock strips block + every layout item referencing it', () => {
     const next = removeBlock(baseDefinition(), 'b');
     expect(next.blocks.map((b) => b.id)).toEqual(['a', 'c']);
     const ids: string[] = [];
@@ -113,7 +137,7 @@ describe('block-side operations', () => {
     expect(ids).toEqual(['n_a', 'g_outer', 'g_inner', 'n_c']);
   });
 
-  it('addBlock appends top-level layout entry', () => {
+  it('addBlock appends item to the root grid by default', () => {
     const block: ReportBlockDefinition = {
       id: 'd',
       type: 'markdown',
@@ -121,64 +145,46 @@ describe('block-side operations', () => {
     };
     const next = addBlock(baseDefinition(), block);
     expect(next.blocks.map((b) => b.id)).toEqual(['a', 'b', 'c', 'd']);
-    const last = next.layout?.[next.layout.length - 1];
-    expect(last?.type).toBe('block');
-    if (last?.type === 'block') expect(last.blockId).toBe('d');
+    const lastItem =
+      next.layout.items[next.layout.items.length - 1];
+    expect(lastItem.child.type).toBe('block');
+    if (lastItem.child.type === 'block') {
+      expect(lastItem.child.blockId).toBe('d');
+    }
   });
 
-  it('updateBlock patches a block in-place', () => {
-    const next = updateBlock(baseDefinition(), 'b', (block) => ({
+  it('updateBlock patches a block in-place without touching layout', () => {
+    const before = baseDefinition();
+    const next = updateBlock(before, 'b', (block) => ({
       ...block,
       title: 'Renamed',
     }));
     expect(next.blocks.find((b) => b.id === 'b')?.title).toBe('Renamed');
-    expect(JSON.stringify(next.layout)).toBe(
-      JSON.stringify(baseDefinition().layout)
-    );
-  });
-
-  it('moveBlock reorders top-level block siblings without touching grids', () => {
-    // The only top-level block is `a`; moveBlock here is a no-op.
-    const next = moveBlock(baseDefinition(), 'a', 2);
-    expect(JSON.stringify(next.layout)).toBe(
-      JSON.stringify(baseDefinition().layout)
-    );
+    expect(JSON.stringify(next.layout)).toBe(JSON.stringify(before.layout));
   });
 });
 
 describe('grid (layout-node) operations', () => {
-  it('pathToLayoutNode returns root index for top-level node', () => {
+  it('pathToLayoutNode returns the root for the root grid id', () => {
+    const path = pathToLayoutNode(baseDefinition(), 'root');
+    expect(path).toEqual({ parentGridId: null, itemIndex: null });
+  });
+
+  it('pathToLayoutNode returns parentGridId + itemIndex for a top-level child', () => {
     const path = pathToLayoutNode(baseDefinition(), 'n_a');
-    expect(path).toEqual({
-      parentGridId: null,
-      itemIndex: null,
-      rootIndex: 0,
-    });
+    expect(path).toEqual({ parentGridId: 'root', itemIndex: 0 });
   });
 
-  it('pathToLayoutNode returns parentGridId + itemIndex for nested node', () => {
-    const path = pathToLayoutNode(baseDefinition(), 'n_b');
-    expect(path).toEqual({
-      parentGridId: 'g_outer',
-      itemIndex: 0,
-      rootIndex: null,
-    });
-  });
-
-  it('pathToLayoutNode finds deeply nested grid', () => {
+  it('pathToLayoutNode finds a node nested inside multiple grids', () => {
     const path = pathToLayoutNode(baseDefinition(), 'n_c');
-    expect(path).toEqual({
-      parentGridId: 'g_inner',
-      itemIndex: 0,
-      rootIndex: null,
-    });
+    expect(path).toEqual({ parentGridId: 'g_inner', itemIndex: 0 });
   });
 
   it('pathToLayoutNode returns null when missing', () => {
     expect(pathToLayoutNode(baseDefinition(), 'missing')).toBe(null);
   });
 
-  it('addLayoutNode at root appends a top-level layout node', () => {
+  it('addLayoutNode with null parent appends into the root grid', () => {
     const newBlock: ReportLayoutNode = {
       id: 'n_d',
       type: 'block',
@@ -187,10 +193,12 @@ describe('grid (layout-node) operations', () => {
     const next = addLayoutNode(baseDefinition(), newBlock, {
       parentGridId: null,
     });
-    expect(next.layout?.[next.layout.length - 1]).toEqual(newBlock);
+    const lastItem =
+      next.layout.items[next.layout.items.length - 1];
+    expect(lastItem.child).toEqual(newBlock);
   });
 
-  it('addLayoutNode into a grid wraps node in a grid item', () => {
+  it('addLayoutNode into a nested grid wraps the node in a grid item', () => {
     const newBlock: ReportLayoutNode = {
       id: 'n_d',
       type: 'block',
@@ -199,14 +207,11 @@ describe('grid (layout-node) operations', () => {
     const next = addLayoutNode(baseDefinition(), newBlock, {
       parentGridId: 'g_outer',
     });
-    const grid = next.layout?.[1];
-    expect(grid?.type).toBe('grid');
-    if (grid?.type === 'grid') {
-      expect(grid.items[grid.items.length - 1].child).toEqual(newBlock);
-    }
+    const outer = next.layout.items[1].child as ReportGridLayoutNode;
+    expect(outer.items[outer.items.length - 1].child).toEqual(newBlock);
   });
 
-  it('addLayoutNode into nested grid finds the right container', () => {
+  it('addLayoutNode into deeply nested grid finds the right container', () => {
     const newBlock: ReportLayoutNode = {
       id: 'n_d',
       type: 'block',
@@ -215,54 +220,64 @@ describe('grid (layout-node) operations', () => {
     const next = addLayoutNode(baseDefinition(), newBlock, {
       parentGridId: 'g_inner',
     });
-    const outer = next.layout?.[1];
-    expect(outer?.type).toBe('grid');
-    if (outer?.type === 'grid') {
-      const inner = outer.items[1].child;
-      expect(inner.type).toBe('grid');
-      if (inner.type === 'grid') {
-        expect(inner.items[1].child).toEqual(newBlock);
-      }
-    }
+    const outer = next.layout.items[1].child as ReportGridLayoutNode;
+    const inner = outer.items[1].child as ReportGridLayoutNode;
+    expect(inner.items[inner.items.length - 1].child).toEqual(newBlock);
   });
 
-  it('removeLayoutNode strips a node by id (root + nested)', () => {
+  it('removeLayoutNode strips a node by id (both top-level and nested)', () => {
     const after = removeLayoutNode(baseDefinition(), 'g_inner');
     const ids: string[] = [];
     walkLayout(after.layout, (node) => ids.push(node.id));
     expect(ids).toEqual(['n_a', 'g_outer', 'n_b']);
   });
 
+  it('removeLayoutNode is a no-op when targeting the root grid (root cannot be removed)', () => {
+    const before = baseDefinition();
+    const after = removeLayoutNode(before, before.layout.id);
+    expect(JSON.stringify(after.layout)).toBe(JSON.stringify(before.layout));
+  });
+
+  it('moveLayoutNode is a no-op when targeting the root grid', () => {
+    const before = baseDefinition();
+    const after = moveLayoutNode(before, before.layout.id, {
+      parentGridId: null,
+    });
+    expect(JSON.stringify(after.layout)).toBe(JSON.stringify(before.layout));
+  });
+
   it('moveLayoutNode moves a nested node to a different grid', () => {
     const next = moveLayoutNode(baseDefinition(), 'n_b', {
       parentGridId: 'g_inner',
     });
-    const outer = next.layout?.[1];
-    expect(outer?.type).toBe('grid');
-    if (outer?.type === 'grid') {
-      // After moving, g_outer should only contain the inner grid (n_b
-      // was removed from it).
-      expect(outer.items.length).toBe(1);
-      expect(outer.items[0].child.id).toBe('g_inner');
-      const inner = outer.items[0].child;
-      if (inner.type === 'grid') {
-        // n_b appended to inner.
-        const lastChildId = inner.items[inner.items.length - 1].child.id;
-        expect(lastChildId).toBe('n_b');
-      }
-    }
+    const outer = next.layout.items[1].child as ReportGridLayoutNode;
+    // g_outer no longer holds n_b — only g_inner remains.
+    expect(outer.items.length).toBe(1);
+    expect(outer.items[0].child.id).toBe('g_inner');
+    const inner = outer.items[0].child as ReportGridLayoutNode;
+    expect(inner.items[inner.items.length - 1].child.id).toBe('n_b');
   });
 
-  it('updateGrid patches grid metadata in-place', () => {
+  it('updateGrid patches the root grid metadata', () => {
+    const next = updateGrid(baseDefinition(), 'root', (g) => ({
+      ...g,
+      title: 'Dashboard',
+      columns: 3,
+    }));
+    expect(next.layout.title).toBe('Dashboard');
+    expect(next.layout.columns).toBe(3);
+    expect(next.layout.items.length).toBe(2);
+  });
+
+  it('updateGrid patches a nested grid in-place', () => {
     const next = updateGrid(baseDefinition(), 'g_outer', (g) => ({
       ...g,
       title: 'Renamed',
       columns: 2,
     }));
-    const grid = next.layout?.[1] as ReportGridLayoutNode;
+    const grid = next.layout.items[1].child as ReportGridLayoutNode;
     expect(grid.title).toBe('Renamed');
     expect(grid.columns).toBe(2);
-    // Items untouched.
     expect(grid.items.length).toBe(2);
   });
 
@@ -271,7 +286,7 @@ describe('grid (layout-node) operations', () => {
       ...item,
       colSpan: 3,
     }));
-    const grid = next.layout?.[1] as ReportGridLayoutNode;
+    const grid = next.layout.items[1].child as ReportGridLayoutNode;
     expect(grid.items[0].colSpan).toBe(3);
     expect(grid.items[1].colSpan).toBeUndefined();
   });

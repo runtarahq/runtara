@@ -1,9 +1,15 @@
-// Phase 9: single layout-editor primitive. Walks `definition.layout`
-// recursively, rendering each `grid` as a CSS grid with the configured
-// `columns` / `columnWidths`. Each item slot hosts either a block
-// editor (`BlockHostInEdit`) or a nested `GridContainer`. Drag-and-drop
-// between slots is powered by `@dnd-kit/core` + `@dnd-kit/sortable`
-// with cross-grid moves dispatched through `moveLayoutNode`.
+// Phase 9/10: single layout-editor primitive. Walks
+// `definition.layout` (the mandatory root grid) recursively, rendering
+// each `grid` as a CSS grid with the configured `columns` /
+// `columnWidths` / `rows`. Each item slot hosts either a block editor
+// (`BlockHostInEdit`) or a nested grid. Drag-and-drop between slots is
+// powered by `@dnd-kit/core` + `@dnd-kit/sortable` with cross-grid
+// moves dispatched through `moveLayoutNode`.
+//
+// Phase 10 model: the report layout is always a single root grid;
+// blocks are added into the root grid's slots (or any nested grid's
+// slots) — not as floating siblings. The root grid cannot be removed
+// or moved.
 
 import {
   DndContext,
@@ -29,14 +35,7 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from '@/shared/components/ui/dropdown-menu';
-import {
-  ChevronDown,
-  GripVertical,
-  Minus,
-  Plus,
-  Settings2,
-  Trash2,
-} from 'lucide-react';
+import { ChevronDown, GripVertical, Minus, Plus, Settings2, Trash2 } from 'lucide-react';
 import { CSSProperties, useState } from 'react';
 import {
   ReportBlockResult,
@@ -50,7 +49,6 @@ import { GridSettingsPanel } from './GridSettingsPanel';
 import { resolveDrop } from './dndResolve';
 import {
   LayoutTarget,
-  addBlock,
   addLayoutNode,
   makeBlockId,
   moveLayoutNode,
@@ -70,15 +68,17 @@ interface GridContainerProps {
   onChange: (definition: ReportDefinition) => void;
 }
 
-const PRESETS = [
+const NESTED_GRID_PRESETS = [
   { label: 'Section (1 column)', columns: 1 },
   { label: '2 equal columns', columns: 2 },
   { label: '3 equal columns', columns: 3 },
   { label: '4-column metric row', columns: 4 },
 ];
 
-/** Top-level editor for the report layout tree. Renders each root-level
- *  layout node and offers "Add grid" / "Add block" affordances. */
+/** Top-level editor for the report layout tree. The layout is always a
+ *  single root grid (Phase 10) — the author drops blocks / nested grids
+ *  into its slots instead of arranging floating siblings at the report
+ *  root. */
 export function GridContainer({
   definition,
   schemas,
@@ -87,31 +87,12 @@ export function GridContainer({
   filters,
   onChange,
 }: GridContainerProps) {
-  const layout = definition.layout ?? [];
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 4 } }),
     useSensor(KeyboardSensor, {
       coordinateGetter: sortableKeyboardCoordinates,
     })
   );
-
-  const handleAddRootGrid = (columns: number) => {
-    const grid = newGrid({ columns });
-    onChange(addLayoutNode(definition, grid, { parentGridId: null }));
-  };
-
-  const handleAddRootBlock = () => {
-    const id = makeBlockId('block');
-    onChange(
-      addBlock(definition, {
-        id,
-        type: 'markdown',
-        source: { schema: '' },
-        markdown: { content: '' },
-        title: 'New block',
-      })
-    );
-  };
 
   const handleDragEnd = (event: DragEndEvent) => {
     const { active, over } = event;
@@ -123,8 +104,6 @@ export function GridContainer({
     onChange(moveLayoutNode(definition, sourceId, result.target));
   };
 
-  const rootIds = layout.map((node) => node.id);
-
   return (
     <DndContext
       sensors={sensors}
@@ -132,59 +111,16 @@ export function GridContainer({
       onDragEnd={handleDragEnd}
     >
       <div className="grid gap-4" data-testid="grid-container-root">
-        {layout.length === 0 ? (
-          <p className="text-sm text-muted-foreground">
-            No layout yet. Add a block or a grid below to start arranging your
-            report.
-          </p>
-        ) : (
-          <SortableContext
-            items={rootIds}
-            strategy={verticalListSortingStrategy}
-          >
-            <div className="grid gap-3">
-              {layout.map((node) => (
-                <SortableLayoutNode
-                  key={node.id}
-                  node={node}
-                  definition={definition}
-                  schemas={schemas}
-                  blockResults={blockResults}
-                  reportId={reportId}
-                  filters={filters}
-                  onChange={onChange}
-                />
-              ))}
-            </div>
-          </SortableContext>
-        )}
-        <div className="flex flex-wrap items-center gap-2 rounded-lg border bg-muted/30 p-3">
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            onClick={handleAddRootBlock}
-          >
-            <Plus className="mr-1 h-3.5 w-3.5" /> Add block
-          </Button>
-          <DropdownMenu>
-            <DropdownMenuTrigger asChild>
-              <Button type="button" variant="outline" size="sm">
-                <Plus className="mr-1 h-3.5 w-3.5" /> Add grid
-              </Button>
-            </DropdownMenuTrigger>
-            <DropdownMenuContent align="start">
-              {PRESETS.map((preset) => (
-                <DropdownMenuItem
-                  key={preset.columns}
-                  onClick={() => handleAddRootGrid(preset.columns)}
-                >
-                  {preset.label}
-                </DropdownMenuItem>
-              ))}
-            </DropdownMenuContent>
-          </DropdownMenu>
-        </div>
+        <GridNodeEditor
+          node={definition.layout}
+          definition={definition}
+          schemas={schemas}
+          blockResults={blockResults}
+          reportId={reportId}
+          filters={filters}
+          onChange={onChange}
+          isRoot
+        />
       </div>
     </DndContext>
   );
@@ -286,7 +222,10 @@ function BlockNodeEditor({
 }
 
 interface GridNodeEditorProps extends Omit<LayoutNodeEditorProps, 'node'> {
-  node: ReportGridLayoutNode & { type: 'grid' };
+  node: ReportGridLayoutNode;
+  /** When true, this is the report-level root grid. The root grid is
+   *  protected — no drag handle, no remove button. */
+  isRoot?: boolean;
 }
 
 function GridNodeEditor({
@@ -297,6 +236,7 @@ function GridNodeEditor({
   reportId,
   filters,
   dragHandleProps,
+  isRoot,
   onChange,
 }: GridNodeEditorProps) {
   const [showSettings, setShowSettings] = useState(false);
@@ -380,7 +320,7 @@ function GridNodeEditor({
     >
       <header className="mb-3 flex flex-wrap items-center justify-between gap-2">
         <div className="flex min-w-0 items-center gap-2">
-          {dragHandleProps ? (
+          {dragHandleProps && !isRoot ? (
             <button
               type="button"
               className="cursor-grab rounded p-0.5 text-muted-foreground hover:bg-muted active:cursor-grabbing"
@@ -398,7 +338,7 @@ function GridNodeEditor({
               </h3>
             ) : (
               <span className="text-xs uppercase tracking-wider text-muted-foreground">
-                Grid · {columns}×{rows}
+                {isRoot ? `Report layout · ${columns}×${rows}` : `Grid · ${columns}×${rows}`}
               </span>
             )}
             {node.description ? (
@@ -442,17 +382,19 @@ function GridNodeEditor({
           >
             <Settings2 className="h-3.5 w-3.5" />
           </Button>
-          <Button
-            type="button"
-            variant="ghost"
-            size="icon"
-            className="h-7 w-7 text-destructive"
-            title="Remove grid"
-            aria-label="Remove grid"
-            onClick={handleDelete}
-          >
-            <Trash2 className="h-3.5 w-3.5" />
-          </Button>
+          {isRoot ? null : (
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon"
+              className="h-7 w-7 text-destructive"
+              title="Remove grid"
+              aria-label="Remove grid"
+              onClick={handleDelete}
+            >
+              <Trash2 className="h-3.5 w-3.5" />
+            </Button>
+          )}
         </div>
       </header>
       {showSettings ? (
@@ -615,7 +557,7 @@ function EmptyCellPlaceholder({
             </Button>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="center">
-            {PRESETS.map((preset) => (
+            {NESTED_GRID_PRESETS.map((preset) => (
               <DropdownMenuItem
                 key={preset.columns}
                 onClick={() => onAddGrid(preset.columns)}

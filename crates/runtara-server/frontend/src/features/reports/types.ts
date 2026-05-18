@@ -132,6 +132,13 @@ export type {
   CreateReportRequest,
   UpdateReportRequest,
   DeleteReportResponse,
+  // Canonical /edit endpoint (Phase 6/8) — batch ReportEditOps applied
+  // atomically by `runtara_report_dsl::edit_ops::apply_edit_ops`.
+  EditReportRequest,
+  EditReportResponse,
+  ReportEditOp,
+  BlockPosition,
+  LayoutTarget,
   // Lists
   ListReportsResponse,
   GetReportResponse,
@@ -171,14 +178,19 @@ export type ReportInteractionDefinition = GenReportInteractionDefinition;
 
 // `ReportDefinition` is the parent of the others — its array fields use the
 // FE-tightened element types so consumers walking the tree never re-fall
-// back to generated optional fields.
+// back to generated optional fields. `layout` is the mandatory single root
+// grid (Phase 10) — the generated type marks it optional because the wire
+// `default_root_grid` fallback covers missing payloads, but the FE always
+// sees a populated value (server-side migration guarantees this) so we
+// tighten to non-optional here.
 export type ReportDefinition = Omit<
   GenReportDefinition,
-  'blocks' | 'filters' | 'datasets'
+  'blocks' | 'filters' | 'datasets' | 'layout'
 > & {
   blocks: ReportBlockDefinition[];
   filters: import('../../generated/RuntaraRuntimeApi').ReportFilterDefinition[];
   datasets?: ReportDatasetDefinition[];
+  layout: import('../../generated/RuntaraRuntimeApi').ReportGridLayoutNode;
 };
 
 // `ReportDto` carries the definition; we surface the FE-tightened version

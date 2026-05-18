@@ -82,27 +82,24 @@ function reportWithGrid(): ReportDto {
         markdown: { content: '# C' },
       },
     ],
-    layout: [
-      {
-        id: 'g_root',
-        type: 'grid',
-        columns: 1,
-        items: [
-          {
-            id: 'item_a',
-            child: { id: 'n_a', type: 'block', blockId: 'a' },
-          },
-          {
-            id: 'item_b',
-            child: { id: 'n_b', type: 'block', blockId: 'b' },
-          },
-          {
-            id: 'item_c',
-            child: { id: 'n_c', type: 'block', blockId: 'c' },
-          },
-        ],
-      },
-    ],
+    layout: {
+      id: 'root',
+      columns: 1,
+      items: [
+        {
+          id: 'item_a',
+          child: { id: 'n_a', type: 'block', blockId: 'a' },
+        },
+        {
+          id: 'item_b',
+          child: { id: 'n_b', type: 'block', blockId: 'b' },
+        },
+        {
+          id: 'item_c',
+          child: { id: 'n_c', type: 'block', blockId: 'c' },
+        },
+      ],
+    },
   };
   return {
     id: REPORT_ID,
@@ -226,9 +223,8 @@ test.describe('wizard v2 grid drag-and-drop (mocked)', () => {
     }).toPass({ timeout: 5000 });
 
     const saved = getSaved()!;
-    const root = saved.definition.layout?.[0];
-    expect(root?.type).toBe('grid');
-    if (root?.type !== 'grid') return;
+    const root = saved.definition.layout;
+    expect(root.id).toBe('root');
     const order = root.items.map((item) =>
       item.child.type === 'block' ? item.child.blockId : item.child.id
     );

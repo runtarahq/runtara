@@ -1,13 +1,25 @@
 {
   "definitionVersion": 1,
-  "layout": [
-    { "id": "n_grid", "type": "grid", "columns": 2, "items": [
+  "layout": {
+    "id": "root",
+    "columns": 1,
+    "items": [
       {
-        "id": "g_orders",
-        "child": { "id": "n_grid_b0", "type": "block", "blockId": "orders_with_customers" }
+        "id": "root_i0",
+        "child": {
+          "id": "n_grid",
+          "type": "grid",
+          "columns": 2,
+          "items": [
+            {
+              "id": "g_orders",
+              "child": { "id": "n_grid_b0", "type": "block", "blockId": "orders_with_customers" }
+            }
+          ]
+        }
       }
-    ]}
-  ],
+    ]
+  },
   "filters": [
     {
       "id": "date_range",

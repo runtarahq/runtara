@@ -17,7 +17,11 @@ interface ViewsEditorV2Props {
 
 function newView(): ReportViewDefinition {
   const id = `view_${Math.random().toString(36).slice(2, 7)}`;
-  return { id, title: 'New view' };
+  return {
+    id,
+    title: 'New view',
+    layout: { id: `${id}_root`, columns: 1, rows: 1, items: [] },
+  };
 }
 
 export function ViewsEditorV2({ definition, onChange }: ViewsEditorV2Props) {

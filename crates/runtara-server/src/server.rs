@@ -38,6 +38,8 @@ use runtime_client::RuntimeClient;
 #[derive(OpenApi)]
 #[openapi(
     paths(
+        // Reports endpoints
+        api::handlers::reports::edit_report,
         // Execution endpoints
         api::handlers::executions::list_all_executions_handler,
         // Workflow endpoints (refactored)
@@ -471,6 +473,16 @@ use runtime_client::RuntimeClient;
             runtara_report_dsl::ReportBlockStatus,
             runtara_report_dsl::ReportBlockError,
             runtara_report_dsl::DeleteReportResponse,
+            runtara_report_dsl::ReportSummary,
+            // Canonical edit endpoint (Phase 6/8) — exposes the
+            // ReportEditOp batch + request/response shells so the FE
+            // codegen client can call `/edit` directly instead of full
+            // PUT round-trips.
+            runtara_report_dsl::edit_ops::ReportEditOp,
+            runtara_report_dsl::edit_ops::BlockPosition,
+            runtara_report_dsl::edit_ops::LayoutTarget,
+            api::handlers::reports::EditReportRequest,
+            api::handlers::reports::EditReportResponse,
         )
     ),
     tags(

@@ -217,8 +217,24 @@ function baseDefinition(
   blocks: ReportBlockDefinition[],
   extras: Partial<ReportDefinition> = {}
 ): ReportDefinition {
+  // Phase 10: every block must live in the root grid for the wizard to
+  // render it. Auto-place each declared block as a root-grid item when
+  // the caller doesn't pass an explicit `layout` override.
+  const autoLayout = {
+    id: 'root',
+    columns: 1,
+    items: blocks.map((block, i) => ({
+      id: `root_i${i}`,
+      child: {
+        id: `n_${block.id}`,
+        type: 'block' as const,
+        blockId: block.id,
+      },
+    })),
+  };
   return {
     definitionVersion: 1,
+    layout: autoLayout,
     filters: [],
     blocks,
     ...extras,
@@ -519,26 +535,30 @@ test.describe('SYN-410 report builder DSL parity (mocked)', () => {
     const definition = baseDefinition(
       [tableBlock('orders', { table: { columns: [{ field: 'id' }] } })],
       {
-        layout: [
-          {
-            id: 'main',
-            type: 'grid',
-            columns: 1,
-            items: [{ blockId: 'orders' }],
-          },
-        ],
+        layout: {
+          id: 'root',
+          columns: 1,
+          items: [
+            {
+              id: 'main_item',
+              child: { id: 'main_node', type: 'block', blockId: 'orders' },
+            },
+          ],
+        },
         views: [
           {
             id: 'list',
             title: 'Orders',
-            layout: [
-              {
-                id: 'list_grid',
-                type: 'grid',
-                columns: 1,
-                items: [{ blockId: 'orders' }],
-              },
-            ],
+            layout: {
+              id: 'view_list_root',
+              columns: 1,
+              items: [
+                {
+                  id: 'view_list_root_i0',
+                  child: { id: 'list_orders_node', type: 'block', blockId: 'orders' },
+                },
+              ],
+            },
           },
           {
             id: 'detail',
@@ -552,14 +572,16 @@ test.describe('SYN-410 report builder DSL parity (mocked)', () => {
                 clearFilters: ['order_id'],
               },
             ],
-            layout: [
-              {
-                id: 'detail_grid',
-                type: 'grid',
-                columns: 1,
-                items: [{ blockId: 'orders' }],
-              },
-            ],
+            layout: {
+              id: 'view_detail_root',
+              columns: 1,
+              items: [
+                {
+                  id: 'view_detail_root_i0',
+                  child: { id: 'detail_orders_node', type: 'block', blockId: 'orders' },
+                },
+              ],
+            },
           },
         ],
       }
@@ -1487,32 +1509,49 @@ test.describe('SYN-410 report builder DSL parity (mocked)', () => {
         },
       ],
       {
-        layout: [
-          {
-            id: 'metrics',
-            type: 'metric_row',
-            title: 'Metrics',
-            blocks: ['order_count', 'total_amount'],
-          },
-          {
-            id: 'split',
-            type: 'columns',
-            columns: [
-              {
-                id: 'left',
-                children: [
-                  { id: 'orders_node', type: 'block', blockId: 'orders' },
+        layout: {
+          id: 'root',
+          columns: 1,
+          items: [
+            {
+              id: 'root_i0',
+              child: {
+                id: 'metrics',
+                type: 'grid',
+                title: 'Metrics',
+                columns: 2,
+                items: [
+                  {
+                    id: 'metrics_i0',
+                    child: { id: 'oc_node', type: 'block', blockId: 'order_count' },
+                  },
+                  {
+                    id: 'metrics_i1',
+                    child: { id: 'ta_node', type: 'block', blockId: 'total_amount' },
+                  },
                 ],
               },
-              {
-                id: 'right',
-                children: [
-                  { id: 'status_node', type: 'block', blockId: 'status_chart' },
+            },
+            {
+              id: 'root_i1',
+              child: {
+                id: 'split',
+                type: 'grid',
+                columns: 2,
+                items: [
+                  {
+                    id: 'split_left',
+                    child: { id: 'orders_node', type: 'block', blockId: 'orders' },
+                  },
+                  {
+                    id: 'split_right',
+                    child: { id: 'status_node', type: 'block', blockId: 'status_chart' },
+                  },
                 ],
               },
-            ],
-          },
-        ],
+            },
+          ],
+        },
       }
     );
 
@@ -1524,24 +1563,21 @@ test.describe('SYN-410 report builder DSL parity (mocked)', () => {
     });
     const saved = await saveThroughWizard(page, getSaved);
 
-    expect(saved.layout?.[0]).toMatchObject({
-      id: 'metrics',
-      type: 'metric_row',
-      blocks: ['order_count', 'total_amount'],
-    });
-    expect(saved.layout?.[1]).toMatchObject({
-      id: 'split',
-      type: 'columns',
-    });
-    expect(
-      saved.layout?.[1].type === 'columns'
-        ? saved.layout[1].columns.flatMap((column) =>
-            (column.children ?? []).map((child) =>
-              child.type === 'block' ? child.blockId : null
-            )
-          )
-        : []
-    ).toEqual(['orders', 'status_chart']);
+    // Root grid wraps the two nested grids.
+    expect(saved.layout.id).toBe('root');
+    expect(saved.layout.items).toHaveLength(2);
+    const metrics = saved.layout.items[0].child;
+    expect(metrics.type).toBe('grid');
+    if (metrics.type !== 'grid') return;
+    expect(metrics.items.map((item) =>
+      item.child.type === 'block' ? item.child.blockId : null
+    )).toEqual(['order_count', 'total_amount']);
+    const split = saved.layout.items[1].child;
+    expect(split.type).toBe('grid');
+    if (split.type !== 'grid') return;
+    expect(split.items.map((item) =>
+      item.child.type === 'block' ? item.child.blockId : null
+    )).toEqual(['orders', 'status_chart']);
   });
 
   test('21 saves actions block type', async ({ page, mockApi }) => {

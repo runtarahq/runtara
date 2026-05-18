@@ -72,7 +72,7 @@ function ReportRendererInner({
     () => getActiveReportLayout(definition, activeViewId),
     [activeViewId, definition]
   );
-  const hasStructuredLayout = layout.length > 0;
+  const hasStructuredLayout = (layout.items ?? []).length > 0;
 
   if (!hasStructuredLayout && definition.blocks.length === 0) {
     return (
@@ -101,7 +101,7 @@ function ReportRendererInner({
       )}
       {hasStructuredLayout ? (
         <LayoutNodes
-          nodes={layout}
+          nodes={(layout.items ?? []).map((item) => item.child)}
           reportId={reportId}
           definition={definition}
           renderResponse={renderResponse}

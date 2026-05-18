@@ -74,7 +74,7 @@ function emptyReport(): ReportDto {
     definitionVersion: 1,
     definition: {
       definitionVersion: 1,
-      layout: [],
+      layout: { id: 'root', columns: 1, rows: 1, items: [] },
       filters: [],
       blocks: [],
     },
@@ -150,7 +150,7 @@ test.describe('wizard v2 author flow (mocked)', () => {
     ).toHaveCount(0);
   });
 
-  test('add a top-level markdown block, save → PUT captures the structure', async ({
+  test('add a block into the root grid, save → PUT captures the structure', async ({
     page,
     mockApi,
   }) => {
@@ -159,10 +159,9 @@ test.describe('wizard v2 author flow (mocked)', () => {
       mockApi as unknown as Parameters<typeof setupWizardEditing>[1]
     );
 
-    // Phase 9: the empty-layout state offers root-level "Add block" /
-    // "Add grid" affordances. Clicking "Add block" pushes a fresh
-    // markdown block onto `definition.blocks` and a matching `block`
-    // layout node onto the root layout array.
+    // Phase 10: the root grid renders an empty cell with a "+ Add block"
+    // affordance. Clicking it pushes a fresh markdown block onto
+    // `definition.blocks` and adds a matching grid item under the root.
     await page
       .getByRole('button', { name: /^Add block$/i })
       .first()
@@ -179,9 +178,10 @@ test.describe('wizard v2 author flow (mocked)', () => {
     expect(definition.blocks).toHaveLength(1);
     const block = definition.blocks[0];
     expect(block.type).toBe('markdown');
+    // The block appears as a child of an item under the root grid.
     expect(
-      (definition.layout ?? []).some(
-        (node) => node.type === 'block' && node.blockId === block.id
+      (definition.layout.items ?? []).some(
+        (item) => item.child.type === 'block' && item.child.blockId === block.id
       )
     ).toBe(true);
   });

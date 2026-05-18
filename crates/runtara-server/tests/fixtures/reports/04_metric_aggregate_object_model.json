@@ -1,23 +1,30 @@
 {
   "definitionVersion": 1,
-  "layout": [
-    {
-      "id": "n_metrics",
-      "type": "grid",
-      "title": "Key metrics",
-      "columns": 2,
-      "items": [
-        {
-          "id": "n_metrics_i0",
-          "child": { "id": "n_metrics_b0", "type": "block", "blockId": "total_revenue" }
-        },
-        {
-          "id": "n_metrics_i1",
-          "child": { "id": "n_metrics_b1", "type": "block", "blockId": "order_count" }
+  "layout": {
+    "id": "root",
+    "columns": 1,
+    "items": [
+      {
+        "id": "root_i0",
+        "child": {
+          "id": "n_metrics",
+          "type": "grid",
+          "title": "Key metrics",
+          "columns": 2,
+          "items": [
+            {
+              "id": "n_metrics_i0",
+              "child": { "id": "n_metrics_b0", "type": "block", "blockId": "total_revenue" }
+            },
+            {
+              "id": "n_metrics_i1",
+              "child": { "id": "n_metrics_b1", "type": "block", "blockId": "order_count" }
+            }
+          ]
         }
-      ]
-    }
-  ],
+      }
+    ]
+  },
   "filters": [
     {
       "id": "date_range",

@@ -309,6 +309,7 @@ export function ReportBlockHost({
             reportId={reportId}
             definition={{
               definitionVersion: 1,
+              layout: { id: 'root', columns: 1, items: [] },
               filters: block.filters ?? [],
               blocks: [block],
             }}

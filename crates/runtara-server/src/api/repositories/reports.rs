@@ -176,48 +176,128 @@ fn row_to_report(row: PgRow) -> Result<ReportDto, sqlx::Error> {
     })
 }
 
-/// Parse a stored definition JSON into a `ReportDefinition`. When the
-/// stored shape no longer matches the current `ReportDefinition` (e.g.
-/// after a schema-breaking cutover landed in Phases 1-7), returns an
-/// empty stub plus the parser error in `Option<String>` so callers can
-/// surface a "needs re-authoring" state instead of crashing.
+/// Parse a stored definition JSON into a `ReportDefinition`. Two
+/// failure modes return an empty stub plus a `needs_re_authoring`
+/// message so the FE can surface a clean state instead of letting the
+/// report look superficially fine:
 ///
-/// Phase 9 collapse: the four legacy layout container types (`section`,
-/// `columns`, `metric_row`, plus the pre-Phase-9 flat-items `grid`) are
-/// translated into the new recursive `Grid` shape *before* serde
-/// deserialize runs, so existing stored reports keep loading without
-/// needing the `needs_re_authoring` fallback.
+/// 1. The stored JSON carries legacy markers that the cutover spec
+///    flagged as "stop loading" — `markdown` root field or
+///    `markdown` layout nodes from the pre-Phase-1 wrapper. Detected
+///    explicitly so the original JSON is preserved on the server (the
+///    operator can inspect it via `get_report` and re-author through
+///    MCP), rather than silently coerced into something that almost
+///    works.
+/// 2. Serde fails because the JSON doesn't fit the current
+///    `ReportDefinition` shape at all (unknown variants, missing
+///    required fields, etc.).
+///
+/// Phase 9's legacy *container* migration (`section` / `columns` /
+/// `metric_row` -> `grid`) is a structural rewrite with no information
+/// loss, so it runs first; only after that do we fall through to the
+/// stub fallback.
 fn parse_stored_definition(
     value: Value,
     definition_version: i32,
 ) -> (ReportDefinition, Option<String>) {
-    let sanitized = sanitize_unsupported_report_definition(value);
-    let migrated = migrate_legacy_layout_in_definition(sanitized);
+    if let Some(reason) = detect_unsupported_legacy_shape(&value) {
+        tracing::warn!(
+            "Stored report definition carries legacy shape markers and is flagged for re-authoring: {reason}"
+        );
+        return (empty_definition(definition_version), Some(reason));
+    }
+    let migrated = migrate_legacy_layout_in_definition(value);
     match serde_json::from_value::<ReportDefinition>(migrated) {
         Ok(definition) => (definition, None),
         Err(error) => {
             tracing::warn!(
                 error = %error,
-                "Stored report definition could not be read after compatibility sanitization"
+                "Stored report definition could not be deserialized into the current shape"
             );
             (
-                ReportDefinition {
-                    definition_version,
-                    layout: vec![],
-                    views: vec![],
-                    filters: vec![],
-                    datasets: vec![],
-                    blocks: vec![],
-                },
+                empty_definition(definition_version),
                 Some(error.to_string()),
             )
         }
     }
 }
 
+fn empty_definition(definition_version: i32) -> ReportDefinition {
+    ReportDefinition {
+        definition_version,
+        layout: runtara_report_dsl::types::default_root_grid(),
+        views: vec![],
+        filters: vec![],
+        datasets: vec![],
+        blocks: vec![],
+    }
+}
+
+/// Detect legacy-shape markers the cutover spec said should refuse to
+/// load. Returns a human-readable reason string when found.
+fn detect_unsupported_legacy_shape(value: &Value) -> Option<String> {
+    let object = value.as_object()?;
+    if object.contains_key("markdown") {
+        return Some(
+            "Stored report uses the pre-Phase-1 `markdown` root field. \
+             Re-author through MCP or the wizard using markdown blocks."
+                .to_string(),
+        );
+    }
+    if layout_contains_markdown_node(object.get("layout")) {
+        return Some(
+            "Stored report layout contains a legacy `markdown` layout node. \
+             Re-author through MCP or the wizard."
+                .to_string(),
+        );
+    }
+    if let Some(Value::Array(views)) = object.get("views") {
+        for view in views {
+            if let Value::Object(view_obj) = view
+                && layout_contains_markdown_node(view_obj.get("layout"))
+            {
+                return Some(
+                    "Stored report view contains a legacy `markdown` layout node. \
+                     Re-author through MCP or the wizard."
+                        .to_string(),
+                );
+            }
+        }
+    }
+    None
+}
+
+fn layout_contains_markdown_node(value: Option<&Value>) -> bool {
+    let Some(Value::Array(nodes)) = value else {
+        return false;
+    };
+    nodes.iter().any(|node| match node {
+        Value::Object(object) => {
+            if object.get("type").and_then(Value::as_str) == Some("markdown") {
+                return true;
+            }
+            if layout_contains_markdown_node(object.get("children")) {
+                return true;
+            }
+            if let Some(Value::Array(columns)) = object.get("columns") {
+                for column in columns {
+                    if let Value::Object(col) = column
+                        && layout_contains_markdown_node(col.get("children"))
+                    {
+                        return true;
+                    }
+                }
+            }
+            false
+        }
+        _ => false,
+    })
+}
+
 /// Walk `definition.layout` and each `view.layout` in the raw JSON tree
 /// and translate every legacy layout container into the new `grid`
-/// shape. Pure structural rewrite — no information loss.
+/// shape, then wrap the resulting node list in a mandatory root grid
+/// (Phase 10). Pure structural rewrite — no information loss.
 ///
 /// The four legacy container types and their grid equivalents:
 ///
@@ -237,14 +317,20 @@ fn parse_stored_definition(
 fn migrate_legacy_layout_in_definition(mut value: Value) -> Value {
     if let Value::Object(object) = &mut value {
         if let Some(layout) = object.get_mut("layout") {
-            migrate_layout_array(layout);
+            *layout = migrate_layout_field(std::mem::replace(layout, Value::Null), "root");
         }
         if let Some(Value::Array(views)) = object.get_mut("views") {
             for view in views {
-                if let Value::Object(view_object) = view
-                    && let Some(layout) = view_object.get_mut("layout")
-                {
-                    migrate_layout_array(layout);
+                if let Value::Object(view_object) = view {
+                    let view_id = view_object
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .map(|s| format!("view_{}_root", s))
+                        .unwrap_or_else(|| "view_root".to_string());
+                    if let Some(layout) = view_object.get_mut("layout") {
+                        *layout =
+                            migrate_layout_field(std::mem::replace(layout, Value::Null), &view_id);
+                    }
                 }
             }
         }
@@ -252,14 +338,88 @@ fn migrate_legacy_layout_in_definition(mut value: Value) -> Value {
     value
 }
 
-fn migrate_layout_array(value: &mut Value) {
-    let Value::Array(nodes) = value else {
-        return;
-    };
-    for node in nodes.iter_mut() {
-        if let Value::Object(_) = node {
-            let original = std::mem::replace(node, Value::Null);
-            *node = migrate_layout_node(original);
+/// Translate the `definition.layout` (or `view.layout`) wire value into
+/// the current shape: a single root [`ReportGridLayoutNode`]. Handles
+/// three input shapes:
+///
+/// 1. `Vec<ReportLayoutNode>` (legacy pre-Phase-10): each item migrated
+///    individually (legacy `section` / `columns` / `metric_row` → grid),
+///    then wrapped in a 1-column root grid whose `items[]` carry the
+///    migrated nodes.
+/// 2. A bare grid object (legacy post-Phase-9): used directly as the
+///    root grid (with any legacy `blockId` shorthand inside items
+///    rewritten via [`migrate_layout_node`]).
+/// 3. Anything else (missing / non-object / non-array): replaced with
+///    an empty root grid.
+fn migrate_layout_field(value: Value, root_id_hint: &str) -> Value {
+    match value {
+        Value::Array(nodes) => {
+            let items: Vec<Value> = nodes
+                .into_iter()
+                .enumerate()
+                .map(|(i, node)| {
+                    let migrated = migrate_layout_node(node);
+                    grid_item(&format!("{}_i{}", root_id_hint, i), migrated)
+                })
+                .collect();
+            let mut grid = serde_json::Map::new();
+            grid.insert("id".into(), Value::String(root_id_hint.to_string()));
+            grid.insert("columns".into(), Value::from(1i64));
+            grid.insert("items".into(), Value::Array(items));
+            Value::Object(grid)
+        }
+        Value::Object(_) => {
+            // The wire value is already a single object — treat it as a
+            // grid node and run the legacy-grid migration. If it was a
+            // legacy non-grid container at the root (section/columns/
+            // metric_row) we still get a Vec back via `migrate_layout_node`
+            // wrapping logic, so this branch is structurally safe for
+            // the (rare) case where authors wrote a bare grid at root in
+            // older wire formats.
+            let migrated = migrate_layout_node(value);
+            // After migration, the result must be a grid object — if a
+            // bare `block` node was supplied at root, wrap it under a
+            // 1-column grid so the root-must-be-grid invariant holds.
+            if migrated
+                .get("type")
+                .and_then(Value::as_str)
+                .map(|t| t == "grid" || t == "block")
+                == Some(true)
+            {
+                if migrated.get("type").and_then(Value::as_str) == Some("grid") {
+                    // Strip `type` from the migrated grid, since the
+                    // ReportGridLayoutNode wire form doesn't carry one
+                    // — the outer enum dispatch is moot now that the
+                    // root is typed.
+                    let Value::Object(mut grid_obj) = migrated else {
+                        unreachable!("migrated had Object type")
+                    };
+                    grid_obj.remove("type");
+                    Value::Object(grid_obj)
+                } else {
+                    // Single block — wrap in a 1-column root grid.
+                    let mut grid = serde_json::Map::new();
+                    grid.insert("id".into(), Value::String(root_id_hint.to_string()));
+                    grid.insert("columns".into(), Value::from(1i64));
+                    grid.insert(
+                        "items".into(),
+                        Value::Array(vec![grid_item(&format!("{}_i0", root_id_hint), migrated)]),
+                    );
+                    Value::Object(grid)
+                }
+            } else {
+                // Already a typeless root-grid object (today's wire
+                // form). Pass-through.
+                migrated
+            }
+        }
+        _ => {
+            // Null / missing / scalar — fall back to an empty root grid.
+            let mut grid = serde_json::Map::new();
+            grid.insert("id".into(), Value::String(root_id_hint.to_string()));
+            grid.insert("columns".into(), Value::from(1i64));
+            grid.insert("items".into(), Value::Array(vec![]));
+            Value::Object(grid)
         }
     }
 }
@@ -465,81 +625,41 @@ fn grid_item(id: &str, child: Value) -> Value {
     Value::Object(item)
 }
 
-fn sanitize_unsupported_report_definition(mut value: Value) -> Value {
-    let Value::Object(object) = &mut value else {
-        return value;
-    };
-
-    object.remove("markdown");
-
-    if let Some(layout) = object.get_mut("layout") {
-        sanitize_unsupported_layout_nodes(layout);
-    }
-
-    if let Some(Value::Array(views)) = object.get_mut("views") {
-        for view in views {
-            if let Some(layout) = view.get_mut("layout") {
-                sanitize_unsupported_layout_nodes(layout);
-            }
-        }
-    }
-
-    value
-}
-
-fn sanitize_unsupported_layout_nodes(node: &mut Value) {
-    match node {
-        Value::Array(nodes) => {
-            nodes.retain(is_supported_layout_node);
-            for child in nodes {
-                sanitize_unsupported_layout_nodes(child);
-            }
-        }
-        Value::Object(object) => {
-            if let Some(children) = object.get_mut("children") {
-                sanitize_unsupported_layout_nodes(children);
-            }
-
-            if let Some(Value::Array(columns)) = object.get_mut("columns") {
-                for column in columns {
-                    if let Some(children) = column.get_mut("children") {
-                        sanitize_unsupported_layout_nodes(children);
-                    }
-                }
-            }
-        }
-        _ => {}
-    }
-}
-
-fn is_supported_layout_node(node: &Value) -> bool {
-    matches!(
-        node.get("type").and_then(Value::as_str),
-        Some("block" | "metric_row" | "section" | "columns" | "grid")
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::api::dto::reports::ReportLayoutNode;
 
     #[test]
-    fn sanitizes_legacy_layout_markdown_nodes_without_converting_them() {
+    fn legacy_markdown_root_field_flags_needs_re_authoring_without_stripping() {
+        // Per the Phase 8 cutover spec, legacy stored definitions stop
+        // loading — the FE/MCP should surface a needs_re_authoring state
+        // instead of the server silently coercing the report into
+        // something almost-but-not-quite right.
         let value = json!({
             "definitionVersion": 1,
             "markdown": "# Legacy wrapper",
+            "layout": [],
+            "filters": [],
+            "blocks": []
+        });
+        let (definition, error) = parse_stored_definition(value, 1);
+        let reason = error.expect("legacy markdown root must flag needs_re_authoring");
+        assert!(
+            reason.contains("markdown"),
+            "reason should call out the legacy markdown field: {reason}"
+        );
+        assert!(definition.layout.items.is_empty());
+        assert!(definition.blocks.is_empty());
+    }
+
+    #[test]
+    fn legacy_markdown_layout_node_flags_needs_re_authoring() {
+        let value = json!({
+            "definitionVersion": 1,
             "layout": [
-                {
-                    "id": "intro",
-                    "type": "markdown",
-                    "content": "# Intro"
-                },
-                {
-                    "id": "items_node",
-                    "type": "block",
-                    "blockId": "items"
-                }
+                {"id": "intro", "type": "markdown", "content": "# Intro"},
+                {"id": "items_node", "type": "block", "blockId": "items"}
             ],
             "filters": [],
             "blocks": [
@@ -551,21 +671,31 @@ mod tests {
                 }
             ]
         });
+        let (definition, error) = parse_stored_definition(value, 1);
+        let reason = error.expect("legacy markdown layout node must flag needs_re_authoring");
+        assert!(reason.contains("markdown"));
+        // No silent extraction of the block — the empty stub is returned
+        // so the FE/MCP surface routes to a re-authoring banner instead
+        // of pretending the report works.
+        assert!(definition.layout.items.is_empty());
+        assert!(definition.blocks.is_empty());
+    }
 
-        let sanitized = sanitize_unsupported_report_definition(value);
-        assert!(sanitized.get("markdown").is_none());
-
-        let definition: ReportDefinition = serde_json::from_value(sanitized).unwrap();
-        assert_eq!(definition.blocks.len(), 1);
-        assert_eq!(definition.blocks[0].id, "items");
-        assert_eq!(definition.layout.len(), 1);
-
-        match &definition.layout[0] {
-            ReportLayoutNode::Block(node) => {
-                assert_eq!(node.block_id, "items");
-            }
-            other => panic!("expected block layout node, got {other:?}"),
-        }
+    #[test]
+    fn legacy_markdown_layout_node_in_view_flags_needs_re_authoring() {
+        let value = json!({
+            "definitionVersion": 1,
+            "layout": [],
+            "filters": [],
+            "blocks": [],
+            "views": [{
+                "id": "v1",
+                "title": "View",
+                "layout": [{"id": "intro", "type": "markdown", "content": "x"}]
+            }]
+        });
+        let (_, error) = parse_stored_definition(value, 1);
+        assert!(error.is_some());
     }
 
     #[test]
@@ -587,7 +717,7 @@ mod tests {
         let (definition, error) = parse_stored_definition(value, 1);
         assert!(error.is_some(), "expected re-authoring error to be set");
         assert!(definition.blocks.is_empty());
-        assert!(definition.layout.is_empty());
+        assert!(definition.layout.items.is_empty());
     }
 
     #[test]
@@ -608,7 +738,7 @@ mod tests {
     }
 
     #[test]
-    fn migrate_legacy_section_becomes_grid_with_columns_one() {
+    fn migrate_legacy_section_becomes_grid_inside_root_grid() {
         let value = json!({
             "definitionVersion": 1,
             "layout": [{
@@ -625,21 +755,25 @@ mod tests {
             ]
         });
         let migrated = migrate_legacy_layout_in_definition(value);
-        let layout = migrated
+        let root = migrated
             .get("layout")
-            .and_then(Value::as_array)
-            .expect("layout array");
-        assert_eq!(layout.len(), 1);
-        let node = &layout[0];
-        assert_eq!(node.get("type").and_then(Value::as_str), Some("grid"));
-        assert_eq!(node.get("title").and_then(Value::as_str), Some("Heading"));
-        assert_eq!(node.get("description").and_then(Value::as_str), Some("Sub"));
-        assert_eq!(node.get("columns").and_then(Value::as_i64), Some(1));
-        let items = node.get("items").and_then(Value::as_array).unwrap();
-        assert_eq!(items.len(), 1);
-        let child = items[0].get("child").unwrap();
-        assert_eq!(child.get("type").and_then(Value::as_str), Some("block"));
-        assert_eq!(child.get("blockId").and_then(Value::as_str), Some("b1"));
+            .and_then(Value::as_object)
+            .expect("root layout is now a grid object");
+        assert_eq!(root.get("id").and_then(Value::as_str), Some("root"));
+        assert!(
+            root.get("type").is_none(),
+            "root grid wire form is typeless"
+        );
+        let root_items = root.get("items").and_then(Value::as_array).unwrap();
+        assert_eq!(root_items.len(), 1);
+        let child = root_items[0].get("child").unwrap();
+        assert_eq!(child.get("type").and_then(Value::as_str), Some("grid"));
+        assert_eq!(child.get("title").and_then(Value::as_str), Some("Heading"));
+        assert_eq!(
+            child.get("description").and_then(Value::as_str),
+            Some("Sub")
+        );
+        assert_eq!(child.get("columns").and_then(Value::as_i64), Some(1));
     }
 
     #[test]
@@ -665,16 +799,20 @@ mod tests {
             "blocks": []
         });
         let migrated = migrate_legacy_layout_in_definition(value);
-        let layout = migrated.get("layout").and_then(Value::as_array).unwrap();
-        let node = &layout[0];
-        assert_eq!(node.get("type").and_then(Value::as_str), Some("grid"));
-        assert_eq!(node.get("columns").and_then(Value::as_i64), Some(2));
-        let widths = node
+        let root_items = migrated
+            .get("layout")
+            .and_then(|v| v.get("items"))
+            .and_then(Value::as_array)
+            .unwrap();
+        let cols = root_items[0].get("child").unwrap();
+        assert_eq!(cols.get("type").and_then(Value::as_str), Some("grid"));
+        assert_eq!(cols.get("columns").and_then(Value::as_i64), Some(2));
+        let widths = cols
             .get("columnWidths")
             .and_then(Value::as_array)
             .expect("columnWidths emitted when any column has explicit width");
         assert_eq!(widths.len(), 2);
-        let items = node.get("items").and_then(Value::as_array).unwrap();
+        let items = cols.get("items").and_then(Value::as_array).unwrap();
         assert_eq!(items.len(), 2);
         let left_child = items[0].get("child").unwrap();
         assert_eq!(left_child.get("type").and_then(Value::as_str), Some("grid"));
@@ -703,12 +841,16 @@ mod tests {
             "blocks": []
         });
         let migrated = migrate_legacy_layout_in_definition(value);
-        let layout = migrated.get("layout").and_then(Value::as_array).unwrap();
-        let node = &layout[0];
-        assert_eq!(node.get("type").and_then(Value::as_str), Some("grid"));
-        assert_eq!(node.get("columns").and_then(Value::as_i64), Some(3));
-        assert_eq!(node.get("title").and_then(Value::as_str), Some("KPIs"));
-        let items = node.get("items").and_then(Value::as_array).unwrap();
+        let root_items = migrated
+            .get("layout")
+            .and_then(|v| v.get("items"))
+            .and_then(Value::as_array)
+            .unwrap();
+        let mr = root_items[0].get("child").unwrap();
+        assert_eq!(mr.get("type").and_then(Value::as_str), Some("grid"));
+        assert_eq!(mr.get("columns").and_then(Value::as_i64), Some(3));
+        assert_eq!(mr.get("title").and_then(Value::as_str), Some("KPIs"));
+        let items = mr.get("items").and_then(Value::as_array).unwrap();
         assert_eq!(items.len(), 3);
         let ids: Vec<&str> = items
             .iter()
@@ -739,10 +881,14 @@ mod tests {
             "blocks": []
         });
         let migrated = migrate_legacy_layout_in_definition(value);
-        let items = migrated.get("layout").and_then(Value::as_array).unwrap()[0]
-            .get("items")
+        let inner_grid = migrated
+            .get("layout")
+            .and_then(|v| v.get("items"))
             .and_then(Value::as_array)
+            .unwrap()[0]
+            .get("child")
             .unwrap();
+        let items = inner_grid.get("items").and_then(Value::as_array).unwrap();
         assert_eq!(
             items[0]
                 .get("child")
@@ -762,6 +908,27 @@ mod tests {
         );
         // blockId is removed from the item itself (moved into child).
         assert!(items[0].get("blockId").is_none());
+    }
+
+    #[test]
+    fn migrate_bare_block_at_root_wraps_in_root_grid() {
+        // Pre-Phase-9 reports could carry a single bare `block` node at
+        // root. After migration, it must end up inside the new root
+        // grid's items.
+        let value = json!({
+            "definitionVersion": 1,
+            "layout": [
+                {"id": "n_intro", "type": "block", "blockId": "intro"}
+            ],
+            "blocks": [{"id": "intro", "type": "markdown", "markdown": {"content": "x"}}]
+        });
+        let migrated = migrate_legacy_layout_in_definition(value);
+        let root = migrated.get("layout").and_then(Value::as_object).unwrap();
+        let items = root.get("items").and_then(Value::as_array).unwrap();
+        assert_eq!(items.len(), 1);
+        let child = items[0].get("child").unwrap();
+        assert_eq!(child.get("type").and_then(Value::as_str), Some("block"));
+        assert_eq!(child.get("blockId").and_then(Value::as_str), Some("intro"));
     }
 
     #[test]
@@ -792,21 +959,23 @@ mod tests {
         });
         let (definition, error) = parse_stored_definition(value, 1);
         assert!(error.is_none(), "legacy layout should migrate cleanly");
-        assert_eq!(definition.layout.len(), 2);
-        match &definition.layout[0] {
+        // Root grid wraps the two legacy containers.
+        assert_eq!(definition.layout.id, "root");
+        assert_eq!(definition.layout.items.len(), 2);
+        match definition.layout.items[0].child.as_ref() {
             ReportLayoutNode::Grid(g) => {
                 assert_eq!(g.title.as_deref(), Some("Intro"));
                 assert_eq!(g.columns, Some(1));
                 assert_eq!(g.items.len(), 1);
             }
-            other => panic!("expected grid at root, got {other:?}"),
+            other => panic!("expected migrated section as grid, got {other:?}"),
         }
-        match &definition.layout[1] {
+        match definition.layout.items[1].child.as_ref() {
             ReportLayoutNode::Grid(g) => {
                 assert_eq!(g.columns, Some(2));
                 assert_eq!(g.items.len(), 2);
             }
-            other => panic!("expected grid at root, got {other:?}"),
+            other => panic!("expected migrated metric_row as grid, got {other:?}"),
         }
     }
 }

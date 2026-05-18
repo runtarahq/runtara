@@ -1,8 +1,15 @@
 {
   "definitionVersion": 1,
-  "layout": [
-    { "id": "n_intro", "type": "block", "blockId": "intro" }
-  ],
+  "layout": {
+    "id": "root",
+    "columns": 1,
+    "items": [
+      {
+        "id": "root_i0",
+        "child": { "id": "n_intro", "type": "block", "blockId": "intro" }
+      }
+    ]
+  },
   "filters": [],
   "blocks": [
     {

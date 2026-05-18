@@ -1303,42 +1303,19 @@ impl ReportService {
                 validate_block_interactions(block, &filter_ids, &view_ids)?;
                 continue;
             }
-            if block.source.kind == ReportSourceKind::WorkflowRuntime {
-                self.providers.get(block.source.kind).validate_block(
+            if matches!(
+                block.source.kind,
+                ReportSourceKind::WorkflowRuntime | ReportSourceKind::System
+            ) {
+                let provider = self.providers.get(block.source.kind);
+                provider.validate_block(
                     block,
                     &filter_ids,
                     &view_ids,
                     &block_condition_filter_defs,
                 )?;
-                let fields = providers::workflow_runtime::workflow_runtime_fields(
-                    providers::workflow_runtime::workflow_runtime_entity(block)?,
-                );
                 validate_report_markdown_placeholders(block, &markdown_placeholders, &|field| {
-                    markdown_output_field_known(field, &|candidate| {
-                        providers::workflow_runtime::workflow_runtime_row_field_known(
-                            &fields, candidate,
-                        )
-                    })
-                })?;
-                continue;
-            }
-            if block.source.kind == ReportSourceKind::System {
-                self.providers.get(block.source.kind).validate_block(
-                    block,
-                    &filter_ids,
-                    &view_ids,
-                    &block_condition_filter_defs,
-                )?;
-                let fields =
-                    providers::system::system_fields(providers::system::system_entity(block)?);
-                let aggregate_output_fields = aggregate_output_fields(block);
-                validate_report_markdown_placeholders(block, &markdown_placeholders, &|field| {
-                    markdown_output_field_known(field, &|candidate| match block.source.mode {
-                        ReportSourceMode::Filter => {
-                            providers::system::system_row_field_known(&fields, candidate)
-                        }
-                        ReportSourceMode::Aggregate => aggregate_output_fields.contains(candidate),
-                    })
+                    provider.markdown_field_known(block, field)
                 })?;
                 continue;
             }
@@ -1683,22 +1660,15 @@ impl ReportService {
         }
 
         let mut layout_node_ids = HashSet::new();
-        for (index, node) in definition.layout.iter().enumerate() {
-            let node_value = serde_json::to_value(node).map_err(|err| {
-                ReportServiceError::Validation(format!(
-                    "Could not serialize layout node {} for validation: {}",
-                    index, err
-                ))
-            })?;
-            validate_layout_node(
-                &node_value,
-                &format!("$.layout[{index}]"),
-                &block_ids,
-                &block_types,
-                &filter_ids,
-                &mut layout_node_ids,
-            )?;
-        }
+        let root_node_value = root_grid_as_layout_node_value(&definition.layout)?;
+        validate_layout_node(
+            &root_node_value,
+            "$.layout",
+            &block_ids,
+            &block_types,
+            &filter_ids,
+            &mut layout_node_ids,
+        )?;
 
         for (view_index, view) in definition.views.iter().enumerate() {
             for (breadcrumb_index, breadcrumb) in view.breadcrumb.iter().enumerate() {
@@ -1727,22 +1697,15 @@ impl ReportService {
             }
 
             let mut view_layout_node_ids = HashSet::new();
-            for (node_index, node) in view.layout.iter().enumerate() {
-                let node_value = serde_json::to_value(node).map_err(|err| {
-                    ReportServiceError::Validation(format!(
-                        "Could not serialize report view '{}' layout node {} for validation: {}",
-                        view.id, node_index, err
-                    ))
-                })?;
-                validate_layout_node(
-                    &node_value,
-                    &format!("$.views[{view_index}].layout[{node_index}]"),
-                    &block_ids,
-                    &block_types,
-                    &filter_ids,
-                    &mut view_layout_node_ids,
-                )?;
-            }
+            let view_root_value = root_grid_as_layout_node_value(&view.layout)?;
+            validate_layout_node(
+                &view_root_value,
+                &format!("$.views[{view_index}].layout"),
+                &block_ids,
+                &block_types,
+                &filter_ids,
+                &mut view_layout_node_ids,
+            )?;
         }
 
         self.validate_workflow_references(tenant_id, definition)
@@ -3712,6 +3675,27 @@ impl ReportService {
             "missing": missing,
         }))
     }
+}
+
+/// Serialize a root [`ReportGridLayoutNode`] into the same wire form as
+/// any nested layout node — `{type: "grid", id, columns, items, ...}` —
+/// so [`validate_layout_node`] can validate the root grid uniformly with
+/// the recursive item walker. The root grid's struct serialization omits
+/// the `type` tag (it's implicit at the typed layout field), so we
+/// re-inject it here.
+fn root_grid_as_layout_node_value(
+    grid: &runtara_report_dsl::ReportGridLayoutNode,
+) -> Result<Value, ReportServiceError> {
+    let mut value = serde_json::to_value(grid).map_err(|err| {
+        ReportServiceError::Validation(format!(
+            "Could not serialize root layout grid for validation: {}",
+            err
+        ))
+    })?;
+    if let Some(object) = value.as_object_mut() {
+        object.insert("type".into(), Value::String("grid".into()));
+    }
+    Ok(value)
 }
 
 fn validate_layout_node(
@@ -7599,7 +7583,7 @@ mod tests {
     ) -> ReportDefinition {
         ReportDefinition {
             definition_version: 1,
-            layout: vec![],
+            layout: runtara_report_dsl::default_root_grid(),
             views: vec![],
             filters,
             datasets,
@@ -7874,7 +7858,7 @@ mod tests {
             parent_view_id: parent_view_id.map(str::to_string),
             clear_filters_on_back: vec![],
             breadcrumb: vec![],
-            layout: vec![],
+            layout: runtara_report_dsl::default_root_grid(),
         }
     }
 
@@ -8485,7 +8469,7 @@ mod tests {
         let dataset = test_dataset();
         let definition = ReportDefinition {
             definition_version: 1,
-            layout: vec![],
+            layout: runtara_report_dsl::default_root_grid(),
             views: vec![],
             filters: vec![ReportFilterDefinition {
                 id: "vendor".to_string(),
@@ -8539,7 +8523,7 @@ mod tests {
         let err = build_dataset_condition(
             &ReportDefinition {
                 definition_version: 1,
-                layout: vec![],
+                layout: runtara_report_dsl::default_root_grid(),
                 views: vec![],
                 filters: vec![],
                 datasets: vec![dataset.clone()],
@@ -8585,7 +8569,7 @@ mod tests {
         });
         let definition = ReportDefinition {
             definition_version: 1,
-            layout: vec![],
+            layout: runtara_report_dsl::default_root_grid(),
             views: vec![],
             filters: vec![],
             datasets: vec![dataset],
@@ -9056,7 +9040,7 @@ mod tests {
         case_filter.strict_when_referenced = true;
         let definition = ReportDefinition {
             definition_version: 1,
-            layout: vec![],
+            layout: runtara_report_dsl::default_root_grid(),
             views: vec![],
             filters: vec![case_filter],
             datasets: vec![],

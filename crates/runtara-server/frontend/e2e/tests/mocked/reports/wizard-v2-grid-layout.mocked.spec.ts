@@ -1,8 +1,9 @@
-// Phase 9 acceptance E2E: drive the grid-only layout editor through a
+// Phase 9/10 acceptance E2E: drive the root-grid layout editor through a
 // realistic author flow — open an existing empty report in edit mode,
-// add a 2-column grid, add a block inside the grid, save, assert the
-// persisted definition contains exactly one top-level grid with one
-// block child plus a matching block on the blocks array.
+// drop a block into the root grid, save, assert the persisted definition
+// has the block as an item of the root grid + a matching block on the
+// blocks array. Phase 10 made the root layout a single mandatory grid;
+// authors no longer add floating siblings at the report root.
 import type { Page, Route } from '@playwright/test';
 import {
   buildObjectModelConnection,
@@ -69,7 +70,7 @@ function emptyReport(): ReportDto {
     definitionVersion: 1,
     definition: {
       definitionVersion: 1,
-      layout: [],
+      layout: { id: 'root', columns: 1, rows: 1, items: [] },
       filters: [],
       blocks: [],
     },
@@ -116,8 +117,6 @@ async function setupGridEditing(
     errors: [],
     warnings: [],
   });
-  // Preview API is debounced 400ms; fulfill with an empty preview so the
-  // editor's BlockHostInEdit renders the placeholder rather than hanging.
   await mockApi.raw(page, runtimeUrl('reports/preview'), {
     success: true,
     report: { id: REPORT_ID, definitionVersion: 1 },
@@ -133,7 +132,7 @@ async function setupGridEditing(
 }
 
 test.describe('wizard v2 grid layout author flow (mocked)', () => {
-  test('Layout section header renders + has the canonical grid-only copy', async ({
+  test('root grid is always visible — even on a brand-new empty report', async ({
     page,
     mockApi,
   }) => {
@@ -144,10 +143,15 @@ test.describe('wizard v2 grid layout author flow (mocked)', () => {
     await expect(
       page.getByRole('heading', { name: 'Layout', level: 2 })
     ).toBeVisible();
-    await expect(page.getByText(/everything is a grid/)).toBeVisible();
+    // Root grid header label reads "Report layout · 1×1" for empty reports.
+    await expect(page.getByText(/Report layout · 1×1/)).toBeVisible();
+    // No "Remove grid" button on the root grid — it cannot be removed.
+    await expect(
+      page.getByRole('button', { name: 'Remove grid' })
+    ).toHaveCount(0);
   });
 
-  test('add a 2-column grid + one block inside → save persists the structure', async ({
+  test('add a block into the root grid → save persists it as a root grid item', async ({
     page,
     mockApi,
   }) => {
@@ -156,16 +160,7 @@ test.describe('wizard v2 grid layout author flow (mocked)', () => {
       mockApi as unknown as import('../../../fixtures/mock.fixture').MockApi
     );
 
-    // Empty state — root-level "Add grid" dropdown.
-    await page
-      .getByRole('button', { name: /^Add grid$/i })
-      .first()
-      .click();
-    await page.getByText('2 equal columns').click();
-
-    // The new grid container now shows up with its own "Add block".
-    // The grid-scoped affordance renders before the root-level dock, so
-    // `.first()` reliably targets it.
+    // Click an empty cell's "+ Add block" button.
     await page
       .getByRole('button', { name: /^Add block$/i })
       .first()
@@ -181,26 +176,20 @@ test.describe('wizard v2 grid layout author flow (mocked)', () => {
     const saved = getSaved()!;
     const definition: ReportDefinition = saved.definition;
 
-    // Exactly one top-level grid node.
-    expect(definition.layout).toHaveLength(1);
-    const root = definition.layout?.[0];
-    expect(root?.type).toBe('grid');
-    if (root?.type !== 'grid') return;
-    expect(root.columns).toBe(2);
-    // One block sitting inside the grid.
-    expect(root.items).toHaveLength(1);
-    const item = root.items[0];
-    expect(item.child.type).toBe('block');
-    if (item.child.type !== 'block') return;
-    // The block reference resolves to a real block on the blocks array.
+    // Root grid present, with a single item pointing at the new block.
+    expect(definition.layout.id).toBe('root');
+    expect(definition.layout.items).toHaveLength(1);
+    const child = definition.layout.items[0].child;
+    expect(child.type).toBe('block');
+    if (child.type !== 'block') return;
     const matchingBlock = definition.blocks.find(
-      (b) => b.id === item.child.blockId
+      (b) => b.id === child.blockId
     );
     expect(matchingBlock).toBeDefined();
     expect(matchingBlock?.type).toBe('markdown');
   });
 
-  test('inline columns/rows steppers grow the grid skeleton + persist on save', async ({
+  test('inline columns/rows steppers grow the root grid skeleton + persist on save', async ({
     page,
     mockApi,
   }) => {
@@ -209,28 +198,17 @@ test.describe('wizard v2 grid layout author flow (mocked)', () => {
       mockApi as unknown as import('../../../fixtures/mock.fixture').MockApi
     );
 
-    // Start from a fresh 1-column grid.
-    await page
-      .getByRole('button', { name: /^Add grid$/i })
-      .first()
-      .click();
-    await page.getByText('Section (1 column)').click();
-
-    // Visible "Grid · 1×1" label confirms the skeleton renders even for
-    // an empty grid.
-    await expect(page.getByText(/Grid · 1×1/)).toBeVisible();
-
-    // Bump columns to 3 via the inline stepper.
+    // Bump columns to 3.
     await page.getByLabel('Add columns').click();
     await page.getByLabel('Add columns').click();
-    await expect(page.getByText(/Grid · 3×1/)).toBeVisible();
+    await expect(page.getByText(/Report layout · 3×1/)).toBeVisible();
 
     // Bump rows to 2.
     await page.getByLabel('Add rows').click();
-    await expect(page.getByText(/Grid · 3×2/)).toBeVisible();
+    await expect(page.getByText(/Report layout · 3×2/)).toBeVisible();
 
-    // 6 empty cells should be visible (3 cols × 2 rows, no items yet).
-    const emptyCells = page.getByTestId(/^empty-cell-/);
+    // 6 empty cells visible (3 cols × 2 rows, no items yet) in the root grid.
+    const emptyCells = page.getByTestId('empty-cell-root');
     await expect(emptyCells).toHaveCount(6);
 
     // Save.
@@ -240,10 +218,8 @@ test.describe('wizard v2 grid layout author flow (mocked)', () => {
     }).toPass({ timeout: 5000 });
 
     const saved = getSaved()!;
-    const grid = saved.definition.layout?.[0];
-    expect(grid?.type).toBe('grid');
-    if (grid?.type !== 'grid') return;
-    expect(grid.columns).toBe(3);
-    expect(grid.rows).toBe(2);
+    expect(saved.definition.layout.id).toBe('root');
+    expect(saved.definition.layout.columns).toBe(3);
+    expect(saved.definition.layout.rows).toBe(2);
   });
 });

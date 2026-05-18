@@ -10,7 +10,7 @@ import { Plus, Trash2 } from 'lucide-react';
 import { ReportGridLayoutNode } from '../../types';
 
 interface GridSettingsPanelProps {
-  grid: ReportGridLayoutNode & { type: 'grid' };
+  grid: ReportGridLayoutNode;
   onChange: (
     updater: (grid: ReportGridLayoutNode) => ReportGridLayoutNode
   ) => void;
