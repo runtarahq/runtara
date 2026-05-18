@@ -62,11 +62,21 @@ describe('changeBlockType', () => {
     expect(after).toBe(before);
   });
 
-  it('preserves id, title, and source across a simple type swap', () => {
+  it('preserves id, title, and source.schema across a simple type swap', () => {
     const before = tableBlock();
     const after = changeBlockType(before, 'chart');
     expect(after.id).toBe(before.id);
     expect(after.title).toBe(before.title);
+    // Source schema + kind are preserved across type swap; switching to
+    // chart flips mode to aggregate and seeds a default aggregate (the
+    // server requires at least one for chart/metric renders).
+    expect(after.source.schema).toBe(before.source.schema);
+    expect(after.source.kind).toBe(before.source.kind);
+  });
+
+  it('switching markdown → table leaves source untouched (no aggregate seeding)', () => {
+    const before = markdownBlock();
+    const after = changeBlockType(before, 'table');
     expect(after.source).toEqual(before.source);
   });
 
@@ -85,7 +95,27 @@ describe('changeBlockType', () => {
       metric?: { valueField?: string };
     };
     expect(after.type).toBe('metric');
-    expect(after.metric).toEqual({ valueField: '' });
+    // Phase 11 follow-up: switching to metric seeds a `count(*)`
+    // aggregate on the source and wires metric.valueField to it so
+    // the block renders out of the box.
+    expect(after.metric).toEqual({ valueField: 'value' });
+    expect(after.source.mode).toBe('aggregate');
+    expect(after.source.aggregates).toEqual([
+      { alias: 'value', op: 'count' },
+    ]);
+  });
+
+  it('switching to chart seeds a default aggregate + series binding', () => {
+    const before = markdownBlock();
+    const after = changeBlockType(before, 'chart') as ReportBlockDefinition & {
+      chart?: { series?: Array<{ field: string }> };
+    };
+    expect(after.type).toBe('chart');
+    expect(after.source.mode).toBe('aggregate');
+    expect(after.source.aggregates).toEqual([
+      { alias: 'value', op: 'count' },
+    ]);
+    expect(after.chart?.series).toEqual([{ field: 'value' }]);
   });
 
   it('switching TO actions resets source to workflow_runtime', () => {

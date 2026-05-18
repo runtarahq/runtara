@@ -8,7 +8,8 @@ import {
   SelectValue,
 } from '@/shared/components/ui/select';
 import { Schema } from '@/generated/RuntaraRuntimeApi';
-import { ReportBlockDefinition } from '../../../types';
+import { ReportBlockDefinition, ReportSource } from '../../../types';
+import { SourceAggregatesEditor } from './SourceAggregatesEditor';
 
 const PLAIN = '__plain__';
 const FORMATS = [
@@ -31,12 +32,23 @@ export function MetricBlockEditor({
   onChange,
 }: MetricBlockEditorProps) {
   const metric = block.metric ?? { valueField: '' };
-  const schemaName = block.source?.schema;
-  const schema = schemas.find((s) => s.name === schemaName);
-  const fields = schema?.columns.map((c) => c.name) ?? [];
+  // Phase 11 follow-up: metric.valueField references a source aggregate
+  // alias. Expose the aggregates editor inline so the user can wire
+  // them up without ever editing raw JSON.
+  const aggregateAliases = (block.source?.aggregates ?? []).map(
+    (agg) => agg.alias
+  );
+
+  const updateSource = (next: ReportSource) =>
+    onChange({ ...block, source: next });
 
   return (
     <div className="grid gap-3">
+      <SourceAggregatesEditor
+        source={block.source}
+        schemas={schemas}
+        onChange={updateSource}
+      />
       <div className="grid gap-1.5">
         <Label className="text-xs">Value field</Label>
         <Select
@@ -46,19 +58,24 @@ export function MetricBlockEditor({
           }
         >
           <SelectTrigger className="h-9">
-            <SelectValue placeholder="Pick a field" />
+            <SelectValue placeholder="Pick an aggregate alias" />
           </SelectTrigger>
           <SelectContent>
-            {metric.valueField && !fields.includes(metric.valueField) ? (
+            {metric.valueField && !aggregateAliases.includes(metric.valueField) ? (
               <SelectItem disabled value={metric.valueField}>
                 {metric.valueField}
               </SelectItem>
             ) : null}
-            {fields.map((field) => (
+            {aggregateAliases.map((field) => (
               <SelectItem key={field} value={field}>
                 {field}
               </SelectItem>
             ))}
+            {aggregateAliases.length === 0 ? (
+              <SelectItem disabled value="__no_aggregates__">
+                Add a source aggregate first
+              </SelectItem>
+            ) : null}
           </SelectContent>
         </Select>
       </div>
