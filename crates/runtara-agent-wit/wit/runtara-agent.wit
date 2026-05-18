@@ -1,0 +1,100 @@
+// Canonical WIT contract for runtara agent components.
+// See docs/wasm-components-migration-plan.md § 4 for design rationale.
+
+package runtara:agent@0.1.0;
+
+interface types {
+    // Mirrors RawConnection (crates/runtara-agents/src/connections.rs).
+    // parameters / rate-limit-config stay as JSON-encoded strings because
+    // integration shapes vary wildly; freezing them in WIT would force a
+    // flag day per connector.
+    record connection-info {
+        connection-id: string,
+        integration-id: string,
+        connection-subtype: option<string>,
+        parameters: string,                  // JSON object
+        rate-limit-config: option<string>,   // JSON object
+    }
+
+    // Mirrors today's AgentError envelope and the JSON shape produced by the
+    // executor wrapper. category / severity are strings (not WIT enums) so
+    // adding a variant is a Rust-side minor bump, not a WIT major bump.
+    record error-info {
+        code: string,
+        message: string,
+        category: string,            // "transient" | "permanent"
+        severity: string,            // "warning" | "error" | "critical"
+        retryable: bool,
+        retry-after-ms: option<u64>,
+        attributes: option<string>,  // JSON object
+    }
+
+    record known-error {
+        code: string,
+        description: string,
+        kind: string,                // "transient" | "permanent"
+        attributes: list<string>,
+    }
+
+    record compensation-hint {
+        capability-id: string,
+        description: option<string>,
+    }
+
+    // Mirrors AgentModuleConfig. One record per component image — not
+    // duplicated into every capability.
+    record module-info {
+        id: string,
+        display-name: string,
+        description: string,
+        has-side-effects: bool,
+        supports-connections: bool,
+        integration-ids: list<string>,
+        secure: bool,
+    }
+
+    record capability-info {
+        id: string,
+        function-name: string,
+        display-name: option<string>,
+        description: option<string>,
+        has-side-effects: bool,
+        is-idempotent: bool,
+        rate-limited: bool,
+        tags: list<string>,
+        input-schema: string,        // JSON Schema document
+        output-schema: string,       // JSON Schema document
+        known-errors: list<known-error>,
+        compensation-hint: option<compensation-hint>,
+    }
+}
+
+interface capabilities {
+    use types.{capability-info, module-info, connection-info, error-info};
+
+    get-module-info:   func() -> module-info;
+    list-capabilities: func() -> list<capability-info>;
+    invoke: func(
+        capability-id: string,
+        input: string,                       // JSON-encoded value
+        connection: option<connection-info>, // out-of-band, not inside input
+    ) -> result<string, error-info>;         // JSON-encoded value on success
+}
+
+world agent {
+    // Outbound HTTP — the only side-effect channel. Agents POST envelopes to
+    // RUNTARA_HTTP_PROXY_URL; the host proxy injects credentials.
+    import wasi:http/outgoing-handler@0.2.3;
+    import wasi:http/types@0.2.3;
+    import wasi:io/streams@0.2.3;
+    import wasi:io/error@0.2.3;
+
+    // Clocks, random, stderr, env-vars (RUNTARA_HTTP_PROXY_URL et al.).
+    import wasi:clocks/wall-clock@0.2.3;
+    import wasi:clocks/monotonic-clock@0.2.3;
+    import wasi:random/random@0.2.3;
+    import wasi:cli/stderr@0.2.3;
+    import wasi:cli/environment@0.2.3;
+
+    export capabilities;
+}

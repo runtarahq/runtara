@@ -1,0 +1,42 @@
+[package]
+name = "runtara-component-host"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Embedded wasmtime host for loading and invoking runtara agent components"
+keywords = ["wasm", "component-model", "wasmtime", "agent"]
+categories = ["wasm"]
+
+[dependencies]
+runtara-agent-wit = { path = "../runtara-agent-wit" }
+
+# Embedded wasmtime engine + WASI Preview 2 support.
+# wasmtime crate version is independent of the wasmtime CLI version pinned in
+# scripts/build-bundle.sh — the CLI is a separate process used by WasmRunner
+# and goes away in Phase 6.
+wasmtime = { version = "44", default-features = false, features = [
+    "std",
+    "anyhow",
+    "runtime",
+    "component-model",
+    "async",
+    "cranelift",
+    "parallel-compilation",
+    "backtrace",
+    "addr2line",
+    "demangle",
+] }
+wasmtime-wasi = "44"
+wasmtime-wasi-http = "44"
+
+# Async runtime (for component instantiation + outgoing http).
+tokio = { version = "1", features = ["sync", "fs", "rt", "macros"] }
+
+# Plumbing
+anyhow = "1"
+tracing = "0.1"
+serde = { workspace = true }
+serde_json = { workspace = true }
+http = "1"
+hyper = "1"
