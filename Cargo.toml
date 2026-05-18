@@ -45,6 +45,9 @@ members = [
     "crates/runtara-agent-bedrock",
     "crates/runtara-agent-object-model",
     "crates/runtara-agent-s3-storage",
+    "crates/runtara-agent-azure-blob-storage",
+    "crates/runtara-agent-sharepoint",
+    "crates/runtara-agent-stripe",
 ]
 default-members = ["crates/runtara-core"]
 
