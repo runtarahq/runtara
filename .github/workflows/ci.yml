@@ -279,6 +279,15 @@ jobs:
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
+      valkey:
+        image: valkey/valkey:8-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "valkey-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
 
     steps:
       - uses: actions/checkout@v4
@@ -298,13 +307,17 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ github.sha }}
 
       - name: Run runtara-server tests
-        # TEST_RUNTARA_SERVER_DATABASE_URL opts the integration tests in
-        # crates/runtara-server/tests/*.rs (e.g. invocation_cleanup_test.rs)
-        # into running against a real Postgres. Without it, skip_if_no_db!()
-        # makes them silently no-op — which previously hid the eager-pass
-        # cleanup regression that motivated this setup.
+        # TEST_RUNTARA_SERVER_DATABASE_URL opts the Postgres-dependent
+        # integration tests (e.g. invocation_cleanup_test.rs) into running
+        # against a real DB. VALKEY_HOST does the same for the Redis
+        # isolation regression tests (redis_isolation.rs, guarding the
+        # BLPOP head-of-line fix from commit 8c43211). Both env-var
+        # skip cleanly when unset, so a developer running `cargo test`
+        # without infra sees no-ops, not failures.
         env:
           TEST_RUNTARA_SERVER_DATABASE_URL: postgres://postgres:postgres@localhost:5432/runtara_test
+          VALKEY_HOST: localhost
+          VALKEY_PORT: "6379"
         run: cargo test -p runtara-server -- --test-threads=1
 
   test-environment:

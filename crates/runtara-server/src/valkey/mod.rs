@@ -13,15 +13,38 @@ use tokio::sync::OnceCell;
 /// Built lazily on first use (or eagerly at server startup via
 /// [`init_shared_manager`]) and shared across every subsystem that talks
 /// to Valkey. The manager itself wraps an `Arc`, so cloning is cheap and
-/// every clone reuses the same multiplexed connection pool — no new TCP
-/// per request.
+/// every clone reuses the same multiplexed connection — no new TCP per
+/// request.
 ///
 /// The URL is captured at first initialization. The server runs against a
 /// single Valkey instance whose URL is fixed for the process lifetime, so
 /// caching a single manager (rather than keying by URL) is intentional.
+///
+/// # Non-blocking commands only
+///
+/// `ConnectionManager` is a *single multiplexed connection*. A blocking
+/// command issued through this manager parks that connection and
+/// head-of-line blocks every other caller until it returns. Callers that
+/// issue any of the following commands MUST use
+/// [`dedicated_manager_for_blocking_consumer`] instead:
+///
+/// - `BLPOP`, `BRPOP`, `BRPOPLPUSH`, `BLMOVE`
+/// - `BZPOPMIN`, `BZPOPMAX`
+/// - `XREAD ... BLOCK`, `XREADGROUP ... BLOCK`
+/// - `SUBSCRIBE`, `PSUBSCRIBE`
+/// - `WAIT`
+/// - any long-running Lua / `EVAL` script
+///
+/// Production incident on 2026-05-13 (commit `8c43211`): the compilation
+/// worker's `BLPOP` was on this shared manager and stalled proxy
+/// rate-limit checks to 3–6 s. Do not re-introduce that pattern.
 static SHARED_MANAGER: OnceCell<ConnectionManager> = OnceCell::const_new();
 
 /// Return the shared connection manager, building it on first call.
+///
+/// **Use only for non-blocking commands.** See the warning on
+/// [`SHARED_MANAGER`]. For blocking consumers call
+/// [`dedicated_manager_for_blocking_consumer`].
 ///
 /// Subsequent calls are O(1) clones. Returns an error only if Redis is
 /// unreachable on the very first call (subsequent reconnects are handled
@@ -40,6 +63,30 @@ pub async fn get_or_create_manager(redis_url: &str) -> Result<ConnectionManager,
 /// times; only the first call performs the connection.
 pub async fn init_shared_manager(redis_url: &str) -> Result<ConnectionManager, RedisError> {
     get_or_create_manager(redis_url).await
+}
+
+/// Build a fresh, isolated `ConnectionManager` for a consumer that issues
+/// blocking Redis commands (`BLPOP`, `XREADGROUP ... BLOCK`, `SUBSCRIBE`,
+/// …).
+///
+/// Every call returns an independent manager backed by its own connection.
+/// The point is isolation — do NOT share the returned handle with the
+/// shared manager's callers, or you negate the benefit. `consumer_name`
+/// is used for log/trace context only.
+///
+/// A grep for this function name enumerates every blocking Redis consumer
+/// in the codebase, which is the second purpose of routing through it.
+pub async fn dedicated_manager_for_blocking_consumer(
+    redis_url: &str,
+    consumer_name: &str,
+) -> Result<ConnectionManager, RedisError> {
+    let client = redis::Client::open(redis_url)?;
+    let manager = ConnectionManager::new(client).await?;
+    tracing::debug!(
+        consumer = consumer_name,
+        "Opened dedicated Redis ConnectionManager for blocking consumer"
+    );
+    Ok(manager)
 }
 
 /// Valkey configuration loaded from environment variables
