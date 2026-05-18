@@ -18,6 +18,7 @@
 //!
 //! See docs/wasm-components-migration-plan.md § 6.
 
+pub mod bindings;
 pub mod engine;
 pub mod host_state;
 

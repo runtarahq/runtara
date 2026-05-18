@@ -81,20 +81,18 @@ interface capabilities {
     ) -> result<string, error-info>;         // JSON-encoded value on success
 }
 
+// The `agent` world declares only the runtara-specific export surface.
+// WASI imports (wasi:http for outbound, wasi:cli/environment for env vars,
+// wasi:clocks, wasi:random, wasi:io, wasi:cli/stderr) are added by the
+// guest agent crate's own world via `include wasi:cli/command@0.2.0`.
+//
+// The host satisfies them at link time using add_to_linker_async from
+// wasmtime-wasi and wasmtime-wasi-http — independent of this WIT.
+//
+// Keeping wasi imports out of this shared world also dodges the
+// LinkOptions plumbing that wasmtime's bindgen otherwise requires for
+// transitively-imported unstable WASI features (wasi:sockets/network-error,
+// wasi:clocks/timezone, wasi:cli/exit-with-code).
 world agent {
-    // Outbound HTTP — the only side-effect channel. Agents POST envelopes to
-    // RUNTARA_HTTP_PROXY_URL; the host proxy injects credentials.
-    import wasi:http/outgoing-handler@0.2.3;
-    import wasi:http/types@0.2.3;
-    import wasi:io/streams@0.2.3;
-    import wasi:io/error@0.2.3;
-
-    // Clocks, random, stderr, env-vars (RUNTARA_HTTP_PROXY_URL et al.).
-    import wasi:clocks/wall-clock@0.2.3;
-    import wasi:clocks/monotonic-clock@0.2.3;
-    import wasi:random/random@0.2.3;
-    import wasi:cli/stderr@0.2.3;
-    import wasi:cli/environment@0.2.3;
-
     export capabilities;
 }
