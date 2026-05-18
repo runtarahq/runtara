@@ -423,50 +423,6 @@ pub fn execute_capability(
             (runtara_agents::integrations::bedrock::__CAPABILITY_EXECUTOR_VISION_TO_TEXT.execute)(input)
         }
 
-        // --- commerce ---
-        ("commerce", "create-product") => {
-            (runtara_agents::integrations::commerce::__CAPABILITY_EXECUTOR_CREATE_PRODUCT.execute)(
-                input,
-            )
-        }
-        ("commerce", "delete-product") => {
-            (runtara_agents::integrations::commerce::__CAPABILITY_EXECUTOR_DELETE_PRODUCT.execute)(
-                input,
-            )
-        }
-        ("commerce", "get-inventory") => {
-            (runtara_agents::integrations::commerce::__CAPABILITY_EXECUTOR_GET_INVENTORY.execute)(
-                input,
-            )
-        }
-        ("commerce", "get-locations") => {
-            (runtara_agents::integrations::commerce::__CAPABILITY_EXECUTOR_GET_LOCATIONS.execute)(
-                input,
-            )
-        }
-        ("commerce", "get-order") => {
-            (runtara_agents::integrations::commerce::__CAPABILITY_EXECUTOR_GET_ORDER.execute)(input)
-        }
-        ("commerce", "get-orders") => {
-            (runtara_agents::integrations::commerce::__CAPABILITY_EXECUTOR_GET_ORDERS.execute)(input)
-        }
-        ("commerce", "get-product") => {
-            (runtara_agents::integrations::commerce::__CAPABILITY_EXECUTOR_GET_PRODUCT.execute)(input)
-        }
-        ("commerce", "get-products") => {
-            (runtara_agents::integrations::commerce::__CAPABILITY_EXECUTOR_GET_PRODUCTS.execute)(input)
-        }
-        ("commerce", "update-inventory") => {
-            (runtara_agents::integrations::commerce::__CAPABILITY_EXECUTOR_UPDATE_INVENTORY.execute)(
-                input,
-            )
-        }
-        ("commerce", "update-product") => {
-            (runtara_agents::integrations::commerce::__CAPABILITY_EXECUTOR_UPDATE_PRODUCT.execute)(
-                input,
-            )
-        }
-
         // --- hubspot ---
         ("hubspot", "create-association") => {
             (runtara_agents::integrations::hubspot::__CAPABILITY_EXECUTOR_CREATE_ASSOCIATION.execute)(input)

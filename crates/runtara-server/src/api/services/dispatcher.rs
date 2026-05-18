@@ -185,7 +185,9 @@ pub const DISPATCHER_WORKFLOW_ID: &str = "__agent_dispatcher__";
 /// v31: Make sharepoint_search query optional (empty = list everything via Graph's q='' semantic)
 /// v32: Add azure_blob_storage integration agent (Shared Key auth + container/blob CRUD)
 /// v33: Add storage_generate_presigned_url capability to s3_storage and azure_blob_storage
-pub const DISPATCHER_VERSION: u32 = 33;
+/// v34: Remove legacy file agent (Phase 2.1 of WASM components migration)
+/// v35: Remove legacy commerce agent (use shopify directly)
+pub const DISPATCHER_VERSION: u32 = 35;
 
 /// Service for managing the agent dispatcher binary
 pub struct DispatcherService {

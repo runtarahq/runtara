@@ -406,7 +406,6 @@ fn generate_specs(out_dir: &Path) {
     use runtara_agents as _;
     use runtara_agents::integrations::ai_tools as _;
     use runtara_agents::integrations::bedrock as _;
-    use runtara_agents::integrations::commerce as _;
     use runtara_agents::integrations::object_model as _;
     use runtara_agents::integrations::openai as _;
     use runtara_agents::integrations::shopify as _;

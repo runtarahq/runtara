@@ -225,76 +225,6 @@ pub static CAPABILITY_REGISTRATIONS: &[CapabilityRegistration] = &[
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
-        meta: &crate::integrations::commerce::__CAPABILITY_META_GET_PRODUCTS,
-        input_type: &crate::integrations::commerce::__INPUT_META_CommerceGetProductsInput,
-        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
-        executor: &crate::integrations::commerce::__CAPABILITY_EXECUTOR_GET_PRODUCTS,
-    },
-    #[cfg(feature = "integrations")]
-    CapabilityRegistration {
-        meta: &crate::integrations::commerce::__CAPABILITY_META_GET_LOCATIONS,
-        input_type: &crate::integrations::commerce::__INPUT_META_CommerceGetLocationsInput,
-        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
-        executor: &crate::integrations::commerce::__CAPABILITY_EXECUTOR_GET_LOCATIONS,
-    },
-    #[cfg(feature = "integrations")]
-    CapabilityRegistration {
-        meta: &crate::integrations::commerce::__CAPABILITY_META_GET_PRODUCT,
-        input_type: &crate::integrations::commerce::__INPUT_META_CommerceGetProductInput,
-        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
-        executor: &crate::integrations::commerce::__CAPABILITY_EXECUTOR_GET_PRODUCT,
-    },
-    #[cfg(feature = "integrations")]
-    CapabilityRegistration {
-        meta: &crate::integrations::commerce::__CAPABILITY_META_CREATE_PRODUCT,
-        input_type: &crate::integrations::commerce::__INPUT_META_CommerceCreateProductInput,
-        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
-        executor: &crate::integrations::commerce::__CAPABILITY_EXECUTOR_CREATE_PRODUCT,
-    },
-    #[cfg(feature = "integrations")]
-    CapabilityRegistration {
-        meta: &crate::integrations::commerce::__CAPABILITY_META_UPDATE_PRODUCT,
-        input_type: &crate::integrations::commerce::__INPUT_META_CommerceUpdateProductInput,
-        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
-        executor: &crate::integrations::commerce::__CAPABILITY_EXECUTOR_UPDATE_PRODUCT,
-    },
-    #[cfg(feature = "integrations")]
-    CapabilityRegistration {
-        meta: &crate::integrations::commerce::__CAPABILITY_META_DELETE_PRODUCT,
-        input_type: &crate::integrations::commerce::__INPUT_META_CommerceDeleteProductInput,
-        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
-        executor: &crate::integrations::commerce::__CAPABILITY_EXECUTOR_DELETE_PRODUCT,
-    },
-    #[cfg(feature = "integrations")]
-    CapabilityRegistration {
-        meta: &crate::integrations::commerce::__CAPABILITY_META_GET_INVENTORY,
-        input_type: &crate::integrations::commerce::__INPUT_META_CommerceGetInventoryInput,
-        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
-        executor: &crate::integrations::commerce::__CAPABILITY_EXECUTOR_GET_INVENTORY,
-    },
-    #[cfg(feature = "integrations")]
-    CapabilityRegistration {
-        meta: &crate::integrations::commerce::__CAPABILITY_META_UPDATE_INVENTORY,
-        input_type: &crate::integrations::commerce::__INPUT_META_CommerceUpdateInventoryInput,
-        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
-        executor: &crate::integrations::commerce::__CAPABILITY_EXECUTOR_UPDATE_INVENTORY,
-    },
-    #[cfg(feature = "integrations")]
-    CapabilityRegistration {
-        meta: &crate::integrations::commerce::__CAPABILITY_META_GET_ORDERS,
-        input_type: &crate::integrations::commerce::__INPUT_META_CommerceGetOrdersInput,
-        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
-        executor: &crate::integrations::commerce::__CAPABILITY_EXECUTOR_GET_ORDERS,
-    },
-    #[cfg(feature = "integrations")]
-    CapabilityRegistration {
-        meta: &crate::integrations::commerce::__CAPABILITY_META_GET_ORDER,
-        input_type: &crate::integrations::commerce::__INPUT_META_CommerceGetOrderInput,
-        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
-        executor: &crate::integrations::commerce::__CAPABILITY_EXECUTOR_GET_ORDER,
-    },
-    #[cfg(feature = "integrations")]
-    CapabilityRegistration {
         meta: &crate::integrations::hubspot::__CAPABILITY_META_LIST_BUSINESS_UNITS,
         input_type: &crate::integrations::hubspot::__INPUT_META_ListBusinessUnitsInput,
         #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
@@ -1973,26 +1903,6 @@ pub static INPUT_TYPES: &[&InputTypeMeta] = &[
     #[cfg(feature = "integrations")]
     &crate::integrations::bedrock::__INPUT_META_BedrockListModelsInput,
     #[cfg(feature = "integrations")]
-    &crate::integrations::commerce::__INPUT_META_CommerceGetProductsInput,
-    #[cfg(feature = "integrations")]
-    &crate::integrations::commerce::__INPUT_META_CommerceGetLocationsInput,
-    #[cfg(feature = "integrations")]
-    &crate::integrations::commerce::__INPUT_META_CommerceGetProductInput,
-    #[cfg(feature = "integrations")]
-    &crate::integrations::commerce::__INPUT_META_CommerceCreateProductInput,
-    #[cfg(feature = "integrations")]
-    &crate::integrations::commerce::__INPUT_META_CommerceUpdateProductInput,
-    #[cfg(feature = "integrations")]
-    &crate::integrations::commerce::__INPUT_META_CommerceDeleteProductInput,
-    #[cfg(feature = "integrations")]
-    &crate::integrations::commerce::__INPUT_META_CommerceGetInventoryInput,
-    #[cfg(feature = "integrations")]
-    &crate::integrations::commerce::__INPUT_META_CommerceUpdateInventoryInput,
-    #[cfg(feature = "integrations")]
-    &crate::integrations::commerce::__INPUT_META_CommerceGetOrdersInput,
-    #[cfg(feature = "integrations")]
-    &crate::integrations::commerce::__INPUT_META_CommerceGetOrderInput,
-    #[cfg(feature = "integrations")]
     &crate::integrations::hubspot::__INPUT_META_ListBusinessUnitsInput,
     #[cfg(feature = "integrations")]
     &crate::integrations::hubspot::__INPUT_META_ListObjectPropertiesInput,
@@ -2447,22 +2357,6 @@ pub static OUTPUT_TYPES: &[&OutputTypeMeta] = &[
     #[cfg(feature = "integrations")]
     &crate::integrations::bedrock::__OUTPUT_META_BedrockListModelsOutput,
     #[cfg(feature = "integrations")]
-    &crate::integrations::commerce::__OUTPUT_META_CommerceProduct,
-    #[cfg(feature = "integrations")]
-    &crate::integrations::commerce::__OUTPUT_META_CommerceInventoryLevel,
-    #[cfg(feature = "integrations")]
-    &crate::integrations::commerce::__OUTPUT_META_CommerceOrder,
-    #[cfg(feature = "integrations")]
-    &crate::integrations::commerce::__OUTPUT_META_CommerceLocation,
-    #[cfg(feature = "integrations")]
-    &crate::integrations::commerce::__OUTPUT_META_CommerceGetProductsOutput,
-    #[cfg(feature = "integrations")]
-    &crate::integrations::commerce::__OUTPUT_META_CommerceGetLocationsOutput,
-    #[cfg(feature = "integrations")]
-    &crate::integrations::commerce::__OUTPUT_META_CommerceDeleteProductOutput,
-    #[cfg(feature = "integrations")]
-    &crate::integrations::commerce::__OUTPUT_META_CommerceGetOrdersOutput,
-    #[cfg(feature = "integrations")]
     &crate::integrations::hubspot::__OUTPUT_META_ListBusinessUnitsOutput,
     #[cfg(feature = "integrations")]
     &crate::integrations::hubspot::__OUTPUT_META_ListObjectPropertiesOutput,
@@ -2808,17 +2702,6 @@ const AGENT_MODULE_BEDROCK: AgentModuleConfig = AgentModuleConfig {
 };
 
 #[cfg(feature = "integrations")]
-const AGENT_MODULE_COMMERCE: AgentModuleConfig = AgentModuleConfig {
-    id: "commerce",
-    name: "Commerce",
-    description: "Unified interface for product, order, and inventory management across multiple e-commerce platforms",
-    has_side_effects: true,
-    supports_connections: true,
-    integration_ids: &["shopify_access_token", "shopify_client_credentials"],
-    secure: true,
-};
-
-#[cfg(feature = "integrations")]
 const AGENT_MODULE_HUBSPOT: AgentModuleConfig = AgentModuleConfig {
     id: "hubspot",
     name: "HubSpot",
@@ -2924,8 +2807,6 @@ pub static EXTRA_AGENT_MODULES: &[&AgentModuleConfig] = &[
     &AGENT_MODULE_AI_TOOLS,
     #[cfg(feature = "integrations")]
     &AGENT_MODULE_BEDROCK,
-    #[cfg(feature = "integrations")]
-    &AGENT_MODULE_COMMERCE,
     #[cfg(feature = "integrations")]
     &AGENT_MODULE_HUBSPOT,
     #[cfg(feature = "integrations")]

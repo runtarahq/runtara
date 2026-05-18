@@ -2,7 +2,7 @@
 
 Every runtara agent ported to a WebAssembly Component. Order is easiest → hardest so each port reinforces the pattern before tackling the next category. Mark each row as it lands.
 
-Totals: **24 agent crates, ~269 capabilities** (some shared schemas). The legacy `file` agent (10 caps) was removed in Phase 2.1 — components have no direct filesystem access; files travel as base64-encoded `FileData` blobs through the existing `connection` channel for the integrations that need them (e.g., s3, sharepoint, compression).
+Totals: **23 agent crates, ~259 capabilities** (some shared schemas). Two legacy agents removed in Phase 2.1: `file` (10 caps — no direct FS in components; route file I/O through s3/sharepoint/etc.) and `commerce` (10 caps — generic facade was redundant; workflows use `shopify` directly).
 
 Conventions:
 - Crate name: `runtara-agent-<id>` (kebab-case of the module id).
@@ -49,7 +49,7 @@ Conventions:
 | [ ] runtara-agent-mailgun | `mailgun` | 1 | Trivial single-call API. |
 | [ ] runtara-agent-slack | `slack` | 2 | Send message + upload file. |
 | [ ] runtara-agent-ai-tools | `ai_tools` | 5 | Provider-routed via connection subtype. |
-| [ ] runtara-agent-commerce | `commerce` | 10 | Generic commerce facade. |
+| ~~runtara-agent-commerce~~ | ~~`commerce`~~ | — | **Removed.** Generic commerce facade was a thin wrapper over Shopify; workflows use the shopify agent directly. |
 | [ ] runtara-agent-openai | `openai` | 8 | Chat / embedding / vision. |
 | [ ] runtara-agent-bedrock | `bedrock` | 7 | AWS Bedrock model invoke. SigV4 stays host-side. |
 | [ ] runtara-agent-object-model | `object_model` | 12 | Internal HTTP to runtara-server. |
