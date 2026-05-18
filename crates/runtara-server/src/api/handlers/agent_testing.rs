@@ -1,29 +1,35 @@
 //! Agent Testing Handler
 //!
-//! HTTP endpoints for testing agents using sandboxed container execution.
-//! Agents are executed via the universal dispatcher in runtara-environment.
+//! HTTP endpoints for testing agents. Routing between the embedded wasmtime
+//! component path and the legacy dispatcher image is decided by the
+//! `?engine=auto|components|legacy` query parameter.
 
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     response::Json,
 };
 
-use crate::api::dto::agent_testing::{TestAgentErrorResponse, TestAgentRequest, TestAgentResponse};
+use crate::api::dto::agent_testing::{
+    TestAgentErrorResponse, TestAgentQuery, TestAgentRequest, TestAgentResponse,
+};
 use crate::api::services::agent_testing::{AgentTestingService, ServiceError};
 use crate::middleware::tenant_auth::OrgId;
 
 /// Test an agent capability with given input
 ///
-/// This endpoint allows testing agents in isolation using sandboxed container execution.
-/// Agent testing must be enabled via ENABLE_OPERATOR_TESTING=true environment variable.
+/// This endpoint allows testing agents in isolation. Pass
+/// `?engine=components` to force the embedded wasmtime path or
+/// `?engine=legacy` to force the dispatcher image; the default `auto`
+/// routes to components when a WASM component is loaded for the agent.
 #[utoipa::path(
     post,
     path = "/api/runtime/agents/{name}/capabilities/{capability_id}/test",
     request_body = TestAgentRequest,
     params(
         ("name" = String, Path, description = "Agent name (e.g., 'utils', 'transform', 'csv')"),
-        ("capability_id" = String, Path, description = "Capability ID (e.g., 'random-double', 'extract')")
+        ("capability_id" = String, Path, description = "Capability ID (e.g., 'random-double', 'extract')"),
+        ("engine" = Option<String>, Query, description = "Engine: auto | components | legacy (default: auto)"),
     ),
     responses(
         (status = 200, description = "Agent executed successfully", body = TestAgentResponse),
@@ -39,9 +45,9 @@ pub async fn test_agent_handler(
     OrgId(tenant_id): OrgId,
     State(service): State<Option<AgentTestingService>>,
     Path((agent_name, capability_id)): Path<(String, String)>,
+    Query(query): Query<TestAgentQuery>,
     Json(request): Json<TestAgentRequest>,
 ) -> Result<Json<TestAgentResponse>, (StatusCode, Json<TestAgentErrorResponse>)> {
-    // Check if service is configured
     let service = service.ok_or_else(|| {
         (
             StatusCode::NOT_FOUND,
@@ -56,7 +62,6 @@ pub async fn test_agent_handler(
         )
     })?;
 
-    // Execute the agent test
     match service
         .test_agent(
             &tenant_id,
@@ -64,6 +69,7 @@ pub async fn test_agent_handler(
             &capability_id,
             request.input,
             request.connection_id,
+            query.engine,
         )
         .await
     {
@@ -73,6 +79,7 @@ pub async fn test_agent_handler(
             error: result.error,
             execution_time_ms: result.execution_time_ms,
             max_memory_mb: result.max_memory_mb,
+            engine: Some(result.engine),
         })),
         Err(err) => {
             let (status, error, message) = match err {

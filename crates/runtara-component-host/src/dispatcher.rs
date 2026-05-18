@@ -11,7 +11,6 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use wasmtime::Engine;
-use wasmtime::component::Linker;
 
 use crate::bindings::exports::runtara::agent::capabilities::{CapabilityInfo, ConnectionInfo};
 use crate::engine::{EngineConfig, build_engine};
@@ -72,8 +71,6 @@ pub struct DispatcherEnv {
 
 pub struct ComponentDispatcherService {
     engine: Arc<Engine>,
-    #[allow(dead_code)] // kept alive for the lifetime of the LoadedAgents
-    linker: Linker<HostState>,
     agents: HashMap<String, Arc<LoadedAgent>>,
     /// Per-agent capability metadata, cached at load time. Populated by an
     /// initial `list-capabilities` call against each component.
@@ -116,9 +113,13 @@ impl ComponentDispatcherService {
             agents.insert(agent_id, loaded);
         }
 
+        // Linker is consumed by `linker.instantiate_pre`; after every agent
+        // is pre-instantiated we drop it — InstancePre carries everything we
+        // need for repeated per-call instantiation.
+        drop(linker);
+
         Ok(Self {
             engine,
-            linker,
             agents,
             metadata,
             env,

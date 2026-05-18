@@ -4513,6 +4513,7 @@ dependencies = [
  "rsa",
  "runtara-agents",
  "runtara-ai",
+ "runtara-component-host",
  "runtara-connections",
  "runtara-core",
  "runtara-dsl",

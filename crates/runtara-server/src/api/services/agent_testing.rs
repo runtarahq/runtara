@@ -1,13 +1,24 @@
 //! Agent Testing Service
 //!
-//! Business logic for testing agents using sandboxed container execution.
-//! Agents are executed via the universal dispatcher in runtara-environment.
+//! Business logic for testing agents. In Phase 1 of the WASM Components
+//! migration, this service supports two execution backends side-by-side:
+//!
+//! 1. **Components** — embedded wasmtime + `runtara_agent_*.wasm` components
+//!    loaded from `agent_components_dir`. See `runtara-component-host`.
+//! 2. **Legacy** — the universal dispatcher image (`__agent_dispatcher__:N`)
+//!    executed via `runtime_client.execute_sync`. Removed in Phase 4.
 
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tracing::{info, warn};
+
+use runtara_component_host::{
+    ComponentDispatcherService, ResolvedConnection, TestCapabilityRequest,
+};
+
+use crate::api::dto::agent_testing::TestEngine;
 
 use super::dispatcher::DispatcherService;
 
@@ -80,30 +91,40 @@ pub struct TestResult {
     pub error: Option<String>,
     pub execution_time_ms: f64,
     pub max_memory_mb: Option<f64>,
+    /// Which engine actually executed this call. Surfaces in the response so
+    /// CI A/B harnesses can confirm routing.
+    pub engine: ActiveEngine,
 }
 
-/// Agent testing service
-///
-/// Executes individual agents in isolation via the universal dispatcher.
+/// The engine actually used for a given call — what the service decided
+/// after honoring the requested `TestEngine` and the available backends.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, utoipa::ToSchema,
+)]
+#[serde(rename_all = "lowercase")]
+pub enum ActiveEngine {
+    Components,
+    Legacy,
+}
+
+/// Agent testing service. Holds both backends so callers can compare them.
 #[derive(Clone)]
 pub struct AgentTestingService {
     enabled: bool,
     rate_limiter: RateLimiter,
     dispatcher_service: Option<Arc<DispatcherService>>,
+    component_dispatcher: Option<Arc<ComponentDispatcherService>>,
     connections: Option<Arc<runtara_connections::ConnectionsFacade>>,
 }
 
 impl AgentTestingService {
-    /// Create a new agent testing service
-    ///
-    /// # Arguments
-    /// * `enabled` - Whether agent testing is enabled
-    /// * `dispatcher_service` - Optional dispatcher service for executing agents
+    /// Create a new agent testing service.
     pub fn new(enabled: bool, dispatcher_service: Option<Arc<DispatcherService>>) -> Self {
         Self {
             enabled,
             rate_limiter: RateLimiter::new(),
             dispatcher_service,
+            component_dispatcher: None,
             connections: None,
         }
     }
@@ -113,22 +134,64 @@ impl AgentTestingService {
         self
     }
 
+    /// Plug in the embedded component dispatcher. When set, agents with a
+    /// loaded `.wasm` component go through it unless `engine=legacy` is
+    /// forced.
+    pub fn with_component_dispatcher(
+        mut self,
+        dispatcher: Arc<ComponentDispatcherService>,
+    ) -> Self {
+        self.component_dispatcher = Some(dispatcher);
+        self
+    }
+
     /// Check if agent testing is enabled
     pub fn is_enabled(&self) -> bool {
         self.enabled
     }
 
-    /// Execute an agent with the given input in a sandboxed container.
+    /// Resolve which engine to use given the request preference and the
+    /// agent's availability in the component dispatcher.
+    fn pick_engine(
+        &self,
+        requested: TestEngine,
+        agent_name: &str,
+    ) -> Result<ActiveEngine, ServiceError> {
+        let has_component = match self.component_dispatcher.as_deref() {
+            Some(d) => d.has_agent(agent_name),
+            None => false,
+        };
+        match requested {
+            TestEngine::Components => {
+                if has_component {
+                    Ok(ActiveEngine::Components)
+                } else {
+                    Err(ServiceError::AgentNotFound(format!(
+                        "agent `{}` has no WASM component loaded",
+                        agent_name
+                    )))
+                }
+            }
+            TestEngine::Legacy => Ok(ActiveEngine::Legacy),
+            TestEngine::Auto => {
+                if has_component {
+                    Ok(ActiveEngine::Components)
+                } else {
+                    Ok(ActiveEngine::Legacy)
+                }
+            }
+        }
+    }
+
+    /// Execute an agent with the given input.
     ///
     /// # Arguments
     /// * `tenant_id` - The tenant identifier
     /// * `agent_name` - The agent module name (e.g., "utils", "http")
-    /// * `capability_id` - The capability ID (e.g., "random-double", "http-request")
+    /// * `capability_id` - The capability ID (e.g., "random-double", "hash")
     /// * `input` - The agent-specific input as JSON
     /// * `connection_id` - Optional connection ID for agents requiring credentials
-    ///
-    /// # Returns
-    /// Result with test execution results or an error
+    /// * `engine` - Preferred execution backend (Auto, Components, or Legacy)
     pub async fn test_agent(
         &self,
         tenant_id: &str,
@@ -136,13 +199,12 @@ impl AgentTestingService {
         capability_id: &str,
         input: Value,
         connection_id: Option<String>,
+        engine: TestEngine,
     ) -> Result<TestResult, ServiceError> {
-        // Check if agent testing is enabled
         if !self.enabled {
             return Err(ServiceError::NotEnabled);
         }
 
-        // Check rate limit
         if let Err(wait_time) = self
             .rate_limiter
             .check_rate_limit(agent_name, capability_id)
@@ -150,7 +212,81 @@ impl AgentTestingService {
             return Err(ServiceError::RateLimitExceeded(wait_time));
         }
 
-        // Get dispatcher service
+        let active = self.pick_engine(engine, agent_name)?;
+        info!(
+            tenant_id = %tenant_id,
+            agent = %agent_name,
+            capability = %capability_id,
+            engine = ?active,
+            "Executing agent test"
+        );
+
+        match active {
+            ActiveEngine::Components => {
+                self.run_via_components(tenant_id, agent_name, capability_id, input, connection_id)
+                    .await
+            }
+            ActiveEngine::Legacy => {
+                self.run_via_legacy_dispatcher(
+                    tenant_id,
+                    agent_name,
+                    capability_id,
+                    input,
+                    connection_id,
+                )
+                .await
+            }
+        }
+    }
+
+    async fn run_via_components(
+        &self,
+        tenant_id: &str,
+        agent_name: &str,
+        capability_id: &str,
+        input: Value,
+        connection_id: Option<String>,
+    ) -> Result<TestResult, ServiceError> {
+        let dispatcher = self
+            .component_dispatcher
+            .as_ref()
+            .expect("pick_engine guards against missing dispatcher");
+
+        let connection = match connection_id.as_deref() {
+            Some(id) => Some(self.resolve_connection(tenant_id, id).await?),
+            None => None,
+        };
+
+        let req = TestCapabilityRequest {
+            tenant_id: tenant_id.to_string(),
+            agent_id: agent_name.to_string(),
+            capability_id: capability_id.to_string(),
+            input,
+            connection,
+        };
+        let result = dispatcher
+            .test_capability(req)
+            .await
+            .map_err(|e| ServiceError::ExecutionError(format!("Components: {}", e)))?;
+
+        Ok(TestResult {
+            success: result.success,
+            output: result.output,
+            error: result.error.map(|e| format!("{}: {}", e.code, e.message)),
+            execution_time_ms: result.execution_time_ms,
+            max_memory_mb: None,
+            engine: ActiveEngine::Components,
+        })
+    }
+
+    async fn run_via_legacy_dispatcher(
+        &self,
+        tenant_id: &str,
+        agent_name: &str,
+        capability_id: &str,
+        input: Value,
+        connection_id: Option<String>,
+    ) -> Result<TestResult, ServiceError> {
         let dispatcher = self.dispatcher_service.as_ref().ok_or_else(|| {
             ServiceError::ExecutionError(
                 "Dispatcher service not configured. Runtime client may not be available."
@@ -158,20 +294,16 @@ impl AgentTestingService {
             )
         })?;
 
-        // Get the pre-initialized dispatcher image
         let image_id = dispatcher
             .get_dispatcher_image(tenant_id)
             .await
             .map_err(|e| ServiceError::ExecutionError(format!("Dispatcher not ready: {}", e)))?;
 
-        // Load connection data if connection_id is provided
-        let connection_data = if let Some(ref conn_id) = connection_id {
-            Some(self.load_connection(tenant_id, conn_id).await?)
-        } else {
-            None
+        let connection_data = match connection_id.as_deref() {
+            Some(id) => Some(self.load_connection_legacy_blob(tenant_id, id).await?),
+            None => None,
         };
 
-        // Build dispatcher input
         let dispatcher_input = serde_json::json!({
             "agent_id": agent_name,
             "capability_id": capability_id,
@@ -179,80 +311,23 @@ impl AgentTestingService {
             "connection": connection_data,
         });
 
-        info!(
-            tenant_id = %tenant_id,
-            agent = %agent_name,
-            capability = %capability_id,
-            "Executing agent test via dispatcher"
-        );
-
         let start = Instant::now();
-
-        // Execute via runtime client
         let result = dispatcher
             .runtime_client()
             .execute_sync(
                 &image_id,
                 tenant_id,
-                "agent-dispatcher", // Workflow ID for tracing context
-                None,               // Generate instance_id automatically
+                "agent-dispatcher",
+                None,
                 Some(dispatcher_input),
-                Some(30), // 30 second timeout for agent tests
+                Some(30),
                 false,
             )
             .await
             .map_err(|e| ServiceError::ExecutionError(format!("Execution failed: {}", e)))?;
-
         let execution_time_ms = start.elapsed().as_secs_f64() * 1000.0;
 
-        // Parse dispatcher output
-        if result.success {
-            if let Some(output) = result.output {
-                // Dispatcher wraps output in { success: bool, output?: Value, error?: String }
-                let success = output
-                    .get("success")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false);
-                let agent_output = output.get("output").cloned();
-                let agent_error = output
-                    .get("error")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string());
-
-                if success {
-                    Ok(TestResult {
-                        success: true,
-                        output: agent_output,
-                        error: None,
-                        execution_time_ms,
-                        max_memory_mb: None, // TODO: get from metrics when available
-                    })
-                } else {
-                    // Agent returned an error
-                    let err_msg = agent_error.unwrap_or_else(|| "Unknown agent error".to_string());
-
-                    // Check for specific error types
-                    if err_msg.contains("Unknown agent") || err_msg.contains("Unknown capability") {
-                        Err(ServiceError::AgentNotFound(err_msg))
-                    } else if err_msg.contains("Connection") && err_msg.contains("not found") {
-                        Err(ServiceError::ConnectionNotFound(err_msg))
-                    } else {
-                        Ok(TestResult {
-                            success: false,
-                            output: None,
-                            error: Some(err_msg),
-                            execution_time_ms,
-                            max_memory_mb: None,
-                        })
-                    }
-                }
-            } else {
-                Err(ServiceError::ExecutionError(
-                    "Dispatcher returned no output".to_string(),
-                ))
-            }
-        } else {
-            // Container execution failed
+        if !result.success {
             let error_msg = result
                 .error
                 .unwrap_or_else(|| "Execution failed".to_string());
@@ -260,22 +335,62 @@ impl AgentTestingService {
                 tenant_id = %tenant_id,
                 agent = %agent_name,
                 error = %error_msg,
-                "Agent test execution failed"
+                "Agent test execution failed (legacy)"
             );
-            Err(ServiceError::ExecutionError(error_msg))
+            return Err(ServiceError::ExecutionError(error_msg));
+        }
+
+        let output = result.output.ok_or_else(|| {
+            ServiceError::ExecutionError("Dispatcher returned no output".to_string())
+        })?;
+        let success = output
+            .get("success")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let agent_output = output.get("output").cloned();
+        let agent_error = output
+            .get("error")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+
+        if success {
+            Ok(TestResult {
+                success: true,
+                output: agent_output,
+                error: None,
+                execution_time_ms,
+                max_memory_mb: None,
+                engine: ActiveEngine::Legacy,
+            })
+        } else {
+            let err_msg = agent_error.unwrap_or_else(|| "Unknown agent error".to_string());
+            if err_msg.contains("Unknown agent") || err_msg.contains("Unknown capability") {
+                Err(ServiceError::AgentNotFound(err_msg))
+            } else if err_msg.contains("Connection") && err_msg.contains("not found") {
+                Err(ServiceError::ConnectionNotFound(err_msg))
+            } else {
+                Ok(TestResult {
+                    success: false,
+                    output: None,
+                    error: Some(err_msg),
+                    execution_time_ms,
+                    max_memory_mb: None,
+                    engine: ActiveEngine::Legacy,
+                })
+            }
         }
     }
 
-    /// Load connection data via the connections facade
-    async fn load_connection(
+    /// Resolve a connection record into the strongly-typed shape the
+    /// component dispatcher expects.
+    async fn resolve_connection(
         &self,
         tenant_id: &str,
         connection_id: &str,
-    ) -> Result<Value, ServiceError> {
+    ) -> Result<ResolvedConnection, ServiceError> {
         let facade = self.connections.as_ref().ok_or_else(|| {
             ServiceError::DatabaseError("ConnectionsFacade not configured".to_string())
         })?;
-
         let conn = facade
             .get_with_parameters(connection_id, tenant_id)
             .await
@@ -286,24 +401,37 @@ impl AgentTestingService {
                     connection_id, tenant_id
                 ))
             })?;
-
-        // integration_id is required for agents to work
         let integration_id = conn.integration_id.ok_or_else(|| {
             ServiceError::ExecutionError(format!(
                 "Connection '{}' has no integration_id configured",
                 connection_id
             ))
         })?;
+        Ok(ResolvedConnection {
+            connection_id: connection_id.to_string(),
+            integration_id,
+            connection_subtype: conn.connection_subtype,
+            parameters: conn
+                .connection_parameters
+                .unwrap_or_else(|| serde_json::json!({})),
+            rate_limit_config: conn.rate_limit_config,
+        })
+    }
 
-        // Build connection data for dispatcher (matches RawConnection structure)
-        // This will be injected as _connection field in agent input
-        let connection_data = serde_json::json!({
-            "integration_id": integration_id,
-            "connection_subtype": conn.connection_subtype,
-            "parameters": conn.connection_parameters,
-            "rate_limit_config": conn.rate_limit_config
-        });
-
-        Ok(connection_data)
+    /// Legacy path connection lookup — returns the same JSON blob shape the
+    /// dispatcher binary expects (`{integration_id, connection_subtype,
+    /// parameters, rate_limit_config}`).
+    async fn load_connection_legacy_blob(
+        &self,
+        tenant_id: &str,
+        connection_id: &str,
+    ) -> Result<Value, ServiceError> {
+        let resolved = self.resolve_connection(tenant_id, connection_id).await?;
+        Ok(serde_json::json!({
+            "integration_id": resolved.integration_id,
+            "connection_subtype": resolved.connection_subtype,
+            "parameters": resolved.parameters,
+            "rate_limit_config": resolved.rate_limit_config,
+        }))
     }
 }

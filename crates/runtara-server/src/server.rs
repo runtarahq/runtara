@@ -1112,8 +1112,45 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
             match dispatcher_service.initialize(&tenant_id).await {
                 Ok(image_id) => {
                     println!("✓ Agent dispatcher ready (image: {})", image_id);
-                    let service = AgentTestingService::new(true, Some(dispatcher_service))
+                    let mut service = AgentTestingService::new(true, Some(dispatcher_service))
                         .with_connections(connections_facade.clone());
+
+                    // Optionally load WASM component agents and plug the
+                    // embedded component dispatcher into the service. When
+                    // configured, agents with a .wasm component go through
+                    // the wasmtime path by default; ?engine=legacy forces
+                    // the dispatcher image.
+                    let cfg = config::get();
+                    if let Some(ref dir) = cfg.agent_components_dir {
+                        use runtara_component_host::{ComponentDispatcherService, DispatcherEnv};
+                        let env = DispatcherEnv {
+                            proxy_url: cfg.http_proxy_url.clone(),
+                            agent_service_url: cfg.agent_service_url.clone(),
+                            object_model_url: cfg.object_model_url.clone(),
+                            core_http_url: format!("http://127.0.0.1:{}", cfg.internal_port),
+                        };
+                        match ComponentDispatcherService::from_dir(dir, env).await {
+                            Ok(dispatcher) => {
+                                let loaded: Vec<&str> = dispatcher.agent_ids().collect();
+                                println!(
+                                    "✓ Component dispatcher loaded {} agent(s) from {}: {}",
+                                    loaded.len(),
+                                    dir.display(),
+                                    loaded.join(", ")
+                                );
+                                service = service.with_component_dispatcher(Arc::new(dispatcher));
+                            }
+                            Err(e) => {
+                                println!(
+                                    "⚠ Failed to load WASM agent components from {}: {}",
+                                    dir.display(),
+                                    e
+                                );
+                                println!("  Continuing with legacy dispatcher only.");
+                            }
+                        }
+                    }
+
                     Some(service)
                 }
                 Err(e) => {

@@ -58,6 +58,10 @@ pub struct TestAgentResponse {
     pub execution_time_ms: f64,
     #[serde(rename = "maxMemoryMb", skip_serializing_if = "Option::is_none")]
     pub max_memory_mb: Option<f64>,
+    /// Which engine actually executed this call ("components" or "legacy").
+    /// Omitted on legacy paths that don't surface it yet.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub engine: Option<crate::api::services::agent_testing::ActiveEngine>,
 }
 
 /// Error response for agent testing
@@ -67,4 +71,29 @@ pub struct TestAgentErrorResponse {
     pub error: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
+}
+
+/// Which execution engine to use for the test call. Forms the value of the
+/// `?engine=` query string on `POST /api/runtime/agents/{name}/capabilities/{cap}/test`.
+///
+/// - `Auto` (default): route through the embedded wasmtime component host
+///   when a WASM component is loaded for the agent; otherwise fall back to
+///   the legacy dispatcher image.
+/// - `Components`: force the embedded wasmtime path. Returns 404 if no
+///   component is loaded for the agent.
+/// - `Legacy`: force the dispatcher-image path (Phase 4 deletes this).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum TestEngine {
+    #[default]
+    Auto,
+    Components,
+    Legacy,
+}
+
+/// Query string parameters for `test_agent_handler`.
+#[derive(Debug, Default, Clone, Deserialize, ToSchema)]
+pub struct TestAgentQuery {
+    #[serde(default)]
+    pub engine: TestEngine,
 }
