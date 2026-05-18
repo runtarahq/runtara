@@ -41,6 +41,10 @@ members = [
     "crates/runtara-agent-mailgun",
     "crates/runtara-agent-slack",
     "crates/runtara-agent-openai",
+    "crates/runtara-agent-ai-tools",
+    "crates/runtara-agent-bedrock",
+    "crates/runtara-agent-object-model",
+    "crates/runtara-agent-s3-storage",
 ]
 default-members = ["crates/runtara-core"]
 

@@ -1,0 +1,25 @@
+[package]
+name = "runtara-agent-bedrock"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "AWS Bedrock integration agent — WebAssembly Component"
+keywords = ["wasm", "component", "agent", "bedrock", "llm"]
+categories = ["wasm", "web-programming::http-client"]
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+wit-bindgen-rt = { version = "0.44", features = ["bitflags"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+runtara-http = { path = "../runtara-http" }
+
+[package.metadata.component]
+package = "runtara:agent-bedrock"
+
+[package.metadata.component.target]
+path = "../runtara-agent-wit/wit"
+world = "agent"

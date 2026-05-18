@@ -4230,6 +4230,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "runtara-agent-ai-tools"
+version = "5.0.0"
+dependencies = [
+ "runtara-http",
+ "serde",
+ "serde_json",
+ "wit-bindgen-rt 0.44.0",
+]
+
+[[package]]
+name = "runtara-agent-bedrock"
+version = "5.0.0"
+dependencies = [
+ "runtara-http",
+ "serde",
+ "serde_json",
+ "wit-bindgen-rt 0.44.0",
+]
+
+[[package]]
 name = "runtara-agent-crypto"
 version = "5.1.1"
 dependencies = [
@@ -4299,9 +4319,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "runtara-agent-object-model"
+version = "5.0.0"
+dependencies = [
+ "runtara-http",
+ "serde",
+ "serde_json",
+ "wit-bindgen-rt 0.44.0",
+]
+
+[[package]]
 name = "runtara-agent-openai"
 version = "5.0.0"
 dependencies = [
+ "runtara-http",
+ "serde",
+ "serde_json",
+ "wit-bindgen-rt 0.44.0",
+]
+
+[[package]]
+name = "runtara-agent-s3-storage"
+version = "5.0.0"
+dependencies = [
+ "base64 0.22.1",
  "runtara-http",
  "serde",
  "serde_json",
