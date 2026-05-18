@@ -355,6 +355,27 @@ pub static CAPABILITY_REGISTRATIONS: &[CapabilityRegistration] = &[
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
+        meta: &crate::integrations::hubspot::__CAPABILITY_META_LIST_BUSINESS_UNITS,
+        input_type: &crate::integrations::hubspot::__INPUT_META_ListBusinessUnitsInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
+        executor: &crate::integrations::hubspot::__CAPABILITY_EXECUTOR_LIST_BUSINESS_UNITS,
+    },
+    #[cfg(feature = "integrations")]
+    CapabilityRegistration {
+        meta: &crate::integrations::hubspot::__CAPABILITY_META_LIST_OBJECT_PROPERTIES,
+        input_type: &crate::integrations::hubspot::__INPUT_META_ListObjectPropertiesInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
+        executor: &crate::integrations::hubspot::__CAPABILITY_EXECUTOR_LIST_OBJECT_PROPERTIES,
+    },
+    #[cfg(feature = "integrations")]
+    CapabilityRegistration {
+        meta: &crate::integrations::hubspot::__CAPABILITY_META_GET_OBJECT_PROPERTY,
+        input_type: &crate::integrations::hubspot::__INPUT_META_GetObjectPropertyInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
+        executor: &crate::integrations::hubspot::__CAPABILITY_EXECUTOR_GET_OBJECT_PROPERTY,
+    },
+    #[cfg(feature = "integrations")]
+    CapabilityRegistration {
         meta: &crate::integrations::hubspot::__CAPABILITY_META_LIST_CONTACTS,
         input_type: &crate::integrations::hubspot::__INPUT_META_ListContactsInput,
         #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
@@ -509,10 +530,31 @@ pub static CAPABILITY_REGISTRATIONS: &[CapabilityRegistration] = &[
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
+        meta: &crate::integrations::hubspot::__CAPABILITY_META_DELETE_QUOTE,
+        input_type: &crate::integrations::hubspot::__INPUT_META_DeleteQuoteInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
+        executor: &crate::integrations::hubspot::__CAPABILITY_EXECUTOR_DELETE_QUOTE,
+    },
+    #[cfg(feature = "integrations")]
+    CapabilityRegistration {
+        meta: &crate::integrations::hubspot::__CAPABILITY_META_SEARCH_QUOTES,
+        input_type: &crate::integrations::hubspot::__INPUT_META_SearchQuotesInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
+        executor: &crate::integrations::hubspot::__CAPABILITY_EXECUTOR_SEARCH_QUOTES,
+    },
+    #[cfg(feature = "integrations")]
+    CapabilityRegistration {
         meta: &crate::integrations::hubspot::__CAPABILITY_META_LIST_LINE_ITEMS,
         input_type: &crate::integrations::hubspot::__INPUT_META_ListLineItemsInput,
         #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::hubspot::__CAPABILITY_EXECUTOR_LIST_LINE_ITEMS,
+    },
+    #[cfg(feature = "integrations")]
+    CapabilityRegistration {
+        meta: &crate::integrations::hubspot::__CAPABILITY_META_GET_LINE_ITEM,
+        input_type: &crate::integrations::hubspot::__INPUT_META_GetLineItemInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
+        executor: &crate::integrations::hubspot::__CAPABILITY_EXECUTOR_GET_LINE_ITEM,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
@@ -523,10 +565,24 @@ pub static CAPABILITY_REGISTRATIONS: &[CapabilityRegistration] = &[
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
+        meta: &crate::integrations::hubspot::__CAPABILITY_META_UPDATE_LINE_ITEM,
+        input_type: &crate::integrations::hubspot::__INPUT_META_UpdateLineItemInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
+        executor: &crate::integrations::hubspot::__CAPABILITY_EXECUTOR_UPDATE_LINE_ITEM,
+    },
+    #[cfg(feature = "integrations")]
+    CapabilityRegistration {
         meta: &crate::integrations::hubspot::__CAPABILITY_META_DELETE_LINE_ITEM,
         input_type: &crate::integrations::hubspot::__INPUT_META_DeleteLineItemInput,
         #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::hubspot::__CAPABILITY_EXECUTOR_DELETE_LINE_ITEM,
+    },
+    #[cfg(feature = "integrations")]
+    CapabilityRegistration {
+        meta: &crate::integrations::hubspot::__CAPABILITY_META_SEARCH_LINE_ITEMS,
+        input_type: &crate::integrations::hubspot::__INPUT_META_SearchLineItemsInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
+        executor: &crate::integrations::hubspot::__CAPABILITY_EXECUTOR_SEARCH_LINE_ITEMS,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
@@ -569,6 +625,34 @@ pub static CAPABILITY_REGISTRATIONS: &[CapabilityRegistration] = &[
         input_type: &crate::integrations::hubspot::__INPUT_META_ListAssociationsInput,
         #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::hubspot::__CAPABILITY_EXECUTOR_LIST_ASSOCIATIONS,
+    },
+    #[cfg(feature = "integrations")]
+    CapabilityRegistration {
+        meta: &crate::integrations::hubspot::__CAPABILITY_META_LIST_WEBHOOK_SUBSCRIPTIONS,
+        input_type: &crate::integrations::hubspot::__INPUT_META_ListWebhookSubscriptionsInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
+        executor: &crate::integrations::hubspot::__CAPABILITY_EXECUTOR_LIST_WEBHOOK_SUBSCRIPTIONS,
+    },
+    #[cfg(feature = "integrations")]
+    CapabilityRegistration {
+        meta: &crate::integrations::hubspot::__CAPABILITY_META_CREATE_WEBHOOK_SUBSCRIPTION,
+        input_type: &crate::integrations::hubspot::__INPUT_META_CreateWebhookSubscriptionInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
+        executor: &crate::integrations::hubspot::__CAPABILITY_EXECUTOR_CREATE_WEBHOOK_SUBSCRIPTION,
+    },
+    #[cfg(feature = "integrations")]
+    CapabilityRegistration {
+        meta: &crate::integrations::hubspot::__CAPABILITY_META_UPDATE_WEBHOOK_SUBSCRIPTION,
+        input_type: &crate::integrations::hubspot::__INPUT_META_UpdateWebhookSubscriptionInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
+        executor: &crate::integrations::hubspot::__CAPABILITY_EXECUTOR_UPDATE_WEBHOOK_SUBSCRIPTION,
+    },
+    #[cfg(feature = "integrations")]
+    CapabilityRegistration {
+        meta: &crate::integrations::hubspot::__CAPABILITY_META_DELETE_WEBHOOK_SUBSCRIPTION,
+        input_type: &crate::integrations::hubspot::__INPUT_META_DeleteWebhookSubscriptionInput,
+        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
+        executor: &crate::integrations::hubspot::__CAPABILITY_EXECUTOR_DELETE_WEBHOOK_SUBSCRIPTION,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
@@ -1979,6 +2063,12 @@ pub static INPUT_TYPES: &[&InputTypeMeta] = &[
     #[cfg(feature = "integrations")]
     &crate::integrations::commerce::__INPUT_META_CommerceGetOrderInput,
     #[cfg(feature = "integrations")]
+    &crate::integrations::hubspot::__INPUT_META_ListBusinessUnitsInput,
+    #[cfg(feature = "integrations")]
+    &crate::integrations::hubspot::__INPUT_META_ListObjectPropertiesInput,
+    #[cfg(feature = "integrations")]
+    &crate::integrations::hubspot::__INPUT_META_GetObjectPropertyInput,
+    #[cfg(feature = "integrations")]
     &crate::integrations::hubspot::__INPUT_META_ListContactsInput,
     #[cfg(feature = "integrations")]
     &crate::integrations::hubspot::__INPUT_META_GetContactInput,
@@ -2023,11 +2113,21 @@ pub static INPUT_TYPES: &[&InputTypeMeta] = &[
     #[cfg(feature = "integrations")]
     &crate::integrations::hubspot::__INPUT_META_UpdateQuoteInput,
     #[cfg(feature = "integrations")]
+    &crate::integrations::hubspot::__INPUT_META_DeleteQuoteInput,
+    #[cfg(feature = "integrations")]
+    &crate::integrations::hubspot::__INPUT_META_SearchQuotesInput,
+    #[cfg(feature = "integrations")]
     &crate::integrations::hubspot::__INPUT_META_ListLineItemsInput,
+    #[cfg(feature = "integrations")]
+    &crate::integrations::hubspot::__INPUT_META_GetLineItemInput,
     #[cfg(feature = "integrations")]
     &crate::integrations::hubspot::__INPUT_META_CreateLineItemInput,
     #[cfg(feature = "integrations")]
+    &crate::integrations::hubspot::__INPUT_META_UpdateLineItemInput,
+    #[cfg(feature = "integrations")]
     &crate::integrations::hubspot::__INPUT_META_DeleteLineItemInput,
+    #[cfg(feature = "integrations")]
+    &crate::integrations::hubspot::__INPUT_META_SearchLineItemsInput,
     #[cfg(feature = "integrations")]
     &crate::integrations::hubspot::__INPUT_META_ListOwnersInput,
     #[cfg(feature = "integrations")]
@@ -2040,6 +2140,14 @@ pub static INPUT_TYPES: &[&InputTypeMeta] = &[
     &crate::integrations::hubspot::__INPUT_META_CreateAssociationInput,
     #[cfg(feature = "integrations")]
     &crate::integrations::hubspot::__INPUT_META_ListAssociationsInput,
+    #[cfg(feature = "integrations")]
+    &crate::integrations::hubspot::__INPUT_META_ListWebhookSubscriptionsInput,
+    #[cfg(feature = "integrations")]
+    &crate::integrations::hubspot::__INPUT_META_CreateWebhookSubscriptionInput,
+    #[cfg(feature = "integrations")]
+    &crate::integrations::hubspot::__INPUT_META_UpdateWebhookSubscriptionInput,
+    #[cfg(feature = "integrations")]
+    &crate::integrations::hubspot::__INPUT_META_DeleteWebhookSubscriptionInput,
     #[cfg(feature = "integrations")]
     &crate::integrations::mailgun::__INPUT_META_SendEmailInput,
     #[cfg(feature = "integrations")]
@@ -2434,6 +2542,12 @@ pub static OUTPUT_TYPES: &[&OutputTypeMeta] = &[
     #[cfg(feature = "integrations")]
     &crate::integrations::commerce::__OUTPUT_META_CommerceGetOrdersOutput,
     #[cfg(feature = "integrations")]
+    &crate::integrations::hubspot::__OUTPUT_META_ListBusinessUnitsOutput,
+    #[cfg(feature = "integrations")]
+    &crate::integrations::hubspot::__OUTPUT_META_ListObjectPropertiesOutput,
+    #[cfg(feature = "integrations")]
+    &crate::integrations::hubspot::__OUTPUT_META_GetObjectPropertyOutput,
+    #[cfg(feature = "integrations")]
     &crate::integrations::hubspot::__OUTPUT_META_ListContactsOutput,
     #[cfg(feature = "integrations")]
     &crate::integrations::hubspot::__OUTPUT_META_GetContactOutput,
@@ -2478,11 +2592,21 @@ pub static OUTPUT_TYPES: &[&OutputTypeMeta] = &[
     #[cfg(feature = "integrations")]
     &crate::integrations::hubspot::__OUTPUT_META_UpdateQuoteOutput,
     #[cfg(feature = "integrations")]
+    &crate::integrations::hubspot::__OUTPUT_META_DeleteQuoteOutput,
+    #[cfg(feature = "integrations")]
+    &crate::integrations::hubspot::__OUTPUT_META_SearchQuotesOutput,
+    #[cfg(feature = "integrations")]
     &crate::integrations::hubspot::__OUTPUT_META_ListLineItemsOutput,
+    #[cfg(feature = "integrations")]
+    &crate::integrations::hubspot::__OUTPUT_META_GetLineItemOutput,
     #[cfg(feature = "integrations")]
     &crate::integrations::hubspot::__OUTPUT_META_CreateLineItemOutput,
     #[cfg(feature = "integrations")]
+    &crate::integrations::hubspot::__OUTPUT_META_UpdateLineItemOutput,
+    #[cfg(feature = "integrations")]
     &crate::integrations::hubspot::__OUTPUT_META_DeleteLineItemOutput,
+    #[cfg(feature = "integrations")]
+    &crate::integrations::hubspot::__OUTPUT_META_SearchLineItemsOutput,
     #[cfg(feature = "integrations")]
     &crate::integrations::hubspot::__OUTPUT_META_ListOwnersOutput,
     #[cfg(feature = "integrations")]
@@ -2495,6 +2619,14 @@ pub static OUTPUT_TYPES: &[&OutputTypeMeta] = &[
     &crate::integrations::hubspot::__OUTPUT_META_CreateAssociationOutput,
     #[cfg(feature = "integrations")]
     &crate::integrations::hubspot::__OUTPUT_META_ListAssociationsOutput,
+    #[cfg(feature = "integrations")]
+    &crate::integrations::hubspot::__OUTPUT_META_ListWebhookSubscriptionsOutput,
+    #[cfg(feature = "integrations")]
+    &crate::integrations::hubspot::__OUTPUT_META_CreateWebhookSubscriptionOutput,
+    #[cfg(feature = "integrations")]
+    &crate::integrations::hubspot::__OUTPUT_META_UpdateWebhookSubscriptionOutput,
+    #[cfg(feature = "integrations")]
+    &crate::integrations::hubspot::__OUTPUT_META_DeleteWebhookSubscriptionOutput,
     #[cfg(feature = "integrations")]
     &crate::integrations::mailgun::__OUTPUT_META_SendEmailOutput,
     #[cfg(feature = "integrations")]

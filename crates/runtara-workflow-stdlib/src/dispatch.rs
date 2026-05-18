@@ -503,6 +503,9 @@ pub fn execute_capability(
         ("hubspot", "create-association") => {
             (runtara_agents::integrations::hubspot::__CAPABILITY_EXECUTOR_CREATE_ASSOCIATION.execute)(input)
         }
+        ("hubspot", "create-webhook-subscription") => {
+            (runtara_agents::integrations::hubspot::__CAPABILITY_EXECUTOR_CREATE_WEBHOOK_SUBSCRIPTION.execute)(input)
+        }
         ("hubspot", "create-company") => {
             (runtara_agents::integrations::hubspot::__CAPABILITY_EXECUTOR_CREATE_COMPANY.execute)(input)
         }
@@ -530,6 +533,12 @@ pub fn execute_capability(
         ("hubspot", "delete-line-item") => {
             (runtara_agents::integrations::hubspot::__CAPABILITY_EXECUTOR_DELETE_LINE_ITEM.execute)(input)
         }
+        ("hubspot", "delete-quote") => {
+            (runtara_agents::integrations::hubspot::__CAPABILITY_EXECUTOR_DELETE_QUOTE.execute)(input)
+        }
+        ("hubspot", "delete-webhook-subscription") => {
+            (runtara_agents::integrations::hubspot::__CAPABILITY_EXECUTOR_DELETE_WEBHOOK_SUBSCRIPTION.execute)(input)
+        }
         ("hubspot", "get-company") => {
             (runtara_agents::integrations::hubspot::__CAPABILITY_EXECUTOR_GET_COMPANY.execute)(input)
         }
@@ -538,6 +547,12 @@ pub fn execute_capability(
         }
         ("hubspot", "get-deal") => {
             (runtara_agents::integrations::hubspot::__CAPABILITY_EXECUTOR_GET_DEAL.execute)(input)
+        }
+        ("hubspot", "get-line-item") => {
+            (runtara_agents::integrations::hubspot::__CAPABILITY_EXECUTOR_GET_LINE_ITEM.execute)(input)
+        }
+        ("hubspot", "get-object-property") => {
+            (runtara_agents::integrations::hubspot::__CAPABILITY_EXECUTOR_GET_OBJECT_PROPERTY.execute)(input)
         }
         ("hubspot", "get-owner") => {
             (runtara_agents::integrations::hubspot::__CAPABILITY_EXECUTOR_GET_OWNER.execute)(input)
@@ -551,6 +566,9 @@ pub fn execute_capability(
         ("hubspot", "list-associations") => {
             (runtara_agents::integrations::hubspot::__CAPABILITY_EXECUTOR_LIST_ASSOCIATIONS.execute)(input)
         }
+        ("hubspot", "list-business-units") => {
+            (runtara_agents::integrations::hubspot::__CAPABILITY_EXECUTOR_LIST_BUSINESS_UNITS.execute)(input)
+        }
         ("hubspot", "list-companies") => {
             (runtara_agents::integrations::hubspot::__CAPABILITY_EXECUTOR_LIST_COMPANIES.execute)(input)
         }
@@ -563,6 +581,9 @@ pub fn execute_capability(
         ("hubspot", "list-line-items") => {
             (runtara_agents::integrations::hubspot::__CAPABILITY_EXECUTOR_LIST_LINE_ITEMS.execute)(input)
         }
+        ("hubspot", "list-object-properties") => {
+            (runtara_agents::integrations::hubspot::__CAPABILITY_EXECUTOR_LIST_OBJECT_PROPERTIES.execute)(input)
+        }
         ("hubspot", "list-owners") => {
             (runtara_agents::integrations::hubspot::__CAPABILITY_EXECUTOR_LIST_OWNERS.execute)(input)
         }
@@ -571,6 +592,9 @@ pub fn execute_capability(
         }
         ("hubspot", "list-quotes") => {
             (runtara_agents::integrations::hubspot::__CAPABILITY_EXECUTOR_LIST_QUOTES.execute)(input)
+        }
+        ("hubspot", "list-webhook-subscriptions") => {
+            (runtara_agents::integrations::hubspot::__CAPABILITY_EXECUTOR_LIST_WEBHOOK_SUBSCRIPTIONS.execute)(input)
         }
         ("hubspot", "search-companies") => {
             (runtara_agents::integrations::hubspot::__CAPABILITY_EXECUTOR_SEARCH_COMPANIES.execute)(input)
@@ -581,6 +605,12 @@ pub fn execute_capability(
         ("hubspot", "search-deals") => {
             (runtara_agents::integrations::hubspot::__CAPABILITY_EXECUTOR_SEARCH_DEALS.execute)(input)
         }
+        ("hubspot", "search-line-items") => {
+            (runtara_agents::integrations::hubspot::__CAPABILITY_EXECUTOR_SEARCH_LINE_ITEMS.execute)(input)
+        }
+        ("hubspot", "search-quotes") => {
+            (runtara_agents::integrations::hubspot::__CAPABILITY_EXECUTOR_SEARCH_QUOTES.execute)(input)
+        }
         ("hubspot", "update-company") => {
             (runtara_agents::integrations::hubspot::__CAPABILITY_EXECUTOR_UPDATE_COMPANY.execute)(input)
         }
@@ -590,8 +620,14 @@ pub fn execute_capability(
         ("hubspot", "update-deal") => {
             (runtara_agents::integrations::hubspot::__CAPABILITY_EXECUTOR_UPDATE_DEAL.execute)(input)
         }
+        ("hubspot", "update-line-item") => {
+            (runtara_agents::integrations::hubspot::__CAPABILITY_EXECUTOR_UPDATE_LINE_ITEM.execute)(input)
+        }
         ("hubspot", "update-quote") => {
             (runtara_agents::integrations::hubspot::__CAPABILITY_EXECUTOR_UPDATE_QUOTE.execute)(input)
+        }
+        ("hubspot", "update-webhook-subscription") => {
+            (runtara_agents::integrations::hubspot::__CAPABILITY_EXECUTOR_UPDATE_WEBHOOK_SUBSCRIPTION.execute)(input)
         }
 
         // --- mailgun ---

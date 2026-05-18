@@ -1,7 +1,7 @@
 //! HubSpot CRM Operations
 //!
-//! Manage contacts, companies, deals, quotes, owners, and pipelines
-//! via the HubSpot CRM API v3.
+//! Manage contacts, companies, deals, quotes, line items, owners, pipelines,
+//! brands, properties, and webhook subscriptions via the HubSpot APIs.
 
 use crate::connections::RawConnection;
 use crate::types::AgentError;
@@ -60,6 +60,231 @@ fn add_properties(query: &mut HashMap<String, String>, properties: &Option<Strin
 /// Build the JSON body for creating/updating a CRM object.
 fn crm_object_body(properties: &Value) -> Value {
     json!({ "properties": properties })
+}
+
+fn crm_search_body(
+    filter_groups: Option<Value>,
+    query: Option<String>,
+    properties: Option<Value>,
+    limit: Option<i64>,
+    after: Option<String>,
+    sorts: Option<Value>,
+) -> Value {
+    let mut body = json!({});
+    if let Some(fg) = filter_groups {
+        body["filterGroups"] = fg;
+    }
+    if let Some(q) = query
+        && !q.is_empty()
+    {
+        body["query"] = Value::String(q);
+    }
+    if let Some(props) = properties {
+        body["properties"] = props;
+    }
+    if let Some(limit) = limit {
+        body["limit"] = json!(limit);
+    }
+    if let Some(after) = after
+        && !after.is_empty()
+    {
+        body["after"] = Value::String(after);
+    }
+    if let Some(sorts) = sorts {
+        body["sorts"] = sorts;
+    }
+    body
+}
+
+// ============================================================================
+// Brands / Business Units
+// ============================================================================
+
+#[derive(Serialize, Deserialize, CapabilityInput)]
+#[capability_input(display_name = "List Brands Input")]
+pub struct ListBusinessUnitsInput {
+    #[field(skip)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub _connection: Option<RawConnection>,
+
+    #[field(
+        display_name = "User ID",
+        description = "HubSpot user ID whose accessible brands/business units should be listed",
+        example = "12345"
+    )]
+    pub user_id: String,
+}
+
+#[derive(Serialize, Deserialize, CapabilityOutput)]
+#[capability_output(display_name = "List Brands Output")]
+pub struct ListBusinessUnitsOutput {
+    #[field(
+        display_name = "Results",
+        description = "Array of brand/business unit objects"
+    )]
+    pub results: Value,
+}
+
+#[capability(
+    module = "hubspot",
+    display_name = "List Brands",
+    description = "List HubSpot brands/business units available to a specific user"
+)]
+pub fn list_business_units(
+    input: ListBusinessUnitsInput,
+) -> Result<ListBusinessUnitsOutput, AgentError> {
+    let connection = require_connection("HUBSPOT", &input._connection)?;
+    let result = hubspot_get(
+        connection,
+        &format!("/business-units/v3/business-units/user/{}", input.user_id),
+        HashMap::new(),
+    )?;
+    Ok(ListBusinessUnitsOutput {
+        results: result["results"].clone(),
+    })
+}
+
+// ============================================================================
+// Properties / Schemas
+// ============================================================================
+
+#[derive(Serialize, Deserialize, CapabilityInput)]
+#[capability_input(display_name = "List Object Properties Input")]
+pub struct ListObjectPropertiesInput {
+    #[field(skip)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub _connection: Option<RawConnection>,
+
+    #[field(
+        display_name = "Object Type",
+        description = "HubSpot object type or object type ID (e.g. 'deals', 'companies', 'contacts', 'line_item', 'quotes', '0-3')"
+    )]
+    pub object_type: String,
+
+    #[field(
+        display_name = "Archived",
+        description = "Whether to include archived property definitions"
+    )]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub archived: Option<bool>,
+
+    #[field(
+        display_name = "Data Sensitivity",
+        description = "Optional dataSensitivity query value, e.g. 'sensitive' for Enterprise sensitive data properties"
+    )]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data_sensitivity: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, CapabilityOutput)]
+#[capability_output(display_name = "List Object Properties Output")]
+pub struct ListObjectPropertiesOutput {
+    #[field(
+        display_name = "Results",
+        description = "Array of property definition objects"
+    )]
+    pub results: Value,
+}
+
+#[capability(
+    module = "hubspot",
+    display_name = "List Object Properties",
+    description = "Read all property definitions for a HubSpot CRM object type"
+)]
+pub fn list_object_properties(
+    input: ListObjectPropertiesInput,
+) -> Result<ListObjectPropertiesOutput, AgentError> {
+    let connection = require_connection("HUBSPOT", &input._connection)?;
+    let mut query = HashMap::new();
+    if let Some(archived) = input.archived {
+        query.insert("archived".to_string(), archived.to_string());
+    }
+    if let Some(data_sensitivity) = input.data_sensitivity
+        && !data_sensitivity.is_empty()
+    {
+        query.insert("dataSensitivity".to_string(), data_sensitivity);
+    }
+    let result = hubspot_get(
+        connection,
+        &format!("/crm/v3/properties/{}", input.object_type),
+        query,
+    )?;
+    Ok(ListObjectPropertiesOutput {
+        results: result["results"].clone(),
+    })
+}
+
+// ---
+
+#[derive(Serialize, Deserialize, CapabilityInput)]
+#[capability_input(display_name = "Get Object Property Input")]
+pub struct GetObjectPropertyInput {
+    #[field(skip)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub _connection: Option<RawConnection>,
+
+    #[field(
+        display_name = "Object Type",
+        description = "HubSpot object type or object type ID (e.g. 'deals', 'companies', 'contacts', 'line_item', 'quotes', '0-3')"
+    )]
+    pub object_type: String,
+
+    #[field(
+        display_name = "Property Name",
+        description = "Internal property name to retrieve",
+        example = "bc_so_number"
+    )]
+    pub property_name: String,
+
+    #[field(
+        display_name = "Archived",
+        description = "Whether to allow archived property definitions"
+    )]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub archived: Option<bool>,
+
+    #[field(
+        display_name = "Data Sensitivity",
+        description = "Optional dataSensitivity query value, e.g. 'sensitive' for Enterprise sensitive data properties"
+    )]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data_sensitivity: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, CapabilityOutput)]
+#[capability_output(display_name = "Get Object Property Output")]
+pub struct GetObjectPropertyOutput {
+    #[field(display_name = "Property", description = "Property definition object")]
+    pub property: Value,
+}
+
+#[capability(
+    module = "hubspot",
+    display_name = "Get Object Property",
+    description = "Read one property definition for a HubSpot CRM object type"
+)]
+pub fn get_object_property(
+    input: GetObjectPropertyInput,
+) -> Result<GetObjectPropertyOutput, AgentError> {
+    let connection = require_connection("HUBSPOT", &input._connection)?;
+    let mut query = HashMap::new();
+    if let Some(archived) = input.archived {
+        query.insert("archived".to_string(), archived.to_string());
+    }
+    if let Some(data_sensitivity) = input.data_sensitivity
+        && !data_sensitivity.is_empty()
+    {
+        query.insert("dataSensitivity".to_string(), data_sensitivity);
+    }
+    let result = hubspot_get(
+        connection,
+        &format!(
+            "/crm/v3/properties/{}/{}",
+            input.object_type, input.property_name
+        ),
+        query,
+    )?;
+    Ok(GetObjectPropertyOutput { property: result })
 }
 
 // ============================================================================
@@ -1291,6 +1516,122 @@ pub fn update_quote(input: UpdateQuoteInput) -> Result<UpdateQuoteOutput, AgentE
     Ok(UpdateQuoteOutput { quote: result })
 }
 
+// ---
+
+#[derive(Serialize, Deserialize, CapabilityInput)]
+#[capability_input(display_name = "Delete Quote Input")]
+pub struct DeleteQuoteInput {
+    #[field(skip)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub _connection: Option<RawConnection>,
+
+    #[field(display_name = "Quote ID", description = "HubSpot quote ID to archive")]
+    pub quote_id: String,
+}
+
+#[derive(Serialize, Deserialize, CapabilityOutput)]
+#[capability_output(display_name = "Delete Quote Output")]
+pub struct DeleteQuoteOutput {
+    #[field(display_name = "Success", description = "Whether the delete succeeded")]
+    pub success: bool,
+}
+
+#[capability(
+    module = "hubspot",
+    display_name = "Delete Quote",
+    description = "Archive (soft-delete) a quote by ID",
+    side_effects = true
+)]
+pub fn delete_quote(input: DeleteQuoteInput) -> Result<DeleteQuoteOutput, AgentError> {
+    let connection = require_connection("HUBSPOT", &input._connection)?;
+    hubspot_delete(
+        connection,
+        &format!("/crm/v3/objects/quotes/{}", input.quote_id),
+    )?;
+    Ok(DeleteQuoteOutput { success: true })
+}
+
+// ---
+
+#[derive(Serialize, Deserialize, CapabilityInput)]
+#[capability_input(display_name = "Search Quotes Input")]
+pub struct SearchQuotesInput {
+    #[field(skip)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub _connection: Option<RawConnection>,
+
+    #[field(
+        display_name = "Filter Groups",
+        description = "Array of filter groups for the search"
+    )]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub filter_groups: Option<Value>,
+
+    #[field(display_name = "Query", description = "Full-text search query string")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub query: Option<String>,
+
+    #[field(
+        display_name = "Properties",
+        description = "Array of property names to return"
+    )]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub properties: Option<Value>,
+
+    #[field(
+        display_name = "Limit",
+        description = "Maximum number of results (1-200)",
+        default = "10"
+    )]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub limit: Option<i64>,
+
+    #[field(display_name = "After", description = "Cursor for pagination")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub after: Option<String>,
+
+    #[field(display_name = "Sorts", description = "Array of sort rules")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sorts: Option<Value>,
+}
+
+#[derive(Serialize, Deserialize, CapabilityOutput)]
+#[capability_output(display_name = "Search Quotes Output")]
+pub struct SearchQuotesOutput {
+    #[field(display_name = "Total", description = "Total matching results")]
+    pub total: i64,
+    #[field(
+        display_name = "Results",
+        description = "Array of matching quote objects"
+    )]
+    pub results: Value,
+    #[field(display_name = "Paging", description = "Pagination info")]
+    pub paging: Value,
+}
+
+#[capability(
+    module = "hubspot",
+    display_name = "Search Quotes",
+    description = "Search quotes using filters, full-text query, or both"
+)]
+pub fn search_quotes(input: SearchQuotesInput) -> Result<SearchQuotesOutput, AgentError> {
+    let connection = require_connection("HUBSPOT", &input._connection)?;
+    let body = crm_search_body(
+        input.filter_groups,
+        input.query,
+        input.properties,
+        input.limit,
+        input.after,
+        input.sorts,
+    );
+    let result = hubspot_post(connection, "/crm/v3/objects/quotes/search", body)?;
+    Ok(SearchQuotesOutput {
+        total: result["total"].as_i64().unwrap_or(0),
+        results: result["results"].clone(),
+        paging: result.get("paging").cloned().unwrap_or(Value::Null),
+    })
+}
+
 // ============================================================================
 // Line Items
 // ============================================================================
@@ -1359,6 +1700,78 @@ pub fn list_line_items(input: ListLineItemsInput) -> Result<ListLineItemsOutput,
 // ---
 
 #[derive(Serialize, Deserialize, CapabilityInput)]
+#[capability_input(display_name = "Get Line Item Input")]
+pub struct GetLineItemInput {
+    #[field(skip)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub _connection: Option<RawConnection>,
+
+    #[field(
+        display_name = "Line Item ID",
+        description = "HubSpot line item ID",
+        example = "12345"
+    )]
+    pub line_item_id: String,
+
+    #[field(
+        display_name = "Properties",
+        description = "Comma-separated list of properties to return"
+    )]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub properties: Option<String>,
+
+    #[field(
+        display_name = "Properties With History",
+        description = "Comma-separated list of properties to return with value history"
+    )]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub properties_with_history: Option<String>,
+
+    #[field(
+        display_name = "Associations",
+        description = "Comma-separated list of associated object types to include"
+    )]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub associations: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, CapabilityOutput)]
+#[capability_output(display_name = "Get Line Item Output")]
+pub struct GetLineItemOutput {
+    #[field(display_name = "Line Item", description = "Line item object")]
+    pub line_item: Value,
+}
+
+#[capability(
+    module = "hubspot",
+    display_name = "Get Line Item",
+    description = "Retrieve a single line item by ID"
+)]
+pub fn get_line_item(input: GetLineItemInput) -> Result<GetLineItemOutput, AgentError> {
+    let connection = require_connection("HUBSPOT", &input._connection)?;
+    let mut query = HashMap::new();
+    add_properties(&mut query, &input.properties);
+    if let Some(properties_with_history) = input.properties_with_history
+        && !properties_with_history.is_empty()
+    {
+        query.insert("propertiesWithHistory".to_string(), properties_with_history);
+    }
+    if let Some(associations) = input.associations
+        && !associations.is_empty()
+    {
+        query.insert("associations".to_string(), associations);
+    }
+    let result = hubspot_get(
+        connection,
+        &format!("/crm/v3/objects/line_items/{}", input.line_item_id),
+        query,
+    )?;
+    Ok(GetLineItemOutput { line_item: result })
+}
+
+// ---
+
+#[derive(Serialize, Deserialize, CapabilityInput)]
 #[capability_input(display_name = "Create Line Item Input")]
 pub struct CreateLineItemInput {
     #[field(skip)]
@@ -1399,6 +1812,51 @@ pub fn create_line_item(input: CreateLineItemInput) -> Result<CreateLineItemOutp
 // ---
 
 #[derive(Serialize, Deserialize, CapabilityInput)]
+#[capability_input(display_name = "Update Line Item Input")]
+pub struct UpdateLineItemInput {
+    #[field(skip)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub _connection: Option<RawConnection>,
+
+    #[field(
+        display_name = "Line Item ID",
+        description = "HubSpot line item ID to update"
+    )]
+    pub line_item_id: String,
+
+    #[field(
+        display_name = "Properties",
+        description = "JSON object of line item properties to update"
+    )]
+    pub properties: Value,
+}
+
+#[derive(Serialize, Deserialize, CapabilityOutput)]
+#[capability_output(display_name = "Update Line Item Output")]
+pub struct UpdateLineItemOutput {
+    #[field(display_name = "Line Item", description = "Updated line item object")]
+    pub line_item: Value,
+}
+
+#[capability(
+    module = "hubspot",
+    display_name = "Update Line Item",
+    description = "Update an existing line item's properties",
+    side_effects = true
+)]
+pub fn update_line_item(input: UpdateLineItemInput) -> Result<UpdateLineItemOutput, AgentError> {
+    let connection = require_connection("HUBSPOT", &input._connection)?;
+    let result = hubspot_patch(
+        connection,
+        &format!("/crm/v3/objects/line_items/{}", input.line_item_id),
+        crm_object_body(&input.properties),
+    )?;
+    Ok(UpdateLineItemOutput { line_item: result })
+}
+
+// ---
+
+#[derive(Serialize, Deserialize, CapabilityInput)]
 #[capability_input(display_name = "Delete Line Item Input")]
 pub struct DeleteLineItemInput {
     #[field(skip)]
@@ -1433,6 +1891,87 @@ pub fn delete_line_item(input: DeleteLineItemInput) -> Result<DeleteLineItemOutp
         &format!("/crm/v3/objects/line_items/{}", input.line_item_id),
     )?;
     Ok(DeleteLineItemOutput { success: true })
+}
+
+// ---
+
+#[derive(Serialize, Deserialize, CapabilityInput)]
+#[capability_input(display_name = "Search Line Items Input")]
+pub struct SearchLineItemsInput {
+    #[field(skip)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub _connection: Option<RawConnection>,
+
+    #[field(
+        display_name = "Filter Groups",
+        description = "Array of filter groups for the search"
+    )]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub filter_groups: Option<Value>,
+
+    #[field(display_name = "Query", description = "Full-text search query string")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub query: Option<String>,
+
+    #[field(
+        display_name = "Properties",
+        description = "Array of property names to return"
+    )]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub properties: Option<Value>,
+
+    #[field(
+        display_name = "Limit",
+        description = "Maximum number of results (1-200)",
+        default = "10"
+    )]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub limit: Option<i64>,
+
+    #[field(display_name = "After", description = "Cursor for pagination")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub after: Option<String>,
+
+    #[field(display_name = "Sorts", description = "Array of sort rules")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sorts: Option<Value>,
+}
+
+#[derive(Serialize, Deserialize, CapabilityOutput)]
+#[capability_output(display_name = "Search Line Items Output")]
+pub struct SearchLineItemsOutput {
+    #[field(display_name = "Total", description = "Total matching results")]
+    pub total: i64,
+    #[field(
+        display_name = "Results",
+        description = "Array of matching line item objects"
+    )]
+    pub results: Value,
+    #[field(display_name = "Paging", description = "Pagination info")]
+    pub paging: Value,
+}
+
+#[capability(
+    module = "hubspot",
+    display_name = "Search Line Items",
+    description = "Search line items using filters, full-text query, or both"
+)]
+pub fn search_line_items(input: SearchLineItemsInput) -> Result<SearchLineItemsOutput, AgentError> {
+    let connection = require_connection("HUBSPOT", &input._connection)?;
+    let body = crm_search_body(
+        input.filter_groups,
+        input.query,
+        input.properties,
+        input.limit,
+        input.after,
+        input.sorts,
+    );
+    let result = hubspot_post(connection, "/crm/v3/objects/line_items/search", body)?;
+    Ok(SearchLineItemsOutput {
+        total: result["total"].as_i64().unwrap_or(0),
+        results: result["results"].clone(),
+        paging: result.get("paging").cloned().unwrap_or(Value::Null),
+    })
 }
 
 // ============================================================================
@@ -1778,4 +2317,260 @@ pub fn list_associations(
         results: result["results"].clone(),
         paging: result.get("paging").cloned().unwrap_or(Value::Null),
     })
+}
+
+// ============================================================================
+// Webhook Subscriptions
+// ============================================================================
+
+#[derive(Serialize, Deserialize, CapabilityInput)]
+#[capability_input(display_name = "List Webhook Subscriptions Input")]
+pub struct ListWebhookSubscriptionsInput {
+    #[field(skip)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub _connection: Option<RawConnection>,
+
+    #[field(
+        display_name = "App ID",
+        description = "HubSpot app ID whose webhook subscriptions should be listed"
+    )]
+    pub app_id: String,
+}
+
+#[derive(Serialize, Deserialize, CapabilityOutput)]
+#[capability_output(display_name = "List Webhook Subscriptions Output")]
+pub struct ListWebhookSubscriptionsOutput {
+    #[field(
+        display_name = "Subscriptions",
+        description = "Webhook subscription array or response object"
+    )]
+    pub subscriptions: Value,
+}
+
+#[capability(
+    module = "hubspot",
+    display_name = "List Webhook Subscriptions",
+    description = "List webhook event subscriptions for a HubSpot app"
+)]
+pub fn list_webhook_subscriptions(
+    input: ListWebhookSubscriptionsInput,
+) -> Result<ListWebhookSubscriptionsOutput, AgentError> {
+    let connection = require_connection("HUBSPOT", &input._connection)?;
+    let result = hubspot_get(
+        connection,
+        &format!("/webhooks/2026-03/{}/subscriptions", input.app_id),
+        HashMap::new(),
+    )?;
+    Ok(ListWebhookSubscriptionsOutput {
+        subscriptions: result,
+    })
+}
+
+// ---
+
+#[derive(Serialize, Deserialize, CapabilityInput)]
+#[capability_input(display_name = "Create Webhook Subscription Input")]
+pub struct CreateWebhookSubscriptionInput {
+    #[field(skip)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub _connection: Option<RawConnection>,
+
+    #[field(
+        display_name = "App ID",
+        description = "HubSpot app ID to create the webhook subscription under"
+    )]
+    pub app_id: String,
+
+    #[field(
+        display_name = "Event Type",
+        description = "Webhook event type (e.g. 'deal.propertyChange', 'line_item.propertyChange', 'object.creation')"
+    )]
+    pub event_type: String,
+
+    #[field(
+        display_name = "Active",
+        description = "Whether the subscription should be active immediately",
+        default = "false"
+    )]
+    pub active: bool,
+
+    #[field(
+        display_name = "Property Name",
+        description = "Property name for propertyChange event types"
+    )]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub property_name: Option<String>,
+
+    #[field(
+        display_name = "Object Type ID",
+        description = "Object type ID for generic object.* event types"
+    )]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub object_type_id: Option<String>,
+
+    #[field(
+        display_name = "Event Type Name",
+        description = "Optional human-readable event type name"
+    )]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub event_type_name: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, CapabilityOutput)]
+#[capability_output(display_name = "Create Webhook Subscription Output")]
+pub struct CreateWebhookSubscriptionOutput {
+    #[field(
+        display_name = "Subscription",
+        description = "Created webhook subscription object"
+    )]
+    pub subscription: Value,
+}
+
+#[capability(
+    module = "hubspot",
+    display_name = "Create Webhook Subscription",
+    description = "Create a webhook event subscription for a HubSpot app",
+    side_effects = true
+)]
+pub fn create_webhook_subscription(
+    input: CreateWebhookSubscriptionInput,
+) -> Result<CreateWebhookSubscriptionOutput, AgentError> {
+    let connection = require_connection("HUBSPOT", &input._connection)?;
+    let mut body = json!({
+        "eventType": input.event_type,
+        "active": input.active
+    });
+    if let Some(property_name) = input.property_name
+        && !property_name.is_empty()
+    {
+        body["propertyName"] = Value::String(property_name);
+    }
+    if let Some(object_type_id) = input.object_type_id
+        && !object_type_id.is_empty()
+    {
+        body["objectTypeId"] = Value::String(object_type_id);
+    }
+    if let Some(event_type_name) = input.event_type_name
+        && !event_type_name.is_empty()
+    {
+        body["eventTypeName"] = Value::String(event_type_name);
+    }
+
+    let result = hubspot_post(
+        connection,
+        &format!("/webhooks/2026-03/{}/subscriptions", input.app_id),
+        body,
+    )?;
+    Ok(CreateWebhookSubscriptionOutput {
+        subscription: result,
+    })
+}
+
+// ---
+
+#[derive(Serialize, Deserialize, CapabilityInput)]
+#[capability_input(display_name = "Update Webhook Subscription Input")]
+pub struct UpdateWebhookSubscriptionInput {
+    #[field(skip)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub _connection: Option<RawConnection>,
+
+    #[field(
+        display_name = "App ID",
+        description = "HubSpot app ID that owns the webhook subscription"
+    )]
+    pub app_id: String,
+
+    #[field(
+        display_name = "Subscription ID",
+        description = "Webhook subscription ID to update"
+    )]
+    pub subscription_id: String,
+
+    #[field(
+        display_name = "Active",
+        description = "Whether the subscription should be active"
+    )]
+    pub active: bool,
+}
+
+#[derive(Serialize, Deserialize, CapabilityOutput)]
+#[capability_output(display_name = "Update Webhook Subscription Output")]
+pub struct UpdateWebhookSubscriptionOutput {
+    #[field(
+        display_name = "Subscription",
+        description = "Updated webhook subscription object"
+    )]
+    pub subscription: Value,
+}
+
+#[capability(
+    module = "hubspot",
+    display_name = "Update Webhook Subscription",
+    description = "Activate or pause a webhook event subscription for a HubSpot app",
+    side_effects = true
+)]
+pub fn update_webhook_subscription(
+    input: UpdateWebhookSubscriptionInput,
+) -> Result<UpdateWebhookSubscriptionOutput, AgentError> {
+    let connection = require_connection("HUBSPOT", &input._connection)?;
+    let result = ProxyHttpClient::new(connection, "HUBSPOT")
+        .put(format!(
+            "/webhooks/2026-03/{}/subscriptions/{}",
+            input.app_id, input.subscription_id
+        ))
+        .json_body(json!({ "active": input.active }))
+        .send_json()?;
+    Ok(UpdateWebhookSubscriptionOutput {
+        subscription: result,
+    })
+}
+
+// ---
+
+#[derive(Serialize, Deserialize, CapabilityInput)]
+#[capability_input(display_name = "Delete Webhook Subscription Input")]
+pub struct DeleteWebhookSubscriptionInput {
+    #[field(skip)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub _connection: Option<RawConnection>,
+
+    #[field(
+        display_name = "App ID",
+        description = "HubSpot app ID that owns the webhook subscription"
+    )]
+    pub app_id: String,
+
+    #[field(
+        display_name = "Subscription ID",
+        description = "Webhook subscription ID to delete"
+    )]
+    pub subscription_id: String,
+}
+
+#[derive(Serialize, Deserialize, CapabilityOutput)]
+#[capability_output(display_name = "Delete Webhook Subscription Output")]
+pub struct DeleteWebhookSubscriptionOutput {
+    #[field(display_name = "Success", description = "Whether the delete succeeded")]
+    pub success: bool,
+}
+
+#[capability(
+    module = "hubspot",
+    display_name = "Delete Webhook Subscription",
+    description = "Delete a webhook event subscription for a HubSpot app",
+    side_effects = true
+)]
+pub fn delete_webhook_subscription(
+    input: DeleteWebhookSubscriptionInput,
+) -> Result<DeleteWebhookSubscriptionOutput, AgentError> {
+    let connection = require_connection("HUBSPOT", &input._connection)?;
+    hubspot_delete(
+        connection,
+        &format!(
+            "/webhooks/2026-03/{}/subscriptions/{}",
+            input.app_id, input.subscription_id
+        ),
+    )?;
+    Ok(DeleteWebhookSubscriptionOutput { success: true })
 }
