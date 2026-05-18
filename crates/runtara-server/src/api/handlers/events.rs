@@ -401,8 +401,14 @@ mod tests {
 
     #[test]
     fn env_parsing() {
-        assert_eq!(parse_webhook_max_body_bytes(None), DEFAULT_WEBHOOK_MAX_BODY_BYTES);
-        assert_eq!(parse_webhook_max_body_bytes(Some("0")), DEFAULT_WEBHOOK_MAX_BODY_BYTES);
+        assert_eq!(
+            parse_webhook_max_body_bytes(None),
+            DEFAULT_WEBHOOK_MAX_BODY_BYTES
+        );
+        assert_eq!(
+            parse_webhook_max_body_bytes(Some("0")),
+            DEFAULT_WEBHOOK_MAX_BODY_BYTES
+        );
         assert_eq!(
             parse_webhook_max_body_bytes(Some("not-a-number")),
             DEFAULT_WEBHOOK_MAX_BODY_BYTES
