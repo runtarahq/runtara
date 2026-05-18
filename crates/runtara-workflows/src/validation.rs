@@ -46,6 +46,7 @@
 //! | E020 | UnknownAgent | Agent doesn't exist |
 //! | E021 | UnknownCapability | Capability doesn't exist |
 //! | E022 | MissingRequiredInput | Required agent input missing |
+//! | E026 | AgentMissingConnection | Agent capability requires connectionId |
 //! | E043 | InvalidChildVersion | Invalid child workflow version format |
 //! | E051 | UndefinedDataReference | `data.*` field not in inputSchema |
 //! | E052 | MissingInputSchema | `data.*` used but no inputSchema defined |
@@ -177,6 +178,12 @@ pub enum ValidationError {
         agent_id: String,
         capability_id: String,
         input_name: String,
+    },
+    /// Agent capability requires a connection_id but none was configured.
+    AgentMissingConnection {
+        step_id: String,
+        agent_id: String,
+        capability_id: String,
     },
 
     // === Child Workflow Errors ===
@@ -485,6 +492,17 @@ impl std::fmt::Display for ValidationError {
                     f,
                     "[E022] Step '{}': capability '{}:{}' requires input '{}' but it is not provided",
                     step_id, agent_id, capability_id, input_name
+                )
+            }
+            ValidationError::AgentMissingConnection {
+                step_id,
+                agent_id,
+                capability_id,
+            } => {
+                write!(
+                    f,
+                    "[E026] Step '{}': capability '{}:{}' requires connection_id but no connectionId is configured",
+                    step_id, agent_id, capability_id
                 )
             }
 
@@ -2169,16 +2187,16 @@ fn validate_agents(graph: &ExecutionGraph, result: &mut ValidationResult) {
     for (step_id, step) in &graph.steps {
         if let Step::Agent(agent_step) = step {
             // Validate agent exists
-            let agent_module = runtara_agents::registry::find_agent_module(&agent_step.agent_id);
-
-            if agent_module.is_none() {
+            let Some(agent_module) =
+                runtara_agents::registry::find_agent_module(&agent_step.agent_id)
+            else {
                 result.errors.push(ValidationError::UnknownAgent {
                     step_id: step_id.clone(),
                     agent_id: agent_step.agent_id.clone(),
                     available_agents: available_agents.clone(),
                 });
                 continue;
-            }
+            };
 
             // Validate capability exists
             let capability_inputs = runtara_agents::registry::get_capability_inputs(
@@ -2212,6 +2230,19 @@ fn validate_agents(graph: &ExecutionGraph, result: &mut ValidationResult) {
                     available_capabilities,
                 });
                 continue;
+            }
+
+            if agent_capability_requires_connection(
+                &agent_step.agent_id,
+                &agent_step.capability_id,
+                agent_module,
+            ) && connection_id_is_missing(agent_step.connection_id.as_ref())
+            {
+                result.errors.push(ValidationError::AgentMissingConnection {
+                    step_id: step_id.clone(),
+                    agent_id: agent_step.agent_id.clone(),
+                    capability_id: agent_step.capability_id.clone(),
+                });
             }
 
             // Validate required inputs are provided
@@ -2331,6 +2362,24 @@ fn validate_agents(graph: &ExecutionGraph, result: &mut ValidationResult) {
             _ => {}
         }
     }
+}
+
+fn connection_id_is_missing(connection_id: Option<&String>) -> bool {
+    match connection_id.map(|id| id.trim()) {
+        None | Some("") | Some("__none__") => true,
+        Some(_) => false,
+    }
+}
+
+fn agent_capability_requires_connection(
+    agent_id: &str,
+    _capability_id: &str,
+    agent_module: &runtara_dsl::agent_meta::AgentModuleConfig,
+) -> bool {
+    // `http` supports optional auth connections, but can still make public
+    // unauthenticated requests. Other connection-capable agent modules require
+    // the host to inject a concrete connection for their capabilities.
+    agent_module.supports_connections && !agent_id.eq_ignore_ascii_case("http")
 }
 
 fn is_condition_input(
@@ -4146,7 +4195,7 @@ fn validate_ai_agent_steps(graph: &ExecutionGraph, result: &mut ValidationResult
     for (step_id, step) in &graph.steps {
         if let Step::AiAgent(ai_step) = step {
             // Must have a connection_id
-            if ai_step.connection_id.is_none() {
+            if connection_id_is_missing(ai_step.connection_id.as_ref()) {
                 result
                     .errors
                     .push(ValidationError::AiAgentMissingConnection {
@@ -4277,7 +4326,7 @@ fn validate_template_syntax(template_str: &str) -> Option<String> {
 mod tests {
     use super::*;
     use runtara_dsl::{
-        AgentStep, EmbedWorkflowStep, FinishStep, LogLevel, LogStep, ReferenceValue,
+        AgentStep, AiAgentStep, EmbedWorkflowStep, FinishStep, LogLevel, LogStep, ReferenceValue,
     };
 
     // Keep runtara-agents linked so tests use the same static capability registry.
@@ -4517,6 +4566,156 @@ mod tests {
         let result = validate_workflow(&graph);
         // Finish step with no outgoing edges is valid
         assert!(!result.has_errors());
+    }
+
+    // === Agent Validation Tests ===
+
+    #[test]
+    fn test_agent_capability_requires_connection_id_when_static_metadata_requires_connection() {
+        let mut input_mapping = InputMapping::new();
+        input_mapping.insert(
+            "schema_name".to_string(),
+            MappingValue::Immediate(runtara_dsl::ImmediateValue {
+                value: serde_json::json!("Product"),
+            }),
+        );
+
+        let mut steps = HashMap::new();
+        steps.insert(
+            "query".to_string(),
+            Step::Agent(AgentStep {
+                id: "query".to_string(),
+                name: None,
+                agent_id: "object_model".to_string(),
+                capability_id: "query-instances".to_string(),
+                connection_id: None,
+                input_mapping: Some(input_mapping),
+                max_retries: None,
+                retry_delay: None,
+                timeout: None,
+                compensation: None,
+                breakpoint: None,
+                durable: None,
+            }),
+        );
+
+        let graph = create_basic_graph(steps, "query");
+        let result = validate_workflow(&graph);
+
+        assert!(result.errors.iter().any(|error| matches!(
+            error,
+            ValidationError::AgentMissingConnection {
+                step_id,
+                agent_id,
+                capability_id,
+            } if step_id == "query"
+                && agent_id == "object_model"
+                && capability_id == "query-instances"
+        )));
+    }
+
+    #[test]
+    fn test_agent_capability_accepts_present_connection_id() {
+        let mut input_mapping = InputMapping::new();
+        input_mapping.insert(
+            "schema_name".to_string(),
+            MappingValue::Immediate(runtara_dsl::ImmediateValue {
+                value: serde_json::json!("Product"),
+            }),
+        );
+
+        let mut steps = HashMap::new();
+        steps.insert(
+            "query".to_string(),
+            Step::Agent(AgentStep {
+                id: "query".to_string(),
+                name: None,
+                agent_id: "object_model".to_string(),
+                capability_id: "query-instances".to_string(),
+                connection_id: Some("conn-postgres".to_string()),
+                input_mapping: Some(input_mapping),
+                max_retries: None,
+                retry_delay: None,
+                timeout: None,
+                compensation: None,
+                breakpoint: None,
+                durable: None,
+            }),
+        );
+
+        let graph = create_basic_graph(steps, "query");
+        let result = validate_workflow(&graph);
+
+        assert!(
+            !result
+                .errors
+                .iter()
+                .any(|error| matches!(error, ValidationError::AgentMissingConnection { .. }))
+        );
+    }
+
+    #[test]
+    fn test_http_agent_connection_id_remains_optional() {
+        let mut input_mapping = InputMapping::new();
+        input_mapping.insert(
+            "url".to_string(),
+            MappingValue::Immediate(runtara_dsl::ImmediateValue {
+                value: serde_json::json!("https://example.com"),
+            }),
+        );
+
+        let mut steps = HashMap::new();
+        steps.insert(
+            "request".to_string(),
+            Step::Agent(AgentStep {
+                id: "request".to_string(),
+                name: None,
+                agent_id: "http".to_string(),
+                capability_id: "http-request".to_string(),
+                connection_id: None,
+                input_mapping: Some(input_mapping),
+                max_retries: None,
+                retry_delay: None,
+                timeout: None,
+                compensation: None,
+                breakpoint: None,
+                durable: None,
+            }),
+        );
+
+        let graph = create_basic_graph(steps, "request");
+        let result = validate_workflow(&graph);
+
+        assert!(
+            !result
+                .errors
+                .iter()
+                .any(|error| matches!(error, ValidationError::AgentMissingConnection { .. }))
+        );
+    }
+
+    #[test]
+    fn test_ai_agent_empty_connection_id_is_missing() {
+        let mut steps = HashMap::new();
+        steps.insert(
+            "assistant".to_string(),
+            Step::AiAgent(AiAgentStep {
+                id: "assistant".to_string(),
+                name: None,
+                connection_id: Some("   ".to_string()),
+                config: None,
+                breakpoint: None,
+                durable: None,
+            }),
+        );
+
+        let graph = create_basic_graph(steps, "assistant");
+        let result = validate_workflow(&graph);
+
+        assert!(result.errors.iter().any(|error| matches!(
+            error,
+            ValidationError::AiAgentMissingConnection { step_id } if step_id == "assistant"
+        )));
     }
 
     // === Reference Tests ===
@@ -4871,6 +5070,20 @@ mod tests {
         assert!(display.contains("[E020]"));
         assert!(display.contains("htpp"));
         assert!(display.contains("Did you mean 'http'?"));
+    }
+
+    #[test]
+    fn test_error_display_agent_missing_connection() {
+        let error = ValidationError::AgentMissingConnection {
+            step_id: "query".to_string(),
+            agent_id: "object_model".to_string(),
+            capability_id: "query-instances".to_string(),
+        };
+        let display = format!("{}", error);
+        assert!(display.contains("[E026]"));
+        assert!(display.contains("query"));
+        assert!(display.contains("object_model:query-instances"));
+        assert!(display.contains("connectionId"));
     }
 
     // === Warning Display Tests ===

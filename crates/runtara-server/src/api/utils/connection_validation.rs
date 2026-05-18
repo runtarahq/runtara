@@ -100,7 +100,15 @@ fn integration_ids_for_agent(agent_id: &str) -> Vec<String> {
 }
 
 fn agent_requires_connection(agent_id: &str) -> bool {
-    agent_id.eq_ignore_ascii_case("object_model")
+    if agent_id.eq_ignore_ascii_case("http") {
+        return false;
+    }
+
+    get_agents()
+        .into_iter()
+        .find(|agent| agent.id.eq_ignore_ascii_case(agent_id))
+        .map(|agent| agent.supports_connections)
+        .unwrap_or(false)
 }
 
 /// Render up to 5 candidate connections as a human-readable list.

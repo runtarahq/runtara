@@ -172,6 +172,20 @@ impl ValidationErrorDto {
                 Some(input_name.clone()),
                 None,
             ),
+            ValidationError::AgentMissingConnection {
+                step_id,
+                agent_id,
+                capability_id,
+            } => (
+                "E026".to_string(),
+                format!(
+                    "Step '{}' capability '{}:{}' requires connectionId",
+                    step_id, agent_id, capability_id
+                ),
+                Some(step_id.clone()),
+                Some("connectionId".to_string()),
+                None,
+            ),
             ValidationError::TypeMismatch {
                 step_id,
                 field_name,

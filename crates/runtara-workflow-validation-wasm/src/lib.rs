@@ -593,6 +593,39 @@ mod tests {
     }
 
     #[test]
+    fn rejects_connection_required_agent_without_connection_id() {
+        let response = validate_execution_graph_json_impl(
+            r#"{
+                "steps": {
+                    "query": {
+                        "stepType": "Agent",
+                        "id": "query",
+                        "agentId": "object_model",
+                        "capabilityId": "query-instances",
+                        "inputMapping": {
+                            "schema_name": {
+                                "valueType": "immediate",
+                                "value": "Product"
+                            }
+                        }
+                    }
+                },
+                "entryPoint": "query"
+            }"#,
+        );
+
+        assert!(response.success);
+        assert!(!response.valid);
+        assert!(
+            response.errors.iter().any(|error| {
+                error.contains("[E026]") && error.contains("requires connection_id")
+            }),
+            "{:?}",
+            response.errors
+        );
+    }
+
+    #[test]
     fn returns_static_step_type_metadata() {
         let value: Value = serde_json::from_str(&get_step_types_json()).unwrap();
         let step_types = value["step_types"].as_array().unwrap();
