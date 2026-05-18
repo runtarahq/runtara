@@ -771,8 +771,12 @@ pub fn compile_workflow(input: CompilationInput) -> io::Result<NativeCompilation
                 continue;
             }
 
-            if let Some(filename) = path.file_name().and_then(|n| n.to_str())
-                && let Some(crate_name_part) = filename.strip_prefix("lib")
+            // Use file_stem to drop the extension before parsing — otherwise
+            // a hash-less cdylib like `libruntara_report_dsl.so` leaks the `.so`
+            // into the crate name (no `-` to split on), producing an invalid
+            // `--extern runtara_report_dsl.so=…` argument that rustc rejects.
+            if let Some(stem) = path.file_stem().and_then(|n| n.to_str())
+                && let Some(crate_name_part) = stem.strip_prefix("lib")
                 && let Some(crate_name) = crate_name_part.split('-').next()
             {
                 // Convert hyphens to underscores for crate names
@@ -782,18 +786,35 @@ pub fn compile_workflow(input: CompilationInput) -> io::Result<NativeCompilation
                     continue;
                 }
 
-                // Keep the most recently modified file when duplicates exist
-                let dominated = extern_crates.get(&extern_name).is_some_and(|existing| {
-                    let existing_mtime = fs::metadata(existing)
-                        .and_then(|m| m.modified())
-                        .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
-                    let new_mtime = fs::metadata(&path)
-                        .and_then(|m| m.modified())
-                        .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
-                    new_mtime > existing_mtime
-                });
+                let new_is_rlib = ext == Some("rlib");
 
-                if !extern_crates.contains_key(&extern_name) || dominated {
+                // Prefer rlibs over dylibs when both are present for the same
+                // crate. Crates declaring `crate-type = ["cdylib", "rlib"]`
+                // (e.g., runtara-report-dsl) emit a cdylib that lacks Rust
+                // metadata, so only the rlib is usable as `--extern`.
+                // Among same-kind duplicates, keep the most recently modified.
+                let should_insert = match extern_crates.get(&extern_name) {
+                    None => true,
+                    Some(existing) => {
+                        let existing_is_rlib =
+                            existing.extension().and_then(|e| e.to_str()) == Some("rlib");
+                        match (new_is_rlib, existing_is_rlib) {
+                            (true, false) => true,
+                            (false, true) => false,
+                            _ => {
+                                let existing_mtime = fs::metadata(existing)
+                                    .and_then(|m| m.modified())
+                                    .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+                                let new_mtime = fs::metadata(&path)
+                                    .and_then(|m| m.modified())
+                                    .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+                                new_mtime > existing_mtime
+                            }
+                        }
+                    }
+                };
+
+                if should_insert {
                     extern_crates.insert(extern_name, path);
                 }
             }
