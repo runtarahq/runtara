@@ -21,9 +21,11 @@
 pub mod bindings;
 pub mod engine;
 pub mod host_state;
+pub mod registry;
 
 pub use engine::{EngineConfig, build_engine, spawn_epoch_ticker};
 pub use host_state::{CallContext, HostState};
+pub use registry::{LoadedAgent, build_linker, instantiate, load_agent};
 
 /// The canonical WIT source this host is designed against.
 pub const AGENT_WIT: &str = runtara_agent_wit::RUNTARA_AGENT_WIT;

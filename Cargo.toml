@@ -30,6 +30,7 @@ members = [
     # WASM Component Model migration — see docs/wasm-components-migration-plan.md
     "crates/runtara-agent-wit",
     "crates/runtara-component-host",
+    "crates/runtara-agent-crypto",
 ]
 default-members = ["crates/runtara-core"]
 
