@@ -111,6 +111,9 @@ pub fn register_report_filters(
     register_filter(env, "percent", ctx.clone(), formatter.clone(), |_| {
         FormatSpec::Percent
     });
+    register_filter(env, "bytes", ctx.clone(), formatter.clone(), |_| {
+        FormatSpec::Bytes
+    });
     register_filter(env, "date", ctx.clone(), formatter.clone(), |_| {
         FormatSpec::Date
     });
@@ -347,6 +350,15 @@ mod tests {
         assert_eq!(
             render("{{ ratio | percent }}", &json!({ "ratio": 0.123 })),
             "12.3%"
+        );
+    }
+
+    #[test]
+    fn render_bytes_filter() {
+        assert_eq!(render("{{ n | bytes }}", &json!({ "n": 1_500 })), "1.50 KB");
+        assert_eq!(
+            render("{{ n | bytes }}", &json!({ "n": 68_719_476_736_i64 })),
+            "68.72 GB"
         );
     }
 

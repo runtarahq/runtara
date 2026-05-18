@@ -892,7 +892,8 @@ function defaultAlign(format?: string | null): TableColumn['align'] {
     formatName === 'number' ||
     formatName === 'number_compact' ||
     formatName === 'decimal' ||
-    formatName === 'percent'
+    formatName === 'percent' ||
+    formatName === 'bytes'
   ) {
     return 'right';
   }

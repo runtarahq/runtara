@@ -18,6 +18,7 @@ const FORMATS = [
   { value: 'decimal', label: 'Decimal' },
   { value: 'currency', label: 'Currency' },
   { value: 'percent', label: 'Percent' },
+  { value: 'bytes', label: 'Bytes (KB / MB / GB)' },
 ];
 
 interface MetricBlockEditorProps {

@@ -52,6 +52,12 @@ pub enum FormatSpec {
     Decimal,
     /// Percentage — input is the raw ratio (`0.123` → `12.3%`).
     Percent,
+    /// Bytes with SI unit suffix (`1500` → `1.50 KB`,
+    /// `2_500_000_000` → `2.50 GB`). Uses decimal thresholds (10^3 each
+    /// step), not binary (1024). For locale-correct rendering the JS
+    /// bridge dispatches to `Intl.NumberFormat({ style: 'unit', unit:
+    /// 'megabyte' })`; the ASCII fallback uses plain `B/KB/MB/…`.
+    Bytes,
     /// Calendar date (no time component).
     Date,
     /// Date + time, locale-formatted.
@@ -101,6 +107,7 @@ impl FormatSpec {
             "number_compact" => FormatSpec::NumberCompact,
             "decimal" => FormatSpec::Decimal,
             "percent" => FormatSpec::Percent,
+            "bytes" => FormatSpec::Bytes,
             "date" => FormatSpec::Date,
             "datetime" => FormatSpec::Datetime,
             "pill" => FormatSpec::Pill,
@@ -122,6 +129,7 @@ impl FormatSpec {
             FormatSpec::NumberCompact => "number_compact".into(),
             FormatSpec::Decimal => "decimal".into(),
             FormatSpec::Percent => "percent".into(),
+            FormatSpec::Bytes => "bytes".into(),
             FormatSpec::Date => "date".into(),
             FormatSpec::Datetime => "datetime".into(),
             FormatSpec::Pill => "pill".into(),
@@ -184,6 +192,10 @@ impl Formatter for SimpleAsciiFormatter {
                 Some(n) => format!("{:.1}%", n * 100.0),
                 None => render_raw(value),
             },
+            FormatSpec::Bytes => match value.as_f64() {
+                Some(n) => format_bytes_ascii(n),
+                None => render_raw(value),
+            },
             FormatSpec::Date => match value.as_str() {
                 Some(s) => s.split('T').next().unwrap_or(s).to_string(),
                 None => render_raw(value),
@@ -229,6 +241,33 @@ fn format_currency_compact_ascii(n: f64, code: &str) -> String {
     let sign = if n < 0.0 { "-" } else { "" };
     let body = format_compact_ascii(n.abs());
     format!("{sign}{symbol}{body}")
+}
+
+/// SI byte formatting — decimal thresholds (10^3 per step), short unit
+/// suffix. Values below 1 KB render as integer bytes; everything else as
+/// two-decimal places. The JS bridge handles the locale-aware rendering;
+/// this is the ASCII fallback used by the server when no `Intl`-backed
+/// formatter is installed.
+fn format_bytes_ascii(n: f64) -> String {
+    if !n.is_finite() {
+        return String::new();
+    }
+    let sign = if n < 0.0 { "-" } else { "" };
+    let abs = n.abs();
+    let (scaled, suffix) = if abs < 1.0e3 {
+        return format!("{sign}{} B", format_thousands(abs.round() as i64));
+    } else if abs < 1.0e6 {
+        (abs / 1.0e3, "KB")
+    } else if abs < 1.0e9 {
+        (abs / 1.0e6, "MB")
+    } else if abs < 1.0e12 {
+        (abs / 1.0e9, "GB")
+    } else if abs < 1.0e15 {
+        (abs / 1.0e12, "TB")
+    } else {
+        (abs / 1.0e15, "PB")
+    };
+    format!("{sign}{:.2} {suffix}", scaled)
 }
 
 fn format_compact_ascii(n: f64) -> String {
@@ -311,6 +350,8 @@ mod tests {
             FormatSpec::parse("number_compact"),
             FormatSpec::NumberCompact
         );
+        assert_eq!(FormatSpec::parse("bytes"), FormatSpec::Bytes);
+        assert_eq!(FormatSpec::Bytes.to_format_string(), "bytes");
         assert_eq!(FormatSpec::parse(""), FormatSpec::Raw);
         assert_eq!(FormatSpec::parse("nonsense"), FormatSpec::Raw);
     }
@@ -340,6 +381,33 @@ mod tests {
         assert_eq!(fmt.format(&json!(1234), &spec, &ctx()), "1.2K");
         assert_eq!(fmt.format(&json!(1_500_000), &spec, &ctx()), "1.5M");
         assert_eq!(fmt.format(&json!(1_000_000_000), &spec, &ctx()), "1B");
+    }
+
+    #[test]
+    fn ascii_bytes() {
+        let fmt = SimpleAsciiFormatter;
+        let spec = FormatSpec::Bytes;
+        // Below 1 KB → integer bytes with unit
+        assert_eq!(fmt.format(&json!(0), &spec, &ctx()), "0 B");
+        assert_eq!(fmt.format(&json!(512), &spec, &ctx()), "512 B");
+        // SI thresholds: 1500 B = 1.50 KB; 2.5 GB; etc.
+        assert_eq!(fmt.format(&json!(1_500), &spec, &ctx()), "1.50 KB");
+        assert_eq!(fmt.format(&json!(2_500_000), &spec, &ctx()), "2.50 MB");
+        assert_eq!(
+            fmt.format(&json!(2_500_000_000_i64), &spec, &ctx()),
+            "2.50 GB"
+        );
+        // The number used by the seeded System resources report (= 64 GiB)
+        // renders as 68.72 GB in SI — the documented behaviour.
+        assert_eq!(
+            fmt.format(&json!(68_719_476_736_i64), &spec, &ctx()),
+            "68.72 GB"
+        );
+        // Negative + null
+        assert_eq!(fmt.format(&json!(-1_500), &spec, &ctx()), "-1.50 KB");
+        assert_eq!(fmt.format(&Value::Null, &spec, &ctx()), "");
+        // Non-numeric input falls through to raw
+        assert_eq!(fmt.format(&json!("abc"), &spec, &ctx()), "abc");
     }
 
     #[test]

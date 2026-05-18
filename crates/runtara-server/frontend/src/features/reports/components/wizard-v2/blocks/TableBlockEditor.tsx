@@ -33,6 +33,7 @@ const FORMATS: Array<{ value: string; label: string }> = [
   { value: 'decimal', label: 'Decimal' },
   { value: 'currency', label: 'Currency' },
   { value: 'percent', label: 'Percent' },
+  { value: 'bytes', label: 'Bytes (KB / MB / GB)' },
   { value: 'date', label: 'Date' },
   { value: 'datetime', label: 'Date + time' },
   { value: 'pill', label: 'Pill' },

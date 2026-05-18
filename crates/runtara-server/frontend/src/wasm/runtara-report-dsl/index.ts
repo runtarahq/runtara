@@ -45,6 +45,7 @@ type FormatSpec =
   | { kind: 'number_compact' }
   | { kind: 'decimal' }
   | { kind: 'percent' }
+  | { kind: 'bytes' }
   | { kind: 'date' }
   | { kind: 'datetime' }
   | { kind: 'pill' }
@@ -223,6 +224,11 @@ function formatValueViaIntl(
         maximumFractionDigits: 2,
       }).format(num);
     }
+    case 'bytes': {
+      const num = toNumber(value);
+      if (num === null) return stringifyRaw(value);
+      return formatBytesViaIntl(num, effectiveLocale);
+    }
     case 'date': {
       const date = toDate(value);
       if (date === null) return stringifyRaw(value);
@@ -248,6 +254,40 @@ function formatValueViaIntl(
     default:
       return stringifyRaw(value);
   }
+}
+
+// SI byte rendering via `Intl.NumberFormat({ style: 'unit', unit: ... })`.
+// Picks the largest unit that keeps the scaled value ≥ 1; below 1 KB the
+// value renders as integer bytes.
+function formatBytesViaIntl(num: number, locale: string | undefined): string {
+  const abs = Math.abs(num);
+  let unit: 'byte' | 'kilobyte' | 'megabyte' | 'gigabyte' | 'terabyte' | 'petabyte';
+  let divisor: number;
+  if (abs < 1e3) {
+    unit = 'byte';
+    divisor = 1;
+  } else if (abs < 1e6) {
+    unit = 'kilobyte';
+    divisor = 1e3;
+  } else if (abs < 1e9) {
+    unit = 'megabyte';
+    divisor = 1e6;
+  } else if (abs < 1e12) {
+    unit = 'gigabyte';
+    divisor = 1e9;
+  } else if (abs < 1e15) {
+    unit = 'terabyte';
+    divisor = 1e12;
+  } else {
+    unit = 'petabyte';
+    divisor = 1e15;
+  }
+  return new Intl.NumberFormat(locale, {
+    style: 'unit',
+    unit,
+    unitDisplay: 'short',
+    maximumFractionDigits: unit === 'byte' ? 0 : 2,
+  }).format(num / divisor);
 }
 
 function toNumber(value: unknown): number | null {
