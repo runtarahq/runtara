@@ -157,38 +157,6 @@ pub fn execute_capability(
             (runtara_agents::datetime::__CAPABILITY_EXECUTOR_UNIX_TO_DATE.execute)(input)
         }
 
-        // --- file ---
-        ("file", "file-append-file") => {
-            (runtara_agents::file::__CAPABILITY_EXECUTOR_FILE_APPEND_FILE.execute)(input)
-        }
-        ("file", "file-copy-file") => {
-            (runtara_agents::file::__CAPABILITY_EXECUTOR_FILE_COPY_FILE.execute)(input)
-        }
-        ("file", "file-create-directory") => {
-            (runtara_agents::file::__CAPABILITY_EXECUTOR_FILE_CREATE_DIRECTORY.execute)(input)
-        }
-        ("file", "file-delete-file") => {
-            (runtara_agents::file::__CAPABILITY_EXECUTOR_FILE_DELETE_FILE.execute)(input)
-        }
-        ("file", "file-file-exists") => {
-            (runtara_agents::file::__CAPABILITY_EXECUTOR_FILE_FILE_EXISTS.execute)(input)
-        }
-        ("file", "file-get-file-info") => {
-            (runtara_agents::file::__CAPABILITY_EXECUTOR_FILE_GET_FILE_INFO.execute)(input)
-        }
-        ("file", "file-list-files") => {
-            (runtara_agents::file::__CAPABILITY_EXECUTOR_FILE_LIST_FILES.execute)(input)
-        }
-        ("file", "file-move-file") => {
-            (runtara_agents::file::__CAPABILITY_EXECUTOR_FILE_MOVE_FILE.execute)(input)
-        }
-        ("file", "file-read-file") => {
-            (runtara_agents::file::__CAPABILITY_EXECUTOR_FILE_READ_FILE.execute)(input)
-        }
-        ("file", "file-write-file") => {
-            (runtara_agents::file::__CAPABILITY_EXECUTOR_FILE_WRITE_FILE.execute)(input)
-        }
-
         // --- http ---
         ("http", "http-request") => {
             (runtara_agents::http::__CAPABILITY_EXECUTOR_HTTP_REQUEST.execute)(input)

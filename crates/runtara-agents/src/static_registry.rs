@@ -134,66 +134,6 @@ pub static CAPABILITY_REGISTRATIONS: &[CapabilityRegistration] = &[
         executor: &crate::datetime::__CAPABILITY_EXECUTOR_UNIX_TO_DATE,
     },
     CapabilityRegistration {
-        meta: &crate::file::__CAPABILITY_META_FILE_WRITE_FILE,
-        input_type: &crate::file::__INPUT_META_WriteFileInput,
-        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
-        executor: &crate::file::__CAPABILITY_EXECUTOR_FILE_WRITE_FILE,
-    },
-    CapabilityRegistration {
-        meta: &crate::file::__CAPABILITY_META_FILE_READ_FILE,
-        input_type: &crate::file::__INPUT_META_ReadFileInput,
-        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
-        executor: &crate::file::__CAPABILITY_EXECUTOR_FILE_READ_FILE,
-    },
-    CapabilityRegistration {
-        meta: &crate::file::__CAPABILITY_META_FILE_LIST_FILES,
-        input_type: &crate::file::__INPUT_META_ListFilesInput,
-        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
-        executor: &crate::file::__CAPABILITY_EXECUTOR_FILE_LIST_FILES,
-    },
-    CapabilityRegistration {
-        meta: &crate::file::__CAPABILITY_META_FILE_DELETE_FILE,
-        input_type: &crate::file::__INPUT_META_DeleteFileInput,
-        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
-        executor: &crate::file::__CAPABILITY_EXECUTOR_FILE_DELETE_FILE,
-    },
-    CapabilityRegistration {
-        meta: &crate::file::__CAPABILITY_META_FILE_FILE_EXISTS,
-        input_type: &crate::file::__INPUT_META_FileExistsInput,
-        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
-        executor: &crate::file::__CAPABILITY_EXECUTOR_FILE_FILE_EXISTS,
-    },
-    CapabilityRegistration {
-        meta: &crate::file::__CAPABILITY_META_FILE_COPY_FILE,
-        input_type: &crate::file::__INPUT_META_CopyFileInput,
-        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
-        executor: &crate::file::__CAPABILITY_EXECUTOR_FILE_COPY_FILE,
-    },
-    CapabilityRegistration {
-        meta: &crate::file::__CAPABILITY_META_FILE_MOVE_FILE,
-        input_type: &crate::file::__INPUT_META_MoveFileInput,
-        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
-        executor: &crate::file::__CAPABILITY_EXECUTOR_FILE_MOVE_FILE,
-    },
-    CapabilityRegistration {
-        meta: &crate::file::__CAPABILITY_META_FILE_CREATE_DIRECTORY,
-        input_type: &crate::file::__INPUT_META_CreateDirectoryInput,
-        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
-        executor: &crate::file::__CAPABILITY_EXECUTOR_FILE_CREATE_DIRECTORY,
-    },
-    CapabilityRegistration {
-        meta: &crate::file::__CAPABILITY_META_FILE_GET_FILE_INFO,
-        input_type: &crate::file::__INPUT_META_GetFileInfoInput,
-        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
-        executor: &crate::file::__CAPABILITY_EXECUTOR_FILE_GET_FILE_INFO,
-    },
-    CapabilityRegistration {
-        meta: &crate::file::__CAPABILITY_META_FILE_APPEND_FILE,
-        input_type: &crate::file::__INPUT_META_AppendFileInput,
-        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
-        executor: &crate::file::__CAPABILITY_EXECUTOR_FILE_APPEND_FILE,
-    },
-    CapabilityRegistration {
         meta: &crate::http::__CAPABILITY_META_HTTP_REQUEST,
         input_type: &crate::http::__INPUT_META_HttpRequestInput,
         #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
@@ -2007,16 +1947,6 @@ pub static INPUT_TYPES: &[&InputTypeMeta] = &[
     &crate::datetime::__INPUT_META_DateToUnixInput,
     &crate::datetime::__INPUT_META_UnixToDateInput,
     &crate::datetime::__INPUT_META_RoundDateInput,
-    &crate::file::__INPUT_META_WriteFileInput,
-    &crate::file::__INPUT_META_ReadFileInput,
-    &crate::file::__INPUT_META_ListFilesInput,
-    &crate::file::__INPUT_META_DeleteFileInput,
-    &crate::file::__INPUT_META_FileExistsInput,
-    &crate::file::__INPUT_META_CopyFileInput,
-    &crate::file::__INPUT_META_MoveFileInput,
-    &crate::file::__INPUT_META_CreateDirectoryInput,
-    &crate::file::__INPUT_META_GetFileInfoInput,
-    &crate::file::__INPUT_META_AppendFileInput,
     &crate::http::__INPUT_META_HttpRequestInput,
     #[cfg(feature = "integrations")]
     &crate::integrations::ai_tools::__INPUT_META_AiTextCompletionInput,
@@ -2491,15 +2421,6 @@ pub static OUTPUT_TYPES: &[&OutputTypeMeta] = &[
     &crate::crypto::__OUTPUT_META_HashResult,
     &crate::datetime::__OUTPUT_META_TimeBetweenResult,
     &crate::datetime::__OUTPUT_META_UnixTimestampResult,
-    &crate::file::__OUTPUT_META_WriteFileResponse,
-    &crate::file::__OUTPUT_META_WorkspaceFileInfo,
-    &crate::file::__OUTPUT_META_DeleteResponse,
-    &crate::file::__OUTPUT_META_ExistsResponse,
-    &crate::file::__OUTPUT_META_CopyResponse,
-    &crate::file::__OUTPUT_META_MoveResponse,
-    &crate::file::__OUTPUT_META_CreateDirResponse,
-    &crate::file::__OUTPUT_META_FileMetadata,
-    &crate::file::__OUTPUT_META_AppendFileResponse,
     &crate::http::__OUTPUT_META_HttpResponse,
     #[cfg(feature = "integrations")]
     &crate::integrations::ai_tools::__OUTPUT_META_AiTextCompletionOutput,

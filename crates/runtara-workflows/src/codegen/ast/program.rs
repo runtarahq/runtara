@@ -187,8 +187,8 @@ fn collect_used_capabilities_recursive(
 fn agent_module_path(agent_id: &str) -> String {
     match agent_id {
         // Core runtara-agents
-        "utils" | "transform" | "http" | "csv" | "text" | "xml" | "datetime" | "file"
-        | "crypto" | "sftp" | "xlsx" | "compression" => {
+        "utils" | "transform" | "http" | "csv" | "text" | "xml" | "datetime" | "crypto"
+        | "sftp" | "xlsx" | "compression" => {
             format!("agents::{}", agent_id)
         }
         // All other agents are integration agents

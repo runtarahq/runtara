@@ -2,7 +2,7 @@
 
 Every runtara agent ported to a WebAssembly Component. Order is easiest → hardest so each port reinforces the pattern before tackling the next category. Mark each row as it lands.
 
-Totals: **25 agent crates, ~279 capabilities** (some shared schemas).
+Totals: **24 agent crates, ~269 capabilities** (some shared schemas). The legacy `file` agent (10 caps) was removed in Phase 2.1 — components have no direct filesystem access; files travel as base64-encoded `FileData` blobs through the existing `connection` channel for the integrations that need them (e.g., s3, sharepoint, compression).
 
 Conventions:
 - Crate name: `runtara-agent-<id>` (kebab-case of the module id).
@@ -15,6 +15,12 @@ Conventions:
 - [x] **runtara-agent-wit** — canonical WIT contract (`runtara:agent@0.1.0`).
 - [x] **runtara-component-host** — embedded wasmtime + ComponentDispatcherService.
 - [x] **runtara-agent-crypto** (2 caps: `hash`, `hmac`) — schema parity with legacy.
+- [x] **runtara-agent-xml** (1 cap: `from-xml`)
+- [x] **runtara-agent-csv** (3 caps: `from-csv`, `to-csv`, `get-header`)
+- [x] **runtara-agent-utils** (13 caps)
+- [x] **runtara-agent-datetime** (9 caps)
+- [x] **runtara-agent-transform** (16 caps)
+- [x] **runtara-agent-text** (28 caps)
 
 ## Phase 2.0 — Shared utilities (deferred)
 
@@ -32,8 +38,8 @@ Conventions:
 | [ ] runtara-agent-utils | `utils` | 13 | `rand`, `delay_ms` — `wasi:clocks` is fine for delay. |
 | [ ] runtara-agent-datetime | `datetime` | 9 | Pure `chrono`. |
 | [ ] runtara-agent-transform | `transform` | 16 | JSON shape manipulation. |
-| [ ] runtara-agent-text | `text` | 28 | Largest pure agent (regex, jinja, base64, case). |
-| [ ] runtara-agent-file | `file` | 10 | Uses `RUNTARA_WORKSPACE_DIR` via `std::fs`. Needs `wasi:filesystem` preopened by host. |
+| [x] runtara-agent-text | `text` | 28 | Largest pure agent. |
+| ~~runtara-agent-file~~ | ~~`file`~~ | — | **Removed.** Components have no direct FS access; file content flows via base64-encoded `FileData` records inside connection-using agents. |
 
 ## Phase 2.2 — HTTP / connection-using agents
 

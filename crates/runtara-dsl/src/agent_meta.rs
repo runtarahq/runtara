@@ -534,15 +534,6 @@ pub const BUILTIN_AGENT_MODULES: &[AgentModuleConfig] = &[
         secure: false,
     },
     AgentModuleConfig {
-        id: "file",
-        name: "File",
-        description: "File system capabilities for reading, writing, listing, copying, moving, and deleting files within the workflow workspace",
-        has_side_effects: true,
-        supports_connections: false,
-        integration_ids: &[],
-        secure: false,
-    },
-    AgentModuleConfig {
         id: "object_model",
         name: "Object Model",
         description: "Object Model capabilities for database CRUD operations - create, query, and check instances in object model schemas (has side effects)",
@@ -1472,8 +1463,8 @@ mod tests {
         // Verify we have the expected number of built-in modules
         assert_eq!(
             BUILTIN_AGENT_MODULES.len(),
-            12,
-            "Expected 12 built-in agent modules"
+            11,
+            "Expected 11 built-in agent modules"
         );
     }
 
@@ -1489,7 +1480,6 @@ mod tests {
         assert!(ids.contains(&"datetime"), "Missing datetime module");
         assert!(ids.contains(&"http"), "Missing http module");
         assert!(ids.contains(&"compression"), "Missing compression module");
-        assert!(ids.contains(&"file"), "Missing file module");
         assert!(ids.contains(&"sftp"), "Missing sftp module");
         assert!(ids.contains(&"object_model"), "Missing object_model module");
     }
@@ -1566,10 +1556,10 @@ mod tests {
 
     #[test]
     fn test_side_effects_modules() {
-        // http, sftp, file, and object_model have side effects
+        // http, sftp, and object_model have side effects
         for module in BUILTIN_AGENT_MODULES {
             match module.id {
-                "http" | "sftp" | "file" | "object_model" => {
+                "http" | "sftp" | "object_model" => {
                     assert!(
                         module.has_side_effects,
                         "{} module should have side effects",
@@ -1589,10 +1579,10 @@ mod tests {
 
     #[test]
     fn test_connection_supporting_modules() {
-        // Only http and sftp support connections
+        // http, sftp, and object_model support connections
         for module in BUILTIN_AGENT_MODULES {
             match module.id {
-                "http" | "sftp" => {
+                "http" | "sftp" | "object_model" => {
                     assert!(
                         module.supports_connections,
                         "{} module should support connections",
