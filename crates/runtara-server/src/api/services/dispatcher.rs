@@ -187,7 +187,8 @@ pub const DISPATCHER_WORKFLOW_ID: &str = "__agent_dispatcher__";
 /// v33: Add storage_generate_presigned_url capability to s3_storage and azure_blob_storage
 /// v34: Remove legacy file agent (Phase 2.1 of WASM components migration)
 /// v35: Remove legacy commerce agent (use shopify directly)
-pub const DISPATCHER_VERSION: u32 = 35;
+/// v36: Cherry-pick main 5c8436dc — add 12 new HubSpot capabilities
+pub const DISPATCHER_VERSION: u32 = 36;
 
 /// Service for managing the agent dispatcher binary
 pub struct DispatcherService {
