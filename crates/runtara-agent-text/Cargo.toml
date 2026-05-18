@@ -1,0 +1,28 @@
+[package]
+name = "runtara-agent-text"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Text agent — string manipulation, regex, base64, templates — as a WebAssembly component"
+keywords = ["wasm", "component", "agent", "text"]
+categories = ["wasm", "text-processing"]
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+wit-bindgen-rt = { version = "0.44", features = ["bitflags"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+base64 = { workspace = true }
+sha2 = { workspace = true }
+regex = "1"
+minijinja = "2.5"
+
+[package.metadata.component]
+package = "runtara:agent-text"
+
+[package.metadata.component.target]
+path = "../runtara-agent-wit/wit"
+world = "agent"
