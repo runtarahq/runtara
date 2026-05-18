@@ -1,0 +1,25 @@
+[package]
+name = "runtara-agent-compression"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Compression agent — thin wrapper that proxies to the host's native zip handler"
+keywords = ["wasm", "component", "agent", "compression"]
+categories = ["wasm"]
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+wit-bindgen-rt = { version = "0.44", features = ["bitflags"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+runtara-http = { path = "../runtara-http" }
+
+[package.metadata.component]
+package = "runtara:agent-compression"
+
+[package.metadata.component.target]
+path = "../runtara-agent-wit/wit"
+world = "agent"

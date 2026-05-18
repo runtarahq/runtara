@@ -50,6 +50,9 @@ members = [
     "crates/runtara-agent-stripe",
     "crates/runtara-agent-hubspot",
     "crates/runtara-agent-shopify",
+    "crates/runtara-agent-sftp",
+    "crates/runtara-agent-compression",
+    "crates/runtara-agent-xlsx",
 ]
 default-members = ["crates/runtara-core"]
 

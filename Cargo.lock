@@ -4261,6 +4261,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "runtara-agent-compression"
+version = "5.0.0"
+dependencies = [
+ "runtara-http",
+ "serde",
+ "serde_json",
+ "wit-bindgen-rt 0.44.0",
+]
+
+[[package]]
 name = "runtara-agent-crypto"
 version = "5.1.1"
 dependencies = [
@@ -4371,6 +4381,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "runtara-agent-sftp"
+version = "5.0.0"
+dependencies = [
+ "runtara-http",
+ "serde",
+ "serde_json",
+ "wit-bindgen-rt 0.44.0",
+]
+
+[[package]]
 name = "runtara-agent-sharepoint"
 version = "5.0.0"
 dependencies = [
@@ -4447,6 +4467,16 @@ dependencies = [
 [[package]]
 name = "runtara-agent-wit"
 version = "5.1.1"
+
+[[package]]
+name = "runtara-agent-xlsx"
+version = "5.0.0"
+dependencies = [
+ "runtara-http",
+ "serde",
+ "serde_json",
+ "wit-bindgen-rt 0.44.0",
+]
 
 [[package]]
 name = "runtara-agent-xml"
