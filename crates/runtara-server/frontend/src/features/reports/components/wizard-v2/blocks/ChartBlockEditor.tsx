@@ -14,7 +14,9 @@ import {
   ReportBlockDefinition,
   ReportChartKind,
   ReportChartSeries,
+  ReportSource,
 } from '../../../types';
+import { SourceAggregatesEditor } from './SourceAggregatesEditor';
 
 const KINDS: Array<{ value: ReportChartKind; label: string }> = [
   { value: 'bar', label: 'Bar' },
@@ -39,13 +41,33 @@ export function ChartBlockEditor({
   const series: ReportChartSeries[] = chart.series ?? [];
   const schemaName = block.source?.schema;
   const schema = schemas.find((s) => s.name === schemaName);
-  const fields = schema?.columns.map((c) => c.name) ?? [];
+  const schemaFields = schema?.columns.map((c) => c.name) ?? [];
+  const aggregateAliases = (block.source?.aggregates ?? []).map(
+    (agg) => agg.alias
+  );
+  // Phase 11 follow-up: chart series.field references aggregate aliases.
+  // The X axis usually picks one of the group-by fields (which are schema
+  // columns). Both pickers offer the relevant set so the user can wire
+  // chart → source aggregates → schema fields correctly.
+  const seriesFieldOptions = aggregateAliases;
+  const xFieldOptions = [
+    ...(block.source?.groupBy ?? []),
+    ...schemaFields.filter((f) => !(block.source?.groupBy ?? []).includes(f)),
+  ];
 
   const updateSeries = (next: ReportChartSeries[]) =>
     onChange({ ...block, chart: { ...chart, series: next } });
 
+  const updateSource = (next: ReportSource) =>
+    onChange({ ...block, source: next });
+
   return (
     <div className="grid gap-3">
+      <SourceAggregatesEditor
+        source={block.source}
+        schemas={schemas}
+        onChange={updateSource}
+      />
       <div className="grid grid-cols-2 gap-3">
         <div className="grid gap-1.5">
           <Label className="text-xs">Chart kind</Label>
@@ -83,12 +105,12 @@ export function ChartBlockEditor({
               <SelectValue placeholder="Pick a field" />
             </SelectTrigger>
             <SelectContent>
-              {chart.x && !fields.includes(chart.x) ? (
+              {chart.x && !xFieldOptions.includes(chart.x) ? (
                 <SelectItem disabled value={chart.x}>
                   {chart.x}
                 </SelectItem>
               ) : null}
-              {fields.map((field) => (
+              {xFieldOptions.map((field) => (
                 <SelectItem key={field} value={field}>
                   {field}
                 </SelectItem>
@@ -133,19 +155,25 @@ export function ChartBlockEditor({
                   }
                 >
                   <SelectTrigger className="h-8 text-xs">
-                    <SelectValue placeholder="Field" />
+                    <SelectValue placeholder="Aggregate alias" />
                   </SelectTrigger>
                   <SelectContent>
-                    {entry.field && !fields.includes(entry.field) ? (
+                    {entry.field &&
+                    !seriesFieldOptions.includes(entry.field) ? (
                       <SelectItem disabled value={entry.field}>
                         {entry.field}
                       </SelectItem>
                     ) : null}
-                    {fields.map((field) => (
+                    {seriesFieldOptions.map((field) => (
                       <SelectItem key={field} value={field}>
                         {field}
                       </SelectItem>
                     ))}
+                    {seriesFieldOptions.length === 0 ? (
+                      <SelectItem disabled value="__no_aggregates__">
+                        Add a source aggregate first
+                      </SelectItem>
+                    ) : null}
                   </SelectContent>
                 </Select>
                 <Input

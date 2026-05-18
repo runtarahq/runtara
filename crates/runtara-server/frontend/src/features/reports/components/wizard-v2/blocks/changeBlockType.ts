@@ -44,7 +44,10 @@ export function changeBlockType(
   };
 
   // Source: actions blocks have a different shape; transitions to/from
-  // actions reset source to a sensible default.
+  // actions reset source to a sensible default. Chart and metric blocks
+  // require at least one aggregate on the source (the server rejects
+  // empty-aggregate chart/metric renders), so we seed a `count(*)`
+  // aggregate + flip `source.mode` to 'aggregate' when switching in.
   let source: ReportSource = block.source;
   if (newType === 'actions') {
     source = {
@@ -56,6 +59,18 @@ export function changeBlockType(
     };
   } else if (block.type === 'actions') {
     source = { kind: 'object_model', schema: '', mode: 'filter' };
+  }
+  if (newType === 'chart' || newType === 'metric') {
+    const hasAggregate = (source.aggregates ?? []).length > 0;
+    if (!hasAggregate) {
+      source = {
+        ...source,
+        mode: 'aggregate',
+        aggregates: [{ alias: 'value', op: 'count' }],
+      };
+    } else if (source.mode !== 'aggregate') {
+      source = { ...source, mode: 'aggregate' };
+    }
   }
 
   // Strip the previous type's config field. We rebuild the object
@@ -81,11 +96,19 @@ function defaultConfigFor(
     case 'table':
       return { table: { columns: [] } };
     case 'chart':
+      // Chart seeds a single series bound to the default 'value'
+      // aggregate that the source-side seeding above adds.
       return {
-        chart: { kind: 'bar', x: '', series: [] },
+        chart: {
+          kind: 'bar',
+          x: '',
+          series: [{ field: 'value' }],
+        },
       };
     case 'metric':
-      return { metric: { valueField: '' } };
+      // Metric points its valueField at the default 'value' aggregate
+      // so the block renders out of the box.
+      return { metric: { valueField: 'value' } };
     case 'card':
       return { card: { groups: [] } };
     case 'actions':
