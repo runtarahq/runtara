@@ -4289,6 +4289,37 @@ dependencies = [
 ]
 
 [[package]]
+name = "runtara-agent-mailgun"
+version = "5.0.0"
+dependencies = [
+ "runtara-http",
+ "serde",
+ "serde_json",
+ "wit-bindgen-rt 0.44.0",
+]
+
+[[package]]
+name = "runtara-agent-openai"
+version = "5.0.0"
+dependencies = [
+ "runtara-http",
+ "serde",
+ "serde_json",
+ "wit-bindgen-rt 0.44.0",
+]
+
+[[package]]
+name = "runtara-agent-slack"
+version = "5.0.0"
+dependencies = [
+ "base64 0.22.1",
+ "runtara-http",
+ "serde",
+ "serde_json",
+ "wit-bindgen-rt 0.44.0",
+]
+
+[[package]]
 name = "runtara-agent-text"
 version = "5.1.1"
 dependencies = [

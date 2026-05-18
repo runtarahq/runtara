@@ -38,6 +38,9 @@ members = [
     "crates/runtara-agent-transform",
     "crates/runtara-agent-text",
     "crates/runtara-agent-http",
+    "crates/runtara-agent-mailgun",
+    "crates/runtara-agent-slack",
+    "crates/runtara-agent-openai",
 ]
 default-members = ["crates/runtara-core"]
 

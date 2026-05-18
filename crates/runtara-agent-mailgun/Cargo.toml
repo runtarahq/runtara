@@ -1,0 +1,25 @@
+[package]
+name = "runtara-agent-mailgun"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Mailgun email agent — WebAssembly Component"
+keywords = ["wasm", "component", "agent", "mailgun", "email"]
+categories = ["wasm", "email"]
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+wit-bindgen-rt = { version = "0.44", features = ["bitflags"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+runtara-http = { path = "../runtara-http" }
+
+[package.metadata.component]
+package = "runtara:agent-mailgun"
+
+[package.metadata.component.target]
+path = "../runtara-agent-wit/wit"
+world = "agent"
