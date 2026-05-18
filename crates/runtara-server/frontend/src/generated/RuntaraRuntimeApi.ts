@@ -858,13 +858,6 @@ export interface BlockPosition {
   index?: number | null;
 }
 
-export interface BucketDto {
-  /** Creation date (ISO 8601) */
-  creationDate: string;
-  /** Bucket name */
-  name: string;
-}
-
 /**
  * Bulk create request supporting two input shapes.
  *
@@ -1394,15 +1387,6 @@ export type CreateApiKeyResponse = ApiKey & {
   key: string;
 };
 
-export interface CreateBucketRequest {
-  /** Bucket name to create */
-  name: string;
-}
-
-export interface CreateBucketResponse {
-  success: boolean;
-}
-
 /** Create connection request */
 export interface CreateConnectionRequest {
   connectionParameters?: any;
@@ -1622,10 +1606,6 @@ export interface DeleteConnectionResponse {
 
 export interface DeleteReportResponse {
   message: string;
-  success: boolean;
-}
-
-export interface DeleteResponse {
   success: boolean;
 }
 
@@ -1993,36 +1973,6 @@ export interface FileData {
   filename?: string | null;
   /** MIME type, e.g., "text/csv", "application/pdf" (optional) */
   mimeType?: string | null;
-}
-
-export interface FileMetadataResponse {
-  /**
-   * File size in bytes
-   * @format int64
-   * @min 0
-   */
-  contentLength: number;
-  /** MIME content type */
-  contentType: string;
-  /** ETag (content hash) */
-  etag: string;
-  /** Last modified timestamp */
-  lastModified: string;
-}
-
-export interface FileObjectDto {
-  /** ETag (content hash) */
-  etag: string;
-  /** Object key (file path) */
-  key: string;
-  /** Last modified timestamp */
-  lastModified: string;
-  /**
-   * File size in bytes
-   * @format int64
-   * @min 0
-   */
-  size: number;
 }
 
 /** Configuration for a Filter step */
@@ -2408,10 +2358,6 @@ export interface ListAllExecutionsResponse {
   success: boolean;
 }
 
-export interface ListBucketsResponse {
-  buckets: BucketDto[];
-}
-
 export interface ListCheckpointsQuery {
   /** @format int32 */
   page?: number | null;
@@ -2474,17 +2420,6 @@ export interface ListInstancesResponse {
   success: boolean;
   /** @format int64 */
   totalCount: number;
-}
-
-export interface ListObjectsResponse {
-  /**
-   * @format int32
-   * @min 0
-   */
-  count: number;
-  files: FileObjectDto[];
-  /** Token for fetching next page (null if no more results) */
-  nextContinuationToken?: string | null;
 }
 
 /** Response for listing all connections' rate limit status */
@@ -4830,17 +4765,6 @@ export interface UpdateWorkflowRequest {
   trackEvents?: boolean | null;
 }
 
-export interface UploadResponse {
-  key: string;
-  /**
-   * Size of uploaded file in bytes
-   * @format int64
-   * @min 0
-   */
-  size: number;
-  success: boolean;
-}
-
 /** Response for validate-mappings endpoint */
 export interface ValidateMappingsResponse {
   /** @min 0 */
@@ -6229,230 +6153,6 @@ export class Api<
         path: `/api/runtime/executions`,
         method: "GET",
         query: query,
-        format: "json",
-        ...params,
-      }),
-
-    /**
-     * No description
-     *
-     * @tags file-storage
-     * @name ListBuckets
-     * @summary List all buckets
-     * @request GET:/api/runtime/files/buckets
-     * @secure
-     */
-    listBuckets: (
-      query?: {
-        /** Optional s3_compatible connection ID */
-        connectionId?: string;
-      },
-      params: RequestParams = {},
-    ) =>
-      this.request<ListBucketsResponse, any>({
-        path: `/api/runtime/files/buckets`,
-        method: "GET",
-        query: query,
-        secure: true,
-        format: "json",
-        ...params,
-      }),
-
-    /**
-     * No description
-     *
-     * @tags file-storage
-     * @name CreateBucket
-     * @summary Create a bucket
-     * @request POST:/api/runtime/files/buckets
-     * @secure
-     */
-    createBucket: (
-      data: CreateBucketRequest,
-      query?: {
-        /** Optional s3_compatible connection ID */
-        connectionId?: string;
-      },
-      params: RequestParams = {},
-    ) =>
-      this.request<CreateBucketResponse, any>({
-        path: `/api/runtime/files/buckets`,
-        method: "POST",
-        query: query,
-        body: data,
-        secure: true,
-        type: ContentType.Json,
-        format: "json",
-        ...params,
-      }),
-
-    /**
-     * No description
-     *
-     * @tags file-storage
-     * @name DeleteBucket
-     * @summary Delete a bucket (must be empty)
-     * @request DELETE:/api/runtime/files/buckets/{bucket}
-     * @secure
-     */
-    deleteBucket: (
-      bucket: string,
-      query?: {
-        /** Optional s3_compatible connection ID */
-        connectionId?: string;
-      },
-      params: RequestParams = {},
-    ) =>
-      this.request<DeleteResponse, any>({
-        path: `/api/runtime/files/buckets/${bucket}`,
-        method: "DELETE",
-        query: query,
-        secure: true,
-        format: "json",
-        ...params,
-      }),
-
-    /**
-     * No description
-     *
-     * @tags file-storage
-     * @name ListObjects
-     * @summary List files in a bucket
-     * @request GET:/api/runtime/files/{bucket}
-     * @secure
-     */
-    listObjects: (
-      bucket: string,
-      query?: {
-        /** Optional s3_compatible connection ID */
-        connectionId?: string;
-        /** Filter by key prefix */
-        prefix?: string;
-        /**
-         * Max results (default: 1000)
-         * @format int32
-         * @min 0
-         */
-        maxKeys?: number;
-        /** Pagination token */
-        continuationToken?: string;
-      },
-      params: RequestParams = {},
-    ) =>
-      this.request<ListObjectsResponse, any>({
-        path: `/api/runtime/files/${bucket}`,
-        method: "GET",
-        query: query,
-        secure: true,
-        format: "json",
-        ...params,
-      }),
-
-    /**
-     * @description Upload a file to the specified bucket. Send as multipart/form-data with a `file` field. Optionally include a `key` field to specify the object key; defaults to the filename.
-     *
-     * @tags file-storage
-     * @name UploadObject
-     * @summary Upload a file (multipart/form-data)
-     * @request POST:/api/runtime/files/{bucket}
-     * @secure
-     */
-    uploadObject: (
-      bucket: string,
-      data: any,
-      query?: {
-        /** Optional s3_compatible connection ID */
-        connectionId?: string;
-      },
-      params: RequestParams = {},
-    ) =>
-      this.request<UploadResponse, void>({
-        path: `/api/runtime/files/${bucket}`,
-        method: "POST",
-        query: query,
-        body: data,
-        secure: true,
-        type: ContentType.FormData,
-        format: "json",
-        ...params,
-      }),
-
-    /**
-     * No description
-     *
-     * @tags file-storage
-     * @name DownloadObject
-     * @summary Download a file
-     * @request GET:/api/runtime/files/{bucket}/{key}
-     * @secure
-     */
-    downloadObject: (
-      bucket: string,
-      key: string,
-      query?: {
-        /** Optional s3_compatible connection ID */
-        connectionId?: string;
-      },
-      params: RequestParams = {},
-    ) =>
-      this.request<void, void>({
-        path: `/api/runtime/files/${bucket}/${key}`,
-        method: "GET",
-        query: query,
-        secure: true,
-        ...params,
-      }),
-
-    /**
-     * No description
-     *
-     * @tags file-storage
-     * @name DeleteObject
-     * @summary Delete a file
-     * @request DELETE:/api/runtime/files/{bucket}/{key}
-     * @secure
-     */
-    deleteObject: (
-      bucket: string,
-      key: string,
-      query?: {
-        /** Optional s3_compatible connection ID */
-        connectionId?: string;
-      },
-      params: RequestParams = {},
-    ) =>
-      this.request<DeleteResponse, any>({
-        path: `/api/runtime/files/${bucket}/${key}`,
-        method: "DELETE",
-        query: query,
-        secure: true,
-        format: "json",
-        ...params,
-      }),
-
-    /**
-     * No description
-     *
-     * @tags file-storage
-     * @name GetObjectInfo
-     * @summary Get file metadata (HEAD)
-     * @request GET:/api/runtime/files/{bucket}/{key}/info
-     * @secure
-     */
-    getObjectInfo: (
-      bucket: string,
-      key: string,
-      query?: {
-        /** Optional s3_compatible connection ID */
-        connectionId?: string;
-      },
-      params: RequestParams = {},
-    ) =>
-      this.request<FileMetadataResponse, void>({
-        path: `/api/runtime/files/${bucket}/${key}/info`,
-        method: "GET",
-        query: query,
-        secure: true,
         format: "json",
         ...params,
       }),

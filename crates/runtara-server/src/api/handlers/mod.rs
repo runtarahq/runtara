@@ -11,7 +11,6 @@ pub mod common;
 pub mod csv_import_export;
 pub mod events;
 pub mod executions;
-pub mod file_storage;
 pub mod internal_agents;
 pub mod internal_object_model;
 pub mod internal_presign;

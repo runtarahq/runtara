@@ -99,11 +99,6 @@ const EditObjectInstance = lazy(() =>
     default: m.EditObjectInstance,
   }))
 );
-const FilesPage = lazy(() =>
-  import('@/features/files/pages/Files').then((m) => ({
-    default: m.Files,
-  }))
-);
 const AnalyticsUsage = lazy(() =>
   import('@/features/analytics/pages/Usage').then((m) => ({
     default: m.Usage,
@@ -372,16 +367,6 @@ export const router = createBrowserRouter(
             <PrivateRoute>
               <Suspense fallback={<PageLoader />}>
                 <EditObjectInstance />
-              </Suspense>
-            </PrivateRoute>
-          ),
-        },
-        {
-          path: '/files',
-          element: (
-            <PrivateRoute>
-              <Suspense fallback={<PageLoader />}>
-                <FilesPage />
               </Suspense>
             </PrivateRoute>
           ),

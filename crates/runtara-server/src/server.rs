@@ -113,15 +113,6 @@ use runtime_client::RuntimeClient;
         api::handlers::csv_import_export::export_csv,
         api::handlers::csv_import_export::import_csv_preview,
         api::handlers::csv_import_export::import_csv,
-        // File Storage endpoints
-        api::handlers::file_storage::list_buckets,
-        api::handlers::file_storage::create_bucket,
-        api::handlers::file_storage::delete_bucket,
-        api::handlers::file_storage::list_objects,
-        api::handlers::file_storage::upload_object,
-        api::handlers::file_storage::download_object,
-        api::handlers::file_storage::get_object_info,
-        api::handlers::file_storage::delete_object,
         // Connection endpoints (served by runtara-connections crate)
         runtara_connections::handler::connections::create_connection_handler,
         runtara_connections::handler::connections::list_connections_handler,
@@ -300,16 +291,6 @@ use runtime_client::RuntimeClient;
             api::dto::csv_import_export::CsvImportResponse,
             api::dto::csv_import_export::CsvValidationError,
             api::dto::csv_import_export::CsvImportValidationErrorResponse,
-            // File Storage DTOs
-            api::dto::file_storage::CreateBucketRequest,
-            api::dto::file_storage::BucketDto,
-            api::dto::file_storage::ListBucketsResponse,
-            api::dto::file_storage::CreateBucketResponse,
-            api::dto::file_storage::FileObjectDto,
-            api::dto::file_storage::ListObjectsResponse,
-            api::dto::file_storage::FileMetadataResponse,
-            api::dto::file_storage::UploadResponse,
-            api::dto::file_storage::DeleteResponse,
             // Connection DTOs (re-exported from runtara-connections crate)
             runtara_connections::types::ErrorResponse,
             runtara_connections::types::ConnectionDto,
@@ -494,7 +475,6 @@ use runtime_client::RuntimeClient;
         (name = "object-storage-internal", description = "Internal object storage API endpoints"),
         (name = "object-storage-legacy", description = "Legacy object storage API endpoints"),
         (name = "object-model", description = "Object model schema and instance management API endpoints"),
-        (name = "file-storage", description = "S3-compatible file storage API endpoints"),
         (name = "connections-controller", description = "Connection management API endpoints (credentials never exposed in responses)"),
         (name = "metrics-controller", description = "Metrics and analytics API endpoints"),
         (name = "analytics-controller", description = "Runtime system analytics API endpoints"),
@@ -1688,48 +1668,6 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
             crate::middleware::auth::authenticate,
         ));
 
-    // File Storage routes (S3-compatible, uses PgPool state for connection resolution)
-    let file_storage_routes = Router::new()
-        // Bucket endpoints
-        .route(
-            "/api/runtime/files/buckets",
-            get(api::handlers::file_storage::list_buckets),
-        )
-        .route(
-            "/api/runtime/files/buckets",
-            post(api::handlers::file_storage::create_bucket),
-        )
-        .route(
-            "/api/runtime/files/buckets/{bucket}",
-            delete(api::handlers::file_storage::delete_bucket),
-        )
-        // File endpoints
-        .route(
-            "/api/runtime/files/{bucket}",
-            get(api::handlers::file_storage::list_objects),
-        )
-        .route(
-            "/api/runtime/files/{bucket}",
-            post(api::handlers::file_storage::upload_object),
-        )
-        .route(
-            "/api/runtime/files/{bucket}/{key}",
-            get(api::handlers::file_storage::download_object),
-        )
-        .route(
-            "/api/runtime/files/{bucket}/{key}/info",
-            get(api::handlers::file_storage::get_object_info),
-        )
-        .route(
-            "/api/runtime/files/{bucket}/{key}",
-            delete(api::handlers::file_storage::delete_object),
-        )
-        .with_state(connections_facade.clone())
-        .route_layer(from_fn_with_state(
-            auth_state.clone(),
-            crate::middleware::auth::authenticate,
-        ));
-
     // Create router for public/global endpoints (no tenant auth required)
     let public_routes = Router::new().route("/health", get(health_handler));
 
@@ -1913,7 +1851,6 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
     let internal_router = Router::new()
         .merge(tenant_routes.clone())
         .merge(object_model_routes.clone())
-        .merge(file_storage_routes.clone())
         .merge(public_routes.clone());
 
     // Build MCP (Model Context Protocol) router with JWT authentication.
@@ -1962,7 +1899,6 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         .nest("/api/runtime", connections_tenant_routes)
         .nest("/api/oauth", oauth_callback_routes)
         .merge(object_model_routes)
-        .merge(file_storage_routes)
         .merge(public_routes.clone())
         .merge(event_routes)
         .merge(channel_routes)

@@ -228,23 +228,6 @@ export const queryKeys = {
       [...queryKeys.reports.byId(id), 'dataset', datasetId, request] as const,
   },
 
-  // Files domain (S3-compatible storage)
-  files: {
-    all: ['files'] as const,
-    buckets: (connectionId?: string) =>
-      [...queryKeys.files.all, 'buckets', connectionId] as const,
-    lists: () => [...queryKeys.files.all, 'list'] as const,
-    list: (params?: {
-      connectionId?: string;
-      bucket?: string;
-      prefix?: string;
-      maxKeys?: number;
-    }) => [...queryKeys.files.lists(), params] as const,
-    details: () => [...queryKeys.files.all, 'detail'] as const,
-    byKey: (bucket: string, key: string) =>
-      [...queryKeys.files.details(), bucket, key] as const,
-  },
-
   // Agents domain
   agents: {
     all: ['agents'] as const,
