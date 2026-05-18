@@ -91,7 +91,11 @@ jobs:
           RUNTARA_RUN_SMOKE_COMPILE: "1"
           RUNTARA_LTO: "off"
         run: |
-          bundle_dir="$(find target/bundle -maxdepth 1 -type d -name 'runtara-*' | head -n 1)"
+          # `cargo test` sets the test process CWD to the crate manifest dir
+          # (crates/runtara-workflows/), not the workspace root — so
+          # RUNTARA_WASM_LIBRARY_DIR must be an absolute path or the test's
+          # `Path::new(&dir).exists()` check resolves against the wrong CWD.
+          bundle_dir="$(find "$PWD/target/bundle" -maxdepth 1 -type d -name 'runtara-*' | head -n 1)"
           if [ -z "$bundle_dir" ]; then
               echo "::error::Extracted bundle directory not found under target/bundle/"
               exit 1
@@ -101,6 +105,7 @@ jobs:
               exit 1
           fi
           export RUNTARA_WASM_LIBRARY_DIR="$bundle_dir/stdlib"
+          echo "RUNTARA_WASM_LIBRARY_DIR=$RUNTARA_WASM_LIBRARY_DIR"
           cargo test -p runtara-workflows --test smoke_compile --release -- --test-threads=1
 
       - name: Upload bundle artifact
