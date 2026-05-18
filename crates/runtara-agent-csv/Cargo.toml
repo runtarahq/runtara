@@ -1,0 +1,28 @@
+[package]
+name = "runtara-agent-csv"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "CSV parsing and generation agent — WebAssembly Component"
+keywords = ["wasm", "component", "agent", "csv"]
+categories = ["wasm", "parser-implementations"]
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+wit-bindgen-rt = { version = "0.44", features = ["bitflags"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+base64 = { workspace = true }
+csv = "1.3"
+encoding_rs = "0.8"
+const_format = "0.2"
+
+[package.metadata.component]
+package = "runtara:agent-csv"
+
+[package.metadata.component.target]
+path = "../runtara-agent-wit/wit"
+world = "agent"

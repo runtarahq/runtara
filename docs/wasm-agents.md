@@ -16,15 +16,12 @@ Conventions:
 - [x] **runtara-component-host** — embedded wasmtime + ComponentDispatcherService.
 - [x] **runtara-agent-crypto** (2 caps: `hash`, `hmac`) — schema parity with legacy.
 
-## Phase 2.0 — Shared utilities
+## Phase 2.0 — Shared utilities (deferred)
 
-- [ ] **runtara-agent-common** — Rust library (NOT a component). Holds:
-  - `RawConnection` (typed mirror of the WIT `ConnectionInfo`); parse helpers.
-  - `AgentError` → WIT `ErrorInfo` conversion.
-  - `ProxyHttpClient` — thin `wasi:http/outgoing-handler` wrapper that POSTs a JSON envelope to `$RUNTARA_HTTP_PROXY_URL` with `X-Runtara-Connection-Id`.
-  - `NativeAgentClient::invoke(module, capability, input, conn)` — POSTs to `$RUNTARA_AGENT_SERVICE_URL/agents/{module}/{capability}` for native-only wrapper components.
-  - `FileData` deserializer (matches `crates/runtara-agents/src/types.rs`).
-  - Re-export `runtara-agent-macro` proc macros for ergonomic use.
+- [ ] **runtara-agent-common** — extract _after_ 3-4 connection-using ports
+  duplicate the same `ProxyHttpClient` / `NativeAgentClient` / error-envelope
+  conversions. Pure agents (Phase 2.1) don't need it, so we don't waste design
+  upfront. Slot lands between Phase 2.1 and Phase 2.2.
 
 ## Phase 2.1 — Pure agents (no outbound HTTP)
 

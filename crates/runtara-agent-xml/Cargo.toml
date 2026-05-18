@@ -1,0 +1,26 @@
+[package]
+name = "runtara-agent-xml"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "XML parsing agent — WebAssembly Component"
+keywords = ["wasm", "component", "agent", "xml"]
+categories = ["wasm", "parser-implementations"]
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+wit-bindgen-rt = { version = "0.44", features = ["bitflags"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+base64 = { workspace = true }
+roxmltree = "0.20"
+
+[package.metadata.component]
+package = "runtara:agent-xml"
+
+[package.metadata.component.target]
+path = "../runtara-agent-wit/wit"
+world = "agent"
