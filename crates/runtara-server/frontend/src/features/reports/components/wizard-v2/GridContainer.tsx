@@ -396,12 +396,12 @@ function GridNodeEditor({
       data-testid={`grid-${node.id}`}
       data-grid-id={node.id}
     >
-      <header className="mb-3 flex flex-wrap items-center justify-between gap-2">
-        <div className="flex min-w-0 items-center gap-2">
+      <header className="mb-3 flex flex-wrap items-center justify-between gap-x-2 gap-y-1.5">
+        <div className="flex min-w-0 shrink items-center gap-2">
           {dragHandleProps && !isRoot ? (
             <button
               type="button"
-              className="cursor-grab rounded p-0.5 text-muted-foreground hover:bg-muted active:cursor-grabbing"
+              className="shrink-0 cursor-grab rounded p-0.5 text-muted-foreground hover:bg-muted active:cursor-grabbing"
               title="Drag to reorder"
               aria-label="Drag grid"
               {...dragHandleProps}
@@ -426,7 +426,11 @@ function GridNodeEditor({
             ) : null}
           </div>
         </div>
-        <div className="flex items-center gap-2">
+        {/* Phase 11 polish: each control is shrink-0 + the row uses
+            flex-wrap + justify-end so deeply-nested narrow grids wrap
+            controls onto a clean second line instead of letting icons
+            drift out of vertical alignment. */}
+        <div className="flex flex-wrap items-center justify-end gap-x-1.5 gap-y-1.5">
           <DimensionStepper
             label="Columns"
             value={columns}
@@ -453,7 +457,7 @@ function GridNodeEditor({
             type="button"
             variant="ghost"
             size="icon"
-            className="h-7 w-7"
+            className="h-7 w-7 shrink-0"
             title="More grid settings"
             aria-label="Grid settings"
             onClick={() => setShowSettings((v) => !v)}
@@ -465,7 +469,7 @@ function GridNodeEditor({
               type="button"
               variant="ghost"
               size="icon"
-              className="h-7 w-7 text-destructive"
+              className="h-7 w-7 shrink-0 text-destructive"
               title="Remove grid"
               aria-label="Remove grid"
               onClick={handleDelete}
@@ -583,7 +587,7 @@ function DimensionStepper({
   const canDecrement = value > min;
   const canIncrement = value < max;
   return (
-    <div className="inline-flex items-center gap-1 rounded-md border bg-background px-1 py-0.5 text-xs">
+    <div className="inline-flex h-7 shrink-0 items-center gap-1 rounded-md border bg-background px-1 py-0.5 text-xs leading-none">
       <span className="px-1 text-muted-foreground">{label}</span>
       <button
         type="button"
