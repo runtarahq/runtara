@@ -1,11 +1,25 @@
 import { Input } from '@/shared/components/ui/input';
 import { Label } from '@/shared/components/ui/label';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/shared/components/ui/select';
 import { Schema } from '@/generated/RuntaraRuntimeApi';
 import {
   ReportBlockDefinition,
+  ReportBlockType,
   ReportDatasetDefinition,
   ReportSource,
 } from '../../../types';
+import {
+  BLOCK_TYPES,
+  blockTypeLabel,
+  changeBlockType,
+  hasMeaningfulTypeConfig,
+} from './changeBlockType';
 import { MarkdownBlockEditor } from './MarkdownBlockEditor';
 import { TableBlockEditor } from './TableBlockEditor';
 import { MetricBlockEditor } from './MetricBlockEditor';
@@ -38,20 +52,63 @@ export function BlockEditor({
 
   const showSourceEditor = block.type !== 'markdown' && !hasDataset;
 
+  const handleTypeChange = (nextType: ReportBlockType) => {
+    if (nextType === block.type) return;
+    if (hasMeaningfulTypeConfig(block)) {
+      const ok = window.confirm(
+        `Switching from "${blockTypeLabel(block.type as ReportBlockType)}" to "${blockTypeLabel(nextType)}" will discard the current ${block.type} configuration. Continue?`
+      );
+      if (!ok) return;
+    }
+    onChange(changeBlockType(block, nextType));
+  };
+
   return (
     <div className="grid gap-3">
-      <div className="grid gap-1.5">
-        <Label className="text-xs" htmlFor={`title_${block.id}`}>
-          Title
-        </Label>
-        <Input
-          id={`title_${block.id}`}
-          value={block.title ?? ''}
-          placeholder="Optional title shown above the block"
-          onChange={(event) =>
-            onChange({ ...block, title: event.target.value || null })
-          }
-        />
+      <div className="grid gap-3 sm:grid-cols-[1fr_auto]">
+        <div className="grid gap-1.5">
+          <Label className="text-xs" htmlFor={`title_${block.id}`}>
+            Title
+          </Label>
+          <Input
+            id={`title_${block.id}`}
+            value={block.title ?? ''}
+            placeholder="Optional title shown above the block"
+            onChange={(event) =>
+              onChange({ ...block, title: event.target.value || null })
+            }
+          />
+        </div>
+        <div className="grid gap-1.5">
+          <Label
+            className="text-xs"
+            htmlFor={`block_type_${block.id}`}
+          >
+            Block type
+          </Label>
+          <Select
+            value={block.type}
+            onValueChange={(value) =>
+              handleTypeChange(value as ReportBlockType)
+            }
+          >
+            <SelectTrigger
+              id={`block_type_${block.id}`}
+              className="w-[160px]"
+              aria-label="Block type"
+              data-testid={`block-type-picker-${block.id}`}
+            >
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {BLOCK_TYPES.map((type) => (
+                <SelectItem key={type} value={type}>
+                  {blockTypeLabel(type)}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
       </div>
 
       {showSourceEditor ? (
