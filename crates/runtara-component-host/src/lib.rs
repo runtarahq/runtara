@@ -19,10 +19,15 @@
 //! See docs/wasm-components-migration-plan.md § 6.
 
 pub mod bindings;
+pub mod dispatcher;
 pub mod engine;
 pub mod host_state;
 pub mod registry;
 
+pub use dispatcher::{
+    ComponentDispatcherService, DispatcherEnv, ResolvedConnection, TestCapabilityRequest,
+    TestError, TestResult,
+};
 pub use engine::{EngineConfig, build_engine, spawn_epoch_ticker};
 pub use host_state::{CallContext, HostState};
 pub use registry::{LoadedAgent, build_linker, instantiate, load_agent};
