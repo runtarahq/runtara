@@ -226,10 +226,16 @@ function findInGrid(
 
 /** Target for `addLayoutNode` / `moveLayoutNode`. `parentGridId` must
  *  reference a grid in the tree (or be `null`, which resolves to the
- *  root grid). `index` is the position inside that grid's `items`. */
+ *  root grid). `index` is the position inside that grid's `items`.
+ *  Phase 11: when `col` and `row` are set, the inserted/moved item is
+ *  pinned to that cell via CSS `grid-column`/`grid-row`. Both must be
+ *  set together; setting one without the other is treated as auto-flow.
+ */
 export interface LayoutTarget {
   parentGridId: string | null;
   index?: number;
+  col?: number;
+  row?: number;
 }
 
 export function addLayoutNode(
@@ -237,9 +243,11 @@ export function addLayoutNode(
   node: ReportLayoutNode,
   target: LayoutTarget
 ): ReportDefinition {
+  const hasExplicitCell = target.col != null && target.row != null;
   const item: ReportGridLayoutItem = {
     id: `item_${node.id}_${Math.random().toString(36).slice(2, 6)}`,
     child: node,
+    ...(hasExplicitCell ? { col: target.col, row: target.row } : {}),
   };
   const targetGridId = target.parentGridId ?? ROOT_GRID_ID;
   return {
@@ -305,9 +313,13 @@ function removeNodeFromGrid<T extends ReportGridLayoutNode>(
 
 /** Moves the node with `nodeId` to `target`. The root grid cannot be
  *  moved. When the source is already at the target position (same parent
- *  grid + same index), returns the definition unchanged so callers can
- *  detect no-op moves without the item-id churn that remove+add would
- *  otherwise introduce. */
+ *  grid + same index AND same explicit cell if requested), returns the
+ *  definition unchanged so callers can detect no-op moves without the
+ *  item-id churn that remove+add would otherwise introduce.
+ *
+ *  Phase 11: when `target.col`/`target.row` are set, the moved item
+ *  gets pinned to that cell. The moved item's previous col/row are
+ *  dropped — explicit drop target wins. */
 export function moveLayoutNode(
   definition: ReportDefinition,
   nodeId: string,
@@ -319,9 +331,17 @@ export function moveLayoutNode(
     return definition;
   }
   const targetParent = target.parentGridId ?? ROOT_GRID_ID;
+  const wantsExplicitCell = target.col != null && target.row != null;
+  const existingItem = findItemByChildId(definition.layout, nodeId);
+  const alreadyAtTargetCell =
+    wantsExplicitCell &&
+    existingItem != null &&
+    existingItem.col === target.col &&
+    existingItem.row === target.row;
   if (
     path.parentGridId === targetParent &&
-    (target.index === undefined || target.index === path.itemIndex)
+    (target.index === undefined || target.index === path.itemIndex) &&
+    (!wantsExplicitCell || alreadyAtTargetCell)
   ) {
     return definition;
   }
@@ -333,6 +353,22 @@ export function moveLayoutNode(
   if (!captured) return definition;
   const removed = removeLayoutNode(definition, nodeId);
   return addLayoutNode(removed, captured, target);
+}
+
+/** Find the grid item that wraps `nodeId` (anywhere in the tree).
+ *  Returns `null` when the node id isn't anywhere in `definition.layout`. */
+function findItemByChildId(
+  grid: ReportGridLayoutNode,
+  nodeId: string
+): ReportGridLayoutItem | null {
+  for (const item of grid.items ?? []) {
+    if (item.child.id === nodeId) return item;
+    if (item.child.type === 'grid') {
+      const nested = findItemByChildId(item.child, nodeId);
+      if (nested) return nested;
+    }
+  }
+  return null;
 }
 
 /** Patches the grid with `gridId` via `updater(prev)`. Works on the root
@@ -417,6 +453,108 @@ export function makeBlockId(seed: string): string {
 /** Generates a unique grid id. */
 export function makeGridId(): string {
   return `grid_${Math.random().toString(36).slice(2, 7)}`;
+}
+
+// ============================================================================
+// Occupancy walker (Phase 11)
+// ============================================================================
+
+/** A grid cell identified by `(row, col)` (both 1-indexed). */
+export interface GridCell {
+  row: number;
+  col: number;
+}
+
+function cellKey(row: number, col: number): string {
+  return `${row},${col}`;
+}
+
+/** Compute the set of cells occupied by `items` inside a `columns × rows`
+ *  grid. Items with explicit `col`/`row` claim their cells first;
+ *  remaining items auto-flow into the leftover cells, mimicking CSS
+ *  `grid-auto-flow: row`. Returns a `Map<"row,col", itemId>` so callers
+ *  can both check occupancy and look up which item owns each cell.
+ *
+ *  Cells beyond the declared `rows × columns` shape are still claimed
+ *  by items whose col+colSpan / row+rowSpan extend past — that mirrors
+ *  CSS behavior. Empty-cell renderers should iterate only the declared
+ *  rectangle.
+ */
+export function computeOccupiedCells(
+  items: ReportGridLayoutItem[] | undefined,
+  columns: number,
+  rows: number
+): Map<string, string> {
+  const occupied = new Map<string, string>();
+  const cols = Math.max(1, columns);
+  const rs = Math.max(1, rows);
+  const autoFlow: ReportGridLayoutItem[] = [];
+
+  // First pass: claim cells for explicit-position items.
+  for (const item of items ?? []) {
+    if (item.col != null && item.row != null) {
+      const colSpan = Math.max(1, item.colSpan ?? 1);
+      const rowSpan = Math.max(1, item.rowSpan ?? 1);
+      for (let dr = 0; dr < rowSpan; dr++) {
+        for (let dc = 0; dc < colSpan; dc++) {
+          const r = item.row + dr;
+          const c = item.col + dc;
+          occupied.set(cellKey(r, c), item.id);
+        }
+      }
+    } else {
+      autoFlow.push(item);
+    }
+  }
+
+  // Second pass: auto-flow remaining items into leftover cells (row-major).
+  let cursor = 0;
+  for (const item of autoFlow) {
+    const colSpan = Math.max(1, item.colSpan ?? 1);
+    const rowSpan = Math.max(1, item.rowSpan ?? 1);
+    // Find the next top-left cell where the item fits without overlap.
+    for (let attempt = cursor; attempt < cols * rs * 2; attempt++) {
+      const r = Math.floor(attempt / cols) + 1;
+      const c = (attempt % cols) + 1;
+      if (c + colSpan - 1 > cols) continue; // would wrap a column
+      let free = true;
+      for (let dr = 0; dr < rowSpan && free; dr++) {
+        for (let dc = 0; dc < colSpan && free; dc++) {
+          if (occupied.has(cellKey(r + dr, c + dc))) free = false;
+        }
+      }
+      if (free) {
+        for (let dr = 0; dr < rowSpan; dr++) {
+          for (let dc = 0; dc < colSpan; dc++) {
+            occupied.set(cellKey(r + dr, c + dc), item.id);
+          }
+        }
+        cursor = attempt + 1;
+        break;
+      }
+    }
+  }
+
+  return occupied;
+}
+
+/** Returns the list of unoccupied `(row, col)` cells inside the declared
+ *  `columns × rows` rectangle, in row-major (top-left first) order. */
+export function listEmptyCells(
+  items: ReportGridLayoutItem[] | undefined,
+  columns: number,
+  rows: number
+): GridCell[] {
+  const occupied = computeOccupiedCells(items, columns, rows);
+  const empties: GridCell[] = [];
+  for (let r = 1; r <= rows; r++) {
+    for (let c = 1; c <= columns; c++) {
+      if (!occupied.has(cellKey(r, c))) {
+        empties.push({ row: r, col: c });
+      }
+    }
+  }
+  return empties;
 }
 
 /** Builds a fresh grid container with the given preset shape. Returned

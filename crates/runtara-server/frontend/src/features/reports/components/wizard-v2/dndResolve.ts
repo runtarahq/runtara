@@ -34,6 +34,22 @@ export function resolveDrop(
 ): ResolveDropResult {
   if (args.sourceId === args.overId) return { apply: false };
 
+  // Phase 11: drop on an empty cell pins the source to that cell.
+  // `EmptyCellPlaceholder` registers itself as a droppable with id
+  // `empty:<gridId>:<col>:<row>`. Parsing it here keeps the resolver
+  // pure (no DOM lookups, no dnd-kit knowledge of the data shape).
+  const emptyCell = parseEmptyCellId(args.overId);
+  if (emptyCell) {
+    return {
+      apply: true,
+      target: {
+        parentGridId: emptyCell.gridId,
+        col: emptyCell.col,
+        row: emptyCell.row,
+      },
+    };
+  }
+
   const overContainer = findContainerById(definition.layout, args.overId);
   if (overContainer) {
     // Drop landed on a grid container — append into its items.
@@ -56,6 +72,19 @@ export function resolveDrop(
       index: siblingLocation.index,
     },
   };
+}
+
+function parseEmptyCellId(
+  id: string
+): { gridId: string; col: number; row: number } | null {
+  if (!id.startsWith('empty:')) return null;
+  const parts = id.slice('empty:'.length).split(':');
+  if (parts.length < 3) return null;
+  const col = Number(parts[parts.length - 2]);
+  const row = Number(parts[parts.length - 1]);
+  const gridId = parts.slice(0, -2).join(':');
+  if (!gridId || !Number.isFinite(col) || !Number.isFinite(row)) return null;
+  return { gridId, col, row };
 }
 
 interface SiblingLocation {

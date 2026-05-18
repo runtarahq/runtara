@@ -149,4 +149,92 @@ describe('GridContainer skeleton', () => {
     expect(next.blocks[0].type).toBe('markdown');
     expect(next.layout.items).toHaveLength(1);
   });
+
+  it('clicking "+ Add block" in the bottom-right cell of a 2×3 grid pins the new block to (col=2, row=3)', () => {
+    const onChange = vi.fn();
+    render(
+      <GridContainer
+        definition={makeEmptyGridDefinition()}
+        schemas={[]}
+        filters={{}}
+        onChange={onChange}
+      />
+    );
+    // 2×3 grid → 6 empty cells in row-major order:
+    //   index 0 = (row=1,col=1), 1 = (row=1,col=2),
+    //   2 = (row=2,col=1),       3 = (row=2,col=2),
+    //   4 = (row=3,col=1),       5 = (row=3,col=2).
+    const addButtons = screen.getAllByRole('button', { name: /^Add block$/i });
+    fireEvent.click(addButtons[5]);
+    const next = onChange.mock.calls[0][0] as ReportDefinition;
+    expect(next.layout.items).toHaveLength(1);
+    expect(next.layout.items[0].col).toBe(2);
+    expect(next.layout.items[0].row).toBe(3);
+  });
+
+  it('renders empty placeholders only at unoccupied cells when an item is pinned', () => {
+    const onChange = vi.fn();
+    const def: ReportDefinition = {
+      definitionVersion: 1,
+      filters: [],
+      blocks: [{ id: 'p', type: 'markdown', source: { schema: '' } }],
+      layout: {
+        id: 'root',
+        columns: 2,
+        rows: 2,
+        items: [
+          {
+            id: 'item_p',
+            col: 1,
+            row: 1,
+            child: { id: 'n_p', type: 'block', blockId: 'p' },
+          },
+        ],
+      },
+    };
+    render(
+      <GridContainer
+        definition={def}
+        schemas={[]}
+        filters={{}}
+        onChange={onChange}
+      />
+    );
+    // Pinned at (1,1) → 3 empty cells remain: (1,2), (2,1), (2,2).
+    const empties = screen.getAllByTestId('empty-cell-root');
+    expect(empties).toHaveLength(3);
+  });
+});
+
+describe('GridContainer in-place editing', () => {
+  it('opens the just-added block in edit mode immediately', () => {
+    const onChange = vi.fn();
+    let definition = makeEmptyGridDefinition();
+    const { rerender } = render(
+      <GridContainer
+        definition={definition}
+        schemas={[]}
+        filters={{}}
+        onChange={(next) => {
+          definition = next;
+          onChange(next);
+        }}
+      />
+    );
+    const addButtons = screen.getAllByRole('button', { name: /^Add block$/i });
+    fireEvent.click(addButtons[0]);
+    // Re-render with the new definition so the just-added block mounts.
+    rerender(
+      <GridContainer
+        definition={definition}
+        schemas={[]}
+        filters={{}}
+        onChange={onChange}
+      />
+    );
+    // The new block opens the inline editor (test-id = inline-editor-<blockId>).
+    expect(definition.blocks).toHaveLength(1);
+    const blockId = definition.blocks[0].id;
+    expect(screen.queryByTestId(`inline-editor-${blockId}`)).not.toBeNull();
+  });
 });

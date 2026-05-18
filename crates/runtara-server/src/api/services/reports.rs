@@ -3783,6 +3783,12 @@ fn validate_layout_node(
                     }
                 }
             }
+            let columns_count = object
+                .get("columns")
+                .and_then(Value::as_i64)
+                .unwrap_or(1)
+                .max(1);
+            let rows_hint = object.get("rows").and_then(Value::as_i64);
             let items = object
                 .get("items")
                 .and_then(Value::as_array)
@@ -3792,6 +3798,10 @@ fn validate_layout_node(
                         node_id
                     ))
                 })?;
+            // Phase 11: collect (row, col, rowSpan, colSpan) tuples for
+            // explicit-position items so we can reject out-of-bounds
+            // values + overlapping cells.
+            let mut explicit_cells: HashSet<(i64, i64)> = HashSet::new();
             for (item_index, item) in items.iter().enumerate() {
                 let Some(item_object) = item.as_object() else {
                     return Err(ReportServiceError::Validation(format!(
@@ -3813,6 +3823,62 @@ fn validate_layout_node(
                             "Grid layout node '{}' item {} {} must be positive",
                             node_id, item_index, field
                         )));
+                    }
+                }
+                let col = item_object.get("col").and_then(Value::as_i64);
+                let row = item_object.get("row").and_then(Value::as_i64);
+                let col_span = item_object
+                    .get("colSpan")
+                    .and_then(Value::as_i64)
+                    .unwrap_or(1);
+                let row_span = item_object
+                    .get("rowSpan")
+                    .and_then(Value::as_i64)
+                    .unwrap_or(1);
+                if let Some(col_value) = col {
+                    if col_value < 1 {
+                        return Err(ReportServiceError::Validation(format!(
+                            "Grid layout node '{}' item {} col must be >= 1",
+                            node_id, item_index
+                        )));
+                    }
+                    if col_value + col_span - 1 > columns_count {
+                        return Err(ReportServiceError::Validation(format!(
+                            "Grid layout node '{}' item {} col+colSpan exceeds grid columns ({columns_count})",
+                            node_id, item_index
+                        )));
+                    }
+                }
+                if let Some(row_value) = row {
+                    if row_value < 1 {
+                        return Err(ReportServiceError::Validation(format!(
+                            "Grid layout node '{}' item {} row must be >= 1",
+                            node_id, item_index
+                        )));
+                    }
+                    if let Some(rows_max) = rows_hint
+                        && row_value + row_span - 1 > rows_max
+                    {
+                        return Err(ReportServiceError::Validation(format!(
+                            "Grid layout node '{}' item {} row+rowSpan exceeds grid rows ({rows_max})",
+                            node_id, item_index
+                        )));
+                    }
+                }
+                // Overlap check between explicit-position items. Items
+                // without col+row skip this — they auto-flow into the
+                // remaining cells at render time.
+                if let (Some(col_value), Some(row_value)) = (col, row) {
+                    for r in 0..row_span {
+                        for c in 0..col_span {
+                            let cell = (row_value + r, col_value + c);
+                            if !explicit_cells.insert(cell) {
+                                return Err(ReportServiceError::Validation(format!(
+                                    "Grid layout node '{}' has overlapping items at cell (row={}, col={})",
+                                    node_id, cell.0, cell.1
+                                )));
+                            }
+                        }
                     }
                 }
                 let child = item_object.get("child").ok_or_else(|| {

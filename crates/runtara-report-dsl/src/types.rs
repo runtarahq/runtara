@@ -262,6 +262,15 @@ pub struct ReportGridLayoutNode {
 #[serde(deny_unknown_fields)]
 pub struct ReportGridLayoutItem {
     pub id: String,
+    /// 1-indexed CSS column-start (Phase 11). When set, the item is placed
+    /// at this column rather than auto-flowing. Items without `col`/`row`
+    /// fall into auto-flow alongside CSS-explicit items, matching CSS
+    /// grid's `grid-auto-flow` behavior.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub col: Option<i64>,
+    /// 1-indexed CSS row-start (Phase 11). See [`Self::col`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub row: Option<i64>,
     #[serde(default, rename = "colSpan", skip_serializing_if = "Option::is_none")]
     pub col_span: Option<i64>,
     #[serde(default, rename = "rowSpan", skip_serializing_if = "Option::is_none")]

@@ -222,4 +222,44 @@ test.describe('wizard v2 grid layout author flow (mocked)', () => {
     expect(saved.definition.layout.columns).toBe(3);
     expect(saved.definition.layout.rows).toBe(2);
   });
+
+  test('clicking the bottom-right empty cell of a 3×2 grid pins the new block to that exact cell', async ({
+    page,
+    mockApi,
+  }) => {
+    const { getSaved } = await setupGridEditing(
+      page,
+      mockApi as unknown as import('../../../fixtures/mock.fixture').MockApi
+    );
+
+    // Grow root to 3×2.
+    await page.getByLabel('Add columns').click();
+    await page.getByLabel('Add columns').click();
+    await page.getByLabel('Add rows').click();
+    await expect(page.getByText(/Report layout · 3×2/)).toBeVisible();
+
+    // The 6th empty cell (row-major) is the bottom-right one.
+    const emptyCells = page.getByTestId('empty-cell-root');
+    await expect(emptyCells).toHaveCount(6);
+    // Click the "+ Add block" inside the last empty cell.
+    await emptyCells.nth(5).getByRole('button', { name: /Add block/i }).click();
+
+    // The inline editor should open immediately for the new block.
+    await expect(
+      page.locator('[data-testid^="inline-editor-"]')
+    ).toBeVisible();
+
+    // Dismiss the inline editor (Done) and save.
+    await page.getByRole('button', { name: /^Done$/ }).click();
+    await page.getByRole('button', { name: /^Save$/ }).click();
+    await expect(async () => {
+      expect(getSaved()).not.toBeNull();
+    }).toPass({ timeout: 5000 });
+
+    const saved = getSaved()!;
+    expect(saved.definition.layout.items).toHaveLength(1);
+    const item = saved.definition.layout.items[0];
+    expect(item.col).toBe(3);
+    expect(item.row).toBe(2);
+  });
 });

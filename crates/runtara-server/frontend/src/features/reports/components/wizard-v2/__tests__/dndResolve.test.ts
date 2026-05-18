@@ -144,6 +144,30 @@ describe('resolveDrop', () => {
       resolveDrop(def, { sourceId: 'n_a', overId: 'missing' })
     ).toEqual({ apply: false });
   });
+
+  it('drop on empty cell pins the source to that (col, row)', () => {
+    const def = definitionWithGrid();
+    const res = resolveDrop(def, {
+      sourceId: 'n_a',
+      overId: 'empty:g_root:3:2',
+    });
+    expect(res).toEqual({
+      apply: true,
+      target: { parentGridId: 'g_root', col: 3, row: 2 },
+    });
+  });
+
+  it('drop on empty cell of a nested grid pins to that grid', () => {
+    const def = twoGridsDefinition();
+    const res = resolveDrop(def, {
+      sourceId: 'n_a',
+      overId: 'empty:g2:2:1',
+    });
+    expect(res).toEqual({
+      apply: true,
+      target: { parentGridId: 'g2', col: 2, row: 1 },
+    });
+  });
 });
 
 describe('resolveDrop + moveLayoutNode end-to-end', () => {

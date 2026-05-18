@@ -62,6 +62,15 @@ pub struct LayoutTarget {
     pub before_id: Option<String>,
     #[serde(default, rename = "afterId", skip_serializing_if = "Option::is_none")]
     pub after_id: Option<String>,
+    /// Phase 11: explicit cell position inside the target grid. When set,
+    /// the inserted/moved item is placed at this column (1-indexed) so
+    /// the renderer pins it to a specific grid cell via CSS
+    /// `grid-column`/`grid-row`. Both fields must be set together; if
+    /// only one is set the other defaults to 1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub col: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub row: Option<i64>,
 }
 
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
@@ -592,7 +601,7 @@ fn insert_into_target(
 ) -> Result<(), EditOpError> {
     let target_grid = resolve_target_grid(root, target.parent_node_id.as_deref())?;
     let index = resolve_grid_item_index(&target_grid.items, target)?;
-    let item = wrap_in_grid_item(node);
+    let item = wrap_in_grid_item(node, target.col, target.row);
     target_grid.items.insert(index, item);
     Ok(())
 }
@@ -622,10 +631,16 @@ fn resolve_target_grid<'a>(
     Ok(grid)
 }
 
-fn wrap_in_grid_item(node: ReportLayoutNode) -> ReportGridLayoutItem {
+fn wrap_in_grid_item(
+    node: ReportLayoutNode,
+    col: Option<i64>,
+    row: Option<i64>,
+) -> ReportGridLayoutItem {
     let id = format!("item_{}", layout_node_id(&node));
     ReportGridLayoutItem {
         id,
+        col,
+        row,
         col_span: None,
         row_span: None,
         child: Box::new(node),
@@ -1030,6 +1045,79 @@ mod tests {
         };
         assert_eq!(inner.items.len(), 1);
         assert_eq!(layout_node_id(&inner.items[0].child), "ln1");
+    }
+
+    #[test]
+    fn add_layout_node_with_explicit_col_row() {
+        let mut def: ReportDefinition = serde_json::from_value(json!({
+            "definitionVersion": 1,
+            "blocks": [{"id": "b1", "type": "markdown", "markdown": {"content": "x"}}],
+            "layout": {"id": "root", "columns": 3, "items": []}
+        }))
+        .unwrap();
+        apply_edit_ops(
+            &mut def,
+            &[ReportEditOp::AddLayoutNode {
+                node: serde_json::from_value(json!({
+                    "type": "block", "id": "ln1", "blockId": "b1"
+                }))
+                .unwrap(),
+                target: LayoutTarget {
+                    parent_node_id: Some("root".to_string()),
+                    col: Some(2),
+                    row: Some(3),
+                    ..Default::default()
+                },
+            }],
+        )
+        .unwrap();
+        assert_eq!(def.layout.items.len(), 1);
+        assert_eq!(def.layout.items[0].col, Some(2));
+        assert_eq!(def.layout.items[0].row, Some(3));
+    }
+
+    #[test]
+    fn move_layout_node_to_explicit_cell() {
+        let mut def: ReportDefinition = serde_json::from_value(json!({
+            "definitionVersion": 1,
+            "blocks": [
+                {"id": "b1", "type": "markdown", "markdown": {"content": "x"}},
+                {"id": "b2", "type": "markdown", "markdown": {"content": "y"}}
+            ],
+            "layout": {
+                "id": "root",
+                "columns": 3,
+                "items": [
+                    {"id": "i1", "child": {"type": "block", "id": "n1", "blockId": "b1"}},
+                    {"id": "i2", "child": {"type": "block", "id": "n2", "blockId": "b2"}}
+                ]
+            }
+        }))
+        .unwrap();
+        // Move n1 to cell (col=3, row=2). The item wrapper gets a new
+        // synthetic id from wrap_in_grid_item; we only need to assert
+        // the col/row landed.
+        apply_edit_ops(
+            &mut def,
+            &[ReportEditOp::MoveLayoutNode {
+                node_id: "n1".to_string(),
+                target: LayoutTarget {
+                    parent_node_id: Some("root".to_string()),
+                    col: Some(3),
+                    row: Some(2),
+                    ..Default::default()
+                },
+            }],
+        )
+        .unwrap();
+        let moved = def
+            .layout
+            .items
+            .iter()
+            .find(|item| layout_node_id(&item.child) == "n1")
+            .expect("n1 still in layout after move");
+        assert_eq!(moved.col, Some(3));
+        assert_eq!(moved.row, Some(2));
     }
 
     #[test]
