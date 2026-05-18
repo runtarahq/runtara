@@ -13,7 +13,9 @@ interface BlockHostInEditProps {
   blockResult?: ReportBlockResult;
   reportId?: string;
   filters: Record<string, unknown>;
-  onConfigure: () => void;
+  /** Phase 11: invoked when the user clicks the Edit pencil. The
+   *  caller swaps the cell from preview mode into the inline editor. */
+  onEdit: () => void;
   onDelete: () => void;
   /** Forwarded `useSortable` attributes + listeners. When provided, a
    *  grip handle becomes a draggable surface for dnd-kit's `PointerSensor`. */
@@ -29,7 +31,7 @@ export function BlockHostInEdit({
   blockResult,
   reportId,
   filters,
-  onConfigure,
+  onEdit,
   onDelete,
   dragHandleProps,
 }: BlockHostInEditProps) {
@@ -66,8 +68,9 @@ export function BlockHostInEdit({
             variant="ghost"
             size="icon"
             className="h-7 w-7"
-            title="Configure block"
-            onClick={onConfigure}
+            title="Edit block"
+            aria-label="Edit block"
+            onClick={onEdit}
           >
             <Pencil className="h-3.5 w-3.5" />
           </Button>

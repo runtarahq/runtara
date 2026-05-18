@@ -577,7 +577,8 @@ fn report_authoring_schema() -> Value {
                 "Phase 9 collapsed the layout vocabulary to two node types: 'block' (leaf reference to a block by id) and 'grid' (recursive container with columns/rows + items).",
                 "Every container (single-column section, multi-column row, metric strip, 2D dashboard) is expressed as a grid with different columns/columnWidths/colSpan/rowSpan. Single column = section, columns=N = side-by-side, columns=4 with metric-blocks inside = metric row.",
                 "Every layout node has a stable id. Use edit_report with add_layout_node / replace_layout_node / patch_layout_node / move_layout_node / remove_layout_node ops for targeted edits. LayoutTarget.parentNodeId picks the destination grid; null resolves to the root grid.",
-                "Grid items wrap their child as { id, colSpan?, rowSpan?, child: <ReportLayoutNode> } — child is itself a block or nested grid.",
+                "Grid items wrap their child as { id, col?, row?, colSpan?, rowSpan?, child: <ReportLayoutNode> }. `col` + `row` are 1-indexed CSS-style cell pinning (Phase 11): when set, the item is placed at that exact cell instead of auto-flowing. Items without `col`/`row` keep CSS auto-flow.",
+                "Use explicit col/row when a block must occupy a specific dashboard cell (e.g. a chart in the bottom-right of a 4×4 grid). Items without col/row fill remaining cells in row-major order around the explicitly-placed ones.",
                 "Use type='block' layout nodes to reference blocks (markdown / table / chart / metric / card / actions). Do not put Markdown content directly in layout nodes."
             ],
             "rootShape": {
@@ -632,6 +633,19 @@ fn report_authoring_schema() -> Value {
                                     {"id": "records_item", "colSpan": 4, "child": {"id": "records_node", "type": "block", "blockId": "records"}}
                                 ]
                             }}
+                        ]
+                    }
+                },
+                "positionalCells4x4": {
+                    "note": "Phase 11: pin blocks to specific cells inside a 4×4 grid via col + row. Other cells remain empty until populated. Items without col/row would auto-flow into remaining cells.",
+                    "snippet": {
+                        "id": "dashboard_grid",
+                        "type": "grid",
+                        "columns": 4,
+                        "rows": 4,
+                        "items": [
+                            {"id": "kpi_item", "col": 1, "row": 1, "colSpan": 2, "child": {"id": "kpi_node", "type": "block", "blockId": "kpi"}},
+                            {"id": "trend_item", "col": 1, "row": 3, "colSpan": 4, "rowSpan": 2, "child": {"id": "trend_node", "type": "block", "blockId": "trend"}}
                         ]
                     }
                 }

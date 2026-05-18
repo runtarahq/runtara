@@ -4,6 +4,8 @@ import {
   addBlock,
   addLayoutNode,
   collectLayoutBlockIds,
+  computeOccupiedCells,
+  listEmptyCells,
   makeBlockId,
   makeGridId,
   moveLayoutNode,
@@ -289,6 +291,150 @@ describe('grid (layout-node) operations', () => {
     const grid = next.layout.items[1].child as ReportGridLayoutNode;
     expect(grid.items[0].colSpan).toBe(3);
     expect(grid.items[1].colSpan).toBeUndefined();
+  });
+});
+
+describe('positional adds (Phase 11)', () => {
+  function emptyRoot(columns: number, rows: number): ReportDefinition {
+    return {
+      definitionVersion: 1,
+      filters: [],
+      blocks: [],
+      layout: { id: 'root', columns, rows, items: [] },
+    };
+  }
+
+  it('addLayoutNode with col/row pins the new item to that cell', () => {
+    const def = emptyRoot(4, 4);
+    const next = addLayoutNode(
+      def,
+      { id: 'n_new', type: 'block', blockId: 'new' },
+      { parentGridId: 'root', col: 3, row: 2 }
+    );
+    expect(next.layout.items).toHaveLength(1);
+    expect(next.layout.items[0].col).toBe(3);
+    expect(next.layout.items[0].row).toBe(2);
+  });
+
+  it('addLayoutNode without col/row produces an auto-flow item', () => {
+    const def = emptyRoot(4, 4);
+    const next = addLayoutNode(
+      def,
+      { id: 'n_new', type: 'block', blockId: 'new' },
+      { parentGridId: 'root' }
+    );
+    expect(next.layout.items[0].col).toBeUndefined();
+    expect(next.layout.items[0].row).toBeUndefined();
+  });
+
+  it('moveLayoutNode with col/row reassigns the item to the new cell', () => {
+    const def: ReportDefinition = {
+      ...emptyRoot(4, 4),
+      blocks: [
+        { id: 'a', type: 'markdown', source: { schema: '' } },
+        { id: 'b', type: 'markdown', source: { schema: '' } },
+      ],
+      layout: {
+        id: 'root',
+        columns: 4,
+        rows: 4,
+        items: [
+          {
+            id: 'item_a',
+            col: 1,
+            row: 1,
+            child: { id: 'n_a', type: 'block', blockId: 'a' },
+          },
+          {
+            id: 'item_b',
+            child: { id: 'n_b', type: 'block', blockId: 'b' },
+          },
+        ],
+      },
+    };
+    const next = moveLayoutNode(def, 'n_a', {
+      parentGridId: 'root',
+      col: 4,
+      row: 3,
+    });
+    const moved = next.layout.items.find(
+      (item) => item.child.id === 'n_a'
+    );
+    expect(moved?.col).toBe(4);
+    expect(moved?.row).toBe(3);
+  });
+});
+
+describe('computeOccupiedCells (Phase 11)', () => {
+  it('returns an empty map when the grid is empty', () => {
+    const occ = computeOccupiedCells([], 3, 3);
+    expect(occ.size).toBe(0);
+  });
+
+  it('claims cells covered by an explicit-position item with spans', () => {
+    const occ = computeOccupiedCells(
+      [
+        {
+          id: 'big',
+          col: 2,
+          row: 2,
+          colSpan: 2,
+          rowSpan: 2,
+          child: { id: 'n', type: 'block', blockId: 'b' },
+        },
+      ],
+      4,
+      4
+    );
+    // (2,2),(2,3),(3,2),(3,3) — note key format is "row,col".
+    expect(occ.get('2,2')).toBe('big');
+    expect(occ.get('2,3')).toBe('big');
+    expect(occ.get('3,2')).toBe('big');
+    expect(occ.get('3,3')).toBe('big');
+    expect(occ.size).toBe(4);
+  });
+
+  it('auto-flow items fill cells around explicit-position items', () => {
+    const occ = computeOccupiedCells(
+      [
+        {
+          id: 'pinned',
+          col: 2,
+          row: 1,
+          child: { id: 'p', type: 'block', blockId: 'p' },
+        },
+        // No col/row — auto-flow into the first available cell, which
+        // is (row=1, col=1) since (row=1, col=2) is taken.
+        {
+          id: 'flow',
+          child: { id: 'f', type: 'block', blockId: 'f' },
+        },
+      ],
+      3,
+      2
+    );
+    expect(occ.get('1,1')).toBe('flow');
+    expect(occ.get('1,2')).toBe('pinned');
+  });
+
+  it('listEmptyCells returns row-major unoccupied cells inside the declared rectangle', () => {
+    const empties = listEmptyCells(
+      [
+        {
+          id: 'one',
+          col: 1,
+          row: 1,
+          child: { id: 'x', type: 'block', blockId: 'x' },
+        },
+      ],
+      2,
+      2
+    );
+    expect(empties).toEqual([
+      { row: 1, col: 2 },
+      { row: 2, col: 1 },
+      { row: 2, col: 2 },
+    ]);
   });
 });
 

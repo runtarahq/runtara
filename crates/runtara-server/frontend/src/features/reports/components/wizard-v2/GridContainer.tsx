@@ -17,6 +17,7 @@ import {
   KeyboardSensor,
   PointerSensor,
   closestCenter,
+  useDroppable,
   useSensor,
   useSensors,
 } from '@dnd-kit/core';
@@ -36,20 +37,21 @@ import {
   DropdownMenuTrigger,
 } from '@/shared/components/ui/dropdown-menu';
 import { ChevronDown, GripVertical, Minus, Plus, Settings2, Trash2 } from 'lucide-react';
-import { CSSProperties, useState } from 'react';
+import { CSSProperties, useEffect, useState } from 'react';
 import {
   ReportBlockResult,
   ReportDefinition,
   ReportGridLayoutNode,
   ReportLayoutNode,
 } from '../../types';
-import { BlockEditor } from './blocks/BlockEditor';
 import { BlockHostInEdit } from './BlockHostInEdit';
 import { GridSettingsPanel } from './GridSettingsPanel';
+import { InlineBlockEditor } from './InlineBlockEditor';
 import { resolveDrop } from './dndResolve';
 import {
   LayoutTarget,
   addLayoutNode,
+  listEmptyCells,
   makeBlockId,
   moveLayoutNode,
   newGrid,
@@ -94,6 +96,29 @@ export function GridContainer({
     })
   );
 
+  // Phase 11: track block ids that were just created in this editor
+  // mount so `BlockNodeEditor` can initialize them in `edit` mode. The
+  // set is consumed (cleared) on first read inside the block editor,
+  // so reopening the preview won't re-trigger edit mode.
+  const [recentlyAddedIds, setRecentlyAddedIds] = useState<Set<string>>(
+    () => new Set()
+  );
+  const markRecentlyAdded = (id: string) => {
+    setRecentlyAddedIds((current) => {
+      const next = new Set(current);
+      next.add(id);
+      return next;
+    });
+  };
+  const consumeRecentlyAdded = (id: string) => {
+    setRecentlyAddedIds((current) => {
+      if (!current.has(id)) return current;
+      const next = new Set(current);
+      next.delete(id);
+      return next;
+    });
+  };
+
   const handleDragEnd = (event: DragEndEvent) => {
     const { active, over } = event;
     if (!over) return;
@@ -119,6 +144,9 @@ export function GridContainer({
           reportId={reportId}
           filters={filters}
           onChange={onChange}
+          recentlyAddedIds={recentlyAddedIds}
+          onMarkRecentlyAdded={markRecentlyAdded}
+          onConsumeRecentlyAdded={consumeRecentlyAdded}
           isRoot
         />
       </div>
@@ -133,6 +161,12 @@ interface SortableLayoutNodeProps {
   blockResults?: Partial<Record<string, ReportBlockResult>>;
   reportId?: string;
   filters: Record<string, unknown>;
+  /** Set of block ids the wizard just created. `BlockNodeEditor` reads
+   *  this once on mount and opens itself in edit mode if its block id
+   *  is present, then consumes it. */
+  recentlyAddedIds: Set<string>;
+  onMarkRecentlyAdded: (id: string) => void;
+  onConsumeRecentlyAdded: (id: string) => void;
   onChange: (definition: ReportDefinition) => void;
 }
 
@@ -182,10 +216,27 @@ function BlockNodeEditor({
   reportId,
   filters,
   dragHandleProps,
+  recentlyAddedIds,
+  onConsumeRecentlyAdded,
   onChange,
 }: BlockNodeEditorProps) {
-  const [expanded, setExpanded] = useState(false);
   const block = definition.blocks.find((b) => b.id === node.blockId);
+  // Phase 11: blocks the wizard just created open directly into edit
+  // mode. We sample `recentlyAddedIds` once on mount (so toggling
+  // Edit→Done→Edit doesn't loop), then consume the entry.
+  const blockId = node.blockId;
+  const [mode, setMode] = useState<'preview' | 'edit'>(() =>
+    recentlyAddedIds.has(blockId) ? 'edit' : 'preview'
+  );
+  useEffect(() => {
+    if (recentlyAddedIds.has(blockId)) {
+      onConsumeRecentlyAdded(blockId);
+    }
+    // The consume call is the side-effect; we only want to fire once
+    // per mount even if the parent set changes later.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   if (!block) {
     return (
       <div className="rounded border border-destructive/30 bg-destructive/5 p-3 text-xs text-destructive">
@@ -194,30 +245,33 @@ function BlockNodeEditor({
       </div>
     );
   }
-  return (
-    <div className="grid gap-2">
-      <BlockHostInEdit
+
+  if (mode === 'edit') {
+    return (
+      <InlineBlockEditor
         block={block}
-        blockResult={blockResults?.[block.id]}
-        reportId={reportId}
-        filters={filters}
+        schemas={schemas}
+        datasets={definition.datasets ?? []}
         dragHandleProps={dragHandleProps}
-        onConfigure={() => setExpanded((v) => !v)}
+        onDone={() => setMode('preview')}
+        onChange={(next) =>
+          onChange(updateBlock(definition, block.id, () => next))
+        }
         onDelete={() => onChange(removeLayoutNode(definition, node.id))}
       />
-      {expanded ? (
-        <div className="rounded border bg-card p-3">
-          <BlockEditor
-            block={block}
-            schemas={schemas}
-            datasets={definition.datasets ?? []}
-            onChange={(next) =>
-              onChange(updateBlock(definition, block.id, () => next))
-            }
-          />
-        </div>
-      ) : null}
-    </div>
+    );
+  }
+
+  return (
+    <BlockHostInEdit
+      block={block}
+      blockResult={blockResults?.[block.id]}
+      reportId={reportId}
+      filters={filters}
+      dragHandleProps={dragHandleProps}
+      onEdit={() => setMode('edit')}
+      onDelete={() => onChange(removeLayoutNode(definition, node.id))}
+    />
   );
 }
 
@@ -237,6 +291,9 @@ function GridNodeEditor({
   filters,
   dragHandleProps,
   isRoot,
+  recentlyAddedIds,
+  onMarkRecentlyAdded,
+  onConsumeRecentlyAdded,
   onChange,
 }: GridNodeEditorProps) {
   const [showSettings, setShowSettings] = useState(false);
@@ -250,20 +307,34 @@ function GridNodeEditor({
   // How many rows the skeleton renders. The viewer renders rows
   // implicitly from items; the editor shows enough rows to fit
   // `items` *and* the user's explicit `rows` hint, never going below 1.
+  // For naturalRows we have to consider both auto-flow item-cells AND
+  // the deepest row touched by an explicit-position item.
   const itemCellCount = node.items.reduce((sum, item) => {
     const cs = Math.max(1, Math.min(item.colSpan ?? 1, columns));
     const rs = Math.max(1, item.rowSpan ?? 1);
     return sum + cs * rs;
   }, 0);
-  const naturalRows = Math.max(1, Math.ceil(itemCellCount / columns));
+  const deepestExplicitRow = node.items.reduce((max, item) => {
+    if (item.row == null) return max;
+    const rs = Math.max(1, item.rowSpan ?? 1);
+    return Math.max(max, item.row + rs - 1);
+  }, 0);
+  const naturalRows = Math.max(
+    1,
+    Math.max(Math.ceil(itemCellCount / columns), deepestExplicitRow)
+  );
   const rows = Math.max(node.rows ?? naturalRows, naturalRows);
-  const emptySlots = Math.max(0, columns * rows - itemCellCount);
+  const emptyCells = listEmptyCells(node.items, columns, rows);
 
   const handleDelete = () => {
     onChange(removeLayoutNode(definition, node.id));
   };
 
-  const handleAddBlockToGrid = () => {
+  // Phase 11: clicking an empty cell at (col, row) creates a new block
+  // and pins it to that exact cell. The new block is marked as
+  // "recently added" so `BlockNodeEditor` opens it directly in edit
+  // mode for immediate configuration.
+  const handleAddBlockToGrid = (col?: number, row?: number) => {
     const id = makeBlockId('block');
     const block = {
       id,
@@ -277,14 +348,21 @@ function GridNodeEditor({
     next = addLayoutNode(
       next,
       { id: `n_${id}`, type: 'block', blockId: id },
-      { parentGridId: node.id }
+      { parentGridId: node.id, col, row }
     );
+    onMarkRecentlyAdded(id);
     onChange(next);
   };
 
-  const handleAddGridToGrid = (subColumns: number) => {
+  const handleAddGridToGrid = (
+    subColumns: number,
+    col?: number,
+    row?: number
+  ) => {
     const sub = newGrid({ columns: subColumns });
-    onChange(addLayoutNode(definition, sub, { parentGridId: node.id }));
+    onChange(
+      addLayoutNode(definition, sub, { parentGridId: node.id, col, row })
+    );
   };
 
   const setColumns = (next: number) => {
@@ -424,18 +502,28 @@ function GridNodeEditor({
                 : undefined;
             const rowSpan =
               item.rowSpan && item.rowSpan > 1 ? item.rowSpan : undefined;
+            // Phase 11: explicit cell pinning. When an item has col/row,
+            // CSS pins it to that cell instead of auto-flowing.
+            const colCss =
+              item.col != null
+                ? `${item.col} / span ${colSpan ?? 1}`
+                : colSpan
+                  ? `span ${colSpan} / span ${colSpan}`
+                  : 'auto';
+            const rowCss =
+              item.row != null
+                ? `${item.row} / span ${rowSpan ?? 1}`
+                : rowSpan
+                  ? `span ${rowSpan} / span ${rowSpan}`
+                  : 'auto';
             return (
               <div
                 key={item.id}
                 className="min-w-0 [grid-column:var(--report-grid-edit-col)] [grid-row:var(--report-grid-edit-row)]"
                 style={
                   {
-                    '--report-grid-edit-col': colSpan
-                      ? `span ${colSpan} / span ${colSpan}`
-                      : 'auto',
-                    '--report-grid-edit-row': rowSpan
-                      ? `span ${rowSpan} / span ${rowSpan}`
-                      : 'auto',
+                    '--report-grid-edit-col': colCss,
+                    '--report-grid-edit-row': rowCss,
                   } as CSSProperties
                 }
               >
@@ -446,17 +534,24 @@ function GridNodeEditor({
                   blockResults={blockResults}
                   reportId={reportId}
                   filters={filters}
+                  recentlyAddedIds={recentlyAddedIds}
+                  onMarkRecentlyAdded={onMarkRecentlyAdded}
+                  onConsumeRecentlyAdded={onConsumeRecentlyAdded}
                   onChange={onChange}
                 />
               </div>
             );
           })}
-          {Array.from({ length: emptySlots }).map((_, i) => (
+          {emptyCells.map((cell) => (
             <EmptyCellPlaceholder
-              key={`empty-${node.id}-${i}`}
+              key={`empty-${node.id}-${cell.row}-${cell.col}`}
               gridId={node.id}
-              onAddBlock={handleAddBlockToGrid}
-              onAddGrid={handleAddGridToGrid}
+              col={cell.col}
+              row={cell.row}
+              onAddBlock={() => handleAddBlockToGrid(cell.col, cell.row)}
+              onAddGrid={(subColumns) =>
+                handleAddGridToGrid(subColumns, cell.col, cell.row)
+              }
             />
           ))}
         </div>
@@ -519,19 +614,44 @@ function DimensionStepper({
 
 interface EmptyCellPlaceholderProps {
   gridId: string;
+  col: number;
+  row: number;
   onAddBlock: () => void;
   onAddGrid: (columns: number) => void;
 }
 
 function EmptyCellPlaceholder({
   gridId,
+  col,
+  row,
   onAddBlock,
   onAddGrid,
 }: EmptyCellPlaceholderProps) {
+  // Phase 11: each empty cell is its own drop target. When a draggable
+  // layout node is dropped here, `resolveDrop` parses the composite id
+  // and produces a target with explicit col/row, so `moveLayoutNode`
+  // pins the moved item to this exact cell.
+  const { setNodeRef, isOver } = useDroppable({
+    id: `empty:${gridId}:${col}:${row}`,
+  });
   return (
     <div
+      ref={setNodeRef}
       data-testid={`empty-cell-${gridId}`}
-      className="flex min-h-[80px] items-center justify-center rounded-md border border-dashed border-muted-foreground/30 bg-background/30 p-2 transition-colors hover:border-muted-foreground/60 hover:bg-muted/30"
+      data-grid-col={col}
+      data-grid-row={row}
+      style={
+        {
+          gridColumn: `${col} / span 1`,
+          gridRow: `${row} / span 1`,
+        } as CSSProperties
+      }
+      className={
+        'flex min-h-[80px] items-center justify-center rounded-md border border-dashed p-2 transition-colors ' +
+        (isOver
+          ? 'border-primary bg-primary/10'
+          : 'border-muted-foreground/30 bg-background/30 hover:border-muted-foreground/60 hover:bg-muted/30')
+      }
     >
       <div className="flex items-center gap-1">
         <Button

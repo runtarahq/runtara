@@ -263,18 +263,28 @@ function LayoutNode({
                 : undefined;
             const rowSpan =
               item.rowSpan && item.rowSpan > 1 ? item.rowSpan : undefined;
+            // Phase 11: explicit cell pinning. When an item has col/row,
+            // CSS pins it to that cell instead of auto-flowing.
+            const colCss =
+              item.col != null
+                ? `${item.col} / span ${colSpan ?? 1}`
+                : colSpan
+                  ? `span ${colSpan} / span ${colSpan}`
+                  : 'auto';
+            const rowCss =
+              item.row != null
+                ? `${item.row} / span ${rowSpan ?? 1}`
+                : rowSpan
+                  ? `span ${rowSpan} / span ${rowSpan}`
+                  : 'auto';
             return (
               <div
                 key={item.id}
                 className="min-w-0 lg:[grid-column:var(--report-grid-column)] lg:[grid-row:var(--report-grid-row)]"
                 style={
                   {
-                    '--report-grid-column': colSpan
-                      ? `span ${colSpan} / span ${colSpan}`
-                      : 'auto',
-                    '--report-grid-row': rowSpan
-                      ? `span ${rowSpan} / span ${rowSpan}`
-                      : 'auto',
+                    '--report-grid-column': colCss,
+                    '--report-grid-row': rowCss,
                   } as CSSProperties
                 }
               >

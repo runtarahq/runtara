@@ -2381,9 +2381,20 @@ export interface KnownErrorInfo {
 export interface LayoutTarget {
   afterId?: string | null;
   beforeId?: string | null;
+  /**
+   * Phase 11: explicit cell position inside the target grid. When set,
+   * the inserted/moved item is placed at this column (1-indexed) so
+   * the renderer pins it to a specific grid cell via CSS
+   * `grid-column`/`grid-row`. Both fields must be set together; if
+   * only one is set the other defaults to 1.
+   * @format int64
+   */
+  col?: number | null;
   /** @min 0 */
   index?: number | null;
   parentNodeId?: string | null;
+  /** @format int64 */
+  row?: number | null;
 }
 
 /** Response for listing all agents */
@@ -3534,9 +3545,22 @@ export interface ReportGridLayoutItem {
    * transparently on read.
    */
   child: ReportLayoutNode;
+  /**
+   * 1-indexed CSS column-start (Phase 11). When set, the item is placed
+   * at this column rather than auto-flowing. Items without `col`/`row`
+   * fall into auto-flow alongside CSS-explicit items, matching CSS
+   * grid's `grid-auto-flow` behavior.
+   * @format int64
+   */
+  col?: number | null;
   /** @format int64 */
   colSpan?: number | null;
   id: string;
+  /**
+   * 1-indexed CSS row-start (Phase 11). See [`Self::col`].
+   * @format int64
+   */
+  row?: number | null;
   /** @format int64 */
   rowSpan?: number | null;
 }
