@@ -1,12 +1,10 @@
 import { describe, expect, it } from 'vitest';
 
 import {
-  compileDisplayTemplate,
   getReportViewBreadcrumbs,
   isWorkflowActionDisabled,
   isWorkflowActionVisible,
   matchesReportRowCondition,
-  renderDisplayTemplate,
   truncateCellText,
 } from './utils';
 import type { ReportDefinition, ReportViewDefinition } from './types';
@@ -20,43 +18,48 @@ describe('report row conditions', () => {
     tags: ['urgent'],
   };
 
+  // Helpers for building canonical `ConditionExpression` shapes in tests.
+  const ref = (path: string) =>
+    ({ type: 'value', valueType: 'reference', value: path }) as const;
+  const imm = (value: unknown) =>
+    ({ type: 'value', valueType: 'immediate', value }) as const;
+  const cond = (op: string, args: unknown[]) =>
+    ({ type: 'operation', op, arguments: args }) as const;
+
   it('matches scalar and nested row fields', () => {
     expect(
       matchesReportRowCondition(
-        { op: 'EQ', arguments: ['status', 'ready'] },
+        cond('EQ', [ref('status'), imm('ready')]) as never,
         row
       )
     ).toBe(true);
     expect(
       matchesReportRowCondition(
-        { op: 'EQ', arguments: ['owner.team', 'risk'] },
+        cond('EQ', [ref('owner.team'), imm('risk')]) as never,
         row
       )
     ).toBe(true);
     expect(
-      matchesReportRowCondition({ op: 'GT', arguments: ['priority', 1] }, row)
+      matchesReportRowCondition(
+        cond('GT', [ref('priority'), imm(1)]) as never,
+        row
+      )
     ).toBe(true);
   });
 
   it('supports logical row conditions', () => {
     expect(
       matchesReportRowCondition(
-        {
-          op: 'AND',
-          arguments: [
-            { op: 'EQ', arguments: ['status', 'ready'] },
-            { op: 'IN', arguments: ['priority', [1, 2, 3]] },
-          ],
-        },
+        cond('AND', [
+          cond('EQ', [ref('status'), imm('ready')]),
+          cond('IN', [ref('priority'), imm([1, 2, 3])]),
+        ]) as never,
         row
       )
     ).toBe(true);
     expect(
       matchesReportRowCondition(
-        {
-          op: 'NOT',
-          arguments: [{ op: 'EQ', arguments: ['status', 'processed'] }],
-        },
+        cond('NOT', [cond('EQ', [ref('status'), imm('processed')])]) as never,
         row
       )
     ).toBe(true);
@@ -67,8 +70,8 @@ describe('report row conditions', () => {
       isWorkflowActionVisible(
         {
           workflowId: 'workflow_1',
-          visibleWhen: { op: 'EQ', arguments: ['status', 'ready'] },
-          hiddenWhen: { op: 'EQ', arguments: ['priority', 5] },
+          visibleWhen: cond('EQ', [ref('status'), imm('ready')]) as never,
+          hiddenWhen: cond('EQ', [ref('priority'), imm(5)]) as never,
         },
         row
       )
@@ -77,7 +80,7 @@ describe('report row conditions', () => {
       isWorkflowActionVisible(
         {
           workflowId: 'workflow_1',
-          visibleWhen: { op: 'EQ', arguments: ['status', 'processed'] },
+          visibleWhen: cond('EQ', [ref('status'), imm('processed')]) as never,
         },
         row
       )
@@ -86,7 +89,7 @@ describe('report row conditions', () => {
       isWorkflowActionVisible(
         {
           workflowId: 'workflow_1',
-          hiddenWhen: { op: 'EQ', arguments: ['status', 'ready'] },
+          hiddenWhen: cond('EQ', [ref('status'), imm('ready')]) as never,
         },
         row
       )
@@ -96,7 +99,7 @@ describe('report row conditions', () => {
   it('evaluates workflow action disabledWhen independently from visibility', () => {
     const action = {
       workflowId: 'workflow_1',
-      disabledWhen: { op: 'EQ', arguments: ['status', 'ready'] },
+      disabledWhen: cond('EQ', [ref('status'), imm('ready')]) as never,
     };
 
     expect(isWorkflowActionVisible(action, row)).toBe(true);
@@ -107,21 +110,24 @@ describe('report row conditions', () => {
 describe('report view navigation', () => {
   const reportDefinition: ReportDefinition = {
     definitionVersion: 1,
+    layout: { id: 'root', columns: 1, items: [] },
     filters: [],
     blocks: [],
     views: [
-      { id: 'a', title: 'Accounts' },
+      { id: 'a', title: 'Accounts', layout: { id: 'view_a_root', columns: 1, items: [] } },
       {
         id: 'b',
         title: 'Branches',
         parentViewId: 'a',
         clearFiltersOnBack: ['b_id'],
+        layout: { id: 'view_b_root', columns: 1, items: [] },
       },
       {
         id: 'c',
         title: 'Cases',
         parentViewId: 'b',
         clearFiltersOnBack: ['c_id'],
+        layout: { id: 'view_c_root', columns: 1, items: [] },
       },
     ],
   };
@@ -197,51 +203,7 @@ describe('truncateCellText', () => {
   });
 });
 
-describe('renderDisplayTemplate', () => {
-  const row = {
-    first_name: 'Jane',
-    last_name: 'Doe',
-    applicant_summary: {
-      full_name: 'Jane Q Doe',
-    },
-    requested_loan: {
-      amount: 120000,
-    },
-  };
-
-  it('concatenates row fields for display-only cells', () => {
-    expect(compileDisplayTemplate('{{first_name}} {{last_name}}')).toEqual({
-      parts: [
-        { kind: 'placeholder', field: 'first_name' },
-        { kind: 'literal', value: ' ' },
-        { kind: 'placeholder', field: 'last_name' },
-      ],
-    });
-    expect(renderDisplayTemplate(row, '{{first_name}} {{last_name}}')).toBe(
-      'Jane Doe'
-    );
-  });
-
-  it('reads nested JSON paths and applies token formats', () => {
-    expect(renderDisplayTemplate(row, '{{applicant_summary.full_name}}')).toBe(
-      'Jane Q Doe'
-    );
-
-    const rendered = renderDisplayTemplate(
-      row,
-      '${{requested_loan.amount | number_compact}} AUD'
-    );
-    expect(rendered).toMatch(/^\$.+ AUD$/);
-    expect(rendered).not.toContain('{{');
-  });
-
-  it('only compiles safe variable interpolation tokens', () => {
-    expect(() => compileDisplayTemplate('{{#if status}}')).toThrow();
-    expect(() =>
-      compileDisplayTemplate('{{first_name + last_name}}')
-    ).toThrow();
-    expect(() => compileDisplayTemplate('{{first_name | }}')).toThrow();
-    expect(() => compileDisplayTemplate('{{first_name')).toThrow();
-    expect(renderDisplayTemplate(row, '{{first_name + last_name}}')).toBe('');
-  });
-});
+// `renderDisplayTemplate` is now backed by the WASM minijinja engine in
+// `runtara-report-dsl`. End-to-end behavior is covered by the Rust tests in
+// `runtara-report-dsl/src/template.rs` and the Playwright report-corpus suite.
+// Vitest doesn't load the WASM bundle, so we keep no FE-side template tests.

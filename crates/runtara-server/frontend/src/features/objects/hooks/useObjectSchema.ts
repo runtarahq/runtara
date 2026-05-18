@@ -3,8 +3,11 @@ import { useObjectSchemaDtos } from './useObjectSchemas';
 
 // Get a single object type by name, derived from the cached schemas list
 // so it inherits the correct auth gate and cache invalidation.
-export function useObjectSchemaDto(typeName: string | undefined) {
-  const { data: schemas, isLoading, error } = useObjectSchemaDtos();
+export function useObjectSchemaDto(
+  typeName: string | undefined,
+  connectionId?: string | null
+) {
+  const { data: schemas, isLoading, error } = useObjectSchemaDtos(connectionId);
 
   const schema: Schema | null =
     typeName && schemas

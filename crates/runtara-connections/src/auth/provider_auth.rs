@@ -5,6 +5,7 @@ use serde_json::Value;
 use std::collections::HashMap;
 
 use super::aws_signing::AwsSigningParams;
+use super::azure_signing::AzureSigningParams;
 use super::token_cache::{
     self, DEFAULT_CLIENT_CREDENTIALS_TTL_SECONDS, DeferredAuth, TokenRequestBody,
 };
@@ -12,11 +13,13 @@ use super::token_cache::{
 pub struct ResolvedConnectionAuth {
     pub base_url: Option<String>,
     pub aws_signing: Option<AwsSigningParams>,
+    pub azure_signing: Option<AzureSigningParams>,
 }
 
 pub(crate) struct ConnectionAuthDescriptor {
     pub base_url: Option<String>,
     pub aws_signing: Option<AwsSigningParams>,
+    pub azure_signing: Option<AzureSigningParams>,
     pub deferred_auth: Option<DeferredAuth>,
 }
 
@@ -51,6 +54,7 @@ pub async fn resolve_connection_auth(
     Ok(ResolvedConnectionAuth {
         base_url: descriptor.base_url,
         aws_signing: descriptor.aws_signing,
+        azure_signing: descriptor.azure_signing,
     })
 }
 
@@ -68,6 +72,7 @@ fn describe_connection_auth(
             ConnectionAuthDescriptor {
                 base_url: Some("https://api.openai.com".into()),
                 aws_signing: None,
+                azure_signing: None,
                 deferred_auth: None,
             }
         }
@@ -80,6 +85,7 @@ fn describe_connection_auth(
                     .as_str()
                     .map(|domain| format!("https://{}", domain)),
                 aws_signing: None,
+                azure_signing: None,
                 deferred_auth: None,
             }
         }
@@ -88,11 +94,13 @@ fn describe_connection_auth(
                 .as_str()
                 .map(|domain| format!("https://{}", domain)),
             aws_signing: None,
+            azure_signing: None,
             deferred_auth: describe_shopify_client_credentials_auth(connection_id, params),
         },
         "microsoft_entra_client_credentials" => ConnectionAuthDescriptor {
             base_url: first_string_param(params, &["base_url"]),
             aws_signing: None,
+            azure_signing: None,
             deferred_auth: describe_microsoft_entra_client_credentials_auth(connection_id, params),
         },
         "hubspot_access_token" => {
@@ -102,6 +110,7 @@ fn describe_connection_auth(
             ConnectionAuthDescriptor {
                 base_url: Some("https://api.hubapi.com".into()),
                 aws_signing: None,
+                azure_signing: None,
                 deferred_auth: None,
             }
         }
@@ -112,6 +121,7 @@ fn describe_connection_auth(
                 ConnectionAuthDescriptor {
                     base_url: Some("https://api.hubapi.com".into()),
                     aws_signing: None,
+                    azure_signing: None,
                     deferred_auth: Some(auth),
                 }
             } else {
@@ -121,6 +131,7 @@ fn describe_connection_auth(
                 ConnectionAuthDescriptor {
                     base_url: Some("https://api.hubapi.com".into()),
                     aws_signing: None,
+                    azure_signing: None,
                     deferred_auth: None,
                 }
             }
@@ -132,6 +143,7 @@ fn describe_connection_auth(
             ConnectionAuthDescriptor {
                 base_url: Some("https://api.stripe.com".into()),
                 aws_signing: None,
+                azure_signing: None,
                 deferred_auth: None,
             }
         }
@@ -142,6 +154,7 @@ fn describe_connection_auth(
             ConnectionAuthDescriptor {
                 base_url: Some("https://slack.com".into()),
                 aws_signing: None,
+                azure_signing: None,
                 deferred_auth: None,
             }
         }
@@ -158,6 +171,7 @@ fn describe_connection_auth(
             ConnectionAuthDescriptor {
                 base_url: Some(base),
                 aws_signing: None,
+                azure_signing: None,
                 deferred_auth: None,
             }
         }
@@ -169,6 +183,7 @@ fn describe_connection_auth(
             ConnectionAuthDescriptor {
                 base_url: params["base_url"].as_str().map(|u| u.to_string()),
                 aws_signing: None,
+                azure_signing: None,
                 deferred_auth: None,
             }
         }
@@ -184,6 +199,7 @@ fn describe_connection_auth(
             ConnectionAuthDescriptor {
                 base_url: params["base_url"].as_str().map(|u| u.to_string()),
                 aws_signing: None,
+                azure_signing: None,
                 deferred_auth: None,
             }
         }
@@ -224,6 +240,22 @@ fn describe_connection_auth(
                     service,
                     session_token,
                 }),
+                azure_signing: None,
+                deferred_auth: None,
+            }
+        }
+        "azure_blob_storage" => {
+            let account_name = first_string_param(params, &["account_name"]).unwrap_or_default();
+            let account_key = first_string_param(params, &["account_key"]).unwrap_or_default();
+            let base_url = resolve_azure_blob_base_url(params, &account_name);
+
+            ConnectionAuthDescriptor {
+                base_url,
+                aws_signing: None,
+                azure_signing: Some(AzureSigningParams {
+                    account_name,
+                    account_key,
+                }),
                 deferred_auth: None,
             }
         }
@@ -240,6 +272,7 @@ fn describe_connection_auth(
             ConnectionAuthDescriptor {
                 base_url: params["base_url"].as_str().map(|u| u.to_string()),
                 aws_signing: None,
+                azure_signing: None,
                 deferred_auth: None,
             }
         }
@@ -379,6 +412,35 @@ fn normalize_endpoint(endpoint: &str) -> String {
     } else {
         format!("https://{}", endpoint)
     }
+}
+
+fn resolve_azure_blob_base_url(params: &Value, account_name: &str) -> Option<String> {
+    if let Some(raw) = first_string_param(params, &["endpoint_override", "endpoint"]) {
+        let trimmed = raw.trim_end_matches('/').to_string();
+        let normalized = normalize_endpoint(&trimmed);
+        // For path-style endpoints (Azurite/Azure Stack), append the account when
+        // it isn't already part of the configured URL.
+        if normalized.ends_with(&format!("/{}", account_name)) || account_name.is_empty() {
+            return Some(normalized);
+        }
+        return Some(format!(
+            "{}/{}",
+            normalized.trim_end_matches('/'),
+            account_name
+        ));
+    }
+
+    if account_name.is_empty() {
+        return None;
+    }
+
+    let suffix = first_string_param(params, &["endpoint_suffix"])
+        .unwrap_or_else(|| "core.windows.net".to_string());
+    Some(format!(
+        "https://{}.blob.{}",
+        account_name,
+        suffix.trim_start_matches('.').trim_end_matches('/')
+    ))
 }
 
 #[cfg(test)]

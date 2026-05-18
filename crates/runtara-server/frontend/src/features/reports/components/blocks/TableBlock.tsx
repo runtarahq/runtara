@@ -12,6 +12,8 @@ import {
   ArrowUp,
   ChevronLeft,
   ChevronRight,
+  ChevronsLeft,
+  ChevronsRight,
   Eye,
   ExternalLink,
   FileText,
@@ -75,22 +77,22 @@ import { useReportWorkflowAction } from './useReportWorkflowAction';
 
 type TableColumn = {
   key: string;
-  label?: string;
-  displayField?: string;
-  displayTemplate?: string;
+  label?: string | null;
+  displayField?: string | null;
+  displayTemplate?: string | null;
   format?: string | null;
-  type?: 'value' | 'chart' | 'workflow_button' | 'interaction_buttons';
+  type?: 'value' | 'chart' | 'workflow_button' | 'interaction_buttons' | null;
   chart?: ReportTableColumn['chart'];
-  secondaryField?: string;
-  linkField?: string;
-  tooltipField?: string;
+  secondaryField?: string | null;
+  linkField?: string | null;
+  tooltipField?: string | null;
   pillVariants?: ReportTableColumn['pillVariants'];
-  levels?: string[];
-  align?: 'left' | 'right' | 'center';
-  maxChars?: number;
-  editable?: boolean;
-  editor?: ReportEditorConfig;
-  workflowAction?: ReportWorkflowActionConfig;
+  levels?: string[] | null;
+  align?: 'left' | 'right' | 'center' | string | null;
+  maxChars?: number | null;
+  editable?: boolean | null;
+  editor?: ReportEditorConfig | null;
+  workflowAction?: ReportWorkflowActionConfig | null;
   interactionButtons?: ReportTableInteractionButtonConfig[];
 };
 
@@ -210,6 +212,13 @@ export function TableBlock({
     () => getPageSizeOptions(block, page.size),
     [block, page.size]
   );
+  const totalPages = getTotalPages(page);
+  const currentPage =
+    totalPages && totalPages > 0
+      ? Math.floor(page.offset / Math.max(page.size, 1)) + 1
+      : undefined;
+  const lastPageOffset =
+    totalPages && totalPages > 0 ? (totalPages - 1) * page.size : undefined;
   const hasSizedColumns = columns.some((column) =>
     hasPositiveMaxChars(column.maxChars)
   );
@@ -477,6 +486,17 @@ export function TableBlock({
               </div>
             )}
             <div className="flex items-center gap-2">
+              {lastPageOffset !== undefined ? (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  disabled={page.offset <= 0}
+                  onClick={() => onPageChange(0, page.size)}
+                >
+                  <ChevronsLeft className="mr-1 h-4 w-4" />
+                  First
+                </Button>
+              ) : null}
               <Button
                 variant="outline"
                 size="sm"
@@ -488,6 +508,11 @@ export function TableBlock({
                 <ChevronLeft className="mr-1 h-4 w-4" />
                 Previous
               </Button>
+              {currentPage !== undefined && totalPages !== undefined ? (
+                <span className="whitespace-nowrap px-1 text-xs text-muted-foreground">
+                  Page {currentPage} of {totalPages}
+                </span>
+              ) : null}
               <Button
                 variant="outline"
                 size="sm"
@@ -497,6 +522,17 @@ export function TableBlock({
                 Next
                 <ChevronRight className="ml-1 h-4 w-4" />
               </Button>
+              {lastPageOffset !== undefined ? (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  disabled={page.offset >= lastPageOffset}
+                  onClick={() => onPageChange(lastPageOffset, page.size)}
+                >
+                  Last
+                  <ChevronsRight className="ml-1 h-4 w-4" />
+                </Button>
+              ) : null}
             </div>
           </div>
         </div>
@@ -608,13 +644,13 @@ function TableBodyRow({
         const writebackContext = getWritebackContext(column, rowObject);
         const workflowActionKey = `${blockId}:${rowKey}:${column.key}`;
         const isWorkflowActionRunning =
-          column.workflowAction !== undefined &&
+          column.workflowAction != null &&
           isWorkflowRunning(workflowActionKey);
         const shouldRenderWorkflowAction =
-          column.workflowAction !== undefined &&
+          column.workflowAction != null &&
           isWorkflowActionVisible(column.workflowAction, rowObject);
         const isWorkflowDisabled =
-          column.workflowAction !== undefined &&
+          column.workflowAction != null &&
           isWorkflowActionDisabled(column.workflowAction, rowObject);
         const isEditing = editingField === column.key;
 
@@ -826,7 +862,9 @@ function isActionColumn(column: TableColumn): boolean {
   return isWorkflowButtonColumn(column) || isInteractionButtonsColumn(column);
 }
 
-function hasPositiveMaxChars(maxChars: number | undefined): maxChars is number {
+function hasPositiveMaxChars(
+  maxChars: number | null | undefined
+): maxChars is number {
   return (
     typeof maxChars === 'number' && Number.isFinite(maxChars) && maxChars > 0
   );
@@ -1059,7 +1097,7 @@ function InteractionButtonsCell({
             onClick={(event) => {
               event.stopPropagation();
               if (disabled) return;
-              onRun?.(button.actions, row);
+              onRun?.(button.actions ?? [], row);
             }}
           >
             <Icon className="h-3.5 w-3.5" />
@@ -1187,7 +1225,7 @@ function TruncatedCellText({
   className,
 }: {
   text: string;
-  maxChars?: number;
+  maxChars?: number | null;
   className?: string;
 }) {
   const display = truncateCellText(text, maxChars);
@@ -1527,6 +1565,12 @@ function getPageSizeOptions(block: ReportBlockDefinition, currentSize: number) {
   return Array.from(new Set([...sizes, currentSize]))
     .filter((size) => Number.isFinite(size) && size > 0)
     .sort((left, right) => left - right);
+}
+
+function getTotalPages(page: NonNullable<TableData['page']>) {
+  if (typeof page.totalCount !== 'number') return undefined;
+  if (page.totalCount <= 0) return 0;
+  return Math.ceil(page.totalCount / Math.max(page.size, 1));
 }
 
 function formatPageRange(page: NonNullable<TableData['page']>) {

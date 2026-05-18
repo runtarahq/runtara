@@ -1,0 +1,63 @@
+---
+source: crates/runtara-server/tests/reports_render_corpus.rs
+expression: snapshot_body
+---
+{
+  "blocks": {
+    "order_header": {
+      "error": {
+        "blockId": "order_header",
+        "code": "BLOCK_RENDER_FAILED",
+        "message": "Schema not found: Order"
+      },
+      "status": "error",
+      "title": "Order",
+      "type": "card"
+    },
+    "order_lines": {
+      "error": {
+        "blockId": "order_lines",
+        "code": "BLOCK_RENDER_FAILED",
+        "message": "Schema not found: OrderLine"
+      },
+      "status": "error",
+      "title": "Order lines",
+      "type": "table"
+    },
+    "orders_overview": {
+      "error": {
+        "blockId": "orders_overview",
+        "code": "BLOCK_RENDER_FAILED",
+        "message": "Schema not found: Order"
+      },
+      "status": "error",
+      "title": "Recent orders",
+      "type": "table"
+    }
+  },
+  "errors": [
+    {
+      "blockId": "orders_overview",
+      "code": "BLOCK_RENDER_FAILED",
+      "message": "Schema not found: Order"
+    },
+    {
+      "blockId": "order_header",
+      "code": "BLOCK_RENDER_FAILED",
+      "message": "Schema not found: Order"
+    },
+    {
+      "blockId": "order_lines",
+      "code": "BLOCK_RENDER_FAILED",
+      "message": "Schema not found: OrderLine"
+    }
+  ],
+  "report": {
+    "definitionVersion": 1,
+    "id": "rep_11_views_with_interactions"
+  },
+  "resolvedFilters": {
+    "selected_order_id": "ord_001"
+  },
+  "success": true
+}

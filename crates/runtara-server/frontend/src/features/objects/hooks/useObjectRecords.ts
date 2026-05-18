@@ -40,6 +40,7 @@ interface PageObjectInstance {
 export function useObjectInstanceDtos(
   schemaId: string | undefined,
   schemaName: string | undefined,
+  connectionId: string | null | undefined,
   condition: unknown = null,
   page: number = 0,
   size: number = 20,
@@ -48,6 +49,7 @@ export function useObjectInstanceDtos(
 ) {
   return useCustomQuery<PageObjectInstance>({
     queryKey: queryKeys.objects.instances.list(schemaId || '', {
+      connectionId,
       condition,
       page,
       size,
@@ -56,7 +58,7 @@ export function useObjectInstanceDtos(
       sortOrder,
     }),
     queryFn: (token, context) => getInstancesBySchema(token, context),
-    enabled: !!schemaId,
+    enabled: !!schemaId && !!connectionId,
   });
 }
 
@@ -65,33 +67,40 @@ export function useObjectInstanceDtos(
  */
 export function useObjectInstanceDto(
   schemaId: string | undefined,
-  instanceId: string | undefined
+  instanceId: string | undefined,
+  connectionId?: string | null
 ) {
   return useCustomQuery<Instance | null>({
     queryKey: queryKeys.objects.instances.byId(
       schemaId || '',
-      instanceId || ''
+      instanceId || '',
+      connectionId
     ),
     queryFn: (token, context) => getInstanceById(token, context),
-    enabled: !!instanceId,
+    enabled: !!instanceId && !!connectionId,
   });
 }
 
 /**
  * Hook to create a new record
  */
-export function useCreateObjectInstanceDto() {
+export function useCreateObjectInstanceDto(connectionId?: string | null) {
   const queryClient = useQueryClient();
 
   return useCustomMutation<
     Instance,
     { schemaId: string; data: CreateInstanceRequest }
   >({
-    mutationFn: (token, { data }) => createInstance(token, data),
+    mutationFn: (token, { data }) => createInstance(token, data, connectionId),
     onSuccess: (newInstance, variables) => {
       // Optimistically add the new instance to all matching queries
       queryClient.setQueriesData<PageObjectInstance>(
-        { queryKey: queryKeys.objects.instances.bySchema(variables.schemaId) },
+        {
+          queryKey: queryKeys.objects.instances.bySchema(
+            variables.schemaId,
+            connectionId
+          ),
+        },
         (oldData) => {
           if (!oldData) return oldData;
 
@@ -109,7 +118,7 @@ export function useCreateObjectInstanceDto() {
 /**
  * Hook to update an existing record with optimistic updates
  */
-export function useUpdateObjectInstanceDto() {
+export function useUpdateObjectInstanceDto(connectionId?: string | null) {
   const queryClient = useQueryClient();
 
   return useCustomMutation<
@@ -117,21 +126,26 @@ export function useUpdateObjectInstanceDto() {
     { schemaId: string; instanceId: string; data: UpdateInstanceRequest }
   >({
     mutationFn: (token, { schemaId, instanceId, data }) =>
-      updateInstance(token, schemaId, instanceId, data),
+      updateInstance(token, schemaId, instanceId, data, connectionId),
     onMutate: async ({ schemaId, instanceId, data }) => {
       // Cancel any outgoing refetches for all queries matching this schema
       await queryClient.cancelQueries({
-        queryKey: queryKeys.objects.instances.bySchema(schemaId),
+        queryKey: queryKeys.objects.instances.bySchema(schemaId, connectionId),
       });
 
       // Snapshot previous data for rollback
       const previousData = queryClient.getQueriesData<PageObjectInstance>({
-        queryKey: queryKeys.objects.instances.bySchema(schemaId),
+        queryKey: queryKeys.objects.instances.bySchema(schemaId, connectionId),
       });
 
       // Update all queries that match this schema ID
       queryClient.setQueriesData<PageObjectInstance>(
-        { queryKey: queryKeys.objects.instances.bySchema(schemaId) },
+        {
+          queryKey: queryKeys.objects.instances.bySchema(
+            schemaId,
+            connectionId
+          ),
+        },
         (oldData) => {
           if (!oldData) return oldData;
 
@@ -156,7 +170,12 @@ export function useUpdateObjectInstanceDto() {
     onSuccess: (returnedData, variables) => {
       // Update all matching queries with the server response
       queryClient.setQueriesData<PageObjectInstance>(
-        { queryKey: queryKeys.objects.instances.bySchema(variables.schemaId) },
+        {
+          queryKey: queryKeys.objects.instances.bySchema(
+            variables.schemaId,
+            connectionId
+          ),
+        },
         (oldData) => {
           if (!oldData) return oldData;
 
@@ -186,7 +205,10 @@ export function useUpdateObjectInstanceDto() {
       }
       // Also refetch to ensure consistency
       queryClient.invalidateQueries({
-        queryKey: queryKeys.objects.instances.bySchema(variables.schemaId),
+        queryKey: queryKeys.objects.instances.bySchema(
+          variables.schemaId,
+          connectionId
+        ),
       });
     },
   });
@@ -195,16 +217,19 @@ export function useUpdateObjectInstanceDto() {
 /**
  * Hook to bulk delete records
  */
-export function useBulkDeleteObjectInstances() {
+export function useBulkDeleteObjectInstances(connectionId?: string | null) {
   const queryClient = useQueryClient();
 
   return useCustomMutation<number, { schemaId: string; instanceIds: string[] }>(
     {
       mutationFn: (token, { schemaId, instanceIds }) =>
-        bulkDeleteInstances(token, schemaId, instanceIds),
+        bulkDeleteInstances(token, schemaId, instanceIds, connectionId),
       onSuccess: (_, variables) => {
         queryClient.invalidateQueries({
-          queryKey: queryKeys.objects.instances.bySchema(variables.schemaId),
+          queryKey: queryKeys.objects.instances.bySchema(
+            variables.schemaId,
+            connectionId
+          ),
         });
       },
     }
@@ -215,7 +240,7 @@ export function useBulkDeleteObjectInstances() {
  * Hook to bulk-insert records from a JSON array with opt-in conflict + error
  * handling.
  */
-export function useBulkCreateObjectInstances() {
+export function useBulkCreateObjectInstances(connectionId?: string | null) {
   const queryClient = useQueryClient();
 
   return useCustomMutation<
@@ -227,10 +252,13 @@ export function useBulkCreateObjectInstances() {
     }
   >({
     mutationFn: (token, { schemaId, instances, options }) =>
-      bulkCreateInstances(token, schemaId, instances, options),
+      bulkCreateInstances(token, schemaId, instances, options, connectionId),
     onSuccess: (_, variables) => {
       queryClient.invalidateQueries({
-        queryKey: queryKeys.objects.instances.bySchema(variables.schemaId),
+        queryKey: queryKeys.objects.instances.bySchema(
+          variables.schemaId,
+          connectionId
+        ),
       });
     },
   });
@@ -239,7 +267,7 @@ export function useBulkCreateObjectInstances() {
 /**
  * Hook to bulk-update a set of instances by ID with a shared property payload.
  */
-export function useBulkUpdateObjectInstances() {
+export function useBulkUpdateObjectInstances(connectionId?: string | null) {
   const queryClient = useQueryClient();
 
   return useCustomMutation<
@@ -251,10 +279,19 @@ export function useBulkUpdateObjectInstances() {
     }
   >({
     mutationFn: (token, { schemaId, instanceIds, properties }) =>
-      bulkUpdateInstancesByIds(token, schemaId, instanceIds, properties),
+      bulkUpdateInstancesByIds(
+        token,
+        schemaId,
+        instanceIds,
+        properties,
+        connectionId
+      ),
     onSuccess: (_, variables) => {
       queryClient.invalidateQueries({
-        queryKey: queryKeys.objects.instances.bySchema(variables.schemaId),
+        queryKey: queryKeys.objects.instances.bySchema(
+          variables.schemaId,
+          connectionId
+        ),
       });
     },
   });
@@ -263,33 +300,33 @@ export function useBulkUpdateObjectInstances() {
 /**
  * Hook to export instances as CSV
  */
-export function useExportCsv() {
+export function useExportCsv(connectionId?: string | null) {
   return useCustomMutation<
     Blob,
     { schemaName: string; data: CsvExportRequest }
   >({
     mutationFn: (token, { schemaName, data }) =>
-      exportCsv(token, schemaName, data),
+      exportCsv(token, schemaName, data, connectionId),
   });
 }
 
 /**
  * Hook to preview CSV import (parse headers, suggest column mappings)
  */
-export function useImportCsvPreview() {
+export function useImportCsvPreview(connectionId?: string | null) {
   return useCustomMutation<
     ImportPreviewResponse,
     { schemaName: string; data: CsvPreviewJsonRequest }
   >({
     mutationFn: (token, { schemaName, data }) =>
-      importCsvPreview(token, schemaName, data),
+      importCsvPreview(token, schemaName, data, connectionId),
   });
 }
 
 /**
  * Hook to import CSV data
  */
-export function useImportCsv() {
+export function useImportCsv(connectionId?: string | null) {
   const queryClient = useQueryClient();
 
   return useCustomMutation<
@@ -297,10 +334,13 @@ export function useImportCsv() {
     { schemaId: string; schemaName: string; data: CsvImportJsonRequest }
   >({
     mutationFn: (token, { schemaName, data }) =>
-      importCsv(token, schemaName, data),
+      importCsv(token, schemaName, data, connectionId),
     onSuccess: (_, variables) => {
       queryClient.invalidateQueries({
-        queryKey: queryKeys.objects.instances.bySchema(variables.schemaId),
+        queryKey: queryKeys.objects.instances.bySchema(
+          variables.schemaId,
+          connectionId
+        ),
       });
     },
   });

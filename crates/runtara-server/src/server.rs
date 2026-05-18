@@ -6,6 +6,7 @@ use axum::{
     routing::{delete, get, patch, post, put},
 };
 use dashmap::DashMap;
+use rmcp::transport::streamable_http_server::session::SessionStore;
 use serde::Serialize;
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use std::sync::Arc;
@@ -37,6 +38,8 @@ use runtime_client::RuntimeClient;
 #[derive(OpenApi)]
 #[openapi(
     paths(
+        // Reports endpoints
+        api::handlers::reports::edit_report,
         // Execution endpoints
         api::handlers::executions::list_all_executions_handler,
         // Workflow endpoints (refactored)
@@ -367,6 +370,119 @@ use runtime_client::RuntimeClient;
             runtara_connections::types::RateLimitTimelineBucket,
             runtara_connections::types::RateLimitTimelineData,
             runtara_connections::types::RateLimitTimelineResponse,
+            // Reports DTOs (sourced from runtara-report-dsl crate, Phase 1 of
+            // the reports refactor — see docs/reports-refactoring-plan.md).
+            // Registering these here makes them available to
+            // `swagger-typescript-api` so the FE can drop its hand-maintained
+            // types.ts in Phase 2.
+            runtara_report_dsl::Condition,
+            runtara_report_dsl::ReportStatus,
+            runtara_report_dsl::ReportDefinition,
+            runtara_report_dsl::ReportViewDefinition,
+            runtara_report_dsl::ReportTitleFromBlock,
+            runtara_report_dsl::ReportViewBreadcrumb,
+            runtara_report_dsl::ReportLayoutNode,
+            runtara_report_dsl::ReportBlockLayoutNode,
+            runtara_report_dsl::ReportGridLayoutNode,
+            runtara_report_dsl::ReportGridLayoutItem,
+            runtara_report_dsl::ReportDatasetDefinition,
+            runtara_report_dsl::ReportDatasetSource,
+            runtara_report_dsl::ReportDatasetDimension,
+            runtara_report_dsl::ReportDatasetMeasure,
+            runtara_report_dsl::ReportDatasetFieldType,
+            runtara_report_dsl::ReportDatasetValueFormat,
+            runtara_report_dsl::ReportSourceKind,
+            runtara_report_dsl::ReportWorkflowRuntimeEntity,
+            runtara_report_dsl::ReportFilterDefinition,
+            runtara_report_dsl::ReportFilterType,
+            runtara_report_dsl::ReportFilterTarget,
+            runtara_report_dsl::ReportBlockDefinition,
+            runtara_report_dsl::ReportMarkdownConfig,
+            runtara_report_dsl::ReportActionsConfig,
+            runtara_report_dsl::ReportActionSubmitConfig,
+            runtara_report_dsl::ReportWorkflowActionConfig,
+            runtara_report_dsl::ReportWorkflowActionContext,
+            runtara_report_dsl::ReportWorkflowActionContextMode,
+            runtara_report_dsl::ReportBlockDatasetQuery,
+            runtara_report_dsl::ReportBlockType,
+            runtara_report_dsl::ReportCardConfig,
+            runtara_report_dsl::ReportCardGroup,
+            runtara_report_dsl::ReportCardField,
+            runtara_report_dsl::ReportCardFieldKind,
+            runtara_report_dsl::ReportSubtableConfig,
+            runtara_report_dsl::ReportSubtableColumn,
+            runtara_report_dsl::ReportSource,
+            runtara_report_dsl::ReportSourceJoin,
+            runtara_report_dsl::ReportJoinKind,
+            runtara_report_dsl::ReportSourceMode,
+            runtara_report_dsl::ReportAggregateSpec,
+            runtara_report_dsl::ReportAggregateFn,
+            runtara_report_dsl::ReportOrderBy,
+            runtara_report_dsl::ReportTableConfig,
+            runtara_report_dsl::ReportTableActionConfig,
+            runtara_report_dsl::ReportTableColumn,
+            runtara_report_dsl::ReportTableInteractionButtonConfig,
+            runtara_report_dsl::ReportEditorConfig,
+            runtara_report_dsl::ReportEditorOption,
+            runtara_report_dsl::ReportLookupConfig,
+            runtara_report_dsl::ReportEditorKind,
+            runtara_report_dsl::ReportTableColumnType,
+            runtara_report_dsl::ReportTableColumnSource,
+            runtara_report_dsl::ReportTableColumnJoin,
+            runtara_report_dsl::ReportPaginationConfig,
+            runtara_report_dsl::ReportChartConfig,
+            runtara_report_dsl::ReportChartKind,
+            runtara_report_dsl::ReportChartSeries,
+            runtara_report_dsl::ReportMetricConfig,
+            runtara_report_dsl::ReportInteractionDefinition,
+            runtara_report_dsl::ReportInteractionTrigger,
+            runtara_report_dsl::ReportInteractionAction,
+            runtara_report_dsl::ReportSummary,
+            runtara_report_dsl::ReportDto,
+            runtara_report_dsl::ListReportsResponse,
+            runtara_report_dsl::GetReportResponse,
+            runtara_report_dsl::CreateReportRequest,
+            runtara_report_dsl::UpdateReportRequest,
+            runtara_report_dsl::ValidateReportRequest,
+            runtara_report_dsl::ValidateReportResponse,
+            runtara_report_dsl::ReportValidationIssue,
+            runtara_report_dsl::ReportRenderRequest,
+            runtara_report_dsl::ReportPreviewRequest,
+            runtara_report_dsl::ReportFilterOptionsRequest,
+            runtara_report_dsl::ReportLookupOptionsRequest,
+            runtara_report_dsl::ReportFilterOptionsResponse,
+            runtara_report_dsl::ReportLookupOptionsResponse,
+            runtara_report_dsl::ReportLookupBlockMetadata,
+            runtara_report_dsl::ReportDatasetQueryRequest,
+            runtara_report_dsl::ReportDatasetFilter,
+            runtara_report_dsl::ReportDatasetQueryResponse,
+            runtara_report_dsl::ReportDatasetQueryMetadata,
+            runtara_report_dsl::ReportDatasetQueryColumn,
+            runtara_report_dsl::ReportDatasetQueryPage,
+            runtara_report_dsl::ReportFilterOptionsMetadata,
+            runtara_report_dsl::ReportFilterOption,
+            runtara_report_dsl::ReportFilterOptionsPage,
+            runtara_report_dsl::ReportBlockOnlyDataRequest,
+            runtara_report_dsl::SubmitReportWorkflowActionRequest,
+            runtara_report_dsl::ReportBlockDataRequest,
+            runtara_report_dsl::ReportTableSearchRequest,
+            runtara_report_dsl::ReportPageRequest,
+            runtara_report_dsl::ReportRenderResponse,
+            runtara_report_dsl::ReportRenderMetadata,
+            runtara_report_dsl::ReportBlockRenderResult,
+            runtara_report_dsl::ReportBlockStatus,
+            runtara_report_dsl::ReportBlockError,
+            runtara_report_dsl::DeleteReportResponse,
+            runtara_report_dsl::ReportSummary,
+            // Canonical edit endpoint (Phase 6/8) — exposes the
+            // ReportEditOp batch + request/response shells so the FE
+            // codegen client can call `/edit` directly instead of full
+            // PUT round-trips.
+            runtara_report_dsl::edit_ops::ReportEditOp,
+            runtara_report_dsl::edit_ops::BlockPosition,
+            runtara_report_dsl::edit_ops::LayoutTarget,
+            api::handlers::reports::EditReportRequest,
+            api::handlers::reports::EditReportResponse,
         )
     ),
     tags(
@@ -393,7 +509,7 @@ use runtime_client::RuntimeClient;
         description = "API for managing workflow definitions with versioning support",
     )
 )]
-struct ApiDoc;
+pub struct ApiDoc;
 
 /// Application state shared across all handlers
 #[derive(Clone)]
@@ -621,23 +737,65 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
     // stream publisher, compilation worker, cron scheduler, MCP/handler
     // utility calls — clones this manager instead of opening its own TCP
     // connection per call.
-    let redis_manager: Option<redis::aio::ConnectionManager> =
-        match crate::valkey::build_redis_url() {
-            Some(url) => match crate::valkey::init_shared_manager(&url).await {
-                Ok(m) => {
-                    println!("✓ Shared Valkey connection manager initialized");
-                    Some(m)
-                }
-                Err(e) => {
+    let redis_url = crate::valkey::build_redis_url();
+    let redis_manager: Option<redis::aio::ConnectionManager> = match redis_url {
+        Some(url) => match crate::valkey::init_shared_manager(&url).await {
+            Ok(m) => {
+                println!("✓ Shared Valkey connection manager initialized");
+                Some(m)
+            }
+            Err(e) => {
+                if config::mcp_session_store() == config::McpSessionStore::Valkey {
                     eprintln!(
-                        "⚠ Failed to initialize shared Valkey connection manager: {}",
+                        "❌ Configuration error: failed to initialize shared Valkey connection manager: {}",
                         e
                     );
-                    None
+                    eprintln!(
+                        "   RUNTARA_MCP_SESSION_STORE=valkey requires a working Valkey connection."
+                    );
+                    std::process::exit(1);
                 }
-            },
-            None => None,
-        };
+                eprintln!(
+                    "⚠ Failed to initialize shared Valkey connection manager: {}",
+                    e
+                );
+                None
+            }
+        },
+        None => {
+            if config::mcp_session_store() == config::McpSessionStore::Valkey {
+                eprintln!(
+                    "❌ Configuration error: RUNTARA_MCP_SESSION_STORE=valkey requires VALKEY_HOST."
+                );
+                std::process::exit(1);
+            }
+            None
+        }
+    };
+
+    let mcp_session_store: Option<Arc<dyn SessionStore>> = match config::mcp_session_store() {
+        config::McpSessionStore::Local => {
+            println!("✓ MCP session recovery store: local");
+            None
+        }
+        config::McpSessionStore::Valkey => {
+            let Some(manager) = redis_manager.clone() else {
+                eprintln!(
+                    "❌ Configuration error: RUNTARA_MCP_SESSION_STORE=valkey requires a shared Valkey connection manager."
+                );
+                std::process::exit(1);
+            };
+            println!(
+                "✓ MCP session recovery store: valkey (ttl={}s)",
+                config::mcp_session_ttl_seconds()
+            );
+            Some(Arc::new(mcp::ValkeyMcpSessionStore::new(
+                manager,
+                tenant_id.clone(),
+                config::mcp_session_ttl_seconds(),
+            )))
+        }
+    };
 
     // Construct connections crate config and facade.
     // Cipher is built from RUNTARA_CONNECTIONS_ENCRYPTION_KEY env var — falls
@@ -704,6 +862,32 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
     );
 
     println!("✓ Object model database connected successfully");
+
+    match connections_facade
+        .ensure_default_connection(
+            &tenant_id,
+            "object_model",
+            format!("Default Object Model Database ({})", tenant_id),
+            "postgres".to_string(),
+            serde_json::json!({ "database_url": object_model_database_url }),
+        )
+        .await
+    {
+        Ok(connection_id) => {
+            tracing::info!(
+                tenant_id = %tenant_id,
+                connection_id = %connection_id,
+                "Default object_model connection is configured"
+            );
+        }
+        Err(error) => {
+            tracing::warn!(
+                tenant_id = %tenant_id,
+                error = ?error,
+                "Failed to auto-populate default object_model connection"
+            );
+        }
+    }
 
     // NOTE: State sync with runtara happens after RuntimeClient is initialized (below)
 
@@ -1245,18 +1429,8 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
             post(api::handlers::reports::query_report_dataset),
         )
         .route(
-            "/api/runtime/reports/{report_id}/blocks",
-            post(api::handlers::reports::add_report_block),
-        )
-        .route(
-            "/api/runtime/reports/{report_id}/blocks/{block_id}",
-            put(api::handlers::reports::replace_report_block)
-                .patch(api::handlers::reports::patch_report_block)
-                .delete(api::handlers::reports::remove_report_block),
-        )
-        .route(
-            "/api/runtime/reports/{report_id}/blocks/{block_id}/move",
-            post(api::handlers::reports::move_report_block),
+            "/api/runtime/reports/{report_id}/edit",
+            post(api::handlers::reports::edit_report),
         )
         // NOTE: Rate limit analytics routes are now served by runtara-connections crate.
         // Invocation Trigger endpoints
@@ -1638,6 +1812,10 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
             "/api/internal/proxy",
             post(api::handlers::internal_proxy::proxy_handler),
         )
+        .route(
+            "/api/internal/presign",
+            post(api::handlers::internal_presign::presign_handler),
+        )
         .layer(DefaultBodyLimit::max(64 * 1024 * 1024))
         .with_state(internal_proxy_state);
 
@@ -1685,7 +1863,14 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
             ),
             connections: connections_facade.clone(),
             engine: execution_engine.clone(),
-        });
+        })
+        // Defense in depth: cap the request body on these public,
+        // unauthenticated webhook ingest routes. events.rs also enforces this
+        // explicitly (it reads the raw body and bypasses extractor limits);
+        // this layer covers the Bytes-extractor sync handler.
+        .layer(DefaultBodyLimit::max(
+            api::handlers::events::webhook_max_body_bytes(),
+        ));
 
     // Initialize channel router for conversational triggers (Telegram, Slack, Teams).
     // The router is always available — it looks up connection + trigger from DB per request.
@@ -1741,6 +1926,7 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         tenant_id.clone(),
         internal_router,
         config::mcp_allowed_hosts().to_vec(),
+        mcp_session_store,
     )
     .layer(from_fn_with_state(
         mcp_auth_state,
@@ -1865,19 +2051,32 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         std::process::exit(1);
     }
 
+    // Cap concurrent TCP connections per listener so a slow-loris attack or a
+    // connection storm can't exhaust file descriptors and take the whole
+    // server down. Configurable via MAX_CONNECTIONS; see `conn_limit`.
+    let max_connections = crate::conn_limit::max_connections_from_env();
+
     // Start public API server
-    let public_listener = tokio::net::TcpListener::bind(&public_addr).await?;
+    let public_listener = crate::conn_limit::LimitedListener::new(
+        tokio::net::TcpListener::bind(&public_addr).await?,
+        max_connections,
+    );
     tracing::info!(
         port = port,
         address = %public_addr,
+        max_connections = max_connections,
         "Public API server started"
     );
 
     // Start internal API server (localhost only)
-    let internal_listener = tokio::net::TcpListener::bind(&internal_addr).await?;
+    let internal_listener = crate::conn_limit::LimitedListener::new(
+        tokio::net::TcpListener::bind(&internal_addr).await?,
+        max_connections,
+    );
     tracing::info!(
         port = internal_port,
         address = %internal_addr,
+        max_connections = max_connections,
         "Internal API server started"
     );
 

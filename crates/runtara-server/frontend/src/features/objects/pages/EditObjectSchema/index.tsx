@@ -7,12 +7,19 @@ import {
 import { usePageTitle } from '@/shared/hooks/usePageTitle';
 import { toast } from 'sonner';
 import { Loader2 } from 'lucide-react';
+import { ObjectModelConnectionSelector } from '@/features/objects/components/ObjectModelConnectionSelector';
+import { useObjectModelConnectionSelection } from '@/features/objects/hooks/useObjectModelConnectionSelection';
 
 export function EditObjectSchema() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
-  const { data: objectSchemaDto, isLoading } = useObjectSchemaDtoById(id);
-  const deleteSchema = useDeleteObjectSchema();
+  const { selectedConnectionId, connectionQuery } =
+    useObjectModelConnectionSelection();
+  const { data: objectSchemaDto, isLoading } = useObjectSchemaDtoById(
+    id,
+    selectedConnectionId
+  );
+  const deleteSchema = useDeleteObjectSchema(selectedConnectionId);
 
   usePageTitle(
     objectSchemaDto?.name
@@ -21,7 +28,7 @@ export function EditObjectSchema() {
   );
 
   const handleSuccess = () => {
-    navigate('/objects/types');
+    navigate(`/objects/types${connectionQuery}`);
   };
 
   const handleDelete = async () => {
@@ -36,7 +43,7 @@ export function EditObjectSchema() {
     try {
       await deleteSchema.mutateAsync(id);
       toast.success('Object type deleted successfully');
-      navigate('/objects/types');
+      navigate(`/objects/types${connectionQuery}`);
     } catch (error) {
       toast.error((error as Error)?.message || 'Failed to delete object type');
     }
@@ -61,11 +68,17 @@ export function EditObjectSchema() {
   }
 
   return (
-    <ObjectSchemaDtoForm
-      objectSchemaDto={objectSchemaDto}
-      onSuccess={handleSuccess}
-      onDelete={handleDelete}
-      isDeleting={deleteSchema.isPending}
-    />
+    <div className="space-y-4">
+      <div className="flex justify-end px-4 pt-4 sm:px-6 lg:px-10">
+        <ObjectModelConnectionSelector />
+      </div>
+      <ObjectSchemaDtoForm
+        objectSchemaDto={objectSchemaDto}
+        onSuccess={handleSuccess}
+        onDelete={handleDelete}
+        isDeleting={deleteSchema.isPending}
+        connectionId={selectedConnectionId}
+      />
+    </div>
   );
 }

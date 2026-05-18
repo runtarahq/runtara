@@ -48,7 +48,7 @@ describe('patchReportWritebackQueryData', () => {
     expect(patched).not.toBe(response);
     expect(patched.blocks.metric_1).toBe(metricBlock);
 
-    const patchedData = patched.blocks.table_1.data as {
+    const patchedData = patched.blocks.table_1!.data as {
       rows: Array<Record<string, unknown>>;
     };
     expect(patchedData.rows[0]).toEqual({

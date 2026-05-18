@@ -31,16 +31,18 @@ interface ObjectInstanceDtoFormProps {
   objectSchemaDto: Schema;
   record?: Instance;
   onSuccess: () => void;
+  connectionId?: string | null;
 }
 
 export function ObjectInstanceDtoForm({
   objectSchemaDto,
   record,
   onSuccess,
+  connectionId,
 }: ObjectInstanceDtoFormProps) {
   const [formValues, setFormValues] = useState<Record<string, any>>({});
-  const createRecord = useCreateObjectInstanceDto();
-  const updateRecord = useUpdateObjectInstanceDto();
+  const createRecord = useCreateObjectInstanceDto(connectionId);
+  const updateRecord = useUpdateObjectInstanceDto(connectionId);
 
   const isEditing = !!record;
 
@@ -117,6 +119,15 @@ export function ObjectInstanceDtoForm({
       toast({
         title: 'Error',
         description: 'Schema is not properly defined',
+        variant: 'destructive',
+      });
+      return;
+    }
+
+    if (!connectionId) {
+      toast({
+        title: 'Error',
+        description: 'Select a database connection first',
         variant: 'destructive',
       });
       return;

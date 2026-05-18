@@ -4,7 +4,6 @@ import { Button } from '@/shared/components/ui/button';
 import { cn } from '@/lib/utils';
 import { useExecutionStore } from '@/features/workflows/stores/executionStore';
 import { useWorkflowStore } from '@/features/workflows/stores/workflowStore';
-import { ExecutionStatus } from '@/generated/RuntaraRuntimeApi';
 
 function JsonBlock({
   data,
@@ -73,7 +72,7 @@ export function DebugStepInspector() {
   const stepName = (selectedNode.data as any)?.name || selectedNodeId;
   const stepType = (selectedNode.data as any)?.stepType || '';
   const isCurrentBreakpoint = breakpointHit?.stepId === selectedNodeId;
-  const isSuspendedStep = nodeStatus?.status === ExecutionStatus.Suspended;
+  const isSuspendedStep = nodeStatus?.status === 'suspended';
 
   // Determine what inputs/outputs to show:
   // - Current breakpoint step: inputs from breakpointHit.inputs (resolved values about to be processed)

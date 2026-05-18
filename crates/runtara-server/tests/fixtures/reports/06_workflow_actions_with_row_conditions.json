@@ -1,0 +1,121 @@
+{
+  "definitionVersion": 1,
+  "layout": {
+    "id": "root",
+    "columns": 1,
+    "items": [
+      {
+        "id": "root_i0",
+        "child": { "id": "n_pending", "type": "block", "blockId": "pending_orders" }
+      }
+    ]
+  },
+  "filters": [
+    {
+      "id": "status",
+      "label": "Status",
+      "type": "multi_select",
+      "default": ["pending_review"],
+      "options": {
+        "source": "static",
+        "values": [
+          { "label": "Pending review", "value": "pending_review" },
+          { "label": "Awaiting payment", "value": "awaiting_payment" },
+          { "label": "On hold", "value": "on_hold" }
+        ]
+      },
+      "appliesTo": [
+        { "blockId": "pending_orders", "field": "status", "op": "in" }
+      ]
+    }
+  ],
+  "blocks": [
+    {
+      "id": "pending_orders",
+      "type": "table",
+      "title": "Pending orders",
+      "hideWhenEmpty": true,
+      "source": {
+        "schema": "Order",
+        "mode": "filter"
+      },
+      "table": {
+        "columns": [
+          { "field": "order_id", "label": "Order", "descriptive": true },
+          { "field": "customer_name", "label": "Customer" },
+          {
+            "field": "total_amount",
+            "label": "Total",
+            "format": "currency",
+            "align": "right"
+          },
+          {
+            "field": "status",
+            "label": "Status",
+            "format": "pill",
+            "pillVariants": {
+              "pending_review": "warning",
+              "awaiting_payment": "warning",
+              "on_hold": "muted"
+            }
+          },
+          {
+            "field": "approve",
+            "label": "Approve",
+            "type": "workflow_button",
+            "workflowAction": {
+              "workflowId": "wf_approve_order",
+              "label": "Approve",
+              "runningLabel": "Approving…",
+              "successMessage": "Order approved",
+              "reloadBlock": true,
+              "visibleWhen": {
+                "type": "operation",
+                "op": "EQ",
+                "arguments": [
+                  { "valueType": "reference", "value": "status" },
+                  { "valueType": "immediate", "value": "pending_review" }
+                ]
+              },
+              "disabledWhen": {
+                "type": "operation",
+                "op": "LT",
+                "arguments": [
+                  { "valueType": "reference", "value": "total_amount" },
+                  { "valueType": "immediate", "value": 0 }
+                ]
+              },
+              "context": {
+                "mode": "row"
+              }
+            }
+          },
+          {
+            "field": "hold",
+            "label": "Hold",
+            "type": "workflow_button",
+            "workflowAction": {
+              "workflowId": "wf_hold_order",
+              "label": "Hold",
+              "hiddenWhen": {
+                "type": "operation",
+                "op": "EQ",
+                "arguments": [
+                  { "valueType": "reference", "value": "status" },
+                  { "valueType": "immediate", "value": "on_hold" }
+                ]
+              },
+              "context": {
+                "mode": "field",
+                "field": "order_id"
+              }
+            }
+          }
+        ],
+        "defaultSort": [
+          { "field": "created_at", "direction": "asc" }
+        ]
+      }
+    }
+  ]
+}

@@ -7,6 +7,7 @@ import {
   ReportDatasetQueryRequest,
   ReportDatasetQueryResponse,
   ReportDto,
+  ReportEditOp,
   ReportFilterOptionsRequest,
   ReportFilterOptionsResponse,
   ReportLookupOptionsRequest,
@@ -66,6 +67,24 @@ export async function updateReport(
   const result = await RuntimeREST.instance.put(
     `/api/runtime/reports/${encodeURIComponent(request.id)}`,
     request.data,
+    createAuthHeaders(token)
+  );
+  return result.data.report;
+}
+
+/** Phase 6/8 canonical mutation entry: POST a batch of `ReportEditOp`s
+ *  to `/edit`; the server applies them atomically via
+ *  `runtara_report_dsl::edit_ops::apply_edit_ops` and returns the
+ *  updated report. Use this for targeted partial mutations (the wizard
+ *  still uses `updateReport` PUT for full-replacement saves since its
+ *  editing model loads + edits + saves the whole definition). */
+export async function editReport(
+  token: string,
+  request: { id: string; ops: ReportEditOp[] }
+): Promise<ReportDto> {
+  const result = await RuntimeREST.instance.post(
+    `/api/runtime/reports/${encodeURIComponent(request.id)}/edit`,
+    { ops: request.ops },
     createAuthHeaders(token)
   );
   return result.data.report;

@@ -7,6 +7,9 @@ repository.workspace = true
 description = "Complete HTTP API server for runtara — workflows, connections, channels, workers"
 keywords = ["durable", "workflow", "server", "runtime"]
 categories = ["web-programming"]
+# Multiple binaries (server + dump_openapi codegen helper). Pin the
+# default so `cargo run -p runtara-server` resolves without `--bin`.
+default-run = "runtara-server"
 
 [lib]
 name = "runtara_server"
@@ -15,6 +18,10 @@ path = "src/lib.rs"
 [[bin]]
 name = "runtara-server"
 path = "src/main.rs"
+
+[[bin]]
+name = "dump_openapi"
+path = "src/bin/dump_openapi.rs"
 
 [features]
 # Embed the pre-built frontend (frontend/dist/) and serve it at the UI mount prefix.
@@ -34,6 +41,7 @@ runtara-object-store = { path = "../runtara-object-store" }
 runtara-text-parser = { path = "../runtara-text-parser" }
 runtara-connections = { path = "../runtara-connections", features = ["utoipa"] }
 runtara-ai = { path = "../runtara-ai" }
+runtara-report-dsl = { path = "../runtara-report-dsl", features = ["utoipa"] }
 
 # Database
 sqlx = { version = "0.8.6", features = [
@@ -104,7 +112,7 @@ url = "2"
 urlencoding = "2"
 
 # MCP (Model Context Protocol) server
-rmcp = { version = "1.4", features = ["server", "transport-streamable-http-server"] }
+rmcp = { version = "1.7", features = ["server", "transport-streamable-http-server"] }
 schemars = "1"
 reqwest = { version = "0.12", features = ["json"] }
 
@@ -143,3 +151,7 @@ serde_json = "1.0"
 wiremock = "0.6"
 tokio = { version = "1", features = ["full", "test-util"] }
 rsa = { version = "0.9", features = ["sha2"] }
+testcontainers = "0.27"
+testcontainers-modules = { version = "0.15", features = ["postgres"] }
+insta = { version = "1", features = ["json", "filters"] }
+proptest = "1"

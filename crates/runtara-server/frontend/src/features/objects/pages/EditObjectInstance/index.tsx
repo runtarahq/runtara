@@ -4,15 +4,20 @@ import { useObjectSchemaDto } from '@/features/objects/hooks/useObjectSchema';
 import { useObjectInstanceDto } from '@/features/objects/hooks/useObjectRecords';
 import { usePageTitle } from '@/shared/hooks/usePageTitle';
 import { Loader2 } from 'lucide-react';
+import { ObjectModelConnectionSelector } from '@/features/objects/components/ObjectModelConnectionSelector';
+import { useObjectModelConnectionSelection } from '@/features/objects/hooks/useObjectModelConnectionSelection';
 
 export function EditObjectInstance() {
   const { typeName, id } = useParams<{ typeName: string; id: string }>();
   const navigate = useNavigate();
+  const { selectedConnectionId, connectionQuery } =
+    useObjectModelConnectionSelection();
   const { data: objectSchemaDto, isLoading: isSchemaLoading } =
-    useObjectSchemaDto(typeName);
+    useObjectSchemaDto(typeName, selectedConnectionId);
   const { data: record, isLoading: isRecordLoading } = useObjectInstanceDto(
     objectSchemaDto?.id ?? undefined,
-    id
+    id,
+    selectedConnectionId
   );
 
   // Set page title with object type name
@@ -23,7 +28,7 @@ export function EditObjectInstance() {
   );
 
   const handleSuccess = () => {
-    navigate(`/objects/${typeName}`);
+    navigate(`/objects/${typeName}${connectionQuery}`);
   };
 
   return (
@@ -40,6 +45,10 @@ export function EditObjectInstance() {
           </div>
         </section>
 
+        <div className="flex justify-end px-4 sm:px-5">
+          <ObjectModelConnectionSelector />
+        </div>
+
         {isSchemaLoading || isRecordLoading ? (
           <div className="flex min-h-[40vh] items-center justify-center px-4 sm:px-5 text-muted-foreground">
             <Loader2 className="mr-2 h-4 w-4 animate-spin" />
@@ -55,6 +64,7 @@ export function EditObjectInstance() {
               objectSchemaDto={objectSchemaDto}
               record={record}
               onSuccess={handleSuccess}
+              connectionId={selectedConnectionId}
             />
           </section>
         )}

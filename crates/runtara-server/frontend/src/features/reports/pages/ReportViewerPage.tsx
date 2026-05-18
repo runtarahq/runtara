@@ -275,7 +275,7 @@ export function ReportViewerPage() {
 }
 
 function getPrimaryRecordCount(
-  blocks: Record<string, { type?: string; data?: unknown }>,
+  blocks: Partial<Record<string, { type?: string; data?: unknown }>>,
   eagerBlocks: Array<{ id: string; type: string }>
 ): number | undefined {
   const tableBlock = eagerBlocks.find((block) => block.type === 'table');

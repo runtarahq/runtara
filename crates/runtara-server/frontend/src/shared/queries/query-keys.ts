@@ -139,22 +139,32 @@ export const queryKeys = {
     all: ['objects'] as const,
     // Schema operations
     schemas: {
-      all: () => [...queryKeys.objects.all, 'schemas'] as const,
-      lists: () => [...queryKeys.objects.schemas.all(), 'list'] as const,
+      all: (connectionId?: string | null) =>
+        [...queryKeys.objects.all, 'schemas', connectionId ?? null] as const,
+      lists: (connectionId?: string | null) =>
+        [...queryKeys.objects.schemas.all(connectionId), 'list'] as const,
       list: (filters?: Record<string, unknown>) =>
-        [...queryKeys.objects.schemas.lists(), filters] as const,
-      details: () => [...queryKeys.objects.schemas.all(), 'detail'] as const,
-      byId: (id: string) =>
-        [...queryKeys.objects.schemas.details(), id] as const,
+        [
+          ...queryKeys.objects.schemas.lists(
+            filters?.connectionId as string | undefined
+          ),
+          filters,
+        ] as const,
+      details: (connectionId?: string | null) =>
+        [...queryKeys.objects.schemas.all(connectionId), 'detail'] as const,
+      byId: (id: string, connectionId?: string | null) =>
+        [...queryKeys.objects.schemas.details(connectionId), id] as const,
     },
     // Instance operations
     instances: {
-      all: () => [...queryKeys.objects.all, 'instances'] as const,
-      bySchema: (schemaId: string) =>
-        [...queryKeys.objects.instances.all(), schemaId] as const,
+      all: (connectionId?: string | null) =>
+        [...queryKeys.objects.all, 'instances', connectionId ?? null] as const,
+      bySchema: (schemaId: string, connectionId?: string | null) =>
+        [...queryKeys.objects.instances.all(connectionId), schemaId] as const,
       list: (
         schemaId: string,
         params?: {
+          connectionId?: string | null;
           condition?: unknown;
           page?: number;
           size?: number;
@@ -162,10 +172,21 @@ export const queryKeys = {
           sortBy?: string[];
           sortOrder?: string[];
         }
-      ) => [...queryKeys.objects.instances.bySchema(schemaId), params] as const,
-      byId: (schemaId: string, instanceId: string) =>
+      ) =>
         [
-          ...queryKeys.objects.instances.bySchema(schemaId),
+          ...queryKeys.objects.instances.bySchema(
+            schemaId,
+            params?.connectionId
+          ),
+          params,
+        ] as const,
+      byId: (
+        schemaId: string,
+        instanceId: string,
+        connectionId?: string | null
+      ) =>
+        [
+          ...queryKeys.objects.instances.bySchema(schemaId, connectionId),
           instanceId,
         ] as const,
     },

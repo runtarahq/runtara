@@ -1,197 +1,260 @@
-export type ReportStatus = 'draft' | 'published' | 'archived';
+// Report DSL types — Phase 2 of the reports refactor.
+//
+// Backend types are sourced from the generated OpenAPI client. To regenerate:
+//   npm run generate-api-runtime-local       # against a running server
+//   npm run generate-api-runtime-offline     # via `cargo run --bin dump_openapi`
+//
+// This file:
+//   - Re-exports backend types under their canonical names.
+//   - Tightens a handful of "optional on the wire, always-present at runtime"
+//     fields via `Omit + &` so FE call sites don't need `??` defaults.
+//   - Declares a handful of FE-internal helper types not on the wire format.
+//
+// Why we use `Omit + &` rather than mapped types: a mapped type like
+// `MakeRequired<T, K>` produces a *new* type that TS treats as structurally
+// distinct from `T`, breaking assignment of API responses to the FE alias.
+// `Omit + &` produces a flat object type with the override applied;
+// assignment from `T` still requires a boundary cast, but consumer
+// signatures remain simple.
 
-export type ReportBlockType =
-  | 'table'
-  | 'chart'
-  | 'metric'
-  | 'actions'
-  | 'markdown'
-  | 'card';
+import type {
+  Condition as GenCondition,
+  ReportBlockDefinition as GenReportBlockDefinition,
+  ReportBlockType,
+  ReportDatasetDefinition as GenReportDatasetDefinition,
+  ReportDefinition as GenReportDefinition,
+  ReportInteractionDefinition as GenReportInteractionDefinition,
+} from '../../generated/RuntaraRuntimeApi';
 
-export type ReportCardFieldKind =
-  | 'value'
-  | 'json'
-  | 'markdown'
-  | 'subcard'
-  | 'subtable'
-  | 'workflow_button';
+// ---------------------------------------------------------------------------
+// Backend types re-exported verbatim.
+// ---------------------------------------------------------------------------
+export type {
+  // Core
+  ReportStatus,
+  ReportBlockType,
+  ReportSummary,
+  // Layout — Phase 9 collapse: only Block + Grid (recursive) remain.
+  ReportLayoutNode,
+  ReportBlockLayoutNode,
+  ReportGridLayoutNode,
+  ReportGridLayoutItem,
+  // Views
+  ReportViewDefinition,
+  ReportViewBreadcrumb,
+  ReportTitleFromBlock,
+  // Filters
+  ReportFilterDefinition,
+  ReportFilterType,
+  ReportFilterTarget,
+  ReportFilterOption,
+  ReportFilterOptionsRequest,
+  ReportFilterOptionsResponse,
+  ReportFilterOptionsPage,
+  ReportFilterOptionsMetadata,
+  ReportLookupOptionsRequest,
+  ReportLookupOptionsResponse,
+  ReportLookupBlockMetadata,
+  // Blocks (definition is tightened below)
+  ReportBlockStatus,
+  ReportBlockRenderResult,
+  ReportBlockError,
+  ReportBlockDataRequest,
+  ReportBlockOnlyDataRequest,
+  ReportBlockDatasetQuery,
+  // Block configs
+  ReportMarkdownConfig,
+  ReportActionsConfig,
+  ReportActionSubmitConfig,
+  ReportTableConfig,
+  ReportTableActionConfig,
+  ReportTableColumn,
+  ReportTableColumnType,
+  ReportTableColumnSource,
+  ReportTableColumnJoin,
+  ReportTableInteractionButtonConfig,
+  ReportChartConfig,
+  ReportChartKind,
+  ReportChartSeries,
+  ReportMetricConfig,
+  ReportCardConfig,
+  ReportCardGroup,
+  ReportCardField,
+  ReportCardFieldKind,
+  ReportSubtableConfig,
+  ReportSubtableColumn,
+  // Sources
+  ReportSource,
+  ReportSourceJoin,
+  ReportSourceKind,
+  ReportSourceMode,
+  ReportJoinKind,
+  ReportWorkflowRuntimeEntity,
+  ReportAggregateSpec,
+  ReportAggregateFn,
+  ReportOrderBy,
+  ReportPaginationConfig,
+  // Datasets (definition is tightened below)
+  ReportDatasetSource,
+  ReportDatasetDimension,
+  ReportDatasetMeasure,
+  ReportDatasetFieldType,
+  ReportDatasetValueFormat,
+  ReportDatasetQueryRequest,
+  ReportDatasetQueryResponse,
+  ReportDatasetQueryColumn,
+  ReportDatasetQueryMetadata,
+  ReportDatasetQueryPage,
+  ReportDatasetFilter,
+  // Workflow actions
+  ReportWorkflowActionConfig,
+  ReportWorkflowActionContext,
+  ReportWorkflowActionContextMode,
+  SubmitReportWorkflowActionRequest,
+  // Interactions (definition is tightened below)
+  ReportInteractionTrigger,
+  ReportInteractionAction,
+  // Editors
+  ReportEditorConfig,
+  ReportEditorOption,
+  ReportEditorKind,
+  ReportLookupConfig,
+  // Search
+  ReportTableSearchRequest,
+  // Pagination
+  ReportPageRequest,
+  // Render
+  ReportRenderRequest,
+  ReportRenderResponse,
+  ReportRenderMetadata,
+  ReportPreviewRequest,
+  // Mutations
+  CreateReportRequest,
+  UpdateReportRequest,
+  DeleteReportResponse,
+  // Canonical /edit endpoint (Phase 6/8) — batch ReportEditOps applied
+  // atomically by `runtara_report_dsl::edit_ops::apply_edit_ops`.
+  EditReportRequest,
+  EditReportResponse,
+  ReportEditOp,
+  BlockPosition,
+  LayoutTarget,
+  // Lists
+  ListReportsResponse,
+  GetReportResponse,
+  // Validation
+  ValidateReportRequest,
+  ValidateReportResponse,
+  ReportValidationIssue,
+  // Generic
+  Condition,
+} from '../../generated/RuntaraRuntimeApi';
 
-export type ReportWorkflowActionContextMode =
-  | 'row'
-  | 'field'
-  | 'value'
-  | 'selection';
+// ---------------------------------------------------------------------------
+// Tightened types — these fields are optional on the wire (Rust `Option<Vec>`
+// with `#[serde(default)]`) but always populated at runtime. The FE uses them
+// without null checks throughout. Boundary helpers in `queries/index.ts`
+// cast API responses up to this stricter shape.
+// ---------------------------------------------------------------------------
 
-export interface ReportWorkflowActionContext {
-  mode?: ReportWorkflowActionContextMode;
-  field?: string;
-  inputKey?: string;
-}
+export type ReportBlockDefinition = Omit<GenReportBlockDefinition, 'source'> & {
+  source: import('../../generated/RuntaraRuntimeApi').ReportSource;
+};
 
-export interface ReportCondition {
-  op: string;
-  arguments?: unknown[];
-}
+export type ReportDatasetDefinition = Omit<
+  GenReportDatasetDefinition,
+  'dimensions' | 'measures'
+> & {
+  dimensions: import('../../generated/RuntaraRuntimeApi').ReportDatasetDimension[];
+  measures: import('../../generated/RuntaraRuntimeApi').ReportDatasetMeasure[];
+};
 
-export type ReportRowCondition = ReportCondition;
+// `ReportInteractionDefinition.actions` is `Option<Vec>` on the wire and so
+// surfaces as optional in the generated type. FE call sites already guard
+// with `?? []`; keep the alias as-is to avoid structural mismatches when
+// passing definitions through wizard/serialization layers.
+export type ReportInteractionDefinition = GenReportInteractionDefinition;
 
+
+// `ReportDefinition` is the parent of the others — its array fields use the
+// FE-tightened element types so consumers walking the tree never re-fall
+// back to generated optional fields. `layout` is the mandatory single root
+// grid (Phase 10) — the generated type marks it optional because the wire
+// `default_root_grid` fallback covers missing payloads, but the FE always
+// sees a populated value (server-side migration guarantees this) so we
+// tighten to non-optional here.
+export type ReportDefinition = Omit<
+  GenReportDefinition,
+  'blocks' | 'filters' | 'datasets' | 'layout'
+> & {
+  blocks: ReportBlockDefinition[];
+  filters: import('../../generated/RuntaraRuntimeApi').ReportFilterDefinition[];
+  datasets?: ReportDatasetDefinition[];
+  layout: import('../../generated/RuntaraRuntimeApi').ReportGridLayoutNode;
+};
+
+// `ReportDto` carries the definition; we surface the FE-tightened version
+// so consumers walking `report.definition.blocks` get the FE element type.
+export type ReportDto = Omit<
+  import('../../generated/RuntaraRuntimeApi').ReportDto,
+  'definition'
+> & {
+  definition: ReportDefinition;
+};
+
+// ---------------------------------------------------------------------------
+// FE-only types — not present in the wire format.
+// ---------------------------------------------------------------------------
+
+/** Filter/source condition (legacy shape — `{op, arguments: [field, value]}`). */
+export type ReportCondition = GenCondition;
+
+/**
+ * Row visibility/disability condition. Canonical `ConditionExpression`
+ * shape — the same evaluator used for workflow steps.
+ */
+export type ReportRowCondition =
+  import('../../generated/RuntaraRuntimeApi').ConditionExpression;
+
+/** Reference operand used inside FE-resolved condition argument lists. */
 export interface ReportConditionFilterRef {
   filter: string;
   path: string;
 }
 
+/** Subquery operand used inside FE-resolved condition argument lists. */
 export interface ReportConditionSubquery {
   subquery: {
     schema: string;
     select: string;
     connectionId?: string;
-    condition?: ReportCondition;
+    condition?: GenCondition;
   };
 }
 
-export interface ReportWorkflowActionConfig {
-  workflowId: string;
-  version?: number;
-  label?: string;
-  runningLabel?: string;
-  successMessage?: string;
-  reloadBlock?: boolean;
-  visibleWhen?: ReportRowCondition;
-  hiddenWhen?: ReportRowCondition;
-  disabledWhen?: ReportRowCondition;
-  context?: ReportWorkflowActionContext;
+/** Visibility-condition shape used on layout nodes (`showWhen`). FE-internal. */
+export interface ReportVisibilityCondition {
+  filter: string;
+  exists?: boolean;
+  equals?: unknown;
+  notEquals?: unknown;
 }
 
-export interface ReportSubtableColumn {
-  field: string;
-  label?: string;
-  format?: string;
-  pillVariants?: Record<string, string>;
-  align?: 'left' | 'right' | 'center';
-}
+/** Pill cell variants the FE knows how to render. */
+export type ReportPillVariant =
+  | 'success'
+  | 'warning'
+  | 'muted'
+  | 'secondary'
+  | 'destructive'
+  | 'outline'
+  | 'default';
 
-export interface ReportSubtableConfig {
-  columns: ReportSubtableColumn[];
-  emptyLabel?: string;
-}
-
-export interface ReportCardField {
-  field: string;
-  label?: string;
-  /** Row field rendered instead of `field` while writeback still targets `field`. */
-  displayField?: string;
-  /** Display-only template rendered from row values. */
-  displayTemplate?: string;
-  /** Renderer for this field. Defaults to `value`. */
-  kind?: ReportCardFieldKind;
-  /** Format hint for `kind=value` (currency, datetime, pill, etc). */
-  format?: string;
-  /** Pill variant map for color-coding `format=pill` value cells. */
-  pillVariants?: Record<string, string>;
-  /** Start collapsed (json/markdown/subcard/subtable). */
-  collapsed?: boolean;
-  /** Inner-grid column span. Default 1. */
-  colSpan?: number;
-  /** Recursive card config used when `kind=subcard`. */
-  subcard?: ReportCardConfig;
-  /** Inline-table config used when `kind=subtable`. */
-  subtable?: ReportSubtableConfig;
-  /** Opt-in writeback. Honored only when the rendered row carries `id`+`schemaId`. */
-  editable?: boolean;
-  /** Explicit editor; overrides format-based inference. */
-  editor?: ReportEditorConfig;
-  /** Workflow launcher rendered as a button for this field. */
-  workflowAction?: ReportWorkflowActionConfig;
-}
-
-export type ReportEditorKind =
-  | 'text'
-  | 'textarea'
-  | 'number'
-  | 'select'
-  | 'toggle'
-  | 'date'
-  | 'datetime'
-  | 'lookup';
-
-export interface ReportEditorOption {
-  label: string;
-  value: unknown;
-}
-
-export interface ReportEditorConfig {
-  kind: ReportEditorKind;
-  lookup?: ReportLookupConfig;
-  options?: ReportEditorOption[];
-  min?: number;
-  max?: number;
-  step?: number;
-  regex?: string;
-  placeholder?: string;
-}
-
-export interface ReportLookupConfig {
-  schema: string;
-  connectionId?: string | null;
-  valueField: string;
-  labelField: string;
-  searchFields?: string[];
-  condition?: ReportCondition;
-  filterMappings?: Array<{
-    filterId: string;
-    field: string;
-    op?: string;
-  }>;
-}
-
-export interface ReportCardGroup {
-  id: string;
-  title?: string;
-  description?: string;
-  /** Number of columns in this group's inner grid (1–4). Default 2. */
-  columns?: number;
-  fields: ReportCardField[];
-}
-
-export interface ReportCardConfig {
-  groups: ReportCardGroup[];
-}
-
-export type ReportFilterType =
-  | 'select'
-  | 'multi_select'
-  | 'radio'
-  | 'checkbox'
-  | 'time_range'
-  | 'number_range'
-  | 'text'
-  | 'search';
-
-export type ReportChartKind = 'line' | 'bar' | 'area' | 'pie' | 'donut';
-
-export type ReportAggregateFn =
-  | 'count'
-  | 'sum'
-  | 'avg'
-  | 'min'
-  | 'max'
-  | 'first_value'
-  | 'last_value'
-  | 'percentile_cont'
-  | 'percentile_disc'
-  | 'stddev_samp'
-  | 'var_samp'
-  | 'expr';
-
-export interface ReportFilterOption {
-  label: string;
-  value: unknown;
-  count?: number;
-}
-
+/** FE filter options config used by the filter editor; mirrors the wire shape
+ * with a few FE-only refinements. */
 export interface ReportFilterOptionsConfig {
   source?: 'static' | 'object_model';
-  values?: ReportFilterOption[];
+  values?: Array<{ label: string; value: unknown; count?: number }>;
   schema?: string;
   field?: string;
   valueField?: string;
@@ -204,452 +267,26 @@ export interface ReportFilterOptionsConfig {
     field: string;
     op?: string;
   }>;
-  condition?: ReportCondition;
+  condition?: GenCondition;
 }
 
-export interface ReportFilterDefinition {
-  /** When true, blocks whose source condition references this filter render an
-   * empty "filter not set" state if the filter has no value, instead of
-   * silently falling back to an unfiltered query. Use for navigation-driven
-   * filters set by row-click + navigate_view. */
-  strictWhenReferenced?: boolean;
-  id: string;
-  label: string;
-  type: ReportFilterType;
-  default?: unknown;
-  required?: boolean;
-  options?: {
-    source?: 'static' | 'object_model';
-    values?: ReportFilterOption[];
-  } & ReportFilterOptionsConfig;
-  appliesTo?: Array<{
-    blockId?: string;
-    field: string;
-    op?: string;
-  }>;
-}
-
-export interface ReportOrderBy {
-  field: string;
-  direction?: 'asc' | 'desc' | string;
-}
-
-export type ReportDatasetFieldType =
-  | 'string'
-  | 'number'
-  | 'decimal'
-  | 'boolean'
-  | 'date'
-  | 'datetime'
-  | 'json';
-
-export type ReportDatasetValueFormat =
-  | 'string'
-  | 'number'
-  | 'decimal'
-  | 'currency'
-  | 'percent'
-  | 'boolean'
-  | 'date'
-  | 'datetime';
-
-export interface ReportDatasetDefinition {
-  id: string;
-  label: string;
-  source: {
-    schema: string;
-    connectionId?: string | null;
-  };
-  timeDimension?: string;
-  dimensions: Array<{
-    field: string;
-    label: string;
-    type: ReportDatasetFieldType;
-    format?: ReportDatasetValueFormat;
-  }>;
-  measures: Array<{
-    id: string;
-    label: string;
-    op: ReportAggregateFn;
-    field?: string;
-    distinct?: boolean;
-    orderBy?: ReportOrderBy[];
-    expression?: unknown;
-    percentile?: number;
-    format: ReportDatasetValueFormat;
-  }>;
-}
-
-export interface ReportBlockDatasetQuery {
-  id: string;
-  dimensions?: string[];
-  measures?: string[];
-  orderBy?: ReportOrderBy[];
-  datasetFilters?: ReportDatasetFilterRequest[];
-  limit?: number;
-}
-
-export interface ReportDatasetFilterRequest {
-  field: string;
-  op?: string;
-  value: unknown;
-}
-
-export interface ReportDatasetQueryRequest {
-  filters?: Record<string, unknown>;
-  datasetFilters?: ReportDatasetFilterRequest[];
-  dimensions: string[];
-  measures: string[];
-  orderBy?: ReportOrderBy[];
-  sort?: ReportOrderBy[];
-  limit?: number;
-  search?: ReportTableSearchRequest;
-  page?: {
-    offset: number;
-    size: number;
-  };
-  timezone?: string;
-}
-
-export interface ReportDatasetQueryColumn {
-  key?: string;
-  field?: string;
-  label: string;
-  type: string;
-  format?: ReportDatasetValueFormat;
-}
-
-export interface ReportDatasetQueryResponse {
-  success: boolean;
-  dataset: {
-    id: string;
-  };
-  columns: ReportDatasetQueryColumn[];
-  rows: unknown[][];
-  page: {
-    offset: number;
-    size: number;
-    totalCount: number;
-    hasNextPage: boolean;
-  };
-}
-
-export interface ReportTableSearchRequest {
-  query: string;
-  fields?: string[];
-}
-
-export interface ReportSource {
-  kind?: 'object_model' | 'workflow_runtime' | 'system';
-  schema: string;
-  connectionId?: string;
-  entity?:
-    | 'instances'
-    | 'actions'
-    | 'runtime_execution_metric_buckets'
-    | 'runtime_system_snapshot'
-    | 'connection_rate_limit_status'
-    | 'connection_rate_limit_events'
-    | 'connection_rate_limit_timeline';
-  workflowId?: string;
-  instanceId?: string;
-  mode?: 'filter' | 'aggregate';
-  condition?: ReportCondition;
-  filterMappings?: Array<{
-    filterId: string;
-    field: string;
-    op?: string;
-  }>;
-  groupBy?: string[];
-  aggregates?: Array<{
-    alias: string;
-    op: ReportAggregateFn;
-    field?: string;
-    distinct?: boolean;
-    orderBy?: ReportOrderBy[];
-    expression?: unknown;
-    percentile?: number;
-  }>;
-  orderBy?: ReportOrderBy[];
-  limit?: number;
-  granularity?: string;
-  interval?: string;
-  join?: ReportSourceJoin[];
-}
-
-export interface ReportSourceJoin {
-  schema: string;
-  alias?: string;
-  connectionId?: string;
-  parentField: string;
-  field: string;
-  op?: string;
-  kind?: 'inner' | 'left';
-}
-
-export interface ReportTableColumnSource extends Omit<ReportSource, 'join'> {
-  select?: string;
-  join?: Array<{
-    parentField: string;
-    field: string;
-    op?: string;
-    kind?: 'inner' | 'left';
-  }>;
-}
-
-export type ReportPillVariant =
-  | 'success'
-  | 'warning'
-  | 'muted'
-  | 'secondary'
-  | 'destructive'
-  | 'outline'
-  | 'default';
-
-export interface ReportTableColumn {
-  field: string;
-  label?: string;
-  /** Row field rendered instead of `field` while sort/writeback still target `field`. */
-  displayField?: string;
-  /** Display-only template rendered from row values. */
-  displayTemplate?: string;
-  format?: string;
-  type?: 'value' | 'chart' | 'workflow_button' | 'interaction_buttons';
-  chart?: {
-    kind: ReportChartKind;
-    x: string;
-    series?: Array<{
-      field: string;
-      label?: string;
-    }>;
-  };
-  source?: ReportTableColumnSource;
-  /** Row field rendered as a subdued line beneath the primary value. */
-  secondaryField?: string;
-  /** Row field whose value is treated as a URL and rendered as an external-link icon. */
-  linkField?: string;
-  /** Row field whose value is shown in a tooltip (e.g. full email behind an avatar). */
-  tooltipField?: string;
-  /** Mapping from cell value to pill variant for `format: "pill"` columns. */
-  pillVariants?: Record<string, ReportPillVariant | string>;
-  /** Ordered levels for `format: "bar_indicator"` columns. */
-  levels?: string[];
-  /** Cell alignment hint. */
-  align?: 'left' | 'right' | 'center';
-  /** Optional display-only text cutoff. Omit to render the full formatted value. */
-  maxChars?: number;
-  /** Marks this column as the row's human-readable label for entity-title lookups. */
-  descriptive?: boolean;
-  /** Opt-in writeback. Honored only when the rendered row carries `id`+`schemaId`. */
-  editable?: boolean;
-  /** Explicit editor; overrides format-based inference. */
-  editor?: ReportEditorConfig;
-  /** Workflow launcher rendered as a button in this column. */
-  workflowAction?: ReportWorkflowActionConfig;
-  /** Row-scoped report interaction buttons rendered in this column. */
-  interactionButtons?: ReportTableInteractionButtonConfig[];
-}
-
-export interface ReportTableInteractionButtonConfig {
-  id: string;
-  label?: string;
-  icon?: 'eye' | 'file_text' | 'activity' | 'arrow_right';
-  visibleWhen?: ReportRowCondition;
-  hiddenWhen?: ReportRowCondition;
-  disabledWhen?: ReportRowCondition;
-  actions: ReportInteractionAction[];
-}
-
-export interface ReportTableActionConfig {
-  id: string;
-  label?: string;
-  workflowAction: ReportWorkflowActionConfig;
-}
-
-export interface ReportBlockDefinition {
-  id: string;
-  type: ReportBlockType;
-  title?: string;
-  lazy?: boolean;
-  dataset?: ReportBlockDatasetQuery;
-  source: ReportSource;
-  table?: {
-    columns?: ReportTableColumn[];
-    selectable?: boolean;
-    actions?: ReportTableActionConfig[];
-    defaultSort?: ReportOrderBy[];
-    pagination?: {
-      defaultPageSize?: number;
-      allowedPageSizes?: number[];
-    };
-  };
-  chart?: {
-    kind: ReportChartKind;
-    x: string;
-    series: Array<{
-      field: string;
-      label?: string;
-    }>;
-  };
-  metric?: {
-    valueField: string;
-    label?: string;
-    format?: string;
-  };
-  actions?: {
-    submit?: {
-      label?: string;
-      implicitPayload?: Record<string, unknown>;
-    };
-  };
-  markdown?: {
-    content: string;
-  };
-  card?: ReportCardConfig;
-  filters?: ReportFilterDefinition[];
-  interactions?: ReportInteractionDefinition[];
-  showWhen?: ReportVisibilityCondition;
-  /** When true, the renderer drops the block entirely (title bar included)
-   *  if its data is empty. Used for action / pending-work blocks that should
-   *  disappear once there's nothing to do. */
-  hideWhenEmpty?: boolean;
-}
-
-export interface ReportInteractionDefinition {
-  id: string;
-  trigger: {
-    event: 'point_click' | 'row_click' | 'cell_click' | string;
-    field?: string;
-  };
-  actions: ReportInteractionAction[];
-}
-
-export interface ReportInteractionAction {
-  type: 'set_filter' | string;
-  filterId?: string;
-  filterIds?: string[];
-  viewId?: string;
-  valueFrom?: string;
-  value?: unknown;
-}
-
-export interface ReportInteractionOptions {
-  replace?: boolean;
-  viewId?: string | null;
-  clearFilters?: string[];
-}
-
-export interface ReportVisibilityCondition {
-  filter: string;
-  exists?: boolean;
-  equals?: unknown;
-  notEquals?: unknown;
-}
-
-type ReportLayoutNodeBase = {
-  id: string;
-  showWhen?: ReportVisibilityCondition;
-};
-
-export type ReportLayoutNode =
-  | ({
-      id: string;
-      type: 'block';
-      blockId: string;
-    } & ReportLayoutNodeBase)
-  | ({
-      id: string;
-      type: 'metric_row';
-      title?: string;
-      blocks: string[];
-    } & ReportLayoutNodeBase)
-  | ({
-      id: string;
-      type: 'section';
-      title?: string;
-      description?: string;
-      children?: ReportLayoutNode[];
-    } & ReportLayoutNodeBase)
-  | ({
-      id: string;
-      type: 'columns';
-      columns: Array<{
-        id: string;
-        width?: number;
-        children?: ReportLayoutNode[];
-      }>;
-    } & ReportLayoutNodeBase)
-  | ({
-      id: string;
-      type: 'grid';
-      columns?: number;
-      items: Array<{
-        id?: string;
-        blockId: string;
-        colSpan?: number;
-        rowSpan?: number;
-      }>;
-    } & ReportLayoutNodeBase);
-
-export interface ReportViewBreadcrumb {
-  label: string;
-  viewId?: string;
-  clearFilters?: string[];
-}
-
-export interface ReportTitleFromBlock {
-  block: string;
-  field?: string;
-}
-
-export interface ReportViewDefinition {
-  id: string;
-  title?: string;
-  titleFrom?: string;
-  titleFromBlock?: ReportTitleFromBlock;
-  parentViewId?: string;
-  clearFiltersOnBack?: string[];
-  breadcrumb?: ReportViewBreadcrumb[];
-  layout?: ReportLayoutNode[];
-}
-
-export interface ReportDefinition {
-  definitionVersion: number;
-  layout?: ReportLayoutNode[];
-  views?: ReportViewDefinition[];
-  datasets?: ReportDatasetDefinition[];
-  filters: ReportFilterDefinition[];
-  blocks: ReportBlockDefinition[];
-}
-
-export interface ReportSummary {
-  id: string;
-  slug: string;
-  name: string;
-  description?: string | null;
-  tags: string[];
-  status: ReportStatus;
-  definitionVersion: number;
-  createdAt: string;
-  updatedAt: string;
-}
-
-export interface ReportDto extends ReportSummary {
-  definition: ReportDefinition;
-}
-
+/** Block render state as observed by the FE renderer.
+ *
+ * Strict supertype of the generated `ReportBlockRenderResult`:
+ *   - same shape on the wire
+ *   - FE additionally surfaces a `'loading'` state during fetches
+ *   - `status` stays optional so the generated form (`status?:
+ *     ReportBlockStatus`) assigns cleanly through this alias.
+ */
 export interface ReportBlockResult {
   type: ReportBlockType;
-  status: 'ready' | 'loading' | 'empty' | 'error';
-  title?: string;
+  status?: 'ready' | 'loading' | 'empty' | 'error';
+  title?: string | null;
   data?: unknown;
-  error?: {
-    code: string;
-    message: string;
-    blockId?: string;
-  };
+  error?: import('../../generated/RuntaraRuntimeApi').ReportBlockError | null;
 }
 
+/** Action used by the workflow polling hooks. */
 export interface ReportWorkflowAction {
   id: string;
   actionId: string;
@@ -671,135 +308,32 @@ export interface ReportWorkflowAction {
   runtime?: Record<string, unknown>;
 }
 
-export interface ReportRenderResponse {
-  success: boolean;
-  report: {
-    id: string;
-    definitionVersion: number;
-  };
-  resolvedFilters: Record<string, unknown>;
-  blocks: Record<string, ReportBlockResult>;
-  errors: Array<{
-    code: string;
-    message: string;
-    blockId?: string;
-  }>;
+/** Per-instance status surfaced to the FE while polling. */
+export interface ReportWorkflowInstanceStatus {
+  id: string;
+  status: string;
 }
 
+/** Run-workflow request sent by FE workflow-button handlers. */
 export interface RunReportWorkflowRequest {
   workflowId: string;
   version?: number;
   context: unknown;
 }
 
+/** Run-workflow response received by FE workflow-button handlers. */
 export interface RunReportWorkflowResponse {
   instanceId: string;
   status: string;
 }
 
-export interface ReportWorkflowInstanceStatus {
-  id: string;
-  status: string;
+/** Options FE passes to its set-filter / navigate-view interaction handler. */
+export interface ReportInteractionOptions {
+  replace?: boolean;
+  viewId?: string | null;
+  clearFilters?: string[];
 }
 
-export interface ReportBlockDataRequest {
-  id: string;
-  page?: {
-    offset: number;
-    size: number;
-  };
-  sort?: ReportOrderBy[];
-  search?: ReportTableSearchRequest;
-  blockFilters?: Record<string, unknown>;
-}
-
-export interface ReportFilterOptionsRequest {
-  filters: Record<string, unknown>;
-  query?: string;
-  offset?: number;
-  limit?: number;
-  timezone?: string;
-}
-
-export interface ReportFilterOptionsResponse {
-  success: boolean;
-  filter: {
-    id: string;
-  };
-  options: ReportFilterOption[];
-  page: {
-    offset: number;
-    size: number;
-    totalCount: number;
-    hasNextPage: boolean;
-  };
-}
-
-export interface ReportLookupOptionsRequest {
-  filters: Record<string, unknown>;
-  blockFilters?: Record<string, unknown>;
-  query?: string;
-  offset?: number;
-  limit?: number;
-  timezone?: string;
-}
-
-export interface ReportLookupOptionsResponse {
-  success: boolean;
-  block: {
-    id: string;
-  };
-  field: string;
-  options: ReportFilterOption[];
-  page: {
-    offset: number;
-    size: number;
-    totalCount: number;
-    hasNextPage: boolean;
-  };
-}
-
-export interface ReportRenderRequest {
-  filters: Record<string, unknown>;
-  blocks?: ReportBlockDataRequest[];
-  timezone?: string;
-}
-
-export interface ReportPreviewRequest extends ReportRenderRequest {
-  definition: ReportDefinition;
-}
-
-export interface ReportValidationIssue {
-  path: string;
-  code: string;
-  message: string;
-  hint?: string | null;
-}
-
-export interface ValidateReportRequest {
-  definition: ReportDefinition;
-}
-
-export interface ValidateReportResponse {
-  valid: boolean;
-  errors: ReportValidationIssue[];
-  warnings: ReportValidationIssue[];
-}
-
-export interface CreateReportRequest {
-  name: string;
-  slug?: string;
-  description?: string | null;
-  tags: string[];
-  status: ReportStatus;
-  definition: ReportDefinition;
-}
-
-export interface UpdateReportRequest {
-  name: string;
-  slug: string;
-  description?: string | null;
-  tags: string[];
-  status: ReportStatus;
-  definition: ReportDefinition;
-}
+/** Dataset filter request shape — historical FE alias of `ReportDatasetFilter`. */
+export type ReportDatasetFilterRequest =
+  import('../../generated/RuntaraRuntimeApi').ReportDatasetFilter;

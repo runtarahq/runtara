@@ -44,6 +44,7 @@ function patchRenderResponse(
   const nextBlocks: ReportRenderResponse['blocks'] = {};
 
   for (const [blockId, blockResult] of Object.entries(response.blocks)) {
+    if (!blockResult) continue;
     const nextBlockResult = patchBlockResult(blockResult, patch);
     nextBlocks[blockId] = nextBlockResult;
     if (nextBlockResult !== blockResult) {
@@ -58,10 +59,10 @@ function patchRenderResponse(
   };
 }
 
-function patchBlockResult(
-  result: ReportBlockResult,
+function patchBlockResult<T extends { data?: unknown }>(
+  result: T,
   patch: ReportWritebackPatch
-): ReportBlockResult {
+): T {
   const nextData = patchBlockData(result.data, patch);
   if (nextData === result.data) return result;
   return {

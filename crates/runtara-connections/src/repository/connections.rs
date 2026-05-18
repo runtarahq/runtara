@@ -9,6 +9,7 @@
 //!
 //! SECURITY: Provides methods to explicitly exclude connection_parameters from queries
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::crypto::CredentialCipher;
@@ -69,6 +70,48 @@ impl ConnectionRepository {
                 Err(sqlx::Error::Decode(format!("cipher decrypt: {}", e).into()))
             }
         }
+    }
+
+    async fn default_for_map(
+        &self,
+        tenant_id: &str,
+        connection_ids: &[String],
+    ) -> Result<HashMap<String, Vec<String>>, sqlx::Error> {
+        if connection_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+
+        let rows = sqlx::query_as::<_, (String, String)>(
+            r#"
+            SELECT connection_id, default_for
+            FROM connection_defaults
+            WHERE tenant_id = $1 AND connection_id = ANY($2)
+            ORDER BY default_for
+            "#,
+        )
+        .bind(tenant_id)
+        .bind(connection_ids)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut map: HashMap<String, Vec<String>> = HashMap::new();
+        for (connection_id, default_for) in rows {
+            map.entry(connection_id).or_default().push(default_for);
+        }
+        Ok(map)
+    }
+
+    async fn attach_default_for(
+        &self,
+        tenant_id: &str,
+        connections: &mut [ConnectionDto],
+    ) -> Result<(), sqlx::Error> {
+        let ids: Vec<String> = connections.iter().map(|c| c.id.clone()).collect();
+        let defaults = self.default_for_map(tenant_id, &ids).await?;
+        for connection in connections {
+            connection.default_for = defaults.get(&connection.id).cloned().unwrap_or_default();
+        }
+        Ok(())
     }
 
     /// Create a new connection
@@ -235,7 +278,7 @@ impl ConnectionRepository {
             .await?
         };
 
-        let connections = rows
+        let mut connections: Vec<ConnectionDto> = rows
             .into_iter()
             .map(
                 |(
@@ -264,10 +307,13 @@ impl ConnectionRepository {
                         rate_limit_config: parse_rate_limit_config(rate_limit_config),
                         rate_limit_stats: None,
                         is_default_file_storage,
+                        default_for: Vec::new(),
                     }
                 },
             )
             .collect();
+
+        self.attach_default_for(tenant_id, &mut connections).await?;
 
         Ok(connections)
     }
@@ -308,7 +354,7 @@ impl ConnectionRepository {
         .fetch_optional(&self.pool)
         .await?;
 
-        Ok(result.map(
+        let mut connection = result.map(
             |(
                 id,
                 tenant_id,
@@ -335,9 +381,17 @@ impl ConnectionRepository {
                     rate_limit_config: parse_rate_limit_config(rate_limit_config),
                     rate_limit_stats: None,
                     is_default_file_storage,
+                    default_for: Vec::new(),
                 }
             },
-        ))
+        );
+
+        if let Some(ref mut connection) = connection {
+            self.attach_default_for(tenant_id, std::slice::from_mut(connection))
+                .await?;
+        }
+
+        Ok(connection)
     }
 
     /// Update a connection with dynamic fields
@@ -551,7 +605,7 @@ impl ConnectionRepository {
             return Ok(vec![]);
         };
 
-        let connections = rows
+        let mut connections: Vec<ConnectionDto> = rows
             .into_iter()
             .map(
                 |(
@@ -580,10 +634,13 @@ impl ConnectionRepository {
                         rate_limit_config: parse_rate_limit_config(rate_limit_config),
                         rate_limit_stats: None,
                         is_default_file_storage,
+                        default_for: Vec::new(),
                     }
                 },
             )
             .collect();
+
+        self.attach_default_for(tenant_id, &mut connections).await?;
 
         Ok(connections)
     }
@@ -666,6 +723,107 @@ impl ConnectionRepository {
                 },
             )
             .transpose()
+    }
+
+    /// Get the connection id configured as the default for an agent/operator.
+    pub async fn get_default_connection_id(
+        &self,
+        tenant_id: &str,
+        default_for: &str,
+    ) -> Result<Option<String>, sqlx::Error> {
+        sqlx::query_scalar::<_, String>(
+            r#"
+            SELECT connection_id
+            FROM connection_defaults
+            WHERE tenant_id = $1 AND default_for = $2
+            "#,
+        )
+        .bind(tenant_id)
+        .bind(default_for)
+        .fetch_optional(&self.pool)
+        .await
+    }
+
+    /// Get the default connection for an agent/operator, including parameters.
+    ///
+    /// SECURITY WARNING: Returns sensitive credentials. Internal use only.
+    pub async fn get_default_connection_with_parameters(
+        &self,
+        tenant_id: &str,
+        default_for: &str,
+    ) -> Result<Option<ConnectionWithParameters>, sqlx::Error> {
+        let Some(connection_id) = self
+            .get_default_connection_id(tenant_id, default_for)
+            .await?
+        else {
+            return Ok(None);
+        };
+
+        self.get_with_parameters(&connection_id, tenant_id).await
+    }
+
+    /// Return all agent/operator ids this connection is default for.
+    pub async fn list_defaults_for_connection(
+        &self,
+        tenant_id: &str,
+        connection_id: &str,
+    ) -> Result<Vec<String>, sqlx::Error> {
+        sqlx::query_scalar::<_, String>(
+            r#"
+            SELECT default_for
+            FROM connection_defaults
+            WHERE tenant_id = $1 AND connection_id = $2
+            ORDER BY default_for
+            "#,
+        )
+        .bind(tenant_id)
+        .bind(connection_id)
+        .fetch_all(&self.pool)
+        .await
+    }
+
+    /// Replace all defaults assigned to a connection.
+    ///
+    /// Existing defaults for the requested operator ids are moved to this
+    /// connection via the primary-key upsert.
+    pub async fn replace_defaults_for_connection(
+        &self,
+        tenant_id: &str,
+        connection_id: &str,
+        default_for: &[String],
+    ) -> Result<(), sqlx::Error> {
+        let mut tx = self.pool.begin().await?;
+
+        sqlx::query(
+            r#"
+            DELETE FROM connection_defaults
+            WHERE tenant_id = $1 AND connection_id = $2
+            "#,
+        )
+        .bind(tenant_id)
+        .bind(connection_id)
+        .execute(&mut *tx)
+        .await?;
+
+        for operator_id in default_for {
+            sqlx::query(
+                r#"
+                INSERT INTO connection_defaults (tenant_id, default_for, connection_id)
+                VALUES ($1, $2, $3)
+                ON CONFLICT (tenant_id, default_for)
+                DO UPDATE SET
+                    connection_id = EXCLUDED.connection_id,
+                    updated_at = NOW()
+                "#,
+            )
+            .bind(tenant_id)
+            .bind(operator_id)
+            .bind(connection_id)
+            .execute(&mut *tx)
+            .await?;
+        }
+
+        tx.commit().await
     }
 
     /// Look up a connection by ID (without tenant filter) including credentials.

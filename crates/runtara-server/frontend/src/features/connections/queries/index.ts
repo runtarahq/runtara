@@ -116,16 +116,24 @@ export async function updateConnection(
     parameters?: Record<string, unknown>;
     rateLimitConfig?: RuntimeAPI.RateLimitConfigDto | null;
     isDefaultFileStorage?: boolean;
+    defaultFor?: string[];
   }
 ) {
-  const { id, title, parameters, rateLimitConfig, isDefaultFileStorage } =
-    connection;
+  const {
+    id,
+    title,
+    parameters,
+    rateLimitConfig,
+    isDefaultFileStorage,
+    defaultFor,
+  } = connection;
 
   const requestBody: RuntimeAPI.UpdateConnectionRequest = {
     title,
     connectionParameters: parameters,
     rateLimitConfig,
     isDefaultFileStorage,
+    defaultFor,
   };
 
   await RuntimeREST.api.updateConnectionHandler(

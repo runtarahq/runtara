@@ -6,11 +6,19 @@ import { ReactFlowProvider } from '@xyflow/react';
 import { Toaster } from '@/shared/components/ui/sonner';
 import { oidcConfig } from '@/shared/config/oidcConfig';
 import { initAnalytics } from '@/shared/analytics/plausible';
+import { ensureReportDsl } from '@/wasm/runtara-report-dsl';
 import App from '@/App';
 
 import './index.css';
 
 initAnalytics();
+// Kick off WASM load early so report renderers don't suspend on first view.
+// The promise is memoized inside `ensureReportDsl`; failure is non-fatal —
+// individual consumers fall back to passthrough strings.
+ensureReportDsl().catch((err) => {
+  // eslint-disable-next-line no-console
+  console.warn('[reportDsl] WASM preload failed', err);
+});
 
 export const queryClient = new QueryClient({
   defaultOptions: {

@@ -1,0 +1,35 @@
+---
+source: crates/runtara-server/tests/reports_render_corpus.rs
+expression: snapshot_body
+---
+{
+  "blocks": {
+    "pending_orders": {
+      "error": {
+        "blockId": "pending_orders",
+        "code": "BLOCK_RENDER_FAILED",
+        "message": "Schema not found: Order"
+      },
+      "status": "error",
+      "title": "Pending orders",
+      "type": "table"
+    }
+  },
+  "errors": [
+    {
+      "blockId": "pending_orders",
+      "code": "BLOCK_RENDER_FAILED",
+      "message": "Schema not found: Order"
+    }
+  ],
+  "report": {
+    "definitionVersion": 1,
+    "id": "rep_06_workflow_actions_with_row_conditions"
+  },
+  "resolvedFilters": {
+    "status": [
+      "active"
+    ]
+  },
+  "success": true
+}

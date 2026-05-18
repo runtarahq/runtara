@@ -168,6 +168,7 @@ interface ObjectSchemaDtoFormProps {
   onSuccess: () => void;
   onDelete?: () => void;
   isDeleting?: boolean;
+  connectionId?: string | null;
 }
 
 interface FormErrors {
@@ -181,6 +182,7 @@ export function ObjectSchemaDtoForm({
   onSuccess,
   onDelete,
   isDeleting,
+  connectionId,
 }: ObjectSchemaDtoFormProps) {
   const [name, setName] = useState(objectSchemaDto?.name || '');
   const [description, setDescription] = useState(
@@ -193,8 +195,8 @@ export function ObjectSchemaDtoForm({
   const [errors, setErrors] = useState<FormErrors>({});
   const [touched, setTouched] = useState<Record<string, boolean>>({});
 
-  const createObjectSchemaDto = useCreateObjectSchemaDto();
-  const updateObjectSchemaDto = useUpdateObjectSchemaDto();
+  const createObjectSchemaDto = useCreateObjectSchemaDto(connectionId);
+  const updateObjectSchemaDto = useUpdateObjectSchemaDto(connectionId);
 
   const isEditing = !!objectSchemaDto;
 
@@ -301,6 +303,11 @@ export function ObjectSchemaDtoForm({
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+
+    if (!connectionId) {
+      toast.error('Select a database connection first');
+      return;
+    }
 
     // Mark all fields as touched on submit
     setTouched({ name: true, tableName: true, fields: true });

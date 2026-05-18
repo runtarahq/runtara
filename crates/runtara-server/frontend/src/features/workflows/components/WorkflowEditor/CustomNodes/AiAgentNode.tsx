@@ -17,7 +17,6 @@ import {
   NODE_TYPE_SIZES,
   NODE_TYPES,
 } from '@/features/workflows/config/workflow.ts';
-import { ExecutionStatus } from '@/generated/RuntaraRuntimeApi';
 import { cn } from '@/lib/utils.ts';
 import { useNodeConfigContext } from '../NodeConfigContext';
 import { NodeFormProvider } from '../NodeForm/NodeFormProvider';
@@ -407,17 +406,17 @@ function AiAgentNodeComponent({
     if (!executionStatus) return null;
     const s = executionStatus.status;
     switch (s) {
-      case ExecutionStatus.Running:
-      case ExecutionStatus.Compiling:
+      case 'running':
+      case 'compiling':
         return <Loader2 className="h-3 w-3 animate-spin text-blue-500" />;
-      case ExecutionStatus.Completed:
+      case 'completed':
         return <CheckCircle2 className="h-3 w-3 text-green-500" />;
-      case ExecutionStatus.Failed:
-      case ExecutionStatus.Timeout:
+      case 'failed':
+      case 'timeout':
         return <XCircle className="h-3 w-3 text-red-500" />;
-      case ExecutionStatus.Queued:
+      case 'queued':
         return <Pause className="h-3 w-3 text-yellow-500" />;
-      case ExecutionStatus.Cancelled:
+      case 'cancelled':
         return <XCircle className="h-3 w-3 text-gray-400" />;
       default:
         return null;

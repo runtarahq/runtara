@@ -107,7 +107,7 @@ export const useExecutionStore = create<ExecutionState>()(
           state.panelOpen = false; // Don't open automatically - user must click "View Details"
           state.nodeExecutionStatus = new Map();
           state.stepDebugData = new Map();
-          state.instanceStatus = ExecutionStatus.Queued;
+          state.instanceStatus = 'queued';
           state.statusVersion += 1; // Increment to clear previous execution
         });
       },

@@ -7,68 +7,9 @@ use crate::api::dto::reports::{ReportOrderBy, ReportSourceJoin};
 
 use super::{ReportServiceError, combine_conditions};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code)]
-pub(super) enum ReportDiagnosticSeverity {
-    Warning,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code)]
-pub(super) struct ReportDiagnostic {
-    pub severity: ReportDiagnosticSeverity,
-    pub block_id: String,
-    pub code: String,
-    pub message: String,
-}
-
-#[derive(Debug, Clone)]
-#[allow(dead_code)]
-pub(super) struct ReportQueryPlan {
-    pub source: ReportSourcePlan,
-    pub projections: Vec<ProjectionPlan>,
-    pub diagnostics: Vec<ReportDiagnostic>,
-}
-
-#[derive(Debug, Clone)]
-#[allow(dead_code)]
-pub(super) struct ReportSourcePlan {
-    pub schema: String,
-    pub joins: Vec<JoinPlan>,
-}
-
-#[derive(Debug, Clone)]
-#[allow(dead_code)]
-pub(super) struct JoinPlan {
-    pub schema: String,
-    pub alias: String,
-    pub parent_field: String,
-    pub field: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code)]
-pub(super) struct ProjectionPlan {
-    pub field: String,
-}
-
-impl ReportQueryPlan {
-    #[cfg(test)]
-    fn for_source(schema: impl Into<String>) -> Self {
-        Self {
-            source: ReportSourcePlan {
-                schema: schema.into(),
-                joins: Vec::new(),
-            },
-            projections: Vec::new(),
-            diagnostics: Vec::new(),
-        }
-    }
-}
-
 /// Resolved dimension data for a single block-level join. Held in memory
 /// during a single aggregate render; sized by `MAX_BROADCAST_JOIN_DIM_ROWS`.
-pub(super) struct JoinResolution {
+pub(crate) struct JoinResolution {
     /// Distinct values of the dim's `field` column. Used to build an
     /// `IN [...]` filter against the primary's `parent_field`.
     pub(super) parent_keys: Vec<Value>,
@@ -81,7 +22,7 @@ pub(super) struct JoinResolution {
 /// [`split_qualified_condition`].
 type SplitCondition = (Option<Condition>, HashMap<String, Vec<Condition>>);
 
-pub(super) fn build_alias_index<'a>(
+pub(crate) fn build_alias_index<'a>(
     joins: &'a [ReportSourceJoin],
     block_id: &str,
 ) -> Result<HashMap<String, &'a ReportSourceJoin>, ReportServiceError> {
@@ -108,7 +49,7 @@ pub(super) fn build_alias_index<'a>(
 /// qualified `aggregates[].field`, qualified `orderBy.column`, qualified
 /// `groupBy` entries whose join's `parent_field` isn't also in the
 /// (unqualified) groupBy.
-pub(super) fn validate_join_request(
+pub(crate) fn validate_join_request(
     request: &AggregateRequest,
     alias_to_join: &HashMap<String, &ReportSourceJoin>,
     block_id: &str,
@@ -176,11 +117,11 @@ pub(super) fn validate_join_request(
 
 /// Returns the alias portion of a qualified `<alias>.<field>` reference,
 /// or `None` for unqualified names.
-pub(super) fn field_alias_prefix(field: &str) -> Option<&str> {
+pub(crate) fn field_alias_prefix(field: &str) -> Option<&str> {
     field.split_once('.').map(|(alias, _)| alias)
 }
 
-pub(super) fn split_qualified_condition(
+pub(crate) fn split_qualified_condition(
     condition: Option<Condition>,
     alias_set: &HashSet<&str>,
     block_id: &str,
@@ -586,7 +527,7 @@ fn walk_condition_field_refs(c: &Condition, visit: &mut impl FnMut(&str)) {
     }
 }
 
-pub(super) fn strip_alias_from_condition(mut c: Condition, alias: &str) -> Condition {
+pub(crate) fn strip_alias_from_condition(mut c: Condition, alias: &str) -> Condition {
     let prefix = format!("{}.", alias);
     if let Some(args) = &mut c.arguments {
         for (index, arg) in args.iter_mut().enumerate() {
@@ -609,7 +550,7 @@ pub(super) fn strip_alias_from_condition(mut c: Condition, alias: &str) -> Condi
 
 /// Stringify a JSON value for use as a HashMap lookup key. Two JSON values
 /// that compare equal under SQL semantics produce the same key.
-pub(super) fn value_to_lookup_key(value: &Value) -> String {
+pub(crate) fn value_to_lookup_key(value: &Value) -> String {
     match value {
         Value::String(s) => s.clone(),
         Value::Bool(b) => b.to_string(),
@@ -622,7 +563,7 @@ pub(super) fn value_to_lookup_key(value: &Value) -> String {
 /// Build the empty result when an inner join has no matching dimension rows
 /// — preserving the column shape the caller requested so downstream code
 /// (table projection, chart rendering) stays uniform.
-pub(super) fn empty_join_result(
+pub(crate) fn empty_join_result(
     group_by: &[String],
     aggregates: &[AggregateSpec],
 ) -> runtara_object_store::AggregateResult {
@@ -638,7 +579,7 @@ pub(super) fn empty_join_result(
 /// Take the primary aggregate result and add columns sourced from the
 /// joined dimensions. Output column order matches the original groupBy
 /// order, with aggregate columns appended at the end.
-pub(super) fn enrich_aggregate_result(
+pub(crate) fn enrich_aggregate_result(
     primary: runtara_object_store::AggregateResult,
     requested_group_by: &[String],
     alias_to_join: &HashMap<String, &ReportSourceJoin>,
@@ -745,37 +686,6 @@ mod tests {
             op: "eq".to_string(),
             kind: ReportJoinKind::Inner,
         }
-    }
-
-    #[test]
-    fn planner_structs_hold_source_projection_and_diagnostics() {
-        let mut plan = ReportQueryPlan::for_source("StockSnapshot");
-        plan.source.joins.push(JoinPlan {
-            schema: "TDProduct".to_string(),
-            alias: "p".to_string(),
-            parent_field: "sku".to_string(),
-            field: "sku".to_string(),
-        });
-        plan.projections.push(ProjectionPlan {
-            field: "p.part_number".to_string(),
-        });
-        plan.diagnostics.push(ReportDiagnostic {
-            severity: ReportDiagnosticSeverity::Warning,
-            block_id: "stock".to_string(),
-            code: "JOIN_BROADCAST".to_string(),
-            message: "Using bounded broadcast join".to_string(),
-        });
-
-        assert_eq!(plan.source.schema, "StockSnapshot");
-        assert_eq!(plan.source.joins[0].schema, "TDProduct");
-        assert_eq!(plan.source.joins[0].alias, "p");
-        assert_eq!(plan.source.joins[0].parent_field, "sku");
-        assert_eq!(plan.source.joins[0].field, "sku");
-        assert_eq!(plan.projections[0].field, "p.part_number");
-        assert_eq!(
-            plan.diagnostics[0].severity,
-            ReportDiagnosticSeverity::Warning
-        );
     }
 
     #[test]

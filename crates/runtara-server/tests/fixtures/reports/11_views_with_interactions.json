@@ -1,0 +1,133 @@
+{
+  "definitionVersion": 1,
+  "layout": {
+    "id": "root",
+    "columns": 1,
+    "items": [
+      {
+        "id": "root_i0",
+        "child": { "id": "n_overview", "type": "block", "blockId": "orders_overview" }
+      }
+    ]
+  },
+  "views": [
+    {
+      "id": "default",
+      "title": "Orders overview",
+      "layout": {
+        "id": "view_default_root",
+        "columns": 1,
+        "items": [
+          {
+            "id": "view_default_root_i0",
+            "child": { "id": "n_overview_default", "type": "block", "blockId": "orders_overview" }
+          }
+        ]
+      }
+    },
+    {
+      "id": "order_detail",
+      "parentViewId": "default",
+      "titleFromBlock": { "block": "order_header" },
+      "clearFiltersOnBack": ["selected_order_id"],
+      "breadcrumb": [
+        { "label": "Orders", "viewId": "default", "clearFilters": ["selected_order_id"] }
+      ],
+      "layout": {
+        "id": "view_order_detail_root",
+        "columns": 1,
+        "items": [
+          {
+            "id": "view_order_detail_root_i0",
+            "child": { "id": "n_header", "type": "block", "blockId": "order_header" }
+          },
+          {
+            "id": "view_order_detail_root_i1",
+            "child": { "id": "n_lines", "type": "block", "blockId": "order_lines" }
+          }
+        ]
+      }
+    }
+  ],
+  "filters": [
+    {
+      "id": "selected_order_id",
+      "label": "Selected order",
+      "type": "text",
+      "strictWhenReferenced": true,
+      "appliesTo": [
+        { "blockId": "order_header", "field": "id", "op": "eq" },
+        { "blockId": "order_lines", "field": "order_id", "op": "eq" }
+      ]
+    }
+  ],
+  "blocks": [
+    {
+      "id": "orders_overview",
+      "type": "table",
+      "title": "Recent orders",
+      "source": {
+        "schema": "Order",
+        "mode": "filter"
+      },
+      "interactions": [
+        {
+          "id": "drill_into_order",
+          "trigger": { "event": "row_click" },
+          "actions": [
+            { "type": "set_filter", "filterId": "selected_order_id", "valueFrom": "id" },
+            { "type": "navigate_view", "viewId": "order_detail" }
+          ]
+        }
+      ],
+      "table": {
+        "columns": [
+          { "field": "order_id", "label": "Order", "descriptive": true },
+          { "field": "customer_name", "label": "Customer" },
+          { "field": "total_amount", "label": "Total", "format": "currency", "align": "right" }
+        ]
+      }
+    },
+    {
+      "id": "order_header",
+      "type": "card",
+      "title": "Order",
+      "source": {
+        "schema": "Order",
+        "mode": "filter",
+        "limit": 1
+      },
+      "card": {
+        "groups": [
+          {
+            "id": "g_main",
+            "columns": 2,
+            "fields": [
+              { "field": "order_id", "label": "Order" },
+              { "field": "status", "label": "Status", "format": "pill" },
+              { "field": "total_amount", "label": "Total", "format": "currency" },
+              { "field": "created_at", "label": "Created", "format": "datetime" }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "order_lines",
+      "type": "table",
+      "title": "Order lines",
+      "source": {
+        "schema": "OrderLine",
+        "mode": "filter"
+      },
+      "table": {
+        "columns": [
+          { "field": "product_id", "label": "Product" },
+          { "field": "quantity", "label": "Qty", "format": "number", "align": "right" },
+          { "field": "unit_price", "label": "Unit price", "format": "currency", "align": "right" },
+          { "field": "line_total", "label": "Line total", "format": "currency", "align": "right" }
+        ]
+      }
+    }
+  ]
+}

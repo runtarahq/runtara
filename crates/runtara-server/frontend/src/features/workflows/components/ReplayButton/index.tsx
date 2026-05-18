@@ -13,6 +13,10 @@ import {
   parseStructuredError,
 } from '@/shared/utils/structured-error';
 
+type ReplayWorkflowResult = {
+  workflowId?: string;
+};
+
 type Props = {
   instanceId: string;
   /** Optional error string to enable smart retry logic */
@@ -51,8 +55,11 @@ export function ReplayButton(props: Props) {
 
     setIsLoading(true);
     try {
-      const result = await replayWorkflow(token, instanceId);
-      const replayedWorkflowId = result?.data?.workflowId;
+      const result = (await replayWorkflow(
+        token,
+        instanceId
+      )) as ReplayWorkflowResult;
+      const replayedWorkflowId = result?.workflowId;
 
       await Promise.all([
         queryClient.invalidateQueries({

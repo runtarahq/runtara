@@ -18,6 +18,26 @@ use crate::api::dto::trigger_event::TriggerEvent;
 use crate::api::repositories::trigger_stream::TriggerStreamPublisher;
 use crate::api::repositories::triggers::TriggerRepository;
 
+/// Default cap on the request body of the public, unauthenticated webhook
+/// ingest endpoints when `WEBHOOK_MAX_BODY_BYTES` is unset or unparseable.
+/// Without a cap a single POST can buffer until the process runs out of
+/// memory and crashes.
+pub const DEFAULT_WEBHOOK_MAX_BODY_BYTES: usize = 10 * 1024 * 1024;
+
+/// Maximum accepted webhook request body in bytes. Reads
+/// `WEBHOOK_MAX_BODY_BYTES`, falling back to [`DEFAULT_WEBHOOK_MAX_BODY_BYTES`];
+/// a `0` or unparseable value falls back to the default rather than wedging
+/// ingest by rejecting every request.
+pub fn webhook_max_body_bytes() -> usize {
+    parse_webhook_max_body_bytes(std::env::var("WEBHOOK_MAX_BODY_BYTES").ok().as_deref())
+}
+
+fn parse_webhook_max_body_bytes(raw: Option<&str>) -> usize {
+    raw.and_then(|v| v.parse::<usize>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(DEFAULT_WEBHOOK_MAX_BODY_BYTES)
+}
+
 /// HTTP trigger execution endpoint
 ///
 /// When a trigger is found for the given trigger_id:
@@ -105,7 +125,7 @@ pub async fn capture_http_event(
         }
     } else {
         // Read body as bytes for non-multipart requests
-        let bytes = match axum::body::to_bytes(body, usize::MAX).await {
+        let bytes = match axum::body::to_bytes(body, webhook_max_body_bytes()).await {
             Ok(b) => b,
             Err(e) => {
                 eprintln!("Failed to read body: {}", e);
@@ -373,4 +393,99 @@ async fn update_trigger_last_run(pool: &PgPool, trigger_id: &str) -> Result<(), 
     .execute(pool)
     .await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn env_parsing() {
+        assert_eq!(
+            parse_webhook_max_body_bytes(None),
+            DEFAULT_WEBHOOK_MAX_BODY_BYTES
+        );
+        assert_eq!(
+            parse_webhook_max_body_bytes(Some("0")),
+            DEFAULT_WEBHOOK_MAX_BODY_BYTES
+        );
+        assert_eq!(
+            parse_webhook_max_body_bytes(Some("not-a-number")),
+            DEFAULT_WEBHOOK_MAX_BODY_BYTES
+        );
+        assert_eq!(parse_webhook_max_body_bytes(Some("1048576")), 1048576);
+    }
+
+    /// Boundary check for the explicit cap in `capture_http_event` (the raw
+    /// `to_bytes(body, webhook_max_body_bytes())` path). A body of exactly
+    /// `LIMIT` bytes must be accepted; `LIMIT + 1` must error.
+    #[tokio::test]
+    async fn to_bytes_cap_boundary() {
+        const LIMIT: usize = 64;
+
+        let at_limit = axum::body::Body::from(vec![b'a'; LIMIT]);
+        let bytes = axum::body::to_bytes(at_limit, LIMIT)
+            .await
+            .expect("a body of exactly LIMIT bytes must be accepted");
+        assert_eq!(bytes.len(), LIMIT);
+
+        let over_limit = axum::body::Body::from(vec![b'a'; LIMIT + 1]);
+        assert!(
+            axum::body::to_bytes(over_limit, LIMIT).await.is_err(),
+            "a body of LIMIT + 1 bytes must be rejected"
+        );
+    }
+
+    /// Boundary check for the defense-in-depth `DefaultBodyLimit` layer on the
+    /// `event_routes` router (covers the `Bytes`-extractor sync handler).
+    /// `LIMIT` bytes → 200; `LIMIT + 1` → 413 Payload Too Large.
+    #[tokio::test]
+    async fn default_body_limit_layer_boundary() {
+        use axum::Router;
+        use axum::extract::DefaultBodyLimit;
+        use axum::http::{Request, StatusCode};
+        use axum::routing::post;
+        use tower::ServiceExt;
+
+        const LIMIT: usize = 64;
+
+        async fn echo(body: axum::body::Bytes) -> StatusCode {
+            let _ = body;
+            StatusCode::OK
+        }
+
+        fn app() -> Router {
+            Router::new()
+                .route("/ingest", post(echo))
+                .layer(DefaultBodyLimit::max(LIMIT))
+        }
+
+        let at_limit = app()
+            .oneshot(
+                Request::post("/ingest")
+                    .body(axum::body::Body::from(vec![b'a'; LIMIT]))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            at_limit.status(),
+            StatusCode::OK,
+            "a body of exactly LIMIT bytes must pass the layer"
+        );
+
+        let over_limit = app()
+            .oneshot(
+                Request::post("/ingest")
+                    .body(axum::body::Body::from(vec![b'a'; LIMIT + 1]))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            over_limit.status(),
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "a body of LIMIT + 1 bytes must be rejected by the layer"
+        );
+    }
 }

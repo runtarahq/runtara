@@ -900,6 +900,61 @@ fn default_path_style() -> Option<bool> {
 }
 
 // ============================================================================
+// Azure Blob Storage Connection Type
+// ============================================================================
+
+/// Parameters for Azure Blob Storage connection (Shared Key authentication).
+///
+/// Credentials are kept server-side; the runtime proxy signs every request
+/// with Azure Shared Key before forwarding upstream.
+#[derive(Debug, Deserialize, ConnectionParams)]
+#[connection(
+    integration_id = "azure_blob_storage",
+    display_name = "Azure Blob Storage",
+    description = "Connect to Azure Blob Storage using a storage account name and access key",
+    category = "storage"
+)]
+pub struct AzureBlobStorageParams {
+    /// Storage account name (e.g. `mystorageacct`)
+    #[field(
+        display_name = "Account Name",
+        description = "Azure storage account name",
+        placeholder = "mystorageacct"
+    )]
+    pub account_name: String,
+
+    /// Base64-encoded account key (primary or secondary)
+    #[field(
+        display_name = "Account Key",
+        description = "Storage account access key (primary or secondary)",
+        placeholder = "base64-encoded key",
+        secret
+    )]
+    pub account_key: String,
+
+    /// DNS suffix for the blob endpoint. Defaults to `core.windows.net`.
+    /// Use `core.usgovcloudapi.net` for Azure Government, `core.chinacloudapi.cn`
+    /// for Azure China, or `core.cloudapi.de` for Azure Germany.
+    #[serde(default)]
+    #[field(
+        display_name = "Endpoint Suffix",
+        description = "DNS suffix for the blob endpoint (defaults to core.windows.net)",
+        placeholder = "core.windows.net"
+    )]
+    pub endpoint_suffix: Option<String>,
+
+    /// Full base URL override for Azurite or Azure Stack deployments
+    /// (e.g. `http://127.0.0.1:10000`). When set, takes precedence over `endpoint_suffix`.
+    #[serde(default)]
+    #[field(
+        display_name = "Endpoint Override",
+        description = "Full endpoint URL for Azurite or Azure Stack (e.g. http://127.0.0.1:10000)",
+        placeholder = "http://127.0.0.1:10000"
+    )]
+    pub endpoint_override: Option<String>,
+}
+
+// ============================================================================
 // Stripe Connection Type
 // ============================================================================
 

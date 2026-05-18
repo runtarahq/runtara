@@ -336,7 +336,7 @@ function ChartTooltip({
 function getChartSeries(
   block: ReportBlockDefinition,
   columns: string[]
-): Array<{ field: string; label?: string }> {
+): Array<{ field: string; label?: string | null }> {
   const configuredSeries = block.chart?.series ?? [];
   if (configuredSeries.length > 0) {
     return configuredSeries;

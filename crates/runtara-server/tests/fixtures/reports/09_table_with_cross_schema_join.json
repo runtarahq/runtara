@@ -1,0 +1,94 @@
+{
+  "definitionVersion": 1,
+  "layout": {
+    "id": "root",
+    "columns": 1,
+    "items": [
+      {
+        "id": "root_i0",
+        "child": {
+          "id": "n_grid",
+          "type": "grid",
+          "columns": 2,
+          "items": [
+            {
+              "id": "g_orders",
+              "child": { "id": "n_grid_b0", "type": "block", "blockId": "orders_with_customers" }
+            }
+          ]
+        }
+      }
+    ]
+  },
+  "filters": [
+    {
+      "id": "date_range",
+      "label": "Period",
+      "type": "time_range",
+      "default": { "preset": "last_30_days" },
+      "required": true,
+      "appliesTo": [
+        { "blockId": "orders_with_customers", "field": "created_at", "op": "between" }
+      ]
+    },
+    {
+      "id": "customer_tier",
+      "label": "Customer tier",
+      "type": "select",
+      "options": {
+        "source": "static",
+        "values": [
+          { "label": "Gold", "value": "gold" },
+          { "label": "Silver", "value": "silver" },
+          { "label": "Bronze", "value": "bronze" }
+        ]
+      },
+      "appliesTo": [
+        { "blockId": "orders_with_customers", "field": "customer.tier", "op": "eq" }
+      ]
+    }
+  ],
+  "blocks": [
+    {
+      "id": "orders_with_customers",
+      "type": "table",
+      "title": "Orders with customer info",
+      "source": {
+        "schema": "Order",
+        "mode": "filter",
+        "join": [
+          {
+            "schema": "Customer",
+            "alias": "customer",
+            "parentField": "customer_id",
+            "field": "id",
+            "op": "eq",
+            "kind": "left"
+          }
+        ]
+      },
+      "table": {
+        "columns": [
+          { "field": "order_id", "label": "Order", "descriptive": true },
+          {
+            "field": "customer_id",
+            "label": "Customer",
+            "displayField": "customer.name",
+            "secondaryField": "customer.email"
+          },
+          {
+            "field": "customer.tier",
+            "label": "Tier",
+            "format": "pill",
+            "pillVariants": { "gold": "warning", "silver": "muted", "bronze": "default" }
+          },
+          { "field": "total_amount", "label": "Total", "format": "currency", "align": "right" },
+          { "field": "created_at", "label": "Created", "format": "datetime" }
+        ],
+        "defaultSort": [
+          { "field": "created_at", "direction": "desc" }
+        ]
+      }
+    }
+  ]
+}

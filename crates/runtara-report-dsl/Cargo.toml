@@ -1,0 +1,58 @@
+[package]
+name = "runtara-report-dsl"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Schema, validators, template engine, and row-condition evaluator for the runtara reports DSL"
+keywords = ["runtara", "reports", "dsl"]
+categories = ["development-tools"]
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = ["json-schema", "aggregate"]
+# Enables `JsonSchema` derives for the server's JSON Schema export pipeline.
+# Pulls `runtara-dsl/json-schema` too so types like `ConditionExpression`
+# implement `JsonSchema`. Optional so the WASM build can opt out.
+json-schema = ["dep:schemars", "runtara-dsl/json-schema"]
+# Enables the in-memory aggregate engine (`virtual_aggregate` module).
+# Pulls `runtara-object-store` for the canonical `AggregateRequest` /
+# `AggregateSpec` / `AggregateFn` / `AggregateResult` types so the engine
+# and the SQL pushdown path agree on shapes. Optional because
+# `runtara-object-store` itself pulls sqlx + tokio and isn't WASM-friendly.
+aggregate = ["dep:runtara-object-store"]
+# Enables `ToSchema` derives so the crate's types appear in the server OpenAPI doc.
+utoipa = ["dep:utoipa"]
+# Enables wasm-bindgen JS bindings for the FE bundle.
+wasm = ["dep:wasm-bindgen", "dep:serde-wasm-bindgen"]
+
+[dependencies]
+# `default-features = false` drops `runtara-dsl::{spec, step_registration}`
+# and the schemars-using surface in `agent_meta` — none of which the WASM
+# bundle needs, and which would otherwise drag schemars + the schema
+# generators into the bundle.
+runtara-dsl = { path = "../runtara-dsl", default-features = false, features = ["utoipa"] }
+
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+schemars = { version = "1", optional = true }
+utoipa = { version = "5", features = ["chrono"], optional = true }
+chrono = { version = "0.4", features = ["serde"] }
+thiserror = "1.0"
+# default-features = false drops `multi_template`, `macros`, `debug`,
+# `adjacent_loop_items` — none of which we need. We keep `builtins`
+# (default filters), `serde` (pass rows via serde_json::Value), and
+# `deserialization` (`ViaDeserialize` for our custom filter signatures).
+minijinja = { version = "2.5", default-features = false, features = ["builtins", "serde", "deserialization"] }
+
+# Optional: the virtual-aggregate engine consumes these shape types.
+runtara-object-store = { path = "../runtara-object-store", optional = true }
+
+# WASM-only deps. cdylib + wasm-bindgen produce the bundle Phase 2 ships to the FE.
+wasm-bindgen = { version = "0.2", optional = true }
+serde-wasm-bindgen = { version = "0.6", optional = true }
+
+[dev-dependencies]
+insta = { version = "1", features = ["json"] }

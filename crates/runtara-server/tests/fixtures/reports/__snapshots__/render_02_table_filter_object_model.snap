@@ -1,0 +1,39 @@
+---
+source: crates/runtara-server/tests/reports_render_corpus.rs
+expression: snapshot_body
+---
+{
+  "blocks": {
+    "recent_orders": {
+      "error": {
+        "blockId": "recent_orders",
+        "code": "BLOCK_RENDER_FAILED",
+        "message": "Schema not found: Order"
+      },
+      "status": "error",
+      "title": "Recent orders",
+      "type": "table"
+    }
+  },
+  "errors": [
+    {
+      "blockId": "recent_orders",
+      "code": "BLOCK_RENDER_FAILED",
+      "message": "Schema not found: Order"
+    }
+  ],
+  "report": {
+    "definitionVersion": 1,
+    "id": "rep_02_table_filter_object_model"
+  },
+  "resolvedFilters": {
+    "date_range": {
+      "from": "[ts]",
+      "to": "[ts]"
+    },
+    "status": [
+      "active"
+    ]
+  },
+  "success": true
+}

@@ -1158,7 +1158,7 @@ type CatalogField = {
   id: string;
   label: string;
   type: string;
-  format?: string;
+  format?: string | null;
   kind: 'dimension' | 'measure';
 };
 
@@ -1361,7 +1361,11 @@ function defaultBlockTitle(
 
 function filteredFields(dataset: ReportDatasetDefinition, query: string) {
   const term = query.trim().toLowerCase();
-  const matches = (field: { field?: string; id?: string; label: string }) => {
+  const matches = (field: {
+    field?: string | null;
+    id?: string | null;
+    label: string;
+  }) => {
     const key = field.field ?? field.id ?? '';
     return (
       term.length === 0 ||
@@ -1515,17 +1519,21 @@ function appendBlockToDefinition(
   block: ReportBlockDefinition
 ): ReportDefinition {
   const blocks = [...definition.blocks, block];
+  const items = [
+    ...(definition.layout.items ?? []),
+    {
+      id: `item_${block.id}_${Math.random().toString(36).slice(2, 6)}`,
+      child: {
+        id: `${block.id}_node`,
+        type: 'block' as const,
+        blockId: block.id,
+      },
+    },
+  ];
   return {
     ...definition,
     blocks,
-    layout: [
-      ...(definition.layout ?? []),
-      {
-        id: `${block.id}_node`,
-        type: 'block',
-        blockId: block.id,
-      },
-    ],
+    layout: { ...definition.layout, items },
   };
 }
 
@@ -1586,7 +1594,7 @@ function isChartViz(value: ExploreVizType): value is ReportChartKind {
 }
 
 function columnKey(column?: ReportDatasetQueryColumn): string {
-  return column?.field ?? column?.key ?? '';
+  return column?.key ?? '';
 }
 
 function fieldLabel(dataset: ReportDatasetDefinition, field: string): string {

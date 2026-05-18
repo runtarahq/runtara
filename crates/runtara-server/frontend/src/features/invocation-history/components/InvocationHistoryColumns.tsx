@@ -8,7 +8,6 @@ import {
   MessageSquare,
   Bug,
 } from 'lucide-react';
-import { ExecutionStatus } from '@/generated/RuntaraRuntimeApi';
 import { ExecutionHistoryItem } from '../types';
 import { formatDate } from '@/lib/utils';
 import { Button } from '@/shared/components/ui/button';
@@ -274,7 +273,7 @@ export const invocationHistoryColumns: ColumnDef<ExecutionHistoryItem>[] = [
 
       return (
         <div className="flex items-center justify-end gap-1 opacity-0 group-hover:opacity-100 transition-opacity duration-150">
-          {status === ExecutionStatus.Suspended && (
+          {status === 'suspended' && (
             <Link to={`/workflows/${workflowId}?attachInstance=${instanceId}`}>
               <Button
                 variant="ghost"
@@ -317,8 +316,8 @@ export const invocationHistoryColumns: ColumnDef<ExecutionHistoryItem>[] = [
             />
           ) : (
             <>
-              {(status === ExecutionStatus.Failed ||
-                status === ExecutionStatus.Cancelled) && (
+              {(status === 'failed' ||
+                status === 'cancelled') && (
                 <ResumeButton
                   instanceId={instanceId}
                   variant="ghost"

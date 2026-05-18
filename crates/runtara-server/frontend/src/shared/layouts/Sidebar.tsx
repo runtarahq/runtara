@@ -147,11 +147,13 @@ function FooterMenu() {
   const navigate = useNavigate();
   const versionLabel = formatBuildLabel(
     config.build.version,
-    config.build.commit
+    config.build.commit,
+    config.build.buildNumber
   );
   const versionTitle = formatBuildTitle(
     config.build.version,
-    config.build.commit
+    config.build.commit,
+    config.build.buildNumber
   );
   const { mutate: createPortalSession, isPending } = useCustomMutation({
     mutationFn: createBillingPortalSession,
@@ -202,23 +204,42 @@ function FooterMenu() {
   );
 }
 
-function formatBuildLabel(version: string, commit?: string): string {
+function formatBuildLabel(
+  version: string,
+  commit?: string,
+  buildNumber?: string
+): string {
   const normalizedVersion = normalizeVersion(version);
   const normalizedCommit = normalizeCommit(commit);
+  const build = buildNumber?.trim() || undefined;
 
-  if (normalizedVersion === 'dev' && normalizedCommit) {
-    return `dev@${normalizedCommit}`;
+  let label =
+    normalizedVersion === 'dev' && normalizedCommit
+      ? `dev@${normalizedCommit}`
+      : normalizedVersion;
+
+  if (build) {
+    label += ` (${build})`;
   }
 
-  return normalizedVersion;
+  return label;
 }
 
-function formatBuildTitle(version: string, commit?: string): string {
+function formatBuildTitle(
+  version: string,
+  commit?: string,
+  buildNumber?: string
+): string {
   const normalizedVersion = normalizeVersion(version);
   const normalizedCommit = normalizeCommit(commit);
+  const build = buildNumber?.trim() || undefined;
 
-  if (normalizedCommit) {
-    return `Runtara ${normalizedVersion} (${normalizedCommit})`;
+  const parts: string[] = [];
+  if (normalizedCommit) parts.push(normalizedCommit);
+  if (build) parts.push(`build #${build}`);
+
+  if (parts.length > 0) {
+    return `Runtara ${normalizedVersion} (${parts.join(', ')})`;
   }
 
   return `Runtara ${normalizedVersion}`;

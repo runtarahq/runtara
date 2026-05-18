@@ -762,3 +762,119 @@ pub fn storage_copy_file(input: CopyFileInput) -> Result<CopyFileOutput, AgentEr
         }),
     }
 }
+
+// ──────────────────────────────────────────────────────────────────────────────
+
+#[derive(Serialize, Deserialize, CapabilityInput)]
+#[capability_input(display_name = "Generate Presigned URL Input")]
+pub struct GeneratePresignedUrlInput {
+    #[field(skip)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub _connection: Option<RawConnection>,
+
+    #[field(display_name = "Bucket", example = "uploads")]
+    pub bucket: String,
+
+    #[field(display_name = "Key", example = "reports/2026-05-16.csv")]
+    pub key: String,
+
+    #[field(
+        display_name = "Operation",
+        description = "What the URL will be used for: download, upload, or delete",
+        example = "download"
+    )]
+    pub operation: String,
+
+    #[field(
+        display_name = "Expires In (seconds)",
+        description = "Lifetime of the signed URL in seconds (max 604800 = 7 days, default 3600)",
+        example = "3600"
+    )]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expires_in_seconds: Option<u64>,
+
+    #[field(
+        display_name = "Content Type",
+        description = "For upload URLs, the MIME type the caller will use (e.g., text/csv)",
+        example = "text/csv"
+    )]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content_type: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, CapabilityOutput)]
+#[capability_output(display_name = "Generate Presigned URL Output")]
+pub struct GeneratePresignedUrlOutput {
+    #[field(display_name = "Success")]
+    pub success: bool,
+
+    #[field(display_name = "URL", description = "Time-limited presigned URL")]
+    pub url: Option<String>,
+
+    #[field(
+        display_name = "Expires In (seconds)",
+        description = "Actual lifetime of the URL after server-side clamping"
+    )]
+    pub expires_in_seconds: Option<u64>,
+
+    #[field(display_name = "Error")]
+    pub error: Option<String>,
+}
+
+const DEFAULT_PRESIGN_EXPIRES_SECONDS: u64 = 3600;
+
+#[capability(
+    module = "s3_storage",
+    display_name = "Generate Presigned URL",
+    description = "Generate a time-limited presigned URL for downloading, uploading, or deleting an object. Callers consume the URL directly without going through runtara.",
+    module_display_name = "S3 Storage",
+    module_supports_connections = true,
+    module_integration_ids = "s3_compatible"
+)]
+pub fn storage_generate_presigned_url(
+    input: GeneratePresignedUrlInput,
+) -> Result<GeneratePresignedUrlOutput, AgentError> {
+    let conn = require_connection(&input._connection)?;
+    let method = match input.operation.to_lowercase().as_str() {
+        "download" | "get" | "read" => "GET",
+        "upload" | "put" | "write" | "create" => "PUT",
+        "delete" => "DELETE",
+        other => {
+            return Ok(GeneratePresignedUrlOutput {
+                success: false,
+                url: None,
+                expires_in_seconds: None,
+                error: Some(format!(
+                    "Unsupported operation `{}` (expected download, upload, or delete)",
+                    other
+                )),
+            });
+        }
+    };
+
+    let path = format!("/{}/{}", input.bucket, input.key);
+    let expires = input
+        .expires_in_seconds
+        .unwrap_or(DEFAULT_PRESIGN_EXPIRES_SECONDS);
+
+    match runtara_http::presign(
+        &conn.connection_id,
+        method,
+        &path,
+        expires,
+        input.content_type.as_deref(),
+    ) {
+        Ok(result) => Ok(GeneratePresignedUrlOutput {
+            success: true,
+            url: Some(result.url),
+            expires_in_seconds: Some(result.expires_in_seconds),
+            error: None,
+        }),
+        Err(e) => Ok(GeneratePresignedUrlOutput {
+            success: false,
+            url: None,
+            expires_in_seconds: None,
+            error: Some(e.to_string()),
+        }),
+    }
+}

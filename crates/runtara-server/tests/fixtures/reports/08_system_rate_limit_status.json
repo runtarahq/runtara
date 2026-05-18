@@ -1,0 +1,111 @@
+{
+  "definitionVersion": 1,
+  "layout": {
+    "id": "root",
+    "columns": 1,
+    "items": [
+      {
+        "id": "root_i0",
+        "child": {
+          "id": "n_columns",
+          "type": "grid",
+          "columns": 2,
+          "columnWidths": [0.4, 0.6],
+          "items": [
+            {
+              "id": "n_columns_item_col_metrics",
+              "child": {
+                "id": "col_metrics",
+                "type": "grid",
+                "columns": 1,
+                "items": [
+                  {
+                    "id": "col_metrics_i0",
+                    "child": { "id": "n_metric", "type": "block", "blockId": "rate_limit_usage" }
+                  }
+                ]
+              }
+            },
+            {
+              "id": "n_columns_item_col_table",
+              "child": {
+                "id": "col_table",
+                "type": "grid",
+                "columns": 1,
+                "items": [
+                  {
+                    "id": "col_table_i0",
+                    "child": { "id": "n_status", "type": "block", "blockId": "rate_limit_status" }
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      }
+    ]
+  },
+  "filters": [
+    {
+      "id": "interval",
+      "label": "Interval",
+      "type": "select",
+      "default": "1h",
+      "options": {
+        "source": "static",
+        "values": [
+          { "label": "Last hour", "value": "1h" },
+          { "label": "Last 24 hours", "value": "24h" },
+          { "label": "Last 7 days", "value": "7d" },
+          { "label": "Last 30 days", "value": "30d" }
+        ]
+      }
+    }
+  ],
+  "blocks": [
+    {
+      "id": "rate_limit_status",
+      "type": "table",
+      "title": "Rate limit status",
+      "source": {
+        "kind": "system",
+        "entity": "connection_rate_limit_status",
+        "mode": "filter",
+        "interval": "1h"
+      },
+      "table": {
+        "columns": [
+          { "field": "connection_id", "label": "Connection", "descriptive": true },
+          { "field": "requests_used", "label": "Used", "format": "number", "align": "right" },
+          { "field": "requests_remaining", "label": "Remaining", "format": "number", "align": "right" },
+          { "field": "utilization_pct", "label": "Utilization", "format": "percent", "align": "right" },
+          {
+            "field": "throttled",
+            "label": "Throttled",
+            "format": "pill",
+            "pillVariants": { "true": "warning", "false": "muted" }
+          }
+        ]
+      }
+    },
+    {
+      "id": "rate_limit_usage",
+      "type": "metric",
+      "title": "Overall utilization",
+      "source": {
+        "kind": "system",
+        "entity": "connection_rate_limit_status",
+        "mode": "aggregate",
+        "interval": "1h",
+        "aggregates": [
+          { "alias": "value", "op": "avg", "field": "utilization_pct" }
+        ]
+      },
+      "metric": {
+        "valueField": "value",
+        "label": "Utilization",
+        "format": "percent"
+      }
+    }
+  ]
+}

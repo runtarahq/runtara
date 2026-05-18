@@ -6,6 +6,7 @@ import remarkGfm from 'remark-gfm';
 import { Button } from '@/shared/components/ui/button';
 import {
   ReportBlockDefinition,
+  ReportBlockRenderResult,
   ReportBlockResult,
   ReportInteractionAction,
   ReportInteractionOptions,
@@ -24,7 +25,7 @@ import { encodeFilterValue } from '../utils';
 type ReportBlockHostProps = {
   reportId: string;
   block: ReportBlockDefinition;
-  initialResult?: ReportBlockResult;
+  initialResult?: ReportBlockResult | ReportBlockRenderResult;
   filters: Record<string, unknown>;
   className?: string;
   onFilterChange?: (filterId: string, value: unknown) => void;
@@ -197,7 +198,7 @@ export function ReportBlockHost({
     for (const action of actions) {
       if (action.type === 'set_filter' && action.filterId) {
         const value =
-          action.valueFrom !== undefined
+          action.valueFrom != null
             ? resolveInteractionValue(action.valueFrom, datum)
             : action.value;
         if (value !== undefined) {
@@ -264,7 +265,7 @@ export function ReportBlockHost({
           continue;
         }
       }
-      actions.push(...interaction.actions);
+      actions.push(...(interaction.actions ?? []));
     }
     return runInteractionActions(actions, datum);
   };
@@ -308,6 +309,7 @@ export function ReportBlockHost({
             reportId={reportId}
             definition={{
               definitionVersion: 1,
+              layout: { id: 'root', columns: 1, items: [] },
               filters: block.filters ?? [],
               blocks: [block],
             }}

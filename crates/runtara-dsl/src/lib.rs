@@ -9,8 +9,9 @@
 //!
 //! Changes to these types automatically update `specs/dsl/v{VERSION}/schema.json` on rebuild.
 
-// Provide imports needed by schema_types.rs
-use schemars::JsonSchema;
+// Provide imports needed by schema_types.rs. Derives use the fully-qualified
+// `schemars::JsonSchema` path (gated behind the `json-schema` feature), so no
+// top-level `use schemars` import is needed here.
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -26,13 +27,21 @@ pub mod agent_meta;
 // Type coercion utilities for agent inputs
 pub mod coercion;
 
-// Specification generation (DSL schema, OpenAPI, compatibility)
+// Specification generation (DSL schema, OpenAPI, compatibility). Gated
+// behind `json-schema` because the schema generators inside use
+// `schemars::schema_for!`. The server keeps this on; WASM consumers
+// opt out via `default-features = false`.
+#[cfg(feature = "json-schema")]
 pub mod spec;
 
 // DSL flat-map schema → JSON Schema conversion
 pub mod schema_convert;
 
-// Step type metadata registry.
+// Step type metadata registry. Gated behind `json-schema` because it
+// generates `schemars::RootSchema` for each step type. WASM consumers
+// of `runtara-dsl` (e.g. `runtara-report-dsl`) opt out of this feature
+// to keep `schemars` out of their tree.
+#[cfg(feature = "json-schema")]
 mod step_registration;
 
 // ============================================================================
@@ -72,7 +81,10 @@ pub struct StepTypeInfo {
 ///
 /// This function returns step type metadata that is automatically derived from
 /// the actual step struct definitions, ensuring the DSL schema is always in sync
-/// with the implementation.
+/// with the implementation. Requires the `json-schema` feature because step
+/// metadata carries a schemars schema generator; WASM consumers (which build
+/// with `default-features = false`) don't need this.
+#[cfg(feature = "json-schema")]
 pub fn get_step_types() -> Vec<StepTypeInfo> {
     // Start step is a virtual step (not a struct), add it manually
     let mut steps = vec![StepTypeInfo {
@@ -480,13 +492,17 @@ mod tests {
 
     #[test]
     fn test_step_type_schema_generation() {
-        // Verify that schema generation functions work
+        // Verify that schema generation functions work. In schemars 1
+        // `Schema` is opaque; round-trip through JSON and confirm the
+        // serialized form is a non-empty object.
         for meta in agent_meta::get_all_step_types() {
             let schema = (meta.schema_fn)();
-            // Just verify it doesn't panic and returns something
+            let value: serde_json::Value =
+                serde_json::to_value(&schema).expect("schema serializes");
+            let object = value.as_object().expect("schema is a JSON object");
             assert!(
-                schema.schema.metadata.is_some() || !schema.definitions.is_empty(),
-                "Schema for {} should have metadata or definitions",
+                !object.is_empty(),
+                "Schema for {} should not be empty",
                 meta.id
             );
         }

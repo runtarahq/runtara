@@ -29,9 +29,26 @@ Per the `always-e2e-verify` rule, **finish the loop**: compile → register → 
 
 ### 1. Build WASM stdlib (one-time, rebuild after stdlib changes)
 
+The `cargo clean` step is **load-bearing**: cargo's incremental compilation
+leaves stale `.rlib` files from previous builds alongside the new ones in
+`target/wasm32-wasip2/release/deps/`. The cache-populate step below copies
+every rlib it finds. If duplicates of the same crate (e.g. two
+`libruntara_sdk-<hash>.rlib`) survive into the cache, rustc may pick a
+different copy than the one we pin with `--extern` when resolving transitive
+deps. The compiled workflow then ends up with two distinct copies of
+`runtara_sdk::SDK_INSTANCE`, which shows up at runtime as
+`No SDK registered. Call register_sdk() at application startup.` even though
+the generated `main()` clearly called `register_sdk()`. Always `cargo clean`
+before rebuilding the WASM stdlib so the cache snapshot is coherent. The
+`wasi` feature is required — without it, integration agents are stripped from
+the WASM build.
+
 ```bash
+cargo clean -p runtara-workflow-stdlib --target wasm32-wasip2
+
 RUSTFLAGS="-C embed-bitcode=yes" \
-  cargo build -p runtara-workflow-stdlib --release --target wasm32-wasip2 --no-default-features
+  cargo build -p runtara-workflow-stdlib --release --target wasm32-wasip2 \
+    --no-default-features --features wasi
 
 cargo build -p runtara-workflow-stdlib --release
 
@@ -156,6 +173,8 @@ Override grace with `RUNTARA_SHUTDOWN_GRACE_MS=5000`.
 | `delay_in_ms: invalid type: null` | Wrap input in `{"data": {...}}` envelope |
 | `runtara-ctl register` connection error on large files | Use the `/api/v1/images/upload` curl path (step 6) |
 | `No such capability 'xxx'` | `runtara-compile` needs `runtara-agents` linked — rebuild it after agent changes |
+| Workflow with an Agent step crashes with `No SDK registered. Call register_sdk() at application startup.` | WASM cache has duplicate rlibs for the same crate. Redo step 1 with `cargo clean` first; the cache populate step copies every rlib it finds, so a clean source build is required. |
+| Integration-agent workflow compiles but errors `failed to resolve: could not find <agent_name> in 'integrations'` | WASM stdlib was built without `--features wasi`. Redo step 1 with the feature flag set. |
 
 ## Faster path: install-test script
 

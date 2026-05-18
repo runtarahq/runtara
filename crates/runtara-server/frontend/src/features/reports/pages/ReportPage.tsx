@@ -1,36 +1,57 @@
-import { useEffect, useMemo, useState } from 'react';
+import { lazy, Suspense, useEffect, useMemo, useState } from 'react';
+import { Link, useNavigate, useParams, useSearchParams } from 'react-router';
 import {
-  Link,
-  useNavigate,
-  useParams,
-  useSearchParams,
-} from 'react-router';
-import { Edit, Eye, Save } from 'lucide-react';
+  AlertTriangle,
+  Compass,
+  Edit,
+  Eye,
+  Printer,
+  RefreshCw,
+  Save,
+} from 'lucide-react';
+import {
+  Alert,
+  AlertDescription,
+  AlertTitle,
+} from '@/shared/components/ui/alert';
 import { Button } from '@/shared/components/ui/button';
 import { TileList, TilesPage } from '@/shared/components/tiles-page';
 import { usePageTitle } from '@/shared/hooks/usePageTitle';
-import { useObjectSchemaDtos } from '@/features/objects/hooks/useObjectSchemas';
+import { useObjectSchemaDtosByConnectionIds } from '@/features/objects/hooks/useObjectSchemas';
+import { ObjectModelConnectionSelector } from '@/features/objects/components/ObjectModelConnectionSelector';
+import { useObjectModelConnectionSelection } from '@/features/objects/hooks/useObjectModelConnectionSelection';
 import {
   useCreateReport,
   useReport,
   useReportPreview,
+  useReportRender,
   useUpdateReport,
   useValidateReport,
 } from '../hooks/useReports';
 import { ReportDeleteButton } from '../components/ReportDeleteButton';
 import { ReportFilterBar } from '../components/ReportFilterBar';
-import { ReportBuilderWizard } from '../components/wizard/ReportBuilderWizard';
-import { ReportBlockResult, ReportDefinition } from '../types';
+import { ReportRenderer } from '../components/ReportRenderer';
+import { ReportBlockResult, ReportDefinition, ReportInteractionOptions } from '../types';
 import {
   decodeFilterValue,
   encodeFilterValue,
   getFilterDefaultValue,
+  getDefaultReportViewId,
   slugify,
 } from '../utils';
 
+// Wizard v2 — operates on ReportDefinition directly, no WizardState
+// intermediate model. Default authoring surface as of Phase 7 cutover.
+// Lazy-loaded so view-only sessions don't pay the parse cost.
+const ReportBuilderWizardV2 = lazy(() =>
+  import('../components/wizard-v2/ReportBuilderWizardV2').then((m) => ({
+    default: m.ReportBuilderWizardV2,
+  }))
+);
+
 const EMPTY_DEFINITION: ReportDefinition = {
   definitionVersion: 1,
-  layout: [],
+  layout: { id: 'root', columns: 1, rows: 1, items: [] },
   filters: [],
   blocks: [],
 };
@@ -45,12 +66,32 @@ export function ReportPage() {
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   const editing = searchParams.get('edit') === '1' || !isExisting;
+  const { selectedConnectionId, connections: objectModelConnections } =
+    useObjectModelConnectionSelection();
+  const objectModelSchemaConnectionIds = useMemo(
+    () =>
+      Array.from(
+        new Set(
+          [
+            selectedConnectionId,
+            ...objectModelConnections.map((connection) => connection.id),
+          ].filter((id): id is string => Boolean(id))
+        )
+      ),
+    [objectModelConnections, selectedConnectionId]
+  );
+  const { schemasByConnectionId } = useObjectSchemaDtosByConnectionIds(
+    objectModelSchemaConnectionIds
+  );
 
   const { data: existingReport, isFetching } = useReport(reportId);
-  const { data: schemas = [] } = useObjectSchemaDtos();
+  const schemas = selectedConnectionId
+    ? (schemasByConnectionId[selectedConnectionId] ?? [])
+    : [];
   const createReport = useCreateReport();
   const updateReport = useUpdateReport();
   const validateReport = useValidateReport();
+  const activeViewId = searchParams.get('view');
 
   usePageTitle(existingReport?.name ?? (isExisting ? 'Report' : 'New report'));
 
@@ -59,12 +100,23 @@ export function ReportPage() {
   const [definition, setDefinition] =
     useState<ReportDefinition>(EMPTY_DEFINITION);
   const [saveError, setSaveError] = useState<string | null>(null);
+  // The server flags reports whose stored JSON no longer fits the
+  // current `ReportDefinition` shape. We hold that flag in local state
+  // (a) so the banner stays sticky after the user opts into
+  // re-authoring; (b) so the wizard never starts from the empty stub
+  // until the operator explicitly chooses to.
+  const [needsReAuthoring, setNeedsReAuthoring] = useState<string | null>(
+    null
+  );
+  const [reAuthoringAccepted, setReAuthoringAccepted] = useState(false);
 
   useEffect(() => {
     if (!existingReport) return;
     setName(existingReport.name);
     setDescription(existingReport.description ?? '');
     setDefinition(existingReport.definition);
+    setNeedsReAuthoring(existingReport.needsReAuthoring ?? null);
+    setReAuthoringAccepted(false);
   }, [existingReport]);
 
   // Filter values come from URL params in view mode; in edit mode we still
@@ -78,34 +130,52 @@ export function ReportPage() {
     );
   }, [definition.filters, searchParams]);
 
-  // Debounce the definition so the preview API isn't pummelled while typing.
+  const renderRequest = useMemo(
+    () =>
+      !editing && isExisting
+        ? {
+            filters: filterValues,
+            timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+          }
+        : undefined,
+    [editing, filterValues, isExisting]
+  );
+  const renderQuery = useReportRender(
+    reportId,
+    renderRequest,
+    Boolean(renderRequest)
+  );
+
+  // Phase 9: in-place block preview for the wizard. Debounced from the
+  // live definition so live edits don't pummel the preview API.
   const [debouncedDefinition, setDebouncedDefinition] =
     useState<ReportDefinition>(EMPTY_DEFINITION);
   useEffect(() => {
     const handle = setTimeout(() => setDebouncedDefinition(definition), 400);
     return () => clearTimeout(handle);
   }, [definition]);
-
   const canPreview = useMemo(
     () =>
+      editing &&
       debouncedDefinition.blocks.some(
         (block) =>
           block.type === 'markdown' ||
           (block.source?.schema && block.source.schema.length > 0)
       ),
-    [debouncedDefinition]
+    [debouncedDefinition, editing]
   );
-
   const previewRequest = useMemo(
     () =>
       canPreview
-        ? { filters: filterValues, definition: debouncedDefinition }
+        ? {
+            filters: filterValues,
+            definition: debouncedDefinition,
+          }
         : undefined,
     [canPreview, debouncedDefinition, filterValues]
   );
-
   const previewQuery = useReportPreview(previewRequest, canPreview);
-  const blockResults: Record<string, ReportBlockResult> = useMemo(
+  const blockResults: Partial<Record<string, ReportBlockResult>> = useMemo(
     () => previewQuery.data?.blocks ?? {},
     [previewQuery.data]
   );
@@ -114,7 +184,8 @@ export function ReportPage() {
     name.trim().length > 0 &&
     !createReport.isPending &&
     !updateReport.isPending &&
-    !validateReport.isPending;
+    !validateReport.isPending &&
+    (!needsReAuthoring || reAuthoringAccepted);
 
   const handleFilterChange = (filterId: string, value: unknown) => {
     setSearchParams(
@@ -122,7 +193,10 @@ export function ReportPage() {
         const next = new URLSearchParams(current);
         const filter = definition.filters.find((f) => f.id === filterId);
         const defaultValue = filter ? getFilterDefaultValue(filter) : undefined;
-        if (isEmptyFilterValue(value) || isSameFilterValue(value, defaultValue)) {
+        if (
+          isEmptyFilterValue(value) ||
+          isSameFilterValue(value, defaultValue)
+        ) {
           next.delete(filterId);
         } else {
           next.set(filterId, encodeFilterValue(value));
@@ -133,11 +207,54 @@ export function ReportPage() {
     );
   };
 
+  const applyFilterUpdates = (
+    updates: Record<string, unknown>,
+    options?: ReportInteractionOptions
+  ) => {
+    setSearchParams(
+      (current) => {
+        const next = new URLSearchParams(current);
+        for (const filterId of options?.clearFilters ?? []) {
+          next.delete(filterId);
+        }
+        for (const [filterId, value] of Object.entries(updates)) {
+          const filter = definition.filters.find((f) => f.id === filterId);
+          const defaultValue = filter
+            ? getFilterDefaultValue(filter)
+            : undefined;
+          if (
+            isEmptyFilterValue(value) ||
+            isSameFilterValue(value, defaultValue)
+          ) {
+            next.delete(filterId);
+          } else {
+            next.set(filterId, encodeFilterValue(value));
+          }
+        }
+        if (options?.viewId !== undefined) {
+          if (options.viewId) next.set('view', options.viewId);
+          else next.delete('view');
+        }
+        return next;
+      },
+      { replace: options?.replace ?? true }
+    );
+  };
+
+  const handleNavigateView = (
+    viewId: string | null,
+    options?: Omit<ReportInteractionOptions, 'viewId'>
+  ) => {
+    applyFilterUpdates({}, { ...options, viewId });
+  };
+
   const handleSave = async () => {
     setSaveError(null);
-    const validation = await validateReport.mutateAsync({ definition });
+    const validation = await validateReport.mutateAsync({
+      definition,
+    });
     if (!validation.valid) {
-      setSaveError(validation.errors[0]?.message ?? 'Report is invalid.');
+      setSaveError(validation.errors?.[0]?.message ?? 'Report is invalid.');
       return;
     }
     const trimmedName = name.trim();
@@ -161,7 +278,20 @@ export function ReportPage() {
     }
   };
 
-  if (isExisting && isFetching) {
+  const handlePrint = () => {
+    window.requestAnimationFrame(() => window.print());
+  };
+
+  // Mount the wizard only after the loaded definition has flowed into local
+  // state. Without this the wizard initializes from EMPTY_DEFINITION (because
+  // its `useMemo([])` runs on the first render, before the `setDefinition`
+  // useEffect copies `existingReport.definition`) and existing reports render
+  // as a blank canvas.
+  const awaitingDefinition =
+    isExisting &&
+    (isFetching || !existingReport || definition === EMPTY_DEFINITION);
+
+  if (awaitingDefinition) {
     return (
       <TilesPage kicker="Reports" title="Loading report">
         <TileList>
@@ -191,7 +321,12 @@ export function ReportPage() {
           placeholder="Optional description shown in the reports list…"
           onChange={(event) => setDescription(event.target.value)}
           className="w-full bg-transparent text-sm text-muted-foreground placeholder:text-muted-foreground focus:outline-none"
-          style={{ border: 'none', outline: 'none', boxShadow: 'none', padding: 0 }}
+          style={{
+            border: 'none',
+            outline: 'none',
+            boxShadow: 'none',
+            padding: 0,
+          }}
         />
       ) : description ? (
         <p className="text-sm text-muted-foreground">{description}</p>
@@ -204,8 +339,19 @@ export function ReportPage() {
           onChange={handleFilterChange}
         />
       ) : null}
+      {editing ? (
+        <div className="mt-2">
+          <ObjectModelConnectionSelector />
+        </div>
+      ) : null}
     </div>
   );
+
+  const exploreSearch = searchParams.toString();
+  const explorePath =
+    isExisting && reportId
+      ? `/reports/${reportId}/explore${exploreSearch ? `?${exploreSearch}` : ''}`
+      : null;
 
   const actions = (
     <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row">
@@ -231,18 +377,46 @@ export function ReportPage() {
           </Link>
         )
       ) : (
-        <Link
-          to={`/reports/${reportId}?edit=1`}
-          className="w-full sm:w-auto"
-        >
+        <>
+          {explorePath ? (
+            <Link to={explorePath} className="w-full sm:w-auto">
+              <Button
+                variant="outline"
+                className="h-11 w-full rounded-full sm:px-5"
+              >
+                <Compass className="mr-2 h-4 w-4" />
+                Explore
+              </Button>
+            </Link>
+          ) : null}
           <Button
             variant="outline"
-            className="h-11 w-full rounded-full sm:px-5"
+            className="h-11 rounded-full sm:px-5"
+            disabled={renderQuery.isFetching}
+            onClick={handlePrint}
           >
-            <Edit className="mr-2 h-4 w-4" />
-            Edit
+            <Printer className="mr-2 h-4 w-4" />
+            Print
           </Button>
-        </Link>
+          <Button
+            variant="outline"
+            className="h-11 rounded-full sm:px-5"
+            disabled={renderQuery.isFetching}
+            onClick={() => renderQuery.refetch()}
+          >
+            <RefreshCw className="mr-2 h-4 w-4" />
+            Refresh
+          </Button>
+          <Link to={`/reports/${reportId}?edit=1`} className="w-full sm:w-auto">
+            <Button
+              variant="outline"
+              className="h-11 w-full rounded-full sm:px-5"
+            >
+              <Edit className="mr-2 h-4 w-4" />
+              Edit
+            </Button>
+          </Link>
+        </>
       )}
       {editing && isExisting && reportId && existingReport ? (
         <ReportDeleteButton
@@ -270,18 +444,93 @@ export function ReportPage() {
       title={titleNode}
       toolbar={toolbar}
       action={actions}
+      className={!editing ? 'report-print-root' : undefined}
+      contentClassName={!editing ? 'report-print-content pb-16' : undefined}
     >
-      <ReportBuilderWizard
-        definition={definition}
-        schemas={schemas}
-        blockResults={blockResults}
-        editing={editing}
-        onChange={(nextDefinition) => {
-          setDefinition(nextDefinition);
-          setSaveError(null);
-          validateReport.reset();
-        }}
-      />
+      {needsReAuthoring ? (
+        <Alert className="mb-4 border-amber-400/60 bg-amber-50 dark:bg-amber-950/30">
+          <AlertTriangle className="h-4 w-4 text-amber-600" />
+          <AlertTitle>This report needs re-authoring</AlertTitle>
+          <AlertDescription>
+            <p className="mb-2 text-sm">
+              The stored definition no longer fits the current schema and
+              has been replaced with an empty stub. Saving now will
+              <strong> overwrite the stored JSON</strong> — the previous
+              content is preserved on the server until you do.
+            </p>
+            <p className="mb-3 text-xs text-muted-foreground">
+              Reason: <code>{needsReAuthoring}</code>
+            </p>
+            {editing ? (
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={() => setReAuthoringAccepted(true)}
+                disabled={reAuthoringAccepted}
+                data-testid="confirm-reauthor"
+              >
+                {reAuthoringAccepted
+                  ? 'Re-authoring confirmed — Save is enabled'
+                  : 'Re-author from scratch'}
+              </Button>
+            ) : null}
+          </AlertDescription>
+        </Alert>
+      ) : null}
+      {editing ? (
+        needsReAuthoring && !reAuthoringAccepted ? (
+          <div
+            className="rounded-md border border-dashed bg-muted/20 p-6 text-sm text-muted-foreground"
+            data-testid="reauthoring-editor-locked"
+          >
+            Editing is disabled until you click "Re-author from scratch"
+            above. This protects the stored definition from being
+            overwritten by the empty stub the loader fell back to.
+          </div>
+        ) : (
+          <Suspense
+            fallback={
+              <div className="h-96 animate-pulse rounded-xl bg-muted/30" />
+            }
+          >
+            <ReportBuilderWizardV2
+              key={reportId ?? 'new'}
+              definition={definition}
+              schemas={schemas}
+              editing={editing}
+              blockResults={blockResults}
+              filters={filterValues}
+              reportId={reportId}
+              onChange={(nextDefinition) => {
+                setDefinition(nextDefinition);
+                setSaveError(null);
+                validateReport.reset();
+              }}
+            />
+          </Suspense>
+        )
+      ) : needsReAuthoring ? (
+        <div
+          className="rounded-md border border-dashed bg-muted/20 p-6 text-sm text-muted-foreground"
+          data-testid="reauthoring-viewer-locked"
+        >
+          The report can't be rendered until it's re-authored. Open it in
+          edit mode to start.
+        </div>
+      ) : reportId ? (
+        <ReportRenderer
+          reportId={reportId}
+          definition={definition}
+          renderResponse={renderQuery.data}
+          filters={filterValues}
+          activeViewId={activeViewId ?? getDefaultReportViewId(definition)}
+          onFilterChange={handleFilterChange}
+          onFiltersChange={applyFilterUpdates}
+          onNavigateView={handleNavigateView}
+          onRefresh={() => renderQuery.refetch()}
+        />
+      ) : null}
       {saveError ? (
         <p className="mt-3 text-sm text-destructive">{saveError}</p>
       ) : null}

@@ -419,8 +419,8 @@ function CardField({
 
 function getDisplayValue(
   row: Record<string, unknown>,
-  displayField: string | undefined,
-  displayTemplate: string | undefined,
+  displayField: string | null | undefined,
+  displayTemplate: string | null | undefined,
   value: unknown
 ) {
   if (displayTemplate) {
@@ -511,12 +511,12 @@ function SubcardField({
   collapsed,
 }: {
   value: unknown;
-  config?: ReportCardConfig;
+  config?: ReportCardConfig | null;
   collapsed: boolean;
 }) {
   const [open, setOpen] = useState(!collapsed);
 
-  if (!config || config.groups.length === 0) {
+  if (!config || !config.groups || config.groups.length === 0) {
     return (
       <span className="text-xs text-destructive">Missing subcard config.</span>
     );
@@ -552,12 +552,13 @@ function SubtableField({
   collapsed,
 }: {
   value: unknown;
-  config?: ReportSubtableConfig;
+  config?: ReportSubtableConfig | null;
   collapsed: boolean;
 }) {
   const [open, setOpen] = useState(!collapsed);
 
-  if (!config || config.columns.length === 0) {
+  const columns = config?.columns ?? [];
+  if (!config || columns.length === 0) {
     return (
       <span className="text-xs text-destructive">Missing subtable config.</span>
     );
@@ -609,7 +610,7 @@ function SubtableField({
       <table className="w-full text-left text-xs">
         <thead className="bg-muted/40">
           <tr>
-            {config.columns.map((column) => (
+            {columns.map((column) => (
               <th
                 key={column.field}
                 className={`px-3 py-2 font-medium text-muted-foreground ${alignClass(column.align)}`}
@@ -625,7 +626,7 @@ function SubtableField({
               key={(row.id as string | undefined) ?? index}
               className="border-t"
             >
-              {config.columns.map((column) => (
+              {columns.map((column) => (
                 <td
                   key={column.field}
                   className={`px-3 py-2 align-top ${alignClass(column.align)}`}
@@ -700,7 +701,7 @@ function humanizePillLabel(value: unknown): string {
   return String(value ?? '');
 }
 
-function alignClass(align?: string) {
+function alignClass(align?: string | null) {
   if (align === 'right') return 'text-right';
   if (align === 'center') return 'text-center';
   return 'text-left';

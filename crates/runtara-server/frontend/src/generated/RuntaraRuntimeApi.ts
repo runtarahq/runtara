@@ -14,15 +14,14 @@
  * Data types for variables.
  * Matches the operator field types for consistency.
  */
-export enum VariableType {
-  String = "string",
-  Number = "number",
-  Integer = "integer",
-  Boolean = "boolean",
-  Array = "array",
-  Object = "object",
-  File = "file",
-}
+export type VariableType =
+  | "string"
+  | "number"
+  | "integer"
+  | "boolean"
+  | "array"
+  | "object"
+  | "file";
 
 /**
  * Type hints for reference values.
@@ -34,23 +33,16 @@ export enum VariableType {
  * - `boolean` for true/false
  * - `json` for pass-through JSON (distinct from `object`/`array` in VariableType)
  */
-export enum ValueType {
-  String = "string",
-  Integer = "integer",
-  Number = "number",
-  Boolean = "boolean",
-  Json = "json",
-  File = "file",
-}
+export type ValueType =
+  | "string"
+  | "integer"
+  | "number"
+  | "boolean"
+  | "json"
+  | "file";
 
 /** Trigger type for invocation triggers */
-export enum TriggerType {
-  HTTP = "HTTP",
-  CRON = "CRON",
-  EMAIL = "EMAIL",
-  APPLICATION = "APPLICATION",
-  CHANNEL = "CHANNEL",
-}
+export type TriggerType = "HTTP" | "CRON" | "EMAIL" | "APPLICATION" | "CHANNEL";
 
 /**
  * Optional secondary text-index annotation for string-typed columns.
@@ -58,119 +50,188 @@ export enum TriggerType {
  * `Trigram` causes a `gin_trgm_ops` GIN index to be created alongside the
  * table, which speeds up `SIMILARITY_GTE` and `similarity()` scoring.
  */
-export enum TextIndexKind {
-  None = "none",
-  Trigram = "trigram",
-}
+export type TextIndexKind = "none" | "trigram";
 
 /** Termination type providing context for why an execution terminated */
-export enum TerminationType {
-  NormalCompletion = "normal_completion",
-  UserInitiated = "user_initiated",
-  QueueTimeout = "queue_timeout",
-  ExecutionTimeout = "execution_timeout",
-  SystemError = "system_error",
-}
+export type TerminationType =
+  | "normal_completion"
+  | "user_initiated"
+  | "queue_timeout"
+  | "execution_timeout"
+  | "system_error";
 
 /**
  * Match type for switch cases.
  * Supports all ConditionOperator values plus compound match types.
  */
-export enum SwitchMatchType {
-  GT = "GT",
-  GTE = "GTE",
-  LT = "LT",
-  LTE = "LTE",
-  EQ = "EQ",
-  NE = "NE",
-  STARTS_WITH = "STARTS_WITH",
-  ENDS_WITH = "ENDS_WITH",
-  CONTAINS = "CONTAINS",
-  IN = "IN",
-  NOT_IN = "NOT_IN",
-  IS_DEFINED = "IS_DEFINED",
-  IS_EMPTY = "IS_EMPTY",
-  IS_NOT_EMPTY = "IS_NOT_EMPTY",
-  BETWEEN = "BETWEEN",
-  RANGE = "RANGE",
-}
+export type SwitchMatchType =
+  | "GT"
+  | "GTE"
+  | "LT"
+  | "LTE"
+  | "EQ"
+  | "NE"
+  | "STARTS_WITH"
+  | "ENDS_WITH"
+  | "CONTAINS"
+  | "IN"
+  | "NOT_IN"
+  | "IS_DEFINED"
+  | "IS_EMPTY"
+  | "IS_NOT_EMPTY"
+  | "BETWEEN"
+  | "RANGE";
 
 /** Sort direction. JSON encoding is UPPERCASE (`"ASC"` / `"DESC"`). */
-export enum SortDirection {
-  ASC = "ASC",
-  DESC = "DESC",
-}
+export type SortDirection = "ASC" | "DESC";
 
 /**
  * Data types for schema fields.
  * Used in input/output schema definitions.
  */
-export enum SchemaFieldType {
-  String = "string",
-  Integer = "integer",
-  Number = "number",
-  Boolean = "boolean",
-  Array = "array",
-  Object = "object",
-  File = "file",
-}
+export type SchemaFieldType =
+  | "string"
+  | "integer"
+  | "number"
+  | "boolean"
+  | "array"
+  | "object"
+  | "file";
+
+export type ReportWorkflowRuntimeEntity =
+  | "instances"
+  | "actions"
+  | "runtime_execution_metric_buckets"
+  | "runtime_system_snapshot"
+  | "connection_rate_limit_status"
+  | "connection_rate_limit_events"
+  | "connection_rate_limit_timeline";
+
+export type ReportWorkflowActionContextMode =
+  | "row"
+  | "field"
+  | "value"
+  | "selection";
+
+export type ReportTableColumnType =
+  | "value"
+  | "chart"
+  | "workflow_button"
+  | "interaction_buttons";
+
+export type ReportStatus = "draft" | "published" | "archived";
+
+export type ReportSourceMode = "filter" | "aggregate";
+
+export type ReportSourceKind = "object_model" | "workflow_runtime" | "system";
+
+export type ReportJoinKind = "inner" | "left";
+
+export type ReportFilterType =
+  | "select"
+  | "multi_select"
+  | "radio"
+  | "checkbox"
+  | "time_range"
+  | "number_range"
+  | "text"
+  | "search";
+
+export type ReportEditorKind =
+  | "text"
+  | "textarea"
+  | "number"
+  | "select"
+  | "toggle"
+  | "date"
+  | "datetime"
+  | "lookup";
+
+export type ReportDatasetValueFormat =
+  | "string"
+  | "number"
+  | "decimal"
+  | "currency"
+  | "percent"
+  | "boolean"
+  | "date"
+  | "datetime";
+
+export type ReportDatasetFieldType =
+  | "string"
+  | "number"
+  | "decimal"
+  | "boolean"
+  | "date"
+  | "datetime"
+  | "json";
+
+export type ReportChartKind = "line" | "bar" | "area" | "pie" | "donut";
+
+export type ReportCardFieldKind =
+  | "value"
+  | "json"
+  | "markdown"
+  | "subcard"
+  | "subtable"
+  | "workflow_button";
+
+export type ReportBlockType =
+  | "table"
+  | "chart"
+  | "metric"
+  | "actions"
+  | "markdown"
+  | "card";
+
+export type ReportBlockStatus = "ready" | "loading" | "empty" | "error";
+
+export type ReportAggregateFn =
+  | "count"
+  | "sum"
+  | "avg"
+  | "min"
+  | "max"
+  | "first_value"
+  | "last_value"
+  | "percentile_cont"
+  | "percentile_disc"
+  | "stddev_samp"
+  | "var_samp"
+  | "expr";
 
 /** Rate limit event types */
-export enum RateLimitEventType {
-  Request = "request",
-  RateLimited = "rate_limited",
-  Retry = "retry",
-}
+export type RateLimitEventType = "request" | "rate_limited" | "retry";
 
 /** Memory allocation tier for workflow execution */
-export enum MemoryTier {
-  S = "S",
-  M = "M",
-  L = "L",
-  XL = "XL",
-}
+export type MemoryTier = "S" | "M" | "L" | "XL";
 
 /** Log level for Log steps */
-export enum LogLevel {
-  Debug = "debug",
-  Info = "info",
-  Warn = "warn",
-  Error = "error",
-}
+export type LogLevel = "debug" | "info" | "warn" | "error";
 
 /** Severity of a validation issue */
-export enum IssueSeverity {
-  Error = "error",
-  Warning = "warning",
-}
+export type IssueSeverity = "error" | "warning";
 
 /** Category of validation issue */
-export enum IssueCategory {
-  MissingStep = "missing_step",
-  UnknownFieldPath = "unknown_field_path",
-  InvalidReferencePath = "invalid_reference_path",
-  MissingConnection = "missing_connection",
-}
+export type IssueCategory =
+  | "missing_step"
+  | "unknown_field_path"
+  | "invalid_reference_path"
+  | "missing_connection";
 
 /** Execution status representing the current state of a workflow execution */
-export enum ExecutionStatus {
-  Queued = "queued",
-  Compiling = "compiling",
-  Running = "running",
-  Suspended = "suspended",
-  Completed = "completed",
-  Failed = "failed",
-  Timeout = "timeout",
-  Cancelled = "cancelled",
-}
+export type ExecutionStatus =
+  | "queued"
+  | "compiling"
+  | "running"
+  | "suspended"
+  | "completed"
+  | "failed"
+  | "timeout"
+  | "cancelled";
 
 /** Error severity for logging and alerting. */
-export enum ErrorSeverity {
-  Info = "info",
-  Warning = "warning",
-  Error = "error",
-  Critical = "critical",
-}
+export type ErrorSeverity = "info" | "warning" | "error" | "critical";
 
 /**
  * Error category for structured errors.
@@ -184,17 +245,13 @@ export enum ErrorSeverity {
  * - `code`: e.g., `VALIDATION_*` vs `BUSINESS_*` or `CREDIT_LIMIT_EXCEEDED`
  * - `severity`: `error` for technical, `warning` for expected business outcomes
  */
-export enum ErrorCategory {
-  Transient = "transient",
-  Permanent = "permanent",
-}
+export type ErrorCategory = "transient" | "permanent";
 
-export enum ConnectionStatus {
-  UNKNOWN = "UNKNOWN",
-  ACTIVE = "ACTIVE",
-  REQUIRES_RECONNECTION = "REQUIRES_RECONNECTION",
-  INVALID_CREDENTIALS = "INVALID_CREDENTIALS",
-}
+export type ConnectionStatus =
+  | "UNKNOWN"
+  | "ACTIVE"
+  | "REQUIRES_RECONNECTION"
+  | "INVALID_CREDENTIALS";
 
 /**
  * Canonical list of connection categories.
@@ -202,19 +259,18 @@ export enum ConnectionStatus {
  * Used for grouping connection types in the UI and API responses.
  * When adding a new integration, pick the most specific category that fits.
  */
-export enum ConnectionCategory {
-  Ecommerce = "ecommerce",
-  FileStorage = "file_storage",
-  Llm = "llm",
-  Crm = "crm",
-  Erp = "erp",
-  Database = "database",
-  Email = "email",
-  Messaging = "messaging",
-  Payment = "payment",
-  Cloud = "cloud",
-  Api = "api",
-}
+export type ConnectionCategory =
+  | "ecommerce"
+  | "file_storage"
+  | "llm"
+  | "crm"
+  | "erp"
+  | "database"
+  | "email"
+  | "messaging"
+  | "payment"
+  | "cloud"
+  | "api";
 
 /**
  * Canonical list of authentication / credential types for connections.
@@ -222,83 +278,67 @@ export enum ConnectionCategory {
  * Describes **what credentials** are used to authenticate, not how they are
  * transported (e.g. bearer header is a delivery mechanism, not a credential type).
  */
-export enum ConnectionAuthType {
-  ApiKey = "api_key",
-  Oauth2AuthorizationCode = "oauth2_authorization_code",
-  Oauth2ClientCredentials = "oauth2_client_credentials",
-  UsernamePassword = "username_password",
-  SshKey = "ssh_key",
-  AccessKey = "access_key",
-  ConnectionString = "connection_string",
-  Custom = "custom",
-}
+export type ConnectionAuthType =
+  | "api_key"
+  | "oauth2_authorization_code"
+  | "oauth2_client_credentials"
+  | "username_password"
+  | "ssh_key"
+  | "access_key"
+  | "connection_string"
+  | "custom";
 
 /** Condition expression operators */
-export enum ConditionOperator {
-  AND = "AND",
-  OR = "OR",
-  NOT = "NOT",
-  GT = "GT",
-  GTE = "GTE",
-  LT = "LT",
-  LTE = "LTE",
-  EQ = "EQ",
-  NE = "NE",
-  STARTS_WITH = "STARTS_WITH",
-  ENDS_WITH = "ENDS_WITH",
-  CONTAINS = "CONTAINS",
-  IN = "IN",
-  NOT_IN = "NOT_IN",
-  LENGTH = "LENGTH",
-  IS_DEFINED = "IS_DEFINED",
-  IS_EMPTY = "IS_EMPTY",
-  IS_NOT_EMPTY = "IS_NOT_EMPTY",
-  SIMILARITY_GTE = "SIMILARITY_GTE",
-  MATCH = "MATCH",
-  COSINE_DISTANCE_LTE = "COSINE_DISTANCE_LTE",
-  L2_DISTANCE_LTE = "L2_DISTANCE_LTE",
-}
+export type ConditionOperator =
+  | "AND"
+  | "OR"
+  | "NOT"
+  | "GT"
+  | "GTE"
+  | "LT"
+  | "LTE"
+  | "EQ"
+  | "NE"
+  | "STARTS_WITH"
+  | "ENDS_WITH"
+  | "CONTAINS"
+  | "IN"
+  | "NOT_IN"
+  | "LENGTH"
+  | "IS_DEFINED"
+  | "IS_EMPTY"
+  | "IS_NOT_EMPTY"
+  | "SIMILARITY_GTE"
+  | "MATCH"
+  | "COSINE_DISTANCE_LTE"
+  | "L2_DISTANCE_LTE";
 
 /** Strategy for compacting conversation memory. */
-export enum CompactionStrategy {
-  Summarize = "summarize",
-  SlidingWindow = "slidingWindow",
-}
+export type CompactionStrategy = "summarize" | "slidingWindow";
 
 /** Behavior on per-row validation failure for bulk-create. */
-export enum BulkValidationMode {
-  Stop = "stop",
-  Skip = "skip",
-}
+export type BulkValidationMode = "stop" | "skip";
 
 /** Behavior on unique-key conflict for bulk-create. */
-export enum BulkConflictMode {
-  Error = "error",
-  Skip = "skip",
-  Upsert = "upsert",
-}
+export type BulkConflictMode = "error" | "skip" | "upsert";
 
 /** LLM provider used by an AI Agent step. */
-export enum AiAgentProvider {
-  Openai = "openai",
-  Bedrock = "bedrock",
-}
+export type AiAgentProvider = "openai" | "bedrock";
 
 /** Aggregate function. JSON encoding is SCREAMING_SNAKE_CASE. */
-export enum AggregateFn {
-  COUNT = "COUNT",
-  SUM = "SUM",
-  AVG = "AVG",
-  MIN = "MIN",
-  MAX = "MAX",
-  FIRST_VALUE = "FIRST_VALUE",
-  LAST_VALUE = "LAST_VALUE",
-  PERCENTILE_CONT = "PERCENTILE_CONT",
-  PERCENTILE_DISC = "PERCENTILE_DISC",
-  STDDEV_SAMP = "STDDEV_SAMP",
-  VAR_SAMP = "VAR_SAMP",
-  EXPR = "EXPR",
-}
+export type AggregateFn =
+  | "COUNT"
+  | "SUM"
+  | "AVG"
+  | "MIN"
+  | "MAX"
+  | "FIRST_VALUE"
+  | "LAST_VALUE"
+  | "PERCENTILE_CONT"
+  | "PERCENTILE_DISC"
+  | "STDDEV_SAMP"
+  | "VAR_SAMP"
+  | "EXPR";
 
 /** API-compatible agent info */
 export interface AgentInfo {
@@ -358,11 +398,24 @@ export interface AgentStep {
   timeout?: number | null;
 }
 
-/** Simplified agent info without capabilities (for list endpoint) */
+/**
+ * Simplified agent info without capabilities (for list endpoint).
+ *
+ * Includes `integrationIds` and `supportsConnections` so callers (and MCP
+ * agents) can identify which agents need a connection without an extra
+ * `get_agent` round-trip per agent.
+ */
 export interface AgentSummary {
   description: string;
   id: string;
+  /**
+   * Connection types this agent can use (e.g. "shopify_access_token",
+   * "openai_api_key"). Pass any of these to `list_connections` as the
+   * `integration_id` filter to find usable connections.
+   */
+  integrationIds: string[];
   name: string;
+  supportsConnections: boolean;
 }
 
 export interface AggregateOrderBy {
@@ -798,6 +851,13 @@ export interface ApiResponseWorkflowDto {
   success: boolean;
 }
 
+export interface BlockPosition {
+  afterId?: string | null;
+  beforeId?: string | null;
+  /** @min 0 */
+  index?: number | null;
+}
+
 export interface BucketDto {
   /** Creation date (ISO 8601) */
   creationDate: string;
@@ -1188,7 +1248,14 @@ export interface ConditionOperation {
   op: ConditionOperator;
 }
 
-/** Evaluates conditions and branches execution */
+/**
+ * Evaluates a condition and branches execution.
+ *
+ * Runtime stores the evaluated boolean as `steps.<id>.outputs.result` for
+ * inspection and later mappings. Branch routing still uses executionPlan edges
+ * labeled `"true"` and `"false"`; do not route Conditional branches with
+ * edge-level conditions.
+ */
 export interface ConditionalStep {
   /** When true, execution pauses before this step in debug mode */
   breakpoint?: boolean | null;
@@ -1227,6 +1294,8 @@ export interface ConnectionCategoryDto {
 export interface ConnectionDto {
   connectionSubtype?: string | null;
   createdAt: string;
+  /** Agent/operator ids this connection is the tenant default for. */
+  defaultFor?: string[];
   id: string;
   /** Connection type identifier that maps to a connection schema (e.g., shopify_access_token, bearer, sftp) */
   integrationId?: string | null;
@@ -1338,6 +1407,7 @@ export interface CreateBucketResponse {
 export interface CreateConnectionRequest {
   connectionParameters?: any;
   connectionSubtype?: string | null;
+  defaultFor?: string[] | null;
   /** Connection type identifier that maps to a connection schema (e.g., shopify_access_token, bearer, sftp) */
   integrationId?: string | null;
   isDefaultFileStorage?: boolean | null;
@@ -1394,6 +1464,15 @@ export interface CreateInvocationTriggerRequest {
    * @example "workflow-456"
    */
   workflow_id: string;
+}
+
+export interface CreateReportRequest {
+  definition: ReportDefinition;
+  description?: string | null;
+  name: string;
+  slug?: string | null;
+  status?: ReportStatus;
+  tags?: string[];
 }
 
 export interface CreateSchemaRequest {
@@ -1492,8 +1571,9 @@ export interface CsvValidationError {
  * This is a **durable** delay: if the workflow crashes during the delay,
  * it will resume from where it left off rather than restarting the delay.
  *
- * For native platforms, this uses `sdk.durable_sleep()` which stores
- * the wake time in the database. For WASI/embedded, it uses blocking sleep.
+ * For native platforms, this uses `sdk.sleep()` (which forwards to
+ * `backend.durable_sleep()`) and stores the wake time in the database.
+ * For WASI/embedded, it uses blocking sleep.
  *
  * Example:
  * ```json
@@ -1519,7 +1599,7 @@ export interface DelayStep {
   breakpoint?: boolean | null;
   /**
    * Disable durability for this step when `Some(false)`. Uses
-   * `std::thread::sleep` instead of `sdk.durable_sleep` — the delay is
+   * `std::thread::sleep` instead of `sdk.sleep` — the delay is
    * not suspendable or resumable across crashes.
    */
   durable?: boolean | null;
@@ -1536,6 +1616,11 @@ export interface DelayStep {
 
 /** Response for delete operation */
 export interface DeleteConnectionResponse {
+  message: string;
+  success: boolean;
+}
+
+export interface DeleteReportResponse {
   message: string;
   success: boolean;
 }
@@ -1560,6 +1645,19 @@ export interface DiskInfo {
    * @min 0
    */
   totalBytes: number;
+}
+
+export interface EditReportRequest {
+  /**
+   * Atomic batch of edit operations applied in order; if any op
+   * fails the entire batch is rolled back.
+   */
+  ops?: ReportEditOp[];
+}
+
+export interface EditReportResponse {
+  report: ReportDto;
+  success: boolean;
 }
 
 /** Executes a nested child workflow */
@@ -1806,13 +1904,15 @@ export interface ExecutionGraph {
  * 3. **Parallel edges** (without conditions OR labels): Multiple unlabeled, condition-less
  *    edges can exist - they execute in parallel (e.g., fan-out patterns).
  *
- * 4. **Conditional step exception**: `true`/`false` labeled edges from a Conditional step
- *    are mutually exclusive based on the condition result, not evaluated via edge conditions.
+ * 4. **Conditional step exception**: Outgoing edges from a Conditional step must use
+ *    `true`/`false` labels. The step's own `condition` chooses the branch; edge-level
+ *    `condition` and `priority` fields are not evaluated for Conditional branches.
  *
  * # Validation Rules
  *
  * - Multiple conditional edges from the same step with the same label must have unique priorities
  * - At most one default (condition-less) edge per (from_step, label) pair
+ * - Conditional step outgoing edges must be unconditioned `true`/`false` branches
  * - If no condition matches and no default exists, the workflow fails (for onError) or continues normally
  */
 export interface ExecutionPlanEdge {
@@ -1821,6 +1921,8 @@ export interface ExecutionPlanEdge {
    *
    * Uses the same format as `Conditional` step conditions, supporting
    * operators like EQ, AND, OR, STARTS_WITH, CONTAINS, etc.
+   * Do not set this on outgoing edges from a `Conditional` step; use the
+   * `Conditional.condition` field plus `true`/`false` edge labels instead.
    *
    * Available context for conditions:
    * - `data.*` - Input data
@@ -2049,6 +2151,11 @@ export interface GetRateLimitStatusResponse {
   success: boolean;
 }
 
+export interface GetReportResponse {
+  report: ReportDto;
+  success: boolean;
+}
+
 export interface GetSchemaResponse {
   schema: Schema;
   success: boolean;
@@ -2253,6 +2360,32 @@ export interface KnownErrorInfo {
   kind: string;
 }
 
+/**
+ * Destination for a layout-node insert / move.
+ *
+ * `parent_node_id` must reference a `Grid` node and the operation
+ * targets that grid's `items` array. When `None`, the operation targets
+ * the report's mandatory root grid (`definition.layout`) — that's the
+ * only valid container outside an explicit `parent_node_id`. The
+ * position fields are mutually exclusive — pick one of
+ * index / before_id / after_id (or none, in which case the node is
+ * appended at the end).
+ *
+ * Phase 9 collapse: previous versions carried a `columnId` field for
+ * the legacy `columns` layout type. With grid-only containers there is
+ * no second-level indirection — items live directly on a Grid.
+ * Phase 10 collapse: `parent_node_id == None` used to mean "root Vec
+ * of layout nodes"; the root is now a single grid, so `None` resolves
+ * to that root grid's items.
+ */
+export interface LayoutTarget {
+  afterId?: string | null;
+  beforeId?: string | null;
+  /** @min 0 */
+  index?: number | null;
+  parentNodeId?: string | null;
+}
+
 /** Response for listing all agents */
 export interface ListAgentsResponse {
   agents: AgentSummary[];
@@ -2348,6 +2481,11 @@ export interface ListRateLimitsResponse {
   /** @min 0 */
   count: number;
   data: RateLimitStatusDto[];
+  success: boolean;
+}
+
+export interface ListReportsResponse {
+  reports: ReportSummary[];
   success: boolean;
 }
 
@@ -2856,6 +2994,1040 @@ export interface RenameFolderResponse {
   workflowsUpdated: number;
 }
 
+export interface ReportActionSubmitConfig {
+  implicitPayload?: Partial<Record<string, any>>;
+  label?: string | null;
+}
+
+export interface ReportActionsConfig {
+  submit?: null | ReportActionSubmitConfig;
+}
+
+export interface ReportAggregateSpec {
+  alias: string;
+  distinct?: boolean;
+  expression?: any;
+  field?: string | null;
+  op: ReportAggregateFn;
+  orderBy?: ReportOrderBy[];
+  /**
+   * Fraction in `[0.0, 1.0]` for `percentile_cont` / `percentile_disc`
+   * aggregates. Required for those ops, rejected otherwise.
+   * @format double
+   */
+  percentile?: number | null;
+}
+
+export interface ReportBlockDataRequest {
+  blockFilters?: Partial<Record<string, any>>;
+  id: string;
+  page?: null | ReportPageRequest;
+  search?: null | ReportTableSearchRequest;
+  sort?: ReportOrderBy[];
+}
+
+export interface ReportBlockDatasetQuery {
+  datasetFilters?: ReportDatasetFilter[];
+  dimensions?: string[];
+  id: string;
+  /** @format int64 */
+  limit?: number | null;
+  measures?: string[];
+  orderBy?: ReportOrderBy[];
+}
+
+export interface ReportBlockDefinition {
+  actions?: null | ReportActionsConfig;
+  card?: null | ReportCardConfig;
+  chart?: null | ReportChartConfig;
+  dataset?: null | ReportBlockDatasetQuery;
+  filters?: ReportFilterDefinition[];
+  /**
+   * When true, the renderer drops the entire block (title bar included) if
+   * its data is empty (e.g. zero table rows or zero open actions). Useful
+   * for action lists or "open issues" tables that should disappear once
+   * there's nothing to show, rather than rendering a stub "No items"
+   * state.
+   */
+  hideWhenEmpty?: boolean;
+  id: string;
+  interactions?: ReportInteractionDefinition[];
+  lazy?: boolean;
+  markdown?: null | ReportMarkdownConfig;
+  metric?: null | ReportMetricConfig;
+  showWhen?: any;
+  source?: ReportSource;
+  table?: null | ReportTableConfig;
+  title?: string | null;
+  type: ReportBlockType;
+}
+
+export interface ReportBlockError {
+  blockId?: string | null;
+  code: string;
+  message: string;
+}
+
+export interface ReportBlockLayoutNode {
+  blockId: string;
+  id: string;
+  showWhen?: any;
+}
+
+export interface ReportBlockOnlyDataRequest {
+  blockFilters?: Partial<Record<string, any>>;
+  filters?: Partial<Record<string, any>>;
+  page?: null | ReportPageRequest;
+  search?: null | ReportTableSearchRequest;
+  sort?: ReportOrderBy[];
+  timezone?: string | null;
+}
+
+export interface ReportBlockRenderResult {
+  data?: any;
+  error?: null | ReportBlockError;
+  status?: ReportBlockStatus;
+  title?: string | null;
+  type: ReportBlockType;
+}
+
+/**
+ * Card block configuration. A card renders a single record (the first row of
+ * a filter-mode source) as a vertical key→value layout, optionally split into
+ * titled groups with multi-column inner grids and per-field formatting.
+ */
+export interface ReportCardConfig {
+  groups?: ReportCardGroup[];
+}
+
+export interface ReportCardField {
+  /**
+   * Span in inner-grid columns. Default 1; use 2+ for fields that should
+   * occupy a wider slot than their siblings (e.g. long descriptions).
+   * @format int32
+   * @min 0
+   */
+  colSpan?: number;
+  /**
+   * Whether the field starts collapsed. Only meaningful for `kind=json` /
+   * `kind=markdown` / `kind=subcard` / `kind=subtable`.
+   */
+  collapsed?: boolean;
+  /**
+   * Optional row property to display instead of `field` while preserving
+   * `field` as the writeback target. Useful for lookup/reference fields
+   * where the row stores an id but a joined label should be shown.
+   */
+  displayField?: string | null;
+  /**
+   * Optional display-only template rendered from the row. Does not affect
+   * filtering, sorting, or writeback; `field` remains the storage target.
+   */
+  displayTemplate?: string | null;
+  /**
+   * Opt-in writeback for this field. Only honored when the rendered row
+   * carries `id` and `schemaId` (filter-mode object-model sources). The
+   * renderer doesn't enforce this on the server — the FE shows an editor
+   * that calls the object-model PUT endpoint directly, which performs its
+   * own auth + type validation.
+   */
+  editable?: boolean;
+  /**
+   * Optional explicit editor configuration. When set, takes precedence
+   * over the default control inferred from `format` / `pillVariants`.
+   */
+  editor?: null | ReportEditorConfig;
+  field: string;
+  format?: string | null;
+  /**
+   * How to render this field. `value` runs through the standard cell
+   * formatter (date/currency/pill/etc); `json` shows a collapsible JSON
+   * tree; `markdown` renders the value as markdown; `subcard` renders a
+   * nested object as a card with its own `groups`; `subtable` renders an
+   * array of objects as a small inline table with its own `columns`.
+   */
+  kind?: ReportCardFieldKind;
+  label?: string | null;
+  /**
+   * Pill variants for `kind=value` + `format=pill`. Maps the cell value to
+   * a badge variant (`success`, `warning`, `destructive`, `default`, …) so
+   * enum/status fields can be color-coded.
+   */
+  pillVariants?: Partial<Record<string, string>> | null;
+  /**
+   * Recursive card config used when `kind=subcard`. The value at `field`
+   * must be a JSON object; the inner groups read keys off that object.
+   */
+  subcard?: null | ReportCardConfig;
+  /**
+   * Inline-table config used when `kind=subtable`. The value at `field`
+   * must be a JSON array of objects.
+   */
+  subtable?: null | ReportSubtableConfig;
+  /**
+   * Optional workflow launcher rendered as a button for this card field.
+   * The frontend executes the referenced workflow with either the whole row,
+   * this field value, or a configured row field as the workflow input context.
+   */
+  workflowAction?: null | ReportWorkflowActionConfig;
+}
+
+export interface ReportCardGroup {
+  /**
+   * Number of columns to lay fields out in within this group (1–4).
+   * @format int32
+   * @min 0
+   */
+  columns?: number;
+  description?: string | null;
+  fields: ReportCardField[];
+  id: string;
+  title?: string | null;
+}
+
+export interface ReportChartConfig {
+  kind: ReportChartKind;
+  series?: ReportChartSeries[];
+  x: string;
+}
+
+export interface ReportChartSeries {
+  field: string;
+  label?: string | null;
+}
+
+export interface ReportDatasetDefinition {
+  dimensions?: ReportDatasetDimension[];
+  id: string;
+  label: string;
+  measures?: ReportDatasetMeasure[];
+  source: ReportDatasetSource;
+  timeDimension?: string | null;
+}
+
+export interface ReportDatasetDimension {
+  field: string;
+  format?: null | ReportDatasetValueFormat;
+  label: string;
+  type: ReportDatasetFieldType;
+}
+
+export interface ReportDatasetFilter {
+  field: string;
+  op?: string;
+  value: any;
+}
+
+export interface ReportDatasetMeasure {
+  distinct?: boolean;
+  expression?: any;
+  field?: string | null;
+  format: ReportDatasetValueFormat;
+  id: string;
+  label: string;
+  op: ReportAggregateFn;
+  orderBy?: ReportOrderBy[];
+  /** @format double */
+  percentile?: number | null;
+}
+
+export interface ReportDatasetQueryColumn {
+  format?: null | ReportDatasetValueFormat;
+  key: string;
+  label: string;
+  type: string;
+}
+
+export interface ReportDatasetQueryMetadata {
+  id: string;
+}
+
+export interface ReportDatasetQueryPage {
+  hasNextPage: boolean;
+  /** @format int64 */
+  offset: number;
+  /** @format int64 */
+  size: number;
+  /** @format int64 */
+  totalCount: number;
+}
+
+export interface ReportDatasetQueryRequest {
+  datasetFilters?: ReportDatasetFilter[];
+  dimensions?: string[];
+  filters?: Partial<Record<string, any>>;
+  /** @format int64 */
+  limit?: number | null;
+  measures?: string[];
+  orderBy?: ReportOrderBy[];
+  page?: null | ReportPageRequest;
+  search?: null | ReportTableSearchRequest;
+  timezone?: string | null;
+}
+
+export interface ReportDatasetQueryResponse {
+  columns: ReportDatasetQueryColumn[];
+  dataset: ReportDatasetQueryMetadata;
+  page: ReportDatasetQueryPage;
+  rows: any[][];
+  success: boolean;
+}
+
+export interface ReportDatasetSource {
+  connectionId?: string | null;
+  schema: string;
+}
+
+export interface ReportDefinition {
+  blocks?: ReportBlockDefinition[];
+  datasets?: ReportDatasetDefinition[];
+  /** @format int32 */
+  definitionVersion?: number;
+  filters?: ReportFilterDefinition[];
+  /**
+   * The report's layout is a single mandatory root grid. Authors drop
+   * blocks (and nested grids for sub-sections) into its `items[]`. The
+   * `default_root_grid` fallback handles wire payloads that omit the
+   * field — repository migration converts legacy `layout: [...]`
+   * arrays into a wrapping root grid before deserialization.
+   */
+  layout?: ReportGridLayoutNode;
+  views?: ReportViewDefinition[];
+}
+
+export interface ReportDto {
+  /** @format date-time */
+  createdAt: string;
+  definition: ReportDefinition;
+  /** @format int32 */
+  definitionVersion: number;
+  description?: string | null;
+  id: string;
+  name: string;
+  /**
+   * Set when the stored JSON failed to deserialize into the current
+   * `ReportDefinition` shape (post-Phase 8 cutover). The returned
+   * `definition` is the empty stub; the FE should render a
+   * "needs re-authoring" state instead of trying to view/edit.
+   */
+  needsReAuthoring?: string | null;
+  slug: string;
+  status: ReportStatus;
+  tags?: string[];
+  /** @format date-time */
+  updatedAt: string;
+}
+
+export type ReportEditOp =
+  | {
+      block: ReportBlockDefinition;
+      kind: "add_block";
+      position?: BlockPosition;
+    }
+  | {
+      block: ReportBlockDefinition;
+      blockId: string;
+      kind: "replace_block";
+    }
+  | {
+      blockId: string;
+      kind: "patch_block";
+      patch: any;
+    }
+  | {
+      blockId: string;
+      kind: "move_block";
+      position?: BlockPosition;
+    }
+  | {
+      blockId: string;
+      kind: "remove_block";
+    }
+  | {
+      kind: "add_layout_node";
+      /**
+       * Layout primitive. Two variants only — `block` (leaf reference to
+       * `definition.blocks[i]`) and `grid` (recursive container). The legacy
+       * `section` / `columns` / `metric_row` types collapsed into `grid` in
+       * Phase 9; the repository's `parse_stored_definition` translates them
+       * transparently on read.
+       */
+      node: ReportLayoutNode;
+      /**
+       * Destination for a layout-node insert / move.
+       *
+       * `parent_node_id` must reference a `Grid` node and the operation
+       * targets that grid's `items` array. When `None`, the operation targets
+       * the report's mandatory root grid (`definition.layout`) — that's the
+       * only valid container outside an explicit `parent_node_id`. The
+       * position fields are mutually exclusive — pick one of
+       * index / before_id / after_id (or none, in which case the node is
+       * appended at the end).
+       *
+       * Phase 9 collapse: previous versions carried a `columnId` field for
+       * the legacy `columns` layout type. With grid-only containers there is
+       * no second-level indirection — items live directly on a Grid.
+       * Phase 10 collapse: `parent_node_id == None` used to mean "root Vec
+       * of layout nodes"; the root is now a single grid, so `None` resolves
+       * to that root grid's items.
+       */
+      target?: LayoutTarget;
+    }
+  | {
+      kind: "replace_layout_node";
+      /**
+       * Layout primitive. Two variants only — `block` (leaf reference to
+       * `definition.blocks[i]`) and `grid` (recursive container). The legacy
+       * `section` / `columns` / `metric_row` types collapsed into `grid` in
+       * Phase 9; the repository's `parse_stored_definition` translates them
+       * transparently on read.
+       */
+      node: ReportLayoutNode;
+      nodeId: string;
+    }
+  | {
+      kind: "patch_layout_node";
+      nodeId: string;
+      patch: any;
+    }
+  | {
+      kind: "move_layout_node";
+      nodeId: string;
+      /**
+       * Destination for a layout-node insert / move.
+       *
+       * `parent_node_id` must reference a `Grid` node and the operation
+       * targets that grid's `items` array. When `None`, the operation targets
+       * the report's mandatory root grid (`definition.layout`) — that's the
+       * only valid container outside an explicit `parent_node_id`. The
+       * position fields are mutually exclusive — pick one of
+       * index / before_id / after_id (or none, in which case the node is
+       * appended at the end).
+       *
+       * Phase 9 collapse: previous versions carried a `columnId` field for
+       * the legacy `columns` layout type. With grid-only containers there is
+       * no second-level indirection — items live directly on a Grid.
+       * Phase 10 collapse: `parent_node_id == None` used to mean "root Vec
+       * of layout nodes"; the root is now a single grid, so `None` resolves
+       * to that root grid's items.
+       */
+      target?: LayoutTarget;
+    }
+  | {
+      kind: "remove_layout_node";
+      nodeId: string;
+    };
+
+/**
+ * Explicit editor configuration for an editable column or card field.
+ *
+ * When omitted, the FE infers a control from the column's `format` /
+ * `pillVariants` (number for currency/decimal/percent, date for date,
+ * select for pill with variants, toggle for booleans, text otherwise).
+ * When set, the explicit `kind` wins.
+ */
+export interface ReportEditorConfig {
+  kind: ReportEditorKind;
+  /**
+   * Dynamic object-model lookup configuration for `kind=lookup`.
+   * The editor displays labels from the lookup schema but commits the
+   * selected value back to the edited row field.
+   */
+  lookup?: null | ReportLookupConfig;
+  /**
+   * Max value for `kind=number`.
+   * @format double
+   */
+  max?: number | null;
+  /**
+   * Min value for `kind=number`.
+   * @format double
+   */
+  min?: number | null;
+  /** Static option list for `kind=select`. */
+  options?: ReportEditorOption[];
+  /** Placeholder shown in empty inputs. */
+  placeholder?: string | null;
+  /** Validation regex for `kind=text` / `kind=textarea`. */
+  regex?: string | null;
+  /**
+   * Step / precision for `kind=number`.
+   * @format double
+   */
+  step?: number | null;
+}
+
+export interface ReportEditorOption {
+  label: string;
+  value: any;
+}
+
+export interface ReportFilterDefinition {
+  appliesTo?: ReportFilterTarget[];
+  default?: any;
+  id: string;
+  label: string;
+  options?: any;
+  required?: boolean;
+  /**
+   * When true, any block whose source `condition` references this filter
+   * will short-circuit to an empty result if the filter has no value at
+   * render time. Use this for navigation-driven filters (e.g. populated by
+   * row-click + navigate_view) so the block never silently falls back to an
+   * unfiltered query when the filter is missing from the URL/state.
+   */
+  strictWhenReferenced?: boolean;
+  type: ReportFilterType;
+}
+
+export interface ReportFilterOption {
+  /** @format int64 */
+  count?: number | null;
+  label: string;
+  value: any;
+}
+
+export interface ReportFilterOptionsMetadata {
+  id: string;
+}
+
+export interface ReportFilterOptionsPage {
+  hasNextPage: boolean;
+  /** @format int64 */
+  offset: number;
+  /** @format int64 */
+  size: number;
+  /** @format int64 */
+  totalCount: number;
+}
+
+export interface ReportFilterOptionsRequest {
+  filters?: Partial<Record<string, any>>;
+  /** @format int64 */
+  limit?: number;
+  /** @format int64 */
+  offset?: number;
+  query?: string | null;
+  timezone?: string | null;
+}
+
+export interface ReportFilterOptionsResponse {
+  filter: ReportFilterOptionsMetadata;
+  options: ReportFilterOption[];
+  page: ReportFilterOptionsPage;
+  success: boolean;
+}
+
+export interface ReportFilterTarget {
+  blockId?: string | null;
+  field: string;
+  filterId?: string | null;
+  op?: string;
+}
+
+export interface ReportGridLayoutItem {
+  /**
+   * Layout primitive. Two variants only — `block` (leaf reference to
+   * `definition.blocks[i]`) and `grid` (recursive container). The legacy
+   * `section` / `columns` / `metric_row` types collapsed into `grid` in
+   * Phase 9; the repository's `parse_stored_definition` translates them
+   * transparently on read.
+   */
+  child: ReportLayoutNode;
+  /** @format int64 */
+  colSpan?: number | null;
+  id: string;
+  /** @format int64 */
+  rowSpan?: number | null;
+}
+
+/**
+ * Grid container with optional title/description and a list of items.
+ * Every layout container — single-column section, multi-column row,
+ * metric-block row, arbitrary 2D grid — is expressed as a `Grid` with
+ * different `columns` + `column_widths` + per-item `col_span` /
+ * `row_span`. Items can be blocks or nested grids.
+ */
+export interface ReportGridLayoutNode {
+  /**
+   * Optional fractional column widths. Length must match `columns`
+   * when set. Defaults to equal split.
+   */
+  columnWidths?: number[] | null;
+  /**
+   * Column count for the grid. Defaults to 1 (single-column = legacy
+   * "section" shape).
+   * @format int64
+   */
+  columns?: number | null;
+  /** Optional secondary text rendered beneath the title. */
+  description?: string | null;
+  id: string;
+  items: ReportGridLayoutItem[];
+  /**
+   * Optional row count. Authoring affordance — when set, the editor
+   * renders `rows × columns` cells so empty slots are visible before
+   * content is added. The viewer renders rows implicitly from items
+   * regardless. When `rows` is less than the rows needed to fit
+   * `items`, the viewer/editor grows to fit.
+   * @format int64
+   */
+  rows?: number | null;
+  showWhen?: any;
+  /** Optional section-style heading rendered above the grid contents. */
+  title?: string | null;
+}
+
+export interface ReportInteractionAction {
+  filterId?: string | null;
+  filterIds?: string[];
+  type: string;
+  value?: any;
+  valueFrom?: string | null;
+  viewId?: string | null;
+}
+
+export interface ReportInteractionDefinition {
+  actions?: ReportInteractionAction[];
+  id: string;
+  trigger: ReportInteractionTrigger;
+}
+
+export interface ReportInteractionTrigger {
+  event: string;
+  field?: string | null;
+}
+
+/**
+ * Layout primitive. Two variants only — `block` (leaf reference to
+ * `definition.blocks[i]`) and `grid` (recursive container). The legacy
+ * `section` / `columns` / `metric_row` types collapsed into `grid` in
+ * Phase 9; the repository's `parse_stored_definition` translates them
+ * transparently on read.
+ */
+export type ReportLayoutNode =
+  | (ReportBlockLayoutNode & {
+      type: "block";
+    })
+  | (ReportGridLayoutNode & {
+      type: "grid";
+    });
+
+export interface ReportLookupBlockMetadata {
+  id: string;
+}
+
+export interface ReportLookupConfig {
+  /** Optional Object Model condition applied to the lookup option query. */
+  condition?: null | Condition;
+  /** Optional connection ID for connection-scoped lookup schemas. */
+  connectionId?: string | null;
+  /** Optional mappings from report/block filters into lookup schema fields. */
+  filterMappings?: ReportFilterTarget[];
+  /** Field shown to users in the searchable option list. */
+  labelField: string;
+  /** Object Model schema to search for options. */
+  schema: string;
+  /**
+   * Fields searched when the user types. If the lookup schema has generated
+   * `tsvector` columns, the backend uses MATCH against those columns;
+   * otherwise it falls back to CONTAINS on these fields. Defaults to
+   * `labelField` when omitted.
+   */
+  searchFields?: string[];
+  /**
+   * Field whose value is written to the edited row. `field` is accepted as
+   * a compatibility alias.
+   */
+  valueField: string;
+}
+
+export interface ReportLookupOptionsRequest {
+  blockFilters?: Partial<Record<string, any>>;
+  filters?: Partial<Record<string, any>>;
+  /** @format int64 */
+  limit?: number;
+  /** @format int64 */
+  offset?: number;
+  query?: string | null;
+  timezone?: string | null;
+}
+
+export interface ReportLookupOptionsResponse {
+  block: ReportLookupBlockMetadata;
+  field: string;
+  options: ReportFilterOption[];
+  page: ReportFilterOptionsPage;
+  success: boolean;
+}
+
+export interface ReportMarkdownConfig {
+  content: string;
+}
+
+export interface ReportMetricConfig {
+  format?: string | null;
+  label?: string | null;
+  valueField: string;
+}
+
+export interface ReportOrderBy {
+  direction?: string;
+  field: string;
+}
+
+export interface ReportPageRequest {
+  /** @format int64 */
+  offset?: number;
+  /** @format int64 */
+  size?: number;
+}
+
+export interface ReportPaginationConfig {
+  allowedPageSizes?: number[];
+  /** @format int64 */
+  defaultPageSize?: number;
+}
+
+export interface ReportPreviewRequest {
+  blocks?: ReportBlockDataRequest[] | null;
+  definition: ReportDefinition;
+  filters?: Partial<Record<string, any>>;
+  timezone?: string | null;
+}
+
+export interface ReportRenderMetadata {
+  /** @format int32 */
+  definitionVersion: number;
+  id: string;
+}
+
+export interface ReportRenderRequest {
+  blocks?: ReportBlockDataRequest[] | null;
+  filters?: Partial<Record<string, any>>;
+  timezone?: string | null;
+}
+
+export interface ReportRenderResponse {
+  blocks: Partial<Record<string, ReportBlockRenderResult>>;
+  errors?: ReportBlockError[];
+  report: ReportRenderMetadata;
+  resolvedFilters: Partial<Record<string, any>>;
+  success: boolean;
+}
+
+export interface ReportSource {
+  aggregates?: ReportAggregateSpec[];
+  condition?: null | Condition;
+  connectionId?: string | null;
+  entity?: null | ReportWorkflowRuntimeEntity;
+  filterMappings?: ReportFilterTarget[];
+  /**
+   * Optional virtual-source granularity. Used by system sources such as
+   * execution metric buckets (`hourly`/`daily`) and rate-limit timelines
+   * (`minute`/`hourly`/`daily`).
+   */
+  granularity?: string | null;
+  groupBy?: string[];
+  instanceId?: string | null;
+  /**
+   * Optional virtual-source period. Used by rate-limit status period stats
+   * (`1h`/`24h`/`7d`/`30d`).
+   */
+  interval?: string | null;
+  /**
+   * Cross-schema joins. When non-empty, fields prefixed with `<alias>.`
+   * resolve against the joined dimension schema. Currently supported on
+   * aggregate-mode blocks; v1 implementation uses broadcast-hash join
+   * (dim resolved client-side, primary query pushed down with the resolved
+   * keys, rows enriched after).
+   */
+  join?: ReportSourceJoin[];
+  kind?: ReportSourceKind;
+  /** @format int64 */
+  limit?: number | null;
+  mode?: ReportSourceMode;
+  orderBy?: ReportOrderBy[];
+  schema?: string;
+  workflowId?: string | null;
+}
+
+/**
+ * Cross-schema join declared on a block-level source. Mirrors the per-cell
+ * `ReportTableColumnJoin` but adds `schema`, `alias`, and `kind` since the
+ * primary schema is the block's source rather than the column's.
+ */
+export interface ReportSourceJoin {
+  /**
+   * Optional alias for qualified field references in `groupBy`,
+   * `condition`, `aggregates[].field`, and `orderBy`. Defaults to `schema`.
+   */
+  alias?: string | null;
+  /** Optional connection ID for the dimension schema. */
+  connectionId?: string | null;
+  /** Field on the joined (dimension) schema. */
+  field: string;
+  /**
+   * Inner or left join. Default: inner. Inner drops fact rows with no
+   * matching dim row; left keeps them with null dim columns.
+   */
+  kind?: ReportJoinKind;
+  /**
+   * Comparison op — eq | ne | gt | gte | lt | lte | in | contains | search.
+   * Default: eq. Mirrors `ReportTableColumnJoin.op`.
+   */
+  op?: string;
+  /** Field on the parent (block-source) schema. */
+  parentField: string;
+  /** Joined (dimension) schema name. */
+  schema: string;
+}
+
+export interface ReportSubtableColumn {
+  /** Cell alignment hint: `left`, `right`, `center`. */
+  align?: string | null;
+  /** Property name on each array element to read for this cell. */
+  field: string;
+  /**
+   * Cell format hint. Same vocabulary as table columns
+   * (`currency`, `datetime`, `pill`, `decimal`, …).
+   */
+  format?: string | null;
+  label?: string | null;
+  /** Pill variant map for `format=pill`. */
+  pillVariants?: Partial<Record<string, string>> | null;
+}
+
+/** Inline-table rendering for an array-of-objects card field. */
+export interface ReportSubtableConfig {
+  columns?: ReportSubtableColumn[];
+  /** Optional message shown when the array is empty (defaults to "No items"). */
+  emptyLabel?: string | null;
+}
+
+export interface ReportSummary {
+  /** @format date-time */
+  createdAt: string;
+  /** @format int32 */
+  definitionVersion: number;
+  description?: string | null;
+  id: string;
+  name: string;
+  /**
+   * Mirrors `ReportDto.needs_re_authoring`. Propagated onto the
+   * summary so callers of `GET /api/runtime/reports` (including the
+   * MCP `list_reports_needing_re_authoring` tool) can filter
+   * without doing a second per-report fetch.
+   */
+  needsReAuthoring?: string | null;
+  slug: string;
+  status: ReportStatus;
+  tags?: string[];
+  /** @format date-time */
+  updatedAt: string;
+}
+
+export interface ReportTableActionConfig {
+  id: string;
+  label?: string | null;
+  workflowAction: ReportWorkflowActionConfig;
+}
+
+export interface ReportTableColumn {
+  /** Optional cell alignment hint: "left", "right", or "center". */
+  align?: string | null;
+  chart?: null | ReportChartConfig;
+  /**
+   * Marks this column as the human-readable label for the row's entity
+   * within this report. Consumed by view `titleFrom: { block }` resolution
+   * and similar entity-label lookups. At most one descriptive column per
+   * table is meaningful; the first encountered wins if multiple are flagged.
+   */
+  descriptive?: boolean;
+  /**
+   * Optional row property to display instead of `field` while preserving
+   * `field` as the sort/writeback key. For example, a Product row can store
+   * `category_id` while displaying a joined `category.name`.
+   */
+  displayField?: string | null;
+  /**
+   * Optional display-only template rendered from the row. Does not affect
+   * filtering, sorting, or writeback; `field` remains the storage target.
+   */
+  displayTemplate?: string | null;
+  /**
+   * Opt-in writeback for this column. Only honored when the rendered row
+   * carries `id` and `schemaId` (filter-mode object-model sources without
+   * joins or aggregates). The renderer doesn't enforce this on the server —
+   * the FE shows an editor that calls the object-model PUT endpoint
+   * directly, which performs its own auth + type validation.
+   */
+  editable?: boolean;
+  /**
+   * Optional explicit editor configuration. When set, takes precedence
+   * over the default control inferred from `format` / `pillVariants`.
+   */
+  editor?: null | ReportEditorConfig;
+  field: string;
+  format?: string | null;
+  /**
+   * Optional row-scoped report interaction buttons rendered in this table
+   * column. Each button executes the same interaction action vocabulary used
+   * by block interactions, such as set_filter followed by navigate_view.
+   */
+  interactionButtons?: ReportTableInteractionButtonConfig[];
+  label?: string | null;
+  /**
+   * Ordered level list for `format: "bar_indicator"` columns; the value's
+   * position determines how many bars are filled.
+   */
+  levels?: string[] | null;
+  /** Optional row field whose value is treated as a URL and rendered as an external-link icon. */
+  linkField?: string | null;
+  /**
+   * Optional display-only text cutoff. When omitted, the frontend renders
+   * the full formatted value.
+   * @min 0
+   */
+  maxChars?: number | null;
+  /**
+   * Mapping from cell value to pill variant for `format: "pill"` columns
+   * (e.g. `{ "active_customer": "success", "churned": "muted" }`).
+   */
+  pillVariants?: Partial<Record<string, string>> | null;
+  /** Optional row field rendered as a subdued line below the primary value. */
+  secondaryField?: string | null;
+  source?: null | ReportTableColumnSource;
+  /** Optional row field whose value is shown in a tooltip on hover (e.g. full email behind an avatar). */
+  tooltipField?: string | null;
+  type?: null | ReportTableColumnType;
+  /**
+   * Optional workflow launcher rendered as a button in this table column.
+   * The frontend executes the referenced workflow with either the whole row,
+   * this cell value, or a configured row field as the workflow input context.
+   */
+  workflowAction?: null | ReportWorkflowActionConfig;
+}
+
+export interface ReportTableColumnJoin {
+  field: string;
+  kind?: ReportJoinKind;
+  op?: string;
+  parentField: string;
+}
+
+export interface ReportTableColumnSource {
+  aggregates?: ReportAggregateSpec[];
+  condition?: null | Condition;
+  connectionId?: string | null;
+  filterMappings?: ReportFilterTarget[];
+  groupBy?: string[];
+  join?: ReportTableColumnJoin[];
+  kind?: ReportSourceKind;
+  /** @format int64 */
+  limit?: number | null;
+  mode?: ReportSourceMode;
+  orderBy?: ReportOrderBy[];
+  schema: string;
+  select?: string | null;
+}
+
+export interface ReportTableConfig {
+  /** Optional table-wide workflow actions executed with selected rows. */
+  actions?: ReportTableActionConfig[];
+  columns?: ReportTableColumn[];
+  defaultSort?: ReportOrderBy[];
+  pagination?: null | ReportPaginationConfig;
+  /** Enables row selection controls even when no table-wide actions are configured. */
+  selectable?: boolean;
+}
+
+export interface ReportTableInteractionButtonConfig {
+  actions?: ReportInteractionAction[];
+  disabledWhen?: null | ConditionExpression;
+  hiddenWhen?: null | ConditionExpression;
+  icon?: string | null;
+  id: string;
+  label?: string | null;
+  visibleWhen?: null | ConditionExpression;
+}
+
+export interface ReportTableSearchRequest {
+  fields?: string[];
+  query: string;
+}
+
+export interface ReportTitleFromBlock {
+  block: string;
+  field?: string | null;
+}
+
+export interface ReportValidationIssue {
+  code: string;
+  hint?: string | null;
+  message: string;
+  path: string;
+}
+
+export interface ReportViewBreadcrumb {
+  clearFilters?: string[];
+  label: string;
+  viewId?: string | null;
+}
+
+export interface ReportViewDefinition {
+  breadcrumb?: ReportViewBreadcrumb[];
+  clearFiltersOnBack?: string[];
+  id: string;
+  /**
+   * Like `ReportDefinition.layout` — a single mandatory root grid for
+   * this view. Detail views typically populate it via the same wizard
+   * flow as the main report.
+   */
+  layout?: ReportGridLayoutNode;
+  parentViewId?: string | null;
+  title?: string | null;
+  titleFrom?: string | null;
+  /**
+   * Resolves the view title from a rendered block's row. The first row of
+   * the referenced block is used; the value comes from `field` if given,
+   * otherwise from the block column flagged `descriptive: true`.
+   */
+  titleFromBlock?: null | ReportTitleFromBlock;
+}
+
+export interface ReportWorkflowActionConfig {
+  context?: ReportWorkflowActionContext;
+  /**
+   * Optional row-level condition. When set, the frontend renders the button
+   * disabled for rows that match this condition.
+   */
+  disabledWhen?: null | ConditionExpression;
+  /**
+   * Optional row-level condition. When set, the frontend hides the button
+   * for rows that match this condition.
+   */
+  hiddenWhen?: null | ConditionExpression;
+  label?: string | null;
+  reloadBlock?: boolean;
+  runningLabel?: string | null;
+  successMessage?: string | null;
+  /** @format int32 */
+  version?: number | null;
+  /**
+   * Optional row-level condition. When set, the frontend renders the button
+   * only for rows that match this condition.
+   */
+  visibleWhen?: null | ConditionExpression;
+  workflowId: string;
+}
+
+export interface ReportWorkflowActionContext {
+  field?: string | null;
+  inputKey?: string | null;
+  mode?: ReportWorkflowActionContextMode;
+}
+
 export interface Schema {
   columns: ColumnDefinition[];
   createdAt: string;
@@ -3074,6 +4246,69 @@ export interface SplitStep {
   /** Nested execution graph for each iteration */
   subgraph: ExecutionGraph;
 }
+
+export interface SqlExecuteRequest {
+  params?: SqlParam[];
+  /**
+   * SQL command using native Postgres / SQLx positional placeholders.
+   * Example: `UPDATE customers SET status = $1 WHERE id = $2`.
+   */
+  sql: string;
+}
+
+export interface SqlExecuteResponse {
+  /**
+   * @format int64
+   * @min 0
+   */
+  rowsAffected: number;
+  success: boolean;
+}
+
+/**
+ * Typed positional SQL parameter. Parameters are bound in array order:
+ * first item = `$1`, second item = `$2`, etc.
+ */
+export type SqlParam = ColumnType & {
+  value: any;
+};
+
+export interface SqlQueryOneResponse {
+  row: any;
+  success: boolean;
+}
+
+export interface SqlQueryRequest {
+  params?: SqlParam[];
+  resultSchema: SqlResultColumn[];
+  /**
+   * SQL string using native Postgres / SQLx positional placeholders.
+   * Example: `SELECT * FROM customers WHERE email = $1`.
+   */
+  sql: string;
+}
+
+export interface SqlQueryResponse {
+  /** @min 0 */
+  rowCount: number;
+  rows: any[];
+  success: boolean;
+}
+
+export interface SqlRawQueryRequest {
+  params?: SqlParam[];
+  /**
+   * SQL string using native Postgres / SQLx positional placeholders.
+   * Example: `SELECT * FROM customers WHERE email = $1`.
+   */
+  sql: string;
+}
+
+/** Expected column for typed SQL query responses. */
+export type SqlResultColumn = ColumnType & {
+  name: string;
+  nullable?: boolean;
+};
 
 /** Union of all step types, discriminated by stepType field */
 export type Step =
@@ -3319,6 +4554,12 @@ export interface StepTypeInfo {
   name: string;
 }
 
+export interface SubmitReportWorkflowActionRequest {
+  blockFilters?: Partial<Record<string, any>>;
+  filters?: Partial<Record<string, any>>;
+  payload?: any;
+}
+
 /**
  * A single case in a Switch step.
  * Defines a match condition and the output to produce if matched.
@@ -3481,6 +4722,7 @@ export interface TestAgentResponse {
 export interface UpdateConnectionRequest {
   connectionParameters?: any;
   connectionSubtype?: string | null;
+  defaultFor?: string[] | null;
   /** Connection type identifier that maps to a connection schema (e.g., shopify_access_token, bearer, sftp) */
   integrationId?: string | null;
   isDefaultFileStorage?: boolean | null;
@@ -3525,6 +4767,15 @@ export interface UpdateInvocationTriggerRequest {
    * @example "workflow-456"
    */
   workflow_id: string;
+}
+
+export interface UpdateReportRequest {
+  definition: ReportDefinition;
+  description?: string | null;
+  name: string;
+  slug: string;
+  status?: ReportStatus;
+  tags?: string[];
 }
 
 export interface UpdateSchemaRequest {
@@ -3577,6 +4828,16 @@ export interface ValidateMappingsResponse {
   /** @min 0 */
   warningCount: number;
   workflowId: string;
+}
+
+export interface ValidateReportRequest {
+  definition: ReportDefinition;
+}
+
+export interface ValidateReportResponse {
+  errors?: ReportValidationIssue[];
+  valid: boolean;
+  warnings?: ReportValidationIssue[];
 }
 
 /** Structured validation error with step context for frontend highlighting */
@@ -3669,6 +4930,18 @@ export interface VisibleWhen {
   notEquals?: any;
 }
 
+export interface WaitForSignalActionConfig {
+  /** Optional non-authoritative display/query context. */
+  context?: Partial<Record<string, MappingValue>>;
+  /**
+   * Platform-level correlation fields used by virtual workflow_runtime
+   * report sources, e.g. {"case_id": {"valueType": "reference", "value": "data.case_id"}}.
+   */
+  correlation?: Partial<Record<string, MappingValue>>;
+  /** Stable action key for report filtering, e.g. case_review_decision. */
+  key?: string | null;
+}
+
 /**
  * Wait for an external signal before continuing execution.
  *
@@ -3715,6 +4988,12 @@ export interface VisibleWhen {
  * ```
  */
 export interface WaitForSignalStep {
+  /**
+   * Optional platform action metadata exposed to reports and other runtime
+   * action consumers. Correlation and context values are evaluated when the
+   * workflow reaches the wait step.
+   */
+  action?: null | WaitForSignalActionConfig;
   /** When true, execution pauses before this step in debug mode */
   breakpoint?: boolean | null;
   /** Unique step identifier */
@@ -3796,7 +5075,7 @@ export interface WhileStep {
 export interface Workflow {
   /**
    * Disable durability for this workflow when `false`. Compiled code contains
-   * no checkpoint reads/writes, no `sdk.durable_sleep`, and no breakpoint
+   * no checkpoint reads/writes, no `sdk.sleep`, and no breakpoint
    * checkpoints. When this field is `Some(false)`, the setting propagates
    * into `ExecutionGraph.durable` (via `parse_workflow`) and then to every
    * nested subgraph and embedded child workflow at codegen time. Default: durable.
@@ -5812,6 +7091,110 @@ export class Api<
       }),
 
     /**
+     * No description
+     *
+     * @tags object-model
+     * @name ExecuteSql
+     * @summary Execute a positional SQL command and return rows affected.
+     * @request POST:/api/runtime/object-model/sql/execute
+     */
+    executeSql: (
+      data: SqlExecuteRequest,
+      query?: {
+        /** Optional connection ID for database selection */
+        connectionId?: string;
+      },
+      params: RequestParams = {},
+    ) =>
+      this.request<SqlExecuteResponse, any>({
+        path: `/api/runtime/object-model/sql/execute`,
+        method: "POST",
+        query: query,
+        body: data,
+        type: ContentType.Json,
+        format: "json",
+        ...params,
+      }),
+
+    /**
+     * @description SQL uses native Postgres / SQLx placeholders (`$1`, `$2`, ...). Parameters are bound in array order and result rows are validated against `resultSchema`.
+     *
+     * @tags object-model
+     * @name QuerySql
+     * @summary Execute a typed positional SQL query.
+     * @request POST:/api/runtime/object-model/sql/query
+     */
+    querySql: (
+      data: SqlQueryRequest,
+      query?: {
+        /** Optional connection ID for database selection */
+        connectionId?: string;
+      },
+      params: RequestParams = {},
+    ) =>
+      this.request<SqlQueryResponse, any>({
+        path: `/api/runtime/object-model/sql/query`,
+        method: "POST",
+        query: query,
+        body: data,
+        type: ContentType.Json,
+        format: "json",
+        ...params,
+      }),
+
+    /**
+     * No description
+     *
+     * @tags object-model
+     * @name QuerySqlOne
+     * @summary Execute a typed positional SQL query that must return exactly one row.
+     * @request POST:/api/runtime/object-model/sql/query-one
+     */
+    querySqlOne: (
+      data: SqlQueryRequest,
+      query?: {
+        /** Optional connection ID for database selection */
+        connectionId?: string;
+      },
+      params: RequestParams = {},
+    ) =>
+      this.request<SqlQueryOneResponse, any>({
+        path: `/api/runtime/object-model/sql/query-one`,
+        method: "POST",
+        query: query,
+        body: data,
+        type: ContentType.Json,
+        format: "json",
+        ...params,
+      }),
+
+    /**
+     * No description
+     *
+     * @tags object-model
+     * @name QuerySqlRaw
+     * @summary Execute a positional SQL query and return raw rows without result-schema validation.
+     * @request POST:/api/runtime/object-model/sql/query-raw
+     */
+    querySqlRaw: (
+      data: SqlRawQueryRequest,
+      query?: {
+        /** Optional connection ID for database selection */
+        connectionId?: string;
+      },
+      params: RequestParams = {},
+    ) =>
+      this.request<SqlQueryResponse, any>({
+        path: `/api/runtime/object-model/sql/query-raw`,
+        method: "POST",
+        query: query,
+        body: data,
+        type: ContentType.Json,
+        format: "json",
+        ...params,
+      }),
+
+    /**
      * @description Returns real-time rate limit state from Redis combined with configuration from PostgreSQL for all connections. Optionally includes aggregated period stats based on the interval parameter.
      *
      * @tags rate-limits-controller
@@ -5830,6 +7213,28 @@ export class Api<
         path: `/api/runtime/rate-limits`,
         method: "GET",
         query: query,
+        format: "json",
+        ...params,
+      }),
+
+    /**
+     * No description
+     *
+     * @tags reports-controller
+     * @name EditReport
+     * @summary Phase 6 canonical edit endpoint. Accepts a batch of `ReportEditOp`s and applies them atomically. The legacy per-op REST + MCP handlers have all been deleted (Phase 8) so this is the only mutation entry point for layout + block changes.
+     * @request POST:/api/runtime/reports/{report_id}/edit
+     */
+    editReport: (
+      reportId: string,
+      data: EditReportRequest,
+      params: RequestParams = {},
+    ) =>
+      this.request<EditReportResponse, void>({
+        path: `/api/runtime/reports/${reportId}/edit`,
+        method: "POST",
+        body: data,
+        type: ContentType.Json,
         format: "json",
         ...params,
       }),
@@ -5915,7 +7320,7 @@ export class Api<
       }),
 
     /**
-     * @description Returns a list of all available step types with full JSON Schema for each. This is generated dynamically from the inventory-registered step metadata.
+     * @description Returns a list of all available step types with full JSON Schema for each. This is generated dynamically from static step metadata.
      *
      * @tags Specifications
      * @name ListStepTypes
@@ -6232,15 +7637,18 @@ export class Api<
       }),
 
     /**
+     * No description
+     *
      * @tags workflow-controller
      * @name ReplayInstanceHandler
      * @summary Replay a workflow instance with the same inputs
      * @request POST:/api/runtime/workflows/instances/{instance_id}/replay
      */
     replayInstanceHandler: (instanceId: string, params: RequestParams = {}) =>
-      this.request<any, ErrorResponse>({
+      this.request<ExecuteWorkflowResponse, ErrorResponse>({
         path: `/api/runtime/workflows/instances/${instanceId}/replay`,
         method: "POST",
+        format: "json",
         ...params,
       }),
 

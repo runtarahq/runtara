@@ -1,0 +1,23 @@
+{
+  "definitionVersion": 1,
+  "layout": {
+    "id": "root",
+    "columns": 1,
+    "items": [
+      {
+        "id": "root_i0",
+        "child": { "id": "n_intro", "type": "block", "blockId": "intro" }
+      }
+    ]
+  },
+  "filters": [],
+  "blocks": [
+    {
+      "id": "intro",
+      "type": "markdown",
+      "markdown": {
+        "content": "# Welcome\n\nThis is a minimal markdown-only report. It has no data sources."
+      }
+    }
+  ]
+}

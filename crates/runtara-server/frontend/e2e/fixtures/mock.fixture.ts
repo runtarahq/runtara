@@ -9,7 +9,11 @@ import type {
   WorkflowDto,
   Schema,
 } from '@/generated/RuntaraRuntimeApi';
-import { paginated } from './builders';
+import {
+  buildConnectionType,
+  buildObjectModelConnection,
+  paginated,
+} from './builders';
 
 type JsonBody = Record<string, unknown> | Array<unknown>;
 
@@ -365,6 +369,30 @@ const factory: MockApi = {
   fallthrough: (page) =>
     page.route(/\/api\/runtime\//, (route) => fulfill(route, {})),
   bootstrap: async (page) => {
+    // Force the SPA into `local` auth mode so it doesn't try to silently
+    // renew an OIDC token against the real authority during boot. Without
+    // this the dev server's `.env`-provided VITE_OIDC_AUTHORITY makes the
+    // OIDC client hang on a network request that never resolves, leaving
+    // PrivateRoute stuck on its loading spinner — the symptom that
+    // showed up as a blank screenshot in every mocked spec.
+    //
+    // `index.html` carries an inline `<script id="runtara-runtime-config">`
+    // that sets `window.__RUNTARA_CONFIG__ = {}` — it always runs AFTER
+    // any `addInitScript`, so we have to rewrite the HTML itself to
+    // bake in the local-auth config.
+    await page.route(/localhost:8081\/(ui\/[^/]+\/)?(index\.html)?(\?.*)?$/, async (route) => {
+      const response = await route.fetch();
+      const html = await response.text();
+      const patched = html.replace(
+        /window\.__RUNTARA_CONFIG__\s*=\s*\{\s*\}\s*;/,
+        `window.__RUNTARA_CONFIG__={"authMode":"local","tenantId":"org_mocked_e2e","apiBaseUrl":""};`
+      );
+      await route.fulfill({
+        response,
+        body: patched,
+        headers: { ...response.headers(), 'content-type': 'text/html; charset=utf-8' },
+      });
+    });
     // Register the catch-all FIRST so later handlers (specific endpoints + spec-level
     // overrides) take precedence (Playwright matches page.route handlers LIFO).
     await page.route(/\/api\/runtime\//, (route) => fulfill(route, {}));
@@ -381,6 +409,16 @@ const factory: MockApi = {
     await page.route(runtimeUrl('metrics/tenant'), (route) =>
       fulfill(route, { workflowsCount: 0, connectionsCount: 0 })
     );
+    // Object Model pages need a selected database before they query schemas.
+    await page.route(runtimeUrl('connections'), (route) =>
+      fulfill(route, {
+        connections: [
+          buildObjectModelConnection({ id: 'conn_object_model_default' }),
+        ],
+        count: 1,
+        success: true,
+      })
+    );
     // Connection categories/types are fetched by several pages
     await page.route(runtimeUrl('connections/categories'), (route) =>
       fulfill(route, { categories: [] })
@@ -389,7 +427,14 @@ const factory: MockApi = {
       fulfill(route, { authTypes: [] })
     );
     await page.route(runtimeUrl('connections/types'), (route) =>
-      fulfill(route, { connectionTypes: [] })
+      fulfill(route, {
+        connectionTypes: [
+          buildConnectionType({
+            integrationId: 'postgres',
+            displayName: 'PostgreSQL',
+          }),
+        ],
+      })
     );
   },
   raw: (page, url, body, opts) =>

@@ -681,6 +681,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "console"
+version = "0.16.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d64e8af5551369d19cf50138de61f1c42074ab970f74e99be916646777f8fc87"
+dependencies = [
+ "encode_unicode",
+ "libc",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "const-oid"
 version = "0.9.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1215,6 +1226,12 @@ checksum = "e079f19b08ca6239f47f8ba8509c11cf3ea30095831f7fed61441475edd8c449"
 dependencies = [
  "serde",
 ]
+
+[[package]]
+name = "encode_unicode"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "34aa73646ffb006b8f5147f3dc182bd4bcb190227ce861fc4a4844bf8e3cb2c0"
 
 [[package]]
 name = "encoding_rs"
@@ -2064,6 +2081,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "879f10e63c20629ecabbb64a8010319738c66a5cd0c29b02d63d272b03751d01"
 dependencies = [
  "generic-array",
+]
+
+[[package]]
+name = "insta"
+version = "1.47.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7b4a6248eb93a4401ed2f37dfe8ea592d3cf05b7cf4f8efa867b6895af7e094e"
+dependencies = [
+ "console",
+ "once_cell",
+ "regex",
+ "serde",
+ "similar",
+ "tempfile",
 ]
 
 [[package]]
@@ -3145,6 +3176,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "proptest"
+version = "1.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4b45fcc2344c680f5025fe57779faef368840d0bd1f42f216291f0dc4ace4744"
+dependencies = [
+ "bit-set",
+ "bit-vec",
+ "bitflags",
+ "num-traits",
+ "rand 0.9.3",
+ "rand_chacha 0.9.0",
+ "rand_xorshift",
+ "regex-syntax",
+ "rusty-fork",
+ "tempfile",
+ "unarray",
+]
+
+[[package]]
 name = "prost"
 version = "0.13.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3218,6 +3268,12 @@ dependencies = [
  "quote",
  "syn 1.0.109",
 ]
+
+[[package]]
+name = "quick-error"
+version = "1.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a1d01941d82fa2ab50be1e79e6714289dd7cde78eba4c074bc5a4374f650dfe0"
 
 [[package]]
 name = "quick-xml"
@@ -3386,6 +3442,15 @@ name = "rand_core"
 version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0c8d0fd677905edcbeedbf2edb6494d676f0e98d54d5cf9bda0b061cb8fb8aba"
+
+[[package]]
+name = "rand_xorshift"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "513962919efc330f829edb2535844d1b912b0fbe2ca165d613e4e8788bb05a5a"
+dependencies = [
+ "rand_core 0.9.3",
+]
 
 [[package]]
 name = "rayon"
@@ -3624,9 +3689,9 @@ dependencies = [
 
 [[package]]
 name = "rmcp"
-version = "1.4.0"
+version = "1.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f542f74cf247da16f19bbc87e298cd201e912314f4083e88cdd671f44f5fcb53"
+checksum = "0810a9f717d9828f475fe1f629f4c305c8464b7f496c3a854b58d29e65f4058e"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -3655,9 +3720,9 @@ dependencies = [
 
 [[package]]
 name = "rmcp-macros"
-version = "1.6.0"
+version = "1.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7caa6743cc0888e433105fe1bc551a7f607940b126a37bc97b478e86064627eb"
+checksum = "6aefac48c364756e97f04c0401ba3231e8607882c7c1d92da0437dc16307904d"
 dependencies = [
  "darling 0.23.0",
  "proc-macro2",
@@ -3695,7 +3760,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-agent-macro"
-version = "4.10.4"
+version = "4.14.0"
 dependencies = [
  "darling 0.20.11",
  "proc-macro2",
@@ -3705,7 +3770,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-agents"
-version = "4.10.4"
+version = "4.14.0"
 dependencies = [
  "base64 0.22.1",
  "calamine",
@@ -3742,7 +3807,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-ai"
-version = "4.10.4"
+version = "4.14.0"
 dependencies = [
  "runtara-http",
  "serde",
@@ -3753,7 +3818,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-connections"
-version = "4.10.4"
+version = "4.14.0"
 dependencies = [
  "aes-gcm",
  "axum 0.8.8",
@@ -3771,6 +3836,8 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "sqlx",
+ "testcontainers",
+ "testcontainers-modules",
  "thiserror 2.0.17",
  "tokio",
  "tracing",
@@ -3783,7 +3850,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-core"
-version = "4.10.4"
+version = "4.14.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3808,9 +3875,9 @@ dependencies = [
 
 [[package]]
 name = "runtara-dsl"
-version = "4.10.4"
+version = "4.14.0"
 dependencies = [
- "schemars 0.8.22",
+ "schemars 1.2.1",
  "serde",
  "serde_json",
  "utoipa",
@@ -3818,7 +3885,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-environment"
-version = "4.10.4"
+version = "4.14.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3849,7 +3916,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-http"
-version = "4.10.4"
+version = "4.14.0"
 dependencies = [
  "base64 0.22.1",
  "serde",
@@ -3861,7 +3928,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-management-sdk"
-version = "4.10.4"
+version = "4.14.0"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -3876,7 +3943,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-object-store"
-version = "4.10.4"
+version = "4.14.0"
 dependencies = [
  "chrono",
  "pgvector",
@@ -3891,8 +3958,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "runtara-report-dsl"
+version = "4.14.0"
+dependencies = [
+ "chrono",
+ "insta",
+ "minijinja",
+ "runtara-dsl",
+ "runtara-object-store",
+ "schemars 1.2.1",
+ "serde",
+ "serde-wasm-bindgen",
+ "serde_json",
+ "thiserror 1.0.69",
+ "utoipa",
+ "wasm-bindgen",
+]
+
+[[package]]
 name = "runtara-sdk"
-version = "4.10.4"
+version = "4.14.0"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -3914,7 +3999,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-sdk-macros"
-version = "4.10.4"
+version = "4.14.0"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -3923,7 +4008,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-server"
-version = "4.10.4"
+version = "4.14.0"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -3940,6 +4025,7 @@ dependencies = [
  "hex",
  "hmac 0.12.1",
  "http-body-util",
+ "insta",
  "jsonschema",
  "jsonwebtoken",
  "num_cpus",
@@ -3948,6 +4034,7 @@ dependencies = [
  "opentelemetry-otlp 0.31.1",
  "opentelemetry-semantic-conventions",
  "opentelemetry_sdk 0.31.0",
+ "proptest",
  "rand 0.8.6",
  "redis",
  "regex",
@@ -3962,6 +4049,7 @@ dependencies = [
  "runtara-environment",
  "runtara-management-sdk",
  "runtara-object-store",
+ "runtara-report-dsl",
  "runtara-text-parser",
  "runtara-workflow-stdlib",
  "runtara-workflows",
@@ -3973,6 +4061,8 @@ dependencies = [
  "sha2 0.10.9",
  "sqlx",
  "sysinfo",
+ "testcontainers",
+ "testcontainers-modules",
  "thiserror 1.0.69",
  "tokio",
  "tokio-util",
@@ -3990,7 +4080,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-test-harness"
-version = "4.10.4"
+version = "4.14.0"
 dependencies = [
  "runtara-dsl",
  "runtara-workflow-stdlib",
@@ -4000,7 +4090,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-text-parser"
-version = "4.10.4"
+version = "4.14.0"
 dependencies = [
  "chrono",
  "regex",
@@ -4010,7 +4100,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-workflow-stdlib"
-version = "4.10.4"
+version = "4.14.0"
 dependencies = [
  "minijinja",
  "opentelemetry 0.28.0",
@@ -4033,7 +4123,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-workflow-validation-wasm"
-version = "4.10.4"
+version = "4.14.0"
 dependencies = [
  "runtara-agents",
  "runtara-dsl",
@@ -4045,7 +4135,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-workflows"
-version = "4.10.4"
+version = "4.14.0"
 dependencies = [
  "minijinja",
  "proc-macro2",
@@ -4198,6 +4288,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b39cdef0fa800fc44525c84ccb54a029961a8215f9619753635a9c0d2538d46d"
 
 [[package]]
+name = "rusty-fork"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cc6bf79ff24e648f6da1f8d1f011e9cac26491b619e6b9280f2b47f1774e6ee2"
+dependencies = [
+ "fnv",
+ "quick-error",
+ "tempfile",
+ "wait-timeout",
+]
+
+[[package]]
 name = "ryu"
 version = "1.0.22"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4232,18 +4334,6 @@ dependencies = [
 
 [[package]]
 name = "schemars"
-version = "0.8.22"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3fbf2ae1b8bc8e02df939598064d22402220cd5bbcca1c76f7d6a310974d5615"
-dependencies = [
- "dyn-clone",
- "schemars_derive 0.8.22",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "schemars"
 version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4cd191f9397d57d581cddd31014772520aa448f65ef991055d7f61582c65165f"
@@ -4263,21 +4353,9 @@ dependencies = [
  "chrono",
  "dyn-clone",
  "ref-cast",
- "schemars_derive 1.2.1",
+ "schemars_derive",
  "serde",
  "serde_json",
-]
-
-[[package]]
-name = "schemars_derive"
-version = "0.8.22"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "32e265784ad618884abaea0600a9adf15393368d840e0222d101a072f3f7534d"
-dependencies = [
- "proc-macro2",
- "quote",
- "serde_derive_internals",
- "syn 2.0.111",
 ]
 
 [[package]]
@@ -4361,6 +4439,17 @@ checksum = "9a8e94ea7f378bd32cbbd37198a4a91436180c5bb472411e48b5ec2e2124ae9e"
 dependencies = [
  "serde_core",
  "serde_derive",
+]
+
+[[package]]
+name = "serde-wasm-bindgen"
+version = "0.6.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8302e169f0eddcc139c70f139d19d6467353af16f9fce27e8c30158036a1e16b"
+dependencies = [
+ "js-sys",
+ "serde",
+ "wasm-bindgen",
 ]
 
 [[package]]
@@ -4583,6 +4672,12 @@ name = "simdutf8"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e3a9fe34e3e7a50316060351f37187a3f546bce95496156754b601a5fa71b76e"
+
+[[package]]
+name = "similar"
+version = "2.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bbbb5d9659141646ae647b42fe094daf6c6192d1620870b449d9557f748b2daa"
 
 [[package]]
 name = "simple_asn1"
@@ -5562,6 +5657,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "562d481066bde0658276a35467c4af00bdc6ee726305698a55b86e61d7ad82bb"
 
 [[package]]
+name = "unarray"
+version = "0.1.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "eaea85b334db583fe3274d12b4cd1880032beab409c0d774be044d4480ab9a94"
+
+[[package]]
 name = "unicase"
 version = "2.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5762,6 +5863,15 @@ name = "vsimd"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5c3082ca00d5a5ef149bb8b555a72ae84c9c59f7250f013ac822ac2e49b19c64"
+
+[[package]]
+name = "wait-timeout"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "09ac3b126d3914f9849036f826e054cbabdc8519970b8998ddaf3b5bd3c65f11"
+dependencies = [
+ "libc",
+]
 
 [[package]]
 name = "walkdir"

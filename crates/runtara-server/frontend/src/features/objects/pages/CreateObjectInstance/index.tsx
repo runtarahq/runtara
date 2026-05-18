@@ -8,11 +8,18 @@ import {
 import { ObjectInstanceDtoForm } from '@/features/objects/components/ObjectInstanceForm';
 import { useObjectSchemaDto } from '@/features/objects/hooks/useObjectSchema';
 import { usePageTitle } from '@/shared/hooks/usePageTitle';
+import { ObjectModelConnectionSelector } from '@/features/objects/components/ObjectModelConnectionSelector';
+import { useObjectModelConnectionSelection } from '@/features/objects/hooks/useObjectModelConnectionSelection';
 
 export function CreateObjectInstance() {
   const { typeName } = useParams<{ typeName: string }>();
   const navigate = useNavigate();
-  const { data: objectSchemaDto, isLoading } = useObjectSchemaDto(typeName);
+  const { selectedConnectionId, connectionQuery } =
+    useObjectModelConnectionSelection();
+  const { data: objectSchemaDto, isLoading } = useObjectSchemaDto(
+    typeName,
+    selectedConnectionId
+  );
 
   // Set page title with object type name
   usePageTitle(
@@ -22,7 +29,7 @@ export function CreateObjectInstance() {
   );
 
   const handleSuccess = () => {
-    navigate(`/objects/${typeName}`);
+    navigate(`/objects/${typeName}${connectionQuery}`);
   };
 
   return (
@@ -38,6 +45,10 @@ export function CreateObjectInstance() {
             </h1>
           </div>
         </section>
+
+        <div className="flex justify-end px-4 sm:px-5">
+          <ObjectModelConnectionSelector />
+        </div>
 
         {isLoading ? (
           <div className="flex min-h-[40vh] items-center justify-center px-4 sm:px-5 text-muted-foreground">
@@ -60,6 +71,7 @@ export function CreateObjectInstance() {
             <ObjectInstanceDtoForm
               objectSchemaDto={objectSchemaDto}
               onSuccess={handleSuccess}
+              connectionId={selectedConnectionId}
             />
           </section>
         )}

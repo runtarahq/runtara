@@ -202,13 +202,28 @@ describe('queryKeys', () => {
   describe('objects', () => {
     describe('schemas', () => {
       it('returns correct base key for all schemas', () => {
-        expect(queryKeys.objects.schemas.all()).toEqual(['objects', 'schemas']);
+        expect(queryKeys.objects.schemas.all()).toEqual([
+          'objects',
+          'schemas',
+          null,
+        ]);
       });
 
       it('returns correct key for schema by ID', () => {
         expect(queryKeys.objects.schemas.byId('schema-123')).toEqual([
           'objects',
           'schemas',
+          null,
+          'detail',
+          'schema-123',
+        ]);
+      });
+
+      it('includes the database connection in schema keys', () => {
+        expect(queryKeys.objects.schemas.byId('schema-123', 'conn-1')).toEqual([
+          'objects',
+          'schemas',
+          'conn-1',
           'detail',
           'schema-123',
         ]);
@@ -218,6 +233,7 @@ describe('queryKeys', () => {
         expect(queryKeys.objects.schemas.lists()).toEqual([
           'objects',
           'schemas',
+          null,
           'list',
         ]);
       });
@@ -228,6 +244,7 @@ describe('queryKeys', () => {
         expect(queryKeys.objects.instances.all()).toEqual([
           'objects',
           'instances',
+          null,
         ]);
       });
 
@@ -235,6 +252,7 @@ describe('queryKeys', () => {
         expect(queryKeys.objects.instances.bySchema('schema-123')).toEqual([
           'objects',
           'instances',
+          null,
           'schema-123',
         ]);
       });
@@ -244,6 +262,18 @@ describe('queryKeys', () => {
         expect(queryKeys.objects.instances.list('schema-123', params)).toEqual([
           'objects',
           'instances',
+          null,
+          'schema-123',
+          params,
+        ]);
+      });
+
+      it('includes the database connection in instance keys', () => {
+        const params = { connectionId: 'conn-1', page: 0, size: 20 };
+        expect(queryKeys.objects.instances.list('schema-123', params)).toEqual([
+          'objects',
+          'instances',
+          'conn-1',
           'schema-123',
           params,
         ]);
@@ -252,7 +282,7 @@ describe('queryKeys', () => {
       it('returns correct key for instance by ID', () => {
         expect(
           queryKeys.objects.instances.byId('schema-123', 'inst-456')
-        ).toEqual(['objects', 'instances', 'schema-123', 'inst-456']);
+        ).toEqual(['objects', 'instances', null, 'schema-123', 'inst-456']);
       });
     });
   });
@@ -382,8 +412,8 @@ describe('queryKeys', () => {
       const listKey = queryKeys.objects.instances.list('schema-1', { page: 0 });
 
       // Instance and list keys should start with the schema key
-      expect(instanceKey.slice(0, 3)).toEqual(schemaKey);
-      expect(listKey.slice(0, 3)).toEqual(schemaKey);
+      expect(instanceKey.slice(0, schemaKey.length)).toEqual(schemaKey);
+      expect(listKey.slice(0, schemaKey.length)).toEqual(schemaKey);
     });
   });
 });

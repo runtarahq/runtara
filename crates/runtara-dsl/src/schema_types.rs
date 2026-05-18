@@ -22,7 +22,8 @@ pub const DSL_VERSION: &str = "3.0.0";
 // ============================================================================
 
 /// Complete workflow definition
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct Workflow {
@@ -47,7 +48,8 @@ pub struct Workflow {
 }
 
 /// Memory allocation tier for workflow execution
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub enum MemoryTier {
     S,
@@ -62,7 +64,8 @@ pub enum MemoryTier {
 // ============================================================================
 
 /// The execution graph containing all steps and control flow
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct ExecutionGraph {
@@ -187,7 +190,8 @@ impl Default for ExecutionGraph {
 /// - At most one default (condition-less) edge per (from_step, label) pair
 /// - Conditional step outgoing edges must be unconditioned `true`/`false` branches
 /// - If no condition matches and no default exists, the workflow fails (for onError) or continues normally
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct ExecutionPlanEdge {
@@ -246,7 +250,8 @@ pub struct ExecutionPlanEdge {
 }
 
 /// Visual annotation for workflow editor UI
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct Note {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -260,7 +265,8 @@ pub struct Note {
 }
 
 /// Position coordinates for UI elements
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct Position {
     pub x: f64,
@@ -272,7 +278,8 @@ pub struct Position {
 // ============================================================================
 
 /// Union of all step types, discriminated by stepType field
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[serde(tag = "stepType")]
 pub enum Step {
@@ -320,7 +327,8 @@ pub enum Step {
 }
 
 /// Common fields shared by all step types
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct StepCommon {
@@ -340,7 +348,8 @@ pub struct StepCommon {
 /// standard mapping system (`data.*`, `steps.<id>.outputs.*`, `variables.*`).
 ///
 /// There is no `outputMapping` field — Finish only takes `inputMapping`.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct FinishStep {
@@ -369,7 +378,8 @@ pub struct FinishStep {
 ///
 /// Defines what compensation step to execute if a downstream step fails,
 /// enabling distributed transaction rollback.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CompensationConfig {
@@ -390,7 +400,8 @@ pub struct CompensationConfig {
 }
 
 /// Executes an agent capability
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AgentStep {
@@ -449,7 +460,8 @@ pub struct AgentStep {
 /// inspection and later mappings. Branch routing still uses executionPlan edges
 /// labeled `"true"` and `"false"`; do not route Conditional branches with
 /// edge-level conditions.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ConditionalStep {
@@ -476,9 +488,10 @@ pub struct ConditionalStep {
 /// being collected — extra fields are allowed, missing required fields fail
 /// the iteration. Likewise `input_schema` validates each iteration's `data`
 /// (the array element) before the subgraph runs.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[schemars(title = "SplitStep")]
+#[cfg_attr(feature = "json-schema", schemars(title = "SplitStep"))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SplitStep {
     /// Unique step identifier
@@ -527,9 +540,10 @@ pub struct SplitStep {
 }
 
 /// Multi-way branch based on value matching
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[schemars(title = "SwitchStep")]
+#[cfg_attr(feature = "json-schema", schemars(title = "SwitchStep"))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SwitchStep {
     /// Unique step identifier
@@ -549,7 +563,8 @@ pub struct SwitchStep {
 }
 
 /// Executes a nested child workflow
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct EmbedWorkflowStep {
@@ -595,7 +610,8 @@ pub struct EmbedWorkflowStep {
 }
 
 /// Child workflow version specification
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[serde(untagged)]
 pub enum ChildVersion {
@@ -606,9 +622,10 @@ pub enum ChildVersion {
 }
 
 /// Conditional loop - repeat subgraph until condition is false
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[schemars(title = "WhileStep")]
+#[cfg_attr(feature = "json-schema", schemars(title = "WhileStep"))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct WhileStep {
     /// Unique step identifier
@@ -636,9 +653,10 @@ pub struct WhileStep {
 }
 
 /// Configuration for a While step.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[schemars(title = "WhileConfig")]
+#[cfg_attr(feature = "json-schema", schemars(title = "WhileConfig"))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct WhileConfig {
     /// Maximum number of iterations (default: 10).
@@ -661,9 +679,10 @@ impl Default for WhileConfig {
 }
 
 /// Emit custom log/debug events during workflow execution
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[schemars(title = "LogStep")]
+#[cfg_attr(feature = "json-schema", schemars(title = "LogStep"))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct LogStep {
     /// Unique step identifier
@@ -691,7 +710,8 @@ pub struct LogStep {
 }
 
 /// Log level for Log steps
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[serde(rename_all = "lowercase")]
 pub enum LogLevel {
@@ -722,9 +742,10 @@ pub enum LogLevel {
 ///   "message": "Order total ${data.total} exceeds credit limit ${data.limit}"
 /// }
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[schemars(title = "ErrorStep")]
+#[cfg_attr(feature = "json-schema", schemars(title = "ErrorStep"))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ErrorStep {
     /// Unique step identifier
@@ -777,7 +798,8 @@ pub struct ErrorStep {
 /// To distinguish technical vs business errors within Permanent, use:
 /// - `code`: e.g., `VALIDATION_*` vs `BUSINESS_*` or `CREDIT_LIMIT_EXCEEDED`
 /// - `severity`: `error` for technical, `warning` for expected business outcomes
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[serde(rename_all = "lowercase")]
 pub enum ErrorCategory {
@@ -789,7 +811,8 @@ pub enum ErrorCategory {
 }
 
 /// Error severity for logging and alerting.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[serde(rename_all = "lowercase")]
 pub enum ErrorSeverity {
@@ -827,9 +850,10 @@ pub enum ErrorSeverity {
 ///   }
 /// }
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[schemars(title = "FilterStep")]
+#[cfg_attr(feature = "json-schema", schemars(title = "FilterStep"))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct FilterStep {
     /// Unique step identifier
@@ -848,9 +872,10 @@ pub struct FilterStep {
 }
 
 /// Configuration for a Filter step
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[schemars(title = "FilterConfig")]
+#[cfg_attr(feature = "json-schema", schemars(title = "FilterConfig"))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct FilterConfig {
     /// Array to filter (MappingValue resolving to array).
@@ -879,9 +904,10 @@ pub struct FilterConfig {
 ///   }
 /// }
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[schemars(title = "GroupByStep")]
+#[cfg_attr(feature = "json-schema", schemars(title = "GroupByStep"))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct GroupByStep {
     /// Unique step identifier
@@ -900,9 +926,10 @@ pub struct GroupByStep {
 }
 
 /// Configuration for a GroupBy step
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[schemars(title = "GroupByConfig")]
+#[cfg_attr(feature = "json-schema", schemars(title = "GroupByConfig"))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct GroupByConfig {
     /// Array to group (MappingValue resolving to array).
@@ -947,9 +974,10 @@ pub struct GroupByConfig {
 ///   "duration_ms": { "valueType": "reference", "value": "data.waitTimeMs" }
 /// }
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[schemars(title = "DelayStep")]
+#[cfg_attr(feature = "json-schema", schemars(title = "DelayStep"))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct DelayStep {
     /// Unique step identifier
@@ -1017,9 +1045,10 @@ pub struct DelayStep {
 ///   "timeoutMs": 86400000
 /// }
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[schemars(title = "WaitForSignalStep")]
+#[cfg_attr(feature = "json-schema", schemars(title = "WaitForSignalStep"))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct WaitForSignalStep {
     /// Unique step identifier
@@ -1072,7 +1101,8 @@ pub struct WaitForSignalStep {
     pub breakpoint: Option<bool>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct WaitForSignalActionConfig {
@@ -1116,7 +1146,8 @@ pub struct WaitForSignalActionConfig {
 ///   }
 /// }
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AiAgentStep {
@@ -1147,7 +1178,8 @@ pub struct AiAgentStep {
 }
 
 /// LLM provider used by an AI Agent step.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum AiAgentProvider {
@@ -1169,7 +1201,8 @@ impl AiAgentProvider {
 }
 
 /// Configuration for the AI Agent step.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AiAgentConfig {
@@ -1235,7 +1268,8 @@ pub struct AiAgentConfig {
 /// The actual storage is delegated to a memory provider agent connected via
 /// a "memory" labeled edge. The provider must implement `load_memory` and
 /// `save_memory` capabilities.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AiAgentMemory {
@@ -1251,7 +1285,8 @@ pub struct AiAgentMemory {
 }
 
 /// Controls how conversation memory is compacted when it grows too large.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CompactionConfig {
@@ -1267,7 +1302,8 @@ pub struct CompactionConfig {
 }
 
 /// Strategy for compacting conversation memory.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[serde(rename_all = "camelCase")]
 pub enum CompactionStrategy {
@@ -1306,7 +1342,8 @@ pub type InputMapping = HashMap<String, MappingValue>;
 /// Example reference: `{ "valueType": "reference", "value": "data.user.name" }`
 /// Example immediate: `{ "valueType": "immediate", "value": "Hello World" }`
 /// Example composite: `{ "valueType": "composite", "value": { "name": {...}, "id": {...} } }`
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[serde(tag = "valueType", rename_all = "lowercase")]
 pub enum MappingValue {
@@ -1341,7 +1378,8 @@ pub enum MappingValue {
 ///
 /// Example: `{ "valueType": "reference", "value": "data.user.name" }`
 /// With type hint: `{ "valueType": "reference", "value": "steps.http.outputs.body.count", "type": "int" }`
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ReferenceValue {
@@ -1366,7 +1404,8 @@ pub struct ReferenceValue {
 /// For strings, this is always treated as a literal string, never as a reference.
 ///
 /// Example: `{ "valueType": "immediate", "value": "Hello World" }`
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ImmediateValue {
@@ -1401,7 +1440,8 @@ pub struct ImmediateValue {
 ///   ]
 /// }
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CompositeValue {
@@ -1411,7 +1451,8 @@ pub struct CompositeValue {
 }
 
 /// Inner value for CompositeValue - either an object or array of MappingValues.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[serde(untagged)]
 pub enum CompositeInner {
@@ -1435,7 +1476,8 @@ pub enum CompositeInner {
 ///
 /// Example: `{ "valueType": "template", "value": "Bearer {{ steps.my_conn.outputs.parameters.api_key }}" }`
 /// With filter: `{ "valueType": "template", "value": "{{ data.name | upper }}" }`
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct TemplateValue {
@@ -1451,9 +1493,10 @@ pub struct TemplateValue {
 /// - `number` for floating point
 /// - `boolean` for true/false
 /// - `json` for pass-through JSON (distinct from `object`/`array` in VariableType)
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[schemars(title = "ValueType")]
+#[cfg_attr(feature = "json-schema", schemars(title = "ValueType"))]
 #[serde(rename_all = "lowercase")]
 pub enum ValueType {
     /// String value
@@ -1472,7 +1515,8 @@ pub enum ValueType {
 
 /// Base64-encoded file data structure.
 /// Used for file inputs/outputs in workflows and operators.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct FileData {
@@ -1494,9 +1538,10 @@ pub struct FileData {
 
 /// Data types for variables.
 /// Matches the operator field types for consistency.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[schemars(title = "VariableType")]
+#[cfg_attr(feature = "json-schema", schemars(title = "VariableType"))]
 #[serde(rename_all = "lowercase")]
 pub enum VariableType {
     /// String value
@@ -1517,9 +1562,10 @@ pub enum VariableType {
 
 /// Data types for schema fields.
 /// Used in input/output schema definitions.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[schemars(title = "SchemaFieldType")]
+#[cfg_attr(feature = "json-schema", schemars(title = "SchemaFieldType"))]
 #[serde(rename_all = "lowercase")]
 pub enum SchemaFieldType {
     /// String value
@@ -1542,7 +1588,8 @@ pub enum SchemaFieldType {
 ///
 /// Variables are static values available during workflow execution
 /// via the `variables.*` path in mappings.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct Variable {
@@ -1569,9 +1616,10 @@ pub struct Variable {
 /// `pattern`, `properties`, and `visible_when` enable clients to render rich
 /// forms from WaitForSignal response schemas. All are backward-compatible —
 /// existing schemas without these fields continue to work unchanged.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[schemars(title = "SchemaField")]
+#[cfg_attr(feature = "json-schema", schemars(title = "SchemaField"))]
 #[serde(rename_all = "camelCase")]
 pub struct SchemaField {
     /// Field type (string, integer, number, boolean, array, object)
@@ -1661,7 +1709,8 @@ pub struct SchemaField {
 /// ```json
 /// { "field": "approved", "equals": false }
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct VisibleWhen {
@@ -1682,7 +1731,8 @@ pub struct VisibleWhen {
 // ============================================================================
 
 /// Condition expression operators
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum ConditionOperator {
@@ -1732,7 +1782,8 @@ pub enum ConditionOperator {
 
 /// A condition expression for conditional branching.
 /// Can be either an operation (with operator and arguments) or a simple value check.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum ConditionExpression {
@@ -1744,7 +1795,8 @@ pub enum ConditionExpression {
 }
 
 /// An operation in a condition expression
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct ConditionOperation {
@@ -1765,7 +1817,8 @@ pub struct ConditionOperation {
 /// - Expression: has "op" and "arguments" fields (from ConditionExpression::Operation)
 ///   or has "valueType" field (from ConditionExpression::Value -> MappingValue)
 /// - Value: has "valueType" field (from MappingValue)
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[serde(untagged)]
 pub enum ConditionArgument {
@@ -1783,9 +1836,10 @@ pub enum ConditionArgument {
 
 /// Match type for switch cases.
 /// Supports all ConditionOperator values plus compound match types.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[schemars(title = "SwitchMatchType")]
+#[cfg_attr(feature = "json-schema", schemars(title = "SwitchMatchType"))]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum SwitchMatchType {
     // Comparison operators (same as ConditionOperator)
@@ -1833,9 +1887,10 @@ pub enum SwitchMatchType {
 
 /// Configuration for a Switch step.
 /// Defines the value to switch on, the cases to match, and the default output.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[schemars(title = "SwitchConfig")]
+#[cfg_attr(feature = "json-schema", schemars(title = "SwitchConfig"))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SwitchConfig {
     /// The value to switch on (evaluated at runtime)
@@ -1872,9 +1927,10 @@ impl SwitchConfig {
 
 /// A single case in a Switch step.
 /// Defines a match condition and the output to produce if matched.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[schemars(title = "SwitchCase")]
+#[cfg_attr(feature = "json-schema", schemars(title = "SwitchCase"))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SwitchCase {
     /// The type of match to perform
@@ -1900,9 +1956,10 @@ pub struct SwitchCase {
 
 /// Configuration for a Split step.
 /// Defines the array to iterate over and execution options.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[schemars(title = "SplitConfig")]
+#[cfg_attr(feature = "json-schema", schemars(title = "SplitConfig"))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SplitConfig {
     /// The array to iterate over

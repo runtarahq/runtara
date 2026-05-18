@@ -1,0 +1,103 @@
+{
+  "definitionVersion": 1,
+  "layout": {
+    "id": "root",
+    "columns": 1,
+    "items": [
+      {
+        "id": "root_i0",
+        "child": { "id": "n_customer", "type": "block", "blockId": "customer_card" }
+      }
+    ]
+  },
+  "filters": [
+    {
+      "id": "customer_id",
+      "label": "Customer",
+      "type": "select",
+      "required": true,
+      "options": {
+        "source": "object_model",
+        "schema": "Customer",
+        "valueField": "id",
+        "labelField": "name"
+      },
+      "appliesTo": [
+        { "blockId": "customer_card", "field": "id", "op": "eq" }
+      ]
+    }
+  ],
+  "blocks": [
+    {
+      "id": "customer_card",
+      "type": "card",
+      "title": "Customer details",
+      "source": {
+        "schema": "Customer",
+        "mode": "filter",
+        "limit": 1
+      },
+      "card": {
+        "groups": [
+          {
+            "id": "g_identity",
+            "title": "Identity",
+            "columns": 2,
+            "fields": [
+              { "field": "name", "label": "Name", "kind": "value" },
+              { "field": "email", "label": "Email", "kind": "value", "format": "email" },
+              { "field": "status", "label": "Status", "kind": "value", "format": "pill", "pillVariants": { "active": "success", "churned": "muted" } },
+              { "field": "created_at", "label": "Joined", "kind": "value", "format": "datetime" }
+            ]
+          },
+          {
+            "id": "g_address",
+            "title": "Billing address",
+            "columns": 1,
+            "fields": [
+              {
+                "field": "billing_address",
+                "label": "Address",
+                "kind": "subcard",
+                "subcard": {
+                  "groups": [
+                    {
+                      "id": "g_address_inner",
+                      "columns": 2,
+                      "fields": [
+                        { "field": "line1", "label": "Line 1" },
+                        { "field": "line2", "label": "Line 2" },
+                        { "field": "city", "label": "City" },
+                        { "field": "postal_code", "label": "Postal code" }
+                      ]
+                    }
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "id": "g_recent_orders",
+            "title": "Recent orders",
+            "columns": 1,
+            "fields": [
+              {
+                "field": "recent_orders",
+                "label": "Orders",
+                "kind": "subtable",
+                "subtable": {
+                  "columns": [
+                    { "field": "order_id", "label": "Order" },
+                    { "field": "total_amount", "label": "Total", "format": "currency", "align": "right" },
+                    { "field": "status", "label": "Status", "format": "pill", "pillVariants": { "active": "success" } }
+                  ],
+                  "emptyLabel": "No orders yet"
+                }
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

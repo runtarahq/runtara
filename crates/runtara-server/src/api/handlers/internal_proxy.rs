@@ -9,7 +9,9 @@
 use axum::{extract::State, http::StatusCode, response::Json};
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
-use runtara_connections::{AwsSigningParams, ConnectionsFacade, RateLimitEventType};
+use runtara_connections::{
+    AwsSigningParams, AzureSigningParams, ConnectionsFacade, RateLimitEventType,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::HashMap;
@@ -89,6 +91,7 @@ pub async fn execute_proxy_request(
     let mut final_headers = request.headers.clone();
     let mut final_url = request.url.clone();
     let mut aws_signing: Option<AwsSigningParams> = None;
+    let mut azure_signing: Option<AzureSigningParams> = None;
 
     // ── Connection credential injection ──────────────────────────────────
     if let Some(ref connection_id) = request.connection_id {
@@ -164,6 +167,7 @@ pub async fn execute_proxy_request(
         }
 
         aws_signing = resolved.aws_signing;
+        azure_signing = resolved.azure_signing;
 
         // ── Pre-flight rate limit check ────────────────────────────────────
         // If adaptive rate limiting is enabled, check the token bucket before
@@ -271,6 +275,52 @@ pub async fn execute_proxy_request(
             &aws.service,
             aws.session_token.as_deref(),
         );
+    }
+
+    // ── Azure Storage Shared Key signing (if needed) ────────────────────
+    if let Some(ref azure) = azure_signing {
+        let parsed_url = url::Url::parse(&final_url).map_err(|e| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": format!("Invalid URL for Azure signing: {}", e)})),
+            )
+        })?;
+
+        // Rewrite a relative x-ms-copy-source header to an absolute URL on the
+        // same storage account before signing, so the canonical resource and the
+        // header value stay in sync.
+        let copy_source_key = final_headers
+            .keys()
+            .find(|k| k.eq_ignore_ascii_case("x-ms-copy-source"))
+            .cloned();
+        if let Some(key) = copy_source_key
+            && let Some(value) = final_headers.get(&key).cloned()
+            && value.starts_with('/')
+        {
+            let scheme = parsed_url.scheme();
+            let host = parsed_url.host_str().unwrap_or("");
+            let absolute = match parsed_url.port() {
+                Some(port) => format!("{}://{}:{}{}", scheme, host, port, value),
+                None => format!("{}://{}{}", scheme, host, value),
+            };
+            final_headers.insert(key, absolute);
+        }
+
+        let payload = body_bytes.as_deref().unwrap_or(b"");
+        runtara_connections::auth::azure_signing::sign_request_shared_key(
+            &method,
+            &parsed_url,
+            &mut final_headers,
+            payload,
+            &azure.account_name,
+            &azure.account_key,
+        )
+        .map_err(|e| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": format!("Azure Shared Key signing failed: {}", e)})),
+            )
+        })?;
     }
 
     let mut req_builder = client.request(reqwest_method, &final_url).timeout(timeout);
@@ -418,6 +468,13 @@ fn record_credential_request_async(
 ///
 /// Blocks: loopback (127.0.0.0/8), private (10/8, 172.16/12, 192.168/16),
 /// link-local (169.254/16), and IPv6 equivalents (::1, fc00::/7, fe80::/10).
+///
+/// **Escape hatch for dev/test environments only:** the
+/// `RUNTARA_PROXY_ALLOWED_HOSTS` env var accepts a comma-separated list of
+/// `host` or `host:port` entries that bypass the SSRF guard. The list is read
+/// once at process start and is intended for local Azurite/MinIO-style
+/// emulators reachable on loopback. **Do not set this in production** — it
+/// re-opens the SSRF surface for every connection routed through the proxy.
 fn reject_private_url(url: &str) -> Result<(), (StatusCode, Json<Value>)> {
     let parsed = url::Url::parse(url).map_err(|_| {
         (
@@ -425,6 +482,15 @@ fn reject_private_url(url: &str) -> Result<(), (StatusCode, Json<Value>)> {
             Json(json!({"error": "Invalid URL"})),
         )
     })?;
+
+    if is_explicitly_allowed_host(&parsed) {
+        tracing::warn!(
+            target: "proxy",
+            url = %parsed,
+            "SSRF guard bypassed by RUNTARA_PROXY_ALLOWED_HOSTS — dev/test only"
+        );
+        return Ok(());
+    }
 
     let host = parsed.host_str().unwrap_or("");
 
@@ -452,6 +518,42 @@ fn reject_private_url(url: &str) -> Result<(), (StatusCode, Json<Value>)> {
     }
 
     Ok(())
+}
+
+/// Read and cache the `RUNTARA_PROXY_ALLOWED_HOSTS` allowlist.
+///
+/// Entries are case-insensitive and may be either bare hosts (matches any port)
+/// or `host:port` pairs (matches only that port). Empty entries are ignored.
+fn allowed_private_hosts() -> &'static [String] {
+    static HOSTS: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    HOSTS
+        .get_or_init(|| {
+            std::env::var("RUNTARA_PROXY_ALLOWED_HOSTS")
+                .unwrap_or_default()
+                .split(',')
+                .map(|s| s.trim().to_ascii_lowercase())
+                .filter(|s| !s.is_empty())
+                .collect()
+        })
+        .as_slice()
+}
+
+fn is_explicitly_allowed_host(url: &url::Url) -> bool {
+    let allowed = allowed_private_hosts();
+    if allowed.is_empty() {
+        return false;
+    }
+    let host = url.host_str().unwrap_or("").to_ascii_lowercase();
+    if host.is_empty() {
+        return false;
+    }
+    let host_with_port = match url.port_or_known_default() {
+        Some(p) => format!("{}:{}", host, p),
+        None => host.clone(),
+    };
+    allowed
+        .iter()
+        .any(|entry| entry == &host || entry == &host_with_port)
 }
 
 fn is_private_ip(ip: &std::net::IpAddr) -> bool {

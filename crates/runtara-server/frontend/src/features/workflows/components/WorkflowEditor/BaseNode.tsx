@@ -77,19 +77,19 @@ export const BaseNode = forwardRef<
 
     const getExecutionBorderClass = (status: ExecutionStatus) => {
       switch (status) {
-        case ExecutionStatus.Running:
-        case ExecutionStatus.Compiling:
+        case 'running':
+        case 'compiling':
           return 'border-blue-500';
-        case ExecutionStatus.Completed:
+        case 'completed':
           return 'border-green-500';
-        case ExecutionStatus.Failed:
-        case ExecutionStatus.Timeout:
+        case 'failed':
+        case 'timeout':
           return 'border-red-500';
-        case ExecutionStatus.Queued:
+        case 'queued':
           return 'border-yellow-500';
-        case ExecutionStatus.Suspended:
+        case 'suspended':
           return 'border-blue-400';
-        case ExecutionStatus.Cancelled:
+        case 'cancelled':
           return 'border-gray-400';
         default:
           return '';
@@ -100,17 +100,17 @@ export const BaseNode = forwardRef<
       if (hasValidationError) return 'bg-red-100 dark:bg-red-950';
       if (executionStatus) {
         switch (executionStatus.status) {
-          case ExecutionStatus.Running:
-          case ExecutionStatus.Compiling:
+          case 'running':
+          case 'compiling':
             return 'bg-blue-100 dark:bg-blue-950';
-          case ExecutionStatus.Completed:
+          case 'completed':
             return 'bg-green-100 dark:bg-green-950';
-          case ExecutionStatus.Failed:
-          case ExecutionStatus.Timeout:
+          case 'failed':
+          case 'timeout':
             return 'bg-red-100 dark:bg-red-950';
-          case ExecutionStatus.Queued:
+          case 'queued':
             return 'bg-yellow-100 dark:bg-yellow-950';
-          case ExecutionStatus.Suspended:
+          case 'suspended':
             return 'bg-slate-100 dark:bg-slate-900';
           default:
             return 'bg-muted/30';
@@ -121,20 +121,20 @@ export const BaseNode = forwardRef<
 
     const getStatusPillIcon = (status: ExecutionStatus) => {
       switch (status) {
-        case ExecutionStatus.Running:
-        case ExecutionStatus.Compiling:
+        case 'running':
+        case 'compiling':
           return <Loader2 className="h-2 w-2 animate-spin" />;
-        case ExecutionStatus.Completed:
+        case 'completed':
           return <CheckCircle2 className="h-2 w-2" />;
-        case ExecutionStatus.Failed:
+        case 'failed':
           return <XCircle className="h-2 w-2" />;
-        case ExecutionStatus.Timeout:
+        case 'timeout':
           return <AlertCircle className="h-2 w-2" />;
-        case ExecutionStatus.Queued:
+        case 'queued':
           return <Pause className="h-2 w-2" />;
-        case ExecutionStatus.Suspended:
+        case 'suspended':
           return <Pause className="h-2 w-2" />;
-        case ExecutionStatus.Cancelled:
+        case 'cancelled':
           return <XCircle className="h-2 w-2" />;
         default:
           return null;
@@ -143,19 +143,19 @@ export const BaseNode = forwardRef<
 
     const getStatusPillClasses = (status: ExecutionStatus) => {
       switch (status) {
-        case ExecutionStatus.Running:
-        case ExecutionStatus.Compiling:
+        case 'running':
+        case 'compiling':
           return 'bg-blue-100 text-blue-700 dark:bg-blue-900 dark:text-blue-300';
-        case ExecutionStatus.Completed:
+        case 'completed':
           return 'bg-green-100 text-green-700 dark:bg-green-900 dark:text-green-300';
-        case ExecutionStatus.Failed:
-        case ExecutionStatus.Timeout:
+        case 'failed':
+        case 'timeout':
           return 'bg-red-100 text-red-700 dark:bg-red-900 dark:text-red-300';
-        case ExecutionStatus.Queued:
+        case 'queued':
           return 'bg-yellow-100 text-yellow-700 dark:bg-yellow-900 dark:text-yellow-300';
-        case ExecutionStatus.Suspended:
+        case 'suspended':
           return 'bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-300';
-        case ExecutionStatus.Cancelled:
+        case 'cancelled':
           return 'bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-400';
         default:
           return '';
@@ -236,13 +236,13 @@ export const BaseNode = forwardRef<
                     ? 'border-dashed border-orange-500 ring-1 ring-orange-500/20'
                     : 'border-border',
           // Subtle glow for suspended (breakpoint hit) nodes
-          executionStatus?.status === ExecutionStatus.Suspended &&
+          executionStatus?.status === 'suspended' &&
             'border-2 animate-glow-pulse',
           // Dim unreached nodes during execution
           isExecutionReadOnly && !executionStatus && 'opacity-40',
           // Extra dim for queued (not-yet-reached) nodes when paused at breakpoint
           isSuspendedExecution &&
-            executionStatus?.status === ExecutionStatus.Queued &&
+            executionStatus?.status === 'queued' &&
             'opacity-25 pointer-events-none',
           className
         )}
@@ -335,7 +335,7 @@ export const BaseNode = forwardRef<
                     )}
                   >
                     {getStatusPillIcon(executionStatus.status)}
-                    {executionStatus.status === ExecutionStatus.Completed &&
+                    {executionStatus.status === 'completed' &&
                     executionStatus.executionTime !== undefined
                       ? formatExecutionTime(executionStatus.executionTime)
                       : null}

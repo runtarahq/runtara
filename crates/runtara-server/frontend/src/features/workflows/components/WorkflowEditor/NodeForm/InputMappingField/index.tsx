@@ -27,23 +27,23 @@ interface ParsedField {
 function getValueTypeFromSchemaType(schemaType: string): ValueType {
   const lowerType = schemaType.toLowerCase();
 
-  if (lowerType === 'string') return ValueType.String;
-  if (lowerType === 'boolean' || lowerType === 'bool') return ValueType.Boolean;
-  if (lowerType === 'integer' || lowerType === 'int') return ValueType.Integer;
+  if (lowerType === 'string') return 'string';
+  if (lowerType === 'boolean' || lowerType === 'bool') return 'boolean';
+  if (lowerType === 'integer' || lowerType === 'int') return 'integer';
   if (lowerType === 'number' || lowerType === 'float' || lowerType === 'double')
-    return ValueType.Number;
+    return 'number';
   if (
     lowerType === 'array' ||
     lowerType.startsWith('[') ||
     lowerType.includes('array<')
   )
-    return ValueType.Json;
+    return 'json';
   if (lowerType === 'object' || lowerType.startsWith('{'))
-    return ValueType.Json;
-  if (lowerType === 'file') return ValueType.File;
+    return 'json';
+  if (lowerType === 'file') return 'file';
 
   // Default to string for unknown types
-  return ValueType.String;
+  return 'string';
 }
 
 export function InputMappingField(props: any) {

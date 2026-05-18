@@ -2,9 +2,7 @@ use chrono::{DateTime, Datelike, Duration, NaiveTime, Utc};
 use regex::Regex;
 use serde_json::{Value, json};
 use sqlx::PgPool;
-use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
 use std::sync::Arc;
 use thiserror::Error;
 use uuid::Uuid;
@@ -14,37 +12,38 @@ use crate::api::dto::object_model::{
     Condition, FilterRequest, Schema as ObjectSchema, SortDirection,
 };
 use crate::api::dto::reports::*;
-use crate::api::dto::workflows::WorkflowInstanceDto;
 use crate::api::repositories::object_model::ObjectStoreManager;
 use crate::api::repositories::reports::ReportRepository;
 use crate::api::repositories::workflows::WorkflowRepository;
 use crate::api::services::object_model::{
     InstanceService, SchemaService, ServiceError as ObjectModelServiceError,
 };
-use crate::api::services::workflow_runtime::{
-    WorkflowRuntimeAction, WorkflowRuntimeError, list_instance_actions, list_workflow_actions,
-    submit_workflow_action,
-};
+use crate::api::services::workflow_runtime::{WorkflowRuntimeError, submit_workflow_action};
 use crate::auth::{AuthContext, AuthMethod};
-use crate::runtime_client::{GetTenantMetricsOptions, MetricsGranularity, RuntimeClient};
-use crate::workers::execution_engine::{ExecutionEngine, ExecutionError};
+use crate::runtime_client::RuntimeClient;
+use crate::workers::execution_engine::ExecutionEngine;
+use crate::workers::execution_engine::ExecutionError;
 
-mod query_plan;
+mod providers;
+pub(crate) mod query_plan;
+mod renderers;
 
+pub use self::providers::{
+    FetchAggregateOutput, FetchParams, FetchRowsOutput, ObjectModelProvider, ProviderRegistry,
+    ReportSourceProvider, SystemProvider, WorkflowRuntimeProvider,
+};
 use self::query_plan::{
-    JoinResolution, build_alias_index, condition_matches_row, empty_join_result,
-    enrich_aggregate_result, field_alias_prefix, primary_pushdown_condition, sort_rows,
-    split_qualified_condition, strip_alias_from_condition, validate_join_request,
-    value_to_lookup_key,
+    JoinResolution, build_alias_index, condition_matches_row, primary_pushdown_condition,
+    sort_rows, value_to_lookup_key,
 };
 
-const MAX_TABLE_PAGE_SIZE: i64 = 500;
+pub(crate) const MAX_TABLE_PAGE_SIZE: i64 = 500;
 const MAX_AGGREGATE_ROWS: i64 = 1000;
 const MAX_JOIN_POST_FILTER_ROWS: i64 = 50_000;
 /// Cap on rows fetched per join from a dimension schema. Broadcast-hash
 /// join breaks down (round trip + memory) past this; report a validation
 /// error so the caller adds a more selective `<alias>.<field>` condition.
-const MAX_BROADCAST_JOIN_DIM_ROWS: i64 = 50_000;
+pub(crate) const MAX_BROADCAST_JOIN_DIM_ROWS: i64 = 50_000;
 
 #[derive(Debug, Error)]
 pub enum ReportServiceError {
@@ -60,14 +59,85 @@ pub enum ReportServiceError {
     Database(String),
 }
 
+impl From<sqlx::Error> for ReportServiceError {
+    fn from(error: sqlx::Error) -> Self {
+        if let sqlx::Error::Database(db_error) = &error
+            && db_error
+                .constraint()
+                .is_some_and(|c| c == "idx_report_definitions_tenant_slug_active")
+        {
+            return ReportServiceError::Conflict(
+                "A report with this slug already exists".to_string(),
+            );
+        }
+        ReportServiceError::Database(error.to_string())
+    }
+}
+
+impl From<ObjectModelServiceError> for ReportServiceError {
+    fn from(error: ObjectModelServiceError) -> Self {
+        match error {
+            ObjectModelServiceError::ValidationError(message)
+            | ObjectModelServiceError::NotFound(message) => ReportServiceError::Validation(message),
+            ObjectModelServiceError::Conflict(message) => ReportServiceError::Conflict(message),
+            ObjectModelServiceError::DatabaseError(message) => {
+                ReportServiceError::Database(message)
+            }
+        }
+    }
+}
+
+impl From<runtara_connections::service::rate_limits::ServiceError> for ReportServiceError {
+    fn from(error: runtara_connections::service::rate_limits::ServiceError) -> Self {
+        use runtara_connections::service::rate_limits::ServiceError;
+        match error {
+            ServiceError::NotFound(message) => ReportServiceError::Validation(message),
+            ServiceError::DatabaseError(message) | ServiceError::RedisError(message) => {
+                ReportServiceError::Database(message)
+            }
+        }
+    }
+}
+
+impl From<WorkflowRuntimeError> for ReportServiceError {
+    fn from(error: WorkflowRuntimeError) -> Self {
+        match error {
+            WorkflowRuntimeError::InvalidRequest(message)
+            | WorkflowRuntimeError::NotFound(message) => ReportServiceError::Validation(message),
+            WorkflowRuntimeError::Conflict(message) => ReportServiceError::Conflict(message),
+            WorkflowRuntimeError::RuntimeUnavailable => ReportServiceError::Validation(
+                "Workflow runtime report sources require a configured runtime client".to_string(),
+            ),
+            WorkflowRuntimeError::Runtime(message) => ReportServiceError::Database(message),
+        }
+    }
+}
+
+impl From<ExecutionError> for ReportServiceError {
+    fn from(error: ExecutionError) -> Self {
+        match error {
+            ExecutionError::ValidationError(message) => ReportServiceError::Validation(message),
+            ExecutionError::NotFound(message) | ExecutionError::WorkflowNotFound(message) => {
+                ReportServiceError::Validation(message)
+            }
+            ExecutionError::NotConnected(_) => ReportServiceError::Validation(
+                "Workflow runtime report sources require a configured runtime client".to_string(),
+            ),
+            other => ReportServiceError::Database(other.to_string()),
+        }
+    }
+}
+
 pub struct ReportService {
     repo: ReportRepository,
     workflow_repo: WorkflowRepository,
     schema_service: SchemaService,
     instance_service: InstanceService,
+    manager: Arc<ObjectStoreManager>,
     connections: Arc<runtara_connections::ConnectionsFacade>,
     engine: Option<Arc<ExecutionEngine>>,
     runtime_client: Option<Arc<RuntimeClient>>,
+    providers: Arc<ProviderRegistry>,
 }
 
 #[derive(Clone, Copy)]
@@ -136,7 +206,14 @@ impl ReportService {
     pub fn report_definition_json_schema() -> Value {
         let mut schema = serde_json::to_value(schemars::schema_for!(ReportDefinition))
             .unwrap_or_else(|_| json!({}));
-        seal_json_schema_objects(&mut schema);
+        // schemars 1 emits internally-tagged enums (`#[serde(tag = "type")]`)
+        // as `oneOf` variants that combine a `$ref` to the inner struct with
+        // an extra discriminator property. The $ref'd struct doesn't expect
+        // the discriminator field, so if we seal it with
+        // `additionalProperties: false` the merge fails validation. Skip
+        // sealing those $ref targets.
+        let unsealable = collect_discriminator_ref_targets(&schema);
+        seal_json_schema_objects(&mut schema, &unsealable, &Vec::new());
         schema
     }
 
@@ -195,14 +272,17 @@ impl ReportService {
         manager: Arc<ObjectStoreManager>,
         connections: Arc<runtara_connections::ConnectionsFacade>,
     ) -> Self {
+        let providers = build_provider_registry(manager.clone(), connections.clone(), None, None);
         Self {
             repo: ReportRepository::new(pool.clone()),
             workflow_repo: WorkflowRepository::new(pool),
             schema_service: SchemaService::new(manager.clone(), connections.clone()),
-            instance_service: InstanceService::new(manager, connections.clone()),
+            instance_service: InstanceService::new(manager.clone(), connections.clone()),
+            manager,
             connections,
             engine: None,
             runtime_client: None,
+            providers: Arc::new(providers),
         }
     }
 
@@ -211,8 +291,15 @@ impl ReportService {
         engine: Arc<ExecutionEngine>,
         runtime_client: Option<Arc<RuntimeClient>>,
     ) -> Self {
-        self.engine = Some(engine);
-        self.runtime_client = runtime_client;
+        self.engine = Some(engine.clone());
+        self.runtime_client = runtime_client.clone();
+        // Rebuild the registry so providers see the late-bound deps.
+        self.providers = Arc::new(build_provider_registry(
+            self.manager.clone(),
+            self.connections.clone(),
+            Some(engine),
+            runtime_client,
+        ));
         self
     }
 
@@ -220,7 +307,7 @@ impl ReportService {
         &self,
         tenant_id: &str,
     ) -> Result<Vec<ReportSummary>, ReportServiceError> {
-        let reports = self.repo.list(tenant_id).await.map_err(map_sqlx_error)?;
+        let reports = self.repo.list(tenant_id).await?;
 
         Ok(reports.iter().map(ReportSummary::from).collect())
     }
@@ -230,18 +317,52 @@ impl ReportService {
         tenant_id: &str,
         id_or_slug: &str,
     ) -> Result<ReportDto, ReportServiceError> {
-        self.repo
+        let mut report = self
+            .repo
             .get(tenant_id, id_or_slug)
+            .await?
+            .ok_or(ReportServiceError::NotFound)?;
+        self.normalize_definition_connections(tenant_id, &mut report.definition)
+            .await;
+        Ok(report)
+    }
+
+    /// Fills in `source.connection_id` on every object_model block + dataset
+    /// when it's missing and the tenant has exactly one active `postgres`
+    /// connection. With zero or multiple connections the function is a no-op
+    /// (the report stays as-is; the user must supply an explicit id). Moved
+    /// from the FE `withDefaultObjectModelConnection` helper as part of the
+    /// Phase 7 wizard rewrite.
+    async fn normalize_definition_connections(
+        &self,
+        tenant_id: &str,
+        definition: &mut ReportDefinition,
+    ) {
+        let default_id = match self
+            .connections
+            .list_connections(tenant_id, Some("postgres"), Some("active"))
             .await
-            .map_err(map_sqlx_error)?
-            .ok_or(ReportServiceError::NotFound)
+        {
+            Ok(conns) if conns.len() == 1 => conns[0].id.clone(),
+            _ => return,
+        };
+        for block in &mut definition.blocks {
+            normalize_source_connection(&mut block.source, &default_id);
+        }
+        for dataset in &mut definition.datasets {
+            if dataset.source.connection_id.is_none() && !dataset.source.schema.trim().is_empty() {
+                dataset.source.connection_id = Some(default_id.clone());
+            }
+        }
     }
 
     pub async fn create_report(
         &self,
         tenant_id: &str,
-        request: CreateReportRequest,
+        mut request: CreateReportRequest,
     ) -> Result<ReportDto, ReportServiceError> {
+        self.normalize_definition_connections(tenant_id, &mut request.definition)
+            .await;
         self.validate_definition(tenant_id, &request.definition)
             .await?;
 
@@ -261,6 +382,7 @@ impl ReportService {
             status: request.status,
             definition_version: request.definition.definition_version,
             definition: request.definition,
+            needs_re_authoring: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         };
@@ -268,15 +390,17 @@ impl ReportService {
         self.repo
             .create(tenant_id, &report)
             .await
-            .map_err(map_sqlx_error)
+            .map_err(Into::into)
     }
 
     pub async fn update_report(
         &self,
         tenant_id: &str,
         id_or_slug: &str,
-        request: UpdateReportRequest,
+        mut request: UpdateReportRequest,
     ) -> Result<ReportDto, ReportServiceError> {
+        self.normalize_definition_connections(tenant_id, &mut request.definition)
+            .await;
         self.validate_definition(tenant_id, &request.definition)
             .await?;
         validate_slug(&request.slug)?;
@@ -291,14 +415,14 @@ impl ReportService {
             status: request.status,
             definition_version: request.definition.definition_version,
             definition: request.definition,
+            needs_re_authoring: None,
             created_at: existing.created_at,
             updated_at: Utc::now(),
         };
 
         self.repo
             .update(tenant_id, id_or_slug, &report)
-            .await
-            .map_err(map_sqlx_error)?
+            .await?
             .ok_or(ReportServiceError::NotFound)
     }
 
@@ -307,11 +431,7 @@ impl ReportService {
         tenant_id: &str,
         id_or_slug: &str,
     ) -> Result<(), ReportServiceError> {
-        let affected = self
-            .repo
-            .delete(tenant_id, id_or_slug)
-            .await
-            .map_err(map_sqlx_error)?;
+        let affected = self.repo.delete(tenant_id, id_or_slug).await?;
 
         if affected == 0 {
             Err(ReportServiceError::NotFound)
@@ -320,148 +440,31 @@ impl ReportService {
         }
     }
 
-    pub async fn add_report_block(
+    /// Apply a batch of [`runtara_report_dsl::edit_ops::ReportEditOp`]
+    /// atomically: load the report, apply ops via the dsl helper (clones
+    /// internally so failures don't mutate intermediate state), validate
+    /// the result, and persist. Returns the updated report. The canonical
+    /// mutation entry point — REST `/edit` + MCP `edit_report` both fan in
+    /// through this method.
+    pub async fn edit_report(
         &self,
         tenant_id: &str,
         id_or_slug: &str,
-        request: AddReportBlockRequest,
-    ) -> Result<ReportBlockMutationResponse, ReportServiceError> {
+        ops: &[runtara_report_dsl::edit_ops::ReportEditOp],
+    ) -> Result<ReportDto, ReportServiceError> {
         let mut report = self.get_report(tenant_id, id_or_slug).await?;
-        if report
-            .definition
-            .blocks
-            .iter()
-            .any(|block| block.id == request.block.id)
-        {
-            return Err(ReportServiceError::Conflict(format!(
-                "Report block '{}' already exists",
-                request.block.id
-            )));
-        }
-
-        let position = request.position.unwrap_or_default();
-        let insert_index = resolve_position_index(&report.definition.blocks, &position)?;
-        let block = request.block;
-        let block_id = block.id.clone();
-
-        report.definition.blocks.insert(insert_index, block.clone());
-
-        let report = self.save_report_definition(tenant_id, report).await?;
-        Ok(ReportBlockMutationResponse {
-            success: true,
-            report,
-            block: Some(block),
-            message: format!("Report block '{}' added", block_id),
-        })
-    }
-
-    pub async fn replace_report_block(
-        &self,
-        tenant_id: &str,
-        id_or_slug: &str,
-        block_id: &str,
-        request: ReplaceReportBlockRequest,
-    ) -> Result<ReportBlockMutationResponse, ReportServiceError> {
-        if request.block.id != block_id {
-            return Err(ReportServiceError::Validation(
-                "Replacement block id must match the path block id".to_string(),
-            ));
-        }
-
-        let mut report = self.get_report(tenant_id, id_or_slug).await?;
-        let index = find_block_index(&report.definition.blocks, block_id)?;
-        report.definition.blocks[index] = request.block.clone();
-
-        let report = self.save_report_definition(tenant_id, report).await?;
-        Ok(ReportBlockMutationResponse {
-            success: true,
-            report,
-            block: Some(request.block),
-            message: format!("Report block '{}' replaced", block_id),
-        })
-    }
-
-    pub async fn patch_report_block(
-        &self,
-        tenant_id: &str,
-        id_or_slug: &str,
-        block_id: &str,
-        request: PatchReportBlockRequest,
-    ) -> Result<ReportBlockMutationResponse, ReportServiceError> {
-        if !request.patch.is_object() {
-            return Err(ReportServiceError::Validation(
-                "Report block patch must be a JSON object".to_string(),
-            ));
-        }
-        if request.patch.get("id").is_some() {
-            return Err(ReportServiceError::Validation(
-                "Report block id cannot be changed with patch_report_block".to_string(),
-            ));
-        }
-
-        let mut report = self.get_report(tenant_id, id_or_slug).await?;
-        let index = find_block_index(&report.definition.blocks, block_id)?;
-        let mut block_value = serde_json::to_value(&report.definition.blocks[index])
-            .map_err(|e| ReportServiceError::Validation(e.to_string()))?;
-        apply_json_merge_patch(&mut block_value, &request.patch);
-        let patched_block: ReportBlockDefinition = serde_json::from_value(block_value)
-            .map_err(|e| ReportServiceError::Validation(format!("Invalid block patch: {}", e)))?;
-        if patched_block.id != block_id {
-            return Err(ReportServiceError::Validation(
-                "Report block id cannot be changed with patch_report_block".to_string(),
-            ));
-        }
-
-        report.definition.blocks[index] = patched_block.clone();
-        let report = self.save_report_definition(tenant_id, report).await?;
-        Ok(ReportBlockMutationResponse {
-            success: true,
-            report,
-            block: Some(patched_block),
-            message: format!("Report block '{}' updated", block_id),
-        })
-    }
-
-    pub async fn move_report_block(
-        &self,
-        tenant_id: &str,
-        id_or_slug: &str,
-        block_id: &str,
-        request: MoveReportBlockRequest,
-    ) -> Result<ReportBlockMutationResponse, ReportServiceError> {
-        let mut report = self.get_report(tenant_id, id_or_slug).await?;
-        let current_index = find_block_index(&report.definition.blocks, block_id)?;
-        let block = report.definition.blocks.remove(current_index);
-        let new_index = resolve_position_index(&report.definition.blocks, &request.position)?;
-        report.definition.blocks.insert(new_index, block.clone());
-
-        let report = self.save_report_definition(tenant_id, report).await?;
-        Ok(ReportBlockMutationResponse {
-            success: true,
-            report,
-            block: Some(block),
-            message: format!("Report block '{}' moved", block_id),
-        })
-    }
-
-    pub async fn remove_report_block(
-        &self,
-        tenant_id: &str,
-        id_or_slug: &str,
-        block_id: &str,
-        _request: RemoveReportBlockRequest,
-    ) -> Result<ReportBlockMutationResponse, ReportServiceError> {
-        let mut report = self.get_report(tenant_id, id_or_slug).await?;
-        let index = find_block_index(&report.definition.blocks, block_id)?;
-        report.definition.blocks.remove(index);
-
-        let report = self.save_report_definition(tenant_id, report).await?;
-        Ok(ReportBlockMutationResponse {
-            success: true,
-            report,
-            block: None,
-            message: format!("Report block '{}' removed", block_id),
-        })
+        runtara_report_dsl::edit_ops::apply_edit_ops(&mut report.definition, ops).map_err(
+            |err| match err.code {
+                "BLOCK_NOT_FOUND" | "LAYOUT_NODE_NOT_FOUND" => {
+                    ReportServiceError::Validation(err.message)
+                }
+                "DUPLICATE_BLOCK_ID" | "DUPLICATE_LAYOUT_NODE_ID" => {
+                    ReportServiceError::Conflict(err.message)
+                }
+                _ => ReportServiceError::Validation(err.message),
+            },
+        )?;
+        self.save_report_definition(tenant_id, report).await
     }
 
     pub async fn validate_report(
@@ -469,7 +472,10 @@ impl ReportService {
         tenant_id: &str,
         definition: &ReportDefinition,
     ) -> ValidateReportResponse {
-        match self.validate_definition(tenant_id, definition).await {
+        let mut normalized = definition.clone();
+        self.normalize_definition_connections(tenant_id, &mut normalized)
+            .await;
+        match self.validate_definition(tenant_id, &normalized).await {
             Ok(()) => ValidateReportResponse {
                 valid: true,
                 errors: vec![],
@@ -490,79 +496,59 @@ impl ReportService {
         request: ReportRenderRequest,
     ) -> Result<ReportRenderResponse, ReportServiceError> {
         let report = self.get_report(tenant_id, id_or_slug).await?;
-        let resolved_filters = resolve_filters(&report.definition, &request.filters);
-        let requested_blocks = requested_blocks(&report.definition, request.blocks.as_deref());
-        let request_by_id: HashMap<_, _> = request
-            .blocks
-            .unwrap_or_default()
-            .into_iter()
-            .map(|block| (block.id.clone(), block))
-            .collect();
-
-        let mut blocks = HashMap::new();
-        let mut errors = Vec::new();
-
-        for block in requested_blocks {
-            let block_request = request_by_id.get(&block.id);
-            let result = self
-                .render_block(
-                    tenant_id,
-                    &report.definition,
-                    block,
-                    &resolved_filters,
-                    block_request,
-                )
-                .await;
-
-            match result {
-                Ok(rendered) => {
-                    blocks.insert(block.id.clone(), rendered);
-                }
-                Err(error) => {
-                    let block_error = ReportBlockError {
-                        code: "BLOCK_RENDER_FAILED".to_string(),
-                        message: error.to_string(),
-                        block_id: Some(block.id.clone()),
-                    };
-                    errors.push(block_error.clone());
-                    blocks.insert(
-                        block.id.clone(),
-                        ReportBlockRenderResult {
-                            block_type: block.block_type,
-                            status: ReportBlockStatus::Error,
-                            title: block.title.clone(),
-                            data: None,
-                            error: Some(block_error),
-                        },
-                    );
-                }
-            }
-        }
-
-        Ok(ReportRenderResponse {
-            success: true,
-            report: ReportRenderMetadata {
-                id: report.id,
-                definition_version: report.definition_version,
-            },
-            resolved_filters,
-            blocks,
-            errors,
-        })
+        let metadata = ReportRenderMetadata {
+            id: report.id,
+            definition_version: report.definition_version,
+        };
+        self.render_blocks(
+            tenant_id,
+            &report.definition,
+            request.filters,
+            request.blocks,
+            metadata,
+        )
+        .await
     }
 
     pub async fn preview_report(
         &self,
         tenant_id: &str,
-        request: ReportPreviewRequest,
+        mut request: ReportPreviewRequest,
     ) -> Result<ReportRenderResponse, ReportServiceError> {
+        self.normalize_definition_connections(tenant_id, &mut request.definition)
+            .await;
         self.validate_definition(tenant_id, &request.definition)
             .await?;
+        let metadata = ReportRenderMetadata {
+            id: "preview".to_string(),
+            definition_version: request.definition.definition_version,
+        };
+        self.render_blocks(
+            tenant_id,
+            &request.definition,
+            request.filters,
+            request.blocks,
+            metadata,
+        )
+        .await
+    }
 
-        let resolved_filters = resolve_filters(&request.definition, &request.filters);
-        let requested_blocks = requested_blocks(&request.definition, request.blocks.as_deref());
-        let request_by_id: HashMap<_, _> = request
-            .blocks
+    /// Single render pipeline shared by `render_report` (persisted definition)
+    /// and `preview_report` (in-flight definition). Resolves filters, iterates
+    /// over the requested blocks, dispatches each through `render_block`, and
+    /// collects per-block errors into the response envelope instead of
+    /// failing the whole request.
+    async fn render_blocks(
+        &self,
+        tenant_id: &str,
+        definition: &ReportDefinition,
+        filters: HashMap<String, Value>,
+        block_requests: Option<Vec<ReportBlockDataRequest>>,
+        metadata: ReportRenderMetadata,
+    ) -> Result<ReportRenderResponse, ReportServiceError> {
+        let resolved_filters = resolve_filters(definition, &filters);
+        let requested_blocks = requested_blocks(definition, block_requests.as_deref());
+        let request_by_id: HashMap<_, _> = block_requests
             .unwrap_or_default()
             .into_iter()
             .map(|block| (block.id.clone(), block))
@@ -576,7 +562,7 @@ impl ReportService {
             let result = self
                 .render_block(
                     tenant_id,
-                    &request.definition,
+                    definition,
                     block,
                     &resolved_filters,
                     block_request,
@@ -610,10 +596,7 @@ impl ReportService {
 
         Ok(ReportRenderResponse {
             success: true,
-            report: ReportRenderMetadata {
-                id: "preview".to_string(),
-                definition_version: request.definition.definition_version,
-            },
+            report: metadata,
             resolved_filters,
             blocks,
             errors,
@@ -681,7 +664,7 @@ impl ReportService {
                 block.id
             )));
         }
-        let entity = workflow_runtime_entity(block)?;
+        let entity = providers::workflow_runtime::workflow_runtime_entity(block)?;
         if entity != ReportWorkflowRuntimeEntity::Actions {
             return Err(ReportServiceError::Validation(format!(
                 "Block '{}' action submit requires workflow_runtime entity 'actions'",
@@ -697,14 +680,16 @@ impl ReportService {
             search: None,
             block_filters: request.block_filters,
         };
+        let condition = build_block_condition(
+            &report.definition,
+            block,
+            &resolved_filters,
+            Some(&block_request),
+        )?;
         let actions = self
-            .workflow_runtime_actions_for_block_context(
-                tenant_id,
-                &report.definition,
-                block,
-                &resolved_filters,
-                Some(&block_request),
-            )
+            .providers
+            .workflow_runtime()
+            .actions_for_block_context(tenant_id, block, condition.as_ref())
             .await?;
         let action = actions
             .into_iter()
@@ -727,7 +712,7 @@ impl ReportService {
             &payload,
         )
         .await
-        .map_err(map_workflow_runtime_error_to_report)?;
+        .map_err(ReportServiceError::from)?;
 
         Ok(json!({
             "success": true,
@@ -801,7 +786,8 @@ impl ReportService {
         let label_field = option_string(options_config, "labelField")
             .unwrap_or(&field)
             .to_string();
-        let connection_id = option_string(options_config, "connectionId");
+        let connection_id = option_string(options_config, "connectionId")
+            .or_else(|| infer_filter_option_connection_id(&report.definition, filter));
         let resolved_filters = resolve_filters(&report.definition, &request.filters);
         let condition_filter_defs = report_filter_definitions_by_id(&report.definition.filters);
         let mut conditions = Vec::new();
@@ -956,8 +942,7 @@ impl ReportService {
             let schema = self
                 .schema_service
                 .get_schema_by_name(&query.schema, tenant_id, query.connection_id)
-                .await
-                .map_err(map_object_model_error)?;
+                .await?;
             if let Some(search_condition) =
                 option_search_condition(&schema, &query.search_fields, search_query)
             {
@@ -991,24 +976,21 @@ impl ReportService {
             offset: Some(offset),
         };
 
-        let result = self
-            .instance_service
-            .aggregate_instances_by_schema(
-                tenant_id,
-                &query.schema,
-                aggregate_request,
-                query.connection_id,
-            )
-            .await
-            .map_err(|error| {
-                let mapped = map_object_model_error(error);
-                match mapped {
+        let result =
+            self.instance_service
+                .aggregate_instances_by_schema(
+                    tenant_id,
+                    &query.schema,
+                    aggregate_request,
+                    query.connection_id,
+                )
+                .await
+                .map_err(|error| match ReportServiceError::from(error) {
                     ReportServiceError::Validation(message) => ReportServiceError::Validation(
                         format!("{} options query is invalid: {}", query.context, message),
                     ),
                     other => other,
-                }
-            })?;
+                })?;
         let value_index = result
             .columns
             .iter()
@@ -1127,8 +1109,7 @@ impl ReportService {
                 aggregate_request,
                 compiled.source.connection_id.as_deref(),
             )
-            .await
-            .map_err(map_object_model_error)?;
+            .await?;
 
         Ok(ReportDatasetQueryResponse {
             success: true,
@@ -1163,8 +1144,7 @@ impl ReportService {
 
         self.repo
             .update(tenant_id, &report.id, &report)
-            .await
-            .map_err(map_sqlx_error)?
+            .await?
             .ok_or(ReportServiceError::NotFound)
     }
 
@@ -1189,7 +1169,7 @@ impl ReportService {
         }
         let report_condition_filter_defs = report_filter_definitions_by_id(&definition.filters);
         for filter in &definition.filters {
-            self.validate_filter_options(tenant_id, filter, &filter_ids)
+            self.validate_filter_options(tenant_id, definition, filter, &filter_ids)
                 .await?;
             validate_filter_option_condition_filter_refs(filter, &report_condition_filter_defs)?;
         }
@@ -1323,30 +1303,19 @@ impl ReportService {
                 validate_block_interactions(block, &filter_ids, &view_ids)?;
                 continue;
             }
-            if block.source.kind == ReportSourceKind::WorkflowRuntime {
-                validate_workflow_runtime_block(
+            if matches!(
+                block.source.kind,
+                ReportSourceKind::WorkflowRuntime | ReportSourceKind::System
+            ) {
+                let provider = self.providers.get(block.source.kind);
+                provider.validate_block(
                     block,
                     &filter_ids,
                     &view_ids,
                     &block_condition_filter_defs,
                 )?;
-                let fields = workflow_runtime_fields(workflow_runtime_entity(block)?);
                 validate_report_markdown_placeholders(block, &markdown_placeholders, &|field| {
-                    markdown_output_field_known(field, &|candidate| {
-                        workflow_runtime_row_field_known(&fields, candidate)
-                    })
-                })?;
-                continue;
-            }
-            if block.source.kind == ReportSourceKind::System {
-                validate_system_block(block, &filter_ids, &view_ids, &block_condition_filter_defs)?;
-                let fields = system_fields(system_entity(block)?);
-                let aggregate_output_fields = aggregate_output_fields(block);
-                validate_report_markdown_placeholders(block, &markdown_placeholders, &|field| {
-                    markdown_output_field_known(field, &|candidate| match block.source.mode {
-                        ReportSourceMode::Filter => system_row_field_known(&fields, candidate),
-                        ReportSourceMode::Aggregate => aggregate_output_fields.contains(candidate),
-                    })
+                    provider.markdown_field_known(block, field)
                 })?;
                 continue;
             }
@@ -1364,8 +1333,7 @@ impl ReportService {
                     tenant_id,
                     block.source.connection_id.as_deref(),
                 )
-                .await
-                .map_err(map_object_model_error)?;
+                .await?;
 
             let schema_fields: HashSet<_> = schema
                 .columns
@@ -1388,8 +1356,7 @@ impl ReportService {
                 let dim_schema = self
                     .schema_service
                     .get_schema_by_name(&join.schema, tenant_id, join.connection_id.as_deref())
-                    .await
-                    .map_err(map_object_model_error)?;
+                    .await?;
                 let dim_fields: HashSet<String> =
                     dim_schema.columns.iter().map(|c| c.name.clone()).collect();
                 if !is_schema_field(&dim_fields, &join.field) {
@@ -1693,22 +1660,15 @@ impl ReportService {
         }
 
         let mut layout_node_ids = HashSet::new();
-        for (index, node) in definition.layout.iter().enumerate() {
-            let node_value = serde_json::to_value(node).map_err(|err| {
-                ReportServiceError::Validation(format!(
-                    "Could not serialize layout node {} for validation: {}",
-                    index, err
-                ))
-            })?;
-            validate_layout_node(
-                &node_value,
-                &format!("$.layout[{index}]"),
-                &block_ids,
-                &block_types,
-                &filter_ids,
-                &mut layout_node_ids,
-            )?;
-        }
+        let root_node_value = root_grid_as_layout_node_value(&definition.layout)?;
+        validate_layout_node(
+            &root_node_value,
+            "$.layout",
+            &block_ids,
+            &block_types,
+            &filter_ids,
+            &mut layout_node_ids,
+        )?;
 
         for (view_index, view) in definition.views.iter().enumerate() {
             for (breadcrumb_index, breadcrumb) in view.breadcrumb.iter().enumerate() {
@@ -1737,22 +1697,15 @@ impl ReportService {
             }
 
             let mut view_layout_node_ids = HashSet::new();
-            for (node_index, node) in view.layout.iter().enumerate() {
-                let node_value = serde_json::to_value(node).map_err(|err| {
-                    ReportServiceError::Validation(format!(
-                        "Could not serialize report view '{}' layout node {} for validation: {}",
-                        view.id, node_index, err
-                    ))
-                })?;
-                validate_layout_node(
-                    &node_value,
-                    &format!("$.views[{view_index}].layout[{node_index}]"),
-                    &block_ids,
-                    &block_types,
-                    &filter_ids,
-                    &mut view_layout_node_ids,
-                )?;
-            }
+            let view_root_value = root_grid_as_layout_node_value(&view.layout)?;
+            validate_layout_node(
+                &view_root_value,
+                &format!("$.views[{view_index}].layout"),
+                &block_ids,
+                &block_types,
+                &filter_ids,
+                &mut view_layout_node_ids,
+            )?;
         }
 
         self.validate_workflow_references(tenant_id, definition)
@@ -1768,7 +1721,7 @@ impl ReportService {
     ) -> Result<(), ReportServiceError> {
         for block in &definition.blocks {
             if block.source.kind == ReportSourceKind::WorkflowRuntime {
-                let workflow_id = workflow_runtime_workflow_id(block)?;
+                let workflow_id = providers::workflow_runtime::workflow_runtime_workflow_id(block)?;
                 self.validate_workflow_exists(
                     tenant_id,
                     workflow_id,
@@ -1821,11 +1774,7 @@ impl ReportService {
         workflow_id: &str,
         context: &str,
     ) -> Result<(), ReportServiceError> {
-        let exists = self
-            .workflow_repo
-            .exists(tenant_id, workflow_id)
-            .await
-            .map_err(map_sqlx_error)?;
+        let exists = self.workflow_repo.exists(tenant_id, workflow_id).await?;
         if !exists {
             return Err(report_validation_error(
                 "$",
@@ -1860,8 +1809,7 @@ impl ReportService {
             let exists = self
                 .workflow_repo
                 .version_exists(tenant_id, &action.workflow_id, version)
-                .await
-                .map_err(map_sqlx_error)?;
+                .await?;
             if !exists {
                 return Err(report_validation_error(
                     "$",
@@ -1902,8 +1850,7 @@ impl ReportService {
                 tenant_id,
                 dataset.source.connection_id.as_deref(),
             )
-            .await
-            .map_err(map_object_model_error)?;
+            .await?;
         let schema_fields: HashSet<_> = schema
             .columns
             .iter()
@@ -2028,6 +1975,7 @@ impl ReportService {
     async fn validate_filter_options(
         &self,
         tenant_id: &str,
+        definition: &ReportDefinition,
         filter: &ReportFilterDefinition,
         filter_ids: &HashSet<String>,
     ) -> Result<(), ReportServiceError> {
@@ -2058,12 +2006,12 @@ impl ReportService {
                 ))
             })?;
         let label_field = option_string(options, "labelField").unwrap_or(value_field);
-        let connection_id = option_string(options, "connectionId");
+        let connection_id = option_string(options, "connectionId")
+            .or_else(|| infer_filter_option_connection_id(definition, filter));
         let schema = self
             .schema_service
             .get_schema_by_name(schema_name, tenant_id, connection_id)
-            .await
-            .map_err(map_object_model_error)?;
+            .await?;
         let schema_fields: HashSet<_> = schema
             .columns
             .iter()
@@ -2176,8 +2124,7 @@ impl ReportService {
         let schema = self
             .schema_service
             .get_schema_by_name(&lookup.schema, tenant_id, lookup.connection_id.as_deref())
-            .await
-            .map_err(map_object_model_error)?;
+            .await?;
         let schema_fields: HashSet<_> = schema
             .columns
             .iter()
@@ -2297,8 +2244,7 @@ impl ReportService {
                     let schema = self
                         .schema_service
                         .get_schema_by_name(schema_name, tenant_id, parent_connection_id)
-                        .await
-                        .map_err(map_object_model_error)?;
+                        .await?;
                     let schema_fields: HashSet<_> = schema
                         .columns
                         .iter()
@@ -2373,8 +2319,7 @@ impl ReportService {
         let nested_schema = self
             .schema_service
             .get_schema_by_name(&source.schema, tenant_id, source.connection_id.as_deref())
-            .await
-            .map_err(map_object_model_error)?;
+            .await?;
         let nested_schema_fields: HashSet<_> = nested_schema
             .columns
             .iter()
@@ -2531,8 +2476,7 @@ impl ReportService {
         let nested_schema = self
             .schema_service
             .get_schema_by_name(&source.schema, tenant_id, source.connection_id.as_deref())
-            .await
-            .map_err(map_object_model_error)?;
+            .await?;
         let nested_schema_fields: HashSet<_> = nested_schema
             .columns
             .iter()
@@ -2614,50 +2558,16 @@ impl ReportService {
             });
         }
 
-        let data = match block.block_type {
-            ReportBlockType::Table => {
-                self.render_table_block(
-                    tenant_id,
-                    definition,
-                    block,
-                    resolved_filters,
-                    block_request,
-                )
-                .await?
-            }
-            ReportBlockType::Chart => {
-                self.render_aggregate_block(tenant_id, definition, block, resolved_filters)
-                    .await?
-            }
-            ReportBlockType::Metric => {
-                self.render_metric_block(tenant_id, definition, block, resolved_filters)
-                    .await?
-            }
-            ReportBlockType::Actions => {
-                self.render_actions_block(
-                    tenant_id,
-                    definition,
-                    block,
-                    resolved_filters,
-                    block_request,
-                )
-                .await?
-            }
-            ReportBlockType::Markdown => {
-                self.render_markdown_block(
-                    tenant_id,
-                    definition,
-                    block,
-                    resolved_filters,
-                    block_request,
-                )
-                .await?
-            }
-            ReportBlockType::Card => {
-                self.render_card_block(tenant_id, definition, block, resolved_filters)
-                    .await?
-            }
-        };
+        let data = renderers::renderer_for(block.block_type)
+            .render(
+                self,
+                tenant_id,
+                definition,
+                block,
+                resolved_filters,
+                block_request,
+            )
+            .await?;
 
         let status = if is_empty_data(&data) {
             ReportBlockStatus::Empty
@@ -2674,7 +2584,7 @@ impl ReportService {
         })
     }
 
-    async fn render_table_block(
+    pub(super) async fn render_table_block(
         &self,
         tenant_id: &str,
         definition: &ReportDefinition,
@@ -2682,28 +2592,6 @@ impl ReportService {
         resolved_filters: &HashMap<String, Value>,
         block_request: Option<&ReportBlockDataRequest>,
     ) -> Result<Value, ReportServiceError> {
-        if block.source.kind == ReportSourceKind::System {
-            return self
-                .render_system_table_block(
-                    tenant_id,
-                    definition,
-                    block,
-                    resolved_filters,
-                    block_request,
-                )
-                .await;
-        }
-        if block.source.kind == ReportSourceKind::WorkflowRuntime {
-            return self
-                .render_workflow_runtime_table_block(
-                    tenant_id,
-                    definition,
-                    block,
-                    resolved_filters,
-                    block_request,
-                )
-                .await;
-        }
         if block.source.mode == ReportSourceMode::Aggregate {
             return self
                 .render_aggregate_table_block(
@@ -2728,180 +2616,41 @@ impl ReportService {
         }
 
         let table = block.table.as_ref();
-        let page_size = clamp_page_size(
-            block_request
-                .and_then(|request| request.page.as_ref().map(|page| page.size))
-                .or_else(|| {
-                    table
-                        .and_then(|table| table.pagination.as_ref())
-                        .map(|p| p.default_page_size)
-                })
-                .unwrap_or(50),
-        );
-        let offset = block_request
-            .and_then(|request| request.page.as_ref().map(|page| page.offset))
-            .unwrap_or(0)
-            .max(0);
+        let ResolvedTablePage {
+            page_size,
+            offset,
+            sort: sort_owned,
+        } = resolve_table_page(block, block_request);
 
-        let sort = block_request
-            .map(|request| request.sort.clone())
-            .filter(|sort| !sort.is_empty())
-            .or_else(|| {
-                table
-                    .map(|table| table.default_sort.clone())
-                    .filter(|sort| !sort.is_empty())
-            })
-            .unwrap_or_else(|| block.source.order_by.clone());
-
-        let filter_request = FilterRequest {
+        let condition = build_block_condition(definition, block, resolved_filters, block_request)?;
+        let provider = self.providers.get(block.source.kind).clone();
+        let params = FetchParams {
+            tenant_id,
+            block,
+            condition: condition.as_ref(),
+            sort: &sort_owned,
             offset,
             limit: page_size,
-            condition: build_block_condition(definition, block, resolved_filters, block_request)?,
-            sort_by: if sort.is_empty() {
-                None
-            } else {
-                Some(sort.iter().map(|entry| entry.field.clone()).collect())
-            },
-            sort_order: if sort.is_empty() {
-                None
-            } else {
-                Some(
-                    sort.iter()
-                        .map(|entry| normalize_sort_direction(&entry.direction))
-                        .collect(),
-                )
-            },
-            score_expression: None,
-            order_by: None,
         };
 
-        let (instances, total_count) = self
-            .instance_service
-            .filter_instances_by_schema(
-                tenant_id,
-                &block.source.schema,
-                filter_request,
-                block.source.connection_id.as_deref(),
-            )
-            .await
-            .map_err(map_object_model_error)?;
+        let output = provider.fetch_rows(params).await?;
+        let columns = provider.table_columns(block)?;
 
-        let rows: Vec<_> = instances.into_iter().map(flatten_instance).collect();
-        let condition_context = ReportConditionRuntimeContext {
-            definition,
-            block,
-            resolved_filters,
-            block_request,
-        };
-        let columns = table_response_columns(table);
-        let rows = self
-            .hydrate_table_chart_columns(tenant_id, condition_context, table, rows)
-            .await?;
-
-        Ok(json!({
-            "columns": columns,
-            "rows": rows,
-            "page": {
-                "offset": offset,
-                "size": page_size,
-                "totalCount": total_count,
-                "hasNextPage": offset + page_size < total_count
-            }
-        }))
-    }
-
-    async fn render_workflow_runtime_table_block(
-        &self,
-        tenant_id: &str,
-        definition: &ReportDefinition,
-        block: &ReportBlockDefinition,
-        resolved_filters: &HashMap<String, Value>,
-        block_request: Option<&ReportBlockDataRequest>,
-    ) -> Result<Value, ReportServiceError> {
-        let entity = workflow_runtime_entity(block)?;
-        let table = block.table.as_ref();
-        let page_size = clamp_page_size(
-            block_request
-                .and_then(|request| request.page.as_ref().map(|page| page.size))
-                .or_else(|| {
-                    table
-                        .and_then(|table| table.pagination.as_ref())
-                        .map(|p| p.default_page_size)
-                })
-                .unwrap_or(50),
-        );
-        let offset = block_request
-            .and_then(|request| request.page.as_ref().map(|page| page.offset))
-            .unwrap_or(0)
-            .max(0);
-        let sort = block_request
-            .map(|request| request.sort.clone())
-            .filter(|sort| !sort.is_empty())
-            .or_else(|| {
-                table
-                    .map(|table| table.default_sort.clone())
-                    .filter(|sort| !sort.is_empty())
-            })
-            .unwrap_or_else(|| block.source.order_by.clone());
-
-        match entity {
-            ReportWorkflowRuntimeEntity::Instances => {
-                let engine = self.require_execution_engine()?;
-                let runtime_client = self.require_runtime_client()?;
-                let workflow_id = workflow_runtime_workflow_id(block)?;
-                let page = (offset / page_size) as i32;
-                let result = engine
-                    .list_executions(tenant_id, workflow_id, Some(page), Some(page_size as i32))
-                    .await
-                    .map_err(map_execution_error_to_report)?;
-
-                let mut rows = Vec::with_capacity(result.content.len());
-                for instance in result.content {
-                    let actions = if should_check_instance_actions(&instance) {
-                        list_instance_actions(runtime_client, workflow_id, &instance.id)
-                            .await
-                            .map_err(map_workflow_runtime_error_to_report)?
-                    } else {
-                        Vec::new()
-                    };
-                    rows.push(workflow_instance_report_row(&instance, &actions));
-                }
-
-                rows = apply_workflow_runtime_row_filters(
-                    rows,
-                    definition,
-                    block,
-                    resolved_filters,
-                    block_request,
-                )?;
-                sort_rows(&mut rows, &sort);
-
-                Ok(json!({
-                    "columns": workflow_runtime_table_columns(table, entity),
-                    "rows": rows.into_iter().map(Value::Object).collect::<Vec<_>>(),
-                    "page": {
-                        "offset": offset,
-                        "size": page_size,
-                        "totalCount": result.total_elements,
-                        "hasNextPage": !result.last,
-                    }
-                }))
-            }
-            ReportWorkflowRuntimeEntity::Actions => {
-                let actions = self
-                    .workflow_runtime_actions_for_block_context(
-                        tenant_id,
-                        definition,
-                        block,
-                        resolved_filters,
-                        block_request,
-                    )
-                    .await?;
-                let mut rows = actions
+        let (rows, total_count, has_next_page) = match output.total_count {
+            // Provider already paginated (object_model SQL pushdown).
+            Some(total) => (
+                output
+                    .rows
                     .into_iter()
-                    .map(|action| workflow_action_report_row(&action))
-                    .collect::<Vec<_>>();
-                sort_rows(&mut rows, &sort);
+                    .map(Value::Object)
+                    .collect::<Vec<_>>(),
+                total,
+                offset + page_size < total,
+            ),
+            // Provider streamed everything matching the condition; slice here.
+            None => {
+                let mut rows = output.rows;
+                sort_rows(&mut rows, &sort_owned);
                 let total_count = rows.len() as i64;
                 let rows = rows
                     .into_iter()
@@ -2909,156 +2658,26 @@ impl ReportService {
                     .take(page_size as usize)
                     .map(Value::Object)
                     .collect::<Vec<_>>();
-
-                Ok(json!({
-                    "columns": workflow_runtime_table_columns(table, entity),
-                    "rows": rows,
-                    "page": {
-                        "offset": offset,
-                        "size": page_size,
-                        "totalCount": total_count,
-                        "hasNextPage": offset + page_size < total_count,
-                    }
-                }))
+                let has_next_page = offset + page_size < total_count;
+                (rows, total_count, has_next_page)
             }
-            _ => Err(ReportServiceError::Validation(format!(
-                "Block '{}' workflow_runtime source does not support system entity {:?}",
-                block.id, entity
-            ))),
-        }
-    }
+        };
 
-    async fn render_system_table_block(
-        &self,
-        tenant_id: &str,
-        definition: &ReportDefinition,
-        block: &ReportBlockDefinition,
-        resolved_filters: &HashMap<String, Value>,
-        block_request: Option<&ReportBlockDataRequest>,
-    ) -> Result<Value, ReportServiceError> {
-        if block.source.mode == ReportSourceMode::Aggregate {
-            return self
-                .render_system_aggregate_table_block(
-                    tenant_id,
-                    definition,
-                    block,
-                    resolved_filters,
-                    block_request,
-                )
-                .await;
-        }
-
-        let entity = system_entity(block)?;
-        let table = block.table.as_ref();
-        let page_size = clamp_page_size(
-            block_request
-                .and_then(|request| request.page.as_ref().map(|page| page.size))
-                .or_else(|| {
-                    table
-                        .and_then(|table| table.pagination.as_ref())
-                        .map(|p| p.default_page_size)
-                })
-                .unwrap_or(50),
-        );
-        let offset = block_request
-            .and_then(|request| request.page.as_ref().map(|page| page.offset))
-            .unwrap_or(0)
-            .max(0);
-        let sort = block_request
-            .map(|request| request.sort.clone())
-            .filter(|sort| !sort.is_empty())
-            .or_else(|| {
-                table
-                    .map(|table| table.default_sort.clone())
-                    .filter(|sort| !sort.is_empty())
-            })
-            .unwrap_or_else(|| block.source.order_by.clone());
-
-        let mut rows = self
-            .system_rows_for_block(
-                tenant_id,
+        // For object-model sources, hydrate chart/lookup columns *after*
+        // pagination. system/workflow_runtime don't support nested columns
+        // (validators reject them) so the hydration step is a no-op there.
+        let rows = if block.source.kind == ReportSourceKind::ObjectModel {
+            let condition_context = ReportConditionRuntimeContext {
                 definition,
                 block,
                 resolved_filters,
                 block_request,
-            )
-            .await?;
-        sort_rows(&mut rows, &sort);
-        let total_count = rows.len() as i64;
-        let rows = rows
-            .into_iter()
-            .skip(offset as usize)
-            .take(page_size as usize)
-            .map(Value::Object)
-            .collect::<Vec<_>>();
-
-        Ok(json!({
-            "columns": system_table_columns(table, entity),
-            "rows": rows,
-            "page": {
-                "offset": offset,
-                "size": page_size,
-                "totalCount": total_count,
-                "hasNextPage": offset + page_size < total_count,
-            }
-        }))
-    }
-
-    async fn render_system_aggregate_table_block(
-        &self,
-        tenant_id: &str,
-        definition: &ReportDefinition,
-        block: &ReportBlockDefinition,
-        resolved_filters: &HashMap<String, Value>,
-        block_request: Option<&ReportBlockDataRequest>,
-    ) -> Result<Value, ReportServiceError> {
-        let table = block.table.as_ref();
-        let page_size = clamp_page_size(
-            block_request
-                .and_then(|request| request.page.as_ref().map(|page| page.size))
-                .or_else(|| {
-                    table
-                        .and_then(|table| table.pagination.as_ref())
-                        .map(|p| p.default_page_size)
-                })
-                .unwrap_or(50),
-        );
-        let offset = block_request
-            .and_then(|request| request.page.as_ref().map(|page| page.offset))
-            .unwrap_or(0)
-            .max(0);
-        let sort = block_request
-            .map(|request| request.sort.clone())
-            .filter(|sort| !sort.is_empty())
-            .or_else(|| {
-                table
-                    .map(|table| table.default_sort.clone())
-                    .filter(|sort| !sort.is_empty())
-            })
-            .unwrap_or_else(|| block.source.order_by.clone());
-
-        let request = build_table_aggregate_request(
-            definition,
-            block,
-            resolved_filters,
-            block_request,
-            &sort,
-            page_size,
-            offset,
-        )?;
-        let rows = self
-            .system_rows_for_block(
-                tenant_id,
-                definition,
-                block,
-                resolved_filters,
-                block_request,
-            )
-            .await?;
-        let result = aggregate_virtual_rows(&block.id, &rows, request)?;
-        let source_columns = result.columns.clone();
-        let columns = table_output_columns(table, &source_columns);
-        let rows = project_aggregate_table_rows(table, &source_columns, result.rows)?;
+            };
+            self.hydrate_table_chart_columns(tenant_id, condition_context, table, rows)
+                .await?
+        } else {
+            rows
+        };
 
         Ok(json!({
             "columns": columns,
@@ -3066,331 +2685,13 @@ impl ReportService {
             "page": {
                 "offset": offset,
                 "size": page_size,
-                "totalCount": result.group_count,
-                "hasNextPage": offset + page_size < result.group_count,
+                "totalCount": total_count,
+                "hasNextPage": has_next_page,
             }
         }))
     }
 
-    async fn render_system_aggregate_block(
-        &self,
-        tenant_id: &str,
-        definition: &ReportDefinition,
-        block: &ReportBlockDefinition,
-        resolved_filters: &HashMap<String, Value>,
-    ) -> Result<Value, ReportServiceError> {
-        let request = build_aggregate_request(definition, block, resolved_filters)?;
-        let rows = self
-            .system_rows_for_block(tenant_id, definition, block, resolved_filters, None)
-            .await?;
-        let result = aggregate_virtual_rows(&block.id, &rows, request)?;
-
-        Ok(json!({
-            "columns": result.columns,
-            "rows": result.rows,
-            "groupCount": result.group_count,
-        }))
-    }
-
-    async fn system_rows_for_block(
-        &self,
-        tenant_id: &str,
-        definition: &ReportDefinition,
-        block: &ReportBlockDefinition,
-        resolved_filters: &HashMap<String, Value>,
-        block_request: Option<&ReportBlockDataRequest>,
-    ) -> Result<Vec<serde_json::Map<String, Value>>, ReportServiceError> {
-        let condition = build_block_condition(definition, block, resolved_filters, block_request)?;
-        let mut rows = self
-            .fetch_system_rows(tenant_id, block, condition.as_ref())
-            .await?;
-
-        if let Some(condition) = &condition {
-            rows = rows
-                .into_iter()
-                .filter_map(
-                    |row| match condition_matches_row(condition, &row, &block.id) {
-                        Ok(true) => Some(Ok(row)),
-                        Ok(false) => None,
-                        Err(error) => Some(Err(error)),
-                    },
-                )
-                .collect::<Result<Vec<_>, _>>()?;
-        }
-
-        Ok(rows)
-    }
-
-    async fn fetch_system_rows(
-        &self,
-        tenant_id: &str,
-        block: &ReportBlockDefinition,
-        condition: Option<&Condition>,
-    ) -> Result<Vec<serde_json::Map<String, Value>>, ReportServiceError> {
-        match system_entity(block)? {
-            ReportWorkflowRuntimeEntity::RuntimeExecutionMetricBuckets => {
-                self.runtime_execution_metric_rows(tenant_id, block, condition)
-                    .await
-            }
-            ReportWorkflowRuntimeEntity::RuntimeSystemSnapshot => {
-                Ok(vec![runtime_system_snapshot_row()])
-            }
-            ReportWorkflowRuntimeEntity::ConnectionRateLimitStatus => {
-                self.connection_rate_limit_status_rows(tenant_id, block)
-                    .await
-            }
-            ReportWorkflowRuntimeEntity::ConnectionRateLimitEvents => {
-                self.connection_rate_limit_event_rows(tenant_id, block, condition)
-                    .await
-            }
-            ReportWorkflowRuntimeEntity::ConnectionRateLimitTimeline => {
-                self.connection_rate_limit_timeline_rows(tenant_id, block, condition)
-                    .await
-            }
-            ReportWorkflowRuntimeEntity::Instances | ReportWorkflowRuntimeEntity::Actions => {
-                Err(ReportServiceError::Validation(format!(
-                    "Block '{}' system source does not support workflow_runtime entity {:?}",
-                    block.id, block.source.entity
-                )))
-            }
-        }
-    }
-
-    async fn runtime_execution_metric_rows(
-        &self,
-        tenant_id: &str,
-        block: &ReportBlockDefinition,
-        condition: Option<&Condition>,
-    ) -> Result<Vec<serde_json::Map<String, Value>>, ReportServiceError> {
-        let runtime_client = self.require_runtime_client()?;
-        let now = Utc::now();
-        let (start_time, end_time) = extract_time_bounds(condition, &["bucketTime"]);
-        let end_time = end_time.unwrap_or(now);
-        let start_time = start_time.unwrap_or(end_time - Duration::days(30));
-        let granularity = parse_metrics_granularity(block.source.granularity.as_deref())?;
-
-        let result = runtime_client
-            .get_tenant_metrics(
-                GetTenantMetricsOptions::new(tenant_id)
-                    .with_start_time(start_time)
-                    .with_end_time(end_time)
-                    .with_granularity(granularity),
-            )
-            .await
-            .map_err(|err| {
-                ReportServiceError::Database(format!(
-                    "Failed to fetch runtime execution metrics: {}",
-                    err
-                ))
-            })?;
-
-        let result_tenant_id = result.tenant_id.clone();
-        let result_granularity = format!("{:?}", result.granularity).to_lowercase();
-
-        Ok(result
-            .buckets
-            .into_iter()
-            .map(|bucket| {
-                serde_json::Map::from_iter([
-                    (
-                        "tenantId".to_string(),
-                        Value::String(result_tenant_id.clone()),
-                    ),
-                    (
-                        "bucketTime".to_string(),
-                        Value::String(bucket.bucket_time.to_rfc3339()),
-                    ),
-                    (
-                        "granularity".to_string(),
-                        Value::String(result_granularity.clone()),
-                    ),
-                    (
-                        "invocationCount".to_string(),
-                        json!(bucket.invocation_count),
-                    ),
-                    ("successCount".to_string(), json!(bucket.success_count)),
-                    ("failureCount".to_string(), json!(bucket.failure_count)),
-                    ("cancelledCount".to_string(), json!(bucket.cancelled_count)),
-                    (
-                        "avgDurationSeconds".to_string(),
-                        option_f64_value(bucket.avg_duration_seconds),
-                    ),
-                    (
-                        "minDurationSeconds".to_string(),
-                        option_f64_value(bucket.min_duration_seconds),
-                    ),
-                    (
-                        "maxDurationSeconds".to_string(),
-                        option_f64_value(bucket.max_duration_seconds),
-                    ),
-                    (
-                        "avgMemoryBytes".to_string(),
-                        bucket
-                            .avg_memory_bytes
-                            .map(Value::from)
-                            .unwrap_or(Value::Null),
-                    ),
-                    (
-                        "maxMemoryBytes".to_string(),
-                        bucket
-                            .max_memory_bytes
-                            .map(Value::from)
-                            .unwrap_or(Value::Null),
-                    ),
-                    (
-                        "successRatePercent".to_string(),
-                        option_f64_value(bucket.success_rate_percent),
-                    ),
-                ])
-            })
-            .collect())
-    }
-
-    async fn connection_rate_limit_status_rows(
-        &self,
-        tenant_id: &str,
-        block: &ReportBlockDefinition,
-    ) -> Result<Vec<serde_json::Map<String, Value>>, ReportServiceError> {
-        let interval = block.source.interval.as_deref().unwrap_or("24h");
-        let service = self.connections.rate_limit_service();
-        let statuses = service
-            .list_all_rate_limits(tenant_id, Some(interval))
-            .await
-            .map_err(map_rate_limit_error)?;
-
-        Ok(statuses.into_iter().map(rate_limit_status_row).collect())
-    }
-
-    async fn connection_rate_limit_event_rows(
-        &self,
-        tenant_id: &str,
-        block: &ReportBlockDefinition,
-        condition: Option<&Condition>,
-    ) -> Result<Vec<serde_json::Map<String, Value>>, ReportServiceError> {
-        let service = self.connections.rate_limit_service();
-        let connection_id = system_connection_id(block, condition);
-        let (from, to) = extract_time_bounds(condition, &["createdAt"]);
-        let from = from.or_else(|| Some(Utc::now() - Duration::days(30)));
-        let event_type = extract_eq_string_condition(condition, "eventType");
-        let limit = block.source.limit.unwrap_or(1000).clamp(1, 1000);
-
-        let mut events = Vec::new();
-        if let Some(connection_id) = connection_id {
-            let response = service
-                .get_rate_limit_history(
-                    &connection_id,
-                    tenant_id,
-                    &runtara_connections::types::RateLimitHistoryQuery {
-                        limit,
-                        offset: 0,
-                        event_type,
-                        from,
-                        to,
-                    },
-                )
-                .await
-                .map_err(map_rate_limit_error)?;
-            events.extend(response.data);
-        } else {
-            let statuses = service
-                .list_all_rate_limits(tenant_id, Some("24h"))
-                .await
-                .map_err(map_rate_limit_error)?;
-            for status in statuses {
-                let response = service
-                    .get_rate_limit_history(
-                        &status.connection_id,
-                        tenant_id,
-                        &runtara_connections::types::RateLimitHistoryQuery {
-                            limit,
-                            offset: 0,
-                            event_type: event_type.clone(),
-                            from,
-                            to,
-                        },
-                    )
-                    .await
-                    .map_err(map_rate_limit_error)?;
-                events.extend(response.data);
-            }
-        }
-
-        events.sort_by(|left, right| right.created_at.cmp(&left.created_at));
-        events.truncate(limit as usize);
-        Ok(events.into_iter().map(rate_limit_event_row).collect())
-    }
-
-    async fn connection_rate_limit_timeline_rows(
-        &self,
-        tenant_id: &str,
-        block: &ReportBlockDefinition,
-        condition: Option<&Condition>,
-    ) -> Result<Vec<serde_json::Map<String, Value>>, ReportServiceError> {
-        let Some(connection_id) = system_connection_id(block, condition) else {
-            return Ok(Vec::new());
-        };
-
-        let now = Utc::now();
-        let (start_time, end_time) =
-            extract_time_bounds(condition, &["bucket", "bucketTime", "createdAt"]);
-        let end_time = end_time.unwrap_or(now);
-        let start_time = start_time.unwrap_or(end_time - Duration::hours(24));
-        let granularity = block
-            .source
-            .granularity
-            .clone()
-            .unwrap_or_else(|| infer_rate_limit_timeline_granularity(start_time, end_time));
-        let tag = extract_eq_string_condition(condition, "tag");
-
-        let service = self.connections.rate_limit_service();
-        let response = service
-            .get_rate_limit_timeline(
-                &connection_id,
-                tenant_id,
-                &runtara_connections::types::RateLimitTimelineQuery {
-                    start_time: Some(start_time),
-                    end_time: Some(end_time),
-                    granularity: granularity.clone(),
-                    tag,
-                },
-            )
-            .await
-            .map_err(map_rate_limit_error)?;
-
-        Ok(response
-            .data
-            .buckets
-            .into_iter()
-            .map(|bucket| {
-                serde_json::Map::from_iter([
-                    (
-                        "connectionId".to_string(),
-                        Value::String(connection_id.clone()),
-                    ),
-                    (
-                        "bucket".to_string(),
-                        Value::String(bucket.bucket.to_rfc3339()),
-                    ),
-                    (
-                        "bucketTime".to_string(),
-                        Value::String(bucket.bucket.to_rfc3339()),
-                    ),
-                    (
-                        "granularity".to_string(),
-                        Value::String(granularity.clone()),
-                    ),
-                    ("requestCount".to_string(), json!(bucket.request_count)),
-                    (
-                        "rateLimitedCount".to_string(),
-                        json!(bucket.rate_limited_count),
-                    ),
-                    ("retryCount".to_string(), json!(bucket.retry_count)),
-                ])
-            })
-            .collect())
-    }
-
-    async fn render_actions_block(
+    pub(super) async fn render_actions_block(
         &self,
         tenant_id: &str,
         definition: &ReportDefinition,
@@ -3398,7 +2699,7 @@ impl ReportService {
         resolved_filters: &HashMap<String, Value>,
         block_request: Option<&ReportBlockDataRequest>,
     ) -> Result<Value, ReportServiceError> {
-        let entity = workflow_runtime_entity(block)?;
+        let entity = providers::workflow_runtime::workflow_runtime_entity(block)?;
         if entity != ReportWorkflowRuntimeEntity::Actions {
             return Err(ReportServiceError::Validation(format!(
                 "Block '{}' action renderer requires workflow_runtime entity 'actions'",
@@ -3406,17 +2707,14 @@ impl ReportService {
             )));
         }
 
+        let condition = build_block_condition(definition, block, resolved_filters, block_request)?;
         let rows = self
-            .workflow_runtime_actions_for_block_context(
-                tenant_id,
-                definition,
-                block,
-                resolved_filters,
-                block_request,
-            )
+            .providers
+            .workflow_runtime()
+            .actions_for_block_context(tenant_id, block, condition.as_ref())
             .await?
             .into_iter()
-            .map(|action| workflow_action_report_row(&action))
+            .map(|action| providers::workflow_runtime::workflow_action_row(&action))
             .collect::<Vec<_>>();
 
         let actions = rows.iter().cloned().map(Value::Object).collect::<Vec<_>>();
@@ -3433,7 +2731,7 @@ impl ReportService {
         }))
     }
 
-    async fn render_markdown_block(
+    pub(super) async fn render_markdown_block(
         &self,
         tenant_id: &str,
         definition: &ReportDefinition,
@@ -3468,81 +2766,6 @@ impl ReportService {
         Ok(Value::Object(data))
     }
 
-    async fn workflow_runtime_actions_for_block_context(
-        &self,
-        tenant_id: &str,
-        definition: &ReportDefinition,
-        block: &ReportBlockDefinition,
-        resolved_filters: &HashMap<String, Value>,
-        block_request: Option<&ReportBlockDataRequest>,
-    ) -> Result<Vec<WorkflowRuntimeAction>, ReportServiceError> {
-        let actions = self
-            .workflow_runtime_actions_for_source(tenant_id, block, 0, 100)
-            .await?;
-        let Some(condition) =
-            build_block_condition(definition, block, resolved_filters, block_request)?
-        else {
-            return Ok(actions);
-        };
-
-        actions
-            .into_iter()
-            .filter_map(|action| {
-                let row = workflow_action_report_row(&action);
-                match condition_matches_row(&condition, &row, &block.id) {
-                    Ok(true) => Some(Ok(action)),
-                    Ok(false) => None,
-                    Err(error) => Some(Err(error)),
-                }
-            })
-            .collect()
-    }
-
-    async fn workflow_runtime_actions_for_source(
-        &self,
-        tenant_id: &str,
-        block: &ReportBlockDefinition,
-        _offset: i64,
-        _page_size: i64,
-    ) -> Result<Vec<WorkflowRuntimeAction>, ReportServiceError> {
-        let workflow_id = workflow_runtime_workflow_id(block)?;
-        let engine = self.require_execution_engine()?;
-        let runtime_client = self.require_runtime_client()?;
-
-        if let Some(instance_id) = block
-            .source
-            .instance_id
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-        {
-            let execution = engine
-                .get_execution_with_metadata(workflow_id, instance_id, tenant_id)
-                .await
-                .map_err(map_execution_error_to_report)?;
-            if !should_check_instance_actions(&execution.instance) {
-                return Ok(Vec::new());
-            }
-            return list_instance_actions(runtime_client, workflow_id, instance_id)
-                .await
-                .map_err(map_workflow_runtime_error_to_report);
-        }
-
-        let actions = list_workflow_actions(
-            engine,
-            runtime_client,
-            tenant_id,
-            workflow_id,
-            Some(0),
-            Some(100),
-        )
-        .await
-        .map_err(map_workflow_runtime_error_to_report)?
-        .actions;
-
-        Ok(actions)
-    }
-
     fn require_execution_engine(&self) -> Result<&ExecutionEngine, ReportServiceError> {
         self.engine.as_deref().ok_or_else(|| {
             ReportServiceError::Validation(
@@ -3568,29 +2791,11 @@ impl ReportService {
         block_request: Option<&ReportBlockDataRequest>,
     ) -> Result<Value, ReportServiceError> {
         let table = block.table.as_ref();
-        let page_size = clamp_page_size(
-            block_request
-                .and_then(|request| request.page.as_ref().map(|page| page.size))
-                .or_else(|| {
-                    table
-                        .and_then(|table| table.pagination.as_ref())
-                        .map(|p| p.default_page_size)
-                })
-                .unwrap_or(50),
-        );
-        let offset = block_request
-            .and_then(|request| request.page.as_ref().map(|page| page.offset))
-            .unwrap_or(0)
-            .max(0);
-        let sort = block_request
-            .map(|request| request.sort.clone())
-            .filter(|sort| !sort.is_empty())
-            .or_else(|| {
-                table
-                    .map(|table| table.default_sort.clone())
-                    .filter(|sort| !sort.is_empty())
-            })
-            .unwrap_or_else(|| block.source.order_by.clone());
+        let ResolvedTablePage {
+            page_size,
+            offset,
+            sort,
+        } = resolve_table_page(block, block_request);
 
         let condition = build_block_condition(definition, block, resolved_filters, block_request)?;
         let alias_to_join = build_alias_index(&block.source.join, &block.id)?;
@@ -3616,8 +2821,7 @@ impl ReportService {
                 filter_request,
                 block.source.connection_id.as_deref(),
             )
-            .await
-            .map_err(map_object_model_error)?;
+            .await?;
 
         if total_candidates > MAX_JOIN_POST_FILTER_ROWS {
             return Err(ReportServiceError::Validation(format!(
@@ -3697,29 +2901,11 @@ impl ReportService {
         block_request: Option<&ReportBlockDataRequest>,
     ) -> Result<Value, ReportServiceError> {
         let table = block.table.as_ref();
-        let page_size = clamp_page_size(
-            block_request
-                .and_then(|request| request.page.as_ref().map(|page| page.size))
-                .or_else(|| {
-                    table
-                        .and_then(|table| table.pagination.as_ref())
-                        .map(|p| p.default_page_size)
-                })
-                .unwrap_or(50),
-        );
-        let offset = block_request
-            .and_then(|request| request.page.as_ref().map(|page| page.offset))
-            .unwrap_or(0)
-            .max(0);
-        let sort = block_request
-            .map(|request| request.sort.clone())
-            .filter(|sort| !sort.is_empty())
-            .or_else(|| {
-                table
-                    .map(|table| table.default_sort.clone())
-                    .filter(|sort| !sort.is_empty())
-            })
-            .unwrap_or_else(|| block.source.order_by.clone());
+        let ResolvedTablePage {
+            page_size,
+            offset,
+            sort,
+        } = resolve_table_page(block, block_request);
 
         let request = build_table_aggregate_request(
             definition,
@@ -3730,9 +2916,25 @@ impl ReportService {
             page_size,
             offset,
         )?;
-        let result = self
-            .aggregate_with_optional_joins(tenant_id, block, request)
-            .await?;
+        let result = {
+            let condition =
+                build_block_condition(definition, block, resolved_filters, block_request)?;
+            let provider = self.providers.get(block.source.kind).clone();
+            let params = FetchParams {
+                tenant_id,
+                block,
+                condition: condition.as_ref(),
+                sort: &sort,
+                offset,
+                limit: page_size,
+            };
+            let output = provider.fetch_aggregate(params, request).await?;
+            runtara_object_store::AggregateResult {
+                columns: output.columns,
+                rows: output.rows,
+                group_count: output.group_count,
+            }
+        };
 
         let source_columns = result.columns.clone();
         let condition_context = ReportConditionRuntimeContext {
@@ -4097,8 +3299,7 @@ impl ReportService {
         let (instances, total) = self
             .instance_service
             .filter_instances_by_schema(tenant_id, schema, request, connection_id)
-            .await
-            .map_err(map_object_model_error)?;
+            .await?;
 
         if total > MAX_BROADCAST_JOIN_DIM_ROWS {
             return Err(ReportServiceError::Validation(format!(
@@ -4175,8 +3376,7 @@ impl ReportService {
                 request,
                 source.connection_id.as_deref(),
             )
-            .await
-            .map_err(map_object_model_error)?;
+            .await?;
 
         if total > MAX_BROADCAST_JOIN_DIM_ROWS {
             return Err(ReportServiceError::Validation(format!(
@@ -4227,8 +3427,7 @@ impl ReportService {
                 request,
                 source.connection_id.as_deref(),
             )
-            .await
-            .map_err(map_object_model_error)?;
+            .await?;
 
         Ok(json!({
             "columns": result.columns,
@@ -4236,23 +3435,16 @@ impl ReportService {
         }))
     }
 
-    async fn render_aggregate_block(
+    pub(super) async fn render_aggregate_block(
         &self,
         tenant_id: &str,
         definition: &ReportDefinition,
         block: &ReportBlockDefinition,
         resolved_filters: &HashMap<String, Value>,
     ) -> Result<Value, ReportServiceError> {
-        if block.source.kind == ReportSourceKind::System {
-            return self
-                .render_system_aggregate_block(tenant_id, definition, block, resolved_filters)
-                .await;
-        }
-        let request = build_aggregate_request(definition, block, resolved_filters)?;
         let result = self
-            .aggregate_with_optional_joins(tenant_id, block, request)
+            .fetch_block_aggregate(tenant_id, definition, block, resolved_filters)
             .await?;
-
         Ok(json!({
             "columns": result.columns,
             "rows": result.rows,
@@ -4260,118 +3452,34 @@ impl ReportService {
         }))
     }
 
-    /// Run an aggregate that may reference joined dimension schemas via
-    /// `<alias>.<field>` qualified field names. Implements broadcast-hash
-    /// join: each declared dimension is resolved client-side first (with any
-    /// `<alias>.<field>` condition terms applied), the primary aggregate is
-    /// filtered by the resolved parent-field keys, and result rows are
-    /// enriched with the joined dimension columns.
-    ///
-    /// When `block.source.join` is empty this is a passthrough to the regular
-    /// aggregate.
-    async fn aggregate_with_optional_joins(
+    /// Shared aggregate fetch for chart + metric blocks. Routes through the
+    /// `ReportSourceProvider` trait so object_model gets SQL pushdown (with
+    /// joins) and system/workflow_runtime get the virtual engine, returning
+    /// a typed [`runtara_object_store::AggregateResult`] either way.
+    async fn fetch_block_aggregate(
         &self,
         tenant_id: &str,
+        definition: &ReportDefinition,
         block: &ReportBlockDefinition,
-        request: AggregateRequest,
+        resolved_filters: &HashMap<String, Value>,
     ) -> Result<runtara_object_store::AggregateResult, ReportServiceError> {
-        let joins = &block.source.join;
-        if joins.is_empty() {
-            return self
-                .instance_service
-                .aggregate_instances_by_schema(
-                    tenant_id,
-                    &block.source.schema,
-                    request,
-                    block.source.connection_id.as_deref(),
-                )
-                .await
-                .map_err(map_object_model_error);
-        }
-
-        let alias_to_join = build_alias_index(joins, &block.id)?;
-        validate_join_request(&request, &alias_to_join, &block.id)?;
-
-        let alias_set: HashSet<&str> = alias_to_join.keys().map(|s| s.as_str()).collect();
-        let (primary_condition, by_alias) =
-            split_qualified_condition(request.condition.clone(), &alias_set, &block.id)?;
-
-        let mut join_data: HashMap<String, JoinResolution> = HashMap::new();
-        for (alias, join) in &alias_to_join {
-            let alias_terms = by_alias.get(alias).cloned().unwrap_or_default();
-            let resolution = self
-                .resolve_join(tenant_id, join, &alias_terms, &request.group_by)
-                .await?;
-            join_data.insert(alias.clone(), resolution);
-        }
-
-        let mut primary_conditions: Vec<Condition> = Vec::new();
-        if let Some(c) = primary_condition {
-            primary_conditions.push(c);
-        }
-        let mut empty_inner_join = false;
-        for (alias, join) in &alias_to_join {
-            let data = &join_data[alias];
-            if data.parent_keys.is_empty() {
-                if matches!(join.kind, ReportJoinKind::Inner) {
-                    empty_inner_join = true;
-                    break;
-                }
-                continue;
-            }
-            primary_conditions.push(Condition {
-                op: "IN".to_string(),
-                arguments: Some(vec![
-                    Value::String(join.parent_field.clone()),
-                    Value::Array(data.parent_keys.clone()),
-                ]),
-            });
-        }
-
-        if empty_inner_join {
-            return Ok(empty_join_result(&request.group_by, &request.aggregates));
-        }
-
-        let primary_group_by: Vec<String> = request
-            .group_by
-            .iter()
-            .filter(|field| field_alias_prefix(field).is_none())
-            .cloned()
-            .collect();
-
-        let primary_order_by: Vec<AggregateOrderBy> = request
-            .order_by
-            .iter()
-            .filter(|order| field_alias_prefix(&order.column).is_none())
-            .cloned()
-            .collect();
-
-        let primary_request = AggregateRequest {
-            condition: combine_conditions(primary_conditions),
-            group_by: primary_group_by,
-            aggregates: request.aggregates.clone(),
-            order_by: primary_order_by,
-            limit: request.limit,
-            offset: request.offset,
+        let request = build_aggregate_request(definition, block, resolved_filters)?;
+        let condition = request.condition.clone();
+        let provider = self.providers.get(block.source.kind).clone();
+        let params = FetchParams {
+            tenant_id,
+            block,
+            condition: condition.as_ref(),
+            sort: &[],
+            offset: 0,
+            limit: MAX_AGGREGATE_ROWS,
         };
-
-        let primary_result = self
-            .instance_service
-            .aggregate_instances_by_schema(
-                tenant_id,
-                &block.source.schema,
-                primary_request,
-                block.source.connection_id.as_deref(),
-            )
-            .await
-            .map_err(map_object_model_error)?;
-
-        Ok(enrich_aggregate_result(
-            primary_result,
-            &request.group_by,
-            &alias_to_join,
-            &join_data,
-        ))
+        let output = provider.fetch_aggregate(params, request).await?;
+        Ok(runtara_object_store::AggregateResult {
+            columns: output.columns,
+            rows: output.rows,
+            group_count: output.group_count,
+        })
     }
 
     async fn resolve_filter_join_data(
@@ -4433,8 +3541,7 @@ impl ReportService {
                     filter,
                     join.connection_id.as_deref(),
                 )
-                .await
-                .map_err(map_object_model_error)?;
+                .await?;
 
             if total > MAX_BROADCAST_JOIN_DIM_ROWS {
                 return Err(ReportServiceError::Validation(format!(
@@ -4470,114 +3577,26 @@ impl ReportService {
         Ok(join_data)
     }
 
-    /// Query the dimension schema and build a lookup keyed by the join's `field`.
-    async fn resolve_join(
-        &self,
-        tenant_id: &str,
-        join: &ReportSourceJoin,
-        alias_terms: &[Condition],
-        _group_by: &[String],
-    ) -> Result<JoinResolution, ReportServiceError> {
-        let alias = join.effective_alias();
-
-        let stripped_conditions: Vec<Condition> = alias_terms
-            .iter()
-            .map(|c| strip_alias_from_condition(c.clone(), alias))
-            .collect();
-
-        let dim_condition = combine_conditions(stripped_conditions);
-
-        let filter = FilterRequest {
-            offset: 0,
-            limit: MAX_BROADCAST_JOIN_DIM_ROWS,
-            condition: dim_condition,
-            sort_by: None,
-            sort_order: None,
-            score_expression: None,
-            order_by: None,
-        };
-
-        let (dim_instances, total) = self
-            .instance_service
-            .filter_instances_by_schema(
-                tenant_id,
-                &join.schema,
-                filter,
-                join.connection_id.as_deref(),
-            )
-            .await
-            .map_err(map_object_model_error)?;
-
-        if total > MAX_BROADCAST_JOIN_DIM_ROWS {
-            return Err(ReportServiceError::Validation(format!(
-                "Join '{}' would broadcast {} rows from '{}'; cap is {}. Add a more \
-                 selective condition on '{}' fields.",
-                alias, total, join.schema, MAX_BROADCAST_JOIN_DIM_ROWS, alias
-            )));
-        }
-
-        let dim_rows: Vec<serde_json::Map<String, Value>> = dim_instances
-            .into_iter()
-            .filter_map(|i| match flatten_instance(i) {
-                Value::Object(map) => Some(map),
-                _ => None,
-            })
-            .collect();
-
-        let mut parent_keys: Vec<Value> = Vec::with_capacity(dim_rows.len());
-        let mut seen_keys: HashSet<String> = HashSet::with_capacity(dim_rows.len());
-        let mut by_key: HashMap<String, serde_json::Map<String, Value>> =
-            HashMap::with_capacity(dim_rows.len());
-
-        for row in dim_rows {
-            let Some(key_value) = row.get(&join.field) else {
-                continue;
-            };
-            if value_is_empty(key_value) {
-                continue;
-            }
-            let key_str = value_to_lookup_key(key_value);
-            if seen_keys.insert(key_str.clone()) {
-                parent_keys.push(key_value.clone());
-            }
-            by_key.entry(key_str).or_insert(row);
-        }
-
-        Ok(JoinResolution {
-            parent_keys,
-            by_key,
-        })
-    }
-
-    async fn render_metric_block(
+    pub(super) async fn render_metric_block(
         &self,
         tenant_id: &str,
         definition: &ReportDefinition,
         block: &ReportBlockDefinition,
         resolved_filters: &HashMap<String, Value>,
     ) -> Result<Value, ReportServiceError> {
-        let aggregate_data = self
-            .render_aggregate_block(tenant_id, definition, block, resolved_filters)
+        let result = self
+            .fetch_block_aggregate(tenant_id, definition, block, resolved_filters)
             .await?;
         let metric = block.metric.as_ref();
         let value_field = metric.map(|m| m.value_field.as_str()).unwrap_or("value");
-        let columns = aggregate_data
-            .get("columns")
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default();
-        let rows = aggregate_data
-            .get("rows")
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default();
-        let value_index = columns
+        let value_index = result
+            .columns
             .iter()
-            .position(|column| column.as_str() == Some(value_field))
+            .position(|column| column == value_field)
             .unwrap_or(0);
-        let value = rows
+        let value = result
+            .rows
             .first()
-            .and_then(Value::as_array)
             .and_then(|row| row.get(value_index))
             .cloned()
             .unwrap_or(Value::Null);
@@ -4587,8 +3606,8 @@ impl ReportService {
             "valueField": value_field,
             "label": metric.and_then(|m| m.label.clone()),
             "format": metric.and_then(|m| m.format.clone()),
-            "columns": columns,
-            "rows": rows,
+            "columns": result.columns,
+            "rows": result.rows,
         }))
     }
 
@@ -4596,26 +3615,17 @@ impl ReportService {
     /// vertical key→value layout. The shape returned mirrors a one-row table
     /// (`columns` + first-row `row`), with `missing: true` when the filter
     /// matches no rows so the frontend can show an empty-card placeholder.
-    async fn render_card_block(
+    pub(super) async fn render_card_block(
         &self,
         tenant_id: &str,
         definition: &ReportDefinition,
         block: &ReportBlockDefinition,
         resolved_filters: &HashMap<String, Value>,
     ) -> Result<Value, ReportServiceError> {
-        if block.source.kind != ReportSourceKind::ObjectModel {
-            return Err(ReportServiceError::Validation(format!(
-                "Block '{}' card blocks only support object_model sources",
-                block.id
-            )));
-        }
-        if block.source.mode != ReportSourceMode::Filter {
-            return Err(ReportServiceError::Validation(format!(
-                "Block '{}' card blocks only support filter-mode sources",
-                block.id
-            )));
-        }
-
+        // Source-kind + source-mode are enforced by the validator
+        // (`SystemProvider::validate_block` rejects system+card, and
+        // `ObjectModelProvider::validate_block` rejects card+aggregate).
+        // No runtime fallback needed.
         let filter_request = FilterRequest {
             offset: 0,
             limit: 1,
@@ -4656,8 +3666,7 @@ impl ReportService {
                 filter_request,
                 block.source.connection_id.as_deref(),
             )
-            .await
-            .map_err(map_object_model_error)?;
+            .await?;
 
         let row = instances.into_iter().next().map(flatten_instance);
         let missing = row.is_none();
@@ -4666,6 +3675,27 @@ impl ReportService {
             "missing": missing,
         }))
     }
+}
+
+/// Serialize a root [`ReportGridLayoutNode`] into the same wire form as
+/// any nested layout node — `{type: "grid", id, columns, items, ...}` —
+/// so [`validate_layout_node`] can validate the root grid uniformly with
+/// the recursive item walker. The root grid's struct serialization omits
+/// the `type` tag (it's implicit at the typed layout field), so we
+/// re-inject it here.
+fn root_grid_as_layout_node_value(
+    grid: &runtara_report_dsl::ReportGridLayoutNode,
+) -> Result<Value, ReportServiceError> {
+    let mut value = serde_json::to_value(grid).map_err(|err| {
+        ReportServiceError::Validation(format!(
+            "Could not serialize root layout grid for validation: {}",
+            err
+        ))
+    })?;
+    if let Some(object) = value.as_object_mut() {
+        object.insert("type".into(), Value::String("grid".into()));
+    }
+    Ok(value)
 }
 
 fn validate_layout_node(
@@ -4712,91 +3742,9 @@ fn validate_layout_node(
                     ))
                 })?;
             validate_layout_block_ref(block_id, block_ids, "layout block")?;
-        }
-        "metric_row" => {
-            let blocks = object
-                .get("blocks")
-                .and_then(Value::as_array)
-                .ok_or_else(|| {
-                    ReportServiceError::Validation(format!(
-                        "Metric row layout node '{}' must include blocks",
-                        node_id
-                    ))
-                })?;
-            if blocks.is_empty() {
-                return Err(ReportServiceError::Validation(format!(
-                    "Metric row layout node '{}' must include at least one block",
-                    node_id
-                )));
-            }
-            for block in blocks {
-                let Some(block_id) = block.as_str() else {
-                    return Err(ReportServiceError::Validation(format!(
-                        "Metric row layout node '{}' blocks entries must be block IDs",
-                        node_id
-                    )));
-                };
-                validate_layout_block_ref(block_id, block_ids, "metric row")?;
-                if block_types.get(block_id) != Some(&ReportBlockType::Metric) {
-                    return Err(ReportServiceError::Validation(format!(
-                        "Metric row layout node '{}' references non-metric block '{}'",
-                        node_id, block_id
-                    )));
-                }
-            }
-        }
-        "section" => {
-            if let Some(children) = object.get("children") {
-                validate_layout_children(
-                    children,
-                    &format!("{path}.children"),
-                    block_ids,
-                    block_types,
-                    filter_ids,
-                    layout_node_ids,
-                )?;
-            }
-        }
-        "columns" => {
-            let columns = object
-                .get("columns")
-                .and_then(Value::as_array)
-                .ok_or_else(|| {
-                    ReportServiceError::Validation(format!(
-                        "Columns layout node '{}' must include columns",
-                        node_id
-                    ))
-                })?;
-            if columns.is_empty() {
-                return Err(ReportServiceError::Validation(format!(
-                    "Columns layout node '{}' must include at least one column",
-                    node_id
-                )));
-            }
-            for (column_index, column) in columns.iter().enumerate() {
-                let Some(column_object) = column.as_object() else {
-                    return Err(ReportServiceError::Validation(format!(
-                        "Columns layout node '{}' column {} must be an object",
-                        node_id, column_index
-                    )));
-                };
-                if column_object.get("id").and_then(Value::as_str).is_none() {
-                    return Err(ReportServiceError::Validation(format!(
-                        "Columns layout node '{}' column {} must include id",
-                        node_id, column_index
-                    )));
-                }
-                if let Some(children) = column_object.get("children") {
-                    validate_layout_children(
-                        children,
-                        &format!("{path}.columns[{column_index}].children"),
-                        block_ids,
-                        block_types,
-                        filter_ids,
-                        layout_node_ids,
-                    )?;
-                }
-            }
+            // Block types reserved for future per-type validation; reference
+            // suppresses the unused-variable warning until that lands.
+            let _ = block_types;
         }
         "grid" => {
             if let Some(columns) = object.get("columns").and_then(Value::as_i64)
@@ -4806,6 +3754,34 @@ fn validate_layout_node(
                     "Grid layout node '{}' columns must be positive",
                     node_id
                 )));
+            }
+            if let Some(rows) = object.get("rows").and_then(Value::as_i64)
+                && rows <= 0
+            {
+                return Err(ReportServiceError::Validation(format!(
+                    "Grid layout node '{}' rows must be positive",
+                    node_id
+                )));
+            }
+            if let Some(widths) = object.get("columnWidths").and_then(Value::as_array) {
+                let columns_count = object
+                    .get("columns")
+                    .and_then(Value::as_i64)
+                    .unwrap_or(widths.len() as i64);
+                if columns_count as usize != widths.len() {
+                    return Err(ReportServiceError::Validation(format!(
+                        "Grid layout node '{}' columnWidths length must match columns",
+                        node_id
+                    )));
+                }
+                for (i, width) in widths.iter().enumerate() {
+                    if width.as_f64().filter(|w| *w > 0.0).is_none() {
+                        return Err(ReportServiceError::Validation(format!(
+                            "Grid layout node '{}' columnWidths[{}] must be a positive number",
+                            node_id, i
+                        )));
+                    }
+                }
             }
             let items = object
                 .get("items")
@@ -4823,16 +3799,12 @@ fn validate_layout_node(
                         node_id, item_index
                     )));
                 };
-                let block_id = item_object
-                    .get("blockId")
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| {
-                        ReportServiceError::Validation(format!(
-                            "Grid layout node '{}' item {} must include blockId",
-                            node_id, item_index
-                        ))
-                    })?;
-                validate_layout_block_ref(block_id, block_ids, "grid")?;
+                if item_object.get("id").and_then(Value::as_str).is_none() {
+                    return Err(ReportServiceError::Validation(format!(
+                        "Grid layout node '{}' item {} must include id",
+                        node_id, item_index
+                    )));
+                }
                 for field in ["colSpan", "rowSpan"] {
                     if let Some(value) = item_object.get(field).and_then(Value::as_i64)
                         && value <= 0
@@ -4843,11 +3815,25 @@ fn validate_layout_node(
                         )));
                     }
                 }
+                let child = item_object.get("child").ok_or_else(|| {
+                    ReportServiceError::Validation(format!(
+                        "Grid layout node '{}' item {} must include child",
+                        node_id, item_index
+                    ))
+                })?;
+                validate_layout_node(
+                    child,
+                    &format!("{path}.items[{item_index}].child"),
+                    block_ids,
+                    block_types,
+                    filter_ids,
+                    layout_node_ids,
+                )?;
             }
         }
         _ => {
             return Err(ReportServiceError::Validation(format!(
-                "Report layout node '{}' has unsupported type '{}'",
+                "Report layout node '{}' has unsupported type '{}' (only 'block' and 'grid' are supported post-Phase 9)",
                 node_id, node_type
             )));
         }
@@ -4918,7 +3904,7 @@ fn validate_report_view_navigation(
     Ok(())
 }
 
-fn validate_block_interactions(
+pub(crate) fn validate_block_interactions(
     block: &ReportBlockDefinition,
     filter_ids: &HashSet<String>,
     view_ids: &HashSet<String>,
@@ -5041,7 +4027,7 @@ fn validate_report_table_interaction_button_columns(
     Ok(())
 }
 
-fn validate_report_interaction_buttons(
+pub(crate) fn validate_report_interaction_buttons(
     buttons: &[ReportTableInteractionButtonConfig],
     filter_ids: &HashSet<String>,
     view_ids: &HashSet<String>,
@@ -5262,352 +4248,7 @@ fn dataset_output_field_known(source: &ReportSource, field_path: &str) -> bool {
     markdown_output_field_known(field_path, &|candidate| output_fields.contains(candidate))
 }
 
-fn validate_workflow_runtime_block(
-    block: &ReportBlockDefinition,
-    filter_ids: &HashSet<String>,
-    view_ids: &HashSet<String>,
-    filter_defs: &HashMap<String, &ReportFilterDefinition>,
-) -> Result<(), ReportServiceError> {
-    let entity = workflow_runtime_entity(block)?;
-    workflow_runtime_workflow_id(block)?;
-
-    if block.source.mode != ReportSourceMode::Filter {
-        return Err(ReportServiceError::Validation(format!(
-            "Block '{}' workflow_runtime source only supports filter mode",
-            block.id
-        )));
-    }
-    if !block.source.schema.trim().is_empty() {
-        return Err(ReportServiceError::Validation(format!(
-            "Block '{}' workflow_runtime source must not set schema",
-            block.id
-        )));
-    }
-    if block.source.connection_id.is_some() {
-        return Err(ReportServiceError::Validation(format!(
-            "Block '{}' workflow_runtime source must not set connectionId",
-            block.id
-        )));
-    }
-    if !block.source.join.is_empty()
-        || !block.source.group_by.is_empty()
-        || !block.source.aggregates.is_empty()
-    {
-        return Err(ReportServiceError::Validation(format!(
-            "Block '{}' workflow_runtime source does not support joins or aggregates",
-            block.id
-        )));
-    }
-
-    match block.block_type {
-        ReportBlockType::Table => {}
-        ReportBlockType::Markdown => {}
-        ReportBlockType::Actions if entity == ReportWorkflowRuntimeEntity::Actions => {}
-        ReportBlockType::Actions => {
-            return Err(ReportServiceError::Validation(format!(
-                "Block '{}' actions block requires workflow_runtime entity 'actions'",
-                block.id
-            )));
-        }
-        _ => {
-            return Err(ReportServiceError::Validation(format!(
-                "Block '{}' workflow_runtime source only supports table, markdown, and actions blocks",
-                block.id
-            )));
-        }
-    }
-
-    let fields = workflow_runtime_fields(entity);
-    validate_report_condition_filter_refs(
-        block.source.condition.as_ref(),
-        filter_defs,
-        &format!("block '{}'", block.id),
-    )?;
-    validate_report_condition_field_refs(
-        block.source.condition.as_ref(),
-        &|field| workflow_runtime_row_field_known(&fields, field),
-        &format!("block '{}'", block.id),
-    )?;
-    validate_report_source_filter_mappings(
-        &block.source.filter_mappings,
-        filter_ids,
-        &|field| workflow_runtime_row_field_known(&fields, field),
-        "source.filterMappings",
-        &format!("block '{}'", block.id),
-    )?;
-    if let Some(table) = &block.table {
-        validate_report_table_display_templates(table, &format!("block '{}'", block.id))?;
-        for column in &table.columns {
-            if column.is_workflow_button() {
-                let action = column.workflow_action.as_ref().ok_or_else(|| {
-                    ReportServiceError::Validation(format!(
-                        "Block '{}' workflow button column '{}' must define workflowAction",
-                        block.id, column.field
-                    ))
-                })?;
-                validate_report_workflow_action_config(
-                    action,
-                    &format!("block '{}' table column '{}'", block.id, column.field),
-                )?;
-                validate_report_workflow_action_context_field(
-                    action,
-                    column.field.as_str(),
-                    |field| fields.contains(field),
-                    &format!(
-                        "Block '{}' workflow button column '{}'",
-                        block.id, column.field
-                    ),
-                )?;
-                validate_report_workflow_action_row_conditions(
-                    action,
-                    |field| workflow_runtime_row_field_known(&fields, field),
-                    &format!(
-                        "Block '{}' workflow button column '{}'",
-                        block.id, column.field
-                    ),
-                )?;
-                continue;
-            }
-            if column.is_interaction_buttons() {
-                validate_report_interaction_buttons(
-                    &column.interaction_buttons,
-                    filter_ids,
-                    view_ids,
-                    &|field| workflow_runtime_row_field_known(&fields, field),
-                    &format!(
-                        "Block '{}' interaction button column '{}'",
-                        block.id, column.field
-                    ),
-                )?;
-                continue;
-            }
-            if column.is_chart() || column.is_value_lookup() {
-                return Err(ReportServiceError::Validation(format!(
-                    "Block '{}' workflow_runtime table columns cannot use nested sources",
-                    block.id
-                )));
-            }
-            if !fields.contains(column.field.as_str()) {
-                return Err(ReportServiceError::Validation(format!(
-                    "Block '{}' references unknown workflow_runtime field '{}'",
-                    block.id, column.field
-                )));
-            }
-        }
-        for sort in &table.default_sort {
-            if !fields.contains(sort.field.as_str()) {
-                return Err(ReportServiceError::Validation(format!(
-                    "Block '{}' references unknown workflow_runtime sort field '{}'",
-                    block.id, sort.field
-                )));
-            }
-        }
-        for action in &table.actions {
-            validate_report_table_action_config(
-                action,
-                &format!("block '{}' table action '{}'", block.id, action.id),
-            )?;
-        }
-    }
-    for sort in &block.source.order_by {
-        if !fields.contains(sort.field.as_str()) {
-            return Err(ReportServiceError::Validation(format!(
-                "Block '{}' references unknown workflow_runtime orderBy field '{}'",
-                block.id, sort.field
-            )));
-        }
-    }
-    validate_block_interactions(block, filter_ids, view_ids)
-}
-
-fn validate_system_block(
-    block: &ReportBlockDefinition,
-    filter_ids: &HashSet<String>,
-    view_ids: &HashSet<String>,
-    filter_defs: &HashMap<String, &ReportFilterDefinition>,
-) -> Result<(), ReportServiceError> {
-    let entity = system_entity(block)?;
-    if !block.source.schema.trim().is_empty() {
-        return Err(ReportServiceError::Validation(format!(
-            "Block '{}' system source must not set schema",
-            block.id
-        )));
-    }
-    if block.source.workflow_id.is_some() || block.source.instance_id.is_some() {
-        return Err(ReportServiceError::Validation(format!(
-            "Block '{}' system source must not set workflowId or instanceId",
-            block.id
-        )));
-    }
-    if !block.source.join.is_empty() {
-        return Err(ReportServiceError::Validation(format!(
-            "Block '{}' system source does not support joins",
-            block.id
-        )));
-    }
-    if matches!(
-        block.block_type,
-        ReportBlockType::Actions | ReportBlockType::Card
-    ) {
-        return Err(ReportServiceError::Validation(format!(
-            "Block '{}' system source only supports table, chart, metric, and markdown blocks",
-            block.id
-        )));
-    }
-
-    let fields = system_fields(entity);
-    let aggregate_output_fields = aggregate_output_fields(block);
-    validate_report_aggregate_specs(&format!("block '{}'", block.id), &block.source.aggregates)?;
-    if block.source.mode == ReportSourceMode::Aggregate && block.source.aggregates.is_empty() {
-        return Err(ReportServiceError::Validation(format!(
-            "Block '{}' aggregate source must define at least one aggregate",
-            block.id
-        )));
-    }
-    validate_report_condition_filter_refs(
-        block.source.condition.as_ref(),
-        filter_defs,
-        &format!("block '{}'", block.id),
-    )?;
-    validate_report_condition_field_refs(
-        block.source.condition.as_ref(),
-        &|field| system_row_field_known(&fields, field),
-        &format!("block '{}'", block.id),
-    )?;
-    validate_report_source_filter_mappings(
-        &block.source.filter_mappings,
-        filter_ids,
-        &|field| system_row_field_known(&fields, field),
-        "source.filterMappings",
-        &format!("block '{}'", block.id),
-    )?;
-    let is_table_value_field = |field: &str| -> bool {
-        match block.source.mode {
-            ReportSourceMode::Filter => system_row_field_known(&fields, field),
-            ReportSourceMode::Aggregate => aggregate_output_fields.contains(field),
-        }
-    };
-
-    if let Some(table) = &block.table {
-        validate_report_table_display_templates(table, &format!("block '{}'", block.id))?;
-        for column in &table.columns {
-            if column.is_interaction_buttons() {
-                validate_report_interaction_buttons(
-                    &column.interaction_buttons,
-                    filter_ids,
-                    view_ids,
-                    &is_table_value_field,
-                    &format!(
-                        "Block '{}' interaction button column '{}'",
-                        block.id, column.field
-                    ),
-                )?;
-                continue;
-            }
-            if column.is_chart() || column.is_value_lookup() || column.is_workflow_button() {
-                return Err(ReportServiceError::Validation(format!(
-                    "Block '{}' system table columns cannot use nested sources or workflow buttons",
-                    block.id
-                )));
-            }
-            if !is_table_value_field(&column.field) {
-                return Err(ReportServiceError::Validation(format!(
-                    "Block '{}' references unknown system table field '{}'",
-                    block.id, column.field
-                )));
-            }
-            if let Some(display_field) = &column.display_field
-                && !is_table_value_field(display_field)
-            {
-                return Err(ReportServiceError::Validation(format!(
-                    "Block '{}' references unknown system table displayField '{}'",
-                    block.id, display_field
-                )));
-            }
-        }
-        for sort in &table.default_sort {
-            if !is_table_value_field(&sort.field) {
-                return Err(ReportServiceError::Validation(format!(
-                    "Block '{}' references unknown system table sort field '{}'",
-                    block.id, sort.field
-                )));
-            }
-        }
-        for action in &table.actions {
-            validate_report_table_action_config(
-                action,
-                &format!("block '{}' table action '{}'", block.id, action.id),
-            )?;
-        }
-    }
-
-    for group_field in &block.source.group_by {
-        if !system_row_field_known(&fields, group_field) {
-            return Err(ReportServiceError::Validation(format!(
-                "Block '{}' references unknown system groupBy field '{}'",
-                block.id, group_field
-            )));
-        }
-    }
-    for aggregate in &block.source.aggregates {
-        if let Some(field) = &aggregate.field
-            && !system_row_field_known(&fields, field)
-        {
-            return Err(ReportServiceError::Validation(format!(
-                "Block '{}' references unknown system aggregate field '{}'",
-                block.id, field
-            )));
-        }
-        for order_by in &aggregate.order_by {
-            if !system_row_field_known(&fields, &order_by.field) {
-                return Err(ReportServiceError::Validation(format!(
-                    "Block '{}' aggregate '{}' references unknown system orderBy field '{}'",
-                    block.id, aggregate.alias, order_by.field
-                )));
-            }
-        }
-    }
-    for order_by in &block.source.order_by {
-        let known = match block.source.mode {
-            ReportSourceMode::Filter => system_row_field_known(&fields, &order_by.field),
-            ReportSourceMode::Aggregate => aggregate_output_fields.contains(&order_by.field),
-        };
-        if !known {
-            return Err(ReportServiceError::Validation(format!(
-                "Block '{}' references unknown system orderBy field '{}'",
-                block.id, order_by.field
-            )));
-        }
-    }
-    if let Some(chart) = &block.chart {
-        if !aggregate_output_fields.contains(&chart.x) {
-            return Err(ReportServiceError::Validation(format!(
-                "Block '{}' references unknown system chart x field '{}'",
-                block.id, chart.x
-            )));
-        }
-        for series in &chart.series {
-            if !aggregate_output_fields.contains(&series.field) {
-                return Err(ReportServiceError::Validation(format!(
-                    "Block '{}' references unknown system chart series field '{}'",
-                    block.id, series.field
-                )));
-            }
-        }
-    }
-    if let Some(metric) = &block.metric
-        && !aggregate_output_fields.contains(&metric.value_field)
-    {
-        return Err(ReportServiceError::Validation(format!(
-            "Block '{}' references unknown system metric valueField '{}'",
-            block.id, metric.value_field
-        )));
-    }
-
-    validate_block_interactions(block, filter_ids, view_ids)
-}
-
-fn validate_report_workflow_action_config(
+pub(crate) fn validate_report_workflow_action_config(
     action: &ReportWorkflowActionConfig,
     context: &str,
 ) -> Result<(), ReportServiceError> {
@@ -5653,7 +4294,7 @@ fn collect_card_workflow_actions<'a>(
     }
 }
 
-fn validate_report_table_action_config(
+pub(crate) fn validate_report_table_action_config(
     action: &ReportTableActionConfig,
     context: &str,
 ) -> Result<(), ReportServiceError> {
@@ -5671,7 +4312,7 @@ fn validate_report_table_action_config(
     Ok(())
 }
 
-fn validate_report_workflow_action_context_field(
+pub(crate) fn validate_report_workflow_action_context_field(
     action: &ReportWorkflowActionConfig,
     fallback_field: &str,
     is_known_field: impl Fn(&str) -> bool,
@@ -5707,7 +4348,7 @@ fn validate_report_workflow_action_context_field(
     Ok(())
 }
 
-fn validate_report_workflow_action_row_conditions(
+pub(crate) fn validate_report_workflow_action_row_conditions(
     action: &ReportWorkflowActionConfig,
     is_known_field: impl Fn(&str) -> bool,
     context: &str,
@@ -5749,141 +4390,125 @@ fn validate_report_workflow_action_row_conditions(
 }
 
 fn validate_report_workflow_action_row_condition(
-    condition: &Condition,
+    condition: &runtara_dsl::ConditionExpression,
     is_known_field: &dyn Fn(&str) -> bool,
     context: &str,
     condition_path: &str,
 ) -> Result<(), ReportServiceError> {
-    let op = condition.op.trim().to_ascii_uppercase();
-    if op.is_empty() {
-        return Err(ReportServiceError::Validation(format!(
-            "{context} {condition_path}.op must not be empty"
-        )));
-    }
+    use runtara_dsl::{ConditionArgument, ConditionExpression, ConditionOperator, MappingValue};
 
-    let args = condition.arguments.as_deref().unwrap_or(&[]);
-    match op.as_str() {
-        "AND" | "OR" => {
+    let operation = match condition {
+        ConditionExpression::Operation(op) => op,
+        ConditionExpression::Value(_) => {
+            return Err(ReportServiceError::Validation(format!(
+                "{context} {condition_path} must be a condition operation, not a bare value"
+            )));
+        }
+    };
+
+    let op = &operation.op;
+    let args = &operation.arguments;
+
+    let recurse_child = |index: usize,
+                         argument: &ConditionArgument|
+     -> Result<(), ReportServiceError> {
+        let path = format!("{condition_path}.arguments[{index}]");
+        match argument {
+            ConditionArgument::Expression(expr) => {
+                validate_report_workflow_action_row_condition(expr, is_known_field, context, &path)
+            }
+            ConditionArgument::Value(_) => Err(ReportServiceError::Validation(format!(
+                "{context} {path} must be a nested condition expression"
+            ))),
+        }
+    };
+
+    let check_field =
+        |argument: &ConditionArgument, path: &str| -> Result<(), ReportServiceError> {
+            let reference = match argument {
+                ConditionArgument::Value(MappingValue::Reference(reference)) => reference,
+                _ => {
+                    return Err(ReportServiceError::Validation(format!(
+                        "{context} {path} must be a row field reference"
+                    )));
+                }
+            };
+            let field = reference.value.trim();
+            if field.is_empty() {
+                return Err(ReportServiceError::Validation(format!(
+                    "{context} {path} must be a non-empty row field reference"
+                )));
+            }
+            if !is_known_field(field) {
+                return Err(ReportServiceError::Validation(format!(
+                    "{context} references unknown workflowAction row condition field '{field}'"
+                )));
+            }
+            Ok(())
+        };
+
+    match op {
+        ConditionOperator::And | ConditionOperator::Or => {
             for (index, argument) in args.iter().enumerate() {
-                let child = workflow_action_row_condition_child(
-                    argument,
-                    context,
-                    &format!("{condition_path}.arguments[{index}]"),
-                )?;
-                validate_report_workflow_action_row_condition(
-                    &child,
-                    is_known_field,
-                    context,
-                    &format!("{condition_path}.arguments[{index}]"),
-                )?;
+                recurse_child(index, argument)?;
             }
         }
-        "NOT" => {
+        ConditionOperator::Not => {
             if args.len() != 1 {
                 return Err(ReportServiceError::Validation(format!(
                     "{context} {condition_path} NOT condition requires one argument"
                 )));
             }
-            let child = workflow_action_row_condition_child(
-                &args[0],
-                context,
-                &format!("{condition_path}.arguments[0]"),
-            )?;
-            validate_report_workflow_action_row_condition(
-                &child,
-                is_known_field,
-                context,
-                &format!("{condition_path}.arguments[0]"),
-            )?;
+            recurse_child(0, &args[0])?;
         }
-        "EQ" | "NE" | "GT" | "GTE" | "LT" | "LTE" | "CONTAINS" => {
+        ConditionOperator::Eq
+        | ConditionOperator::Ne
+        | ConditionOperator::Gt
+        | ConditionOperator::Gte
+        | ConditionOperator::Lt
+        | ConditionOperator::Lte
+        | ConditionOperator::Contains
+        | ConditionOperator::StartsWith
+        | ConditionOperator::EndsWith => {
             if args.len() != 2 {
                 return Err(ReportServiceError::Validation(format!(
-                    "{context} {condition_path} {op} condition requires two arguments"
+                    "{context} {condition_path} {op:?} condition requires two arguments"
                 )));
             }
-            validate_report_workflow_action_condition_field(
-                &args[0],
-                is_known_field,
-                context,
-                &format!("{condition_path}.arguments[0]"),
-            )?;
+            check_field(&args[0], &format!("{condition_path}.arguments[0]"))?;
         }
-        "IN" | "NOT_IN" => {
+        ConditionOperator::In | ConditionOperator::NotIn => {
             if args.len() != 2 {
                 return Err(ReportServiceError::Validation(format!(
-                    "{context} {condition_path} {op} condition requires two arguments"
+                    "{context} {condition_path} {op:?} condition requires two arguments"
                 )));
             }
-            validate_report_workflow_action_condition_field(
-                &args[0],
-                is_known_field,
-                context,
-                &format!("{condition_path}.arguments[0]"),
-            )?;
-            if !args[1].is_array() {
+            check_field(&args[0], &format!("{condition_path}.arguments[0]"))?;
+            // The second argument should be an immediate array literal.
+            if !matches!(&args[1], ConditionArgument::Value(MappingValue::Immediate(value)) if value.value.is_array())
+            {
                 return Err(ReportServiceError::Validation(format!(
-                    "{context} {condition_path}.arguments[1] must be an array for {op}"
+                    "{context} {condition_path}.arguments[1] must be an immediate array for {op:?}"
                 )));
             }
         }
-        "IS_DEFINED" | "IS_EMPTY" | "IS_NOT_EMPTY" => {
+        ConditionOperator::IsDefined
+        | ConditionOperator::IsEmpty
+        | ConditionOperator::IsNotEmpty => {
             if args.len() != 1 {
                 return Err(ReportServiceError::Validation(format!(
-                    "{context} {condition_path} {op} condition requires one argument"
+                    "{context} {condition_path} {op:?} condition requires one argument"
                 )));
             }
-            validate_report_workflow_action_condition_field(
-                &args[0],
-                is_known_field,
-                context,
-                &format!("{condition_path}.arguments[0]"),
-            )?;
+            check_field(&args[0], &format!("{condition_path}.arguments[0]"))?;
         }
-        _ => {
+        other => {
             return Err(ReportServiceError::Validation(format!(
-                "{context} {condition_path} uses unsupported row condition op '{}'",
-                condition.op
+                "{context} {condition_path} uses unsupported row condition op '{other:?}'"
             )));
         }
     }
 
-    Ok(())
-}
-
-fn workflow_action_row_condition_child(
-    argument: &Value,
-    context: &str,
-    path: &str,
-) -> Result<Condition, ReportServiceError> {
-    serde_json::from_value::<Condition>(argument.clone()).map_err(|err| {
-        ReportServiceError::Validation(format!(
-            "{context} {path} must be a condition object: {err}"
-        ))
-    })
-}
-
-fn validate_report_workflow_action_condition_field(
-    argument: &Value,
-    is_known_field: &dyn Fn(&str) -> bool,
-    context: &str,
-    path: &str,
-) -> Result<(), ReportServiceError> {
-    let Some(field) = argument
-        .as_str()
-        .map(str::trim)
-        .filter(|field| !field.is_empty())
-    else {
-        return Err(ReportServiceError::Validation(format!(
-            "{context} {path} must be a non-empty row field name"
-        )));
-    };
-    if !is_known_field(field) {
-        return Err(ReportServiceError::Validation(format!(
-            "{context} references unknown workflowAction row condition field '{}'",
-            field
-        )));
-    }
     Ok(())
 }
 
@@ -5892,13 +4517,6 @@ fn is_report_row_metadata_field(field: &str) -> bool {
         field,
         "id" | "schemaId" | "schemaName" | "tenantId" | "createdAt" | "updatedAt"
     )
-}
-
-fn workflow_runtime_row_field_known(fields: &HashSet<&'static str>, field: &str) -> bool {
-    fields.contains(field)
-        || field
-            .split_once('.')
-            .is_some_and(|(base, _)| fields.contains(base))
 }
 
 fn validate_layout_visibility(
@@ -5944,79 +4562,6 @@ fn validate_show_when_value(
         return Err(ReportServiceError::Validation(format!(
             "Report {context} showWhen.exists must be boolean"
         )));
-    }
-    Ok(())
-}
-
-fn workflow_runtime_fields(entity: ReportWorkflowRuntimeEntity) -> HashSet<&'static str> {
-    match entity {
-        ReportWorkflowRuntimeEntity::Instances => [
-            "id",
-            "instanceId",
-            "workflowId",
-            "workflowName",
-            "status",
-            "createdAt",
-            "updatedAt",
-            "usedVersion",
-            "durationSeconds",
-            "hasActions",
-            "actionCount",
-        ]
-        .into_iter()
-        .collect(),
-        ReportWorkflowRuntimeEntity::Actions => [
-            "id",
-            "actionId",
-            "actionKind",
-            "targetKind",
-            "targetId",
-            "workflowId",
-            "instanceId",
-            "signalId",
-            "actionKey",
-            "label",
-            "message",
-            "inputSchema",
-            "schemaFormat",
-            "status",
-            "requestedAt",
-            "correlation",
-            "context",
-            "runtime",
-        ]
-        .into_iter()
-        .collect(),
-        ReportWorkflowRuntimeEntity::RuntimeExecutionMetricBuckets
-        | ReportWorkflowRuntimeEntity::RuntimeSystemSnapshot
-        | ReportWorkflowRuntimeEntity::ConnectionRateLimitStatus
-        | ReportWorkflowRuntimeEntity::ConnectionRateLimitEvents
-        | ReportWorkflowRuntimeEntity::ConnectionRateLimitTimeline => HashSet::new(),
-    }
-}
-
-fn validate_layout_children(
-    children: &Value,
-    path: &str,
-    block_ids: &HashSet<String>,
-    block_types: &HashMap<String, ReportBlockType>,
-    filter_ids: &HashSet<String>,
-    layout_node_ids: &mut HashSet<String>,
-) -> Result<(), ReportServiceError> {
-    let Some(children) = children.as_array() else {
-        return Err(ReportServiceError::Validation(format!(
-            "Report layout children at {path} must be an array"
-        )));
-    };
-    for (index, child) in children.iter().enumerate() {
-        validate_layout_node(
-            child,
-            &format!("{path}[{index}]"),
-            block_ids,
-            block_types,
-            filter_ids,
-            layout_node_ids,
-        )?;
     }
     Ok(())
 }
@@ -6197,7 +4742,7 @@ fn validate_filter_option_condition_filter_refs(
     )
 }
 
-fn validate_report_condition_filter_refs(
+pub(crate) fn validate_report_condition_filter_refs(
     condition: Option<&Condition>,
     filter_defs: &HashMap<String, &ReportFilterDefinition>,
     context: &str,
@@ -6238,7 +4783,7 @@ fn validate_report_condition_filter_refs(
     Ok(())
 }
 
-fn validate_report_table_display_templates(
+pub(crate) fn validate_report_table_display_templates(
     table: &ReportTableConfig,
     context: &str,
 ) -> Result<(), ReportServiceError> {
@@ -6274,317 +4819,30 @@ fn validate_report_display_template(
     template: &str,
     context: &str,
 ) -> Result<(), ReportServiceError> {
-    validate_safe_display_template(template).map_err(|message| {
+    runtara_report_dsl::validate_safe_display_template(template).map_err(|message| {
         ReportServiceError::Validation(format!(
             "{context} is invalid: {message}. Supported syntax is '{{{{field.path}}}}' or '{{{{field.path | format}}}}' only"
         ))
     })
 }
 
-fn validate_safe_display_template(template: &str) -> Result<(), &'static str> {
-    let mut cursor = 0;
-    while cursor < template.len() {
-        let open = find_from(template, "{{", cursor);
-        let close = find_from(template, "}}", cursor);
-        if close.is_some_and(|close| open.is_none_or(|open| close < open)) {
-            return Err("unexpected close delimiter");
-        }
-        let Some(open) = open else {
-            return Ok(());
-        };
-        let Some(close) = find_from(template, "}}", open + 2) else {
-            return Err("unclosed variable");
-        };
-
-        let token = template[open + 2..close].trim();
-        validate_display_template_token(token)?;
-        cursor = close + 2;
-    }
-    Ok(())
-}
-
-fn validate_display_template_token(token: &str) -> Result<(), &'static str> {
-    if token.is_empty() {
-        return Err("empty variable");
-    }
-    if token.contains("{{") || token.contains("}}") {
-        return Err("nested variables are not supported");
-    }
-
-    let parts = token.split('|').collect::<Vec<_>>();
-    match parts.as_slice() {
-        [field] => validate_display_template_field(field.trim()),
-        [field, format] => {
-            validate_display_template_field(field.trim())?;
-            validate_display_template_format(format.trim())
-        }
-        _ => Err("only one format pipe is supported"),
-    }
-}
-
-fn validate_display_template_field(field: &str) -> Result<(), &'static str> {
-    let field = field.strip_prefix("row.").unwrap_or(field);
-    let mut parts = field.split('.');
-    let Some(first) = parts.next().filter(|part| !part.is_empty()) else {
-        return Err("field path is empty");
-    };
-    if !is_identifier_part(first) {
-        return Err("field path is invalid");
-    }
-    for part in parts {
-        if part.is_empty() {
-            return Err("field path is invalid");
-        }
-        if part.chars().all(|ch| ch.is_ascii_digit()) {
-            continue;
-        }
-        if !is_identifier_part(part) {
-            return Err("field path is invalid");
-        }
-    }
-    Ok(())
-}
-
-fn validate_display_template_format(format: &str) -> Result<(), &'static str> {
-    if format.is_empty() {
-        return Err("format is empty");
-    }
-    let mut parts = format.split(':');
-    let Some(name) = parts.next() else {
-        return Err("format is invalid");
-    };
-    if !is_identifier_part(name) {
-        return Err("format is invalid");
-    }
-    if let Some(argument) = parts.next()
-        && (argument.is_empty()
-            || !argument
-                .chars()
-                .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-'))
-    {
-        return Err("format is invalid");
-    }
-    if parts.next().is_some() {
-        return Err("format is invalid");
-    }
-    Ok(())
-}
-
-fn is_identifier_part(value: &str) -> bool {
-    let mut chars = value.chars();
-    let Some(first) = chars.next() else {
-        return false;
-    };
-    (first.is_ascii_alphabetic() || first == '_')
-        && chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
-}
-
-fn find_from(value: &str, pattern: &str, cursor: usize) -> Option<usize> {
-    value[cursor..].find(pattern).map(|index| cursor + index)
-}
-
-fn validate_report_condition_field_refs(
+/// Thin wrapper over [`runtara_report_dsl::validate_condition_field_refs`]
+/// that wraps the dsl error into a [`ReportServiceError`]. The validator
+/// itself lives in the dsl crate now so both server and FE can call it.
+pub(crate) fn validate_report_condition_field_refs(
     condition: Option<&Condition>,
     is_known_field: &dyn Fn(&str) -> bool,
     context: &str,
 ) -> Result<(), ReportServiceError> {
-    if let Some(condition) = condition {
-        validate_report_condition_field_refs_at(condition, is_known_field, context, "condition")?;
-    }
-    Ok(())
+    let Some(condition) = condition else {
+        return Ok(());
+    };
+    runtara_report_dsl::validate_condition_field_refs(condition, is_known_field, context).map_err(
+        |err| report_validation_error("$", err.code, err.message, err.hint.map(|h| h.to_string())),
+    )
 }
 
-fn validate_report_condition_field_refs_at(
-    condition: &Condition,
-    is_known_field: &dyn Fn(&str) -> bool,
-    context: &str,
-    path: &str,
-) -> Result<(), ReportServiceError> {
-    let op = condition.op.to_ascii_uppercase();
-    let args = condition.arguments.as_deref().ok_or_else(|| {
-        report_validation_error(
-            "$",
-            "INVALID_CONDITION_ARGUMENTS",
-            format!(
-            "{} {} operator '{}' requires arguments",
-            context, path, condition.op
-            ),
-            Some("Conditions must use { op, arguments } with the field name as the first operand for comparison operators.".to_string()),
-        )
-    })?;
-
-    match op.as_str() {
-        "AND" | "OR" => {
-            if args.is_empty() {
-                return Err(report_validation_error(
-                    "$",
-                    "INVALID_CONDITION_ARGUMENTS",
-                    format!(
-                        "{} {} operator '{}' requires at least one condition argument",
-                        context, path, condition.op
-                    ),
-                    Some("AND/OR arguments must be condition objects.".to_string()),
-                ));
-            }
-            for (index, argument) in args.iter().enumerate() {
-                let child = condition_from_value(argument).ok_or_else(|| {
-                    report_validation_error(
-                        "$",
-                        "INVALID_CONDITION_ARGUMENTS",
-                        format!(
-                            "{} {} operator '{}' argument {} must be a condition object",
-                            context, path, condition.op, index
-                        ),
-                        Some("Use nested condition objects inside logical operators.".to_string()),
-                    )
-                })?;
-                validate_report_condition_field_refs_at(
-                    &child,
-                    is_known_field,
-                    context,
-                    &format!("{path}.arguments[{index}]"),
-                )?;
-            }
-        }
-        "NOT" => {
-            if args.len() != 1 {
-                return Err(report_validation_error(
-                    "$",
-                    "INVALID_CONDITION_ARGUMENTS",
-                    format!(
-                        "{} {} operator '{}' requires exactly one condition argument",
-                        context, path, condition.op
-                    ),
-                    Some("NOT must wrap exactly one condition object.".to_string()),
-                ));
-            }
-            let child = condition_from_value(&args[0]).ok_or_else(|| {
-                report_validation_error(
-                    "$",
-                    "INVALID_CONDITION_ARGUMENTS",
-                    format!(
-                        "{} {} operator '{}' argument 0 must be a condition object",
-                        context, path, condition.op
-                    ),
-                    Some("NOT must wrap exactly one condition object.".to_string()),
-                )
-            })?;
-            validate_report_condition_field_refs_at(
-                &child,
-                is_known_field,
-                context,
-                &format!("{path}.arguments[0]"),
-            )?;
-        }
-        "EQ" | "NE" | "GT" | "LT" | "GTE" | "LTE" | "CONTAINS" | "IN" | "NOT_IN" => {
-            validate_report_condition_arg_count(context, path, &condition.op, args, 2)?;
-            validate_report_condition_field_arg(
-                context,
-                path,
-                &condition.op,
-                args,
-                is_known_field,
-            )?;
-        }
-        "IS_EMPTY" | "IS_NOT_EMPTY" | "IS_DEFINED" => {
-            validate_report_condition_arg_count(context, path, &condition.op, args, 1)?;
-            validate_report_condition_field_arg(
-                context,
-                path,
-                &condition.op,
-                args,
-                is_known_field,
-            )?;
-        }
-        "SIMILARITY_GTE" | "COSINE_DISTANCE_LTE" | "L2_DISTANCE_LTE" => {
-            validate_report_condition_arg_count(context, path, &condition.op, args, 3)?;
-            validate_report_condition_field_arg(
-                context,
-                path,
-                &condition.op,
-                args,
-                is_known_field,
-            )?;
-        }
-        _ => {
-            return Err(report_validation_error(
-                "$",
-                "UNSUPPORTED_CONDITION_OPERATOR",
-                format!(
-                    "{} {} uses unsupported condition operator '{}'",
-                    context, path, condition.op
-                ),
-                Some("Use Object Model condition operators such as EQ, NE, GT, GTE, LT, LTE, IN, NOT_IN, CONTAINS, IS_DEFINED, IS_EMPTY, or IS_NOT_EMPTY.".to_string()),
-            ));
-        }
-    }
-
-    Ok(())
-}
-
-fn validate_report_condition_arg_count(
-    context: &str,
-    path: &str,
-    op: &str,
-    args: &[Value],
-    expected: usize,
-) -> Result<(), ReportServiceError> {
-    if args.len() != expected {
-        return Err(report_validation_error(
-            "$",
-            "INVALID_CONDITION_ARGUMENTS",
-            format!(
-                "{} {} operator '{}' requires exactly {} argument{}",
-                context,
-                path,
-                op,
-                expected,
-                if expected == 1 { "" } else { "s" }
-            ),
-            Some("Check the condition operator arity and operand order.".to_string()),
-        ));
-    }
-    Ok(())
-}
-
-fn validate_report_condition_field_arg(
-    context: &str,
-    path: &str,
-    op: &str,
-    args: &[Value],
-    is_known_field: &dyn Fn(&str) -> bool,
-) -> Result<(), ReportServiceError> {
-    let field = args
-        .first()
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|field| !field.is_empty())
-        .ok_or_else(|| {
-            report_validation_error(
-                "$",
-                "INVALID_CONDITION_FIELD",
-                format!(
-                    "{} {} operator '{}' first argument must be a non-empty field name",
-                    context, path, op
-                ),
-                Some(
-                    "The first operand must be a field available from the report source."
-                        .to_string(),
-                ),
-            )
-        })?;
-    if !is_known_field(field) {
-        return Err(report_validation_error(
-            "$",
-            "UNKNOWN_CONDITION_FIELD",
-            format!("{} {} references unknown field '{}'", context, path, field),
-            Some("Use a field from the source schema, joined schema alias, dataset output, workflow runtime entity, or system entity for this condition.".to_string()),
-        ));
-    }
-    Ok(())
-}
-
-fn validate_report_source_filter_mappings(
+pub(crate) fn validate_report_source_filter_mappings(
     mappings: &[ReportFilterTarget],
     filter_ids: &HashSet<String>,
     is_known_field: &dyn Fn(&str) -> bool,
@@ -7067,13 +5325,7 @@ fn is_known_condition_filter_ref_path(path: &str) -> bool {
     matches!(path, "value" | "values" | "from" | "to" | "min" | "max")
 }
 
-fn condition_from_value(value: &Value) -> Option<Condition> {
-    let object = value.as_object()?;
-    if !(object.contains_key("op") || object.contains_key("arguments")) {
-        return None;
-    }
-    serde_json::from_value(value.clone()).ok()
-}
+pub(crate) use runtara_report_dsl::condition_from_value;
 
 fn static_filter_options_response(
     filter: &ReportFilterDefinition,
@@ -7151,6 +5403,42 @@ fn filter_option_label(value: &Value) -> String {
         Value::String(value) => value.clone(),
         _ => value.to_string(),
     }
+}
+
+fn infer_filter_option_connection_id<'a>(
+    definition: &'a ReportDefinition,
+    filter: &ReportFilterDefinition,
+) -> Option<&'a str> {
+    let target = match filter.applies_to.as_slice() {
+        [target] => target,
+        _ => return None,
+    };
+    let block_id = target.block_id.as_deref()?;
+    let block = definition
+        .blocks
+        .iter()
+        .find(|candidate| candidate.id == block_id)?;
+
+    if let Some(dataset_query) = &block.dataset {
+        return definition
+            .datasets
+            .iter()
+            .find(|dataset| dataset.id == dataset_query.id)
+            .and_then(|dataset| dataset.source.connection_id.as_deref())
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+    }
+
+    if block.source.kind == ReportSourceKind::ObjectModel {
+        return block
+            .source
+            .connection_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+    }
+
+    None
 }
 
 fn option_string<'a>(options: &'a serde_json::Map<String, Value>, key: &str) -> Option<&'a str> {
@@ -7608,7 +5896,7 @@ fn between_condition(field: &str, value: &Value) -> Option<Condition> {
     combine_conditions(conditions)
 }
 
-fn combine_conditions(conditions: Vec<Condition>) -> Option<Condition> {
+pub(crate) fn combine_conditions(conditions: Vec<Condition>) -> Option<Condition> {
     match conditions.len() {
         0 => None,
         1 => conditions.into_iter().next(),
@@ -7624,1471 +5912,17 @@ fn combine_conditions(conditions: Vec<Condition>) -> Option<Condition> {
     }
 }
 
-fn workflow_runtime_entity(
-    block: &ReportBlockDefinition,
-) -> Result<ReportWorkflowRuntimeEntity, ReportServiceError> {
-    let entity = block.source.entity.ok_or_else(|| {
-        ReportServiceError::Validation(format!(
-            "Block '{}' workflow_runtime source must specify entity",
-            block.id
-        ))
-    })?;
-    match entity {
-        ReportWorkflowRuntimeEntity::Instances | ReportWorkflowRuntimeEntity::Actions => Ok(entity),
-        _ => Err(ReportServiceError::Validation(format!(
-            "Block '{}' workflow_runtime source does not support system entity {:?}",
-            block.id, entity
-        ))),
-    }
-}
-
-fn system_entity(
-    block: &ReportBlockDefinition,
-) -> Result<ReportWorkflowRuntimeEntity, ReportServiceError> {
-    let entity = block.source.entity.ok_or_else(|| {
-        ReportServiceError::Validation(format!(
-            "Block '{}' system source must specify entity",
-            block.id
-        ))
-    })?;
-    match entity {
-        ReportWorkflowRuntimeEntity::RuntimeExecutionMetricBuckets
-        | ReportWorkflowRuntimeEntity::RuntimeSystemSnapshot
-        | ReportWorkflowRuntimeEntity::ConnectionRateLimitStatus
-        | ReportWorkflowRuntimeEntity::ConnectionRateLimitEvents
-        | ReportWorkflowRuntimeEntity::ConnectionRateLimitTimeline => Ok(entity),
-        ReportWorkflowRuntimeEntity::Instances | ReportWorkflowRuntimeEntity::Actions => {
-            Err(ReportServiceError::Validation(format!(
-                "Block '{}' system source does not support workflow_runtime entity {:?}",
-                block.id, entity
-            )))
-        }
-    }
-}
-
-fn workflow_runtime_workflow_id(block: &ReportBlockDefinition) -> Result<&str, ReportServiceError> {
-    block
-        .source
-        .workflow_id
-        .as_deref()
-        .map(str::trim)
-        .filter(|workflow_id| !workflow_id.is_empty())
-        .ok_or_else(|| {
-            ReportServiceError::Validation(format!(
-                "Block '{}' workflow_runtime source must specify workflowId",
-                block.id
-            ))
-        })
-}
-
-fn should_check_instance_actions(instance: &WorkflowInstanceDto) -> bool {
-    !instance.status.is_terminal() && instance.has_pending_input
-}
-
-fn workflow_instance_report_row(
-    instance: &WorkflowInstanceDto,
-    actions: &[WorkflowRuntimeAction],
-) -> serde_json::Map<String, Value> {
-    let mut row = serde_json::Map::new();
-    row.insert("id".to_string(), Value::String(instance.id.clone()));
-    row.insert("instanceId".to_string(), Value::String(instance.id.clone()));
-    row.insert(
-        "workflowId".to_string(),
-        Value::String(instance.workflow_id.clone()),
-    );
-    if let Some(workflow_name) = &instance.workflow_name {
-        row.insert(
-            "workflowName".to_string(),
-            Value::String(workflow_name.clone()),
-        );
-    }
-    row.insert("status".to_string(), json!(instance.status));
-    row.insert(
-        "createdAt".to_string(),
-        Value::String(instance.created.clone()),
-    );
-    row.insert(
-        "updatedAt".to_string(),
-        Value::String(instance.updated.clone()),
-    );
-    row.insert("usedVersion".to_string(), json!(instance.used_version));
-    row.insert(
-        "durationSeconds".to_string(),
-        instance
-            .execution_duration_seconds
-            .map(Value::from)
-            .unwrap_or(Value::Null),
-    );
-    row.insert("hasActions".to_string(), Value::Bool(!actions.is_empty()));
-    row.insert("actionCount".to_string(), json!(actions.len()));
-    row
-}
-
-fn workflow_action_report_row(action: &WorkflowRuntimeAction) -> serde_json::Map<String, Value> {
-    let mut row = serde_json::Map::new();
-    row.insert("id".to_string(), Value::String(action.id.clone()));
-    row.insert(
-        "actionId".to_string(),
-        Value::String(action.action_id.clone()),
-    );
-    row.insert(
-        "actionKind".to_string(),
-        Value::String(action.action_kind.clone()),
-    );
-    row.insert(
-        "targetKind".to_string(),
-        Value::String(action.target_kind.clone()),
-    );
-    row.insert(
-        "targetId".to_string(),
-        Value::String(action.target_id.clone()),
-    );
-    row.insert(
-        "workflowId".to_string(),
-        Value::String(action.workflow_id.clone()),
-    );
-    row.insert(
-        "instanceId".to_string(),
-        Value::String(action.instance_id.clone()),
-    );
-    row.insert(
-        "signalId".to_string(),
-        Value::String(action.signal_id.clone()),
-    );
-    row.insert(
-        "actionKey".to_string(),
-        action
-            .action_key
-            .as_ref()
-            .map(|value| Value::String(value.clone()))
-            .unwrap_or(Value::Null),
-    );
-    row.insert("label".to_string(), Value::String(action.label.clone()));
-    row.insert("message".to_string(), Value::String(action.message.clone()));
-    row.insert(
-        "inputSchema".to_string(),
-        action.input_schema.clone().unwrap_or(Value::Null),
-    );
-    row.insert(
-        "schemaFormat".to_string(),
-        Value::String(action.schema_format.clone()),
-    );
-    row.insert("status".to_string(), Value::String(action.status.clone()));
-    row.insert(
-        "requestedAt".to_string(),
-        action
-            .requested_at
-            .map(|value| Value::String(value.to_rfc3339()))
-            .unwrap_or(Value::Null),
-    );
-    row.insert("correlation".to_string(), action.correlation.clone());
-    row.insert("context".to_string(), action.context.clone());
-    row.insert("runtime".to_string(), action.runtime.clone());
-    row
-}
-
-fn workflow_runtime_table_columns(
-    table: Option<&ReportTableConfig>,
-    entity: ReportWorkflowRuntimeEntity,
-) -> Vec<Value> {
-    if let Some(table) = table
-        && !table.columns.is_empty()
-    {
-        return table
-            .columns
-            .iter()
-            .map(|column| {
-                json!({
-                    "key": column.field,
-                    "label": column.label.clone().unwrap_or_else(|| humanize_label(&column.field)),
-                    "format": column.format,
-                })
-            })
-            .collect();
-    }
-
-    let columns: &[(&str, &str, Option<&str>)] = match entity {
-        ReportWorkflowRuntimeEntity::Instances => &[
-            ("instanceId", "Instance ID", None),
-            ("status", "Status", None),
-            ("hasActions", "Has Actions", Some("boolean")),
-            ("actionCount", "Actions", Some("number")),
-            ("createdAt", "Created", Some("datetime")),
-            ("updatedAt", "Updated", Some("datetime")),
-            ("usedVersion", "Version", Some("number")),
-            ("durationSeconds", "Duration", Some("number")),
-        ],
-        ReportWorkflowRuntimeEntity::Actions => &[
-            ("actionId", "Action ID", None),
-            ("label", "Action", None),
-            ("status", "Status", None),
-            ("instanceId", "Instance ID", None),
-            ("requestedAt", "Requested", Some("datetime")),
-        ],
-        _ => &[],
-    };
-
-    columns
-        .iter()
-        .map(|(key, label, format)| {
-            json!({
-                "key": key,
-                "label": label,
-                "format": format,
-            })
-        })
-        .collect()
-}
-
-fn system_fields(entity: ReportWorkflowRuntimeEntity) -> HashSet<&'static str> {
-    match entity {
-        ReportWorkflowRuntimeEntity::RuntimeExecutionMetricBuckets => [
-            "tenantId",
-            "bucketTime",
-            "granularity",
-            "invocationCount",
-            "successCount",
-            "failureCount",
-            "cancelledCount",
-            "avgDurationSeconds",
-            "minDurationSeconds",
-            "maxDurationSeconds",
-            "avgMemoryBytes",
-            "maxMemoryBytes",
-            "successRatePercent",
-        ]
-        .into_iter()
-        .collect(),
-        ReportWorkflowRuntimeEntity::RuntimeSystemSnapshot => [
-            "capturedAt",
-            "cpuArchitecture",
-            "cpuPhysicalCores",
-            "cpuLogicalCores",
-            "memoryTotalBytes",
-            "memoryAvailableBytes",
-            "memoryAvailableForWorkflowsBytes",
-            "memoryUsedBytes",
-            "memoryUsedPercent",
-            "diskPath",
-            "diskTotalBytes",
-            "diskAvailableBytes",
-            "diskUsedBytes",
-            "diskUsedPercent",
-        ]
-        .into_iter()
-        .collect(),
-        ReportWorkflowRuntimeEntity::ConnectionRateLimitStatus => [
-            "connectionId",
-            "connectionTitle",
-            "integrationId",
-            "config",
-            "state",
-            "metrics",
-            "periodStats",
-            "configRequestsPerSecond",
-            "configBurstSize",
-            "configRetryOnLimit",
-            "configMaxRetries",
-            "configMaxWaitMs",
-            "stateAvailable",
-            "stateCurrentTokens",
-            "stateLastRefillMs",
-            "stateLearnedLimit",
-            "stateCallsInWindow",
-            "stateTotalCalls",
-            "stateWindowStartMs",
-            "capacityPercent",
-            "utilizationPercent",
-            "isRateLimited",
-            "retryAfterMs",
-            "periodInterval",
-            "periodTotalRequests",
-            "periodRateLimitedCount",
-            "periodRetryCount",
-            "periodRateLimitedPercent",
-        ]
-        .into_iter()
-        .collect(),
-        ReportWorkflowRuntimeEntity::ConnectionRateLimitEvents => [
-            "id",
-            "connectionId",
-            "eventType",
-            "createdAt",
-            "metadata",
-            "tag",
-        ]
-        .into_iter()
-        .collect(),
-        ReportWorkflowRuntimeEntity::ConnectionRateLimitTimeline => [
-            "connectionId",
-            "bucket",
-            "bucketTime",
-            "granularity",
-            "requestCount",
-            "rateLimitedCount",
-            "retryCount",
-        ]
-        .into_iter()
-        .collect(),
-        ReportWorkflowRuntimeEntity::Instances | ReportWorkflowRuntimeEntity::Actions => {
-            HashSet::new()
-        }
-    }
-}
-
-fn system_row_field_known(fields: &HashSet<&'static str>, field: &str) -> bool {
-    fields.contains(field)
-        || field
-            .split_once('.')
-            .is_some_and(|(root, _)| fields.contains(root))
-}
-
-fn system_table_columns(
-    table: Option<&ReportTableConfig>,
-    entity: ReportWorkflowRuntimeEntity,
-) -> Vec<Value> {
-    if let Some(table) = table
-        && !table.columns.is_empty()
-    {
-        return table
-            .columns
-            .iter()
-            .map(|column| {
-                json!({
-                    "key": column.field,
-                    "label": column.label.clone().unwrap_or_else(|| humanize_label(&column.field)),
-                    "format": column.format,
-                })
-            })
-            .collect();
-    }
-
-    let columns: &[(&str, &str, Option<&str>)] = match entity {
-        ReportWorkflowRuntimeEntity::RuntimeExecutionMetricBuckets => &[
-            ("bucketTime", "Bucket", Some("datetime")),
-            ("invocationCount", "Invocations", Some("number")),
-            ("successCount", "Successes", Some("number")),
-            ("failureCount", "Failures", Some("number")),
-            ("cancelledCount", "Cancelled", Some("number")),
-            ("successRatePercent", "Success Rate", Some("percent")),
-            ("avgDurationSeconds", "Avg Duration", Some("number")),
-            ("maxMemoryBytes", "Max Memory", Some("bytes")),
-        ],
-        ReportWorkflowRuntimeEntity::RuntimeSystemSnapshot => &[
-            ("capturedAt", "Captured", Some("datetime")),
-            ("cpuArchitecture", "CPU Architecture", None),
-            ("cpuPhysicalCores", "Physical Cores", Some("number")),
-            ("cpuLogicalCores", "Logical Cores", Some("number")),
-            ("memoryUsedPercent", "Memory Used", Some("percent")),
-            ("diskUsedPercent", "Disk Used", Some("percent")),
-        ],
-        ReportWorkflowRuntimeEntity::ConnectionRateLimitStatus => &[
-            ("connectionTitle", "Connection", None),
-            ("integrationId", "Integration", None),
-            ("isRateLimited", "Rate Limited", Some("boolean")),
-            ("capacityPercent", "Capacity", Some("percent")),
-            ("utilizationPercent", "Utilization", Some("percent")),
-            ("periodTotalRequests", "Requests", Some("number")),
-            ("periodRateLimitedCount", "Limited", Some("number")),
-            ("periodRetryCount", "Retries", Some("number")),
-        ],
-        ReportWorkflowRuntimeEntity::ConnectionRateLimitEvents => &[
-            ("createdAt", "Created", Some("datetime")),
-            ("connectionId", "Connection", None),
-            ("eventType", "Event", None),
-            ("tag", "Tag", None),
-        ],
-        ReportWorkflowRuntimeEntity::ConnectionRateLimitTimeline => &[
-            ("bucketTime", "Bucket", Some("datetime")),
-            ("requestCount", "Requests", Some("number")),
-            ("rateLimitedCount", "Limited", Some("number")),
-            ("retryCount", "Retries", Some("number")),
-        ],
-        ReportWorkflowRuntimeEntity::Instances | ReportWorkflowRuntimeEntity::Actions => &[],
-    };
-
-    columns
-        .iter()
-        .map(|(key, label, format)| {
-            json!({
-                "key": key,
-                "label": label,
-                "format": format,
-            })
-        })
-        .collect()
-}
-
-fn option_f64_value(value: Option<f64>) -> Value {
+pub(crate) fn option_f64_value(value: Option<f64>) -> Value {
     value
         .and_then(serde_json::Number::from_f64)
         .map(Value::Number)
         .unwrap_or(Value::Null)
 }
 
-fn f64_value(value: f64) -> Value {
+pub(crate) fn f64_value(value: f64) -> Value {
     serde_json::Number::from_f64(value)
         .map(Value::Number)
         .unwrap_or(Value::Null)
-}
-
-fn runtime_system_snapshot_row() -> serde_json::Map<String, Value> {
-    let mut sys = sysinfo::System::new();
-    sys.refresh_memory();
-
-    let total_memory = sys.total_memory();
-    let available_memory = sys.available_memory();
-    let available_for_workflows = (available_memory as f64 * 0.8) as u64;
-    let used_memory = total_memory.saturating_sub(available_memory);
-    let memory_used_percent = percent(used_memory as f64, total_memory as f64);
-
-    let data_dir = std::env::var("DATA_DIR").unwrap_or_else(|_| ".data".to_string());
-    let data_path = PathBuf::from(&data_dir);
-    let canonical_path = data_path.canonicalize().unwrap_or(data_path);
-    let disks = sysinfo::Disks::new_with_refreshed_list();
-    let disk_info = disks
-        .iter()
-        .filter(|disk| canonical_path.starts_with(disk.mount_point()))
-        .max_by_key(|disk| disk.mount_point().as_os_str().len())
-        .map(|disk| {
-            (
-                disk.total_space(),
-                disk.available_space(),
-                canonical_path.display().to_string(),
-            )
-        })
-        .or_else(|| {
-            disks
-                .iter()
-                .next()
-                .map(|disk| (disk.total_space(), disk.available_space(), data_dir.clone()))
-        })
-        .unwrap_or((0, 0, data_dir));
-    let disk_used = disk_info.0.saturating_sub(disk_info.1);
-    let disk_used_percent = percent(disk_used as f64, disk_info.0 as f64);
-
-    serde_json::Map::from_iter([
-        (
-            "capturedAt".to_string(),
-            Value::String(Utc::now().to_rfc3339()),
-        ),
-        (
-            "cpuArchitecture".to_string(),
-            Value::String(std::env::consts::ARCH.to_string()),
-        ),
-        (
-            "cpuPhysicalCores".to_string(),
-            json!(num_cpus::get_physical()),
-        ),
-        ("cpuLogicalCores".to_string(), json!(num_cpus::get())),
-        ("memoryTotalBytes".to_string(), json!(total_memory)),
-        ("memoryAvailableBytes".to_string(), json!(available_memory)),
-        (
-            "memoryAvailableForWorkflowsBytes".to_string(),
-            json!(available_for_workflows),
-        ),
-        ("memoryUsedBytes".to_string(), json!(used_memory)),
-        (
-            "memoryUsedPercent".to_string(),
-            f64_value(memory_used_percent),
-        ),
-        ("diskPath".to_string(), Value::String(disk_info.2)),
-        ("diskTotalBytes".to_string(), json!(disk_info.0)),
-        ("diskAvailableBytes".to_string(), json!(disk_info.1)),
-        ("diskUsedBytes".to_string(), json!(disk_used)),
-        ("diskUsedPercent".to_string(), f64_value(disk_used_percent)),
-    ])
-}
-
-fn percent(numerator: f64, denominator: f64) -> f64 {
-    if denominator <= 0.0 {
-        0.0
-    } else {
-        (numerator / denominator) * 100.0
-    }
-}
-
-fn rate_limit_status_row(
-    status: runtara_connections::types::RateLimitStatusDto,
-) -> serde_json::Map<String, Value> {
-    let config_value = status
-        .config
-        .as_ref()
-        .and_then(|config| serde_json::to_value(config).ok())
-        .unwrap_or(Value::Null);
-    let state_value = serde_json::to_value(&status.state).unwrap_or(Value::Null);
-    let metrics_value = serde_json::to_value(&status.metrics).unwrap_or(Value::Null);
-    let period_value = status
-        .period_stats
-        .as_ref()
-        .and_then(|stats| serde_json::to_value(stats).ok())
-        .unwrap_or(Value::Null);
-
-    let mut row = serde_json::Map::new();
-    row.insert(
-        "connectionId".to_string(),
-        Value::String(status.connection_id),
-    );
-    row.insert(
-        "connectionTitle".to_string(),
-        Value::String(status.connection_title),
-    );
-    row.insert(
-        "integrationId".to_string(),
-        status
-            .integration_id
-            .map(Value::String)
-            .unwrap_or(Value::Null),
-    );
-    row.insert("config".to_string(), config_value);
-    row.insert("state".to_string(), state_value);
-    row.insert("metrics".to_string(), metrics_value);
-    row.insert("periodStats".to_string(), period_value);
-
-    if let Some(config) = status.config {
-        row.insert(
-            "configRequestsPerSecond".to_string(),
-            json!(config.requests_per_second),
-        );
-        row.insert("configBurstSize".to_string(), json!(config.burst_size));
-        row.insert(
-            "configRetryOnLimit".to_string(),
-            Value::Bool(config.retry_on_limit),
-        );
-        row.insert("configMaxRetries".to_string(), json!(config.max_retries));
-        row.insert("configMaxWaitMs".to_string(), json!(config.max_wait_ms));
-    } else {
-        row.insert("configRequestsPerSecond".to_string(), Value::Null);
-        row.insert("configBurstSize".to_string(), Value::Null);
-        row.insert("configRetryOnLimit".to_string(), Value::Null);
-        row.insert("configMaxRetries".to_string(), Value::Null);
-        row.insert("configMaxWaitMs".to_string(), Value::Null);
-    }
-
-    row.insert(
-        "stateAvailable".to_string(),
-        Value::Bool(status.state.available),
-    );
-    row.insert(
-        "stateCurrentTokens".to_string(),
-        option_f64_value(status.state.current_tokens),
-    );
-    row.insert(
-        "stateLastRefillMs".to_string(),
-        status
-            .state
-            .last_refill_ms
-            .map(Value::from)
-            .unwrap_or(Value::Null),
-    );
-    row.insert(
-        "stateLearnedLimit".to_string(),
-        status
-            .state
-            .learned_limit
-            .map(Value::from)
-            .unwrap_or(Value::Null),
-    );
-    row.insert(
-        "stateCallsInWindow".to_string(),
-        status
-            .state
-            .calls_in_window
-            .map(Value::from)
-            .unwrap_or(Value::Null),
-    );
-    row.insert(
-        "stateTotalCalls".to_string(),
-        status
-            .state
-            .total_calls
-            .map(Value::from)
-            .unwrap_or(Value::Null),
-    );
-    row.insert(
-        "stateWindowStartMs".to_string(),
-        status
-            .state
-            .window_start_ms
-            .map(Value::from)
-            .unwrap_or(Value::Null),
-    );
-    row.insert(
-        "capacityPercent".to_string(),
-        option_f64_value(status.metrics.capacity_percent),
-    );
-    row.insert(
-        "utilizationPercent".to_string(),
-        option_f64_value(status.metrics.utilization_percent),
-    );
-    row.insert(
-        "isRateLimited".to_string(),
-        Value::Bool(status.metrics.is_rate_limited),
-    );
-    row.insert(
-        "retryAfterMs".to_string(),
-        status
-            .metrics
-            .retry_after_ms
-            .map(Value::from)
-            .unwrap_or(Value::Null),
-    );
-
-    if let Some(period) = status.period_stats {
-        row.insert("periodInterval".to_string(), Value::String(period.interval));
-        row.insert(
-            "periodTotalRequests".to_string(),
-            json!(period.total_requests),
-        );
-        row.insert(
-            "periodRateLimitedCount".to_string(),
-            json!(period.rate_limited_count),
-        );
-        row.insert("periodRetryCount".to_string(), json!(period.retry_count));
-        row.insert(
-            "periodRateLimitedPercent".to_string(),
-            f64_value(period.rate_limited_percent),
-        );
-    } else {
-        row.insert("periodInterval".to_string(), Value::Null);
-        row.insert("periodTotalRequests".to_string(), Value::Null);
-        row.insert("periodRateLimitedCount".to_string(), Value::Null);
-        row.insert("periodRetryCount".to_string(), Value::Null);
-        row.insert("periodRateLimitedPercent".to_string(), Value::Null);
-    }
-
-    row
-}
-
-fn rate_limit_event_row(
-    event: runtara_connections::types::RateLimitEventDto,
-) -> serde_json::Map<String, Value> {
-    let tag = event
-        .metadata
-        .as_ref()
-        .and_then(|metadata| metadata.get("tag"))
-        .cloned()
-        .unwrap_or(Value::Null);
-    serde_json::Map::from_iter([
-        ("id".to_string(), json!(event.id)),
-        (
-            "connectionId".to_string(),
-            Value::String(event.connection_id),
-        ),
-        ("eventType".to_string(), Value::String(event.event_type)),
-        (
-            "createdAt".to_string(),
-            Value::String(event.created_at.to_rfc3339()),
-        ),
-        (
-            "metadata".to_string(),
-            event.metadata.unwrap_or(Value::Null),
-        ),
-        ("tag".to_string(), tag),
-    ])
-}
-
-fn parse_metrics_granularity(
-    granularity: Option<&str>,
-) -> Result<MetricsGranularity, ReportServiceError> {
-    match granularity
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .unwrap_or("hourly")
-        .to_ascii_lowercase()
-        .as_str()
-    {
-        "hour" | "hourly" => Ok(MetricsGranularity::Hourly),
-        "day" | "daily" => Ok(MetricsGranularity::Daily),
-        other => Err(ReportServiceError::Validation(format!(
-            "Unsupported system metrics granularity '{}'. Use hourly or daily.",
-            other
-        ))),
-    }
-}
-
-fn infer_rate_limit_timeline_granularity(
-    start_time: DateTime<Utc>,
-    end_time: DateTime<Utc>,
-) -> String {
-    let duration = end_time - start_time;
-    if duration <= Duration::hours(2) {
-        "minute".to_string()
-    } else if duration <= Duration::days(7) {
-        "hourly".to_string()
-    } else {
-        "daily".to_string()
-    }
-}
-
-fn map_rate_limit_error(
-    error: runtara_connections::service::rate_limits::ServiceError,
-) -> ReportServiceError {
-    match error {
-        runtara_connections::service::rate_limits::ServiceError::NotFound(message) => {
-            ReportServiceError::Validation(message)
-        }
-        runtara_connections::service::rate_limits::ServiceError::DatabaseError(message)
-        | runtara_connections::service::rate_limits::ServiceError::RedisError(message) => {
-            ReportServiceError::Database(message)
-        }
-    }
-}
-
-fn system_connection_id(
-    block: &ReportBlockDefinition,
-    condition: Option<&Condition>,
-) -> Option<String> {
-    block
-        .source
-        .connection_id
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToString::to_string)
-        .or_else(|| extract_eq_string_condition(condition, "connectionId"))
-}
-
-fn extract_eq_string_condition(condition: Option<&Condition>, field: &str) -> Option<String> {
-    let condition = condition?;
-    let op = condition.op.to_ascii_uppercase();
-    let args = condition.arguments.as_deref().unwrap_or(&[]);
-    if matches!(op.as_str(), "AND" | "OR") {
-        return args.iter().find_map(|argument| {
-            condition_from_value(argument)
-                .as_ref()
-                .and_then(|child| extract_eq_string_condition(Some(child), field))
-        });
-    }
-    if op == "EQ" && args.len() == 2 && args.first().and_then(Value::as_str) == Some(field) {
-        return args.get(1).and_then(condition_scalar_to_string);
-    }
-    if op == "IN" && args.len() == 2 && args.first().and_then(Value::as_str) == Some(field) {
-        return args
-            .get(1)
-            .and_then(Value::as_array)
-            .and_then(|values| values.iter().find_map(condition_scalar_to_string));
-    }
-    None
-}
-
-fn condition_scalar_to_string(value: &Value) -> Option<String> {
-    match value {
-        Value::String(value) => Some(value.clone()),
-        Value::Number(value) => Some(value.to_string()),
-        Value::Bool(value) => Some(value.to_string()),
-        _ => None,
-    }
-}
-
-fn extract_time_bounds(
-    condition: Option<&Condition>,
-    fields: &[&str],
-) -> (Option<DateTime<Utc>>, Option<DateTime<Utc>>) {
-    let mut lower: Option<DateTime<Utc>> = None;
-    let mut upper: Option<DateTime<Utc>> = None;
-    if let Some(condition) = condition {
-        collect_time_bounds(condition, fields, &mut lower, &mut upper);
-    }
-    (lower, upper)
-}
-
-fn collect_time_bounds(
-    condition: &Condition,
-    fields: &[&str],
-    lower: &mut Option<DateTime<Utc>>,
-    upper: &mut Option<DateTime<Utc>>,
-) {
-    let op = condition.op.to_ascii_uppercase();
-    let args = condition.arguments.as_deref().unwrap_or(&[]);
-
-    for argument in args {
-        if let Some(child) = condition_from_value(argument) {
-            collect_time_bounds(&child, fields, lower, upper);
-        }
-    }
-
-    if args.len() != 2 {
-        return;
-    }
-    let Some(field) = args.first().and_then(Value::as_str) else {
-        return;
-    };
-    if !fields.contains(&field) {
-        return;
-    }
-    let Some(bound) = args.get(1).and_then(parse_datetime_value) else {
-        return;
-    };
-    match op.as_str() {
-        "GT" | "GTE" => {
-            if lower.is_none_or(|current| bound > current) {
-                *lower = Some(bound);
-            }
-        }
-        "LT" | "LTE" => {
-            if upper.is_none_or(|current| bound < current) {
-                *upper = Some(bound);
-            }
-        }
-        _ => {}
-    }
-}
-
-fn parse_datetime_value(value: &Value) -> Option<DateTime<Utc>> {
-    match value {
-        Value::String(value) => DateTime::parse_from_rfc3339(value)
-            .ok()
-            .map(|value| value.with_timezone(&Utc)),
-        Value::Number(value) => value
-            .as_i64()
-            .and_then(DateTime::<Utc>::from_timestamp_millis),
-        _ => None,
-    }
-}
-
-fn aggregate_virtual_rows(
-    block_id: &str,
-    rows: &[serde_json::Map<String, Value>],
-    request: AggregateRequest,
-) -> Result<runtara_object_store::AggregateResult, ReportServiceError> {
-    if request.aggregates.is_empty() {
-        return Err(ReportServiceError::Validation(format!(
-            "Block '{}' must define at least one aggregate",
-            block_id
-        )));
-    }
-
-    let row_refs = rows
-        .iter()
-        .filter_map(|row| match request.condition.as_ref() {
-            Some(condition) => match condition_matches_row(condition, row, block_id) {
-                Ok(true) => Some(Ok(row)),
-                Ok(false) => None,
-                Err(error) => Some(Err(error)),
-            },
-            None => Some(Ok(row)),
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-
-    let mut groups: Vec<VirtualAggregateGroup<'_>> = Vec::new();
-    if request.group_by.is_empty() {
-        groups.push(VirtualAggregateGroup {
-            values: Vec::new(),
-            rows: row_refs,
-        });
-    } else {
-        let mut group_index_by_key = HashMap::new();
-        for row in row_refs {
-            let values = request
-                .group_by
-                .iter()
-                .map(|field| {
-                    virtual_row_value(row, field)
-                        .cloned()
-                        .unwrap_or(Value::Null)
-                })
-                .collect::<Vec<_>>();
-            let key = value_to_lookup_key(&Value::Array(values.clone()));
-            let index = if let Some(index) = group_index_by_key.get(&key) {
-                *index
-            } else {
-                let index = groups.len();
-                group_index_by_key.insert(key, index);
-                groups.push(VirtualAggregateGroup {
-                    values,
-                    rows: Vec::new(),
-                });
-                index
-            };
-            groups[index].rows.push(row);
-        }
-    }
-
-    let mut columns = request.group_by.clone();
-    columns.extend(
-        request
-            .aggregates
-            .iter()
-            .map(|aggregate| aggregate.alias.clone()),
-    );
-
-    let mut output_rows = Vec::with_capacity(groups.len());
-    for group in groups {
-        let mut row = group.values.clone();
-        let mut aliases = HashMap::new();
-        for aggregate in &request.aggregates {
-            let value = virtual_aggregate_value(block_id, aggregate, &group.rows, &aliases)?;
-            aliases.insert(aggregate.alias.clone(), value.clone());
-            row.push(value);
-        }
-        output_rows.push(row);
-    }
-
-    let group_count = output_rows.len() as i64;
-    sort_virtual_aggregate_rows(&mut output_rows, &columns, &request)?;
-    let offset = request.offset.unwrap_or(0).max(0) as usize;
-    let rows = output_rows
-        .into_iter()
-        .skip(offset)
-        .take(
-            request
-                .limit
-                .map(|limit| limit.clamp(1, MAX_AGGREGATE_ROWS) as usize)
-                .unwrap_or(usize::MAX),
-        )
-        .collect();
-
-    Ok(runtara_object_store::AggregateResult {
-        columns,
-        rows,
-        group_count,
-    })
-}
-
-struct VirtualAggregateGroup<'a> {
-    values: Vec<Value>,
-    rows: Vec<&'a serde_json::Map<String, Value>>,
-}
-
-fn virtual_aggregate_value(
-    block_id: &str,
-    aggregate: &AggregateSpec,
-    rows: &[&serde_json::Map<String, Value>],
-    aliases: &HashMap<String, Value>,
-) -> Result<Value, ReportServiceError> {
-    match aggregate.fn_ {
-        AggregateFn::Count => virtual_count_value(block_id, aggregate, rows),
-        AggregateFn::Sum => {
-            let values = virtual_numeric_values(block_id, aggregate, rows)?;
-            if values.is_empty() {
-                Ok(Value::Null)
-            } else {
-                Ok(f64_value(values.iter().sum()))
-            }
-        }
-        AggregateFn::Avg => {
-            let values = virtual_numeric_values(block_id, aggregate, rows)?;
-            if values.is_empty() {
-                Ok(Value::Null)
-            } else {
-                Ok(f64_value(values.iter().sum::<f64>() / values.len() as f64))
-            }
-        }
-        AggregateFn::Min | AggregateFn::Max => virtual_min_max_value(block_id, aggregate, rows),
-        AggregateFn::FirstValue | AggregateFn::LastValue => {
-            virtual_first_last_value(block_id, aggregate, rows)
-        }
-        AggregateFn::PercentileCont | AggregateFn::PercentileDisc => {
-            virtual_percentile_value(block_id, aggregate, rows)
-        }
-        AggregateFn::StddevSamp | AggregateFn::VarSamp => {
-            virtual_sample_stat_value(block_id, aggregate, rows)
-        }
-        AggregateFn::Expr => {
-            let expression = aggregate.expression.as_ref().ok_or_else(|| {
-                ReportServiceError::Validation(format!(
-                    "Block '{}' aggregate '{}' expression is required for expr",
-                    block_id, aggregate.alias
-                ))
-            })?;
-            evaluate_virtual_expression(block_id, expression, aliases)
-        }
-    }
-}
-
-fn virtual_count_value(
-    block_id: &str,
-    aggregate: &AggregateSpec,
-    rows: &[&serde_json::Map<String, Value>],
-) -> Result<Value, ReportServiceError> {
-    if aggregate.distinct {
-        let column = aggregate.column.as_deref().ok_or_else(|| {
-            ReportServiceError::Validation(format!(
-                "Block '{}' aggregate '{}' distinct count requires field",
-                block_id, aggregate.alias
-            ))
-        })?;
-        let mut values = HashSet::new();
-        for row in rows {
-            let value = virtual_row_value(row, column).unwrap_or(&Value::Null);
-            if !value.is_null() {
-                values.insert(value_to_lookup_key(value));
-            }
-        }
-        return Ok(json!(values.len()));
-    }
-
-    if let Some(column) = aggregate.column.as_deref() {
-        Ok(json!(
-            rows.iter()
-                .filter(|row| {
-                    virtual_row_value(row, column).is_some_and(|value| !value.is_null())
-                })
-                .count()
-        ))
-    } else {
-        Ok(json!(rows.len()))
-    }
-}
-
-fn virtual_numeric_values(
-    block_id: &str,
-    aggregate: &AggregateSpec,
-    rows: &[&serde_json::Map<String, Value>],
-) -> Result<Vec<f64>, ReportServiceError> {
-    let column = required_aggregate_column(block_id, aggregate)?;
-    Ok(rows
-        .iter()
-        .filter_map(|row| virtual_row_value(row, column).and_then(Value::as_f64))
-        .collect())
-}
-
-fn virtual_min_max_value(
-    block_id: &str,
-    aggregate: &AggregateSpec,
-    rows: &[&serde_json::Map<String, Value>],
-) -> Result<Value, ReportServiceError> {
-    let column = required_aggregate_column(block_id, aggregate)?;
-    let mut values = rows
-        .iter()
-        .filter_map(|row| virtual_row_value(row, column))
-        .filter(|value| !value.is_null());
-    let Some(first) = values.next() else {
-        return Ok(Value::Null);
-    };
-    let mut selected = first.clone();
-    for value in values {
-        let ordering = virtual_compare_values(value, &selected).unwrap_or(Ordering::Equal);
-        let should_replace = match aggregate.fn_ {
-            AggregateFn::Min => ordering == Ordering::Less,
-            AggregateFn::Max => ordering == Ordering::Greater,
-            _ => false,
-        };
-        if should_replace {
-            selected = value.clone();
-        }
-    }
-    Ok(selected)
-}
-
-fn virtual_first_last_value(
-    block_id: &str,
-    aggregate: &AggregateSpec,
-    rows: &[&serde_json::Map<String, Value>],
-) -> Result<Value, ReportServiceError> {
-    let column = required_aggregate_column(block_id, aggregate)?;
-    if aggregate.order_by.is_empty() {
-        return Err(ReportServiceError::Validation(format!(
-            "Block '{}' aggregate '{}' first_value/last_value requires orderBy",
-            block_id, aggregate.alias
-        )));
-    }
-    let mut sorted = rows.to_vec();
-    let flip = matches!(aggregate.fn_, AggregateFn::LastValue);
-    sorted.sort_by(|left, right| {
-        compare_virtual_rows_by_order(left, right, &aggregate.order_by, flip)
-    });
-    Ok(sorted
-        .first()
-        .and_then(|row| virtual_row_value(row, column))
-        .cloned()
-        .unwrap_or(Value::Null))
-}
-
-fn virtual_percentile_value(
-    block_id: &str,
-    aggregate: &AggregateSpec,
-    rows: &[&serde_json::Map<String, Value>],
-) -> Result<Value, ReportServiceError> {
-    required_aggregate_column(block_id, aggregate)?;
-    let percentile = aggregate.percentile.ok_or_else(|| {
-        ReportServiceError::Validation(format!(
-            "Block '{}' aggregate '{}' percentile is required",
-            block_id, aggregate.alias
-        ))
-    })?;
-    if !(0.0..=1.0).contains(&percentile) {
-        return Err(ReportServiceError::Validation(format!(
-            "Block '{}' aggregate '{}' percentile must be between 0 and 1",
-            block_id, aggregate.alias
-        )));
-    }
-    let order_by = aggregate.order_by.first().ok_or_else(|| {
-        ReportServiceError::Validation(format!(
-            "Block '{}' aggregate '{}' percentile requires orderBy",
-            block_id, aggregate.alias
-        ))
-    })?;
-    let mut values = rows
-        .iter()
-        .filter_map(|row| virtual_row_value(row, &order_by.column).and_then(Value::as_f64))
-        .collect::<Vec<_>>();
-    values.sort_by(|left, right| left.partial_cmp(right).unwrap_or(Ordering::Equal));
-    if order_by.direction == SortDirection::Desc {
-        values.reverse();
-    }
-    if values.is_empty() {
-        return Ok(Value::Null);
-    }
-    if matches!(aggregate.fn_, AggregateFn::PercentileDisc) {
-        let index = ((percentile * values.len() as f64).ceil() as usize)
-            .saturating_sub(1)
-            .min(values.len() - 1);
-        return Ok(f64_value(values[index]));
-    }
-    if values.len() == 1 {
-        return Ok(f64_value(values[0]));
-    }
-    let rank = percentile * (values.len() - 1) as f64;
-    let lower_index = rank.floor() as usize;
-    let upper_index = rank.ceil() as usize;
-    if lower_index == upper_index {
-        return Ok(f64_value(values[lower_index]));
-    }
-    let fraction = rank - lower_index as f64;
-    Ok(f64_value(
-        values[lower_index] + ((values[upper_index] - values[lower_index]) * fraction),
-    ))
-}
-
-fn virtual_sample_stat_value(
-    block_id: &str,
-    aggregate: &AggregateSpec,
-    rows: &[&serde_json::Map<String, Value>],
-) -> Result<Value, ReportServiceError> {
-    let values = virtual_numeric_values(block_id, aggregate, rows)?;
-    if values.len() < 2 {
-        return Ok(Value::Null);
-    }
-    let mean = values.iter().sum::<f64>() / values.len() as f64;
-    let variance = values
-        .iter()
-        .map(|value| (value - mean).powi(2))
-        .sum::<f64>()
-        / (values.len() - 1) as f64;
-    if matches!(aggregate.fn_, AggregateFn::StddevSamp) {
-        Ok(f64_value(variance.sqrt()))
-    } else {
-        Ok(f64_value(variance))
-    }
-}
-
-fn required_aggregate_column<'a>(
-    block_id: &str,
-    aggregate: &'a AggregateSpec,
-) -> Result<&'a str, ReportServiceError> {
-    aggregate.column.as_deref().ok_or_else(|| {
-        ReportServiceError::Validation(format!(
-            "Block '{}' aggregate '{}' requires field",
-            block_id, aggregate.alias
-        ))
-    })
-}
-
-fn sort_virtual_aggregate_rows(
-    rows: &mut [Vec<Value>],
-    columns: &[String],
-    request: &AggregateRequest,
-) -> Result<(), ReportServiceError> {
-    let column_index = columns
-        .iter()
-        .enumerate()
-        .map(|(index, column)| (column.as_str(), index))
-        .collect::<HashMap<_, _>>();
-
-    if request.order_by.is_empty() {
-        rows.sort_by(|left, right| {
-            for index in 0..request.group_by.len() {
-                let ordering = virtual_compare_values(
-                    left.get(index).unwrap_or(&Value::Null),
-                    right.get(index).unwrap_or(&Value::Null),
-                )
-                .unwrap_or(Ordering::Equal);
-                if ordering != Ordering::Equal {
-                    return ordering;
-                }
-            }
-            Ordering::Equal
-        });
-        return Ok(());
-    }
-
-    for order_by in &request.order_by {
-        if !column_index.contains_key(order_by.column.as_str()) {
-            return Err(ReportServiceError::Validation(format!(
-                "Aggregate orderBy references unavailable field '{}'",
-                order_by.column
-            )));
-        }
-    }
-
-    rows.sort_by(|left, right| {
-        for order_by in &request.order_by {
-            let index = column_index[order_by.column.as_str()];
-            let ordering = virtual_compare_values(
-                left.get(index).unwrap_or(&Value::Null),
-                right.get(index).unwrap_or(&Value::Null),
-            )
-            .unwrap_or(Ordering::Equal);
-            let ordering = if order_by.direction == SortDirection::Desc {
-                ordering.reverse()
-            } else {
-                ordering
-            };
-            if ordering != Ordering::Equal {
-                return ordering;
-            }
-        }
-        Ordering::Equal
-    });
-    Ok(())
-}
-
-fn compare_virtual_rows_by_order(
-    left: &serde_json::Map<String, Value>,
-    right: &serde_json::Map<String, Value>,
-    order_by: &[AggregateOrderBy],
-    flip_direction: bool,
-) -> Ordering {
-    for order in order_by {
-        let left_value = virtual_row_value(left, &order.column).unwrap_or(&Value::Null);
-        let right_value = virtual_row_value(right, &order.column).unwrap_or(&Value::Null);
-        let ordering = virtual_compare_values(left_value, right_value).unwrap_or(Ordering::Equal);
-        let descending = if flip_direction {
-            order.direction == SortDirection::Asc
-        } else {
-            order.direction == SortDirection::Desc
-        };
-        let ordering = if descending {
-            ordering.reverse()
-        } else {
-            ordering
-        };
-        if ordering != Ordering::Equal {
-            return ordering;
-        }
-    }
-    Ordering::Equal
-}
-
-fn virtual_row_value<'a>(
-    row: &'a serde_json::Map<String, Value>,
-    field: &str,
-) -> Option<&'a Value> {
-    if let Some(value) = row.get(field) {
-        return Some(value);
-    }
-
-    let mut parts = field.split('.');
-    let first = parts.next()?;
-    let mut current = row.get(first)?;
-    for part in parts {
-        current = match current {
-            Value::Object(object) => object.get(part)?,
-            Value::Array(values) => {
-                let index = part.parse::<usize>().ok()?;
-                values.get(index)?
-            }
-            _ => return None,
-        };
-    }
-    Some(current)
-}
-
-fn virtual_compare_values(left: &Value, right: &Value) -> Option<Ordering> {
-    match (left, right) {
-        (Value::Null, Value::Null) => Some(Ordering::Equal),
-        (Value::Null, _) => Some(Ordering::Greater),
-        (_, Value::Null) => Some(Ordering::Less),
-        (Value::Number(left), Value::Number(right)) => left.as_f64()?.partial_cmp(&right.as_f64()?),
-        (Value::String(left), Value::String(right)) => Some(left.cmp(right)),
-        (Value::Bool(left), Value::Bool(right)) => Some(left.cmp(right)),
-        _ => Some(virtual_value_sort_key(left).cmp(&virtual_value_sort_key(right))),
-    }
-}
-
-fn virtual_value_sort_key(value: &Value) -> String {
-    match value {
-        Value::String(value) => value.clone(),
-        Value::Bool(value) => value.to_string(),
-        Value::Number(value) => value.to_string(),
-        Value::Null => String::new(),
-        other => other.to_string(),
-    }
-}
-
-fn evaluate_virtual_expression(
-    block_id: &str,
-    expression: &Value,
-    aliases: &HashMap<String, Value>,
-) -> Result<Value, ReportServiceError> {
-    let normalized = normalize_report_aggregate_expression(expression);
-    evaluate_virtual_expression_inner(block_id, &normalized, aliases, 0)
-}
-
-fn evaluate_virtual_expression_inner(
-    block_id: &str,
-    expression: &Value,
-    aliases: &HashMap<String, Value>,
-    depth: u8,
-) -> Result<Value, ReportServiceError> {
-    if depth > 8 {
-        return Err(ReportServiceError::Validation(format!(
-            "Block '{}' aggregate expression is too deeply nested",
-            block_id
-        )));
-    }
-    let Some(object) = expression.as_object() else {
-        return Ok(expression.clone());
-    };
-
-    if let Some(value_type) = object.get("valueType").and_then(Value::as_str) {
-        let value = object.get("value").cloned().unwrap_or(Value::Null);
-        return match value_type.to_ascii_lowercase().as_str() {
-            "alias" => {
-                let alias = value.as_str().ok_or_else(|| {
-                    ReportServiceError::Validation(format!(
-                        "Block '{}' aggregate expression alias value must be a string",
-                        block_id
-                    ))
-                })?;
-                Ok(aliases.get(alias).cloned().unwrap_or(Value::Null))
-            }
-            "immediate" => Ok(value),
-            "reference" => Err(ReportServiceError::Validation(format!(
-                "Block '{}' aggregate expressions cannot reference row fields",
-                block_id
-            ))),
-            other => Err(ReportServiceError::Validation(format!(
-                "Block '{}' aggregate expression uses unsupported valueType '{}'",
-                block_id, other
-            ))),
-        };
-    }
-
-    let op = object
-        .get("op")
-        .and_then(Value::as_str)
-        .map(normalize_expression_token)
-        .ok_or_else(|| {
-            ReportServiceError::Validation(format!(
-                "Block '{}' aggregate expression operation must include op",
-                block_id
-            ))
-        })?;
-    let arguments = object
-        .get("arguments")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default()
-        .into_iter()
-        .map(|argument| evaluate_virtual_expression_inner(block_id, &argument, aliases, depth + 1))
-        .collect::<Result<Vec<_>, _>>()?;
-
-    evaluate_virtual_expression_op(&op, &arguments)
-}
-
-fn evaluate_virtual_expression_op(
-    op: &str,
-    arguments: &[Value],
-) -> Result<Value, ReportServiceError> {
-    match op {
-        "ADD" => Ok(option_f64_value(Some(
-            arguments.iter().filter_map(Value::as_f64).sum(),
-        ))),
-        "SUB" => {
-            let Some(first) = arguments.first().and_then(Value::as_f64) else {
-                return Ok(Value::Null);
-            };
-            Ok(f64_value(
-                arguments
-                    .iter()
-                    .skip(1)
-                    .filter_map(Value::as_f64)
-                    .fold(first, |acc, value| acc - value),
-            ))
-        }
-        "MUL" => Ok(f64_value(
-            arguments
-                .iter()
-                .filter_map(Value::as_f64)
-                .fold(1.0, |acc, value| acc * value),
-        )),
-        "DIV" => {
-            let (Some(left), Some(right)) = (
-                arguments.first().and_then(Value::as_f64),
-                arguments.get(1).and_then(Value::as_f64),
-            ) else {
-                return Ok(Value::Null);
-            };
-            if right == 0.0 {
-                Ok(Value::Null)
-            } else {
-                Ok(f64_value(left / right))
-            }
-        }
-        "NEG" => Ok(arguments
-            .first()
-            .and_then(Value::as_f64)
-            .map(|value| f64_value(-value))
-            .unwrap_or(Value::Null)),
-        "ABS" => Ok(arguments
-            .first()
-            .and_then(Value::as_f64)
-            .map(|value| f64_value(value.abs()))
-            .unwrap_or(Value::Null)),
-        "COALESCE" => Ok(arguments
-            .iter()
-            .find(|value| !value_is_empty(value))
-            .cloned()
-            .unwrap_or(Value::Null)),
-        "EQ" | "NE" | "GT" | "GTE" | "LT" | "LTE" => {
-            let left = arguments.first().unwrap_or(&Value::Null);
-            let right = arguments.get(1).unwrap_or(&Value::Null);
-            let ordering = virtual_compare_values(left, right);
-            let equal = left == right || ordering == Some(Ordering::Equal);
-            let result = match op {
-                "EQ" => equal,
-                "NE" => !equal,
-                "GT" => ordering == Some(Ordering::Greater),
-                "GTE" => equal || matches!(ordering, Some(Ordering::Greater | Ordering::Equal)),
-                "LT" => ordering == Some(Ordering::Less),
-                "LTE" => equal || matches!(ordering, Some(Ordering::Less | Ordering::Equal)),
-                _ => false,
-            };
-            Ok(Value::Bool(result))
-        }
-        "AND" => Ok(Value::Bool(arguments.iter().all(expression_truthy))),
-        "OR" => Ok(Value::Bool(arguments.iter().any(expression_truthy))),
-        "NOT" => Ok(Value::Bool(
-            !arguments.first().is_some_and(expression_truthy),
-        )),
-        "IS_DEFINED" => Ok(Value::Bool(
-            arguments.first().is_some_and(|value| !value.is_null()),
-        )),
-        "IS_EMPTY" => Ok(Value::Bool(arguments.first().is_none_or(value_is_empty))),
-        "IS_NOT_EMPTY" => Ok(Value::Bool(
-            arguments
-                .first()
-                .is_some_and(|value| !value_is_empty(value)),
-        )),
-        other => Err(ReportServiceError::Validation(format!(
-            "Aggregate expression uses unsupported op '{}'",
-            other
-        ))),
-    }
-}
-
-fn expression_truthy(value: &Value) -> bool {
-    match value {
-        Value::Bool(value) => *value,
-        Value::Number(value) => value.as_f64().is_some_and(|value| value != 0.0),
-        Value::String(value) => !value.trim().is_empty(),
-        Value::Array(values) => !values.is_empty(),
-        Value::Object(values) => !values.is_empty(),
-        Value::Null => false,
-    }
 }
 
 fn merge_report_action_payload(
@@ -9163,55 +5997,6 @@ fn auth_method_name(method: &AuthMethod) -> &'static str {
         AuthMethod::Jwt => "jwt",
         AuthMethod::ApiKey => "api_key",
         AuthMethod::Unauthenticated => "unauthenticated",
-    }
-}
-
-fn apply_workflow_runtime_row_filters(
-    rows: Vec<serde_json::Map<String, Value>>,
-    definition: &ReportDefinition,
-    block: &ReportBlockDefinition,
-    resolved_filters: &HashMap<String, Value>,
-    block_request: Option<&ReportBlockDataRequest>,
-) -> Result<Vec<serde_json::Map<String, Value>>, ReportServiceError> {
-    let Some(condition) =
-        build_block_condition(definition, block, resolved_filters, block_request)?
-    else {
-        return Ok(rows);
-    };
-
-    rows.into_iter()
-        .filter_map(
-            |row| match condition_matches_row(&condition, &row, &block.id) {
-                Ok(true) => Some(Ok(row)),
-                Ok(false) => None,
-                Err(error) => Some(Err(error)),
-            },
-        )
-        .collect()
-}
-
-fn map_workflow_runtime_error_to_report(error: WorkflowRuntimeError) -> ReportServiceError {
-    match error {
-        WorkflowRuntimeError::InvalidRequest(message) => ReportServiceError::Validation(message),
-        WorkflowRuntimeError::NotFound(message) => ReportServiceError::Validation(message),
-        WorkflowRuntimeError::Conflict(message) => ReportServiceError::Conflict(message),
-        WorkflowRuntimeError::RuntimeUnavailable => ReportServiceError::Validation(
-            "Workflow runtime report sources require a configured runtime client".to_string(),
-        ),
-        WorkflowRuntimeError::Runtime(message) => ReportServiceError::Database(message),
-    }
-}
-
-fn map_execution_error_to_report(error: ExecutionError) -> ReportServiceError {
-    match error {
-        ExecutionError::ValidationError(message) => ReportServiceError::Validation(message),
-        ExecutionError::NotFound(message) | ExecutionError::WorkflowNotFound(message) => {
-            ReportServiceError::Validation(message)
-        }
-        ExecutionError::NotConnected(_) => ReportServiceError::Validation(
-            "Workflow runtime report sources require a configured runtime client".to_string(),
-        ),
-        _ => ReportServiceError::Database(error.to_string()),
     }
 }
 
@@ -9709,7 +6494,7 @@ fn table_output_columns(
         .unwrap_or_else(|| source_columns.to_vec())
 }
 
-fn table_response_columns(table: Option<&ReportTableConfig>) -> Vec<Value> {
+pub(crate) fn table_response_columns(table: Option<&ReportTableConfig>) -> Vec<Value> {
     table
         .map(|table| {
             table
@@ -9923,11 +6708,11 @@ fn condition_from_table_column_join(
     }
 }
 
-fn aggregate_output_fields(block: &ReportBlockDefinition) -> HashSet<String> {
+pub(crate) fn aggregate_output_fields(block: &ReportBlockDefinition) -> HashSet<String> {
     aggregate_source_output_fields(&block.source.group_by, &block.source.aggregates)
 }
 
-fn validate_report_aggregate_specs(
+pub(crate) fn validate_report_aggregate_specs(
     context: &str,
     aggregates: &[ReportAggregateSpec],
 ) -> Result<(), ReportServiceError> {
@@ -10305,7 +7090,7 @@ fn normalize_expression_token(value: &str) -> String {
     }
 }
 
-fn normalize_sort_direction(value: &str) -> String {
+pub(crate) fn normalize_sort_direction(value: &str) -> String {
     if value.eq_ignore_ascii_case("desc") {
         "desc".to_string()
     } else {
@@ -10313,7 +7098,7 @@ fn normalize_sort_direction(value: &str) -> String {
     }
 }
 
-fn value_is_empty(value: &Value) -> bool {
+pub(crate) fn value_is_empty(value: &Value) -> bool {
     match value {
         Value::Null => true,
         Value::String(value) => value.trim().is_empty(),
@@ -10351,7 +7136,7 @@ fn ensure_array(value: &Value) -> Value {
     }
 }
 
-fn flatten_instance(instance: crate::api::dto::object_model::Instance) -> Value {
+pub(crate) fn flatten_instance(instance: crate::api::dto::object_model::Instance) -> Value {
     let mut row = serde_json::Map::new();
     row.insert("id".to_string(), Value::String(instance.id));
     row.insert("tenantId".to_string(), Value::String(instance.tenant_id));
@@ -10419,6 +7204,58 @@ fn clamp_page_size(size: i64) -> i64 {
     size.clamp(1, MAX_TABLE_PAGE_SIZE)
 }
 
+/// Pre-resolved pagination + sort for a table-shaped render path.
+///
+/// Replaces three near-identical copies that used to live inline in
+/// `render_table_block`, `render_aggregate_table_block`, and
+/// `render_joined_filter_table_block`. Resolution order:
+///
+/// - `page_size`: request override → table-config default → 50, clamped to
+///   `[1, MAX_TABLE_PAGE_SIZE]`.
+/// - `offset`: request override → 0, clamped to `>= 0`.
+/// - `sort`: request override (if non-empty) → table-config default sort
+///   (if non-empty) → block `source.order_by`.
+struct ResolvedTablePage {
+    page_size: i64,
+    offset: i64,
+    sort: Vec<ReportOrderBy>,
+}
+
+fn resolve_table_page(
+    block: &ReportBlockDefinition,
+    block_request: Option<&ReportBlockDataRequest>,
+) -> ResolvedTablePage {
+    let table = block.table.as_ref();
+    let page_size = clamp_page_size(
+        block_request
+            .and_then(|request| request.page.as_ref().map(|page| page.size))
+            .or_else(|| {
+                table
+                    .and_then(|table| table.pagination.as_ref())
+                    .map(|p| p.default_page_size)
+            })
+            .unwrap_or(50),
+    );
+    let offset = block_request
+        .and_then(|request| request.page.as_ref().map(|page| page.offset))
+        .unwrap_or(0)
+        .max(0);
+    let sort = block_request
+        .map(|request| request.sort.clone())
+        .filter(|sort| !sort.is_empty())
+        .or_else(|| {
+            table
+                .map(|table| table.default_sort.clone())
+                .filter(|sort| !sort.is_empty())
+        })
+        .unwrap_or_else(|| block.source.order_by.clone());
+    ResolvedTablePage {
+        page_size,
+        offset,
+        sort,
+    }
+}
+
 fn slugify(value: &str) -> String {
     let mut slug = String::new();
     let mut last_dash = false;
@@ -10453,7 +7290,7 @@ fn validate_slug(slug: &str) -> Result<(), ReportServiceError> {
     Ok(())
 }
 
-fn humanize_label(value: &str) -> String {
+pub(crate) fn humanize_label(value: &str) -> String {
     value
         .split(['_', '-'])
         .filter(|part| !part.is_empty())
@@ -10468,135 +7305,169 @@ fn humanize_label(value: &str) -> String {
         .join(" ")
 }
 
-fn find_block_index(
-    blocks: &[ReportBlockDefinition],
-    block_id: &str,
-) -> Result<usize, ReportServiceError> {
-    blocks
-        .iter()
-        .position(|block| block.id == block_id)
-        .ok_or_else(|| ReportServiceError::Validation(format!("Unknown block '{}'", block_id)))
-}
-
-fn resolve_position_index(
-    blocks: &[ReportBlockDefinition],
-    position: &ReportBlockPosition,
-) -> Result<usize, ReportServiceError> {
-    let selector_count = usize::from(position.index.is_some())
-        + usize::from(position.before_block_id.is_some())
-        + usize::from(position.after_block_id.is_some());
-
-    if selector_count > 1 {
-        return Err(ReportServiceError::Validation(
-            "Report block position must use only one of index, beforeBlockId, or afterBlockId"
-                .to_string(),
-        ));
+fn normalize_source_connection(source: &mut ReportSource, default_id: &str) {
+    let is_object_model = matches!(source.kind, ReportSourceKind::ObjectModel);
+    if is_object_model && source.connection_id.is_none() && !source.schema.trim().is_empty() {
+        source.connection_id = Some(default_id.to_string());
     }
-
-    if let Some(index) = position.index {
-        return Ok(index.min(blocks.len()));
-    }
-
-    if let Some(before_block_id) = &position.before_block_id {
-        if before_block_id.trim().is_empty() {
-            return Err(ReportServiceError::Validation(
-                "beforeBlockId cannot be empty".to_string(),
-            ));
-        }
-        return blocks
-            .iter()
-            .position(|block| block.id == *before_block_id)
-            .ok_or_else(|| {
-                ReportServiceError::Validation(format!(
-                    "Unknown beforeBlockId '{}'",
-                    before_block_id
-                ))
-            });
-    }
-
-    if let Some(after_block_id) = &position.after_block_id {
-        if after_block_id.trim().is_empty() {
-            return Err(ReportServiceError::Validation(
-                "afterBlockId cannot be empty".to_string(),
-            ));
-        }
-        return blocks
-            .iter()
-            .position(|block| block.id == *after_block_id)
-            .map(|index| index + 1)
-            .ok_or_else(|| {
-                ReportServiceError::Validation(format!("Unknown afterBlockId '{}'", after_block_id))
-            });
-    }
-
-    Ok(blocks.len())
-}
-
-fn apply_json_merge_patch(target: &mut Value, patch: &Value) {
-    match (target, patch) {
-        (Value::Object(target), Value::Object(patch)) => {
-            for (key, patch_value) in patch {
-                if patch_value.is_null() {
-                    target.remove(key);
-                } else {
-                    apply_json_merge_patch(
-                        target.entry(key.clone()).or_insert(Value::Null),
-                        patch_value,
-                    );
-                }
-            }
-        }
-        (target, patch) => {
-            *target = patch.clone();
+    for join in &mut source.join {
+        if join.connection_id.is_none() {
+            join.connection_id = Some(default_id.to_string());
         }
     }
 }
 
-fn map_sqlx_error(error: sqlx::Error) -> ReportServiceError {
-    if let sqlx::Error::Database(db_error) = &error
-        && db_error
-            .constraint()
-            .is_some_and(|constraint| constraint == "idx_report_definitions_tenant_slug_active")
-    {
-        return ReportServiceError::Conflict("A report with this slug already exists".to_string());
-    }
-
-    ReportServiceError::Database(error.to_string())
-}
-
-fn map_object_model_error(error: ObjectModelServiceError) -> ReportServiceError {
-    match error {
-        ObjectModelServiceError::ValidationError(message) => {
-            ReportServiceError::Validation(message)
-        }
-        ObjectModelServiceError::NotFound(message) => ReportServiceError::Validation(message),
-        ObjectModelServiceError::Conflict(message) => ReportServiceError::Conflict(message),
-        ObjectModelServiceError::DatabaseError(message) => ReportServiceError::Database(message),
-    }
-}
-
-fn seal_json_schema_objects(schema: &mut Value) {
+fn seal_json_schema_objects(
+    schema: &mut Value,
+    unsealable_defs: &std::collections::HashSet<String>,
+    path: &[String],
+) {
     match schema {
         Value::Object(object) => {
-            if object.contains_key("properties") && !object.contains_key("additionalProperties") {
+            // Skip sealing when this object:
+            // - participates in a composition (`allOf`/`oneOf`/`anyOf`) — each
+            //   variant only declares a subset of fields; sealing the partial
+            //   variants would contradict the merged shape;
+            // - carries a `$ref` — it implicitly inherits `properties` from
+            //   the referenced schema; OR
+            // - is a `$defs` definition referenced from a discriminator
+            //   variant (schemars 1's internally-tagged enum shape merges
+            //   the $ref's properties with an extra discriminator field).
+            let in_composition = object.contains_key("allOf")
+                || object.contains_key("oneOf")
+                || object.contains_key("anyOf");
+            let has_ref = object.contains_key("$ref");
+            let unsealable_def = matches!(path, [ns, name] if (ns == "$defs" || ns == "definitions") && unsealable_defs.contains(name));
+
+            if !in_composition
+                && !has_ref
+                && !unsealable_def
+                && object.contains_key("properties")
+                && !object.contains_key("additionalProperties")
+            {
                 object.insert("additionalProperties".to_string(), Value::Bool(false));
             }
-            for value in object.values_mut() {
-                seal_json_schema_objects(value);
+            let keys: Vec<String> = object.keys().cloned().collect();
+            for key in keys {
+                if let Some(value) = object.get_mut(&key) {
+                    let mut child_path: Vec<String> = path.to_vec();
+                    child_path.push(key);
+                    seal_json_schema_objects(value, unsealable_defs, &child_path);
+                }
             }
         }
         Value::Array(values) => {
             for value in values {
-                seal_json_schema_objects(value);
+                seal_json_schema_objects(value, unsealable_defs, path);
             }
         }
         _ => {}
     }
 }
 
+/// Walk the schema looking for `$ref` references that appear inside a
+/// `oneOf`/`anyOf` variant alongside `properties` + `required` (the shape
+/// schemars 1 emits for internally-tagged enum variants). The $ref'd
+/// `$defs` entry must remain unsealed so the discriminator merge works.
+fn collect_discriminator_ref_targets(schema: &Value) -> std::collections::HashSet<String> {
+    let mut targets = std::collections::HashSet::new();
+    walk_for_discriminator_refs(schema, &mut targets);
+    targets
+}
+
+fn walk_for_discriminator_refs(value: &Value, targets: &mut std::collections::HashSet<String>) {
+    if let Some(array) = value
+        .get("oneOf")
+        .or_else(|| value.get("anyOf"))
+        .and_then(Value::as_array)
+    {
+        for variant in array {
+            let Some(object) = variant.as_object() else {
+                continue;
+            };
+            if !(object.contains_key("$ref") && object.contains_key("properties")) {
+                continue;
+            }
+            let Some(reference) = object.get("$ref").and_then(Value::as_str) else {
+                continue;
+            };
+            if let Some(name) = reference
+                .strip_prefix("#/$defs/")
+                .or_else(|| reference.strip_prefix("#/definitions/"))
+            {
+                targets.insert(name.to_string());
+            }
+        }
+    }
+    match value {
+        Value::Object(map) => {
+            for child in map.values() {
+                walk_for_discriminator_refs(child, targets);
+            }
+        }
+        Value::Array(array) => {
+            for child in array {
+                walk_for_discriminator_refs(child, targets);
+            }
+        }
+        _ => {}
+    }
+}
+
+// ============================================================================
+// Source provider plumbing
+// ============================================================================
+//
+// The trait + registry live in `providers/`. The shim functions below are the
+// integration seam: each provider holds the deps it needs (engine, runtime
+// client, connections, manager) and delegates back here for the actual fetch.
+// Once the leaf fetchers move into their respective provider files, these
+// shims collapse to inlined trait-method bodies.
+
+fn build_provider_registry(
+    manager: Arc<ObjectStoreManager>,
+    connections: Arc<runtara_connections::ConnectionsFacade>,
+    engine: Option<Arc<ExecutionEngine>>,
+    runtime_client: Option<Arc<RuntimeClient>>,
+) -> ProviderRegistry {
+    ProviderRegistry::new(
+        Arc::new(ObjectModelProvider::new(manager, connections.clone())),
+        Arc::new(WorkflowRuntimeProvider::new(engine, runtime_client.clone())),
+        Arc::new(SystemProvider::new(runtime_client, connections)),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api::services::reports::query_plan::{
+        enrich_aggregate_result, split_qualified_condition, strip_alias_from_condition,
+        validate_join_request,
+    };
+
+    /// Test-only wrapper around the `runtara-report-dsl` aggregate engine.
+    /// Preserves the legacy `(block_id, rows, request)` signature the
+    /// virtual-aggregate tests below were written against. Production
+    /// callers go through `SystemProvider::fetch_aggregate`.
+    fn aggregate_virtual_rows(
+        block_id: &str,
+        rows: &[serde_json::Map<String, Value>],
+        request: AggregateRequest,
+    ) -> Result<runtara_object_store::AggregateResult, ReportServiceError> {
+        runtara_report_dsl::virtual_aggregate::aggregate_virtual_rows(
+            block_id,
+            rows,
+            request.into(),
+            |condition, row, block_id| {
+                let local = Condition {
+                    op: condition.op.clone(),
+                    arguments: condition.arguments.clone(),
+                };
+                condition_matches_row(&local, row, block_id).map_err(|err| err.to_string())
+            },
+        )
+        .map_err(|err| ReportServiceError::Validation(err.0))
+    }
 
     fn object_column(
         name: &str,
@@ -10685,6 +7556,83 @@ mod tests {
             format: None,
         });
         block
+    }
+
+    fn test_filter_for_block(filter_id: &str, block_id: &str) -> ReportFilterDefinition {
+        ReportFilterDefinition {
+            id: filter_id.to_string(),
+            label: filter_id.to_string(),
+            filter_type: ReportFilterType::Select,
+            default: None,
+            required: false,
+            strict_when_referenced: false,
+            options: None,
+            applies_to: vec![ReportFilterTarget {
+                filter_id: None,
+                block_id: Some(block_id.to_string()),
+                field: "status".to_string(),
+                op: "eq".to_string(),
+            }],
+        }
+    }
+
+    fn test_definition(
+        filters: Vec<ReportFilterDefinition>,
+        datasets: Vec<ReportDatasetDefinition>,
+        blocks: Vec<ReportBlockDefinition>,
+    ) -> ReportDefinition {
+        ReportDefinition {
+            definition_version: 1,
+            layout: runtara_report_dsl::default_root_grid(),
+            views: vec![],
+            filters,
+            datasets,
+            blocks,
+        }
+    }
+
+    #[test]
+    fn infer_filter_option_connection_id_uses_target_block_source() {
+        let mut block = test_block("orders");
+        block.source.connection_id = Some("conn_orders".to_string());
+        let filter = test_filter_for_block("status_filter", "orders");
+        let definition = test_definition(vec![filter.clone()], vec![], vec![block]);
+
+        assert_eq!(
+            infer_filter_option_connection_id(&definition, &filter),
+            Some("conn_orders")
+        );
+    }
+
+    #[test]
+    fn infer_filter_option_connection_id_uses_target_dataset_source() {
+        let mut block = test_block("orders");
+        block.dataset = Some(ReportBlockDatasetQuery {
+            id: "orders_dataset".to_string(),
+            dimensions: vec![],
+            measures: vec![],
+            order_by: vec![],
+            dataset_filters: vec![],
+            limit: None,
+        });
+        let dataset = ReportDatasetDefinition {
+            id: "orders_dataset".to_string(),
+            label: "Orders".to_string(),
+            source: ReportDatasetSource {
+                schema: "Order".to_string(),
+                connection_id: Some("conn_dataset".to_string()),
+            },
+            time_dimension: None,
+            dimensions: vec![],
+            measures: vec![],
+        };
+        let filter = test_filter_for_block("status_filter", "orders");
+        let definition = test_definition(vec![filter.clone()], vec![dataset], vec![block]);
+
+        assert_eq!(
+            infer_filter_option_connection_id(&definition, &filter),
+            Some("conn_dataset")
+        );
     }
 
     fn table_column(field: &str) -> ReportTableColumn {
@@ -10910,7 +7858,7 @@ mod tests {
             parent_view_id: parent_view_id.map(str::to_string),
             clear_filters_on_back: vec![],
             breadcrumb: vec![],
-            layout: vec![],
+            layout: runtara_report_dsl::default_root_grid(),
         }
     }
 
@@ -11182,44 +8130,11 @@ mod tests {
         assert!(err.to_string().contains("cycle"));
     }
 
-    #[test]
-    fn resolves_report_block_positions() {
-        let blocks = vec![test_block("a"), test_block("b"), test_block("c")];
-
-        assert_eq!(
-            resolve_position_index(
-                &blocks,
-                &ReportBlockPosition {
-                    index: Some(1),
-                    ..Default::default()
-                }
-            )
-            .unwrap(),
-            1
-        );
-        assert_eq!(
-            resolve_position_index(
-                &blocks,
-                &ReportBlockPosition {
-                    before_block_id: Some("b".to_string()),
-                    ..Default::default()
-                }
-            )
-            .unwrap(),
-            1
-        );
-        assert_eq!(
-            resolve_position_index(
-                &blocks,
-                &ReportBlockPosition {
-                    after_block_id: Some("b".to_string()),
-                    ..Default::default()
-                }
-            )
-            .unwrap(),
-            2
-        );
-    }
+    // Position-index resolution lives in `runtara-report-dsl::edit_ops`
+    // now and has its own coverage there
+    // (`add_block_appends_when_no_position`, `move_block_by_after_id`).
+    // The server-side `to_dsl_position` is a 4-line wire-shape converter
+    // and is exercised by every REST per-op shim test below.
 
     #[test]
     fn table_search_condition_uses_configured_columns() {
@@ -11484,6 +8399,7 @@ mod tests {
 
     #[test]
     fn display_template_syntax_accepts_safe_interpolation_only() {
+        use runtara_report_dsl::validate_safe_display_template;
         validate_safe_display_template(
             "{{first_name}} {{row.requested_loan.amount | number_compact}} AUD",
         )
@@ -11553,7 +8469,7 @@ mod tests {
         let dataset = test_dataset();
         let definition = ReportDefinition {
             definition_version: 1,
-            layout: vec![],
+            layout: runtara_report_dsl::default_root_grid(),
             views: vec![],
             filters: vec![ReportFilterDefinition {
                 id: "vendor".to_string(),
@@ -11607,7 +8523,7 @@ mod tests {
         let err = build_dataset_condition(
             &ReportDefinition {
                 definition_version: 1,
-                layout: vec![],
+                layout: runtara_report_dsl::default_root_grid(),
                 views: vec![],
                 filters: vec![],
                 datasets: vec![dataset.clone()],
@@ -11653,7 +8569,7 @@ mod tests {
         });
         let definition = ReportDefinition {
             definition_version: 1,
-            layout: vec![],
+            layout: runtara_report_dsl::default_root_grid(),
             views: vec![],
             filters: vec![],
             datasets: vec![dataset],
@@ -11761,7 +8677,7 @@ mod tests {
     }
 
     #[test]
-    fn layout_validation_accepts_nested_layout_nodes() {
+    fn layout_validation_accepts_nested_grid_layout_nodes() {
         let blocks = [test_metric_block("snapshots"), test_block("records")];
         let block_ids = blocks
             .iter()
@@ -11774,14 +8690,32 @@ mod tests {
         let filter_ids = HashSet::new();
         let mut layout_node_ids = HashSet::new();
 
+        // A grid containing a nested grid (one column) with a block plus a
+        // sibling block. Mirrors the post-Phase-9 wire shape for what was
+        // previously a `section` wrapping a `metric_row` + a block.
         validate_layout_node(
             &json!({
                 "id": "summary",
-                "type": "section",
+                "type": "grid",
                 "title": "Summary",
-                "children": [
-                    {"id": "summary_metrics", "type": "metric_row", "blocks": ["snapshots"]},
-                    {"id": "records_block", "type": "block", "blockId": "records"}
+                "columns": 1,
+                "items": [
+                    {
+                        "id": "summary_i0",
+                        "child": {
+                            "id": "summary_metrics",
+                            "type": "grid",
+                            "columns": 1,
+                            "items": [{
+                                "id": "summary_metrics_i0",
+                                "child": {"id": "snapshots_block", "type": "block", "blockId": "snapshots"}
+                            }]
+                        }
+                    },
+                    {
+                        "id": "summary_i1",
+                        "child": {"id": "records_block", "type": "block", "blockId": "records"}
+                    }
                 ]
             }),
             "$.layout[0]",
@@ -11965,7 +8899,7 @@ mod tests {
             "table": { "columns": [{ "field": "id" }], "defaultSort": [] }
         });
 
-        apply_json_merge_patch(
+        runtara_report_dsl::edit_ops::apply_json_merge_patch(
             &mut value,
             &json!({
                 "title": "Recent orders",
@@ -12106,7 +9040,7 @@ mod tests {
         case_filter.strict_when_referenced = true;
         let definition = ReportDefinition {
             definition_version: 1,
-            layout: vec![],
+            layout: runtara_report_dsl::default_root_grid(),
             views: vec![],
             filters: vec![case_filter],
             datasets: vec![],

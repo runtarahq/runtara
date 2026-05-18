@@ -19,55 +19,55 @@ use crate::{
 // Schema Generator Functions
 // ========================================================================
 
-fn schema_finish_step() -> schemars::schema::RootSchema {
+fn schema_finish_step() -> schemars::Schema {
     schemars::schema_for!(FinishStep)
 }
 
-fn schema_agent_step() -> schemars::schema::RootSchema {
+fn schema_agent_step() -> schemars::Schema {
     schemars::schema_for!(AgentStep)
 }
 
-fn schema_conditional_step() -> schemars::schema::RootSchema {
+fn schema_conditional_step() -> schemars::Schema {
     schemars::schema_for!(ConditionalStep)
 }
 
-fn schema_split_step() -> schemars::schema::RootSchema {
+fn schema_split_step() -> schemars::Schema {
     schemars::schema_for!(SplitStep)
 }
 
-fn schema_switch_step() -> schemars::schema::RootSchema {
+fn schema_switch_step() -> schemars::Schema {
     schemars::schema_for!(SwitchStep)
 }
 
-fn schema_embed_workflow_step() -> schemars::schema::RootSchema {
+fn schema_embed_workflow_step() -> schemars::Schema {
     schemars::schema_for!(EmbedWorkflowStep)
 }
 
-fn schema_while_step() -> schemars::schema::RootSchema {
+fn schema_while_step() -> schemars::Schema {
     schemars::schema_for!(WhileStep)
 }
 
-fn schema_log_step() -> schemars::schema::RootSchema {
+fn schema_log_step() -> schemars::Schema {
     schemars::schema_for!(LogStep)
 }
 
-fn schema_error_step() -> schemars::schema::RootSchema {
+fn schema_error_step() -> schemars::Schema {
     schemars::schema_for!(ErrorStep)
 }
 
-fn schema_filter_step() -> schemars::schema::RootSchema {
+fn schema_filter_step() -> schemars::Schema {
     schemars::schema_for!(FilterStep)
 }
 
-fn schema_group_by_step() -> schemars::schema::RootSchema {
+fn schema_group_by_step() -> schemars::Schema {
     schemars::schema_for!(GroupByStep)
 }
 
-fn schema_wait_for_signal_step() -> schemars::schema::RootSchema {
+fn schema_wait_for_signal_step() -> schemars::Schema {
     schemars::schema_for!(WaitForSignalStep)
 }
 
-fn schema_ai_agent_step() -> schemars::schema::RootSchema {
+fn schema_ai_agent_step() -> schemars::Schema {
     schemars::schema_for!(AiAgentStep)
 }
 

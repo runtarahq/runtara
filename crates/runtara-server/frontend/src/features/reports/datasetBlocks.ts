@@ -12,7 +12,7 @@ const DEFAULT_TABLE_PAGE_SIZES = [25, 50, 100];
 
 export function createDefaultDatasetBlockQuery(
   dataset: ReportDatasetDefinition,
-  current?: ReportBlockDatasetQuery
+  current?: ReportBlockDatasetQuery | null
 ): ReportBlockDatasetQuery {
   const dimensionFields = new Set(
     dataset.dimensions.map((dimension) => dimension.field)
@@ -55,7 +55,7 @@ export function createDefaultDatasetBlockQuery(
 export function reconcileDatasetBlock(
   block: ReportBlockDefinition,
   dataset: ReportDatasetDefinition,
-  query: ReportBlockDatasetQuery | undefined = block.dataset
+  query: ReportBlockDatasetQuery | null | undefined = block.dataset
 ): ReportBlockDefinition {
   const nextQuery = createDefaultDatasetBlockQuery(dataset, query);
   const outputFields = datasetQueryOutputFields(nextQuery);

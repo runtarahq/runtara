@@ -1,4 +1,4 @@
-import { CSSProperties, Fragment, useMemo } from 'react';
+import { CSSProperties, Fragment, Suspense, useMemo } from 'react';
 import {
   ReportDefinition,
   ReportInteractionOptions,
@@ -14,6 +14,7 @@ import {
   getReportViewBreadcrumbs,
   isVisibleByShowWhen,
 } from '../utils';
+import { useReportDsl } from '../hooks/useReportDsl';
 import { ReportBlockHost } from './ReportBlockHost';
 
 type ReportRendererProps = {
@@ -34,7 +35,21 @@ type ReportRendererProps = {
   onRefresh?: () => void | Promise<unknown>;
 };
 
-export function ReportRenderer({
+export function ReportRenderer(props: ReportRendererProps) {
+  return (
+    <Suspense fallback={<ReportRendererSkeleton />}>
+      <ReportRendererInner {...props} />
+    </Suspense>
+  );
+}
+
+function ReportRendererSkeleton() {
+  return (
+    <div className="h-32 w-full animate-pulse rounded-xl bg-muted/30" />
+  );
+}
+
+function ReportRendererInner({
   reportId,
   definition,
   renderResponse,
@@ -45,6 +60,10 @@ export function ReportRenderer({
   onNavigateView,
   onRefresh,
 }: ReportRendererProps) {
+  // Suspends until the WASM bundle loads; cached for the rest of the
+  // session afterward. Cell renderers inside the tree call
+  // `getReportDsl()` synchronously.
+  useReportDsl();
   const activeView = useMemo(
     () => getActiveReportView(definition, activeViewId),
     [activeViewId, definition]
@@ -53,7 +72,21 @@ export function ReportRenderer({
     () => getActiveReportLayout(definition, activeViewId),
     [activeViewId, definition]
   );
-  const hasStructuredLayout = layout.length > 0;
+  const hasStructuredLayout = (layout.items ?? []).length > 0;
+
+  if (!hasStructuredLayout && definition.blocks.length === 0) {
+    return (
+      <div className="grid place-items-center gap-2 rounded-xl border border-dashed bg-muted/10 px-6 py-12 text-center">
+        <p className="text-sm font-medium text-foreground">
+          This report has no content yet
+        </p>
+        <p className="max-w-prose text-xs text-muted-foreground">
+          Switch to edit mode to add a markdown section, metric, chart, table,
+          or card.
+        </p>
+      </div>
+    );
+  }
 
   return (
     <div className="w-full">
@@ -68,7 +101,7 @@ export function ReportRenderer({
       )}
       {hasStructuredLayout ? (
         <LayoutNodes
-          nodes={layout}
+          nodes={(layout.items ?? []).map((item) => item.child)}
           reportId={reportId}
           definition={definition}
           renderResponse={renderResponse}
@@ -192,40 +225,17 @@ function LayoutNode({
     );
   }
 
-  if (node.type === 'metric_row') {
+  if (node.type === 'grid') {
+    const columns = Math.max(node.columns ?? 1, 1);
+    const widths = node.columnWidths;
+    const template =
+      widths && widths.length === columns
+        ? widths.map((w) => `${Math.max(w, 0.0001)}fr`).join(' ')
+        : `repeat(${columns}, minmax(0, 1fr))`;
     return (
       <section className="my-5 w-full">
-        {node.title && (
-          <h2 className="mb-2 text-base font-semibold text-foreground">
-            {node.title}
-          </h2>
-        )}
-        <div className="grid w-full gap-3 [grid-template-columns:repeat(auto-fit,minmax(220px,1fr))]">
-          {node.blocks.map((blockId) => (
-            <ReportBlockById
-              key={blockId}
-              blockId={blockId}
-              reportId={reportId}
-              definition={definition}
-              renderResponse={renderResponse}
-              filters={filters}
-              onFilterChange={onFilterChange}
-              onFiltersChange={onFiltersChange}
-              onNavigateView={onNavigateView}
-              onRefresh={onRefresh}
-              className="my-0"
-            />
-          ))}
-        </div>
-      </section>
-    );
-  }
-
-  if (node.type === 'section') {
-    return (
-      <section className="my-8">
         {(node.title || node.description) && (
-          <div className="mb-4">
+          <div className="mb-3">
             {node.title && (
               <h2 className="text-lg font-semibold text-foreground">
                 {node.title}
@@ -238,98 +248,51 @@ function LayoutNode({
             )}
           </div>
         )}
-        <LayoutNodes
-          nodes={node.children ?? []}
-          reportId={reportId}
-          definition={definition}
-          renderResponse={renderResponse}
-          filters={filters}
-          onFilterChange={onFilterChange}
-          onFiltersChange={onFiltersChange}
-          onNavigateView={onNavigateView}
-          onRefresh={onRefresh}
-        />
-      </section>
-    );
-  }
-
-  if (node.type === 'columns') {
-    const template = node.columns
-      .map((column) => `${Math.max(column.width ?? 1, 1)}fr`)
-      .join(' ');
-    return (
-      <section
-        className="my-5 grid w-full gap-4 lg:[grid-template-columns:var(--report-columns)]"
-        style={{ '--report-columns': template } as CSSProperties}
-      >
-        {node.columns.map((column) => (
-          <div key={column.id} className="min-w-0">
-            <LayoutNodes
-              nodes={column.children ?? []}
-              reportId={reportId}
-              definition={definition}
-              renderResponse={renderResponse}
-              filters={filters}
-              onFilterChange={onFilterChange}
-              onFiltersChange={onFiltersChange}
-              onNavigateView={onNavigateView}
-              onRefresh={onRefresh}
-            />
-          </div>
-        ))}
-      </section>
-    );
-  }
-
-  if (node.type === 'grid') {
-    const columns = Math.max(node.columns ?? 12, 1);
-    return (
-      <section
-        className="my-5 grid w-full gap-4 xl:[grid-template-columns:var(--report-grid-columns)]"
-        style={
-          {
-            '--report-grid-columns': `repeat(${columns}, minmax(0, 1fr))`,
-          } as CSSProperties
-        }
-      >
-        {node.items.map((item, index) => {
-          const colSpan =
-            item.colSpan && item.colSpan > 1
-              ? Math.min(item.colSpan, columns)
-              : undefined;
-          const rowSpan =
-            item.rowSpan && item.rowSpan > 1 ? item.rowSpan : undefined;
-
-          return (
-            <div
-              key={item.id ?? `${item.blockId}-${index}`}
-              className="min-w-0 xl:[grid-column:var(--report-grid-column)] xl:[grid-row:var(--report-grid-row)]"
-              style={
-                {
-                  '--report-grid-column': colSpan
-                    ? `span ${colSpan} / span ${colSpan}`
-                    : 'auto',
-                  '--report-grid-row': rowSpan
-                    ? `span ${rowSpan} / span ${rowSpan}`
-                    : 'auto',
-                } as CSSProperties
-              }
-            >
-              <ReportBlockById
-                blockId={item.blockId}
-                reportId={reportId}
-                definition={definition}
-                renderResponse={renderResponse}
-                filters={filters}
-                onFilterChange={onFilterChange}
-                onFiltersChange={onFiltersChange}
-                onNavigateView={onNavigateView}
-                onRefresh={onRefresh}
-                className="my-0"
-              />
-            </div>
-          );
-        })}
+        <div
+          className="grid w-full gap-4 lg:[grid-template-columns:var(--report-grid-columns)]"
+          style={
+            {
+              '--report-grid-columns': template,
+            } as CSSProperties
+          }
+        >
+          {node.items.map((item) => {
+            const colSpan =
+              item.colSpan && item.colSpan > 1
+                ? Math.min(item.colSpan, columns)
+                : undefined;
+            const rowSpan =
+              item.rowSpan && item.rowSpan > 1 ? item.rowSpan : undefined;
+            return (
+              <div
+                key={item.id}
+                className="min-w-0 lg:[grid-column:var(--report-grid-column)] lg:[grid-row:var(--report-grid-row)]"
+                style={
+                  {
+                    '--report-grid-column': colSpan
+                      ? `span ${colSpan} / span ${colSpan}`
+                      : 'auto',
+                    '--report-grid-row': rowSpan
+                      ? `span ${rowSpan} / span ${rowSpan}`
+                      : 'auto',
+                  } as CSSProperties
+                }
+              >
+                <LayoutNodes
+                  nodes={[item.child]}
+                  reportId={reportId}
+                  definition={definition}
+                  renderResponse={renderResponse}
+                  filters={filters}
+                  onFilterChange={onFilterChange}
+                  onFiltersChange={onFiltersChange}
+                  onNavigateView={onNavigateView}
+                  onRefresh={onRefresh}
+                />
+              </div>
+            );
+          })}
+        </div>
       </section>
     );
   }

@@ -30,8 +30,8 @@ type FieldEditorProps = {
   value: unknown;
   displayValue?: unknown;
   format?: string | null;
-  pillVariants?: Record<string, string> | null;
-  editor?: ReportEditorConfig;
+  pillVariants?: Partial<Record<string, string>> | null;
+  editor?: ReportEditorConfig | null;
   lookupContext?: LookupContext;
   busy?: boolean;
   onCommit: (next: unknown) => void;
@@ -160,7 +160,7 @@ export function FieldEditor({
         ref={inputRef as React.RefObject<HTMLTextAreaElement>}
         value={draft}
         disabled={busy}
-        placeholder={editor?.placeholder}
+        placeholder={editor?.placeholder ?? undefined}
         onChange={(event) => setDraft(event.target.value)}
         onKeyDown={(event) => {
           if (event.key === 'Escape') {
@@ -194,10 +194,10 @@ export function FieldEditor({
       type={inputType}
       value={draft}
       disabled={busy}
-      placeholder={editor?.placeholder}
-      min={editor?.min}
-      max={editor?.max}
-      step={editor?.step}
+      placeholder={editor?.placeholder ?? undefined}
+      min={editor?.min ?? undefined}
+      max={editor?.max ?? undefined}
+      step={editor?.step ?? undefined}
       onChange={(event) => setDraft(event.target.value)}
       onKeyDown={handleKeyDown}
       onBlur={commit}
@@ -217,7 +217,7 @@ function LookupEditor({
 }: {
   value: unknown;
   displayValue?: unknown;
-  editor?: ReportEditorConfig;
+  editor?: ReportEditorConfig | null;
   lookupContext?: LookupContext;
   busy?: boolean;
   onCommit: (next: unknown) => void;
@@ -338,8 +338,8 @@ type InferredEditor = {
 function inferEditorKind(
   value: unknown,
   format: string | null | undefined,
-  pillVariants: Record<string, string> | null | undefined,
-  editor: ReportEditorConfig | undefined
+  pillVariants: Partial<Record<string, string>> | null | undefined,
+  editor: ReportEditorConfig | null | undefined
 ): InferredEditor {
   if (editor?.kind) {
     return {
@@ -367,7 +367,7 @@ function inferEditorKind(
 }
 
 function variantsToOptions(
-  pillVariants: Record<string, string> | null | undefined
+  pillVariants: Partial<Record<string, string>> | null | undefined
 ): Array<{ label: string; value: unknown }> {
   if (!pillVariants) return [];
   return Object.keys(pillVariants).map((key) => ({

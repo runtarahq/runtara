@@ -2,6 +2,9 @@ use std::sync::OnceLock;
 
 const DEFAULT_MCP_ALLOWED_HOSTS: [&str; 3] = ["localhost", "127.0.0.1", "::1"];
 const RUNTARA_MCP_ALLOWED_HOSTS_ENV: &str = "RUNTARA_MCP_ALLOWED_HOSTS";
+const RUNTARA_MCP_SESSION_STORE_ENV: &str = "RUNTARA_MCP_SESSION_STORE";
+const RUNTARA_MCP_SESSION_TTL_SECONDS_ENV: &str = "RUNTARA_MCP_SESSION_TTL_SECONDS";
+const DEFAULT_MCP_SESSION_TTL_SECONDS: u64 = 86_400;
 
 /// Global application configuration.
 ///
@@ -43,10 +46,32 @@ pub struct Config {
     pub agent_service_url: String,
     /// Host or host:port authorities accepted by the MCP Streamable HTTP transport.
     pub mcp_allowed_hosts: Vec<String>,
+    /// Backing store for MCP Streamable HTTP session recovery.
+    pub mcp_session_store: McpSessionStore,
+    /// TTL for externally persisted MCP session recovery state.
+    pub mcp_session_ttl_seconds: u64,
     /// Skip the graceful drain on Ctrl+C / SIGTERM. Defaults to true in debug
     /// builds so `cargo run` exits promptly; production release builds keep
     /// the full drain unless `RUNTARA_DEV_MODE=true` is set explicitly.
     pub dev_mode: bool,
+}
+
+/// Backing store for MCP Streamable HTTP session recovery.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum McpSessionStore {
+    /// Process-local in-memory session state only.
+    Local,
+    /// Valkey-backed recovery state with process-local live workers.
+    Valkey,
+}
+
+impl McpSessionStore {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Local => "local",
+            Self::Valkey => "valkey",
+        }
+    }
 }
 
 /// Global configuration instance.
@@ -106,6 +131,24 @@ impl Config {
         let mcp_allowed_hosts = mcp_allowed_hosts_from_raw(
             std::env::var(RUNTARA_MCP_ALLOWED_HOSTS_ENV).ok().as_deref(),
         );
+        let mcp_session_store = mcp_session_store_from_raw(
+            std::env::var(RUNTARA_MCP_SESSION_STORE_ENV).ok().as_deref(),
+        )?;
+        let mcp_session_ttl_seconds = parse_positive_u64_or(
+            RUNTARA_MCP_SESSION_TTL_SECONDS_ENV,
+            DEFAULT_MCP_SESSION_TTL_SECONDS,
+        )?;
+
+        if mcp_session_store == McpSessionStore::Valkey
+            && std::env::var("VALKEY_HOST")
+                .ok()
+                .is_none_or(|host| host.trim().is_empty())
+        {
+            return Err(ConfigError::MissingDependency {
+                missing: "VALKEY_HOST",
+                required_by: "RUNTARA_MCP_SESSION_STORE=valkey",
+            });
+        }
 
         let dev_mode: bool = parse_bool_or("RUNTARA_DEV_MODE", cfg!(debug_assertions))?;
 
@@ -127,6 +170,8 @@ impl Config {
             object_model_url,
             agent_service_url,
             mcp_allowed_hosts,
+            mcp_session_store,
+            mcp_session_ttl_seconds,
             dev_mode,
         })
     }
@@ -138,6 +183,13 @@ pub enum ConfigError {
     /// A required environment variable is missing.
     #[error("missing required environment variable: {0}")]
     Missing(&'static str),
+
+    /// A required dependency environment variable is missing.
+    #[error("missing required environment variable: {missing} ({required_by})")]
+    MissingDependency {
+        missing: &'static str,
+        required_by: &'static str,
+    },
 
     /// An environment variable has an invalid value.
     #[error("invalid value for {0}: {1}")]
@@ -180,12 +232,32 @@ fn parse_u64_or(name: &'static str, default: u64) -> Result<u64, ConfigError> {
     }
 }
 
+fn parse_positive_u64_or(name: &'static str, default: u64) -> Result<u64, ConfigError> {
+    let value = parse_u64_or(name, default)?;
+    if value == 0 {
+        return Err(ConfigError::Invalid(name, "must be a positive integer"));
+    }
+    Ok(value)
+}
+
 fn parse_usize_or(name: &'static str, default: usize) -> Result<usize, ConfigError> {
     match std::env::var(name) {
         Ok(v) => v
             .parse()
             .map_err(|_| ConfigError::Invalid(name, "must be a non-negative integer")),
         Err(_) => Ok(default),
+    }
+}
+
+fn mcp_session_store_from_raw(raw: Option<&str>) -> Result<McpSessionStore, ConfigError> {
+    match raw.map(str::trim) {
+        None => Ok(McpSessionStore::Valkey),
+        Some("local") => Ok(McpSessionStore::Local),
+        Some("valkey") => Ok(McpSessionStore::Valkey),
+        Some(_) => Err(ConfigError::Invalid(
+            RUNTARA_MCP_SESSION_STORE_ENV,
+            "must be one of local/valkey",
+        )),
     }
 }
 
@@ -301,6 +373,16 @@ pub fn mcp_allowed_hosts() -> &'static [String] {
     &get().mcp_allowed_hosts
 }
 
+/// Backing store for MCP Streamable HTTP session recovery.
+pub fn mcp_session_store() -> McpSessionStore {
+    get().mcp_session_store
+}
+
+/// TTL for externally persisted MCP session recovery state.
+pub fn mcp_session_ttl_seconds() -> u64 {
+    get().mcp_session_ttl_seconds
+}
+
 /// Whether the server is running in development mode. When true, shutdown
 /// skips the graceful execution/instance drain so Ctrl+C exits promptly.
 pub fn dev_mode() -> bool {
@@ -360,5 +442,31 @@ mod tests {
                 "staging.example.com:8443"
             ]
         );
+    }
+
+    #[test]
+    fn mcp_session_store_defaults_to_valkey() {
+        assert_eq!(
+            mcp_session_store_from_raw(None).unwrap(),
+            McpSessionStore::Valkey
+        );
+    }
+
+    #[test]
+    fn mcp_session_store_parses_valid_values() {
+        assert_eq!(
+            mcp_session_store_from_raw(Some("local")).unwrap(),
+            McpSessionStore::Local
+        );
+        assert_eq!(
+            mcp_session_store_from_raw(Some("valkey")).unwrap(),
+            McpSessionStore::Valkey
+        );
+    }
+
+    #[test]
+    fn mcp_session_store_rejects_invalid_values() {
+        assert!(mcp_session_store_from_raw(Some("redis")).is_err());
+        assert!(mcp_session_store_from_raw(Some("")).is_err());
     }
 }

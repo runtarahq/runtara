@@ -2,7 +2,6 @@
 //!
 //! Data transfer objects for schema and instance management
 
-use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
@@ -280,12 +279,12 @@ pub struct IndexDefinition {
 // Condition-based Filtering Structures
 // ============================================================================
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, JsonSchema)]
-pub struct Condition {
-    pub op: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub arguments: Option<Vec<serde_json::Value>>,
-}
+// `Condition` is the wire shape `{op, arguments?}` shared by reports and
+// object-model filtering. It lives in `runtara-report-dsl` so the reports
+// DSL crate and FE WASM bundle can use it without depending on the server.
+// Re-exporting here keeps the existing `api::dto::object_model::Condition`
+// import sites working unchanged.
+pub use runtara_report_dsl::Condition;
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct FilterRequest {
@@ -898,7 +897,7 @@ impl From<AggregateSpec> for runtara_object_store::AggregateSpec {
 impl From<AggregateRequest> for runtara_object_store::AggregateRequest {
     fn from(r: AggregateRequest) -> Self {
         runtara_object_store::AggregateRequest {
-            condition: r.condition.map(Into::into),
+            condition: r.condition.map(condition_to_store),
             group_by: r.group_by,
             aggregates: r.aggregates.into_iter().map(Into::into).collect(),
             order_by: r.order_by.into_iter().map(Into::into).collect(),
@@ -1126,12 +1125,13 @@ impl From<UpdateSchemaRequest> for runtara_object_store::UpdateSchemaRequest {
     }
 }
 
-impl From<Condition> for runtara_object_store::Condition {
-    fn from(cond: Condition) -> Self {
-        Self {
-            op: cond.op,
-            arguments: cond.arguments,
-        }
+// `Condition` and `runtara_object_store::Condition` are structurally
+// identical but live in different crates (orphan rule blocks a direct
+// `From` impl). This free function bridges them at call sites.
+pub fn condition_to_store(cond: Condition) -> runtara_object_store::Condition {
+    runtara_object_store::Condition {
+        op: cond.op,
+        arguments: cond.arguments,
     }
 }
 
@@ -1140,7 +1140,7 @@ impl From<FilterRequest> for StoreFilterRequest {
         Self {
             offset: req.offset,
             limit: req.limit,
-            condition: req.condition.map(|c| c.into()),
+            condition: req.condition.map(condition_to_store),
             sort_by: req.sort_by,
             sort_order: req.sort_order,
             score_expression: req.score_expression.map(|s| s.into()),

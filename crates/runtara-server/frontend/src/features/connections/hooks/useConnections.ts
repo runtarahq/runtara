@@ -78,6 +78,7 @@ export function useUpdateConnection() {
       title?: string;
       parameters?: Record<string, string>;
       isDefaultFileStorage?: boolean;
+      defaultFor?: string[];
     }
   >({
     mutationFn: (token, connection) => updateConnection(token, connection),

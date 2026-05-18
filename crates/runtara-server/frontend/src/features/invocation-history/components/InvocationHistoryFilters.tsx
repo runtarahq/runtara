@@ -55,11 +55,11 @@ const STATUS_OPTIONS: {
   label: string;
 }[] = [
   { value: ALL_VALUE, label: 'All statuses' },
-  { value: ExecutionStatus.Queued, label: 'Queued' },
-  { value: ExecutionStatus.Running, label: 'Running' },
-  { value: ExecutionStatus.Completed, label: 'Completed' },
-  { value: ExecutionStatus.Failed, label: 'Failed' },
-  { value: ExecutionStatus.Cancelled, label: 'Cancelled' },
+  { value: 'queued', label: 'Queued' },
+  { value: 'running', label: 'Running' },
+  { value: 'completed', label: 'Completed' },
+  { value: 'failed', label: 'Failed' },
+  { value: 'cancelled', label: 'Cancelled' },
 ];
 
 export function InvocationHistoryFilters({ filters, onFiltersChange }: Props) {

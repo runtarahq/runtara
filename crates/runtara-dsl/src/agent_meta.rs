@@ -338,7 +338,8 @@ pub struct CapabilityInfo {
 
 /// API-compatible capability field info.
 /// Used for agent inputs and workflow input/output schemas.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct CapabilityField {
     pub name: String,
@@ -367,7 +368,8 @@ pub struct CapabilityField {
 
 /// API-compatible field type info.
 /// Describes the type of a field, including nested structures.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct FieldTypeInfo {
     #[serde(rename = "type")]
@@ -390,7 +392,8 @@ pub struct FieldTypeInfo {
 
 /// API-compatible output field info.
 /// Describes an output field with type information.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct OutputField {
     pub name: String,
@@ -544,8 +547,8 @@ pub const BUILTIN_AGENT_MODULES: &[AgentModuleConfig] = &[
         name: "Object Model",
         description: "Object Model capabilities for database CRUD operations - create, query, and check instances in object model schemas (has side effects)",
         has_side_effects: true,
-        supports_connections: false,
-        integration_ids: &[],
+        supports_connections: true,
+        integration_ids: &["postgres"],
         secure: false,
     },
 ];
@@ -565,11 +568,18 @@ pub fn find_agent_module(id: &str) -> Option<&'static AgentModuleConfig> {
 // ============================================================================
 // Step Type Metadata (for automatic DSL generation)
 // ============================================================================
+//
+// The whole block is gated behind `json-schema` because `SchemaGeneratorFn`
+// returns `schemars::Schema`. WASM consumers (e.g.
+// `runtara-report-dsl`) build with `default-features = false` to keep
+// `schemars` out of their tree.
 
 /// Function pointer type for generating JSON schema
-pub type SchemaGeneratorFn = fn() -> schemars::schema::RootSchema;
+#[cfg(feature = "json-schema")]
+pub type SchemaGeneratorFn = fn() -> schemars::Schema;
 
 /// Metadata for a step type.
+#[cfg(feature = "json-schema")]
 #[derive(Debug, Clone)]
 pub struct StepTypeMeta {
     /// Step type ID in PascalCase (e.g., "Conditional", "Agent")
@@ -585,11 +595,13 @@ pub struct StepTypeMeta {
 }
 
 /// Get all registered step type metadata
+#[cfg(feature = "json-schema")]
 pub fn get_all_step_types() -> impl Iterator<Item = &'static StepTypeMeta> {
     crate::step_registration::STEP_TYPES.iter().copied()
 }
 
 /// Find step type metadata by id
+#[cfg(feature = "json-schema")]
 pub fn find_step_type(id: &str) -> Option<&'static StepTypeMeta> {
     get_all_step_types().find(|m| m.id == id)
 }
@@ -983,48 +995,57 @@ fn rust_to_json_schema_type(rust_type: &str) -> (String, Option<String>, Option<
     (result.json_type, result.format, result.items_json)
 }
 
-/// Get JSON Schema for ConditionExpression type
+/// Get JSON Schema for ConditionExpression type.
+///
+/// Uses schemars when the `json-schema` feature is on; otherwise (or if
+/// schemars serialization fails) returns the hand-written fallback so
+/// callers in no-`json-schema` builds (e.g. WASM) still get a usable
+/// schema description.
 fn get_condition_expression_schema() -> serde_json::Value {
-    use serde_json::json;
+    #[cfg(feature = "json-schema")]
+    {
+        let schema = schemars::schema_for!(crate::ConditionExpression);
+        if let Ok(value) = serde_json::to_value(schema) {
+            return value;
+        }
+    }
+    condition_expression_fallback_schema()
+}
 
-    // Generate schema using schemars (types are in crate root via include!)
-    let schema = schemars::schema_for!(crate::ConditionExpression);
-    serde_json::to_value(schema).unwrap_or_else(|_| {
-        // Fallback to manual schema if schemars fails
-        json!({
-            "oneOf": [
-                {
-                    "type": "object",
-                    "title": "Operation",
-                    "description": "A comparison or logical operation",
-                    "properties": {
-                        "type": { "const": "operation" },
-                        "op": {
-                            "type": "string",
-                            "enum": ["And", "Or", "Not", "Eq", "Ne", "Gt", "Lt", "Gte", "Lte",
-                                     "StartsWith", "EndsWith", "Contains", "In", "NotIn",
-                                     "Length", "IsDefined", "IsEmpty", "IsNotEmpty"]
-                        },
-                        "arguments": {
-                            "type": "array",
-                            "description": "Arguments can be nested expressions or values (reference/immediate)"
-                        }
+fn condition_expression_fallback_schema() -> serde_json::Value {
+    serde_json::json!({
+        "oneOf": [
+            {
+                "type": "object",
+                "title": "Operation",
+                "description": "A comparison or logical operation",
+                "properties": {
+                    "type": { "const": "operation" },
+                    "op": {
+                        "type": "string",
+                        "enum": ["And", "Or", "Not", "Eq", "Ne", "Gt", "Lt", "Gte", "Lte",
+                                 "StartsWith", "EndsWith", "Contains", "In", "NotIn",
+                                 "Length", "IsDefined", "IsEmpty", "IsNotEmpty"]
                     },
-                    "required": ["type", "op", "arguments"]
+                    "arguments": {
+                        "type": "array",
+                        "description": "Arguments can be nested expressions or values (reference/immediate)"
+                    }
                 },
-                {
-                    "type": "object",
-                    "title": "Value",
-                    "description": "A direct value (reference or immediate) - evaluated as truthy/falsy",
-                    "properties": {
-                        "type": { "const": "value" },
-                        "valueType": { "type": "string", "enum": ["reference", "immediate"] },
-                        "value": { "description": "The value content" }
-                    },
-                    "required": ["type", "valueType", "value"]
-                }
-            ]
-        })
+                "required": ["type", "op", "arguments"]
+            },
+            {
+                "type": "object",
+                "title": "Value",
+                "description": "A direct value (reference or immediate) - evaluated as truthy/falsy",
+                "properties": {
+                    "type": { "const": "value" },
+                    "valueType": { "type": "string", "enum": ["reference", "immediate"] },
+                    "value": { "description": "The value content" }
+                },
+                "required": ["type", "valueType", "value"]
+            }
+        ]
     })
 }
 

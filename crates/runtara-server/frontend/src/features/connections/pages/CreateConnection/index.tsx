@@ -92,6 +92,7 @@ export function CreateConnection() {
       maxWaitMs,
       retryOnLimit,
       isDefaultFileStorage,
+      defaultFor,
       ...parameters
     } = data;
 
@@ -113,6 +114,7 @@ export function CreateConnection() {
       isDefaultFileStorage: isDefaultFileStorage
         ? Boolean(isDefaultFileStorage)
         : undefined,
+      defaultFor: Array.isArray(defaultFor) ? (defaultFor as string[]) : [],
     });
   };
 

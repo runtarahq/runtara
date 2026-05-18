@@ -1,0 +1,81 @@
+---
+source: crates/runtara-server/tests/reports_render_corpus.rs
+expression: snapshot_body
+---
+{
+  "blocks": {
+    "kpi_order_count": {
+      "error": {
+        "blockId": "kpi_order_count",
+        "code": "BLOCK_RENDER_FAILED",
+        "message": "Schema not found: Order"
+      },
+      "status": "error",
+      "title": "Orders",
+      "type": "metric"
+    },
+    "kpi_total_revenue": {
+      "error": {
+        "blockId": "kpi_total_revenue",
+        "code": "BLOCK_RENDER_FAILED",
+        "message": "Schema not found: Order"
+      },
+      "status": "error",
+      "title": "Revenue",
+      "type": "metric"
+    },
+    "revenue_chart": {
+      "error": {
+        "blockId": "revenue_chart",
+        "code": "BLOCK_RENDER_FAILED",
+        "message": "Schema not found: Order"
+      },
+      "status": "error",
+      "title": "Revenue by day",
+      "type": "chart"
+    },
+    "top_products_table": {
+      "error": {
+        "blockId": "top_products_table",
+        "code": "BLOCK_RENDER_FAILED",
+        "message": "Schema not found: Order"
+      },
+      "status": "error",
+      "title": "Top products",
+      "type": "table"
+    }
+  },
+  "errors": [
+    {
+      "blockId": "kpi_total_revenue",
+      "code": "BLOCK_RENDER_FAILED",
+      "message": "Schema not found: Order"
+    },
+    {
+      "blockId": "kpi_order_count",
+      "code": "BLOCK_RENDER_FAILED",
+      "message": "Schema not found: Order"
+    },
+    {
+      "blockId": "revenue_chart",
+      "code": "BLOCK_RENDER_FAILED",
+      "message": "Schema not found: Order"
+    },
+    {
+      "blockId": "top_products_table",
+      "code": "BLOCK_RENDER_FAILED",
+      "message": "Schema not found: Order"
+    }
+  ],
+  "report": {
+    "definitionVersion": 1,
+    "id": "rep_10_datasets_with_block_queries"
+  },
+  "resolvedFilters": {
+    "date_range": {
+      "from": "[ts]",
+      "to": "[ts]"
+    }
+  },
+  "success": true
+}

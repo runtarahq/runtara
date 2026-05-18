@@ -7,8 +7,12 @@ use crate::repository::connections::ConnectionRepository;
 use crate::service::rate_limits::RateLimitService;
 use crate::types::*;
 use crate::util::rate_limit_defaults::get_default_rate_limit_config;
+use std::collections::BTreeSet;
 use std::sync::Arc;
 use uuid::Uuid;
+
+const OBJECT_STORAGE_DEFAULT_FOR: &str = "object_storage";
+const OBJECT_STORAGE_INTEGRATION_IDS: &[&str] = &["s3_compatible", "azure_blob_storage"];
 
 pub struct ConnectionService {
     repository: Arc<ConnectionRepository>,
@@ -32,6 +36,57 @@ impl ConnectionService {
             repository,
             rate_limit_service: Some(rate_limit_service),
         }
+    }
+
+    fn normalize_default_for(
+        default_for: Option<Vec<String>>,
+        is_default_file_storage: Option<bool>,
+    ) -> Vec<String> {
+        let mut values = BTreeSet::new();
+        for value in default_for.unwrap_or_default() {
+            let trimmed = value.trim();
+            if !trimmed.is_empty() {
+                values.insert(trimmed.to_string());
+            }
+        }
+        if is_default_file_storage == Some(true) {
+            values.insert(OBJECT_STORAGE_DEFAULT_FOR.to_string());
+        }
+        values.into_iter().collect()
+    }
+
+    fn is_compatible_default_for(integration_id: &str, default_for: &str) -> bool {
+        if default_for == OBJECT_STORAGE_DEFAULT_FOR {
+            return OBJECT_STORAGE_INTEGRATION_IDS
+                .iter()
+                .any(|candidate| candidate == &integration_id);
+        }
+
+        runtara_agents::registry::get_agents()
+            .into_iter()
+            .find(|agent| agent.id.eq_ignore_ascii_case(default_for))
+            .map(|agent| {
+                agent
+                    .integration_ids
+                    .iter()
+                    .any(|candidate| candidate == integration_id)
+            })
+            .unwrap_or(false)
+    }
+
+    fn validate_default_for(
+        integration_id: &str,
+        default_for: &[String],
+    ) -> Result<(), ServiceError> {
+        for operator_id in default_for {
+            if !Self::is_compatible_default_for(integration_id, operator_id) {
+                return Err(ServiceError::ValidationError(format!(
+                    "Connection type '{}' is not compatible with default '{}'",
+                    integration_id, operator_id
+                )));
+            }
+        }
+        Ok(())
     }
 
     /// Create a new connection
@@ -83,6 +138,20 @@ impl ConnectionService {
             request.rate_limit_config = get_default_rate_limit_config(integration_id);
         }
 
+        let default_for = Self::normalize_default_for(
+            request.default_for.clone(),
+            request.is_default_file_storage,
+        );
+        let integration_id = request.integration_id.clone().unwrap_or_default();
+        Self::validate_default_for(&integration_id, &default_for)?;
+
+        if default_for
+            .iter()
+            .any(|value| value == OBJECT_STORAGE_DEFAULT_FOR)
+        {
+            request.is_default_file_storage = Some(true);
+        }
+
         // If marking as default file storage, clear any existing default first
         if request.is_default_file_storage == Some(true) {
             self.repository
@@ -106,6 +175,13 @@ impl ConnectionService {
                     ServiceError::DatabaseError(e.to_string())
                 }
             })?;
+
+        if !default_for.is_empty() {
+            self.repository
+                .replace_defaults_for_connection(tenant_id, &connection_id, &default_for)
+                .await
+                .map_err(|e| ServiceError::DatabaseError(e.to_string()))?;
+        }
 
         Ok(connection_id)
     }
@@ -166,6 +242,39 @@ impl ConnectionService {
             ));
         }
 
+        let default_for = request.default_for.clone().map(|default_for| {
+            Self::normalize_default_for(Some(default_for), request.is_default_file_storage)
+        });
+
+        let current_connection = if request.integration_id.is_some() || default_for.is_some() {
+            Some(self.get_connection(id, tenant_id).await?)
+        } else {
+            None
+        };
+
+        let integration_id = request
+            .integration_id
+            .clone()
+            .or_else(|| {
+                current_connection
+                    .as_ref()
+                    .and_then(|connection| connection.integration_id.clone())
+            })
+            .unwrap_or_default();
+
+        if let Some(ref default_for) = default_for {
+            Self::validate_default_for(&integration_id, default_for)?;
+        }
+
+        let mut request = request;
+        if let Some(ref default_for) = default_for {
+            request.is_default_file_storage = Some(
+                default_for
+                    .iter()
+                    .any(|value| value == OBJECT_STORAGE_DEFAULT_FOR),
+            );
+        }
+
         // If marking as default file storage, clear any existing default first
         if request.is_default_file_storage == Some(true) {
             self.repository
@@ -190,6 +299,13 @@ impl ConnectionService {
 
         if rows_affected == 0 {
             return Err(ServiceError::NotFound("Connection not found".to_string()));
+        }
+
+        if let Some(default_for) = default_for {
+            self.repository
+                .replace_defaults_for_connection(tenant_id, id, &default_for)
+                .await
+                .map_err(|e| ServiceError::DatabaseError(e.to_string()))?;
         }
 
         // Fetch and return updated connection

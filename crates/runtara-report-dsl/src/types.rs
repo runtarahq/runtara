@@ -1,0 +1,1938 @@
+//! Report DTOs.
+//!
+//! Reports are described by markdown plus typed data blocks. The browser sends
+//! viewer state to the backend; the backend validates and executes block data
+//! queries through Object Model services.
+
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use std::collections::HashMap;
+use std::fmt;
+
+use crate::condition::Condition;
+use runtara_dsl::ConditionExpression;
+
+fn default_definition_version() -> i32 {
+    1
+}
+
+fn default_report_status() -> ReportStatus {
+    ReportStatus::Published
+}
+
+fn default_source_mode() -> ReportSourceMode {
+    ReportSourceMode::Filter
+}
+
+fn default_block_status() -> ReportBlockStatus {
+    ReportBlockStatus::Ready
+}
+
+fn default_report_source_kind() -> ReportSourceKind {
+    ReportSourceKind::ObjectModel
+}
+
+/// A report's `layout` is always a single root [`ReportGridLayoutNode`].
+/// When the wire payload omits it (e.g. legacy or hand-built JSON), this
+/// helper provides an empty 1-column root grid so the rest of the system
+/// always works against a present grid.
+pub fn default_root_grid() -> ReportGridLayoutNode {
+    ReportGridLayoutNode {
+        id: "root".to_string(),
+        title: None,
+        description: None,
+        columns: Some(1),
+        rows: None,
+        column_widths: None,
+        items: vec![],
+        show_when: None,
+    }
+}
+
+fn is_default_report_source_kind(kind: &ReportSourceKind) -> bool {
+    *kind == ReportSourceKind::ObjectModel
+}
+
+pub fn default_report_source() -> ReportSource {
+    ReportSource {
+        kind: default_report_source_kind(),
+        schema: String::new(),
+        connection_id: None,
+        entity: None,
+        workflow_id: None,
+        instance_id: None,
+        mode: default_source_mode(),
+        condition: None,
+        filter_mappings: vec![],
+        group_by: vec![],
+        aggregates: vec![],
+        order_by: vec![],
+        limit: None,
+        granularity: None,
+        interval: None,
+        join: vec![],
+    }
+}
+
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ReportStatus {
+    Draft,
+    Published,
+    Archived,
+}
+
+impl ReportStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Draft => "draft",
+            Self::Published => "published",
+            Self::Archived => "archived",
+        }
+    }
+
+    pub fn from_db(value: &str) -> Self {
+        match value {
+            "draft" => Self::Draft,
+            "archived" => Self::Archived,
+            _ => Self::Published,
+        }
+    }
+}
+
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReportDefinition {
+    #[serde(default = "default_definition_version", rename = "definitionVersion")]
+    pub definition_version: i32,
+    /// The report's layout is a single mandatory root grid. Authors drop
+    /// blocks (and nested grids for sub-sections) into its `items[]`. The
+    /// `default_root_grid` fallback handles wire payloads that omit the
+    /// field — repository migration converts legacy `layout: [...]`
+    /// arrays into a wrapping root grid before deserialization.
+    #[serde(default = "default_root_grid")]
+    pub layout: ReportGridLayoutNode,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub views: Vec<ReportViewDefinition>,
+    #[serde(default)]
+    pub filters: Vec<ReportFilterDefinition>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub datasets: Vec<ReportDatasetDefinition>,
+    #[serde(default)]
+    pub blocks: Vec<ReportBlockDefinition>,
+}
+
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReportViewDefinition {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, rename = "titleFrom", skip_serializing_if = "Option::is_none")]
+    pub title_from: Option<String>,
+    /// Resolves the view title from a rendered block's row. The first row of
+    /// the referenced block is used; the value comes from `field` if given,
+    /// otherwise from the block column flagged `descriptive: true`.
+    #[serde(
+        default,
+        rename = "titleFromBlock",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub title_from_block: Option<ReportTitleFromBlock>,
+    #[serde(
+        default,
+        rename = "parentViewId",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub parent_view_id: Option<String>,
+    #[serde(
+        default,
+        rename = "clearFiltersOnBack",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub clear_filters_on_back: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub breadcrumb: Vec<ReportViewBreadcrumb>,
+    /// Like `ReportDefinition.layout` — a single mandatory root grid for
+    /// this view. Detail views typically populate it via the same wizard
+    /// flow as the main report.
+    #[serde(default = "default_root_grid")]
+    pub layout: ReportGridLayoutNode,
+}
+
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReportTitleFromBlock {
+    pub block: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub field: Option<String>,
+}
+
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReportViewBreadcrumb {
+    pub label: String,
+    #[serde(default, rename = "viewId", skip_serializing_if = "Option::is_none")]
+    pub view_id: Option<String>,
+    #[serde(
+        default,
+        rename = "clearFilters",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub clear_filters: Vec<String>,
+}
+
+/// Layout primitive. Two variants only — `block` (leaf reference to
+/// `definition.blocks[i]`) and `grid` (recursive container). The legacy
+/// `section` / `columns` / `metric_row` types collapsed into `grid` in
+/// Phase 9; the repository's `parse_stored_definition` translates them
+/// transparently on read.
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ReportLayoutNode {
+    Block(ReportBlockLayoutNode),
+    Grid(ReportGridLayoutNode),
+}
+
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReportBlockLayoutNode {
+    pub id: String,
+    #[serde(rename = "blockId")]
+    pub block_id: String,
+    #[serde(default, rename = "showWhen", skip_serializing_if = "Option::is_none")]
+    pub show_when: Option<Value>,
+}
+
+/// Grid container with optional title/description and a list of items.
+/// Every layout container — single-column section, multi-column row,
+/// metric-block row, arbitrary 2D grid — is expressed as a `Grid` with
+/// different `columns` + `column_widths` + per-item `col_span` /
+/// `row_span`. Items can be blocks or nested grids.
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReportGridLayoutNode {
+    pub id: String,
+    /// Optional section-style heading rendered above the grid contents.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    /// Optional secondary text rendered beneath the title.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// Column count for the grid. Defaults to 1 (single-column = legacy
+    /// "section" shape).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub columns: Option<i64>,
+    /// Optional row count. Authoring affordance — when set, the editor
+    /// renders `rows × columns` cells so empty slots are visible before
+    /// content is added. The viewer renders rows implicitly from items
+    /// regardless. When `rows` is less than the rows needed to fit
+    /// `items`, the viewer/editor grows to fit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rows: Option<i64>,
+    /// Optional fractional column widths. Length must match `columns`
+    /// when set. Defaults to equal split.
+    #[serde(
+        default,
+        rename = "columnWidths",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub column_widths: Option<Vec<f64>>,
+    pub items: Vec<ReportGridLayoutItem>,
+    #[serde(default, rename = "showWhen", skip_serializing_if = "Option::is_none")]
+    pub show_when: Option<Value>,
+}
+
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReportGridLayoutItem {
+    pub id: String,
+    #[serde(default, rename = "colSpan", skip_serializing_if = "Option::is_none")]
+    pub col_span: Option<i64>,
+    #[serde(default, rename = "rowSpan", skip_serializing_if = "Option::is_none")]
+    pub row_span: Option<i64>,
+    #[cfg_attr(feature = "utoipa", schema(no_recursion))]
+    pub child: Box<ReportLayoutNode>,
+}
+
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReportDatasetDefinition {
+    pub id: String,
+    pub label: String,
+    pub source: ReportDatasetSource,
+    #[serde(
+        default,
+        rename = "timeDimension",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub time_dimension: Option<String>,
+    #[serde(default)]
+    pub dimensions: Vec<ReportDatasetDimension>,
+    #[serde(default)]
+    pub measures: Vec<ReportDatasetMeasure>,
+}
+
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReportDatasetSource {
+    pub schema: String,
+    #[serde(
+        default,
+        rename = "connectionId",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub connection_id: Option<String>,
+}
+
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReportDatasetDimension {
+    pub field: String,
+    pub label: String,
+    #[serde(rename = "type")]
+    pub dimension_type: ReportDatasetFieldType,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub format: Option<ReportDatasetValueFormat>,
+}
+
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReportDatasetMeasure {
+    pub id: String,
+    pub label: String,
+    #[serde(rename = "op")]
+    pub op: ReportAggregateFn,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub field: Option<String>,
+    #[serde(default)]
+    pub distinct: bool,
+    #[serde(default, rename = "orderBy")]
+    pub order_by: Vec<ReportOrderBy>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expression: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub percentile: Option<f64>,
+    pub format: ReportDatasetValueFormat,
+}
+
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ReportDatasetFieldType {
+    String,
+    Number,
+    Decimal,
+    Boolean,
+    Date,
+    Datetime,
+    Json,
+}
+
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ReportDatasetValueFormat {
+    String,
+    Number,
+    Decimal,
+    Currency,
+    Percent,
+    Boolean,
+    Date,
+    Datetime,
+}
+
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ReportSourceKind {
+    #[default]
+    ObjectModel,
+    WorkflowRuntime,
+    System,
+}
+
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ReportWorkflowRuntimeEntity {
+    Instances,
+    Actions,
+    RuntimeExecutionMetricBuckets,
+    RuntimeSystemSnapshot,
+    ConnectionRateLimitStatus,
+    ConnectionRateLimitEvents,
+    ConnectionRateLimitTimeline,
+}
+
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReportFilterDefinition {
+    pub id: String,
+    pub label: String,
+    #[serde(rename = "type")]
+    pub filter_type: ReportFilterType,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default: Option<Value>,
+    #[serde(default)]
+    pub required: bool,
+    /// When true, any block whose source `condition` references this filter
+    /// will short-circuit to an empty result if the filter has no value at
+    /// render time. Use this for navigation-driven filters (e.g. populated by
+    /// row-click + navigate_view) so the block never silently falls back to an
+    /// unfiltered query when the filter is missing from the URL/state.
+    #[serde(
+        default,
+        rename = "strictWhenReferenced",
+        skip_serializing_if = "is_false_filter"
+    )]
+    pub strict_when_referenced: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub options: Option<Value>,
+    #[serde(default, rename = "appliesTo")]
+    pub applies_to: Vec<ReportFilterTarget>,
+}
+
+fn is_false_filter(value: &bool) -> bool {
+    !value
+}
+
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ReportFilterType {
+    Select,
+    MultiSelect,
+    Radio,
+    Checkbox,
+    TimeRange,
+    NumberRange,
+    Text,
+    Search,
+}
+
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReportFilterTarget {
+    #[serde(default, rename = "filterId", skip_serializing_if = "Option::is_none")]
+    pub filter_id: Option<String>,
+    #[serde(default, rename = "blockId", skip_serializing_if = "Option::is_none")]
+    pub block_id: Option<String>,
+    pub field: String,
+    #[serde(default = "default_filter_op")]
+    pub op: String,
+}
+
+fn default_filter_op() -> String {
+    "eq".to_string()
+}
+
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReportBlockDefinition {
+    pub id: String,
+    #[serde(rename = "type")]
+    pub block_type: ReportBlockType,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub lazy: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dataset: Option<ReportBlockDatasetQuery>,
+    #[serde(
+        default = "default_report_source",
+        skip_serializing_if = "ReportSource::is_empty"
+    )]
+    pub source: ReportSource,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub table: Option<ReportTableConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chart: Option<ReportChartConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metric: Option<ReportMetricConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actions: Option<ReportActionsConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub card: Option<ReportCardConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub markdown: Option<ReportMarkdownConfig>,
+    #[serde(default)]
+    pub filters: Vec<ReportFilterDefinition>,
+    #[serde(default)]
+    pub interactions: Vec<ReportInteractionDefinition>,
+    #[serde(default, rename = "showWhen", skip_serializing_if = "Option::is_none")]
+    pub show_when: Option<Value>,
+    /// When true, the renderer drops the entire block (title bar included) if
+    /// its data is empty (e.g. zero table rows or zero open actions). Useful
+    /// for action lists or "open issues" tables that should disappear once
+    /// there's nothing to show, rather than rendering a stub "No items"
+    /// state.
+    #[serde(
+        default,
+        rename = "hideWhenEmpty",
+        skip_serializing_if = "is_false_block"
+    )]
+    pub hide_when_empty: bool,
+}
+
+fn is_false_block(value: &bool) -> bool {
+    !value
+}
+
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReportMarkdownConfig {
+    pub content: String,
+}
+
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReportActionsConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub submit: Option<ReportActionSubmitConfig>,
+}
+
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReportActionSubmitConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    #[serde(
+        default,
+        rename = "implicitPayload",
+        skip_serializing_if = "HashMap::is_empty"
+    )]
+    pub implicit_payload: HashMap<String, Value>,
+}
+
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReportWorkflowActionConfig {
+    #[serde(rename = "workflowId")]
+    pub workflow_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    #[serde(
+        default,
+        rename = "runningLabel",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub running_label: Option<String>,
+    #[serde(
+        default,
+        rename = "successMessage",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub success_message: Option<String>,
+    #[serde(default, rename = "reloadBlock", skip_serializing_if = "is_false")]
+    pub reload_block: bool,
+    /// Optional row-level condition. When set, the frontend renders the button
+    /// only for rows that match this condition.
+    #[serde(
+        default,
+        rename = "visibleWhen",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub visible_when: Option<ConditionExpression>,
+    /// Optional row-level condition. When set, the frontend hides the button
+    /// for rows that match this condition.
+    #[serde(
+        default,
+        rename = "hiddenWhen",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub hidden_when: Option<ConditionExpression>,
+    /// Optional row-level condition. When set, the frontend renders the button
+    /// disabled for rows that match this condition.
+    #[serde(
+        default,
+        rename = "disabledWhen",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub disabled_when: Option<ConditionExpression>,
+    #[serde(default)]
+    pub context: ReportWorkflowActionContext,
+}
+
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReportWorkflowActionContext {
+    #[serde(default)]
+    pub mode: ReportWorkflowActionContextMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub field: Option<String>,
+    #[serde(default, rename = "inputKey", skip_serializing_if = "Option::is_none")]
+    pub input_key: Option<String>,
+}
+
+impl Default for ReportWorkflowActionContext {
+    fn default() -> Self {
+        Self {
+            mode: ReportWorkflowActionContextMode::Row,
+            field: None,
+            input_key: None,
+        }
+    }
+}
+
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ReportWorkflowActionContextMode {
+    #[default]
+    Row,
+    Field,
+    Value,
+    Selection,
+}
+
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReportBlockDatasetQuery {
+    pub id: String,
+    #[serde(default)]
+    pub dimensions: Vec<String>,
+    #[serde(default)]
+    pub measures: Vec<String>,
+    #[serde(default, rename = "orderBy")]
+    pub order_by: Vec<ReportOrderBy>,
+    #[serde(
+        default,
+        rename = "datasetFilters",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub dataset_filters: Vec<ReportDatasetFilter>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<i64>,
+}
+
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum ReportBlockType {
+    Table,
+    Chart,
+    Metric,
+    Actions,
+    Markdown,
+    Card,
+}
+
+/// Card block configuration. A card renders a single record (the first row of
+/// a filter-mode source) as a vertical key→value layout, optionally split into
+/// titled groups with multi-column inner grids and per-field formatting.
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReportCardConfig {
+    #[serde(default)]
+    pub groups: Vec<ReportCardGroup>,
+}
+
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReportCardGroup {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// Number of columns to lay fields out in within this group (1–4).
+    #[serde(default = "default_card_group_columns")]
+    pub columns: u8,
+    pub fields: Vec<ReportCardField>,
+}
+
+fn default_card_group_columns() -> u8 {
+    2
+}
+
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReportCardField {
+    pub field: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    /// Optional row property to display instead of `field` while preserving
+    /// `field` as the writeback target. Useful for lookup/reference fields
+    /// where the row stores an id but a joined label should be shown.
+    #[serde(
+        default,
+        rename = "displayField",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub display_field: Option<String>,
+    /// Optional display-only template rendered from the row. Does not affect
+    /// filtering, sorting, or writeback; `field` remains the storage target.
+    #[serde(
+        default,
+        rename = "displayTemplate",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub display_template: Option<String>,
+    /// How to render this field. `value` runs through the standard cell
+    /// formatter (date/currency/pill/etc); `json` shows a collapsible JSON
+    /// tree; `markdown` renders the value as markdown; `subcard` renders a
+    /// nested object as a card with its own `groups`; `subtable` renders an
+    /// array of objects as a small inline table with its own `columns`.
+    #[serde(default = "default_card_field_kind")]
+    pub kind: ReportCardFieldKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub format: Option<String>,
+    /// Pill variants for `kind=value` + `format=pill`. Maps the cell value to
+    /// a badge variant (`success`, `warning`, `destructive`, `default`, …) so
+    /// enum/status fields can be color-coded.
+    #[serde(
+        default,
+        rename = "pillVariants",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub pill_variants: Option<std::collections::BTreeMap<String, String>>,
+    /// Whether the field starts collapsed. Only meaningful for `kind=json` /
+    /// `kind=markdown` / `kind=subcard` / `kind=subtable`.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub collapsed: bool,
+    /// Span in inner-grid columns. Default 1; use 2+ for fields that should
+    /// occupy a wider slot than their siblings (e.g. long descriptions).
+    #[serde(default = "default_card_field_col_span", rename = "colSpan")]
+    pub col_span: u8,
+    /// Recursive card config used when `kind=subcard`. The value at `field`
+    /// must be a JSON object; the inner groups read keys off that object.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "utoipa", schema(no_recursion))]
+    pub subcard: Option<Box<ReportCardConfig>>,
+    /// Inline-table config used when `kind=subtable`. The value at `field`
+    /// must be a JSON array of objects.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subtable: Option<ReportSubtableConfig>,
+    /// Opt-in writeback for this field. Only honored when the rendered row
+    /// carries `id` and `schemaId` (filter-mode object-model sources). The
+    /// renderer doesn't enforce this on the server — the FE shows an editor
+    /// that calls the object-model PUT endpoint directly, which performs its
+    /// own auth + type validation.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub editable: bool,
+    /// Optional explicit editor configuration. When set, takes precedence
+    /// over the default control inferred from `format` / `pillVariants`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub editor: Option<ReportEditorConfig>,
+    /// Optional workflow launcher rendered as a button for this card field.
+    /// The frontend executes the referenced workflow with either the whole row,
+    /// this field value, or a configured row field as the workflow input context.
+    #[serde(
+        default,
+        rename = "workflowAction",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub workflow_action: Option<ReportWorkflowActionConfig>,
+}
+
+fn default_card_field_kind() -> ReportCardFieldKind {
+    ReportCardFieldKind::Value
+}
+
+fn default_card_field_col_span() -> u8 {
+    1
+}
+
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ReportCardFieldKind {
+    Value,
+    Json,
+    Markdown,
+    Subcard,
+    Subtable,
+    WorkflowButton,
+}
+
+/// Inline-table rendering for an array-of-objects card field.
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReportSubtableConfig {
+    #[serde(default)]
+    pub columns: Vec<ReportSubtableColumn>,
+    /// Optional message shown when the array is empty (defaults to "No items").
+    #[serde(
+        default,
+        rename = "emptyLabel",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub empty_label: Option<String>,
+}
+
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReportSubtableColumn {
+    /// Property name on each array element to read for this cell.
+    pub field: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    /// Cell format hint. Same vocabulary as table columns
+    /// (`currency`, `datetime`, `pill`, `decimal`, …).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub format: Option<String>,
+    /// Pill variant map for `format=pill`.
+    #[serde(
+        default,
+        rename = "pillVariants",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub pill_variants: Option<std::collections::BTreeMap<String, String>>,
+    /// Cell alignment hint: `left`, `right`, `center`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub align: Option<String>,
+}
+
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReportSource {
+    #[serde(
+        default = "default_report_source_kind",
+        skip_serializing_if = "is_default_report_source_kind"
+    )]
+    pub kind: ReportSourceKind,
+    #[serde(default)]
+    pub schema: String,
+    #[serde(
+        default,
+        rename = "connectionId",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub connection_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entity: Option<ReportWorkflowRuntimeEntity>,
+    #[serde(
+        default,
+        rename = "workflowId",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub workflow_id: Option<String>,
+    #[serde(
+        default,
+        rename = "instanceId",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub instance_id: Option<String>,
+    #[serde(default = "default_source_mode")]
+    pub mode: ReportSourceMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub condition: Option<Condition>,
+    #[serde(default, rename = "filterMappings")]
+    pub filter_mappings: Vec<ReportFilterTarget>,
+    #[serde(default, rename = "groupBy")]
+    pub group_by: Vec<String>,
+    #[serde(default)]
+    pub aggregates: Vec<ReportAggregateSpec>,
+    #[serde(default, rename = "orderBy")]
+    pub order_by: Vec<ReportOrderBy>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<i64>,
+    /// Optional virtual-source granularity. Used by system sources such as
+    /// execution metric buckets (`hourly`/`daily`) and rate-limit timelines
+    /// (`minute`/`hourly`/`daily`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub granularity: Option<String>,
+    /// Optional virtual-source period. Used by rate-limit status period stats
+    /// (`1h`/`24h`/`7d`/`30d`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interval: Option<String>,
+    /// Cross-schema joins. When non-empty, fields prefixed with `<alias>.`
+    /// resolve against the joined dimension schema. Currently supported on
+    /// aggregate-mode blocks; v1 implementation uses broadcast-hash join
+    /// (dim resolved client-side, primary query pushed down with the resolved
+    /// keys, rows enriched after).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub join: Vec<ReportSourceJoin>,
+}
+
+impl ReportSource {
+    pub fn is_empty(&self) -> bool {
+        self.kind == ReportSourceKind::ObjectModel
+            && self.schema.trim().is_empty()
+            && self.connection_id.is_none()
+            && self.entity.is_none()
+            && self.workflow_id.is_none()
+            && self.instance_id.is_none()
+            && self.mode == default_source_mode()
+            && self.condition.is_none()
+            && self.filter_mappings.is_empty()
+            && self.group_by.is_empty()
+            && self.aggregates.is_empty()
+            && self.order_by.is_empty()
+            && self.limit.is_none()
+            && self.granularity.is_none()
+            && self.interval.is_none()
+            && self.join.is_empty()
+    }
+}
+
+/// Cross-schema join declared on a block-level source. Mirrors the per-cell
+/// `ReportTableColumnJoin` but adds `schema`, `alias`, and `kind` since the
+/// primary schema is the block's source rather than the column's.
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReportSourceJoin {
+    /// Joined (dimension) schema name.
+    pub schema: String,
+    /// Optional alias for qualified field references in `groupBy`,
+    /// `condition`, `aggregates[].field`, and `orderBy`. Defaults to `schema`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alias: Option<String>,
+    /// Optional connection ID for the dimension schema.
+    #[serde(
+        default,
+        rename = "connectionId",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub connection_id: Option<String>,
+    /// Field on the joined (dimension) schema.
+    pub field: String,
+    /// Field on the parent (block-source) schema.
+    #[serde(rename = "parentField")]
+    pub parent_field: String,
+    /// Comparison op — eq | ne | gt | gte | lt | lte | in | contains | search.
+    /// Default: eq. Mirrors `ReportTableColumnJoin.op`.
+    #[serde(default = "default_filter_op")]
+    pub op: String,
+    /// Inner or left join. Default: inner. Inner drops fact rows with no
+    /// matching dim row; left keeps them with null dim columns.
+    #[serde(default)]
+    pub kind: ReportJoinKind,
+}
+
+impl ReportSourceJoin {
+    /// Resolve the alias used for qualified field refs.
+    pub fn effective_alias(&self) -> &str {
+        self.alias.as_deref().unwrap_or(&self.schema)
+    }
+}
+
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ReportJoinKind {
+    #[default]
+    Inner,
+    Left,
+}
+
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ReportSourceMode {
+    Filter,
+    Aggregate,
+}
+
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReportAggregateSpec {
+    pub alias: String,
+    #[serde(rename = "op")]
+    pub op: ReportAggregateFn,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub field: Option<String>,
+    #[serde(default)]
+    pub distinct: bool,
+    #[serde(default, rename = "orderBy")]
+    pub order_by: Vec<ReportOrderBy>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expression: Option<Value>,
+    /// Fraction in `[0.0, 1.0]` for `percentile_cont` / `percentile_disc`
+    /// aggregates. Required for those ops, rejected otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub percentile: Option<f64>,
+}
+
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ReportAggregateFn {
+    Count,
+    Sum,
+    Avg,
+    Min,
+    Max,
+    FirstValue,
+    LastValue,
+    PercentileCont,
+    PercentileDisc,
+    StddevSamp,
+    VarSamp,
+    Expr,
+}
+
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReportOrderBy {
+    pub field: String,
+    #[serde(default = "default_sort_direction")]
+    pub direction: String,
+}
+
+fn default_sort_direction() -> String {
+    "asc".to_string()
+}
+
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReportTableConfig {
+    #[serde(default)]
+    pub columns: Vec<ReportTableColumn>,
+    /// Enables row selection controls even when no table-wide actions are configured.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub selectable: bool,
+    /// Optional table-wide workflow actions executed with selected rows.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub actions: Vec<ReportTableActionConfig>,
+    #[serde(default, rename = "defaultSort")]
+    pub default_sort: Vec<ReportOrderBy>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pagination: Option<ReportPaginationConfig>,
+}
+
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReportTableActionConfig {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    #[serde(rename = "workflowAction")]
+    pub workflow_action: ReportWorkflowActionConfig,
+}
+
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReportTableColumn {
+    pub field: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    /// Optional row property to display instead of `field` while preserving
+    /// `field` as the sort/writeback key. For example, a Product row can store
+    /// `category_id` while displaying a joined `category.name`.
+    #[serde(
+        default,
+        rename = "displayField",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub display_field: Option<String>,
+    /// Optional display-only template rendered from the row. Does not affect
+    /// filtering, sorting, or writeback; `field` remains the storage target.
+    #[serde(
+        default,
+        rename = "displayTemplate",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub display_template: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub format: Option<String>,
+    #[serde(default, rename = "type", skip_serializing_if = "Option::is_none")]
+    pub column_type: Option<ReportTableColumnType>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chart: Option<ReportChartConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<ReportTableColumnSource>,
+    /// Optional row field rendered as a subdued line below the primary value.
+    #[serde(
+        default,
+        rename = "secondaryField",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub secondary_field: Option<String>,
+    /// Optional row field whose value is treated as a URL and rendered as an external-link icon.
+    #[serde(default, rename = "linkField", skip_serializing_if = "Option::is_none")]
+    pub link_field: Option<String>,
+    /// Optional row field whose value is shown in a tooltip on hover (e.g. full email behind an avatar).
+    #[serde(
+        default,
+        rename = "tooltipField",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub tooltip_field: Option<String>,
+    /// Mapping from cell value to pill variant for `format: "pill"` columns
+    /// (e.g. `{ "active_customer": "success", "churned": "muted" }`).
+    #[serde(
+        default,
+        rename = "pillVariants",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub pill_variants: Option<std::collections::BTreeMap<String, String>>,
+    /// Ordered level list for `format: "bar_indicator"` columns; the value's
+    /// position determines how many bars are filled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub levels: Option<Vec<String>>,
+    /// Optional cell alignment hint: "left", "right", or "center".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub align: Option<String>,
+    /// Optional display-only text cutoff. When omitted, the frontend renders
+    /// the full formatted value.
+    #[serde(default, rename = "maxChars", skip_serializing_if = "Option::is_none")]
+    pub max_chars: Option<usize>,
+    /// Marks this column as the human-readable label for the row's entity
+    /// within this report. Consumed by view `titleFrom: { block }` resolution
+    /// and similar entity-label lookups. At most one descriptive column per
+    /// table is meaningful; the first encountered wins if multiple are flagged.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub descriptive: bool,
+    /// Opt-in writeback for this column. Only honored when the rendered row
+    /// carries `id` and `schemaId` (filter-mode object-model sources without
+    /// joins or aggregates). The renderer doesn't enforce this on the server —
+    /// the FE shows an editor that calls the object-model PUT endpoint
+    /// directly, which performs its own auth + type validation.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub editable: bool,
+    /// Optional explicit editor configuration. When set, takes precedence
+    /// over the default control inferred from `format` / `pillVariants`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub editor: Option<ReportEditorConfig>,
+    /// Optional workflow launcher rendered as a button in this table column.
+    /// The frontend executes the referenced workflow with either the whole row,
+    /// this cell value, or a configured row field as the workflow input context.
+    #[serde(
+        default,
+        rename = "workflowAction",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub workflow_action: Option<ReportWorkflowActionConfig>,
+    /// Optional row-scoped report interaction buttons rendered in this table
+    /// column. Each button executes the same interaction action vocabulary used
+    /// by block interactions, such as set_filter followed by navigate_view.
+    #[serde(
+        default,
+        rename = "interactionButtons",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub interaction_buttons: Vec<ReportTableInteractionButtonConfig>,
+}
+
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReportTableInteractionButtonConfig {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<String>,
+    #[serde(
+        default,
+        rename = "visibleWhen",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub visible_when: Option<ConditionExpression>,
+    #[serde(
+        default,
+        rename = "hiddenWhen",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub hidden_when: Option<ConditionExpression>,
+    #[serde(
+        default,
+        rename = "disabledWhen",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub disabled_when: Option<ConditionExpression>,
+    #[serde(default)]
+    pub actions: Vec<ReportInteractionAction>,
+}
+
+/// Explicit editor configuration for an editable column or card field.
+///
+/// When omitted, the FE infers a control from the column's `format` /
+/// `pillVariants` (number for currency/decimal/percent, date for date,
+/// select for pill with variants, toggle for booleans, text otherwise).
+/// When set, the explicit `kind` wins.
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReportEditorConfig {
+    pub kind: ReportEditorKind,
+    /// Dynamic object-model lookup configuration for `kind=lookup`.
+    /// The editor displays labels from the lookup schema but commits the
+    /// selected value back to the edited row field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lookup: Option<ReportLookupConfig>,
+    /// Static option list for `kind=select`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub options: Vec<ReportEditorOption>,
+    /// Min value for `kind=number`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min: Option<f64>,
+    /// Max value for `kind=number`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max: Option<f64>,
+    /// Step / precision for `kind=number`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step: Option<f64>,
+    /// Validation regex for `kind=text` / `kind=textarea`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub regex: Option<String>,
+    /// Placeholder shown in empty inputs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placeholder: Option<String>,
+}
+
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReportEditorOption {
+    pub label: String,
+    pub value: Value,
+}
+
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReportLookupConfig {
+    /// Object Model schema to search for options.
+    pub schema: String,
+    /// Optional connection ID for connection-scoped lookup schemas.
+    #[serde(
+        default,
+        rename = "connectionId",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub connection_id: Option<String>,
+    /// Field whose value is written to the edited row. `field` is accepted as
+    /// a compatibility alias.
+    #[serde(rename = "valueField", alias = "field")]
+    pub value_field: String,
+    /// Field shown to users in the searchable option list.
+    #[serde(rename = "labelField")]
+    pub label_field: String,
+    /// Fields searched when the user types. If the lookup schema has generated
+    /// `tsvector` columns, the backend uses MATCH against those columns;
+    /// otherwise it falls back to CONTAINS on these fields. Defaults to
+    /// `labelField` when omitted.
+    #[serde(default, rename = "searchFields")]
+    pub search_fields: Vec<String>,
+    /// Optional Object Model condition applied to the lookup option query.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub condition: Option<Condition>,
+    /// Optional mappings from report/block filters into lookup schema fields.
+    #[serde(default, rename = "filterMappings")]
+    pub filter_mappings: Vec<ReportFilterTarget>,
+}
+
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ReportEditorKind {
+    Text,
+    Textarea,
+    Number,
+    Select,
+    Toggle,
+    Date,
+    Datetime,
+    Lookup,
+}
+
+fn is_false(value: &bool) -> bool {
+    !value
+}
+
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ReportTableColumnType {
+    Value,
+    Chart,
+    WorkflowButton,
+    InteractionButtons,
+}
+
+impl ReportTableColumn {
+    pub fn is_chart(&self) -> bool {
+        matches!(self.column_type, Some(ReportTableColumnType::Chart))
+    }
+
+    pub fn is_value_lookup(&self) -> bool {
+        matches!(self.column_type, Some(ReportTableColumnType::Value)) && self.source.is_some()
+    }
+
+    pub fn is_workflow_button(&self) -> bool {
+        matches!(
+            self.column_type,
+            Some(ReportTableColumnType::WorkflowButton)
+        ) || self.workflow_action.is_some()
+    }
+
+    pub fn is_interaction_buttons(&self) -> bool {
+        matches!(
+            self.column_type,
+            Some(ReportTableColumnType::InteractionButtons)
+        ) || !self.interaction_buttons.is_empty()
+    }
+}
+
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReportTableColumnSource {
+    #[serde(
+        default = "default_report_source_kind",
+        skip_serializing_if = "is_default_report_source_kind"
+    )]
+    pub kind: ReportSourceKind,
+    pub schema: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub select: Option<String>,
+    #[serde(
+        default,
+        rename = "connectionId",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub connection_id: Option<String>,
+    #[serde(default = "default_source_mode")]
+    pub mode: ReportSourceMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub condition: Option<Condition>,
+    #[serde(default, rename = "filterMappings")]
+    pub filter_mappings: Vec<ReportFilterTarget>,
+    #[serde(default, rename = "groupBy")]
+    pub group_by: Vec<String>,
+    #[serde(default)]
+    pub aggregates: Vec<ReportAggregateSpec>,
+    #[serde(default, rename = "orderBy")]
+    pub order_by: Vec<ReportOrderBy>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<i64>,
+    #[serde(default)]
+    pub join: Vec<ReportTableColumnJoin>,
+}
+
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReportTableColumnJoin {
+    #[serde(rename = "parentField")]
+    pub parent_field: String,
+    pub field: String,
+    #[serde(default = "default_filter_op")]
+    pub op: String,
+    #[serde(default = "default_column_join_kind")]
+    pub kind: ReportJoinKind,
+}
+
+fn default_column_join_kind() -> ReportJoinKind {
+    ReportJoinKind::Left
+}
+
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReportPaginationConfig {
+    #[serde(default = "default_page_size", rename = "defaultPageSize")]
+    pub default_page_size: i64,
+    #[serde(default, rename = "allowedPageSizes")]
+    pub allowed_page_sizes: Vec<i64>,
+}
+
+fn default_page_size() -> i64 {
+    50
+}
+
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReportChartConfig {
+    pub kind: ReportChartKind,
+    pub x: String,
+    #[serde(default)]
+    pub series: Vec<ReportChartSeries>,
+}
+
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ReportChartKind {
+    Line,
+    Bar,
+    Area,
+    Pie,
+    Donut,
+}
+
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReportChartSeries {
+    pub field: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+}
+
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReportMetricConfig {
+    #[serde(rename = "valueField")]
+    pub value_field: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub format: Option<String>,
+}
+
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReportInteractionDefinition {
+    pub id: String,
+    pub trigger: ReportInteractionTrigger,
+    #[serde(default)]
+    pub actions: Vec<ReportInteractionAction>,
+}
+
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReportInteractionTrigger {
+    pub event: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub field: Option<String>,
+}
+
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReportInteractionAction {
+    #[serde(rename = "type")]
+    pub action_type: String,
+    #[serde(default, rename = "filterId", skip_serializing_if = "Option::is_none")]
+    pub filter_id: Option<String>,
+    #[serde(default, rename = "filterIds", skip_serializing_if = "Vec::is_empty")]
+    pub filter_ids: Vec<String>,
+    #[serde(default, rename = "viewId", skip_serializing_if = "Option::is_none")]
+    pub view_id: Option<String>,
+    #[serde(default, rename = "valueFrom", skip_serializing_if = "Option::is_none")]
+    pub value_from: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<Value>,
+}
+
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReportSummary {
+    pub id: String,
+    pub slug: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    pub status: ReportStatus,
+    #[serde(rename = "definitionVersion")]
+    pub definition_version: i32,
+    /// Mirrors `ReportDto.needs_re_authoring`. Propagated onto the
+    /// summary so callers of `GET /api/runtime/reports` (including the
+    /// MCP `list_reports_needing_re_authoring` tool) can filter
+    /// without doing a second per-report fetch.
+    #[serde(
+        default,
+        rename = "needsReAuthoring",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub needs_re_authoring: Option<String>,
+    #[serde(rename = "createdAt")]
+    pub created_at: DateTime<Utc>,
+    #[serde(rename = "updatedAt")]
+    pub updated_at: DateTime<Utc>,
+}
+
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReportDto {
+    pub id: String,
+    pub slug: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    pub status: ReportStatus,
+    #[serde(rename = "definitionVersion")]
+    pub definition_version: i32,
+    pub definition: ReportDefinition,
+    /// Set when the stored JSON failed to deserialize into the current
+    /// `ReportDefinition` shape (post-Phase 8 cutover). The returned
+    /// `definition` is the empty stub; the FE should render a
+    /// "needs re-authoring" state instead of trying to view/edit.
+    #[serde(
+        default,
+        rename = "needsReAuthoring",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub needs_re_authoring: Option<String>,
+    #[serde(rename = "createdAt")]
+    pub created_at: DateTime<Utc>,
+    #[serde(rename = "updatedAt")]
+    pub updated_at: DateTime<Utc>,
+}
+
+impl From<&ReportDto> for ReportSummary {
+    fn from(report: &ReportDto) -> Self {
+        Self {
+            id: report.id.clone(),
+            slug: report.slug.clone(),
+            name: report.name.clone(),
+            description: report.description.clone(),
+            tags: report.tags.clone(),
+            status: report.status,
+            definition_version: report.definition_version,
+            needs_re_authoring: report.needs_re_authoring.clone(),
+            created_at: report.created_at,
+            updated_at: report.updated_at,
+        }
+    }
+}
+
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ListReportsResponse {
+    pub success: bool,
+    pub reports: Vec<ReportSummary>,
+}
+
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[derive(Debug, Serialize, Deserialize)]
+pub struct GetReportResponse {
+    pub success: bool,
+    pub report: ReportDto,
+}
+
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CreateReportRequest {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slug: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    pub definition: ReportDefinition,
+    #[serde(default = "default_report_status")]
+    pub status: ReportStatus,
+}
+
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[derive(Debug, Serialize, Deserialize)]
+pub struct UpdateReportRequest {
+    pub name: String,
+    pub slug: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    pub definition: ReportDefinition,
+    #[serde(default = "default_report_status")]
+    pub status: ReportStatus,
+}
+
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ValidateReportRequest {
+    pub definition: ReportDefinition,
+}
+
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ValidateReportResponse {
+    pub valid: bool,
+    #[serde(default)]
+    pub errors: Vec<ReportValidationIssue>,
+    #[serde(default)]
+    pub warnings: Vec<ReportValidationIssue>,
+}
+
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReportValidationIssue {
+    pub path: String,
+    pub code: String,
+    pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hint: Option<String>,
+}
+
+impl fmt::Display for ReportValidationIssue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if let Some(hint) = &self.hint {
+            write!(
+                f,
+                "{} at {}: {} ({})",
+                self.code, self.path, self.message, hint
+            )
+        } else {
+            write!(f, "{} at {}: {}", self.code, self.path, self.message)
+        }
+    }
+}
+
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ReportRenderRequest {
+    #[serde(default)]
+    pub filters: HashMap<String, Value>,
+    #[serde(default)]
+    pub blocks: Option<Vec<ReportBlockDataRequest>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timezone: Option<String>,
+}
+
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ReportPreviewRequest {
+    pub definition: ReportDefinition,
+    #[serde(default)]
+    pub filters: HashMap<String, Value>,
+    #[serde(default)]
+    pub blocks: Option<Vec<ReportBlockDataRequest>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timezone: Option<String>,
+}
+
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ReportFilterOptionsRequest {
+    #[serde(default)]
+    pub filters: HashMap<String, Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub query: Option<String>,
+    #[serde(default)]
+    pub offset: i64,
+    #[serde(default = "default_filter_options_limit")]
+    pub limit: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timezone: Option<String>,
+}
+
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ReportLookupOptionsRequest {
+    #[serde(default)]
+    pub filters: HashMap<String, Value>,
+    #[serde(default, rename = "blockFilters")]
+    pub block_filters: HashMap<String, Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub query: Option<String>,
+    #[serde(default)]
+    pub offset: i64,
+    #[serde(default = "default_filter_options_limit")]
+    pub limit: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timezone: Option<String>,
+}
+
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ReportFilterOptionsResponse {
+    pub success: bool,
+    pub filter: ReportFilterOptionsMetadata,
+    pub options: Vec<ReportFilterOption>,
+    pub page: ReportFilterOptionsPage,
+}
+
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ReportLookupOptionsResponse {
+    pub success: bool,
+    pub block: ReportLookupBlockMetadata,
+    pub field: String,
+    pub options: Vec<ReportFilterOption>,
+    pub page: ReportFilterOptionsPage,
+}
+
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ReportLookupBlockMetadata {
+    pub id: String,
+}
+
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ReportDatasetQueryRequest {
+    #[serde(default)]
+    pub filters: HashMap<String, Value>,
+    #[serde(default, rename = "datasetFilters")]
+    pub dataset_filters: Vec<ReportDatasetFilter>,
+    #[serde(default)]
+    pub dimensions: Vec<String>,
+    #[serde(default)]
+    pub measures: Vec<String>,
+    #[serde(default, rename = "orderBy", alias = "sort")]
+    pub order_by: Vec<ReportOrderBy>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub search: Option<ReportTableSearchRequest>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page: Option<ReportPageRequest>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timezone: Option<String>,
+}
+
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReportDatasetFilter {
+    pub field: String,
+    #[serde(default = "default_filter_op")]
+    pub op: String,
+    pub value: Value,
+}
+
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ReportDatasetQueryResponse {
+    pub success: bool,
+    pub dataset: ReportDatasetQueryMetadata,
+    pub columns: Vec<ReportDatasetQueryColumn>,
+    pub rows: Vec<Vec<Value>>,
+    pub page: ReportDatasetQueryPage,
+}
+
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ReportDatasetQueryMetadata {
+    pub id: String,
+}
+
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReportDatasetQueryColumn {
+    pub key: String,
+    pub label: String,
+    #[serde(rename = "type")]
+    pub column_type: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub format: Option<ReportDatasetValueFormat>,
+}
+
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ReportDatasetQueryPage {
+    pub offset: i64,
+    pub size: i64,
+    #[serde(rename = "totalCount")]
+    pub total_count: i64,
+    #[serde(rename = "hasNextPage")]
+    pub has_next_page: bool,
+}
+
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ReportFilterOptionsMetadata {
+    pub id: String,
+}
+
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReportFilterOption {
+    pub label: String,
+    pub value: Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub count: Option<i64>,
+}
+
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ReportFilterOptionsPage {
+    pub offset: i64,
+    pub size: i64,
+    #[serde(rename = "totalCount")]
+    pub total_count: i64,
+    #[serde(rename = "hasNextPage")]
+    pub has_next_page: bool,
+}
+
+fn default_filter_options_limit() -> i64 {
+    100
+}
+
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ReportBlockOnlyDataRequest {
+    #[serde(default)]
+    pub filters: HashMap<String, Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page: Option<ReportPageRequest>,
+    #[serde(default)]
+    pub sort: Vec<ReportOrderBy>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub search: Option<ReportTableSearchRequest>,
+    #[serde(default, rename = "blockFilters")]
+    pub block_filters: HashMap<String, Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timezone: Option<String>,
+}
+
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SubmitReportWorkflowActionRequest {
+    #[serde(default)]
+    pub payload: Value,
+    #[serde(default)]
+    pub filters: HashMap<String, Value>,
+    #[serde(default, rename = "blockFilters")]
+    pub block_filters: HashMap<String, Value>,
+}
+
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReportBlockDataRequest {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page: Option<ReportPageRequest>,
+    #[serde(default)]
+    pub sort: Vec<ReportOrderBy>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub search: Option<ReportTableSearchRequest>,
+    #[serde(default, rename = "blockFilters")]
+    pub block_filters: HashMap<String, Value>,
+}
+
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReportTableSearchRequest {
+    pub query: String,
+    #[serde(default)]
+    pub fields: Vec<String>,
+}
+
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReportPageRequest {
+    #[serde(default)]
+    pub offset: i64,
+    #[serde(default = "default_page_size")]
+    pub size: i64,
+}
+
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ReportRenderResponse {
+    pub success: bool,
+    pub report: ReportRenderMetadata,
+    #[serde(rename = "resolvedFilters")]
+    pub resolved_filters: HashMap<String, Value>,
+    pub blocks: HashMap<String, ReportBlockRenderResult>,
+    #[serde(default)]
+    pub errors: Vec<ReportBlockError>,
+}
+
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ReportRenderMetadata {
+    pub id: String,
+    #[serde(rename = "definitionVersion")]
+    pub definition_version: i32,
+}
+
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReportBlockRenderResult {
+    #[serde(rename = "type")]
+    pub block_type: ReportBlockType,
+    #[serde(default = "default_block_status")]
+    pub status: ReportBlockStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<ReportBlockError>,
+}
+
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ReportBlockStatus {
+    Ready,
+    Loading,
+    Empty,
+    Error,
+}
+
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReportBlockError {
+    pub code: String,
+    pub message: String,
+    #[serde(default, rename = "blockId", skip_serializing_if = "Option::is_none")]
+    pub block_id: Option<String>,
+}
+
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DeleteReportResponse {
+    pub success: bool,
+    pub message: String,
+}
+
+// Legacy per-op block mutation request/response types
+// (ReportBlockPosition, Add/Replace/Patch/Move/RemoveReportBlockRequest,
+// ReportBlockMutationResponse) were deleted in Phase 8 alongside the
+// per-op REST + MCP shims. All block edits now flow through
+// `runtara_report_dsl::edit_ops::ReportEditOp` via the canonical
+// `POST /api/runtime/reports/{id}/edit` endpoint.

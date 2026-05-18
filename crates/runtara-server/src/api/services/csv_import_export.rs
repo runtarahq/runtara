@@ -4,7 +4,7 @@
 //! and importing CSV data into object model schemas.
 
 use crate::api::dto::csv_import_export::*;
-use crate::api::dto::object_model::{ColumnDefinition, ColumnType};
+use crate::api::dto::object_model::{ColumnDefinition, ColumnType, condition_to_store};
 use crate::api::repositories::object_model::ObjectStoreManager;
 use crate::api::services::object_model::{ServiceError, get_store};
 use runtara_connections::ConnectionsFacade;
@@ -109,7 +109,7 @@ pub async fn export_csv(
         let filter = StoreFilterRequest {
             offset,
             limit: EXPORT_PAGE_SIZE,
-            condition: request.condition.clone().map(|c| c.into()),
+            condition: request.condition.clone().map(condition_to_store),
             sort_by: request.sort_by.clone(),
             sort_order: request.sort_order.clone(),
             score_expression: None,

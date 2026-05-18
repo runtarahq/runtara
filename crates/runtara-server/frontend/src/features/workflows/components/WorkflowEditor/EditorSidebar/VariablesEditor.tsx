@@ -20,7 +20,7 @@ export interface UIVariable {
 }
 
 // Re-export for convenience
-export { VariableType };
+export type { VariableType };
 
 /**
  * Converts a string value to the appropriate JSON type based on the variable type.
@@ -35,23 +35,23 @@ function convertValueToType(value: any, type: VariableType): any {
   const stringValue = typeof value === 'string' ? value : String(value);
 
   switch (type) {
-    case VariableType.Boolean:
+    case 'boolean':
       if (typeof value === 'boolean') return value;
       return stringValue.toLowerCase() === 'true';
 
-    case VariableType.Number: {
+    case 'number': {
       if (typeof value === 'number') return value;
       const num = parseFloat(stringValue);
       return isNaN(num) ? 0 : num;
     }
 
-    case VariableType.Integer: {
+    case 'integer': {
       if (typeof value === 'number' && Number.isInteger(value)) return value;
       const int = parseInt(stringValue, 10);
       return isNaN(int) ? 0 : int;
     }
 
-    case VariableType.Array:
+    case 'array':
       if (Array.isArray(value)) return value;
       try {
         const parsed = JSON.parse(stringValue);
@@ -60,7 +60,7 @@ function convertValueToType(value: any, type: VariableType): any {
         return [];
       }
 
-    case VariableType.Object:
+    case 'object':
       if (typeof value === 'object' && !Array.isArray(value)) return value;
       try {
         const parsed = JSON.parse(stringValue);
@@ -71,8 +71,8 @@ function convertValueToType(value: any, type: VariableType): any {
         return {};
       }
 
-    case VariableType.String:
-    case VariableType.File:
+    case 'string':
+    case 'file':
     default:
       return stringValue;
   }
@@ -103,7 +103,7 @@ export function VariablesEditor({
   const handleAdd = () => {
     onChange([
       ...variables,
-      { name: '', value: '', type: VariableType.String } as UIVariable,
+      { name: '', value: '', type: 'string' } as UIVariable,
     ]);
   };
 
@@ -180,7 +180,7 @@ export function VariablesEditor({
                   />
                 </td>
                 <td className="p-2">
-                  {variable.type === VariableType.Boolean ? (
+                  {variable.type === 'boolean' ? (
                     <Select
                       value={String(variable.value === true)}
                       onValueChange={(val) =>
@@ -210,7 +210,7 @@ export function VariablesEditor({
                 </td>
                 <td className="p-2">
                   <Select
-                    value={variable.type || VariableType.String}
+                    value={variable.type || 'string'}
                     onValueChange={(value) =>
                       handleChange(index, 'type', value as VariableType)
                     }
@@ -220,23 +220,23 @@ export function VariablesEditor({
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
-                      <SelectItem value={VariableType.String}>
+                      <SelectItem value={'string'}>
                         String
                       </SelectItem>
-                      <SelectItem value={VariableType.Number}>
+                      <SelectItem value={'number'}>
                         Number
                       </SelectItem>
-                      <SelectItem value={VariableType.Integer}>
+                      <SelectItem value={'integer'}>
                         Integer
                       </SelectItem>
-                      <SelectItem value={VariableType.Boolean}>
+                      <SelectItem value={'boolean'}>
                         Boolean
                       </SelectItem>
-                      <SelectItem value={VariableType.Object}>
+                      <SelectItem value={'object'}>
                         Object
                       </SelectItem>
-                      <SelectItem value={VariableType.Array}>Array</SelectItem>
-                      <SelectItem value={VariableType.File}>File</SelectItem>
+                      <SelectItem value={'array'}>Array</SelectItem>
+                      <SelectItem value={'file'}>File</SelectItem>
                     </SelectContent>
                   </Select>
                 </td>

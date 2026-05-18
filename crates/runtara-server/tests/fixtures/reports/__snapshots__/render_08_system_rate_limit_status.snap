@@ -1,0 +1,118 @@
+---
+source: crates/runtara-server/tests/reports_render_corpus.rs
+expression: snapshot_body
+---
+{
+  "blocks": {
+    "rate_limit_status": {
+      "data": {
+        "columns": [
+          {
+            "format": null,
+            "key": "connection_id",
+            "label": "Connection"
+          },
+          {
+            "format": "number",
+            "key": "requests_used",
+            "label": "Used"
+          },
+          {
+            "format": "number",
+            "key": "requests_remaining",
+            "label": "Remaining"
+          },
+          {
+            "format": "percent",
+            "key": "utilization_pct",
+            "label": "Utilization"
+          },
+          {
+            "format": "pill",
+            "key": "throttled",
+            "label": "Throttled"
+          }
+        ],
+        "page": {
+          "hasNextPage": false,
+          "offset": 0,
+          "size": 50,
+          "totalCount": 1
+        },
+        "rows": [
+          {
+            "capacityPercent": null,
+            "config": null,
+            "configBurstSize": null,
+            "configMaxRetries": null,
+            "configMaxWaitMs": null,
+            "configRequestsPerSecond": null,
+            "configRetryOnLimit": null,
+            "connectionId": "[uuid]",
+            "connectionTitle": "Default Object Model DB",
+            "integrationId": "postgres",
+            "isRateLimited": false,
+            "metrics": {
+              "isRateLimited": false
+            },
+            "periodInterval": "1h",
+            "periodRateLimitedCount": 0,
+            "periodRateLimitedPercent": 0.0,
+            "periodRetryCount": 0,
+            "periodStats": {
+              "interval": "1h",
+              "rateLimitedCount": 0,
+              "rateLimitedPercent": 0.0,
+              "retryCount": 0,
+              "totalRequests": 0
+            },
+            "periodTotalRequests": 0,
+            "retryAfterMs": null,
+            "state": {
+              "available": false
+            },
+            "stateAvailable": false,
+            "stateCallsInWindow": null,
+            "stateCurrentTokens": null,
+            "stateLastRefillMs": null,
+            "stateLearnedLimit": null,
+            "stateTotalCalls": null,
+            "stateWindowStartMs": null,
+            "utilizationPercent": null
+          }
+        ]
+      },
+      "status": "ready",
+      "title": "Rate limit status",
+      "type": "table"
+    },
+    "rate_limit_usage": {
+      "data": {
+        "columns": [
+          "value"
+        ],
+        "format": "percent",
+        "label": "Utilization",
+        "rows": [
+          [
+            null
+          ]
+        ],
+        "value": null,
+        "valueField": "value"
+      },
+      "status": "ready",
+      "title": "Overall utilization",
+      "type": "metric"
+    }
+  },
+  "errors": [],
+  "report": {
+    "definitionVersion": 1,
+    "id": "rep_08_system_rate_limit_status"
+  },
+  "resolvedFilters": {
+    "interval": "1h"
+  },
+  "success": true
+}

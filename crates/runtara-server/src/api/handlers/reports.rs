@@ -363,100 +363,58 @@ pub async fn query_report_dataset(
     }
 }
 
-pub async fn add_report_block(
+#[derive(Debug, serde::Deserialize, utoipa::ToSchema)]
+pub struct EditReportRequest {
+    /// Atomic batch of edit operations applied in order; if any op
+    /// fails the entire batch is rolled back.
+    #[serde(default)]
+    pub ops: Vec<runtara_report_dsl::edit_ops::ReportEditOp>,
+}
+
+#[derive(Debug, serde::Serialize, utoipa::ToSchema)]
+pub struct EditReportResponse {
+    pub success: bool,
+    pub report: ReportDto,
+}
+
+/// Phase 6 canonical edit endpoint. Accepts a batch of `ReportEditOp`s
+/// and applies them atomically. The legacy per-op REST + MCP handlers
+/// have all been deleted (Phase 8) so this is the only mutation entry
+/// point for layout + block changes.
+#[utoipa::path(
+    post,
+    path = "/api/runtime/reports/{report_id}/edit",
+    tag = "reports-controller",
+    params(
+        ("report_id" = String, Path, description = "Report id or slug"),
+    ),
+    request_body = EditReportRequest,
+    responses(
+        (status = 200, description = "Batch applied", body = EditReportResponse),
+        (status = 400, description = "Validation error"),
+        (status = 404, description = "Report not found"),
+    )
+)]
+pub async fn edit_report(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
     State(pool): State<PgPool>,
     State(manager): State<Arc<ObjectStoreManager>>,
     State(connections): State<Arc<runtara_connections::ConnectionsFacade>>,
     Path(report_id): Path<String>,
-    Json(request): Json<AddReportBlockRequest>,
-) -> Result<(StatusCode, Json<ReportBlockMutationResponse>), (StatusCode, Json<Value>)> {
+    Json(request): Json<EditReportRequest>,
+) -> Result<(StatusCode, Json<EditReportResponse>), (StatusCode, Json<Value>)> {
     let service = ReportService::new(pool, manager, connections);
-
     match service
-        .add_report_block(&tenant_id, &report_id, request)
+        .edit_report(&tenant_id, &report_id, &request.ops)
         .await
     {
-        Ok(response) => Ok((StatusCode::OK, Json(response))),
-        Err(error) => Err(error_response(error)),
-    }
-}
-
-pub async fn replace_report_block(
-    crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
-    State(pool): State<PgPool>,
-    State(manager): State<Arc<ObjectStoreManager>>,
-    State(connections): State<Arc<runtara_connections::ConnectionsFacade>>,
-    Path((report_id, block_id)): Path<(String, String)>,
-    Json(request): Json<ReplaceReportBlockRequest>,
-) -> Result<(StatusCode, Json<ReportBlockMutationResponse>), (StatusCode, Json<Value>)> {
-    let service = ReportService::new(pool, manager, connections);
-
-    match service
-        .replace_report_block(&tenant_id, &report_id, &block_id, request)
-        .await
-    {
-        Ok(response) => Ok((StatusCode::OK, Json(response))),
-        Err(error) => Err(error_response(error)),
-    }
-}
-
-pub async fn patch_report_block(
-    crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
-    State(pool): State<PgPool>,
-    State(manager): State<Arc<ObjectStoreManager>>,
-    State(connections): State<Arc<runtara_connections::ConnectionsFacade>>,
-    Path((report_id, block_id)): Path<(String, String)>,
-    Json(request): Json<PatchReportBlockRequest>,
-) -> Result<(StatusCode, Json<ReportBlockMutationResponse>), (StatusCode, Json<Value>)> {
-    let service = ReportService::new(pool, manager, connections);
-
-    match service
-        .patch_report_block(&tenant_id, &report_id, &block_id, request)
-        .await
-    {
-        Ok(response) => Ok((StatusCode::OK, Json(response))),
-        Err(error) => Err(error_response(error)),
-    }
-}
-
-pub async fn move_report_block(
-    crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
-    State(pool): State<PgPool>,
-    State(manager): State<Arc<ObjectStoreManager>>,
-    State(connections): State<Arc<runtara_connections::ConnectionsFacade>>,
-    Path((report_id, block_id)): Path<(String, String)>,
-    Json(request): Json<MoveReportBlockRequest>,
-) -> Result<(StatusCode, Json<ReportBlockMutationResponse>), (StatusCode, Json<Value>)> {
-    let service = ReportService::new(pool, manager, connections);
-
-    match service
-        .move_report_block(&tenant_id, &report_id, &block_id, request)
-        .await
-    {
-        Ok(response) => Ok((StatusCode::OK, Json(response))),
-        Err(error) => Err(error_response(error)),
-    }
-}
-
-pub async fn remove_report_block(
-    crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
-    State(pool): State<PgPool>,
-    State(manager): State<Arc<ObjectStoreManager>>,
-    State(connections): State<Arc<runtara_connections::ConnectionsFacade>>,
-    Path((report_id, block_id)): Path<(String, String)>,
-    body: Option<Json<RemoveReportBlockRequest>>,
-) -> Result<(StatusCode, Json<ReportBlockMutationResponse>), (StatusCode, Json<Value>)> {
-    let service = ReportService::new(pool, manager, connections);
-    let request = body
-        .map(|Json(request)| request)
-        .unwrap_or(RemoveReportBlockRequest {});
-
-    match service
-        .remove_report_block(&tenant_id, &report_id, &block_id, request)
-        .await
-    {
-        Ok(response) => Ok((StatusCode::OK, Json(response))),
+        Ok(report) => Ok((
+            StatusCode::OK,
+            Json(EditReportResponse {
+                success: true,
+                report,
+            }),
+        )),
         Err(error) => Err(error_response(error)),
     }
 }

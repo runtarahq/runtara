@@ -14,7 +14,7 @@ use crate::config::ConnectionsState;
 use crate::error::ConnectionsError;
 use crate::repository::connections::{ConnectionRepository, ConnectionWithParameters};
 use crate::service::rate_limits::RateLimitService;
-use crate::types::{ConnectionDto, RateLimitEventType};
+use crate::types::{ConnectionDto, ConnectionStatus, CreateConnectionRequest, RateLimitEventType};
 
 /// Facade over all connection-domain operations.
 ///
@@ -88,6 +88,63 @@ impl ConnectionsFacade {
             .get_with_parameters(id, tenant_id)
             .await
             .map_err(ConnectionsError::Database)
+    }
+
+    /// Get the default connection for an agent/operator, including secret parameters.
+    ///
+    /// SECURITY: Only use for internal runtime credential resolution.
+    pub async fn get_default_with_parameters(
+        &self,
+        tenant_id: &str,
+        default_for: &str,
+    ) -> Result<Option<ConnectionWithParameters>, ConnectionsError> {
+        self.repo()
+            .get_default_connection_with_parameters(tenant_id, default_for)
+            .await
+            .map_err(ConnectionsError::Database)
+    }
+
+    /// Ensure a tenant has a default connection for an agent/operator.
+    ///
+    /// If the default already exists, returns that connection id. Otherwise a
+    /// new active connection is created and mapped as the default.
+    pub async fn ensure_default_connection(
+        &self,
+        tenant_id: &str,
+        default_for: &str,
+        title: String,
+        integration_id: String,
+        connection_parameters: Value,
+    ) -> Result<String, ConnectionsError> {
+        let repo = self.repo();
+        if let Some(connection_id) = repo
+            .get_default_connection_id(tenant_id, default_for)
+            .await
+            .map_err(ConnectionsError::Database)?
+        {
+            return Ok(connection_id);
+        }
+
+        let connection_id = uuid::Uuid::new_v4().to_string();
+        let request = CreateConnectionRequest {
+            title,
+            connection_subtype: None,
+            connection_parameters: Some(connection_parameters),
+            integration_id: Some(integration_id),
+            rate_limit_config: None,
+            valid_until: None,
+            status: Some(ConnectionStatus::Active),
+            is_default_file_storage: None,
+            default_for: None,
+        };
+        repo.create(&request, tenant_id, &connection_id)
+            .await
+            .map_err(ConnectionsError::Database)?;
+        repo.replace_defaults_for_connection(tenant_id, &connection_id, &[default_for.to_string()])
+            .await
+            .map_err(ConnectionsError::Database)?;
+
+        Ok(connection_id)
     }
 
     /// Get a connection by ID without tenant filter (for webhook routing).
