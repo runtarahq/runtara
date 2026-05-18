@@ -42,6 +42,32 @@ impl Guest for Component {
 
     fn list_capabilities() -> Vec<CapabilityInfo> {
         vec![
+            // Brands / Business Units
+            cap(
+                "list-business-units",
+                "list_business_units",
+                "List Brands",
+                "List HubSpot brands/business units available to a specific user",
+                LIST_BUSINESS_UNITS_INPUT_SCHEMA,
+                LIST_BUSINESS_UNITS_OUTPUT_SCHEMA,
+            ),
+            // Properties / Schemas
+            cap(
+                "list-object-properties",
+                "list_object_properties",
+                "List Object Properties",
+                "Read all property definitions for a HubSpot CRM object type",
+                LIST_OBJECT_PROPERTIES_INPUT_SCHEMA,
+                LIST_OBJECT_PROPERTIES_OUTPUT_SCHEMA,
+            ),
+            cap(
+                "get-object-property",
+                "get_object_property",
+                "Get Object Property",
+                "Read one property definition for a HubSpot CRM object type",
+                GET_OBJECT_PROPERTY_INPUT_SCHEMA,
+                GET_OBJECT_PROPERTY_OUTPUT_SCHEMA,
+            ),
             // Contacts
             cap(
                 "list-contacts",
@@ -222,6 +248,22 @@ impl Guest for Component {
                 UPDATE_QUOTE_INPUT_SCHEMA,
                 UPDATE_QUOTE_OUTPUT_SCHEMA,
             ),
+            cap(
+                "delete-quote",
+                "delete_quote",
+                "Delete Quote",
+                "Archive (soft-delete) a quote by ID",
+                DELETE_QUOTE_INPUT_SCHEMA,
+                DELETE_QUOTE_OUTPUT_SCHEMA,
+            ),
+            cap(
+                "search-quotes",
+                "search_quotes",
+                "Search Quotes",
+                "Search quotes using filters, full-text query, or both",
+                SEARCH_QUOTES_INPUT_SCHEMA,
+                SEARCH_QUOTES_OUTPUT_SCHEMA,
+            ),
             // Line items
             cap(
                 "list-line-items",
@@ -232,6 +274,14 @@ impl Guest for Component {
                 LIST_LINE_ITEMS_OUTPUT_SCHEMA,
             ),
             cap(
+                "get-line-item",
+                "get_line_item",
+                "Get Line Item",
+                "Retrieve a single line item by ID",
+                GET_LINE_ITEM_INPUT_SCHEMA,
+                GET_LINE_ITEM_OUTPUT_SCHEMA,
+            ),
+            cap(
                 "create-line-item",
                 "create_line_item",
                 "Create Line Item",
@@ -240,12 +290,28 @@ impl Guest for Component {
                 CREATE_LINE_ITEM_OUTPUT_SCHEMA,
             ),
             cap(
+                "update-line-item",
+                "update_line_item",
+                "Update Line Item",
+                "Update an existing line item's properties",
+                UPDATE_LINE_ITEM_INPUT_SCHEMA,
+                UPDATE_LINE_ITEM_OUTPUT_SCHEMA,
+            ),
+            cap(
                 "delete-line-item",
                 "delete_line_item",
                 "Delete Line Item",
                 "Archive (soft-delete) a line item by ID",
                 DELETE_LINE_ITEM_INPUT_SCHEMA,
                 DELETE_LINE_ITEM_OUTPUT_SCHEMA,
+            ),
+            cap(
+                "search-line-items",
+                "search_line_items",
+                "Search Line Items",
+                "Search line items using filters, full-text query, or both",
+                SEARCH_LINE_ITEMS_INPUT_SCHEMA,
+                SEARCH_LINE_ITEMS_OUTPUT_SCHEMA,
             ),
             // Owners
             cap(
@@ -298,6 +364,39 @@ impl Guest for Component {
                 LIST_ASSOCIATIONS_INPUT_SCHEMA,
                 LIST_ASSOCIATIONS_OUTPUT_SCHEMA,
             ),
+            // Webhook Subscriptions
+            cap(
+                "list-webhook-subscriptions",
+                "list_webhook_subscriptions",
+                "List Webhook Subscriptions",
+                "List webhook event subscriptions for a HubSpot app",
+                LIST_WEBHOOK_SUBSCRIPTIONS_INPUT_SCHEMA,
+                LIST_WEBHOOK_SUBSCRIPTIONS_OUTPUT_SCHEMA,
+            ),
+            cap(
+                "create-webhook-subscription",
+                "create_webhook_subscription",
+                "Create Webhook Subscription",
+                "Create a webhook event subscription for a HubSpot app",
+                CREATE_WEBHOOK_SUBSCRIPTION_INPUT_SCHEMA,
+                CREATE_WEBHOOK_SUBSCRIPTION_OUTPUT_SCHEMA,
+            ),
+            cap(
+                "update-webhook-subscription",
+                "update_webhook_subscription",
+                "Update Webhook Subscription",
+                "Activate or pause a webhook event subscription for a HubSpot app",
+                UPDATE_WEBHOOK_SUBSCRIPTION_INPUT_SCHEMA,
+                UPDATE_WEBHOOK_SUBSCRIPTION_OUTPUT_SCHEMA,
+            ),
+            cap(
+                "delete-webhook-subscription",
+                "delete_webhook_subscription",
+                "Delete Webhook Subscription",
+                "Delete a webhook event subscription for a HubSpot app",
+                DELETE_WEBHOOK_SUBSCRIPTION_INPUT_SCHEMA,
+                DELETE_WEBHOOK_SUBSCRIPTION_OUTPUT_SCHEMA,
+            ),
         ]
     }
 
@@ -307,6 +406,11 @@ impl Guest for Component {
         connection: Option<ConnectionInfo>,
     ) -> Result<String, ErrorInfo> {
         match capability_id.as_str() {
+            // Brands / Business Units
+            "list-business-units" => list_business_units(&input, connection.as_ref()),
+            // Properties / Schemas
+            "list-object-properties" => list_object_properties(&input, connection.as_ref()),
+            "get-object-property" => get_object_property(&input, connection.as_ref()),
             // Contacts
             "list-contacts" => list_contacts(&input, connection.as_ref()),
             "get-contact" => get_contact(&input, connection.as_ref()),
@@ -333,10 +437,15 @@ impl Guest for Component {
             "get-quote" => get_quote(&input, connection.as_ref()),
             "create-quote" => create_quote(&input, connection.as_ref()),
             "update-quote" => update_quote(&input, connection.as_ref()),
+            "delete-quote" => delete_quote(&input, connection.as_ref()),
+            "search-quotes" => search_quotes(&input, connection.as_ref()),
             // Line items
             "list-line-items" => list_line_items(&input, connection.as_ref()),
+            "get-line-item" => get_line_item(&input, connection.as_ref()),
             "create-line-item" => create_line_item(&input, connection.as_ref()),
+            "update-line-item" => update_line_item(&input, connection.as_ref()),
             "delete-line-item" => delete_line_item(&input, connection.as_ref()),
+            "search-line-items" => search_line_items(&input, connection.as_ref()),
             // Owners
             "list-owners" => list_owners(&input, connection.as_ref()),
             "get-owner" => get_owner(&input, connection.as_ref()),
@@ -346,6 +455,17 @@ impl Guest for Component {
             // Associations
             "create-association" => create_association(&input, connection.as_ref()),
             "list-associations" => list_associations(&input, connection.as_ref()),
+            // Webhook Subscriptions
+            "list-webhook-subscriptions" => list_webhook_subscriptions(&input, connection.as_ref()),
+            "create-webhook-subscription" => {
+                create_webhook_subscription(&input, connection.as_ref())
+            }
+            "update-webhook-subscription" => {
+                update_webhook_subscription(&input, connection.as_ref())
+            }
+            "delete-webhook-subscription" => {
+                delete_webhook_subscription(&input, connection.as_ref())
+            }
             other => Err(permanent_err(
                 "UNKNOWN_CAPABILITY",
                 format!("hubspot agent has no capability `{other}`"),
@@ -684,6 +804,103 @@ fn truncate(s: &str, max: usize) -> String {
 // =============================================================================
 // Capability implementations
 // =============================================================================
+
+// -----------------------------------------------------------------------------
+// Brands / Business Units
+// -----------------------------------------------------------------------------
+
+fn list_business_units(
+    input_json: &str,
+    connection: Option<&ConnectionInfo>,
+) -> Result<String, ErrorInfo> {
+    #[derive(serde::Deserialize)]
+    struct Input {
+        user_id: String,
+    }
+    let input: Input = serde_json::from_str(input_json)
+        .map_err(|e| permanent_err("INPUT_DESERIALIZATION_ERROR", e.to_string()))?;
+    let conn = require_connection(connection)?;
+
+    let result = hubspot_get(
+        conn,
+        &format!("/business-units/v3/business-units/user/{}", input.user_id),
+        HashMap::new(),
+    )?;
+    serde_json::to_string(&serde_json::json!({
+        "results": result["results"],
+    }))
+    .map_err(|e| permanent_err("OUTPUT_SERIALIZATION_ERROR", e.to_string()))
+}
+
+// -----------------------------------------------------------------------------
+// Properties / Schemas
+// -----------------------------------------------------------------------------
+
+fn list_object_properties(
+    input_json: &str,
+    connection: Option<&ConnectionInfo>,
+) -> Result<String, ErrorInfo> {
+    #[derive(serde::Deserialize)]
+    struct Input {
+        object_type: String,
+        #[serde(default)]
+        archived: Option<bool>,
+        #[serde(default)]
+        data_sensitivity: Option<String>,
+    }
+    let input: Input = serde_json::from_str(input_json)
+        .map_err(|e| permanent_err("INPUT_DESERIALIZATION_ERROR", e.to_string()))?;
+    let conn = require_connection(connection)?;
+
+    let mut query = HashMap::new();
+    if let Some(archived) = input.archived {
+        query.insert("archived".to_string(), archived.to_string());
+    }
+    push_str(&mut query, "dataSensitivity", &input.data_sensitivity);
+    let result = hubspot_get(
+        conn,
+        &format!("/crm/v3/properties/{}", input.object_type),
+        query,
+    )?;
+    serde_json::to_string(&serde_json::json!({
+        "results": result["results"],
+    }))
+    .map_err(|e| permanent_err("OUTPUT_SERIALIZATION_ERROR", e.to_string()))
+}
+
+fn get_object_property(
+    input_json: &str,
+    connection: Option<&ConnectionInfo>,
+) -> Result<String, ErrorInfo> {
+    #[derive(serde::Deserialize)]
+    struct Input {
+        object_type: String,
+        property_name: String,
+        #[serde(default)]
+        archived: Option<bool>,
+        #[serde(default)]
+        data_sensitivity: Option<String>,
+    }
+    let input: Input = serde_json::from_str(input_json)
+        .map_err(|e| permanent_err("INPUT_DESERIALIZATION_ERROR", e.to_string()))?;
+    let conn = require_connection(connection)?;
+
+    let mut query = HashMap::new();
+    if let Some(archived) = input.archived {
+        query.insert("archived".to_string(), archived.to_string());
+    }
+    push_str(&mut query, "dataSensitivity", &input.data_sensitivity);
+    let result = hubspot_get(
+        conn,
+        &format!(
+            "/crm/v3/properties/{}/{}",
+            input.object_type, input.property_name
+        ),
+        query,
+    )?;
+    serde_json::to_string(&serde_json::json!({ "property": result }))
+        .map_err(|e| permanent_err("OUTPUT_SERIALIZATION_ERROR", e.to_string()))
+}
 
 // -----------------------------------------------------------------------------
 // Contacts
@@ -1258,6 +1475,63 @@ fn update_quote(
         .map_err(|e| permanent_err("OUTPUT_SERIALIZATION_ERROR", e.to_string()))
 }
 
+fn delete_quote(
+    input_json: &str,
+    connection: Option<&ConnectionInfo>,
+) -> Result<String, ErrorInfo> {
+    #[derive(serde::Deserialize)]
+    struct Input {
+        quote_id: String,
+    }
+    let input: Input = serde_json::from_str(input_json)
+        .map_err(|e| permanent_err("INPUT_DESERIALIZATION_ERROR", e.to_string()))?;
+    let conn = require_connection(connection)?;
+
+    hubspot_delete(conn, &format!("/crm/v3/objects/quotes/{}", input.quote_id))?;
+    serde_json::to_string(&serde_json::json!({ "success": true }))
+        .map_err(|e| permanent_err("OUTPUT_SERIALIZATION_ERROR", e.to_string()))
+}
+
+fn search_quotes(
+    input_json: &str,
+    connection: Option<&ConnectionInfo>,
+) -> Result<String, ErrorInfo> {
+    #[derive(serde::Deserialize)]
+    struct Input {
+        #[serde(default)]
+        filter_groups: Option<Value>,
+        #[serde(default)]
+        query: Option<String>,
+        #[serde(default)]
+        properties: Option<Value>,
+        #[serde(default)]
+        limit: Option<i64>,
+        #[serde(default)]
+        after: Option<String>,
+        #[serde(default)]
+        sorts: Option<Value>,
+    }
+    let input: Input = serde_json::from_str(input_json)
+        .map_err(|e| permanent_err("INPUT_DESERIALIZATION_ERROR", e.to_string()))?;
+    let conn = require_connection(connection)?;
+
+    let body = build_search_body(
+        input.filter_groups,
+        input.query,
+        input.properties,
+        input.limit,
+        input.after,
+        input.sorts,
+    );
+    let result = hubspot_post(conn, "/crm/v3/objects/quotes/search", body)?;
+    serde_json::to_string(&serde_json::json!({
+        "total": result["total"].as_i64().unwrap_or(0),
+        "results": result["results"],
+        "paging": result.get("paging").cloned().unwrap_or(Value::Null),
+    }))
+    .map_err(|e| permanent_err("OUTPUT_SERIALIZATION_ERROR", e.to_string()))
+}
+
 // -----------------------------------------------------------------------------
 // Line Items
 // -----------------------------------------------------------------------------
@@ -1294,6 +1568,41 @@ fn list_line_items(
     .map_err(|e| permanent_err("OUTPUT_SERIALIZATION_ERROR", e.to_string()))
 }
 
+fn get_line_item(
+    input_json: &str,
+    connection: Option<&ConnectionInfo>,
+) -> Result<String, ErrorInfo> {
+    #[derive(serde::Deserialize)]
+    struct Input {
+        line_item_id: String,
+        #[serde(default)]
+        properties: Option<String>,
+        #[serde(default)]
+        properties_with_history: Option<String>,
+        #[serde(default)]
+        associations: Option<String>,
+    }
+    let input: Input = serde_json::from_str(input_json)
+        .map_err(|e| permanent_err("INPUT_DESERIALIZATION_ERROR", e.to_string()))?;
+    let conn = require_connection(connection)?;
+
+    let mut query = HashMap::new();
+    push_properties(&mut query, &input.properties);
+    push_str(
+        &mut query,
+        "propertiesWithHistory",
+        &input.properties_with_history,
+    );
+    push_str(&mut query, "associations", &input.associations);
+    let result = hubspot_get(
+        conn,
+        &format!("/crm/v3/objects/line_items/{}", input.line_item_id),
+        query,
+    )?;
+    serde_json::to_string(&serde_json::json!({ "line_item": result }))
+        .map_err(|e| permanent_err("OUTPUT_SERIALIZATION_ERROR", e.to_string()))
+}
+
 fn create_line_item(
     input_json: &str,
     connection: Option<&ConnectionInfo>,
@@ -1309,6 +1618,28 @@ fn create_line_item(
     let result = hubspot_post(
         conn,
         "/crm/v3/objects/line_items",
+        crm_object_body(&input.properties),
+    )?;
+    serde_json::to_string(&serde_json::json!({ "line_item": result }))
+        .map_err(|e| permanent_err("OUTPUT_SERIALIZATION_ERROR", e.to_string()))
+}
+
+fn update_line_item(
+    input_json: &str,
+    connection: Option<&ConnectionInfo>,
+) -> Result<String, ErrorInfo> {
+    #[derive(serde::Deserialize)]
+    struct Input {
+        line_item_id: String,
+        properties: Value,
+    }
+    let input: Input = serde_json::from_str(input_json)
+        .map_err(|e| permanent_err("INPUT_DESERIALIZATION_ERROR", e.to_string()))?;
+    let conn = require_connection(connection)?;
+
+    let result = hubspot_patch(
+        conn,
+        &format!("/crm/v3/objects/line_items/{}", input.line_item_id),
         crm_object_body(&input.properties),
     )?;
     serde_json::to_string(&serde_json::json!({ "line_item": result }))
@@ -1333,6 +1664,46 @@ fn delete_line_item(
     )?;
     serde_json::to_string(&serde_json::json!({ "success": true }))
         .map_err(|e| permanent_err("OUTPUT_SERIALIZATION_ERROR", e.to_string()))
+}
+
+fn search_line_items(
+    input_json: &str,
+    connection: Option<&ConnectionInfo>,
+) -> Result<String, ErrorInfo> {
+    #[derive(serde::Deserialize)]
+    struct Input {
+        #[serde(default)]
+        filter_groups: Option<Value>,
+        #[serde(default)]
+        query: Option<String>,
+        #[serde(default)]
+        properties: Option<Value>,
+        #[serde(default)]
+        limit: Option<i64>,
+        #[serde(default)]
+        after: Option<String>,
+        #[serde(default)]
+        sorts: Option<Value>,
+    }
+    let input: Input = serde_json::from_str(input_json)
+        .map_err(|e| permanent_err("INPUT_DESERIALIZATION_ERROR", e.to_string()))?;
+    let conn = require_connection(connection)?;
+
+    let body = build_search_body(
+        input.filter_groups,
+        input.query,
+        input.properties,
+        input.limit,
+        input.after,
+        input.sorts,
+    );
+    let result = hubspot_post(conn, "/crm/v3/objects/line_items/search", body)?;
+    serde_json::to_string(&serde_json::json!({
+        "total": result["total"].as_i64().unwrap_or(0),
+        "results": result["results"],
+        "paging": result.get("paging").cloned().unwrap_or(Value::Null),
+    }))
+    .map_err(|e| permanent_err("OUTPUT_SERIALIZATION_ERROR", e.to_string()))
 }
 
 // -----------------------------------------------------------------------------
@@ -1501,6 +1872,131 @@ fn list_associations(
         "paging": result.get("paging").cloned().unwrap_or(Value::Null),
     }))
     .map_err(|e| permanent_err("OUTPUT_SERIALIZATION_ERROR", e.to_string()))
+}
+
+// -----------------------------------------------------------------------------
+// Webhook Subscriptions
+// -----------------------------------------------------------------------------
+
+fn list_webhook_subscriptions(
+    input_json: &str,
+    connection: Option<&ConnectionInfo>,
+) -> Result<String, ErrorInfo> {
+    #[derive(serde::Deserialize)]
+    struct Input {
+        app_id: String,
+    }
+    let input: Input = serde_json::from_str(input_json)
+        .map_err(|e| permanent_err("INPUT_DESERIALIZATION_ERROR", e.to_string()))?;
+    let conn = require_connection(connection)?;
+
+    let result = hubspot_get(
+        conn,
+        &format!("/webhooks/2026-03/{}/subscriptions", input.app_id),
+        HashMap::new(),
+    )?;
+    serde_json::to_string(&serde_json::json!({ "subscriptions": result }))
+        .map_err(|e| permanent_err("OUTPUT_SERIALIZATION_ERROR", e.to_string()))
+}
+
+fn create_webhook_subscription(
+    input_json: &str,
+    connection: Option<&ConnectionInfo>,
+) -> Result<String, ErrorInfo> {
+    #[derive(serde::Deserialize)]
+    struct Input {
+        app_id: String,
+        event_type: String,
+        #[serde(default)]
+        active: bool,
+        #[serde(default)]
+        property_name: Option<String>,
+        #[serde(default)]
+        object_type_id: Option<String>,
+        #[serde(default)]
+        event_type_name: Option<String>,
+    }
+    let input: Input = serde_json::from_str(input_json)
+        .map_err(|e| permanent_err("INPUT_DESERIALIZATION_ERROR", e.to_string()))?;
+    let conn = require_connection(connection)?;
+
+    let mut body = json!({
+        "eventType": input.event_type,
+        "active": input.active,
+    });
+    if let Some(property_name) = &input.property_name {
+        if !property_name.is_empty() {
+            body["propertyName"] = Value::String(property_name.clone());
+        }
+    }
+    if let Some(object_type_id) = &input.object_type_id {
+        if !object_type_id.is_empty() {
+            body["objectTypeId"] = Value::String(object_type_id.clone());
+        }
+    }
+    if let Some(event_type_name) = &input.event_type_name {
+        if !event_type_name.is_empty() {
+            body["eventTypeName"] = Value::String(event_type_name.clone());
+        }
+    }
+
+    let result = hubspot_post(
+        conn,
+        &format!("/webhooks/2026-03/{}/subscriptions", input.app_id),
+        body,
+    )?;
+    serde_json::to_string(&serde_json::json!({ "subscription": result }))
+        .map_err(|e| permanent_err("OUTPUT_SERIALIZATION_ERROR", e.to_string()))
+}
+
+fn update_webhook_subscription(
+    input_json: &str,
+    connection: Option<&ConnectionInfo>,
+) -> Result<String, ErrorInfo> {
+    #[derive(serde::Deserialize)]
+    struct Input {
+        app_id: String,
+        subscription_id: String,
+        active: bool,
+    }
+    let input: Input = serde_json::from_str(input_json)
+        .map_err(|e| permanent_err("INPUT_DESERIALIZATION_ERROR", e.to_string()))?;
+    let conn = require_connection(connection)?;
+
+    let result = hubspot_put(
+        conn,
+        &format!(
+            "/webhooks/2026-03/{}/subscriptions/{}",
+            input.app_id, input.subscription_id
+        ),
+        json!({ "active": input.active }),
+    )?;
+    serde_json::to_string(&serde_json::json!({ "subscription": result }))
+        .map_err(|e| permanent_err("OUTPUT_SERIALIZATION_ERROR", e.to_string()))
+}
+
+fn delete_webhook_subscription(
+    input_json: &str,
+    connection: Option<&ConnectionInfo>,
+) -> Result<String, ErrorInfo> {
+    #[derive(serde::Deserialize)]
+    struct Input {
+        app_id: String,
+        subscription_id: String,
+    }
+    let input: Input = serde_json::from_str(input_json)
+        .map_err(|e| permanent_err("INPUT_DESERIALIZATION_ERROR", e.to_string()))?;
+    let conn = require_connection(connection)?;
+
+    hubspot_delete(
+        conn,
+        &format!(
+            "/webhooks/2026-03/{}/subscriptions/{}",
+            input.app_id, input.subscription_id
+        ),
+    )?;
+    serde_json::to_string(&serde_json::json!({ "success": true }))
+        .map_err(|e| permanent_err("OUTPUT_SERIALIZATION_ERROR", e.to_string()))
 }
 
 // -----------------------------------------------------------------------------
@@ -2069,6 +2565,225 @@ const LIST_ASSOCIATIONS_OUTPUT_SCHEMA: &str = r#"{
     "properties": {
         "results": { "description": "Array of associated object references" },
         "paging":  { "description": "Pagination info" }
+    }
+}"#;
+
+// --- Brands / Business Units ---
+
+const LIST_BUSINESS_UNITS_INPUT_SCHEMA: &str = r#"{
+    "type": "object",
+    "required": ["user_id"],
+    "properties": {
+        "user_id": { "type": "string", "description": "HubSpot user ID whose accessible brands/business units should be listed", "example": "12345" }
+    }
+}"#;
+
+const LIST_BUSINESS_UNITS_OUTPUT_SCHEMA: &str = r#"{
+    "type": "object",
+    "properties": {
+        "results": { "description": "Array of brand/business unit objects" }
+    }
+}"#;
+
+// --- Properties / Schemas ---
+
+const LIST_OBJECT_PROPERTIES_INPUT_SCHEMA: &str = r#"{
+    "type": "object",
+    "required": ["object_type"],
+    "properties": {
+        "object_type":      { "type": "string",  "description": "HubSpot object type or object type ID (e.g. 'deals', 'companies', 'contacts', 'line_item', 'quotes', '0-3')" },
+        "archived":         { "type": "boolean", "description": "Whether to include archived property definitions" },
+        "data_sensitivity": { "type": "string",  "description": "Optional dataSensitivity query value, e.g. 'sensitive' for Enterprise sensitive data properties" }
+    }
+}"#;
+
+const LIST_OBJECT_PROPERTIES_OUTPUT_SCHEMA: &str = r#"{
+    "type": "object",
+    "properties": {
+        "results": { "description": "Array of property definition objects" }
+    }
+}"#;
+
+const GET_OBJECT_PROPERTY_INPUT_SCHEMA: &str = r#"{
+    "type": "object",
+    "required": ["object_type", "property_name"],
+    "properties": {
+        "object_type":      { "type": "string",  "description": "HubSpot object type or object type ID (e.g. 'deals', 'companies', 'contacts', 'line_item', 'quotes', '0-3')" },
+        "property_name":    { "type": "string",  "description": "Internal property name to retrieve", "example": "bc_so_number" },
+        "archived":         { "type": "boolean", "description": "Whether to allow archived property definitions" },
+        "data_sensitivity": { "type": "string",  "description": "Optional dataSensitivity query value, e.g. 'sensitive' for Enterprise sensitive data properties" }
+    }
+}"#;
+
+const GET_OBJECT_PROPERTY_OUTPUT_SCHEMA: &str = r#"{
+    "type": "object",
+    "properties": {
+        "property": { "description": "Property definition object" }
+    }
+}"#;
+
+// --- Quotes (extended) ---
+
+const DELETE_QUOTE_INPUT_SCHEMA: &str = r#"{
+    "type": "object",
+    "required": ["quote_id"],
+    "properties": {
+        "quote_id": { "type": "string", "description": "HubSpot quote ID to archive" }
+    }
+}"#;
+
+const DELETE_QUOTE_OUTPUT_SCHEMA: &str = r#"{
+    "type": "object",
+    "properties": {
+        "success": { "type": "boolean", "description": "Whether the delete succeeded" }
+    }
+}"#;
+
+const SEARCH_QUOTES_INPUT_SCHEMA: &str = r#"{
+    "type": "object",
+    "properties": {
+        "filter_groups": { "description": "Array of filter groups for the search" },
+        "query":         { "type": "string",  "description": "Full-text search query string" },
+        "properties":    { "description": "Array of property names to return" },
+        "limit":         { "type": "integer", "description": "Maximum number of results (1-200)", "default": 10 },
+        "after":         { "type": "string",  "description": "Cursor for pagination" },
+        "sorts":         { "description": "Array of sort rules" }
+    }
+}"#;
+
+const SEARCH_QUOTES_OUTPUT_SCHEMA: &str = r#"{
+    "type": "object",
+    "properties": {
+        "total":   { "type": "integer", "description": "Total matching results" },
+        "results": { "description": "Array of matching quote objects" },
+        "paging":  { "description": "Pagination info" }
+    }
+}"#;
+
+// --- Line items (extended) ---
+
+const GET_LINE_ITEM_INPUT_SCHEMA: &str = r#"{
+    "type": "object",
+    "required": ["line_item_id"],
+    "properties": {
+        "line_item_id":            { "type": "string", "description": "HubSpot line item ID", "example": "12345" },
+        "properties":              { "type": "string", "description": "Comma-separated list of properties to return" },
+        "properties_with_history": { "type": "string", "description": "Comma-separated list of properties to return with value history" },
+        "associations":            { "type": "string", "description": "Comma-separated list of associated object types to include" }
+    }
+}"#;
+
+const GET_LINE_ITEM_OUTPUT_SCHEMA: &str = r#"{
+    "type": "object",
+    "properties": {
+        "line_item": { "description": "Line item object" }
+    }
+}"#;
+
+const UPDATE_LINE_ITEM_INPUT_SCHEMA: &str = r#"{
+    "type": "object",
+    "required": ["line_item_id", "properties"],
+    "properties": {
+        "line_item_id": { "type": "string", "description": "HubSpot line item ID to update" },
+        "properties":   { "description": "JSON object of line item properties to update" }
+    }
+}"#;
+
+const UPDATE_LINE_ITEM_OUTPUT_SCHEMA: &str = r#"{
+    "type": "object",
+    "properties": {
+        "line_item": { "description": "Updated line item object" }
+    }
+}"#;
+
+const SEARCH_LINE_ITEMS_INPUT_SCHEMA: &str = r#"{
+    "type": "object",
+    "properties": {
+        "filter_groups": { "description": "Array of filter groups for the search" },
+        "query":         { "type": "string",  "description": "Full-text search query string" },
+        "properties":    { "description": "Array of property names to return" },
+        "limit":         { "type": "integer", "description": "Maximum number of results (1-200)", "default": 10 },
+        "after":         { "type": "string",  "description": "Cursor for pagination" },
+        "sorts":         { "description": "Array of sort rules" }
+    }
+}"#;
+
+const SEARCH_LINE_ITEMS_OUTPUT_SCHEMA: &str = r#"{
+    "type": "object",
+    "properties": {
+        "total":   { "type": "integer", "description": "Total matching results" },
+        "results": { "description": "Array of matching line item objects" },
+        "paging":  { "description": "Pagination info" }
+    }
+}"#;
+
+// --- Webhook Subscriptions ---
+
+const LIST_WEBHOOK_SUBSCRIPTIONS_INPUT_SCHEMA: &str = r#"{
+    "type": "object",
+    "required": ["app_id"],
+    "properties": {
+        "app_id": { "type": "string", "description": "HubSpot app ID whose webhook subscriptions should be listed" }
+    }
+}"#;
+
+const LIST_WEBHOOK_SUBSCRIPTIONS_OUTPUT_SCHEMA: &str = r#"{
+    "type": "object",
+    "properties": {
+        "subscriptions": { "description": "Webhook subscription array or response object" }
+    }
+}"#;
+
+const CREATE_WEBHOOK_SUBSCRIPTION_INPUT_SCHEMA: &str = r#"{
+    "type": "object",
+    "required": ["app_id", "event_type", "active"],
+    "properties": {
+        "app_id":          { "type": "string",  "description": "HubSpot app ID to create the webhook subscription under" },
+        "event_type":      { "type": "string",  "description": "Webhook event type (e.g. 'deal.propertyChange', 'line_item.propertyChange', 'object.creation')" },
+        "active":          { "type": "boolean", "description": "Whether the subscription should be active immediately", "default": false },
+        "property_name":   { "type": "string",  "description": "Property name for propertyChange event types" },
+        "object_type_id":  { "type": "string",  "description": "Object type ID for generic object.* event types" },
+        "event_type_name": { "type": "string",  "description": "Optional human-readable event type name" }
+    }
+}"#;
+
+const CREATE_WEBHOOK_SUBSCRIPTION_OUTPUT_SCHEMA: &str = r#"{
+    "type": "object",
+    "properties": {
+        "subscription": { "description": "Created webhook subscription object" }
+    }
+}"#;
+
+const UPDATE_WEBHOOK_SUBSCRIPTION_INPUT_SCHEMA: &str = r#"{
+    "type": "object",
+    "required": ["app_id", "subscription_id", "active"],
+    "properties": {
+        "app_id":          { "type": "string",  "description": "HubSpot app ID that owns the webhook subscription" },
+        "subscription_id": { "type": "string",  "description": "Webhook subscription ID to update" },
+        "active":          { "type": "boolean", "description": "Whether the subscription should be active" }
+    }
+}"#;
+
+const UPDATE_WEBHOOK_SUBSCRIPTION_OUTPUT_SCHEMA: &str = r#"{
+    "type": "object",
+    "properties": {
+        "subscription": { "description": "Updated webhook subscription object" }
+    }
+}"#;
+
+const DELETE_WEBHOOK_SUBSCRIPTION_INPUT_SCHEMA: &str = r#"{
+    "type": "object",
+    "required": ["app_id", "subscription_id"],
+    "properties": {
+        "app_id":          { "type": "string", "description": "HubSpot app ID that owns the webhook subscription" },
+        "subscription_id": { "type": "string", "description": "Webhook subscription ID to delete" }
+    }
+}"#;
+
+const DELETE_WEBHOOK_SUBSCRIPTION_OUTPUT_SCHEMA: &str = r#"{
+    "type": "object",
+    "properties": {
+        "success": { "type": "boolean", "description": "Whether the delete succeeded" }
     }
 }"#;
 
