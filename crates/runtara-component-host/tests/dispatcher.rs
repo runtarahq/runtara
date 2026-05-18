@@ -74,18 +74,26 @@ async fn dispatcher_invokes_crypto_hash() -> anyhow::Result<()> {
             tenant_id: "tenant-test".into(),
             agent_id: "crypto".into(),
             capability_id: "hash".into(),
-            input: serde_json::json!({ "value": "hello" }),
+            input: serde_json::json!({ "data": "hello" }),
             connection: None,
         })
         .await?;
 
     assert!(result.success, "expected success, got {:?}", result.error);
     let out = result.output.expect("output present");
-    let hex = out.get("hex").and_then(|v| v.as_str()).expect("hex string");
+    let hash = out
+        .get("hash")
+        .and_then(|v| v.as_str())
+        .expect("hash string");
     assert_eq!(
-        hex,
+        hash,
         "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
     );
+    assert_eq!(
+        out.get("algorithm").and_then(|v| v.as_str()),
+        Some("sha256")
+    );
+    assert_eq!(out.get("format").and_then(|v| v.as_str()), Some("hex"));
     assert!(result.execution_time_ms > 0.0);
     Ok(())
 }

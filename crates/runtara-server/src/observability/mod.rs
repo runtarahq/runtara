@@ -47,6 +47,13 @@ pub struct Metrics {
     pub db_queries_total: Counter<u64>,
     pub db_query_duration: Histogram<f64>,
     pub db_pool_connections_active: UpDownCounter<i64>,
+
+    // Agent test metrics. Labeled by `engine` (components|legacy), `agent`,
+    // and `capability` so dashboards can compare per-engine latency and
+    // throughput during the migration.
+    pub agent_test_total: Counter<u64>,
+    pub agent_test_failed: Counter<u64>,
+    pub agent_test_duration: Histogram<f64>,
 }
 
 impl Metrics {
@@ -136,6 +143,23 @@ impl Metrics {
             .with_description("Active database pool connections")
             .build();
 
+        // Agent test metrics
+        let agent_test_total = meter
+            .u64_counter("runtara.agent_test.total")
+            .with_description("Total agent test invocations")
+            .build();
+
+        let agent_test_failed = meter
+            .u64_counter("runtara.agent_test.failed")
+            .with_description("Failed agent test invocations")
+            .build();
+
+        let agent_test_duration = meter
+            .f64_histogram("runtara.agent_test.duration")
+            .with_description("Agent test invocation duration in seconds")
+            .with_unit("s")
+            .build();
+
         Self {
             meter,
             worker_executions_total,
@@ -153,6 +177,9 @@ impl Metrics {
             db_queries_total,
             db_query_duration,
             db_pool_connections_active,
+            agent_test_total,
+            agent_test_failed,
+            agent_test_duration,
         }
     }
 

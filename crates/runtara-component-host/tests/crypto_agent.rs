@@ -68,7 +68,7 @@ async fn crypto_list_capabilities_and_hash() -> anyhow::Result<()> {
     let (mut store2, agent2) = instantiate(&engine, &loaded.pre, state2).await?;
     let result = agent2
         .runtara_agent_capabilities()
-        .call_invoke(&mut store2, "hash", r#"{"value":"hello"}"#, None)
+        .call_invoke(&mut store2, "hash", r#"{"data":"hello"}"#, None)
         .await?
         .map_err(|e| anyhow::anyhow!("guest error: {}: {}", e.code, e.message))?;
 

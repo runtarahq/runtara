@@ -14,11 +14,13 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tracing::{info, warn};
 
+use opentelemetry::KeyValue;
 use runtara_component_host::{
     ComponentDispatcherService, ResolvedConnection, TestCapabilityRequest,
 };
 
 use crate::api::dto::agent_testing::TestEngine;
+use crate::observability::metrics;
 
 use super::dispatcher::DispatcherService;
 
@@ -221,7 +223,7 @@ impl AgentTestingService {
             "Executing agent test"
         );
 
-        match active {
+        let result = match active {
             ActiveEngine::Components => {
                 self.run_via_components(tenant_id, agent_name, capability_id, input, connection_id)
                     .await
@@ -236,7 +238,37 @@ impl AgentTestingService {
                 )
                 .await
             }
+        };
+
+        // Per-engine telemetry: count + duration histogram, labeled by
+        // engine/agent/capability so dashboards can A/B during the migration.
+        if let Some(m) = metrics() {
+            let engine_label = match active {
+                ActiveEngine::Components => "components",
+                ActiveEngine::Legacy => "legacy",
+            };
+            let attrs = [
+                KeyValue::new("engine", engine_label),
+                KeyValue::new("agent", agent_name.to_string()),
+                KeyValue::new("capability", capability_id.to_string()),
+                KeyValue::new("tenant_id", tenant_id.to_string()),
+            ];
+            m.agent_test_total.add(1, &attrs);
+            match &result {
+                Ok(r) => {
+                    m.agent_test_duration
+                        .record(r.execution_time_ms / 1000.0, &attrs);
+                    if !r.success {
+                        m.agent_test_failed.add(1, &attrs);
+                    }
+                }
+                Err(_) => {
+                    m.agent_test_failed.add(1, &attrs);
+                }
+            }
         }
+
+        result
     }
 
     async fn run_via_components(

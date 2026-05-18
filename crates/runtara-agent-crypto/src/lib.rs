@@ -1,8 +1,10 @@
 //! Crypto agent — hashing and HMAC — as a WebAssembly component.
 //!
-//! Phase 1 minimal implementation: two capabilities (hash, hmac) to validate
-//! the end-to-end component pipeline. Full crypto agent (md5, sha1, etc.)
-//! follows once the pattern is proven.
+//! Schema matches the legacy `runtara-agents/src/agents/crypto.rs` agent so
+//! A/B parity tests can compare results byte-for-byte:
+//! - `hash`: SHA-256 / SHA-512 / SHA-1 / MD5, hex or base64 output, string or
+//!   base64-encoded FileData input.
+//! - `hmac`: HMAC-SHA-256 / HMAC-SHA-512, hex or base64 output.
 
 #![cfg(target_arch = "wasm32")]
 
@@ -15,7 +17,106 @@ use bindings::exports::runtara::agent::capabilities::{
     CapabilityInfo, ConnectionInfo, ErrorInfo, Guest, ModuleInfo,
 };
 use hmac::{Hmac, Mac};
-use sha2::{Digest, Sha256};
+use md5::Md5;
+use sha1::Sha1;
+use sha2::{Digest, Sha256, Sha512};
+
+// -----------------------------------------------------------------------------
+// Input types (mirror runtara-agents/src/agents/crypto.rs)
+// -----------------------------------------------------------------------------
+
+#[derive(serde::Deserialize)]
+#[serde(untagged)]
+enum HashDataInput {
+    Text(String),
+    File(FileData),
+}
+
+#[derive(serde::Deserialize)]
+struct FileData {
+    /// Base64-encoded content.
+    content: String,
+    #[serde(default)]
+    #[allow(dead_code)]
+    filename: Option<String>,
+    #[serde(default)]
+    #[allow(dead_code)]
+    mime_type: Option<String>,
+}
+
+impl HashDataInput {
+    fn to_bytes(&self) -> Result<Vec<u8>, ErrorInfo> {
+        match self {
+            HashDataInput::Text(s) => Ok(s.as_bytes().to_vec()),
+            HashDataInput::File(f) => BASE64.decode(&f.content).map_err(|e| ErrorInfo {
+                code: "INVALID_BASE64".into(),
+                message: format!("FileData.content is not valid base64: {e}"),
+                category: "permanent".into(),
+                severity: "error".into(),
+                retryable: false,
+                retry_after_ms: None,
+                attributes: None,
+            }),
+        }
+    }
+}
+
+#[derive(serde::Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+enum HashAlgorithm {
+    #[default]
+    Sha256,
+    Sha512,
+    Sha1,
+    Md5,
+}
+
+#[derive(serde::Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+enum OutputFormat {
+    #[default]
+    Hex,
+    Base64,
+}
+
+#[derive(serde::Deserialize, Default)]
+enum HmacAlgorithm {
+    #[default]
+    #[serde(rename = "hmac-sha256")]
+    HmacSha256,
+    #[serde(rename = "hmac-sha512")]
+    HmacSha512,
+}
+
+#[derive(serde::Deserialize)]
+struct HashInput {
+    data: HashDataInput,
+    #[serde(default)]
+    algorithm: HashAlgorithm,
+    #[serde(default)]
+    output_format: OutputFormat,
+}
+
+#[derive(serde::Deserialize)]
+struct HmacInput {
+    data: HashDataInput,
+    secret: String,
+    #[serde(default)]
+    algorithm: HmacAlgorithm,
+    #[serde(default)]
+    output_format: OutputFormat,
+}
+
+#[derive(serde::Serialize)]
+struct HashResult {
+    hash: String,
+    algorithm: String,
+    format: String,
+}
+
+// -----------------------------------------------------------------------------
+// Component plumbing
+// -----------------------------------------------------------------------------
 
 struct Component;
 
@@ -38,7 +139,11 @@ impl Guest for Component {
                 id: "hash".into(),
                 function_name: "hash".into(),
                 display_name: Some("Hash".into()),
-                description: Some("Compute a SHA-256 hash of a UTF-8 string.".into()),
+                description: Some(
+                    "Hash data using SHA-256, SHA-512, SHA-1, or MD5. \
+                     Accepts strings or base64-encoded files."
+                        .into(),
+                ),
                 has_side_effects: false,
                 is_idempotent: true,
                 rate_limited: false,
@@ -52,13 +157,17 @@ impl Guest for Component {
                 id: "hmac".into(),
                 function_name: "hmac".into(),
                 display_name: Some("HMAC".into()),
-                description: Some("Compute an HMAC-SHA-256 over a UTF-8 string.".into()),
+                description: Some(
+                    "Create HMAC authentication code using HMAC-SHA256 or HMAC-SHA512. \
+                     Accepts strings or base64-encoded files."
+                        .into(),
+                ),
                 has_side_effects: false,
                 is_idempotent: true,
                 rate_limited: false,
                 tags: vec!["crypto".into()],
                 input_schema: HMAC_INPUT_SCHEMA.into(),
-                output_schema: HMAC_OUTPUT_SCHEMA.into(),
+                output_schema: HASH_OUTPUT_SCHEMA.into(),
                 known_errors: vec![],
                 compensation_hint: None,
             },
@@ -72,7 +181,7 @@ impl Guest for Component {
     ) -> Result<String, ErrorInfo> {
         match capability_id.as_str() {
             "hash" => hash(&input),
-            "hmac" => hmac_sha256(&input),
+            "hmac" => hmac_capability(&input),
             other => Err(ErrorInfo {
                 code: "UNKNOWN_CAPABILITY".into(),
                 message: format!("crypto agent has no capability `{other}`"),
@@ -87,59 +196,85 @@ impl Guest for Component {
 }
 
 fn hash(input_json: &str) -> Result<String, ErrorInfo> {
-    #[derive(serde::Deserialize)]
-    struct In {
-        value: String,
-    }
-    #[derive(serde::Serialize)]
-    struct Out {
-        hex: String,
-        base64: String,
-    }
-
-    let input: In = serde_json::from_str(input_json).map_err(json_err)?;
-    let digest = Sha256::digest(input.value.as_bytes());
-    let out = Out {
-        hex: hex_encode(&digest),
-        base64: BASE64.encode(digest),
+    let input: HashInput = serde_json::from_str(input_json).map_err(bad_json)?;
+    let data = input.data.to_bytes()?;
+    let hash_bytes: Vec<u8> = match input.algorithm {
+        HashAlgorithm::Sha256 => Sha256::digest(&data).to_vec(),
+        HashAlgorithm::Sha512 => Sha512::digest(&data).to_vec(),
+        HashAlgorithm::Sha1 => Sha1::digest(&data).to_vec(),
+        HashAlgorithm::Md5 => Md5::digest(&data).to_vec(),
     };
-    serde_json::to_string(&out).map_err(json_err)
+    let out = HashResult {
+        hash: format_hash(&hash_bytes, &input.output_format),
+        algorithm: algorithm_name(&input.algorithm).into(),
+        format: format_name(&input.output_format).into(),
+    };
+    serde_json::to_string(&out).map_err(bad_json)
 }
 
-fn hmac_sha256(input_json: &str) -> Result<String, ErrorInfo> {
-    #[derive(serde::Deserialize)]
-    struct In {
-        key: String,
-        message: String,
-    }
-    #[derive(serde::Serialize)]
-    struct Out {
-        hex: String,
-        base64: String,
-    }
-
-    let input: In = serde_json::from_str(input_json).map_err(json_err)?;
-    let mut mac = Hmac::<Sha256>::new_from_slice(input.key.as_bytes()).map_err(|e| ErrorInfo {
-        code: "INVALID_KEY".into(),
-        message: e.to_string(),
-        category: "permanent".into(),
-        severity: "error".into(),
-        retryable: false,
-        retry_after_ms: None,
-        attributes: None,
-    })?;
-    mac.update(input.message.as_bytes());
-    let tag = mac.finalize().into_bytes();
-    let out = Out {
-        hex: hex_encode(&tag),
-        base64: BASE64.encode(tag),
+fn hmac_capability(input_json: &str) -> Result<String, ErrorInfo> {
+    let input: HmacInput = serde_json::from_str(input_json).map_err(bad_json)?;
+    let data = input.data.to_bytes()?;
+    let secret = input.secret.as_bytes();
+    let hmac_bytes: Vec<u8> = match input.algorithm {
+        HmacAlgorithm::HmacSha256 => {
+            let mut mac = Hmac::<Sha256>::new_from_slice(secret).map_err(invalid_key)?;
+            mac.update(&data);
+            mac.finalize().into_bytes().to_vec()
+        }
+        HmacAlgorithm::HmacSha512 => {
+            let mut mac = Hmac::<Sha512>::new_from_slice(secret).map_err(invalid_key)?;
+            mac.update(&data);
+            mac.finalize().into_bytes().to_vec()
+        }
     };
-    serde_json::to_string(&out).map_err(json_err)
+    let out = HashResult {
+        hash: format_hash(&hmac_bytes, &input.output_format),
+        algorithm: hmac_algorithm_name(&input.algorithm).into(),
+        format: format_name(&input.output_format).into(),
+    };
+    serde_json::to_string(&out).map_err(bad_json)
 }
 
-fn json_err(e: serde_json::Error) -> ErrorInfo {
+fn format_hash(bytes: &[u8], format: &OutputFormat) -> String {
+    match format {
+        OutputFormat::Hex => {
+            let mut s = String::with_capacity(bytes.len() * 2);
+            for b in bytes {
+                s.push_str(&format!("{b:02x}"));
+            }
+            s
+        }
+        OutputFormat::Base64 => BASE64.encode(bytes),
+    }
+}
+
+fn algorithm_name(algorithm: &HashAlgorithm) -> &'static str {
+    match algorithm {
+        HashAlgorithm::Sha256 => "sha256",
+        HashAlgorithm::Sha512 => "sha512",
+        HashAlgorithm::Sha1 => "sha1",
+        HashAlgorithm::Md5 => "md5",
+    }
+}
+
+fn hmac_algorithm_name(algorithm: &HmacAlgorithm) -> &'static str {
+    match algorithm {
+        HmacAlgorithm::HmacSha256 => "hmac-sha256",
+        HmacAlgorithm::HmacSha512 => "hmac-sha512",
+    }
+}
+
+fn format_name(format: &OutputFormat) -> &'static str {
+    match format {
+        OutputFormat::Hex => "hex",
+        OutputFormat::Base64 => "base64",
+    }
+}
+
+fn bad_json(e: serde_json::Error) -> ErrorInfo {
     ErrorInfo {
-        code: "BAD_JSON".into(),
+        code: "INPUT_DESERIALIZATION_ERROR".into(),
         message: e.to_string(),
         category: "permanent".into(),
         severity: "error".into(),
@@ -149,42 +284,91 @@ fn json_err(e: serde_json::Error) -> ErrorInfo {
     }
 }
 
-fn hex_encode(bytes: &[u8]) -> String {
-    let mut s = String::with_capacity(bytes.len() * 2);
-    for b in bytes {
-        s.push_str(&format!("{b:02x}"));
+fn invalid_key(e: hmac::digest::InvalidLength) -> ErrorInfo {
+    ErrorInfo {
+        code: "INVALID_KEY".into(),
+        message: format!("Invalid HMAC key: {e}"),
+        category: "permanent".into(),
+        severity: "error".into(),
+        retryable: false,
+        retry_after_ms: None,
+        attributes: None,
     }
-    s
 }
+
+// -----------------------------------------------------------------------------
+// JSON Schemas published via list-capabilities()
+// -----------------------------------------------------------------------------
 
 const HASH_INPUT_SCHEMA: &str = r#"{
     "type": "object",
-    "required": ["value"],
-    "properties": { "value": { "type": "string" } }
-}"#;
-
-const HASH_OUTPUT_SCHEMA: &str = r#"{
-    "type": "object",
+    "required": ["data"],
     "properties": {
-        "hex":    { "type": "string" },
-        "base64": { "type": "string" }
+        "data": {
+            "oneOf": [
+                { "type": "string", "description": "Data to hash (UTF-8 string)" },
+                {
+                    "type": "object",
+                    "required": ["content"],
+                    "properties": {
+                        "content":   { "type": "string", "description": "Base64-encoded content" },
+                        "filename":  { "type": "string" },
+                        "mime_type": { "type": "string" }
+                    }
+                }
+            ]
+        },
+        "algorithm": {
+            "type": "string",
+            "enum": ["sha256", "sha512", "sha1", "md5"],
+            "default": "sha256"
+        },
+        "output_format": {
+            "type": "string",
+            "enum": ["hex", "base64"],
+            "default": "hex"
+        }
     }
 }"#;
 
 const HMAC_INPUT_SCHEMA: &str = r#"{
     "type": "object",
-    "required": ["key", "message"],
+    "required": ["data", "secret"],
     "properties": {
-        "key":     { "type": "string" },
-        "message": { "type": "string" }
+        "data": {
+            "oneOf": [
+                { "type": "string" },
+                {
+                    "type": "object",
+                    "required": ["content"],
+                    "properties": {
+                        "content":   { "type": "string", "description": "Base64-encoded content" },
+                        "filename":  { "type": "string" },
+                        "mime_type": { "type": "string" }
+                    }
+                }
+            ]
+        },
+        "secret": { "type": "string", "description": "Secret key for HMAC" },
+        "algorithm": {
+            "type": "string",
+            "enum": ["hmac-sha256", "hmac-sha512"],
+            "default": "hmac-sha256"
+        },
+        "output_format": {
+            "type": "string",
+            "enum": ["hex", "base64"],
+            "default": "hex"
+        }
     }
 }"#;
 
-const HMAC_OUTPUT_SCHEMA: &str = r#"{
+const HASH_OUTPUT_SCHEMA: &str = r#"{
     "type": "object",
     "properties": {
-        "hex":    { "type": "string" },
-        "base64": { "type": "string" }
+        "hash":      { "type": "string" },
+        "algorithm": { "type": "string" },
+        "format":    { "type": "string" }
     }
 }"#;
 
