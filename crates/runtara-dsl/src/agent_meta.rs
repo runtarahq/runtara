@@ -1550,6 +1550,22 @@ impl AgentCatalog {
             .find(|c| c.id == capability_id)
     }
 
+    /// Return the `integration_ids` of the agent matching `agent_id`
+    /// (case-insensitive), or an empty `Vec` if the agent isn't loaded.
+    ///
+    /// Used by the connections layer to translate user-facing
+    /// "show me connections for agent <X>" queries into the
+    /// `integration_id` list that the connection service stores on
+    /// each row — so the connection service itself doesn't need to
+    /// know what an "agent" is.
+    pub fn integration_ids_for(&self, agent_id: &str) -> Vec<String> {
+        self.agents()
+            .iter()
+            .find(|a| a.id.eq_ignore_ascii_case(agent_id))
+            .map(|a| a.integration_ids.clone())
+            .unwrap_or_default()
+    }
+
     /// Number of agents in the catalog.
     pub fn len(&self) -> usize {
         self.agents.len()
@@ -1628,6 +1644,23 @@ mod catalog_tests {
         assert!(cat.capability("crypto", "hash").is_some());
         assert!(cat.capability("crypto", "missing").is_none());
         assert!(cat.capability("missing", "hash").is_none());
+    }
+
+    #[test]
+    fn integration_ids_for_returns_agent_integrations() {
+        let mut agent = sample_agent("slack");
+        agent.integration_ids = vec!["slack_oauth".into(), "slack_legacy".into()];
+        let cat = AgentCatalog::from_agents(vec![agent]);
+
+        assert_eq!(
+            cat.integration_ids_for("slack"),
+            vec!["slack_oauth".to_string(), "slack_legacy".to_string()],
+        );
+        assert_eq!(
+            cat.integration_ids_for("SLACK"),
+            cat.integration_ids_for("slack")
+        );
+        assert!(cat.integration_ids_for("missing").is_empty());
     }
 
     #[test]

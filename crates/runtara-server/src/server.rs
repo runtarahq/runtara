@@ -779,6 +779,70 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
+    // Build the component dispatcher (embedded wasmtime) once at startup and
+    // share its Arc with every service that needs it — the compilation worker
+    // reads its catalog so compiled workflows see the same agent set the
+    // runtime can route to; `AgentTestingService` routes test invocations
+    // through it; `AgentsService` reads its metadata to override the legacy
+    // registry for component-backed agents.
+    let component_dispatcher: Option<Arc<runtara_component_host::ComponentDispatcherService>> = {
+        let cfg = config::get();
+        if let Some(ref dir) = cfg.agent_components_dir {
+            use runtara_component_host::{ComponentDispatcherService, DispatcherEnv};
+            let env = DispatcherEnv {
+                proxy_url: cfg.http_proxy_url.clone(),
+                agent_service_url: cfg.agent_service_url.clone(),
+                object_model_url: cfg.object_model_url.clone(),
+                core_http_url: format!("http://127.0.0.1:{}", cfg.internal_port),
+            };
+            match ComponentDispatcherService::from_dir(dir, env).await {
+                Ok(dispatcher) => {
+                    let loaded: Vec<&str> = dispatcher.agent_ids().collect();
+                    println!(
+                        "✓ Component dispatcher loaded {} agent(s) from {}: {}",
+                        loaded.len(),
+                        dir.display(),
+                        loaded.join(", ")
+                    );
+                    Some(Arc::new(dispatcher))
+                }
+                Err(e) => {
+                    println!(
+                        "⚠ Failed to load WASM agent components from {}: {}",
+                        dir.display(),
+                        e
+                    );
+                    println!("  Continuing with legacy dispatcher only.");
+                    None
+                }
+            }
+        } else {
+            None
+        }
+    };
+
+    // Snapshot the runtime agent catalog once at boot. Validators in app
+    // state read this instead of the statically-linked agent registry. If
+    // the component dispatcher isn't configured, fall back to the
+    // statically-linked set so the validator surface keeps working.
+    let agent_catalog: Arc<runtara_dsl::agent_meta::AgentCatalog> = component_dispatcher
+        .as_ref()
+        .map(|d| d.catalog())
+        .unwrap_or_else(|| {
+            Arc::new(runtara_dsl::agent_meta::AgentCatalog::from_agents(
+                runtara_agents::registry::get_agents(),
+            ))
+        });
+
+    // Derive the connection-defaults compatibility map from the runtime
+    // agent catalog. Encapsulates the `default_for → integration_ids` view
+    // that the connection service uses for validation, plus virtual
+    // platform-level buckets (e.g. `object_storage`) the catalog doesn't
+    // know about.
+    let integration_compatibility = Arc::new(
+        runtara_connections::IntegrationCompatibility::from_catalog(&agent_catalog),
+    );
+
     // Construct connections crate config and facade.
     // Cipher is built from RUNTARA_CONNECTIONS_ENCRYPTION_KEY env var — falls
     // back to NoOp (plaintext at rest) with a loud warning if missing. See
@@ -790,6 +854,8 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
             .unwrap_or_else(|_| "http://localhost:8080".to_string()),
         http_client: reqwest::Client::new(),
         cipher: runtara_connections::cipher_from_env(),
+        compatibility: integration_compatibility.clone(),
+        agent_catalog: agent_catalog.clone(),
     };
     let connections_state =
         runtara_connections::ConnectionsState::from_config(connections_config.clone());
@@ -995,48 +1061,6 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
             .clone()
             .map(|m| Arc::new(api::repositories::trigger_stream::TriggerStreamPublisher::new(m)));
 
-    // Build the component dispatcher (embedded wasmtime) once at startup and
-    // share its Arc with every service that needs it — the compilation worker
-    // reads its catalog so compiled workflows see the same agent set the
-    // runtime can route to; `AgentTestingService` routes test invocations
-    // through it; `AgentsService` reads its metadata to override the legacy
-    // registry for component-backed agents.
-    let component_dispatcher: Option<Arc<runtara_component_host::ComponentDispatcherService>> = {
-        let cfg = config::get();
-        if let Some(ref dir) = cfg.agent_components_dir {
-            use runtara_component_host::{ComponentDispatcherService, DispatcherEnv};
-            let env = DispatcherEnv {
-                proxy_url: cfg.http_proxy_url.clone(),
-                agent_service_url: cfg.agent_service_url.clone(),
-                object_model_url: cfg.object_model_url.clone(),
-                core_http_url: format!("http://127.0.0.1:{}", cfg.internal_port),
-            };
-            match ComponentDispatcherService::from_dir(dir, env).await {
-                Ok(dispatcher) => {
-                    let loaded: Vec<&str> = dispatcher.agent_ids().collect();
-                    println!(
-                        "✓ Component dispatcher loaded {} agent(s) from {}: {}",
-                        loaded.len(),
-                        dir.display(),
-                        loaded.join(", ")
-                    );
-                    Some(Arc::new(dispatcher))
-                }
-                Err(e) => {
-                    println!(
-                        "⚠ Failed to load WASM agent components from {}: {}",
-                        dir.display(),
-                        e
-                    );
-                    println!("  Continuing with legacy dispatcher only.");
-                    None
-                }
-            }
-        } else {
-            None
-        }
-    };
-
     if let Some(ref config) = valkey_config {
         println!("Valkey configuration detected, starting workers...");
 
@@ -1175,19 +1199,6 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         use crate::api::services::operators::AgentsService;
         AgentsService::new().with_component_dispatcher(component_dispatcher.clone())
     };
-
-    // Snapshot the runtime agent catalog once at boot. Validators in app
-    // state read this instead of the statically-linked agent registry. If
-    // the component dispatcher isn't configured, fall back to the
-    // statically-linked set so the validator surface keeps working.
-    let agent_catalog: Arc<runtara_dsl::agent_meta::AgentCatalog> = component_dispatcher
-        .as_ref()
-        .map(|d| d.catalog())
-        .unwrap_or_else(|| {
-            Arc::new(runtara_dsl::agent_meta::AgentCatalog::from_agents(
-                runtara_agents::registry::get_agents(),
-            ))
-        });
 
     // Build the unified execution engine shared by handlers and workers.
     // Handlers use it directly via AppState / FromRef; the trigger worker
