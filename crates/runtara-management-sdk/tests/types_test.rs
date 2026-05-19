@@ -51,7 +51,7 @@ fn test_signal_type_to_i32() {
 
 #[test]
 fn test_runner_type_default() {
-    assert_eq!(RunnerType::default(), RunnerType::Oci);
+    assert_eq!(RunnerType::default(), RunnerType::Wasm);
 }
 
 #[test]

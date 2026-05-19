@@ -6,7 +6,9 @@
 //! - Image registry (create, list, delete images)
 //! - Instance lifecycle (start, stop, resume, status)
 //! - Wake queue (schedule and execute durable sleep wakes)
-//! - Container execution (OCI runner by default)
+//! - Container execution. Runner defaults to `wasm` because the only
+//!   compile path now in `runtara-workflows` produces components-mode
+//!   `workflow.wasm`. Set `RUNTARA_RUNNER=oci` or `native` to override.
 
 use std::sync::Arc;
 use tracing::{info, warn};
@@ -109,21 +111,26 @@ async fn main() -> anyhow::Result<()> {
 }
 
 fn build_runner(persistence: Arc<dyn runtara_core::persistence::Persistence>) -> Arc<dyn Runner> {
+    // Default: `wasm`. The components-mode compile path emits
+    // `workflow.wasm`, so the most common case (and the one the server's
+    // image registry tags as `RunnerType::Wasm`) wants the wasmtime
+    // runner. `oci` / `native` remain available for legacy or specialty
+    // setups via `RUNTARA_RUNNER=...`.
     match std::env::var("RUNTARA_RUNNER")
-        .unwrap_or_else(|_| "oci".to_string())
+        .unwrap_or_else(|_| "wasm".to_string())
         .to_ascii_lowercase()
         .as_str()
     {
-        "wasm" | "wasmtime" => Arc::new(WasmRunner::new(
-            runtara_environment::runner::wasm::WasmRunnerConfig::from_env(),
+        "oci" => Arc::new(OciRunner::new(
+            runtara_environment::runner::oci::OciRunnerConfig::from_env(),
             persistence,
         )),
         "native" => Arc::new(NativeRunner::new(
             runtara_environment::runner::native::NativeRunnerConfig::from_env(),
             persistence,
         )),
-        _ => Arc::new(OciRunner::new(
-            runtara_environment::runner::oci::OciRunnerConfig::from_env(),
+        _ => Arc::new(WasmRunner::new(
+            runtara_environment::runner::wasm::WasmRunnerConfig::from_env(),
             persistence,
         )),
     }

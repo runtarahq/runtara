@@ -316,6 +316,12 @@ version = "0.0.1"
 edition = "2024"
 publish = false
 
+# Workflow build dirs sometimes live inside the parent workspace (e.g.
+# `DATA_DIR=.data` under the repo root). An empty `[workspace]` table
+# tells cargo "this is its own workspace root" so it doesn't refuse to
+# build with `current package believes it's in a workspace when it's not`.
+[workspace]
+
 [lib]
 crate-type = ["cdylib"]
 

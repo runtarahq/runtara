@@ -176,7 +176,20 @@ fn run_codegen(
 // ---------------------------------------------------------------------------
 
 fn data_dir() -> PathBuf {
-    PathBuf::from(std::env::var("DATA_DIR").unwrap_or_else(|_| ".data".to_string()))
+    // Make the path absolute. cargo-component runs with `current_dir =
+    // build_dir`, so a relative `CARGO_TARGET_DIR` like `.data/.../target`
+    // would re-resolve against the new cwd and nest one level deeper. By
+    // anchoring DATA_DIR (and every path derived from it) to the *original*
+    // cwd at first use, the build dir + target dir stay where the caller
+    // expects.
+    let raw = PathBuf::from(std::env::var("DATA_DIR").unwrap_or_else(|_| ".data".to_string()));
+    if raw.is_absolute() {
+        raw
+    } else {
+        std::env::current_dir()
+            .map(|cwd| cwd.join(&raw))
+            .unwrap_or(raw)
+    }
 }
 
 fn build_dir_for(tenant_id: &str, workflow_id: &str, version: u32) -> PathBuf {

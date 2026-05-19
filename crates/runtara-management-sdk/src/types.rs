@@ -486,12 +486,14 @@ impl ListInstancesOptions {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RunnerType {
-    /// OCI container runner (default).
-    #[default]
+    /// OCI container runner.
     Oci,
     /// Native process runner.
     Native,
-    /// WebAssembly runner.
+    /// WebAssembly runner (default). Matches the components-mode
+    /// compile path in `runtara-workflows`, which always produces
+    /// a composed `workflow.wasm`.
+    #[default]
     Wasm,
 }
 
@@ -1554,7 +1556,7 @@ mod tests {
 
     #[test]
     fn test_runner_type_default() {
-        assert_eq!(RunnerType::default(), RunnerType::Oci);
+        assert_eq!(RunnerType::default(), RunnerType::Wasm);
     }
 
     #[test]
@@ -1748,7 +1750,7 @@ mod tests {
         let opts = RegisterImageOptions::new("tenant-1", "my-image", vec![1, 2, 3]);
 
         assert!(opts.description.is_none());
-        assert_eq!(opts.runner_type, RunnerType::Oci);
+        assert_eq!(opts.runner_type, RunnerType::Wasm);
         assert!(opts.metadata.is_none());
     }
 

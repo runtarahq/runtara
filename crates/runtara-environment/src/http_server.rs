@@ -778,11 +778,20 @@ async fn handle_register_image_upload(
         let _ = std::fs::set_permissions(&binary_path, std::fs::Permissions::from_mode(0o755));
     }
 
-    // Create OCI bundle if needed
+    // Pick runner type. Caller-supplied wins; otherwise sniff the binary's
+    // magic bytes: WebAssembly modules + components start with `\0asm`, so
+    // we tag those as `Wasm`. Anything else stays `Oci` for backwards
+    // compatibility with native binaries shipped in OCI bundles.
     let runner_type = runner_type_str
         .as_deref()
         .map(runner_type_from_string)
-        .unwrap_or(RunnerType::Oci);
+        .unwrap_or_else(|| {
+            if binary.starts_with(b"\0asm") {
+                RunnerType::Wasm
+            } else {
+                RunnerType::Oci
+            }
+        });
 
     let bundle_path_str = if runner_type == RunnerType::Oci {
         if let Err(e) = crate::runner::oci::create_bundle_at_path(&bundle_path, &binary_path) {
