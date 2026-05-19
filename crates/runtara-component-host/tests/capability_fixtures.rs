@@ -1,10 +1,18 @@
 //! Fixture-driven capability smoke harness.
 //!
-//! Every `tests/fixtures/<agent_id>/<capability_id>.json` describes one
-//! happy-path call: the input the dispatcher should accept and what the
-//! returned output must contain. The runner walks the fixtures directory,
-//! loads the production bundle (`target/wasm32-wasip1/release/`), and
-//! invokes each fixture through `ComponentDispatcherService::test_capability`.
+//! Fixtures live next to the agent they exercise:
+//!   `crates/runtara-agent-<x>/fixtures/<capability_id>.json`.
+//! Each one describes a happy-path call: the input the dispatcher should
+//! accept and what the returned output must contain. The runner walks every
+//! `crates/runtara-agent-*/fixtures/` directory, loads the production bundle
+//! (`target/wasm32-wasip1/release/`), and invokes each fixture through
+//! `ComponentDispatcherService::test_capability`.
+//!
+//! Keeping fixtures inside the agent crate keeps each agent self-contained —
+//! moving or extracting an agent crate carries its tests + fixtures along.
+//! The harness itself stays centralized here because driving a WASM component
+//! requires the dispatcher (wasmtime + wac compose plumbing), which is too
+//! heavy to instantiate per agent crate.
 //!
 //! This complements the per-component unit tests in each `runtara-agent-<x>`
 //! crate: the unit tests cover capability logic in isolation, this runner
@@ -25,6 +33,12 @@
 //!   }
 //! }
 //! ```
+//!
+//! Adding a fixture: drop `<capability>.json` into your agent crate's
+//! `fixtures/` directory. The filename stem (without `.json`) must be the
+//! capability id exactly as it appears in `meta.json`. The agent_id is
+//! looked up from that crate's staged `meta.json`, so hyphen↔underscore
+//! variation between crate names and agent ids is handled automatically.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -46,10 +60,8 @@ fn bundle_dir() -> PathBuf {
     workspace_root().join("target/wasm32-wasip1/release")
 }
 
-fn fixtures_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests")
-        .join("fixtures")
+fn crates_dir() -> PathBuf {
+    workspace_root().join("crates")
 }
 
 fn env() -> DispatcherEnv {
@@ -84,21 +96,43 @@ struct LoadedFixture {
     fixture: Fixture,
 }
 
-fn load_all_fixtures(root: &Path) -> Vec<LoadedFixture> {
+/// For a crate named `runtara-agent-<x>`, the matching wasm artifact is
+/// `runtara_agent_<x with underscores>.wasm`, and its meta.json sits next to
+/// it carrying the authoritative `id` field. Looking up the agent_id this way
+/// keeps the fixture mapping correct even when the crate name and agent id
+/// differ in punctuation (e.g. `runtara-agent-ai-tools` → `ai-tools`).
+fn agent_id_for_crate(crate_dir_name: &str, bundle: &Path) -> Option<String> {
+    let suffix = crate_dir_name.strip_prefix("runtara-agent-")?;
+    let wasm_stem = format!("runtara_agent_{}", suffix.replace('-', "_"));
+    let meta_path = bundle.join(format!("{wasm_stem}.meta.json"));
+    let body = fs::read_to_string(&meta_path).ok()?;
+    let parsed: Value = serde_json::from_str(&body).ok()?;
+    parsed
+        .get("id")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+}
+
+fn load_all_fixtures(crates_root: &Path, bundle: &Path) -> Vec<LoadedFixture> {
     let mut out = Vec::new();
-    let Ok(agents) = fs::read_dir(root) else {
+    let Ok(entries) = fs::read_dir(crates_root) else {
         return out;
     };
-    for agent_entry in agents.flatten() {
-        if !agent_entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+    for crate_entry in entries.flatten() {
+        let crate_name = crate_entry.file_name().to_string_lossy().to_string();
+        if !crate_name.starts_with("runtara-agent-") {
             continue;
         }
-        let agent_id = agent_entry.file_name().to_string_lossy().to_string();
-        for fixture_entry in fs::read_dir(agent_entry.path())
-            .into_iter()
-            .flatten()
-            .flatten()
-        {
+        let fixtures = crate_entry.path().join("fixtures");
+        if !fixtures.is_dir() {
+            continue;
+        }
+        let Some(agent_id) = agent_id_for_crate(&crate_name, bundle) else {
+            // No meta.json for this crate's wasm — bundle wasn't built for it.
+            // Skip silently; the bundle-presence check will report up top.
+            continue;
+        };
+        for fixture_entry in fs::read_dir(&fixtures).into_iter().flatten().flatten() {
             let path = fixture_entry.path();
             if path.extension().and_then(|e| e.to_str()) != Some("json") {
                 continue;
@@ -176,11 +210,10 @@ async fn capability_fixtures_drive_production_bundle() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let fixtures = load_all_fixtures(&fixtures_dir());
+    let fixtures = load_all_fixtures(&crates_dir(), &bundle);
     assert!(
         !fixtures.is_empty(),
-        "no fixtures found under {}",
-        fixtures_dir().display()
+        "no fixtures found under crates/runtara-agent-*/fixtures/"
     );
 
     let dispatcher = ComponentDispatcherService::from_dir(&bundle, env()).await?;
