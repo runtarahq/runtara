@@ -75,9 +75,10 @@ pub struct DispatcherEnv {
 pub struct ComponentDispatcherService {
     engine: Arc<Engine>,
     agents: HashMap<String, Arc<LoadedAgent>>,
-    /// Per-agent metadata, loaded from each component's sidecar
-    /// `runtara_agent_<id>.meta.json` at construction time.
-    agent_info: HashMap<String, AgentInfo>,
+    /// Snapshot of every loaded agent's metadata. Shared (`Arc`) so the
+    /// server-side `AgentsService` + workflow validation paths can hold the
+    /// same data without copying.
+    catalog: Arc<runtara_dsl::agent_meta::AgentCatalog>,
     env: DispatcherEnv,
 }
 
@@ -153,10 +154,18 @@ impl ComponentDispatcherService {
         // need for repeated per-call instantiation.
         drop(linker);
 
+        // Build the public catalog from the parsed `AgentInfo`s. Sorted by
+        // id so API output + tests are deterministic.
+        let mut by_id: Vec<(String, AgentInfo)> = agent_info.into_iter().collect();
+        by_id.sort_by(|a, b| a.0.cmp(&b.0));
+        let catalog = Arc::new(runtara_dsl::agent_meta::AgentCatalog::from_agents(
+            by_id.into_iter().map(|(_, v)| v).collect(),
+        ));
+
         Ok(Self {
             engine,
             agents,
-            agent_info,
+            catalog,
             env,
         })
     }
@@ -175,7 +184,14 @@ impl ComponentDispatcherService {
 
     /// Full metadata for one agent (parsed from its sidecar `meta.json`).
     pub fn agent_info_of(&self, agent_id: &str) -> Option<&AgentInfo> {
-        self.agent_info.get(agent_id)
+        self.catalog.agent(agent_id)
+    }
+
+    /// The shared agent catalog. Server-side validators + the
+    /// `AgentsService` consume this instead of `runtara_agents::registry`
+    /// so the runtime, not compile-time, is the source of truth.
+    pub fn catalog(&self) -> Arc<runtara_dsl::agent_meta::AgentCatalog> {
+        Arc::clone(&self.catalog)
     }
 
     /// Execute one capability and return a `TestResult` shaped for the
