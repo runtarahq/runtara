@@ -445,7 +445,7 @@ mod tests {
         let world = emit_world_wit(&["crypto".into(), "object-model".into()]);
         assert!(world.contains("import runtara:agent-crypto/capabilities@0.3.0;"));
         assert!(world.contains("import runtara:agent-object-model/capabilities@0.3.0;"));
-        assert!(world.contains("include wasi:cli/command@0.2.0;"));
+        assert!(world.contains("include wasi:cli/command@0.2.3;"));
     }
 
     #[test]
@@ -481,7 +481,7 @@ mod tests {
     fn empty_agent_set_still_yields_valid_wit_and_wac() {
         let world = emit_world_wit(&[]);
         assert!(world.contains("world workflow {"));
-        assert!(world.contains("include wasi:cli/command@0.2.0;"));
+        assert!(world.contains("include wasi:cli/command@0.2.3;"));
         let wac = emit_wac(&[]);
         assert!(wac.contains("let wf = new runtara:workflow-logic"));
     }

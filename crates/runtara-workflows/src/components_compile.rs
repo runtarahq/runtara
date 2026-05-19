@@ -376,7 +376,15 @@ fn run_cargo_component_build(build_dir: &Path) -> io::Result<PathBuf> {
         .arg("--release")
         .arg("--target")
         .arg("wasm32-wasip2")
-        .env("CARGO_TARGET_DIR", build_dir.join("target"))
+        // Per-tenant shared target dir if RUNTARA_COMPONENTS_TARGET_DIR is set
+        // (used by test fixtures to amortize the ~30s cold build across many
+        // workflows in one process). Otherwise default to per-workflow.
+        .env(
+            "CARGO_TARGET_DIR",
+            std::env::var_os("RUNTARA_COMPONENTS_TARGET_DIR")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| build_dir.join("target")),
+        )
         .status()
         .map_err(|e| {
             io::Error::other(format!(
@@ -390,12 +398,15 @@ fn run_cargo_component_build(build_dir: &Path) -> io::Result<PathBuf> {
             build_dir.display()
         )));
     }
-    let wasm = build_dir
-        .join("target/wasm32-wasip1/release/workflow_logic.wasm")
+    let target_root = std::env::var_os("RUNTARA_COMPONENTS_TARGET_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| build_dir.join("target"));
+    let wasm = target_root
+        .join("wasm32-wasip1/release/workflow_logic.wasm")
         .canonicalize()
         .or_else(|_| {
-            build_dir
-                .join("target/wasm32-wasip2/release/workflow_logic.wasm")
+            target_root
+                .join("wasm32-wasip2/release/workflow_logic.wasm")
                 .canonicalize()
         })
         .map_err(|e| {

@@ -1452,8 +1452,7 @@ pub(crate) fn emit_main(graph: &ExecutionGraph) -> TokenStream {
             // Initialize SDK from environment variables.
             // Required env vars: RUNTARA_INSTANCE_ID, RUNTARA_TENANT_ID
             // HTTP: RUNTARA_HTTP_URL (defaults to http://127.0.0.1:8003)
-            let mut sdk_instance = RuntaraSdk::from_env();
-            let mut sdk_instance = match sdk_instance {
+            let mut sdk_instance = match RuntaraSdk::from_env() {
                 Ok(s) => s,
                 Err(e) => {
                     tracing::error!("Failed to initialize SDK: {}", e);
