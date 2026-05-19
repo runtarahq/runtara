@@ -78,7 +78,7 @@ pub mod runtara {
 #[allow(dead_code, clippy::all)]
 pub mod exports {
     pub mod runtara {
-        pub mod agent {
+        pub mod agent_sharepoint {
             #[allow(dead_code, async_fn_in_trait, unused_imports, clippy::all)]
             pub mod capabilities {
                 #[used]
@@ -398,20 +398,21 @@ pub mod exports {
                     ) -> Result<_rt::Vec<u8>, ErrorInfo>;
                 }
                 #[doc(hidden)]
-                macro_rules! __export_runtara_agent_capabilities_0_3_0_cabi {
+                macro_rules! __export_runtara_agent_sharepoint_capabilities_0_3_0_cabi {
                     ($ty:ident with_types_in $($path_to_types:tt)*) => {
                         const _ : () = { #[unsafe (export_name =
-                        "runtara:agent/capabilities@0.3.0#invoke")] unsafe extern "C" fn
-                        export_invoke(arg0 : * mut u8,) -> * mut u8 { unsafe {
-                        $($path_to_types)*:: _export_invoke_cabi::<$ty > (arg0) } }
-                        #[unsafe (export_name =
-                        "cabi_post_runtara:agent/capabilities@0.3.0#invoke")] unsafe
-                        extern "C" fn _post_return_invoke(arg0 : * mut u8,) { unsafe {
-                        $($path_to_types)*:: __post_return_invoke::<$ty > (arg0) } } };
+                        "runtara:agent-sharepoint/capabilities@0.3.0#invoke")] unsafe
+                        extern "C" fn export_invoke(arg0 : * mut u8,) -> * mut u8 {
+                        unsafe { $($path_to_types)*:: _export_invoke_cabi::<$ty > (arg0)
+                        } } #[unsafe (export_name =
+                        "cabi_post_runtara:agent-sharepoint/capabilities@0.3.0#invoke")]
+                        unsafe extern "C" fn _post_return_invoke(arg0 : * mut u8,) {
+                        unsafe { $($path_to_types)*:: __post_return_invoke::<$ty > (arg0)
+                        } } };
                     };
                 }
                 #[doc(hidden)]
-                pub(crate) use __export_runtara_agent_capabilities_0_3_0_cabi;
+                pub(crate) use __export_runtara_agent_sharepoint_capabilities_0_3_0_cabi;
                 #[repr(align(8))]
                 struct _RetArea(
                     [::core::mem::MaybeUninit<
@@ -506,18 +507,19 @@ macro_rules! __export_agent_impl {
     };
     ($ty:ident with_types_in $($path_to_types_root:tt)*) => {
         $($path_to_types_root)*::
-        exports::runtara::agent::capabilities::__export_runtara_agent_capabilities_0_3_0_cabi!($ty
-        with_types_in $($path_to_types_root)*:: exports::runtara::agent::capabilities);
+        exports::runtara::agent_sharepoint::capabilities::__export_runtara_agent_sharepoint_capabilities_0_3_0_cabi!($ty
+        with_types_in $($path_to_types_root)*::
+        exports::runtara::agent_sharepoint::capabilities);
     };
 }
 #[doc(inline)]
 pub(crate) use __export_agent_impl as export;
 #[cfg(target_arch = "wasm32")]
-#[unsafe(link_section = "component-type:wit-bindgen:0.41.0:runtara:agent@0.3.0:agent:encoded world")]
+#[unsafe(link_section = "component-type:wit-bindgen:0.41.0:runtara:agent-sharepoint@0.3.0:agent:encoded world")]
 #[doc(hidden)]
 #[allow(clippy::octal_escapes)]
-pub static __WIT_BINDGEN_COMPONENT_TYPE: [u8; 582] = *b"\
-\0asm\x0d\0\x01\0\0\x19\x16wit-component-encoding\x04\0\x07\xca\x03\x01A\x02\x01\
+pub static __WIT_BINDGEN_COMPONENT_TYPE: [u8; 604] = *b"\
+\0asm\x0d\0\x01\0\0\x19\x16wit-component-encoding\x04\0\x07\xe0\x03\x01A\x02\x01\
 A\x06\x01B\x06\x01ks\x01r\x05\x0dconnection-ids\x0eintegration-ids\x12connection\
 -subtype\0\x0aparameterss\x11rate-limit-config\0\x04\0\x0fconnection-info\x03\0\x01\
 \x01kw\x01r\x07\x04codes\x07messages\x08categorys\x08severitys\x09retryable\x7f\x0e\
@@ -526,9 +528,9 @@ a:agent/types@0.3.0\x05\0\x02\x03\0\0\x0fconnection-info\x02\x03\0\0\x0aerror-in
 fo\x01B\x09\x02\x03\x02\x01\x01\x04\0\x0fconnection-info\x03\0\0\x02\x03\x02\x01\
 \x02\x04\0\x0aerror-info\x03\0\x02\x01p}\x01k\x01\x01j\x01\x04\x01\x03\x01@\x03\x0d\
 capability-ids\x05input\x04\x0aconnection\x05\0\x06\x04\0\x06invoke\x01\x07\x04\0\
-\x20runtara:agent/capabilities@0.3.0\x05\x03\x04\0\x19runtara:agent/agent@0.3.0\x04\
-\0\x0b\x0b\x01\0\x05agent\x03\0\0\0G\x09producers\x01\x0cprocessed-by\x02\x0dwit\
--component\x070.227.1\x10wit-bindgen-rust\x060.41.0";
++runtara:agent-sharepoint/capabilities@0.3.0\x05\x03\x04\0$runtara:agent-sharepo\
+int/agent@0.3.0\x04\0\x0b\x0b\x01\0\x05agent\x03\0\0\0G\x09producers\x01\x0cproc\
+essed-by\x02\x0dwit-component\x070.227.1\x10wit-bindgen-rust\x060.41.0";
 #[inline(never)]
 #[doc(hidden)]
 pub fn __link_custom_section_describing_imports() {

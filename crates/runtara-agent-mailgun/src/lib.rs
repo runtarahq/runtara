@@ -446,7 +446,7 @@ pub fn agent_info() -> runtara_dsl::agent_meta::AgentInfo {
 // ============================================================================
 
 #[cfg(target_arch = "wasm32")]
-use bindings::exports::runtara::agent::capabilities::{ConnectionInfo, ErrorInfo, Guest};
+use bindings::exports::runtara::agent_mailgun::capabilities::{ConnectionInfo, ErrorInfo, Guest};
 
 #[cfg(target_arch = "wasm32")]
 struct Component;

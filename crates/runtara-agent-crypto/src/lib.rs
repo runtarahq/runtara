@@ -370,7 +370,12 @@ pub fn agent_info() -> runtara_dsl::agent_meta::AgentInfo {
 // -----------------------------------------------------------------------------
 
 #[cfg(target_arch = "wasm32")]
-use bindings::exports::runtara::agent::capabilities::{ConnectionInfo, ErrorInfo, Guest};
+// Per-agent WIT layout: this agent's `capabilities` interface lives under
+// `runtara:agent-crypto`, so cargo-component generates the export bindings
+// under `bindings::exports::runtara::agent_crypto::capabilities`. Shared
+// records (ConnectionInfo / ErrorInfo) are re-exported there too via the WIT
+// `use runtara:agent/types@0.3.0.{…};` import.
+use bindings::exports::runtara::agent_crypto::capabilities::{ConnectionInfo, ErrorInfo, Guest};
 
 #[cfg(target_arch = "wasm32")]
 struct Component;
