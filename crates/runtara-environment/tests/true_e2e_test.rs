@@ -256,6 +256,7 @@ fn test_compile_minimal_workflow() {
         track_events: false,
         child_workflows: vec![],
         connection_service_url: None,
+        compile_mode: Default::default(),
     };
 
     let result = compile_workflow(input);
@@ -308,6 +309,7 @@ fn test_compile_transform_workflow() {
         track_events: true, // Enable debug mode for visibility
         child_workflows: vec![],
         connection_service_url: None,
+        compile_mode: Default::default(),
     };
 
     let result = compile_workflow(input);
@@ -353,6 +355,7 @@ fn test_create_oci_bundle() {
         track_events: false,
         child_workflows: vec![],
         connection_service_url: None,
+        compile_mode: Default::default(),
     };
 
     let compilation_result = compile_workflow(input).expect("Compilation failed");
@@ -415,6 +418,7 @@ fn test_bundle_network_modes() {
         track_events: false,
         child_workflows: vec![],
         connection_service_url: None,
+        compile_mode: Default::default(),
     };
 
     let compilation_result = compile_workflow(input).expect("Compilation failed");
@@ -477,6 +481,7 @@ async fn test_full_container_execution() {
         track_events: true,
         child_workflows: vec![],
         connection_service_url: None,
+        compile_mode: Default::default(),
     };
 
     let compilation_result = compile_workflow(input).expect("Compilation failed");
@@ -599,6 +604,7 @@ async fn test_transform_workflow_e2e() {
         track_events: true,
         child_workflows: vec![],
         connection_service_url: None,
+        compile_mode: Default::default(),
     };
 
     let compilation_result = compile_workflow(input).expect("Compilation failed");
@@ -692,6 +698,7 @@ async fn test_container_timeout() {
         track_events: false,
         child_workflows: vec![],
         connection_service_url: None,
+        compile_mode: Default::default(),
     };
 
     let compilation_result = compile_workflow(input).expect("Compilation failed");
@@ -766,6 +773,7 @@ async fn test_container_metrics_collection() {
         track_events: false,
         child_workflows: vec![],
         connection_service_url: None,
+        compile_mode: Default::default(),
     };
 
     let compilation_result = compile_workflow(input).expect("Compilation failed");

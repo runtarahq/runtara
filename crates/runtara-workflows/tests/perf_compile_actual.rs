@@ -117,6 +117,7 @@ fn compile_actual_large_embedded_workflow() {
             track_events: input.track_events,
             child_workflows,
             connection_service_url: input.connection_service_url,
+            compile_mode: Default::default(),
         };
 
         let compile_start = Instant::now();

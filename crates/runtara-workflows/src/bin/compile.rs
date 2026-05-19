@@ -488,6 +488,7 @@ fn main() -> ExitCode {
         track_events: args.track_events,
         child_workflows: vec![],
         connection_service_url: None,
+        compile_mode: Default::default(),
     };
 
     if args.verbose {

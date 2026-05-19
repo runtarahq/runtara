@@ -169,6 +169,7 @@ async fn test_launch_detached_captures_spawned_pid() {
         track_events: false,
         child_workflows: vec![],
         connection_service_url: None,
+        compile_mode: Default::default(),
     };
 
     let compilation_result = compile_workflow(input).expect("Compilation failed");
@@ -284,6 +285,7 @@ async fn test_launch_detached_with_pasta_captures_pid() {
         track_events: false,
         child_workflows: vec![],
         connection_service_url: None,
+        compile_mode: Default::default(),
     };
 
     let compilation_result = compile_workflow(input).expect("Compilation failed");

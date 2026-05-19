@@ -362,6 +362,41 @@ pub struct ChildWorkflowInput {
 
 /// Input for compilation (all data pre-loaded, no DB access needed).
 ///
+/// Which compilation backend to use for this workflow.
+///
+/// Both modes produce a `workflow.wasm` artifact that the same runner can
+/// execute via `wasmtime run`; the difference is what's inside the binary.
+///
+/// `RustcLegacy` (default) is the existing path: `rustc` compiles the codegen'd
+/// crate against pre-built rlibs of every agent's executor, statically linking
+/// the capabilities the workflow uses. The .wasm has zero WIT imports for
+/// agents.
+///
+/// `Components` is the Phase 3 path: codegen emits a workflow-logic crate
+/// that imports each used agent as `runtara:agent/capabilities@0.3.0`,
+/// `cargo component build` turns it into a Component, then `wac compose`
+/// links workflow-logic + only the required agent components into a single
+/// composed `.wasm`. The final artifact still runs under `wasmtime run` —
+/// wasmtime detects components automatically.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum CompileMode {
+    /// Existing path: `rustc` against pre-built agent rlibs. Default.
+    #[default]
+    RustcLegacy,
+    /// Phase 3 path: `cargo component build` + `wac compose`.
+    Components,
+}
+
+impl CompileMode {
+    /// String form used in workflow metadata + cache keys.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            CompileMode::RustcLegacy => "rustc-legacy",
+            CompileMode::Components => "components",
+        }
+    }
+}
+
 /// This struct contains everything needed to compile a workflow to a native binary.
 /// The caller is responsible for loading all required data (including child workflows)
 /// before calling compilation functions.
@@ -383,6 +418,10 @@ pub struct CompilationInput {
     /// If provided, generated code will fetch connections from this service.
     /// Expected endpoint: GET {url}/{tenant_id}/{connection_id}
     pub connection_service_url: Option<String>,
+    /// Compilation backend. Defaults to `RustcLegacy`; flip to `Components`
+    /// to route through `cargo component build` + `wac compose`.
+    #[doc(alias = "compileMode")]
+    pub compile_mode: CompileMode,
 }
 
 /// Result of native binary compilation.
@@ -452,6 +491,9 @@ pub fn compile_workflow(input: CompilationInput) -> io::Result<NativeCompilation
         track_events,
         child_workflows,
         connection_service_url,
+        // Components-mode dispatch lands in step 2 — for now every workflow
+        // takes the rustc-legacy path regardless of this field.
+        compile_mode: _,
     } = input;
 
     // Validate workflow for security, correctness, and configuration

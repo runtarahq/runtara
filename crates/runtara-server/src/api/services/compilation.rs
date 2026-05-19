@@ -141,6 +141,7 @@ impl CompilationService {
             track_events,
             child_workflows,
             connection_service_url: self.connection_service_url.clone(),
+            compile_mode: Default::default(),
         };
 
         // 5. Check if already registered BEFORE compiling, unless a rebuild was requested.

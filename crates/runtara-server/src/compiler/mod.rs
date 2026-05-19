@@ -105,6 +105,7 @@ pub async fn compile_with_child_workflows(
         track_events,
         child_workflows,
         connection_service_url,
+        compile_mode: Default::default(),
     };
 
     // Compile using runtara-workflows
