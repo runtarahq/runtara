@@ -642,11 +642,12 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
     // Must be called BEFORE any tracing macros are used
     observability::init_telemetry()?;
 
-    // Validate agent metadata - ensures all capabilities have CapabilityInput and CapabilityOutput defined
-    // This catches missing metadata at startup rather than at runtime
-    runtara_agents::registry::validate_agent_metadata_or_panic();
-    println!("✓ Agent metadata validated");
-
+    // The agent catalog is now sourced from the component dispatcher's
+    // `<agent>.meta.json` sidecars at boot — the bundle-emit step generates
+    // those from the macro derives, so any inconsistency surfaces at build
+    // time. The boot-time `validate_agent_metadata_or_panic()` checked
+    // self-consistency of the compile-time aggregator in `runtara-agents`,
+    // which is now vestigial; the check is removed.
     println!("✓ Configured for tenant: {}", server_config.tenant_id);
     println!("✓ Object model URL: {}", server_config.object_model_url);
     println!("✓ Agent service URL: {}", server_config.agent_service_url);
