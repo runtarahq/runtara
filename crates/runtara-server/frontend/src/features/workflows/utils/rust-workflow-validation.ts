@@ -1,9 +1,11 @@
 import initRustValidation, {
+  agentCatalogLoaded,
   getAgentJson,
   getAgentsJson,
   getCapabilitySchemaJson,
   getStepTypeSchemaJson,
   getStepTypesJson,
+  initAgentCatalog,
   validateExecutionGraphJson,
   validateSchemaFieldsJson,
   validateWorkflowStartInputsJson,
@@ -40,13 +42,67 @@ export interface RustSchemaFieldsValidationResult
 
 let initPromise: Promise<unknown> | null = null;
 
+/**
+ * One-shot fetch of `GET /api/runtime/agents` whose response is pushed
+ * into the WASM via `initAgentCatalog`. The server returns the catalog
+ * from its runtime `ComponentDispatcherService` (which loads each
+ * `<agent>.meta.json` from `$RUNTARA_AGENT_COMPONENTS_DIR` at boot) —
+ * so the validator + the runtime see the same agent set.
+ *
+ * Idempotent: skips the fetch if `agentCatalogLoaded()` already returns
+ * true (e.g. another caller initialized it).
+ */
+async function loadAgentCatalogIntoWasm(): Promise<void> {
+  if (agentCatalogLoaded()) {
+    return;
+  }
+  let response: Response;
+  try {
+    response = await fetch('/api/runtime/agents', {
+      credentials: 'include',
+      headers: { accept: 'application/json' },
+    });
+  } catch (error) {
+    throw new Error(
+      `Failed to fetch /api/runtime/agents for validator init: ${
+        error instanceof Error ? error.message : String(error)
+      }`
+    );
+  }
+  if (!response.ok) {
+    throw new Error(
+      `/api/runtime/agents returned HTTP ${response.status} ${response.statusText}`
+    );
+  }
+  const body = (await response.json()) as { agents?: unknown };
+  const agentsArray = Array.isArray(body?.agents) ? body.agents : [];
+  const initResultRaw = initAgentCatalog(JSON.stringify(agentsArray));
+  let parsed: { success?: boolean; agentCount?: number; error?: string };
+  try {
+    parsed = JSON.parse(initResultRaw) as typeof parsed;
+  } catch {
+    throw new Error(
+      `Validator returned non-JSON from initAgentCatalog: ${initResultRaw}`
+    );
+  }
+  if (!parsed.success) {
+    throw new Error(
+      `Validator rejected agent catalog payload: ${
+        parsed.error ?? 'unknown error'
+      }`
+    );
+  }
+}
+
 function ensureRustValidatorInitialized(): Promise<unknown> {
   initPromise ??= initRustValidation({
     module_or_path: rustValidationWasmUrl,
-  }).catch((error) => {
-    initPromise = null;
-    throw error;
-  });
+  })
+    .then(() => loadAgentCatalogIntoWasm())
+    .catch((error) => {
+      initPromise = null;
+      throw error;
+    });
   return initPromise;
 }
 
