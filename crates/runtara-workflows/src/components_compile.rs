@@ -45,7 +45,6 @@ pub fn compile_workflow_components(input: CompilationInput) -> io::Result<Native
         track_events,
         child_workflows,
         connection_service_url,
-        compile_mode: _,
     } = input;
 
     // 1. Codegen — produce the four artifacts.

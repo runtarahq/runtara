@@ -75,7 +75,6 @@ fn compile_with_opts(name: &str, json: &str, opts: CompileOpts) {
         track_events: opts.track_events,
         child_workflows: vec![],
         connection_service_url: None,
-        compile_mode: Default::default(),
     };
 
     let result = compile_workflow(input).unwrap_or_else(|e| panic!("smoke {name}: {e}"));
@@ -681,7 +680,6 @@ fn smoke_embed_workflow() {
             execution_graph: child_graph,
         }],
         connection_service_url: None,
-        compile_mode: Default::default(),
     };
 
     let result = compile_workflow(input).unwrap_or_else(|e| panic!("smoke embed_workflow: {e}"));
@@ -1322,7 +1320,6 @@ fn smoke_embed_chain_3_levels() {
             },
         ],
         connection_service_url: None,
-        compile_mode: Default::default(),
     };
 
     let result =

@@ -16,7 +16,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use runtara_workflows::{CompilationInput, CompileMode, ExecutionGraph, compile_workflow};
+use runtara_workflows::{CompilationInput, ExecutionGraph, compile_workflow};
 use tempfile::TempDir;
 
 fn e2e_enabled() -> bool {
@@ -146,7 +146,6 @@ fn components_e2e_compiles_trivial_workflow() {
         track_events: false,
         child_workflows: vec![],
         connection_service_url: None,
-        compile_mode: CompileMode::Components,
     };
 
     // The original Phase-3 blocker — cargo-component 0.21.1 rejecting

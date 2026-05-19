@@ -113,8 +113,8 @@ pub use agents_library::{
 };
 #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
 pub use compile::{
-    ChildDependency, ChildWorkflowInput, CompilationInput, CompileMode, NativeCompilationResult,
-    compile_workflow, translate_workflow, workflow_has_side_effects,
+    ChildDependency, ChildWorkflowInput, CompilationInput, NativeCompilationResult,
+    TEMPLATE_MAJOR_VERSION, compile_workflow, workflow_has_side_effects,
 };
 pub use dependency_analysis::{DependencyGraph, WorkflowReference};
 pub use input_validation::{

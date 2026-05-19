@@ -4195,7 +4195,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-agent-ai-tools"
-version = "5.0.0"
+version = "5.1.1"
 dependencies = [
  "runtara-agent-macro",
  "runtara-dsl",
@@ -4208,7 +4208,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-agent-azure-blob-storage"
-version = "5.0.0"
+version = "5.1.1"
 dependencies = [
  "base64 0.22.1",
  "runtara-agent-macro",
@@ -4222,7 +4222,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-agent-bedrock"
-version = "5.0.0"
+version = "5.1.1"
 dependencies = [
  "runtara-agent-macro",
  "runtara-dsl",
@@ -4235,7 +4235,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-agent-bundle-emit"
-version = "5.0.0"
+version = "5.1.1"
 dependencies = [
  "anyhow",
  "runtara-agent-ai-tools",
@@ -4267,7 +4267,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-agent-compression"
-version = "5.0.0"
+version = "5.1.1"
 dependencies = [
  "runtara-agent-macro",
  "runtara-dsl",
@@ -4326,7 +4326,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-agent-http"
-version = "5.0.0"
+version = "5.1.1"
 dependencies = [
  "base64 0.22.1",
  "runtara-agent-macro",
@@ -4340,7 +4340,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-agent-hubspot"
-version = "5.0.0"
+version = "5.1.1"
 dependencies = [
  "runtara-agent-macro",
  "runtara-dsl",
@@ -4363,7 +4363,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-agent-mailgun"
-version = "5.0.0"
+version = "5.1.1"
 dependencies = [
  "runtara-agent-macro",
  "runtara-dsl",
@@ -4376,7 +4376,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-agent-object-model"
-version = "5.0.0"
+version = "5.1.1"
 dependencies = [
  "runtara-agent-macro",
  "runtara-dsl",
@@ -4389,7 +4389,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-agent-openai"
-version = "5.0.0"
+version = "5.1.1"
 dependencies = [
  "runtara-agent-macro",
  "runtara-dsl",
@@ -4402,7 +4402,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-agent-s3-storage"
-version = "5.0.0"
+version = "5.1.1"
 dependencies = [
  "base64 0.22.1",
  "runtara-agent-macro",
@@ -4416,7 +4416,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-agent-sftp"
-version = "5.0.0"
+version = "5.1.1"
 dependencies = [
  "runtara-agent-macro",
  "runtara-dsl",
@@ -4429,7 +4429,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-agent-sharepoint"
-version = "5.0.0"
+version = "5.1.1"
 dependencies = [
  "base64 0.22.1",
  "runtara-agent-macro",
@@ -4443,7 +4443,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-agent-shopify"
-version = "5.0.0"
+version = "5.1.1"
 dependencies = [
  "runtara-agent-macro",
  "runtara-dsl",
@@ -4456,7 +4456,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-agent-slack"
-version = "5.0.0"
+version = "5.1.1"
 dependencies = [
  "base64 0.22.1",
  "runtara-agent-macro",
@@ -4470,7 +4470,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-agent-stripe"
-version = "5.0.0"
+version = "5.1.1"
 dependencies = [
  "runtara-agent-macro",
  "runtara-dsl",
@@ -4528,7 +4528,7 @@ version = "5.1.1"
 
 [[package]]
 name = "runtara-agent-xlsx"
-version = "5.0.0"
+version = "5.1.1"
 dependencies = [
  "runtara-agent-macro",
  "runtara-dsl",

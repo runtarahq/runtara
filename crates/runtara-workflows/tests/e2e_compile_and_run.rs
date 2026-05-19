@@ -1153,7 +1153,6 @@ fn test_compile_simple_passthrough() {
         track_events: false,
         child_workflows: vec![],
         connection_service_url: None,
-        compile_mode: Default::default(),
     };
 
     let result = compile_workflow(input).expect("Compilation failed");
@@ -1191,7 +1190,6 @@ fn test_compile_transform_workflow() {
         track_events: false,
         child_workflows: vec![],
         connection_service_url: None,
-        compile_mode: Default::default(),
     };
 
     let result = compile_workflow(input).expect("Compilation failed");
@@ -1229,7 +1227,6 @@ fn test_compile_conditional_workflow() {
         track_events: false,
         child_workflows: vec![],
         connection_service_url: None,
-        compile_mode: Default::default(),
     };
 
     let result = compile_workflow(input).expect("Compilation failed");
@@ -1266,7 +1263,6 @@ fn test_compile_conditional_length_comparison() {
         track_events: false,
         child_workflows: vec![],
         connection_service_url: None,
-        compile_mode: Default::default(),
     };
 
     let result = compile_workflow(input).expect("Compilation failed");
@@ -1303,7 +1299,6 @@ fn test_compile_split_workflow() {
         track_events: false,
         child_workflows: vec![],
         connection_service_url: None,
-        compile_mode: Default::default(),
     };
 
     let result = compile_workflow(input).expect("Compilation failed");
@@ -1356,7 +1351,6 @@ fn test_compile_embed_workflow_workflow() {
         track_events: false,
         child_workflows: vec![child_workflow],
         connection_service_url: None,
-        compile_mode: Default::default(),
     };
 
     let result = compile_workflow(input).expect("Compilation failed");
@@ -1394,7 +1388,6 @@ fn test_compile_with_track_events() {
         track_events: true, // Enable debug mode
         child_workflows: vec![],
         connection_service_url: None,
-        compile_mode: Default::default(),
     };
 
     let result = compile_workflow(input).expect("Compilation failed");
@@ -1467,7 +1460,6 @@ fn test_side_effects_detection() {
         track_events: false,
         child_workflows: vec![],
         connection_service_url: None,
-        compile_mode: Default::default(),
     };
 
     let result = compile_workflow(input).expect("Compilation failed");
@@ -1506,7 +1498,6 @@ fn test_compile_while_simple() {
         track_events: false,
         child_workflows: vec![],
         connection_service_url: None,
-        compile_mode: Default::default(),
     };
 
     let result = compile_workflow(input).expect("Compilation failed");
@@ -1543,7 +1534,6 @@ fn test_compile_while_nested_condition() {
         track_events: false,
         child_workflows: vec![],
         connection_service_url: None,
-        compile_mode: Default::default(),
     };
 
     let result = compile_workflow(input).expect("Compilation failed");
@@ -1576,7 +1566,6 @@ fn test_compile_while_with_loop_index() {
         track_events: false,
         child_workflows: vec![],
         connection_service_url: None,
-        compile_mode: Default::default(),
     };
 
     let result = compile_workflow(input).expect("Compilation failed");
@@ -1613,7 +1602,6 @@ fn test_compile_log_all_levels() {
         track_events: false,
         child_workflows: vec![],
         connection_service_url: None,
-        compile_mode: Default::default(),
     };
 
     let result = compile_workflow(input).expect("Compilation failed");
@@ -1651,7 +1639,6 @@ fn test_compile_log_with_context() {
         track_events: false,
         child_workflows: vec![],
         connection_service_url: None,
-        compile_mode: Default::default(),
     };
 
     let result = compile_workflow(input).expect("Compilation failed");
@@ -1684,7 +1671,6 @@ fn test_compile_log_in_subgraph() {
         track_events: false,
         child_workflows: vec![],
         connection_service_url: None,
-        compile_mode: Default::default(),
     };
 
     let result = compile_workflow(input).expect("Compilation failed");
@@ -1908,7 +1894,6 @@ fn test_compile_error_all_categories() {
         track_events: false,
         child_workflows: vec![],
         connection_service_url: None,
-        compile_mode: Default::default(),
     };
 
     let result = compile_workflow(input).expect("Compilation failed");
@@ -1946,7 +1931,6 @@ fn test_compile_error_with_context() {
         track_events: false,
         child_workflows: vec![],
         connection_service_url: None,
-        compile_mode: Default::default(),
     };
 
     let result = compile_workflow(input).expect("Compilation failed");
@@ -1979,7 +1963,6 @@ fn test_compile_error_transient() {
         track_events: false,
         child_workflows: vec![],
         connection_service_url: None,
-        compile_mode: Default::default(),
     };
 
     let result = compile_workflow(input).expect("Compilation failed");
@@ -2012,7 +1995,6 @@ fn test_compile_error_in_loop() {
         track_events: false,
         child_workflows: vec![],
         connection_service_url: None,
-        compile_mode: Default::default(),
     };
 
     let result = compile_workflow(input).expect("Compilation failed");
@@ -2130,7 +2112,6 @@ fn test_compile_http_structured_errors() {
         track_events: false,
         child_workflows: vec![],
         connection_service_url: None,
-        compile_mode: Default::default(),
     };
 
     let result = compile_workflow(input).expect("Compilation failed");
@@ -2167,7 +2148,6 @@ fn test_compile_error_retry_exhausted() {
         track_events: false,
         child_workflows: vec![],
         connection_service_url: None,
-        compile_mode: Default::default(),
     };
 
     let result = compile_workflow(input).expect("Compilation failed");
@@ -2214,7 +2194,6 @@ fn test_run_in_oci_container() {
         track_events: false,
         child_workflows: vec![],
         connection_service_url: None,
-        compile_mode: Default::default(),
     };
 
     let result = compile_workflow(input).expect("Compilation failed");
@@ -2289,7 +2268,6 @@ fn test_run_split_workflow_in_oci_container() {
         track_events: false,
         child_workflows: vec![],
         connection_service_url: None,
-        compile_mode: Default::default(),
     };
 
     let result = compile_workflow(input).expect("Compilation failed");
@@ -2382,7 +2360,6 @@ fn test_run_embed_workflow_workflow_in_oci_container() {
         track_events: false,
         child_workflows: vec![child_workflow],
         connection_service_url: None,
-        compile_mode: Default::default(),
     };
 
     let result = compile_workflow(input).expect("Compilation failed");

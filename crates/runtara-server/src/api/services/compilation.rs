@@ -38,6 +38,27 @@ fn image_source_checksum(image: &ImageSummary) -> Option<&str> {
         .and_then(|v| v.as_str())
 }
 
+/// `templateMajor` stored in image metadata at registration time. Used by the
+/// cache check below to invalidate every workflow on a major-version bump of
+/// the compiler (e.g. `5` → `6`); minor / patch bumps don't recompile.
+/// Returns `None` for images that pre-date the field, which forces a recompile
+/// so they pick up the components-mode pipeline.
+fn image_template_major(image: &ImageSummary) -> Option<&str> {
+    image
+        .metadata
+        .as_ref()
+        .and_then(|m| m.pointer("/workflow/templateMajor"))
+        .and_then(|v| v.as_str())
+}
+
+/// Whether `image` is a cache hit for the current source + compiler major.
+/// Both must match — pre-existing images lack `templateMajor` so they always
+/// miss, forcing a recompile through the components path.
+fn image_cache_hits(image: &ImageSummary, source_checksum: &str) -> bool {
+    image_source_checksum(image) == Some(source_checksum)
+        && image_template_major(image) == Some(runtara_workflows::TEMPLATE_MAJOR_VERSION)
+}
+
 /// Service for workflow compilation operations
 pub struct CompilationService {
     repository: Arc<WorkflowRepository>,
@@ -141,7 +162,6 @@ impl CompilationService {
             track_events,
             child_workflows,
             connection_service_url: self.connection_service_url.clone(),
-            compile_mode: Default::default(),
         };
 
         // 5. Check if already registered BEFORE compiling, unless a rebuild was requested.
@@ -193,7 +213,7 @@ impl CompilationService {
                 .await
             {
                 Ok(Some(existing_image))
-                    if image_source_checksum(&existing_image) == Some(source_checksum.as_str()) =>
+                    if image_cache_hits(&existing_image, source_checksum.as_str()) =>
                 {
                     let existing_id = existing_image.image_id;
                     info!(
@@ -513,6 +533,9 @@ impl CompilationService {
                     "workflowId": workflow_id,
                     "version": version,
                     "sourceChecksum": source_checksum,
+                    // Major version of `runtara-workflows`. Cache miss on major
+                    // bump invalidates every workflow on next deploy.
+                    "templateMajor": runtara_workflows::TEMPLATE_MAJOR_VERSION,
                 }
             }));
 
