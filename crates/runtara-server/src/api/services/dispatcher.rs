@@ -4,6 +4,7 @@
 //! The dispatcher allows testing individual agents in isolation without
 //! creating a full workflow.
 
+use crate::runtime_client::RuntimeClient;
 use runtara_management_sdk::{RegisterImageStreamOptions, RunnerType};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -13,8 +14,6 @@ use std::process::Command;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{info, warn};
-
-use crate::runtime_client::RuntimeClient;
 
 /// The dispatcher source code template
 ///
@@ -310,9 +309,14 @@ impl DispatcherService {
             tenant_id = %tenant_id,
             "Compiling agent dispatcher"
         );
-
+        let tenant_owned = tenant_id.to_string();
         // Compile the dispatcher
-        let compile_result = self.compile_dispatcher(tenant_id)?;
+        let compile_result =
+            tokio::task::spawn_blocking(move || Self::compile_dispatcher(&tenant_owned))
+                .await
+                .map_err(|e| {
+                    DispatcherError::CompilationError(format!("Compilation task panicked: {}", e))
+                })??;
 
         // Register with runtara-environment
         let image_id = self.register_image(tenant_id, &compile_result).await?;
@@ -328,7 +332,7 @@ impl DispatcherService {
     }
 
     /// Compile the dispatcher to a WASM binary (same mechanism as workflows)
-    fn compile_dispatcher(&self, tenant_id: &str) -> Result<CompilationResult, DispatcherError> {
+    fn compile_dispatcher(tenant_id: &str) -> Result<CompilationResult, DispatcherError> {
         // Use WASM library paths (same as workflow compilation)
         let native_libs = runtara_workflows::get_wasm_native_library().map_err(|e| {
             DispatcherError::CompilationError(format!("Failed to get WASM libraries: {}", e))
