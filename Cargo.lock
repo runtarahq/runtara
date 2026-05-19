@@ -4943,6 +4943,7 @@ dependencies = [
 name = "runtara-workflows"
 version = "5.1.1"
 dependencies = [
+ "base64 0.22.1",
  "minijinja",
  "proc-macro2",
  "quote",
