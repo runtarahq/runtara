@@ -263,8 +263,15 @@ fn validate_execution_graph_json_impl(execution_graph_json: &str) -> ValidationR
         }
     };
 
+    // TODO(phase-d): replace with a catalog pushed by the frontend (one
+    // `GET /api/runtime/agents` on app boot, then `initAgentCatalog(json)`).
+    // For now the WASM bundle still embeds the static agent set; the
+    // catalog wrapper is just there to satisfy the post-Phase-B
+    // `validate_workflow` signature.
+    let catalog =
+        runtara_dsl::agent_meta::AgentCatalog::from_agents(runtara_agents::registry::get_agents());
     let validation_result =
-        runtara_workflows::validation::validate_workflow(&workflow.execution_graph);
+        runtara_workflows::validation::validate_workflow(&workflow.execution_graph, &catalog);
     let errors = validation_result
         .errors
         .iter()

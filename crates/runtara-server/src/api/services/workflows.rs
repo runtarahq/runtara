@@ -10,6 +10,14 @@ use crate::api::utils::validation::is_valid_identifier;
 use crate::types::MemoryTier;
 use runtara_connections::ConnectionsFacade;
 use runtara_workflows::validation::validate_workflow;
+
+/// TODO(phase-c): thread the runtime `AgentCatalog` from app state. Until
+/// Phase C wires it in, every call site lazily builds the catalog from the
+/// statically-linked agent registry — the two sources are identical today
+/// because both crates link the same set.
+fn build_static_catalog() -> runtara_dsl::agent_meta::AgentCatalog {
+    runtara_dsl::agent_meta::AgentCatalog::from_agents(runtara_agents::registry::get_agents())
+}
 use serde_json::Value;
 use std::sync::Arc;
 use uuid::Uuid;
@@ -411,7 +419,8 @@ impl WorkflowService {
 
         // Run comprehensive workflow validation from runtara-workflows
         // This validates security (connection leaks), structure, and configuration
-        let validation_result = validate_workflow(&workflow.execution_graph);
+        let validation_result =
+            validate_workflow(&workflow.execution_graph, &build_static_catalog());
 
         // Collect errors as structured DTOs (blocking)
         if !validation_result.errors.is_empty() {
@@ -831,7 +840,8 @@ impl WorkflowService {
 
         // Run comprehensive workflow validation from runtara-workflows
         // This validates security (connection leaks), structure, and configuration
-        let validation_result = validate_workflow(&workflow.execution_graph);
+        let validation_result =
+            validate_workflow(&workflow.execution_graph, &build_static_catalog());
 
         // Convert workflow errors to ValidationIssue format
         for error in &validation_result.errors {

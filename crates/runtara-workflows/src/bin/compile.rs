@@ -400,12 +400,18 @@ fn main() -> ExitCode {
         );
     }
 
+    // Build the agent catalog from the statically-linked agent registry —
+    // the `runtara-compile` CLI doesn't have a runtime dispatcher, so it
+    // falls back to the compile-time set.
+    let catalog =
+        runtara_dsl::agent_meta::AgentCatalog::from_agents(runtara_agents::registry::get_agents());
+
     // Handle --analyze flag
     if args.analyze_only {
         print_analysis(&execution_graph);
 
         // Also run validation and show summary
-        let validation_result = validate_workflow(&execution_graph);
+        let validation_result = validate_workflow(&execution_graph, &catalog);
         println!("Validation:");
         if validation_result.errors.is_empty() && validation_result.warnings.is_empty() {
             println!("  No errors or warnings");
@@ -432,7 +438,7 @@ fn main() -> ExitCode {
             eprintln!("[3/5] Validating workflow...");
         }
         let validate_start = Instant::now();
-        let validation_result = validate_workflow(&execution_graph);
+        let validation_result = validate_workflow(&execution_graph, &catalog);
         if args.verbose {
             eprintln!(
                 "       Validation completed in {:?}",

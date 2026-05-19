@@ -1741,8 +1741,16 @@ pub async fn validate_graph_handler(Json(body): Json<Value>) -> (StatusCode, Jso
         "executionGraph": body.clone()
     })) {
         Ok(workflow) => {
-            let validation_result =
-                runtara_workflows::validation::validate_workflow(&workflow.execution_graph);
+            // TODO(phase-c): thread the runtime AgentCatalog from app state
+            // here. For now, build it from the statically-linked agent set —
+            // both sources contain the same agents until Phase C lands.
+            let catalog = runtara_dsl::agent_meta::AgentCatalog::from_agents(
+                runtara_agents::registry::get_agents(),
+            );
+            let validation_result = runtara_workflows::validation::validate_workflow(
+                &workflow.execution_graph,
+                &catalog,
+            );
 
             let errors: Vec<String> = validation_result
                 .errors
