@@ -88,13 +88,21 @@ resolve_versions() {
     RUNTARA_COMMIT="${BUILD_COMMIT:-$(git rev-parse --short=12 HEAD 2>/dev/null || echo unknown)}"
     RUNTARA_BUILD_NUMBER="${BUILD_NUMBER:-${GITHUB_RUN_NUMBER:-}}"
 
+    if [ "$RUNTARA_VERSION" = "dev" ]; then
+        _CARGO_WS_VERSION="$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')"
+        RUNTARA_STAMP_VERSION="${_CARGO_WS_VERSION}-dev"
+    else
+        RUNTARA_STAMP_VERSION="$RUNTARA_VERSION"
+    fi
+
     # Rust version from the active toolchain (pinned by rust-toolchain.toml)
     RUSTC_VERSION="$(rustc --version | cut -d' ' -f2)"
 
     # Respect CARGO_TARGET_DIR if set
     TARGET_DIR="${CARGO_TARGET_DIR:-target}"
 
-    info "Runtara version: ${RUNTARA_VERSION}"
+    info "Runtara version: ${RUNTARA_VERSION} (artifact channel)"
+    info "Stamped version: ${RUNTARA_STAMP_VERSION} (reported in binary/UI)"
     info "Runtara commit:  ${RUNTARA_COMMIT}"
     info "Rustc version:   ${RUSTC_VERSION}"
     info "Wasmtime version: ${WASMTIME_VERSION}"
@@ -139,7 +147,7 @@ build_server() {
     fi
 
     step "Building runtara-server (release, with embed-ui)"
-    BUILD_VERSION="$RUNTARA_VERSION" BUILD_COMMIT="$RUNTARA_COMMIT" BUILD_NUMBER="$RUNTARA_BUILD_NUMBER" \
+    BUILD_VERSION="$RUNTARA_STAMP_VERSION" BUILD_COMMIT="$RUNTARA_COMMIT" BUILD_NUMBER="$RUNTARA_BUILD_NUMBER" \
         cargo build --release -p runtara-server --features embed-ui
 }
 
@@ -320,12 +328,12 @@ assemble_bundle() {
     cp "$ROOT_DIR/docs/licenses/"* "$bundle/licenses/"
 
     # ── VERSION ──
-    echo "$RUNTARA_VERSION" > "$bundle/VERSION"
+    echo "$RUNTARA_STAMP_VERSION" > "$bundle/VERSION"
 
     # ── MANIFEST.json ──
     cat > "$bundle/MANIFEST.json" <<MANIFEST
 {
-  "runtara_version": "${RUNTARA_VERSION}",
+  "runtara_version": "${RUNTARA_STAMP_VERSION}",
   "runtara_commit": "${RUNTARA_COMMIT}",
   "rustc_version": "${RUSTC_VERSION}",
   "wasmtime_version": "${WASMTIME_VERSION}",
