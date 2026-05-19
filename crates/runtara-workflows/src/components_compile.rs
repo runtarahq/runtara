@@ -67,6 +67,13 @@ pub fn compile_workflow_components(input: CompilationInput) -> io::Result<Native
     fs::write(build_dir.join("wit/world.wit"), &artifacts.world_wit)?;
     fs::write(build_dir.join("workflow.wac"), &artifacts.wac_source)?;
 
+    // cargo-component's wit-parser resolves `runtara:agent` (and the wasi:*
+    // package set the world `include`s) by reading `wit/deps/`. Mirror the
+    // whole tree from the agent-wit crate so the worker's wit/ is
+    // self-contained — much simpler than relying on cargo-component's path
+    // dependencies to side-effect the deps directory.
+    stage_wit_deps(&build_dir.join("wit/deps"))?;
+
     // 3. Stage the agent-cas (copies missing .wasm files from the bundle dir).
     let cas_dir = stage_agent_cas(&artifacts.agents_required)?;
 
@@ -183,6 +190,45 @@ fn workspace_root() -> PathBuf {
         .and_then(Path::parent)
         .map(Path::to_path_buf)
         .unwrap_or_else(|| PathBuf::from("."))
+}
+
+/// Copy `crates/runtara-agent-wit/wit/` into the workflow's `wit/deps/` so
+/// cargo-component's wit-parser can resolve `runtara:agent` and the wasi:*
+/// packages it transitively pulls in. Idempotent — overwrites any existing
+/// dep tree from a previous compile.
+fn stage_wit_deps(deps_dir: &Path) -> io::Result<()> {
+    fs::create_dir_all(deps_dir)?;
+    let src_root = workspace_root().join("crates/runtara-agent-wit/wit");
+
+    // Copy the runtara-agent.wit file itself into deps/runtara-agent/.
+    let runtara_dst = deps_dir.join("runtara-agent");
+    fs::create_dir_all(&runtara_dst)?;
+    fs::copy(
+        src_root.join("runtara-agent.wit"),
+        runtara_dst.join("runtara-agent.wit"),
+    )?;
+
+    // Mirror the wasi:* deps that the agent world includes via wit-deps.
+    let src_deps = src_root.join("deps");
+    if src_deps.is_dir() {
+        copy_dir_recursive(&src_deps, deps_dir)?;
+    }
+    Ok(())
+}
+
+fn copy_dir_recursive(src: &Path, dst: &Path) -> io::Result<()> {
+    fs::create_dir_all(dst)?;
+    for entry in fs::read_dir(src)? {
+        let entry = entry?;
+        let path = entry.path();
+        let target = dst.join(entry.file_name());
+        if path.is_dir() {
+            copy_dir_recursive(&path, &target)?;
+        } else {
+            fs::copy(&path, &target)?;
+        }
+    }
+    Ok(())
 }
 
 fn resolve_cargo_toml_placeholders(toml: &str) -> io::Result<String> {
