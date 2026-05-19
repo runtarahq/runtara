@@ -2189,3 +2189,1273 @@ fn error_string_to_error_info(s: String) -> ErrorInfo {
 
 #[cfg(target_arch = "wasm32")]
 bindings::export!(Component with_types_in bindings);
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    // ============================================================================
+    // render_template tests
+    // ============================================================================
+
+    #[test]
+    fn test_render_template_basic() {
+        let input = TemplateInput {
+            text: Some("Hello {{ name }}!".to_string()),
+            context: json!({"name": "World"}),
+        };
+        let result = render_template(input).unwrap();
+        assert_eq!(result, "Hello World!");
+    }
+
+    #[test]
+    fn test_render_template_multiple_variables() {
+        let input = TemplateInput {
+            text: Some("Hello {{ name }}, you have {{ count }} messages".to_string()),
+            context: json!({"name": "Alice", "count": 5}),
+        };
+        let result = render_template(input).unwrap();
+        assert_eq!(result, "Hello Alice, you have 5 messages");
+    }
+
+    #[test]
+    fn test_render_template_empty_context() {
+        let input = TemplateInput {
+            text: Some("Hello World".to_string()),
+            context: json!({}),
+        };
+        let result = render_template(input).unwrap();
+        assert_eq!(result, "Hello World");
+    }
+
+    #[test]
+    fn test_render_template_empty_text() {
+        let input = TemplateInput {
+            text: Some("".to_string()),
+            context: json!({"name": "World"}),
+        };
+        let result = render_template(input).unwrap();
+        assert_eq!(result, "");
+    }
+
+    #[test]
+    fn test_render_template_missing_text() {
+        let input = TemplateInput {
+            text: None,
+            context: json!({"name": "World"}),
+        };
+        let result = render_template(input);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert_eq!(err.code, "TEXT_TEMPLATE_MISSING");
+        assert!(err.message.contains("Template text is required"));
+    }
+
+    #[test]
+    fn test_render_template_with_conditionals() {
+        let input = TemplateInput {
+            text: Some(
+                "{% if show_message %}Hello {{ name }}{% else %}Goodbye{% endif %}".to_string(),
+            ),
+            context: json!({"show_message": true, "name": "Alice"}),
+        };
+        let result = render_template(input).unwrap();
+        assert_eq!(result, "Hello Alice");
+    }
+
+    #[test]
+    fn test_render_template_with_loop() {
+        let input = TemplateInput {
+            text: Some("Items: {% for item in items %}{{ item }}, {% endfor %}".to_string()),
+            context: json!({"items": ["apple", "banana", "cherry"]}),
+        };
+        let result = render_template(input).unwrap();
+        assert_eq!(result, "Items: apple, banana, cherry, ");
+    }
+
+    #[test]
+    fn test_render_template_with_filters() {
+        let input = TemplateInput {
+            text: Some("{{ name|upper }}".to_string()),
+            context: json!({"name": "alice"}),
+        };
+        let result = render_template(input).unwrap();
+        assert_eq!(result, "ALICE");
+    }
+
+    #[test]
+    fn test_render_template_nested_objects() {
+        let input = TemplateInput {
+            text: Some("{{ user.name }} lives in {{ user.address.city }}".to_string()),
+            context: json!({
+                "user": {
+                    "name": "Bob",
+                    "address": {
+                        "city": "New York"
+                    }
+                }
+            }),
+        };
+        let result = render_template(input).unwrap();
+        assert_eq!(result, "Bob lives in New York");
+    }
+
+    #[test]
+    fn test_render_template_array_access() {
+        let input = TemplateInput {
+            text: Some("First: {{ items[0] }}, Last: {{ items[2] }}".to_string()),
+            context: json!({"items": ["first", "second", "third"]}),
+        };
+        let result = render_template(input).unwrap();
+        assert_eq!(result, "First: first, Last: third");
+    }
+
+    #[test]
+    fn test_render_template_invalid_syntax() {
+        let input = TemplateInput {
+            text: Some("{{ unclosed".to_string()),
+            context: json!({}),
+        };
+        let result = render_template(input);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert_eq!(err.code, "TEXT_TEMPLATE_PARSE_ERROR");
+        assert!(err.message.contains("Template parse error"));
+    }
+
+    #[test]
+    fn test_render_template_undefined_variable() {
+        let input = TemplateInput {
+            text: Some("Hello {{ undefined_var }}".to_string()),
+            context: json!({"name": "World"}),
+        };
+        let result = render_template(input).unwrap();
+        // MiniJinja renders undefined variables as empty strings by default
+        assert_eq!(result, "Hello ");
+    }
+
+    #[test]
+    fn test_render_template_numbers() {
+        let input = TemplateInput {
+            text: Some("Price: ${{ price }}, Quantity: {{ quantity }}".to_string()),
+            context: json!({"price": 19.99, "quantity": 42}),
+        };
+        let result = render_template(input).unwrap();
+        assert_eq!(result, "Price: $19.99, Quantity: 42");
+    }
+
+    #[test]
+    fn test_render_template_boolean() {
+        let input = TemplateInput {
+            text: Some("{% if is_active %}Active{% else %}Inactive{% endif %}".to_string()),
+            context: json!({"is_active": false}),
+        };
+        let result = render_template(input).unwrap();
+        assert_eq!(result, "Inactive");
+    }
+
+    // ============================================================================
+    // Other text operation tests
+    // ============================================================================
+
+    #[test]
+    fn test_trim_normalize() {
+        let input = SimpleTextInput {
+            text: Some("  Hello   \n  World  \n  ".to_string()),
+        };
+        let result = trim_normalize(input).unwrap();
+        assert_eq!(result, "Hello World");
+    }
+
+    #[test]
+    fn test_trim_normalize_empty() {
+        let input = SimpleTextInput {
+            text: Some("".to_string()),
+        };
+        let result = trim_normalize(input).unwrap();
+        assert_eq!(result, "");
+    }
+
+    #[test]
+    fn test_case_conversion_lowercase() {
+        let input = CaseConversionInput {
+            text: Some("HELLO WORLD".to_string()),
+            format: CaseFormat::Lowercase,
+        };
+        let result = case_conversion(input).unwrap();
+        assert_eq!(result, "hello world");
+    }
+
+    #[test]
+    fn test_case_conversion_uppercase() {
+        let input = CaseConversionInput {
+            text: Some("hello world".to_string()),
+            format: CaseFormat::Uppercase,
+        };
+        let result = case_conversion(input).unwrap();
+        assert_eq!(result, "HELLO WORLD");
+    }
+
+    #[test]
+    fn test_case_conversion_title_case() {
+        let input = CaseConversionInput {
+            text: Some("hello world from rust".to_string()),
+            format: CaseFormat::TitleCase,
+        };
+        let result = case_conversion(input).unwrap();
+        assert_eq!(result, "Hello World From Rust");
+    }
+
+    #[test]
+    fn test_find_replace() {
+        let input = FindReplaceInput {
+            text: Some("Hello World".to_string()),
+            pattern: Some("World".to_string()),
+            replacement: Some("Rust".to_string()),
+        };
+        let result = find_replace(input).unwrap();
+        assert_eq!(result, "Hello Rust");
+    }
+
+    #[test]
+    fn test_find_replace_multiple() {
+        let input = FindReplaceInput {
+            text: Some("foo bar foo baz".to_string()),
+            pattern: Some("foo".to_string()),
+            replacement: Some("qux".to_string()),
+        };
+        let result = find_replace(input).unwrap();
+        assert_eq!(result, "qux bar qux baz");
+    }
+
+    #[test]
+    fn test_extract_first_line() {
+        let input = SimpleTextInput {
+            text: Some("First line\nSecond line\nThird line".to_string()),
+        };
+        let result = extract_first_line(input).unwrap();
+        assert_eq!(result, "First line");
+    }
+
+    #[test]
+    fn test_extract_first_line_single() {
+        let input = SimpleTextInput {
+            text: Some("Only one line".to_string()),
+        };
+        let result = extract_first_line(input).unwrap();
+        assert_eq!(result, "Only one line");
+    }
+
+    #[test]
+    fn test_extract_first_word() {
+        let input = SimpleTextInput {
+            text: Some("  Hello World  ".to_string()),
+        };
+        let result = extract_first_word(input).unwrap();
+        assert_eq!(result, "Hello");
+    }
+
+    #[test]
+    fn test_extract_first_word_single() {
+        let input = SimpleTextInput {
+            text: Some("Hello".to_string()),
+        };
+        let result = extract_first_word(input).unwrap();
+        assert_eq!(result, "Hello");
+    }
+
+    #[test]
+    fn test_split_join() {
+        let input = SplitInput {
+            text: Some("a,b,c,d".to_string()),
+            delimiter: Some(",".to_string()),
+            join_delimiter: Some(" - ".to_string()),
+        };
+        let result = split_join(input).unwrap();
+        assert_eq!(result, "a - b - c - d");
+    }
+
+    #[test]
+    fn test_split_join_default_delimiters() {
+        let input = SplitInput {
+            text: Some("a,b,c".to_string()),
+            ..Default::default()
+        };
+        let result = split_join(input).unwrap();
+        assert_eq!(result, "a b c");
+    }
+
+    #[test]
+    fn test_split() {
+        let input = SplitInput {
+            text: Some("a,b,c,d".to_string()),
+            delimiter: Some(",".to_string()),
+            ..Default::default()
+        };
+        let result = split(input).unwrap();
+        assert_eq!(result, vec!["a", "b", "c", "d"]);
+    }
+
+    #[test]
+    fn test_split_default_delimiter() {
+        let input = SplitInput {
+            text: Some("a,b,c".to_string()),
+            ..Default::default()
+        };
+        let result = split(input).unwrap();
+        assert_eq!(result, vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn test_remove_characters() {
+        let input = RemoveCharactersInput {
+            text: Some("Hello, World!".to_string()),
+            pattern: Some(",!".to_string()),
+        };
+        let result = remove_characters(input).unwrap();
+        assert_eq!(result, "Hello World");
+    }
+
+    #[test]
+    fn test_remove_characters_none() {
+        let input = RemoveCharactersInput {
+            text: Some("Hello World".to_string()),
+            pattern: None,
+        };
+        let result = remove_characters(input).unwrap();
+        assert_eq!(result, "Hello World");
+    }
+
+    #[test]
+    fn test_substring_extraction() {
+        let input = SubstringInput {
+            text: Some("Hello [World] from Rust".to_string()),
+            start_delimiter: Some("[".to_string()),
+            end_delimiter: Some("]".to_string()),
+        };
+        let result = substring_extraction(input).unwrap();
+        assert_eq!(result, "World");
+    }
+
+    #[test]
+    fn test_substring_extraction_not_found() {
+        let input = SubstringInput {
+            text: Some("Hello World".to_string()),
+            start_delimiter: Some("[".to_string()),
+            end_delimiter: Some("]".to_string()),
+        };
+        let result = substring_extraction(input).unwrap();
+        assert_eq!(result, "");
+    }
+
+    #[test]
+    fn test_collapse_expand_lines_collapse() {
+        let input = SplitInput {
+            text: Some("Line 1\nLine 2\nLine 3".to_string()),
+            delimiter: None,
+            ..Default::default()
+        };
+        let result = collapse_expand_lines(input).unwrap();
+        assert_eq!(result, "Line 1 Line 2 Line 3");
+    }
+
+    #[test]
+    fn test_collapse_expand_lines_expand() {
+        let input = SplitInput {
+            text: Some("a,b,c".to_string()),
+            delimiter: Some(",".to_string()),
+            ..Default::default()
+        };
+        let result = collapse_expand_lines(input).unwrap();
+        assert_eq!(result, "a\nb\nc");
+    }
+
+    #[test]
+    fn test_slugify() {
+        let input = SimpleTextInput {
+            text: Some("Hello World!".to_string()),
+        };
+        let result = slugify(input).unwrap();
+        assert_eq!(result, "hello-world");
+    }
+
+    #[test]
+    fn test_slugify_with_accents() {
+        let input = SimpleTextInput {
+            text: Some("Café Français".to_string()),
+        };
+        let result = slugify(input).unwrap();
+        assert_eq!(result, "cafe-francais");
+    }
+
+    #[test]
+    fn test_slugify_multiple_spaces() {
+        let input = SimpleTextInput {
+            text: Some("Hello   World".to_string()),
+        };
+        let result = slugify(input).unwrap();
+        assert_eq!(result, "hello-world");
+    }
+
+    #[test]
+    fn test_slugify_special_chars() {
+        let input = SimpleTextInput {
+            text: Some("Hello@World#2024".to_string()),
+        };
+        let result = slugify(input).unwrap();
+        assert_eq!(result, "helloworld2024");
+    }
+
+    #[test]
+    fn test_hash_text() {
+        let input = SimpleTextInput {
+            text: Some("Hello World".to_string()),
+        };
+        let result = hash_text(input).unwrap();
+        // SHA-256 hash of "Hello World"
+        assert_eq!(
+            result,
+            "a591a6d40bf420404a011733cfb7b190d62c65bf0bcda32b57b277d9ad9f146e"
+        );
+    }
+
+    #[test]
+    fn test_hash_text_empty() {
+        let input = SimpleTextInput {
+            text: Some("".to_string()),
+        };
+        let result = hash_text(input).unwrap();
+        assert_eq!(result, "");
+    }
+
+    #[test]
+    fn test_as_byte_array() {
+        let input = ByteArrayInput {
+            text: Some("Hello".to_string()),
+            encoding: TextEncoding::Utf8,
+        };
+        let result = as_byte_array(input).unwrap();
+        assert_eq!(result, vec![72, 101, 108, 108, 111]);
+    }
+
+    #[test]
+    fn test_as_byte_array_default_encoding() {
+        let input = ByteArrayInput {
+            text: Some("Hi".to_string()),
+            ..Default::default()
+        };
+        let result = as_byte_array(input).unwrap();
+        assert_eq!(result, vec![72, 105]);
+    }
+
+    #[test]
+    fn test_from_base64_with_string_input() {
+        let encoded = FileData::from_bytes("hello".as_bytes().to_vec(), None, None).content;
+        let input = FromBase64Input {
+            data: json!(encoded),
+            encoding: "UTF-8".to_string(),
+        };
+
+        let result = from_base64(input).unwrap();
+        assert_eq!(result, "hello");
+    }
+
+    #[test]
+    fn test_to_base64_from_string() {
+        let input = ToBase64Input {
+            data: json!("hi"),
+            filename: Some("note.txt".to_string()),
+            mime_type: Some("text/plain".to_string()),
+        };
+
+        let result = to_base64(input).unwrap();
+        assert_eq!(result.filename.as_deref(), Some("note.txt"));
+        assert_eq!(result.mime_type.as_deref(), Some("text/plain"));
+        assert_eq!(String::from_utf8(result.decode().unwrap()).unwrap(), "hi");
+    }
+
+    #[test]
+    fn test_to_base64_from_byte_array() {
+        let input = ToBase64Input {
+            data: json!([1, 2, 3]),
+            ..Default::default()
+        };
+
+        let result = to_base64(input).unwrap();
+        assert_eq!(result.decode().unwrap(), vec![1, 2, 3]);
+    }
+
+    // ============================================================================
+    // Regex operations tests
+    // ============================================================================
+
+    #[test]
+    fn test_regex_replace_basic() {
+        let input = RegexReplaceInput {
+            text: Some("Phone: 1234567890".to_string()),
+            pattern: Some(r"(\d{3})(\d{3})(\d{4})".to_string()),
+            replacement: Some("($1) $2-$3".to_string()),
+            ..Default::default()
+        };
+        let result = regex_replace(input).unwrap();
+        assert_eq!(result, "Phone: (123) 456-7890");
+    }
+
+    #[test]
+    fn test_regex_replace_global() {
+        let input = RegexReplaceInput {
+            text: Some("foo bar foo baz".to_string()),
+            pattern: Some("foo".to_string()),
+            replacement: Some("qux".to_string()),
+            global: true,
+            ..Default::default()
+        };
+        let result = regex_replace(input).unwrap();
+        assert_eq!(result, "qux bar qux baz");
+    }
+
+    #[test]
+    fn test_regex_replace_first_only() {
+        let input = RegexReplaceInput {
+            text: Some("foo bar foo baz".to_string()),
+            pattern: Some("foo".to_string()),
+            replacement: Some("qux".to_string()),
+            global: false,
+            ..Default::default()
+        };
+        let result = regex_replace(input).unwrap();
+        assert_eq!(result, "qux bar foo baz");
+    }
+
+    #[test]
+    fn test_regex_replace_case_insensitive() {
+        let input = RegexReplaceInput {
+            text: Some("Hello HELLO hello".to_string()),
+            pattern: Some("hello".to_string()),
+            replacement: Some("hi".to_string()),
+            case_insensitive: true,
+            global: true,
+        };
+        let result = regex_replace(input).unwrap();
+        assert_eq!(result, "hi hi hi");
+    }
+
+    #[test]
+    fn test_regex_replace_empty_text() {
+        let input = RegexReplaceInput {
+            text: Some("".to_string()),
+            pattern: Some("foo".to_string()),
+            replacement: Some("bar".to_string()),
+            ..Default::default()
+        };
+        let result = regex_replace(input).unwrap();
+        assert_eq!(result, "");
+    }
+
+    #[test]
+    fn test_regex_replace_invalid_pattern() {
+        let input = RegexReplaceInput {
+            text: Some("test".to_string()),
+            pattern: Some("[invalid".to_string()),
+            replacement: Some("".to_string()),
+            ..Default::default()
+        };
+        let result = regex_replace(input);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Invalid regex pattern"));
+    }
+
+    #[test]
+    fn test_regex_match_basic() {
+        let input = RegexMatchInput {
+            text: Some("Order #12345 shipped".to_string()),
+            pattern: Some(r"Order #(\d+)".to_string()),
+            capture_group: 1,
+            ..Default::default()
+        };
+        let result = regex_match(input).unwrap();
+        assert_eq!(result, json!("12345"));
+    }
+
+    #[test]
+    fn test_regex_match_full_match() {
+        let input = RegexMatchInput {
+            text: Some("Order #12345 shipped".to_string()),
+            pattern: Some(r"Order #(\d+)".to_string()),
+            capture_group: 0,
+            ..Default::default()
+        };
+        let result = regex_match(input).unwrap();
+        assert_eq!(result, json!("Order #12345"));
+    }
+
+    #[test]
+    fn test_regex_match_all_matches() {
+        let input = RegexMatchInput {
+            text: Some("Order #123, Order #456, Order #789".to_string()),
+            pattern: Some(r"Order #(\d+)".to_string()),
+            capture_group: 1,
+            all_matches: true,
+            ..Default::default()
+        };
+        let result = regex_match(input).unwrap();
+        assert_eq!(result, json!(["123", "456", "789"]));
+    }
+
+    #[test]
+    fn test_regex_match_no_match() {
+        let input = RegexMatchInput {
+            text: Some("Hello World".to_string()),
+            pattern: Some(r"\d+".to_string()),
+            ..Default::default()
+        };
+        let result = regex_match(input).unwrap();
+        assert_eq!(result, Value::Null);
+    }
+
+    #[test]
+    fn test_regex_match_empty_all_matches() {
+        let input = RegexMatchInput {
+            text: Some("Hello World".to_string()),
+            pattern: Some(r"\d+".to_string()),
+            all_matches: true,
+            ..Default::default()
+        };
+        let result = regex_match(input).unwrap();
+        assert_eq!(result, json!([]));
+    }
+
+    #[test]
+    fn test_regex_test_matching() {
+        let input = RegexTestInput {
+            text: Some("test@example.com".to_string()),
+            pattern: Some(r"[\w.-]+@[\w.-]+\.\w+".to_string()),
+            ..Default::default()
+        };
+        let result = regex_test(input).unwrap();
+        assert!(result);
+    }
+
+    #[test]
+    fn test_regex_test_not_matching() {
+        let input = RegexTestInput {
+            text: Some("not-an-email".to_string()),
+            pattern: Some(r"[\w.-]+@[\w.-]+\.\w+".to_string()),
+            ..Default::default()
+        };
+        let result = regex_test(input).unwrap();
+        assert!(!result);
+    }
+
+    #[test]
+    fn test_regex_test_case_insensitive() {
+        let input = RegexTestInput {
+            text: Some("HELLO".to_string()),
+            pattern: Some("hello".to_string()),
+            case_insensitive: true,
+        };
+        let result = regex_test(input).unwrap();
+        assert!(result);
+    }
+
+    #[test]
+    fn test_regex_split_basic() {
+        let input = RegexSplitInput {
+            text: Some("a,b;c\td".to_string()),
+            pattern: Some(r"[,;\t]+".to_string()),
+            limit: 0,
+        };
+        let result = regex_split(input).unwrap();
+        assert_eq!(result, vec!["a", "b", "c", "d"]);
+    }
+
+    #[test]
+    fn test_regex_split_with_limit() {
+        let input = RegexSplitInput {
+            text: Some("a,b,c,d,e".to_string()),
+            pattern: Some(",".to_string()),
+            limit: 3,
+        };
+        let result = regex_split(input).unwrap();
+        assert_eq!(result, vec!["a", "b", "c,d,e"]);
+    }
+
+    #[test]
+    fn test_regex_split_whitespace() {
+        let input = RegexSplitInput {
+            text: Some("hello   world\t\tfoo".to_string()),
+            pattern: Some(r"\s+".to_string()),
+            limit: 0,
+        };
+        let result = regex_split(input).unwrap();
+        assert_eq!(result, vec!["hello", "world", "foo"]);
+    }
+
+    // ============================================================================
+    // String operations tests
+    // ============================================================================
+
+    #[test]
+    fn test_pad_text_left() {
+        let input = PadTextInput {
+            text: Some("123".to_string()),
+            length: Some(6),
+            pad_char: "0".to_string(),
+            direction: PadDirection::Left,
+        };
+        let result = pad_text(input).unwrap();
+        assert_eq!(result, "000123");
+    }
+
+    #[test]
+    fn test_pad_text_right() {
+        let input = PadTextInput {
+            text: Some("hello".to_string()),
+            length: Some(10),
+            pad_char: ".".to_string(),
+            direction: PadDirection::Right,
+        };
+        let result = pad_text(input).unwrap();
+        assert_eq!(result, "hello.....");
+    }
+
+    #[test]
+    fn test_pad_text_both() {
+        let input = PadTextInput {
+            text: Some("hi".to_string()),
+            length: Some(6),
+            pad_char: "*".to_string(),
+            direction: PadDirection::Both,
+        };
+        let result = pad_text(input).unwrap();
+        assert_eq!(result, "**hi**");
+    }
+
+    #[test]
+    fn test_pad_text_already_long() {
+        let input = PadTextInput {
+            text: Some("hello world".to_string()),
+            length: Some(5),
+            pad_char: " ".to_string(),
+            direction: PadDirection::Left,
+        };
+        let result = pad_text(input).unwrap();
+        assert_eq!(result, "hello world");
+    }
+
+    #[test]
+    fn test_truncate_text_basic() {
+        let input = TruncateTextInput {
+            text: Some("This is a long sentence".to_string()),
+            max_length: Some(10),
+            suffix: "...".to_string(),
+            word_boundary: false,
+        };
+        let result = truncate_text(input).unwrap();
+        assert_eq!(result, "This is...");
+    }
+
+    #[test]
+    fn test_truncate_text_word_boundary() {
+        let input = TruncateTextInput {
+            text: Some("This is a long sentence".to_string()),
+            max_length: Some(12),
+            suffix: "...".to_string(),
+            word_boundary: true,
+        };
+        let result = truncate_text(input).unwrap();
+        assert_eq!(result, "This is...");
+    }
+
+    #[test]
+    fn test_truncate_text_no_suffix() {
+        let input = TruncateTextInput {
+            text: Some("Hello World".to_string()),
+            max_length: Some(5),
+            suffix: "".to_string(),
+            word_boundary: false,
+        };
+        let result = truncate_text(input).unwrap();
+        assert_eq!(result, "Hello");
+    }
+
+    #[test]
+    fn test_truncate_text_already_short() {
+        let input = TruncateTextInput {
+            text: Some("Hi".to_string()),
+            max_length: Some(10),
+            suffix: "...".to_string(),
+            word_boundary: false,
+        };
+        let result = truncate_text(input).unwrap();
+        assert_eq!(result, "Hi");
+    }
+
+    #[test]
+    fn test_wrap_text_basic() {
+        let input = WrapTextInput {
+            text: Some("Hello World this is a test".to_string()),
+            width: 10,
+            preserve_newlines: true,
+        };
+        let result = wrap_text(input).unwrap();
+        assert!(result.contains('\n'));
+        // Each line should be <= 10 chars
+        for line in result.lines() {
+            assert!(line.len() <= 10);
+        }
+    }
+
+    #[test]
+    fn test_wrap_text_preserve_newlines() {
+        let input = WrapTextInput {
+            text: Some("Line1\nLine2".to_string()),
+            width: 80,
+            preserve_newlines: true,
+        };
+        let result = wrap_text(input).unwrap();
+        assert_eq!(result, "Line1\nLine2");
+    }
+
+    #[test]
+    fn test_wrap_text_short_text() {
+        let input = WrapTextInput {
+            text: Some("Short".to_string()),
+            width: 80,
+            preserve_newlines: true,
+        };
+        let result = wrap_text(input).unwrap();
+        assert_eq!(result, "Short");
+    }
+
+    // ============================================================================
+    // Data extraction tests
+    // ============================================================================
+
+    #[test]
+    fn test_extract_numbers_integers() {
+        let input = ExtractNumbersInput {
+            text: Some("Price: 123, Quantity: 456".to_string()),
+            include_decimals: false,
+            include_negative: false,
+        };
+        let result = extract_numbers(input).unwrap();
+        assert_eq!(result, vec![123.0, 456.0]);
+    }
+
+    #[test]
+    fn test_extract_numbers_decimals() {
+        let input = ExtractNumbersInput {
+            text: Some("Total: $123.45, Tax: $6.78".to_string()),
+            include_decimals: true,
+            include_negative: false,
+        };
+        let result = extract_numbers(input).unwrap();
+        assert_eq!(result, vec![123.45, 6.78]);
+    }
+
+    #[test]
+    fn test_extract_numbers_negative() {
+        let input = ExtractNumbersInput {
+            text: Some("Balance: -50, Credit: 100".to_string()),
+            include_decimals: false,
+            include_negative: true,
+        };
+        let result = extract_numbers(input).unwrap();
+        assert_eq!(result, vec![-50.0, 100.0]);
+    }
+
+    #[test]
+    #[allow(clippy::approx_constant)]
+    fn test_extract_numbers_all_options() {
+        let input = ExtractNumbersInput {
+            text: Some("Values: -12.5, 3.14, -7".to_string()),
+            include_decimals: true,
+            include_negative: true,
+        };
+        let result = extract_numbers(input).unwrap();
+        assert_eq!(result, vec![-12.5, 3.14, -7.0]);
+    }
+
+    #[test]
+    fn test_extract_emails_basic() {
+        let input = SimpleTextInput {
+            text: Some("Contact: alice@example.com, bob@test.org".to_string()),
+        };
+        let result = extract_emails(input).unwrap();
+        assert_eq!(result, vec!["alice@example.com", "bob@test.org"]);
+    }
+
+    #[test]
+    fn test_extract_emails_complex() {
+        let input = SimpleTextInput {
+            text: Some("Email: user.name+tag@sub.domain.com here".to_string()),
+        };
+        let result = extract_emails(input).unwrap();
+        assert_eq!(result, vec!["user.name+tag@sub.domain.com"]);
+    }
+
+    #[test]
+    fn test_extract_emails_none() {
+        let input = SimpleTextInput {
+            text: Some("No emails here".to_string()),
+        };
+        let result = extract_emails(input).unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_extract_urls_basic() {
+        let input = SimpleTextInput {
+            text: Some("Visit https://example.com and http://test.org".to_string()),
+        };
+        let result = extract_urls(input).unwrap();
+        assert_eq!(result, vec!["https://example.com", "http://test.org"]);
+    }
+
+    #[test]
+    fn test_extract_urls_with_path() {
+        let input = SimpleTextInput {
+            text: Some("Link: https://example.com/path/to/page?query=1".to_string()),
+        };
+        let result = extract_urls(input).unwrap();
+        assert_eq!(result, vec!["https://example.com/path/to/page?query=1"]);
+    }
+
+    #[test]
+    fn test_extract_urls_none() {
+        let input = SimpleTextInput {
+            text: Some("No URLs in this text".to_string()),
+        };
+        let result = extract_urls(input).unwrap();
+        assert!(result.is_empty());
+    }
+
+    // ============================================================================
+    // Advanced operations tests
+    // ============================================================================
+
+    #[test]
+    fn test_compare_text_exact_match() {
+        let input = CompareTextInput {
+            text_a: Some("Hello".to_string()),
+            text_b: Some("Hello".to_string()),
+            mode: CompareMode::Exact,
+            ngram_n: None,
+        };
+        let result = compare_text(input).unwrap();
+        assert_eq!(result, json!(true));
+    }
+
+    #[test]
+    fn test_compare_text_exact_no_match() {
+        let input = CompareTextInput {
+            text_a: Some("Hello".to_string()),
+            text_b: Some("hello".to_string()),
+            mode: CompareMode::Exact,
+            ngram_n: None,
+        };
+        let result = compare_text(input).unwrap();
+        assert_eq!(result, json!(false));
+    }
+
+    #[test]
+    fn test_compare_text_case_insensitive() {
+        let input = CompareTextInput {
+            text_a: Some("Hello".to_string()),
+            text_b: Some("hello".to_string()),
+            mode: CompareMode::CaseInsensitive,
+            ngram_n: None,
+        };
+        let result = compare_text(input).unwrap();
+        assert_eq!(result, json!(true));
+    }
+
+    #[test]
+    fn test_compare_text_levenshtein() {
+        let input = CompareTextInput {
+            text_a: Some("kitten".to_string()),
+            text_b: Some("sitting".to_string()),
+            mode: CompareMode::LevenshteinDistance,
+            ngram_n: None,
+        };
+        let result = compare_text(input).unwrap();
+        assert_eq!(result, json!(3)); // kitten -> sitten -> sittin -> sitting
+    }
+
+    #[test]
+    fn test_compare_text_levenshtein_identical() {
+        let input = CompareTextInput {
+            text_a: Some("hello".to_string()),
+            text_b: Some("hello".to_string()),
+            mode: CompareMode::LevenshteinDistance,
+            ngram_n: None,
+        };
+        let result = compare_text(input).unwrap();
+        assert_eq!(result, json!(0));
+    }
+
+    #[test]
+    fn test_compare_text_contains() {
+        let input = CompareTextInput {
+            text_a: Some("Hello World".to_string()),
+            text_b: Some("World".to_string()),
+            mode: CompareMode::Contains,
+            ngram_n: None,
+        };
+        let result = compare_text(input).unwrap();
+        assert_eq!(result, json!(true));
+    }
+
+    #[test]
+    fn test_compare_text_not_contains() {
+        let input = CompareTextInput {
+            text_a: Some("Hello World".to_string()),
+            text_b: Some("Universe".to_string()),
+            mode: CompareMode::Contains,
+            ngram_n: None,
+        };
+        let result = compare_text(input).unwrap();
+        assert_eq!(result, json!(false));
+    }
+
+    #[test]
+    fn test_compare_text_jaro_identical() {
+        let input = CompareTextInput {
+            text_a: Some("hello".to_string()),
+            text_b: Some("hello".to_string()),
+            mode: CompareMode::JaroSimilarity,
+            ngram_n: None,
+        };
+        let result = compare_text(input).unwrap();
+        assert_eq!(result.as_f64().unwrap(), 1.0);
+    }
+
+    #[test]
+    fn test_compare_text_jaro_classic_example() {
+        // The canonical example: "MARTHA" vs "MARHTA" → Jaro ≈ 0.9444
+        let input = CompareTextInput {
+            text_a: Some("MARTHA".to_string()),
+            text_b: Some("MARHTA".to_string()),
+            mode: CompareMode::JaroSimilarity,
+            ngram_n: None,
+        };
+        let v = compare_text(input).unwrap().as_f64().unwrap();
+        assert!((v - 0.9444444444444444).abs() < 1e-9, "got {}", v);
+    }
+
+    #[test]
+    fn test_compare_text_jaro_winkler_classic_example() {
+        // "MARTHA"/"MARHTA": Jaro ≈ 0.9444, common prefix 3 ("MAR") so JW
+        // = 0.9444 + 3*0.1*(1 - 0.9444) ≈ 0.9611
+        let input = CompareTextInput {
+            text_a: Some("MARTHA".to_string()),
+            text_b: Some("MARHTA".to_string()),
+            mode: CompareMode::JaroWinklerSimilarity,
+            ngram_n: None,
+        };
+        let v = compare_text(input).unwrap().as_f64().unwrap();
+        assert!((v - 0.9611111111111111).abs() < 1e-9, "got {}", v);
+    }
+
+    #[test]
+    fn test_compare_text_jaro_disjoint() {
+        let input = CompareTextInput {
+            text_a: Some("abc".to_string()),
+            text_b: Some("xyz".to_string()),
+            mode: CompareMode::JaroSimilarity,
+            ngram_n: None,
+        };
+        assert_eq!(compare_text(input).unwrap().as_f64().unwrap(), 0.0);
+    }
+
+    #[test]
+    fn test_compare_text_jaro_winkler_empty() {
+        // Both empty → identical (1.0).
+        let input = CompareTextInput {
+            text_a: Some(String::new()),
+            text_b: Some(String::new()),
+            mode: CompareMode::JaroWinklerSimilarity,
+            ngram_n: None,
+        };
+        assert_eq!(compare_text(input).unwrap().as_f64().unwrap(), 1.0);
+        // One empty → 0.0.
+        let input = CompareTextInput {
+            text_a: Some("hello".to_string()),
+            text_b: Some(String::new()),
+            mode: CompareMode::JaroWinklerSimilarity,
+            ngram_n: None,
+        };
+        assert_eq!(compare_text(input).unwrap().as_f64().unwrap(), 0.0);
+    }
+
+    #[test]
+    fn test_compare_text_jaro_unicode() {
+        // Multi-byte chars are compared by codepoint, not bytes.
+        let input = CompareTextInput {
+            text_a: Some("café".to_string()),
+            text_b: Some("café".to_string()),
+            mode: CompareMode::JaroSimilarity,
+            ngram_n: None,
+        };
+        assert_eq!(compare_text(input).unwrap().as_f64().unwrap(), 1.0);
+    }
+
+    #[test]
+    fn test_compare_text_ngram_jaccard_identical() {
+        let input = CompareTextInput {
+            text_a: Some("hello".to_string()),
+            text_b: Some("hello".to_string()),
+            mode: CompareMode::NgramJaccard,
+            ngram_n: Some(3),
+        };
+        assert_eq!(compare_text(input).unwrap().as_f64().unwrap(), 1.0);
+    }
+
+    #[test]
+    fn test_compare_text_ngram_jaccard_disjoint() {
+        let input = CompareTextInput {
+            text_a: Some("aaaaa".to_string()),
+            text_b: Some("bbbbb".to_string()),
+            mode: CompareMode::NgramJaccard,
+            ngram_n: Some(3),
+        };
+        assert_eq!(compare_text(input).unwrap().as_f64().unwrap(), 0.0);
+    }
+
+    #[test]
+    fn test_compare_text_ngram_jaccard_partial() {
+        // "abcde" → {abc, bcd, cde}; "abcef" → {abc, bce, cef}
+        // intersection = {abc} = 1, union = 5 → 1/5 = 0.2
+        let input = CompareTextInput {
+            text_a: Some("abcde".to_string()),
+            text_b: Some("abcef".to_string()),
+            mode: CompareMode::NgramJaccard,
+            ngram_n: Some(3),
+        };
+        let v = compare_text(input).unwrap().as_f64().unwrap();
+        assert!((v - 0.2).abs() < 1e-9, "got {}", v);
+    }
+
+    #[test]
+    fn test_compare_text_ngram_overlap_smaller_set() {
+        // "ab" → {ab}; "abc" → {ab, bc}. intersection = 1, min(1, 2) = 1 → 1.0
+        let input = CompareTextInput {
+            text_a: Some("ab".to_string()),
+            text_b: Some("abc".to_string()),
+            mode: CompareMode::NgramOverlap,
+            ngram_n: Some(2),
+        };
+        assert_eq!(compare_text(input).unwrap().as_f64().unwrap(), 1.0);
+    }
+
+    #[test]
+    fn test_compare_text_ngram_n_validation() {
+        for n in [0u8, 1, 9, 99] {
+            let input = CompareTextInput {
+                text_a: Some("hi".to_string()),
+                text_b: Some("hi".to_string()),
+                mode: CompareMode::NgramJaccard,
+                ngram_n: Some(n),
+            };
+            let err = compare_text(input).unwrap_err();
+            assert!(err.contains("ngram_n must be in 2..=8"), "n={}: {}", n, err);
+        }
+    }
+
+    #[test]
+    fn test_compare_text_ngram_default_n() {
+        // Omit ngram_n → defaults to 3.
+        let input = CompareTextInput {
+            text_a: Some("hello".to_string()),
+            text_b: Some("hello".to_string()),
+            mode: CompareMode::NgramJaccard,
+            ngram_n: None,
+        };
+        assert_eq!(compare_text(input).unwrap().as_f64().unwrap(), 1.0);
+    }
+
+    #[test]
+    fn test_compare_text_ngram_case_insensitive() {
+        // shingles() lowercases, so "HELLO" / "hello" should be 1.0.
+        let input = CompareTextInput {
+            text_a: Some("HELLO".to_string()),
+            text_b: Some("hello".to_string()),
+            mode: CompareMode::NgramJaccard,
+            ngram_n: Some(3),
+        };
+        assert_eq!(compare_text(input).unwrap().as_f64().unwrap(), 1.0);
+    }
+
+    #[test]
+    fn test_count_occurrences_literal() {
+        let input = CountOccurrencesInput {
+            text: Some("the quick brown fox jumps over the lazy dog".to_string()),
+            pattern: Some("the".to_string()),
+            use_regex: false,
+            case_insensitive: false,
+        };
+        let result = count_occurrences(input).unwrap();
+        assert_eq!(result, 2);
+    }
+
+    #[test]
+    fn test_count_occurrences_case_insensitive() {
+        let input = CountOccurrencesInput {
+            text: Some("The quick brown fox jumps over the lazy dog".to_string()),
+            pattern: Some("the".to_string()),
+            use_regex: false,
+            case_insensitive: true,
+        };
+        let result = count_occurrences(input).unwrap();
+        assert_eq!(result, 2);
+    }
+
+    #[test]
+    fn test_count_occurrences_regex() {
+        let input = CountOccurrencesInput {
+            text: Some("abc123def456ghi789".to_string()),
+            pattern: Some(r"\d+".to_string()),
+            use_regex: true,
+            case_insensitive: false,
+        };
+        let result = count_occurrences(input).unwrap();
+        assert_eq!(result, 3);
+    }
+
+    #[test]
+    fn test_count_occurrences_regex_case_insensitive() {
+        let input = CountOccurrencesInput {
+            text: Some("Hello hello HELLO".to_string()),
+            pattern: Some("hello".to_string()),
+            use_regex: true,
+            case_insensitive: true,
+        };
+        let result = count_occurrences(input).unwrap();
+        assert_eq!(result, 3);
+    }
+
+    #[test]
+    fn test_count_occurrences_empty_text() {
+        let input = CountOccurrencesInput {
+            text: Some("".to_string()),
+            pattern: Some("test".to_string()),
+            use_regex: false,
+            case_insensitive: false,
+        };
+        let result = count_occurrences(input).unwrap();
+        assert_eq!(result, 0);
+    }
+
+    #[test]
+    fn test_count_occurrences_empty_pattern() {
+        let input = CountOccurrencesInput {
+            text: Some("test".to_string()),
+            pattern: Some("".to_string()),
+            use_regex: false,
+            case_insensitive: false,
+        };
+        let result = count_occurrences(input).unwrap();
+        assert_eq!(result, 0);
+    }
+}
