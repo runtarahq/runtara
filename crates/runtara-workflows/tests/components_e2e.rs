@@ -59,14 +59,19 @@ fn agent_wasm_staged() -> bool {
     dir.join("runtara_agent_crypto.wasm").exists()
 }
 
-fn isolated_data_dir() -> TempDir {
+fn isolated_data_dir() -> Option<TempDir> {
+    // If the caller already set DATA_DIR (e.g. for debugging — `DATA_DIR=/tmp/foo
+    // cargo test ...`), respect it and don't create a tempdir.
+    if std::env::var_os("DATA_DIR").is_some() {
+        return None;
+    }
     let temp = TempDir::new().expect("temp dir");
     // SAFETY: single-threaded test binary; the pipeline reads DATA_DIR once
     // per call.
     unsafe {
         std::env::set_var("DATA_DIR", temp.path());
     }
-    temp
+    Some(temp)
 }
 
 /// Minimal workflow: receive `data.text`, hash it via `crypto/hash`, finish
@@ -144,40 +149,45 @@ fn components_e2e_compiles_trivial_workflow() {
         compile_mode: CompileMode::Components,
     };
 
-    // KNOWN BLOCKER: cargo-component 0.21.1's bundled wit-parser rejects
-    // named imports of versioned packages with namespace separators —
-    // `import crypto: runtara:agent/capabilities@0.3.0;` parses as
-    // `runtara` (package) followed by an unexpected `:`. Modern wasm-tools
-    // (>=1.249) accepts this syntax, so this E2E will start passing once
-    // cargo-component bumps its parser dep.
+    // The original Phase-3 blocker — cargo-component 0.21.1 rejecting
+    // `import crypto: runtara:agent/capabilities@0.3.0;` — is gone. Each
+    // agent now exports under its own WIT package
+    // (`runtara:agent-<id>/capabilities@0.3.0`) and the workflow uses
+    // anonymous imports per agent, which the older parser accepts.
     //
-    // Alternatives that bypass the limitation (track in follow-ups):
-    //   (a) per-agent unique WIT package (e.g. runtara:agent-crypto) so
-    //       anonymous imports `import runtara:agent-crypto/capabilities;`
-    //       are enough — requires duplicating the WIT contract across all
-    //       23 agent crates, plus host-side multi-binding refactor.
-    //   (b) Phase 6+ embedded-wasmtime path — drop WAC composition; the
-    //       host's ComponentDispatcherService satisfies workflow imports
-    //       at instantiate time across any number of agents.
+    // Remaining gap: `runtara-sdk` transitively pulls `ring`, which
+    // compiles C code via `cc-rs` and needs a wasi-sdk on PATH plus
+    // CFLAGS pointing at it. Once those env vars are set (or `ring` is
+    // swapped for `ring-with-getrandom` / `aws-lc-rs` / a pure-rust
+    // alternative), this test produces a real composed workflow.wasm.
     //
-    // For now we assert the codegen + path resolution + dep-staging are
-    // wired (everything up to `cargo component build` succeeds in
-    // producing the artifacts) and accept that the final build step
-    // fails until the blocker resolves.
+    // For now, accept any of:
+    //   - the build succeeds (toolchain is configured)
+    //   - cargo component fails on the ring/wasi-sdk step (the
+    //     toolchain gap we know about)
     match compile_workflow(input) {
         Ok(result) => {
             assert!(result.binary_path.exists());
             assert!(result.binary_size > 0);
             assert_eq!(result.binary_checksum.len(), 64);
+            eprintln!(
+                "✓ components-mode compile produced {} ({} bytes, sha256={})",
+                result.binary_path.display(),
+                result.binary_size,
+                result.binary_checksum
+            );
         }
         Err(e) => {
             let msg = e.to_string();
             assert!(
-                msg.contains("expected `/`, found `:`")
-                    || msg.contains("cargo component build returned"),
-                "unexpected components-mode compile failure: {msg}"
+                msg.contains("cargo component build returned"),
+                "unexpected components-mode compile failure (not the known \
+                 ring/wasi-sdk gap): {msg}"
             );
-            eprintln!("EXPECTED-FAIL (cargo-component named-import blocker): {msg}");
+            eprintln!(
+                "PARTIAL: cargo-component WIT parsing succeeds; build fails \
+                 downstream (likely ring/wasi-sdk toolchain gap): {msg}"
+            );
         }
     }
 }

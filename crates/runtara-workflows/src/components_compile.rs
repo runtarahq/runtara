@@ -61,7 +61,8 @@ pub fn compile_workflow_components(input: CompilationInput) -> io::Result<Native
     let build_dir = build_dir_for(&tenant_id, &workflow_id, version);
     fs::create_dir_all(build_dir.join("src"))?;
     fs::create_dir_all(build_dir.join("wit"))?;
-    let cargo_toml = resolve_cargo_toml_placeholders(&artifacts.cargo_toml)?;
+    let cargo_toml =
+        resolve_cargo_toml_placeholders(&artifacts.cargo_toml, &artifacts.agents_required)?;
     fs::write(build_dir.join("Cargo.toml"), cargo_toml)?;
     fs::write(build_dir.join("src/lib.rs"), &artifacts.lib_rs)?;
     fs::write(build_dir.join("wit/world.wit"), &artifacts.world_wit)?;
@@ -73,6 +74,12 @@ pub fn compile_workflow_components(input: CompilationInput) -> io::Result<Native
     // self-contained — much simpler than relying on cargo-component's path
     // dependencies to side-effect the deps directory.
     stage_wit_deps(&build_dir.join("wit/deps"))?;
+
+    // Each used agent's per-agent WIT package (`runtara:agent-<id>@0.3.0`)
+    // also has to be in the workflow's wit/deps/ so cargo-component can
+    // resolve the anonymous import `runtara:agent-<id>/capabilities@0.3.0`
+    // emitted by the components codegen.
+    stage_per_agent_wits(&build_dir.join("wit/deps"), &artifacts.agents_required)?;
 
     // 3. Stage the agent-cas (copies missing .wasm files from the bundle dir).
     let cas_dir = stage_agent_cas(&artifacts.agents_required)?;
@@ -216,6 +223,38 @@ fn stage_wit_deps(deps_dir: &Path) -> io::Result<()> {
     Ok(())
 }
 
+/// For each agent the workflow imports, copy its `wit/agent.wit` (declaring
+/// the unique per-agent package `runtara:agent-<id>@0.3.0`) into
+/// `wit/deps/runtara-agent-<id>/agent.wit`. cargo-component's wit-parser
+/// uses the directory name as a dep id and reads the contained .wit files
+/// to populate its package map.
+fn stage_per_agent_wits(deps_dir: &Path, required: &[AgentRequirement]) -> io::Result<()> {
+    let ws = workspace_root();
+    for req in required {
+        let src = ws.join(format!(
+            "crates/runtara-agent-{}/wit/agent.wit",
+            req.agent_id
+        ));
+        if !src.exists() {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!(
+                    "per-agent WIT missing for `{}` at {} — run \
+                     `cargo build -p runtara-agent-{}` to trigger the build.rs that \
+                     generates it, or check that the crate is in the workspace",
+                    req.agent_id,
+                    src.display(),
+                    req.agent_id
+                ),
+            ));
+        }
+        let dst_dir = deps_dir.join(format!("runtara-agent-{}", req.agent_id));
+        fs::create_dir_all(&dst_dir)?;
+        fs::copy(&src, dst_dir.join("agent.wit"))?;
+    }
+    Ok(())
+}
+
 fn copy_dir_recursive(src: &Path, dst: &Path) -> io::Result<()> {
     fs::create_dir_all(dst)?;
     for entry in fs::read_dir(src)? {
@@ -231,15 +270,49 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> io::Result<()> {
     Ok(())
 }
 
-fn resolve_cargo_toml_placeholders(toml: &str) -> io::Result<String> {
+fn resolve_cargo_toml_placeholders(
+    toml: &str,
+    required: &[AgentRequirement],
+) -> io::Result<String> {
     let ws = workspace_root();
     let stdlib_path = ws.join("crates/runtara-workflow-stdlib");
     let sdk_path = ws.join("crates/runtara-sdk");
     let agent_wit_path = ws.join("crates/runtara-agent-wit/wit");
-    Ok(toml
+    let deps_root = agent_wit_path.join("deps");
+    let mut out = toml
         .replace("{{STDLIB_PATH}}", &stdlib_path.display().to_string())
         .replace("{{SDK_PATH}}", &sdk_path.display().to_string())
-        .replace("{{AGENT_WIT_PATH}}", &agent_wit_path.display().to_string()))
+        .replace("{{AGENT_WIT_PATH}}", &agent_wit_path.display().to_string())
+        .replace(
+            "{{WASI_CLI_PATH}}",
+            &deps_root.join("cli").display().to_string(),
+        )
+        .replace(
+            "{{WASI_IO_PATH}}",
+            &deps_root.join("io").display().to_string(),
+        )
+        .replace(
+            "{{WASI_CLOCKS_PATH}}",
+            &deps_root.join("clocks").display().to_string(),
+        )
+        .replace(
+            "{{WASI_RANDOM_PATH}}",
+            &deps_root.join("random").display().to_string(),
+        )
+        .replace(
+            "{{WASI_FILESYSTEM_PATH}}",
+            &deps_root.join("filesystem").display().to_string(),
+        )
+        .replace(
+            "{{WASI_SOCKETS_PATH}}",
+            &deps_root.join("sockets").display().to_string(),
+        );
+    for req in required {
+        let agent_wit = ws.join(format!("crates/runtara-agent-{}/wit", req.agent_id));
+        let token = format!("{{{{AGENT_PER_WIT_PATH:{}}}}}", req.agent_id);
+        out = out.replace(&token, &agent_wit.display().to_string());
+    }
+    Ok(out)
 }
 
 // ---------------------------------------------------------------------------
