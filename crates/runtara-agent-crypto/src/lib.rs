@@ -471,3 +471,150 @@ fn error_string_to_error_info(s: String) -> ErrorInfo {
 
 #[cfg(target_arch = "wasm32")]
 bindings::export!(Component with_types_in bindings);
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_hash_sha256_string() {
+        let input = HashInput {
+            data: HashDataInput::Text("Hello World".to_string()),
+            algorithm: HashAlgorithm::Sha256,
+            output_format: OutputFormat::Hex,
+        };
+        let result = hash(input).unwrap();
+        assert_eq!(result.algorithm, "sha256");
+        assert_eq!(result.format, "hex");
+        // SHA-256 of "Hello World"
+        assert_eq!(
+            result.hash,
+            "a591a6d40bf420404a011733cfb7b190d62c65bf0bcda32b57b277d9ad9f146e"
+        );
+    }
+
+    #[test]
+    fn test_hash_sha512_string() {
+        let input = HashInput {
+            data: HashDataInput::Text("Hello World".to_string()),
+            algorithm: HashAlgorithm::Sha512,
+            output_format: OutputFormat::Hex,
+        };
+        let result = hash(input).unwrap();
+        assert_eq!(result.algorithm, "sha512");
+        assert!(result.hash.len() == 128); // SHA-512 produces 64 bytes = 128 hex chars
+    }
+
+    #[test]
+    fn test_hash_sha1_string() {
+        let input = HashInput {
+            data: HashDataInput::Text("Hello World".to_string()),
+            algorithm: HashAlgorithm::Sha1,
+            output_format: OutputFormat::Hex,
+        };
+        let result = hash(input).unwrap();
+        assert_eq!(result.algorithm, "sha1");
+        // SHA-1 of "Hello World"
+        assert_eq!(result.hash, "0a4d55a8d778e5022fab701977c5d840bbc486d0");
+    }
+
+    #[test]
+    fn test_hash_md5_string() {
+        let input = HashInput {
+            data: HashDataInput::Text("Hello World".to_string()),
+            algorithm: HashAlgorithm::Md5,
+            output_format: OutputFormat::Hex,
+        };
+        let result = hash(input).unwrap();
+        assert_eq!(result.algorithm, "md5");
+        // MD5 of "Hello World"
+        assert_eq!(result.hash, "b10a8db164e0754105b7a99be72e3fe5");
+    }
+
+    #[test]
+    fn test_hash_base64_output() {
+        let input = HashInput {
+            data: HashDataInput::Text("Hello World".to_string()),
+            algorithm: HashAlgorithm::Sha256,
+            output_format: OutputFormat::Base64,
+        };
+        let result = hash(input).unwrap();
+        assert_eq!(result.format, "base64");
+        // Base64 encoding of SHA-256 hash
+        assert_eq!(result.hash, "pZGm1Av0IEBKARczz7exkNYsZb8LzaMrV7J32a2fFG4=");
+    }
+
+    #[test]
+    fn test_hash_file_data() {
+        // "Hello World" encoded as base64
+        let file_data = FileData {
+            content: "SGVsbG8gV29ybGQ=".to_string(),
+            filename: Some("test.txt".to_string()),
+            mime_type: Some("text/plain".to_string()),
+        };
+        let input = HashInput {
+            data: HashDataInput::File(file_data),
+            algorithm: HashAlgorithm::Sha256,
+            output_format: OutputFormat::Hex,
+        };
+        let result = hash(input).unwrap();
+        // Should produce same hash as the string "Hello World"
+        assert_eq!(
+            result.hash,
+            "a591a6d40bf420404a011733cfb7b190d62c65bf0bcda32b57b277d9ad9f146e"
+        );
+    }
+
+    #[test]
+    fn test_hmac_sha256() {
+        let input = HmacInput {
+            data: HashDataInput::Text("Hello World".to_string()),
+            secret: "secret-key".to_string(),
+            algorithm: HmacAlgorithm::HmacSha256,
+            output_format: OutputFormat::Hex,
+        };
+        let result = hmac_capability(input).unwrap();
+        assert_eq!(result.algorithm, "hmac-sha256");
+        assert_eq!(result.format, "hex");
+        assert_eq!(result.hash.len(), 64); // HMAC-SHA256 produces 32 bytes = 64 hex chars
+    }
+
+    #[test]
+    fn test_hmac_sha512() {
+        let input = HmacInput {
+            data: HashDataInput::Text("Hello World".to_string()),
+            secret: "secret-key".to_string(),
+            algorithm: HmacAlgorithm::HmacSha512,
+            output_format: OutputFormat::Hex,
+        };
+        let result = hmac_capability(input).unwrap();
+        assert_eq!(result.algorithm, "hmac-sha512");
+        assert_eq!(result.hash.len(), 128); // HMAC-SHA512 produces 64 bytes = 128 hex chars
+    }
+
+    #[test]
+    fn test_hmac_base64_output() {
+        let input = HmacInput {
+            data: HashDataInput::Text("Hello World".to_string()),
+            secret: "secret-key".to_string(),
+            algorithm: HmacAlgorithm::HmacSha256,
+            output_format: OutputFormat::Base64,
+        };
+        let result = hmac_capability(input).unwrap();
+        assert_eq!(result.format, "base64");
+    }
+
+    #[test]
+    fn test_hash_empty_string() {
+        let input = HashInput {
+            data: HashDataInput::Text("".to_string()),
+            algorithm: HashAlgorithm::Sha256,
+            output_format: OutputFormat::Hex,
+        };
+        let result = hash(input).unwrap();
+        // SHA-256 of empty string
+        assert_eq!(
+            result.hash,
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+    }
+}

@@ -817,3 +817,234 @@ fn error_string_to_error_info(s: String) -> ErrorInfo {
 
 #[cfg(target_arch = "wasm32")]
 bindings::export!(Component with_types_in bindings);
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn test_from_csv_with_headers() {
+        let csv_data = b"name,age,active\nAlice,30,true\nBob,25,false";
+        let input = FromCsvInput {
+            skip_empty_lines: true,
+            data: CsvDataInput::Bytes(csv_data.to_vec()),
+            encoding: "UTF-8".to_string(),
+            delimiter: ',',
+            quote_char: '"',
+            escape_char: None,
+            use_header: true,
+            trim_whitespace: false,
+        };
+
+        let result = from_csv(input).unwrap();
+        assert_eq!(result.len(), 2);
+
+        assert_eq!(result[0]["name"], "Alice");
+        assert_eq!(result[0]["age"], "30");
+        assert_eq!(result[0]["active"], "true");
+
+        assert_eq!(result[1]["name"], "Bob");
+        assert_eq!(result[1]["age"], "25");
+    }
+
+    #[test]
+    fn test_from_csv_without_headers() {
+        let csv_data = b"Alice,30\nBob,25";
+        let input = FromCsvInput {
+            skip_empty_lines: true,
+            data: CsvDataInput::Bytes(csv_data.to_vec()),
+            encoding: "UTF-8".to_string(),
+            delimiter: ',',
+            quote_char: '"',
+            escape_char: None,
+            use_header: false,
+            trim_whitespace: false,
+        };
+
+        let result = from_csv(input).unwrap();
+        assert_eq!(result.len(), 2);
+
+        if let Value::Array(row1) = &result[0] {
+            assert_eq!(row1[0], "Alice");
+            assert_eq!(row1[1], "30");
+        } else {
+            panic!("Expected array");
+        }
+    }
+
+    #[test]
+    fn test_from_csv_custom_delimiter() {
+        let csv_data = b"name;age\nAlice;30\nBob;25";
+        let input = FromCsvInput {
+            skip_empty_lines: true,
+            data: CsvDataInput::Bytes(csv_data.to_vec()),
+            encoding: "UTF-8".to_string(),
+            delimiter: ';',
+            quote_char: '"',
+            escape_char: None,
+            use_header: true,
+            trim_whitespace: false,
+        };
+
+        let result = from_csv(input).unwrap();
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0]["name"], "Alice");
+    }
+
+    #[test]
+    fn test_from_csv_skip_empty_lines() {
+        let csv_data = b"name,age\n\nAlice,30\n\nBob,25\n";
+        let input = FromCsvInput {
+            skip_empty_lines: true,
+            data: CsvDataInput::Bytes(csv_data.to_vec()),
+            encoding: "UTF-8".to_string(),
+            delimiter: ',',
+            quote_char: '"',
+            escape_char: None,
+            use_header: true,
+            trim_whitespace: false,
+        };
+
+        let result = from_csv(input).unwrap();
+        assert_eq!(result.len(), 2);
+    }
+
+    #[test]
+    fn test_from_csv_base64_string() {
+        let csv_data = b"name,age\nAlice,30";
+        let encoded = base64::engine::general_purpose::STANDARD.encode(csv_data);
+        let input = FromCsvInput {
+            skip_empty_lines: true,
+            data: CsvDataInput::Base64String(encoded),
+            encoding: "UTF-8".to_string(),
+            delimiter: ',',
+            quote_char: '"',
+            escape_char: None,
+            use_header: true,
+            trim_whitespace: false,
+        };
+
+        let result = from_csv(input).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0]["name"], "Alice");
+    }
+
+    #[test]
+    fn test_to_csv_array_of_objects() {
+        let data = json!([
+            {"name": "Alice", "age": 30},
+            {"name": "Bob", "age": 25}
+        ]);
+
+        let input = ToCsvInput {
+            value: data,
+            encoding: "UTF-8".to_string(),
+            delimiter: ',',
+            quote_char: '"',
+            escape_char: None,
+            use_header: true,
+        };
+
+        let result = to_csv(input).unwrap();
+        let csv_string = String::from_utf8(result).unwrap();
+
+        assert!(csv_string.contains("name"));
+        assert!(csv_string.contains("age"));
+        assert!(csv_string.contains("Alice"));
+        assert!(csv_string.contains("30"));
+    }
+
+    #[test]
+    fn test_to_csv_without_header() {
+        let data = json!([
+            {"name": "Alice", "age": 30}
+        ]);
+
+        let input = ToCsvInput {
+            value: data,
+            encoding: "UTF-8".to_string(),
+            delimiter: ',',
+            quote_char: '"',
+            escape_char: None,
+            use_header: false,
+        };
+
+        let result = to_csv(input).unwrap();
+        let csv_string = String::from_utf8(result).unwrap();
+
+        // Should not contain header row
+        assert!(!csv_string.starts_with("name"));
+        assert!(csv_string.contains("Alice"));
+    }
+
+    #[test]
+    fn test_to_csv_custom_delimiter() {
+        let data = json!([{"name": "Alice", "age": 30}]);
+
+        let input = ToCsvInput {
+            value: data,
+            encoding: "UTF-8".to_string(),
+            delimiter: ';',
+            quote_char: '"',
+            escape_char: None,
+            use_header: true,
+        };
+
+        let result = to_csv(input).unwrap();
+        let csv_string = String::from_utf8(result).unwrap();
+
+        assert!(csv_string.contains(';'));
+    }
+
+    #[test]
+    fn test_get_header_with_type_inference() {
+        let csv_data = b"name,age,active\nAlice,30,true";
+        let input = GetHeaderInput {
+            data: CsvDataInput::Bytes(csv_data.to_vec()),
+            encoding: "UTF-8".to_string(),
+            delimiter: ',',
+            quote_char: '"',
+            escape_char: None,
+            use_header: true,
+            trim_whitespace: false,
+        };
+
+        let result = get_header(input).unwrap();
+
+        assert_eq!(result.get("name"), Some(&"String".to_string()));
+        assert_eq!(result.get("age"), Some(&"Integer".to_string()));
+        assert_eq!(result.get("active"), Some(&"Boolean".to_string()));
+    }
+
+    #[test]
+    fn test_get_header_without_headers() {
+        let csv_data = b"Alice,30,true\nBob,25,false";
+        let input = GetHeaderInput {
+            data: CsvDataInput::Bytes(csv_data.to_vec()),
+            encoding: "UTF-8".to_string(),
+            delimiter: ',',
+            quote_char: '"',
+            escape_char: None,
+            use_header: false,
+            trim_whitespace: false,
+        };
+
+        let result = get_header(input).unwrap();
+
+        // Should generate column names
+        assert!(result.contains_key("Column 1"));
+        assert!(result.contains_key("Column 2"));
+        assert!(result.contains_key("Column 3"));
+    }
+
+    #[test]
+    #[allow(clippy::approx_constant)]
+    fn test_infer_type() {
+        assert_eq!(infer_type("true"), "Boolean");
+        assert_eq!(infer_type("false"), "Boolean");
+        assert_eq!(infer_type("42"), "Integer");
+        assert_eq!(infer_type("3.14"), "Double");
+        assert_eq!(infer_type("hello"), "String");
+        assert_eq!(infer_type(""), "String");
+    }
+}
