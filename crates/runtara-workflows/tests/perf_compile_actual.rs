@@ -75,6 +75,9 @@ fn compile_actual_large_embedded_workflow() {
         .collect();
 
     let codegen_start = Instant::now();
+    let catalog = std::sync::Arc::new(runtara_dsl::agent_meta::AgentCatalog::from_agents(
+        runtara_agents::registry::get_agents(),
+    ));
     let rust_code = codegen::ast::compile_with_children(
         &input.execution_graph,
         input.track_events,
@@ -82,6 +85,7 @@ fn compile_actual_large_embedded_workflow() {
         step_to_child_ref,
         input.connection_service_url.clone(),
         Some(input.tenant_id.clone()),
+        catalog,
     )
     .expect("codegen should succeed");
     let codegen_elapsed = codegen_start.elapsed();
@@ -117,6 +121,7 @@ fn compile_actual_large_embedded_workflow() {
             track_events: input.track_events,
             child_workflows,
             connection_service_url: input.connection_service_url,
+            agent_catalog: None,
         };
 
         let compile_start = Instant::now();

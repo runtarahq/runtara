@@ -15,23 +15,18 @@ use super::super::mapping;
 use super::{
     emit_agent_span_start, emit_breakpoint_check, emit_step_debug_end, emit_step_debug_start,
 };
-use runtara_agents::registry::{get_all_capabilities, get_capability_inputs};
 use runtara_dsl::AgentStep;
+use runtara_dsl::agent_meta::AgentCatalog;
 
-/// Check if a capability requires rate limiting by looking up its metadata.
-/// Returns true if the capability has rate_limited = true in its #[capability] macro.
-fn needs_rate_limiting(agent_id: &str, capability_id: &str) -> bool {
-    let agent_lower = agent_id.to_lowercase();
-
-    for cap in get_all_capabilities() {
-        let module = cap.module.unwrap_or("unknown");
-        if module == agent_lower && cap.capability_id == capability_id {
-            return cap.rate_limited;
-        }
-    }
-
-    // Default to false if capability not found (shouldn't happen for valid workflows)
-    false
+/// Check if a capability requires rate limiting by looking up its metadata
+/// in the runtime catalog. Returns `false` if the capability is unknown to
+/// the catalog (which only happens if validation was skipped — we choose
+/// the conservative "no rate limit" answer rather than refusing to emit).
+fn needs_rate_limiting(catalog: &AgentCatalog, agent_id: &str, capability_id: &str) -> bool {
+    catalog
+        .capability(agent_id, capability_id)
+        .map(|c| c.rate_limited)
+        .unwrap_or(false)
 }
 
 /// Emit code for an Agent step.
@@ -44,7 +39,7 @@ pub fn emit(step: &AgentStep, ctx: &mut EmitContext) -> Result<TokenStream, Code
 
     // All capabilities use #[resilient] for crash recovery.
     // Rate limiting is only applied to external API calls.
-    let needs_rate_limit = needs_rate_limiting(agent_id, capability_id);
+    let needs_rate_limit = needs_rate_limiting(&ctx.catalog, agent_id, capability_id);
 
     // Rate-limited capabilities get more retries and a longer base delay,
     // since 429 errors are expected to succeed after waiting.
@@ -141,7 +136,10 @@ pub fn emit(step: &AgentStep, ctx: &mut EmitContext) -> Result<TokenStream, Code
     // Generate resolved-input validation for required capability inputs. Static
     // validation proves the mapping key exists; this catches runtime references
     // that resolve to null/missing before agent deserialization.
-    let required_input_fields: Vec<TokenStream> = get_capability_inputs(agent_id, capability_id)
+    let required_input_fields: Vec<TokenStream> = ctx
+        .catalog
+        .capability(agent_id, capability_id)
+        .map(|c| c.inputs.clone())
         .unwrap_or_default()
         .into_iter()
         .filter(|field| field.required && field.name != "_connection")
@@ -655,6 +653,14 @@ mod tests {
     #[test]
     fn test_emit_agent_validates_required_inputs_before_dispatch() {
         let mut ctx = EmitContext::new(false);
+        // Empty catalog skips required-input emission; load the static one
+        // so this test (which asserts on the embedded validation block)
+        // can find http/http-request's required `url` field.
+        ctx.set_catalog(std::sync::Arc::new(
+            runtara_dsl::agent_meta::AgentCatalog::from_agents(
+                runtara_agents::registry::get_agents(),
+            ),
+        ));
         let mut step = create_agent_step("fetch-url", "http", "http-request");
         step.input_mapping = Some(HashMap::from([(
             "url".to_string(),
@@ -1142,7 +1148,8 @@ mod tests {
     #[test]
     fn test_needs_rate_limiting_unknown_capability() {
         // Unknown capabilities should not require rate limiting by default
-        let result = needs_rate_limiting("nonexistent", "fake-capability");
+        let catalog = runtara_dsl::agent_meta::AgentCatalog::new();
+        let result = needs_rate_limiting(&catalog, "nonexistent", "fake-capability");
         assert!(
             !result,
             "Unknown capabilities should default to no rate limiting"

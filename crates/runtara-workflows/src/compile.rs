@@ -140,6 +140,12 @@ pub struct CompilationInput {
     /// If provided, generated code will fetch connections from this service.
     /// Expected endpoint: `GET {url}/{tenant_id}/{connection_id}`.
     pub connection_service_url: Option<String>,
+    /// Runtime agent metadata catalog. Optional so callers that haven't
+    /// migrated yet keep working — `None` falls back to building one from
+    /// the statically-linked `runtara_agents::registry`. Production code
+    /// (the server) passes the dispatcher's catalog so the compile picks
+    /// up exactly the agents the runtime can dispatch.
+    pub agent_catalog: Option<std::sync::Arc<runtara_dsl::agent_meta::AgentCatalog>>,
 }
 
 /// Result of native binary compilation.

@@ -494,6 +494,7 @@ fn main() -> ExitCode {
         track_events: args.track_events,
         child_workflows: vec![],
         connection_service_url: None,
+        agent_catalog: None,
     };
 
     if args.verbose {

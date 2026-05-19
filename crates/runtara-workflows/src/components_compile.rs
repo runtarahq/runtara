@@ -45,7 +45,18 @@ pub fn compile_workflow_components(input: CompilationInput) -> io::Result<Native
         track_events,
         child_workflows,
         connection_service_url,
+        agent_catalog,
     } = input;
+
+    // Fall back to the statically-linked agent registry if the caller didn't
+    // supply a runtime catalog. The server normally hands in
+    // `ComponentDispatcherService::catalog()`; CLI / test paths leave it
+    // unset and get the embedded set.
+    let catalog = agent_catalog.unwrap_or_else(|| {
+        std::sync::Arc::new(runtara_dsl::agent_meta::AgentCatalog::from_agents(
+            runtara_agents::registry::get_agents(),
+        ))
+    });
 
     // 1. Codegen — produce the four artifacts.
     let artifacts = run_codegen(
@@ -54,6 +65,7 @@ pub fn compile_workflow_components(input: CompilationInput) -> io::Result<Native
         &child_workflows,
         connection_service_url.as_deref(),
         &tenant_id,
+        catalog,
     )?;
 
     // 2. Materialize the workflow-logic crate.
@@ -135,6 +147,7 @@ fn run_codegen(
     child_workflows: &[ChildWorkflowInput],
     connection_service_url: Option<&str>,
     tenant_id: &str,
+    catalog: std::sync::Arc<runtara_dsl::agent_meta::AgentCatalog>,
 ) -> io::Result<CodegenArtifacts> {
     let child_graphs: HashMap<String, ExecutionGraph> = child_workflows
         .iter()
@@ -160,6 +173,7 @@ fn run_codegen(
         connection_service_url.map(str::to_string),
         Some(tenant_id.to_string()),
     );
+    ctx.set_catalog(catalog);
     ctx.rate_limit_budget_ms = graph.rate_limit_budget_ms;
     ctx.durable = graph.durable.unwrap_or(true);
 

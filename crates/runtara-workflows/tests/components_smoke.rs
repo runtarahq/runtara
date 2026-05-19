@@ -683,6 +683,7 @@ fn components_smoke_all_shapes() {
             track_events: false,
             child_workflows,
             connection_service_url: None,
+            agent_catalog: None,
         };
 
         let started = std::time::Instant::now();

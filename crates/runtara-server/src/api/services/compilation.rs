@@ -65,6 +65,12 @@ pub struct CompilationService {
     connection_service_url: Option<String>,
     /// Runtime client for registering images with runtara-environment
     runtime_client: Option<Arc<RuntimeClient>>,
+    /// Runtime agent metadata catalog (snapshot of every `<agent>.meta.json`
+    /// staged at `$RUNTARA_AGENT_COMPONENTS_DIR`). When set, the compile
+    /// pipeline uses it instead of the statically-linked
+    /// `runtara_agents::registry`, making the server's compiled view of
+    /// agents match what the runtime dispatcher can actually invoke.
+    agent_catalog: Option<Arc<runtara_dsl::agent_meta::AgentCatalog>>,
 }
 
 impl CompilationService {
@@ -77,7 +83,19 @@ impl CompilationService {
             repository,
             connection_service_url,
             runtime_client,
+            agent_catalog: None,
         }
+    }
+
+    /// Plug in the runtime agent catalog. Wired up at server boot from the
+    /// `ComponentDispatcherService` so every compile sees the same agent
+    /// set the dispatcher can route to.
+    pub fn with_agent_catalog(
+        mut self,
+        catalog: Arc<runtara_dsl::agent_meta::AgentCatalog>,
+    ) -> Self {
+        self.agent_catalog = Some(catalog);
+        self
     }
 
     /// Compile a workflow to binary and optionally register with runtara-environment
@@ -162,6 +180,10 @@ impl CompilationService {
             track_events,
             child_workflows,
             connection_service_url: self.connection_service_url.clone(),
+            // When configured, the compile uses the runtime catalog from
+            // the component dispatcher so the compiled view of agents
+            // matches what the runtime can actually invoke.
+            agent_catalog: self.agent_catalog.clone(),
         };
 
         // 5. Check if already registered BEFORE compiling, unless a rebuild was requested.

@@ -407,6 +407,7 @@ fn components_execute_crypto_hash_produces_expected_digest() {
         track_events: false,
         child_workflows: vec![],
         connection_service_url: None,
+        agent_catalog: None,
     };
     let compiled = compile_workflow(input).expect("compile crypto/hash workflow");
     assert!(compiled.binary_path.exists(), "compiled wasm missing");
