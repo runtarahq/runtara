@@ -86,6 +86,10 @@ pub mod codegen;
 #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
 pub mod compile;
 
+/// Phase 3 components-mode compile pipeline (cargo component + wac compose).
+#[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
+pub mod components_compile;
+
 /// Dependency analysis for child workflows.
 pub mod dependency_analysis;
 

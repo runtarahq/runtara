@@ -483,6 +483,12 @@ fn get_native_libs(target: Option<&str>) -> io::Result<crate::agents_library::Na
 /// # Returns
 /// Result with native binary compilation data
 pub fn compile_workflow(input: CompilationInput) -> io::Result<NativeCompilationResult> {
+    // Branch on compile_mode before destructuring so the components-mode
+    // path can take the full input by value.
+    if input.compile_mode == CompileMode::Components {
+        return crate::components_compile::compile_workflow_components(input);
+    }
+
     let CompilationInput {
         tenant_id,
         workflow_id,
@@ -491,8 +497,6 @@ pub fn compile_workflow(input: CompilationInput) -> io::Result<NativeCompilation
         track_events,
         child_workflows,
         connection_service_url,
-        // Components-mode dispatch lands in step 2 — for now every workflow
-        // takes the rustc-legacy path regardless of this field.
         compile_mode: _,
     } = input;
 
