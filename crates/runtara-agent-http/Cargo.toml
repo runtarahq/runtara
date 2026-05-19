@@ -31,6 +31,10 @@ runtara-agent-macro = { path = "../runtara-agent-macro" }
 runtara-dsl = { path = "../runtara-dsl", default-features = false }
 strum = { version = "0.26", features = ["derive"] }
 
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+wiremock = "0.6"
+
 [package.metadata.component]
 package = "runtara:agent-http"
 

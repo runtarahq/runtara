@@ -4335,6 +4335,8 @@ dependencies = [
  "serde",
  "serde_json",
  "strum",
+ "tokio",
+ "wiremock",
  "wit-bindgen-rt 0.44.0",
 ]
 
