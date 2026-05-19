@@ -1,32 +1,101 @@
-//! Object Model CRUD agent — WebAssembly Component.
+//! Object Model CRUD agent — WebAssembly component.
 //!
-//! Schema parity with
-//! `runtara-agents/src/agents/integrations/object_model.rs`.
+//! This agent is special: it does not talk to an external service. Requests
+//! target the **internal** runtara-server object-model HTTP API
+//! (`RUNTARA_OBJECT_MODEL_URL`). Because the traffic is internal we call
+//! `.call()` directly — bypassing `RUNTARA_HTTP_PROXY_URL` — exactly matching
+//! the legacy host-side implementation. The connection is identified by the
+//! `connectionId` query parameter and JSON body field; the tenant id is
+//! supplied via the `X-Org-Id` header sourced from `RUNTARA_TENANT_ID`.
 //!
-//! Routing model: all requests target the **internal** runtara-server
-//! object-model API (`RUNTARA_OBJECT_MODEL_URL`). Because this is internal
-//! traffic the requests are sent via `.call()` — direct, bypassing
-//! `RUNTARA_HTTP_PROXY_URL` — matching the legacy behaviour exactly.
-//! The tenant is identified via the `X-Org-Id` header populated from
-//! `RUNTARA_TENANT_ID`, and connection routing uses the `connectionId` query
-//! parameter / request-body field populated from the connection supplied by
-//! the workflow runtime.
+//! Capability metadata travels through `#[capability_input]` / `#[capability]` /
+//! `#[capability_output]` annotations on the same Rust types and functions that
+//! the wasm cdylib's `invoke` dispatcher calls into. The workspace binary
+//! `runtara-agent-bundle-emit` reads these macro-emitted `&'static` statics on
+//! the host architecture and writes `runtara_agent_object_model.meta.json` next
+//! to the `.wasm` — the JSON is a build artifact, never hand-edited.
+#![allow(clippy::result_large_err)]
 
-#![cfg(target_arch = "wasm32")]
+use runtara_agent_macro::{CapabilityInput, CapabilityOutput, capability};
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+use std::collections::HashMap;
 
+#[cfg(target_arch = "wasm32")]
 #[allow(warnings)]
 mod bindings;
 
-use bindings::exports::runtara::agent::capabilities::{
-    CapabilityInfo, ConnectionInfo, ErrorInfo, Guest, ModuleInfo,
-};
-use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+// ============================================================================
+// Local AgentError shim (mirrors the shim in runtara-agent-mailgun)
+// ============================================================================
 
-// =============================================================================
-// Env helpers (mirrors integration_utils/env.rs — inline because we cannot
-// depend on the non-WASM runtara-agents crate from a component)
-// =============================================================================
+#[derive(Debug, Clone, Serialize)]
+pub struct AgentError {
+    pub code: String,
+    pub message: String,
+    pub category: &'static str,
+    pub severity: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retry_after_ms: Option<u64>,
+    #[serde(skip_serializing_if = "HashMap::is_empty")]
+    pub attributes: HashMap<String, Value>,
+}
+
+impl AgentError {
+    pub fn permanent(code: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            code: code.into(),
+            message: message.into(),
+            category: "permanent",
+            severity: "error",
+            retry_after_ms: None,
+            attributes: HashMap::new(),
+        }
+    }
+
+    pub fn transient(code: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            code: code.into(),
+            message: message.into(),
+            category: "transient",
+            severity: "warning",
+            retry_after_ms: None,
+            attributes: HashMap::new(),
+        }
+    }
+
+    pub fn with_attr(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.attributes
+            .insert(key.into(), Value::String(value.into()));
+        self
+    }
+}
+
+impl From<AgentError> for String {
+    fn from(err: AgentError) -> Self {
+        serde_json::to_string(&err).unwrap_or_else(|_| format!("[{}] {}", err.code, err.message))
+    }
+}
+
+// ============================================================================
+// RawConnection (local mirror of crates/runtara-agents/src/connections.rs)
+// ============================================================================
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RawConnection {
+    #[serde(default)]
+    pub connection_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub connection_subtype: Option<String>,
+    pub integration_id: String,
+    pub parameters: Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rate_limit_config: Option<Value>,
+}
+
+// ============================================================================
+// Env helpers
+// ============================================================================
 
 fn object_model_base_url() -> String {
     std::env::var("RUNTARA_OBJECT_MODEL_URL")
@@ -37,33 +106,31 @@ fn tenant_id() -> String {
     std::env::var("RUNTARA_TENANT_ID").unwrap_or_default()
 }
 
-// =============================================================================
+// ============================================================================
 // Connection helpers
-// =============================================================================
+// ============================================================================
 
-/// Extract the connection_id from a WIT `ConnectionInfo`, return an error if
-/// the connection is absent or has an empty id.
-fn require_connection_id(connection: Option<&ConnectionInfo>) -> Result<String, ErrorInfo> {
+fn require_connection_id(connection: Option<&RawConnection>) -> Result<&str, AgentError> {
     match connection {
-        Some(c) if !c.connection_id.is_empty() => Ok(c.connection_id.clone()),
-        Some(_) => Err(permanent_err(
+        Some(c) if !c.connection_id.is_empty() => Ok(c.connection_id.as_str()),
+        Some(_) => Err(AgentError::permanent(
             "OBJECT_MODEL_NO_CONNECTION_ID",
             "Object model capability invoked with a connection that has no connection_id",
-        )),
-        None => Err(permanent_err(
+        )
+        .with_attr("integration", "OBJECT_MODEL")),
+        None => Err(AgentError::permanent(
             "OBJECT_MODEL_NO_CONNECTION",
             "Object model capability requires a connection but none was provided",
-        )),
+        )
+        .with_attr("integration", "OBJECT_MODEL")),
     }
 }
 
-/// Append `?connectionId=<id>` (or `&connectionId=<id>`) to a path.
 fn path_with_connection(path: &str, connection_id: &str) -> String {
     let sep = if path.contains('?') { '&' } else { '?' };
     format!("{}{}connectionId={}", path, sep, url_encode(connection_id))
 }
 
-/// Insert `"connectionId"` into a JSON object body.
 fn with_connection_in_body(mut body: Value, connection_id: &str) -> Value {
     if let Some(map) = body.as_object_mut() {
         map.insert(
@@ -74,13 +141,11 @@ fn with_connection_in_body(mut body: Value, connection_id: &str) -> Value {
     body
 }
 
-// =============================================================================
-// HTTP helpers
-// =============================================================================
+// ============================================================================
+// HTTP helpers (use .call() directly — internal API, no proxy)
+// ============================================================================
 
-/// POST to the internal object-model API; returns parsed JSON.
-/// Uses `.call()` (direct, not via proxy) — matching legacy behaviour.
-fn http_post(path: &str, body: Value, connection_id: &str) -> Result<Value, ErrorInfo> {
+fn http_post(path: &str, body: Value, connection_id: &str) -> Result<Value, AgentError> {
     let path = path_with_connection(path, connection_id);
     let body = with_connection_in_body(body, connection_id);
     let url = format!("{}{}", object_model_base_url(), path);
@@ -93,23 +158,23 @@ fn http_post(path: &str, body: Value, connection_id: &str) -> Result<Value, Erro
         .body_json(&body)
         .call()
         .map_err(|e| {
-            permanent_err(
+            AgentError::permanent(
                 "OBJECT_MODEL_HTTP_ERROR",
                 format!("Object model API request failed: {e}"),
             )
+            .with_attr("integration", "OBJECT_MODEL")
         })?;
 
     resp.into_json::<Value>().map_err(|e| {
-        permanent_err(
+        AgentError::permanent(
             "OBJECT_MODEL_PARSE_ERROR",
             format!("Failed to parse object model API response: {e}"),
         )
+        .with_attr("integration", "OBJECT_MODEL")
     })
 }
 
-/// PUT to the internal object-model API; returns parsed JSON.
-/// Uses `.call()` (direct, not via proxy) — matching legacy behaviour.
-fn http_put(path: &str, body: Value, connection_id: &str) -> Result<Value, ErrorInfo> {
+fn http_put(path: &str, body: Value, connection_id: &str) -> Result<Value, AgentError> {
     let path = path_with_connection(path, connection_id);
     let body = with_connection_in_body(body, connection_id);
     let url = format!("{}{}", object_model_base_url(), path);
@@ -122,23 +187,23 @@ fn http_put(path: &str, body: Value, connection_id: &str) -> Result<Value, Error
         .body_json(&body)
         .call()
         .map_err(|e| {
-            permanent_err(
+            AgentError::permanent(
                 "OBJECT_MODEL_HTTP_ERROR",
                 format!("Object model API request failed: {e}"),
             )
+            .with_attr("integration", "OBJECT_MODEL")
         })?;
 
     resp.into_json::<Value>().map_err(|e| {
-        permanent_err(
+        AgentError::permanent(
             "OBJECT_MODEL_PARSE_ERROR",
             format!("Failed to parse object model API response: {e}"),
         )
+        .with_attr("integration", "OBJECT_MODEL")
     })
 }
 
-/// GET from the internal object-model API; returns parsed JSON.
-/// Uses `.call()` (direct, not via proxy) — matching legacy behaviour.
-fn http_get(path: &str, connection_id: &str) -> Result<Value, ErrorInfo> {
+fn http_get(path: &str, connection_id: &str) -> Result<Value, AgentError> {
     let path = path_with_connection(path, connection_id);
     let url = format!("{}{}", object_model_base_url(), path);
     let tid = tenant_id();
@@ -148,28 +213,48 @@ fn http_get(path: &str, connection_id: &str) -> Result<Value, ErrorInfo> {
         .header("X-Org-Id", &tid)
         .call()
         .map_err(|e| {
-            permanent_err(
+            AgentError::permanent(
                 "OBJECT_MODEL_HTTP_ERROR",
                 format!("Object model API request failed: {e}"),
             )
+            .with_attr("integration", "OBJECT_MODEL")
         })?;
 
     resp.into_json::<Value>().map_err(|e| {
-        permanent_err(
+        AgentError::permanent(
             "OBJECT_MODEL_PARSE_ERROR",
             format!("Failed to parse object model API response: {e}"),
         )
+        .with_attr("integration", "OBJECT_MODEL")
     })
 }
 
-// =============================================================================
-// ConditionExpression → JSON conversion
-// (mirrors condition_expr_to_json / mapping_value_to_json in the legacy file)
-// =============================================================================
+// ============================================================================
+// URL encoding (no external dep — same logic as runtara-agent-http)
+// ============================================================================
 
-/// Minimal wire-compatible representation of a DSL condition expression.
-/// We deserialise the caller-supplied JSON string into this tree and then
-/// re-serialise it into the shape the object-model API expects.
+fn url_encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            'a'..='z' | 'A'..='Z' | '0'..='9' | '-' | '_' | '.' | '~' => out.push(c),
+            _ => {
+                for byte in c.to_string().as_bytes() {
+                    out.push_str(&format!("%{byte:02X}"));
+                }
+            }
+        }
+    }
+    out
+}
+
+// ============================================================================
+// Condition parsing — minimal wire-compatible mirror of the DSL
+// ConditionExpression. The macro version of object_model in legacy depends on
+// runtara_dsl::ConditionExpression / MappingValue, but we keep this crate
+// independent of runtara-agents and rely only on JSON round-tripping.
+// ============================================================================
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 enum ConditionExpr {
@@ -198,13 +283,7 @@ struct MappingValue {
 }
 
 fn mapping_value_to_json(mv: &MappingValue) -> Value {
-    // reference → string payload (becomes the column name in SQL)
-    // immediate → raw value
-    // others    → raw value
-    match mv.value_type.as_str() {
-        "reference" => mv.value.clone(),
-        _ => mv.value.clone(),
-    }
+    mv.value.clone()
 }
 
 fn condition_expr_to_json(expr: &ConditionExpr) -> Value {
@@ -227,8 +306,7 @@ fn condition_expr_to_json(expr: &ConditionExpr) -> Value {
     }
 }
 
-/// Parse a condition from an optional JSON Value (the field arrives already
-/// deserialised from the input JSON string).
+/// Parse a condition from an optional JSON value; returns None for null/absent.
 fn parse_condition(v: Option<&Value>) -> Option<Value> {
     v.and_then(|v| {
         if v.is_null() {
@@ -240,676 +318,1136 @@ fn parse_condition(v: Option<&Value>) -> Option<Value> {
     })
 }
 
-// =============================================================================
-// URL encoding (no external dep — same logic as runtara-agent-http)
-// =============================================================================
-
-fn url_encode(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for c in s.chars() {
-        match c {
-            'a'..='z' | 'A'..='Z' | '0'..='9' | '-' | '_' | '.' | '~' => out.push(c),
-            _ => {
-                for byte in c.to_string().as_bytes() {
-                    out.push_str(&format!("%{byte:02X}"));
-                }
-            }
-        }
-    }
-    out
-}
-
-// =============================================================================
-// Error helpers
-// =============================================================================
-
-fn permanent_err(code: &str, message: impl Into<String>) -> ErrorInfo {
-    ErrorInfo {
-        code: code.into(),
-        message: message.into(),
-        category: "permanent".into(),
-        severity: "error".into(),
-        retryable: false,
-        retry_after_ms: None,
-        attributes: None,
-    }
-}
-
-// =============================================================================
-// Component plumbing
-// =============================================================================
-
-struct Component;
-
-impl Guest for Component {
-    fn get_module_info() -> ModuleInfo {
-        ModuleInfo {
-            id: "object_model".into(),
-            display_name: "Object Model".into(),
-            description: "CRUD operations over the runtara object-model API \
-                          (list schemas, create/query/update/delete instances, \
-                          bulk operations, aggregates, and conversation memory)."
-                .into(),
-            has_side_effects: true,
-            supports_connections: true,
-            integration_ids: vec!["postgres".into()],
-            secure: true,
-        }
-    }
-
-    fn list_capabilities() -> Vec<CapabilityInfo> {
-        vec![
-            cap(
-                "create-instance",
-                "create_instance",
-                "Create Instance",
-                "Create a new instance in an object model schema",
-                true,
-                CREATE_INSTANCE_INPUT,
-                CREATE_INSTANCE_OUTPUT,
-                &[],
-            ),
-            cap(
-                "query-instances",
-                "query_instances",
-                "Query Instances",
-                "Query instances from an object model schema with optional filters",
-                false,
-                QUERY_INSTANCES_INPUT,
-                QUERY_INSTANCES_OUTPUT,
-                &[],
-            ),
-            cap(
-                "check-instance-exists",
-                "check_instance_exists",
-                "Check Instance Exists",
-                "Check if an instance matching the given filters exists",
-                false,
-                CHECK_INSTANCE_EXISTS_INPUT,
-                CHECK_INSTANCE_EXISTS_OUTPUT,
-                &[],
-            ),
-            cap(
-                "create-if-not-exists",
-                "create_if_not_exists",
-                "Create If Not Exists",
-                "Create an instance only if no matching instance exists (idempotent insert)",
-                true,
-                CREATE_IF_NOT_EXISTS_INPUT,
-                CREATE_IF_NOT_EXISTS_OUTPUT,
-                &[],
-            ),
-            cap(
-                "update-instance",
-                "update_instance",
-                "Update Instance",
-                "Update an existing instance in an object model schema",
-                true,
-                UPDATE_INSTANCE_INPUT,
-                UPDATE_INSTANCE_OUTPUT,
-                &[],
-            ),
-            cap(
-                "delete-instance",
-                "delete_instance",
-                "Delete Instance",
-                "Delete a single instance from an object model schema",
-                true,
-                DELETE_INSTANCE_INPUT,
-                DELETE_INSTANCE_OUTPUT,
-                &[],
-            ),
-            cap(
-                "bulk-create-instances",
-                "bulk_create_instances",
-                "Bulk Create Instances",
-                "Insert many instances in a single transaction",
-                true,
-                BULK_CREATE_INSTANCES_INPUT,
-                BULK_CREATE_INSTANCES_OUTPUT,
-                &[],
-            ),
-            cap(
-                "bulk-update-instances",
-                "bulk_update_instances",
-                "Bulk Update Instances",
-                "Update many instances in one transaction, by condition or by per-row values",
-                true,
-                BULK_UPDATE_INSTANCES_INPUT,
-                BULK_UPDATE_INSTANCES_OUTPUT,
-                &[],
-            ),
-            cap(
-                "bulk-delete-instances",
-                "bulk_delete_instances",
-                "Bulk Delete Instances",
-                "Delete many instances in one transaction, by IDs or by condition",
-                true,
-                BULK_DELETE_INSTANCES_INPUT,
-                BULK_DELETE_INSTANCES_OUTPUT,
-                &[],
-            ),
-            cap(
-                "query-aggregate",
-                "query_aggregate",
-                "Query Aggregate",
-                "Group and aggregate object model instances (COUNT, SUM, MIN, MAX, \
-                 FIRST_VALUE, LAST_VALUE). Returns a columnar {columns, rows, \
-                 group_count} result.",
-                false,
-                QUERY_AGGREGATE_INPUT,
-                QUERY_AGGREGATE_OUTPUT,
-                &[],
-            ),
-            cap(
-                "load-memory",
-                "load_memory",
-                "Load Memory",
-                "Load conversation memory for an AI agent by conversation ID",
-                false,
-                LOAD_MEMORY_INPUT,
-                LOAD_MEMORY_OUTPUT,
-                &["memory:read"],
-            ),
-            cap(
-                "save-memory",
-                "save_memory",
-                "Save Memory",
-                "Save conversation memory for an AI agent, creating or updating by conversation ID",
-                true,
-                SAVE_MEMORY_INPUT,
-                SAVE_MEMORY_OUTPUT,
-                &["memory:write"],
-            ),
-        ]
-    }
-
-    fn invoke(
-        capability_id: String,
-        input: String,
-        connection: Option<ConnectionInfo>,
-    ) -> Result<String, ErrorInfo> {
-        match capability_id.as_str() {
-            "create-instance" => invoke_create_instance(&input, connection.as_ref()),
-            "query-instances" => invoke_query_instances(&input, connection.as_ref()),
-            "check-instance-exists" => invoke_check_instance_exists(&input, connection.as_ref()),
-            "create-if-not-exists" => invoke_create_if_not_exists(&input, connection.as_ref()),
-            "update-instance" => invoke_update_instance(&input, connection.as_ref()),
-            "delete-instance" => invoke_delete_instance(&input, connection.as_ref()),
-            "bulk-create-instances" => invoke_bulk_create_instances(&input, connection.as_ref()),
-            "bulk-update-instances" => invoke_bulk_update_instances(&input, connection.as_ref()),
-            "bulk-delete-instances" => invoke_bulk_delete_instances(&input, connection.as_ref()),
-            "query-aggregate" => invoke_query_aggregate(&input, connection.as_ref()),
-            "load-memory" => invoke_load_memory(&input, connection.as_ref()),
-            "save-memory" => invoke_save_memory(&input, connection.as_ref()),
-            other => Err(permanent_err(
-                "UNKNOWN_CAPABILITY",
-                format!("object_model agent has no capability `{other}`"),
-            )),
-        }
-    }
-}
-
-// =============================================================================
-// Capability builder helper
-// =============================================================================
-
-#[allow(clippy::too_many_arguments)]
-fn cap(
-    id: &str,
-    function_name: &str,
-    display_name: &str,
-    description: &str,
-    has_side_effects: bool,
-    input_schema: &str,
-    output_schema: &str,
-    tags: &[&str],
-) -> CapabilityInfo {
-    CapabilityInfo {
-        id: id.into(),
-        function_name: function_name.into(),
-        display_name: Some(display_name.into()),
-        description: Some(description.into()),
-        has_side_effects,
-        is_idempotent: false,
-        rate_limited: false,
-        tags: tags.iter().map(|t| t.to_string()).collect(),
-        input_schema: input_schema.into(),
-        output_schema: output_schema.into(),
-        known_errors: vec![],
-        compensation_hint: None,
-    }
-}
-
-// =============================================================================
+// ============================================================================
 // Capability: create_instance
-// =============================================================================
+// ============================================================================
 
-fn invoke_create_instance(
-    input_json: &str,
-    connection: Option<&ConnectionInfo>,
-) -> Result<String, ErrorInfo> {
-    let connection_id = require_connection_id(connection)?;
-    let input: Value = serde_json::from_str(input_json)
-        .map_err(|e| permanent_err("INPUT_DESERIALIZATION_ERROR", e.to_string()))?;
+#[derive(Debug, Deserialize, CapabilityInput)]
+#[capability_input(display_name = "Create Instance Input")]
+pub struct CreateInstanceInput {
+    /// Connection data injected by the wasm Guest::invoke wrapper.
+    #[field(skip)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub _connection: Option<RawConnection>,
 
-    let schema_name = input["schema_name"].as_str().unwrap_or("").to_string();
-    let data = input["data"].clone();
+    #[field(
+        display_name = "Schema Name",
+        description = "The name of the object model schema to create an instance in",
+        example = "ImportedFile"
+    )]
+    pub schema_name: String,
 
+    #[field(
+        display_name = "Data",
+        description = "The field values to store in the new instance",
+        example = r#"{"name": "file.txt", "source": "sftp"}"#
+    )]
+    pub data: Value,
+}
+
+#[derive(Debug, Serialize, Deserialize, CapabilityOutput)]
+#[capability_output(
+    display_name = "Create Instance Output",
+    description = "Result of creating an instance in the object model"
+)]
+pub struct CreateInstanceOutput {
+    #[field(
+        display_name = "Success",
+        description = "Whether the operation succeeded",
+        example = "true"
+    )]
+    pub success: bool,
+
+    #[field(
+        display_name = "Instance ID",
+        description = "The ID of the created instance"
+    )]
+    pub instance_id: Option<String>,
+
+    #[field(
+        display_name = "Error",
+        description = "Error message if the operation failed"
+    )]
+    pub error: Option<String>,
+}
+
+#[capability(
+    module = "object_model",
+    display_name = "Create Instance",
+    description = "Create a new instance in an object model schema",
+    module_display_name = "Object Model",
+    module_description = "CRUD operations over the runtara object-model API (list schemas, \
+                          create/query/update/delete instances, bulk operations, aggregates, \
+                          and conversation memory).",
+    module_has_side_effects = true,
+    module_supports_connections = true,
+    module_integration_ids = "postgres",
+    module_secure = true,
+    side_effects = true
+)]
+pub fn create_instance(input: CreateInstanceInput) -> Result<CreateInstanceOutput, AgentError> {
+    let connection_id = require_connection_id(input._connection.as_ref())?.to_string();
     let resp = http_post(
         "/instances",
         json!({
-            "schema_name": schema_name,
-            "properties": data,
+            "schema_name": input.schema_name,
+            "properties": input.data,
         }),
         &connection_id,
     )?;
 
-    serde_json::to_string(&json!({
-        "success": resp["success"].as_bool().unwrap_or(false),
-        "instance_id": resp["instance_id"].as_str(),
-        "error": resp["error"].as_str(),
-    }))
-    .map_err(|e| permanent_err("OUTPUT_SERIALIZATION_ERROR", e.to_string()))
+    Ok(CreateInstanceOutput {
+        success: resp["success"].as_bool().unwrap_or(false),
+        instance_id: resp["instance_id"].as_str().map(String::from),
+        error: resp["error"].as_str().map(String::from),
+    })
 }
 
-// =============================================================================
+// ============================================================================
 // Capability: query_instances
-// =============================================================================
+// ============================================================================
 
-fn invoke_query_instances(
-    input_json: &str,
-    connection: Option<&ConnectionInfo>,
-) -> Result<String, ErrorInfo> {
-    let connection_id = require_connection_id(connection)?;
-    let input: Value = serde_json::from_str(input_json)
-        .map_err(|e| permanent_err("INPUT_DESERIALIZATION_ERROR", e.to_string()))?;
+#[derive(Debug, Deserialize, CapabilityInput)]
+#[capability_input(display_name = "Query Instances Input")]
+pub struct QueryInstancesInput {
+    #[field(skip)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub _connection: Option<RawConnection>,
 
-    let schema_name = input["schema_name"].as_str().unwrap_or("").to_string();
-    let filters = input.get("filters").cloned().unwrap_or(json!({}));
-    let condition_json = parse_condition(input.get("condition"));
-    let score_expression = input
-        .get("scoreExpression")
-        .or_else(|| input.get("score_expression"))
-        .cloned();
-    let order_by = input
-        .get("orderBy")
-        .or_else(|| input.get("order_by"))
-        .cloned();
-    let limit = input["limit"].as_i64().unwrap_or(100);
-    let offset = input["offset"].as_i64().unwrap_or(0);
+    #[field(
+        display_name = "Schema Name",
+        description = "The name of the object model schema to query",
+        example = "ImportedFile"
+    )]
+    pub schema_name: String,
+
+    #[field(
+        display_name = "Filters",
+        description = "Key-value pairs to filter instances by (simple AND logic)",
+        example = r#"{"source": "sftp"}"#
+    )]
+    #[serde(default)]
+    pub filters: HashMap<String, Value>,
+
+    /// Advanced filtering condition (DSL ConditionExpression). When set, takes
+    /// precedence over simple filters.
+    #[field(
+        display_name = "Condition",
+        description = "Advanced filtering condition with operators like Or, And, Eq, IsDefined. \
+                       Uses same ConditionExpression as Conditional and Filter steps."
+    )]
+    #[serde(default)]
+    pub condition: Option<Value>,
+
+    /// Optional computed score column for vector nearest-neighbor search.
+    #[field(
+        display_name = "Score Expression",
+        description = "Optional computed score column passed as an object, not an escaped JSON \
+                       string. For vector nearest-neighbor search, order by the alias ascending."
+    )]
+    #[serde(
+        default,
+        rename = "scoreExpression",
+        alias = "score_expression",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub score_expression: Option<Value>,
+
+    /// Optional structured ordering.
+    #[field(
+        display_name = "Order By",
+        description = "Optional structured ordering. For vector nearest-neighbor search, order \
+                       by the score expression alias ascending."
+    )]
+    #[serde(
+        default,
+        rename = "orderBy",
+        alias = "order_by",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub order_by: Option<Value>,
+
+    #[field(
+        display_name = "Limit",
+        description = "Maximum number of instances to return",
+        example = "100"
+    )]
+    #[serde(default = "default_limit")]
+    pub limit: i64,
+
+    #[field(
+        display_name = "Offset",
+        description = "Number of instances to skip",
+        example = "0"
+    )]
+    #[serde(default)]
+    pub offset: i64,
+}
+
+fn default_limit() -> i64 {
+    100
+}
+
+#[derive(Debug, Serialize, Deserialize, CapabilityOutput)]
+#[capability_output(
+    display_name = "Query Instances Output",
+    description = "Result of querying instances from the object model"
+)]
+pub struct QueryInstancesOutput {
+    #[field(
+        display_name = "Success",
+        description = "Whether the operation succeeded",
+        example = "true"
+    )]
+    pub success: bool,
+
+    #[field(display_name = "Instances", description = "The matching instances")]
+    pub instances: Vec<Value>,
+
+    #[field(
+        display_name = "Total Count",
+        description = "Total count of matching instances",
+        example = "42"
+    )]
+    pub total_count: i64,
+
+    #[field(
+        display_name = "Error",
+        description = "Error message if the operation failed"
+    )]
+    pub error: Option<String>,
+}
+
+#[capability(
+    module = "object_model",
+    display_name = "Query Instances",
+    description = "Query instances from an object model schema with optional filters",
+    side_effects = false
+)]
+pub fn query_instances(input: QueryInstancesInput) -> Result<QueryInstancesOutput, AgentError> {
+    let connection_id = require_connection_id(input._connection.as_ref())?.to_string();
+    let condition_json = parse_condition(input.condition.as_ref());
 
     let resp = http_post(
         "/instances/query",
         json!({
-            "schema_name": schema_name,
-            "filters": filters,
+            "schema_name": input.schema_name,
+            "filters": input.filters,
             "condition": condition_json,
-            "scoreExpression": score_expression,
-            "orderBy": order_by,
-            "limit": limit,
-            "offset": offset,
+            "scoreExpression": input.score_expression,
+            "orderBy": input.order_by,
+            "limit": input.limit,
+            "offset": input.offset,
         }),
         &connection_id,
     )?;
 
     let instances = resp["instances"].as_array().cloned().unwrap_or_default();
 
-    serde_json::to_string(&json!({
-        "success": resp["success"].as_bool().unwrap_or(false),
-        "instances": instances,
-        "total_count": resp["total_count"].as_i64().unwrap_or(0),
-        "error": resp["error"].as_str(),
-    }))
-    .map_err(|e| permanent_err("OUTPUT_SERIALIZATION_ERROR", e.to_string()))
+    Ok(QueryInstancesOutput {
+        success: resp["success"].as_bool().unwrap_or(false),
+        instances,
+        total_count: resp["total_count"].as_i64().unwrap_or(0),
+        error: resp["error"].as_str().map(String::from),
+    })
 }
 
-// =============================================================================
+// ============================================================================
 // Capability: check_instance_exists
-// =============================================================================
+// ============================================================================
 
-fn invoke_check_instance_exists(
-    input_json: &str,
-    connection: Option<&ConnectionInfo>,
-) -> Result<String, ErrorInfo> {
-    let connection_id = require_connection_id(connection)?;
-    let input: Value = serde_json::from_str(input_json)
-        .map_err(|e| permanent_err("INPUT_DESERIALIZATION_ERROR", e.to_string()))?;
+#[derive(Debug, Deserialize, CapabilityInput)]
+#[capability_input(display_name = "Check Instance Exists Input")]
+pub struct CheckInstanceExistsInput {
+    #[field(skip)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub _connection: Option<RawConnection>,
 
-    let schema_name = input["schema_name"].as_str().unwrap_or("").to_string();
-    let filters = input.get("filters").cloned().unwrap_or(json!({}));
+    #[field(
+        display_name = "Schema Name",
+        description = "The name of the object model schema to check",
+        example = "ImportedFile"
+    )]
+    pub schema_name: String,
 
+    #[field(
+        display_name = "Filters",
+        description = "Key-value pairs to match against existing instances",
+        example = r#"{"source": "sftp"}"#
+    )]
+    pub filters: HashMap<String, Value>,
+}
+
+#[derive(Debug, Serialize, Deserialize, CapabilityOutput)]
+#[capability_output(
+    display_name = "Check Instance Exists Output",
+    description = "Result of checking if an instance exists in the object model"
+)]
+pub struct CheckInstanceExistsOutput {
+    #[field(
+        display_name = "Exists",
+        description = "Whether a matching instance exists",
+        example = "true"
+    )]
+    pub exists: bool,
+
+    #[field(
+        display_name = "Instance ID",
+        description = "The ID of the matching instance (if exists)"
+    )]
+    pub instance_id: Option<String>,
+
+    #[field(
+        display_name = "Instance",
+        description = "The full instance data (if exists)"
+    )]
+    pub instance: Option<Value>,
+}
+
+#[capability(
+    module = "object_model",
+    display_name = "Check Instance Exists",
+    description = "Check if an instance matching the given filters exists",
+    side_effects = false
+)]
+pub fn check_instance_exists(
+    input: CheckInstanceExistsInput,
+) -> Result<CheckInstanceExistsOutput, AgentError> {
+    let connection_id = require_connection_id(input._connection.as_ref())?.to_string();
     let resp = http_post(
         "/instances/exists",
         json!({
-            "schema_name": schema_name,
-            "filters": filters,
+            "schema_name": input.schema_name,
+            "filters": input.filters,
         }),
         &connection_id,
     )?;
 
-    let instance = resp.get("instance").cloned().filter(|v| !v.is_null());
-
-    serde_json::to_string(&json!({
-        "exists": resp["exists"].as_bool().unwrap_or(false),
-        "instance_id": resp["instance_id"].as_str(),
-        "instance": instance,
-    }))
-    .map_err(|e| permanent_err("OUTPUT_SERIALIZATION_ERROR", e.to_string()))
+    Ok(CheckInstanceExistsOutput {
+        exists: resp["exists"].as_bool().unwrap_or(false),
+        instance_id: resp["instance_id"].as_str().map(String::from),
+        instance: resp.get("instance").cloned().filter(|v| !v.is_null()),
+    })
 }
 
-// =============================================================================
+// ============================================================================
 // Capability: create_if_not_exists
-// =============================================================================
+// ============================================================================
 
-fn invoke_create_if_not_exists(
-    input_json: &str,
-    connection: Option<&ConnectionInfo>,
-) -> Result<String, ErrorInfo> {
-    let connection_id = require_connection_id(connection)?;
-    let input: Value = serde_json::from_str(input_json)
-        .map_err(|e| permanent_err("INPUT_DESERIALIZATION_ERROR", e.to_string()))?;
+#[derive(Debug, Deserialize, CapabilityInput)]
+#[capability_input(display_name = "Create If Not Exists Input")]
+pub struct CreateIfNotExistsInput {
+    #[field(skip)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub _connection: Option<RawConnection>,
 
-    let schema_name = input["schema_name"].as_str().unwrap_or("").to_string();
-    let match_filters = input.get("match_filters").cloned().unwrap_or(json!({}));
-    let data = input["data"].clone();
+    #[field(
+        display_name = "Schema Name",
+        description = "The name of the object model schema",
+        example = "ImportedFile"
+    )]
+    pub schema_name: String,
 
+    #[field(
+        display_name = "Match Filters",
+        description = "Conditions to check if record already exists",
+        example = r#"{"source": "sftp"}"#
+    )]
+    pub match_filters: HashMap<String, Value>,
+
+    #[field(
+        display_name = "Data",
+        description = "The field values to store in the new instance (if created)",
+        example = r#"{"name": "file.txt"}"#
+    )]
+    pub data: Value,
+}
+
+#[derive(Debug, Serialize, Deserialize, CapabilityOutput)]
+#[capability_output(
+    display_name = "Create If Not Exists Output",
+    description = "Result of create-if-not-exists (upsert) operation"
+)]
+pub struct CreateIfNotExistsOutput {
+    #[field(
+        display_name = "Success",
+        description = "Whether the operation succeeded",
+        example = "true"
+    )]
+    pub success: bool,
+
+    #[field(
+        display_name = "Created",
+        description = "Whether a new instance was created",
+        example = "true"
+    )]
+    pub created: bool,
+
+    #[field(
+        display_name = "Already Existed",
+        description = "Whether the instance already existed",
+        example = "false"
+    )]
+    pub already_existed: bool,
+
+    #[field(
+        display_name = "Instance ID",
+        description = "The instance ID (whether new or existing)"
+    )]
+    pub instance_id: Option<String>,
+
+    #[field(
+        display_name = "Error",
+        description = "Error message if the operation failed"
+    )]
+    pub error: Option<String>,
+}
+
+#[capability(
+    module = "object_model",
+    display_name = "Create If Not Exists",
+    description = "Create an instance only if no matching instance exists (idempotent insert)",
+    side_effects = true
+)]
+pub fn create_if_not_exists(
+    input: CreateIfNotExistsInput,
+) -> Result<CreateIfNotExistsOutput, AgentError> {
+    let connection_id = require_connection_id(input._connection.as_ref())?.to_string();
     let resp = http_post(
         "/instances/create-if-not-exists",
         json!({
-            "schema_name": schema_name,
-            "match_filters": match_filters,
-            "data": data,
+            "schema_name": input.schema_name,
+            "match_filters": input.match_filters,
+            "data": input.data,
         }),
         &connection_id,
     )?;
 
-    serde_json::to_string(&json!({
-        "success": resp["success"].as_bool().unwrap_or(false),
-        "created": resp["created"].as_bool().unwrap_or(false),
-        "already_existed": resp["already_existed"].as_bool().unwrap_or(false),
-        "instance_id": resp["instance_id"].as_str(),
-        "error": resp["error"].as_str(),
-    }))
-    .map_err(|e| permanent_err("OUTPUT_SERIALIZATION_ERROR", e.to_string()))
+    Ok(CreateIfNotExistsOutput {
+        success: resp["success"].as_bool().unwrap_or(false),
+        created: resp["created"].as_bool().unwrap_or(false),
+        already_existed: resp["already_existed"].as_bool().unwrap_or(false),
+        instance_id: resp["instance_id"].as_str().map(String::from),
+        error: resp["error"].as_str().map(String::from),
+    })
 }
 
-// =============================================================================
+// ============================================================================
 // Capability: update_instance
-// =============================================================================
+// ============================================================================
 
-fn invoke_update_instance(
-    input_json: &str,
-    connection: Option<&ConnectionInfo>,
-) -> Result<String, ErrorInfo> {
-    let connection_id = require_connection_id(connection)?;
-    let input: Value = serde_json::from_str(input_json)
-        .map_err(|e| permanent_err("INPUT_DESERIALIZATION_ERROR", e.to_string()))?;
+#[derive(Debug, Deserialize, CapabilityInput)]
+#[capability_input(display_name = "Update Instance Input")]
+pub struct UpdateInstanceInput {
+    #[field(skip)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub _connection: Option<RawConnection>,
 
-    let schema_name = input["schema_name"].as_str().unwrap_or("").to_string();
-    let instance_id = input["instance_id"].as_str().unwrap_or("").to_string();
-    let data = input["data"].clone();
+    #[field(
+        display_name = "Schema Name",
+        description = "The name of the object model schema",
+        example = "Product"
+    )]
+    pub schema_name: String,
+
+    #[field(
+        display_name = "Instance ID",
+        description = "The ID of the instance to update",
+        example = "550e8400-e29b-41d4-a716-446655440000"
+    )]
+    pub instance_id: String,
+
+    #[field(
+        display_name = "Data",
+        description = "The field values to update in the instance",
+        example = r#"{"quantity": 100}"#
+    )]
+    pub data: HashMap<String, Value>,
+}
+
+#[derive(Debug, Serialize, Deserialize, CapabilityOutput)]
+#[capability_output(
+    display_name = "Update Instance Output",
+    description = "Result of updating an instance in the object model"
+)]
+pub struct UpdateInstanceOutput {
+    #[field(
+        display_name = "Success",
+        description = "Whether the operation succeeded",
+        example = "true"
+    )]
+    pub success: bool,
+
+    #[field(
+        display_name = "Instance ID",
+        description = "The ID of the updated instance"
+    )]
+    pub instance_id: Option<String>,
+
+    #[field(
+        display_name = "Error",
+        description = "Error message if the operation failed"
+    )]
+    pub error: Option<String>,
+}
+
+#[capability(
+    module = "object_model",
+    display_name = "Update Instance",
+    description = "Update an existing instance in an object model schema",
+    side_effects = true
+)]
+pub fn update_instance(input: UpdateInstanceInput) -> Result<UpdateInstanceOutput, AgentError> {
+    let connection_id = require_connection_id(input._connection.as_ref())?.to_string();
+    let properties = Value::Object(input.data.into_iter().collect());
 
     let resp = http_put(
         &format!(
             "/instances/{}/{}",
-            url_encode(&schema_name),
-            url_encode(&instance_id),
+            url_encode(&input.schema_name),
+            url_encode(&input.instance_id),
         ),
-        json!({ "data": data }),
+        json!({ "data": properties }),
         &connection_id,
     )?;
 
-    serde_json::to_string(&json!({
-        "success": resp["success"].as_bool().unwrap_or(false),
-        "instance_id": resp["instance_id"].as_str(),
-        "error": resp["error"].as_str(),
-    }))
-    .map_err(|e| permanent_err("OUTPUT_SERIALIZATION_ERROR", e.to_string()))
+    Ok(UpdateInstanceOutput {
+        success: resp["success"].as_bool().unwrap_or(false),
+        instance_id: resp["instance_id"].as_str().map(String::from),
+        error: resp["error"].as_str().map(String::from),
+    })
 }
 
-// =============================================================================
+// ============================================================================
 // Capability: delete_instance
-// =============================================================================
+// ============================================================================
 
-fn invoke_delete_instance(
-    input_json: &str,
-    connection: Option<&ConnectionInfo>,
-) -> Result<String, ErrorInfo> {
-    let connection_id = require_connection_id(connection)?;
-    let input: Value = serde_json::from_str(input_json)
-        .map_err(|e| permanent_err("INPUT_DESERIALIZATION_ERROR", e.to_string()))?;
+#[derive(Debug, Deserialize, CapabilityInput)]
+#[capability_input(display_name = "Delete Instance Input")]
+pub struct DeleteInstanceInput {
+    #[field(skip)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub _connection: Option<RawConnection>,
 
-    let schema_name = input["schema_name"].as_str().unwrap_or("").to_string();
-    let instance_id = input["instance_id"].as_str().unwrap_or("").to_string();
+    #[field(
+        display_name = "Schema Name",
+        description = "The name of the object model schema",
+        example = "Product"
+    )]
+    pub schema_name: String,
 
+    #[field(
+        display_name = "Instance ID",
+        description = "The ID of the instance to delete",
+        example = "550e8400-e29b-41d4-a716-446655440000"
+    )]
+    pub instance_id: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, CapabilityOutput)]
+#[capability_output(
+    display_name = "Delete Instance Output",
+    description = "Result of deleting an instance"
+)]
+pub struct DeleteInstanceOutput {
+    #[field(
+        display_name = "Success",
+        description = "Whether the operation succeeded"
+    )]
+    pub success: bool,
+
+    #[field(
+        display_name = "Error",
+        description = "Error message if the operation failed"
+    )]
+    pub error: Option<String>,
+}
+
+#[capability(
+    module = "object_model",
+    display_name = "Delete Instance",
+    description = "Delete a single instance from an object model schema",
+    side_effects = true
+)]
+pub fn delete_instance(input: DeleteInstanceInput) -> Result<DeleteInstanceOutput, AgentError> {
+    let connection_id = require_connection_id(input._connection.as_ref())?.to_string();
     let resp = http_post(
         "/instances/delete",
         json!({
-            "schema_name": schema_name,
-            "instance_id": instance_id,
+            "schema_name": input.schema_name,
+            "instance_id": input.instance_id,
         }),
         &connection_id,
     )?;
 
-    serde_json::to_string(&json!({
-        "success": resp["success"].as_bool().unwrap_or(false),
-        "error": resp["error"].as_str(),
-    }))
-    .map_err(|e| permanent_err("OUTPUT_SERIALIZATION_ERROR", e.to_string()))
+    Ok(DeleteInstanceOutput {
+        success: resp["success"].as_bool().unwrap_or(false),
+        error: resp["error"].as_str().map(String::from),
+    })
 }
 
-// =============================================================================
+// ============================================================================
 // Capability: bulk_create_instances
-// =============================================================================
+// ============================================================================
 
-fn invoke_bulk_create_instances(
-    input_json: &str,
-    connection: Option<&ConnectionInfo>,
-) -> Result<String, ErrorInfo> {
-    let connection_id = require_connection_id(connection)?;
-    let input: Value = serde_json::from_str(input_json)
-        .map_err(|e| permanent_err("INPUT_DESERIALIZATION_ERROR", e.to_string()))?;
+#[derive(Debug, Deserialize, CapabilityInput)]
+#[capability_input(display_name = "Bulk Create Instances Input")]
+pub struct BulkCreateInstancesInput {
+    #[field(skip)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub _connection: Option<RawConnection>,
 
-    let schema_name = input["schema_name"].as_str().unwrap_or("").to_string();
-    let mut body = json!({ "schema_name": schema_name });
+    #[field(
+        display_name = "Schema Name",
+        description = "The name of the object model schema",
+        example = "Product"
+    )]
+    pub schema_name: String,
 
-    if let Some(instances) = input.get("instances").filter(|v| !v.is_null()) {
-        body["instances"] = instances.clone();
+    #[field(
+        display_name = "Instances",
+        description = "Array of property objects, one per record to insert (object form)",
+        example = r#"[{"sku": "A", "quantity": 1}]"#
+    )]
+    #[serde(default)]
+    pub instances: Option<Vec<HashMap<String, Value>>>,
+
+    #[field(
+        display_name = "Columns",
+        description = "Column names for columnar form; paired with `rows`",
+        example = r#"["sku", "quantity"]"#
+    )]
+    #[serde(default)]
+    pub columns: Option<Vec<String>>,
+
+    #[field(
+        display_name = "Rows",
+        description = "Rows in columnar form — each inner array has the same length as `columns`",
+        example = r#"[["A", 1], ["B", 2]]"#
+    )]
+    #[serde(default)]
+    pub rows: Option<Vec<Vec<Value>>>,
+
+    #[field(
+        display_name = "Constants",
+        description = "Column values merged into every columnar row as defaults; row cells \
+                       override on overlap",
+        example = r#"{"snapshot_date": "2026-04-18"}"#
+    )]
+    #[serde(default)]
+    pub constants: Option<HashMap<String, Value>>,
+
+    #[field(
+        display_name = "Nullify Empty Strings",
+        description = "When true, \"\" in non-string columns becomes null before type validation",
+        example = "false"
+    )]
+    #[serde(default)]
+    pub nullify_empty_strings: Option<bool>,
+
+    #[field(
+        display_name = "On Conflict",
+        description = "Conflict handling mode: 'error' (default) aborts, 'skip' silently skips \
+                       existing rows, 'upsert' updates them",
+        example = "\"skip\""
+    )]
+    #[serde(default)]
+    pub on_conflict: Option<String>,
+
+    #[field(
+        display_name = "Conflict Columns",
+        description = "Columns that uniquely identify a row for conflict detection. Required \
+                       with on_conflict=skip|upsert",
+        example = r#"["sku"]"#
+    )]
+    #[serde(default)]
+    pub conflict_columns: Option<Vec<String>>,
+
+    #[field(
+        display_name = "On Error",
+        description = "Validation-failure handling: 'stop' (default) aborts on first failure, \
+                       'skip' records the row in errors and continues",
+        example = "\"skip\""
+    )]
+    #[serde(default)]
+    pub on_error: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct AgentBulkRowError {
+    pub index: usize,
+    pub reason: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, CapabilityOutput)]
+#[capability_output(
+    display_name = "Bulk Create Instances Output",
+    description = "Result of a bulk insert"
+)]
+pub struct BulkCreateInstancesOutput {
+    #[field(
+        display_name = "Success",
+        description = "Whether the operation succeeded"
+    )]
+    pub success: bool,
+
+    #[field(
+        display_name = "Created Count",
+        description = "Number of rows inserted (or updated, in upsert mode)"
+    )]
+    pub created_count: i64,
+
+    #[field(
+        display_name = "Skipped Count",
+        description = "Number of rows skipped (validation failure or ON CONFLICT DO NOTHING)"
+    )]
+    pub skipped_count: i64,
+
+    #[field(
+        display_name = "Errors",
+        description = "Per-row errors when on_error='skip'"
+    )]
+    pub errors: Vec<AgentBulkRowError>,
+
+    #[field(
+        display_name = "Error",
+        description = "Error message if the operation failed"
+    )]
+    pub error: Option<String>,
+}
+
+#[capability(
+    module = "object_model",
+    display_name = "Bulk Create Instances",
+    description = "Insert many instances in a single transaction",
+    side_effects = true
+)]
+pub fn bulk_create_instances(
+    input: BulkCreateInstancesInput,
+) -> Result<BulkCreateInstancesOutput, AgentError> {
+    let connection_id = require_connection_id(input._connection.as_ref())?.to_string();
+    let mut body = json!({ "schema_name": input.schema_name });
+
+    if let Some(instances) = input.instances {
+        let instances_json: Vec<Value> = instances
+            .into_iter()
+            .map(|m| Value::Object(m.into_iter().collect()))
+            .collect();
+        body["instances"] = json!(instances_json);
     }
-    if let Some(columns) = input.get("columns").filter(|v| !v.is_null()) {
-        body["columns"] = columns.clone();
+    if let Some(columns) = input.columns {
+        body["columns"] = json!(columns);
     }
-    if let Some(rows) = input.get("rows").filter(|v| !v.is_null()) {
-        body["rows"] = rows.clone();
+    if let Some(rows) = input.rows {
+        body["rows"] = json!(rows);
     }
-    if let Some(constants) = input.get("constants").filter(|v| !v.is_null()) {
-        body["constants"] = constants.clone();
+    if let Some(constants) = input.constants {
+        body["constants"] = Value::Object(constants.into_iter().collect());
     }
-    if let Some(flag) = input.get("nullify_empty_strings").filter(|v| !v.is_null()) {
-        body["nullify_empty_strings"] = flag.clone();
+    if let Some(flag) = input.nullify_empty_strings {
+        body["nullify_empty_strings"] = json!(flag);
     }
-    if let Some(mode) = input.get("on_conflict").and_then(|v| v.as_str()) {
+    if let Some(mode) = input.on_conflict {
         body["on_conflict"] = json!(mode.to_lowercase());
     }
-    if let Some(mode) = input.get("on_error").and_then(|v| v.as_str()) {
+    if let Some(mode) = input.on_error {
         body["on_error"] = json!(mode.to_lowercase());
     }
-    if let Some(cols) = input.get("conflict_columns").filter(|v| !v.is_null()) {
-        body["conflict_columns"] = cols.clone();
+    if let Some(cols) = input.conflict_columns {
+        body["conflict_columns"] = json!(cols);
     }
 
     let resp = http_post("/instances/bulk-create", body, &connection_id)?;
 
-    let errors: Vec<Value> = resp
+    let errors: Vec<AgentBulkRowError> = resp
         .get("errors")
         .and_then(|v| v.as_array())
-        .cloned()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|entry| {
+                    let index = entry.get("index").and_then(|v| v.as_u64())? as usize;
+                    let reason = entry.get("reason").and_then(|v| v.as_str())?.to_string();
+                    Some(AgentBulkRowError { index, reason })
+                })
+                .collect()
+        })
         .unwrap_or_default();
 
-    serde_json::to_string(&json!({
-        "success": resp["success"].as_bool().unwrap_or(false),
-        "created_count": resp["created_count"].as_i64().unwrap_or(0),
-        "skipped_count": resp["skipped_count"].as_i64().unwrap_or(0),
-        "errors": errors,
-        "error": resp["error"].as_str(),
-    }))
-    .map_err(|e| permanent_err("OUTPUT_SERIALIZATION_ERROR", e.to_string()))
+    Ok(BulkCreateInstancesOutput {
+        success: resp["success"].as_bool().unwrap_or(false),
+        created_count: resp["created_count"].as_i64().unwrap_or(0),
+        skipped_count: resp["skipped_count"].as_i64().unwrap_or(0),
+        errors,
+        error: resp["error"].as_str().map(String::from),
+    })
 }
 
-// =============================================================================
+// ============================================================================
 // Capability: bulk_update_instances
-// =============================================================================
+// ============================================================================
 
-fn invoke_bulk_update_instances(
-    input_json: &str,
-    connection: Option<&ConnectionInfo>,
-) -> Result<String, ErrorInfo> {
-    let connection_id = require_connection_id(connection)?;
-    let input: Value = serde_json::from_str(input_json)
-        .map_err(|e| permanent_err("INPUT_DESERIALIZATION_ERROR", e.to_string()))?;
+#[derive(Debug, Deserialize, Serialize)]
+pub struct BulkUpdateByIdEntry {
+    pub id: String,
+    pub properties: HashMap<String, Value>,
+}
 
-    let schema_name = input["schema_name"].as_str().unwrap_or("").to_string();
+#[derive(Debug, Deserialize, CapabilityInput)]
+#[capability_input(display_name = "Bulk Update Instances Input")]
+pub struct BulkUpdateInstancesInput {
+    #[field(skip)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub _connection: Option<RawConnection>,
 
-    let has_condition = input
-        .get("condition")
-        .map(|v| !v.is_null())
-        .unwrap_or(false);
-    let has_properties = input
-        .get("properties")
-        .map(|v| !v.is_null())
-        .unwrap_or(false);
-    let has_updates = input.get("updates").map(|v| !v.is_null()).unwrap_or(false);
+    #[field(
+        display_name = "Schema Name",
+        description = "The name of the object model schema",
+        example = "Product"
+    )]
+    pub schema_name: String,
 
-    let body = if has_condition && has_properties {
-        let condition_json = parse_condition(input.get("condition")).ok_or_else(|| {
-            permanent_err(
+    #[field(
+        display_name = "Condition",
+        description = "Optional DSL condition; when set, `properties` is applied to every \
+                       matching row"
+    )]
+    #[serde(default)]
+    pub condition: Option<Value>,
+
+    #[field(
+        display_name = "Properties",
+        description = "Property values applied to rows matching `condition`",
+        example = r#"{"status": "archived"}"#
+    )]
+    #[serde(default)]
+    pub properties: Option<HashMap<String, Value>>,
+
+    #[field(
+        display_name = "Updates",
+        description = "Per-row updates: list of {id, properties}",
+        example = r#"[{"id": "...", "properties": {"quantity": 5}}]"#
+    )]
+    #[serde(default)]
+    pub updates: Option<Vec<BulkUpdateByIdEntry>>,
+}
+
+#[derive(Debug, Serialize, Deserialize, CapabilityOutput)]
+#[capability_output(
+    display_name = "Bulk Update Instances Output",
+    description = "Result of a bulk update"
+)]
+pub struct BulkUpdateInstancesOutput {
+    #[field(
+        display_name = "Success",
+        description = "Whether the operation succeeded"
+    )]
+    pub success: bool,
+
+    #[field(display_name = "Updated Count", description = "Number of rows updated")]
+    pub updated_count: i64,
+
+    #[field(
+        display_name = "Error",
+        description = "Error message if the operation failed"
+    )]
+    pub error: Option<String>,
+}
+
+#[capability(
+    module = "object_model",
+    display_name = "Bulk Update Instances",
+    description = "Update many instances in one transaction, by condition or by per-row values",
+    side_effects = true
+)]
+pub fn bulk_update_instances(
+    input: BulkUpdateInstancesInput,
+) -> Result<BulkUpdateInstancesOutput, AgentError> {
+    let connection_id = require_connection_id(input._connection.as_ref())?.to_string();
+
+    let body = if let (Some(cond_value), Some(props)) =
+        (input.condition.as_ref(), input.properties.as_ref())
+    {
+        let cond_json = parse_condition(Some(cond_value)).ok_or_else(|| {
+            AgentError::permanent(
                 "OBJECT_MODEL_INVALID_INPUT",
                 "Failed to parse condition for bulk update",
             )
+            .with_attr("integration", "OBJECT_MODEL")
         })?;
         json!({
-            "schema_name": schema_name,
+            "schema_name": input.schema_name,
             "mode": "byCondition",
-            "properties": input["properties"],
-            "condition": condition_json,
+            "properties": Value::Object(props.clone().into_iter().collect()),
+            "condition": cond_json,
         })
-    } else if has_updates {
+    } else if let Some(updates) = input.updates {
+        let updates_json: Vec<Value> = updates
+            .into_iter()
+            .map(|e| {
+                json!({
+                    "id": e.id,
+                    "properties": Value::Object(e.properties.into_iter().collect()),
+                })
+            })
+            .collect();
         json!({
-            "schema_name": schema_name,
+            "schema_name": input.schema_name,
             "mode": "byIds",
-            "updates": input["updates"],
+            "updates": updates_json,
         })
     } else {
-        return serde_json::to_string(&json!({
-            "success": false,
-            "updated_count": 0,
-            "error": "Either (condition + properties) or `updates` must be provided",
-        }))
-        .map_err(|e| permanent_err("OUTPUT_SERIALIZATION_ERROR", e.to_string()));
+        return Ok(BulkUpdateInstancesOutput {
+            success: false,
+            updated_count: 0,
+            error: Some("Either (condition + properties) or `updates` must be provided".into()),
+        });
     };
 
     let resp = http_post("/instances/bulk-update", body, &connection_id)?;
 
-    serde_json::to_string(&json!({
-        "success": resp["success"].as_bool().unwrap_or(false),
-        "updated_count": resp["updated_count"].as_i64().unwrap_or(0),
-        "error": resp["error"].as_str(),
-    }))
-    .map_err(|e| permanent_err("OUTPUT_SERIALIZATION_ERROR", e.to_string()))
+    Ok(BulkUpdateInstancesOutput {
+        success: resp["success"].as_bool().unwrap_or(false),
+        updated_count: resp["updated_count"].as_i64().unwrap_or(0),
+        error: resp["error"].as_str().map(String::from),
+    })
 }
 
-// =============================================================================
+// ============================================================================
 // Capability: bulk_delete_instances
-// =============================================================================
+// ============================================================================
 
-fn invoke_bulk_delete_instances(
-    input_json: &str,
-    connection: Option<&ConnectionInfo>,
-) -> Result<String, ErrorInfo> {
-    let connection_id = require_connection_id(connection)?;
-    let input: Value = serde_json::from_str(input_json)
-        .map_err(|e| permanent_err("INPUT_DESERIALIZATION_ERROR", e.to_string()))?;
+#[derive(Debug, Deserialize, CapabilityInput)]
+#[capability_input(display_name = "Bulk Delete Instances Input")]
+pub struct BulkDeleteInstancesInput {
+    #[field(skip)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub _connection: Option<RawConnection>,
 
-    let schema_name = input["schema_name"].as_str().unwrap_or("").to_string();
+    #[field(
+        display_name = "Schema Name",
+        description = "The name of the object model schema",
+        example = "Product"
+    )]
+    pub schema_name: String,
 
-    let ids = input.get("ids").and_then(|v| v.as_array()).cloned();
-    let has_ids = ids.as_ref().map(|a| !a.is_empty()).unwrap_or(false);
-    let has_condition = input
-        .get("condition")
-        .map(|v| !v.is_null())
-        .unwrap_or(false);
+    #[field(
+        display_name = "IDs",
+        description = "List of instance IDs to delete (mutually exclusive with `condition`)"
+    )]
+    #[serde(default)]
+    pub ids: Option<Vec<String>>,
 
-    let body = if has_ids {
-        json!({
-            "schema_name": schema_name,
-            "ids": ids.unwrap(),
-        })
-    } else if has_condition {
-        let condition_json = parse_condition(input.get("condition")).ok_or_else(|| {
-            permanent_err(
-                "OBJECT_MODEL_INVALID_INPUT",
-                "Failed to parse condition for bulk delete",
-            )
-        })?;
-        json!({
-            "schema_name": schema_name,
-            "condition": condition_json,
-        })
-    } else {
-        return serde_json::to_string(&json!({
-            "success": false,
-            "deleted_count": 0,
-            "error": "Either `ids` or `condition` must be provided",
-        }))
-        .map_err(|e| permanent_err("OUTPUT_SERIALIZATION_ERROR", e.to_string()));
+    #[field(
+        display_name = "Condition",
+        description = "DSL condition to select rows to delete (mutually exclusive with `ids`)"
+    )]
+    #[serde(default)]
+    pub condition: Option<Value>,
+}
+
+#[derive(Debug, Serialize, Deserialize, CapabilityOutput)]
+#[capability_output(
+    display_name = "Bulk Delete Instances Output",
+    description = "Result of a bulk delete"
+)]
+pub struct BulkDeleteInstancesOutput {
+    #[field(
+        display_name = "Success",
+        description = "Whether the operation succeeded"
+    )]
+    pub success: bool,
+
+    #[field(display_name = "Deleted Count", description = "Number of rows deleted")]
+    pub deleted_count: i64,
+
+    #[field(
+        display_name = "Error",
+        description = "Error message if the operation failed"
+    )]
+    pub error: Option<String>,
+}
+
+#[capability(
+    module = "object_model",
+    display_name = "Bulk Delete Instances",
+    description = "Delete many instances in one transaction, by IDs or by condition",
+    side_effects = true
+)]
+pub fn bulk_delete_instances(
+    input: BulkDeleteInstancesInput,
+) -> Result<BulkDeleteInstancesOutput, AgentError> {
+    let connection_id = require_connection_id(input._connection.as_ref())?.to_string();
+
+    let body = match (input.ids, input.condition) {
+        (Some(ids), _) if !ids.is_empty() => json!({
+            "schema_name": input.schema_name,
+            "ids": ids,
+        }),
+        (_, Some(cond)) => {
+            let cond_json = parse_condition(Some(&cond)).ok_or_else(|| {
+                AgentError::permanent(
+                    "OBJECT_MODEL_INVALID_INPUT",
+                    "Failed to parse condition for bulk delete",
+                )
+                .with_attr("integration", "OBJECT_MODEL")
+            })?;
+            json!({
+                "schema_name": input.schema_name,
+                "condition": cond_json,
+            })
+        }
+        _ => {
+            return Ok(BulkDeleteInstancesOutput {
+                success: false,
+                deleted_count: 0,
+                error: Some("Either `ids` or `condition` must be provided".into()),
+            });
+        }
     };
 
     let resp = http_post("/instances/bulk-delete", body, &connection_id)?;
 
-    serde_json::to_string(&json!({
-        "success": resp["success"].as_bool().unwrap_or(false),
-        "deleted_count": resp["deleted_count"].as_i64().unwrap_or(0),
-        "error": resp["error"].as_str(),
-    }))
-    .map_err(|e| permanent_err("OUTPUT_SERIALIZATION_ERROR", e.to_string()))
+    Ok(BulkDeleteInstancesOutput {
+        success: resp["success"].as_bool().unwrap_or(false),
+        deleted_count: resp["deleted_count"].as_i64().unwrap_or(0),
+        error: resp["error"].as_str().map(String::from),
+    })
 }
 
-// =============================================================================
+// ============================================================================
 // Capability: query_aggregate
-// =============================================================================
+// ============================================================================
 
-fn invoke_query_aggregate(
-    input_json: &str,
-    connection: Option<&ConnectionInfo>,
-) -> Result<String, ErrorInfo> {
-    let connection_id = require_connection_id(connection)?;
-    let input: Value = serde_json::from_str(input_json)
-        .map_err(|e| permanent_err("INPUT_DESERIALIZATION_ERROR", e.to_string()))?;
+#[derive(Debug, Deserialize, CapabilityInput)]
+#[capability_input(display_name = "Query Aggregate Input")]
+pub struct QueryAggregateInput {
+    #[field(skip)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub _connection: Option<RawConnection>,
 
-    let schema_name = input["schema_name"].as_str().unwrap_or("").to_string();
-    let condition_json = parse_condition(input.get("condition"));
-    let group_by = input.get("group_by").cloned().unwrap_or(json!([]));
-    let aggregates = input.get("aggregates").cloned().unwrap_or(json!([]));
-    let order_by = input.get("order_by").cloned().unwrap_or(json!([]));
-    let limit = input.get("limit").cloned();
-    let offset = input.get("offset").cloned();
+    #[field(
+        display_name = "Schema Name",
+        description = "The name of the object model schema to aggregate over",
+        example = "StockSnapshot"
+    )]
+    pub schema_name: String,
+
+    #[field(
+        display_name = "Condition",
+        description = "Optional filter condition (same DSL as Query Instances). Applied before \
+                       GROUP BY."
+    )]
+    #[serde(default)]
+    pub condition: Option<Value>,
+
+    #[field(
+        display_name = "Group By",
+        description = "Columns to group by. Empty list → one row over the whole filtered set.",
+        example = r#"["sku"]"#
+    )]
+    #[serde(default)]
+    pub group_by: Vec<String>,
+
+    #[field(
+        display_name = "Aggregates",
+        description = "Aggregate expressions: [{alias, fn, column?, distinct?, order_by?, \
+                       expression?}]. fn is one of COUNT, SUM, MIN, MAX, FIRST_VALUE, \
+                       LAST_VALUE, EXPR.",
+        example = r#"[{"alias":"first_qty","fn":"FIRST_VALUE","column":"qty","order_by":[{"column":"snapshot_date","direction":"ASC"}]}]"#
+    )]
+    pub aggregates: Vec<Value>,
+
+    #[field(
+        display_name = "Order By",
+        description = "Top-level sort — targets group_by columns or aggregate aliases.",
+        example = r#"[{"column":"last_qty","direction":"DESC"}]"#
+    )]
+    #[serde(default)]
+    pub order_by: Vec<Value>,
+
+    #[field(
+        display_name = "Limit",
+        description = "Max result rows. Server caps at 100000.",
+        example = "200"
+    )]
+    #[serde(default)]
+    pub limit: Option<i64>,
+
+    #[field(
+        display_name = "Offset",
+        description = "Pagination offset",
+        example = "0"
+    )]
+    #[serde(default)]
+    pub offset: Option<i64>,
+}
+
+#[derive(Debug, Serialize, Deserialize, CapabilityOutput)]
+#[capability_output(
+    display_name = "Query Aggregate Output",
+    description = "Columnar aggregate result: ordered column names, rows aligned to those \
+                   columns, and the total number of groups matched."
+)]
+pub struct QueryAggregateOutput {
+    #[field(
+        display_name = "Success",
+        description = "Whether the operation succeeded"
+    )]
+    pub success: bool,
+
+    #[field(
+        display_name = "Columns",
+        description = "Output column names — group_by columns first, then aggregate aliases."
+    )]
+    pub columns: Vec<String>,
+
+    #[field(
+        display_name = "Rows",
+        description = "Result rows, each aligned to the `columns` list."
+    )]
+    pub rows: Vec<Vec<Value>>,
+
+    #[field(
+        display_name = "Group Count",
+        description = "Total number of groups matched by the condition (before limit/offset). \
+                       1 when there is no group_by."
+    )]
+    pub group_count: i64,
+
+    #[field(
+        display_name = "Error",
+        description = "Error message if the operation failed"
+    )]
+    pub error: Option<String>,
+}
+
+#[capability(
+    module = "object_model",
+    display_name = "Query Aggregate",
+    description = "Group and aggregate object model instances (COUNT, SUM, MIN, MAX, \
+                   FIRST_VALUE, LAST_VALUE). Returns a columnar {columns, rows, group_count} \
+                   result.",
+    side_effects = false
+)]
+pub fn query_aggregate(input: QueryAggregateInput) -> Result<QueryAggregateOutput, AgentError> {
+    let connection_id = require_connection_id(input._connection.as_ref())?.to_string();
+    let condition_json = parse_condition(input.condition.as_ref());
 
     let resp = http_post(
         "/instances/aggregate",
         json!({
-            "schema_name": schema_name,
+            "schema_name": input.schema_name,
             "condition": condition_json,
-            "group_by": group_by,
-            "aggregates": aggregates,
-            "order_by": order_by,
-            "limit": limit,
-            "offset": offset,
+            "group_by": input.group_by,
+            "aggregates": input.aggregates,
+            "order_by": input.order_by,
+            "limit": input.limit,
+            "offset": input.offset,
         }),
         &connection_id,
     )?;
 
-    let columns: Vec<String> = resp
+    let columns = resp
         .get("columns")
         .and_then(|v| v.as_array())
         .map(|arr| {
@@ -922,29 +1460,32 @@ fn invoke_query_aggregate(
     let rows = resp
         .get("rows")
         .and_then(|v| v.as_array())
-        .cloned()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|row| row.as_array().map(|cells| cells.to_vec()))
+                .collect()
+        })
         .unwrap_or_default();
 
-    serde_json::to_string(&json!({
-        "success": resp["success"].as_bool().unwrap_or(false),
-        "columns": columns,
-        "rows": rows,
-        "group_count": resp["group_count"].as_i64().unwrap_or(0),
-        "error": resp["error"].as_str(),
-    }))
-    .map_err(|e| permanent_err("OUTPUT_SERIALIZATION_ERROR", e.to_string()))
+    Ok(QueryAggregateOutput {
+        success: resp["success"].as_bool().unwrap_or(false),
+        columns,
+        rows,
+        group_count: resp["group_count"].as_i64().unwrap_or(0),
+        error: resp["error"].as_str().map(String::from),
+    })
 }
 
-// =============================================================================
+// ============================================================================
 // Capability: load_memory / save_memory
-// =============================================================================
+// ============================================================================
 
 const MEMORY_SCHEMA_NAME: &str = "_ai_conversation_memory";
 const MEMORY_TABLE_NAME: &str = "_ai_conversation_memory";
 
 /// Ensure the conversation memory schema exists (mirrors legacy
 /// `ensure_memory_schema`). GET the schema first; create it on 404 / missing.
-fn ensure_memory_schema(connection_id: &str) -> Result<(), ErrorInfo> {
+fn ensure_memory_schema(connection_id: &str) -> Result<(), AgentError> {
     let resp = http_get(&format!("/schemas/{}", MEMORY_SCHEMA_NAME), connection_id)?;
 
     if resp["success"].as_bool().unwrap_or(false)
@@ -974,23 +1515,74 @@ fn ensure_memory_schema(connection_id: &str) -> Result<(), ErrorInfo> {
     Ok(())
 }
 
-fn invoke_load_memory(
-    input_json: &str,
-    connection: Option<&ConnectionInfo>,
-) -> Result<String, ErrorInfo> {
-    let connection_id = require_connection_id(connection)?;
-    let input: Value = serde_json::from_str(input_json)
-        .map_err(|e| permanent_err("INPUT_DESERIALIZATION_ERROR", e.to_string()))?;
+#[derive(Debug, Deserialize, CapabilityInput)]
+#[capability_input(display_name = "Load Memory Input")]
+pub struct LoadMemoryInput {
+    #[field(skip)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub _connection: Option<RawConnection>,
 
-    let conversation_id = input["conversation_id"].as_str().unwrap_or("").to_string();
+    #[field(
+        display_name = "Conversation ID",
+        description = "Unique identifier for the conversation to load",
+        example = "session_abc123"
+    )]
+    pub conversation_id: String,
+}
 
+#[derive(Debug, Serialize, Deserialize, CapabilityOutput)]
+#[capability_output(
+    display_name = "Load Memory Output",
+    description = "Previously stored conversation messages"
+)]
+pub struct LoadMemoryOutput {
+    #[field(
+        display_name = "Success",
+        description = "Whether the operation succeeded"
+    )]
+    pub success: bool,
+
+    #[field(
+        display_name = "Messages",
+        description = "Array of conversation messages in rig message format"
+    )]
+    pub messages: Vec<Value>,
+
+    #[field(
+        display_name = "Message Count",
+        description = "Number of messages in the conversation"
+    )]
+    pub message_count: i64,
+
+    #[field(
+        display_name = "Error",
+        description = "Error message if the operation failed"
+    )]
+    pub error: Option<String>,
+}
+
+#[capability(
+    module = "object_model",
+    display_name = "Load Memory",
+    description = "Load conversation memory for an AI agent by conversation ID",
+    side_effects = false,
+    tags = "memory:read"
+)]
+pub fn load_memory(input: LoadMemoryInput) -> Result<LoadMemoryOutput, AgentError> {
+    let connection_id = require_connection_id(input._connection.as_ref())?.to_string();
     ensure_memory_schema(&connection_id)?;
+
+    let mut filters = HashMap::new();
+    filters.insert(
+        "conversation_id".to_string(),
+        Value::String(input.conversation_id.clone()),
+    );
 
     let resp = http_post(
         "/instances/query",
         json!({
             "schema_name": MEMORY_SCHEMA_NAME,
-            "filters": { "conversation_id": conversation_id },
+            "filters": filters,
             "limit": 1,
             "offset": 0,
         }),
@@ -1005,53 +1597,102 @@ fn invoke_load_memory(
                 .cloned()
                 .unwrap_or_default();
             let count = messages.len() as i64;
-            return serde_json::to_string(&json!({
-                "success": true,
-                "messages": messages,
-                "message_count": count,
-                "error": null,
-            }))
-            .map_err(|e| permanent_err("OUTPUT_SERIALIZATION_ERROR", e.to_string()));
+            return Ok(LoadMemoryOutput {
+                success: true,
+                messages,
+                message_count: count,
+                error: None,
+            });
         }
 
-        return serde_json::to_string(&json!({
-            "success": true,
-            "messages": [],
-            "message_count": 0,
-            "error": null,
-        }))
-        .map_err(|e| permanent_err("OUTPUT_SERIALIZATION_ERROR", e.to_string()));
+        return Ok(LoadMemoryOutput {
+            success: true,
+            messages: vec![],
+            message_count: 0,
+            error: None,
+        });
     }
 
-    serde_json::to_string(&json!({
-        "success": false,
-        "messages": [],
-        "message_count": 0,
-        "error": resp["error"].as_str(),
-    }))
-    .map_err(|e| permanent_err("OUTPUT_SERIALIZATION_ERROR", e.to_string()))
+    Ok(LoadMemoryOutput {
+        success: false,
+        messages: vec![],
+        message_count: 0,
+        error: resp["error"].as_str().map(String::from),
+    })
 }
 
-fn invoke_save_memory(
-    input_json: &str,
-    connection: Option<&ConnectionInfo>,
-) -> Result<String, ErrorInfo> {
-    let connection_id = require_connection_id(connection)?;
-    let input: Value = serde_json::from_str(input_json)
-        .map_err(|e| permanent_err("INPUT_DESERIALIZATION_ERROR", e.to_string()))?;
+#[derive(Debug, Deserialize, CapabilityInput)]
+#[capability_input(display_name = "Save Memory Input")]
+pub struct SaveMemoryInput {
+    #[field(skip)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub _connection: Option<RawConnection>,
 
-    let conversation_id = input["conversation_id"].as_str().unwrap_or("").to_string();
-    let messages = input["messages"].clone();
-    let message_count = messages.as_array().map(|a| a.len() as i64).unwrap_or(0);
+    #[field(
+        display_name = "Conversation ID",
+        description = "Unique identifier for the conversation to save",
+        example = "session_abc123"
+    )]
+    pub conversation_id: String,
 
+    #[field(
+        display_name = "Messages",
+        description = "Array of conversation messages in rig message format"
+    )]
+    pub messages: Vec<Value>,
+}
+
+#[derive(Debug, Serialize, Deserialize, CapabilityOutput)]
+#[capability_output(
+    display_name = "Save Memory Output",
+    description = "Result of saving conversation memory"
+)]
+pub struct SaveMemoryOutput {
+    #[field(
+        display_name = "Success",
+        description = "Whether the operation succeeded"
+    )]
+    pub success: bool,
+
+    #[field(
+        display_name = "Message Count",
+        description = "Number of messages saved"
+    )]
+    pub message_count: i64,
+
+    #[field(
+        display_name = "Error",
+        description = "Error message if the operation failed"
+    )]
+    pub error: Option<String>,
+}
+
+#[capability(
+    module = "object_model",
+    display_name = "Save Memory",
+    description = "Save conversation memory for an AI agent, creating or updating by \
+                   conversation ID",
+    side_effects = true,
+    tags = "memory:write"
+)]
+pub fn save_memory(input: SaveMemoryInput) -> Result<SaveMemoryOutput, AgentError> {
+    let connection_id = require_connection_id(input._connection.as_ref())?.to_string();
     ensure_memory_schema(&connection_id)?;
 
-    // Check if conversation already exists
+    let message_count = input.messages.len() as i64;
+    let messages_json = Value::Array(input.messages);
+
+    let mut filters = HashMap::new();
+    filters.insert(
+        "conversation_id".to_string(),
+        Value::String(input.conversation_id.clone()),
+    );
+
     let query_resp = http_post(
         "/instances/query",
         json!({
             "schema_name": MEMORY_SCHEMA_NAME,
-            "filters": { "conversation_id": conversation_id },
+            "filters": filters,
             "limit": 1,
             "offset": 0,
         }),
@@ -1059,13 +1700,14 @@ fn invoke_save_memory(
     )?;
 
     if !query_resp["success"].as_bool().unwrap_or(false) {
-        return Err(permanent_err(
+        return Err(AgentError::permanent(
             "OBJECT_MODEL_MEMORY_QUERY_ERROR",
             format!(
                 "Failed to query existing memory: {}",
                 query_resp["error"].as_str().unwrap_or("unknown error")
             ),
-        ));
+        )
+        .with_attr("integration", "OBJECT_MODEL"));
     }
 
     if let Some(instance) = query_resp["instances"].as_array().and_then(|a| a.first()) {
@@ -1079,7 +1721,7 @@ fn invoke_save_memory(
             ),
             json!({
                 "data": {
-                    "messages": messages,
+                    "messages": messages_json,
                     "message_count": message_count,
                 }
             }),
@@ -1087,13 +1729,14 @@ fn invoke_save_memory(
         )?;
 
         if !update_resp["success"].as_bool().unwrap_or(false) {
-            return Err(permanent_err(
+            return Err(AgentError::permanent(
                 "OBJECT_MODEL_MEMORY_UPDATE_ERROR",
                 format!(
                     "Failed to update memory: {}",
                     update_resp["error"].as_str().unwrap_or("unknown error")
                 ),
-            ));
+            )
+            .with_attr("integration", "OBJECT_MODEL"));
         }
     } else {
         // Create new
@@ -1102,8 +1745,8 @@ fn invoke_save_memory(
             json!({
                 "schema_name": MEMORY_SCHEMA_NAME,
                 "properties": {
-                    "conversation_id": conversation_id,
-                    "messages": messages,
+                    "conversation_id": input.conversation_id,
+                    "messages": messages_json,
                     "message_count": message_count,
                 }
             }),
@@ -1111,272 +1754,277 @@ fn invoke_save_memory(
         )?;
 
         if !create_resp["success"].as_bool().unwrap_or(false) {
-            return Err(permanent_err(
+            return Err(AgentError::permanent(
                 "OBJECT_MODEL_MEMORY_CREATE_ERROR",
                 format!(
                     "Failed to create memory: {}",
                     create_resp["error"].as_str().unwrap_or("unknown error")
                 ),
-            ));
+            )
+            .with_attr("integration", "OBJECT_MODEL"));
         }
     }
 
-    serde_json::to_string(&json!({
-        "success": true,
-        "message_count": message_count,
-        "error": null,
-    }))
-    .map_err(|e| permanent_err("OUTPUT_SERIALIZATION_ERROR", e.to_string()))
+    Ok(SaveMemoryOutput {
+        success: true,
+        message_count,
+        error: None,
+    })
 }
 
-// =============================================================================
-// JSON Schemas (inline — mirrors field/type definitions in the legacy file)
-// =============================================================================
+// ============================================================================
+// AgentInfo assembler (host-only)
+// ============================================================================
 
-const CREATE_INSTANCE_INPUT: &str = r#"{
-  "type": "object",
-  "required": ["schema_name", "data"],
-  "properties": {
-    "schema_name": { "type": "string",  "description": "The name of the object model schema to create an instance in", "example": "ImportedFile" },
-    "data":        { "description": "The field values to store in the new instance", "example": "{\"name\": \"file.txt\"}" }
-  }
-}"#;
+#[cfg(not(target_arch = "wasm32"))]
+pub fn agent_info() -> runtara_dsl::agent_meta::AgentInfo {
+    use runtara_dsl::agent_meta::{
+        AgentInfo, CapabilityMeta, InputTypeMeta, OutputTypeMeta, capability_to_api,
+    };
+    use std::collections::HashMap;
 
-const CREATE_INSTANCE_OUTPUT: &str = r#"{
-  "type": "object",
-  "properties": {
-    "success":     { "type": "boolean" },
-    "instance_id": { "type": ["string", "null"] },
-    "error":       { "type": ["string", "null"] }
-  }
-}"#;
+    let caps: &[&'static CapabilityMeta] = &[
+        &__CAPABILITY_META_CREATE_INSTANCE,
+        &__CAPABILITY_META_QUERY_INSTANCES,
+        &__CAPABILITY_META_CHECK_INSTANCE_EXISTS,
+        &__CAPABILITY_META_CREATE_IF_NOT_EXISTS,
+        &__CAPABILITY_META_UPDATE_INSTANCE,
+        &__CAPABILITY_META_DELETE_INSTANCE,
+        &__CAPABILITY_META_BULK_CREATE_INSTANCES,
+        &__CAPABILITY_META_BULK_UPDATE_INSTANCES,
+        &__CAPABILITY_META_BULK_DELETE_INSTANCES,
+        &__CAPABILITY_META_QUERY_AGGREGATE,
+        &__CAPABILITY_META_LOAD_MEMORY,
+        &__CAPABILITY_META_SAVE_MEMORY,
+    ];
 
-const QUERY_INSTANCES_INPUT: &str = r#"{
-  "type": "object",
-  "required": ["schema_name"],
-  "properties": {
-    "schema_name":      { "type": "string", "description": "The name of the object model schema to query", "example": "ImportedFile" },
-    "filters":          { "type": "object", "description": "Key-value pairs to filter instances by (simple AND logic)", "example": "{\"source\": \"sftp\"}" },
-    "condition":        { "description": "Advanced filtering condition with operators like Or, And, Eq, IsDefined. Uses same ConditionExpression as Conditional and Filter steps." },
-    "scoreExpression":  { "type": "object", "description": "Optional computed score column for vector nearest-neighbor search." },
-    "score_expression": { "type": "object", "description": "Alias for scoreExpression." },
-    "orderBy":          { "type": "array",  "description": "Optional structured ordering." },
-    "order_by":         { "type": "array",  "description": "Alias for orderBy." },
-    "limit":            { "type": "integer", "default": 100, "description": "Maximum number of instances to return" },
-    "offset":           { "type": "integer", "default": 0,   "description": "Number of instances to skip" }
-  }
-}"#;
+    let input_types: HashMap<&'static str, &'static InputTypeMeta> = [
+        (
+            "CreateInstanceInput",
+            &__INPUT_META_CreateInstanceInput as &InputTypeMeta,
+        ),
+        ("QueryInstancesInput", &__INPUT_META_QueryInstancesInput),
+        (
+            "CheckInstanceExistsInput",
+            &__INPUT_META_CheckInstanceExistsInput,
+        ),
+        (
+            "CreateIfNotExistsInput",
+            &__INPUT_META_CreateIfNotExistsInput,
+        ),
+        ("UpdateInstanceInput", &__INPUT_META_UpdateInstanceInput),
+        ("DeleteInstanceInput", &__INPUT_META_DeleteInstanceInput),
+        (
+            "BulkCreateInstancesInput",
+            &__INPUT_META_BulkCreateInstancesInput,
+        ),
+        (
+            "BulkUpdateInstancesInput",
+            &__INPUT_META_BulkUpdateInstancesInput,
+        ),
+        (
+            "BulkDeleteInstancesInput",
+            &__INPUT_META_BulkDeleteInstancesInput,
+        ),
+        ("QueryAggregateInput", &__INPUT_META_QueryAggregateInput),
+        ("LoadMemoryInput", &__INPUT_META_LoadMemoryInput),
+        ("SaveMemoryInput", &__INPUT_META_SaveMemoryInput),
+    ]
+    .into_iter()
+    .collect();
 
-const QUERY_INSTANCES_OUTPUT: &str = r#"{
-  "type": "object",
-  "properties": {
-    "success":     { "type": "boolean" },
-    "instances":   { "type": "array" },
-    "total_count": { "type": "integer" },
-    "error":       { "type": ["string", "null"] }
-  }
-}"#;
+    let output_types: HashMap<&'static str, &'static OutputTypeMeta> = [
+        (
+            "CreateInstanceOutput",
+            &__OUTPUT_META_CreateInstanceOutput as &OutputTypeMeta,
+        ),
+        ("QueryInstancesOutput", &__OUTPUT_META_QueryInstancesOutput),
+        (
+            "CheckInstanceExistsOutput",
+            &__OUTPUT_META_CheckInstanceExistsOutput,
+        ),
+        (
+            "CreateIfNotExistsOutput",
+            &__OUTPUT_META_CreateIfNotExistsOutput,
+        ),
+        ("UpdateInstanceOutput", &__OUTPUT_META_UpdateInstanceOutput),
+        ("DeleteInstanceOutput", &__OUTPUT_META_DeleteInstanceOutput),
+        (
+            "BulkCreateInstancesOutput",
+            &__OUTPUT_META_BulkCreateInstancesOutput,
+        ),
+        (
+            "BulkUpdateInstancesOutput",
+            &__OUTPUT_META_BulkUpdateInstancesOutput,
+        ),
+        (
+            "BulkDeleteInstancesOutput",
+            &__OUTPUT_META_BulkDeleteInstancesOutput,
+        ),
+        ("QueryAggregateOutput", &__OUTPUT_META_QueryAggregateOutput),
+        ("LoadMemoryOutput", &__OUTPUT_META_LoadMemoryOutput),
+        ("SaveMemoryOutput", &__OUTPUT_META_SaveMemoryOutput),
+    ]
+    .into_iter()
+    .collect();
 
-const CHECK_INSTANCE_EXISTS_INPUT: &str = r#"{
-  "type": "object",
-  "required": ["schema_name", "filters"],
-  "properties": {
-    "schema_name": { "type": "string", "description": "The name of the object model schema to check", "example": "ImportedFile" },
-    "filters":     { "type": "object", "description": "Key-value pairs to match against existing instances", "example": "{\"source\": \"sftp\"}" }
-  }
-}"#;
+    let capabilities = caps
+        .iter()
+        .map(|cap| {
+            capability_to_api(
+                cap,
+                input_types.get(cap.input_type).copied(),
+                output_types.get(cap.output_type).copied(),
+            )
+        })
+        .collect();
 
-const CHECK_INSTANCE_EXISTS_OUTPUT: &str = r#"{
-  "type": "object",
-  "properties": {
-    "exists":      { "type": "boolean" },
-    "instance_id": { "type": ["string", "null"] },
-    "instance":    {}
-  }
-}"#;
+    AgentInfo {
+        id: "object-model".into(),
+        name: "Object Model".into(),
+        description: "CRUD operations over the runtara object-model API (list schemas, \
+                      create/query/update/delete instances, bulk operations, aggregates, \
+                      and conversation memory)."
+            .into(),
+        has_side_effects: true,
+        supports_connections: true,
+        integration_ids: vec!["postgres".to_string()],
+        capabilities,
+    }
+}
 
-const CREATE_IF_NOT_EXISTS_INPUT: &str = r#"{
-  "type": "object",
-  "required": ["schema_name", "match_filters", "data"],
-  "properties": {
-    "schema_name":   { "type": "string", "description": "The name of the object model schema", "example": "ImportedFile" },
-    "match_filters": { "type": "object", "description": "Conditions to check if record already exists" },
-    "data":          { "description": "The field values to store in the new instance (if created)" }
-  }
-}"#;
+// ============================================================================
+// Wasm component plumbing
+// ============================================================================
 
-const CREATE_IF_NOT_EXISTS_OUTPUT: &str = r#"{
-  "type": "object",
-  "properties": {
-    "success":        { "type": "boolean" },
-    "created":        { "type": "boolean" },
-    "already_existed":{ "type": "boolean" },
-    "instance_id":    { "type": ["string", "null"] },
-    "error":          { "type": ["string", "null"] }
-  }
-}"#;
+#[cfg(target_arch = "wasm32")]
+use bindings::exports::runtara::agent::capabilities::{ConnectionInfo, ErrorInfo, Guest};
 
-const UPDATE_INSTANCE_INPUT: &str = r#"{
-  "type": "object",
-  "required": ["schema_name", "instance_id", "data"],
-  "properties": {
-    "schema_name": { "type": "string",  "description": "The name of the object model schema", "example": "Product" },
-    "instance_id": { "type": "string",  "description": "The ID of the instance to update", "example": "550e8400-e29b-41d4-a716-446655440000" },
-    "data":        { "type": "object",  "description": "The field values to update in the instance", "example": "{\"quantity\": 100}" }
-  }
-}"#;
+#[cfg(target_arch = "wasm32")]
+struct Component;
 
-const UPDATE_INSTANCE_OUTPUT: &str = r#"{
-  "type": "object",
-  "properties": {
-    "success":     { "type": "boolean" },
-    "instance_id": { "type": ["string", "null"] },
-    "error":       { "type": ["string", "null"] }
-  }
-}"#;
+#[cfg(target_arch = "wasm32")]
+impl Guest for Component {
+    fn invoke(
+        capability_id: String,
+        input: Vec<u8>,
+        connection: Option<ConnectionInfo>,
+    ) -> Result<Vec<u8>, ErrorInfo> {
+        let mut value: serde_json::Value = serde_json::from_slice(&input).map_err(bad_json)?;
 
-const DELETE_INSTANCE_INPUT: &str = r#"{
-  "type": "object",
-  "required": ["schema_name", "instance_id"],
-  "properties": {
-    "schema_name": { "type": "string", "description": "The name of the object model schema", "example": "Product" },
-    "instance_id": { "type": "string", "description": "The ID of the instance to delete",    "example": "550e8400-e29b-41d4-a716-446655440000" }
-  }
-}"#;
+        // Inject the WIT `connection` arg into the input JSON under `_connection`
+        // so the macro-generated executor can deserialize it into the
+        // capability input struct's `_connection: Option<RawConnection>` field.
+        if let Some(c) = connection.as_ref() {
+            if let serde_json::Value::Object(ref mut obj) = value {
+                let parameters = serde_json::from_str::<serde_json::Value>(&c.parameters)
+                    .unwrap_or(serde_json::Value::Null);
+                let rate_limit_config = c
+                    .rate_limit_config
+                    .as_ref()
+                    .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok());
+                obj.insert(
+                    "_connection".into(),
+                    serde_json::json!({
+                        "connection_id": c.connection_id,
+                        "integration_id": c.integration_id,
+                        "connection_subtype": c.connection_subtype,
+                        "parameters": parameters,
+                        "rate_limit_config": rate_limit_config,
+                    }),
+                );
+            }
+        }
 
-const DELETE_INSTANCE_OUTPUT: &str = r#"{
-  "type": "object",
-  "properties": {
-    "success": { "type": "boolean" },
-    "error":   { "type": ["string", "null"] }
-  }
-}"#;
+        let executor_result = match capability_id.as_str() {
+            "create-instance" => __executor_create_instance(value),
+            "query-instances" => __executor_query_instances(value),
+            "check-instance-exists" => __executor_check_instance_exists(value),
+            "create-if-not-exists" => __executor_create_if_not_exists(value),
+            "update-instance" => __executor_update_instance(value),
+            "delete-instance" => __executor_delete_instance(value),
+            "bulk-create-instances" => __executor_bulk_create_instances(value),
+            "bulk-update-instances" => __executor_bulk_update_instances(value),
+            "bulk-delete-instances" => __executor_bulk_delete_instances(value),
+            "query-aggregate" => __executor_query_aggregate(value),
+            "load-memory" => __executor_load_memory(value),
+            "save-memory" => __executor_save_memory(value),
+            other => {
+                return Err(ErrorInfo {
+                    code: "UNKNOWN_CAPABILITY".into(),
+                    message: format!("object_model agent has no capability `{other}`"),
+                    category: "permanent".into(),
+                    severity: "error".into(),
+                    retryable: false,
+                    retry_after_ms: None,
+                    attributes: None,
+                });
+            }
+        };
+        executor_result
+            .map_err(error_string_to_error_info)
+            .and_then(|out_value| serde_json::to_vec(&out_value).map_err(bad_json))
+    }
+}
 
-const BULK_CREATE_INSTANCES_INPUT: &str = r#"{
-  "type": "object",
-  "required": ["schema_name"],
-  "properties": {
-    "schema_name":          { "type": "string",  "description": "The name of the object model schema", "example": "Product" },
-    "instances":            { "type": "array",   "description": "Array of property objects, one per record to insert (object form)", "example": "[{\"sku\": \"A\", \"quantity\": 1}]" },
-    "columns":              { "type": "array",   "items": { "type": "string" }, "description": "Column names for columnar form" },
-    "rows":                 { "type": "array",   "description": "Rows in columnar form" },
-    "constants":            { "type": "object",  "description": "Column values merged into every columnar row as defaults" },
-    "nullify_empty_strings":{ "type": "boolean", "description": "When true, empty strings become null in non-string columns" },
-    "on_conflict":          { "type": "string",  "enum": ["error", "skip", "upsert"], "description": "Conflict handling mode", "example": "\"skip\"" },
-    "conflict_columns":     { "type": "array",   "items": { "type": "string" }, "description": "Columns used to detect conflicts" },
-    "on_error":             { "type": "string",  "enum": ["stop", "skip"], "description": "Validation-failure handling", "example": "\"skip\"" }
-  }
-}"#;
+#[cfg(target_arch = "wasm32")]
+fn bad_json(e: serde_json::Error) -> ErrorInfo {
+    ErrorInfo {
+        code: "INPUT_DESERIALIZATION_ERROR".into(),
+        message: e.to_string(),
+        category: "permanent".into(),
+        severity: "error".into(),
+        retryable: false,
+        retry_after_ms: None,
+        attributes: None,
+    }
+}
 
-const BULK_CREATE_INSTANCES_OUTPUT: &str = r#"{
-  "type": "object",
-  "properties": {
-    "success":       { "type": "boolean" },
-    "created_count": { "type": "integer" },
-    "skipped_count": { "type": "integer" },
-    "errors":        { "type": "array" },
-    "error":         { "type": ["string", "null"] }
-  }
-}"#;
+#[cfg(target_arch = "wasm32")]
+fn error_string_to_error_info(s: String) -> ErrorInfo {
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(&s) {
+        let category = value
+            .get("category")
+            .and_then(|v| v.as_str())
+            .unwrap_or("permanent")
+            .to_string();
+        let retryable = value
+            .get("retryable")
+            .and_then(|v| v.as_bool())
+            .unwrap_or_else(|| category == "transient");
+        ErrorInfo {
+            code: value
+                .get("code")
+                .and_then(|v| v.as_str())
+                .unwrap_or("CAPABILITY_ERROR")
+                .into(),
+            message: value
+                .get("message")
+                .and_then(|v| v.as_str())
+                .unwrap_or(&s)
+                .into(),
+            category,
+            severity: value
+                .get("severity")
+                .and_then(|v| v.as_str())
+                .unwrap_or("error")
+                .into(),
+            retryable,
+            retry_after_ms: value.get("retry_after_ms").and_then(|v| v.as_u64()),
+            attributes: value.get("attributes").map(|v| v.to_string()),
+        }
+    } else {
+        ErrorInfo {
+            code: "CAPABILITY_ERROR".into(),
+            message: s,
+            category: "permanent".into(),
+            severity: "error".into(),
+            retryable: false,
+            retry_after_ms: None,
+            attributes: None,
+        }
+    }
+}
 
-const BULK_UPDATE_INSTANCES_INPUT: &str = r#"{
-  "type": "object",
-  "required": ["schema_name"],
-  "properties": {
-    "schema_name": { "type": "string", "description": "The name of the object model schema", "example": "Product" },
-    "condition":   { "description": "Optional DSL condition; when set, `properties` is applied to every matching row" },
-    "properties":  { "type": "object", "description": "Property values applied to rows matching `condition`", "example": "{\"status\": \"archived\"}" },
-    "updates":     { "type": "array",  "description": "Per-row updates: list of {id, properties}", "example": "[{\"id\": \"...\", \"properties\": {\"quantity\": 5}}]" }
-  }
-}"#;
-
-const BULK_UPDATE_INSTANCES_OUTPUT: &str = r#"{
-  "type": "object",
-  "properties": {
-    "success":       { "type": "boolean" },
-    "updated_count": { "type": "integer" },
-    "error":         { "type": ["string", "null"] }
-  }
-}"#;
-
-const BULK_DELETE_INSTANCES_INPUT: &str = r#"{
-  "type": "object",
-  "required": ["schema_name"],
-  "properties": {
-    "schema_name": { "type": "string", "description": "The name of the object model schema", "example": "Product" },
-    "ids":         { "type": "array",  "items": { "type": "string" }, "description": "List of instance IDs to delete (mutually exclusive with `condition`)" },
-    "condition":   { "description": "DSL condition to select rows to delete (mutually exclusive with `ids`)" }
-  }
-}"#;
-
-const BULK_DELETE_INSTANCES_OUTPUT: &str = r#"{
-  "type": "object",
-  "properties": {
-    "success":       { "type": "boolean" },
-    "deleted_count": { "type": "integer" },
-    "error":         { "type": ["string", "null"] }
-  }
-}"#;
-
-const QUERY_AGGREGATE_INPUT: &str = r#"{
-  "type": "object",
-  "required": ["schema_name", "aggregates"],
-  "properties": {
-    "schema_name": { "type": "string", "description": "The name of the object model schema to aggregate over", "example": "StockSnapshot" },
-    "condition":   { "description": "Optional filter condition (same DSL as Query Instances). Applied before GROUP BY." },
-    "group_by":    { "type": "array",  "items": { "type": "string" }, "description": "Columns to group by. Empty list → one row over the whole filtered set.", "example": "[\"sku\"]" },
-    "aggregates":  { "type": "array",  "description": "Aggregate expressions: [{alias, fn, column?, distinct?, order_by?, expression?}]. fn is one of COUNT, SUM, MIN, MAX, FIRST_VALUE, LAST_VALUE, EXPR.", "example": "[{\"alias\":\"first_qty\",\"fn\":\"FIRST_VALUE\",\"column\":\"qty\",\"order_by\":[{\"column\":\"snapshot_date\",\"direction\":\"ASC\"}]}]" },
-    "order_by":    { "type": "array",  "description": "Top-level sort — targets group_by columns or aggregate aliases.", "example": "[{\"column\":\"last_qty\",\"direction\":\"DESC\"}]" },
-    "limit":       { "type": "integer", "description": "Max result rows. Server caps at 100000.", "example": "200" },
-    "offset":      { "type": "integer", "description": "Pagination offset", "example": "0" }
-  }
-}"#;
-
-const QUERY_AGGREGATE_OUTPUT: &str = r#"{
-  "type": "object",
-  "properties": {
-    "success":     { "type": "boolean" },
-    "columns":     { "type": "array", "items": { "type": "string" }, "description": "Output column names — group_by columns first, then aggregate aliases." },
-    "rows":        { "type": "array", "description": "Result rows, each aligned to the `columns` list." },
-    "group_count": { "type": "integer", "description": "Total number of groups matched by the condition (before limit/offset). 1 when there is no group_by." },
-    "error":       { "type": ["string", "null"] }
-  }
-}"#;
-
-const LOAD_MEMORY_INPUT: &str = r#"{
-  "type": "object",
-  "required": ["conversation_id"],
-  "properties": {
-    "conversation_id": { "type": "string", "description": "Unique identifier for the conversation to load", "example": "session_abc123" }
-  }
-}"#;
-
-const LOAD_MEMORY_OUTPUT: &str = r#"{
-  "type": "object",
-  "properties": {
-    "success":       { "type": "boolean" },
-    "messages":      { "type": "array", "description": "Array of conversation messages in rig message format" },
-    "message_count": { "type": "integer" },
-    "error":         { "type": ["string", "null"] }
-  }
-}"#;
-
-const SAVE_MEMORY_INPUT: &str = r#"{
-  "type": "object",
-  "required": ["conversation_id", "messages"],
-  "properties": {
-    "conversation_id": { "type": "string", "description": "Unique identifier for the conversation to save", "example": "session_abc123" },
-    "messages":        { "type": "array",  "description": "Array of conversation messages in rig message format" }
-  }
-}"#;
-
-const SAVE_MEMORY_OUTPUT: &str = r#"{
-  "type": "object",
-  "properties": {
-    "success":       { "type": "boolean" },
-    "message_count": { "type": "integer" },
-    "error":         { "type": ["string", "null"] }
-  }
-}"#;
-
+#[cfg(target_arch = "wasm32")]
 bindings::export!(Component with_types_in bindings);

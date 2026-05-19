@@ -18,7 +18,5 @@ mod tests {
     #[allow(unused_imports)]
     use super::Agent;
     #[allow(unused_imports)]
-    use super::exports::runtara::agent::capabilities::{
-        CapabilityInfo, ConnectionInfo, ErrorInfo, ModuleInfo,
-    };
+    use super::exports::runtara::agent::capabilities::{ConnectionInfo, ErrorInfo};
 }

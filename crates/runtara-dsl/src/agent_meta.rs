@@ -328,7 +328,7 @@ pub struct CapabilityInfo {
     pub compensation_hint: Option<CompensationHintInfo>,
     /// Known errors this capability can return.
     /// Used for tooling hints and documentation.
-    #[serde(rename = "knownErrors", skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, rename = "knownErrors", skip_serializing_if = "Vec::is_empty")]
     pub known_errors: Vec<KnownErrorInfo>,
     /// Semantic tags for capability classification and filtering.
     /// Well-known tags: "memory:read", "memory:write".
@@ -380,10 +380,12 @@ pub struct FieldTypeInfo {
     pub display_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none", skip_deserializing)]
+    /// Sidecar meta.json carries this; legacy registry populates it server-side
+    /// from `OutputTypeMeta`. Either way, the round-trip via serde is symmetric.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fields: Option<Box<Vec<OutputField>>>,
     /// For array types, describes the item type
-    #[serde(skip_serializing_if = "Option::is_none", skip_deserializing)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub items: Option<Box<FieldTypeInfo>>,
     /// Whether this field can be null
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -411,10 +413,10 @@ pub struct OutputField {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub nullable: bool,
     /// For array types, describes the item type
-    #[serde(skip_serializing_if = "Option::is_none", skip_deserializing)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub items: Option<Box<FieldTypeInfo>>,
     /// For nested object types, the fields of the nested object
-    #[serde(skip_serializing_if = "Option::is_none", skip_deserializing)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fields: Option<Box<Vec<OutputField>>>,
 }
 

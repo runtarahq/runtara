@@ -53,6 +53,10 @@ members = [
     "crates/runtara-agent-sftp",
     "crates/runtara-agent-compression",
     "crates/runtara-agent-xlsx",
+    # Build tool: emits per-agent meta.json siblings to each .wasm by walking
+    # the macro-emitted statics in every agent crate. Run by
+    # scripts/build-agent-components.sh after `cargo component build`.
+    "crates/runtara-agent-bundle-emit",
 ]
 default-members = ["crates/runtara-core"]
 

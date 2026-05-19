@@ -1,7 +1,11 @@
 //! Text agent — string manipulation, regex, base64, templates — as a WebAssembly component.
 //!
-//! Schema matches the legacy `runtara-agents/src/agents/text.rs` agent so
-//! A/B parity tests can compare results byte-for-byte.
+//! Capability metadata travels through `#[capability_input]` / `#[capability]` /
+//! `#[capability_output]` annotations on the same Rust types and functions that
+//! the wasm cdylib's `invoke` dispatcher calls into. The workspace binary
+//! `runtara-agent-bundle-emit` reads these macro-emitted `&'static` statics on
+//! the host architecture and writes `runtara_agent_text.meta.json` next to
+//! the `.wasm` — the JSON is a build artifact, never hand-edited.
 //!
 //! Capabilities (28 total):
 //!   render-template, trim-normalize, case-conversion, find-replace,
@@ -12,302 +16,841 @@
 //!   pad-text, truncate-text, wrap-text,
 //!   extract-numbers, extract-emails, extract-urls,
 //!   compare-text, count-occurrences.
-
-#![cfg(target_arch = "wasm32")]
-
-#[allow(warnings)]
-mod bindings;
+#![allow(clippy::result_large_err)]
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
-use bindings::exports::runtara::agent::capabilities::{
-    CapabilityInfo, ConnectionInfo, ErrorInfo, Guest, ModuleInfo,
-};
 use minijinja::Environment;
 use regex::RegexBuilder;
+use runtara_agent_macro::{CapabilityInput, CapabilityOutput, capability};
+use runtara_dsl::agent_meta::EnumVariants;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use sha2::{Digest, Sha256};
+use strum::VariantNames;
 
-// ---------------------------------------------------------------------------
-// Input types (mirror runtara-agents/src/agents/text.rs)
-// ---------------------------------------------------------------------------
+#[cfg(target_arch = "wasm32")]
+#[allow(warnings)]
+mod bindings;
 
-#[derive(serde::Deserialize, Default)]
-#[serde(rename_all = "kebab-case")]
-enum CaseFormat {
-    #[default]
-    Lowercase,
-    Uppercase,
-    TitleCase,
+// ============================================================================
+// Local AgentError shim
+// ============================================================================
+//
+// The host crate's `runtara_agents::types::AgentError` pulls in `tracing`
+// and a lot of other host-only baggage. We only need the on-the-wire JSON
+// shape that the `#[capability]` macro expects (`Into<String>` returning
+// `{"code","message","category","severity",...}`), so we inline a minimal
+// version here.
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentError {
+    pub code: String,
+    pub message: String,
+    pub category: String,
+    pub severity: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retry_after_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    pub attributes: std::collections::HashMap<String, Value>,
 }
 
-#[derive(serde::Deserialize, Default)]
-#[serde(rename_all = "UPPERCASE")]
-enum TextEncoding {
-    #[default]
-    #[serde(rename = "UTF-8")]
-    Utf8,
+impl AgentError {
+    pub fn permanent(code: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            code: code.into(),
+            message: message.into(),
+            category: "permanent".into(),
+            severity: "error".into(),
+            retry_after_ms: None,
+            attributes: std::collections::HashMap::new(),
+        }
+    }
+
+    pub fn with_attr(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.attributes
+            .insert(key.into(), Value::String(value.into()));
+        self
+    }
 }
 
-#[derive(serde::Deserialize, Default)]
-#[serde(rename_all = "kebab-case")]
-enum PadDirection {
-    Left,
-    #[default]
-    Right,
-    Both,
+impl std::fmt::Display for AgentError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "[{}] {}", self.code, self.message)
+    }
 }
 
-#[derive(serde::Deserialize, Default)]
-#[serde(rename_all = "kebab-case")]
-enum CompareMode {
-    #[default]
-    Exact,
-    CaseInsensitive,
-    LevenshteinDistance,
-    Contains,
-    JaroSimilarity,
-    JaroWinklerSimilarity,
-    NgramJaccard,
-    NgramOverlap,
+impl std::error::Error for AgentError {}
+
+/// Serialize into the canonical JSON envelope so the `#[capability]` macro
+/// executor passes us straight through to `error_string_to_error_info` on
+/// the wasm side (which parses the JSON back into a typed `ErrorInfo`).
+impl From<AgentError> for String {
+    fn from(err: AgentError) -> Self {
+        serde_json::to_string(&err).unwrap_or_else(|_| format!("[{}] {}", err.code, err.message))
+    }
 }
 
-// --- input structs ---
-
-#[derive(serde::Deserialize, Default)]
-struct SimpleTextInput {
-    #[serde(default)]
-    text: Option<String>,
-}
-
-#[derive(serde::Deserialize, Default)]
-struct TemplateInput {
-    #[serde(default)]
-    text: Option<String>,
-    context: serde_json::Value,
-}
-
-#[derive(serde::Deserialize, Default)]
-struct CaseConversionInput {
-    #[serde(default)]
-    text: Option<String>,
-    #[serde(default)]
-    format: CaseFormat,
-}
-
-#[derive(serde::Deserialize, Default)]
-struct FindReplaceInput {
-    #[serde(default)]
-    text: Option<String>,
-    #[serde(default)]
-    pattern: Option<String>,
-    #[serde(default)]
-    replacement: Option<String>,
-}
-
-#[derive(serde::Deserialize, Default)]
-struct RemoveCharactersInput {
-    #[serde(default)]
-    text: Option<String>,
-    #[serde(default)]
-    pattern: Option<String>,
-}
-
-#[derive(serde::Deserialize, Default)]
-struct SplitInput {
-    #[serde(default)]
-    text: Option<String>,
-    #[serde(default)]
-    delimiter: Option<String>,
-    #[serde(default)]
-    join_delimiter: Option<String>,
-}
-
-#[derive(serde::Deserialize, Default)]
-struct SubstringInput {
-    #[serde(default)]
-    text: Option<String>,
-    #[serde(default)]
-    start_delimiter: Option<String>,
-    #[serde(default)]
-    end_delimiter: Option<String>,
-}
-
-#[derive(serde::Deserialize, Default)]
-struct ByteArrayInput {
-    #[serde(default)]
-    text: Option<String>,
-    #[serde(default)]
-    encoding: TextEncoding,
-}
-
-#[derive(serde::Deserialize, Default)]
-struct FromBase64Input {
-    data: serde_json::Value,
-    #[serde(default = "default_utf8")]
-    encoding: String,
-}
-
-fn default_utf8() -> String {
-    "UTF-8".to_string()
-}
-
-#[derive(serde::Deserialize, Default)]
-struct ToBase64Input {
-    data: serde_json::Value,
-    #[serde(default)]
-    filename: Option<String>,
-    #[serde(default, rename = "mimeType")]
-    mime_type: Option<String>,
-}
-
-#[derive(serde::Deserialize, Default)]
-struct RegexReplaceInput {
-    #[serde(default)]
-    text: Option<String>,
-    #[serde(default)]
-    pattern: Option<String>,
-    #[serde(default)]
-    replacement: Option<String>,
-    #[serde(default = "default_true")]
-    global: bool,
-    #[serde(default)]
-    case_insensitive: bool,
-}
+// ============================================================================
+// Default value functions (needed before struct definitions)
+// ============================================================================
 
 fn default_true() -> bool {
     true
-}
-
-#[derive(serde::Deserialize, Default)]
-struct RegexMatchInput {
-    #[serde(default)]
-    text: Option<String>,
-    #[serde(default)]
-    pattern: Option<String>,
-    #[serde(default)]
-    capture_group: usize,
-    #[serde(default)]
-    all_matches: bool,
-    #[serde(default)]
-    case_insensitive: bool,
-}
-
-#[derive(serde::Deserialize, Default)]
-struct RegexTestInput {
-    #[serde(default)]
-    text: Option<String>,
-    #[serde(default)]
-    pattern: Option<String>,
-    #[serde(default)]
-    case_insensitive: bool,
-}
-
-#[derive(serde::Deserialize, Default)]
-struct RegexSplitInput {
-    #[serde(default)]
-    text: Option<String>,
-    #[serde(default)]
-    pattern: Option<String>,
-    #[serde(default)]
-    limit: usize,
-}
-
-#[derive(serde::Deserialize, Default)]
-struct PadTextInput {
-    #[serde(default)]
-    text: Option<String>,
-    #[serde(default)]
-    length: Option<usize>,
-    #[serde(default = "default_space")]
-    pad_char: String,
-    #[serde(default)]
-    direction: PadDirection,
 }
 
 fn default_space() -> String {
     " ".to_string()
 }
 
-#[derive(serde::Deserialize, Default)]
-struct TruncateTextInput {
-    #[serde(default)]
-    text: Option<String>,
-    #[serde(default)]
-    max_length: Option<usize>,
-    #[serde(default)]
-    suffix: String,
-    #[serde(default)]
-    word_boundary: bool,
-}
-
-#[derive(serde::Deserialize, Default)]
-struct WrapTextInput {
-    #[serde(default)]
-    text: Option<String>,
-    #[serde(default = "default_wrap_width")]
-    width: usize,
-    #[serde(default = "default_true")]
-    preserve_newlines: bool,
-}
-
 fn default_wrap_width() -> usize {
     80
 }
 
-#[derive(serde::Deserialize, Default)]
-struct ExtractNumbersInput {
-    #[serde(default)]
-    text: Option<String>,
-    #[serde(default = "default_true")]
-    include_decimals: bool,
-    #[serde(default)]
-    include_negative: bool,
+fn default_encoding() -> String {
+    "UTF-8".to_string()
 }
 
-#[derive(serde::Deserialize, Default)]
-struct CompareTextInput {
-    #[serde(default)]
-    text_a: Option<String>,
-    #[serde(default)]
-    text_b: Option<String>,
-    #[serde(default)]
-    mode: CompareMode,
-    #[serde(default)]
-    ngram_n: Option<u8>,
+// ============================================================================
+// Enums (with VariantNames + EnumVariants so the macro records allowed values)
+// ============================================================================
+
+/// Case format for text conversion
+#[derive(Debug, Default, Deserialize, Clone, Copy, VariantNames)]
+#[serde(rename_all = "kebab-case")]
+#[strum(serialize_all = "kebab-case")]
+pub enum CaseFormat {
+    /// Convert text to lowercase
+    #[default]
+    Lowercase,
+    /// Convert text to UPPERCASE
+    Uppercase,
+    /// Convert Text To Title Case
+    TitleCase,
 }
 
-#[derive(serde::Deserialize, Default)]
-struct CountOccurrencesInput {
-    #[serde(default)]
-    text: Option<String>,
-    #[serde(default)]
-    pattern: Option<String>,
-    #[serde(default)]
-    use_regex: bool,
-    #[serde(default)]
-    case_insensitive: bool,
+impl EnumVariants for CaseFormat {
+    fn variant_names() -> &'static [&'static str] {
+        Self::VARIANTS
+    }
 }
 
-// FileData — mirrors legacy types.rs and the crypto agent's inline version
-#[derive(serde::Serialize, serde::Deserialize)]
-struct FileData {
-    content: String,
+/// Text encoding format
+#[derive(Debug, Default, Deserialize, Clone, Copy, VariantNames)]
+#[serde(rename_all = "UPPERCASE")]
+#[strum(serialize_all = "UPPERCASE")]
+pub enum TextEncoding {
+    /// UTF-8 encoding (Unicode)
+    #[default]
+    #[serde(rename = "UTF-8")]
+    #[strum(serialize = "UTF-8")]
+    Utf8,
+}
+
+impl EnumVariants for TextEncoding {
+    fn variant_names() -> &'static [&'static str] {
+        Self::VARIANTS
+    }
+}
+
+/// Padding direction for pad-text capability
+#[derive(Debug, Deserialize, Clone, Copy, VariantNames, Default)]
+#[serde(rename_all = "kebab-case")]
+#[strum(serialize_all = "kebab-case")]
+pub enum PadDirection {
+    /// Pad on the left side
+    Left,
+    /// Pad on the right side
+    #[default]
+    Right,
+    /// Pad on both sides (center the text)
+    Both,
+}
+
+impl EnumVariants for PadDirection {
+    fn variant_names() -> &'static [&'static str] {
+        Self::VARIANTS
+    }
+}
+
+/// Comparison mode for compare-text capability
+#[derive(Debug, Deserialize, Clone, Copy, VariantNames, Default)]
+#[serde(rename_all = "kebab-case")]
+#[strum(serialize_all = "kebab-case")]
+pub enum CompareMode {
+    /// Exact string equality
+    #[default]
+    Exact,
+    /// Case-insensitive equality
+    CaseInsensitive,
+    /// Levenshtein edit distance
+    LevenshteinDistance,
+    /// Check if first string contains second
+    Contains,
+    /// Jaro string similarity in `[0.0, 1.0]` (1.0 = identical).
+    JaroSimilarity,
+    /// Jaro-Winkler similarity — Jaro with a bonus for matching common
+    /// prefixes (up to 4 chars). Returns a score in `[0.0, 1.0]`.
+    JaroWinklerSimilarity,
+    /// Jaccard coefficient over character n-grams (shingles): |A ∩ B| / |A ∪ B|.
+    /// `n` defaults to 3; configurable via `ngram_n` (range 2..=8). Inputs
+    /// are lowercased and compared by Unicode codepoint.
+    NgramJaccard,
+    /// Overlap coefficient over character n-grams: |A ∩ B| / min(|A|, |B|).
+    /// Same `ngram_n` rules as `NgramJaccard`.
+    NgramOverlap,
+}
+
+impl EnumVariants for CompareMode {
+    fn variant_names() -> &'static [&'static str] {
+        Self::VARIANTS
+    }
+}
+
+// ============================================================================
+// Input types (with capability macros so meta.json can be derived)
+// ============================================================================
+
+/// Input for simple text operations (trim-normalize, extract-first-line, extract-first-word, slugify, hash-text)
+#[derive(Debug, Deserialize, Default, CapabilityInput)]
+#[capability_input(display_name = "Simple Text Input")]
+pub struct SimpleTextInput {
+    #[field(
+        display_name = "Input Text",
+        description = "The text to process",
+        example = "Hello World"
+    )]
+    #[serde(default)]
+    pub text: Option<String>,
+}
+
+/// Input for template rendering
+#[derive(Debug, Deserialize, Default, CapabilityInput)]
+#[capability_input(display_name = "Template Input")]
+pub struct TemplateInput {
+    #[field(
+        display_name = "Template",
+        description = "The template string with Jinja2 syntax",
+        example = "Hello {{name}}, you have {{count}} messages"
+    )]
+    #[serde(default)]
+    pub text: Option<String>,
+
+    #[field(
+        display_name = "Variables",
+        description = "JSON object with template variables",
+        example = r#"{"name": "Alice", "count": 5}"#
+    )]
+    pub context: Value,
+}
+
+/// Input for case conversion
+#[derive(Debug, Deserialize, Default, CapabilityInput)]
+#[capability_input(display_name = "Case Conversion Input")]
+pub struct CaseConversionInput {
+    #[field(
+        display_name = "Input Text",
+        description = "The text to convert",
+        example = "Hello World"
+    )]
+    #[serde(default)]
+    pub text: Option<String>,
+
+    #[field(
+        display_name = "Case Format",
+        description = "The target case format (lowercase, uppercase, or title-case)",
+        example = "lowercase",
+        default = "lowercase",
+        enum_type = "CaseFormat"
+    )]
+    #[serde(default)]
+    pub format: CaseFormat,
+}
+
+/// Input for find and replace
+#[derive(Debug, Deserialize, Default, CapabilityInput)]
+#[capability_input(display_name = "Find Replace Input")]
+pub struct FindReplaceInput {
+    #[field(
+        display_name = "Input Text",
+        description = "The text to search within",
+        example = "Hello World"
+    )]
+    #[serde(default)]
+    pub text: Option<String>,
+
+    #[field(
+        display_name = "Find Pattern",
+        description = "The text pattern to find",
+        example = "World"
+    )]
+    #[serde(default)]
+    pub pattern: Option<String>,
+
+    #[field(
+        display_name = "Replacement",
+        description = "The replacement text",
+        example = "Universe"
+    )]
+    #[serde(default)]
+    pub replacement: Option<String>,
+}
+
+/// Input for removing characters
+#[derive(Debug, Deserialize, Default, CapabilityInput)]
+#[capability_input(display_name = "Remove Characters Input")]
+pub struct RemoveCharactersInput {
+    #[field(
+        display_name = "Input Text",
+        description = "The text to process",
+        example = "Hello, World!"
+    )]
+    #[serde(default)]
+    pub text: Option<String>,
+
+    #[field(
+        display_name = "Characters to Remove",
+        description = "Characters to remove (each character in the string will be removed)",
+        example = ",!"
+    )]
+    #[serde(default)]
+    pub pattern: Option<String>,
+}
+
+/// Input for split operations (split, split-join, collapse-expand-lines)
+#[derive(Debug, Deserialize, Default, CapabilityInput)]
+#[capability_input(display_name = "Split Input")]
+pub struct SplitInput {
+    #[field(
+        display_name = "Input Text",
+        description = "The text to split",
+        example = "apple,banana,cherry"
+    )]
+    #[serde(default)]
+    pub text: Option<String>,
+
+    #[field(
+        display_name = "Split Delimiter",
+        description = "The delimiter to split on",
+        example = ",",
+        default = ","
+    )]
+    #[serde(default)]
+    pub delimiter: Option<String>,
+
+    #[field(
+        display_name = "Join Delimiter",
+        description = "The delimiter to join with (for split-join operation)",
+        example = " - ",
+        default = " "
+    )]
+    #[serde(default)]
+    pub join_delimiter: Option<String>,
+}
+
+/// Input for substring extraction
+#[derive(Debug, Deserialize, Default, CapabilityInput)]
+#[capability_input(display_name = "Substring Input")]
+pub struct SubstringInput {
+    #[field(
+        display_name = "Input Text",
+        description = "The text to extract from",
+        example = "Hello [World] from Rust"
+    )]
+    #[serde(default)]
+    pub text: Option<String>,
+
+    #[field(
+        display_name = "Start Delimiter",
+        description = "The starting delimiter",
+        example = "["
+    )]
+    #[serde(default)]
+    pub start_delimiter: Option<String>,
+
+    #[field(
+        display_name = "End Delimiter",
+        description = "The ending delimiter",
+        example = "]"
+    )]
+    #[serde(default)]
+    pub end_delimiter: Option<String>,
+}
+
+/// Input for byte array conversion
+#[derive(Debug, Deserialize, Default, CapabilityInput)]
+#[capability_input(display_name = "Byte Array Input")]
+pub struct ByteArrayInput {
+    #[field(
+        display_name = "Input Text",
+        description = "The text to convert to bytes",
+        example = "Hello"
+    )]
+    #[serde(default)]
+    pub text: Option<String>,
+
+    #[field(
+        display_name = "Encoding",
+        description = "The text encoding to use",
+        example = "UTF-8",
+        default = "UTF-8",
+        enum_type = "TextEncoding"
+    )]
+    #[serde(default)]
+    pub encoding: TextEncoding,
+}
+
+/// Input for base64 decoding
+#[derive(Debug, Deserialize, Default, CapabilityInput)]
+#[capability_input(display_name = "From Base64 Input")]
+pub struct FromBase64Input {
+    #[field(
+        display_name = "Data",
+        description = "Base64 encoded string or FileData object"
+    )]
+    pub data: Value,
+
+    #[field(
+        display_name = "Encoding",
+        description = "Output encoding for text",
+        example = "UTF-8",
+        default = "UTF-8"
+    )]
+    #[serde(default = "default_encoding")]
+    pub encoding: String,
+}
+
+/// Input for base64 encoding
+#[derive(Debug, Deserialize, Default, CapabilityInput)]
+#[capability_input(display_name = "To Base64 Input")]
+pub struct ToBase64Input {
+    #[field(
+        display_name = "Data",
+        description = "Text to encode, bytes array, or FileData-like structure"
+    )]
+    pub data: Value,
+
+    #[field(
+        display_name = "Filename",
+        description = "Optional filename for FileData output",
+        example = "document.txt"
+    )]
     #[serde(skip_serializing_if = "Option::is_none")]
-    filename: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none", rename = "mimeType")]
-    mime_type: Option<String>,
+    pub filename: Option<String>,
+
+    #[field(
+        display_name = "MIME Type",
+        description = "Optional MIME type for FileData output",
+        example = "text/plain"
+    )]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "mimeType")]
+    pub mime_type: Option<String>,
+}
+
+/// Input for regex replace operations
+#[derive(Debug, Deserialize, Default, CapabilityInput)]
+#[capability_input(display_name = "Regex Replace Input")]
+pub struct RegexReplaceInput {
+    #[field(
+        display_name = "Input Text",
+        description = "The text to search within",
+        example = "Phone: 1234567890"
+    )]
+    #[serde(default)]
+    pub text: Option<String>,
+
+    #[field(
+        display_name = "Pattern",
+        description = "The regex pattern to match (supports capture groups)",
+        example = r"(\d{3})(\d{3})(\d{4})"
+    )]
+    #[serde(default)]
+    pub pattern: Option<String>,
+
+    #[field(
+        display_name = "Replacement",
+        description = "The replacement string (use $1, $2 for capture groups)",
+        example = "($1) $2-$3"
+    )]
+    #[serde(default)]
+    pub replacement: Option<String>,
+
+    #[field(
+        display_name = "Replace All",
+        description = "Replace all matches (true) or only the first (false)",
+        default = "true"
+    )]
+    #[serde(default = "default_true")]
+    pub global: bool,
+
+    #[field(
+        display_name = "Case Insensitive",
+        description = "Match case-insensitively",
+        default = "false"
+    )]
+    #[serde(default)]
+    pub case_insensitive: bool,
+}
+
+/// Input for regex match operations
+#[derive(Debug, Deserialize, Default, CapabilityInput)]
+#[capability_input(display_name = "Regex Match Input")]
+pub struct RegexMatchInput {
+    #[field(
+        display_name = "Input Text",
+        description = "The text to search within",
+        example = "Order #12345 shipped"
+    )]
+    #[serde(default)]
+    pub text: Option<String>,
+
+    #[field(
+        display_name = "Pattern",
+        description = "The regex pattern to match",
+        example = r"Order #(\d+)"
+    )]
+    #[serde(default)]
+    pub pattern: Option<String>,
+
+    #[field(
+        display_name = "Capture Group",
+        description = "Which capture group to return (0 = full match)",
+        default = "0"
+    )]
+    #[serde(default)]
+    pub capture_group: usize,
+
+    #[field(
+        display_name = "All Matches",
+        description = "Return all matches (true) or only the first (false)",
+        default = "false"
+    )]
+    #[serde(default)]
+    pub all_matches: bool,
+
+    #[field(
+        display_name = "Case Insensitive",
+        description = "Match case-insensitively",
+        default = "false"
+    )]
+    #[serde(default)]
+    pub case_insensitive: bool,
+}
+
+/// Input for regex test operations
+#[derive(Debug, Deserialize, Default, CapabilityInput)]
+#[capability_input(display_name = "Regex Test Input")]
+pub struct RegexTestInput {
+    #[field(
+        display_name = "Input Text",
+        description = "The text to test",
+        example = "test@example.com"
+    )]
+    #[serde(default)]
+    pub text: Option<String>,
+
+    #[field(
+        display_name = "Pattern",
+        description = "The regex pattern to test",
+        example = r"^[\w.-]+@[\w.-]+\.\w+$"
+    )]
+    #[serde(default)]
+    pub pattern: Option<String>,
+
+    #[field(
+        display_name = "Case Insensitive",
+        description = "Match case-insensitively",
+        default = "false"
+    )]
+    #[serde(default)]
+    pub case_insensitive: bool,
+}
+
+/// Input for regex split operations
+#[derive(Debug, Deserialize, Default, CapabilityInput)]
+#[capability_input(display_name = "Regex Split Input")]
+pub struct RegexSplitInput {
+    #[field(
+        display_name = "Input Text",
+        description = "The text to split",
+        example = "a,b;c\td"
+    )]
+    #[serde(default)]
+    pub text: Option<String>,
+
+    #[field(
+        display_name = "Pattern",
+        description = "The regex pattern to split on",
+        example = r"[,;\t]+"
+    )]
+    #[serde(default)]
+    pub pattern: Option<String>,
+
+    #[field(
+        display_name = "Limit",
+        description = "Maximum number of splits (0 = unlimited)",
+        default = "0"
+    )]
+    #[serde(default)]
+    pub limit: usize,
+}
+
+/// Input for pad text operations
+#[derive(Debug, Deserialize, Default, CapabilityInput)]
+#[capability_input(display_name = "Pad Text Input")]
+pub struct PadTextInput {
+    #[field(
+        display_name = "Input Text",
+        description = "The text to pad",
+        example = "123"
+    )]
+    #[serde(default)]
+    pub text: Option<String>,
+
+    #[field(
+        display_name = "Length",
+        description = "Target length after padding",
+        example = "10"
+    )]
+    #[serde(default)]
+    pub length: Option<usize>,
+
+    #[field(
+        display_name = "Pad Character",
+        description = "Character to pad with",
+        example = "0",
+        default = " "
+    )]
+    #[serde(default = "default_space")]
+    pub pad_char: String,
+
+    #[field(
+        display_name = "Direction",
+        description = "Direction to pad (left, right, or both)",
+        default = "right",
+        enum_type = "PadDirection"
+    )]
+    #[serde(default)]
+    pub direction: PadDirection,
+}
+
+/// Input for truncate text operations
+#[derive(Debug, Deserialize, Default, CapabilityInput)]
+#[capability_input(display_name = "Truncate Text Input")]
+pub struct TruncateTextInput {
+    #[field(
+        display_name = "Input Text",
+        description = "The text to truncate",
+        example = "This is a long sentence that needs truncating"
+    )]
+    #[serde(default)]
+    pub text: Option<String>,
+
+    #[field(
+        display_name = "Max Length",
+        description = "Maximum length of the result",
+        example = "20"
+    )]
+    #[serde(default)]
+    pub max_length: Option<usize>,
+
+    #[field(
+        display_name = "Suffix",
+        description = "Suffix to add when truncated",
+        example = "...",
+        default = ""
+    )]
+    #[serde(default)]
+    pub suffix: String,
+
+    #[field(
+        display_name = "Word Boundary",
+        description = "Truncate at word boundaries (don't cut words)",
+        default = "false"
+    )]
+    #[serde(default)]
+    pub word_boundary: bool,
+}
+
+/// Input for wrap text operations
+#[derive(Debug, Deserialize, Default, CapabilityInput)]
+#[capability_input(display_name = "Wrap Text Input")]
+pub struct WrapTextInput {
+    #[field(
+        display_name = "Input Text",
+        description = "The text to wrap",
+        example = "This is a long line that should be wrapped at a specific column width."
+    )]
+    #[serde(default)]
+    pub text: Option<String>,
+
+    #[field(
+        display_name = "Width",
+        description = "Column width for wrapping",
+        example = "40",
+        default = "80"
+    )]
+    #[serde(default = "default_wrap_width")]
+    pub width: usize,
+
+    #[field(
+        display_name = "Preserve Newlines",
+        description = "Preserve existing newlines in the text",
+        default = "true"
+    )]
+    #[serde(default = "default_true")]
+    pub preserve_newlines: bool,
+}
+
+/// Input for extract numbers operations
+#[derive(Debug, Deserialize, Default, CapabilityInput)]
+#[capability_input(display_name = "Extract Numbers Input")]
+pub struct ExtractNumbersInput {
+    #[field(
+        display_name = "Input Text",
+        description = "The text to extract numbers from",
+        example = "Order total: $123.45, Quantity: 5"
+    )]
+    #[serde(default)]
+    pub text: Option<String>,
+
+    #[field(
+        display_name = "Include Decimals",
+        description = "Include decimal numbers (e.g., 123.45)",
+        default = "true"
+    )]
+    #[serde(default = "default_true")]
+    pub include_decimals: bool,
+
+    #[field(
+        display_name = "Include Negative",
+        description = "Include negative numbers (e.g., -123)",
+        default = "false"
+    )]
+    #[serde(default)]
+    pub include_negative: bool,
+}
+
+/// Input for compare text operations
+#[derive(Debug, Deserialize, Default, CapabilityInput)]
+#[capability_input(display_name = "Compare Text Input")]
+pub struct CompareTextInput {
+    #[field(
+        display_name = "Text A",
+        description = "First text to compare",
+        example = "Hello World"
+    )]
+    #[serde(default)]
+    pub text_a: Option<String>,
+
+    #[field(
+        display_name = "Text B",
+        description = "Second text to compare",
+        example = "hello world"
+    )]
+    #[serde(default)]
+    pub text_b: Option<String>,
+
+    #[field(
+        display_name = "Mode",
+        description = "Comparison mode",
+        default = "exact",
+        enum_type = "CompareMode"
+    )]
+    #[serde(default)]
+    pub mode: CompareMode,
+
+    #[field(
+        display_name = "N-gram Size",
+        description = "Shingle length for n-gram comparison modes (2..=8). Defaults to 3.",
+        example = "3"
+    )]
+    #[serde(default)]
+    pub ngram_n: Option<u8>,
+}
+
+/// Input for count occurrences operations
+#[derive(Debug, Deserialize, Default, CapabilityInput)]
+#[capability_input(display_name = "Count Occurrences Input")]
+pub struct CountOccurrencesInput {
+    #[field(
+        display_name = "Input Text",
+        description = "The text to search within",
+        example = "The quick brown fox jumps over the lazy dog"
+    )]
+    #[serde(default)]
+    pub text: Option<String>,
+
+    #[field(
+        display_name = "Pattern",
+        description = "The pattern to count (literal or regex)",
+        example = "the"
+    )]
+    #[serde(default)]
+    pub pattern: Option<String>,
+
+    #[field(
+        display_name = "Use Regex",
+        description = "Treat pattern as a regex",
+        default = "false"
+    )]
+    #[serde(default)]
+    pub use_regex: bool,
+
+    #[field(
+        display_name = "Case Insensitive",
+        description = "Match case-insensitively",
+        default = "false"
+    )]
+    #[serde(default)]
+    pub case_insensitive: bool,
+}
+
+// ============================================================================
+// Output types
+// ============================================================================
+
+/// Base64-encoded file with optional metadata. Used by `to-base64`.
+#[derive(Debug, Clone, Serialize, Deserialize, CapabilityOutput)]
+#[capability_output(
+    display_name = "File Data",
+    description = "Base64-encoded file with optional metadata"
+)]
+pub struct FileData {
+    #[field(display_name = "Content", description = "Base64-encoded file content")]
+    pub content: String,
+
+    #[field(
+        display_name = "Filename",
+        description = "Original filename (optional)"
+    )]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub filename: Option<String>,
+
+    #[field(
+        display_name = "MIME Type",
+        description = "MIME type (e.g., 'text/plain', 'text/csv', 'application/xml')"
+    )]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "mimeType")]
+    pub mime_type: Option<String>,
 }
 
 impl FileData {
-    fn decode(&self) -> Result<Vec<u8>, ErrorInfo> {
+    /// Decode the base64 content to raw bytes
+    fn decode(&self) -> Result<Vec<u8>, AgentError> {
         BASE64.decode(&self.content).map_err(|e| {
-            permanent(
-                "TEXT_BASE64_DECODE_ERROR",
-                format!("Failed to decode base64 content: {e}"),
+            AgentError::permanent(
+                "FILE_BASE64_DECODE_ERROR",
+                format!("Failed to decode base64 file content: {}", e),
             )
+            .with_attr("decode_error", e.to_string())
         })
     }
 
+    /// Create FileData from raw bytes
     fn from_bytes(data: Vec<u8>, filename: Option<String>, mime_type: Option<String>) -> Self {
         FileData {
             content: BASE64.encode(&data),
@@ -316,33 +859,41 @@ impl FileData {
         }
     }
 
-    fn from_value(value: &serde_json::Value) -> Result<Self, ErrorInfo> {
+    /// Try to parse a Value as FileData
+    fn from_value(value: &Value) -> Result<Self, AgentError> {
         match value {
-            serde_json::Value::String(s) => Ok(FileData {
+            Value::String(s) => Ok(FileData {
                 content: s.clone(),
                 filename: None,
                 mime_type: None,
             }),
-            serde_json::Value::Object(_) => serde_json::from_value(value.clone()).map_err(|e| {
-                permanent(
+            Value::Object(_) => serde_json::from_value(value.clone()).map_err(|e| {
+                AgentError::permanent(
                     "FILE_INVALID_STRUCTURE",
-                    format!("Invalid file data structure: {e}"),
+                    format!("Invalid file data structure: {}", e),
                 )
+                .with_attr("parse_error", e.to_string())
             }),
-            serde_json::Value::Array(arr) => {
+            Value::Array(arr) => {
                 let mut bytes = Vec::with_capacity(arr.len());
                 for (idx, v) in arr.iter().enumerate() {
                     let num = v.as_u64().ok_or_else(|| {
-                        permanent(
+                        AgentError::permanent(
                             "FILE_INVALID_BYTE_ARRAY",
-                            format!("Byte array element at index {idx} is not a number"),
+                            "Byte array must contain only numbers",
                         )
+                        .with_attr("index", idx.to_string())
                     })?;
                     if num > 255 {
-                        return Err(permanent(
+                        return Err(AgentError::permanent(
                             "FILE_BYTE_OUT_OF_RANGE",
-                            format!("Byte value {num} at index {idx} must be 0-255"),
-                        ));
+                            format!(
+                                "Byte value {} at index {} must be in the range 0-255",
+                                num, idx
+                            ),
+                        )
+                        .with_attr("index", idx.to_string())
+                        .with_attr("value", num.to_string()));
                     }
                     bytes.push(num as u8);
                 }
@@ -350,360 +901,104 @@ impl FileData {
             }
             other => {
                 let type_name = match other {
-                    serde_json::Value::Null => "null",
-                    serde_json::Value::Bool(_) => "boolean",
-                    serde_json::Value::Number(_) => "number",
+                    Value::Null => "null",
+                    Value::Bool(_) => "boolean",
+                    Value::Number(_) => "number",
                     _ => "unknown",
                 };
-                Err(permanent(
+                Err(AgentError::permanent(
                     "FILE_INVALID_INPUT_TYPE",
-                    format!("Expected string, object, or array; got {type_name}"),
-                ))
+                    "File data must be a string (base64), byte array, or object with content field",
+                )
+                .with_attr("received_type", type_name))
             }
         }
     }
 }
 
-// ---------------------------------------------------------------------------
-// Component plumbing
-// ---------------------------------------------------------------------------
+// ============================================================================
+// Capabilities — annotated for metadata; the `__executor_*` fns the macro
+// emits are what the wasm Guest impl dispatches to.
+// ============================================================================
 
-struct Component;
+/// Renders a Jinja2-style template with the provided context
+#[capability(
+    id = "render-template",
+    module = "text",
+    module_display_name = "Text",
+    module_description = "Text capabilities for string manipulation, formatting, and text processing",
+    display_name = "Render Template",
+    description = "Render a Jinja2-style template with provided variables",
+    errors(
+        permanent("TEXT_TEMPLATE_MISSING", "Template text is required"),
+        permanent("TEXT_TEMPLATE_PARSE_ERROR", "Failed to parse template syntax"),
+        permanent("TEXT_TEMPLATE_LOAD_ERROR", "Failed to load template"),
+        permanent("TEXT_TEMPLATE_RENDER_ERROR", "Failed to render template with context"),
+    )
+)]
+pub fn render_template(input: TemplateInput) -> Result<String, AgentError> {
+    let template_str = input.text.ok_or_else(|| {
+        AgentError::permanent("TEXT_TEMPLATE_MISSING", "Template text is required")
+    })?;
 
-impl Guest for Component {
-    fn get_module_info() -> ModuleInfo {
-        ModuleInfo {
-            id: "text".into(),
-            display_name: "Text".into(),
-            description: "String manipulation, regex, base64 encoding, and template rendering."
-                .into(),
-            has_side_effects: false,
-            supports_connections: false,
-            integration_ids: vec![],
-            secure: false,
-        }
-    }
-
-    fn list_capabilities() -> Vec<CapabilityInfo> {
-        vec![
-            cap(
-                "render-template",
-                "render-template",
-                "Render Template",
-                "Render a Jinja2-style template with provided variables",
-                SCHEMA_TEMPLATE_INPUT,
-                SCHEMA_STRING_OUTPUT,
-            ),
-            cap(
-                "trim-normalize",
-                "trim-normalize",
-                "Trim and Normalize",
-                "Remove leading/trailing whitespace and collapse multiple spaces into one",
-                SCHEMA_SIMPLE_TEXT_INPUT,
-                SCHEMA_STRING_OUTPUT,
-            ),
-            cap(
-                "case-conversion",
-                "case-conversion",
-                "Case Conversion",
-                "Convert text to lowercase, UPPERCASE, or Title Case",
-                SCHEMA_CASE_CONVERSION_INPUT,
-                SCHEMA_STRING_OUTPUT,
-            ),
-            cap(
-                "find-replace",
-                "find-replace",
-                "Find and Replace",
-                "Replace all instances of a pattern with a replacement string",
-                SCHEMA_FIND_REPLACE_INPUT,
-                SCHEMA_STRING_OUTPUT,
-            ),
-            cap(
-                "extract-first-line",
-                "extract-first-line",
-                "Extract First Line",
-                "Get only the text before the first newline",
-                SCHEMA_SIMPLE_TEXT_INPUT,
-                SCHEMA_STRING_OUTPUT,
-            ),
-            cap(
-                "extract-first-word",
-                "extract-first-word",
-                "Extract First Word",
-                "Get the first space-separated token",
-                SCHEMA_SIMPLE_TEXT_INPUT,
-                SCHEMA_STRING_OUTPUT,
-            ),
-            cap(
-                "split-join",
-                "split-join",
-                "Split and Join",
-                "Split text by one delimiter and join with another",
-                SCHEMA_SPLIT_INPUT,
-                SCHEMA_STRING_OUTPUT,
-            ),
-            cap(
-                "split",
-                "split",
-                "Split",
-                "Split text by a delimiter into an array",
-                SCHEMA_SPLIT_INPUT,
-                SCHEMA_STRING_ARRAY_OUTPUT,
-            ),
-            cap(
-                "remove-characters",
-                "remove-characters",
-                "Remove Characters",
-                "Remove specific characters from text",
-                SCHEMA_REMOVE_CHARACTERS_INPUT,
-                SCHEMA_STRING_OUTPUT,
-            ),
-            cap(
-                "substring-extraction",
-                "substring-extraction",
-                "Substring Extraction",
-                "Extract text between start and end delimiters",
-                SCHEMA_SUBSTRING_INPUT,
-                SCHEMA_STRING_OUTPUT,
-            ),
-            cap(
-                "collapse-expand-lines",
-                "collapse-expand-lines",
-                "Collapse/Expand Lines",
-                "Collapse multiline text into one line or expand delimited text into multiple lines",
-                SCHEMA_SPLIT_INPUT,
-                SCHEMA_STRING_OUTPUT,
-            ),
-            cap(
-                "slugify",
-                "slugify",
-                "Slugify",
-                "Convert text to a URL-safe or SKU-friendly format",
-                SCHEMA_SIMPLE_TEXT_INPUT,
-                SCHEMA_STRING_OUTPUT,
-            ),
-            cap(
-                "hash-text",
-                "hash-text",
-                "Hash Text",
-                "Create a SHA-256 hash of the input text",
-                SCHEMA_SIMPLE_TEXT_INPUT,
-                SCHEMA_STRING_OUTPUT,
-            ),
-            cap(
-                "as-byte-array",
-                "as-byte-array",
-                "As Byte Array",
-                "Convert text to a byte array",
-                SCHEMA_BYTE_ARRAY_INPUT,
-                SCHEMA_BYTE_ARRAY_OUTPUT,
-            ),
-            cap(
-                "from-base64",
-                "from-base64",
-                "From Base64",
-                "Decode base64 content to a string",
-                SCHEMA_FROM_BASE64_INPUT,
-                SCHEMA_STRING_OUTPUT,
-            ),
-            cap(
-                "to-base64",
-                "to-base64",
-                "To Base64",
-                "Encode text or bytes to base64 as a FileData structure",
-                SCHEMA_TO_BASE64_INPUT,
-                SCHEMA_FILE_DATA_OUTPUT,
-            ),
-            cap(
-                "regex-replace",
-                "regex-replace",
-                "Regex Replace",
-                "Replace text using regex patterns (supports $1, $2 capture groups)",
-                SCHEMA_REGEX_REPLACE_INPUT,
-                SCHEMA_STRING_OUTPUT,
-            ),
-            cap(
-                "regex-match",
-                "regex-match",
-                "Regex Match",
-                "Extract text matching a regex pattern (returns matches or capture groups)",
-                SCHEMA_REGEX_MATCH_INPUT,
-                SCHEMA_ANY_OUTPUT,
-            ),
-            cap(
-                "regex-test",
-                "regex-test",
-                "Regex Test",
-                "Test if text matches a regex pattern (returns true/false)",
-                SCHEMA_REGEX_TEST_INPUT,
-                SCHEMA_BOOL_OUTPUT,
-            ),
-            cap(
-                "regex-split",
-                "regex-split",
-                "Regex Split",
-                "Split text using a regex pattern",
-                SCHEMA_REGEX_SPLIT_INPUT,
-                SCHEMA_STRING_ARRAY_OUTPUT,
-            ),
-            cap(
-                "pad-text",
-                "pad-text",
-                "Pad Text",
-                "Pad text to a specified length with a character",
-                SCHEMA_PAD_TEXT_INPUT,
-                SCHEMA_STRING_OUTPUT,
-            ),
-            cap(
-                "truncate-text",
-                "truncate-text",
-                "Truncate Text",
-                "Truncate text to a maximum length with an optional suffix",
-                SCHEMA_TRUNCATE_TEXT_INPUT,
-                SCHEMA_STRING_OUTPUT,
-            ),
-            cap(
-                "wrap-text",
-                "wrap-text",
-                "Wrap Text",
-                "Wrap text at a specified column width",
-                SCHEMA_WRAP_TEXT_INPUT,
-                SCHEMA_STRING_OUTPUT,
-            ),
-            cap(
-                "extract-numbers",
-                "extract-numbers",
-                "Extract Numbers",
-                "Extract all numbers from text",
-                SCHEMA_EXTRACT_NUMBERS_INPUT,
-                SCHEMA_NUMBER_ARRAY_OUTPUT,
-            ),
-            cap(
-                "extract-emails",
-                "extract-emails",
-                "Extract Emails",
-                "Extract all email addresses from text",
-                SCHEMA_SIMPLE_TEXT_INPUT,
-                SCHEMA_STRING_ARRAY_OUTPUT,
-            ),
-            cap(
-                "extract-urls",
-                "extract-urls",
-                "Extract URLs",
-                "Extract all URLs from text",
-                SCHEMA_SIMPLE_TEXT_INPUT,
-                SCHEMA_STRING_ARRAY_OUTPUT,
-            ),
-            cap(
-                "compare-text",
-                "compare-text",
-                "Compare Text",
-                "Compare two text strings using various modes",
-                SCHEMA_COMPARE_TEXT_INPUT,
-                SCHEMA_ANY_OUTPUT,
-            ),
-            cap(
-                "count-occurrences",
-                "count-occurrences",
-                "Count Occurrences",
-                "Count occurrences of a pattern (literal or regex) in text",
-                SCHEMA_COUNT_OCCURRENCES_INPUT,
-                SCHEMA_NUMBER_OUTPUT,
-            ),
-        ]
-    }
-
-    fn invoke(
-        capability_id: String,
-        input: String,
-        _connection: Option<ConnectionInfo>,
-    ) -> Result<String, ErrorInfo> {
-        match capability_id.as_str() {
-            "render-template" => invoke_render_template(&input),
-            "trim-normalize" => invoke_trim_normalize(&input),
-            "case-conversion" => invoke_case_conversion(&input),
-            "find-replace" => invoke_find_replace(&input),
-            "extract-first-line" => invoke_extract_first_line(&input),
-            "extract-first-word" => invoke_extract_first_word(&input),
-            "split-join" => invoke_split_join(&input),
-            "split" => invoke_split(&input),
-            "remove-characters" => invoke_remove_characters(&input),
-            "substring-extraction" => invoke_substring_extraction(&input),
-            "collapse-expand-lines" => invoke_collapse_expand_lines(&input),
-            "slugify" => invoke_slugify(&input),
-            "hash-text" => invoke_hash_text(&input),
-            "as-byte-array" => invoke_as_byte_array(&input),
-            "from-base64" => invoke_from_base64(&input),
-            "to-base64" => invoke_to_base64(&input),
-            "regex-replace" => invoke_regex_replace(&input),
-            "regex-match" => invoke_regex_match(&input),
-            "regex-test" => invoke_regex_test(&input),
-            "regex-split" => invoke_regex_split(&input),
-            "pad-text" => invoke_pad_text(&input),
-            "truncate-text" => invoke_truncate_text(&input),
-            "wrap-text" => invoke_wrap_text(&input),
-            "extract-numbers" => invoke_extract_numbers(&input),
-            "extract-emails" => invoke_extract_emails(&input),
-            "extract-urls" => invoke_extract_urls(&input),
-            "compare-text" => invoke_compare_text(&input),
-            "count-occurrences" => invoke_count_occurrences(&input),
-            other => Err(permanent(
-                "UNKNOWN_CAPABILITY",
-                format!("text agent has no capability `{other}`"),
-            )),
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Capability implementations
-// ---------------------------------------------------------------------------
-
-fn invoke_render_template(json: &str) -> Result<String, ErrorInfo> {
-    let input: TemplateInput = parse(json)?;
-    let template_str = input
-        .text
-        .ok_or_else(|| permanent("TEXT_TEMPLATE_MISSING", "Template text is required"))?;
     if template_str.is_empty() {
-        return ok_str("");
+        return Ok(String::new());
     }
+
     let mut env = Environment::new();
     env.add_template("tmpl", &template_str).map_err(|e| {
-        permanent(
+        AgentError::permanent(
             "TEXT_TEMPLATE_PARSE_ERROR",
-            format!("Template parse error: {e}"),
+            format!("Template parse error: {}", e),
         )
+        .with_attr("parse_error", e.to_string())
     })?;
+
     let tmpl = env.get_template("tmpl").map_err(|e| {
-        permanent(
+        AgentError::permanent(
             "TEXT_TEMPLATE_LOAD_ERROR",
-            format!("Failed to get template: {e}"),
+            format!("Failed to get template: {}", e),
         )
     })?;
+
     let result = tmpl.render(input.context).map_err(|e| {
-        permanent(
+        AgentError::permanent(
             "TEXT_TEMPLATE_RENDER_ERROR",
-            format!("Template render error: {e}"),
+            format!("Template render error: {}", e),
         )
+        .with_attr("render_error", e.to_string())
     })?;
-    ok_str(result)
+
+    Ok(result)
 }
 
-fn invoke_trim_normalize(json: &str) -> Result<String, ErrorInfo> {
-    let input: SimpleTextInput = parse(json)?;
+/// Removes leading/trailing whitespace, collapses multiple spaces/newlines into a single space
+#[capability(
+    id = "trim-normalize",
+    module = "text",
+    display_name = "Trim and Normalize",
+    description = "Remove leading/trailing whitespace and collapse multiple spaces into one"
+)]
+pub fn trim_normalize(input: SimpleTextInput) -> Result<String, String> {
     let text = input.text.unwrap_or_default();
     if text.is_empty() {
-        return ok_str("");
+        return Ok(String::new());
     }
     let result = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    ok_str(result)
+    Ok(result)
 }
 
-fn invoke_case_conversion(json: &str) -> Result<String, ErrorInfo> {
-    let input: CaseConversionInput = parse(json)?;
+/// Converts text to lowercase, UPPERCASE, or Title Case
+#[capability(
+    id = "case-conversion",
+    module = "text",
+    display_name = "Case Conversion",
+    description = "Convert text to lowercase, UPPERCASE, or Title Case"
+)]
+pub fn case_conversion(input: CaseConversionInput) -> Result<String, String> {
     let text = input.text.unwrap_or_default();
     if text.is_empty() {
-        return ok_str("");
+        return Ok(String::new());
     }
     let result = match input.format {
         CaseFormat::Uppercase => text.to_uppercase(),
@@ -723,45 +1018,69 @@ fn invoke_case_conversion(json: &str) -> Result<String, ErrorInfo> {
             .join(" "),
         CaseFormat::Lowercase => text.to_lowercase(),
     };
-    ok_str(result)
+    Ok(result)
 }
 
-fn invoke_find_replace(json: &str) -> Result<String, ErrorInfo> {
-    let input: FindReplaceInput = parse(json)?;
+/// Replaces all instances of a substring with another
+#[capability(
+    id = "find-replace",
+    module = "text",
+    display_name = "Find and Replace",
+    description = "Replace all instances of a pattern with a replacement string"
+)]
+pub fn find_replace(input: FindReplaceInput) -> Result<String, String> {
     let text = input.text.unwrap_or_default();
     if text.is_empty() {
-        return ok_str("");
+        return Ok(String::new());
     }
     let result = match (input.pattern, input.replacement) {
         (Some(pattern), Some(replacement)) => text.replace(&pattern, &replacement),
         _ => text,
     };
-    ok_str(result)
+    Ok(result)
 }
 
-fn invoke_extract_first_line(json: &str) -> Result<String, ErrorInfo> {
-    let input: SimpleTextInput = parse(json)?;
+/// Gets only the text before the first newline
+#[capability(
+    id = "extract-first-line",
+    module = "text",
+    display_name = "Extract First Line",
+    description = "Get only the text before the first newline"
+)]
+pub fn extract_first_line(input: SimpleTextInput) -> Result<String, String> {
     let text = input.text.unwrap_or_default();
     if text.is_empty() {
-        return ok_str("");
+        return Ok(String::new());
     }
-    ok_str(text.lines().next().unwrap_or(""))
+    Ok(text.lines().next().unwrap_or("").to_string())
 }
 
-fn invoke_extract_first_word(json: &str) -> Result<String, ErrorInfo> {
-    let input: SimpleTextInput = parse(json)?;
+/// Gets the first space-separated token
+#[capability(
+    id = "extract-first-word",
+    module = "text",
+    display_name = "Extract First Word",
+    description = "Get the first space-separated token"
+)]
+pub fn extract_first_word(input: SimpleTextInput) -> Result<String, String> {
     let text = input.text.unwrap_or_default();
     if text.trim().is_empty() {
-        return ok_str("");
+        return Ok(String::new());
     }
-    ok_str(text.split_whitespace().next().unwrap_or(""))
+    Ok(text.split_whitespace().next().unwrap_or("").to_string())
 }
 
-fn invoke_split_join(json: &str) -> Result<String, ErrorInfo> {
-    let input: SplitInput = parse(json)?;
+/// Splits by delimiter and joins with another
+#[capability(
+    id = "split-join",
+    module = "text",
+    display_name = "Split and Join",
+    description = "Split text by one delimiter and join with another"
+)]
+pub fn split_join(input: SplitInput) -> Result<String, String> {
     let text = input.text.unwrap_or_default();
     if text.is_empty() {
-        return ok_str("");
+        return Ok(String::new());
     }
     let delimiter = input.delimiter.as_deref().unwrap_or(",");
     let join_delimiter = input.join_delimiter.as_deref().unwrap_or(" ");
@@ -770,25 +1089,37 @@ fn invoke_split_join(json: &str) -> Result<String, ErrorInfo> {
         .map(|s| s.trim())
         .collect::<Vec<_>>()
         .join(join_delimiter);
-    ok_str(result)
+    Ok(result)
 }
 
-fn invoke_split(json: &str) -> Result<String, ErrorInfo> {
-    let input: SplitInput = parse(json)?;
+/// Splits by delimiter
+#[capability(
+    id = "split",
+    module = "text",
+    display_name = "Split",
+    description = "Split text by a delimiter into an array"
+)]
+pub fn split(input: SplitInput) -> Result<Vec<String>, String> {
     let text = input.text.unwrap_or_default();
     if text.is_empty() {
-        return json_ok(&Vec::<String>::new());
+        return Ok(Vec::new());
     }
     let delimiter = input.delimiter.as_deref().unwrap_or(",");
-    let result: Vec<String> = text.split(delimiter).map(|s| s.to_string()).collect();
-    json_ok(&result)
+    let result = text.split(delimiter).map(|s| s.to_string()).collect();
+    Ok(result)
 }
 
-fn invoke_remove_characters(json: &str) -> Result<String, ErrorInfo> {
-    let input: RemoveCharactersInput = parse(json)?;
+/// Strips specific characters or symbols
+#[capability(
+    id = "remove-characters",
+    module = "text",
+    display_name = "Remove Characters",
+    description = "Remove specific characters from text"
+)]
+pub fn remove_characters(input: RemoveCharactersInput) -> Result<String, String> {
     let text = input.text.unwrap_or_default();
     if text.is_empty() {
-        return ok_str("");
+        return Ok(String::new());
     }
     let result = match input.pattern {
         Some(pattern) if !pattern.is_empty() => {
@@ -799,14 +1130,20 @@ fn invoke_remove_characters(json: &str) -> Result<String, ErrorInfo> {
         }
         _ => text,
     };
-    ok_str(result)
+    Ok(result)
 }
 
-fn invoke_substring_extraction(json: &str) -> Result<String, ErrorInfo> {
-    let input: SubstringInput = parse(json)?;
+/// Extracts text between known delimiters
+#[capability(
+    id = "substring-extraction",
+    module = "text",
+    display_name = "Substring Extraction",
+    description = "Extract text between start and end delimiters"
+)]
+pub fn substring_extraction(input: SubstringInput) -> Result<String, String> {
     let text = input.text.unwrap_or_default();
     if text.is_empty() {
-        return ok_str("");
+        return Ok(String::new());
     }
     let result = match (input.start_delimiter, input.end_delimiter) {
         (Some(start), Some(end)) => {
@@ -823,14 +1160,20 @@ fn invoke_substring_extraction(json: &str) -> Result<String, ErrorInfo> {
         }
         _ => text,
     };
-    ok_str(result)
+    Ok(result)
 }
 
-fn invoke_collapse_expand_lines(json: &str) -> Result<String, ErrorInfo> {
-    let input: SplitInput = parse(json)?;
+/// Collapses multiline input into one line or expands comma-separated text into multiple lines
+#[capability(
+    id = "collapse-expand-lines",
+    module = "text",
+    display_name = "Collapse/Expand Lines",
+    description = "Collapse multiline text into one line or expand delimited text into multiple lines"
+)]
+pub fn collapse_expand_lines(input: SplitInput) -> Result<String, String> {
     let text = input.text.unwrap_or_default();
     if text.is_empty() {
-        return ok_str("");
+        return Ok(String::new());
     }
     let result = match input.delimiter {
         None => text.lines().map(|s| s.trim()).collect::<Vec<_>>().join(" "),
@@ -840,14 +1183,20 @@ fn invoke_collapse_expand_lines(json: &str) -> Result<String, ErrorInfo> {
             .collect::<Vec<_>>()
             .join("\n"),
     };
-    ok_str(result)
+    Ok(result)
 }
 
-fn invoke_slugify(json: &str) -> Result<String, ErrorInfo> {
-    let input: SimpleTextInput = parse(json)?;
+/// Converts to a URL-safe or SKU-friendly format
+#[capability(
+    id = "slugify",
+    module = "text",
+    display_name = "Slugify",
+    description = "Convert text to a URL-safe or SKU-friendly format"
+)]
+pub fn slugify(input: SimpleTextInput) -> Result<String, String> {
     let text = input.text.unwrap_or_default();
     if text.is_empty() {
-        return ok_str("");
+        return Ok(String::new());
     }
     let mut result = text.to_lowercase();
     result = normalize_nfd(&result);
@@ -860,47 +1209,83 @@ fn invoke_slugify(json: &str) -> Result<String, ErrorInfo> {
         result = result.replace("--", "-");
     }
     result = result.trim_matches('-').to_string();
-    ok_str(result)
+    Ok(result)
 }
 
-fn invoke_hash_text(json: &str) -> Result<String, ErrorInfo> {
-    let input: SimpleTextInput = parse(json)?;
+/// Creates a secure hash of the input text using SHA-256
+#[capability(
+    id = "hash-text",
+    module = "text",
+    display_name = "Hash Text",
+    description = "Create a SHA-256 hash of the input text"
+)]
+pub fn hash_text(input: SimpleTextInput) -> Result<String, String> {
     let text = input.text.unwrap_or_default();
     if text.is_empty() {
-        return ok_str("");
+        return Ok(String::new());
     }
     let mut hasher = Sha256::new();
     hasher.update(text.as_bytes());
     let result = hasher.finalize();
-    let hex: String = result.iter().map(|b| format!("{b:02x}")).collect();
-    ok_str(hex)
+    let hex_string = result
+        .iter()
+        .map(|b| format!("{:02x}", b))
+        .collect::<String>();
+    Ok(hex_string)
 }
 
-fn invoke_as_byte_array(json: &str) -> Result<String, ErrorInfo> {
-    let input: ByteArrayInput = parse(json)?;
+/// Converts input text to a byte array
+#[capability(
+    id = "as-byte-array",
+    module = "text",
+    display_name = "As Byte Array",
+    description = "Convert text to a byte array"
+)]
+pub fn as_byte_array(input: ByteArrayInput) -> Result<Vec<u8>, String> {
     let text = input.text.unwrap_or_default();
-    let bytes: Vec<u8> = match input.encoding {
-        TextEncoding::Utf8 => text.into_bytes(),
-    };
-    json_ok(&bytes)
+    match input.encoding {
+        TextEncoding::Utf8 => Ok(text.into_bytes()),
+    }
 }
 
-fn invoke_from_base64(json: &str) -> Result<String, ErrorInfo> {
-    let input: FromBase64Input = parse(json)?;
+/// Decode base64 content to a string
+#[capability(
+    id = "from-base64",
+    module = "text",
+    display_name = "From Base64",
+    description = "Decode base64 content to a string",
+    errors(permanent("TEXT_UNSUPPORTED_ENCODING", "Unsupported text encoding"),)
+)]
+pub fn from_base64(input: FromBase64Input) -> Result<String, AgentError> {
     let file_data = FileData::from_value(&input.data)?;
     let bytes = file_data.decode()?;
-    let text = decode_text_bytes(bytes, &input.encoding)?;
-    ok_str(text)
+    decode_text_bytes(bytes, &input.encoding)
 }
 
-fn invoke_to_base64(json: &str) -> Result<String, ErrorInfo> {
-    let input: ToBase64Input = parse(json)?;
+/// Encode text or bytes into a FileData structure with base64 content
+#[capability(
+    id = "to-base64",
+    module = "text",
+    display_name = "To Base64",
+    description = "Encode text or bytes to base64 as a FileData structure",
+    errors(
+        permanent("TEXT_INVALID_FILE_DATA", "Invalid file data structure"),
+        permanent("TEXT_INVALID_BYTE_ARRAY", "Byte array must contain only numbers"),
+        permanent("TEXT_BYTE_OUT_OF_RANGE", "Byte value must be in range 0-255"),
+        permanent(
+            "TEXT_INVALID_INPUT_TYPE",
+            "Input must be string, byte array, or file object"
+        ),
+    )
+)]
+pub fn to_base64(input: ToBase64Input) -> Result<FileData, AgentError> {
     if input.data.is_object() {
         let mut file: FileData = serde_json::from_value(input.data.clone()).map_err(|e| {
-            permanent(
+            AgentError::permanent(
                 "TEXT_INVALID_FILE_DATA",
-                format!("Invalid file data structure: {e}"),
+                format!("Invalid file data structure: {}", e),
             )
+            .with_attr("parse_error", e.to_string())
         })?;
         if input.filename.is_some() {
             file.filename = input.filename;
@@ -908,24 +1293,31 @@ fn invoke_to_base64(json: &str) -> Result<String, ErrorInfo> {
         if input.mime_type.is_some() {
             file.mime_type = input.mime_type;
         }
-        return json_ok(&file);
+        return Ok(file);
     }
+
     let bytes = match &input.data {
-        serde_json::Value::String(s) => s.as_bytes().to_vec(),
-        serde_json::Value::Array(arr) => {
+        Value::String(s) => s.as_bytes().to_vec(),
+        Value::Array(arr) => {
             let mut buf = Vec::with_capacity(arr.len());
             for (idx, v) in arr.iter().enumerate() {
                 let num = v.as_u64().ok_or_else(|| {
-                    permanent(
+                    AgentError::permanent(
                         "TEXT_INVALID_BYTE_ARRAY",
-                        format!("Element at index {idx} is not a number"),
+                        "Byte array must contain only numbers",
                     )
+                    .with_attr("index", idx.to_string())
                 })?;
                 if num > 255 {
-                    return Err(permanent(
+                    return Err(AgentError::permanent(
                         "TEXT_BYTE_OUT_OF_RANGE",
-                        format!("Byte value {num} at index {idx} must be 0-255"),
-                    ));
+                        format!(
+                            "Byte value {} at index {} must be in the range 0-255",
+                            num, idx
+                        ),
+                    )
+                    .with_attr("index", idx.to_string())
+                    .with_attr("value", num.to_string()));
                 }
                 buf.push(num as u8);
             }
@@ -933,97 +1325,122 @@ fn invoke_to_base64(json: &str) -> Result<String, ErrorInfo> {
         }
         other => {
             let type_name = match other {
-                serde_json::Value::Null => "null",
-                serde_json::Value::Bool(_) => "boolean",
-                serde_json::Value::Number(_) => "number",
+                Value::Null => "null",
+                Value::Bool(_) => "boolean",
+                Value::Number(_) => "number",
                 _ => "unknown",
             };
-            return Err(permanent(
+            return Err(AgentError::permanent(
                 "TEXT_INVALID_INPUT_TYPE",
-                format!("Input must be string, byte array, or file object; got {type_name}"),
-            ));
+                "Input must be string, byte array, or file object",
+            )
+            .with_attr("received_type", type_name));
         }
     };
-    let file = FileData::from_bytes(bytes, input.filename, input.mime_type);
-    json_ok(&file)
+
+    Ok(FileData::from_bytes(bytes, input.filename, input.mime_type))
 }
 
-fn invoke_regex_replace(json: &str) -> Result<String, ErrorInfo> {
-    let input: RegexReplaceInput = parse(json)?;
+/// Replace text using regex patterns with capture group support
+#[capability(
+    id = "regex-replace",
+    module = "text",
+    display_name = "Regex Replace",
+    description = "Replace text using regex patterns (supports $1, $2 capture groups)"
+)]
+pub fn regex_replace(input: RegexReplaceInput) -> Result<String, String> {
     let text = input.text.unwrap_or_default();
     if text.is_empty() {
-        return ok_str("");
+        return Ok(String::new());
     }
     let pattern = input
         .pattern
-        .ok_or_else(|| permanent("TEXT_MISSING_PATTERN", "Pattern is required"))?;
+        .ok_or_else(|| "Pattern is required".to_string())?;
     let replacement = input.replacement.unwrap_or_default();
-    let re = build_regex(&pattern, input.case_insensitive)?;
+    let re = build_safe_regex(&pattern, input.case_insensitive)?;
     let result = if input.global {
         re.replace_all(&text, replacement.as_str()).into_owned()
     } else {
         re.replace(&text, replacement.as_str()).into_owned()
     };
-    ok_str(result)
+    Ok(result)
 }
 
-fn invoke_regex_match(json: &str) -> Result<String, ErrorInfo> {
-    let input: RegexMatchInput = parse(json)?;
+/// Extract text matching a regex pattern
+#[capability(
+    id = "regex-match",
+    module = "text",
+    display_name = "Regex Match",
+    description = "Extract text matching a regex pattern (returns matches or capture groups)"
+)]
+pub fn regex_match(input: RegexMatchInput) -> Result<Value, String> {
     let text = input.text.unwrap_or_default();
     if text.is_empty() {
-        if input.all_matches {
-            return json_ok(&Vec::<String>::new());
+        return if input.all_matches {
+            Ok(Value::Array(vec![]))
         } else {
-            return json_ok(&serde_json::Value::Null);
-        }
+            Ok(Value::Null)
+        };
     }
     let pattern = input
         .pattern
-        .ok_or_else(|| permanent("TEXT_MISSING_PATTERN", "Pattern is required"))?;
-    let re = build_regex(&pattern, input.case_insensitive)?;
+        .ok_or_else(|| "Pattern is required".to_string())?;
+    let re = build_safe_regex(&pattern, input.case_insensitive)?;
     if input.all_matches {
-        let matches: Vec<serde_json::Value> = re
+        let matches: Vec<Value> = re
             .captures_iter(&text)
             .filter_map(|caps| {
                 caps.get(input.capture_group)
-                    .map(|m| serde_json::Value::String(m.as_str().to_string()))
+                    .map(|m| Value::String(m.as_str().to_string()))
             })
             .collect();
-        json_ok(&matches)
+        Ok(Value::Array(matches))
     } else {
         match re.captures(&text) {
             Some(caps) => match caps.get(input.capture_group) {
-                Some(m) => json_ok(&serde_json::Value::String(m.as_str().to_string())),
-                None => json_ok(&serde_json::Value::Null),
+                Some(m) => Ok(Value::String(m.as_str().to_string())),
+                None => Ok(Value::Null),
             },
-            None => json_ok(&serde_json::Value::Null),
+            None => Ok(Value::Null),
         }
     }
 }
 
-fn invoke_regex_test(json: &str) -> Result<String, ErrorInfo> {
-    let input: RegexTestInput = parse(json)?;
+/// Test if text matches a regex pattern
+#[capability(
+    id = "regex-test",
+    module = "text",
+    display_name = "Regex Test",
+    description = "Test if text matches a regex pattern (returns true/false)"
+)]
+pub fn regex_test(input: RegexTestInput) -> Result<bool, String> {
     let text = input.text.unwrap_or_default();
     if text.is_empty() {
-        return json_ok(&false);
+        return Ok(false);
     }
     let pattern = input
         .pattern
-        .ok_or_else(|| permanent("TEXT_MISSING_PATTERN", "Pattern is required"))?;
-    let re = build_regex(&pattern, input.case_insensitive)?;
-    json_ok(&re.is_match(&text))
+        .ok_or_else(|| "Pattern is required".to_string())?;
+    let re = build_safe_regex(&pattern, input.case_insensitive)?;
+    Ok(re.is_match(&text))
 }
 
-fn invoke_regex_split(json: &str) -> Result<String, ErrorInfo> {
-    let input: RegexSplitInput = parse(json)?;
+/// Split text using a regex pattern
+#[capability(
+    id = "regex-split",
+    module = "text",
+    display_name = "Regex Split",
+    description = "Split text using a regex pattern"
+)]
+pub fn regex_split(input: RegexSplitInput) -> Result<Vec<String>, String> {
     let text = input.text.unwrap_or_default();
     if text.is_empty() {
-        return json_ok(&Vec::<String>::new());
+        return Ok(Vec::new());
     }
     let pattern = input
         .pattern
-        .ok_or_else(|| permanent("TEXT_MISSING_PATTERN", "Pattern is required"))?;
-    let re = build_regex(&pattern, false)?;
+        .ok_or_else(|| "Pattern is required".to_string())?;
+    let re = build_safe_regex(&pattern, false)?;
     let result: Vec<String> = if input.limit > 0 {
         re.splitn(&text, input.limit)
             .map(|s| s.to_string())
@@ -1031,48 +1448,60 @@ fn invoke_regex_split(json: &str) -> Result<String, ErrorInfo> {
     } else {
         re.split(&text).map(|s| s.to_string()).collect()
     };
-    json_ok(&result)
+    Ok(result)
 }
 
-fn invoke_pad_text(json: &str) -> Result<String, ErrorInfo> {
-    let input: PadTextInput = parse(json)?;
+/// Pad text to a specified length
+#[capability(
+    id = "pad-text",
+    module = "text",
+    display_name = "Pad Text",
+    description = "Pad text to a specified length with a character"
+)]
+pub fn pad_text(input: PadTextInput) -> Result<String, String> {
     let text = input.text.unwrap_or_default();
     let target_len = input.length.unwrap_or(text.len());
     if text.len() >= target_len {
-        return ok_str(text);
+        return Ok(text);
     }
     let pad_char = input.pad_char.chars().next().unwrap_or(' ');
     let padding_needed = target_len - text.len();
     let result = match input.direction {
         PadDirection::Left => {
-            let padding: String = std::iter::repeat(pad_char).take(padding_needed).collect();
-            format!("{padding}{text}")
+            let padding: String = std::iter::repeat_n(pad_char, padding_needed).collect();
+            format!("{}{}", padding, text)
         }
         PadDirection::Right => {
-            let padding: String = std::iter::repeat(pad_char).take(padding_needed).collect();
-            format!("{text}{padding}")
+            let padding: String = std::iter::repeat_n(pad_char, padding_needed).collect();
+            format!("{}{}", text, padding)
         }
         PadDirection::Both => {
             let left_pad = padding_needed / 2;
             let right_pad = padding_needed - left_pad;
-            let left: String = std::iter::repeat(pad_char).take(left_pad).collect();
-            let right: String = std::iter::repeat(pad_char).take(right_pad).collect();
-            format!("{left}{text}{right}")
+            let left: String = std::iter::repeat_n(pad_char, left_pad).collect();
+            let right: String = std::iter::repeat_n(pad_char, right_pad).collect();
+            format!("{}{}{}", left, text, right)
         }
     };
-    ok_str(result)
+    Ok(result)
 }
 
-fn invoke_truncate_text(json: &str) -> Result<String, ErrorInfo> {
-    let input: TruncateTextInput = parse(json)?;
+/// Truncate text to a maximum length with optional suffix
+#[capability(
+    id = "truncate-text",
+    module = "text",
+    display_name = "Truncate Text",
+    description = "Truncate text to a maximum length with an optional suffix"
+)]
+pub fn truncate_text(input: TruncateTextInput) -> Result<String, String> {
     let text = input.text.unwrap_or_default();
     let max_len = input.max_length.unwrap_or(text.len());
     if text.len() <= max_len {
-        return ok_str(text);
+        return Ok(text);
     }
     let suffix_len = input.suffix.len();
     if suffix_len >= max_len {
-        return ok_str(input.suffix.chars().take(max_len).collect::<String>());
+        return Ok(input.suffix.chars().take(max_len).collect());
     }
     let content_len = max_len - suffix_len;
     let truncated = if input.word_boundary {
@@ -1086,19 +1515,25 @@ fn invoke_truncate_text(json: &str) -> Result<String, ErrorInfo> {
     } else {
         text.chars().take(content_len).collect()
     };
-    ok_str(format!("{truncated}{}", input.suffix))
+    Ok(format!("{}{}", truncated, input.suffix))
 }
 
-fn invoke_wrap_text(json: &str) -> Result<String, ErrorInfo> {
-    let input: WrapTextInput = parse(json)?;
+/// Wrap text at a specified column width
+#[capability(
+    id = "wrap-text",
+    module = "text",
+    display_name = "Wrap Text",
+    description = "Wrap text at a specified column width"
+)]
+pub fn wrap_text(input: WrapTextInput) -> Result<String, String> {
     let text = input.text.unwrap_or_default();
     if text.is_empty() || input.width == 0 {
-        return ok_str(text);
+        return Ok(text);
     }
     let lines: Vec<&str> = if input.preserve_newlines {
         text.lines().collect()
     } else {
-        vec![text.as_str()]
+        vec![&text]
     };
     let mut result = Vec::new();
     for line in lines {
@@ -1141,14 +1576,20 @@ fn invoke_wrap_text(json: &str) -> Result<String, ErrorInfo> {
             result.push(current_line);
         }
     }
-    ok_str(result.join("\n"))
+    Ok(result.join("\n"))
 }
 
-fn invoke_extract_numbers(json: &str) -> Result<String, ErrorInfo> {
-    let input: ExtractNumbersInput = parse(json)?;
+/// Extract all numbers from text
+#[capability(
+    id = "extract-numbers",
+    module = "text",
+    display_name = "Extract Numbers",
+    description = "Extract all numbers from text"
+)]
+pub fn extract_numbers(input: ExtractNumbersInput) -> Result<Vec<f64>, String> {
     let text = input.text.unwrap_or_default();
     if text.is_empty() {
-        return json_ok(&Vec::<f64>::new());
+        return Ok(Vec::new());
     }
     let pattern = if input.include_negative && input.include_decimals {
         r"-?\d+(?:\.\d+)?"
@@ -1159,128 +1600,178 @@ fn invoke_extract_numbers(json: &str) -> Result<String, ErrorInfo> {
     } else {
         r"\d+"
     };
-    let re = build_regex(pattern, false)?;
+    let re = build_safe_regex(pattern, false)?;
     let numbers: Vec<f64> = re
         .find_iter(&text)
         .filter_map(|m| m.as_str().parse::<f64>().ok())
         .collect();
-    json_ok(&numbers)
+    Ok(numbers)
 }
 
-fn invoke_extract_emails(json: &str) -> Result<String, ErrorInfo> {
-    let input: SimpleTextInput = parse(json)?;
+/// Extract email addresses from text
+#[capability(
+    id = "extract-emails",
+    module = "text",
+    display_name = "Extract Emails",
+    description = "Extract all email addresses from text"
+)]
+pub fn extract_emails(input: SimpleTextInput) -> Result<Vec<String>, String> {
     let text = input.text.unwrap_or_default();
     if text.is_empty() {
-        return json_ok(&Vec::<String>::new());
+        return Ok(Vec::new());
     }
     let pattern = r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}";
-    let re = build_regex(pattern, false)?;
+    let re = build_safe_regex(pattern, false)?;
     let emails: Vec<String> = re
         .find_iter(&text)
         .map(|m| m.as_str().to_string())
         .collect();
-    json_ok(&emails)
+    Ok(emails)
 }
 
-fn invoke_extract_urls(json: &str) -> Result<String, ErrorInfo> {
-    let input: SimpleTextInput = parse(json)?;
+/// Extract URLs from text
+#[capability(
+    id = "extract-urls",
+    module = "text",
+    display_name = "Extract URLs",
+    description = "Extract all URLs from text"
+)]
+pub fn extract_urls(input: SimpleTextInput) -> Result<Vec<String>, String> {
     let text = input.text.unwrap_or_default();
     if text.is_empty() {
-        return json_ok(&Vec::<String>::new());
+        return Ok(Vec::new());
     }
     let pattern = r"https?://[^\s<>\[\]{}|\\^`\x00-\x1f]+|ftp://[^\s<>\[\]{}|\\^`\x00-\x1f]+";
-    let re = build_regex(pattern, true)?;
+    let re = build_safe_regex(pattern, true)?;
     let urls: Vec<String> = re
         .find_iter(&text)
         .map(|m| m.as_str().to_string())
         .collect();
-    json_ok(&urls)
+    Ok(urls)
 }
 
-fn invoke_compare_text(json: &str) -> Result<String, ErrorInfo> {
-    let input: CompareTextInput = parse(json)?;
+/// Compare two text strings
+#[capability(
+    id = "compare-text",
+    module = "text",
+    display_name = "Compare Text",
+    description = "Compare two text strings using various modes"
+)]
+pub fn compare_text(input: CompareTextInput) -> Result<Value, String> {
     let text_a = input.text_a.unwrap_or_default();
     let text_b = input.text_b.unwrap_or_default();
-    let result: serde_json::Value = match input.mode {
-        CompareMode::Exact => serde_json::Value::Bool(text_a == text_b),
-        CompareMode::CaseInsensitive => {
-            serde_json::Value::Bool(text_a.to_lowercase() == text_b.to_lowercase())
-        }
+    let result = match input.mode {
+        CompareMode::Exact => Value::Bool(text_a == text_b),
+        CompareMode::CaseInsensitive => Value::Bool(text_a.to_lowercase() == text_b.to_lowercase()),
         CompareMode::LevenshteinDistance => {
-            let d = levenshtein_distance(&text_a, &text_b);
-            serde_json::Value::Number(serde_json::Number::from(d))
+            let distance = levenshtein_distance(&text_a, &text_b);
+            Value::Number(serde_json::Number::from(distance))
         }
-        CompareMode::Contains => serde_json::Value::Bool(text_a.contains(&text_b)),
-        CompareMode::JaroSimilarity => json_score(jaro_similarity(&text_a, &text_b)),
-        CompareMode::JaroWinklerSimilarity => json_score(jaro_winkler_similarity(&text_a, &text_b)),
+        CompareMode::Contains => Value::Bool(text_a.contains(&text_b)),
+        CompareMode::JaroSimilarity => {
+            let score = jaro_similarity(&text_a, &text_b);
+            json_score(score)
+        }
+        CompareMode::JaroWinklerSimilarity => {
+            let score = jaro_winkler_similarity(&text_a, &text_b);
+            json_score(score)
+        }
         CompareMode::NgramJaccard => {
             let n = resolve_ngram_n(input.ngram_n)?;
-            json_score(ngram_jaccard(&text_a, &text_b, n))
+            let score = ngram_jaccard(&text_a, &text_b, n);
+            json_score(score)
         }
         CompareMode::NgramOverlap => {
             let n = resolve_ngram_n(input.ngram_n)?;
-            json_score(ngram_overlap(&text_a, &text_b, n))
+            let score = ngram_overlap(&text_a, &text_b, n);
+            json_score(score)
         }
     };
-    json_ok(&result)
+    Ok(result)
 }
 
-fn invoke_count_occurrences(json: &str) -> Result<String, ErrorInfo> {
-    let input: CountOccurrencesInput = parse(json)?;
+/// Count occurrences of a pattern in text
+#[capability(
+    id = "count-occurrences",
+    module = "text",
+    display_name = "Count Occurrences",
+    description = "Count occurrences of a pattern (literal or regex) in text"
+)]
+pub fn count_occurrences(input: CountOccurrencesInput) -> Result<usize, String> {
     let text = input.text.unwrap_or_default();
     if text.is_empty() {
-        return json_ok(&0usize);
+        return Ok(0);
     }
     let pattern = input
         .pattern
-        .ok_or_else(|| permanent("TEXT_MISSING_PATTERN", "Pattern is required"))?;
+        .ok_or_else(|| "Pattern is required".to_string())?;
     if pattern.is_empty() {
-        return json_ok(&0usize);
+        return Ok(0);
     }
-    let count = if input.use_regex {
-        let re = build_regex(&pattern, input.case_insensitive)?;
-        re.find_iter(&text).count()
+    if input.use_regex {
+        let re = build_safe_regex(&pattern, input.case_insensitive)?;
+        Ok(re.find_iter(&text).count())
     } else if input.case_insensitive {
-        text.to_lowercase().matches(&pattern.to_lowercase()).count()
+        let text_lower = text.to_lowercase();
+        let pattern_lower = pattern.to_lowercase();
+        Ok(text_lower.matches(&pattern_lower).count())
     } else {
-        text.matches(&pattern).count()
-    };
-    json_ok(&count)
+        Ok(text.matches(&pattern).count())
+    }
 }
 
-// ---------------------------------------------------------------------------
+// ============================================================================
 // Shared helpers
-// ---------------------------------------------------------------------------
+// ============================================================================
 
-fn build_regex(pattern: &str, case_insensitive: bool) -> Result<regex::Regex, ErrorInfo> {
+/// Build a regex with safety limits to prevent ReDoS attacks.
+/// Returns `AgentError` (auto-converted to JSON via `Into<String>`).
+fn build_safe_regex(pattern: &str, case_insensitive: bool) -> Result<regex::Regex, AgentError> {
     RegexBuilder::new(pattern)
         .case_insensitive(case_insensitive)
         .size_limit(10 * (1 << 20))
         .dfa_size_limit(10 * (1 << 20))
         .build()
-        .map_err(|e| permanent("TEXT_INVALID_REGEX", format!("Invalid regex pattern: {e}")))
+        .map_err(|e| {
+            AgentError::permanent(
+                "TEXT_INVALID_REGEX",
+                format!("Invalid regex pattern: {}", e),
+            )
+            .with_attr("pattern", pattern.to_string())
+            .with_attr("regex_error", e.to_string())
+        })
 }
 
-fn decode_text_bytes(bytes: Vec<u8>, encoding: &str) -> Result<String, ErrorInfo> {
+fn decode_text_bytes(bytes: Vec<u8>, encoding: &str) -> Result<String, AgentError> {
     let enc = encoding.to_uppercase();
-    match enc.as_str() {
-        "UTF-8" | "UTF8" => String::from_utf8(bytes).map_err(|e| {
-            permanent(
+    let enc = enc.as_str();
+    if enc == "UTF-8" || enc == "UTF8" {
+        String::from_utf8(bytes).map_err(|e| {
+            AgentError::permanent(
                 "TEXT_UTF8_DECODE_ERROR",
-                format!("Decoded bytes are not valid UTF-8: {e}"),
+                format!("Decoded bytes are not valid UTF-8: {}", e),
             )
-        }),
-        "LATIN-1" | "LATIN1" | "ISO-8859-1" | "ISO88591" | "WINDOWS-1252" | "CP1252" => {
-            Ok(bytes.into_iter().map(|b| b as char).collect())
-        }
-        "AUTO" => match String::from_utf8(bytes) {
+            .with_attr("decode_error", e.to_string())
+        })
+    } else if enc == "LATIN-1"
+        || enc == "LATIN1"
+        || enc == "ISO-8859-1"
+        || enc == "ISO88591"
+        || enc == "WINDOWS-1252"
+        || enc == "CP1252"
+    {
+        Ok(bytes.into_iter().map(|b| b as char).collect())
+    } else if enc == "AUTO" {
+        match String::from_utf8(bytes) {
             Ok(s) => Ok(s),
             Err(e) => Ok(e.into_bytes().into_iter().map(|b| b as char).collect()),
-        },
-        _ => Err(permanent(
+        }
+    } else {
+        Err(AgentError::permanent(
             "TEXT_UNSUPPORTED_ENCODING",
-            format!("Unsupported encoding: {enc}"),
-        )),
+            format!("Unsupported encoding: {}", enc),
+        )
+        .with_attr("encoding", enc.to_string()))
     }
 }
 
@@ -1405,12 +1896,12 @@ fn jaro_winkler_similarity(a: &str, b: &str) -> f64 {
 
 const NGRAM_MAX_INPUT_BYTES: usize = 64 * 1024;
 
-fn resolve_ngram_n(n: Option<u8>) -> Result<usize, ErrorInfo> {
+fn resolve_ngram_n(n: Option<u8>) -> Result<usize, String> {
     let n = n.unwrap_or(3) as usize;
     if !(2..=8).contains(&n) {
-        return Err(permanent(
-            "TEXT_INVALID_NGRAM_N",
-            format!("ngram_n must be in 2..=8, got {n}"),
+        return Err(format!(
+            "ngram_n must be in 2..=8, got {} — pick a small shingle length",
+            n
         ));
     }
     Ok(n)
@@ -1462,48 +1953,185 @@ fn ngram_overlap(a: &str, b: &str, n: usize) -> f64 {
     intersection / denom
 }
 
-fn json_score(score: f64) -> serde_json::Value {
+fn json_score(score: f64) -> Value {
     serde_json::Number::from_f64(score)
-        .map(serde_json::Value::Number)
-        .unwrap_or(serde_json::Value::Null)
+        .map(Value::Number)
+        .unwrap_or(Value::Null)
 }
 
-// ---------------------------------------------------------------------------
-// Dispatch helpers
-// ---------------------------------------------------------------------------
+// ============================================================================
+// AgentInfo assembler (host-only; the wasm binary doesn't need it)
+// ============================================================================
 
-fn cap(
-    id: &str,
-    function_name: &str,
-    display_name: &str,
-    description: &str,
-    input_schema: &str,
-    output_schema: &str,
-) -> CapabilityInfo {
-    CapabilityInfo {
-        id: id.into(),
-        function_name: function_name.into(),
-        display_name: Some(display_name.into()),
-        description: Some(description.into()),
+/// Build the canonical `AgentInfo` for this agent by walking the macro-emitted
+/// `&'static` statics. The workspace `runtara-agent-bundle-emit` binary calls
+/// this on the host architecture and writes the JSON to disk; the wasm binary
+/// itself never executes this code, so we cfg-gate it out to keep the
+/// component small.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn agent_info() -> runtara_dsl::agent_meta::AgentInfo {
+    use runtara_dsl::agent_meta::{
+        AgentInfo, CapabilityMeta, InputTypeMeta, OutputTypeMeta, capability_to_api,
+    };
+    use std::collections::HashMap;
+
+    let caps: &[&'static CapabilityMeta] = &[
+        &__CAPABILITY_META_RENDER_TEMPLATE,
+        &__CAPABILITY_META_TRIM_NORMALIZE,
+        &__CAPABILITY_META_CASE_CONVERSION,
+        &__CAPABILITY_META_FIND_REPLACE,
+        &__CAPABILITY_META_EXTRACT_FIRST_LINE,
+        &__CAPABILITY_META_EXTRACT_FIRST_WORD,
+        &__CAPABILITY_META_SPLIT_JOIN,
+        &__CAPABILITY_META_SPLIT,
+        &__CAPABILITY_META_REMOVE_CHARACTERS,
+        &__CAPABILITY_META_SUBSTRING_EXTRACTION,
+        &__CAPABILITY_META_COLLAPSE_EXPAND_LINES,
+        &__CAPABILITY_META_SLUGIFY,
+        &__CAPABILITY_META_HASH_TEXT,
+        &__CAPABILITY_META_AS_BYTE_ARRAY,
+        &__CAPABILITY_META_FROM_BASE64,
+        &__CAPABILITY_META_TO_BASE64,
+        &__CAPABILITY_META_REGEX_REPLACE,
+        &__CAPABILITY_META_REGEX_MATCH,
+        &__CAPABILITY_META_REGEX_TEST,
+        &__CAPABILITY_META_REGEX_SPLIT,
+        &__CAPABILITY_META_PAD_TEXT,
+        &__CAPABILITY_META_TRUNCATE_TEXT,
+        &__CAPABILITY_META_WRAP_TEXT,
+        &__CAPABILITY_META_EXTRACT_NUMBERS,
+        &__CAPABILITY_META_EXTRACT_EMAILS,
+        &__CAPABILITY_META_EXTRACT_URLS,
+        &__CAPABILITY_META_COMPARE_TEXT,
+        &__CAPABILITY_META_COUNT_OCCURRENCES,
+    ];
+
+    let input_types: HashMap<&'static str, &'static InputTypeMeta> = [
+        (
+            "SimpleTextInput",
+            &__INPUT_META_SimpleTextInput as &InputTypeMeta,
+        ),
+        ("TemplateInput", &__INPUT_META_TemplateInput),
+        ("CaseConversionInput", &__INPUT_META_CaseConversionInput),
+        ("FindReplaceInput", &__INPUT_META_FindReplaceInput),
+        ("RemoveCharactersInput", &__INPUT_META_RemoveCharactersInput),
+        ("SplitInput", &__INPUT_META_SplitInput),
+        ("SubstringInput", &__INPUT_META_SubstringInput),
+        ("ByteArrayInput", &__INPUT_META_ByteArrayInput),
+        ("FromBase64Input", &__INPUT_META_FromBase64Input),
+        ("ToBase64Input", &__INPUT_META_ToBase64Input),
+        ("RegexReplaceInput", &__INPUT_META_RegexReplaceInput),
+        ("RegexMatchInput", &__INPUT_META_RegexMatchInput),
+        ("RegexTestInput", &__INPUT_META_RegexTestInput),
+        ("RegexSplitInput", &__INPUT_META_RegexSplitInput),
+        ("PadTextInput", &__INPUT_META_PadTextInput),
+        ("TruncateTextInput", &__INPUT_META_TruncateTextInput),
+        ("WrapTextInput", &__INPUT_META_WrapTextInput),
+        ("ExtractNumbersInput", &__INPUT_META_ExtractNumbersInput),
+        ("CompareTextInput", &__INPUT_META_CompareTextInput),
+        ("CountOccurrencesInput", &__INPUT_META_CountOccurrencesInput),
+    ]
+    .into_iter()
+    .collect();
+
+    let output_types: HashMap<&'static str, &'static OutputTypeMeta> =
+        [("FileData", &__OUTPUT_META_FileData as &OutputTypeMeta)]
+            .into_iter()
+            .collect();
+
+    let capabilities = caps
+        .iter()
+        .map(|cap| {
+            capability_to_api(
+                cap,
+                input_types.get(cap.input_type).copied(),
+                output_types.get(cap.output_type).copied(),
+            )
+        })
+        .collect();
+
+    AgentInfo {
+        id: "text".into(),
+        name: "Text".into(),
+        description: "Text capabilities for string manipulation, formatting, and text processing"
+            .into(),
         has_side_effects: false,
-        is_idempotent: true,
-        rate_limited: false,
-        tags: vec!["text".into()],
-        input_schema: input_schema.into(),
-        output_schema: output_schema.into(),
-        known_errors: vec![],
-        compensation_hint: None,
+        supports_connections: false,
+        integration_ids: vec![],
+        capabilities,
     }
 }
 
-fn parse<T: serde::de::DeserializeOwned>(json: &str) -> Result<T, ErrorInfo> {
-    serde_json::from_str(json).map_err(|e| permanent("INPUT_DESERIALIZATION_ERROR", e.to_string()))
+// ============================================================================
+// Wasm component plumbing
+// ============================================================================
+
+#[cfg(target_arch = "wasm32")]
+use bindings::exports::runtara::agent::capabilities::{ConnectionInfo, ErrorInfo, Guest};
+
+#[cfg(target_arch = "wasm32")]
+struct Component;
+
+#[cfg(target_arch = "wasm32")]
+impl Guest for Component {
+    fn invoke(
+        capability_id: String,
+        input: Vec<u8>,
+        _connection: Option<ConnectionInfo>,
+    ) -> Result<Vec<u8>, ErrorInfo> {
+        let value: serde_json::Value = serde_json::from_slice(&input).map_err(bad_json)?;
+        let executor_result = match capability_id.as_str() {
+            "render-template" => __executor_render_template(value),
+            "trim-normalize" => __executor_trim_normalize(value),
+            "case-conversion" => __executor_case_conversion(value),
+            "find-replace" => __executor_find_replace(value),
+            "extract-first-line" => __executor_extract_first_line(value),
+            "extract-first-word" => __executor_extract_first_word(value),
+            "split-join" => __executor_split_join(value),
+            "split" => __executor_split(value),
+            "remove-characters" => __executor_remove_characters(value),
+            "substring-extraction" => __executor_substring_extraction(value),
+            "collapse-expand-lines" => __executor_collapse_expand_lines(value),
+            "slugify" => __executor_slugify(value),
+            "hash-text" => __executor_hash_text(value),
+            "as-byte-array" => __executor_as_byte_array(value),
+            "from-base64" => __executor_from_base64(value),
+            "to-base64" => __executor_to_base64(value),
+            "regex-replace" => __executor_regex_replace(value),
+            "regex-match" => __executor_regex_match(value),
+            "regex-test" => __executor_regex_test(value),
+            "regex-split" => __executor_regex_split(value),
+            "pad-text" => __executor_pad_text(value),
+            "truncate-text" => __executor_truncate_text(value),
+            "wrap-text" => __executor_wrap_text(value),
+            "extract-numbers" => __executor_extract_numbers(value),
+            "extract-emails" => __executor_extract_emails(value),
+            "extract-urls" => __executor_extract_urls(value),
+            "compare-text" => __executor_compare_text(value),
+            "count-occurrences" => __executor_count_occurrences(value),
+            other => {
+                return Err(ErrorInfo {
+                    code: "UNKNOWN_CAPABILITY".into(),
+                    message: format!("text agent has no capability `{other}`"),
+                    category: "permanent".into(),
+                    severity: "error".into(),
+                    retryable: false,
+                    retry_after_ms: None,
+                    attributes: None,
+                });
+            }
+        };
+        executor_result
+            .map_err(error_string_to_error_info)
+            .and_then(|out_value| serde_json::to_vec(&out_value).map_err(bad_json))
+    }
 }
 
-fn permanent(code: impl Into<String>, message: impl Into<String>) -> ErrorInfo {
+#[cfg(target_arch = "wasm32")]
+fn bad_json(e: serde_json::Error) -> ErrorInfo {
     ErrorInfo {
-        code: code.into(),
-        message: message.into(),
+        code: "INPUT_DESERIALIZATION_ERROR".into(),
+        message: e.to_string(),
         category: "permanent".into(),
         severity: "error".into(),
         retryable: false,
@@ -1512,234 +2140,52 @@ fn permanent(code: impl Into<String>, message: impl Into<String>) -> ErrorInfo {
     }
 }
 
-fn ok_str(s: impl Into<String>) -> Result<String, ErrorInfo> {
-    let s = s.into();
-    serde_json::to_string(&s).map_err(|e| permanent("SERIALIZATION_ERROR", e.to_string()))
+/// The `#[capability]` macro packages each error as a JSON-string with
+/// `{ code, message, category, severity }`. Parse it back into a typed
+/// `ErrorInfo` for the WIT result.
+#[cfg(target_arch = "wasm32")]
+fn error_string_to_error_info(s: String) -> ErrorInfo {
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(&s) {
+        ErrorInfo {
+            code: value
+                .get("code")
+                .and_then(|v| v.as_str())
+                .unwrap_or("CAPABILITY_ERROR")
+                .into(),
+            message: value
+                .get("message")
+                .and_then(|v| v.as_str())
+                .unwrap_or(&s)
+                .into(),
+            category: value
+                .get("category")
+                .and_then(|v| v.as_str())
+                .unwrap_or("permanent")
+                .into(),
+            severity: value
+                .get("severity")
+                .and_then(|v| v.as_str())
+                .unwrap_or("error")
+                .into(),
+            retryable: value
+                .get("retryable")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
+            retry_after_ms: value.get("retry_after_ms").and_then(|v| v.as_u64()),
+            attributes: value.get("attributes").map(|v| v.to_string()),
+        }
+    } else {
+        ErrorInfo {
+            code: "CAPABILITY_ERROR".into(),
+            message: s,
+            category: "permanent".into(),
+            severity: "error".into(),
+            retryable: false,
+            retry_after_ms: None,
+            attributes: None,
+        }
+    }
 }
 
-fn json_ok<T: serde::Serialize>(value: &T) -> Result<String, ErrorInfo> {
-    serde_json::to_string(value).map_err(|e| permanent("SERIALIZATION_ERROR", e.to_string()))
-}
-
-// ---------------------------------------------------------------------------
-// JSON Schemas
-// ---------------------------------------------------------------------------
-
-const SCHEMA_SIMPLE_TEXT_INPUT: &str = r#"{
-    "type": "object",
-    "properties": {
-        "text": { "type": "string", "description": "The text to process" }
-    }
-}"#;
-
-const SCHEMA_TEMPLATE_INPUT: &str = r#"{
-    "type": "object",
-    "properties": {
-        "text": { "type": "string", "description": "The template string with Jinja2 syntax" },
-        "context": { "type": "object", "description": "JSON object with template variables" }
-    }
-}"#;
-
-const SCHEMA_CASE_CONVERSION_INPUT: &str = r#"{
-    "type": "object",
-    "properties": {
-        "text": { "type": "string" },
-        "format": { "type": "string", "enum": ["lowercase", "uppercase", "title-case"], "default": "lowercase" }
-    }
-}"#;
-
-const SCHEMA_FIND_REPLACE_INPUT: &str = r#"{
-    "type": "object",
-    "properties": {
-        "text": { "type": "string" },
-        "pattern": { "type": "string", "description": "The text pattern to find" },
-        "replacement": { "type": "string", "description": "The replacement text" }
-    }
-}"#;
-
-const SCHEMA_SPLIT_INPUT: &str = r#"{
-    "type": "object",
-    "properties": {
-        "text": { "type": "string" },
-        "delimiter": { "type": "string", "description": "The delimiter to split on", "default": "," },
-        "join_delimiter": { "type": "string", "description": "The delimiter to join with", "default": " " }
-    }
-}"#;
-
-const SCHEMA_REMOVE_CHARACTERS_INPUT: &str = r#"{
-    "type": "object",
-    "properties": {
-        "text": { "type": "string" },
-        "pattern": { "type": "string", "description": "Characters to remove" }
-    }
-}"#;
-
-const SCHEMA_SUBSTRING_INPUT: &str = r#"{
-    "type": "object",
-    "properties": {
-        "text": { "type": "string" },
-        "start_delimiter": { "type": "string" },
-        "end_delimiter": { "type": "string" }
-    }
-}"#;
-
-const SCHEMA_BYTE_ARRAY_INPUT: &str = r#"{
-    "type": "object",
-    "properties": {
-        "text": { "type": "string" },
-        "encoding": { "type": "string", "enum": ["UTF-8"], "default": "UTF-8" }
-    }
-}"#;
-
-const SCHEMA_FROM_BASE64_INPUT: &str = r#"{
-    "type": "object",
-    "required": ["data"],
-    "properties": {
-        "data": {
-            "oneOf": [
-                { "type": "string", "description": "Base64 encoded string" },
-                { "type": "object", "required": ["content"], "properties": { "content": { "type": "string" } } }
-            ]
-        },
-        "encoding": { "type": "string", "default": "UTF-8" }
-    }
-}"#;
-
-const SCHEMA_TO_BASE64_INPUT: &str = r#"{
-    "type": "object",
-    "required": ["data"],
-    "properties": {
-        "data": {
-            "oneOf": [
-                { "type": "string" },
-                { "type": "array", "items": { "type": "number" } },
-                { "type": "object", "required": ["content"], "properties": { "content": { "type": "string" } } }
-            ]
-        },
-        "filename": { "type": "string" },
-        "mimeType": { "type": "string" }
-    }
-}"#;
-
-const SCHEMA_REGEX_REPLACE_INPUT: &str = r#"{
-    "type": "object",
-    "properties": {
-        "text": { "type": "string" },
-        "pattern": { "type": "string" },
-        "replacement": { "type": "string" },
-        "global": { "type": "boolean", "default": true },
-        "case_insensitive": { "type": "boolean", "default": false }
-    }
-}"#;
-
-const SCHEMA_REGEX_MATCH_INPUT: &str = r#"{
-    "type": "object",
-    "properties": {
-        "text": { "type": "string" },
-        "pattern": { "type": "string" },
-        "capture_group": { "type": "integer", "default": 0 },
-        "all_matches": { "type": "boolean", "default": false },
-        "case_insensitive": { "type": "boolean", "default": false }
-    }
-}"#;
-
-const SCHEMA_REGEX_TEST_INPUT: &str = r#"{
-    "type": "object",
-    "properties": {
-        "text": { "type": "string" },
-        "pattern": { "type": "string" },
-        "case_insensitive": { "type": "boolean", "default": false }
-    }
-}"#;
-
-const SCHEMA_REGEX_SPLIT_INPUT: &str = r#"{
-    "type": "object",
-    "properties": {
-        "text": { "type": "string" },
-        "pattern": { "type": "string" },
-        "limit": { "type": "integer", "default": 0 }
-    }
-}"#;
-
-const SCHEMA_PAD_TEXT_INPUT: &str = r#"{
-    "type": "object",
-    "properties": {
-        "text": { "type": "string" },
-        "length": { "type": "integer" },
-        "pad_char": { "type": "string", "default": " " },
-        "direction": { "type": "string", "enum": ["left", "right", "both"], "default": "right" }
-    }
-}"#;
-
-const SCHEMA_TRUNCATE_TEXT_INPUT: &str = r#"{
-    "type": "object",
-    "properties": {
-        "text": { "type": "string" },
-        "max_length": { "type": "integer" },
-        "suffix": { "type": "string", "default": "" },
-        "word_boundary": { "type": "boolean", "default": false }
-    }
-}"#;
-
-const SCHEMA_WRAP_TEXT_INPUT: &str = r#"{
-    "type": "object",
-    "properties": {
-        "text": { "type": "string" },
-        "width": { "type": "integer", "default": 80 },
-        "preserve_newlines": { "type": "boolean", "default": true }
-    }
-}"#;
-
-const SCHEMA_EXTRACT_NUMBERS_INPUT: &str = r#"{
-    "type": "object",
-    "properties": {
-        "text": { "type": "string" },
-        "include_decimals": { "type": "boolean", "default": true },
-        "include_negative": { "type": "boolean", "default": false }
-    }
-}"#;
-
-const SCHEMA_COMPARE_TEXT_INPUT: &str = r#"{
-    "type": "object",
-    "properties": {
-        "text_a": { "type": "string" },
-        "text_b": { "type": "string" },
-        "mode": {
-            "type": "string",
-            "enum": ["exact", "case-insensitive", "levenshtein-distance", "contains",
-                     "jaro-similarity", "jaro-winkler-similarity", "ngram-jaccard", "ngram-overlap"],
-            "default": "exact"
-        },
-        "ngram_n": { "type": "integer", "description": "Shingle length for n-gram modes (2..=8)" }
-    }
-}"#;
-
-const SCHEMA_COUNT_OCCURRENCES_INPUT: &str = r#"{
-    "type": "object",
-    "properties": {
-        "text": { "type": "string" },
-        "pattern": { "type": "string" },
-        "use_regex": { "type": "boolean", "default": false },
-        "case_insensitive": { "type": "boolean", "default": false }
-    }
-}"#;
-
-// Output schemas
-const SCHEMA_STRING_OUTPUT: &str = r#"{ "type": "string" }"#;
-const SCHEMA_BOOL_OUTPUT: &str = r#"{ "type": "boolean" }"#;
-const SCHEMA_NUMBER_OUTPUT: &str = r#"{ "type": "number" }"#;
-const SCHEMA_STRING_ARRAY_OUTPUT: &str = r#"{ "type": "array", "items": { "type": "string" } }"#;
-const SCHEMA_NUMBER_ARRAY_OUTPUT: &str = r#"{ "type": "array", "items": { "type": "number" } }"#;
-const SCHEMA_BYTE_ARRAY_OUTPUT: &str =
-    r#"{ "type": "array", "items": { "type": "integer", "minimum": 0, "maximum": 255 } }"#;
-const SCHEMA_ANY_OUTPUT: &str = r#"{}"#;
-const SCHEMA_FILE_DATA_OUTPUT: &str = r#"{
-    "type": "object",
-    "properties": {
-        "content": { "type": "string", "description": "Base64-encoded content" },
-        "filename": { "type": "string" },
-        "mimeType": { "type": "string" }
-    }
-}"#;
-
+#[cfg(target_arch = "wasm32")]
 bindings::export!(Component with_types_in bindings);

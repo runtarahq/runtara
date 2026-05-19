@@ -1,7 +1,11 @@
 //! Transform agent — JSON manipulation — as a WebAssembly component.
 //!
-//! Schema matches the legacy `runtara-agents/src/agents/transform.rs` agent so
-//! A/B parity tests can compare results byte-for-byte.
+//! Capability metadata travels through `#[capability_input]` / `#[capability]` /
+//! `#[capability_output]` annotations on the same Rust types and functions that
+//! the wasm cdylib's `invoke` dispatcher calls into. The workspace binary
+//! `runtara-agent-bundle-emit` reads these macro-emitted `&'static` statics on
+//! the host architecture and writes `runtara_agent_transform.meta.json` next to
+//! the `.wasm` — the JSON is a build artifact, never hand-edited.
 //!
 //! Capabilities (16):
 //! - `extract`            — extract property values from an array of objects
@@ -20,266 +24,85 @@
 //! - `flat-map`           — extract nested arrays and flatten into one
 //! - `array-length`       — get the length/size of an array, string, or object
 //! - `ensure-array`       — wrap a non-array value in an array
+#![allow(clippy::result_large_err)]
 
-#![cfg(target_arch = "wasm32")]
+use runtara_agent_macro::{CapabilityInput, CapabilityOutput, capability};
+use runtara_dsl::agent_meta::EnumVariants;
+use serde::{Deserialize, Deserializer, Serialize};
+use serde_json::Value;
+use std::collections::HashMap;
+use strum::VariantNames;
 
+#[cfg(target_arch = "wasm32")]
 #[allow(warnings)]
 mod bindings;
 
-use bindings::exports::runtara::agent::capabilities::{
-    CapabilityInfo, ConnectionInfo, ErrorInfo, Guest, ModuleInfo,
-};
-use serde::Deserialize;
-use serde_json::Value;
-use std::collections::HashMap;
+// -----------------------------------------------------------------------------
+// Local AgentError shim — preserves the legacy `with_attr` chain shape so the
+// macro-generated executor receives a JSON-string error that the host
+// dispatcher can parse back into the WIT `ErrorInfo` record.
+// -----------------------------------------------------------------------------
 
-// =============================================================================
-// Component plumbing
-// =============================================================================
+#[derive(Debug, Clone, Serialize)]
+pub struct AgentError {
+    pub code: String,
+    pub message: String,
+    pub category: &'static str,
+    pub severity: &'static str,
+    #[serde(skip_serializing_if = "HashMap::is_empty")]
+    pub attributes: HashMap<String, Value>,
+}
 
-struct Component;
-
-impl Guest for Component {
-    fn get_module_info() -> ModuleInfo {
-        ModuleInfo {
-            id: "transform".into(),
-            display_name: "Transform".into(),
-            description:
-                "JSON data manipulation: extract, filter, sort, group, map, coalesce, and more."
-                    .into(),
-            has_side_effects: false,
-            supports_connections: false,
-            integration_ids: vec![],
-            secure: false,
+impl AgentError {
+    pub fn permanent(code: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            code: code.into(),
+            message: message.into(),
+            category: "permanent",
+            severity: "error",
+            attributes: HashMap::new(),
         }
     }
 
-    fn list_capabilities() -> Vec<CapabilityInfo> {
-        vec![
-            cap(
-                "extract",
-                "Extract Property",
-                "Extract property values from an array of objects based on a property path",
-                EXTRACT_INPUT_SCHEMA,
-                EXTRACT_OUTPUT_SCHEMA,
-            ),
-            cap(
-                "get-value-by-path",
-                "Get Value By Path",
-                "Get a value from an object using a JSONPath-like property path",
-                GET_VALUE_BY_PATH_INPUT_SCHEMA,
-                VALUE_OUTPUT_SCHEMA,
-            ),
-            cap(
-                "set-value-by-path",
-                "Set Value By Path",
-                "Set a value in an object at a specified JSONPath-like property path",
-                SET_VALUE_BY_PATH_INPUT_SCHEMA,
-                VALUE_OUTPUT_SCHEMA,
-            ),
-            cap(
-                "filter-non-values",
-                "Filter Non-Values",
-                "Filter an array removing elements with null, empty, blank, or zero values",
-                FILTER_NON_VALUES_INPUT_SCHEMA,
-                FILTER_OUTPUT_SCHEMA,
-            ),
-            cap(
-                "select-first",
-                "Select First",
-                "Select the first truthy value from an array (skips null, empty, zero, false)",
-                SELECT_FIRST_INPUT_SCHEMA,
-                VALUE_OUTPUT_SCHEMA,
-            ),
-            cap(
-                "coalesce",
-                "Coalesce",
-                "Return the first non-null value from an array of values",
-                COALESCE_INPUT_SCHEMA,
-                VALUE_OUTPUT_SCHEMA,
-            ),
-            cap(
-                "from-json-string",
-                "From JSON String",
-                "Parse a JSON string into a structured value",
-                FROM_JSON_STRING_INPUT_SCHEMA,
-                VALUE_OUTPUT_SCHEMA,
-            ),
-            cap(
-                "to-json-string",
-                "To JSON String",
-                "Convert a value to a JSON string",
-                TO_JSON_STRING_INPUT_SCHEMA,
-                TO_JSON_STRING_OUTPUT_SCHEMA,
-            ),
-            cap(
-                "filter",
-                "Filter Array",
-                "Filter an array based on property values matching or excluding specified values",
-                FILTER_INPUT_SCHEMA,
-                FILTER_OUTPUT_SCHEMA,
-            ),
-            cap(
-                "sort",
-                "Sort Array",
-                "Sort an array of items, optionally by a property path",
-                SORT_INPUT_SCHEMA,
-                SORT_OUTPUT_SCHEMA,
-            ),
-            cap(
-                "map-fields",
-                "Map Fields",
-                "Map fields from a source object to a target object using field path mappings",
-                MAP_FIELDS_INPUT_SCHEMA,
-                MAP_FIELDS_OUTPUT_SCHEMA,
-            ),
-            cap(
-                "group-by",
-                "Group By",
-                "Group array items by a property key, returning either a map or array of groups",
-                GROUP_BY_INPUT_SCHEMA,
-                GROUP_BY_OUTPUT_SCHEMA,
-            ),
-            cap(
-                "append",
-                "Append",
-                "Append an item to the end of an array",
-                APPEND_INPUT_SCHEMA,
-                APPEND_OUTPUT_SCHEMA,
-            ),
-            cap(
-                "flat-map",
-                "Flat Map",
-                "Extract nested arrays from each item by property path and flatten into a single array",
-                FLAT_MAP_INPUT_SCHEMA,
-                FLAT_MAP_OUTPUT_SCHEMA,
-            ),
-            cap(
-                "array-length",
-                "Array Length",
-                "Get the length of an array, string, or number of keys in an object",
-                ARRAY_LENGTH_INPUT_SCHEMA,
-                ARRAY_LENGTH_OUTPUT_SCHEMA,
-            ),
-            cap(
-                "ensure-array",
-                "Ensure Array",
-                "Ensure a value is an array. Arrays pass through unchanged, null becomes empty array, other values are wrapped in a single-element array.",
-                ENSURE_ARRAY_INPUT_SCHEMA,
-                ENSURE_ARRAY_OUTPUT_SCHEMA,
-            ),
-        ]
-    }
-
-    fn invoke(
-        capability_id: String,
-        input: String,
-        _connection: Option<ConnectionInfo>,
-    ) -> Result<String, ErrorInfo> {
-        match capability_id.as_str() {
-            "extract" => invoke_extract(&input),
-            "get-value-by-path" => invoke_get_value_by_path(&input),
-            "set-value-by-path" => invoke_set_value_by_path(&input),
-            "filter-non-values" => invoke_filter_non_values(&input),
-            "select-first" => invoke_select_first(&input),
-            "coalesce" => invoke_coalesce(&input),
-            "from-json-string" => invoke_from_json_string(&input),
-            "to-json-string" => invoke_to_json_string(&input),
-            "filter" => invoke_filter(&input),
-            "sort" => invoke_sort(&input),
-            "map-fields" => invoke_map_fields(&input),
-            "group-by" => invoke_group_by(&input),
-            "append" => invoke_append(&input),
-            "flat-map" => invoke_flat_map(&input),
-            "array-length" => invoke_array_length(&input),
-            "ensure-array" => invoke_ensure_array(&input),
-            other => Err(ErrorInfo {
-                code: "UNKNOWN_CAPABILITY".into(),
-                message: format!("transform agent has no capability `{other}`"),
-                category: "permanent".into(),
-                severity: "error".into(),
-                retryable: false,
-                retry_after_ms: None,
-                attributes: None,
-            }),
-        }
+    pub fn with_attr(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.attributes
+            .insert(key.into(), Value::String(value.into()));
+        self
     }
 }
 
-// =============================================================================
-// Input types (mirror runtara-agents/src/agents/transform.rs)
-// =============================================================================
+impl From<AgentError> for String {
+    fn from(err: AgentError) -> Self {
+        serde_json::to_string(&err).unwrap_or_else(|_| format!("[{}] {}", err.code, err.message))
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Helpers shared with input types
+// -----------------------------------------------------------------------------
 
 /// Custom deserializer that treats null as an empty Vec
 fn deserialize_value_or_empty_vec<'de, D>(deserializer: D) -> Result<Vec<Value>, D::Error>
 where
-    D: serde::Deserializer<'de>,
+    D: Deserializer<'de>,
 {
     let opt: Option<Vec<Value>> = Option::deserialize(deserializer)?;
     Ok(opt.unwrap_or_default())
 }
 
-#[derive(Deserialize)]
-struct ExtractInput {
-    pub value: Vec<Value>,
-    pub property_path: String,
+fn default_ascending() -> bool {
+    true
 }
 
-#[derive(Deserialize)]
-struct GetValueByPathInput {
-    pub value: Option<Value>,
-    pub property_path: Option<String>,
-}
+// -----------------------------------------------------------------------------
+// Enums (with VariantNames + EnumVariants so the macro can record allowed values)
+// -----------------------------------------------------------------------------
 
-#[derive(Deserialize)]
-struct SetValueByPathInput {
-    pub target: Option<Value>,
-    pub property_path: Option<String>,
-    pub value: Option<Value>,
-}
-
-#[derive(Deserialize)]
-struct FilterNoValueInput {
-    pub value: Vec<Value>,
-    #[serde(default)]
-    pub property_path: Option<String>,
-    #[serde(default)]
-    pub filter_empty_strings: bool,
-    #[serde(default)]
-    pub filter_null_values: bool,
-    #[serde(default)]
-    pub filter_blank_strings: bool,
-    #[serde(default)]
-    pub filter_zero_values: bool,
-}
-
-#[derive(Deserialize)]
-struct SelectFirstInput {
-    pub value: Option<Vec<Value>>,
-}
-
-#[derive(Deserialize)]
-struct CoalesceInput {
-    pub values: Vec<Value>,
-    #[serde(default)]
-    pub treat_empty_string_as_null: bool,
-    #[serde(default)]
-    pub treat_zero_as_null: bool,
-}
-
-#[derive(Deserialize)]
-struct FromJsonStringInput {
-    pub value: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct ToJsonStringInput {
-    pub value: Value,
-}
-
-#[derive(Debug, Deserialize, Clone, PartialEq)]
+/// Condition for filtering array items
+#[derive(Debug, Deserialize, Clone, PartialEq, VariantNames)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
-enum MatchCondition {
+#[strum(serialize_all = "SCREAMING_SNAKE_CASE")]
+pub enum MatchCondition {
     Includes,
     Excludes,
     StartsWith,
@@ -287,76 +110,545 @@ enum MatchCondition {
     Contains,
 }
 
-#[derive(Deserialize)]
-struct FilterInput {
+impl EnumVariants for MatchCondition {
+    fn variant_names() -> &'static [&'static str] {
+        Self::VARIANTS
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Input types
+// -----------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize, CapabilityInput)]
+#[capability_input(display_name = "Extract Property Input")]
+pub struct ExtractInput {
+    #[field(
+        display_name = "Input Array",
+        description = "The array of objects to extract property values from",
+        example = r#"[{"name": "Alice", "age": 30}, {"name": "Bob", "age": 25}]"#
+    )]
+    pub value: Vec<Value>,
+
+    #[field(
+        display_name = "Property Path",
+        description = "The property path to extract from each item (JSONPath syntax)",
+        example = "name"
+    )]
+    pub property_path: String,
+}
+
+#[derive(Debug, Deserialize, CapabilityInput)]
+#[capability_input(display_name = "Get Value Input")]
+pub struct GetValueByPathInput {
+    #[field(
+        display_name = "Input Value",
+        description = "The object to extract a property value from",
+        example = r#"{"user": {"name": "Alice", "age": 30}}"#
+    )]
+    pub value: Option<Value>,
+
+    #[field(
+        display_name = "Property Path",
+        description = "The property path to extract (JSONPath syntax)",
+        example = "user.name"
+    )]
+    pub property_path: Option<String>,
+}
+
+#[derive(Debug, Deserialize, CapabilityInput)]
+#[capability_input(display_name = "Set Value Input")]
+pub struct SetValueByPathInput {
+    #[field(
+        display_name = "Target Object",
+        description = "The object to set a property value in",
+        example = r#"{"user": {"name": "Alice"}}"#
+    )]
+    pub target: Option<Value>,
+
+    #[field(
+        display_name = "Property Path",
+        description = "The property path to set (JSONPath syntax, creates nested objects if needed)",
+        example = "user.age"
+    )]
+    pub property_path: Option<String>,
+
+    #[field(
+        display_name = "Value",
+        description = "The value to set at the property path",
+        example = "30"
+    )]
+    pub value: Option<Value>,
+}
+
+#[derive(Debug, Deserialize, CapabilityInput)]
+#[capability_input(display_name = "Filter Non-Values Input")]
+pub struct FilterNoValueInput {
+    #[field(
+        display_name = "Input Array",
+        description = "The array of items to filter",
+        example = r#"[{"x": 1}, {"x": null}, {"x": ""}]"#
+    )]
+    pub value: Vec<Value>,
+
+    #[field(
+        display_name = "Property Path",
+        description = "The property path to check in each item (if omitted, checks the item itself)",
+        example = "x"
+    )]
+    #[serde(default)]
+    pub property_path: Option<String>,
+
+    #[field(
+        display_name = "Filter Empty Strings",
+        description = "Remove items where the value is an empty string (\"\")",
+        example = "false",
+        default = "false"
+    )]
+    #[serde(default)]
+    pub filter_empty_strings: bool,
+
+    #[field(
+        display_name = "Filter Null Values",
+        description = "Remove items where the value is null",
+        example = "true",
+        default = "false"
+    )]
+    #[serde(default)]
+    pub filter_null_values: bool,
+
+    #[field(
+        display_name = "Filter Blank Strings",
+        description = "Remove items where the value is a whitespace-only string",
+        example = "false",
+        default = "false"
+    )]
+    #[serde(default)]
+    pub filter_blank_strings: bool,
+
+    #[field(
+        display_name = "Filter Zero Values",
+        description = "Remove items where the value is 0 or \"0\"",
+        example = "false",
+        default = "false"
+    )]
+    #[serde(default)]
+    pub filter_zero_values: bool,
+}
+
+#[derive(Debug, Deserialize, CapabilityInput)]
+#[capability_input(display_name = "Select First Input")]
+pub struct SelectFirstInput {
+    #[field(
+        display_name = "Input Array",
+        description = "The array to select the first truthy value from (skips null, empty strings, 0, false)",
+        example = r#"[null, "", 0, "hello", "world"]"#
+    )]
+    pub value: Option<Vec<Value>>,
+}
+
+#[derive(Debug, Deserialize, CapabilityInput)]
+#[capability_input(display_name = "Coalesce Input")]
+pub struct CoalesceInput {
+    #[field(
+        display_name = "Values",
+        description = "Array of values to check; returns the first non-null/non-undefined value",
+        example = r#"[null, 42, "fallback"]"#
+    )]
+    pub values: Vec<Value>,
+
+    #[field(
+        display_name = "Treat Empty String As Null",
+        description = "If true, empty strings are treated as null and skipped",
+        example = "false",
+        default = "false"
+    )]
+    #[serde(default)]
+    pub treat_empty_string_as_null: bool,
+
+    #[field(
+        display_name = "Treat Zero As Null",
+        description = "If true, zero values (0, 0.0) are treated as null and skipped",
+        example = "false",
+        default = "false"
+    )]
+    #[serde(default)]
+    pub treat_zero_as_null: bool,
+}
+
+#[derive(Debug, Deserialize, CapabilityInput)]
+#[capability_input(display_name = "Parse JSON Input")]
+pub struct FromJsonStringInput {
+    #[field(
+        display_name = "JSON String",
+        description = "The JSON string to parse into a value",
+        example = r#""{\"name\":\"Alice\",\"age\":30}""#
+    )]
+    pub value: Option<String>,
+}
+
+#[derive(Debug, Deserialize, CapabilityInput)]
+#[capability_input(display_name = "Stringify JSON Input")]
+pub struct ToJsonStringInput {
+    #[field(
+        display_name = "Input Value",
+        description = "The value to serialize to a JSON string",
+        example = r#"{"name": "Alice", "age": 30}"#
+    )]
+    pub value: Value,
+}
+
+#[derive(Debug, Deserialize, CapabilityInput)]
+#[capability_input(display_name = "Filter Array Input")]
+pub struct FilterInput {
+    #[field(
+        display_name = "Input Array",
+        description = "The array of items to filter",
+        example = r#"[{"status": "active"}, {"status": "inactive"}]"#
+    )]
     #[serde(default, deserialize_with = "deserialize_value_or_empty_vec")]
     pub value: Vec<Value>,
+
+    #[field(
+        display_name = "Property Path",
+        description = "The property path to extract from each item (JSONPath syntax). Use \"$\" or \"\" to filter the array values directly.",
+        example = "status"
+    )]
     pub property_path: String,
+
+    #[field(
+        display_name = "Match Values",
+        description = "The value(s) to compare against (single value or array)",
+        example = r#"["active", "pending"]"#
+    )]
     pub match_values: Value,
+
+    #[field(
+        display_name = "Match Condition",
+        description = "Whether to include or exclude matching items",
+        example = "INCLUDES",
+        enum_type = "MatchCondition"
+    )]
     pub match_condition: MatchCondition,
 }
 
-fn default_ascending() -> bool {
-    true
-}
-
-#[derive(Deserialize)]
-struct SortInput {
+#[derive(Debug, Deserialize, CapabilityInput)]
+#[capability_input(display_name = "Sort Array Input")]
+pub struct SortInput {
+    #[field(
+        display_name = "Input Array",
+        description = "The array to sort",
+        example = r#"[{"age": 35}, {"age": 30}, {"age": 25}]"#
+    )]
     pub value: Vec<Value>,
+
+    #[field(
+        display_name = "Property Path",
+        description = "The property path to sort by (if omitted, sorts the items directly)",
+        example = "age"
+    )]
     pub property_path: Option<String>,
+
+    #[field(
+        display_name = "Ascending Order",
+        description = "Whether to sort in ascending order (true) or descending order (false)",
+        example = "true",
+        default = "true"
+    )]
     #[serde(default = "default_ascending")]
     pub ascending: bool,
 }
 
-#[derive(Deserialize)]
-struct MapFieldsInput {
+#[derive(Debug, Deserialize, CapabilityInput)]
+#[capability_input(display_name = "Map Fields Input")]
+pub struct MapFieldsInput {
+    #[field(
+        display_name = "Source Data",
+        description = "The source object containing data to map",
+        example = r#"{"firstName": "Alice", "userAge": 30, "email": "alice@example.com"}"#
+    )]
     pub source_data: Value,
+
+    #[field(
+        display_name = "Field Mappings",
+        description = "Map of source field paths to target field names",
+        example = r#"{"firstName": "name", "userAge": "age"}"#
+    )]
     pub mappings: HashMap<String, String>,
 }
 
-#[derive(Deserialize)]
-struct GroupByInput {
+#[derive(Debug, Deserialize, CapabilityInput)]
+#[capability_input(display_name = "Group By Input")]
+pub struct GroupByInput {
+    #[field(
+        display_name = "Input Array",
+        description = "The array of items to group",
+        example = r#"[{"name": "Alice", "status": "active"}, {"name": "Bob", "status": "inactive"}]"#
+    )]
     pub value: Value,
+
+    #[field(
+        display_name = "Group Key",
+        description = "The property path to use as the grouping key (JSONPath syntax)",
+        example = "status"
+    )]
     pub key: String,
+
+    #[field(
+        display_name = "Return As Map",
+        description = "Return grouped items as a map (key -> items) instead of an array of arrays",
+        example = "true",
+        default = "false"
+    )]
     #[serde(default)]
     pub as_map: bool,
 }
 
-#[derive(Deserialize)]
-struct AppendInput {
+#[derive(Debug, Deserialize, CapabilityInput)]
+#[capability_input(display_name = "Append Input")]
+pub struct AppendInput {
+    #[field(
+        display_name = "Array",
+        description = "The array to append an item to (can contain objects or primitive values)",
+        example = r#"[{"name": "Alice"}, {"name": "Bob"}]"#
+    )]
     pub array: Vec<Value>,
+
+    #[field(
+        display_name = "Item",
+        description = "The item to append to the array (can be an object or primitive value)",
+        example = r#"{"name": "Charlie"}"#
+    )]
     pub item: Value,
 }
 
-#[derive(Deserialize)]
-struct FlatMapInput {
+#[derive(Debug, Deserialize, CapabilityInput)]
+#[capability_input(display_name = "Flat Map Input")]
+pub struct FlatMapInput {
+    #[field(
+        display_name = "Input Array",
+        description = "The array of objects to flat map",
+        example = r#"[{"items": [1, 2]}, {"items": [3, 4]}]"#
+    )]
     pub value: Vec<Value>,
+
+    #[field(
+        display_name = "Property Path",
+        description = "The property path to the nested array in each item (JSONPath syntax)",
+        example = "items"
+    )]
     pub property_path: String,
 }
 
-#[derive(Deserialize)]
-struct ArrayLengthInput {
+#[derive(Debug, Deserialize, CapabilityInput)]
+#[capability_input(display_name = "Array Length Input")]
+pub struct ArrayLengthInput {
+    #[field(
+        display_name = "Value",
+        description = "Array, string, or object to get the length/size of",
+        example = r#"[1, 2, 3]"#
+    )]
     pub value: Value,
 }
 
-#[derive(Deserialize)]
-struct EnsureArrayInput {
+#[derive(Debug, Deserialize, CapabilityInput)]
+#[capability_input(display_name = "Ensure Array Input")]
+pub struct EnsureArrayInput {
+    #[field(
+        display_name = "Value",
+        description = "Value to wrap in an array if not already an array. Arrays pass through unchanged, null becomes empty array.",
+        example = r#"{"name": "Alice"}"#
+    )]
     pub value: Value,
 }
 
-// =============================================================================
-// Capability implementations
-// =============================================================================
+// -----------------------------------------------------------------------------
+// Output types
+// -----------------------------------------------------------------------------
 
-fn invoke_extract(input_json: &str) -> Result<String, ErrorInfo> {
-    let input: ExtractInput = serde_json::from_str(input_json).map_err(bad_input)?;
+#[derive(Debug, Serialize, Deserialize, CapabilityOutput)]
+#[capability_output(display_name = "Extract Output")]
+pub struct ExtractOutput {
+    #[field(
+        display_name = "Values",
+        description = "Array of extracted property values"
+    )]
+    pub values: Vec<Value>,
 
+    #[field(display_name = "Count", description = "Number of values extracted")]
+    pub count: usize,
+}
+
+#[derive(Debug, Serialize, Deserialize, CapabilityOutput)]
+#[capability_output(display_name = "Filter Output")]
+pub struct FilterOutput {
+    #[field(
+        display_name = "Items",
+        description = "Array of items that passed the filter"
+    )]
+    pub items: Vec<Value>,
+
+    #[field(
+        display_name = "Count",
+        description = "Number of items that passed the filter"
+    )]
+    pub count: usize,
+
+    #[field(
+        display_name = "Removed Count",
+        description = "Number of items removed by the filter"
+    )]
+    pub removed_count: usize,
+}
+
+#[derive(Debug, Serialize, Deserialize, CapabilityOutput)]
+#[capability_output(display_name = "Sort Output")]
+pub struct SortOutput {
+    #[field(display_name = "Items", description = "Array of sorted items")]
+    pub items: Vec<Value>,
+
+    #[field(
+        display_name = "Count",
+        description = "Number of items in the sorted array"
+    )]
+    pub count: usize,
+}
+
+#[derive(Debug, Serialize, Deserialize, CapabilityOutput)]
+#[capability_output(display_name = "Group By Output")]
+pub struct GroupByOutput {
+    #[field(
+        display_name = "Groups",
+        description = "Grouped items - either a map (key -> items) or array of arrays"
+    )]
+    pub groups: Value,
+
+    #[field(
+        display_name = "Group Count",
+        description = "Number of unique groups created"
+    )]
+    pub group_count: usize,
+}
+
+#[derive(Debug, Serialize, Deserialize, CapabilityOutput)]
+#[capability_output(display_name = "Map Fields Output")]
+pub struct MapFieldsOutput {
+    #[field(
+        display_name = "Result",
+        description = "Object with mapped field values"
+    )]
+    pub result: HashMap<String, Value>,
+
+    #[field(
+        display_name = "Field Count",
+        description = "Number of fields successfully mapped"
+    )]
+    pub field_count: usize,
+}
+
+#[derive(Debug, Serialize, Deserialize, CapabilityOutput)]
+#[capability_output(display_name = "Append Output")]
+pub struct AppendOutput {
+    #[field(
+        display_name = "Array",
+        description = "Array with the new item appended"
+    )]
+    pub array: Vec<Value>,
+
+    #[field(
+        display_name = "Length",
+        description = "New length of the array after appending"
+    )]
+    pub length: usize,
+}
+
+#[derive(Debug, Serialize, Deserialize, CapabilityOutput)]
+#[capability_output(display_name = "Flat Map Output")]
+pub struct FlatMapOutput {
+    #[field(
+        display_name = "Items",
+        description = "Flattened array of all nested items"
+    )]
+    pub items: Vec<Value>,
+
+    #[field(
+        display_name = "Count",
+        description = "Total number of items in the flattened array"
+    )]
+    pub count: usize,
+}
+
+#[derive(Debug, Serialize, Deserialize, CapabilityOutput)]
+#[capability_output(display_name = "Array Length Output")]
+pub struct ArrayLengthOutput {
+    #[field(
+        display_name = "Length",
+        description = "Length of array/string, or number of keys in object"
+    )]
+    pub length: usize,
+
+    #[field(
+        display_name = "Is Array",
+        description = "True if the value was an array"
+    )]
+    pub is_array: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize, CapabilityOutput)]
+#[capability_output(display_name = "JSON String Output")]
+pub struct ToJsonStringOutput {
+    #[field(display_name = "JSON", description = "The serialized JSON string")]
+    pub json: String,
+
+    #[field(
+        display_name = "Length",
+        description = "Length of the JSON string in characters"
+    )]
+    pub length: usize,
+}
+
+#[derive(Debug, Serialize, Deserialize, CapabilityOutput)]
+#[capability_output(display_name = "Ensure Array Output")]
+pub struct EnsureArrayOutput {
+    #[field(
+        display_name = "Items",
+        description = "The input wrapped as an array (or the original array if already an array)"
+    )]
+    pub items: Vec<Value>,
+
+    #[field(
+        display_name = "Count",
+        description = "Number of items in the resulting array"
+    )]
+    pub count: usize,
+
+    #[field(
+        display_name = "Was Array",
+        description = "True if the input was already an array, false if it was wrapped"
+    )]
+    pub was_array: bool,
+}
+
+// -----------------------------------------------------------------------------
+// Capabilities — annotated for metadata; the `__executor_*` fns the macro emits
+// are what the wasm Guest impl dispatches to.
+// -----------------------------------------------------------------------------
+
+/// Extracts values from an array of objects based on a property path
+#[capability(
+    module = "transform",
+    module_display_name = "Transform",
+    module_description = "Transform capabilities for data manipulation, filtering, sorting, and JSON operations",
+    display_name = "Extract Property",
+    description = "Extract property values from an array of objects based on a property path"
+)]
+pub fn extract(input: ExtractInput) -> Result<ExtractOutput, String> {
     if input.value.is_empty() || input.property_path.is_empty() {
         let count = input.value.len();
-        return to_json(serde_json::json!({
-            "values": input.value,
-            "count": count
-        }));
+        return Ok(ExtractOutput {
+            values: input.value,
+            count,
+        });
     }
 
     let values: Vec<Value> = input
@@ -365,20 +657,30 @@ fn invoke_extract(input_json: &str) -> Result<String, ErrorInfo> {
         .map(|item| get_property_value(item, &input.property_path))
         .collect();
     let count = values.len();
-    to_json(serde_json::json!({ "values": values, "count": count }))
+    Ok(ExtractOutput { values, count })
 }
 
-fn invoke_get_value_by_path(input_json: &str) -> Result<String, ErrorInfo> {
-    let input: GetValueByPathInput = serde_json::from_str(input_json).map_err(bad_input)?;
+/// Gets a value from an object by property path
+#[capability(
+    module = "transform",
+    display_name = "Get Value By Path",
+    description = "Get a value from an object using a JSONPath-like property path"
+)]
+pub fn get_value_by_path(input: GetValueByPathInput) -> Result<Value, String> {
     let result = match (input.value, input.property_path) {
         (Some(value), Some(path)) if !path.is_empty() => get_property_value(&value, &path),
         _ => Value::Null,
     };
-    to_json(result)
+    Ok(result)
 }
 
-fn invoke_set_value_by_path(input_json: &str) -> Result<String, ErrorInfo> {
-    let input: SetValueByPathInput = serde_json::from_str(input_json).map_err(bad_input)?;
+/// Sets a value in an object at the specified property path
+#[capability(
+    module = "transform",
+    display_name = "Set Value By Path",
+    description = "Set a value in an object at a specified JSONPath-like property path"
+)]
+pub fn set_value_by_path(input: SetValueByPathInput) -> Result<Value, String> {
     let result = match (input.target, input.property_path, input.value) {
         (Some(target), Some(path), value) if !path.is_empty() => {
             set_property_value(target, &path, value.unwrap_or(Value::Null))
@@ -386,18 +688,23 @@ fn invoke_set_value_by_path(input_json: &str) -> Result<String, ErrorInfo> {
         (Some(target), _, _) => target,
         _ => Value::Null,
     };
-    to_json(result)
+    Ok(result)
 }
 
-fn invoke_filter_non_values(input_json: &str) -> Result<String, ErrorInfo> {
-    let input: FilterNoValueInput = serde_json::from_str(input_json).map_err(bad_input)?;
+/// Filters an array removing elements with no values based on criteria
+#[capability(
+    module = "transform",
+    display_name = "Filter Non-Values",
+    description = "Filter an array removing elements with null, empty, blank, or zero values"
+)]
+pub fn filter_non_values(input: FilterNoValueInput) -> Result<FilterOutput, String> {
     let original_count = input.value.len();
     if input.value.is_empty() {
-        return to_json(serde_json::json!({
-            "items": [],
-            "count": 0,
-            "removed_count": 0
-        }));
+        return Ok(FilterOutput {
+            items: input.value,
+            count: 0,
+            removed_count: 0,
+        });
     }
 
     let items: Vec<Value> = input
@@ -414,142 +721,167 @@ fn invoke_filter_non_values(input_json: &str) -> Result<String, ErrorInfo> {
                 return false;
             }
 
-            if input.filter_empty_strings {
-                if let Some(s) = property_value.as_str() {
-                    if s.is_empty() {
-                        return false;
-                    }
-                }
+            if input.filter_empty_strings
+                && let Some(s) = property_value.as_str()
+                && s.is_empty()
+            {
+                return false;
             }
 
-            if input.filter_blank_strings {
-                if let Some(s) = property_value.as_str() {
-                    if s.trim().is_empty() {
-                        return false;
-                    }
-                }
+            if input.filter_blank_strings
+                && let Some(s) = property_value.as_str()
+                && s.trim().is_empty()
+            {
+                return false;
             }
 
             if input.filter_zero_values {
-                if let Some(n) = property_value.as_f64() {
-                    if n == 0.0 {
-                        return false;
-                    }
+                if let Some(n) = property_value.as_f64()
+                    && n == 0.0
+                {
+                    return false;
                 }
-                if let Some(s) = property_value.as_str() {
-                    if s == "0" {
-                        return false;
-                    }
+                if let Some(s) = property_value.as_str()
+                    && s == "0"
+                {
+                    return false;
                 }
             }
 
             true
         })
         .collect();
-
     let count = items.len();
-    to_json(serde_json::json!({
-        "items": items,
-        "count": count,
-        "removed_count": original_count - count
-    }))
+    Ok(FilterOutput {
+        items,
+        count,
+        removed_count: original_count - count,
+    })
 }
 
-fn invoke_select_first(input_json: &str) -> Result<String, ErrorInfo> {
-    let input: SelectFirstInput = serde_json::from_str(input_json).map_err(bad_input)?;
+/// Returns the first truthy value from an array
+#[capability(
+    module = "transform",
+    display_name = "Select First",
+    description = "Select the first truthy value from an array (skips null, empty, zero, false)"
+)]
+pub fn select_first(input: SelectFirstInput) -> Result<Value, String> {
     let Some(values) = input.value else {
-        return to_json(Value::Null);
+        return Ok(Value::Null);
     };
 
     if values.is_empty() {
-        return to_json(Value::Null);
+        return Ok(Value::Null);
     }
 
     for item in values {
         if item.is_null() {
             continue;
         }
-        if let Some(s) = item.as_str() {
-            if s.is_empty() || s.trim().is_empty() {
-                continue;
-            }
+
+        if let Some(s) = item.as_str()
+            && (s.is_empty() || s.trim().is_empty())
+        {
+            continue;
         }
-        if let Some(n) = item.as_f64() {
-            if n == 0.0 {
-                continue;
-            }
+
+        if let Some(n) = item.as_f64()
+            && n == 0.0
+        {
+            continue;
         }
-        if let Some(b) = item.as_bool() {
-            if !b {
-                continue;
-            }
+
+        if let Some(b) = item.as_bool()
+            && !b
+        {
+            continue;
         }
-        return to_json(item);
+
+        return Ok(item);
     }
 
-    to_json(Value::Null)
+    Ok(Value::Null)
 }
 
-fn invoke_coalesce(input_json: &str) -> Result<String, ErrorInfo> {
-    let input: CoalesceInput = serde_json::from_str(input_json).map_err(bad_input)?;
+/// Returns the first non-null value from an array
+#[capability(
+    module = "transform",
+    display_name = "Coalesce",
+    description = "Return the first non-null value from an array of values"
+)]
+pub fn coalesce(input: CoalesceInput) -> Result<Value, String> {
     for value in input.values {
         if value.is_null() {
             continue;
         }
+
         if input.treat_empty_string_as_null && value.as_str().is_some_and(|s| s.is_empty()) {
             continue;
         }
+
         if input.treat_zero_as_null && value.as_f64().is_some_and(|n| n == 0.0) {
             continue;
         }
-        return to_json(value);
+
+        return Ok(value);
     }
-    to_json(Value::Null)
+
+    Ok(Value::Null)
 }
 
-fn invoke_from_json_string(input_json: &str) -> Result<String, ErrorInfo> {
-    let input: FromJsonStringInput = serde_json::from_str(input_json).map_err(bad_input)?;
+/// Parses a JSON string into a Value
+#[capability(
+    module = "transform",
+    display_name = "From JSON String",
+    description = "Parse a JSON string into a structured value",
+    errors(permanent("TRANSFORM_JSON_PARSE_ERROR", "Failed to parse JSON string"),)
+)]
+pub fn from_json_string(input: FromJsonStringInput) -> Result<Value, AgentError> {
     match input.value {
-        Some(json_str) if !json_str.is_empty() => {
-            let parsed: Value = serde_json::from_str(&json_str).map_err(|e| ErrorInfo {
-                code: "TRANSFORM_JSON_PARSE_ERROR".into(),
-                message: format!("Failed to parse JSON: {}", e),
-                category: "permanent".into(),
-                severity: "error".into(),
-                retryable: false,
-                retry_after_ms: None,
-                attributes: None,
-            })?;
-            to_json(parsed)
-        }
-        _ => to_json(Value::Null),
+        Some(json_str) if !json_str.is_empty() => serde_json::from_str(&json_str).map_err(|e| {
+            AgentError::permanent(
+                "TRANSFORM_JSON_PARSE_ERROR",
+                format!("Failed to parse JSON: {}", e),
+            )
+            .with_attr("parse_error", e.to_string())
+        }),
+        _ => Ok(Value::Null),
     }
 }
 
-fn invoke_to_json_string(input_json: &str) -> Result<String, ErrorInfo> {
-    let input: ToJsonStringInput = serde_json::from_str(input_json).map_err(bad_input)?;
-    let json = serde_json::to_string(&input.value).map_err(|e| ErrorInfo {
-        code: "TRANSFORM_JSON_SERIALIZE_ERROR".into(),
-        message: format!("Failed to serialize JSON: {}", e),
-        category: "permanent".into(),
-        severity: "error".into(),
-        retryable: false,
-        retry_after_ms: None,
-        attributes: None,
+/// Converts a Value to a JSON string
+#[capability(
+    module = "transform",
+    display_name = "To JSON String",
+    description = "Convert a value to a JSON string",
+    errors(permanent("TRANSFORM_JSON_SERIALIZE_ERROR", "Failed to serialize value to JSON"),)
+)]
+pub fn to_json_string(input: ToJsonStringInput) -> Result<ToJsonStringOutput, AgentError> {
+    let json = serde_json::to_string(&input.value).map_err(|e| {
+        AgentError::permanent(
+            "TRANSFORM_JSON_SERIALIZE_ERROR",
+            format!("Failed to serialize JSON: {}", e),
+        )
+        .with_attr("serialize_error", e.to_string())
     })?;
     let length = json.len();
-    to_json(serde_json::json!({ "json": json, "length": length }))
+    Ok(ToJsonStringOutput { json, length })
 }
 
-fn invoke_filter(input_json: &str) -> Result<String, ErrorInfo> {
-    let input: FilterInput = serde_json::from_str(input_json).map_err(bad_input)?;
+/// Filters an array based on property values matching filter criteria
+#[capability(
+    module = "transform",
+    display_name = "Filter Array",
+    description = "Filter an array based on property values matching or excluding specified values"
+)]
+pub fn filter(input: FilterInput) -> Result<FilterOutput, String> {
     let original_count = input.value.len();
     if input.value.is_empty() {
-        return to_json(serde_json::json!({
-            "items": [],
-            "count": 0,
-            "removed_count": 0
-        }));
+        return Ok(FilterOutput {
+            items: input.value,
+            count: 0,
+            removed_count: 0,
+        });
     }
 
     let match_values_list: Vec<Value> = match input.match_values {
@@ -594,42 +926,62 @@ fn invoke_filter(input_json: &str) -> Result<String, ErrorInfo> {
         .collect();
 
     let count = filtered.len();
-    to_json(serde_json::json!({
-        "items": filtered,
-        "count": count,
-        "removed_count": original_count - count
-    }))
+    Ok(FilterOutput {
+        items: filtered,
+        count,
+        removed_count: original_count - count,
+    })
 }
 
-fn invoke_sort(input_json: &str) -> Result<String, ErrorInfo> {
-    let input: SortInput = serde_json::from_str(input_json).map_err(bad_input)?;
+/// Sorts an array based on a property path
+#[capability(
+    module = "transform",
+    display_name = "Sort Array",
+    description = "Sort an array of items, optionally by a property path"
+)]
+pub fn sort(input: SortInput) -> Result<SortOutput, String> {
     if input.value.is_empty() {
-        return to_json(serde_json::json!({ "items": [], "count": 0 }));
+        return Ok(SortOutput {
+            items: input.value,
+            count: 0,
+        });
     }
 
     let mut sorted_list = input.value;
+
     sorted_list.sort_by(|a, b| {
         let value1 = if let Some(ref path) = input.property_path {
             get_property_value(a, path)
         } else {
             a.clone()
         };
+
         let value2 = if let Some(ref path) = input.property_path {
             get_property_value(b, path)
         } else {
             b.clone()
         };
+
         let cmp = compare_values(&value1, &value2);
+
         if input.ascending { cmp } else { cmp.reverse() }
     });
 
     let count = sorted_list.len();
-    to_json(serde_json::json!({ "items": sorted_list, "count": count }))
+    Ok(SortOutput {
+        items: sorted_list,
+        count,
+    })
 }
 
-fn invoke_map_fields(input_json: &str) -> Result<String, ErrorInfo> {
-    let input: MapFieldsInput = serde_json::from_str(input_json).map_err(bad_input)?;
-    let mut result: HashMap<String, Value> = HashMap::new();
+/// Maps fields from source object to target object based on mappings
+#[capability(
+    module = "transform",
+    display_name = "Map Fields",
+    description = "Map fields from a source object to a target object using field path mappings"
+)]
+pub fn map_fields(input: MapFieldsInput) -> Result<MapFieldsOutput, String> {
+    let mut result = HashMap::new();
 
     for (source_field, target_field) in input.mappings {
         let value = get_property_value(&input.source_data, &source_field);
@@ -639,24 +991,34 @@ fn invoke_map_fields(input_json: &str) -> Result<String, ErrorInfo> {
     }
 
     let field_count = result.len();
-    to_json(serde_json::json!({ "result": result, "field_count": field_count }))
+    Ok(MapFieldsOutput {
+        result,
+        field_count,
+    })
 }
 
-fn invoke_group_by(input_json: &str) -> Result<String, ErrorInfo> {
-    let input: GroupByInput = serde_json::from_str(input_json).map_err(bad_input)?;
-
+/// Groups an array of items by a specified key (JSONPath)
+#[capability(
+    module = "transform",
+    display_name = "Group By",
+    description = "Group array items by a property key, returning either a map or array of groups",
+    errors(
+        permanent("TRANSFORM_INVALID_INPUT", "Expected array or collection input"),
+        permanent(
+            "TRANSFORM_KEY_SERIALIZE_ERROR",
+            "Failed to serialize group key to string"
+        ),
+    )
+)]
+pub fn group_by(input: GroupByInput) -> Result<GroupByOutput, AgentError> {
     let collection = match &input.value {
         Value::Array(arr) => arr,
         Value::Null => {
-            return Err(ErrorInfo {
-                code: "TRANSFORM_INVALID_INPUT".into(),
-                message: "Unsupported value. Expected array or collection.".into(),
-                category: "permanent".into(),
-                severity: "error".into(),
-                retryable: false,
-                retry_after_ms: None,
-                attributes: Some(r#"{"received_type":"null"}"#.into()),
-            });
+            return Err(AgentError::permanent(
+                "TRANSFORM_INVALID_INPUT",
+                "Unsupported value. Expected array or collection.",
+            )
+            .with_attr("received_type", "null"));
         }
         other => {
             let type_name = match other {
@@ -666,25 +1028,23 @@ fn invoke_group_by(input_json: &str) -> Result<String, ErrorInfo> {
                 Value::Bool(_) => "boolean",
                 _ => "unknown",
             };
-            return Err(ErrorInfo {
-                code: "TRANSFORM_INVALID_INPUT".into(),
-                message: "Unsupported value. Expected array or collection.".into(),
-                category: "permanent".into(),
-                severity: "error".into(),
-                retryable: false,
-                retry_after_ms: None,
-                attributes: Some(format!(r#"{{"received_type":"{type_name}"}}"#)),
-            });
+            return Err(AgentError::permanent(
+                "TRANSFORM_INVALID_INPUT",
+                "Unsupported value. Expected array or collection.",
+            )
+            .with_attr("received_type", type_name));
         }
     };
 
     if collection.is_empty() {
-        let groups = if input.as_map {
-            Value::Object(serde_json::Map::new())
-        } else {
-            Value::Array(vec![])
-        };
-        return to_json(serde_json::json!({ "groups": groups, "group_count": 0 }));
+        return Ok(GroupByOutput {
+            groups: if input.as_map {
+                Value::Object(serde_json::Map::new())
+            } else {
+                Value::Array(vec![])
+            },
+            group_count: 0,
+        });
     }
 
     let json_path = if input.key.starts_with("$.") {
@@ -697,56 +1057,74 @@ fn invoke_group_by(input_json: &str) -> Result<String, ErrorInfo> {
 
     for item in collection {
         let key_value = get_property_value(item, &json_path);
+
         if key_value.is_null() {
             continue;
         }
+
         let key_str = match &key_value {
             Value::String(s) => s.clone(),
             Value::Number(n) => n.to_string(),
             Value::Bool(b) => b.to_string(),
-            _ => serde_json::to_string(&key_value).map_err(|e| ErrorInfo {
-                code: "TRANSFORM_KEY_SERIALIZE_ERROR".into(),
-                message: format!("Failed to serialize group key to string: {}", e),
-                category: "permanent".into(),
-                severity: "error".into(),
-                retryable: false,
-                retry_after_ms: None,
-                attributes: None,
+            _ => serde_json::to_string(&key_value).map_err(|e| {
+                AgentError::permanent(
+                    "TRANSFORM_KEY_SERIALIZE_ERROR",
+                    format!("Failed to serialize group key to string: {}", e),
+                )
             })?,
         };
+
         grouped.entry(key_str).or_default().push(item.clone());
     }
 
     let group_count = grouped.len();
-    let groups = if input.as_map {
+    if input.as_map {
         let mut map = serde_json::Map::new();
         for (key, values) in grouped {
             map.insert(key, Value::Array(values));
         }
-        Value::Object(map)
+        Ok(GroupByOutput {
+            groups: Value::Object(map),
+            group_count,
+        })
     } else {
         let arrays: Vec<Value> = grouped.into_values().map(Value::Array).collect();
-        Value::Array(arrays)
-    };
-
-    to_json(serde_json::json!({ "groups": groups, "group_count": group_count }))
+        Ok(GroupByOutput {
+            groups: Value::Array(arrays),
+            group_count,
+        })
+    }
 }
 
-fn invoke_append(input_json: &str) -> Result<String, ErrorInfo> {
-    let input: AppendInput = serde_json::from_str(input_json).map_err(bad_input)?;
+/// Appends an item to an array
+#[capability(
+    module = "transform",
+    display_name = "Append",
+    description = "Append an item to the end of an array"
+)]
+pub fn append(input: AppendInput) -> Result<AppendOutput, String> {
     let mut array = input.array;
     array.push(input.item);
     let length = array.len();
-    to_json(serde_json::json!({ "array": array, "length": length }))
+    Ok(AppendOutput { array, length })
 }
 
-fn invoke_flat_map(input_json: &str) -> Result<String, ErrorInfo> {
-    let input: FlatMapInput = serde_json::from_str(input_json).map_err(bad_input)?;
+/// Extracts nested arrays from each item and flattens them into a single array
+#[capability(
+    module = "transform",
+    display_name = "Flat Map",
+    description = "Extract nested arrays from each item by property path and flatten into a single array"
+)]
+pub fn flat_map(input: FlatMapInput) -> Result<FlatMapOutput, String> {
     if input.value.is_empty() || input.property_path.is_empty() {
-        return to_json(serde_json::json!({ "items": [], "count": 0 }));
+        return Ok(FlatMapOutput {
+            items: vec![],
+            count: 0,
+        });
     }
 
     let mut items = Vec::new();
+
     for item in input.value {
         let nested = get_property_value(&item, &input.property_path);
         if let Some(arr) = nested.as_array() {
@@ -755,11 +1133,16 @@ fn invoke_flat_map(input_json: &str) -> Result<String, ErrorInfo> {
     }
 
     let count = items.len();
-    to_json(serde_json::json!({ "items": items, "count": count }))
+    Ok(FlatMapOutput { items, count })
 }
 
-fn invoke_array_length(input_json: &str) -> Result<String, ErrorInfo> {
-    let input: ArrayLengthInput = serde_json::from_str(input_json).map_err(bad_input)?;
+/// Gets the length/size of an array, string, or object
+#[capability(
+    module = "transform",
+    display_name = "Array Length",
+    description = "Get the length of an array, string, or number of keys in an object"
+)]
+pub fn array_length(input: ArrayLengthInput) -> Result<ArrayLengthOutput, String> {
     let (length, is_array) = match &input.value {
         Value::Array(arr) => (arr.len(), true),
         Value::String(s) => (s.len(), false),
@@ -767,23 +1150,34 @@ fn invoke_array_length(input_json: &str) -> Result<String, ErrorInfo> {
         Value::Null => (0, false),
         _ => (0, false),
     };
-    to_json(serde_json::json!({ "length": length, "is_array": is_array }))
+
+    Ok(ArrayLengthOutput { length, is_array })
 }
 
-fn invoke_ensure_array(input_json: &str) -> Result<String, ErrorInfo> {
-    let input: EnsureArrayInput = serde_json::from_str(input_json).map_err(bad_input)?;
+/// Ensures a value is an array, wrapping non-array values in a single-element array
+#[capability(
+    module = "transform",
+    display_name = "Ensure Array",
+    description = "Ensure a value is an array. Arrays pass through unchanged, null becomes empty array, other values are wrapped in a single-element array."
+)]
+pub fn ensure_array(input: EnsureArrayInput) -> Result<EnsureArrayOutput, String> {
     let (items, was_array) = match input.value {
         Value::Array(arr) => (arr, true),
         Value::Null => (vec![], false),
         other => (vec![other], false),
     };
+
     let count = items.len();
-    to_json(serde_json::json!({ "items": items, "count": count, "was_array": was_array }))
+    Ok(EnsureArrayOutput {
+        items,
+        count,
+        was_array,
+    })
 }
 
-// =============================================================================
+// -----------------------------------------------------------------------------
 // Helper functions (mirror runtara-agents/src/agents/transform.rs)
-// =============================================================================
+// -----------------------------------------------------------------------------
 
 fn get_property_value(obj: &Value, property_path: &str) -> Value {
     if property_path.is_empty() {
@@ -828,8 +1222,9 @@ fn set_property_value(obj: Value, property_path: &str, value: Value) -> Value {
             map.insert(parts[0].to_string(), value);
             return Value::Object(map);
         } else {
-            set_nested_value(&mut map, &parts, value);
-            return Value::Object(map);
+            let mut current_map = map.clone();
+            set_nested_value(&mut current_map, &parts, value);
+            return Value::Object(current_map);
         }
     }
 
@@ -862,6 +1257,7 @@ fn matches_filter_values(property_value: &Value, filter_values: &[Value]) -> boo
     if property_value.is_null() {
         return false;
     }
+
     if let Some(arr) = property_value.as_array() {
         for element in arr {
             if filter_values.contains(element) {
@@ -870,6 +1266,7 @@ fn matches_filter_values(property_value: &Value, filter_values: &[Value]) -> boo
         }
         return false;
     }
+
     filter_values.contains(property_value)
 }
 
@@ -901,34 +1298,172 @@ fn compare_values(a: &Value, b: &Value) -> std::cmp::Ordering {
         (Value::Null, Value::Null) => Ordering::Equal,
         (Value::Null, _) => Ordering::Greater,
         (_, Value::Null) => Ordering::Less,
+
         (Value::Number(n1), Value::Number(n2)) => {
             let f1 = n1.as_f64().unwrap_or(0.0);
             let f2 = n2.as_f64().unwrap_or(0.0);
             f1.partial_cmp(&f2).unwrap_or(Ordering::Equal)
         }
+
         (Value::String(s1), Value::String(s2)) => s1.cmp(s2),
+
         (Value::Bool(b1), Value::Bool(b2)) => b1.cmp(b2),
+
         _ => a.to_string().cmp(&b.to_string()),
     }
 }
 
-// =============================================================================
-// Serialization helpers
-// =============================================================================
+// -----------------------------------------------------------------------------
+// AgentInfo assembler (host-only; the wasm binary doesn't need it)
+// -----------------------------------------------------------------------------
 
-fn to_json<T: serde::Serialize>(v: T) -> Result<String, ErrorInfo> {
-    serde_json::to_string(&v).map_err(|e| ErrorInfo {
-        code: "SERIALIZATION_ERROR".into(),
-        message: e.to_string(),
-        category: "permanent".into(),
-        severity: "error".into(),
-        retryable: false,
-        retry_after_ms: None,
-        attributes: None,
-    })
+/// Build the canonical `AgentInfo` for this agent by walking the macro-emitted
+/// `&'static` statics. The workspace `runtara-agent-bundle-emit` binary calls
+/// this on the host architecture and writes the JSON to disk; the wasm binary
+/// itself never executes this code, so we cfg-gate it out to keep the
+/// component small.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn agent_info() -> runtara_dsl::agent_meta::AgentInfo {
+    use runtara_dsl::agent_meta::{
+        AgentInfo, CapabilityMeta, InputTypeMeta, OutputTypeMeta, capability_to_api,
+    };
+    use std::collections::HashMap;
+
+    let caps: &[&'static CapabilityMeta] = &[
+        &__CAPABILITY_META_EXTRACT,
+        &__CAPABILITY_META_GET_VALUE_BY_PATH,
+        &__CAPABILITY_META_SET_VALUE_BY_PATH,
+        &__CAPABILITY_META_FILTER_NON_VALUES,
+        &__CAPABILITY_META_SELECT_FIRST,
+        &__CAPABILITY_META_COALESCE,
+        &__CAPABILITY_META_FROM_JSON_STRING,
+        &__CAPABILITY_META_TO_JSON_STRING,
+        &__CAPABILITY_META_FILTER,
+        &__CAPABILITY_META_SORT,
+        &__CAPABILITY_META_MAP_FIELDS,
+        &__CAPABILITY_META_GROUP_BY,
+        &__CAPABILITY_META_APPEND,
+        &__CAPABILITY_META_FLAT_MAP,
+        &__CAPABILITY_META_ARRAY_LENGTH,
+        &__CAPABILITY_META_ENSURE_ARRAY,
+    ];
+    let input_types: HashMap<&'static str, &'static InputTypeMeta> = [
+        ("ExtractInput", &__INPUT_META_ExtractInput as &InputTypeMeta),
+        ("GetValueByPathInput", &__INPUT_META_GetValueByPathInput),
+        ("SetValueByPathInput", &__INPUT_META_SetValueByPathInput),
+        ("FilterNoValueInput", &__INPUT_META_FilterNoValueInput),
+        ("SelectFirstInput", &__INPUT_META_SelectFirstInput),
+        ("CoalesceInput", &__INPUT_META_CoalesceInput),
+        ("FromJsonStringInput", &__INPUT_META_FromJsonStringInput),
+        ("ToJsonStringInput", &__INPUT_META_ToJsonStringInput),
+        ("FilterInput", &__INPUT_META_FilterInput),
+        ("SortInput", &__INPUT_META_SortInput),
+        ("MapFieldsInput", &__INPUT_META_MapFieldsInput),
+        ("GroupByInput", &__INPUT_META_GroupByInput),
+        ("AppendInput", &__INPUT_META_AppendInput),
+        ("FlatMapInput", &__INPUT_META_FlatMapInput),
+        ("ArrayLengthInput", &__INPUT_META_ArrayLengthInput),
+        ("EnsureArrayInput", &__INPUT_META_EnsureArrayInput),
+    ]
+    .into_iter()
+    .collect();
+    let output_types: HashMap<&'static str, &'static OutputTypeMeta> = [
+        (
+            "ExtractOutput",
+            &__OUTPUT_META_ExtractOutput as &OutputTypeMeta,
+        ),
+        ("FilterOutput", &__OUTPUT_META_FilterOutput),
+        ("SortOutput", &__OUTPUT_META_SortOutput),
+        ("GroupByOutput", &__OUTPUT_META_GroupByOutput),
+        ("MapFieldsOutput", &__OUTPUT_META_MapFieldsOutput),
+        ("AppendOutput", &__OUTPUT_META_AppendOutput),
+        ("FlatMapOutput", &__OUTPUT_META_FlatMapOutput),
+        ("ArrayLengthOutput", &__OUTPUT_META_ArrayLengthOutput),
+        ("ToJsonStringOutput", &__OUTPUT_META_ToJsonStringOutput),
+        ("EnsureArrayOutput", &__OUTPUT_META_EnsureArrayOutput),
+    ]
+    .into_iter()
+    .collect();
+
+    let capabilities = caps
+        .iter()
+        .map(|cap| {
+            capability_to_api(
+                cap,
+                input_types.get(cap.input_type).copied(),
+                output_types.get(cap.output_type).copied(),
+            )
+        })
+        .collect();
+
+    AgentInfo {
+        id: "transform".into(),
+        name: "Transform".into(),
+        description:
+            "Transform capabilities for data manipulation, filtering, sorting, and JSON operations"
+                .into(),
+        has_side_effects: false,
+        supports_connections: false,
+        integration_ids: vec![],
+        capabilities,
+    }
 }
 
-fn bad_input(e: serde_json::Error) -> ErrorInfo {
+// -----------------------------------------------------------------------------
+// Wasm component plumbing
+// -----------------------------------------------------------------------------
+
+#[cfg(target_arch = "wasm32")]
+use bindings::exports::runtara::agent::capabilities::{ConnectionInfo, ErrorInfo, Guest};
+
+#[cfg(target_arch = "wasm32")]
+struct Component;
+
+#[cfg(target_arch = "wasm32")]
+impl Guest for Component {
+    fn invoke(
+        capability_id: String,
+        input: Vec<u8>,
+        _connection: Option<ConnectionInfo>,
+    ) -> Result<Vec<u8>, ErrorInfo> {
+        let value: serde_json::Value = serde_json::from_slice(&input).map_err(bad_json)?;
+        let executor_result = match capability_id.as_str() {
+            "extract" => __executor_extract(value),
+            "get-value-by-path" => __executor_get_value_by_path(value),
+            "set-value-by-path" => __executor_set_value_by_path(value),
+            "filter-non-values" => __executor_filter_non_values(value),
+            "select-first" => __executor_select_first(value),
+            "coalesce" => __executor_coalesce(value),
+            "from-json-string" => __executor_from_json_string(value),
+            "to-json-string" => __executor_to_json_string(value),
+            "filter" => __executor_filter(value),
+            "sort" => __executor_sort(value),
+            "map-fields" => __executor_map_fields(value),
+            "group-by" => __executor_group_by(value),
+            "append" => __executor_append(value),
+            "flat-map" => __executor_flat_map(value),
+            "array-length" => __executor_array_length(value),
+            "ensure-array" => __executor_ensure_array(value),
+            other => {
+                return Err(ErrorInfo {
+                    code: "UNKNOWN_CAPABILITY".into(),
+                    message: format!("transform agent has no capability `{other}`"),
+                    category: "permanent".into(),
+                    severity: "error".into(),
+                    retryable: false,
+                    retry_after_ms: None,
+                    attributes: None,
+                });
+            }
+        };
+        executor_result
+            .map_err(error_string_to_error_info)
+            .and_then(|out_value| serde_json::to_vec(&out_value).map_err(bad_json))
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn bad_json(e: serde_json::Error) -> ErrorInfo {
     ErrorInfo {
         code: "INPUT_DESERIALIZATION_ERROR".into(),
         message: e.to_string(),
@@ -940,269 +1475,52 @@ fn bad_input(e: serde_json::Error) -> ErrorInfo {
     }
 }
 
-fn cap(
-    id: &str,
-    display_name: &str,
-    description: &str,
-    input_schema: &str,
-    output_schema: &str,
-) -> CapabilityInfo {
-    CapabilityInfo {
-        id: id.into(),
-        function_name: id.into(),
-        display_name: Some(display_name.into()),
-        description: Some(description.into()),
-        has_side_effects: false,
-        is_idempotent: true,
-        rate_limited: false,
-        tags: vec!["transform".into()],
-        input_schema: input_schema.into(),
-        output_schema: output_schema.into(),
-        known_errors: vec![],
-        compensation_hint: None,
+/// The `#[capability]` macro packages each error as a JSON-string with
+/// `{ code, message, category, severity }`. Parse it back into a typed
+/// `ErrorInfo` for the WIT result.
+#[cfg(target_arch = "wasm32")]
+fn error_string_to_error_info(s: String) -> ErrorInfo {
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(&s) {
+        ErrorInfo {
+            code: value
+                .get("code")
+                .and_then(|v| v.as_str())
+                .unwrap_or("CAPABILITY_ERROR")
+                .into(),
+            message: value
+                .get("message")
+                .and_then(|v| v.as_str())
+                .unwrap_or(&s)
+                .into(),
+            category: value
+                .get("category")
+                .and_then(|v| v.as_str())
+                .unwrap_or("permanent")
+                .into(),
+            severity: value
+                .get("severity")
+                .and_then(|v| v.as_str())
+                .unwrap_or("error")
+                .into(),
+            retryable: value
+                .get("retryable")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
+            retry_after_ms: value.get("retry_after_ms").and_then(|v| v.as_u64()),
+            attributes: value.get("attributes").map(|v| v.to_string()),
+        }
+    } else {
+        ErrorInfo {
+            code: "CAPABILITY_ERROR".into(),
+            message: s,
+            category: "permanent".into(),
+            severity: "error".into(),
+            retryable: false,
+            retry_after_ms: None,
+            attributes: None,
+        }
     }
 }
 
-// =============================================================================
-// JSON Schemas published via list-capabilities()
-// =============================================================================
-
-const EXTRACT_INPUT_SCHEMA: &str = r#"{
-    "type": "object",
-    "required": ["value", "property_path"],
-    "properties": {
-        "value": {
-            "type": "array",
-            "description": "The array of objects to extract property values from"
-        },
-        "property_path": {
-            "type": "string",
-            "description": "The property path to extract from each item (JSONPath syntax)"
-        }
-    }
-}"#;
-
-const EXTRACT_OUTPUT_SCHEMA: &str = r#"{
-    "type": "object",
-    "properties": {
-        "values": { "type": "array", "description": "Array of extracted property values" },
-        "count":  { "type": "integer", "description": "Number of values extracted" }
-    }
-}"#;
-
-const GET_VALUE_BY_PATH_INPUT_SCHEMA: &str = r#"{
-    "type": "object",
-    "properties": {
-        "value":         { "description": "The object to extract a property value from" },
-        "property_path": { "type": "string", "description": "The property path to extract (JSONPath syntax)" }
-    }
-}"#;
-
-const SET_VALUE_BY_PATH_INPUT_SCHEMA: &str = r#"{
-    "type": "object",
-    "properties": {
-        "target":        { "description": "The object to set a property value in" },
-        "property_path": { "type": "string", "description": "The property path to set (JSONPath syntax)" },
-        "value":         { "description": "The value to set at the property path" }
-    }
-}"#;
-
-const VALUE_OUTPUT_SCHEMA: &str = r#"{ "description": "A JSON value (any type)" }"#;
-
-const FILTER_NON_VALUES_INPUT_SCHEMA: &str = r#"{
-    "type": "object",
-    "required": ["value"],
-    "properties": {
-        "value":               { "type": "array", "description": "The array of items to filter" },
-        "property_path":       { "type": "string", "description": "The property path to check in each item" },
-        "filter_empty_strings":{ "type": "boolean", "default": false },
-        "filter_null_values":  { "type": "boolean", "default": false },
-        "filter_blank_strings":{ "type": "boolean", "default": false },
-        "filter_zero_values":  { "type": "boolean", "default": false }
-    }
-}"#;
-
-const FILTER_OUTPUT_SCHEMA: &str = r#"{
-    "type": "object",
-    "properties": {
-        "items":        { "type": "array" },
-        "count":        { "type": "integer" },
-        "removed_count":{ "type": "integer" }
-    }
-}"#;
-
-const SELECT_FIRST_INPUT_SCHEMA: &str = r#"{
-    "type": "object",
-    "properties": {
-        "value": { "type": "array", "description": "The array to select the first truthy value from" }
-    }
-}"#;
-
-const COALESCE_INPUT_SCHEMA: &str = r#"{
-    "type": "object",
-    "required": ["values"],
-    "properties": {
-        "values":                  { "type": "array", "description": "Array of values to check" },
-        "treat_empty_string_as_null": { "type": "boolean", "default": false },
-        "treat_zero_as_null":         { "type": "boolean", "default": false }
-    }
-}"#;
-
-const FROM_JSON_STRING_INPUT_SCHEMA: &str = r#"{
-    "type": "object",
-    "properties": {
-        "value": { "type": "string", "description": "The JSON string to parse" }
-    }
-}"#;
-
-const TO_JSON_STRING_INPUT_SCHEMA: &str = r#"{
-    "type": "object",
-    "required": ["value"],
-    "properties": {
-        "value": { "description": "The value to serialize to a JSON string" }
-    }
-}"#;
-
-const TO_JSON_STRING_OUTPUT_SCHEMA: &str = r#"{
-    "type": "object",
-    "properties": {
-        "json":   { "type": "string", "description": "The serialized JSON string" },
-        "length": { "type": "integer" }
-    }
-}"#;
-
-const FILTER_INPUT_SCHEMA: &str = r#"{
-    "type": "object",
-    "required": ["property_path", "match_values", "match_condition"],
-    "properties": {
-        "value":           { "type": "array", "description": "The array of items to filter" },
-        "property_path":   { "type": "string", "description": "Property path to check; use \"$\" or \"\" to filter values directly" },
-        "match_values":    { "description": "Value(s) to compare against (single value or array)" },
-        "match_condition": {
-            "type": "string",
-            "enum": ["INCLUDES", "EXCLUDES", "STARTS_WITH", "ENDS_WITH", "CONTAINS"]
-        }
-    }
-}"#;
-
-const SORT_INPUT_SCHEMA: &str = r#"{
-    "type": "object",
-    "required": ["value"],
-    "properties": {
-        "value":         { "type": "array" },
-        "property_path": { "type": "string", "description": "Property path to sort by (optional)" },
-        "ascending":     { "type": "boolean", "default": true }
-    }
-}"#;
-
-const SORT_OUTPUT_SCHEMA: &str = r#"{
-    "type": "object",
-    "properties": {
-        "items": { "type": "array" },
-        "count": { "type": "integer" }
-    }
-}"#;
-
-const MAP_FIELDS_INPUT_SCHEMA: &str = r#"{
-    "type": "object",
-    "required": ["source_data", "mappings"],
-    "properties": {
-        "source_data": { "type": "object", "description": "The source object containing data to map" },
-        "mappings":    { "type": "object", "description": "Map of source field paths to target field names", "additionalProperties": { "type": "string" } }
-    }
-}"#;
-
-const MAP_FIELDS_OUTPUT_SCHEMA: &str = r#"{
-    "type": "object",
-    "properties": {
-        "result":      { "type": "object" },
-        "field_count": { "type": "integer" }
-    }
-}"#;
-
-const GROUP_BY_INPUT_SCHEMA: &str = r#"{
-    "type": "object",
-    "required": ["value", "key"],
-    "properties": {
-        "value":  { "type": "array", "description": "The array of items to group" },
-        "key":    { "type": "string", "description": "Property path to group by (JSONPath syntax)" },
-        "as_map": { "type": "boolean", "default": false, "description": "Return as map (key -> items) instead of array of arrays" }
-    }
-}"#;
-
-const GROUP_BY_OUTPUT_SCHEMA: &str = r#"{
-    "type": "object",
-    "properties": {
-        "groups":      { "description": "Grouped items — map or array depending on as_map" },
-        "group_count": { "type": "integer" }
-    }
-}"#;
-
-const APPEND_INPUT_SCHEMA: &str = r#"{
-    "type": "object",
-    "required": ["array", "item"],
-    "properties": {
-        "array": { "type": "array", "description": "The array to append to" },
-        "item":  { "description": "The item to append" }
-    }
-}"#;
-
-const APPEND_OUTPUT_SCHEMA: &str = r#"{
-    "type": "object",
-    "properties": {
-        "array":  { "type": "array" },
-        "length": { "type": "integer" }
-    }
-}"#;
-
-const FLAT_MAP_INPUT_SCHEMA: &str = r#"{
-    "type": "object",
-    "required": ["value", "property_path"],
-    "properties": {
-        "value":         { "type": "array", "description": "The array of objects to flat map" },
-        "property_path": { "type": "string", "description": "Property path to the nested array in each item" }
-    }
-}"#;
-
-const FLAT_MAP_OUTPUT_SCHEMA: &str = r#"{
-    "type": "object",
-    "properties": {
-        "items": { "type": "array" },
-        "count": { "type": "integer" }
-    }
-}"#;
-
-const ARRAY_LENGTH_INPUT_SCHEMA: &str = r#"{
-    "type": "object",
-    "required": ["value"],
-    "properties": {
-        "value": { "description": "Array, string, or object to get the length/size of" }
-    }
-}"#;
-
-const ARRAY_LENGTH_OUTPUT_SCHEMA: &str = r#"{
-    "type": "object",
-    "properties": {
-        "length":   { "type": "integer" },
-        "is_array": { "type": "boolean" }
-    }
-}"#;
-
-const ENSURE_ARRAY_INPUT_SCHEMA: &str = r#"{
-    "type": "object",
-    "required": ["value"],
-    "properties": {
-        "value": { "description": "Value to wrap in an array if not already an array" }
-    }
-}"#;
-
-const ENSURE_ARRAY_OUTPUT_SCHEMA: &str = r#"{
-    "type": "object",
-    "properties": {
-        "items":     { "type": "array" },
-        "count":     { "type": "integer" },
-        "was_array": { "type": "boolean" }
-    }
-}"#;
-
+#[cfg(target_arch = "wasm32")]
 bindings::export!(Component with_types_in bindings);

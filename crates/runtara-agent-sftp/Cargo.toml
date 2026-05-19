@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "SFTP agent — thin wrapper that proxies to the host's native SFTP handler"
+description = "SFTP agent — WebAssembly Component that forwards each invoke to the host's internal native SFTP handler"
 keywords = ["wasm", "component", "agent", "sftp"]
 categories = ["wasm"]
 
@@ -15,7 +15,20 @@ crate-type = ["cdylib", "rlib"]
 wit-bindgen-rt = { version = "0.44", features = ["bitflags"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
+# `runtara-http` compiles host-side (ureq) and wasm-side (wasi). The wasm build
+# posts each capability call to the host's internal native agent endpoint where
+# the real SFTP work (libssh2 etc.) happens — this component never opens SSH
+# sockets itself.
 runtara-http = { path = "../runtara-http" }
+# Capability metadata stays beside the code: `#[capability_input]`,
+# `#[capability_output]`, `#[capability]` emit `&'static CapabilityMeta` /
+# `&'static InputTypeMeta` / `&'static OutputTypeMeta` items, and the host-only
+# `agent_info()` fn collects them into a `runtara_dsl::agent_meta::AgentInfo`.
+# A workspace `emit-meta` binary then serializes that to `meta.json` next to
+# the `.wasm` — the JSON is a build artifact, never hand-edited.
+runtara-agent-macro = { path = "../runtara-agent-macro" }
+runtara-dsl = { path = "../runtara-dsl", default-features = false }
+strum = { version = "0.26", features = ["derive"] }
 
 [package.metadata.component]
 package = "runtara:agent-sftp"

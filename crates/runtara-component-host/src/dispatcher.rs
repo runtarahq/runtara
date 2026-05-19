@@ -1,18 +1,21 @@
 //! `ComponentDispatcherService` — the host-facing API that
 //! `AgentTestingService` calls into instead of dispatcher-image roundtrips.
 //!
-//! Loads `runtara_agent_*.wasm` components from a directory at construction
-//! time, pre-instantiates each, and exposes per-capability test invocation.
+//! Loads `runtara_agent_*.wasm` + `runtara_agent_*.meta.json` pairs from a
+//! directory at construction time, pre-instantiates each `.wasm`, and serves
+//! the parsed `AgentInfo` directly to the server. The `.wasm` exports only
+//! `invoke`; all metadata travels through the sidecar JSON.
 
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
+use runtara_dsl::agent_meta::AgentInfo;
 use serde::{Deserialize, Serialize};
 use wasmtime::Engine;
 
-use crate::bindings::exports::runtara::agent::capabilities::{CapabilityInfo, ConnectionInfo};
+use crate::bindings::exports::runtara::agent::capabilities::ConnectionInfo;
 use crate::engine::{EngineConfig, build_engine};
 use crate::host_state::{CallContext, HostState};
 use crate::registry::{LoadedAgent, build_linker, instantiate, load_agent};
@@ -72,22 +75,27 @@ pub struct DispatcherEnv {
 pub struct ComponentDispatcherService {
     engine: Arc<Engine>,
     agents: HashMap<String, Arc<LoadedAgent>>,
-    /// Per-agent capability metadata, cached at load time. Populated by an
-    /// initial `list-capabilities` call against each component.
-    metadata: HashMap<String, Vec<CapabilityInfo>>,
+    /// Per-agent metadata, loaded from each component's sidecar
+    /// `runtara_agent_<id>.meta.json` at construction time.
+    agent_info: HashMap<String, AgentInfo>,
     env: DispatcherEnv,
 }
 
 impl ComponentDispatcherService {
-    /// Build the service from a directory of `runtara_agent_*.wasm` files.
-    /// The filename stem after the `runtara_agent_` prefix becomes the agent
-    /// id (e.g. `runtara_agent_crypto.wasm` → agent id `crypto`).
+    /// Build the service from a directory of `runtara_agent_*.wasm` files,
+    /// each accompanied by a sibling `runtara_agent_*.meta.json`. The filename
+    /// stem after the `runtara_agent_` prefix becomes the agent id (e.g.
+    /// `runtara_agent_crypto.wasm` → agent id `crypto`).
+    ///
+    /// A missing `.meta.json` is a hard error — the `.wasm` is unusable to the
+    /// server without metadata. Mismatched ids (filename stem vs.
+    /// `meta.id`) are also rejected so registration can't silently misroute.
     pub async fn from_dir(component_dir: &Path, env: DispatcherEnv) -> Result<Self> {
         let engine = build_engine(&EngineConfig::default())?;
         let linker = build_linker(&engine)?;
 
         let mut agents = HashMap::new();
-        let mut metadata = HashMap::new();
+        let mut agent_info: HashMap<String, AgentInfo> = HashMap::new();
 
         let entries = std::fs::read_dir(component_dir)
             .with_context(|| format!("read component directory {}", component_dir.display()))?;
@@ -100,16 +108,43 @@ impl ComponentDispatcherService {
             let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
                 continue;
             };
-            let Some(agent_id) = stem.strip_prefix("runtara_agent_") else {
+            let Some(stem_id) = stem.strip_prefix("runtara_agent_") else {
                 continue;
             };
-            let agent_id = agent_id.to_string();
+            // cargo-component drops the .wasm filename in snake_case (it
+            // converts hyphens in the crate name to underscores). The
+            // canonical agent id everywhere else — `meta.json`,
+            // `AgentsService`, workflow DSL refs — is kebab. Convert here so
+            // both halves of the bundle agree on the id format.
+            let agent_id = stem_id.replace('_', "-");
+
+            let meta_path = path.with_extension("meta.json");
+            let meta_bytes = std::fs::read(&meta_path).with_context(|| {
+                format!(
+                    "agent `{agent_id}`: missing sidecar metadata at {}",
+                    meta_path.display()
+                )
+            })?;
+            let info: AgentInfo = serde_json::from_slice(&meta_bytes).with_context(|| {
+                format!(
+                    "agent `{agent_id}`: failed to parse sidecar metadata {}",
+                    meta_path.display()
+                )
+            })?;
+            // Normalize both sides to kebab for the equality check —
+            // cargo-component drops snake_case filenames, but the canonical
+            // id everywhere else is kebab, so an agent crate can sensibly
+            // write either form in its `agent_info().id` literal.
+            if info.id.replace('_', "-") != agent_id {
+                anyhow::bail!(
+                    "agent id mismatch: filename stem is `{agent_id}` but meta.id is `{}`",
+                    info.id
+                );
+            }
 
             let loaded = load_agent(&engine, &linker, &path, &agent_id)?;
 
-            // Capability enumeration: one throwaway store at load time.
-            let caps = enumerate_capabilities(&engine, &loaded).await?;
-            metadata.insert(agent_id.clone(), caps);
+            agent_info.insert(agent_id.clone(), info);
             agents.insert(agent_id, loaded);
         }
 
@@ -121,7 +156,7 @@ impl ComponentDispatcherService {
         Ok(Self {
             engine,
             agents,
-            metadata,
+            agent_info,
             env,
         })
     }
@@ -138,9 +173,9 @@ impl ComponentDispatcherService {
         self.agents.keys().map(String::as_str)
     }
 
-    /// Capability metadata for one agent, populated at load time.
-    pub fn capabilities_of(&self, agent_id: &str) -> Option<&[CapabilityInfo]> {
-        self.metadata.get(agent_id).map(|v| v.as_slice())
+    /// Full metadata for one agent (parsed from its sidecar `meta.json`).
+    pub fn agent_info_of(&self, agent_id: &str) -> Option<&AgentInfo> {
+        self.agent_info.get(agent_id)
     }
 
     /// Execute one capability and return a `TestResult` shaped for the
@@ -161,7 +196,7 @@ impl ComponentDispatcherService {
                 .as_ref()
                 .map(|v| serde_json::to_string(v).unwrap_or_else(|_| "{}".into())),
         });
-        let input_json = serde_json::to_string(&req.input)?;
+        let input_bytes = serde_json::to_vec(&req.input)?;
 
         let ctx = Arc::new(CallContext::for_test(
             &req.tenant_id,
@@ -176,14 +211,14 @@ impl ComponentDispatcherService {
         let started = std::time::Instant::now();
         let result = agent_handle
             .runtara_agent_capabilities()
-            .call_invoke(&mut store, &req.capability_id, &input_json, conn.as_ref())
+            .call_invoke(&mut store, &req.capability_id, &input_bytes, conn.as_ref())
             .await?;
         let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
 
         Ok(match result {
-            Ok(out_json) => TestResult {
+            Ok(out_bytes) => TestResult {
                 success: true,
-                output: serde_json::from_str(&out_json).ok(),
+                output: serde_json::from_slice(&out_bytes).ok(),
                 error: None,
                 execution_time_ms: elapsed_ms,
             },
@@ -201,17 +236,4 @@ impl ComponentDispatcherService {
             },
         })
     }
-}
-
-async fn enumerate_capabilities(
-    engine: &Engine,
-    loaded: &LoadedAgent,
-) -> Result<Vec<CapabilityInfo>> {
-    let state = HostState::new(Arc::new(CallContext::placeholder_for_metadata()));
-    let (mut store, agent) = instantiate(engine, &loaded.pre, state).await?;
-    let caps = agent
-        .runtara_agent_capabilities()
-        .call_list_capabilities(&mut store)
-        .await?;
-    Ok(caps)
 }

@@ -1,7 +1,11 @@
 //! DateTime agent — date/time manipulation — as a WebAssembly component.
 //!
-//! Schema matches the legacy `runtara-agents/src/agents/datetime.rs` agent so
-//! A/B parity tests can compare results byte-for-byte.
+//! Capability metadata travels through `#[capability_input]` / `#[capability]` /
+//! `#[capability_output]` annotations on the same Rust types and functions that
+//! the wasm cdylib's `invoke` dispatcher calls into. The workspace binary
+//! `runtara-agent-bundle-emit` reads these macro-emitted `&'static` statics on
+//! the host architecture and writes `runtara_agent_datetime.meta.json` next to
+//! the `.wasm` — the JSON is a build artifact, never hand-edited.
 //!
 //! Capabilities:
 //! - `get-current-date`      – current UTC date/time with optional timezone
@@ -14,153 +18,28 @@
 //! - `date-to-unix`          – convert date string → Unix timestamp
 //! - `unix-to-date`          – convert Unix timestamp → ISO 8601 string
 
-#![cfg(target_arch = "wasm32")]
-
-#[allow(warnings)]
-mod bindings;
-
-use bindings::exports::runtara::agent::capabilities::{
-    CapabilityInfo, ConnectionInfo, ErrorInfo, Guest, ModuleInfo,
-};
 use chrono::{
     DateTime, Datelike, Duration, FixedOffset, NaiveDateTime, Offset, TimeZone, Timelike, Utc,
 };
 use chrono_tz::Tz;
+use runtara_agent_macro::{CapabilityInput, CapabilityOutput, capability};
+use runtara_dsl::agent_meta::EnumVariants;
+use serde::{Deserialize, Serialize};
+use strum::VariantNames;
+
+#[cfg(target_arch = "wasm32")]
+#[allow(warnings)]
+mod bindings;
 
 // ============================================================================
-// Input/output types — mirror the legacy agent structs
+// Enums (with VariantNames + EnumVariants so the macro can record allowed values)
 // ============================================================================
 
-#[derive(serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct GetCurrentDateInput {
-    #[serde(default = "default_true")]
-    include_time: bool,
-    #[serde(default)]
-    timezone: Option<String>,
-}
-
-impl Default for GetCurrentDateInput {
-    fn default() -> Self {
-        Self {
-            include_time: true,
-            timezone: None,
-        }
-    }
-}
-
-#[derive(serde::Deserialize, Default)]
-struct FormatDateInput {
-    #[serde(default)]
-    date: Option<String>,
-    #[serde(default)]
-    format: DateFormat,
-    #[serde(rename = "customFormat", default)]
-    custom_format: Option<String>,
-    #[serde(default)]
-    timezone: Option<String>,
-}
-
-#[derive(serde::Deserialize, Default)]
-struct AddToDateInput {
-    #[serde(default)]
-    date: Option<String>,
-    #[serde(default)]
-    amount: i64,
-    #[serde(default)]
-    unit: TimeUnit,
-    #[serde(default)]
-    timezone: Option<String>,
-}
-
-#[derive(serde::Deserialize, Default)]
-struct SubtractFromDateInput {
-    #[serde(default)]
-    date: Option<String>,
-    #[serde(default)]
-    amount: i64,
-    #[serde(default)]
-    unit: TimeUnit,
-    #[serde(default)]
-    timezone: Option<String>,
-}
-
-#[derive(serde::Deserialize, Default)]
-#[serde(rename_all = "camelCase")]
-struct GetTimeBetweenInput {
-    #[serde(default)]
-    start_date: Option<String>,
-    #[serde(default)]
-    end_date: Option<String>,
-    #[serde(default)]
-    unit: TimeUnit,
-}
-
-#[derive(serde::Deserialize, Default)]
-struct ExtractDatePartInput {
-    #[serde(default)]
-    date: Option<String>,
-    #[serde(default)]
-    part: DatePart,
-    #[serde(default)]
-    timezone: Option<String>,
-}
-
-#[derive(serde::Deserialize, Default)]
-struct DateToUnixInput {
-    #[serde(default)]
-    date: Option<String>,
-    #[serde(default)]
-    milliseconds: bool,
-}
-
-#[derive(serde::Deserialize, Default)]
-#[serde(rename_all = "camelCase")]
-struct UnixToDateInput {
-    #[serde(default)]
-    timestamp: Option<i64>,
-    #[serde(default)]
-    is_milliseconds: Option<bool>,
-    #[serde(default)]
-    timezone: Option<String>,
-}
-
-#[derive(serde::Deserialize, Default)]
-struct RoundDateInput {
-    #[serde(default)]
-    date: Option<String>,
-    #[serde(default)]
-    unit: TimeUnit,
-    #[serde(default)]
-    mode: RoundMode,
-    #[serde(default)]
-    timezone: Option<String>,
-}
-
-// ---- output structs ----
-
-#[derive(serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-struct TimeBetweenResult {
-    difference: i64,
-    unit: String,
-    exact_ms: i64,
-}
-
-#[derive(serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-struct UnixTimestampResult {
-    timestamp: i64,
-    is_milliseconds: bool,
-}
-
-// ============================================================================
-// Enums
-// ============================================================================
-
-#[derive(serde::Deserialize, Clone, Copy, Default)]
+/// Time unit for date arithmetic and rounding operations
+#[derive(Debug, Default, Deserialize, Clone, Copy, VariantNames)]
 #[serde(rename_all = "kebab-case")]
-enum TimeUnit {
+#[strum(serialize_all = "kebab-case")]
+pub enum TimeUnit {
     Years,
     Months,
     Weeks,
@@ -169,6 +48,12 @@ enum TimeUnit {
     Hours,
     Minutes,
     Seconds,
+}
+
+impl EnumVariants for TimeUnit {
+    fn variant_names() -> &'static [&'static str] {
+        Self::VARIANTS
+    }
 }
 
 impl std::fmt::Display for TimeUnit {
@@ -185,9 +70,11 @@ impl std::fmt::Display for TimeUnit {
     }
 }
 
-#[derive(serde::Deserialize, Clone, Copy, Default)]
+/// Date component to extract
+#[derive(Debug, Default, Deserialize, Clone, Copy, VariantNames)]
 #[serde(rename_all = "kebab-case")]
-enum DatePart {
+#[strum(serialize_all = "kebab-case")]
+pub enum DatePart {
     Year,
     Month,
     Week,
@@ -202,18 +89,34 @@ enum DatePart {
     Quarter,
 }
 
-#[derive(serde::Deserialize, Clone, Copy, Default)]
+impl EnumVariants for DatePart {
+    fn variant_names() -> &'static [&'static str] {
+        Self::VARIANTS
+    }
+}
+
+/// Rounding mode for round-date operation
+#[derive(Debug, Default, Deserialize, Clone, Copy, VariantNames)]
 #[serde(rename_all = "kebab-case")]
-enum RoundMode {
+#[strum(serialize_all = "kebab-case")]
+pub enum RoundMode {
     Floor,
     Ceil,
     #[default]
     Round,
 }
 
-#[derive(serde::Deserialize, Clone, Copy, Default)]
+impl EnumVariants for RoundMode {
+    fn variant_names() -> &'static [&'static str] {
+        Self::VARIANTS
+    }
+}
+
+/// Preset date formats
+#[derive(Debug, Default, Deserialize, Clone, Copy, VariantNames)]
 #[serde(rename_all = "kebab-case")]
-enum DateFormat {
+#[strum(serialize_all = "kebab-case")]
+pub enum DateFormat {
     #[default]
     Iso8601,
     Rfc2822,
@@ -228,40 +131,383 @@ enum DateFormat {
     Custom,
 }
 
+impl EnumVariants for DateFormat {
+    fn variant_names() -> &'static [&'static str] {
+        Self::VARIANTS
+    }
+}
+
 // ============================================================================
-// Helpers
+// Inputs / outputs (with capability macros so meta.json can be derived)
+// ============================================================================
+
+/// Input for getting current date/time
+#[derive(Debug, Deserialize, CapabilityInput)]
+#[capability_input(display_name = "Get Current Date Input")]
+pub struct GetCurrentDateInput {
+    #[field(
+        display_name = "Include Time",
+        description = "Whether to include time in the output (default: true)",
+        example = "true",
+        default = "true"
+    )]
+    #[serde(default = "default_true")]
+    #[serde(rename = "includeTime")]
+    pub include_time: bool,
+
+    #[field(
+        display_name = "Timezone",
+        description = "Timezone (e.g., 'America/New_York', '+05:30', 'UTC'). Default: UTC",
+        example = "America/New_York"
+    )]
+    #[serde(default)]
+    pub timezone: Option<String>,
+}
+
+impl Default for GetCurrentDateInput {
+    fn default() -> Self {
+        Self {
+            include_time: true,
+            timezone: None,
+        }
+    }
+}
+
+/// Input for formatting a date
+#[derive(Debug, Deserialize, Default, CapabilityInput)]
+#[capability_input(display_name = "Format Date Input")]
+pub struct FormatDateInput {
+    #[field(
+        display_name = "Date",
+        description = "Date to format (ISO 8601, Unix timestamp, or common formats)",
+        example = "2024-01-15T14:30:00Z"
+    )]
+    #[serde(default)]
+    pub date: Option<String>,
+
+    #[field(
+        display_name = "Format",
+        description = "Preset format type",
+        example = "iso8601",
+        default = "iso8601",
+        enum_type = "DateFormat"
+    )]
+    #[serde(default)]
+    pub format: DateFormat,
+
+    #[field(
+        display_name = "Custom Format",
+        description = "Custom format using Luxon tokens (yyyy, MM, dd, HH, mm, ss)",
+        example = "yyyy-MM-dd HH:mm:ss"
+    )]
+    #[serde(default)]
+    #[serde(rename = "customFormat")]
+    pub custom_format: Option<String>,
+
+    #[field(
+        display_name = "Timezone",
+        description = "Output timezone (e.g., 'America/New_York', '+05:30'). Default: UTC",
+        example = "Europe/London"
+    )]
+    #[serde(default)]
+    pub timezone: Option<String>,
+}
+
+/// Input for adding duration to a date
+#[derive(Debug, Deserialize, Default, CapabilityInput)]
+#[capability_input(display_name = "Add to Date Input")]
+pub struct AddToDateInput {
+    #[field(
+        display_name = "Date",
+        description = "The date to add to (ISO 8601, Unix timestamp, or common formats)",
+        example = "2024-01-15T14:30:00Z"
+    )]
+    #[serde(default)]
+    pub date: Option<String>,
+
+    #[field(
+        display_name = "Amount",
+        description = "Amount to add (positive) or subtract (negative)",
+        example = "7"
+    )]
+    #[serde(default)]
+    pub amount: i64,
+
+    #[field(
+        display_name = "Unit",
+        description = "Time unit (years, months, weeks, days, hours, minutes, seconds)",
+        example = "days",
+        default = "days",
+        enum_type = "TimeUnit"
+    )]
+    #[serde(default)]
+    pub unit: TimeUnit,
+
+    #[field(
+        display_name = "Timezone",
+        description = "Timezone for the operation. Default: UTC",
+        example = "UTC"
+    )]
+    #[serde(default)]
+    pub timezone: Option<String>,
+}
+
+/// Input for subtracting duration from a date
+#[derive(Debug, Deserialize, Default, CapabilityInput)]
+#[capability_input(display_name = "Subtract from Date Input")]
+pub struct SubtractFromDateInput {
+    #[field(
+        display_name = "Date",
+        description = "The date to subtract from (ISO 8601, Unix timestamp, or common formats)",
+        example = "2024-01-15T14:30:00Z"
+    )]
+    #[serde(default)]
+    pub date: Option<String>,
+
+    #[field(
+        display_name = "Amount",
+        description = "Amount to subtract",
+        example = "3"
+    )]
+    #[serde(default)]
+    pub amount: i64,
+
+    #[field(
+        display_name = "Unit",
+        description = "Time unit (years, months, weeks, days, hours, minutes, seconds)",
+        example = "months",
+        default = "days",
+        enum_type = "TimeUnit"
+    )]
+    #[serde(default)]
+    pub unit: TimeUnit,
+
+    #[field(
+        display_name = "Timezone",
+        description = "Timezone for the operation. Default: UTC",
+        example = "UTC"
+    )]
+    #[serde(default)]
+    pub timezone: Option<String>,
+}
+
+/// Input for calculating time between two dates
+#[derive(Debug, Deserialize, Default, CapabilityInput)]
+#[capability_input(display_name = "Get Time Between Input")]
+pub struct GetTimeBetweenInput {
+    #[field(
+        display_name = "Start Date",
+        description = "The start date (ISO 8601, Unix timestamp, or common formats)",
+        example = "2024-01-01T00:00:00Z"
+    )]
+    #[serde(default)]
+    #[serde(rename = "startDate")]
+    pub start_date: Option<String>,
+
+    #[field(
+        display_name = "End Date",
+        description = "The end date (ISO 8601, Unix timestamp, or common formats)",
+        example = "2024-01-15T00:00:00Z"
+    )]
+    #[serde(default)]
+    #[serde(rename = "endDate")]
+    pub end_date: Option<String>,
+
+    #[field(
+        display_name = "Unit",
+        description = "Unit for the result (years, months, weeks, days, hours, minutes, seconds)",
+        example = "days",
+        default = "days",
+        enum_type = "TimeUnit"
+    )]
+    #[serde(default)]
+    pub unit: TimeUnit,
+}
+
+/// Output for time between calculation
+#[derive(Debug, Clone, Serialize, Deserialize, CapabilityOutput)]
+#[capability_output(display_name = "Time Between Result")]
+#[serde(rename_all = "camelCase")]
+pub struct TimeBetweenResult {
+    #[field(
+        display_name = "Difference",
+        description = "The difference in the specified unit",
+        example = "14"
+    )]
+    pub difference: i64,
+
+    #[field(
+        display_name = "Unit",
+        description = "The unit of the difference",
+        example = "days"
+    )]
+    pub unit: String,
+
+    #[field(
+        display_name = "Exact Milliseconds",
+        description = "Exact difference in milliseconds",
+        example = "1209600000"
+    )]
+    pub exact_ms: i64,
+}
+
+/// Input for extracting a part of a date
+#[derive(Debug, Deserialize, Default, CapabilityInput)]
+#[capability_input(display_name = "Extract Date Part Input")]
+pub struct ExtractDatePartInput {
+    #[field(
+        display_name = "Date",
+        description = "The date to extract from (ISO 8601, Unix timestamp, or common formats)",
+        example = "2024-01-15T14:30:00Z"
+    )]
+    #[serde(default)]
+    pub date: Option<String>,
+
+    #[field(
+        display_name = "Part",
+        description = "Date part to extract (year, month, week, day, hour, minute, second, etc.)",
+        example = "year",
+        default = "day",
+        enum_type = "DatePart"
+    )]
+    #[serde(default)]
+    pub part: DatePart,
+
+    #[field(
+        display_name = "Timezone",
+        description = "Timezone for extraction. Default: UTC",
+        example = "America/New_York"
+    )]
+    #[serde(default)]
+    pub timezone: Option<String>,
+}
+
+/// Input for converting date to Unix timestamp
+#[derive(Debug, Deserialize, Default, CapabilityInput)]
+#[capability_input(display_name = "Date to Unix Input")]
+pub struct DateToUnixInput {
+    #[field(
+        display_name = "Date",
+        description = "The date to convert (ISO 8601, Unix timestamp, or common formats)",
+        example = "2024-01-15T14:30:00Z"
+    )]
+    #[serde(default)]
+    pub date: Option<String>,
+
+    #[field(
+        display_name = "Milliseconds",
+        description = "If true, returns Unix timestamp in milliseconds instead of seconds (default: false)",
+        example = "false",
+        default = "false"
+    )]
+    #[serde(default)]
+    pub milliseconds: bool,
+}
+
+/// Output for Unix timestamp conversion
+#[derive(Debug, Clone, Serialize, Deserialize, CapabilityOutput)]
+#[capability_output(display_name = "Unix Timestamp Result")]
+#[serde(rename_all = "camelCase")]
+pub struct UnixTimestampResult {
+    #[field(
+        display_name = "Timestamp",
+        description = "Unix timestamp (seconds or milliseconds based on input)",
+        example = "1705329000"
+    )]
+    pub timestamp: i64,
+
+    #[field(
+        display_name = "Is Milliseconds",
+        description = "True if timestamp is in milliseconds, false if seconds",
+        example = "false"
+    )]
+    pub is_milliseconds: bool,
+}
+
+/// Input for converting Unix timestamp to date
+#[derive(Debug, Deserialize, Default, CapabilityInput)]
+#[capability_input(display_name = "Unix to Date Input")]
+pub struct UnixToDateInput {
+    #[field(
+        display_name = "Timestamp",
+        description = "Unix timestamp in seconds or milliseconds",
+        example = "1705329000"
+    )]
+    #[serde(default)]
+    pub timestamp: Option<i64>,
+
+    #[field(
+        display_name = "Is Milliseconds",
+        description = "If true, timestamp is in milliseconds; if false, in seconds (default: auto-detect)",
+        example = "false"
+    )]
+    #[serde(default)]
+    #[serde(rename = "isMilliseconds")]
+    pub is_milliseconds: Option<bool>,
+
+    #[field(
+        display_name = "Timezone",
+        description = "Output timezone (e.g., 'America/New_York', '+05:30'). Default: UTC",
+        example = "UTC"
+    )]
+    #[serde(default)]
+    pub timezone: Option<String>,
+}
+
+/// Input for rounding a date
+#[derive(Debug, Deserialize, Default, CapabilityInput)]
+#[capability_input(display_name = "Round Date Input")]
+pub struct RoundDateInput {
+    #[field(
+        display_name = "Date",
+        description = "The date to round (ISO 8601, Unix timestamp, or common formats)",
+        example = "2024-01-15T14:37:42Z"
+    )]
+    #[serde(default)]
+    pub date: Option<String>,
+
+    #[field(
+        display_name = "Unit",
+        description = "Time unit to round to (years, months, weeks, days, hours, minutes, seconds)",
+        example = "hours",
+        default = "days",
+        enum_type = "TimeUnit"
+    )]
+    #[serde(default)]
+    pub unit: TimeUnit,
+
+    #[field(
+        display_name = "Mode",
+        description = "Rounding mode (floor, ceil, round)",
+        example = "floor",
+        default = "round",
+        enum_type = "RoundMode"
+    )]
+    #[serde(default)]
+    pub mode: RoundMode,
+
+    #[field(
+        display_name = "Timezone",
+        description = "Timezone for rounding. Default: UTC",
+        example = "UTC"
+    )]
+    #[serde(default)]
+    pub timezone: Option<String>,
+}
+
+// ============================================================================
+// Default value helpers
 // ============================================================================
 
 fn default_true() -> bool {
     true
 }
 
-fn bad_json(e: serde_json::Error) -> ErrorInfo {
-    ErrorInfo {
-        code: "INPUT_DESERIALIZATION_ERROR".into(),
-        message: e.to_string(),
-        category: "permanent".into(),
-        severity: "error".into(),
-        retryable: false,
-        retry_after_ms: None,
-        attributes: None,
-    }
-}
+// ============================================================================
+// Luxon → chrono format conversion
+// ============================================================================
 
-fn date_err(msg: impl Into<String>) -> ErrorInfo {
-    ErrorInfo {
-        code: "DATE_ERROR".into(),
-        message: msg.into(),
-        category: "permanent".into(),
-        severity: "error".into(),
-        retryable: false,
-        retry_after_ms: None,
-        attributes: None,
-    }
-}
-
-// ---- Luxon → chrono format conversion ----
-
+/// Converts a Luxon-style format string to chrono strftime format.
 fn luxon_to_chrono_format(luxon_format: &str) -> String {
     let mut result = String::with_capacity(luxon_format.len() * 2);
     let chars: Vec<char> = luxon_format.chars().collect();
@@ -281,13 +527,16 @@ fn luxon_to_chrono_format(luxon_format: &str) -> String {
 
 fn try_match_token(s: &str) -> Option<(usize, &'static str)> {
     static TOKENS: &[(&str, &str)] = &[
+        // 4-char tokens
         ("yyyy", "%Y"),
         ("MMMM", "%B"),
         ("EEEE", "%A"),
+        // 3-char tokens
         ("MMM", "%b"),
         ("EEE", "%a"),
         ("SSS", "%3f"),
         ("ZZZ", "%:z"),
+        // 2-char tokens
         ("yy", "%y"),
         ("MM", "%m"),
         ("dd", "%d"),
@@ -296,6 +545,7 @@ fn try_match_token(s: &str) -> Option<(usize, &'static str)> {
         ("mm", "%M"),
         ("ss", "%S"),
         ("ZZ", "%z"),
+        // 1-char tokens
         ("a", "%p"),
         ("W", "%W"),
         ("o", "%j"),
@@ -310,9 +560,12 @@ fn try_match_token(s: &str) -> Option<(usize, &'static str)> {
     None
 }
 
-// ---- Date parsing ----
+// ============================================================================
+// Date parsing helpers
+// ============================================================================
 
 const PARSE_FORMATS: &[&str] = &[
+    // ISO 8601 variants
     "%Y-%m-%dT%H:%M:%S%.fZ",
     "%Y-%m-%dT%H:%M:%SZ",
     "%Y-%m-%dT%H:%M:%S%.f%:z",
@@ -322,14 +575,18 @@ const PARSE_FORMATS: &[&str] = &[
     "%Y-%m-%d %H:%M:%S%.f",
     "%Y-%m-%d %H:%M:%S",
     "%Y-%m-%d",
+    // US formats (2-digit year first - chrono's %Y is lenient)
     "%m/%d/%y %H:%M:%S",
     "%m/%d/%y",
+    // US formats (4-digit year)
     "%m/%d/%Y %H:%M:%S",
     "%m/%d/%Y",
+    // European formats (2-digit year first)
     "%d/%m/%y %H:%M:%S",
     "%d/%m/%y",
     "%d.%m.%y %H:%M:%S",
     "%d.%m.%y",
+    // European formats (4-digit year)
     "%d/%m/%Y %H:%M:%S",
     "%d/%m/%Y",
     "%d.%m.%Y %H:%M:%S",
@@ -386,7 +643,9 @@ fn parse_flexible_date(
     ))
 }
 
-// ---- Timezone helpers ----
+// ============================================================================
+// Timezone helpers
+// ============================================================================
 
 fn parse_timezone(tz_str: &str) -> Result<FixedOffset, String> {
     let trimmed = tz_str.trim();
@@ -464,7 +723,9 @@ fn format_iso8601(dt: &DateTime<FixedOffset>) -> String {
     }
 }
 
-// ---- Date arithmetic helpers ----
+// ============================================================================
+// Date arithmetic helpers
+// ============================================================================
 
 fn add_months(dt: DateTime<FixedOffset>, months: i32) -> DateTime<FixedOffset> {
     let naive = dt.naive_local();
@@ -503,68 +764,72 @@ fn is_leap_year(year: i32) -> bool {
 }
 
 // ============================================================================
-// Capability implementations
+// Capabilities — annotated for metadata; the `__executor_*` fns the macro emits
+// are what the wasm Guest impl dispatches to.
 // ============================================================================
 
-fn get_current_date(input_json: &str) -> Result<String, ErrorInfo> {
-    let input: GetCurrentDateInput = if input_json.trim().is_empty() || input_json.trim() == "null"
-    {
-        GetCurrentDateInput::default()
-    } else {
-        serde_json::from_str(input_json).map_err(bad_json)?
-    };
-
+/// Get the current date and optionally time
+#[capability(
+    module = "datetime",
+    module_display_name = "DateTime",
+    module_description = "Date and time capabilities for parsing, formatting, calculating, and manipulating dates",
+    display_name = "Get Current Date",
+    description = "Get the current date and optionally time in the specified timezone"
+)]
+pub fn get_current_date(input: GetCurrentDateInput) -> Result<String, String> {
     let now = Utc::now();
-    let dt = apply_timezone(now, input.timezone.as_deref()).map_err(date_err)?;
+    let dt = apply_timezone(now, input.timezone.as_deref())?;
 
-    let result = if input.include_time {
-        format_iso8601(&dt)
+    if input.include_time {
+        Ok(format_iso8601(&dt))
     } else {
-        dt.format("%Y-%m-%d").to_string()
-    };
-    serde_json::to_string(&result).map_err(bad_json)
+        Ok(dt.format("%Y-%m-%d").to_string())
+    }
 }
 
-fn format_date(input_json: &str) -> Result<String, ErrorInfo> {
-    let input: FormatDateInput = serde_json::from_str(input_json).map_err(bad_json)?;
-    let date_str = input
-        .date
-        .as_ref()
-        .ok_or_else(|| date_err("Date is required"))?;
-    let dt = parse_flexible_date(date_str, input.timezone.as_deref()).map_err(date_err)?;
+/// Format a date using preset formats or custom Luxon-style tokens
+#[capability(
+    module = "datetime",
+    display_name = "Format Date",
+    description = "Format a date using preset formats or custom Luxon-style tokens (yyyy, MM, dd, HH, mm, ss)"
+)]
+pub fn format_date(input: FormatDateInput) -> Result<String, String> {
+    let date_str = input.date.as_ref().ok_or("Date is required")?;
+    let dt = parse_flexible_date(date_str, input.timezone.as_deref())?;
 
-    let formatted = match input.format {
-        DateFormat::Iso8601 => format_iso8601(&dt),
-        DateFormat::Rfc2822 => dt.format("%a, %d %b %Y %H:%M:%S %z").to_string(),
-        DateFormat::DateOnly => dt.format("%Y-%m-%d").to_string(),
-        DateFormat::TimeOnly => dt.format("%H:%M:%S").to_string(),
-        DateFormat::UsShortDate => dt.format("%m/%d/%Y").to_string(),
-        DateFormat::EuShortDate => dt.format("%d/%m/%Y").to_string(),
-        DateFormat::LongDate => dt.format("%B %d, %Y").to_string(),
-        DateFormat::DateTime => dt.format("%Y-%m-%d %H:%M:%S").to_string(),
-        DateFormat::Unix => dt.timestamp().to_string(),
+    match input.format {
+        DateFormat::Iso8601 => Ok(format_iso8601(&dt)),
+        DateFormat::Rfc2822 => Ok(dt.format("%a, %d %b %Y %H:%M:%S %z").to_string()),
+        DateFormat::DateOnly => Ok(dt.format("%Y-%m-%d").to_string()),
+        DateFormat::TimeOnly => Ok(dt.format("%H:%M:%S").to_string()),
+        DateFormat::UsShortDate => Ok(dt.format("%m/%d/%Y").to_string()),
+        DateFormat::EuShortDate => Ok(dt.format("%d/%m/%Y").to_string()),
+        DateFormat::LongDate => Ok(dt.format("%B %d, %Y").to_string()),
+        DateFormat::DateTime => Ok(dt.format("%Y-%m-%d %H:%M:%S").to_string()),
+        DateFormat::Unix => Ok(dt.timestamp().to_string()),
         DateFormat::UnixMs => {
-            (dt.timestamp() * 1000 + dt.timestamp_subsec_millis() as i64).to_string()
+            Ok((dt.timestamp() * 1000 + dt.timestamp_subsec_millis() as i64).to_string())
         }
         DateFormat::Custom => {
             let custom = input
                 .custom_format
                 .as_ref()
-                .ok_or_else(|| date_err("Custom format is required when format is 'custom'"))?;
+                .ok_or("Custom format is required when format is 'custom'")?;
             let chrono_fmt = luxon_to_chrono_format(custom);
-            dt.format(&chrono_fmt).to_string()
+            Ok(dt.format(&chrono_fmt).to_string())
         }
-    };
-    serde_json::to_string(&formatted).map_err(bad_json)
+    }
 }
 
-fn add_to_date(input_json: &str) -> Result<String, ErrorInfo> {
-    let input: AddToDateInput = serde_json::from_str(input_json).map_err(bad_json)?;
-    let date_str = input
-        .date
-        .as_ref()
-        .ok_or_else(|| date_err("Date is required"))?;
-    let dt = parse_flexible_date(date_str, input.timezone.as_deref()).map_err(date_err)?;
+/// Add a duration to a date
+#[capability(
+    module = "datetime",
+    display_name = "Add to Date",
+    description = "Add a duration (years, months, weeks, days, hours, minutes, seconds) to a date"
+)]
+pub fn add_to_date(input: AddToDateInput) -> Result<String, String> {
+    let date_str = input.date.as_ref().ok_or("Date is required")?;
+    let dt = parse_flexible_date(date_str, input.timezone.as_deref())?;
     let amount = input.amount;
 
     let result = match input.unit {
@@ -576,41 +841,37 @@ fn add_to_date(input_json: &str) -> Result<String, ErrorInfo> {
         TimeUnit::Minutes => dt + Duration::minutes(amount),
         TimeUnit::Seconds => dt + Duration::seconds(amount),
     };
-
-    serde_json::to_string(&format_iso8601(&result)).map_err(bad_json)
+    Ok(format_iso8601(&result))
 }
 
-fn subtract_from_date(input_json: &str) -> Result<String, ErrorInfo> {
-    let input: SubtractFromDateInput = serde_json::from_str(input_json).map_err(bad_json)?;
-    // Delegate to add_to_date with negated amount
+/// Subtract a duration from a date
+#[capability(
+    module = "datetime",
+    display_name = "Subtract from Date",
+    description = "Subtract a duration (years, months, weeks, days, hours, minutes, seconds) from a date"
+)]
+pub fn subtract_from_date(input: SubtractFromDateInput) -> Result<String, String> {
+    // Reuse add_to_date with negated amount
     let add_input = AddToDateInput {
         date: input.date,
         amount: -input.amount,
         unit: input.unit,
         timezone: input.timezone,
     };
-    let add_json = serde_json::to_string(&serde_json::json!({
-        "date": add_input.date,
-        "amount": add_input.amount,
-        "unit": format!("{}", add_input.unit),
-        "timezone": add_input.timezone,
-    }))
-    .map_err(bad_json)?;
-    add_to_date(&add_json)
+    add_to_date(add_input)
 }
 
-fn get_time_between(input_json: &str) -> Result<String, ErrorInfo> {
-    let input: GetTimeBetweenInput = serde_json::from_str(input_json).map_err(bad_json)?;
-    let start_str = input
-        .start_date
-        .as_ref()
-        .ok_or_else(|| date_err("Start date is required"))?;
-    let end_str = input
-        .end_date
-        .as_ref()
-        .ok_or_else(|| date_err("End date is required"))?;
-    let start = parse_flexible_date(start_str, None).map_err(date_err)?;
-    let end = parse_flexible_date(end_str, None).map_err(date_err)?;
+/// Calculate the difference between two dates
+#[capability(
+    module = "datetime",
+    display_name = "Get Time Between Dates",
+    description = "Calculate the difference between two dates in the specified unit"
+)]
+pub fn get_time_between(input: GetTimeBetweenInput) -> Result<TimeBetweenResult, String> {
+    let start_str = input.start_date.as_ref().ok_or("Start date is required")?;
+    let end_str = input.end_date.as_ref().ok_or("End date is required")?;
+    let start = parse_flexible_date(start_str, None)?;
+    let end = parse_flexible_date(end_str, None)?;
 
     let duration = end.signed_duration_since(start);
     let exact_ms = duration.num_milliseconds();
@@ -625,23 +886,24 @@ fn get_time_between(input_json: &str) -> Result<String, ErrorInfo> {
         TimeUnit::Seconds => duration.num_seconds(),
     };
 
-    let result = TimeBetweenResult {
+    Ok(TimeBetweenResult {
         difference,
         unit: input.unit.to_string(),
         exact_ms,
-    };
-    serde_json::to_string(&result).map_err(bad_json)
+    })
 }
 
-fn extract_date_part(input_json: &str) -> Result<String, ErrorInfo> {
-    let input: ExtractDatePartInput = serde_json::from_str(input_json).map_err(bad_json)?;
-    let date_str = input
-        .date
-        .as_ref()
-        .ok_or_else(|| date_err("Date is required"))?;
-    let dt = parse_flexible_date(date_str, input.timezone.as_deref()).map_err(date_err)?;
+/// Extract a specific component from a date
+#[capability(
+    module = "datetime",
+    display_name = "Extract Part of Date",
+    description = "Extract a specific component (year, month, day, hour, etc.) from a date"
+)]
+pub fn extract_date_part(input: ExtractDatePartInput) -> Result<i32, String> {
+    let date_str = input.date.as_ref().ok_or("Date is required")?;
+    let dt = parse_flexible_date(date_str, input.timezone.as_deref())?;
 
-    let value: i32 = match input.part {
+    let value = match input.part {
         DatePart::Year => dt.year(),
         DatePart::Month => dt.month() as i32,
         DatePart::Week => dt.iso_week().week() as i32,
@@ -654,16 +916,18 @@ fn extract_date_part(input_json: &str) -> Result<String, ErrorInfo> {
         DatePart::Millisecond => (dt.nanosecond() / 1_000_000) as i32,
         DatePart::Quarter => ((dt.month() - 1) / 3 + 1) as i32,
     };
-    serde_json::to_string(&value).map_err(bad_json)
+    Ok(value)
 }
 
-fn round_date(input_json: &str) -> Result<String, ErrorInfo> {
-    let input: RoundDateInput = serde_json::from_str(input_json).map_err(bad_json)?;
-    let date_str = input
-        .date
-        .as_ref()
-        .ok_or_else(|| date_err("Date is required"))?;
-    let dt = parse_flexible_date(date_str, input.timezone.as_deref()).map_err(date_err)?;
+/// Round a date to the nearest unit
+#[capability(
+    module = "datetime",
+    display_name = "Round Date",
+    description = "Round a date to the nearest unit (floor, ceil, or round)"
+)]
+pub fn round_date(input: RoundDateInput) -> Result<String, String> {
+    let date_str = input.date.as_ref().ok_or("Date is required")?;
+    let dt = parse_flexible_date(date_str, input.timezone.as_deref())?;
     let naive = dt.naive_local();
 
     let rounded_naive = match input.unit {
@@ -839,16 +1103,18 @@ fn round_date(input_json: &str) -> Result<String, ErrorInfo> {
     };
 
     let result = dt.offset().from_local_datetime(&rounded_naive).unwrap();
-    serde_json::to_string(&format_iso8601(&result)).map_err(bad_json)
+    Ok(format_iso8601(&result))
 }
 
-fn date_to_unix(input_json: &str) -> Result<String, ErrorInfo> {
-    let input: DateToUnixInput = serde_json::from_str(input_json).map_err(bad_json)?;
-    let date_str = input
-        .date
-        .as_ref()
-        .ok_or_else(|| date_err("Date is required"))?;
-    let dt = parse_flexible_date(date_str, None).map_err(date_err)?;
+/// Convert a date to Unix timestamp
+#[capability(
+    module = "datetime",
+    display_name = "Date to Unix Timestamp",
+    description = "Convert a date to Unix timestamp (seconds or milliseconds)"
+)]
+pub fn date_to_unix(input: DateToUnixInput) -> Result<UnixTimestampResult, String> {
+    let date_str = input.date.as_ref().ok_or("Date is required")?;
+    let dt = parse_flexible_date(date_str, None)?;
 
     let timestamp = if input.milliseconds {
         dt.timestamp() * 1000 + dt.timestamp_subsec_millis() as i64
@@ -856,18 +1122,20 @@ fn date_to_unix(input_json: &str) -> Result<String, ErrorInfo> {
         dt.timestamp()
     };
 
-    let result = UnixTimestampResult {
+    Ok(UnixTimestampResult {
         timestamp,
         is_milliseconds: input.milliseconds,
-    };
-    serde_json::to_string(&result).map_err(bad_json)
+    })
 }
 
-fn unix_to_date(input_json: &str) -> Result<String, ErrorInfo> {
-    let input: UnixToDateInput = serde_json::from_str(input_json).map_err(bad_json)?;
-    let ts = input
-        .timestamp
-        .ok_or_else(|| date_err("Timestamp is required"))?;
+/// Convert a Unix timestamp to a date string
+#[capability(
+    module = "datetime",
+    display_name = "Unix Timestamp to Date",
+    description = "Convert a Unix timestamp (seconds or milliseconds) to an ISO 8601 date string"
+)]
+pub fn unix_to_date(input: UnixToDateInput) -> Result<String, String> {
+    let ts = input.timestamp.ok_or("Timestamp is required")?;
     let is_ms = input.is_milliseconds.unwrap_or(ts > 1_000_000_000_000);
     let (secs, nanos) = if is_ms {
         (ts / 1000, ((ts % 1000) * 1_000_000) as u32)
@@ -875,370 +1143,204 @@ fn unix_to_date(input_json: &str) -> Result<String, ErrorInfo> {
         (ts, 0)
     };
     let utc = DateTime::from_timestamp(secs, nanos)
-        .ok_or_else(|| date_err(format!("Invalid Unix timestamp: {}", ts)))?;
-    let dt = apply_timezone(utc, input.timezone.as_deref()).map_err(date_err)?;
-    serde_json::to_string(&format_iso8601(&dt)).map_err(bad_json)
+        .ok_or_else(|| format!("Invalid Unix timestamp: {}", ts))?;
+    let dt = apply_timezone(utc, input.timezone.as_deref())?;
+    Ok(format_iso8601(&dt))
 }
 
 // ============================================================================
-// JSON Schemas
+// AgentInfo assembler (host-only; the wasm binary doesn't need it)
 // ============================================================================
 
-const GET_CURRENT_DATE_INPUT_SCHEMA: &str = r#"{
-  "type": "object",
-  "properties": {
-    "includeTime": {
-      "type": "boolean",
-      "description": "Whether to include time in the output (default: true)",
-      "default": true
-    },
-    "timezone": {
-      "type": "string",
-      "description": "Timezone (e.g., 'America/New_York', '+05:30', 'UTC'). Default: UTC"
+/// Build the canonical `AgentInfo` for this agent by walking the macro-emitted
+/// `&'static` statics. The workspace `runtara-agent-bundle-emit` binary calls
+/// this on the host architecture and writes the JSON to disk; the wasm binary
+/// itself never executes this code, so we cfg-gate it out to keep the
+/// component small.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn agent_info() -> runtara_dsl::agent_meta::AgentInfo {
+    use runtara_dsl::agent_meta::{
+        AgentInfo, CapabilityMeta, InputTypeMeta, OutputTypeMeta, capability_to_api,
+    };
+    use std::collections::HashMap;
+
+    let caps: &[&'static CapabilityMeta] = &[
+        &__CAPABILITY_META_GET_CURRENT_DATE,
+        &__CAPABILITY_META_FORMAT_DATE,
+        &__CAPABILITY_META_ADD_TO_DATE,
+        &__CAPABILITY_META_SUBTRACT_FROM_DATE,
+        &__CAPABILITY_META_GET_TIME_BETWEEN,
+        &__CAPABILITY_META_EXTRACT_DATE_PART,
+        &__CAPABILITY_META_ROUND_DATE,
+        &__CAPABILITY_META_DATE_TO_UNIX,
+        &__CAPABILITY_META_UNIX_TO_DATE,
+    ];
+    let input_types: HashMap<&'static str, &'static InputTypeMeta> = [
+        (
+            "GetCurrentDateInput",
+            &__INPUT_META_GetCurrentDateInput as &InputTypeMeta,
+        ),
+        ("FormatDateInput", &__INPUT_META_FormatDateInput),
+        ("AddToDateInput", &__INPUT_META_AddToDateInput),
+        ("SubtractFromDateInput", &__INPUT_META_SubtractFromDateInput),
+        ("GetTimeBetweenInput", &__INPUT_META_GetTimeBetweenInput),
+        ("ExtractDatePartInput", &__INPUT_META_ExtractDatePartInput),
+        ("RoundDateInput", &__INPUT_META_RoundDateInput),
+        ("DateToUnixInput", &__INPUT_META_DateToUnixInput),
+        ("UnixToDateInput", &__INPUT_META_UnixToDateInput),
+    ]
+    .into_iter()
+    .collect();
+    let output_types: HashMap<&'static str, &'static OutputTypeMeta> = [
+        (
+            "TimeBetweenResult",
+            &__OUTPUT_META_TimeBetweenResult as &OutputTypeMeta,
+        ),
+        ("UnixTimestampResult", &__OUTPUT_META_UnixTimestampResult),
+    ]
+    .into_iter()
+    .collect();
+
+    let capabilities = caps
+        .iter()
+        .map(|cap| {
+            capability_to_api(
+                cap,
+                input_types.get(cap.input_type).copied(),
+                output_types.get(cap.output_type).copied(),
+            )
+        })
+        .collect();
+
+    AgentInfo {
+        id: "datetime".into(),
+        name: "DateTime".into(),
+        description:
+            "Date and time capabilities for parsing, formatting, calculating, and manipulating dates"
+                .into(),
+        has_side_effects: false,
+        supports_connections: false,
+        integration_ids: vec![],
+        capabilities,
     }
-  }
-}"#;
-
-const GET_CURRENT_DATE_OUTPUT_SCHEMA: &str = r#"{
-  "type": "string",
-  "description": "Current date/time as ISO 8601 string or date-only string"
-}"#;
-
-const FORMAT_DATE_INPUT_SCHEMA: &str = r#"{
-  "type": "object",
-  "required": ["date"],
-  "properties": {
-    "date": {
-      "type": "string",
-      "description": "Date to format (ISO 8601, Unix timestamp, or common formats)"
-    },
-    "format": {
-      "type": "string",
-      "enum": ["iso8601","rfc2822","date-only","time-only","us-short-date","eu-short-date","long-date","date-time","unix","unix-ms","custom"],
-      "default": "iso8601"
-    },
-    "customFormat": {
-      "type": "string",
-      "description": "Custom format using Luxon tokens (yyyy, MM, dd, HH, mm, ss)"
-    },
-    "timezone": {
-      "type": "string",
-      "description": "Output timezone. Default: UTC"
-    }
-  }
-}"#;
-
-const FORMAT_DATE_OUTPUT_SCHEMA: &str = r#"{
-  "type": "string",
-  "description": "Formatted date string"
-}"#;
-
-const ADD_TO_DATE_INPUT_SCHEMA: &str = r#"{
-  "type": "object",
-  "required": ["date"],
-  "properties": {
-    "date": { "type": "string", "description": "The date to add to" },
-    "amount": { "type": "integer", "description": "Amount to add (positive) or subtract (negative)", "default": 0 },
-    "unit": {
-      "type": "string",
-      "enum": ["years","months","weeks","days","hours","minutes","seconds"],
-      "default": "days"
-    },
-    "timezone": { "type": "string", "description": "Timezone for the operation. Default: UTC" }
-  }
-}"#;
-
-const DATE_OUTPUT_SCHEMA: &str = r#"{
-  "type": "string",
-  "description": "ISO 8601 date/time string"
-}"#;
-
-const SUBTRACT_FROM_DATE_INPUT_SCHEMA: &str = r#"{
-  "type": "object",
-  "required": ["date"],
-  "properties": {
-    "date": { "type": "string", "description": "The date to subtract from" },
-    "amount": { "type": "integer", "description": "Amount to subtract", "default": 0 },
-    "unit": {
-      "type": "string",
-      "enum": ["years","months","weeks","days","hours","minutes","seconds"],
-      "default": "days"
-    },
-    "timezone": { "type": "string", "description": "Timezone for the operation. Default: UTC" }
-  }
-}"#;
-
-const GET_TIME_BETWEEN_INPUT_SCHEMA: &str = r#"{
-  "type": "object",
-  "required": ["startDate","endDate"],
-  "properties": {
-    "startDate": { "type": "string", "description": "The start date" },
-    "endDate": { "type": "string", "description": "The end date" },
-    "unit": {
-      "type": "string",
-      "enum": ["years","months","weeks","days","hours","minutes","seconds"],
-      "default": "days"
-    }
-  }
-}"#;
-
-const GET_TIME_BETWEEN_OUTPUT_SCHEMA: &str = r#"{
-  "type": "object",
-  "properties": {
-    "difference": { "type": "integer", "description": "The difference in the specified unit" },
-    "unit": { "type": "string", "description": "The unit of the difference" },
-    "exactMs": { "type": "integer", "description": "Exact difference in milliseconds" }
-  }
-}"#;
-
-const EXTRACT_DATE_PART_INPUT_SCHEMA: &str = r#"{
-  "type": "object",
-  "required": ["date"],
-  "properties": {
-    "date": { "type": "string", "description": "The date to extract from" },
-    "part": {
-      "type": "string",
-      "enum": ["year","month","week","day","day-of-week","day-of-year","hour","minute","second","millisecond","quarter"],
-      "default": "day"
-    },
-    "timezone": { "type": "string", "description": "Timezone for extraction. Default: UTC" }
-  }
-}"#;
-
-const EXTRACT_DATE_PART_OUTPUT_SCHEMA: &str = r#"{
-  "type": "integer",
-  "description": "Extracted date part value"
-}"#;
-
-const ROUND_DATE_INPUT_SCHEMA: &str = r#"{
-  "type": "object",
-  "required": ["date"],
-  "properties": {
-    "date": { "type": "string", "description": "The date to round" },
-    "unit": {
-      "type": "string",
-      "enum": ["years","months","weeks","days","hours","minutes","seconds"],
-      "default": "days"
-    },
-    "mode": {
-      "type": "string",
-      "enum": ["floor","ceil","round"],
-      "default": "round"
-    },
-    "timezone": { "type": "string", "description": "Timezone for rounding. Default: UTC" }
-  }
-}"#;
-
-const DATE_TO_UNIX_INPUT_SCHEMA: &str = r#"{
-  "type": "object",
-  "required": ["date"],
-  "properties": {
-    "date": { "type": "string", "description": "The date to convert" },
-    "milliseconds": {
-      "type": "boolean",
-      "description": "If true, returns Unix timestamp in milliseconds instead of seconds (default: false)",
-      "default": false
-    }
-  }
-}"#;
-
-const DATE_TO_UNIX_OUTPUT_SCHEMA: &str = r#"{
-  "type": "object",
-  "properties": {
-    "timestamp": { "type": "integer", "description": "Unix timestamp (seconds or milliseconds)" },
-    "isMilliseconds": { "type": "boolean", "description": "True if timestamp is in milliseconds" }
-  }
-}"#;
-
-const UNIX_TO_DATE_INPUT_SCHEMA: &str = r#"{
-  "type": "object",
-  "required": ["timestamp"],
-  "properties": {
-    "timestamp": { "type": "integer", "description": "Unix timestamp in seconds or milliseconds" },
-    "isMilliseconds": {
-      "type": "boolean",
-      "description": "If true, timestamp is in milliseconds; if false, in seconds (default: auto-detect)"
-    },
-    "timezone": { "type": "string", "description": "Output timezone. Default: UTC" }
-  }
-}"#;
+}
 
 // ============================================================================
-// Component plumbing
+// Wasm component plumbing
 // ============================================================================
 
+#[cfg(target_arch = "wasm32")]
+use bindings::exports::runtara::agent::capabilities::{ConnectionInfo, ErrorInfo, Guest};
+
+#[cfg(target_arch = "wasm32")]
 struct Component;
 
+#[cfg(target_arch = "wasm32")]
 impl Guest for Component {
-    fn get_module_info() -> ModuleInfo {
-        ModuleInfo {
-            id: "datetime".into(),
-            display_name: "DateTime".into(),
-            description: "Date and time capabilities for parsing, formatting, calculating, and manipulating dates.".into(),
-            has_side_effects: false,
-            supports_connections: false,
-            integration_ids: vec![],
-            secure: false,
-        }
-    }
-
-    fn list_capabilities() -> Vec<CapabilityInfo> {
-        vec![
-            CapabilityInfo {
-                id: "get-current-date".into(),
-                function_name: "get-current-date".into(),
-                display_name: Some("Get Current Date".into()),
-                description: Some("Get the current date and optionally time in the specified timezone.".into()),
-                has_side_effects: false,
-                is_idempotent: false,
-                rate_limited: false,
-                tags: vec!["datetime".into()],
-                input_schema: GET_CURRENT_DATE_INPUT_SCHEMA.into(),
-                output_schema: GET_CURRENT_DATE_OUTPUT_SCHEMA.into(),
-                known_errors: vec![],
-                compensation_hint: None,
-            },
-            CapabilityInfo {
-                id: "format-date".into(),
-                function_name: "format-date".into(),
-                display_name: Some("Format Date".into()),
-                description: Some("Format a date using preset formats or custom Luxon-style tokens (yyyy, MM, dd, HH, mm, ss).".into()),
-                has_side_effects: false,
-                is_idempotent: true,
-                rate_limited: false,
-                tags: vec!["datetime".into()],
-                input_schema: FORMAT_DATE_INPUT_SCHEMA.into(),
-                output_schema: FORMAT_DATE_OUTPUT_SCHEMA.into(),
-                known_errors: vec![],
-                compensation_hint: None,
-            },
-            CapabilityInfo {
-                id: "add-to-date".into(),
-                function_name: "add-to-date".into(),
-                display_name: Some("Add to Date".into()),
-                description: Some("Add a duration (years, months, weeks, days, hours, minutes, seconds) to a date.".into()),
-                has_side_effects: false,
-                is_idempotent: true,
-                rate_limited: false,
-                tags: vec!["datetime".into()],
-                input_schema: ADD_TO_DATE_INPUT_SCHEMA.into(),
-                output_schema: DATE_OUTPUT_SCHEMA.into(),
-                known_errors: vec![],
-                compensation_hint: None,
-            },
-            CapabilityInfo {
-                id: "subtract-from-date".into(),
-                function_name: "subtract-from-date".into(),
-                display_name: Some("Subtract from Date".into()),
-                description: Some("Subtract a duration (years, months, weeks, days, hours, minutes, seconds) from a date.".into()),
-                has_side_effects: false,
-                is_idempotent: true,
-                rate_limited: false,
-                tags: vec!["datetime".into()],
-                input_schema: SUBTRACT_FROM_DATE_INPUT_SCHEMA.into(),
-                output_schema: DATE_OUTPUT_SCHEMA.into(),
-                known_errors: vec![],
-                compensation_hint: None,
-            },
-            CapabilityInfo {
-                id: "get-time-between".into(),
-                function_name: "get-time-between".into(),
-                display_name: Some("Get Time Between Dates".into()),
-                description: Some("Calculate the difference between two dates in the specified unit.".into()),
-                has_side_effects: false,
-                is_idempotent: true,
-                rate_limited: false,
-                tags: vec!["datetime".into()],
-                input_schema: GET_TIME_BETWEEN_INPUT_SCHEMA.into(),
-                output_schema: GET_TIME_BETWEEN_OUTPUT_SCHEMA.into(),
-                known_errors: vec![],
-                compensation_hint: None,
-            },
-            CapabilityInfo {
-                id: "extract-date-part".into(),
-                function_name: "extract-date-part".into(),
-                display_name: Some("Extract Part of Date".into()),
-                description: Some("Extract a specific component (year, month, day, hour, etc.) from a date.".into()),
-                has_side_effects: false,
-                is_idempotent: true,
-                rate_limited: false,
-                tags: vec!["datetime".into()],
-                input_schema: EXTRACT_DATE_PART_INPUT_SCHEMA.into(),
-                output_schema: EXTRACT_DATE_PART_OUTPUT_SCHEMA.into(),
-                known_errors: vec![],
-                compensation_hint: None,
-            },
-            CapabilityInfo {
-                id: "round-date".into(),
-                function_name: "round-date".into(),
-                display_name: Some("Round Date".into()),
-                description: Some("Round a date to the nearest unit (floor, ceil, or round).".into()),
-                has_side_effects: false,
-                is_idempotent: true,
-                rate_limited: false,
-                tags: vec!["datetime".into()],
-                input_schema: ROUND_DATE_INPUT_SCHEMA.into(),
-                output_schema: DATE_OUTPUT_SCHEMA.into(),
-                known_errors: vec![],
-                compensation_hint: None,
-            },
-            CapabilityInfo {
-                id: "date-to-unix".into(),
-                function_name: "date-to-unix".into(),
-                display_name: Some("Date to Unix Timestamp".into()),
-                description: Some("Convert a date to Unix timestamp (seconds or milliseconds).".into()),
-                has_side_effects: false,
-                is_idempotent: true,
-                rate_limited: false,
-                tags: vec!["datetime".into()],
-                input_schema: DATE_TO_UNIX_INPUT_SCHEMA.into(),
-                output_schema: DATE_TO_UNIX_OUTPUT_SCHEMA.into(),
-                known_errors: vec![],
-                compensation_hint: None,
-            },
-            CapabilityInfo {
-                id: "unix-to-date".into(),
-                function_name: "unix-to-date".into(),
-                display_name: Some("Unix Timestamp to Date".into()),
-                description: Some("Convert a Unix timestamp (seconds or milliseconds) to an ISO 8601 date string.".into()),
-                has_side_effects: false,
-                is_idempotent: true,
-                rate_limited: false,
-                tags: vec!["datetime".into()],
-                input_schema: UNIX_TO_DATE_INPUT_SCHEMA.into(),
-                output_schema: DATE_OUTPUT_SCHEMA.into(),
-                known_errors: vec![],
-                compensation_hint: None,
-            },
-        ]
-    }
-
     fn invoke(
         capability_id: String,
-        input: String,
+        input: Vec<u8>,
         _connection: Option<ConnectionInfo>,
-    ) -> Result<String, ErrorInfo> {
-        match capability_id.as_str() {
-            "get-current-date" => get_current_date(&input),
-            "format-date" => format_date(&input),
-            "add-to-date" => add_to_date(&input),
-            "subtract-from-date" => subtract_from_date(&input),
-            "get-time-between" => get_time_between(&input),
-            "extract-date-part" => extract_date_part(&input),
-            "round-date" => round_date(&input),
-            "date-to-unix" => date_to_unix(&input),
-            "unix-to-date" => unix_to_date(&input),
-            other => Err(ErrorInfo {
-                code: "UNKNOWN_CAPABILITY".into(),
-                message: format!("datetime agent has no capability `{other}`"),
-                category: "permanent".into(),
-                severity: "error".into(),
-                retryable: false,
-                retry_after_ms: None,
-                attributes: None,
-            }),
+    ) -> Result<Vec<u8>, ErrorInfo> {
+        // Some capabilities (notably `get-current-date`) accept an empty body
+        // and use type defaults. Normalize that into `null` so serde_json can
+        // run the deserializer; the executor uses `coerce_input` + serde
+        // defaults from there.
+        let value: serde_json::Value =
+            if input.is_empty() || input.iter().all(|b| b.is_ascii_whitespace()) {
+                serde_json::Value::Null
+            } else {
+                serde_json::from_slice(&input).map_err(bad_json)?
+            };
+
+        let executor_result = match capability_id.as_str() {
+            "get-current-date" => __executor_get_current_date(value),
+            "format-date" => __executor_format_date(value),
+            "add-to-date" => __executor_add_to_date(value),
+            "subtract-from-date" => __executor_subtract_from_date(value),
+            "get-time-between" => __executor_get_time_between(value),
+            "extract-date-part" => __executor_extract_date_part(value),
+            "round-date" => __executor_round_date(value),
+            "date-to-unix" => __executor_date_to_unix(value),
+            "unix-to-date" => __executor_unix_to_date(value),
+            other => {
+                return Err(ErrorInfo {
+                    code: "UNKNOWN_CAPABILITY".into(),
+                    message: format!("datetime agent has no capability `{other}`"),
+                    category: "permanent".into(),
+                    severity: "error".into(),
+                    retryable: false,
+                    retry_after_ms: None,
+                    attributes: None,
+                });
+            }
+        };
+
+        executor_result
+            .map_err(error_string_to_error_info)
+            .and_then(|out_value| serde_json::to_vec(&out_value).map_err(bad_json))
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn bad_json(e: serde_json::Error) -> ErrorInfo {
+    ErrorInfo {
+        code: "INPUT_DESERIALIZATION_ERROR".into(),
+        message: e.to_string(),
+        category: "permanent".into(),
+        severity: "error".into(),
+        retryable: false,
+        retry_after_ms: None,
+        attributes: None,
+    }
+}
+
+/// The `#[capability]` macro packages each error as a JSON-string with
+/// `{ code, message, category, severity }`. Parse it back into a typed
+/// `ErrorInfo` for the WIT result.
+#[cfg(target_arch = "wasm32")]
+fn error_string_to_error_info(s: String) -> ErrorInfo {
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(&s) {
+        ErrorInfo {
+            code: value
+                .get("code")
+                .and_then(|v| v.as_str())
+                .unwrap_or("CAPABILITY_ERROR")
+                .into(),
+            message: value
+                .get("message")
+                .and_then(|v| v.as_str())
+                .unwrap_or(&s)
+                .into(),
+            category: value
+                .get("category")
+                .and_then(|v| v.as_str())
+                .unwrap_or("permanent")
+                .into(),
+            severity: value
+                .get("severity")
+                .and_then(|v| v.as_str())
+                .unwrap_or("error")
+                .into(),
+            retryable: value
+                .get("retryable")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
+            retry_after_ms: value.get("retry_after_ms").and_then(|v| v.as_u64()),
+            attributes: value.get("attributes").map(|v| v.to_string()),
+        }
+    } else {
+        ErrorInfo {
+            code: "CAPABILITY_ERROR".into(),
+            message: s,
+            category: "permanent".into(),
+            severity: "error".into(),
+            retryable: false,
+            retry_after_ms: None,
+            attributes: None,
         }
     }
 }
 
+#[cfg(target_arch = "wasm32")]
 bindings::export!(Component with_types_in bindings);

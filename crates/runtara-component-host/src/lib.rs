@@ -32,5 +32,11 @@ pub use engine::{EngineConfig, build_engine, spawn_epoch_ticker};
 pub use host_state::{CallContext, HostState};
 pub use registry::{LoadedAgent, build_linker, instantiate, load_agent};
 
+/// Agent metadata loaded from a sidecar `<agent>.meta.json` next to the
+/// component `.wasm`. Re-exported here so server code can call
+/// `dispatcher.agent_info_of("crypto")` and receive the canonical
+/// `runtara_dsl::agent_meta::AgentInfo` shape directly.
+pub use runtara_dsl::agent_meta::AgentInfo;
+
 /// The canonical WIT source this host is designed against.
 pub const AGENT_WIT: &str = runtara_agent_wit::RUNTARA_AGENT_WIT;

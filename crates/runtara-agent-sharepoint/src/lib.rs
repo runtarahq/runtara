@@ -2,35 +2,122 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! Microsoft SharePoint integration agent — WebAssembly Component.
 //!
-//! Schema parity with `runtara-agents/src/agents/integrations/sharepoint.rs`.
+//! Capability metadata travels through `#[capability_input]` / `#[capability]` /
+//! `#[capability_output]` annotations on the same Rust types and functions that
+//! the wasm cdylib's `invoke` dispatcher calls into. The workspace binary
+//! `runtara-agent-bundle-emit` reads these macro-emitted `&'static` statics on
+//! the host architecture and writes `runtara_agent_sharepoint.meta.json` next
+//! to the `.wasm` — the JSON is a build artifact, never hand-edited.
 //!
-//! Routing model: all Graph API requests go through the runtara HTTP proxy
-//! via `X-Runtara-Connection-Id`. The proxy injects the Microsoft Entra OAuth
-//! token. The component never sees secrets.
+//! Routing model: all Graph API requests go through the runtara HTTP proxy via
+//! the `X-Runtara-Connection-Id` header — the proxy attaches the Microsoft
+//! Entra OAuth token and forwards. The component never sees secrets.
 //!
-//! Chunked upload PUT requests and async copy monitor polling use absolute
-//! Azure Blob / async-operation URLs that are pre-signed by Microsoft Graph
-//! and must NOT carry a `Connection-Id` header.
+//! Chunked-upload PUTs target absolute Azure Blob URLs returned by Graph's
+//! `createUploadSession`, and async-copy monitor polling hits absolute
+//! `/_api/v2.0/monitor/...` URLs that are pre-signed by Microsoft Graph — both
+//! intentionally OMIT the connection-id header so the proxy doesn't try to
+//! re-authenticate the absolute URL.
+#![allow(clippy::result_large_err)]
 
-#![cfg(target_arch = "wasm32")]
-
-#[allow(warnings)]
-mod bindings;
-
+use base64::Engine as _;
+use runtara_agent_macro::{CapabilityInput, CapabilityOutput, capability};
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::time::Duration;
 
-use base64::Engine as _;
-use bindings::exports::runtara::agent::capabilities::{
-    CapabilityInfo, ConnectionInfo, ErrorInfo, Guest, ModuleInfo,
-};
-use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+#[cfg(target_arch = "wasm32")]
+#[allow(warnings)]
+mod bindings;
+
+// ============================================================================
+// Local AgentError shim
+// ============================================================================
+//
+// The host crate's `runtara_agents::types::AgentError` pulls in `tracing` and
+// other host-only baggage. We only need the on-the-wire JSON shape that the
+// `#[capability]` macro expects (`Into<String>` returning
+// `{"code","message","category","severity",...}`), so we inline a minimal
+// version here. Mirrors the shim in `runtara-agent-mailgun`.
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AgentError {
+    pub code: String,
+    pub message: String,
+    pub category: &'static str,
+    pub severity: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retry_after_ms: Option<u64>,
+    #[serde(skip_serializing_if = "HashMap::is_empty")]
+    pub attributes: HashMap<String, Value>,
+}
+
+impl AgentError {
+    pub fn permanent(code: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            code: code.into(),
+            message: message.into(),
+            category: "permanent",
+            severity: "error",
+            retry_after_ms: None,
+            attributes: HashMap::new(),
+        }
+    }
+
+    pub fn transient(code: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            code: code.into(),
+            message: message.into(),
+            category: "transient",
+            severity: "warning",
+            retry_after_ms: None,
+            attributes: HashMap::new(),
+        }
+    }
+
+    pub fn with_attr(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.attributes
+            .insert(key.into(), Value::String(value.into()));
+        self
+    }
+
+    pub fn with_retry_after_ms(mut self, ms: u64) -> Self {
+        self.retry_after_ms = Some(ms);
+        self
+    }
+}
+
+/// Serialize into the canonical JSON envelope so the `#[capability]` macro
+/// executor passes us straight through to `error_string_to_error_info` on the
+/// wasm side (which parses the JSON back into a typed `ErrorInfo`).
+impl From<AgentError> for String {
+    fn from(err: AgentError) -> Self {
+        serde_json::to_string(&err).unwrap_or_else(|_| format!("[{}] {}", err.code, err.message))
+    }
+}
+
+// ============================================================================
+// RawConnection (local mirror of crates/runtara-agents/src/connections.rs)
+// ============================================================================
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RawConnection {
+    #[serde(default)]
+    pub connection_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub connection_subtype: Option<String>,
+    pub integration_id: String,
+    pub parameters: Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rate_limit_config: Option<Value>,
+}
 
 // ============================================================================
 // Constants
 // ============================================================================
 
+const PREFIX: &str = "SHAREPOINT";
 const GRAPH_BASE: &str = "https://graph.microsoft.com/v1.0";
 
 /// Simple-upload cap: Graph supports up to 250 MB but the single-PUT endpoint
@@ -41,212 +128,44 @@ const SIMPLE_UPLOAD_MAX_BYTES: usize = 4 * 1024 * 1024;
 const UPLOAD_SESSION_CHUNK_BYTES: usize = 4 * 1024 * 1024;
 
 // ============================================================================
-// Component plumbing
+// Default helpers (used by `#[serde(default = "...")]`)
 // ============================================================================
 
-struct Component;
+fn default_root() -> String {
+    "root".to_string()
+}
 
-impl Guest for Component {
-    fn get_module_info() -> ModuleInfo {
-        ModuleInfo {
-            id: "sharepoint".into(),
-            display_name: "Microsoft SharePoint".into(),
-            description: "Microsoft SharePoint — file management over Microsoft Graph".into(),
-            has_side_effects: true,
-            supports_connections: true,
-            integration_ids: vec!["microsoft_entra_client_credentials".into()],
-            secure: true,
-        }
-    }
+fn default_true() -> Option<bool> {
+    Some(true)
+}
 
-    fn list_capabilities() -> Vec<CapabilityInfo> {
-        vec![
-            cap(
-                "sharepoint-list-drives",
-                "sharepoint_list_drives",
-                "List Drives",
-                "List document libraries (drives) for a SharePoint site",
-                LIST_DRIVES_INPUT_SCHEMA,
-                LIST_DRIVES_OUTPUT_SCHEMA,
-            ),
-            cap(
-                "sharepoint-list-children",
-                "sharepoint_list_children",
-                "List Children",
-                "List files and folders under a SharePoint folder (or drive root)",
-                LIST_CHILDREN_INPUT_SCHEMA,
-                LIST_CHILDREN_OUTPUT_SCHEMA,
-            ),
-            cap(
-                "sharepoint-get-item",
-                "sharepoint_get_item",
-                "Get Item",
-                "Get metadata for a file or folder by drive and item ID",
-                GET_ITEM_INPUT_SCHEMA,
-                GET_ITEM_OUTPUT_SCHEMA,
-            ),
-            cap(
-                "sharepoint-get-item-by-path",
-                "sharepoint_get_item_by_path",
-                "Get Item By Path",
-                "Resolve a path within a drive to a driveItem and return its metadata",
-                GET_ITEM_BY_PATH_INPUT_SCHEMA,
-                GET_ITEM_OUTPUT_SCHEMA,
-            ),
-            cap(
-                "sharepoint-download-file",
-                "sharepoint_download_file",
-                "Download File",
-                "Download a file's contents. Returns base64 by default; pass as_text=true for UTF-8 text.",
-                DOWNLOAD_FILE_INPUT_SCHEMA,
-                DOWNLOAD_FILE_OUTPUT_SCHEMA,
-            ),
-            cap(
-                "sharepoint-upload-file",
-                "sharepoint_upload_file",
-                "Upload File",
-                "Upload a file (≤ 4 MB) to a folder in SharePoint. Use Upload File (Large) for bigger files.",
-                UPLOAD_FILE_INPUT_SCHEMA,
-                UPLOAD_FILE_OUTPUT_SCHEMA,
-            ),
-            cap(
-                "sharepoint-upload-file-large",
-                "sharepoint_upload_file_large",
-                "Upload File (Large)",
-                "Upload a file via a chunked upload session (4 MB chunks, up to 250 MB total)",
-                UPLOAD_FILE_LARGE_INPUT_SCHEMA,
-                UPLOAD_FILE_OUTPUT_SCHEMA,
-            ),
-            cap(
-                "sharepoint-create-folder",
-                "sharepoint_create_folder",
-                "Create Folder",
-                "Create a folder in a SharePoint document library",
-                CREATE_FOLDER_INPUT_SCHEMA,
-                CREATE_FOLDER_OUTPUT_SCHEMA,
-            ),
-            cap(
-                "sharepoint-delete-item",
-                "sharepoint_delete_item",
-                "Delete Item",
-                "Delete a file or folder by driveItem ID",
-                DELETE_ITEM_INPUT_SCHEMA,
-                DELETE_ITEM_OUTPUT_SCHEMA,
-            ),
-            cap(
-                "sharepoint-move-item",
-                "sharepoint_move_item",
-                "Move / Rename Item",
-                "Move and/or rename a file or folder. At least one of new_parent_id or new_name is required.",
-                MOVE_ITEM_INPUT_SCHEMA,
-                GET_ITEM_OUTPUT_SCHEMA,
-            ),
-            cap(
-                "sharepoint-copy-item",
-                "sharepoint_copy_item",
-                "Copy Item",
-                "Start an async copy of a file/folder. Returns a monitor URL — poll with Get Copy Status.",
-                COPY_ITEM_INPUT_SCHEMA,
-                COPY_ITEM_OUTPUT_SCHEMA,
-            ),
-            cap(
-                "sharepoint-get-copy-status",
-                "sharepoint_get_copy_status",
-                "Get Copy Status",
-                "Poll a copy operation's monitor URL. The monitor URL is absolute and skips connection auth.",
-                GET_COPY_STATUS_INPUT_SCHEMA,
-                GET_COPY_STATUS_OUTPUT_SCHEMA,
-            ),
-            cap(
-                "sharepoint-search",
-                "sharepoint_search",
-                "Search",
-                "Search for files and folders within a drive",
-                SEARCH_INPUT_SCHEMA,
-                LIST_CHILDREN_OUTPUT_SCHEMA,
-            ),
-            cap(
-                "sharepoint-search-global",
-                "sharepoint_search_global",
-                "Search (Global)",
-                "Cross-tenant search via the Microsoft Search API. Use this when per-drive Search returns 403 under app-only auth. Region is required under app-only.",
-                SEARCH_GLOBAL_INPUT_SCHEMA,
-                SEARCH_GLOBAL_OUTPUT_SCHEMA,
-            ),
-        ]
-    }
-
-    fn invoke(
-        capability_id: String,
-        input: String,
-        connection: Option<ConnectionInfo>,
-    ) -> Result<String, ErrorInfo> {
-        match capability_id.as_str() {
-            "sharepoint-list-drives" => list_drives(&input, connection.as_ref()),
-            "sharepoint-list-children" => list_children(&input, connection.as_ref()),
-            "sharepoint-get-item" => get_item(&input, connection.as_ref()),
-            "sharepoint-get-item-by-path" => get_item_by_path(&input, connection.as_ref()),
-            "sharepoint-download-file" => download_file(&input, connection.as_ref()),
-            "sharepoint-upload-file" => upload_file(&input, connection.as_ref()),
-            "sharepoint-upload-file-large" => upload_file_large(&input, connection.as_ref()),
-            "sharepoint-create-folder" => create_folder(&input, connection.as_ref()),
-            "sharepoint-delete-item" => delete_item(&input, connection.as_ref()),
-            "sharepoint-move-item" => move_item(&input, connection.as_ref()),
-            "sharepoint-copy-item" => copy_item(&input, connection.as_ref()),
-            "sharepoint-get-copy-status" => get_copy_status(&input, connection.as_ref()),
-            "sharepoint-search" => search(&input, connection.as_ref()),
-            "sharepoint-search-global" => search_global(&input, connection.as_ref()),
-            other => Err(permanent_err(
-                "UNKNOWN_CAPABILITY",
-                format!("sharepoint agent has no capability `{other}`"),
-            )),
-        }
-    }
+fn default_search_entity_types() -> Vec<String> {
+    vec!["driveItem".to_string()]
 }
 
 // ============================================================================
-// Helper: build CapabilityInfo
+// HTTP helpers (Graph API via the runtara proxy)
 // ============================================================================
 
-fn cap(
-    id: &str,
-    function_name: &str,
-    display_name: &str,
-    description: &str,
-    input_schema: &str,
-    output_schema: &str,
-) -> CapabilityInfo {
-    CapabilityInfo {
-        id: id.into(),
-        function_name: function_name.into(),
-        display_name: Some(display_name.into()),
-        description: Some(description.into()),
-        has_side_effects: true,
-        is_idempotent: false,
-        rate_limited: true,
-        tags: vec!["sharepoint".into(), "microsoft".into()],
-        input_schema: input_schema.into(),
-        output_schema: output_schema.into(),
-        known_errors: vec![],
-        compensation_hint: None,
-    }
-}
-
-// ============================================================================
-// HTTP helpers
-// ============================================================================
-
-/// Build the full Graph API URL for a relative path.
 fn graph_url(path: &str) -> String {
     format!("{}{}", GRAPH_BASE, path)
 }
 
-/// Execute a Graph API GET request with optional query parameters.
+fn require_connection(connection: Option<&RawConnection>) -> Result<&RawConnection, AgentError> {
+    connection.ok_or_else(|| {
+        AgentError::permanent(
+            format!("{}_MISSING_CONNECTION", PREFIX),
+            "A Microsoft Entra client credentials connection is required",
+        )
+        .with_attr("integration", PREFIX)
+    })
+}
+
 fn graph_get(
-    connection: &ConnectionInfo,
+    connection: &RawConnection,
     path: &str,
     query: HashMap<String, String>,
-) -> Result<Value, ErrorInfo> {
+) -> Result<Value, AgentError> {
     let url = graph_url(path);
     let client = runtara_http::HttpClient::with_timeout(Duration::from_millis(30_000));
     let mut req = client
@@ -255,17 +174,18 @@ fn graph_get(
     for (k, v) in &query {
         req = req.query(k, v);
     }
-    let resp = req
-        .call_agent()
-        .map_err(|e| transient_err("NETWORK_ERROR", format!("Graph GET {path} failed: {e}")))?;
+    let resp = req.call_agent().map_err(|e| {
+        AgentError::transient("NETWORK_ERROR", format!("Graph GET {path} failed: {e}"))
+            .with_attr("integration", PREFIX)
+    })?;
     parse_graph_response(resp, path)
 }
 
-/// Execute a Graph API POST request with a JSON body.
-fn graph_post(connection: &ConnectionInfo, path: &str, body: &Value) -> Result<Value, ErrorInfo> {
+fn graph_post(connection: &RawConnection, path: &str, body: &Value) -> Result<Value, AgentError> {
     let url = graph_url(path);
-    let body_bytes = serde_json::to_vec(body)
-        .map_err(|e| permanent_err("SERIALIZATION_ERROR", e.to_string()))?;
+    let body_bytes = serde_json::to_vec(body).map_err(|e| {
+        AgentError::permanent("SERIALIZATION_ERROR", e.to_string()).with_attr("integration", PREFIX)
+    })?;
     let client = runtara_http::HttpClient::with_timeout(Duration::from_millis(30_000));
     let resp = client
         .request("POST", &url)
@@ -273,15 +193,18 @@ fn graph_post(connection: &ConnectionInfo, path: &str, body: &Value) -> Result<V
         .header("X-Runtara-Connection-Id", &connection.connection_id)
         .body_bytes(&body_bytes)
         .call_agent()
-        .map_err(|e| transient_err("NETWORK_ERROR", format!("Graph POST {path} failed: {e}")))?;
+        .map_err(|e| {
+            AgentError::transient("NETWORK_ERROR", format!("Graph POST {path} failed: {e}"))
+                .with_attr("integration", PREFIX)
+        })?;
     parse_graph_response(resp, path)
 }
 
-/// Execute a Graph API PATCH request with a JSON body.
-fn graph_patch(connection: &ConnectionInfo, path: &str, body: &Value) -> Result<Value, ErrorInfo> {
+fn graph_patch(connection: &RawConnection, path: &str, body: &Value) -> Result<Value, AgentError> {
     let url = graph_url(path);
-    let body_bytes = serde_json::to_vec(body)
-        .map_err(|e| permanent_err("SERIALIZATION_ERROR", e.to_string()))?;
+    let body_bytes = serde_json::to_vec(body).map_err(|e| {
+        AgentError::permanent("SERIALIZATION_ERROR", e.to_string()).with_attr("integration", PREFIX)
+    })?;
     let client = runtara_http::HttpClient::with_timeout(Duration::from_millis(30_000));
     let resp = client
         .request("PATCH", &url)
@@ -289,35 +212,39 @@ fn graph_patch(connection: &ConnectionInfo, path: &str, body: &Value) -> Result<
         .header("X-Runtara-Connection-Id", &connection.connection_id)
         .body_bytes(&body_bytes)
         .call_agent()
-        .map_err(|e| transient_err("NETWORK_ERROR", format!("Graph PATCH {path} failed: {e}")))?;
+        .map_err(|e| {
+            AgentError::transient("NETWORK_ERROR", format!("Graph PATCH {path} failed: {e}"))
+                .with_attr("integration", PREFIX)
+        })?;
     parse_graph_response(resp, path)
 }
 
-/// Execute a Graph API DELETE request (expects 204 No Content).
-fn graph_delete(connection: &ConnectionInfo, path: &str) -> Result<(), ErrorInfo> {
+fn graph_delete(connection: &RawConnection, path: &str) -> Result<(), AgentError> {
     let url = graph_url(path);
     let client = runtara_http::HttpClient::with_timeout(Duration::from_millis(30_000));
     let resp = client
         .request("DELETE", &url)
         .header("X-Runtara-Connection-Id", &connection.connection_id)
         .call_agent()
-        .map_err(|e| transient_err("NETWORK_ERROR", format!("Graph DELETE {path} failed: {e}")))?;
+        .map_err(|e| {
+            AgentError::transient("NETWORK_ERROR", format!("Graph DELETE {path} failed: {e}"))
+                .with_attr("integration", PREFIX)
+        })?;
     let status = resp.status;
     if (200..300).contains(&status) || status == 204 {
         return Ok(());
     }
     let body_text = String::from_utf8_lossy(&resp.body).to_string();
-    Err(graph_http_error(status, &body_text, path))
+    Err(graph_http_error(status, &body_text, path, &resp.headers))
 }
 
-/// Execute a Graph API PUT with raw bytes (simple upload).
 fn graph_put_bytes(
-    connection: &ConnectionInfo,
+    connection: &RawConnection,
     path: &str,
     bytes: &[u8],
     content_type: &str,
     query: HashMap<String, String>,
-) -> Result<Value, ErrorInfo> {
+) -> Result<Value, AgentError> {
     let url = graph_url(path);
     let client = runtara_http::HttpClient::with_timeout(Duration::from_millis(60_000));
     let mut req = client
@@ -328,21 +255,24 @@ fn graph_put_bytes(
     for (k, v) in &query {
         req = req.query(k, v);
     }
-    let resp = req
-        .call_agent()
-        .map_err(|e| transient_err("NETWORK_ERROR", format!("Graph PUT {path} failed: {e}")))?;
+    let resp = req.call_agent().map_err(|e| {
+        AgentError::transient("NETWORK_ERROR", format!("Graph PUT {path} failed: {e}"))
+            .with_attr("integration", PREFIX)
+    })?;
     parse_graph_response(resp, path)
 }
 
-/// Execute a POST to an arbitrary absolute URL (e.g. copy endpoint that
-/// returns 202 with a Location header). Returns the raw response.
+/// POST to an arbitrary URL with the connection header (used for `/copy`
+/// which is a Graph endpoint but we need the raw response to read the
+/// Location header).
 fn graph_post_raw(
-    connection: &ConnectionInfo,
+    connection: &RawConnection,
     absolute_url: &str,
     body: &Value,
-) -> Result<runtara_http::HttpResponse, ErrorInfo> {
-    let body_bytes = serde_json::to_vec(body)
-        .map_err(|e| permanent_err("SERIALIZATION_ERROR", e.to_string()))?;
+) -> Result<runtara_http::HttpResponse, AgentError> {
+    let body_bytes = serde_json::to_vec(body).map_err(|e| {
+        AgentError::permanent("SERIALIZATION_ERROR", e.to_string()).with_attr("integration", PREFIX)
+    })?;
     let client = runtara_http::HttpClient::with_timeout(Duration::from_millis(30_000));
     client
         .request("POST", absolute_url)
@@ -350,25 +280,29 @@ fn graph_post_raw(
         .header("X-Runtara-Connection-Id", &connection.connection_id)
         .body_bytes(&body_bytes)
         .call_agent()
-        .map_err(|e| transient_err("NETWORK_ERROR", format!("POST {absolute_url} failed: {e}")))
+        .map_err(|e| {
+            AgentError::transient("NETWORK_ERROR", format!("POST {absolute_url} failed: {e}"))
+                .with_attr("integration", PREFIX)
+        })
 }
 
-/// Execute a GET against a pre-signed absolute URL (no connection header).
-fn get_absolute_url(url: &str) -> Result<runtara_http::HttpResponse, ErrorInfo> {
+/// GET against a pre-signed absolute URL — NO connection header (the URL
+/// carries its own auth, and the proxy would otherwise overwrite it).
+fn get_absolute_url(url: &str) -> Result<runtara_http::HttpResponse, AgentError> {
     let client = runtara_http::HttpClient::with_timeout(Duration::from_millis(30_000));
-    client
-        .request("GET", url)
-        .call_agent()
-        .map_err(|e| transient_err("NETWORK_ERROR", format!("GET {url} failed: {e}")))
+    client.request("GET", url).call_agent().map_err(|e| {
+        AgentError::transient("NETWORK_ERROR", format!("GET {url} failed: {e}"))
+            .with_attr("integration", PREFIX)
+    })
 }
 
-/// Execute a PUT against a pre-signed absolute URL (no connection header).
+/// PUT against a pre-signed absolute Azure Blob URL — NO connection header.
 fn put_absolute_url(
     url: &str,
     bytes: &[u8],
     content_type: &str,
     content_range: &str,
-) -> Result<runtara_http::HttpResponse, ErrorInfo> {
+) -> Result<runtara_http::HttpResponse, AgentError> {
     let client = runtara_http::HttpClient::with_timeout(Duration::from_millis(120_000));
     client
         .request("PUT", url)
@@ -376,48 +310,82 @@ fn put_absolute_url(
         .header("Content-Range", content_range)
         .body_bytes(bytes)
         .call_agent()
-        .map_err(|e| transient_err("NETWORK_ERROR", format!("PUT chunk to {url} failed: {e}")))
+        .map_err(|e| {
+            AgentError::transient("NETWORK_ERROR", format!("PUT chunk to {url} failed: {e}"))
+                .with_attr("integration", PREFIX)
+        })
 }
 
-/// Parse a Graph API response. Non-2xx → permanent/transient error.
-fn parse_graph_response(resp: runtara_http::HttpResponse, path: &str) -> Result<Value, ErrorInfo> {
+fn parse_graph_response(resp: runtara_http::HttpResponse, path: &str) -> Result<Value, AgentError> {
     let status = resp.status;
     if !(200..300).contains(&status) {
         let body_text = String::from_utf8_lossy(&resp.body).to_string();
-        return Err(graph_http_error(status, &body_text, path));
+        return Err(graph_http_error(status, &body_text, path, &resp.headers));
     }
     if resp.body.is_empty() {
         return Ok(Value::Null);
     }
     serde_json::from_slice(&resp.body).map_err(|e| {
-        permanent_err(
-            "SHAREPOINT_RESPONSE_PARSE_ERROR",
+        AgentError::permanent(
+            format!("{}_RESPONSE_PARSE_ERROR", PREFIX),
             format!("Graph response parse error for {path}: {e}"),
         )
+        .with_attr("integration", PREFIX)
     })
 }
 
-fn graph_http_error(status: u16, body: &str, path: &str) -> ErrorInfo {
-    let (category, code) = if status == 429 {
-        ("transient", "HTTP_429")
-    } else if (500..600).contains(&status) {
-        ("transient", "HTTP_5XX")
+fn graph_http_error(
+    status: u16,
+    body: &str,
+    path: &str,
+    headers: &HashMap<String, String>,
+) -> AgentError {
+    let (code, mut err) = if status == 429 || (500..600).contains(&status) {
+        let code = if status == 429 {
+            "HTTP_429"
+        } else {
+            "HTTP_5XX"
+        };
+        (
+            code,
+            AgentError::transient(
+                code,
+                format!("Graph HTTP {status} for {path}: {}", truncate(body, 512)),
+            ),
+        )
     } else {
-        ("permanent", "HTTP_4XX")
+        (
+            "HTTP_4XX",
+            AgentError::permanent(
+                "HTTP_4XX",
+                format!("Graph HTTP {status} for {path}: {}", truncate(body, 512)),
+            ),
+        )
     };
-    ErrorInfo {
-        code: code.into(),
-        message: format!("Graph HTTP {status} for {path}: {}", truncate(body, 512)),
-        category: category.into(),
-        severity: "error".into(),
-        retryable: category == "transient",
-        retry_after_ms: None,
-        attributes: serde_json::to_string(&json!({"status_code": status, "path": path})).ok(),
+    let _ = code; // already encoded in err.code
+    err = err
+        .with_attr("integration", PREFIX)
+        .with_attr("status_code", status.to_string())
+        .with_attr("path", path);
+    if status == 429 {
+        let retry_after_ms = headers
+            .get("retry-after-ms")
+            .and_then(|v| v.parse::<u64>().ok())
+            .or_else(|| {
+                headers
+                    .get("retry-after")
+                    .and_then(|v| v.parse::<u64>().ok())
+                    .map(|s| s * 1000)
+            });
+        if let Some(ms) = retry_after_ms {
+            err = err.with_retry_after_ms(ms);
+        }
     }
+    err
 }
 
 // ============================================================================
-// Domain helpers (inlined from sharepoint_client.rs)
+// Domain helpers (lifted from sharepoint_client.rs)
 // ============================================================================
 
 /// Resolve `(drive_id, item_id)` to a Graph path segment.
@@ -446,8 +414,10 @@ fn encode_graph_path(path: &str) -> String {
     out
 }
 
-/// Percent-encode the inner content of an OData literal inside a URL path
-/// segment. Space becomes `%20` (not `+` — `+` is literal in path context).
+/// Percent-encode the inner content of an OData literal that lives inside a
+/// URL path segment (not a query string). Space MUST be `%20` here — `+` is a
+/// literal `+` in path context. Caller is expected to double single quotes
+/// BEFORE calling this (OData escape).
 fn encode_odata_path_literal(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for b in s.bytes() {
@@ -477,29 +447,30 @@ fn extract_next_relative_path(next_link: Option<&str>) -> Option<String> {
         }
         return Some(rest.to_string());
     }
-    if let Some(stripped) = link.strip_prefix("https://") {
-        if let Some(slash) = stripped.find('/') {
-            return Some(stripped[slash..].to_string());
-        }
+    if let Some(stripped) = link.strip_prefix("https://")
+        && let Some(slash) = stripped.find('/')
+    {
+        return Some(stripped[slash..].to_string());
     }
-    if let Some(stripped) = link.strip_prefix("http://") {
-        if let Some(slash) = stripped.find('/') {
-            return Some(stripped[slash..].to_string());
-        }
+    if let Some(stripped) = link.strip_prefix("http://")
+        && let Some(slash) = stripped.find('/')
+    {
+        return Some(stripped[slash..].to_string());
     }
     None
 }
 
 /// Decode content from base64 or raw UTF-8 bytes.
-fn decode_content(content: &str, is_base64: bool) -> Result<Vec<u8>, ErrorInfo> {
+fn decode_content(content: &str, is_base64: bool) -> Result<Vec<u8>, AgentError> {
     if is_base64 {
         base64::engine::general_purpose::STANDARD
             .decode(content.as_bytes())
             .map_err(|e| {
-                permanent_err(
-                    "SHAREPOINT_INVALID_CONTENT",
+                AgentError::permanent(
+                    format!("{}_INVALID_CONTENT", PREFIX),
                     format!("Invalid base64 content: {}", e),
                 )
+                .with_attr("integration", PREFIX)
             })
     } else {
         Ok(content.as_bytes().to_vec())
@@ -509,13 +480,13 @@ fn decode_content(content: &str, is_base64: bool) -> Result<Vec<u8>, ErrorInfo> 
 /// Build the `@microsoft.graph.conflictBehavior` query map.
 fn conflict_query(conflict_behavior: Option<&str>) -> HashMap<String, String> {
     let mut q = HashMap::new();
-    if let Some(cb) = conflict_behavior {
-        if !cb.is_empty() {
-            q.insert(
-                "@microsoft.graph.conflictBehavior".to_string(),
-                cb.to_string(),
-            );
-        }
+    if let Some(cb) = conflict_behavior
+        && !cb.is_empty()
+    {
+        q.insert(
+            "@microsoft.graph.conflictBehavior".to_string(),
+            cb.to_string(),
+        );
     }
     q
 }
@@ -564,45 +535,74 @@ fn parse_drive(v: &Value) -> Value {
     })
 }
 
-/// Extract the MIME type from a parsed `driveItem` (for download response).
 fn mime_type_from_item(item: &Value) -> Option<String> {
     item.get("mime_type")
         .and_then(|v| v.as_str())
         .map(String::from)
 }
 
-/// Extract the name from a parsed `driveItem` (for download response).
 fn name_from_item(item: &Value) -> Option<String> {
     item.get("name").and_then(|v| v.as_str()).map(String::from)
 }
 
-// ============================================================================
-// Require connection
-// ============================================================================
-
-fn require_connection(connection: Option<&ConnectionInfo>) -> Result<&ConnectionInfo, ErrorInfo> {
-    connection.ok_or_else(|| {
-        permanent_err(
-            "SHAREPOINT_MISSING_CONNECTION",
-            "A Microsoft Entra client credentials connection is required",
-        )
-    })
+fn truncate(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        s.to_string()
+    } else {
+        let mut t = s[..max].to_string();
+        t.push('…');
+        t
+    }
 }
 
 // ============================================================================
-// Capability 1: list_drives
+// list_drives
 // ============================================================================
 
-#[derive(Debug, Deserialize)]
-struct ListDrivesInput {
-    site_id: String,
+#[derive(Debug, Serialize, Deserialize, CapabilityInput)]
+#[capability_input(display_name = "List Drives Input")]
+pub struct ListDrivesInput {
+    /// Connection data injected by the wasm Guest::invoke wrapper before
+    /// dispatching to the capability executor. `#[field(skip)]` keeps this
+    /// out of the capability metadata.
+    #[field(skip)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub _connection: Option<RawConnection>,
+
+    #[field(
+        display_name = "Site ID",
+        description = "Microsoft Graph site identifier (e.g. 'contoso.sharepoint.com,GUID,GUID' or 'root')",
+        example = "contoso.sharepoint.com,11111111-2222-3333-4444-555555555555,66666666-7777-8888-9999-000000000000"
+    )]
+    pub site_id: String,
 }
 
-fn list_drives(input_json: &str, connection: Option<&ConnectionInfo>) -> Result<String, ErrorInfo> {
-    let input: ListDrivesInput = serde_json::from_str(input_json)
-        .map_err(|e| permanent_err("INPUT_DESERIALIZATION_ERROR", e.to_string()))?;
-    let conn = require_connection(connection)?;
+#[derive(Debug, Serialize, Deserialize, CapabilityOutput)]
+#[capability_output(display_name = "List Drives Output")]
+pub struct ListDrivesOutput {
+    #[field(
+        display_name = "Drives",
+        description = "Document libraries on the site"
+    )]
+    pub drives: Vec<Value>,
 
+    #[field(display_name = "Count")]
+    pub count: u32,
+}
+
+#[capability(
+    module = "sharepoint",
+    display_name = "List Drives",
+    description = "List document libraries (drives) for a SharePoint site",
+    module_display_name = "Microsoft SharePoint",
+    module_description = "Microsoft SharePoint — file management over Microsoft Graph",
+    module_has_side_effects = true,
+    module_supports_connections = true,
+    module_integration_ids = "microsoft_entra_client_credentials",
+    module_secure = true
+)]
+pub fn sharepoint_list_drives(input: ListDrivesInput) -> Result<ListDrivesOutput, AgentError> {
+    let conn = require_connection(input._connection.as_ref())?;
     let path = format!("/sites/{}/drives", input.site_id);
     let result = graph_get(conn, &path, HashMap::new())?;
     let drives: Vec<Value> = result
@@ -611,34 +611,75 @@ fn list_drives(input_json: &str, connection: Option<&ConnectionInfo>) -> Result<
         .map(|arr| arr.iter().map(parse_drive).collect())
         .unwrap_or_default();
     let count = drives.len() as u32;
-
-    serde_json::to_string(&json!({ "drives": drives, "count": count }))
-        .map_err(|e| permanent_err("OUTPUT_SERIALIZATION_ERROR", e.to_string()))
+    Ok(ListDrivesOutput { drives, count })
 }
 
 // ============================================================================
-// Capability 2: list_children
+// list_children
 // ============================================================================
 
-#[derive(Debug, Deserialize)]
-struct ListChildrenInput {
-    drive_id: String,
+#[derive(Debug, Serialize, Deserialize, CapabilityInput)]
+#[capability_input(display_name = "List Children Input")]
+pub struct ListChildrenInput {
+    #[field(skip)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub _connection: Option<RawConnection>,
+
+    #[field(display_name = "Drive ID", description = "Document library drive ID")]
+    pub drive_id: String,
+
+    #[field(
+        display_name = "Item ID",
+        description = "Folder driveItem ID, or 'root' for the drive's root folder",
+        default = "root"
+    )]
     #[serde(default = "default_root")]
-    item_id: String,
-    #[serde(default)]
-    page_size: Option<u32>,
-    #[serde(default)]
-    page_token: Option<String>,
+    pub item_id: String,
+
+    #[field(
+        display_name = "Page Size",
+        description = "Maximum items per page (Graph $top, max 200)"
+    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page_size: Option<u32>,
+
+    #[field(
+        display_name = "Page Token",
+        description = "Pass back the previous response's next_page_token to fetch the next page"
+    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page_token: Option<String>,
 }
 
-fn list_children(
-    input_json: &str,
-    connection: Option<&ConnectionInfo>,
-) -> Result<String, ErrorInfo> {
-    let input: ListChildrenInput = serde_json::from_str(input_json)
-        .map_err(|e| permanent_err("INPUT_DESERIALIZATION_ERROR", e.to_string()))?;
-    let conn = require_connection(connection)?;
+#[derive(Debug, Serialize, Deserialize, CapabilityOutput)]
+#[capability_output(display_name = "List Children Output")]
+pub struct ListChildrenOutput {
+    #[field(
+        display_name = "Items",
+        description = "Files and folders under the parent"
+    )]
+    pub items: Vec<Value>,
 
+    #[field(display_name = "Count")]
+    pub count: u32,
+
+    #[field(display_name = "Next Page Token")]
+    pub next_page_token: Option<String>,
+}
+
+#[capability(
+    module = "sharepoint",
+    display_name = "List Children",
+    description = "List files and folders under a SharePoint folder (or drive root)"
+)]
+pub fn sharepoint_list_children(
+    input: ListChildrenInput,
+) -> Result<ListChildrenOutput, AgentError> {
+    let conn = require_connection(input._connection.as_ref())?;
+
+    // If the caller supplied a page token, that token IS the relative path
+    // already extracted from `@odata.nextLink` — use it verbatim and don't
+    // re-apply $top.
     let (path, query) = if let Some(token) = input.page_token.as_ref().filter(|t| !t.is_empty()) {
         (token.clone(), HashMap::new())
     } else {
@@ -659,88 +700,150 @@ fn list_children(
     let count = items.len() as u32;
     let next_page_token =
         extract_next_relative_path(result.get("@odata.nextLink").and_then(|v| v.as_str()));
-
-    serde_json::to_string(&json!({
-        "items": items,
-        "count": count,
-        "next_page_token": next_page_token,
-    }))
-    .map_err(|e| permanent_err("OUTPUT_SERIALIZATION_ERROR", e.to_string()))
+    Ok(ListChildrenOutput {
+        items,
+        count,
+        next_page_token,
+    })
 }
 
 // ============================================================================
-// Capability 3: get_item
+// get_item
 // ============================================================================
 
-#[derive(Debug, Deserialize)]
-struct GetItemInput {
-    drive_id: String,
-    item_id: String,
+#[derive(Debug, Serialize, Deserialize, CapabilityInput)]
+#[capability_input(display_name = "Get Item Input")]
+pub struct GetItemInput {
+    #[field(skip)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub _connection: Option<RawConnection>,
+
+    #[field(display_name = "Drive ID")]
+    pub drive_id: String,
+
+    #[field(display_name = "Item ID")]
+    pub item_id: String,
 }
 
-fn get_item(input_json: &str, connection: Option<&ConnectionInfo>) -> Result<String, ErrorInfo> {
-    let input: GetItemInput = serde_json::from_str(input_json)
-        .map_err(|e| permanent_err("INPUT_DESERIALIZATION_ERROR", e.to_string()))?;
-    let conn = require_connection(connection)?;
+#[derive(Debug, Serialize, Deserialize, CapabilityOutput)]
+#[capability_output(display_name = "Get Item Output")]
+pub struct GetItemOutput {
+    #[field(display_name = "Item", description = "Drive item metadata")]
+    pub item: Value,
+}
 
+#[capability(
+    module = "sharepoint",
+    display_name = "Get Item",
+    description = "Get metadata for a file or folder by drive and item ID"
+)]
+pub fn sharepoint_get_item(input: GetItemInput) -> Result<GetItemOutput, AgentError> {
+    let conn = require_connection(input._connection.as_ref())?;
     let path = item_path(&input.drive_id, &input.item_id);
     let result = graph_get(conn, &path, HashMap::new())?;
-
-    serde_json::to_string(&json!({ "item": parse_drive_item(&result) }))
-        .map_err(|e| permanent_err("OUTPUT_SERIALIZATION_ERROR", e.to_string()))
+    Ok(GetItemOutput {
+        item: parse_drive_item(&result),
+    })
 }
 
 // ============================================================================
-// Capability 4: get_item_by_path
+// get_item_by_path
 // ============================================================================
 
-#[derive(Debug, Deserialize)]
-struct GetItemByPathInput {
-    drive_id: String,
-    path: String,
+#[derive(Debug, Serialize, Deserialize, CapabilityInput)]
+#[capability_input(display_name = "Get Item By Path Input")]
+pub struct GetItemByPathInput {
+    #[field(skip)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub _connection: Option<RawConnection>,
+
+    #[field(display_name = "Drive ID")]
+    pub drive_id: String,
+
+    #[field(
+        display_name = "Path",
+        description = "Path within the drive (no leading slash)",
+        example = "Reports/Q1 2026/summary.xlsx"
+    )]
+    pub path: String,
 }
 
-fn get_item_by_path(
-    input_json: &str,
-    connection: Option<&ConnectionInfo>,
-) -> Result<String, ErrorInfo> {
-    let input: GetItemByPathInput = serde_json::from_str(input_json)
-        .map_err(|e| permanent_err("INPUT_DESERIALIZATION_ERROR", e.to_string()))?;
-    let conn = require_connection(connection)?;
-
+#[capability(
+    module = "sharepoint",
+    display_name = "Get Item By Path",
+    description = "Resolve a path within a drive to a driveItem and return its metadata"
+)]
+pub fn sharepoint_get_item_by_path(input: GetItemByPathInput) -> Result<GetItemOutput, AgentError> {
+    let conn = require_connection(input._connection.as_ref())?;
     let trimmed = input.path.trim_start_matches('/');
     let encoded = encode_graph_path(trimmed);
     let path = format!("/drives/{}/root:/{}", input.drive_id, encoded);
     let result = graph_get(conn, &path, HashMap::new())?;
-
-    serde_json::to_string(&json!({ "item": parse_drive_item(&result) }))
-        .map_err(|e| permanent_err("OUTPUT_SERIALIZATION_ERROR", e.to_string()))
+    Ok(GetItemOutput {
+        item: parse_drive_item(&result),
+    })
 }
 
 // ============================================================================
-// Capability 5: download_file
+// download_file
 // ============================================================================
 
-#[derive(Debug, Deserialize)]
-struct DownloadFileInput {
-    drive_id: String,
-    item_id: String,
+#[derive(Debug, Serialize, Deserialize, CapabilityInput)]
+#[capability_input(display_name = "Download File Input")]
+pub struct DownloadFileInput {
+    #[field(skip)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub _connection: Option<RawConnection>,
+
+    #[field(display_name = "Drive ID")]
+    pub drive_id: String,
+
+    #[field(display_name = "Item ID")]
+    pub item_id: String,
+
+    #[field(
+        display_name = "As Text",
+        description = "Return content as UTF-8 text instead of base64 (default: false)",
+        default = "false"
+    )]
     #[serde(default)]
-    as_text: Option<bool>,
+    pub as_text: Option<bool>,
 }
 
-fn download_file(
-    input_json: &str,
-    connection: Option<&ConnectionInfo>,
-) -> Result<String, ErrorInfo> {
-    let input: DownloadFileInput = serde_json::from_str(input_json)
-        .map_err(|e| permanent_err("INPUT_DESERIALIZATION_ERROR", e.to_string()))?;
-    let conn = require_connection(connection)?;
+#[derive(Debug, Serialize, Deserialize, CapabilityOutput)]
+#[capability_output(display_name = "Download File Output")]
+pub struct DownloadFileOutput {
+    #[field(
+        display_name = "Content",
+        description = "Base64 by default, or UTF-8 if as_text=true"
+    )]
+    pub content: Option<String>,
 
-    // Fetch metadata for filename / content_type.
+    #[field(display_name = "Content Type")]
+    pub content_type: Option<String>,
+
+    #[field(display_name = "Size", description = "Size in bytes")]
+    pub size: Option<u64>,
+
+    #[field(display_name = "Filename")]
+    pub filename: Option<String>,
+}
+
+#[capability(
+    module = "sharepoint",
+    display_name = "Download File",
+    description = "Download a file's contents. Returns base64 by default; pass as_text=true for UTF-8 text."
+)]
+pub fn sharepoint_download_file(
+    input: DownloadFileInput,
+) -> Result<DownloadFileOutput, AgentError> {
+    let conn = require_connection(input._connection.as_ref())?;
+
+    // Fetch metadata first so we can populate filename / content_type even if
+    // the proxy returns the body without echoing the upstream Content-Type.
     let meta_path = item_path(&input.drive_id, &input.item_id);
     let meta = graph_get(conn, &meta_path, HashMap::new()).ok();
-    let parsed_meta = meta.as_ref().map(|m| parse_drive_item(m));
+    let parsed_meta = meta.as_ref().map(parse_drive_item);
 
     // Download the content bytes.
     let content_path = format!("{}/content", meta_path);
@@ -751,31 +854,35 @@ fn download_file(
         .header("X-Runtara-Connection-Id", &conn.connection_id)
         .call_agent()
         .map_err(|e| {
-            transient_err(
+            AgentError::transient(
                 "NETWORK_ERROR",
                 format!("Graph GET {content_path} failed: {e}"),
             )
+            .with_attr("integration", PREFIX)
         })?;
 
     if !(200..300).contains(&resp.status) {
         let body_text = String::from_utf8_lossy(&resp.body).to_string();
-        return Err(graph_http_error(resp.status, &body_text, &content_path));
+        return Err(graph_http_error(
+            resp.status,
+            &body_text,
+            &content_path,
+            &resp.headers,
+        ));
     }
 
     let bytes = resp.body;
     let size = bytes.len() as u64;
 
-    // Try to decode as base64 if the proxy returned it that way (text/binary contract),
-    // otherwise use raw bytes.
-    let final_bytes: Vec<u8> = {
-        // If the response looks like base64 text, try to decode.
-        match String::from_utf8(bytes.clone()) {
-            Ok(text) => match base64::engine::general_purpose::STANDARD.decode(text.trim()) {
-                Ok(decoded) => decoded,
-                Err(_) => bytes,
-            },
+    // The proxy may return either raw binary bytes or base64-encoded text
+    // depending on the contract negotiation. If the body decodes as base64,
+    // unwrap once so we don't double-encode the final response.
+    let final_bytes: Vec<u8> = match String::from_utf8(bytes.clone()) {
+        Ok(text) => match base64::engine::general_purpose::STANDARD.decode(text.trim()) {
+            Ok(decoded) => decoded,
             Err(_) => bytes,
-        }
+        },
+        Err(_) => bytes,
     };
 
     let as_text = input.as_text.unwrap_or(false);
@@ -785,52 +892,94 @@ fn download_file(
         Some(base64::engine::general_purpose::STANDARD.encode(&final_bytes))
     };
 
-    let content_type = parsed_meta.as_ref().and_then(mime_type_from_item);
-    let filename = parsed_meta.as_ref().and_then(name_from_item);
-
-    serde_json::to_string(&json!({
-        "content": content,
-        "content_type": content_type,
-        "size": size,
-        "filename": filename,
-    }))
-    .map_err(|e| permanent_err("OUTPUT_SERIALIZATION_ERROR", e.to_string()))
+    Ok(DownloadFileOutput {
+        content,
+        content_type: parsed_meta.as_ref().and_then(mime_type_from_item),
+        size: Some(size),
+        filename: parsed_meta.as_ref().and_then(name_from_item),
+    })
 }
 
 // ============================================================================
-// Capability 6: upload_file (≤ 4 MB simple PUT)
+// upload_file (≤ 4 MB simple PUT)
 // ============================================================================
 
-#[derive(Debug, Deserialize)]
-struct UploadFileInput {
-    drive_id: String,
+#[derive(Debug, Serialize, Deserialize, CapabilityInput)]
+#[capability_input(display_name = "Upload File Input")]
+pub struct UploadFileInput {
+    #[field(skip)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub _connection: Option<RawConnection>,
+
+    #[field(display_name = "Drive ID")]
+    pub drive_id: String,
+
+    #[field(
+        display_name = "Parent ID",
+        description = "Folder driveItem ID to upload into, or 'root' for the drive's root",
+        default = "root"
+    )]
     #[serde(default = "default_root")]
-    parent_id: String,
-    filename: String,
-    content: String,
-    #[serde(default = "default_true_opt")]
-    is_base64: Option<bool>,
-    #[serde(default)]
-    content_type: Option<String>,
-    #[serde(default)]
-    conflict_behavior: Option<String>,
+    pub parent_id: String,
+
+    #[field(display_name = "Filename", description = "Name of the file to create")]
+    pub filename: String,
+
+    #[field(
+        display_name = "Content",
+        description = "File content; either raw text or base64-encoded bytes"
+    )]
+    pub content: String,
+
+    #[field(
+        display_name = "Is Base64",
+        description = "Whether content is base64-encoded (default: true)",
+        default = "true"
+    )]
+    #[serde(default = "default_true")]
+    pub is_base64: Option<bool>,
+
+    #[field(
+        display_name = "Content Type",
+        description = "MIME type of the upload (default: application/octet-stream)"
+    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_type: Option<String>,
+
+    #[field(
+        display_name = "Conflict Behavior",
+        description = "fail | rename | replace (default: replace)"
+    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conflict_behavior: Option<String>,
 }
 
-fn upload_file(input_json: &str, connection: Option<&ConnectionInfo>) -> Result<String, ErrorInfo> {
-    let input: UploadFileInput = serde_json::from_str(input_json)
-        .map_err(|e| permanent_err("INPUT_DESERIALIZATION_ERROR", e.to_string()))?;
-    let conn = require_connection(connection)?;
+#[derive(Debug, Serialize, Deserialize, CapabilityOutput)]
+#[capability_output(display_name = "Upload File Output")]
+pub struct UploadFileOutput {
+    #[field(display_name = "Item", description = "Created driveItem metadata")]
+    pub item: Value,
+}
 
+#[capability(
+    module = "sharepoint",
+    display_name = "Upload File",
+    description = "Upload a file (≤ 4 MB) to a folder in SharePoint. Use Upload File (Large) for bigger files.",
+    side_effects = true
+)]
+pub fn sharepoint_upload_file(input: UploadFileInput) -> Result<UploadFileOutput, AgentError> {
+    let conn = require_connection(input._connection.as_ref())?;
     let bytes = decode_content(&input.content, input.is_base64.unwrap_or(true))?;
     if bytes.len() > SIMPLE_UPLOAD_MAX_BYTES {
-        return Err(permanent_err(
-            "SHAREPOINT_FILE_TOO_LARGE",
+        return Err(AgentError::permanent(
+            format!("{}_FILE_TOO_LARGE", PREFIX),
             format!(
                 "File is {} bytes; simple upload caps at {} bytes — use Upload File (Large)",
                 bytes.len(),
                 SIMPLE_UPLOAD_MAX_BYTES
             ),
-        ));
+        )
+        .with_attr("integration", PREFIX));
     }
 
     let encoded_filename = encode_graph_path(&input.filename);
@@ -845,48 +994,83 @@ fn upload_file(input_json: &str, connection: Option<&ConnectionInfo>) -> Result<
             input.drive_id, input.parent_id, encoded_filename
         )
     };
-    let ct = input
+    let content_type = input
         .content_type
+        .clone()
         .unwrap_or_else(|| "application/octet-stream".to_string());
     let query = conflict_query(input.conflict_behavior.as_deref());
 
-    let result = graph_put_bytes(conn, &path, &bytes, &ct, query)?;
+    let result = graph_put_bytes(conn, &path, &bytes, &content_type, query)?;
 
-    serde_json::to_string(&json!({ "item": parse_drive_item(&result) }))
-        .map_err(|e| permanent_err("OUTPUT_SERIALIZATION_ERROR", e.to_string()))
+    Ok(UploadFileOutput {
+        item: parse_drive_item(&result),
+    })
 }
 
 // ============================================================================
-// Capability 7: upload_file_large (chunked upload session)
+// upload_file_large (chunked upload session, > 4 MB up to 250 MB)
 // ============================================================================
 
-#[derive(Debug, Deserialize)]
-struct UploadFileLargeInput {
-    drive_id: String,
+#[derive(Debug, Serialize, Deserialize, CapabilityInput)]
+#[capability_input(display_name = "Upload File (Large) Input")]
+pub struct UploadFileLargeInput {
+    #[field(skip)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub _connection: Option<RawConnection>,
+
+    #[field(display_name = "Drive ID")]
+    pub drive_id: String,
+
+    #[field(
+        display_name = "Parent ID",
+        description = "Folder driveItem ID to upload into, or 'root'",
+        default = "root"
+    )]
     #[serde(default = "default_root")]
-    parent_id: String,
-    filename: String,
-    content: String,
-    #[serde(default = "default_true_opt")]
-    is_base64: Option<bool>,
-    #[serde(default)]
-    conflict_behavior: Option<String>,
+    pub parent_id: String,
+
+    #[field(display_name = "Filename")]
+    pub filename: String,
+
+    #[field(
+        display_name = "Content",
+        description = "File content as base64 (use is_base64=false for raw text)"
+    )]
+    pub content: String,
+
+    #[field(
+        display_name = "Is Base64",
+        description = "Whether content is base64-encoded (default: true)",
+        default = "true"
+    )]
+    #[serde(default = "default_true")]
+    pub is_base64: Option<bool>,
+
+    #[field(
+        display_name = "Conflict Behavior",
+        description = "fail | rename | replace (default: replace)"
+    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conflict_behavior: Option<String>,
 }
 
-fn upload_file_large(
-    input_json: &str,
-    connection: Option<&ConnectionInfo>,
-) -> Result<String, ErrorInfo> {
-    let input: UploadFileLargeInput = serde_json::from_str(input_json)
-        .map_err(|e| permanent_err("INPUT_DESERIALIZATION_ERROR", e.to_string()))?;
-    let conn = require_connection(connection)?;
-
+#[capability(
+    module = "sharepoint",
+    display_name = "Upload File (Large)",
+    description = "Upload a file via a chunked upload session (4 MB chunks, up to 250 MB total)",
+    side_effects = true
+)]
+pub fn sharepoint_upload_file_large(
+    input: UploadFileLargeInput,
+) -> Result<UploadFileOutput, AgentError> {
+    let conn = require_connection(input._connection.as_ref())?;
     let bytes = decode_content(&input.content, input.is_base64.unwrap_or(true))?;
     if bytes.is_empty() {
-        return Err(permanent_err(
-            "SHAREPOINT_EMPTY_UPLOAD",
+        return Err(AgentError::permanent(
+            format!("{}_EMPTY_UPLOAD", PREFIX),
             "Upload content is empty",
-        ));
+        )
+        .with_attr("integration", PREFIX));
     }
 
     let encoded_filename = encode_graph_path(&input.filename);
@@ -914,26 +1098,27 @@ fn upload_file_large(
         .get("uploadUrl")
         .and_then(|x| x.as_str())
         .ok_or_else(|| {
-            permanent_err(
-                "SHAREPOINT_INVALID_UPLOAD_SESSION",
+            AgentError::permanent(
+                format!("{}_INVALID_UPLOAD_SESSION", PREFIX),
                 "createUploadSession response missing uploadUrl",
             )
+            .with_attr("integration", PREFIX)
         })?
         .to_string();
 
     let item = upload_chunks(&upload_url, &bytes)?;
 
-    serde_json::to_string(&json!({ "item": item }))
-        .map_err(|e| permanent_err("OUTPUT_SERIALIZATION_ERROR", e.to_string()))
+    Ok(UploadFileOutput { item })
 }
 
 /// Drive chunked upload against an absolute Azure Blob URL (no connection header).
-fn upload_chunks(upload_url: &str, bytes: &[u8]) -> Result<Value, ErrorInfo> {
+fn upload_chunks(upload_url: &str, bytes: &[u8]) -> Result<Value, AgentError> {
     if bytes.is_empty() {
-        return Err(permanent_err(
-            "SHAREPOINT_EMPTY_UPLOAD",
+        return Err(AgentError::permanent(
+            format!("{}_EMPTY_UPLOAD", PREFIX),
             "Upload session requires non-empty content",
-        ));
+        )
+        .with_attr("integration", PREFIX));
     }
 
     let total = bytes.len();
@@ -955,47 +1140,80 @@ fn upload_chunks(upload_url: &str, bytes: &[u8]) -> Result<Value, ErrorInfo> {
 
         let status = resp.status;
         // Intermediate chunks return 202; final chunk returns 200/201 with driveItem JSON.
-        if (status == 200 || status == 201) && !resp.body.is_empty() {
-            if let Ok(v) = serde_json::from_slice::<Value>(&resp.body) {
-                last_item = Some(v);
-            }
+        if (status == 200 || status == 201)
+            && !resp.body.is_empty()
+            && let Ok(v) = serde_json::from_slice::<Value>(&resp.body)
+        {
+            last_item = Some(v);
         }
 
         offset = end;
     }
 
     let final_value = last_item.ok_or_else(|| {
-        permanent_err(
-            "SHAREPOINT_UPLOAD_INCOMPLETE",
+        AgentError::permanent(
+            format!("{}_UPLOAD_INCOMPLETE", PREFIX),
             "Upload session completed without receiving the final driveItem response",
         )
+        .with_attr("integration", PREFIX)
     })?;
 
     Ok(parse_drive_item(&final_value))
 }
 
 // ============================================================================
-// Capability 8: create_folder
+// create_folder
 // ============================================================================
 
-#[derive(Debug, Deserialize)]
-struct CreateFolderInput {
-    drive_id: String,
+#[derive(Debug, Serialize, Deserialize, CapabilityInput)]
+#[capability_input(display_name = "Create Folder Input")]
+pub struct CreateFolderInput {
+    #[field(skip)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub _connection: Option<RawConnection>,
+
+    #[field(display_name = "Drive ID")]
+    pub drive_id: String,
+
+    #[field(
+        display_name = "Parent ID",
+        description = "Parent folder driveItem ID, or 'root'",
+        default = "root"
+    )]
     #[serde(default = "default_root")]
-    parent_id: String,
-    folder_name: String,
-    #[serde(default)]
-    conflict_behavior: Option<String>,
+    pub parent_id: String,
+
+    #[field(display_name = "Folder Name")]
+    pub folder_name: String,
+
+    #[field(
+        display_name = "Conflict Behavior",
+        description = "fail | rename | replace (default: rename)"
+    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conflict_behavior: Option<String>,
 }
 
-fn create_folder(
-    input_json: &str,
-    connection: Option<&ConnectionInfo>,
-) -> Result<String, ErrorInfo> {
-    let input: CreateFolderInput = serde_json::from_str(input_json)
-        .map_err(|e| permanent_err("INPUT_DESERIALIZATION_ERROR", e.to_string()))?;
-    let conn = require_connection(connection)?;
+#[derive(Debug, Serialize, Deserialize, CapabilityOutput)]
+#[capability_output(display_name = "Create Folder Output")]
+pub struct CreateFolderOutput {
+    #[field(
+        display_name = "Item",
+        description = "Created folder driveItem metadata"
+    )]
+    pub item: Value,
+}
 
+#[capability(
+    module = "sharepoint",
+    display_name = "Create Folder",
+    description = "Create a folder in a SharePoint document library",
+    side_effects = true
+)]
+pub fn sharepoint_create_folder(
+    input: CreateFolderInput,
+) -> Result<CreateFolderOutput, AgentError> {
+    let conn = require_connection(input._connection.as_ref())?;
     let path = format!("{}/children", item_path(&input.drive_id, &input.parent_id));
     let body = json!({
         "name": input.folder_name,
@@ -1006,59 +1224,98 @@ fn create_folder(
             .unwrap_or("rename"),
     });
     let result = graph_post(conn, &path, &body)?;
-
-    serde_json::to_string(&json!({ "item": parse_drive_item(&result) }))
-        .map_err(|e| permanent_err("OUTPUT_SERIALIZATION_ERROR", e.to_string()))
+    Ok(CreateFolderOutput {
+        item: parse_drive_item(&result),
+    })
 }
 
 // ============================================================================
-// Capability 9: delete_item
+// delete_item
 // ============================================================================
 
-#[derive(Debug, Deserialize)]
-struct DeleteItemInput {
-    drive_id: String,
-    item_id: String,
+#[derive(Debug, Serialize, Deserialize, CapabilityInput)]
+#[capability_input(display_name = "Delete Item Input")]
+pub struct DeleteItemInput {
+    #[field(skip)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub _connection: Option<RawConnection>,
+
+    #[field(display_name = "Drive ID")]
+    pub drive_id: String,
+
+    #[field(display_name = "Item ID", description = "File or folder driveItem ID")]
+    pub item_id: String,
 }
 
-fn delete_item(input_json: &str, connection: Option<&ConnectionInfo>) -> Result<String, ErrorInfo> {
-    let input: DeleteItemInput = serde_json::from_str(input_json)
-        .map_err(|e| permanent_err("INPUT_DESERIALIZATION_ERROR", e.to_string()))?;
-    let conn = require_connection(connection)?;
+#[derive(Debug, Serialize, Deserialize, CapabilityOutput)]
+#[capability_output(display_name = "Delete Item Output")]
+pub struct DeleteItemOutput {
+    #[field(display_name = "Success")]
+    pub success: bool,
+}
 
+#[capability(
+    module = "sharepoint",
+    display_name = "Delete Item",
+    description = "Delete a file or folder by driveItem ID",
+    side_effects = true
+)]
+pub fn sharepoint_delete_item(input: DeleteItemInput) -> Result<DeleteItemOutput, AgentError> {
+    let conn = require_connection(input._connection.as_ref())?;
     let path = item_path(&input.drive_id, &input.item_id);
     graph_delete(conn, &path)?;
-
-    serde_json::to_string(&json!({ "success": true }))
-        .map_err(|e| permanent_err("OUTPUT_SERIALIZATION_ERROR", e.to_string()))
+    Ok(DeleteItemOutput { success: true })
 }
 
 // ============================================================================
-// Capability 10: move_item (PATCH)
+// move_item
 // ============================================================================
 
-#[derive(Debug, Deserialize)]
-struct MoveItemInput {
-    drive_id: String,
-    item_id: String,
-    #[serde(default)]
-    new_parent_id: Option<String>,
-    #[serde(default)]
-    new_name: Option<String>,
+#[derive(Debug, Serialize, Deserialize, CapabilityInput)]
+#[capability_input(display_name = "Move Item Input")]
+pub struct MoveItemInput {
+    #[field(skip)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub _connection: Option<RawConnection>,
+
+    #[field(display_name = "Drive ID")]
+    pub drive_id: String,
+
+    #[field(display_name = "Item ID")]
+    pub item_id: String,
+
+    #[field(
+        display_name = "New Parent ID",
+        description = "New parent folder driveItem ID (omit to keep the same parent)"
+    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub new_parent_id: Option<String>,
+
+    #[field(
+        display_name = "New Name",
+        description = "New filename (omit to keep the same name)"
+    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub new_name: Option<String>,
 }
 
-fn move_item(input_json: &str, connection: Option<&ConnectionInfo>) -> Result<String, ErrorInfo> {
-    let input: MoveItemInput = serde_json::from_str(input_json)
-        .map_err(|e| permanent_err("INPUT_DESERIALIZATION_ERROR", e.to_string()))?;
-    let conn = require_connection(connection)?;
+#[capability(
+    module = "sharepoint",
+    display_name = "Move / Rename Item",
+    description = "Move and/or rename a file or folder. At least one of new_parent_id or new_name is required.",
+    side_effects = true
+)]
+pub fn sharepoint_move_item(input: MoveItemInput) -> Result<GetItemOutput, AgentError> {
+    let conn = require_connection(input._connection.as_ref())?;
 
     let parent_set = input.new_parent_id.as_ref().is_some_and(|s| !s.is_empty());
     let name_set = input.new_name.as_ref().is_some_and(|s| !s.is_empty());
     if !parent_set && !name_set {
-        return Err(permanent_err(
-            "SHAREPOINT_INVALID_INPUT",
+        return Err(AgentError::permanent(
+            format!("{}_INVALID_INPUT", PREFIX),
             "At least one of new_parent_id or new_name must be provided",
-        ));
+        )
+        .with_attr("integration", PREFIX));
     }
 
     let mut body = json!({});
@@ -1071,31 +1328,67 @@ fn move_item(input_json: &str, connection: Option<&ConnectionInfo>) -> Result<St
 
     let path = item_path(&input.drive_id, &input.item_id);
     let result = graph_patch(conn, &path, &body)?;
-
-    serde_json::to_string(&json!({ "item": parse_drive_item(&result) }))
-        .map_err(|e| permanent_err("OUTPUT_SERIALIZATION_ERROR", e.to_string()))
+    Ok(GetItemOutput {
+        item: parse_drive_item(&result),
+    })
 }
 
 // ============================================================================
-// Capability 11: copy_item (async; returns monitor URL)
+// copy_item (async; returns monitor URL)
 // ============================================================================
 
-#[derive(Debug, Deserialize)]
-struct CopyItemInput {
-    drive_id: String,
-    item_id: String,
-    #[serde(default)]
-    destination_drive_id: Option<String>,
-    destination_parent_id: String,
-    #[serde(default)]
-    new_name: Option<String>,
+#[derive(Debug, Serialize, Deserialize, CapabilityInput)]
+#[capability_input(display_name = "Copy Item Input")]
+pub struct CopyItemInput {
+    #[field(skip)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub _connection: Option<RawConnection>,
+
+    #[field(display_name = "Drive ID", description = "Source drive ID")]
+    pub drive_id: String,
+
+    #[field(display_name = "Item ID", description = "Source driveItem ID")]
+    pub item_id: String,
+
+    #[field(
+        display_name = "Destination Drive ID",
+        description = "Target drive ID (omit to copy within the same drive)"
+    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub destination_drive_id: Option<String>,
+
+    #[field(
+        display_name = "Destination Parent ID",
+        description = "Target folder driveItem ID"
+    )]
+    pub destination_parent_id: String,
+
+    #[field(
+        display_name = "New Name",
+        description = "Optional new filename for the copy"
+    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub new_name: Option<String>,
 }
 
-fn copy_item(input_json: &str, connection: Option<&ConnectionInfo>) -> Result<String, ErrorInfo> {
-    let input: CopyItemInput = serde_json::from_str(input_json)
-        .map_err(|e| permanent_err("INPUT_DESERIALIZATION_ERROR", e.to_string()))?;
-    let conn = require_connection(connection)?;
+#[derive(Debug, Serialize, Deserialize, CapabilityOutput)]
+#[capability_output(display_name = "Copy Item Output")]
+pub struct CopyItemOutput {
+    #[field(
+        display_name = "Monitor URL",
+        description = "Absolute URL to poll the async operation; pass to Get Copy Status"
+    )]
+    pub monitor_url: Option<String>,
+}
 
+#[capability(
+    module = "sharepoint",
+    display_name = "Copy Item",
+    description = "Start an async copy of a file/folder. Returns a monitor URL — poll with Get Copy Status.",
+    side_effects = true
+)]
+pub fn sharepoint_copy_item(input: CopyItemInput) -> Result<CopyItemOutput, AgentError> {
+    let conn = require_connection(input._connection.as_ref())?;
     let copy_path = format!("{}/copy", item_path(&input.drive_id, &input.item_id));
     let copy_url = graph_url(&copy_path);
 
@@ -1112,7 +1405,7 @@ fn copy_item(input_json: &str, connection: Option<&ConnectionInfo>) -> Result<St
         body["name"] = json!(name);
     }
 
-    // Graph returns 202 with a Location header — we need the raw response.
+    // Graph returns 202 Accepted with a Location header pointing at the monitor URL.
     let resp = graph_post_raw(conn, &copy_url, &body)?;
     let monitor_url = resp
         .headers
@@ -1120,31 +1413,66 @@ fn copy_item(input_json: &str, connection: Option<&ConnectionInfo>) -> Result<St
         .find(|(k, _)| k.eq_ignore_ascii_case("location"))
         .map(|(_, v)| v.clone());
 
-    serde_json::to_string(&json!({ "monitor_url": monitor_url }))
-        .map_err(|e| permanent_err("OUTPUT_SERIALIZATION_ERROR", e.to_string()))
+    Ok(CopyItemOutput { monitor_url })
 }
 
 // ============================================================================
-// Capability 12: get_copy_status (poll monitor URL)
+// get_copy_status (poll monitor URL)
 // ============================================================================
 
-#[derive(Debug, Deserialize)]
-struct GetCopyStatusInput {
-    monitor_url: String,
+#[derive(Debug, Serialize, Deserialize, CapabilityInput)]
+#[capability_input(display_name = "Get Copy Status Input")]
+pub struct GetCopyStatusInput {
+    #[field(skip)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub _connection: Option<RawConnection>,
+
+    #[field(
+        display_name = "Monitor URL",
+        description = "Absolute monitor URL returned by Copy Item"
+    )]
+    pub monitor_url: String,
 }
 
-fn get_copy_status(
-    input_json: &str,
-    _connection: Option<&ConnectionInfo>,
-) -> Result<String, ErrorInfo> {
-    let input: GetCopyStatusInput = serde_json::from_str(input_json)
-        .map_err(|e| permanent_err("INPUT_DESERIALIZATION_ERROR", e.to_string()))?;
+#[derive(Debug, Serialize, Deserialize, CapabilityOutput)]
+#[capability_output(display_name = "Get Copy Status Output")]
+pub struct GetCopyStatusOutput {
+    #[field(
+        display_name = "Status",
+        description = "notStarted | inProgress | completed | failed"
+    )]
+    pub status: String,
 
+    #[field(display_name = "Percentage Complete")]
+    pub percentage_complete: Option<f64>,
+
+    #[field(
+        display_name = "Resource ID",
+        description = "ID of the new item once completed"
+    )]
+    pub resource_id: Option<String>,
+
+    #[field(
+        display_name = "Error Code",
+        description = "Service-reported failure code"
+    )]
+    pub error_code: Option<String>,
+}
+
+#[capability(
+    module = "sharepoint",
+    display_name = "Get Copy Status",
+    description = "Poll a copy operation's monitor URL. The monitor URL is absolute and skips connection auth."
+)]
+pub fn sharepoint_get_copy_status(
+    input: GetCopyStatusInput,
+) -> Result<GetCopyStatusOutput, AgentError> {
     if input.monitor_url.is_empty() {
-        return Err(permanent_err(
-            "SHAREPOINT_INVALID_MONITOR_URL",
+        return Err(AgentError::permanent(
+            format!("{}_INVALID_MONITOR_URL", PREFIX),
             "Monitor URL is empty",
-        ));
+        )
+        .with_attr("integration", PREFIX));
     }
 
     let resp = get_absolute_url(&input.monitor_url)?;
@@ -1177,34 +1505,54 @@ fn get_copy_status(
         .and_then(|c| c.as_str())
         .map(String::from);
 
-    serde_json::to_string(&json!({
-        "status": status,
-        "percentage_complete": percentage_complete,
-        "resource_id": resource_id,
-        "error_code": error_code,
-    }))
-    .map_err(|e| permanent_err("OUTPUT_SERIALIZATION_ERROR", e.to_string()))
+    Ok(GetCopyStatusOutput {
+        status,
+        percentage_complete,
+        resource_id,
+        error_code,
+    })
 }
 
 // ============================================================================
-// Capability 13: search (per-drive)
+// search (per-drive)
 // ============================================================================
 
-#[derive(Debug, Deserialize)]
-struct SearchInput {
-    drive_id: String,
-    #[serde(default)]
-    query: Option<String>,
-    #[serde(default)]
-    page_size: Option<u32>,
-    #[serde(default)]
-    page_token: Option<String>,
+#[derive(Debug, Serialize, Deserialize, CapabilityInput)]
+#[capability_input(display_name = "Search Input")]
+pub struct SearchInput {
+    #[field(skip)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub _connection: Option<RawConnection>,
+
+    #[field(display_name = "Drive ID")]
+    pub drive_id: String,
+
+    #[field(
+        display_name = "Query",
+        description = "Search text. Leave empty to list every item under the drive root (Graph accepts q='')."
+    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub query: Option<String>,
+
+    #[field(display_name = "Page Size")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page_size: Option<u32>,
+
+    #[field(
+        display_name = "Page Token",
+        description = "From previous response's next_page_token"
+    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page_token: Option<String>,
 }
 
-fn search(input_json: &str, connection: Option<&ConnectionInfo>) -> Result<String, ErrorInfo> {
-    let input: SearchInput = serde_json::from_str(input_json)
-        .map_err(|e| permanent_err("INPUT_DESERIALIZATION_ERROR", e.to_string()))?;
-    let conn = require_connection(connection)?;
+#[capability(
+    module = "sharepoint",
+    display_name = "Search",
+    description = "Search for files and folders within a drive"
+)]
+pub fn sharepoint_search(input: SearchInput) -> Result<ListChildrenOutput, AgentError> {
+    let conn = require_connection(input._connection.as_ref())?;
 
     let (path, query) = if let Some(token) = input.page_token.as_ref().filter(|t| !t.is_empty()) {
         (token.clone(), HashMap::new())
@@ -1213,6 +1561,12 @@ fn search(input_json: &str, connection: Option<&ConnectionInfo>) -> Result<Strin
         if let Some(top) = input.page_size {
             q.insert("$top".to_string(), top.to_string());
         }
+        // Wrap the query in the literal single-quote syntax Graph expects.
+        // OData rule: double single quotes inside the literal. Then percent-
+        // encode the literal so characters like `*`, ` `, `#`, `?`, `&` don't
+        // trip Graph's URL WAF before reaching the OData parser. Empty / unset
+        // query is valid — Graph treats `q=''` as "match everything under the
+        // drive root".
         let raw_query = input.query.as_deref().unwrap_or("");
         let odata_escaped = raw_query.replace('\'', "''");
         let url_encoded = encode_odata_path_literal(&odata_escaped);
@@ -1232,54 +1586,119 @@ fn search(input_json: &str, connection: Option<&ConnectionInfo>) -> Result<Strin
     let count = items.len() as u32;
     let next_page_token =
         extract_next_relative_path(result.get("@odata.nextLink").and_then(|v| v.as_str()));
-
-    serde_json::to_string(&json!({
-        "items": items,
-        "count": count,
-        "next_page_token": next_page_token,
-    }))
-    .map_err(|e| permanent_err("OUTPUT_SERIALIZATION_ERROR", e.to_string()))
+    Ok(ListChildrenOutput {
+        items,
+        count,
+        next_page_token,
+    })
 }
 
 // ============================================================================
-// Capability 14: search_global (Microsoft Search API)
+// search_global (Microsoft Search API — POST /search/query)
 // ============================================================================
+//
+// Why a second search capability?
+//
+// `/drives/{id}/root/search(q=)` (used by `sharepoint_search`) is restricted
+// under app-only auth — it returns 403 `accessDenied` even when the app has
+// `Files.Read.All` and `Sites.Read.All`. The drive-search service does its own
+// authorization check that's stricter than file/site permissions.
+//
+// `POST /search/query` (Microsoft Search) has a different, app-only-friendly
+// authorization path. It REQUIRES a `region` parameter under app-only —
+// "Application permissions require an Office 365 region" per the API contract.
 
-#[derive(Debug, Deserialize)]
-struct SearchGlobalInput {
-    query: String,
-    region: String,
+#[derive(Debug, Serialize, Deserialize, CapabilityInput)]
+#[capability_input(display_name = "Search (Global) Input")]
+pub struct SearchGlobalInput {
+    #[field(skip)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub _connection: Option<RawConnection>,
+
+    #[field(
+        display_name = "Query",
+        description = "Search text (REQUIRED — Microsoft Search rejects empty queryString). Supports KQL syntax (e.g. 'filename:budget', 'path:\"sites/X\"'). Use the per-drive Search capability with empty query to list every item instead."
+    )]
+    pub query: String,
+
+    #[field(
+        display_name = "Region",
+        description = "Office 365 region for the search (REQUIRED under app-only auth). Examples: 'NAM', 'EUR', 'APC', 'AUS', 'CAN', 'IND', 'JPN', 'GBR', 'KOR'.",
+        example = "NAM"
+    )]
+    pub region: String,
+
+    #[field(
+        display_name = "Entity Types",
+        description = "What to search for. Defaults to ['driveItem']. Other valid values: 'listItem', 'list', 'site', 'drive'.",
+        default = "[\"driveItem\"]"
+    )]
     #[serde(default = "default_search_entity_types")]
-    entity_types: Vec<String>,
-    #[serde(default)]
-    page_size: Option<u32>,
-    #[serde(default)]
-    from: Option<u32>,
+    pub entity_types: Vec<String>,
+
+    #[field(
+        display_name = "Page Size",
+        description = "Maximum results per page (1-500, default 25)"
+    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page_size: Option<u32>,
+
+    #[field(
+        display_name = "From",
+        description = "Result offset for pagination (default 0)"
+    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from: Option<u32>,
 }
 
-fn default_search_entity_types() -> Vec<String> {
-    vec!["driveItem".to_string()]
+#[derive(Debug, Serialize, Deserialize, CapabilityOutput)]
+#[capability_output(display_name = "Search (Global) Output")]
+pub struct SearchGlobalOutput {
+    #[field(
+        display_name = "Items",
+        description = "Search hits, normalized into the same shape as List Children items"
+    )]
+    pub items: Vec<Value>,
+
+    #[field(display_name = "Count", description = "Number of items in this page")]
+    pub count: u32,
+
+    #[field(
+        display_name = "Total",
+        description = "Estimated total matching items (across all pages)"
+    )]
+    pub total: Option<u64>,
+
+    #[field(
+        display_name = "More Results Available",
+        description = "True if there are more pages — pass next 'from' to get them"
+    )]
+    pub more_results_available: bool,
 }
 
-fn search_global(
-    input_json: &str,
-    connection: Option<&ConnectionInfo>,
-) -> Result<String, ErrorInfo> {
-    let input: SearchGlobalInput = serde_json::from_str(input_json)
-        .map_err(|e| permanent_err("INPUT_DESERIALIZATION_ERROR", e.to_string()))?;
-    let conn = require_connection(connection)?;
+#[capability(
+    module = "sharepoint",
+    display_name = "Search (Global)",
+    description = "Cross-tenant search via the Microsoft Search API. Use this when per-drive Search returns 403 under app-only auth. Region is required under app-only."
+)]
+pub fn sharepoint_search_global(
+    input: SearchGlobalInput,
+) -> Result<SearchGlobalOutput, AgentError> {
+    let conn = require_connection(input._connection.as_ref())?;
 
     if input.query.trim().is_empty() {
-        return Err(permanent_err(
-            "SHAREPOINT_INVALID_INPUT",
+        return Err(AgentError::permanent(
+            format!("{}_INVALID_INPUT", PREFIX),
             "query is required",
-        ));
+        )
+        .with_attr("integration", PREFIX));
     }
     if input.region.trim().is_empty() {
-        return Err(permanent_err(
-            "SHAREPOINT_INVALID_INPUT",
+        return Err(AgentError::permanent(
+            format!("{}_INVALID_INPUT", PREFIX),
             "region is required under app-only auth (e.g. 'NAM', 'EUR')",
-        ));
+        )
+        .with_attr("integration", PREFIX));
     }
 
     let entity_types = if input.entity_types.is_empty() {
@@ -1303,10 +1722,13 @@ fn search_global(
 
     let result = graph_post(conn, "/search/query", &body)?;
 
+    // Response shape:
+    // { "value": [ { "hitsContainers": [ { "hits": [ { "resource": {...} } ], "total": N, "moreResultsAvailable": bool } ] } ] }
     let first_response = result
         .get("value")
         .and_then(|v| v.as_array())
         .and_then(|a| a.first());
+
     let hits_container = first_response
         .and_then(|r| r.get("hitsContainers"))
         .and_then(|hc| hc.as_array())
@@ -1332,41 +1754,190 @@ fn search_global(
         .unwrap_or(false);
     let count = items.len() as u32;
 
-    serde_json::to_string(&json!({
-        "items": items,
-        "count": count,
-        "total": total,
-        "more_results_available": more_results_available,
-    }))
-    .map_err(|e| permanent_err("OUTPUT_SERIALIZATION_ERROR", e.to_string()))
+    Ok(SearchGlobalOutput {
+        items,
+        count,
+        total,
+        more_results_available,
+    })
 }
 
 // ============================================================================
-// Shared utilities
+// AgentInfo assembler (host-only; the wasm binary doesn't need it)
 // ============================================================================
 
-fn default_root() -> String {
-    "root".to_string()
-}
+/// Build the canonical `AgentInfo` for this agent by walking the macro-emitted
+/// `&'static` statics. The workspace `runtara-agent-bundle-emit` binary calls
+/// this on the host architecture and writes the JSON to disk; the wasm binary
+/// itself never executes this code, so we cfg-gate it out to keep the
+/// component small.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn agent_info() -> runtara_dsl::agent_meta::AgentInfo {
+    use runtara_dsl::agent_meta::{
+        AgentInfo, CapabilityMeta, InputTypeMeta, OutputTypeMeta, capability_to_api,
+    };
+    use std::collections::HashMap;
 
-fn default_true_opt() -> Option<bool> {
-    Some(true)
-}
+    let caps: &[&'static CapabilityMeta] = &[
+        &__CAPABILITY_META_SHAREPOINT_LIST_DRIVES,
+        &__CAPABILITY_META_SHAREPOINT_LIST_CHILDREN,
+        &__CAPABILITY_META_SHAREPOINT_GET_ITEM,
+        &__CAPABILITY_META_SHAREPOINT_GET_ITEM_BY_PATH,
+        &__CAPABILITY_META_SHAREPOINT_DOWNLOAD_FILE,
+        &__CAPABILITY_META_SHAREPOINT_UPLOAD_FILE,
+        &__CAPABILITY_META_SHAREPOINT_UPLOAD_FILE_LARGE,
+        &__CAPABILITY_META_SHAREPOINT_CREATE_FOLDER,
+        &__CAPABILITY_META_SHAREPOINT_DELETE_ITEM,
+        &__CAPABILITY_META_SHAREPOINT_MOVE_ITEM,
+        &__CAPABILITY_META_SHAREPOINT_COPY_ITEM,
+        &__CAPABILITY_META_SHAREPOINT_GET_COPY_STATUS,
+        &__CAPABILITY_META_SHAREPOINT_SEARCH,
+        &__CAPABILITY_META_SHAREPOINT_SEARCH_GLOBAL,
+    ];
 
-fn truncate(s: &str, max: usize) -> String {
-    if s.len() <= max {
-        s.to_string()
-    } else {
-        let mut t = s[..max].to_string();
-        t.push_str("…");
-        t
+    let input_types: HashMap<&'static str, &'static InputTypeMeta> = [
+        (
+            "ListDrivesInput",
+            &__INPUT_META_ListDrivesInput as &InputTypeMeta,
+        ),
+        ("ListChildrenInput", &__INPUT_META_ListChildrenInput),
+        ("GetItemInput", &__INPUT_META_GetItemInput),
+        ("GetItemByPathInput", &__INPUT_META_GetItemByPathInput),
+        ("DownloadFileInput", &__INPUT_META_DownloadFileInput),
+        ("UploadFileInput", &__INPUT_META_UploadFileInput),
+        ("UploadFileLargeInput", &__INPUT_META_UploadFileLargeInput),
+        ("CreateFolderInput", &__INPUT_META_CreateFolderInput),
+        ("DeleteItemInput", &__INPUT_META_DeleteItemInput),
+        ("MoveItemInput", &__INPUT_META_MoveItemInput),
+        ("CopyItemInput", &__INPUT_META_CopyItemInput),
+        ("GetCopyStatusInput", &__INPUT_META_GetCopyStatusInput),
+        ("SearchInput", &__INPUT_META_SearchInput),
+        ("SearchGlobalInput", &__INPUT_META_SearchGlobalInput),
+    ]
+    .into_iter()
+    .collect();
+
+    let output_types: HashMap<&'static str, &'static OutputTypeMeta> = [
+        (
+            "ListDrivesOutput",
+            &__OUTPUT_META_ListDrivesOutput as &OutputTypeMeta,
+        ),
+        ("ListChildrenOutput", &__OUTPUT_META_ListChildrenOutput),
+        ("GetItemOutput", &__OUTPUT_META_GetItemOutput),
+        ("DownloadFileOutput", &__OUTPUT_META_DownloadFileOutput),
+        ("UploadFileOutput", &__OUTPUT_META_UploadFileOutput),
+        ("CreateFolderOutput", &__OUTPUT_META_CreateFolderOutput),
+        ("DeleteItemOutput", &__OUTPUT_META_DeleteItemOutput),
+        ("CopyItemOutput", &__OUTPUT_META_CopyItemOutput),
+        ("GetCopyStatusOutput", &__OUTPUT_META_GetCopyStatusOutput),
+        ("SearchGlobalOutput", &__OUTPUT_META_SearchGlobalOutput),
+    ]
+    .into_iter()
+    .collect();
+
+    let capabilities = caps
+        .iter()
+        .map(|cap| {
+            capability_to_api(
+                cap,
+                input_types.get(cap.input_type).copied(),
+                output_types.get(cap.output_type).copied(),
+            )
+        })
+        .collect();
+
+    AgentInfo {
+        id: "sharepoint".into(),
+        name: "Microsoft SharePoint".into(),
+        description: "Microsoft SharePoint — file management over Microsoft Graph".into(),
+        has_side_effects: true,
+        supports_connections: true,
+        integration_ids: vec!["microsoft_entra_client_credentials".to_string()],
+        capabilities,
     }
 }
 
-fn permanent_err(code: &str, message: impl Into<String>) -> ErrorInfo {
+// ============================================================================
+// Wasm component plumbing
+// ============================================================================
+
+#[cfg(target_arch = "wasm32")]
+use bindings::exports::runtara::agent::capabilities::{ConnectionInfo, ErrorInfo, Guest};
+
+#[cfg(target_arch = "wasm32")]
+struct Component;
+
+#[cfg(target_arch = "wasm32")]
+impl Guest for Component {
+    fn invoke(
+        capability_id: String,
+        input: Vec<u8>,
+        connection: Option<ConnectionInfo>,
+    ) -> Result<Vec<u8>, ErrorInfo> {
+        let mut value: serde_json::Value = serde_json::from_slice(&input).map_err(bad_json)?;
+
+        // Inject the WIT `connection` arg into the input JSON under `_connection`
+        // so the macro-generated executor can deserialize it into the
+        // capability input struct's `_connection: Option<RawConnection>` field.
+        if let Some(c) = connection.as_ref() {
+            if let serde_json::Value::Object(ref mut obj) = value {
+                let parameters = serde_json::from_str::<serde_json::Value>(&c.parameters)
+                    .unwrap_or(serde_json::Value::Null);
+                let rate_limit_config = c
+                    .rate_limit_config
+                    .as_ref()
+                    .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok());
+                obj.insert(
+                    "_connection".into(),
+                    serde_json::json!({
+                        "connection_id": c.connection_id,
+                        "integration_id": c.integration_id,
+                        "connection_subtype": c.connection_subtype,
+                        "parameters": parameters,
+                        "rate_limit_config": rate_limit_config,
+                    }),
+                );
+            }
+        }
+
+        let executor_result = match capability_id.as_str() {
+            "sharepoint-list-drives" => __executor_sharepoint_list_drives(value),
+            "sharepoint-list-children" => __executor_sharepoint_list_children(value),
+            "sharepoint-get-item" => __executor_sharepoint_get_item(value),
+            "sharepoint-get-item-by-path" => __executor_sharepoint_get_item_by_path(value),
+            "sharepoint-download-file" => __executor_sharepoint_download_file(value),
+            "sharepoint-upload-file" => __executor_sharepoint_upload_file(value),
+            "sharepoint-upload-file-large" => __executor_sharepoint_upload_file_large(value),
+            "sharepoint-create-folder" => __executor_sharepoint_create_folder(value),
+            "sharepoint-delete-item" => __executor_sharepoint_delete_item(value),
+            "sharepoint-move-item" => __executor_sharepoint_move_item(value),
+            "sharepoint-copy-item" => __executor_sharepoint_copy_item(value),
+            "sharepoint-get-copy-status" => __executor_sharepoint_get_copy_status(value),
+            "sharepoint-search" => __executor_sharepoint_search(value),
+            "sharepoint-search-global" => __executor_sharepoint_search_global(value),
+            other => {
+                return Err(ErrorInfo {
+                    code: "UNKNOWN_CAPABILITY".into(),
+                    message: format!("sharepoint agent has no capability `{other}`"),
+                    category: "permanent".into(),
+                    severity: "error".into(),
+                    retryable: false,
+                    retry_after_ms: None,
+                    attributes: None,
+                });
+            }
+        };
+        executor_result
+            .map_err(error_string_to_error_info)
+            .and_then(|out_value| serde_json::to_vec(&out_value).map_err(bad_json))
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn bad_json(e: serde_json::Error) -> ErrorInfo {
     ErrorInfo {
-        code: code.into(),
-        message: message.into(),
+        code: "INPUT_DESERIALIZATION_ERROR".into(),
+        message: e.to_string(),
         category: "permanent".into(),
         severity: "error".into(),
         retryable: false,
@@ -1375,254 +1946,54 @@ fn permanent_err(code: &str, message: impl Into<String>) -> ErrorInfo {
     }
 }
 
-fn transient_err(code: &str, message: impl Into<String>) -> ErrorInfo {
-    ErrorInfo {
-        code: code.into(),
-        message: message.into(),
-        category: "transient".into(),
-        severity: "warning".into(),
-        retryable: true,
-        retry_after_ms: None,
-        attributes: None,
+/// The `#[capability]` macro packages each error as a JSON-string with
+/// `{ code, message, category, severity, ... }`. Parse it back into a typed
+/// `ErrorInfo` for the WIT result.
+#[cfg(target_arch = "wasm32")]
+fn error_string_to_error_info(s: String) -> ErrorInfo {
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(&s) {
+        let category = value
+            .get("category")
+            .and_then(|v| v.as_str())
+            .unwrap_or("permanent")
+            .to_string();
+        let retryable = value
+            .get("retryable")
+            .and_then(|v| v.as_bool())
+            .unwrap_or_else(|| category == "transient");
+        ErrorInfo {
+            code: value
+                .get("code")
+                .and_then(|v| v.as_str())
+                .unwrap_or("CAPABILITY_ERROR")
+                .into(),
+            message: value
+                .get("message")
+                .and_then(|v| v.as_str())
+                .unwrap_or(&s)
+                .into(),
+            category,
+            severity: value
+                .get("severity")
+                .and_then(|v| v.as_str())
+                .unwrap_or("error")
+                .into(),
+            retryable,
+            retry_after_ms: value.get("retry_after_ms").and_then(|v| v.as_u64()),
+            attributes: value.get("attributes").map(|v| v.to_string()),
+        }
+    } else {
+        ErrorInfo {
+            code: "CAPABILITY_ERROR".into(),
+            message: s,
+            category: "permanent".into(),
+            severity: "error".into(),
+            retryable: false,
+            retry_after_ms: None,
+            attributes: None,
+        }
     }
 }
 
-// ============================================================================
-// JSON Schemas — mirror legacy field names and defaults exactly
-// ============================================================================
-
-const LIST_DRIVES_INPUT_SCHEMA: &str = r#"{
-    "type": "object",
-    "required": ["site_id"],
-    "properties": {
-        "site_id": {
-            "type": "string",
-            "description": "Microsoft Graph site identifier (e.g. 'contoso.sharepoint.com,GUID,GUID' or 'root')",
-            "example": "contoso.sharepoint.com,11111111-2222-3333-4444-555555555555,66666666-7777-8888-9999-000000000000"
-        }
-    }
-}"#;
-
-const LIST_DRIVES_OUTPUT_SCHEMA: &str = r#"{
-    "type": "object",
-    "properties": {
-        "drives": { "type": "array", "items": {}, "description": "Document libraries on the site" },
-        "count":  { "type": "integer", "description": "Number of drives returned" }
-    }
-}"#;
-
-const LIST_CHILDREN_INPUT_SCHEMA: &str = r#"{
-    "type": "object",
-    "required": ["drive_id"],
-    "properties": {
-        "drive_id":   { "type": "string", "description": "Document library drive ID" },
-        "item_id":    { "type": "string", "description": "Folder driveItem ID, or 'root' for the drive's root folder", "default": "root" },
-        "page_size":  { "type": "integer", "description": "Maximum items per page (Graph $top, max 200)" },
-        "page_token": { "type": "string",  "description": "Pass back the previous response's next_page_token to fetch the next page" }
-    }
-}"#;
-
-const LIST_CHILDREN_OUTPUT_SCHEMA: &str = r#"{
-    "type": "object",
-    "properties": {
-        "items":           { "type": "array", "items": {}, "description": "Files and folders under the parent" },
-        "count":           { "type": "integer" },
-        "next_page_token": { "type": "string",  "description": "Pass to the next call to get the next page" }
-    }
-}"#;
-
-const GET_ITEM_INPUT_SCHEMA: &str = r#"{
-    "type": "object",
-    "required": ["drive_id", "item_id"],
-    "properties": {
-        "drive_id": { "type": "string" },
-        "item_id":  { "type": "string" }
-    }
-}"#;
-
-const GET_ITEM_OUTPUT_SCHEMA: &str = r#"{
-    "type": "object",
-    "properties": {
-        "item": { "description": "Drive item metadata", "type": "object" }
-    }
-}"#;
-
-const GET_ITEM_BY_PATH_INPUT_SCHEMA: &str = r#"{
-    "type": "object",
-    "required": ["drive_id", "path"],
-    "properties": {
-        "drive_id": { "type": "string" },
-        "path":     { "type": "string", "description": "Path within the drive (no leading slash)", "example": "Reports/Q1 2026/summary.xlsx" }
-    }
-}"#;
-
-const DOWNLOAD_FILE_INPUT_SCHEMA: &str = r#"{
-    "type": "object",
-    "required": ["drive_id", "item_id"],
-    "properties": {
-        "drive_id": { "type": "string" },
-        "item_id":  { "type": "string" },
-        "as_text":  { "type": "boolean", "description": "Return content as UTF-8 text instead of base64 (default: false)", "default": false }
-    }
-}"#;
-
-const DOWNLOAD_FILE_OUTPUT_SCHEMA: &str = r#"{
-    "type": "object",
-    "properties": {
-        "content":      { "type": "string", "description": "Base64 by default, or UTF-8 if as_text=true" },
-        "content_type": { "type": "string" },
-        "size":         { "type": "integer", "description": "Size in bytes" },
-        "filename":     { "type": "string" }
-    }
-}"#;
-
-const UPLOAD_FILE_INPUT_SCHEMA: &str = r#"{
-    "type": "object",
-    "required": ["drive_id", "filename", "content"],
-    "properties": {
-        "drive_id":         { "type": "string" },
-        "parent_id":        { "type": "string", "description": "Folder driveItem ID to upload into, or 'root' for the drive's root", "default": "root" },
-        "filename":         { "type": "string", "description": "Name of the file to create" },
-        "content":          { "type": "string", "description": "File content; either raw text or base64-encoded bytes" },
-        "is_base64":        { "type": "boolean", "description": "Whether content is base64-encoded (default: true)", "default": true },
-        "content_type":     { "type": "string", "description": "MIME type of the upload (default: application/octet-stream)" },
-        "conflict_behavior":{ "type": "string", "description": "fail | rename | replace (default: replace)" }
-    }
-}"#;
-
-const UPLOAD_FILE_OUTPUT_SCHEMA: &str = r#"{
-    "type": "object",
-    "properties": {
-        "item": { "description": "Created driveItem metadata", "type": "object" }
-    }
-}"#;
-
-const UPLOAD_FILE_LARGE_INPUT_SCHEMA: &str = r#"{
-    "type": "object",
-    "required": ["drive_id", "filename", "content"],
-    "properties": {
-        "drive_id":         { "type": "string" },
-        "parent_id":        { "type": "string", "description": "Folder driveItem ID to upload into, or 'root'", "default": "root" },
-        "filename":         { "type": "string" },
-        "content":          { "type": "string", "description": "File content as base64 (use is_base64=false for raw text)" },
-        "is_base64":        { "type": "boolean", "description": "Whether content is base64-encoded (default: true)", "default": true },
-        "conflict_behavior":{ "type": "string", "description": "fail | rename | replace (default: replace)" }
-    }
-}"#;
-
-const CREATE_FOLDER_INPUT_SCHEMA: &str = r#"{
-    "type": "object",
-    "required": ["drive_id", "folder_name"],
-    "properties": {
-        "drive_id":         { "type": "string" },
-        "parent_id":        { "type": "string", "description": "Parent folder driveItem ID, or 'root'", "default": "root" },
-        "folder_name":      { "type": "string" },
-        "conflict_behavior":{ "type": "string", "description": "fail | rename | replace (default: rename)" }
-    }
-}"#;
-
-const CREATE_FOLDER_OUTPUT_SCHEMA: &str = r#"{
-    "type": "object",
-    "properties": {
-        "item": { "description": "Created folder driveItem metadata", "type": "object" }
-    }
-}"#;
-
-const DELETE_ITEM_INPUT_SCHEMA: &str = r#"{
-    "type": "object",
-    "required": ["drive_id", "item_id"],
-    "properties": {
-        "drive_id": { "type": "string" },
-        "item_id":  { "type": "string", "description": "File or folder driveItem ID" }
-    }
-}"#;
-
-const DELETE_ITEM_OUTPUT_SCHEMA: &str = r#"{
-    "type": "object",
-    "properties": {
-        "success": { "type": "boolean" }
-    }
-}"#;
-
-const MOVE_ITEM_INPUT_SCHEMA: &str = r#"{
-    "type": "object",
-    "required": ["drive_id", "item_id"],
-    "properties": {
-        "drive_id":     { "type": "string" },
-        "item_id":      { "type": "string" },
-        "new_parent_id":{ "type": "string", "description": "New parent folder driveItem ID (omit to keep the same parent)" },
-        "new_name":     { "type": "string", "description": "New filename (omit to keep the same name)" }
-    }
-}"#;
-
-const COPY_ITEM_INPUT_SCHEMA: &str = r#"{
-    "type": "object",
-    "required": ["drive_id", "item_id", "destination_parent_id"],
-    "properties": {
-        "drive_id":             { "type": "string", "description": "Source drive ID" },
-        "item_id":              { "type": "string", "description": "Source driveItem ID" },
-        "destination_drive_id": { "type": "string", "description": "Target drive ID (omit to copy within the same drive)" },
-        "destination_parent_id":{ "type": "string", "description": "Target folder driveItem ID" },
-        "new_name":             { "type": "string", "description": "Optional new filename for the copy" }
-    }
-}"#;
-
-const COPY_ITEM_OUTPUT_SCHEMA: &str = r#"{
-    "type": "object",
-    "properties": {
-        "monitor_url": { "type": "string", "description": "Absolute URL to poll the async operation; pass to Get Copy Status" }
-    }
-}"#;
-
-const GET_COPY_STATUS_INPUT_SCHEMA: &str = r#"{
-    "type": "object",
-    "required": ["monitor_url"],
-    "properties": {
-        "monitor_url": { "type": "string", "description": "Absolute monitor URL returned by Copy Item" }
-    }
-}"#;
-
-const GET_COPY_STATUS_OUTPUT_SCHEMA: &str = r#"{
-    "type": "object",
-    "properties": {
-        "status":              { "type": "string",  "description": "notStarted | inProgress | completed | failed" },
-        "percentage_complete": { "type": "number",  "description": "0..100 when reported" },
-        "resource_id":         { "type": "string",  "description": "ID of the new item once completed" },
-        "error_code":          { "type": "string",  "description": "Service-reported failure code" }
-    }
-}"#;
-
-const SEARCH_INPUT_SCHEMA: &str = r#"{
-    "type": "object",
-    "required": ["drive_id"],
-    "properties": {
-        "drive_id":   { "type": "string" },
-        "query":      { "type": "string",  "description": "Search text. Leave empty to list every item under the drive root." },
-        "page_size":  { "type": "integer" },
-        "page_token": { "type": "string",  "description": "From previous response's next_page_token" }
-    }
-}"#;
-
-const SEARCH_GLOBAL_INPUT_SCHEMA: &str = r#"{
-    "type": "object",
-    "required": ["query", "region"],
-    "properties": {
-        "query":        { "type": "string",  "description": "Search text (REQUIRED). Supports KQL syntax." },
-        "region":       { "type": "string",  "description": "Office 365 region (REQUIRED under app-only auth). Examples: 'NAM', 'EUR', 'APC'.", "example": "NAM" },
-        "entity_types": { "type": "array", "items": { "type": "string" }, "description": "What to search for. Default: ['driveItem']", "default": ["driveItem"] },
-        "page_size":    { "type": "integer", "description": "Maximum results per page (1-500, default 25)" },
-        "from":         { "type": "integer", "description": "Result offset for pagination (default 0)" }
-    }
-}"#;
-
-const SEARCH_GLOBAL_OUTPUT_SCHEMA: &str = r#"{
-    "type": "object",
-    "properties": {
-        "items":                 { "type": "array", "items": {}, "description": "Search hits, normalized into the same shape as List Children items" },
-        "count":                 { "type": "integer", "description": "Number of items in this page" },
-        "total":                 { "type": "integer", "description": "Estimated total matching items (across all pages)" },
-        "more_results_available":{ "type": "boolean","description": "True if there are more pages" }
-    }
-}"#;
-
+#[cfg(target_arch = "wasm32")]
 bindings::export!(Component with_types_in bindings);

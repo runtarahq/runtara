@@ -23,6 +23,11 @@ dist/
 target/
 dist/
 
+# Build artifacts: per-agent metadata sidecars are derived from each agent
+# crate's macro-emitted `&'static` statics by `runtara-agent-bundle-emit`.
+# Never hand-edit; regenerate via `scripts/build-agent-components.sh`.
+crates/runtara-agent-*/meta.json
+
 # JetBrains IDE
 .idea/
 

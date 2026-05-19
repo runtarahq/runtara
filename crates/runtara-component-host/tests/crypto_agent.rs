@@ -1,10 +1,7 @@
-//! End-to-end smoke test for Phase 1: load the runtara-agent-crypto component
-//! into wasmtime, call `list-capabilities()`, then `invoke("hash", ...)` and
-//! assert the SHA-256 output.
-//!
-//! Requires `cargo component build --release --target wasm32-wasip2
-//! -p runtara-agent-crypto` first. Skipped (with a clear message) if the
-//! .wasm file isn't present.
+//! End-to-end smoke test: load `runtara_agent_crypto.wasm` directly into
+//! wasmtime and call the (now-only) `invoke` export. Skipped if the .wasm is
+//! missing — `cargo component build --release --target wasm32-wasip2 -p
+//! runtara-agent-crypto` first.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -14,14 +11,13 @@ use runtara_component_host::{
 };
 
 fn agent_wasm_path() -> PathBuf {
-    // crates/runtara-component-host -> workspace root -> target/...
     let workspace = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .unwrap()
         .parent()
         .unwrap()
         .to_path_buf();
-    // cargo component drops the output under wasm32-wasip1 even though the
+    // cargo-component drops the output under wasm32-wasip1 even though the
     // target triple we asked for is wasm32-wasip2 — see cargo-component
     // adapter behavior. Both names are checked.
     let p1 = workspace.join("target/wasm32-wasip1/release/runtara_agent_crypto.wasm");
@@ -30,7 +26,7 @@ fn agent_wasm_path() -> PathBuf {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn crypto_list_capabilities_and_hash() -> anyhow::Result<()> {
+async fn crypto_invoke_hash() -> anyhow::Result<()> {
     let wasm = agent_wasm_path();
     if !wasm.exists() {
         eprintln!(
@@ -53,26 +49,17 @@ async fn crypto_list_capabilities_and_hash() -> anyhow::Result<()> {
     ));
     let state = HostState::new(ctx.clone());
     let (mut store, agent) = instantiate(&engine, &loaded.pre, state).await?;
-
-    let caps = agent
+    let result = agent
         .runtara_agent_capabilities()
-        .call_list_capabilities(&mut store)
-        .await?;
-    assert_eq!(caps.len(), 2, "expected hash + hmac, got {:?}", caps);
-    assert!(caps.iter().any(|c| c.id == "hash"));
-    assert!(caps.iter().any(|c| c.id == "hmac"));
-
-    // Fresh store for the invoke call — components don't share Store across
-    // calls in this Phase 1 dispatcher model.
-    let state2 = HostState::new(ctx.clone());
-    let (mut store2, agent2) = instantiate(&engine, &loaded.pre, state2).await?;
-    let result = agent2
-        .runtara_agent_capabilities()
-        .call_invoke(&mut store2, "hash", r#"{"data":"hello"}"#, None)
+        .call_invoke(&mut store, "hash", br#"{"data":"hello"}"#, None)
         .await?
         .map_err(|e| anyhow::anyhow!("guest error: {}: {}", e.code, e.message))?;
 
     // SHA-256("hello") = 2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824
-    assert!(result.contains("2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"));
+    let out: serde_json::Value = serde_json::from_slice(&result)?;
+    assert_eq!(
+        out.get("hash").and_then(|v| v.as_str()),
+        Some("2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824")
+    );
     Ok(())
 }

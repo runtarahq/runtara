@@ -1,120 +1,153 @@
-//! Slack Bot agent — WebAssembly Component.
+//! Slack Bot agent — WebAssembly component.
 //!
-//! Schema parity with `runtara-agents/src/agents/integrations/slack.rs`.
+//! Capability metadata travels through `#[capability_input]` / `#[capability]` /
+//! `#[capability_output]` annotations on the same Rust types and functions that
+//! the wasm cdylib's `invoke` dispatcher calls into. The workspace binary
+//! `runtara-agent-bundle-emit` reads these macro-emitted `&'static` statics on
+//! the host architecture and writes `runtara_agent_slack.meta.json` next to
+//! the `.wasm` — the JSON is a build artifact, never hand-edited.
 //!
-//! Routing model: `runtara_http::HttpClient` reads `RUNTARA_HTTP_PROXY_URL` and
-//! routes every request through the proxy. For Slack API calls, we set
-//! `X-Runtara-Connection-Id` so the proxy can attach the Bot token server-side.
-//! The component never handles secrets directly.
+//! Routing model: the `runtara-http` client reads `RUNTARA_HTTP_PROXY_URL` and
+//! forwards every request through the proxy as a JSON envelope. The
+//! `X-Runtara-Connection-Id` header causes the proxy to attach the bot token
+//! and resolve `https://slack.com/api/...`. The component never sees secrets.
 //!
-//! The upload-file capability uses the Slack V2 upload flow:
+//! The `upload-file` capability follows Slack's V2 upload flow:
 //!   1. `files.getUploadURLExternal` — obtain a presigned upload URL (via proxy + auth).
 //!   2. POST raw bytes to the presigned URL — no connection header; URL is pre-signed.
 //!   3. `files.completeUploadExternal` — finalize and share to channel (via proxy + auth).
+#![allow(clippy::result_large_err)]
 
-#![cfg(target_arch = "wasm32")]
+use runtara_agent_macro::{CapabilityInput, CapabilityOutput, capability};
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+use std::collections::HashMap;
+use std::time::Duration;
 
+#[cfg(target_arch = "wasm32")]
 #[allow(warnings)]
 mod bindings;
 
-use std::time::Duration;
+// ============================================================================
+// Local AgentError shim
+// ============================================================================
+//
+// The host crate's `runtara_agents::types::AgentError` pulls in `tracing` and
+// other host-only baggage. We only need the on-the-wire JSON shape that the
+// `#[capability]` macro expects (`Into<String>` returning
+// `{"code","message","category","severity",...}`), so we inline a minimal
+// version here. Mirrors the shim in `runtara-agent-mailgun`.
 
-use bindings::exports::runtara::agent::capabilities::{
-    CapabilityInfo, ConnectionInfo, ErrorInfo, Guest, ModuleInfo,
-};
-use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+#[derive(Debug, Clone, Serialize)]
+pub struct AgentError {
+    pub code: String,
+    pub message: String,
+    pub category: &'static str,
+    pub severity: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retry_after_ms: Option<u64>,
+    #[serde(skip_serializing_if = "HashMap::is_empty")]
+    pub attributes: HashMap<String, Value>,
+}
 
-// -----------------------------------------------------------------------------
+impl AgentError {
+    pub fn permanent(code: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            code: code.into(),
+            message: message.into(),
+            category: "permanent",
+            severity: "error",
+            retry_after_ms: None,
+            attributes: HashMap::new(),
+        }
+    }
+
+    pub fn transient(code: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            code: code.into(),
+            message: message.into(),
+            category: "transient",
+            severity: "warning",
+            retry_after_ms: None,
+            attributes: HashMap::new(),
+        }
+    }
+
+    pub fn with_attr(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.attributes
+            .insert(key.into(), Value::String(value.into()));
+        self
+    }
+
+    pub fn with_attr_value(mut self, key: impl Into<String>, value: Value) -> Self {
+        self.attributes.insert(key.into(), value);
+        self
+    }
+
+    pub fn with_retry_after_ms(mut self, ms: u64) -> Self {
+        self.retry_after_ms = Some(ms);
+        self
+    }
+}
+
+/// Serialize into the canonical JSON envelope so the `#[capability]` macro
+/// executor passes us straight through to `error_string_to_error_info` on the
+/// wasm side (which parses the JSON back into a typed `ErrorInfo`).
+impl From<AgentError> for String {
+    fn from(err: AgentError) -> Self {
+        serde_json::to_string(&err).unwrap_or_else(|_| format!("[{}] {}", err.code, err.message))
+    }
+}
+
+// ============================================================================
+// RawConnection (local mirror of crates/runtara-agents/src/connections.rs)
+// ============================================================================
+//
+// The host crate's `RawConnection` lives in `runtara-agents` and isn't a
+// wasm-compatible dependency. We mirror just the struct so the macro-derived
+// executor can deserialize what the wasm Guest::invoke wrapper injects into
+// the input JSON under the `_connection` key.
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RawConnection {
+    #[serde(default)]
+    pub connection_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub connection_subtype: Option<String>,
+    pub integration_id: String,
+    pub parameters: Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rate_limit_config: Option<Value>,
+}
+
+// ============================================================================
 // Constants
-// -----------------------------------------------------------------------------
+// ============================================================================
 
 const SLACK_API_BASE: &str = "https://slack.com/api";
 const DEFAULT_TIMEOUT_MS: u64 = 30_000;
 const UPLOAD_TIMEOUT_MS: u64 = 120_000;
 
-// -----------------------------------------------------------------------------
-// Helpers — error constructors
-// -----------------------------------------------------------------------------
-
-fn permanent_err(code: &str, message: impl Into<String>) -> ErrorInfo {
-    ErrorInfo {
-        code: code.into(),
-        message: message.into(),
-        category: "permanent".into(),
-        severity: "error".into(),
-        retryable: false,
-        retry_after_ms: None,
-        attributes: None,
-    }
-}
-
-fn transient_err(code: &str, message: impl Into<String>) -> ErrorInfo {
-    ErrorInfo {
-        code: code.into(),
-        message: message.into(),
-        category: "transient".into(),
-        severity: "warning".into(),
-        retryable: true,
-        retry_after_ms: None,
-        attributes: None,
-    }
-}
-
-/// Classify an HTTP status code into a transient or permanent error.
-fn classify_http_err(
-    prefix: &str,
-    status: u16,
-    body: &str,
-    retry_after_ms: Option<u64>,
-) -> ErrorInfo {
-    let (code, category, retryable) = if status == 429 {
-        (format!("{prefix}_RATE_LIMITED"), "transient", true)
-    } else if (500..600).contains(&status) {
-        (format!("{prefix}_SERVER_ERROR"), "transient", true)
-    } else {
-        (format!("{prefix}_HTTP_{status}"), "permanent", false)
-    };
-    ErrorInfo {
-        code,
-        message: format!("HTTP {status}: {}", truncate(body, 512)),
-        category: category.into(),
-        severity: if retryable { "warning" } else { "error" }.into(),
-        retryable,
-        retry_after_ms,
-        attributes: None,
-    }
-}
-
-fn truncate(s: &str, max: usize) -> String {
-    if s.len() <= max {
-        s.to_string()
-    } else {
-        let mut t = s[..max].to_string();
-        t.push('…');
-        t
-    }
-}
-
-// -----------------------------------------------------------------------------
-// Core Slack API helper
-// -----------------------------------------------------------------------------
+// ============================================================================
+// Shared Slack API helper
+// ============================================================================
 
 /// POST a JSON body to `https://slack.com/api/{slack_method}` through the
 /// proxy (which injects the Bot token for the connection). Handles Slack's
 /// "200 OK with ok:false" error pattern and maps well-known error codes to
-/// structured `ErrorInfo` values.
+/// structured `AgentError` values.
 fn slack_api_call(
     slack_method: &str,
-    connection: &ConnectionInfo,
+    connection: &RawConnection,
     body: &Value,
-) -> Result<Value, ErrorInfo> {
+) -> Result<Value, AgentError> {
     let url = format!("{}/{}", SLACK_API_BASE, slack_method);
     let body_bytes = serde_json::to_vec(body).map_err(|e| {
-        permanent_err(
+        AgentError::permanent(
             "SLACK_SERIALIZATION_ERROR",
             format!("Failed to serialize request body: {e}"),
         )
+        .with_attr("integration", "SLACK")
     })?;
 
     let client = runtara_http::HttpClient::with_timeout(Duration::from_millis(DEFAULT_TIMEOUT_MS));
@@ -125,24 +158,27 @@ fn slack_api_call(
         .body_bytes(&body_bytes)
         .call_agent()
         .map_err(|e| {
-            transient_err(
+            AgentError::transient(
                 "SLACK_NETWORK_ERROR",
                 format!("Network error calling Slack {slack_method}: {e}"),
             )
+            .with_attr("integration", "SLACK")
+            .with_attr("method", slack_method)
         })?;
 
     let status = response.status;
 
-    // Parse the response body as JSON
-    let resp_json: Value = serde_json::from_slice(&response.body).map_err(|_| {
-        let body_str = String::from_utf8_lossy(&response.body).to_string();
-        classify_http_err("SLACK", status, &body_str, None)
-    })?;
+    // Try parsing the response body as JSON regardless of status; Slack returns
+    // JSON for both success and error responses on the Web API.
+    let parse_result: Result<Value, _> = serde_json::from_slice(&response.body);
 
     // Non-2xx HTTP errors
     if !(200..300).contains(&status) {
-        let body_str = serde_json::to_string(&resp_json).unwrap_or_default();
-        let retry_after = response
+        let body_str = match &parse_result {
+            Ok(v) => serde_json::to_string(v).unwrap_or_default(),
+            Err(_) => String::from_utf8_lossy(&response.body).to_string(),
+        };
+        let retry_after_ms = response
             .headers
             .get("retry-after-ms")
             .and_then(|v| v.parse::<u64>().ok())
@@ -153,75 +189,181 @@ fn slack_api_call(
                     .and_then(|v| v.parse::<u64>().ok())
                     .map(|s| s * 1000)
             });
-        return Err(classify_http_err("SLACK", status, &body_str, retry_after));
+
+        let mut err = if status == 429 {
+            AgentError::transient(
+                "SLACK_RATE_LIMITED",
+                format!("HTTP {status}: {}", truncate(&body_str, 512)),
+            )
+        } else if (500..600).contains(&status) {
+            AgentError::transient(
+                "SLACK_SERVER_ERROR",
+                format!("HTTP {status}: {}", truncate(&body_str, 512)),
+            )
+        } else {
+            AgentError::permanent(
+                format!("SLACK_HTTP_{status}"),
+                format!("HTTP {status}: {}", truncate(&body_str, 512)),
+            )
+        };
+        err = err
+            .with_attr("integration", "SLACK")
+            .with_attr("method", slack_method)
+            .with_attr("status_code", status.to_string())
+            .with_attr("body", truncate(&body_str, 512));
+        if let Some(ms) = retry_after_ms {
+            err = err.with_retry_after_ms(ms);
+        }
+        return Err(err);
     }
 
+    let response_json = parse_result.map_err(|e| {
+        let body_str = String::from_utf8_lossy(&response.body).to_string();
+        AgentError::permanent(
+            "SLACK_RESPONSE_PARSE_ERROR",
+            format!("Failed to parse Slack response: {e}"),
+        )
+        .with_attr("integration", "SLACK")
+        .with_attr("method", slack_method)
+        .with_attr("body", truncate(&body_str, 512))
+    })?;
+
     // Slack API errors — "200 OK" with ok: false
-    if resp_json["ok"].as_bool() != Some(true) {
-        let slack_code = resp_json["error"]
+    if response_json["ok"].as_bool() != Some(true) {
+        let slack_code = response_json["error"]
             .as_str()
             .unwrap_or("unknown_error")
             .to_string();
         let msg = format!("Slack API error ({slack_method}): {slack_code}");
-        let attrs = serde_json::to_string(&json!({
-            "error": slack_code,
-            "method": slack_method,
-        }))
-        .ok();
 
-        let (code, category, retryable) = match slack_code.as_str() {
-            "ratelimited" => ("SLACK_RATE_LIMITED", "transient", true),
-            "channel_not_found" => ("SLACK_CHANNEL_NOT_FOUND", "permanent", false),
-            "not_in_channel" => ("SLACK_NOT_IN_CHANNEL", "permanent", false),
-            "is_archived" => ("SLACK_CHANNEL_ARCHIVED", "permanent", false),
-            "invalid_auth" | "account_inactive" | "token_revoked" => {
-                ("SLACK_AUTH_ERROR", "permanent", false)
-            }
-            _ => ("SLACK_API_ERROR", "permanent", false),
+        // (code, retryable) — `retryable` decides whether the error envelope is
+        // built via `transient()` (warning severity, category=transient) or
+        // `permanent()` (error severity, category=permanent), preserving the
+        // legacy host classifier's per-Slack-error mapping.
+        let (code, retryable) = match slack_code.as_str() {
+            "ratelimited" => ("SLACK_RATE_LIMITED", true),
+            "channel_not_found" => ("SLACK_CHANNEL_NOT_FOUND", false),
+            "not_in_channel" => ("SLACK_NOT_IN_CHANNEL", false),
+            "is_archived" => ("SLACK_CHANNEL_ARCHIVED", false),
+            "invalid_auth" | "account_inactive" | "token_revoked" => ("SLACK_AUTH_ERROR", false),
+            _ => ("SLACK_API_ERROR", false),
         };
 
-        return Err(ErrorInfo {
-            code: code.into(),
-            message: msg,
-            category: category.into(),
-            severity: if retryable { "warning" } else { "error" }.into(),
-            retryable,
-            retry_after_ms: None,
-            attributes: attrs,
-        });
+        let err = if retryable {
+            AgentError::transient(code, msg)
+        } else {
+            AgentError::permanent(code, msg)
+        };
+
+        return Err(err
+            .with_attr("integration", "SLACK")
+            .with_attr("method", slack_method)
+            .with_attr("error", slack_code)
+            .with_attr_value("response", response_json));
     }
 
-    Ok(resp_json)
+    Ok(response_json)
 }
 
-// -----------------------------------------------------------------------------
-// Capability: send-message
-// -----------------------------------------------------------------------------
+// ============================================================================
+// Send Message
+// ============================================================================
 
-#[derive(Debug, Deserialize)]
-struct SendMessageInput {
-    channel: String,
-    text: String,
-    #[serde(default)]
-    blocks: Option<Value>,
-    #[serde(default)]
-    thread_ts: Option<String>,
-    #[serde(default)]
-    unfurl_links: Option<bool>,
-    #[serde(default)]
-    unfurl_media: Option<bool>,
+#[derive(Debug, Serialize, Deserialize, CapabilityInput)]
+#[capability_input(display_name = "Send Message Input")]
+pub struct SendMessageInput {
+    /// Connection data injected by the wasm Guest::invoke wrapper before
+    /// dispatching to the capability executor. `#[field(skip)]` keeps this
+    /// out of the capability metadata (the UI/runtime fills it from the
+    /// configured connection, not from user input).
+    #[field(skip)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub _connection: Option<RawConnection>,
+
+    #[field(
+        display_name = "Channel",
+        description = "Slack channel ID (e.g. C01234ABCDE) or user ID for direct messages",
+        example = "C01234ABCDE"
+    )]
+    pub channel: String,
+
+    #[field(
+        display_name = "Text",
+        description = "Message text (supports Slack mrkdwn formatting). Used as fallback when blocks are provided.",
+        example = "Hello, world!"
+    )]
+    pub text: String,
+
+    #[field(
+        display_name = "Blocks",
+        description = "Block Kit blocks as JSON array for rich message formatting. When provided, text becomes the fallback for notifications."
+    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocks: Option<Value>,
+
+    #[field(
+        display_name = "Thread Timestamp",
+        description = "Timestamp of the parent message to reply in a thread (e.g. 1234567890.123456)"
+    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_ts: Option<String>,
+
+    #[field(
+        display_name = "Unfurl Links",
+        description = "Whether to enable link unfurling (default: true)"
+    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unfurl_links: Option<bool>,
+
+    #[field(
+        display_name = "Unfurl Media",
+        description = "Whether to enable media unfurling (default: true)"
+    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unfurl_media: Option<bool>,
 }
 
-#[derive(Debug, Serialize)]
-struct SendMessageOutput {
-    ok: bool,
-    channel: String,
-    ts: String,
+#[derive(Debug, Serialize, Deserialize, CapabilityOutput)]
+#[capability_output(display_name = "Send Message Output")]
+pub struct SendMessageOutput {
+    #[field(
+        display_name = "OK",
+        description = "Whether the API call was successful"
+    )]
+    pub ok: bool,
+
+    #[field(
+        display_name = "Channel",
+        description = "Channel ID where the message was posted"
+    )]
+    pub channel: String,
+
+    #[field(
+        display_name = "Timestamp",
+        description = "Message timestamp (unique message identifier within the channel)"
+    )]
+    pub ts: String,
 }
 
-fn send_message(input_json: &str, connection: &ConnectionInfo) -> Result<String, ErrorInfo> {
-    let input: SendMessageInput = serde_json::from_str(input_json)
-        .map_err(|e| permanent_err("INPUT_DESERIALIZATION_ERROR", e.to_string()))?;
+#[capability(
+    module = "slack",
+    display_name = "Send Message",
+    description = "Send a message to a Slack channel or user. Supports plain text with mrkdwn formatting and Block Kit for rich layouts.",
+    module_display_name = "Slack",
+    module_description = "Slack messaging for sending messages, files, and reactions",
+    module_has_side_effects = true,
+    module_supports_connections = true,
+    module_integration_ids = "slack_bot",
+    module_secure = true
+)]
+pub fn send_message(input: SendMessageInput) -> Result<SendMessageOutput, AgentError> {
+    let connection = input._connection.as_ref().ok_or_else(|| {
+        AgentError::permanent(
+            "SLACK_MISSING_CONNECTION",
+            "SLACK capability invoked without a connection — add one in the step configuration",
+        )
+        .with_attr("integration", "SLACK")
+    })?;
 
     let mut body = json!({
         "channel": input.channel,
@@ -243,57 +385,125 @@ fn send_message(input_json: &str, connection: &ConnectionInfo) -> Result<String,
 
     let resp = slack_api_call("chat.postMessage", connection, &body)?;
 
-    let output = SendMessageOutput {
+    Ok(SendMessageOutput {
         ok: true,
         channel: resp["channel"].as_str().unwrap_or("").to_string(),
         ts: resp["ts"].as_str().unwrap_or("").to_string(),
-    };
-
-    serde_json::to_string(&output)
-        .map_err(|e| permanent_err("OUTPUT_SERIALIZATION_ERROR", e.to_string()))
+    })
 }
 
-// -----------------------------------------------------------------------------
-// Capability: upload-file
-// -----------------------------------------------------------------------------
+// ============================================================================
+// Upload File
+// ============================================================================
 
-#[derive(Debug, Deserialize)]
-struct UploadFileInput {
-    channel: String,
-    /// Base64-encoded file content.
-    content: String,
-    filename: String,
-    #[serde(default)]
-    title: Option<String>,
-    #[serde(default)]
-    initial_comment: Option<String>,
-    #[serde(default)]
-    thread_ts: Option<String>,
-    #[serde(default)]
-    content_type: Option<String>,
+#[derive(Debug, Serialize, Deserialize, CapabilityInput)]
+#[capability_input(display_name = "Upload File Input")]
+pub struct UploadFileInput {
+    /// Connection data injected by the wasm Guest::invoke wrapper before
+    /// dispatching to the capability executor. `#[field(skip)]` keeps this
+    /// out of the capability metadata (the UI/runtime fills it from the
+    /// configured connection, not from user input).
+    #[field(skip)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub _connection: Option<RawConnection>,
+
+    #[field(
+        display_name = "Channel",
+        description = "Slack channel ID to share the file in",
+        example = "C01234ABCDE"
+    )]
+    pub channel: String,
+
+    #[field(
+        display_name = "Content",
+        description = "Base64-encoded file content",
+        example = "SGVsbG8gV29ybGQ="
+    )]
+    pub content: String,
+
+    #[field(
+        display_name = "Filename",
+        description = "Filename with extension (e.g. report.pdf, data.csv)",
+        example = "report.pdf"
+    )]
+    pub filename: String,
+
+    #[field(
+        display_name = "Title",
+        description = "Display title for the file in Slack (defaults to filename)"
+    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+
+    #[field(
+        display_name = "Initial Comment",
+        description = "Message text to post alongside the file"
+    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub initial_comment: Option<String>,
+
+    #[field(
+        display_name = "Thread Timestamp",
+        description = "Timestamp of the parent message to upload the file in a thread"
+    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_ts: Option<String>,
+
+    #[field(
+        display_name = "Content Type",
+        description = "MIME type of the file (e.g. application/pdf, text/csv). Auto-detected by Slack if omitted."
+    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_type: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
-struct UploadFileOutput {
-    ok: bool,
-    file_id: String,
-    title: String,
+#[derive(Debug, Serialize, Deserialize, CapabilityOutput)]
+#[capability_output(display_name = "Upload File Output")]
+pub struct UploadFileOutput {
+    #[field(display_name = "OK", description = "Whether the upload was successful")]
+    pub ok: bool,
+
+    #[field(display_name = "File ID", description = "Slack file ID")]
+    pub file_id: String,
+
+    #[field(
+        display_name = "Title",
+        description = "File title as displayed in Slack"
+    )]
+    pub title: String,
 }
 
-fn upload_file(input_json: &str, connection: &ConnectionInfo) -> Result<String, ErrorInfo> {
+#[capability(
+    module = "slack",
+    display_name = "Upload File",
+    description = "Upload a file to a Slack channel. Accepts base64-encoded content. Uses the Slack V2 upload API (files.getUploadURLExternal → raw POST → files.completeUploadExternal).",
+    module_display_name = "Slack",
+    module_description = "Slack messaging for sending messages, files, and reactions",
+    module_has_side_effects = true,
+    module_supports_connections = true,
+    module_integration_ids = "slack_bot",
+    module_secure = true
+)]
+pub fn upload_file(input: UploadFileInput) -> Result<UploadFileOutput, AgentError> {
     use base64::Engine as _;
 
-    let input: UploadFileInput = serde_json::from_str(input_json)
-        .map_err(|e| permanent_err("INPUT_DESERIALIZATION_ERROR", e.to_string()))?;
+    let connection = input._connection.as_ref().ok_or_else(|| {
+        AgentError::permanent(
+            "SLACK_MISSING_CONNECTION",
+            "SLACK capability invoked without a connection — add one in the step configuration",
+        )
+        .with_attr("integration", "SLACK")
+    })?;
 
     // Decode base64 file content
     let file_bytes = base64::engine::general_purpose::STANDARD
         .decode(&input.content)
         .map_err(|e| {
-            permanent_err(
+            AgentError::permanent(
                 "SLACK_INVALID_CONTENT",
                 format!("Invalid base64 file content: {e}"),
             )
+            .with_attr("integration", "SLACK")
         })?;
 
     let file_length = file_bytes.len();
@@ -303,22 +513,26 @@ fn upload_file(input_json: &str, connection: &ConnectionInfo) -> Result<String, 
         "filename": input.filename,
         "length": file_length,
     });
-    if let Some(ref ct) = input.content_type {
-        get_url_body["snippet_type"] = json!(ct);
+    if let Some(ref snippet_type) = input.content_type {
+        get_url_body["snippet_type"] = json!(snippet_type);
     }
 
     let url_resp = slack_api_call("files.getUploadURLExternal", connection, &get_url_body)?;
 
     let upload_url = url_resp["upload_url"].as_str().ok_or_else(|| {
-        permanent_err(
+        AgentError::permanent(
             "SLACK_MISSING_UPLOAD_URL",
             "Slack did not return an upload_url",
         )
+        .with_attr("integration", "SLACK")
+        .with_attr_value("response", url_resp.clone())
     })?;
 
-    let file_id = url_resp["file_id"]
-        .as_str()
-        .ok_or_else(|| permanent_err("SLACK_MISSING_FILE_ID", "Slack did not return a file_id"))?;
+    let file_id = url_resp["file_id"].as_str().ok_or_else(|| {
+        AgentError::permanent("SLACK_MISSING_FILE_ID", "Slack did not return a file_id")
+            .with_attr("integration", "SLACK")
+            .with_attr_value("response", url_resp.clone())
+    })?;
 
     // Step 2: Upload raw bytes to the presigned URL — no connection header,
     // no auth injection; the URL is already authenticated by Slack.
@@ -335,16 +549,17 @@ fn upload_file(input_json: &str, connection: &ConnectionInfo) -> Result<String, 
         .body_bytes(&file_bytes)
         .call_agent()
         .map_err(|e| {
-            transient_err(
+            AgentError::transient(
                 "SLACK_UPLOAD_NETWORK_ERROR",
                 format!("Network error uploading file bytes: {e}"),
             )
+            .with_attr("integration", "SLACK")
         })?;
 
     let upload_status = upload_response.status;
     if !(200..300).contains(&upload_status) {
         let body_str = String::from_utf8_lossy(&upload_response.body).to_string();
-        let retry_after = upload_response
+        let retry_after_ms = upload_response
             .headers
             .get("retry-after-ms")
             .and_then(|v| v.parse::<u64>().ok())
@@ -355,12 +570,31 @@ fn upload_file(input_json: &str, connection: &ConnectionInfo) -> Result<String, 
                     .and_then(|v| v.parse::<u64>().ok())
                     .map(|s| s * 1000)
             });
-        return Err(classify_http_err(
-            "SLACK_UPLOAD",
-            upload_status,
-            &body_str,
-            retry_after,
-        ));
+
+        let mut err = if upload_status == 429 {
+            AgentError::transient(
+                "SLACK_UPLOAD_RATE_LIMITED",
+                format!("HTTP {upload_status}: {}", truncate(&body_str, 512)),
+            )
+        } else if (500..600).contains(&upload_status) {
+            AgentError::transient(
+                "SLACK_UPLOAD_SERVER_ERROR",
+                format!("HTTP {upload_status}: {}", truncate(&body_str, 512)),
+            )
+        } else {
+            AgentError::permanent(
+                format!("SLACK_UPLOAD_HTTP_{upload_status}"),
+                format!("HTTP {upload_status}: {}", truncate(&body_str, 512)),
+            )
+        };
+        err = err
+            .with_attr("integration", "SLACK")
+            .with_attr("status_code", upload_status.to_string())
+            .with_attr("body", truncate(&body_str, 512));
+        if let Some(ms) = retry_after_ms {
+            err = err.with_retry_after_ms(ms);
+        }
+        return Err(err);
     }
 
     // Step 3: Complete the upload and share to channel
@@ -395,191 +629,213 @@ fn upload_file(input_json: &str, connection: &ConnectionInfo) -> Result<String, 
         .unwrap_or(&title)
         .to_string();
 
-    let output = UploadFileOutput {
+    Ok(UploadFileOutput {
         ok: true,
         file_id: returned_id,
         title: returned_title,
-    };
-
-    serde_json::to_string(&output)
-        .map_err(|e| permanent_err("OUTPUT_SERIALIZATION_ERROR", e.to_string()))
+    })
 }
 
-// -----------------------------------------------------------------------------
-// WIT component plumbing
-// -----------------------------------------------------------------------------
+// ============================================================================
+// Helpers
+// ============================================================================
 
+fn truncate(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        s.to_string()
+    } else {
+        let mut t = s[..max].to_string();
+        t.push('…');
+        t
+    }
+}
+
+// ============================================================================
+// AgentInfo assembler (host-only; the wasm binary doesn't need it)
+// ============================================================================
+
+/// Build the canonical `AgentInfo` for this agent by walking the macro-emitted
+/// `&'static` statics. The workspace `runtara-agent-bundle-emit` binary calls
+/// this on the host architecture and writes the JSON to disk; the wasm binary
+/// itself never executes this code, so we cfg-gate it out to keep the
+/// component small.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn agent_info() -> runtara_dsl::agent_meta::AgentInfo {
+    use runtara_dsl::agent_meta::{
+        AgentInfo, CapabilityMeta, InputTypeMeta, OutputTypeMeta, capability_to_api,
+    };
+    use std::collections::HashMap;
+
+    let caps: &[&'static CapabilityMeta] = &[
+        &__CAPABILITY_META_SEND_MESSAGE,
+        &__CAPABILITY_META_UPLOAD_FILE,
+    ];
+    let input_types: HashMap<&'static str, &'static InputTypeMeta> = [
+        (
+            "SendMessageInput",
+            &__INPUT_META_SendMessageInput as &InputTypeMeta,
+        ),
+        ("UploadFileInput", &__INPUT_META_UploadFileInput),
+    ]
+    .into_iter()
+    .collect();
+    let output_types: HashMap<&'static str, &'static OutputTypeMeta> = [
+        (
+            "SendMessageOutput",
+            &__OUTPUT_META_SendMessageOutput as &OutputTypeMeta,
+        ),
+        ("UploadFileOutput", &__OUTPUT_META_UploadFileOutput),
+    ]
+    .into_iter()
+    .collect();
+
+    let capabilities = caps
+        .iter()
+        .map(|cap| {
+            capability_to_api(
+                cap,
+                input_types.get(cap.input_type).copied(),
+                output_types.get(cap.output_type).copied(),
+            )
+        })
+        .collect();
+
+    AgentInfo {
+        id: "slack".into(),
+        name: "Slack".into(),
+        description: "Slack messaging for sending messages, files, and reactions".into(),
+        has_side_effects: true,
+        supports_connections: true,
+        integration_ids: vec!["slack_bot".to_string()],
+        capabilities,
+    }
+}
+
+// ============================================================================
+// Wasm component plumbing
+// ============================================================================
+
+#[cfg(target_arch = "wasm32")]
+use bindings::exports::runtara::agent::capabilities::{ConnectionInfo, ErrorInfo, Guest};
+
+#[cfg(target_arch = "wasm32")]
 struct Component;
 
+#[cfg(target_arch = "wasm32")]
 impl Guest for Component {
-    fn get_module_info() -> ModuleInfo {
-        ModuleInfo {
-            id: "slack".into(),
-            display_name: "Slack".into(),
-            description: "Slack messaging: send messages and upload files via the Slack Web API."
-                .into(),
-            has_side_effects: true,
-            supports_connections: true,
-            integration_ids: vec!["slack_bot".into()],
-            secure: true,
-        }
-    }
-
-    fn list_capabilities() -> Vec<CapabilityInfo> {
-        vec![
-            CapabilityInfo {
-                id: "send-message".into(),
-                function_name: "send_message".into(),
-                display_name: Some("Send Message".into()),
-                description: Some(
-                    "Send a message to a Slack channel or user. Supports plain text with \
-                     mrkdwn formatting and Block Kit for rich layouts."
-                        .into(),
-                ),
-                has_side_effects: true,
-                is_idempotent: false,
-                rate_limited: true,
-                tags: vec!["slack".into(), "messaging".into()],
-                input_schema: SEND_MESSAGE_INPUT_SCHEMA.into(),
-                output_schema: SEND_MESSAGE_OUTPUT_SCHEMA.into(),
-                known_errors: vec![],
-                compensation_hint: None,
-            },
-            CapabilityInfo {
-                id: "upload-file".into(),
-                function_name: "upload_file".into(),
-                display_name: Some("Upload File".into()),
-                description: Some(
-                    "Upload a file to a Slack channel. Accepts base64-encoded content. \
-                     Uses the Slack V2 upload API (files.getUploadURLExternal → raw POST \
-                     → files.completeUploadExternal)."
-                        .into(),
-                ),
-                has_side_effects: true,
-                is_idempotent: false,
-                rate_limited: true,
-                tags: vec!["slack".into(), "files".into()],
-                input_schema: UPLOAD_FILE_INPUT_SCHEMA.into(),
-                output_schema: UPLOAD_FILE_OUTPUT_SCHEMA.into(),
-                known_errors: vec![],
-                compensation_hint: None,
-            },
-        ]
-    }
-
     fn invoke(
         capability_id: String,
-        input: String,
+        input: Vec<u8>,
         connection: Option<ConnectionInfo>,
-    ) -> Result<String, ErrorInfo> {
-        let conn = connection.ok_or_else(|| {
-            permanent_err(
-                "SLACK_CONNECTION_REQUIRED",
-                "Slack capabilities require a connection (slack_bot)",
-            )
-        })?;
+    ) -> Result<Vec<u8>, ErrorInfo> {
+        let mut value: serde_json::Value = serde_json::from_slice(&input).map_err(bad_json)?;
 
-        match capability_id.as_str() {
-            "send-message" => send_message(&input, &conn),
-            "upload-file" => upload_file(&input, &conn),
-            other => Err(permanent_err(
-                "UNKNOWN_CAPABILITY",
-                format!("slack agent has no capability `{other}`"),
-            )),
+        // Inject the WIT `connection` arg into the input JSON under `_connection`
+        // so the macro-generated executor can deserialize it into the
+        // capability input struct's `_connection: Option<RawConnection>` field.
+        if let Some(c) = connection.as_ref() {
+            if let serde_json::Value::Object(ref mut obj) = value {
+                let parameters = serde_json::from_str::<serde_json::Value>(&c.parameters)
+                    .unwrap_or(serde_json::Value::Null);
+                let rate_limit_config = c
+                    .rate_limit_config
+                    .as_ref()
+                    .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok());
+                obj.insert(
+                    "_connection".into(),
+                    serde_json::json!({
+                        "connection_id": c.connection_id,
+                        "integration_id": c.integration_id,
+                        "connection_subtype": c.connection_subtype,
+                        "parameters": parameters,
+                        "rate_limit_config": rate_limit_config,
+                    }),
+                );
+            }
+        }
+
+        let executor_result = match capability_id.as_str() {
+            "send-message" => __executor_send_message(value),
+            "upload-file" => __executor_upload_file(value),
+            other => {
+                return Err(ErrorInfo {
+                    code: "UNKNOWN_CAPABILITY".into(),
+                    message: format!("slack agent has no capability `{other}`"),
+                    category: "permanent".into(),
+                    severity: "error".into(),
+                    retryable: false,
+                    retry_after_ms: None,
+                    attributes: None,
+                });
+            }
+        };
+        executor_result
+            .map_err(error_string_to_error_info)
+            .and_then(|out_value| serde_json::to_vec(&out_value).map_err(bad_json))
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn bad_json(e: serde_json::Error) -> ErrorInfo {
+    ErrorInfo {
+        code: "INPUT_DESERIALIZATION_ERROR".into(),
+        message: e.to_string(),
+        category: "permanent".into(),
+        severity: "error".into(),
+        retryable: false,
+        retry_after_ms: None,
+        attributes: None,
+    }
+}
+
+/// The `#[capability]` macro packages each error as a JSON-string with
+/// `{ code, message, category, severity, ... }`. Parse it back into a typed
+/// `ErrorInfo` for the WIT result.
+#[cfg(target_arch = "wasm32")]
+fn error_string_to_error_info(s: String) -> ErrorInfo {
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(&s) {
+        let category = value
+            .get("category")
+            .and_then(|v| v.as_str())
+            .unwrap_or("permanent")
+            .to_string();
+        let retryable = value
+            .get("retryable")
+            .and_then(|v| v.as_bool())
+            .unwrap_or_else(|| category == "transient");
+        ErrorInfo {
+            code: value
+                .get("code")
+                .and_then(|v| v.as_str())
+                .unwrap_or("CAPABILITY_ERROR")
+                .into(),
+            message: value
+                .get("message")
+                .and_then(|v| v.as_str())
+                .unwrap_or(&s)
+                .into(),
+            category,
+            severity: value
+                .get("severity")
+                .and_then(|v| v.as_str())
+                .unwrap_or("error")
+                .into(),
+            retryable,
+            retry_after_ms: value.get("retry_after_ms").and_then(|v| v.as_u64()),
+            attributes: value.get("attributes").map(|v| v.to_string()),
+        }
+    } else {
+        ErrorInfo {
+            code: "CAPABILITY_ERROR".into(),
+            message: s,
+            category: "permanent".into(),
+            severity: "error".into(),
+            retryable: false,
+            retry_after_ms: None,
+            attributes: None,
         }
     }
 }
 
-// -----------------------------------------------------------------------------
-// JSON Schemas (mirrors legacy CapabilityInput/CapabilityOutput structs)
-// -----------------------------------------------------------------------------
-
-const SEND_MESSAGE_INPUT_SCHEMA: &str = r#"{
-    "type": "object",
-    "required": ["channel", "text"],
-    "properties": {
-        "channel": {
-            "type": "string",
-            "description": "Slack channel ID (e.g. C01234ABCDE) or user ID for direct messages",
-            "example": "C01234ABCDE"
-        },
-        "text": {
-            "type": "string",
-            "description": "Message text (supports Slack mrkdwn formatting). Used as fallback when blocks are provided.",
-            "example": "Hello, world!"
-        },
-        "blocks": {
-            "description": "Block Kit blocks as JSON array for rich message formatting. When provided, text becomes the fallback for notifications."
-        },
-        "thread_ts": {
-            "type": "string",
-            "description": "Timestamp of the parent message to reply in a thread (e.g. 1234567890.123456)"
-        },
-        "unfurl_links": {
-            "type": "boolean",
-            "description": "Whether to enable link unfurling (default: true)"
-        },
-        "unfurl_media": {
-            "type": "boolean",
-            "description": "Whether to enable media unfurling (default: true)"
-        }
-    }
-}"#;
-
-const SEND_MESSAGE_OUTPUT_SCHEMA: &str = r#"{
-    "type": "object",
-    "properties": {
-        "ok":      { "type": "boolean", "description": "Whether the API call was successful" },
-        "channel": { "type": "string",  "description": "Channel ID where the message was posted" },
-        "ts":      { "type": "string",  "description": "Message timestamp (unique message identifier within the channel)" }
-    }
-}"#;
-
-const UPLOAD_FILE_INPUT_SCHEMA: &str = r#"{
-    "type": "object",
-    "required": ["channel", "content", "filename"],
-    "properties": {
-        "channel": {
-            "type": "string",
-            "description": "Slack channel ID to share the file in",
-            "example": "C01234ABCDE"
-        },
-        "content": {
-            "type": "string",
-            "description": "Base64-encoded file content",
-            "example": "SGVsbG8gV29ybGQ="
-        },
-        "filename": {
-            "type": "string",
-            "description": "Filename with extension (e.g. report.pdf, data.csv)",
-            "example": "report.pdf"
-        },
-        "title": {
-            "type": "string",
-            "description": "Display title for the file in Slack (defaults to filename)"
-        },
-        "initial_comment": {
-            "type": "string",
-            "description": "Message text to post alongside the file"
-        },
-        "thread_ts": {
-            "type": "string",
-            "description": "Timestamp of the parent message to upload the file in a thread"
-        },
-        "content_type": {
-            "type": "string",
-            "description": "MIME type of the file (e.g. application/pdf, text/csv). Auto-detected by Slack if omitted."
-        }
-    }
-}"#;
-
-const UPLOAD_FILE_OUTPUT_SCHEMA: &str = r#"{
-    "type": "object",
-    "properties": {
-        "ok":      { "type": "boolean", "description": "Whether the upload was successful" },
-        "file_id": { "type": "string",  "description": "Slack file ID" },
-        "title":   { "type": "string",  "description": "File title as displayed in Slack" }
-    }
-}"#;
-
+#[cfg(target_arch = "wasm32")]
 bindings::export!(Component with_types_in bindings);

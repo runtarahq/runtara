@@ -1,121 +1,178 @@
 //! Utility agent — math, dates, strings, country codes — as a WebAssembly component.
 //!
+//! Capability metadata travels through `#[capability_input]` / `#[capability]`
+//! annotations on the same Rust types and functions that the wasm cdylib's
+//! `invoke` dispatcher calls into. The workspace binary
+//! `runtara-agent-bundle-emit` reads these macro-emitted `&'static` statics on
+//! the host architecture and writes `runtara_agent_utils.meta.json` next to
+//! the `.wasm` — the JSON is a build artifact, never hand-edited.
+//!
 //! Schema matches the legacy `runtara-agents/src/agents/utils.rs` agent so
-//! A/B parity tests can compare results:
-//! - `random-double`: Generate a random double between 0 and 1
-//! - `random-array`: Generate an array of random integers
-//! - `return-input-string`: Return the input string value
-//! - `return-input`: Return the input JSON value
-//! - `do-nothing`: No-op operation that returns null
-//! - `delay-in-ms`: Delay execution for N milliseconds
-//! - `calculate`: Evaluate a mathematical expression with variables
-//! - `format-date-from-iso`: Format an ISO date to a custom format
-//! - `iso-to-unix-timestamp`: Convert ISO date to Unix timestamp
-//! - `get-current-unix-timestamp`: Get the current Unix timestamp
-//! - `get-current-iso-datetime`: Get the current date/time in ISO format
-//! - `get-current-formatted-datetime`: Get the current date/time in a custom format
-//! - `country-name-to-iso-code`: Convert country name to ISO code
+//! A/B parity tests can compare results.
 
-#![cfg(target_arch = "wasm32")]
+use rand::Rng;
+use runtara_agent_macro::{CapabilityInput, capability};
+use serde::Deserialize;
+use serde_json::Value;
+use std::collections::HashMap;
 
+#[cfg(target_arch = "wasm32")]
 #[allow(warnings)]
 mod bindings;
 
-use bindings::exports::runtara::agent::capabilities::{
-    CapabilityInfo, ConnectionInfo, ErrorInfo, Guest, ModuleInfo,
-};
-use std::collections::HashMap;
-
 // -----------------------------------------------------------------------------
-// Error helpers (mirror crypto agent pattern)
+// Inputs (with capability macros so meta.json can be derived)
 // -----------------------------------------------------------------------------
 
-fn permanent_err(code: &str, message: impl Into<String>) -> ErrorInfo {
-    ErrorInfo {
-        code: code.into(),
-        message: message.into(),
-        category: "permanent".into(),
-        severity: "error".into(),
-        retryable: false,
-        retry_after_ms: None,
-        attributes: None,
-    }
+#[derive(Debug, Deserialize, CapabilityInput)]
+#[capability_input(display_name = "Random Double Input")]
+pub struct RandomDoubleInput {}
+
+#[derive(Debug, Deserialize, CapabilityInput)]
+#[capability_input(display_name = "Random Array Input")]
+pub struct ReturnRandomArrayInput {
+    #[field(
+        display_name = "Array Size",
+        description = "The number of random integers to generate",
+        example = "5"
+    )]
+    pub size: i32,
 }
 
-fn bad_json(e: serde_json::Error) -> ErrorInfo {
-    permanent_err("INPUT_DESERIALIZATION_ERROR", e.to_string())
+#[derive(Debug, Deserialize, CapabilityInput)]
+#[capability_input(display_name = "String Input")]
+pub struct ReturnStringInput {
+    #[field(
+        display_name = "Value",
+        description = "The string value to return as output",
+        example = "Hello World"
+    )]
+    pub value: String,
 }
 
-fn capability_err(message: impl Into<String>) -> ErrorInfo {
-    permanent_err("CAPABILITY_ERROR", message)
+#[derive(Debug, Deserialize, CapabilityInput)]
+#[capability_input(display_name = "JSON Value Input")]
+pub struct ReturnInputData {
+    #[field(
+        display_name = "Value",
+        description = "The JSON value to return as output"
+    )]
+    pub value: Value,
 }
 
-// -----------------------------------------------------------------------------
-// Input/Output types (mirror legacy utils.rs)
-// -----------------------------------------------------------------------------
+#[derive(Debug, Deserialize, CapabilityInput)]
+#[capability_input(display_name = "No Operation Input")]
+pub struct DoNothingInput {}
 
-#[derive(serde::Deserialize)]
-struct RandomDoubleInput {}
-
-#[derive(serde::Deserialize)]
-struct ReturnRandomArrayInput {
-    size: i32,
+#[derive(Debug, Deserialize, CapabilityInput)]
+#[capability_input(display_name = "Delay Input")]
+pub struct DelayInMsInput {
+    #[field(
+        display_name = "Delay (milliseconds)",
+        description = "The amount of time to pause execution in milliseconds",
+        example = "1000"
+    )]
+    pub delay_value: u64,
 }
 
-#[derive(serde::Deserialize)]
-struct ReturnStringInput {
-    value: String,
-}
+#[derive(Debug, Deserialize, CapabilityInput)]
+#[capability_input(display_name = "Calculate Expression Input")]
+pub struct CalculateInput {
+    #[field(
+        display_name = "Expression",
+        description = "Mathematical expression with variables and operators (+, -, *, /, %, parentheses)",
+        example = "(x + y) * 2"
+    )]
+    pub expression: String,
 
-#[derive(serde::Deserialize)]
-struct ReturnInputData {
-    value: serde_json::Value,
-}
+    #[field(
+        display_name = "Variables",
+        description = "Map of variable names to their numeric values (supports numbers and string numbers)"
+    )]
+    pub variables: HashMap<String, Value>,
 
-#[derive(serde::Deserialize)]
-struct DoNothingInput {}
-
-#[derive(serde::Deserialize)]
-struct DelayInMsInput {
-    delay_value: u64,
-}
-
-#[derive(serde::Deserialize)]
-struct CalculateInput {
-    expression: String,
-    variables: HashMap<String, serde_json::Value>,
+    #[field(
+        display_name = "Enable Rounding",
+        description = "Round the result to the specified number of decimal places",
+        default = "false"
+    )]
     #[serde(default)]
-    enable_rounding: bool,
-    decimal_places: Option<u32>,
+    pub enable_rounding: bool,
+
+    #[field(
+        display_name = "Decimal Places",
+        description = "Number of decimal places to round to (maximum 15)",
+        example = "2"
+    )]
+    pub decimal_places: Option<u32>,
 }
 
-#[derive(serde::Deserialize)]
-struct FormatDateFromIsoInput {
-    iso_date: String,
-    target_format: String,
+#[derive(Debug, Deserialize, CapabilityInput)]
+#[capability_input(display_name = "Format Date Input")]
+pub struct FormatDateFromIsoInput {
+    #[field(
+        display_name = "ISO Date",
+        description = "The date/time in ISO 8601 format (e.g., 2024-01-15T10:30:00Z)",
+        example = "2024-01-15T10:30:00Z"
+    )]
+    pub iso_date: String,
+
+    #[field(
+        display_name = "Target Format",
+        description = "Format pattern using yyyy, MM, dd, HH, mm, ss tokens",
+        example = "yyyy-MM-dd HH:mm:ss"
+    )]
+    pub target_format: String,
 }
 
-#[derive(serde::Deserialize)]
-struct IsoToUnixTimestampInput {
-    iso_date: String,
+#[derive(Debug, Deserialize, CapabilityInput)]
+#[capability_input(display_name = "ISO to Unix Timestamp Input")]
+pub struct IsoToUnixTimestampInput {
+    #[field(
+        display_name = "ISO Date",
+        description = "The date/time in ISO 8601 format to convert to Unix timestamp",
+        example = "2024-01-15T10:30:00Z"
+    )]
+    pub iso_date: String,
 }
 
-#[derive(serde::Deserialize)]
-struct GetCurrentUnixTimestampInput {}
+#[derive(Debug, Deserialize, CapabilityInput)]
+#[capability_input(display_name = "Current Unix Timestamp Input")]
+pub struct GetCurrentUnixTimestampInput {}
 
-#[derive(serde::Deserialize)]
-struct GetCurrentIsoDatetimeInput {}
+#[derive(Debug, Deserialize, CapabilityInput)]
+#[capability_input(display_name = "Current ISO Datetime Input")]
+pub struct GetCurrentIsoDatetimeInput {}
 
-#[derive(serde::Deserialize)]
-struct GetCurrentFormattedDateTimeInput {
-    format: String,
+#[derive(Debug, Deserialize, CapabilityInput)]
+#[capability_input(display_name = "Current Formatted DateTime Input")]
+pub struct GetCurrentFormattedDateTimeInput {
+    #[field(
+        display_name = "Format",
+        description = "Format pattern using yyyy, MM, dd, HH, mm, ss tokens",
+        example = "yyyy-MM-dd"
+    )]
+    pub format: String,
 }
 
-#[derive(serde::Deserialize)]
-struct CountryNameToIsoCodeInput {
-    country_name: String,
+#[derive(Debug, Deserialize, CapabilityInput)]
+#[capability_input(display_name = "Country Name to ISO Code Input")]
+pub struct CountryNameToIsoCodeInput {
+    #[field(
+        display_name = "Country Name",
+        description = "The full country name or commonly used alternative",
+        example = "United States"
+    )]
+    pub country_name: String,
+
+    #[field(
+        display_name = "Code Type",
+        description = "The type of ISO code to return (alpha2 or alpha3)",
+        example = "alpha2",
+        default = "alpha2"
+    )]
     #[serde(default = "default_code_type")]
-    code_type: String,
+    pub code_type: String,
 }
 
 fn default_code_type() -> String {
@@ -123,393 +180,204 @@ fn default_code_type() -> String {
 }
 
 // -----------------------------------------------------------------------------
-// Component plumbing
+// Capabilities — annotated for metadata; the `__executor_*` fns the macro emits
+// are what the wasm Guest impl dispatches to.
 // -----------------------------------------------------------------------------
 
-struct Component;
-
-impl Guest for Component {
-    fn get_module_info() -> ModuleInfo {
-        ModuleInfo {
-            id: "utils".into(),
-            display_name: "Utils".into(),
-            description: "Utility operations: math, dates, strings, and country code lookups."
-                .into(),
-            has_side_effects: false,
-            supports_connections: false,
-            integration_ids: vec![],
-            secure: false,
-        }
-    }
-
-    fn list_capabilities() -> Vec<CapabilityInfo> {
-        vec![
-            CapabilityInfo {
-                id: "random-double".into(),
-                function_name: "random_double".into(),
-                display_name: Some("Random Double".into()),
-                description: Some("Generate a random double between 0 and 1".into()),
-                has_side_effects: false,
-                is_idempotent: false,
-                rate_limited: false,
-                tags: vec!["utils".into(), "random".into()],
-                input_schema: r#"{"type":"object","properties":{}}"#.into(),
-                output_schema: r#"{"type":"number"}"#.into(),
-                known_errors: vec![],
-                compensation_hint: None,
-            },
-            CapabilityInfo {
-                id: "random-array".into(),
-                function_name: "random_array".into(),
-                display_name: Some("Random Array".into()),
-                description: Some("Generate an array of random integers".into()),
-                has_side_effects: false,
-                is_idempotent: false,
-                rate_limited: false,
-                tags: vec!["utils".into(), "random".into()],
-                input_schema: r#"{"type":"object","required":["size"],"properties":{"size":{"type":"integer","description":"The number of random integers to generate"}}}"#.into(),
-                output_schema: r#"{"type":"array","items":{"type":"integer"}}"#.into(),
-                known_errors: vec![],
-                compensation_hint: None,
-            },
-            CapabilityInfo {
-                id: "return-input-string".into(),
-                function_name: "return_input_string".into(),
-                display_name: Some("Return String".into()),
-                description: Some("Returns the input string value".into()),
-                has_side_effects: false,
-                is_idempotent: true,
-                rate_limited: false,
-                tags: vec!["utils".into()],
-                input_schema: r#"{"type":"object","required":["value"],"properties":{"value":{"type":"string","description":"The string value to return as output"}}}"#.into(),
-                output_schema: r#"{"type":"string"}"#.into(),
-                known_errors: vec![],
-                compensation_hint: None,
-            },
-            CapabilityInfo {
-                id: "return-input".into(),
-                function_name: "return_input".into(),
-                display_name: Some("Return Input".into()),
-                description: Some("Returns the input JSON value".into()),
-                has_side_effects: false,
-                is_idempotent: true,
-                rate_limited: false,
-                tags: vec!["utils".into()],
-                input_schema: r#"{"type":"object","required":["value"],"properties":{"value":{"description":"The JSON value to return as output"}}}"#.into(),
-                output_schema: r#"{}"#.into(),
-                known_errors: vec![],
-                compensation_hint: None,
-            },
-            CapabilityInfo {
-                id: "do-nothing".into(),
-                function_name: "do_nothing".into(),
-                display_name: Some("Do Nothing".into()),
-                description: Some("No-op operation that returns null".into()),
-                has_side_effects: false,
-                is_idempotent: true,
-                rate_limited: false,
-                tags: vec!["utils".into()],
-                input_schema: r#"{"type":"object","properties":{}}"#.into(),
-                output_schema: r#"{"type":"null"}"#.into(),
-                known_errors: vec![],
-                compensation_hint: None,
-            },
-            CapabilityInfo {
-                id: "delay-in-ms".into(),
-                function_name: "delay_in_ms".into(),
-                display_name: Some("Delay".into()),
-                description: Some("Delays execution for the specified number of milliseconds. For durable delays that survive crashes, use the Delay step type instead.".into()),
-                has_side_effects: false,
-                is_idempotent: true,
-                rate_limited: false,
-                tags: vec!["utils".into()],
-                input_schema: r#"{"type":"object","required":["delay_value"],"properties":{"delay_value":{"type":"integer","description":"The amount of time to pause execution in milliseconds"}}}"#.into(),
-                output_schema: r#"{"type":"integer"}"#.into(),
-                known_errors: vec![],
-                compensation_hint: None,
-            },
-            CapabilityInfo {
-                id: "calculate".into(),
-                function_name: "calculate".into(),
-                display_name: Some("Calculate".into()),
-                description: Some("Evaluate a mathematical expression with variables".into()),
-                has_side_effects: false,
-                is_idempotent: true,
-                rate_limited: false,
-                tags: vec!["utils".into(), "math".into()],
-                input_schema: r#"{"type":"object","required":["expression","variables"],"properties":{"expression":{"type":"string","description":"Mathematical expression with variables and operators (+, -, *, /, %, parentheses)"},"variables":{"type":"object","description":"Map of variable names to their numeric values (supports numbers and string numbers)"},"enable_rounding":{"type":"boolean","default":false,"description":"Round the result to the specified number of decimal places"},"decimal_places":{"type":"integer","description":"Number of decimal places to round to (maximum 15)"}}}"#.into(),
-                output_schema: r#"{"type":"number"}"#.into(),
-                known_errors: vec![],
-                compensation_hint: None,
-            },
-            CapabilityInfo {
-                id: "format-date-from-iso".into(),
-                function_name: "format_date_from_iso".into(),
-                display_name: Some("Format Date".into()),
-                description: Some("Format an ISO date to a custom format".into()),
-                has_side_effects: false,
-                is_idempotent: true,
-                rate_limited: false,
-                tags: vec!["utils".into(), "date".into()],
-                input_schema: r#"{"type":"object","required":["iso_date","target_format"],"properties":{"iso_date":{"type":"string","description":"The date/time in ISO 8601 format (e.g., 2024-01-15T10:30:00Z)"},"target_format":{"type":"string","description":"Format pattern using yyyy, MM, dd, HH, mm, ss tokens"}}}"#.into(),
-                output_schema: r#"{"type":"string"}"#.into(),
-                known_errors: vec![],
-                compensation_hint: None,
-            },
-            CapabilityInfo {
-                id: "iso-to-unix-timestamp".into(),
-                function_name: "iso_to_unix_timestamp".into(),
-                display_name: Some("ISO to Unix".into()),
-                description: Some("Convert ISO date to Unix timestamp".into()),
-                has_side_effects: false,
-                is_idempotent: true,
-                rate_limited: false,
-                tags: vec!["utils".into(), "date".into()],
-                input_schema: r#"{"type":"object","required":["iso_date"],"properties":{"iso_date":{"type":"string","description":"The date/time in ISO 8601 format to convert to Unix timestamp"}}}"#.into(),
-                output_schema: r#"{"type":"integer"}"#.into(),
-                known_errors: vec![],
-                compensation_hint: None,
-            },
-            CapabilityInfo {
-                id: "get-current-unix-timestamp".into(),
-                function_name: "get_current_unix_timestamp".into(),
-                display_name: Some("Current Unix Timestamp".into()),
-                description: Some("Get the current Unix timestamp".into()),
-                has_side_effects: false,
-                is_idempotent: false,
-                rate_limited: false,
-                tags: vec!["utils".into(), "date".into()],
-                input_schema: r#"{"type":"object","properties":{}}"#.into(),
-                output_schema: r#"{"type":"integer"}"#.into(),
-                known_errors: vec![],
-                compensation_hint: None,
-            },
-            CapabilityInfo {
-                id: "get-current-iso-datetime".into(),
-                function_name: "get_current_iso_datetime".into(),
-                display_name: Some("Current ISO Datetime".into()),
-                description: Some("Get the current date/time in ISO format".into()),
-                has_side_effects: false,
-                is_idempotent: false,
-                rate_limited: false,
-                tags: vec!["utils".into(), "date".into()],
-                input_schema: r#"{"type":"object","properties":{}}"#.into(),
-                output_schema: r#"{"type":"string"}"#.into(),
-                known_errors: vec![],
-                compensation_hint: None,
-            },
-            CapabilityInfo {
-                id: "get-current-formatted-datetime".into(),
-                function_name: "get_current_formatted_datetime".into(),
-                display_name: Some("Current Formatted DateTime".into()),
-                description: Some("Get the current date/time in a custom format".into()),
-                has_side_effects: false,
-                is_idempotent: false,
-                rate_limited: false,
-                tags: vec!["utils".into(), "date".into()],
-                input_schema: r#"{"type":"object","required":["format"],"properties":{"format":{"type":"string","description":"Format pattern using yyyy, MM, dd, HH, mm, ss tokens"}}}"#.into(),
-                output_schema: r#"{"type":"string"}"#.into(),
-                known_errors: vec![],
-                compensation_hint: None,
-            },
-            CapabilityInfo {
-                id: "country-name-to-iso-code".into(),
-                function_name: "country_name_to_iso_code".into(),
-                display_name: Some("Country to ISO Code".into()),
-                description: Some("Convert country name to ISO code".into()),
-                has_side_effects: false,
-                is_idempotent: true,
-                rate_limited: false,
-                tags: vec!["utils".into(), "country".into()],
-                input_schema: r#"{"type":"object","required":["country_name"],"properties":{"country_name":{"type":"string","description":"The full country name or commonly used alternative"},"code_type":{"type":"string","enum":["alpha2","alpha3"],"default":"alpha2","description":"The type of ISO code to return"}}}"#.into(),
-                output_schema: r#"{"type":"string"}"#.into(),
-                known_errors: vec![],
-                compensation_hint: None,
-            },
-        ]
-    }
-
-    fn invoke(
-        capability_id: String,
-        input: String,
-        _connection: Option<ConnectionInfo>,
-    ) -> Result<String, ErrorInfo> {
-        match capability_id.as_str() {
-            "random-double" => cap_random_double(&input),
-            "random-array" => cap_random_array(&input),
-            "return-input-string" => cap_return_input_string(&input),
-            "return-input" => cap_return_input(&input),
-            "do-nothing" => cap_do_nothing(&input),
-            "delay-in-ms" => cap_delay_in_ms(&input),
-            "calculate" => cap_calculate(&input),
-            "format-date-from-iso" => cap_format_date_from_iso(&input),
-            "iso-to-unix-timestamp" => cap_iso_to_unix_timestamp(&input),
-            "get-current-unix-timestamp" => cap_get_current_unix_timestamp(&input),
-            "get-current-iso-datetime" => cap_get_current_iso_datetime(&input),
-            "get-current-formatted-datetime" => cap_get_current_formatted_datetime(&input),
-            "country-name-to-iso-code" => cap_country_name_to_iso_code(&input),
-            other => Err(ErrorInfo {
-                code: "UNKNOWN_CAPABILITY".into(),
-                message: format!("utils agent has no capability `{other}`"),
-                category: "permanent".into(),
-                severity: "error".into(),
-                retryable: false,
-                retry_after_ms: None,
-                attributes: None,
-            }),
-        }
-    }
-}
-
-// -----------------------------------------------------------------------------
-// Capability implementations
-// -----------------------------------------------------------------------------
-
-fn cap_random_double(input_json: &str) -> Result<String, ErrorInfo> {
-    let _input: RandomDoubleInput = serde_json::from_str(input_json).map_err(bad_json)?;
-    use rand::Rng;
+#[capability(
+    module = "utils",
+    module_display_name = "Utils",
+    module_description = "Utility operations: random numbers, math, dates, country codes, delays.",
+    display_name = "Random Double",
+    description = "Generate a random double between 0 and 1"
+)]
+pub fn random_double(_input: RandomDoubleInput) -> Result<f64, String> {
     let mut rng = rand::thread_rng();
-    let v: f64 = rng.r#gen();
-    serde_json::to_string(&v).map_err(bad_json)
+    Ok(rng.r#gen())
 }
 
-fn cap_random_array(input_json: &str) -> Result<String, ErrorInfo> {
-    let input: ReturnRandomArrayInput = serde_json::from_str(input_json).map_err(bad_json)?;
+#[capability(
+    module = "utils",
+    display_name = "Random Array",
+    description = "Generate an array of random integers"
+)]
+pub fn random_array(input: ReturnRandomArrayInput) -> Result<Vec<i64>, String> {
     if input.size < 0 {
-        return Err(capability_err("Size cannot be negative"));
+        return Err("Size cannot be negative".to_string());
     }
-    use rand::Rng;
+
+    let size = input.size as usize;
     let mut rng = rand::thread_rng();
-    let result: Vec<i64> = (0..input.size)
-        .map(|_| rng.gen_range(0..=input.size) as i64)
-        .collect();
-    serde_json::to_string(&result).map_err(bad_json)
+    let mut result = Vec::with_capacity(size);
+
+    for _ in 0..size {
+        let random_val: i32 = rng.gen_range(0..=input.size);
+        result.push(random_val as i64);
+    }
+
+    Ok(result)
 }
 
-fn cap_return_input_string(input_json: &str) -> Result<String, ErrorInfo> {
-    let input: ReturnStringInput = serde_json::from_str(input_json).map_err(bad_json)?;
-    serde_json::to_string(&input.value).map_err(bad_json)
+#[capability(
+    module = "utils",
+    display_name = "Return String",
+    description = "Returns the input string value"
+)]
+pub fn return_input_string(input: ReturnStringInput) -> Result<String, String> {
+    Ok(input.value)
 }
 
-fn cap_return_input(input_json: &str) -> Result<String, ErrorInfo> {
-    let input: ReturnInputData = serde_json::from_str(input_json).map_err(bad_json)?;
-    serde_json::to_string(&input.value).map_err(bad_json)
+#[capability(
+    module = "utils",
+    display_name = "Return Input",
+    description = "Returns the input JSON value"
+)]
+pub fn return_input(input: ReturnInputData) -> Result<Value, String> {
+    Ok(input.value)
 }
 
-fn cap_do_nothing(input_json: &str) -> Result<String, ErrorInfo> {
-    let _input: DoNothingInput = serde_json::from_str(input_json).map_err(bad_json)?;
-    Ok("null".into())
+#[capability(
+    module = "utils",
+    display_name = "Do Nothing",
+    description = "No-op operation that returns null"
+)]
+pub fn do_nothing(_input: DoNothingInput) -> Result<Value, String> {
+    Ok(Value::Null)
 }
 
-fn cap_delay_in_ms(input_json: &str) -> Result<String, ErrorInfo> {
-    let input: DelayInMsInput = serde_json::from_str(input_json).map_err(bad_json)?;
-    // std::thread::sleep routes to wasi:clocks/monotonic-clock.subscribe-duration under
-    // wasm32-wasip2 when compiled with the wasi target. This is the idiomatic approach.
+#[capability(
+    module = "utils",
+    display_name = "Delay",
+    description = "Delays execution for the specified number of milliseconds. For durable delays that survive crashes, use the Delay step type instead."
+)]
+pub fn delay_in_ms(input: DelayInMsInput) -> Result<u64, String> {
+    // std::thread::sleep routes to wasi:clocks/monotonic-clock.subscribe-duration
+    // under wasm32-wasip2 — idiomatic and host-portable.
     std::thread::sleep(std::time::Duration::from_millis(input.delay_value));
-    serde_json::to_string(&input.delay_value).map_err(bad_json)
+    Ok(input.delay_value)
 }
 
-fn cap_calculate(input_json: &str) -> Result<String, ErrorInfo> {
-    let input: CalculateInput = serde_json::from_str(input_json).map_err(bad_json)?;
-
+#[capability(
+    module = "utils",
+    display_name = "Calculate",
+    description = "Evaluate a mathematical expression with variables"
+)]
+pub fn calculate(input: CalculateInput) -> Result<f64, String> {
     let mut variables: HashMap<String, f64> = HashMap::new();
     for (key, value) in input.variables {
         let num = match &value {
-            serde_json::Value::Number(n) => n.as_f64().ok_or_else(|| {
-                capability_err(format!("Variable '{}' has invalid number: {}", key, n))
-            })?,
-            serde_json::Value::String(s) => s.parse::<f64>().map_err(|_| {
-                capability_err(format!(
-                    "Variable '{}' cannot be parsed as number: '{}'",
-                    key, s
-                ))
-            })?,
-            serde_json::Value::Null => {
-                return Err(capability_err(format!("Variable '{}' is null", key)));
+            Value::Number(n) => n
+                .as_f64()
+                .ok_or_else(|| format!("Variable '{}' has invalid number: {}", key, n))?,
+            Value::String(s) => s
+                .parse::<f64>()
+                .map_err(|_| format!("Variable '{}' cannot be parsed as number: '{}'", key, s))?,
+            Value::Null => {
+                return Err(format!("Variable '{}' is null", key));
             }
             _ => {
-                return Err(capability_err(format!(
+                return Err(format!(
                     "Variable '{}' must be a number or string, got: {:?}",
                     key, value
-                )));
+                ));
             }
         };
         variables.insert(key, num);
     }
 
-    let result = calculate_expression(
+    calculate_expression(
         &input.expression,
         &variables,
         input.enable_rounding,
         input.decimal_places,
     )
-    .map_err(capability_err)?;
-
-    serde_json::to_string(&result).map_err(bad_json)
 }
 
-fn cap_format_date_from_iso(input_json: &str) -> Result<String, ErrorInfo> {
-    let input: FormatDateFromIsoInput = serde_json::from_str(input_json).map_err(bad_json)?;
+#[capability(
+    module = "utils",
+    display_name = "Format Date",
+    description = "Format an ISO date to a custom format"
+)]
+pub fn format_date_from_iso(input: FormatDateFromIsoInput) -> Result<String, String> {
     if input.iso_date.trim().is_empty() {
-        return Err(capability_err("ISO date cannot be null or empty"));
+        return Err("ISO date cannot be null or empty".to_string());
     }
+
     if input.target_format.trim().is_empty() {
-        return Err(capability_err("Target format cannot be null or empty"));
+        return Err("Target format cannot be null or empty".to_string());
     }
-    let formatted =
-        parse_and_format_datetime(&input.iso_date, &input.target_format).map_err(capability_err)?;
-    serde_json::to_string(&formatted).map_err(bad_json)
+
+    parse_and_format_datetime(&input.iso_date, &input.target_format)
 }
 
-fn cap_iso_to_unix_timestamp(input_json: &str) -> Result<String, ErrorInfo> {
-    let input: IsoToUnixTimestampInput = serde_json::from_str(input_json).map_err(bad_json)?;
+#[capability(
+    module = "utils",
+    display_name = "ISO to Unix",
+    description = "Convert ISO date to Unix timestamp"
+)]
+pub fn iso_to_unix_timestamp(input: IsoToUnixTimestampInput) -> Result<i64, String> {
     if input.iso_date.trim().is_empty() {
-        return Err(capability_err("ISO date cannot be null or empty"));
+        return Err("ISO date cannot be null or empty".to_string());
     }
-    let ts = parse_iso_to_unix(&input.iso_date).map_err(capability_err)?;
-    serde_json::to_string(&ts).map_err(bad_json)
+
+    parse_iso_to_unix(&input.iso_date)
 }
 
-fn cap_get_current_unix_timestamp(input_json: &str) -> Result<String, ErrorInfo> {
-    let _input: GetCurrentUnixTimestampInput =
-        serde_json::from_str(input_json).map_err(bad_json)?;
-    let ts = current_unix_timestamp();
-    serde_json::to_string(&ts).map_err(bad_json)
+#[capability(
+    module = "utils",
+    display_name = "Current Unix Timestamp",
+    description = "Get the current Unix timestamp"
+)]
+pub fn get_current_unix_timestamp(_input: GetCurrentUnixTimestampInput) -> Result<i64, String> {
+    Ok(current_unix_timestamp())
 }
 
-fn cap_get_current_iso_datetime(input_json: &str) -> Result<String, ErrorInfo> {
-    let _input: GetCurrentIsoDatetimeInput = serde_json::from_str(input_json).map_err(bad_json)?;
+#[capability(
+    module = "utils",
+    display_name = "Current ISO Datetime",
+    description = "Get the current date/time in ISO format"
+)]
+pub fn get_current_iso_datetime(_input: GetCurrentIsoDatetimeInput) -> Result<String, String> {
     let ts = current_unix_timestamp() as u64;
     let (year, month, day, hour, minute, second) = unix_to_datetime(ts);
-    let iso = format!(
+    Ok(format!(
         "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
         year, month, day, hour, minute, second
-    );
-    serde_json::to_string(&iso).map_err(bad_json)
+    ))
 }
 
-fn cap_get_current_formatted_datetime(input_json: &str) -> Result<String, ErrorInfo> {
-    let input: GetCurrentFormattedDateTimeInput =
-        serde_json::from_str(input_json).map_err(bad_json)?;
+#[capability(
+    module = "utils",
+    display_name = "Current Formatted DateTime",
+    description = "Get the current date/time in a custom format"
+)]
+pub fn get_current_formatted_datetime(
+    input: GetCurrentFormattedDateTimeInput,
+) -> Result<String, String> {
     if input.format.trim().is_empty() {
-        return Err(capability_err("Format cannot be null or empty"));
+        return Err("Format cannot be null or empty".to_string());
     }
-    let ts = current_unix_timestamp() as u64;
-    let formatted = format_timestamp(&ts, &input.format).map_err(capability_err)?;
-    serde_json::to_string(&formatted).map_err(bad_json)
+
+    let timestamp = current_unix_timestamp() as u64;
+    format_timestamp(&timestamp, &input.format)
 }
 
-fn cap_country_name_to_iso_code(input_json: &str) -> Result<String, ErrorInfo> {
-    let input: CountryNameToIsoCodeInput = serde_json::from_str(input_json).map_err(bad_json)?;
+#[capability(
+    module = "utils",
+    display_name = "Country to ISO Code",
+    description = "Convert country name to ISO code"
+)]
+pub fn country_name_to_iso_code(input: CountryNameToIsoCodeInput) -> Result<String, String> {
     if input.country_name.trim().is_empty() {
-        return Err(capability_err("Country name cannot be null or empty"));
+        return Err("Country name cannot be null or empty".to_string());
     }
+
     let code_type = input.code_type.trim().to_lowercase();
     if code_type != "alpha2" && code_type != "alpha3" {
-        return Err(capability_err("Code type must be 'alpha2' or 'alpha3'"));
+        return Err("Code type must be 'alpha2' or 'alpha3'".to_string());
     }
-    let code = find_country_code(&input.country_name, &code_type).map_err(capability_err)?;
-    serde_json::to_string(&code).map_err(bad_json)
+
+    find_country_code(&input.country_name, &code_type)
 }
 
 // -----------------------------------------------------------------------------
@@ -519,8 +387,7 @@ fn cap_country_name_to_iso_code(input_json: &str) -> Result<String, ErrorInfo> {
 /// Returns the current Unix timestamp in seconds.
 ///
 /// Under wasm32-wasip2, `std::time::SystemTime::now()` routes through
-/// `wasi:clocks/wall-clock.now()`. We fall back to computing from the
-/// monotonic clock if needed, but the std path is simplest.
+/// `wasi:clocks/wall-clock.now()`. On the host this uses the system clock.
 fn current_unix_timestamp() -> i64 {
     use std::time::{SystemTime, UNIX_EPOCH};
     SystemTime::now()
@@ -530,7 +397,7 @@ fn current_unix_timestamp() -> i64 {
 }
 
 // -----------------------------------------------------------------------------
-// Helper Functions — Expression Calculation (ported from legacy utils.rs)
+// Helper Functions — Expression Calculation
 // -----------------------------------------------------------------------------
 
 fn calculate_expression(
@@ -545,12 +412,11 @@ fn calculate_expression(
         return Err("Expression cannot be null or empty".to_string());
     }
 
-    if enable_rounding {
-        if let Some(places) = decimal_places {
-            if places > 15 {
-                return Err("Decimal places cannot exceed 15".to_string());
-            }
-        }
+    if enable_rounding
+        && let Some(places) = decimal_places
+        && places > 15
+    {
+        return Err("Decimal places cannot exceed 15".to_string());
     }
 
     let expr_vars = validate_and_extract_variables(expr)?;
@@ -597,6 +463,7 @@ fn validate_and_extract_variables(expression: &str) -> Result<Vec<String>, Strin
                     break;
                 }
             }
+
             if !is_reserved_keyword(&current_var) && !variables.contains(&current_var) {
                 variables.push(current_var.clone());
             }
@@ -644,6 +511,7 @@ fn substitute_variables(expression: &str, variables: &HashMap<String, f64>) -> S
                     break;
                 }
             }
+
             if let Some(&value) = variables.get(&current_word) {
                 result.push_str(&value.to_string());
             } else {
@@ -764,7 +632,7 @@ fn parse_primary(expr: &str, pos: &mut usize) -> Result<f64, String> {
 }
 
 // -----------------------------------------------------------------------------
-// Helper Functions — Date/Time (ported from legacy utils.rs)
+// Helper Functions — Date/Time
 // -----------------------------------------------------------------------------
 
 fn parse_iso_to_unix(iso_date: &str) -> Result<i64, String> {
@@ -901,7 +769,7 @@ fn format_timestamp(timestamp: &u64, format: &str) -> Result<String, String> {
 }
 
 // -----------------------------------------------------------------------------
-// Helper Functions — Country Codes (ported from legacy utils.rs)
+// Helper Functions — Country Codes
 // -----------------------------------------------------------------------------
 
 fn find_country_code(country_name: &str, code_type: &str) -> Result<String, String> {
@@ -1220,4 +1088,215 @@ fn initialize_country_mappings() -> HashMap<&'static str, Vec<&'static str>> {
     mappings
 }
 
+// -----------------------------------------------------------------------------
+// AgentInfo assembler (host-only; the wasm binary doesn't need it)
+// -----------------------------------------------------------------------------
+
+/// Build the canonical `AgentInfo` for this agent by walking the macro-emitted
+/// `&'static` statics. The workspace `runtara-agent-bundle-emit` binary calls
+/// this on the host architecture and writes the JSON to disk; the wasm binary
+/// itself never executes this code, so we cfg-gate it out to keep the
+/// component small.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn agent_info() -> runtara_dsl::agent_meta::AgentInfo {
+    use runtara_dsl::agent_meta::{
+        AgentInfo, CapabilityMeta, InputTypeMeta, OutputTypeMeta, capability_to_api,
+    };
+    use std::collections::HashMap;
+
+    let caps: &[&'static CapabilityMeta] = &[
+        &__CAPABILITY_META_RANDOM_DOUBLE,
+        &__CAPABILITY_META_RANDOM_ARRAY,
+        &__CAPABILITY_META_RETURN_INPUT_STRING,
+        &__CAPABILITY_META_RETURN_INPUT,
+        &__CAPABILITY_META_DO_NOTHING,
+        &__CAPABILITY_META_DELAY_IN_MS,
+        &__CAPABILITY_META_CALCULATE,
+        &__CAPABILITY_META_FORMAT_DATE_FROM_ISO,
+        &__CAPABILITY_META_ISO_TO_UNIX_TIMESTAMP,
+        &__CAPABILITY_META_GET_CURRENT_UNIX_TIMESTAMP,
+        &__CAPABILITY_META_GET_CURRENT_ISO_DATETIME,
+        &__CAPABILITY_META_GET_CURRENT_FORMATTED_DATETIME,
+        &__CAPABILITY_META_COUNTRY_NAME_TO_ISO_CODE,
+    ];
+    let input_types: HashMap<&'static str, &'static InputTypeMeta> = [
+        (
+            "RandomDoubleInput",
+            &__INPUT_META_RandomDoubleInput as &InputTypeMeta,
+        ),
+        (
+            "ReturnRandomArrayInput",
+            &__INPUT_META_ReturnRandomArrayInput,
+        ),
+        ("ReturnStringInput", &__INPUT_META_ReturnStringInput),
+        ("ReturnInputData", &__INPUT_META_ReturnInputData),
+        ("DoNothingInput", &__INPUT_META_DoNothingInput),
+        ("DelayInMsInput", &__INPUT_META_DelayInMsInput),
+        ("CalculateInput", &__INPUT_META_CalculateInput),
+        (
+            "FormatDateFromIsoInput",
+            &__INPUT_META_FormatDateFromIsoInput,
+        ),
+        (
+            "IsoToUnixTimestampInput",
+            &__INPUT_META_IsoToUnixTimestampInput,
+        ),
+        (
+            "GetCurrentUnixTimestampInput",
+            &__INPUT_META_GetCurrentUnixTimestampInput,
+        ),
+        (
+            "GetCurrentIsoDatetimeInput",
+            &__INPUT_META_GetCurrentIsoDatetimeInput,
+        ),
+        (
+            "GetCurrentFormattedDateTimeInput",
+            &__INPUT_META_GetCurrentFormattedDateTimeInput,
+        ),
+        (
+            "CountryNameToIsoCodeInput",
+            &__INPUT_META_CountryNameToIsoCodeInput,
+        ),
+    ]
+    .into_iter()
+    .collect();
+    // No struct outputs — every capability returns a primitive (f64, i64, u64,
+    // String, Vec<i64>, or serde_json::Value). `capability_to_api` handles those
+    // via `rust_to_json_schema_type`, so we pass an empty output-type registry.
+    let output_types: HashMap<&'static str, &'static OutputTypeMeta> = HashMap::new();
+
+    let capabilities = caps
+        .iter()
+        .map(|cap| {
+            capability_to_api(
+                cap,
+                input_types.get(cap.input_type).copied(),
+                output_types.get(cap.output_type).copied(),
+            )
+        })
+        .collect();
+
+    AgentInfo {
+        id: "utils".into(),
+        name: "Utils".into(),
+        description: "Utility operations: random numbers, math, dates, country codes, delays."
+            .into(),
+        has_side_effects: false,
+        supports_connections: false,
+        integration_ids: vec![],
+        capabilities,
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Wasm component plumbing
+// -----------------------------------------------------------------------------
+
+#[cfg(target_arch = "wasm32")]
+use bindings::exports::runtara::agent::capabilities::{ConnectionInfo, ErrorInfo, Guest};
+
+#[cfg(target_arch = "wasm32")]
+struct Component;
+
+#[cfg(target_arch = "wasm32")]
+impl Guest for Component {
+    fn invoke(
+        capability_id: String,
+        input: Vec<u8>,
+        _connection: Option<ConnectionInfo>,
+    ) -> Result<Vec<u8>, ErrorInfo> {
+        let value: serde_json::Value = serde_json::from_slice(&input).map_err(bad_json)?;
+        let executor_result = match capability_id.as_str() {
+            "random-double" => __executor_random_double(value),
+            "random-array" => __executor_random_array(value),
+            "return-input-string" => __executor_return_input_string(value),
+            "return-input" => __executor_return_input(value),
+            "do-nothing" => __executor_do_nothing(value),
+            "delay-in-ms" => __executor_delay_in_ms(value),
+            "calculate" => __executor_calculate(value),
+            "format-date-from-iso" => __executor_format_date_from_iso(value),
+            "iso-to-unix-timestamp" => __executor_iso_to_unix_timestamp(value),
+            "get-current-unix-timestamp" => __executor_get_current_unix_timestamp(value),
+            "get-current-iso-datetime" => __executor_get_current_iso_datetime(value),
+            "get-current-formatted-datetime" => __executor_get_current_formatted_datetime(value),
+            "country-name-to-iso-code" => __executor_country_name_to_iso_code(value),
+            other => {
+                return Err(ErrorInfo {
+                    code: "UNKNOWN_CAPABILITY".into(),
+                    message: format!("utils agent has no capability `{other}`"),
+                    category: "permanent".into(),
+                    severity: "error".into(),
+                    retryable: false,
+                    retry_after_ms: None,
+                    attributes: None,
+                });
+            }
+        };
+        executor_result
+            .map_err(error_string_to_error_info)
+            .and_then(|out_value| serde_json::to_vec(&out_value).map_err(bad_json))
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn bad_json(e: serde_json::Error) -> ErrorInfo {
+    ErrorInfo {
+        code: "INPUT_DESERIALIZATION_ERROR".into(),
+        message: e.to_string(),
+        category: "permanent".into(),
+        severity: "error".into(),
+        retryable: false,
+        retry_after_ms: None,
+        attributes: None,
+    }
+}
+
+/// The `#[capability]` macro packages each error as a JSON-string with
+/// `{ code, message, category, severity }`. Parse it back into a typed
+/// `ErrorInfo` for the WIT result.
+#[cfg(target_arch = "wasm32")]
+fn error_string_to_error_info(s: String) -> ErrorInfo {
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(&s) {
+        ErrorInfo {
+            code: value
+                .get("code")
+                .and_then(|v| v.as_str())
+                .unwrap_or("CAPABILITY_ERROR")
+                .into(),
+            message: value
+                .get("message")
+                .and_then(|v| v.as_str())
+                .unwrap_or(&s)
+                .into(),
+            category: value
+                .get("category")
+                .and_then(|v| v.as_str())
+                .unwrap_or("permanent")
+                .into(),
+            severity: value
+                .get("severity")
+                .and_then(|v| v.as_str())
+                .unwrap_or("error")
+                .into(),
+            retryable: value
+                .get("retryable")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
+            retry_after_ms: value.get("retry_after_ms").and_then(|v| v.as_u64()),
+            attributes: value.get("attributes").map(|v| v.to_string()),
+        }
+    } else {
+        ErrorInfo {
+            code: "CAPABILITY_ERROR".into(),
+            message: s,
+            category: "permanent".into(),
+            severity: "error".into(),
+            retryable: false,
+            retry_after_ms: None,
+            attributes: None,
+        }
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
 bindings::export!(Component with_types_in bindings);

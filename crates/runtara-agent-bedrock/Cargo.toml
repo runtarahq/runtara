@@ -15,7 +15,19 @@ crate-type = ["cdylib", "rlib"]
 wit-bindgen-rt = { version = "0.44", features = ["bitflags"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
+# runtara-http compiles host-side (ureq) and wasm-side (wasi); the wasm build
+# routes through the proxy via the `X-Runtara-Connection-Id` header so AWS
+# credentials never enter the .wasm binary (the proxy computes SigV4).
 runtara-http = { path = "../runtara-http" }
+# Capability metadata stays beside the code: `#[capability_input]`,
+# `#[capability_output]`, `#[capability]` emit `&'static CapabilityMeta` /
+# `&'static InputTypeMeta` / `&'static OutputTypeMeta` items, and the host-only
+# `agent_info()` fn collects them into a `runtara_dsl::agent_meta::AgentInfo`.
+# A workspace `emit-meta` binary then serializes that to `meta.json` next to
+# the `.wasm` — the JSON is a build artifact, never hand-edited.
+runtara-agent-macro = { path = "../runtara-agent-macro" }
+runtara-dsl = { path = "../runtara-dsl", default-features = false }
+strum = { version = "0.26", features = ["derive"] }
 
 [package.metadata.component]
 package = "runtara:agent-bedrock"

@@ -809,27 +809,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a6ef517f0926dd24a1582492c791b6a4818a4d94e789a334894aa15b0d12f55c"
 
 [[package]]
-name = "const_format"
-version = "0.2.36"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4481a617ad9a412be3b97c5d403fef8ed023103368908b9c50af598ff467cc1e"
-dependencies = [
- "const_format_proc_macros",
- "konst",
-]
-
-[[package]]
-name = "const_format_proc_macros"
-version = "0.2.34"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1d57c2eccfb16dbac1f4e61e206105db5820c9d26c3c472bc17c774259ef7744"
-dependencies = [
- "proc-macro2",
- "quote",
- "unicode-xid",
-]
-
-[[package]]
 name = "constant_time_eq"
 version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2565,21 +2544,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "konst"
-version = "0.2.20"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "128133ed7824fcd73d6e7b17957c5eb7bacb885649bd8c69708b2331a10bcefb"
-dependencies = [
- "konst_macro_rules",
-]
-
-[[package]]
-name = "konst_macro_rules"
-version = "0.2.19"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a4933f3f57a8e9d9da04db23fb153356ecaf00cbd14aee46279c33dc80925c37"
-
-[[package]]
 name = "lazy_static"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4233,9 +4197,12 @@ dependencies = [
 name = "runtara-agent-ai-tools"
 version = "5.0.0"
 dependencies = [
+ "runtara-agent-macro",
+ "runtara-dsl",
  "runtara-http",
  "serde",
  "serde_json",
+ "strum",
  "wit-bindgen-rt 0.44.0",
 ]
 
@@ -4244,9 +4211,12 @@ name = "runtara-agent-azure-blob-storage"
 version = "5.0.0"
 dependencies = [
  "base64 0.22.1",
+ "runtara-agent-macro",
+ "runtara-dsl",
  "runtara-http",
  "serde",
  "serde_json",
+ "strum",
  "wit-bindgen-rt 0.44.0",
 ]
 
@@ -4254,19 +4224,57 @@ dependencies = [
 name = "runtara-agent-bedrock"
 version = "5.0.0"
 dependencies = [
+ "runtara-agent-macro",
+ "runtara-dsl",
  "runtara-http",
  "serde",
  "serde_json",
+ "strum",
  "wit-bindgen-rt 0.44.0",
+]
+
+[[package]]
+name = "runtara-agent-bundle-emit"
+version = "5.0.0"
+dependencies = [
+ "anyhow",
+ "runtara-agent-ai-tools",
+ "runtara-agent-azure-blob-storage",
+ "runtara-agent-bedrock",
+ "runtara-agent-compression",
+ "runtara-agent-crypto",
+ "runtara-agent-csv",
+ "runtara-agent-datetime",
+ "runtara-agent-http",
+ "runtara-agent-hubspot",
+ "runtara-agent-mailgun",
+ "runtara-agent-object-model",
+ "runtara-agent-openai",
+ "runtara-agent-s3-storage",
+ "runtara-agent-sftp",
+ "runtara-agent-sharepoint",
+ "runtara-agent-shopify",
+ "runtara-agent-slack",
+ "runtara-agent-stripe",
+ "runtara-agent-text",
+ "runtara-agent-transform",
+ "runtara-agent-utils",
+ "runtara-agent-xlsx",
+ "runtara-agent-xml",
+ "runtara-dsl",
+ "serde_json",
 ]
 
 [[package]]
 name = "runtara-agent-compression"
 version = "5.0.0"
 dependencies = [
+ "runtara-agent-macro",
+ "runtara-dsl",
  "runtara-http",
  "serde",
  "serde_json",
+ "strum",
  "wit-bindgen-rt 0.44.0",
 ]
 
@@ -4277,10 +4285,13 @@ dependencies = [
  "base64 0.22.1",
  "hmac 0.12.1",
  "md-5 0.10.6",
+ "runtara-agent-macro",
+ "runtara-dsl",
  "serde",
  "serde_json",
  "sha1",
  "sha2 0.10.9",
+ "strum",
  "wit-bindgen-rt 0.44.0",
 ]
 
@@ -4289,11 +4300,13 @@ name = "runtara-agent-csv"
 version = "5.1.1"
 dependencies = [
  "base64 0.22.1",
- "const_format",
  "csv",
  "encoding_rs",
+ "runtara-agent-macro",
+ "runtara-dsl",
  "serde",
  "serde_json",
+ "strum",
  "wit-bindgen-rt 0.44.0",
 ]
 
@@ -4303,8 +4316,11 @@ version = "5.1.1"
 dependencies = [
  "chrono",
  "chrono-tz",
+ "runtara-agent-macro",
+ "runtara-dsl",
  "serde",
  "serde_json",
+ "strum",
  "wit-bindgen-rt 0.44.0",
 ]
 
@@ -4313,9 +4329,12 @@ name = "runtara-agent-http"
 version = "5.0.0"
 dependencies = [
  "base64 0.22.1",
+ "runtara-agent-macro",
+ "runtara-dsl",
  "runtara-http",
  "serde",
  "serde_json",
+ "strum",
  "wit-bindgen-rt 0.44.0",
 ]
 
@@ -4323,9 +4342,12 @@ dependencies = [
 name = "runtara-agent-hubspot"
 version = "5.0.0"
 dependencies = [
+ "runtara-agent-macro",
+ "runtara-dsl",
  "runtara-http",
  "serde",
  "serde_json",
+ "strum",
  "wit-bindgen-rt 0.44.0",
 ]
 
@@ -4343,9 +4365,12 @@ dependencies = [
 name = "runtara-agent-mailgun"
 version = "5.0.0"
 dependencies = [
+ "runtara-agent-macro",
+ "runtara-dsl",
  "runtara-http",
  "serde",
  "serde_json",
+ "strum",
  "wit-bindgen-rt 0.44.0",
 ]
 
@@ -4353,9 +4378,12 @@ dependencies = [
 name = "runtara-agent-object-model"
 version = "5.0.0"
 dependencies = [
+ "runtara-agent-macro",
+ "runtara-dsl",
  "runtara-http",
  "serde",
  "serde_json",
+ "strum",
  "wit-bindgen-rt 0.44.0",
 ]
 
@@ -4363,9 +4391,12 @@ dependencies = [
 name = "runtara-agent-openai"
 version = "5.0.0"
 dependencies = [
+ "runtara-agent-macro",
+ "runtara-dsl",
  "runtara-http",
  "serde",
  "serde_json",
+ "strum",
  "wit-bindgen-rt 0.44.0",
 ]
 
@@ -4374,9 +4405,12 @@ name = "runtara-agent-s3-storage"
 version = "5.0.0"
 dependencies = [
  "base64 0.22.1",
+ "runtara-agent-macro",
+ "runtara-dsl",
  "runtara-http",
  "serde",
  "serde_json",
+ "strum",
  "wit-bindgen-rt 0.44.0",
 ]
 
@@ -4384,9 +4418,12 @@ dependencies = [
 name = "runtara-agent-sftp"
 version = "5.0.0"
 dependencies = [
+ "runtara-agent-macro",
+ "runtara-dsl",
  "runtara-http",
  "serde",
  "serde_json",
+ "strum",
  "wit-bindgen-rt 0.44.0",
 ]
 
@@ -4395,9 +4432,12 @@ name = "runtara-agent-sharepoint"
 version = "5.0.0"
 dependencies = [
  "base64 0.22.1",
+ "runtara-agent-macro",
+ "runtara-dsl",
  "runtara-http",
  "serde",
  "serde_json",
+ "strum",
  "wit-bindgen-rt 0.44.0",
 ]
 
@@ -4405,9 +4445,12 @@ dependencies = [
 name = "runtara-agent-shopify"
 version = "5.0.0"
 dependencies = [
+ "runtara-agent-macro",
+ "runtara-dsl",
  "runtara-http",
  "serde",
  "serde_json",
+ "strum",
  "wit-bindgen-rt 0.44.0",
 ]
 
@@ -4416,9 +4459,12 @@ name = "runtara-agent-slack"
 version = "5.0.0"
 dependencies = [
  "base64 0.22.1",
+ "runtara-agent-macro",
+ "runtara-dsl",
  "runtara-http",
  "serde",
  "serde_json",
+ "strum",
  "wit-bindgen-rt 0.44.0",
 ]
 
@@ -4426,9 +4472,12 @@ dependencies = [
 name = "runtara-agent-stripe"
 version = "5.0.0"
 dependencies = [
+ "runtara-agent-macro",
+ "runtara-dsl",
  "runtara-http",
  "serde",
  "serde_json",
+ "strum",
  "wit-bindgen-rt 0.44.0",
 ]
 
@@ -4439,9 +4488,12 @@ dependencies = [
  "base64 0.22.1",
  "minijinja",
  "regex",
+ "runtara-agent-macro",
+ "runtara-dsl",
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "strum",
  "wit-bindgen-rt 0.44.0",
 ]
 
@@ -4449,8 +4501,11 @@ dependencies = [
 name = "runtara-agent-transform"
 version = "5.1.1"
 dependencies = [
+ "runtara-agent-macro",
+ "runtara-dsl",
  "serde",
  "serde_json",
+ "strum",
  "wit-bindgen-rt 0.44.0",
 ]
 
@@ -4459,8 +4514,11 @@ name = "runtara-agent-utils"
 version = "5.1.1"
 dependencies = [
  "rand 0.8.6",
+ "runtara-agent-macro",
+ "runtara-dsl",
  "serde",
  "serde_json",
+ "strum",
  "wit-bindgen-rt 0.44.0",
 ]
 
@@ -4472,9 +4530,12 @@ version = "5.1.1"
 name = "runtara-agent-xlsx"
 version = "5.0.0"
 dependencies = [
+ "runtara-agent-macro",
+ "runtara-dsl",
  "runtara-http",
  "serde",
  "serde_json",
+ "strum",
  "wit-bindgen-rt 0.44.0",
 ]
 
@@ -4484,8 +4545,11 @@ version = "5.1.1"
 dependencies = [
  "base64 0.22.1",
  "roxmltree",
+ "runtara-agent-macro",
+ "runtara-dsl",
  "serde",
  "serde_json",
+ "strum",
  "wit-bindgen-rt 0.44.0",
 ]
 
@@ -4544,9 +4608,12 @@ dependencies = [
  "anyhow",
  "http",
  "hyper",
+ "runtara-agent-crypto",
  "runtara-agent-wit",
+ "runtara-dsl",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "tracing",
  "wasmtime",

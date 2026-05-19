@@ -512,6 +512,9 @@ struct AppState {
     connections: Arc<runtara_connections::ConnectionsFacade>,
     /// Unified execution engine — single orchestrator for all execution paths
     engine: Arc<workers::execution_engine::ExecutionEngine>,
+    /// Metadata service for agent listings — pre-built with the component
+    /// dispatcher so component-backed agents override the legacy registry.
+    agents: api::services::operators::AgentsService,
 }
 
 // Implement FromRef to allow extracting PgPool from AppState
@@ -585,6 +588,13 @@ impl axum::extract::FromRef<AppState> for Arc<runtara_connections::ConnectionsFa
 impl axum::extract::FromRef<AppState> for Arc<workers::execution_engine::ExecutionEngine> {
     fn from_ref(state: &AppState) -> Arc<workers::execution_engine::ExecutionEngine> {
         state.engine.clone()
+    }
+}
+
+// Implement FromRef to allow extracting AgentsService from AppState
+impl axum::extract::FromRef<AppState> for api::services::operators::AgentsService {
+    fn from_ref(state: &AppState) -> api::services::operators::AgentsService {
+        state.agents.clone()
     }
 }
 
@@ -1103,6 +1113,46 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         .map(|v| v.to_lowercase() != "false" && v != "0")
         .unwrap_or(true);
 
+    // Build the component dispatcher (embedded wasmtime) once at startup and
+    // share its Arc with every service that needs it — `AgentTestingService`
+    // routes test invocations through it, `AgentsService` reads its metadata
+    // to override the legacy registry for component-backed agents.
+    let component_dispatcher: Option<Arc<runtara_component_host::ComponentDispatcherService>> = {
+        let cfg = config::get();
+        if let Some(ref dir) = cfg.agent_components_dir {
+            use runtara_component_host::{ComponentDispatcherService, DispatcherEnv};
+            let env = DispatcherEnv {
+                proxy_url: cfg.http_proxy_url.clone(),
+                agent_service_url: cfg.agent_service_url.clone(),
+                object_model_url: cfg.object_model_url.clone(),
+                core_http_url: format!("http://127.0.0.1:{}", cfg.internal_port),
+            };
+            match ComponentDispatcherService::from_dir(dir, env).await {
+                Ok(dispatcher) => {
+                    let loaded: Vec<&str> = dispatcher.agent_ids().collect();
+                    println!(
+                        "✓ Component dispatcher loaded {} agent(s) from {}: {}",
+                        loaded.len(),
+                        dir.display(),
+                        loaded.join(", ")
+                    );
+                    Some(Arc::new(dispatcher))
+                }
+                Err(e) => {
+                    println!(
+                        "⚠ Failed to load WASM agent components from {}: {}",
+                        dir.display(),
+                        e
+                    );
+                    println!("  Continuing with legacy dispatcher only.");
+                    None
+                }
+            }
+        } else {
+            None
+        }
+    };
+
     let agent_testing: Option<AgentTestingService> = if enable_operator_testing {
         if let Some(ref client) = runtime_client {
             let dispatcher_service = Arc::new(DispatcherService::new(client.clone()));
@@ -1114,43 +1164,9 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
                     println!("✓ Agent dispatcher ready (image: {})", image_id);
                     let mut service = AgentTestingService::new(true, Some(dispatcher_service))
                         .with_connections(connections_facade.clone());
-
-                    // Optionally load WASM component agents and plug the
-                    // embedded component dispatcher into the service. When
-                    // configured, agents with a .wasm component go through
-                    // the wasmtime path by default; ?engine=legacy forces
-                    // the dispatcher image.
-                    let cfg = config::get();
-                    if let Some(ref dir) = cfg.agent_components_dir {
-                        use runtara_component_host::{ComponentDispatcherService, DispatcherEnv};
-                        let env = DispatcherEnv {
-                            proxy_url: cfg.http_proxy_url.clone(),
-                            agent_service_url: cfg.agent_service_url.clone(),
-                            object_model_url: cfg.object_model_url.clone(),
-                            core_http_url: format!("http://127.0.0.1:{}", cfg.internal_port),
-                        };
-                        match ComponentDispatcherService::from_dir(dir, env).await {
-                            Ok(dispatcher) => {
-                                let loaded: Vec<&str> = dispatcher.agent_ids().collect();
-                                println!(
-                                    "✓ Component dispatcher loaded {} agent(s) from {}: {}",
-                                    loaded.len(),
-                                    dir.display(),
-                                    loaded.join(", ")
-                                );
-                                service = service.with_component_dispatcher(Arc::new(dispatcher));
-                            }
-                            Err(e) => {
-                                println!(
-                                    "⚠ Failed to load WASM agent components from {}: {}",
-                                    dir.display(),
-                                    e
-                                );
-                                println!("  Continuing with legacy dispatcher only.");
-                            }
-                        }
+                    if let Some(ref dispatcher) = component_dispatcher {
+                        service = service.with_component_dispatcher(dispatcher.clone());
                     }
-
                     Some(service)
                 }
                 Err(e) => {
@@ -1166,6 +1182,13 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
     } else {
         println!("Agent testing disabled (ENABLE_OPERATOR_TESTING=false)");
         None
+    };
+
+    // Build the AgentsService once with the component dispatcher attached so
+    // every handler reads the same component-backed metadata view.
+    let agents_service = {
+        use crate::api::services::operators::AgentsService;
+        AgentsService::new().with_component_dispatcher(component_dispatcher.clone())
     };
 
     // Build the unified execution engine shared by handlers and workers.
@@ -1504,6 +1527,10 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
             get(api::handlers::operators::get_agent_connection_schema_handler),
         )
         .route(
+            "/api/runtime/_internal/components/status",
+            get(api::handlers::operators::components_status_handler),
+        )
+        .route(
             "/api/runtime/agents/{name}/capabilities/{capability_id}/test",
             post(api::handlers::agent_testing::test_agent_handler),
         )
@@ -1571,6 +1598,7 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
             ),
             connections: connections_facade.clone(),
             engine: execution_engine.clone(),
+            agents: agents_service.clone(),
         })
         // Apply JWT authentication middleware to all tenant-scoped routes
         .route_layer(from_fn_with_state(
@@ -1838,6 +1866,7 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
             ),
             connections: connections_facade.clone(),
             engine: execution_engine.clone(),
+            agents: agents_service.clone(),
         })
         // Defense in depth: cap the request body on these public,
         // unauthenticated webhook ingest routes. events.rs also enforces this

@@ -1,227 +1,135 @@
-//! S3-Compatible Storage integration agent — WebAssembly Component.
+//! S3-compatible storage agent — WebAssembly component.
 //!
-//! Schema parity with `runtara-agents/src/agents/integrations/s3_storage.rs`.
+//! Capability metadata travels through `#[capability_input]` / `#[capability]` /
+//! `#[capability_output]` annotations on the same Rust types and functions that
+//! the wasm cdylib's `invoke` dispatcher calls into. The workspace binary
+//! `runtara-agent-bundle-emit` reads these macro-emitted `&'static` statics on
+//! the host architecture and writes `runtara_agent_s3_storage.meta.json` next
+//! to the `.wasm` — the JSON is a build artifact, never hand-edited.
 //!
-//! Routing model: the underlying `runtara-http` client reads
-//! `RUNTARA_HTTP_PROXY_URL` and forwards every request through the proxy as a
-//! JSON envelope, injecting `X-Runtara-Connection-Id` so the proxy can resolve
-//! the connection, compute SigV4, and forward to S3. The component never sees
-//! AWS credentials or performs any signing.
+//! Routing model: the `runtara-http` client reads `RUNTARA_HTTP_PROXY_URL` and
+//! forwards every request through the proxy as a JSON envelope. The
+//! `X-Runtara-Connection-Id` header causes the proxy to resolve the connection,
+//! attach AWS SigV4 signing, and forward to the configured S3 endpoint. The
+//! component never sees AWS credentials and never signs requests itself.
 //!
-//! No OnceLock, no client cache, no Arc<S3Client>. Each invoke() call is a
-//! fresh wasmtime::Store; caching across calls is useless overhead here.
+//! Binary content (upload/download) flows over the wire as base64 inside the
+//! JSON capability input/output. The component decodes/encodes base64 itself;
+//! the raw bytes only exist as the body of the proxied PUT/GET. Default upload
+//! cap is 50 MB (matches the legacy `s3_storage` agent).
+#![allow(clippy::result_large_err)]
 
-#![cfg(target_arch = "wasm32")]
+use base64::Engine as _;
+use runtara_agent_macro::{CapabilityInput, CapabilityOutput, capability};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use std::collections::HashMap;
+use std::time::Duration;
 
+#[cfg(target_arch = "wasm32")]
 #[allow(warnings)]
 mod bindings;
 
-use std::time::Duration;
+// ============================================================================
+// Local AgentError shim
+// ============================================================================
+//
+// The host crate's `runtara_agents::types::AgentError` pulls in `tracing` and
+// other host-only baggage. We only need the on-the-wire JSON shape that the
+// `#[capability]` macro expects (`Into<String>` returning
+// `{"code","message","category","severity",...}`), so we inline a minimal
+// version here. Mirrors the shim in `runtara-agent-mailgun` / `-hubspot`.
 
-use base64::Engine as _;
-use bindings::exports::runtara::agent::capabilities::{
-    CapabilityInfo, ConnectionInfo, ErrorInfo, Guest, ModuleInfo,
-};
-use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+#[derive(Debug, Clone, Serialize)]
+pub struct AgentError {
+    pub code: String,
+    pub message: String,
+    pub category: &'static str,
+    pub severity: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retry_after_ms: Option<u64>,
+    #[serde(skip_serializing_if = "HashMap::is_empty")]
+    pub attributes: HashMap<String, Value>,
+}
 
-// -----------------------------------------------------------------------------
-// Component plumbing
-// -----------------------------------------------------------------------------
-
-struct Component;
-
-impl Guest for Component {
-    fn get_module_info() -> ModuleInfo {
-        ModuleInfo {
-            id: "s3_storage".into(),
-            display_name: "S3 Storage".into(),
-            description: "S3-compatible object storage: bucket and file management, \
-                          plus presigned URL generation. Credentials are injected \
-                          server-side by the runtara HTTP proxy."
-                .into(),
-            has_side_effects: true,
-            supports_connections: true,
-            integration_ids: vec!["s3_compatible".into()],
-            secure: true,
+impl AgentError {
+    pub fn permanent(code: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            code: code.into(),
+            message: message.into(),
+            category: "permanent",
+            severity: "error",
+            retry_after_ms: None,
+            attributes: HashMap::new(),
         }
     }
 
-    fn list_capabilities() -> Vec<CapabilityInfo> {
-        vec![
-            // Bucket operations
-            cap(
-                "storage-create-bucket",
-                "storage_create_bucket",
-                "Create Bucket",
-                "Create a new bucket in S3-compatible storage",
-                false,
-                true,
-                STORAGE_CREATE_BUCKET_INPUT_SCHEMA,
-                STORAGE_CREATE_BUCKET_OUTPUT_SCHEMA,
-            ),
-            cap(
-                "storage-list-buckets",
-                "storage_list_buckets",
-                "List Buckets",
-                "List all buckets in S3-compatible storage",
-                false,
-                false,
-                STORAGE_LIST_BUCKETS_INPUT_SCHEMA,
-                STORAGE_LIST_BUCKETS_OUTPUT_SCHEMA,
-            ),
-            cap(
-                "storage-delete-bucket",
-                "storage_delete_bucket",
-                "Delete Bucket",
-                "Delete an empty bucket from S3-compatible storage",
-                false,
-                true,
-                STORAGE_DELETE_BUCKET_INPUT_SCHEMA,
-                STORAGE_DELETE_BUCKET_OUTPUT_SCHEMA,
-            ),
-            // File operations
-            cap(
-                "storage-upload-file",
-                "storage_upload_file",
-                "Upload File",
-                "Upload a file to S3-compatible storage. Content can be base64-encoded binary or plain text.",
-                false,
-                true,
-                STORAGE_UPLOAD_FILE_INPUT_SCHEMA,
-                STORAGE_UPLOAD_FILE_OUTPUT_SCHEMA,
-            ),
-            cap(
-                "storage-download-file",
-                "storage_download_file",
-                "Download File",
-                "Download a file from S3-compatible storage. Returns base64-encoded content by default, or UTF-8 text if as_text is true.",
-                false,
-                false,
-                STORAGE_DOWNLOAD_FILE_INPUT_SCHEMA,
-                STORAGE_DOWNLOAD_FILE_OUTPUT_SCHEMA,
-            ),
-            cap(
-                "storage-list-files",
-                "storage_list_files",
-                "List Files",
-                "List files in a bucket with optional prefix filter and pagination",
-                false,
-                false,
-                STORAGE_LIST_FILES_INPUT_SCHEMA,
-                STORAGE_LIST_FILES_OUTPUT_SCHEMA,
-            ),
-            cap(
-                "storage-get-file-info",
-                "storage_get_file_info",
-                "Get File Info",
-                "Get metadata about a file without downloading it (content type, size, last modified)",
-                false,
-                false,
-                STORAGE_GET_FILE_INFO_INPUT_SCHEMA,
-                STORAGE_GET_FILE_INFO_OUTPUT_SCHEMA,
-            ),
-            cap(
-                "storage-delete-file",
-                "storage_delete_file",
-                "Delete File",
-                "Delete a file from S3-compatible storage",
-                false,
-                true,
-                STORAGE_DELETE_FILE_INPUT_SCHEMA,
-                STORAGE_DELETE_FILE_OUTPUT_SCHEMA,
-            ),
-            cap(
-                "storage-copy-file",
-                "storage_copy_file",
-                "Copy File",
-                "Copy a file within or across buckets in S3-compatible storage",
-                false,
-                true,
-                STORAGE_COPY_FILE_INPUT_SCHEMA,
-                STORAGE_COPY_FILE_OUTPUT_SCHEMA,
-            ),
-            cap(
-                "storage-generate-presigned-url",
-                "storage_generate_presigned_url",
-                "Generate Presigned URL",
-                "Generate a time-limited presigned URL for downloading, uploading, or deleting an object. \
-                 Callers consume the URL directly without going through runtara.",
-                false,
-                false,
-                STORAGE_GENERATE_PRESIGNED_URL_INPUT_SCHEMA,
-                STORAGE_GENERATE_PRESIGNED_URL_OUTPUT_SCHEMA,
-            ),
-        ]
-    }
-
-    fn invoke(
-        capability_id: String,
-        input: String,
-        connection: Option<ConnectionInfo>,
-    ) -> Result<String, ErrorInfo> {
-        match capability_id.as_str() {
-            "storage-create-bucket" => storage_create_bucket(&input, connection.as_ref()),
-            "storage-list-buckets" => storage_list_buckets(&input, connection.as_ref()),
-            "storage-delete-bucket" => storage_delete_bucket(&input, connection.as_ref()),
-            "storage-upload-file" => storage_upload_file(&input, connection.as_ref()),
-            "storage-download-file" => storage_download_file(&input, connection.as_ref()),
-            "storage-list-files" => storage_list_files(&input, connection.as_ref()),
-            "storage-get-file-info" => storage_get_file_info(&input, connection.as_ref()),
-            "storage-delete-file" => storage_delete_file(&input, connection.as_ref()),
-            "storage-copy-file" => storage_copy_file(&input, connection.as_ref()),
-            "storage-generate-presigned-url" => {
-                storage_generate_presigned_url(&input, connection.as_ref())
-            }
-            other => Err(permanent_err(
-                "UNKNOWN_CAPABILITY",
-                format!("s3_storage agent has no capability `{other}`"),
-            )),
+    pub fn transient(code: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            code: code.into(),
+            message: message.into(),
+            category: "transient",
+            severity: "warning",
+            retry_after_ms: None,
+            attributes: HashMap::new(),
         }
     }
-}
 
-// -----------------------------------------------------------------------------
-// Helper: build a CapabilityInfo
-// -----------------------------------------------------------------------------
+    pub fn with_attr(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.attributes
+            .insert(key.into(), Value::String(value.into()));
+        self
+    }
 
-fn cap(
-    id: &str,
-    function_name: &str,
-    display_name: &str,
-    description: &str,
-    is_idempotent: bool,
-    has_side_effects: bool,
-    input_schema: &str,
-    output_schema: &str,
-) -> CapabilityInfo {
-    CapabilityInfo {
-        id: id.into(),
-        function_name: function_name.into(),
-        display_name: Some(display_name.into()),
-        description: Some(description.into()),
-        has_side_effects,
-        is_idempotent,
-        rate_limited: false,
-        tags: vec!["s3".into(), "storage".into()],
-        input_schema: input_schema.into(),
-        output_schema: output_schema.into(),
-        known_errors: vec![],
-        compensation_hint: None,
+    #[allow(dead_code)]
+    pub fn with_retry_after_ms(mut self, ms: u64) -> Self {
+        self.retry_after_ms = Some(ms);
+        self
     }
 }
 
-// -----------------------------------------------------------------------------
-// Shared helpers
-// -----------------------------------------------------------------------------
+impl From<AgentError> for String {
+    fn from(err: AgentError) -> Self {
+        serde_json::to_string(&err).unwrap_or_else(|_| format!("[{}] {}", err.code, err.message))
+    }
+}
 
-/// Require a connection or return `S3_MISSING_CONNECTION`.
-fn require_connection(connection: Option<&ConnectionInfo>) -> Result<&ConnectionInfo, ErrorInfo> {
-    connection.ok_or_else(|| {
-        permanent_err(
+// ============================================================================
+// RawConnection (local mirror of crates/runtara-agents/src/connections.rs)
+// ============================================================================
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RawConnection {
+    #[serde(default)]
+    pub connection_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub connection_subtype: Option<String>,
+    pub integration_id: String,
+    pub parameters: Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rate_limit_config: Option<Value>,
+}
+
+// ============================================================================
+// Shared S3 helpers
+// ============================================================================
+
+/// Default request timeout — matches the existing wasm crate.
+const S3_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Size limit for uploads: 50 MB (matches the legacy `s3_storage` constant).
+const MAX_UPLOAD_SIZE: usize = 50 * 1024 * 1024;
+
+/// Default lifetime for presigned URLs (1 hour).
+const DEFAULT_PRESIGN_EXPIRES_SECONDS: u64 = 3600;
+
+fn require_connection(connection: &Option<RawConnection>) -> Result<&RawConnection, AgentError> {
+    connection.as_ref().ok_or_else(|| {
+        AgentError::permanent(
             "S3_MISSING_CONNECTION",
             "No S3 connection configured. Add an s3_compatible connection to this step.",
         )
+        .with_attr("integration", "s3_compatible")
     })
 }
 
@@ -254,8 +162,8 @@ fn s3_request(
     connection_id: &str,
     headers: &[(&str, &str)],
     body: Option<&[u8]>,
-) -> Result<runtara_http::HttpResponse, ErrorInfo> {
-    let client = runtara_http::HttpClient::with_timeout(Duration::from_secs(60));
+) -> Result<runtara_http::HttpResponse, AgentError> {
+    let client = runtara_http::HttpClient::with_timeout(S3_TIMEOUT);
     let mut req = client
         .request(method, path)
         .header("X-Runtara-Connection-Id", connection_id);
@@ -269,10 +177,11 @@ fn s3_request(
     }
 
     req.call_agent().map_err(|e| {
-        transient_err(
-            "NETWORK_ERROR",
+        AgentError::transient(
+            "S3_NETWORK_ERROR",
             format!("S3 request {method} {path} failed: {e}"),
         )
+        .with_attr("integration", "s3_compatible")
     })
 }
 
@@ -303,19 +212,36 @@ fn extract_xml_tag(xml: &str, tag: &str) -> Option<String> {
     Some(xml[start..end].to_string())
 }
 
-fn parse_list_buckets_xml(xml: &str) -> Vec<Value> {
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct S3BucketEntry {
+    pub name: String,
+    pub creation_date: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct S3ObjectEntry {
+    pub key: String,
+    pub size: u64,
+    pub last_modified: String,
+    pub etag: String,
+}
+
+fn parse_list_buckets_xml(xml: &str) -> Vec<S3BucketEntry> {
     let mut buckets = Vec::new();
     for block in xml.split("<Bucket>").skip(1) {
         let name = extract_xml_tag(block, "Name").unwrap_or_default();
         let creation_date = extract_xml_tag(block, "CreationDate").unwrap_or_default();
         if !name.is_empty() {
-            buckets.push(json!({"name": name, "creation_date": creation_date}));
+            buckets.push(S3BucketEntry {
+                name,
+                creation_date,
+            });
         }
     }
     buckets
 }
 
-fn parse_list_objects_xml(xml: &str) -> (Vec<Value>, Option<String>) {
+fn parse_list_objects_xml(xml: &str) -> (Vec<S3ObjectEntry>, Option<String>) {
     let next_token = extract_xml_tag(xml, "NextContinuationToken");
     let mut objects = Vec::new();
     for block in xml.split("<Contents>").skip(1) {
@@ -326,45 +252,67 @@ fn parse_list_objects_xml(xml: &str) -> (Vec<Value>, Option<String>) {
         let last_modified = extract_xml_tag(block, "LastModified").unwrap_or_default();
         let etag = extract_xml_tag(block, "ETag").unwrap_or_default();
         if !key.is_empty() {
-            objects.push(json!({
-                "key": key,
-                "size": size,
-                "last_modified": last_modified,
-                "etag": etag,
-            }));
+            objects.push(S3ObjectEntry {
+                key,
+                size,
+                last_modified,
+                etag,
+            });
         }
     }
     (objects, next_token)
 }
 
-// -----------------------------------------------------------------------------
+// ============================================================================
 // Capability 1: Create Bucket
-// -----------------------------------------------------------------------------
+// ============================================================================
 
-#[derive(Debug, Deserialize)]
-struct CreateBucketInput {
-    bucket: String,
+#[derive(Debug, Serialize, Deserialize, CapabilityInput)]
+#[capability_input(display_name = "Create Bucket Input")]
+pub struct CreateBucketInput {
+    #[field(skip)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub _connection: Option<RawConnection>,
+
+    #[field(
+        display_name = "Bucket",
+        description = "Name of the bucket to create",
+        example = "uploads"
+    )]
+    pub bucket: String,
 }
 
-#[derive(Debug, Serialize)]
-struct CreateBucketOutput {
-    success: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    error: Option<String>,
+#[derive(Debug, Serialize, Deserialize, CapabilityOutput)]
+#[capability_output(display_name = "Create Bucket Output")]
+pub struct CreateBucketOutput {
+    #[field(display_name = "Success")]
+    pub success: bool,
+
+    #[field(display_name = "Error")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
-fn storage_create_bucket(
-    input_json: &str,
-    connection: Option<&ConnectionInfo>,
-) -> Result<String, ErrorInfo> {
-    let input: CreateBucketInput = serde_json::from_str(input_json)
-        .map_err(|e| permanent_err("INPUT_DESERIALIZATION_ERROR", e.to_string()))?;
-    let conn = require_connection(connection)?;
-
+#[capability(
+    id = "storage-create-bucket",
+    module = "s3-storage",
+    display_name = "Create Bucket",
+    description = "Create a new bucket in S3-compatible storage",
+    side_effects = true,
+    idempotent = false,
+    module_display_name = "S3 Storage",
+    module_description = "S3-compatible object storage: bucket and file management, plus presigned URL generation. Credentials are injected server-side by the runtara HTTP proxy.",
+    module_has_side_effects = true,
+    module_supports_connections = true,
+    module_integration_ids = "s3_compatible",
+    module_secure = true
+)]
+pub fn storage_create_bucket(input: CreateBucketInput) -> Result<CreateBucketOutput, AgentError> {
+    let connection = require_connection(&input._connection)?;
     let path = bucket_path(&input.bucket);
-    let resp = s3_request("PUT", &path, &conn.connection_id, &[], None)?;
+    let resp = s3_request("PUT", &path, &connection.connection_id, &[], None)?;
 
-    let out = match resp.status {
+    Ok(match resp.status {
         200 | 201 | 409 => CreateBucketOutput {
             success: true,
             error: None,
@@ -376,32 +324,51 @@ fn storage_create_bucket(
                 error: Some(format!("CreateBucket failed: {}", parse_s3_error(&body))),
             }
         }
-    };
-    serde_json::to_string(&out)
-        .map_err(|e| permanent_err("OUTPUT_SERIALIZATION_ERROR", e.to_string()))
+    })
 }
 
-// -----------------------------------------------------------------------------
+// ============================================================================
 // Capability 2: List Buckets
-// -----------------------------------------------------------------------------
+// ============================================================================
 
-#[derive(Debug, Serialize)]
-struct ListBucketsOutput {
-    success: bool,
-    buckets: Vec<Value>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    error: Option<String>,
+#[derive(Debug, Serialize, Deserialize, CapabilityInput)]
+#[capability_input(display_name = "List Buckets Input")]
+pub struct ListBucketsInput {
+    #[field(skip)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub _connection: Option<RawConnection>,
 }
 
-fn storage_list_buckets(
-    _input_json: &str,
-    connection: Option<&ConnectionInfo>,
-) -> Result<String, ErrorInfo> {
-    let conn = require_connection(connection)?;
+#[derive(Debug, Serialize, Deserialize, CapabilityOutput)]
+#[capability_output(display_name = "List Buckets Output")]
+pub struct ListBucketsOutput {
+    #[field(display_name = "Success")]
+    pub success: bool,
 
-    let resp = s3_request("GET", "/", &conn.connection_id, &[], None)?;
+    #[field(
+        display_name = "Buckets",
+        description = "List of bucket entries with name and creation date"
+    )]
+    pub buckets: Vec<S3BucketEntry>,
 
-    let out = if resp.status == 200 {
+    #[field(display_name = "Error")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+#[capability(
+    id = "storage-list-buckets",
+    module = "s3-storage",
+    display_name = "List Buckets",
+    description = "List all buckets in S3-compatible storage",
+    side_effects = false,
+    idempotent = true
+)]
+pub fn storage_list_buckets(input: ListBucketsInput) -> Result<ListBucketsOutput, AgentError> {
+    let connection = require_connection(&input._connection)?;
+    let resp = s3_request("GET", "/", &connection.connection_id, &[], None)?;
+
+    Ok(if resp.status == 200 {
         let xml = String::from_utf8_lossy(&resp.body).to_string();
         ListBucketsOutput {
             success: true,
@@ -415,39 +382,53 @@ fn storage_list_buckets(
             buckets: vec![],
             error: Some(format!("ListBuckets failed: {}", parse_s3_error(&body))),
         }
-    };
-    serde_json::to_string(&out)
-        .map_err(|e| permanent_err("OUTPUT_SERIALIZATION_ERROR", e.to_string()))
+    })
 }
 
-// -----------------------------------------------------------------------------
+// ============================================================================
 // Capability 3: Delete Bucket
-// -----------------------------------------------------------------------------
+// ============================================================================
 
-#[derive(Debug, Deserialize)]
-struct DeleteBucketInput {
-    bucket: String,
+#[derive(Debug, Serialize, Deserialize, CapabilityInput)]
+#[capability_input(display_name = "Delete Bucket Input")]
+pub struct DeleteBucketInput {
+    #[field(skip)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub _connection: Option<RawConnection>,
+
+    #[field(
+        display_name = "Bucket",
+        description = "Name of the bucket to delete (must be empty)",
+        example = "old-exports"
+    )]
+    pub bucket: String,
 }
 
-#[derive(Debug, Serialize)]
-struct DeleteBucketOutput {
-    success: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    error: Option<String>,
+#[derive(Debug, Serialize, Deserialize, CapabilityOutput)]
+#[capability_output(display_name = "Delete Bucket Output")]
+pub struct DeleteBucketOutput {
+    #[field(display_name = "Success")]
+    pub success: bool,
+
+    #[field(display_name = "Error")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
-fn storage_delete_bucket(
-    input_json: &str,
-    connection: Option<&ConnectionInfo>,
-) -> Result<String, ErrorInfo> {
-    let input: DeleteBucketInput = serde_json::from_str(input_json)
-        .map_err(|e| permanent_err("INPUT_DESERIALIZATION_ERROR", e.to_string()))?;
-    let conn = require_connection(connection)?;
-
+#[capability(
+    id = "storage-delete-bucket",
+    module = "s3-storage",
+    display_name = "Delete Bucket",
+    description = "Delete an empty bucket from S3-compatible storage",
+    side_effects = true,
+    idempotent = true
+)]
+pub fn storage_delete_bucket(input: DeleteBucketInput) -> Result<DeleteBucketOutput, AgentError> {
+    let connection = require_connection(&input._connection)?;
     let path = bucket_path(&input.bucket);
-    let resp = s3_request("DELETE", &path, &conn.connection_id, &[], None)?;
+    let resp = s3_request("DELETE", &path, &connection.connection_id, &[], None)?;
 
-    let out = match resp.status {
+    Ok(match resp.status {
         200 | 204 | 404 => DeleteBucketOutput {
             success: true,
             error: None,
@@ -459,65 +440,109 @@ fn storage_delete_bucket(
                 error: Some(format!("DeleteBucket failed: {}", parse_s3_error(&body))),
             }
         }
-    };
-    serde_json::to_string(&out)
-        .map_err(|e| permanent_err("OUTPUT_SERIALIZATION_ERROR", e.to_string()))
+    })
 }
 
-// -----------------------------------------------------------------------------
+// ============================================================================
 // Capability 4: Upload File
-// -----------------------------------------------------------------------------
+// ============================================================================
 
-/// Size limit for uploads: 50 MB (matches legacy constant).
-const MAX_UPLOAD_SIZE: usize = 50 * 1024 * 1024;
+#[derive(Debug, Serialize, Deserialize, CapabilityInput)]
+#[capability_input(display_name = "Upload File Input")]
+pub struct UploadFileInput {
+    #[field(skip)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub _connection: Option<RawConnection>,
 
-#[derive(Debug, Deserialize)]
-struct UploadFileInput {
-    bucket: String,
-    key: String,
-    content: String,
-    #[serde(default)]
-    content_type: Option<String>,
-    /// Whether content is base64-encoded (default: true).
+    #[field(
+        display_name = "Bucket",
+        description = "Bucket to upload to",
+        example = "uploads"
+    )]
+    pub bucket: String,
+
+    #[field(
+        display_name = "Key",
+        description = "Object key (file path within the bucket)",
+        example = "reports/2026-03-22.csv"
+    )]
+    pub key: String,
+
+    #[field(
+        display_name = "Content",
+        description = "File content as base64-encoded string (default) or plain text. Max 50 MB after decode.",
+        example = "SGVsbG8gV29ybGQ="
+    )]
+    pub content: String,
+
+    #[field(
+        display_name = "Content Type",
+        description = "MIME type of the file (e.g., text/csv, image/png)",
+        example = "text/csv"
+    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_type: Option<String>,
+
+    #[field(
+        display_name = "Is Base64",
+        description = "Whether content is base64-encoded (default: true)",
+        default = "true"
+    )]
     #[serde(default = "default_true_opt")]
-    is_base64: Option<bool>,
+    pub is_base64: Option<bool>,
 }
 
 fn default_true_opt() -> Option<bool> {
     Some(true)
 }
 
-#[derive(Debug, Serialize)]
-struct UploadFileOutput {
-    success: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    key: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    size: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    error: Option<String>,
+#[derive(Debug, Serialize, Deserialize, CapabilityOutput)]
+#[capability_output(display_name = "Upload File Output")]
+pub struct UploadFileOutput {
+    #[field(display_name = "Success")]
+    pub success: bool,
+
+    #[field(display_name = "Key", description = "The key of the uploaded file")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
+
+    #[field(
+        display_name = "Size",
+        description = "Size in bytes of the uploaded file"
+    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size: Option<u64>,
+
+    #[field(display_name = "Error")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
-fn storage_upload_file(
-    input_json: &str,
-    connection: Option<&ConnectionInfo>,
-) -> Result<String, ErrorInfo> {
-    let input: UploadFileInput = serde_json::from_str(input_json)
-        .map_err(|e| permanent_err("INPUT_DESERIALIZATION_ERROR", e.to_string()))?;
-    let conn = require_connection(connection)?;
+#[capability(
+    id = "storage-upload-file",
+    module = "s3-storage",
+    display_name = "Upload File",
+    description = "Upload a file to S3-compatible storage. Content can be base64-encoded binary or plain text.",
+    side_effects = true,
+    idempotent = false
+)]
+pub fn storage_upload_file(input: UploadFileInput) -> Result<UploadFileOutput, AgentError> {
+    let connection = require_connection(&input._connection)?;
 
-    // Decode content
     let is_base64 = input.is_base64.unwrap_or(true);
     let data = if is_base64 {
         base64::engine::general_purpose::STANDARD
             .decode(&input.content)
-            .map_err(|e| permanent_err("S3_INVALID_CONTENT", format!("Invalid base64: {}", e)))?
+            .map_err(|e| {
+                AgentError::permanent("S3_INVALID_CONTENT", format!("Invalid base64: {}", e))
+                    .with_attr("integration", "s3_compatible")
+            })?
     } else {
         input.content.into_bytes()
     };
 
     if data.len() > MAX_UPLOAD_SIZE {
-        let out = UploadFileOutput {
+        return Ok(UploadFileOutput {
             success: false,
             key: None,
             size: None,
@@ -525,9 +550,7 @@ fn storage_upload_file(
                 "File exceeds maximum size of {} MB",
                 MAX_UPLOAD_SIZE / 1024 / 1024
             )),
-        };
-        return serde_json::to_string(&out)
-            .map_err(|e| permanent_err("OUTPUT_SERIALIZATION_ERROR", e.to_string()));
+        });
     }
 
     let size = data.len() as u64;
@@ -540,12 +563,12 @@ fn storage_upload_file(
     let resp = s3_request(
         "PUT",
         &path,
-        &conn.connection_id,
+        &connection.connection_id,
         &[("Content-Type", ct)],
         Some(&data),
     )?;
 
-    let out = match resp.status {
+    Ok(match resp.status {
         200 | 201 => UploadFileOutput {
             success: true,
             key: Some(input.key),
@@ -561,47 +584,84 @@ fn storage_upload_file(
                 error: Some(format!("PutObject failed: {}", parse_s3_error(&body))),
             }
         }
-    };
-    serde_json::to_string(&out)
-        .map_err(|e| permanent_err("OUTPUT_SERIALIZATION_ERROR", e.to_string()))
+    })
 }
 
-// -----------------------------------------------------------------------------
+// ============================================================================
 // Capability 5: Download File
-// -----------------------------------------------------------------------------
+// ============================================================================
 
-#[derive(Debug, Deserialize)]
-struct DownloadFileInput {
-    bucket: String,
-    key: String,
+#[derive(Debug, Serialize, Deserialize, CapabilityInput)]
+#[capability_input(display_name = "Download File Input")]
+pub struct DownloadFileInput {
+    #[field(skip)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub _connection: Option<RawConnection>,
+
+    #[field(
+        display_name = "Bucket",
+        description = "Bucket to download from",
+        example = "uploads"
+    )]
+    pub bucket: String,
+
+    #[field(
+        display_name = "Key",
+        description = "Object key (file path within the bucket)",
+        example = "reports/2026-03-22.csv"
+    )]
+    pub key: String,
+
+    #[field(
+        display_name = "As Text",
+        description = "Return content as UTF-8 text instead of base64 (default: false)",
+        default = "false"
+    )]
     #[serde(default)]
-    as_text: Option<bool>,
+    pub as_text: Option<bool>,
 }
 
-#[derive(Debug, Serialize)]
-struct DownloadFileOutput {
-    success: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    content: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    content_type: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    size: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    error: Option<String>,
+#[derive(Debug, Serialize, Deserialize, CapabilityOutput)]
+#[capability_output(display_name = "Download File Output")]
+pub struct DownloadFileOutput {
+    #[field(display_name = "Success")]
+    pub success: bool,
+
+    #[field(
+        display_name = "Content",
+        description = "File content (base64 by default, or UTF-8 text when as_text is true)"
+    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content: Option<String>,
+
+    #[field(display_name = "Content Type", description = "MIME type of the file")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_type: Option<String>,
+
+    #[field(display_name = "Size", description = "Size in bytes")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size: Option<u64>,
+
+    #[field(display_name = "Error")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
-fn storage_download_file(
-    input_json: &str,
-    connection: Option<&ConnectionInfo>,
-) -> Result<String, ErrorInfo> {
-    let input: DownloadFileInput = serde_json::from_str(input_json)
-        .map_err(|e| permanent_err("INPUT_DESERIALIZATION_ERROR", e.to_string()))?;
-    let conn = require_connection(connection)?;
+#[capability(
+    id = "storage-download-file",
+    module = "s3-storage",
+    display_name = "Download File",
+    description = "Download a file from S3-compatible storage. Returns base64-encoded content by default, or UTF-8 text if as_text is true.",
+    side_effects = false,
+    idempotent = true
+)]
+pub fn storage_download_file(input: DownloadFileInput) -> Result<DownloadFileOutput, AgentError> {
+    let connection = require_connection(&input._connection)?;
 
-    // HEAD first to get content_type (mirrors legacy behaviour).
+    // HEAD first to pull content_type without re-streaming the body. Mirrors
+    // the legacy behaviour; failure of HEAD doesn't abort the GET.
     let head_path = object_path(&input.bucket, &input.key);
-    let content_type = s3_request("HEAD", &head_path, &conn.connection_id, &[], None)
+    let content_type = s3_request("HEAD", &head_path, &connection.connection_id, &[], None)
         .ok()
         .and_then(|r| {
             if r.status == 200 {
@@ -615,9 +675,9 @@ fn storage_download_file(
         });
 
     let get_path = object_path(&input.bucket, &input.key);
-    let resp = s3_request("GET", &get_path, &conn.connection_id, &[], None)?;
+    let resp = s3_request("GET", &get_path, &connection.connection_id, &[], None)?;
 
-    let out = if resp.status == 200 {
+    Ok(if resp.status == 200 {
         let size = resp.body.len() as u64;
         let content = if input.as_text.unwrap_or(false) {
             String::from_utf8(resp.body).unwrap_or_else(|e| {
@@ -642,43 +702,88 @@ fn storage_download_file(
             size: None,
             error: Some(format!("GetObject failed: {}", parse_s3_error(&body))),
         }
-    };
-    serde_json::to_string(&out)
-        .map_err(|e| permanent_err("OUTPUT_SERIALIZATION_ERROR", e.to_string()))
+    })
 }
 
-// -----------------------------------------------------------------------------
+// ============================================================================
 // Capability 6: List Files
-// -----------------------------------------------------------------------------
+// ============================================================================
 
-#[derive(Debug, Deserialize)]
-struct ListFilesInput {
-    bucket: String,
-    #[serde(default)]
-    prefix: Option<String>,
-    #[serde(default)]
-    max_keys: Option<u32>,
-    #[serde(default)]
-    continuation_token: Option<String>,
+#[derive(Debug, Serialize, Deserialize, CapabilityInput)]
+#[capability_input(display_name = "List Files Input")]
+pub struct ListFilesInput {
+    #[field(skip)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub _connection: Option<RawConnection>,
+
+    #[field(
+        display_name = "Bucket",
+        description = "Bucket to list files from",
+        example = "uploads"
+    )]
+    pub bucket: String,
+
+    #[field(
+        display_name = "Prefix",
+        description = "Filter files by key prefix (like a folder path)",
+        example = "reports/"
+    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prefix: Option<String>,
+
+    #[field(
+        display_name = "Max Keys",
+        description = "Maximum number of files to return (default: 1000)",
+        example = "100"
+    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_keys: Option<u32>,
+
+    #[field(
+        display_name = "Continuation Token",
+        description = "Token for paginating through results"
+    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub continuation_token: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
-struct ListFilesOutput {
-    success: bool,
-    files: Vec<Value>,
-    count: u32,
-    next_continuation_token: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    error: Option<String>,
+#[derive(Debug, Serialize, Deserialize, CapabilityOutput)]
+#[capability_output(display_name = "List Files Output")]
+pub struct ListFilesOutput {
+    #[field(display_name = "Success")]
+    pub success: bool,
+
+    #[field(
+        display_name = "Files",
+        description = "List of file objects with key, size, last_modified, etag"
+    )]
+    pub files: Vec<S3ObjectEntry>,
+
+    #[field(display_name = "Count", description = "Number of files returned")]
+    pub count: u32,
+
+    #[field(
+        display_name = "Next Continuation Token",
+        description = "Token for fetching the next page"
+    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_continuation_token: Option<String>,
+
+    #[field(display_name = "Error")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
-fn storage_list_files(
-    input_json: &str,
-    connection: Option<&ConnectionInfo>,
-) -> Result<String, ErrorInfo> {
-    let input: ListFilesInput = serde_json::from_str(input_json)
-        .map_err(|e| permanent_err("INPUT_DESERIALIZATION_ERROR", e.to_string()))?;
-    let conn = require_connection(connection)?;
+#[capability(
+    id = "storage-list-files",
+    module = "s3-storage",
+    display_name = "List Files",
+    description = "List files in a bucket with optional prefix filter and pagination",
+    side_effects = false,
+    idempotent = true
+)]
+pub fn storage_list_files(input: ListFilesInput) -> Result<ListFilesOutput, AgentError> {
+    let connection = require_connection(&input._connection)?;
 
     let mut query_parts = vec!["list-type=2".to_string()];
     if let Some(p) = &input.prefix {
@@ -692,9 +797,9 @@ fn storage_list_files(
     }
 
     let path = format!("/{}?{}", input.bucket, query_parts.join("&"));
-    let resp = s3_request("GET", &path, &conn.connection_id, &[], None)?;
+    let resp = s3_request("GET", &path, &connection.connection_id, &[], None)?;
 
-    let out = if resp.status == 200 {
+    Ok(if resp.status == 200 {
         let xml = String::from_utf8_lossy(&resp.body).to_string();
         let (files, next_token) = parse_list_objects_xml(&xml);
         let count = files.len() as u32;
@@ -714,48 +819,68 @@ fn storage_list_files(
             next_continuation_token: None,
             error: Some(format!("ListObjects failed: {}", parse_s3_error(&body))),
         }
-    };
-    serde_json::to_string(&out)
-        .map_err(|e| permanent_err("OUTPUT_SERIALIZATION_ERROR", e.to_string()))
+    })
 }
 
-// -----------------------------------------------------------------------------
+// ============================================================================
 // Capability 7: Get File Info
-// -----------------------------------------------------------------------------
+// ============================================================================
 
-#[derive(Debug, Deserialize)]
-struct GetFileInfoInput {
-    bucket: String,
-    key: String,
+#[derive(Debug, Serialize, Deserialize, CapabilityInput)]
+#[capability_input(display_name = "Get File Info Input")]
+pub struct GetFileInfoInput {
+    #[field(skip)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub _connection: Option<RawConnection>,
+
+    #[field(display_name = "Bucket", example = "uploads")]
+    pub bucket: String,
+
+    #[field(display_name = "Key", example = "reports/2026-03-22.csv")]
+    pub key: String,
 }
 
-#[derive(Debug, Serialize)]
-struct GetFileInfoOutput {
-    success: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    content_type: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    size: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    etag: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    last_modified: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    error: Option<String>,
+#[derive(Debug, Serialize, Deserialize, CapabilityOutput)]
+#[capability_output(display_name = "Get File Info Output")]
+pub struct GetFileInfoOutput {
+    #[field(display_name = "Success")]
+    pub success: bool,
+
+    #[field(display_name = "Content Type")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_type: Option<String>,
+
+    #[field(display_name = "Size", description = "File size in bytes")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size: Option<u64>,
+
+    #[field(display_name = "ETag")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub etag: Option<String>,
+
+    #[field(display_name = "Last Modified")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_modified: Option<String>,
+
+    #[field(display_name = "Error")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
-fn storage_get_file_info(
-    input_json: &str,
-    connection: Option<&ConnectionInfo>,
-) -> Result<String, ErrorInfo> {
-    let input: GetFileInfoInput = serde_json::from_str(input_json)
-        .map_err(|e| permanent_err("INPUT_DESERIALIZATION_ERROR", e.to_string()))?;
-    let conn = require_connection(connection)?;
-
+#[capability(
+    id = "storage-get-file-info",
+    module = "s3-storage",
+    display_name = "Get File Info",
+    description = "Get metadata about a file without downloading it (content type, size, last modified)",
+    side_effects = false,
+    idempotent = true
+)]
+pub fn storage_get_file_info(input: GetFileInfoInput) -> Result<GetFileInfoOutput, AgentError> {
+    let connection = require_connection(&input._connection)?;
     let path = object_path(&input.bucket, &input.key);
-    let resp = s3_request("HEAD", &path, &conn.connection_id, &[], None)?;
+    let resp = s3_request("HEAD", &path, &connection.connection_id, &[], None)?;
 
-    let out = if resp.status == 200 {
+    Ok(if resp.status == 200 {
         let content_type = resp
             .headers
             .get("content-type")
@@ -784,40 +909,52 @@ fn storage_get_file_info(
             last_modified: None,
             error: Some(format!("HeadObject failed (status {})", resp.status)),
         }
-    };
-    serde_json::to_string(&out)
-        .map_err(|e| permanent_err("OUTPUT_SERIALIZATION_ERROR", e.to_string()))
+    })
 }
 
-// -----------------------------------------------------------------------------
+// ============================================================================
 // Capability 8: Delete File
-// -----------------------------------------------------------------------------
+// ============================================================================
 
-#[derive(Debug, Deserialize)]
-struct DeleteFileInput {
-    bucket: String,
-    key: String,
+#[derive(Debug, Serialize, Deserialize, CapabilityInput)]
+#[capability_input(display_name = "Delete File Input")]
+pub struct DeleteFileInput {
+    #[field(skip)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub _connection: Option<RawConnection>,
+
+    #[field(display_name = "Bucket", example = "uploads")]
+    pub bucket: String,
+
+    #[field(display_name = "Key", example = "reports/old-report.csv")]
+    pub key: String,
 }
 
-#[derive(Debug, Serialize)]
-struct DeleteFileOutput {
-    success: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    error: Option<String>,
+#[derive(Debug, Serialize, Deserialize, CapabilityOutput)]
+#[capability_output(display_name = "Delete File Output")]
+pub struct DeleteFileOutput {
+    #[field(display_name = "Success")]
+    pub success: bool,
+
+    #[field(display_name = "Error")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
-fn storage_delete_file(
-    input_json: &str,
-    connection: Option<&ConnectionInfo>,
-) -> Result<String, ErrorInfo> {
-    let input: DeleteFileInput = serde_json::from_str(input_json)
-        .map_err(|e| permanent_err("INPUT_DESERIALIZATION_ERROR", e.to_string()))?;
-    let conn = require_connection(connection)?;
-
+#[capability(
+    id = "storage-delete-file",
+    module = "s3-storage",
+    display_name = "Delete File",
+    description = "Delete a file from S3-compatible storage",
+    side_effects = true,
+    idempotent = true
+)]
+pub fn storage_delete_file(input: DeleteFileInput) -> Result<DeleteFileOutput, AgentError> {
+    let connection = require_connection(&input._connection)?;
     let path = object_path(&input.bucket, &input.key);
-    let resp = s3_request("DELETE", &path, &conn.connection_id, &[], None)?;
+    let resp = s3_request("DELETE", &path, &connection.connection_id, &[], None)?;
 
-    let out = match resp.status {
+    Ok(match resp.status {
         200 | 204 | 404 => DeleteFileOutput {
             success: true,
             error: None,
@@ -829,49 +966,66 @@ fn storage_delete_file(
                 error: Some(format!("DeleteObject failed: {}", parse_s3_error(&body))),
             }
         }
-    };
-    serde_json::to_string(&out)
-        .map_err(|e| permanent_err("OUTPUT_SERIALIZATION_ERROR", e.to_string()))
+    })
 }
 
-// -----------------------------------------------------------------------------
+// ============================================================================
 // Capability 9: Copy File
-// -----------------------------------------------------------------------------
+// ============================================================================
 
-#[derive(Debug, Deserialize)]
-struct CopyFileInput {
-    source_bucket: String,
-    source_key: String,
-    destination_bucket: String,
-    destination_key: String,
+#[derive(Debug, Serialize, Deserialize, CapabilityInput)]
+#[capability_input(display_name = "Copy File Input")]
+pub struct CopyFileInput {
+    #[field(skip)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub _connection: Option<RawConnection>,
+
+    #[field(display_name = "Source Bucket", example = "uploads")]
+    pub source_bucket: String,
+
+    #[field(display_name = "Source Key", example = "temp/file.csv")]
+    pub source_key: String,
+
+    #[field(display_name = "Destination Bucket", example = "archive")]
+    pub destination_bucket: String,
+
+    #[field(display_name = "Destination Key", example = "2026/03/file.csv")]
+    pub destination_key: String,
 }
 
-#[derive(Debug, Serialize)]
-struct CopyFileOutput {
-    success: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    error: Option<String>,
+#[derive(Debug, Serialize, Deserialize, CapabilityOutput)]
+#[capability_output(display_name = "Copy File Output")]
+pub struct CopyFileOutput {
+    #[field(display_name = "Success")]
+    pub success: bool,
+
+    #[field(display_name = "Error")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
-fn storage_copy_file(
-    input_json: &str,
-    connection: Option<&ConnectionInfo>,
-) -> Result<String, ErrorInfo> {
-    let input: CopyFileInput = serde_json::from_str(input_json)
-        .map_err(|e| permanent_err("INPUT_DESERIALIZATION_ERROR", e.to_string()))?;
-    let conn = require_connection(connection)?;
+#[capability(
+    id = "storage-copy-file",
+    module = "s3-storage",
+    display_name = "Copy File",
+    description = "Copy a file within or across buckets in S3-compatible storage",
+    side_effects = true,
+    idempotent = true
+)]
+pub fn storage_copy_file(input: CopyFileInput) -> Result<CopyFileOutput, AgentError> {
+    let connection = require_connection(&input._connection)?;
 
     let dst_path = object_path(&input.destination_bucket, &input.destination_key);
     let copy_source = format!("/{}/{}", input.source_bucket, input.source_key);
     let resp = s3_request(
         "PUT",
         &dst_path,
-        &conn.connection_id,
+        &connection.connection_id,
         &[("x-amz-copy-source", &copy_source)],
         None,
     )?;
 
-    let out = match resp.status {
+    Ok(match resp.status {
         200 | 201 => CopyFileOutput {
             success: true,
             error: None,
@@ -883,53 +1037,92 @@ fn storage_copy_file(
                 error: Some(format!("CopyObject failed: {}", parse_s3_error(&body))),
             }
         }
-    };
-    serde_json::to_string(&out)
-        .map_err(|e| permanent_err("OUTPUT_SERIALIZATION_ERROR", e.to_string()))
+    })
 }
 
-// -----------------------------------------------------------------------------
+// ============================================================================
 // Capability 10: Generate Presigned URL
-// -----------------------------------------------------------------------------
+// ============================================================================
 
-const DEFAULT_PRESIGN_EXPIRES_SECONDS: u64 = 3600;
+#[derive(Debug, Serialize, Deserialize, CapabilityInput)]
+#[capability_input(display_name = "Generate Presigned URL Input")]
+pub struct GeneratePresignedUrlInput {
+    #[field(skip)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub _connection: Option<RawConnection>,
 
-#[derive(Debug, Deserialize)]
-struct GeneratePresignedUrlInput {
-    bucket: String,
-    key: String,
-    operation: String,
-    #[serde(default)]
-    expires_in_seconds: Option<u64>,
-    #[serde(default)]
-    content_type: Option<String>,
+    #[field(display_name = "Bucket", example = "uploads")]
+    pub bucket: String,
+
+    #[field(display_name = "Key", example = "reports/2026-05-16.csv")]
+    pub key: String,
+
+    #[field(
+        display_name = "Operation",
+        description = "What the URL will be used for: download, upload, or delete",
+        example = "download"
+    )]
+    pub operation: String,
+
+    #[field(
+        display_name = "Expires In Seconds",
+        description = "Lifetime of the signed URL in seconds (max 604800 = 7 days, default 3600)",
+        default = "3600",
+        example = "3600"
+    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_in_seconds: Option<u64>,
+
+    #[field(
+        display_name = "Content Type",
+        description = "For upload URLs, the MIME type the caller will use (e.g., text/csv)",
+        example = "text/csv"
+    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_type: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
-struct GeneratePresignedUrlOutput {
-    success: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    url: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    expires_in_seconds: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    error: Option<String>,
+#[derive(Debug, Serialize, Deserialize, CapabilityOutput)]
+#[capability_output(display_name = "Generate Presigned URL Output")]
+pub struct GeneratePresignedUrlOutput {
+    #[field(display_name = "Success")]
+    pub success: bool,
+
+    #[field(display_name = "URL", description = "Time-limited presigned URL")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+
+    #[field(
+        display_name = "Expires In Seconds",
+        description = "Actual lifetime of the URL after server-side clamping"
+    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_in_seconds: Option<u64>,
+
+    #[field(display_name = "Error")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
-fn storage_generate_presigned_url(
-    input_json: &str,
-    connection: Option<&ConnectionInfo>,
-) -> Result<String, ErrorInfo> {
-    let input: GeneratePresignedUrlInput = serde_json::from_str(input_json)
-        .map_err(|e| permanent_err("INPUT_DESERIALIZATION_ERROR", e.to_string()))?;
-    let conn = require_connection(connection)?;
+#[capability(
+    id = "storage-generate-presigned-url",
+    module = "s3-storage",
+    display_name = "Generate Presigned URL",
+    description = "Generate a time-limited presigned URL for downloading, uploading, or deleting an object. Callers consume the URL directly without going through runtara.",
+    side_effects = false,
+    idempotent = true
+)]
+pub fn storage_generate_presigned_url(
+    input: GeneratePresignedUrlInput,
+) -> Result<GeneratePresignedUrlOutput, AgentError> {
+    let connection = require_connection(&input._connection)?;
 
     let method = match input.operation.to_lowercase().as_str() {
         "download" | "get" | "read" => "GET",
         "upload" | "put" | "write" | "create" => "PUT",
         "delete" => "DELETE",
         other => {
-            let out = GeneratePresignedUrlOutput {
+            return Ok(GeneratePresignedUrlOutput {
                 success: false,
                 url: None,
                 expires_in_seconds: None,
@@ -937,9 +1130,7 @@ fn storage_generate_presigned_url(
                     "Unsupported operation `{}` (expected download, upload, or delete)",
                     other
                 )),
-            };
-            return serde_json::to_string(&out)
-                .map_err(|e| permanent_err("OUTPUT_SERIALIZATION_ERROR", e.to_string()));
+            });
         }
     };
 
@@ -948,38 +1139,248 @@ fn storage_generate_presigned_url(
         .expires_in_seconds
         .unwrap_or(DEFAULT_PRESIGN_EXPIRES_SECONDS);
 
-    let out = match runtara_http::presign(
-        &conn.connection_id,
-        method,
-        &path,
-        expires,
-        input.content_type.as_deref(),
-    ) {
-        Ok(result) => GeneratePresignedUrlOutput {
-            success: true,
-            url: Some(result.url),
-            expires_in_seconds: Some(result.expires_in_seconds),
-            error: None,
+    Ok(
+        match runtara_http::presign(
+            &connection.connection_id,
+            method,
+            &path,
+            expires,
+            input.content_type.as_deref(),
+        ) {
+            Ok(result) => GeneratePresignedUrlOutput {
+                success: true,
+                url: Some(result.url),
+                expires_in_seconds: Some(result.expires_in_seconds),
+                error: None,
+            },
+            Err(e) => GeneratePresignedUrlOutput {
+                success: false,
+                url: None,
+                expires_in_seconds: None,
+                error: Some(e.to_string()),
+            },
         },
-        Err(e) => GeneratePresignedUrlOutput {
-            success: false,
-            url: None,
-            expires_in_seconds: None,
-            error: Some(e.to_string()),
-        },
-    };
-    serde_json::to_string(&out)
-        .map_err(|e| permanent_err("OUTPUT_SERIALIZATION_ERROR", e.to_string()))
+    )
 }
 
-// -----------------------------------------------------------------------------
-// Error helpers
-// -----------------------------------------------------------------------------
+// ============================================================================
+// AgentInfo assembler (host-only; the wasm binary doesn't need it)
+// ============================================================================
 
-fn permanent_err(code: &str, message: impl Into<String>) -> ErrorInfo {
+/// Build the canonical `AgentInfo` for this agent by walking the macro-emitted
+/// `&'static` statics. The workspace `runtara-agent-bundle-emit` binary calls
+/// this on the host architecture and writes the JSON to disk; the wasm binary
+/// itself never executes this code, so we cfg-gate it out to keep the
+/// component small.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn agent_info() -> runtara_dsl::agent_meta::AgentInfo {
+    use runtara_dsl::agent_meta::{
+        AgentInfo, CapabilityMeta, InputTypeMeta, OutputTypeMeta, capability_to_api,
+    };
+    use std::collections::HashMap;
+
+    let caps: &[&'static CapabilityMeta] = &[
+        &__CAPABILITY_META_STORAGE_CREATE_BUCKET,
+        &__CAPABILITY_META_STORAGE_LIST_BUCKETS,
+        &__CAPABILITY_META_STORAGE_DELETE_BUCKET,
+        &__CAPABILITY_META_STORAGE_UPLOAD_FILE,
+        &__CAPABILITY_META_STORAGE_DOWNLOAD_FILE,
+        &__CAPABILITY_META_STORAGE_LIST_FILES,
+        &__CAPABILITY_META_STORAGE_GET_FILE_INFO,
+        &__CAPABILITY_META_STORAGE_DELETE_FILE,
+        &__CAPABILITY_META_STORAGE_COPY_FILE,
+        &__CAPABILITY_META_STORAGE_GENERATE_PRESIGNED_URL,
+    ];
+
+    let input_types: HashMap<&'static str, &'static InputTypeMeta> = [
+        (
+            "CreateBucketInput",
+            &__INPUT_META_CreateBucketInput as &InputTypeMeta,
+        ),
+        (
+            "ListBucketsInput",
+            &__INPUT_META_ListBucketsInput as &InputTypeMeta,
+        ),
+        (
+            "DeleteBucketInput",
+            &__INPUT_META_DeleteBucketInput as &InputTypeMeta,
+        ),
+        (
+            "UploadFileInput",
+            &__INPUT_META_UploadFileInput as &InputTypeMeta,
+        ),
+        (
+            "DownloadFileInput",
+            &__INPUT_META_DownloadFileInput as &InputTypeMeta,
+        ),
+        (
+            "ListFilesInput",
+            &__INPUT_META_ListFilesInput as &InputTypeMeta,
+        ),
+        (
+            "GetFileInfoInput",
+            &__INPUT_META_GetFileInfoInput as &InputTypeMeta,
+        ),
+        (
+            "DeleteFileInput",
+            &__INPUT_META_DeleteFileInput as &InputTypeMeta,
+        ),
+        (
+            "CopyFileInput",
+            &__INPUT_META_CopyFileInput as &InputTypeMeta,
+        ),
+        (
+            "GeneratePresignedUrlInput",
+            &__INPUT_META_GeneratePresignedUrlInput as &InputTypeMeta,
+        ),
+    ]
+    .into_iter()
+    .collect();
+
+    let output_types: HashMap<&'static str, &'static OutputTypeMeta> = [
+        (
+            "CreateBucketOutput",
+            &__OUTPUT_META_CreateBucketOutput as &OutputTypeMeta,
+        ),
+        (
+            "ListBucketsOutput",
+            &__OUTPUT_META_ListBucketsOutput as &OutputTypeMeta,
+        ),
+        (
+            "DeleteBucketOutput",
+            &__OUTPUT_META_DeleteBucketOutput as &OutputTypeMeta,
+        ),
+        (
+            "UploadFileOutput",
+            &__OUTPUT_META_UploadFileOutput as &OutputTypeMeta,
+        ),
+        (
+            "DownloadFileOutput",
+            &__OUTPUT_META_DownloadFileOutput as &OutputTypeMeta,
+        ),
+        (
+            "ListFilesOutput",
+            &__OUTPUT_META_ListFilesOutput as &OutputTypeMeta,
+        ),
+        (
+            "GetFileInfoOutput",
+            &__OUTPUT_META_GetFileInfoOutput as &OutputTypeMeta,
+        ),
+        (
+            "DeleteFileOutput",
+            &__OUTPUT_META_DeleteFileOutput as &OutputTypeMeta,
+        ),
+        (
+            "CopyFileOutput",
+            &__OUTPUT_META_CopyFileOutput as &OutputTypeMeta,
+        ),
+        (
+            "GeneratePresignedUrlOutput",
+            &__OUTPUT_META_GeneratePresignedUrlOutput as &OutputTypeMeta,
+        ),
+    ]
+    .into_iter()
+    .collect();
+
+    let capabilities = caps
+        .iter()
+        .map(|cap| {
+            capability_to_api(
+                cap,
+                input_types.get(cap.input_type).copied(),
+                output_types.get(cap.output_type).copied(),
+            )
+        })
+        .collect();
+
+    AgentInfo {
+        id: "s3-storage".into(),
+        name: "S3 Storage".into(),
+        description: "S3-compatible object storage: bucket and file management, plus presigned URL generation. Credentials are injected server-side by the runtara HTTP proxy.".into(),
+        has_side_effects: true,
+        supports_connections: true,
+        integration_ids: vec!["s3_compatible".to_string()],
+        capabilities,
+    }
+}
+
+// ============================================================================
+// Wasm component plumbing
+// ============================================================================
+
+#[cfg(target_arch = "wasm32")]
+use bindings::exports::runtara::agent::capabilities::{ConnectionInfo, ErrorInfo, Guest};
+
+#[cfg(target_arch = "wasm32")]
+struct Component;
+
+#[cfg(target_arch = "wasm32")]
+impl Guest for Component {
+    fn invoke(
+        capability_id: String,
+        input: Vec<u8>,
+        connection: Option<ConnectionInfo>,
+    ) -> Result<Vec<u8>, ErrorInfo> {
+        let mut value: serde_json::Value = serde_json::from_slice(&input).map_err(bad_json)?;
+
+        // Inject the WIT `connection` arg into the input JSON under `_connection`
+        // so the macro-generated executor can deserialize it into the
+        // capability input struct's `_connection: Option<RawConnection>` field.
+        if let Some(c) = connection.as_ref() {
+            if let serde_json::Value::Object(ref mut obj) = value {
+                let parameters = serde_json::from_str::<serde_json::Value>(&c.parameters)
+                    .unwrap_or(serde_json::Value::Null);
+                let rate_limit_config = c
+                    .rate_limit_config
+                    .as_ref()
+                    .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok());
+                obj.insert(
+                    "_connection".into(),
+                    serde_json::json!({
+                        "connection_id": c.connection_id,
+                        "integration_id": c.integration_id,
+                        "connection_subtype": c.connection_subtype,
+                        "parameters": parameters,
+                        "rate_limit_config": rate_limit_config,
+                    }),
+                );
+            }
+        }
+
+        let executor_result = match capability_id.as_str() {
+            "storage-create-bucket" => __executor_storage_create_bucket(value),
+            "storage-list-buckets" => __executor_storage_list_buckets(value),
+            "storage-delete-bucket" => __executor_storage_delete_bucket(value),
+            "storage-upload-file" => __executor_storage_upload_file(value),
+            "storage-download-file" => __executor_storage_download_file(value),
+            "storage-list-files" => __executor_storage_list_files(value),
+            "storage-get-file-info" => __executor_storage_get_file_info(value),
+            "storage-delete-file" => __executor_storage_delete_file(value),
+            "storage-copy-file" => __executor_storage_copy_file(value),
+            "storage-generate-presigned-url" => __executor_storage_generate_presigned_url(value),
+            other => {
+                return Err(ErrorInfo {
+                    code: "UNKNOWN_CAPABILITY".into(),
+                    message: format!("s3-storage agent has no capability `{other}`"),
+                    category: "permanent".into(),
+                    severity: "error".into(),
+                    retryable: false,
+                    retry_after_ms: None,
+                    attributes: None,
+                });
+            }
+        };
+        executor_result
+            .map_err(error_string_to_error_info)
+            .and_then(|out_value| serde_json::to_vec(&out_value).map_err(bad_json))
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn bad_json(e: serde_json::Error) -> ErrorInfo {
     ErrorInfo {
-        code: code.into(),
-        message: message.into(),
+        code: "INPUT_DESERIALIZATION_ERROR".into(),
+        message: e.to_string(),
         category: "permanent".into(),
         severity: "error".into(),
         retryable: false,
@@ -988,210 +1389,54 @@ fn permanent_err(code: &str, message: impl Into<String>) -> ErrorInfo {
     }
 }
 
-fn transient_err(code: &str, message: impl Into<String>) -> ErrorInfo {
-    ErrorInfo {
-        code: code.into(),
-        message: message.into(),
-        category: "transient".into(),
-        severity: "warning".into(),
-        retryable: true,
-        retry_after_ms: None,
-        attributes: None,
+/// The `#[capability]` macro packages each error as a JSON-string with
+/// `{ code, message, category, severity, ... }`. Parse it back into a typed
+/// `ErrorInfo` for the WIT result.
+#[cfg(target_arch = "wasm32")]
+fn error_string_to_error_info(s: String) -> ErrorInfo {
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(&s) {
+        let category = value
+            .get("category")
+            .and_then(|v| v.as_str())
+            .unwrap_or("permanent")
+            .to_string();
+        let retryable = value
+            .get("retryable")
+            .and_then(|v| v.as_bool())
+            .unwrap_or_else(|| category == "transient");
+        ErrorInfo {
+            code: value
+                .get("code")
+                .and_then(|v| v.as_str())
+                .unwrap_or("CAPABILITY_ERROR")
+                .into(),
+            message: value
+                .get("message")
+                .and_then(|v| v.as_str())
+                .unwrap_or(&s)
+                .into(),
+            category,
+            severity: value
+                .get("severity")
+                .and_then(|v| v.as_str())
+                .unwrap_or("error")
+                .into(),
+            retryable,
+            retry_after_ms: value.get("retry_after_ms").and_then(|v| v.as_u64()),
+            attributes: value.get("attributes").map(|v| v.to_string()),
+        }
+    } else {
+        ErrorInfo {
+            code: "CAPABILITY_ERROR".into(),
+            message: s,
+            category: "permanent".into(),
+            severity: "error".into(),
+            retryable: false,
+            retry_after_ms: None,
+            attributes: None,
+        }
     }
 }
 
-// -----------------------------------------------------------------------------
-// JSON Schemas — mirror legacy field names and defaults exactly
-// -----------------------------------------------------------------------------
-
-const STORAGE_CREATE_BUCKET_INPUT_SCHEMA: &str = r#"{
-    "type": "object",
-    "required": ["bucket"],
-    "properties": {
-        "bucket": { "type": "string", "description": "Name of the bucket to create", "example": "uploads" }
-    }
-}"#;
-
-const STORAGE_CREATE_BUCKET_OUTPUT_SCHEMA: &str = r#"{
-    "type": "object",
-    "properties": {
-        "success": { "type": "boolean" },
-        "error":   { "type": "string" }
-    }
-}"#;
-
-const STORAGE_LIST_BUCKETS_INPUT_SCHEMA: &str = r#"{
-    "type": "object",
-    "properties": {}
-}"#;
-
-const STORAGE_LIST_BUCKETS_OUTPUT_SCHEMA: &str = r#"{
-    "type": "object",
-    "properties": {
-        "success": { "type": "boolean" },
-        "buckets": { "type": "array", "items": {}, "description": "List of bucket names and creation dates" },
-        "error":   { "type": "string" }
-    }
-}"#;
-
-const STORAGE_DELETE_BUCKET_INPUT_SCHEMA: &str = r#"{
-    "type": "object",
-    "required": ["bucket"],
-    "properties": {
-        "bucket": { "type": "string", "description": "Name of the bucket to delete (must be empty)", "example": "old-exports" }
-    }
-}"#;
-
-const STORAGE_DELETE_BUCKET_OUTPUT_SCHEMA: &str = r#"{
-    "type": "object",
-    "properties": {
-        "success": { "type": "boolean" },
-        "error":   { "type": "string" }
-    }
-}"#;
-
-const STORAGE_UPLOAD_FILE_INPUT_SCHEMA: &str = r#"{
-    "type": "object",
-    "required": ["bucket", "key", "content"],
-    "properties": {
-        "bucket":       { "type": "string", "description": "Bucket to upload to", "example": "uploads" },
-        "key":          { "type": "string", "description": "Object key (file path within the bucket)", "example": "reports/2026-03-22.csv" },
-        "content":      { "type": "string", "description": "File content as base64-encoded string or plain text", "example": "SGVsbG8gV29ybGQ=" },
-        "content_type": { "type": "string", "description": "MIME type of the file (e.g., text/csv, image/png)", "example": "text/csv" },
-        "is_base64":    { "type": "boolean", "description": "Whether content is base64-encoded (default: true)", "default": true }
-    }
-}"#;
-
-const STORAGE_UPLOAD_FILE_OUTPUT_SCHEMA: &str = r#"{
-    "type": "object",
-    "properties": {
-        "success": { "type": "boolean" },
-        "key":     { "type": "string", "description": "The key of the uploaded file" },
-        "size":    { "type": "integer", "description": "Size in bytes of the uploaded file" },
-        "error":   { "type": "string" }
-    }
-}"#;
-
-const STORAGE_DOWNLOAD_FILE_INPUT_SCHEMA: &str = r#"{
-    "type": "object",
-    "required": ["bucket", "key"],
-    "properties": {
-        "bucket":  { "type": "string", "description": "Bucket to download from", "example": "uploads" },
-        "key":     { "type": "string", "description": "Object key (file path within the bucket)", "example": "reports/2026-03-22.csv" },
-        "as_text": { "type": "boolean", "description": "Return content as UTF-8 text instead of base64 (default: false)", "default": false }
-    }
-}"#;
-
-const STORAGE_DOWNLOAD_FILE_OUTPUT_SCHEMA: &str = r#"{
-    "type": "object",
-    "properties": {
-        "success":      { "type": "boolean" },
-        "content":      { "type": "string", "description": "File content (base64 or text)" },
-        "content_type": { "type": "string", "description": "MIME type of the file" },
-        "size":         { "type": "integer", "description": "Size in bytes" },
-        "error":        { "type": "string" }
-    }
-}"#;
-
-const STORAGE_LIST_FILES_INPUT_SCHEMA: &str = r#"{
-    "type": "object",
-    "required": ["bucket"],
-    "properties": {
-        "bucket":             { "type": "string", "description": "Bucket to list files from", "example": "uploads" },
-        "prefix":             { "type": "string", "description": "Filter files by key prefix (like a folder path)", "example": "reports/" },
-        "max_keys":           { "type": "integer", "description": "Maximum number of files to return (default: 1000)", "example": 100 },
-        "continuation_token": { "type": "string", "description": "Token for paginating through results" }
-    }
-}"#;
-
-const STORAGE_LIST_FILES_OUTPUT_SCHEMA: &str = r#"{
-    "type": "object",
-    "properties": {
-        "success":                  { "type": "boolean" },
-        "files":                    { "type": "array", "items": {}, "description": "List of file objects with key, size, last_modified, etag" },
-        "count":                    { "type": "integer", "description": "Number of files returned" },
-        "next_continuation_token":  { "type": "string", "description": "Token for fetching the next page" },
-        "error":                    { "type": "string" }
-    }
-}"#;
-
-const STORAGE_GET_FILE_INFO_INPUT_SCHEMA: &str = r#"{
-    "type": "object",
-    "required": ["bucket", "key"],
-    "properties": {
-        "bucket": { "type": "string", "example": "uploads" },
-        "key":    { "type": "string", "example": "reports/2026-03-22.csv" }
-    }
-}"#;
-
-const STORAGE_GET_FILE_INFO_OUTPUT_SCHEMA: &str = r#"{
-    "type": "object",
-    "properties": {
-        "success":       { "type": "boolean" },
-        "content_type":  { "type": "string" },
-        "size":          { "type": "integer", "description": "File size in bytes" },
-        "etag":          { "type": "string" },
-        "last_modified": { "type": "string" },
-        "error":         { "type": "string" }
-    }
-}"#;
-
-const STORAGE_DELETE_FILE_INPUT_SCHEMA: &str = r#"{
-    "type": "object",
-    "required": ["bucket", "key"],
-    "properties": {
-        "bucket": { "type": "string", "example": "uploads" },
-        "key":    { "type": "string", "example": "reports/old-report.csv" }
-    }
-}"#;
-
-const STORAGE_DELETE_FILE_OUTPUT_SCHEMA: &str = r#"{
-    "type": "object",
-    "properties": {
-        "success": { "type": "boolean" },
-        "error":   { "type": "string" }
-    }
-}"#;
-
-const STORAGE_COPY_FILE_INPUT_SCHEMA: &str = r#"{
-    "type": "object",
-    "required": ["source_bucket", "source_key", "destination_bucket", "destination_key"],
-    "properties": {
-        "source_bucket":      { "type": "string", "example": "uploads" },
-        "source_key":         { "type": "string", "example": "temp/file.csv" },
-        "destination_bucket": { "type": "string", "example": "archive" },
-        "destination_key":    { "type": "string", "example": "2026/03/file.csv" }
-    }
-}"#;
-
-const STORAGE_COPY_FILE_OUTPUT_SCHEMA: &str = r#"{
-    "type": "object",
-    "properties": {
-        "success": { "type": "boolean" },
-        "error":   { "type": "string" }
-    }
-}"#;
-
-const STORAGE_GENERATE_PRESIGNED_URL_INPUT_SCHEMA: &str = r#"{
-    "type": "object",
-    "required": ["bucket", "key", "operation"],
-    "properties": {
-        "bucket":             { "type": "string", "example": "uploads" },
-        "key":                { "type": "string", "example": "reports/2026-05-16.csv" },
-        "operation":          { "type": "string", "description": "What the URL will be used for: download, upload, or delete", "enum": ["download", "get", "read", "upload", "put", "write", "create", "delete"], "example": "download" },
-        "expires_in_seconds": { "type": "integer", "description": "Lifetime of the signed URL in seconds (max 604800 = 7 days, default 3600)", "default": 3600, "example": 3600 },
-        "content_type":       { "type": "string", "description": "For upload URLs, the MIME type the caller will use (e.g., text/csv)", "example": "text/csv" }
-    }
-}"#;
-
-const STORAGE_GENERATE_PRESIGNED_URL_OUTPUT_SCHEMA: &str = r#"{
-    "type": "object",
-    "properties": {
-        "success":            { "type": "boolean" },
-        "url":                { "type": "string", "description": "Time-limited presigned URL" },
-        "expires_in_seconds": { "type": "integer", "description": "Actual lifetime of the URL after server-side clamping" },
-        "error":              { "type": "string" }
-    }
-}"#;
-
+#[cfg(target_arch = "wasm32")]
 bindings::export!(Component with_types_in bindings);

@@ -1,11 +1,18 @@
 //! AI Tools integration agent — WebAssembly Component.
 //!
-//! Schema parity with `runtara-agents/src/agents/integrations/ai_tools.rs`.
+//! Provider-router for deterministic AI capabilities (text completion, image
+//! generation, vision, embeddings) across multiple LLM providers (OpenAI, AWS
+//! Bedrock). Each capability inspects the active `_connection`'s
+//! `integration_id` to dispatch to the right provider; the runtara HTTP proxy
+//! handles credential injection and base-URL rewriting per provider (OpenAI:
+//! `https://api.openai.com`; Bedrock: `https://bedrock-runtime.{region}.amazonaws.com`).
 //!
-//! This is a provider-router: at invoke time it inspects `connection.integration_id`
-//! and dispatches to the correct provider (OpenAI or AWS Bedrock). The runtara HTTP
-//! proxy handles credential injection and base-URL rewriting for each provider
-//! (OpenAI: `https://api.openai.com`; Bedrock: `https://bedrock-runtime.{region}.amazonaws.com`).
+//! Capability metadata travels through `#[capability_input]` / `#[capability]` /
+//! `#[capability_output]` annotations on the same Rust types and functions that
+//! the wasm cdylib's `invoke` dispatcher calls into. The workspace binary
+//! `runtara-agent-bundle-emit` reads the macro-emitted `&'static` statics on
+//! the host architecture and writes `runtara_agent_ai_tools.meta.json` next to
+//! the `.wasm` — the JSON is a build artifact, never hand-edited.
 //!
 //! Capabilities:
 //! - `text-completion`   — text generation with optional structured output
@@ -13,182 +20,161 @@
 //! - `vision-to-text`    — image analysis with optional structured output
 //! - `vision-to-image`   — image editing/manipulation
 //! - `embed-text`        — vector embedding for one or more strings
+#![allow(clippy::result_large_err)]
 
-#![cfg(target_arch = "wasm32")]
+use runtara_agent_macro::{CapabilityInput, CapabilityOutput, capability};
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+use std::collections::HashMap;
+use std::time::Duration;
 
+#[cfg(target_arch = "wasm32")]
 #[allow(warnings)]
 mod bindings;
 
-use std::time::Duration;
+// ============================================================================
+// Local AgentError shim
+// ============================================================================
+//
+// The host crate's `runtara_agents::types::AgentError` pulls in `tracing` and
+// other host-only baggage. We only need the on-the-wire JSON shape that the
+// `#[capability]` macro expects (`Into<String>` returning
+// `{"code","message","category","severity",...}`), so we inline a minimal
+// version here. Mirrors the shim in `runtara-agent-mailgun`.
 
-use bindings::exports::runtara::agent::capabilities::{
-    CapabilityInfo, ConnectionInfo, ErrorInfo, Guest, ModuleInfo,
-};
-use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+#[derive(Debug, Clone, Serialize)]
+pub struct AgentError {
+    pub code: String,
+    pub message: String,
+    pub category: &'static str,
+    pub severity: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retry_after_ms: Option<u64>,
+    #[serde(skip_serializing_if = "HashMap::is_empty")]
+    pub attributes: HashMap<String, Value>,
+}
 
-// -----------------------------------------------------------------------------
+impl AgentError {
+    pub fn permanent(code: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            code: code.into(),
+            message: message.into(),
+            category: "permanent",
+            severity: "error",
+            retry_after_ms: None,
+            attributes: HashMap::new(),
+        }
+    }
+
+    pub fn transient(code: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            code: code.into(),
+            message: message.into(),
+            category: "transient",
+            severity: "warning",
+            retry_after_ms: None,
+            attributes: HashMap::new(),
+        }
+    }
+
+    pub fn with_attr(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.attributes
+            .insert(key.into(), Value::String(value.into()));
+        self
+    }
+
+    pub fn with_attr_value(mut self, key: impl Into<String>, value: Value) -> Self {
+        self.attributes.insert(key.into(), value);
+        self
+    }
+
+    pub fn with_retry_after_ms(mut self, ms: u64) -> Self {
+        self.retry_after_ms = Some(ms);
+        self
+    }
+}
+
+/// Serialize into the canonical JSON envelope so the `#[capability]` macro
+/// executor passes us straight through to `error_string_to_error_info` on the
+/// wasm side (which parses the JSON back into a typed `ErrorInfo`).
+impl From<AgentError> for String {
+    fn from(err: AgentError) -> Self {
+        serde_json::to_string(&err).unwrap_or_else(|_| format!("[{}] {}", err.code, err.message))
+    }
+}
+
+// ============================================================================
+// RawConnection (local mirror of crates/runtara-agents/src/connections.rs)
+// ============================================================================
+//
+// The host crate's `RawConnection` lives in `runtara-agents` and isn't a
+// wasm-compatible dependency. We mirror just the struct so the macro-derived
+// executor can deserialize what the wasm Guest::invoke wrapper injects into
+// the input JSON under the `_connection` key.
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RawConnection {
+    #[serde(default)]
+    pub connection_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub connection_subtype: Option<String>,
+    pub integration_id: String,
+    pub parameters: Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rate_limit_config: Option<Value>,
+}
+
+// ============================================================================
 // Provider routing
-// -----------------------------------------------------------------------------
+// ============================================================================
 
 const PROVIDER_OPENAI: &str = "openai_api_key";
 const PROVIDER_BEDROCK: &str = "aws_credentials";
 
-fn provider_of(connection: &ConnectionInfo) -> &str {
+fn provider_of(connection: &RawConnection) -> &str {
     connection.integration_id.as_str()
 }
 
-// -----------------------------------------------------------------------------
+fn require_connection(connection: Option<&RawConnection>) -> Result<&RawConnection, AgentError> {
+    connection.ok_or_else(|| {
+        AgentError::permanent("AI_TOOLS_MISSING_CONNECTION", "LLM connection is required")
+    })
+}
+
+fn unsupported_provider(integration_id: &str) -> AgentError {
+    AgentError::permanent(
+        "AI_TOOLS_UNSUPPORTED_PROVIDER",
+        format!("LLM provider not supported: {}", integration_id),
+    )
+    .with_attr("integration_id", integration_id)
+}
+
+// ============================================================================
 // Shared types
-// -----------------------------------------------------------------------------
+// ============================================================================
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct LlmUsage {
-    prompt_tokens: i32,
-    completion_tokens: i32,
-    total_tokens: i32,
+pub struct LlmUsage {
+    pub prompt_tokens: i32,
+    pub completion_tokens: i32,
+    pub total_tokens: i32,
 }
 
-// -----------------------------------------------------------------------------
-// Component plumbing
-// -----------------------------------------------------------------------------
-
-struct Component;
-
-impl Guest for Component {
-    fn get_module_info() -> ModuleInfo {
-        ModuleInfo {
-            id: "ai_tools".into(),
-            display_name: "AI Tools".into(),
-            description: "AI tools — deterministic AI capabilities for text completion, image \
-                          generation, structured output, and vision across multiple LLM providers."
-                .into(),
-            has_side_effects: true,
-            supports_connections: true,
-            integration_ids: vec![PROVIDER_OPENAI.into(), PROVIDER_BEDROCK.into()],
-            secure: true,
-        }
-    }
-
-    fn list_capabilities() -> Vec<CapabilityInfo> {
-        vec![
-            cap(
-                "text-completion",
-                "ai_text_completion",
-                "Text Completion",
-                "Generate text completion using any LLM provider. Supports optional structured \
-                 output via output_schema.",
-                TEXT_COMPLETION_INPUT_SCHEMA,
-                TEXT_COMPLETION_OUTPUT_SCHEMA,
-            ),
-            cap(
-                "image-generation",
-                "ai_image_generation",
-                "Image Generation",
-                "Generate images using AI image generation models",
-                IMAGE_GENERATION_INPUT_SCHEMA,
-                IMAGE_GENERATION_OUTPUT_SCHEMA,
-            ),
-            cap(
-                "vision-to-text",
-                "ai_vision_to_text",
-                "Vision to Text",
-                "Analyze images and generate text descriptions. Supports optional structured \
-                 output via output_schema.",
-                VISION_TO_TEXT_INPUT_SCHEMA,
-                VISION_TO_TEXT_OUTPUT_SCHEMA,
-            ),
-            cap(
-                "vision-to-image",
-                "ai_vision_to_image",
-                "Vision to Image",
-                "Edit and manipulate images using AI models",
-                VISION_TO_IMAGE_INPUT_SCHEMA,
-                VISION_TO_IMAGE_OUTPUT_SCHEMA,
-            ),
-            cap(
-                "embed-text",
-                "ai_embed_text",
-                "Embed Text",
-                "Generate vector embeddings for one or more strings. Use the result to populate \
-                 a Vector column for similarity search.",
-                EMBED_TEXT_INPUT_SCHEMA,
-                EMBED_TEXT_OUTPUT_SCHEMA,
-            ),
-        ]
-    }
-
-    fn invoke(
-        capability_id: String,
-        input: String,
-        connection: Option<ConnectionInfo>,
-    ) -> Result<String, ErrorInfo> {
-        match capability_id.as_str() {
-            "text-completion" => text_completion(&input, connection.as_ref()),
-            "image-generation" => image_generation(&input, connection.as_ref()),
-            "vision-to-text" => vision_to_text(&input, connection.as_ref()),
-            "vision-to-image" => vision_to_image(&input, connection.as_ref()),
-            "embed-text" => embed_text(&input, connection.as_ref()),
-            other => Err(permanent_err(
-                "UNKNOWN_CAPABILITY",
-                format!("ai_tools agent has no capability `{other}`"),
-            )),
-        }
-    }
-}
-
-// -----------------------------------------------------------------------------
-// Helper: build CapabilityInfo with AI-tools-appropriate flags
-// -----------------------------------------------------------------------------
-
-fn cap(
-    id: &str,
-    function_name: &str,
-    display_name: &str,
-    description: &str,
-    input_schema: &str,
-    output_schema: &str,
-) -> CapabilityInfo {
-    CapabilityInfo {
-        id: id.into(),
-        function_name: function_name.into(),
-        display_name: Some(display_name.into()),
-        description: Some(description.into()),
-        has_side_effects: true,
-        is_idempotent: false,
-        rate_limited: true,
-        tags: vec!["ai".into(), "llm".into()],
-        input_schema: input_schema.into(),
-        output_schema: output_schema.into(),
-        known_errors: vec![],
-        compensation_hint: None,
-    }
-}
-
-// -----------------------------------------------------------------------------
-// Connection helpers
-// -----------------------------------------------------------------------------
-
-fn require_connection(connection: Option<&ConnectionInfo>) -> Result<&ConnectionInfo, ErrorInfo> {
-    connection
-        .ok_or_else(|| permanent_err("AI_TOOLS_MISSING_CONNECTION", "LLM connection is required"))
-}
-
-// -----------------------------------------------------------------------------
+// ============================================================================
 // OpenAI HTTP helper
-// -----------------------------------------------------------------------------
+// ============================================================================
 
 /// POST `body` to `https://api.openai.com{path}` via the runtara proxy.
 fn openai_post(
-    connection: &ConnectionInfo,
+    connection: &RawConnection,
     path: &str,
     body: Value,
     timeout_ms: u64,
-) -> Result<Value, ErrorInfo> {
+) -> Result<Value, AgentError> {
     let url = format!("https://api.openai.com{path}");
     let body_bytes = serde_json::to_vec(&body)
-        .map_err(|e| permanent_err("SERIALIZATION_ERROR", e.to_string()))?;
+        .map_err(|e| AgentError::permanent("SERIALIZATION_ERROR", e.to_string()))?;
 
     let client = runtara_http::HttpClient::with_timeout(Duration::from_millis(timeout_ms));
     let response = client
@@ -198,7 +184,7 @@ fn openai_post(
         .body_bytes(&body_bytes)
         .call_agent()
         .map_err(|e| {
-            transient_err(
+            AgentError::transient(
                 "NETWORK_ERROR",
                 format!("OpenAI request to {path} failed: {e}"),
             )
@@ -209,44 +195,52 @@ fn openai_post(
         let body_text = String::from_utf8_lossy(&response.body).to_string();
         let (category, code) = classify_http_status(status);
         let retry_after_ms = parse_retry_after(&response.headers);
-        return Err(ErrorInfo {
-            code: code.into(),
-            message: format!("OpenAI HTTP {status}: {}", truncate(&body_text, 512)),
-            category: category.into(),
-            severity: "error".into(),
-            retryable: category == "transient",
-            retry_after_ms,
-            attributes: serde_json::to_string(&json!({"status_code": status, "path": path})).ok(),
-        });
+        let mut err = if category == "transient" {
+            AgentError::transient(
+                code,
+                format!("OpenAI HTTP {status}: {}", truncate(&body_text, 512)),
+            )
+        } else {
+            AgentError::permanent(
+                code,
+                format!("OpenAI HTTP {status}: {}", truncate(&body_text, 512)),
+            )
+        };
+        err = err
+            .with_attr("status_code", status.to_string())
+            .with_attr("path", path)
+            .with_attr("body", truncate(&body_text, 512));
+        if let Some(ms) = retry_after_ms {
+            err = err.with_retry_after_ms(ms);
+        }
+        return Err(err);
     }
 
     serde_json::from_slice(&response.body).map_err(|e| {
-        permanent_err(
+        AgentError::permanent(
             "RESPONSE_PARSE_ERROR",
             format!("OpenAI response parse error: {e}"),
         )
     })
 }
 
-// -----------------------------------------------------------------------------
+// ============================================================================
 // Bedrock HTTP helper
-// -----------------------------------------------------------------------------
+// ============================================================================
 
-/// POST `body` to `https://bedrock-runtime.{region}.amazonaws.com{path}` via the
-/// runtara proxy. The proxy injects SigV4 signing and the regional base URL
-/// from the aws_credentials connection parameters.
+/// POST `body` to `https://bedrock-runtime.{region}.amazonaws.com{path}` via
+/// the runtara proxy. The proxy injects SigV4 signing and resolves the regional
+/// base URL from the aws_credentials connection parameters. We send a relative
+/// path so the proxy constructs the regional endpoint (e.g.
+/// `https://bedrock-runtime.us-east-1.amazonaws.com`).
 fn bedrock_post(
-    connection: &ConnectionInfo,
+    connection: &RawConnection,
     path: &str,
     body: Value,
     timeout_ms: u64,
-) -> Result<Value, ErrorInfo> {
-    // The proxy resolves the full URL from the connection's region parameter and
-    // prepends the base URL. We send a relative path so the proxy can construct
-    // the correct regional endpoint (e.g. https://bedrock-runtime.us-east-1.amazonaws.com).
-    // Using the relative path form matches how the legacy ProxyHttpClient works.
+) -> Result<Value, AgentError> {
     let body_bytes = serde_json::to_vec(&body)
-        .map_err(|e| permanent_err("SERIALIZATION_ERROR", e.to_string()))?;
+        .map_err(|e| AgentError::permanent("SERIALIZATION_ERROR", e.to_string()))?;
 
     let client = runtara_http::HttpClient::with_timeout(Duration::from_millis(timeout_ms));
     let response = client
@@ -257,7 +251,7 @@ fn bedrock_post(
         .body_bytes(&body_bytes)
         .call_agent()
         .map_err(|e| {
-            transient_err(
+            AgentError::transient(
                 "NETWORK_ERROR",
                 format!("Bedrock request to {path} failed: {e}"),
             )
@@ -268,67 +262,161 @@ fn bedrock_post(
         let body_text = String::from_utf8_lossy(&response.body).to_string();
         let (category, code) = classify_http_status(status);
         let retry_after_ms = parse_retry_after(&response.headers);
-        return Err(ErrorInfo {
-            code: code.into(),
-            message: format!("Bedrock HTTP {status}: {}", truncate(&body_text, 512)),
-            category: category.into(),
-            severity: "error".into(),
-            retryable: category == "transient",
-            retry_after_ms,
-            attributes: serde_json::to_string(&json!({"status_code": status, "path": path})).ok(),
-        });
+        let mut err = if category == "transient" {
+            AgentError::transient(
+                code,
+                format!("Bedrock HTTP {status}: {}", truncate(&body_text, 512)),
+            )
+        } else {
+            AgentError::permanent(
+                code,
+                format!("Bedrock HTTP {status}: {}", truncate(&body_text, 512)),
+            )
+        };
+        err = err
+            .with_attr("status_code", status.to_string())
+            .with_attr("path", path)
+            .with_attr("body", truncate(&body_text, 512));
+        if let Some(ms) = retry_after_ms {
+            err = err.with_retry_after_ms(ms);
+        }
+        return Err(err);
     }
 
     serde_json::from_slice(&response.body).map_err(|e| {
-        permanent_err(
+        AgentError::permanent(
             "RESPONSE_PARSE_ERROR",
             format!("Bedrock response parse error: {e}"),
         )
     })
 }
 
-// -----------------------------------------------------------------------------
+// ============================================================================
 // Capability 1: Text Completion
-// -----------------------------------------------------------------------------
+// ============================================================================
 
-#[derive(Debug, Deserialize)]
-struct TextCompletionInput {
+#[derive(Debug, Default, Serialize, Deserialize, CapabilityInput)]
+#[capability_input(display_name = "AI Text Completion Input")]
+pub struct TextCompletionInput {
+    /// Connection data injected by the wasm Guest::invoke wrapper before
+    /// dispatching to the capability executor. `#[field(skip)]` keeps this
+    /// out of the capability metadata (the UI/runtime fills it from the
+    /// configured connection, not from user input).
+    #[field(skip)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub _connection: Option<RawConnection>,
+
+    #[field(
+        display_name = "Prompt",
+        description = "The user message or prompt to send to the LLM",
+        example = "Explain quantum computing in simple terms"
+    )]
     #[serde(default)]
-    prompt: String,
-    #[serde(default)]
-    system_prompt: Option<String>,
-    #[serde(default)]
-    model: Option<String>,
-    #[serde(default)]
-    max_tokens: Option<i32>,
-    #[serde(default)]
-    temperature: Option<f64>,
-    #[serde(default)]
-    top_p: Option<f64>,
-    #[serde(default)]
-    stop_sequences: Option<Vec<String>>,
-    #[serde(default)]
-    output_schema: Option<Value>,
+    pub prompt: String,
+
+    #[field(
+        display_name = "System Prompt",
+        description = "Optional system instructions to set the assistant's behavior",
+        example = "You are a helpful assistant"
+    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system_prompt: Option<String>,
+
+    #[field(
+        display_name = "Model",
+        description = "The model identifier to use (auto-selects based on provider if not specified)",
+        example = "gpt-4o"
+    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+
+    #[field(
+        display_name = "Max Tokens",
+        description = "Maximum number of tokens to generate in the response",
+        example = "1024"
+    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<i32>,
+
+    #[field(
+        display_name = "Temperature",
+        description = "Sampling temperature (0-2). Higher values increase randomness",
+        example = "0.7"
+    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub temperature: Option<f64>,
+
+    #[field(
+        display_name = "Top P",
+        description = "Nucleus sampling parameter for controlling diversity",
+        example = "0.9"
+    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub top_p: Option<f64>,
+
+    #[field(
+        display_name = "Stop Sequences",
+        description = "Sequences where the model will stop generating further tokens",
+        example = "[\"END\", \"STOP\"]"
+    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop_sequences: Option<Vec<String>>,
+
+    #[field(
+        display_name = "Output Schema",
+        description = "Optional JSON schema for structured output. When provided, the model returns JSON conforming to this schema.",
+        example = "{\"type\": \"object\", \"properties\": {\"name\": {\"type\": \"string\"}}}"
+    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_schema: Option<Value>,
 }
 
-#[derive(Debug, Serialize)]
-struct TextCompletionOutput {
-    text: String,
-    model: String,
-    usage: LlmUsage,
-    finish_reason: String,
+#[derive(Debug, Serialize, Deserialize, CapabilityOutput)]
+#[capability_output(display_name = "AI Text Completion Output")]
+pub struct TextCompletionOutput {
+    #[field(
+        display_name = "Text",
+        description = "The generated text response from the model"
+    )]
+    pub text: String,
+
+    #[field(display_name = "Model", description = "The model used for generation")]
+    pub model: String,
+
+    #[field(display_name = "Usage", description = "Token usage statistics")]
+    pub usage: LlmUsage,
+
+    #[field(
+        display_name = "Finish Reason",
+        description = "The reason generation stopped (e.g., 'stop', 'length')"
+    )]
+    pub finish_reason: String,
+
+    #[field(
+        display_name = "Structured Output",
+        description = "Parsed JSON output when output_schema was provided"
+    )]
     #[serde(skip_serializing_if = "Option::is_none")]
-    structured_output: Option<Value>,
+    pub structured_output: Option<Value>,
 }
 
-fn text_completion(
-    input_json: &str,
-    connection: Option<&ConnectionInfo>,
-) -> Result<String, ErrorInfo> {
-    let input: TextCompletionInput = serde_json::from_str(input_json)
-        .map_err(|e| permanent_err("INPUT_DESERIALIZATION_ERROR", e.to_string()))?;
-    let connection = require_connection(connection)?;
-
+#[capability(
+    module = "ai_tools",
+    display_name = "Text Completion",
+    description = "Generate text completion using any LLM provider. Supports optional structured output via output_schema.",
+    side_effects = true,
+    idempotent = false,
+    rate_limited = true,
+    tags = "ai,llm",
+    module_display_name = "AI Tools",
+    module_description = "AI tools — deterministic AI capabilities for text completion, image generation, structured output, and vision across multiple LLM providers",
+    module_has_side_effects = true,
+    module_supports_connections = true,
+    module_integration_ids = "openai_api_key,aws_credentials",
+    module_secure = true
+)]
+pub fn text_completion(input: TextCompletionInput) -> Result<TextCompletionOutput, AgentError> {
+    let connection = require_connection(input._connection.as_ref())?;
     match provider_of(connection) {
         PROVIDER_OPENAI => text_completion_openai(&input, connection),
         PROVIDER_BEDROCK => text_completion_bedrock(&input, connection),
@@ -338,8 +426,8 @@ fn text_completion(
 
 fn text_completion_openai(
     input: &TextCompletionInput,
-    connection: &ConnectionInfo,
-) -> Result<String, ErrorInfo> {
+    connection: &RawConnection,
+) -> Result<TextCompletionOutput, AgentError> {
     // If output_schema is provided, use OpenAI structured output path.
     if let Some(ref schema) = input.output_schema {
         return text_completion_openai_structured(input, connection, schema);
@@ -366,20 +454,20 @@ fn text_completion_openai(
             body["max_tokens"] = json!(max_tokens);
         }
     }
-    if let Some(temperature) = input.temperature {
-        if !is_o_series {
-            body["temperature"] = json!(temperature);
-        }
+    if let Some(temperature) = input.temperature
+        && !is_o_series
+    {
+        body["temperature"] = json!(temperature);
     }
-    if let Some(top_p) = input.top_p {
-        if !is_o_series {
-            body["top_p"] = json!(top_p);
-        }
+    if let Some(top_p) = input.top_p
+        && !is_o_series
+    {
+        body["top_p"] = json!(top_p);
     }
-    if let Some(stop) = &input.stop_sequences {
-        if !is_o_series {
-            body["stop"] = json!(stop);
-        }
+    if let Some(stop) = &input.stop_sequences
+        && !is_o_series
+    {
+        body["stop"] = json!(stop);
     }
 
     let resp = openai_post(connection, "/v1/chat/completions", body, 120_000)?;
@@ -391,21 +479,20 @@ fn text_completion_openai(
         .to_string();
     let usage = extract_openai_usage(&resp);
 
-    serde_json::to_string(&TextCompletionOutput {
+    Ok(TextCompletionOutput {
         text,
         model: model_used,
         usage,
         finish_reason,
         structured_output: None,
     })
-    .map_err(|e| permanent_err("OUTPUT_SERIALIZATION_ERROR", e.to_string()))
 }
 
 fn text_completion_openai_structured(
     input: &TextCompletionInput,
-    connection: &ConnectionInfo,
+    connection: &RawConnection,
     schema: &Value,
-) -> Result<String, ErrorInfo> {
+) -> Result<TextCompletionOutput, AgentError> {
     let mut messages = Vec::new();
     if let Some(system) = &input.system_prompt {
         messages.push(json!({"role": "system", "content": system}));
@@ -431,7 +518,7 @@ fn text_completion_openai_structured(
     let resp = openai_post(connection, "/v1/chat/completions", body, 120_000)?;
     let content = openai_extract_content(&resp)?;
     let structured_output: Value = serde_json::from_str(&content).map_err(|e| {
-        permanent_err(
+        AgentError::permanent(
             "OPENAI_INVALID_RESPONSE",
             format!("Failed to parse structured output: {e}"),
         )
@@ -440,20 +527,19 @@ fn text_completion_openai_structured(
     let usage = extract_openai_usage(&resp);
     let text = serde_json::to_string(&structured_output).unwrap_or_default();
 
-    serde_json::to_string(&TextCompletionOutput {
+    Ok(TextCompletionOutput {
         text,
         model: model_used,
         usage,
         finish_reason: "stop".to_string(),
         structured_output: Some(structured_output),
     })
-    .map_err(|e| permanent_err("OUTPUT_SERIALIZATION_ERROR", e.to_string()))
 }
 
 fn text_completion_bedrock(
     input: &TextCompletionInput,
-    connection: &ConnectionInfo,
-) -> Result<String, ErrorInfo> {
+    connection: &RawConnection,
+) -> Result<TextCompletionOutput, AgentError> {
     // If output_schema is provided, use prompt-engineering path for structured output.
     if let Some(ref schema) = input.output_schema {
         return text_completion_bedrock_structured(input, connection, schema);
@@ -480,7 +566,7 @@ fn text_completion_bedrock(
     let (text, prompt_tokens, completion_tokens, finish_reason) =
         extract_bedrock_text_response(&resp, is_claude)?;
 
-    serde_json::to_string(&TextCompletionOutput {
+    Ok(TextCompletionOutput {
         text,
         model,
         usage: LlmUsage {
@@ -491,16 +577,15 @@ fn text_completion_bedrock(
         finish_reason,
         structured_output: None,
     })
-    .map_err(|e| permanent_err("OUTPUT_SERIALIZATION_ERROR", e.to_string()))
 }
 
 fn text_completion_bedrock_structured(
     input: &TextCompletionInput,
-    connection: &ConnectionInfo,
+    connection: &RawConnection,
     schema: &Value,
-) -> Result<String, ErrorInfo> {
+) -> Result<TextCompletionOutput, AgentError> {
     let schema_str = serde_json::to_string_pretty(schema)
-        .map_err(|e| permanent_err("SERIALIZATION_ERROR", e.to_string()))?;
+        .map_err(|e| AgentError::permanent("SERIALIZATION_ERROR", e.to_string()))?;
     let enhanced_prompt = format!(
         "{}\n\nRespond with valid JSON matching this schema:\n{}\n\nReturn ONLY the JSON, no other text.",
         input.prompt, schema_str
@@ -526,14 +611,14 @@ fn text_completion_bedrock_structured(
         extract_bedrock_text_response(&resp, is_claude)?;
 
     let structured_output: Value = serde_json::from_str(&text).map_err(|e| {
-        permanent_err(
+        AgentError::permanent(
             "BEDROCK_INVALID_RESPONSE",
             format!("Failed to parse structured output as JSON: {e}"),
         )
     })?;
     let serialized_text = serde_json::to_string(&structured_output).unwrap_or_default();
 
-    serde_json::to_string(&TextCompletionOutput {
+    Ok(TextCompletionOutput {
         text: serialized_text,
         model,
         usage: LlmUsage {
@@ -544,52 +629,118 @@ fn text_completion_bedrock_structured(
         finish_reason: "stop".to_string(),
         structured_output: Some(structured_output),
     })
-    .map_err(|e| permanent_err("OUTPUT_SERIALIZATION_ERROR", e.to_string()))
 }
 
-// -----------------------------------------------------------------------------
+// ============================================================================
 // Capability 2: Image Generation
-// -----------------------------------------------------------------------------
+// ============================================================================
 
-#[derive(Debug, Deserialize)]
-struct ImageGenerationInput {
+#[derive(Debug, Default, Serialize, Deserialize, CapabilityInput)]
+#[capability_input(display_name = "AI Image Generation Input")]
+pub struct ImageGenerationInput {
+    #[field(skip)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub _connection: Option<RawConnection>,
+
+    #[field(
+        display_name = "Prompt",
+        description = "Text description of the image to generate",
+        example = "A serene landscape with mountains at sunset"
+    )]
     #[serde(default)]
-    prompt: String,
-    #[serde(default)]
-    negative_prompt: Option<String>,
-    #[serde(default)]
-    model: Option<String>,
-    #[serde(default)]
-    width: Option<i32>,
-    #[serde(default)]
-    height: Option<i32>,
-    #[serde(default)]
-    quality: Option<String>,
-    #[serde(default)]
-    style: Option<String>,
+    pub prompt: String,
+
+    #[field(
+        display_name = "Negative Prompt",
+        description = "Elements to exclude from the generated image",
+        example = "blurry, low quality, distorted"
+    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub negative_prompt: Option<String>,
+
+    #[field(
+        display_name = "Model",
+        description = "Image generation model to use",
+        example = "dall-e-3"
+    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+
+    #[field(
+        display_name = "Width",
+        description = "Desired image width in pixels",
+        example = "1024"
+    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub width: Option<i32>,
+
+    #[field(
+        display_name = "Height",
+        description = "Desired image height in pixels",
+        example = "1024"
+    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub height: Option<i32>,
+
+    #[field(
+        display_name = "Quality",
+        description = "Image quality setting (e.g., 'standard', 'hd')",
+        example = "hd"
+    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quality: Option<String>,
+
+    #[field(
+        display_name = "Style",
+        description = "Image style preset (e.g., 'vivid', 'natural')",
+        example = "vivid"
+    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub style: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
-struct ImageGenerationOutput {
-    image_data: String,
-    mime_type: String,
+#[derive(Debug, Serialize, Deserialize, CapabilityOutput)]
+#[capability_output(display_name = "AI Image Generation Output")]
+pub struct ImageGenerationOutput {
+    #[field(display_name = "Image Data", description = "Base64-encoded image data")]
+    pub image_data: String,
+
+    #[field(
+        display_name = "MIME Type",
+        description = "Image format (e.g., 'image/png')"
+    )]
+    pub mime_type: String,
+
+    #[field(display_name = "Width", description = "Actual image width in pixels")]
     #[serde(skip_serializing_if = "Option::is_none")]
-    width: Option<i32>,
+    pub width: Option<i32>,
+
+    #[field(display_name = "Height", description = "Actual image height in pixels")]
     #[serde(skip_serializing_if = "Option::is_none")]
-    height: Option<i32>,
-    model: String,
+    pub height: Option<i32>,
+
+    #[field(display_name = "Model", description = "Model used for generation")]
+    pub model: String,
+
+    #[field(
+        display_name = "Revised Prompt",
+        description = "AI-revised prompt if the model modified it"
+    )]
     #[serde(skip_serializing_if = "Option::is_none")]
-    revised_prompt: Option<String>,
+    pub revised_prompt: Option<String>,
 }
 
-fn image_generation(
-    input_json: &str,
-    connection: Option<&ConnectionInfo>,
-) -> Result<String, ErrorInfo> {
-    let input: ImageGenerationInput = serde_json::from_str(input_json)
-        .map_err(|e| permanent_err("INPUT_DESERIALIZATION_ERROR", e.to_string()))?;
-    let connection = require_connection(connection)?;
-
+#[capability(
+    module = "ai_tools",
+    display_name = "Image Generation",
+    description = "Generate images using AI image generation models",
+    side_effects = true,
+    idempotent = false,
+    rate_limited = true,
+    tags = "ai,llm"
+)]
+pub fn image_generation(input: ImageGenerationInput) -> Result<ImageGenerationOutput, AgentError> {
+    let connection = require_connection(input._connection.as_ref())?;
     match provider_of(connection) {
         PROVIDER_OPENAI => image_generation_openai(&input, connection),
         PROVIDER_BEDROCK => image_generation_bedrock(&input, connection),
@@ -599,8 +750,8 @@ fn image_generation(
 
 fn image_generation_openai(
     input: &ImageGenerationInput,
-    connection: &ConnectionInfo,
-) -> Result<String, ErrorInfo> {
+    connection: &RawConnection,
+) -> Result<ImageGenerationOutput, AgentError> {
     let model = input
         .model
         .clone()
@@ -638,7 +789,7 @@ fn image_generation_openai(
     let image_data = resp["data"][0]["b64_json"]
         .as_str()
         .ok_or_else(|| {
-            permanent_err(
+            AgentError::permanent(
                 "OPENAI_INVALID_RESPONSE",
                 "Missing b64_json in OpenAI response",
             )
@@ -648,7 +799,7 @@ fn image_generation_openai(
         .as_str()
         .map(|s| s.to_string());
 
-    serde_json::to_string(&ImageGenerationOutput {
+    Ok(ImageGenerationOutput {
         image_data,
         mime_type: "image/png".to_string(),
         width: input.width.or(Some(1024)),
@@ -656,13 +807,12 @@ fn image_generation_openai(
         model,
         revised_prompt,
     })
-    .map_err(|e| permanent_err("OUTPUT_SERIALIZATION_ERROR", e.to_string()))
 }
 
 fn image_generation_bedrock(
     input: &ImageGenerationInput,
-    connection: &ConnectionInfo,
-) -> Result<String, ErrorInfo> {
+    connection: &RawConnection,
+) -> Result<ImageGenerationOutput, AgentError> {
     let model = input
         .model
         .clone()
@@ -688,14 +838,14 @@ fn image_generation_bedrock(
     let image_data = resp["artifacts"][0]["base64"]
         .as_str()
         .ok_or_else(|| {
-            permanent_err(
+            AgentError::permanent(
                 "BEDROCK_INVALID_RESPONSE",
                 "Missing base64 image in Bedrock response",
             )
         })?
         .to_string();
 
-    serde_json::to_string(&ImageGenerationOutput {
+    Ok(ImageGenerationOutput {
         image_data,
         mime_type: "image/png".to_string(),
         width: input.width.or(Some(1024)),
@@ -703,48 +853,110 @@ fn image_generation_bedrock(
         model,
         revised_prompt: None,
     })
-    .map_err(|e| permanent_err("OUTPUT_SERIALIZATION_ERROR", e.to_string()))
 }
 
-// -----------------------------------------------------------------------------
+// ============================================================================
 // Capability 3: Vision to Text
-// -----------------------------------------------------------------------------
+// ============================================================================
 
-#[derive(Debug, Deserialize)]
-struct VisionToTextInput {
+#[derive(Debug, Default, Serialize, Deserialize, CapabilityInput)]
+#[capability_input(display_name = "AI Vision to Text Input")]
+pub struct VisionToTextInput {
+    #[field(skip)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub _connection: Option<RawConnection>,
+
+    #[field(
+        display_name = "Prompt",
+        description = "Question or instruction about the image",
+        example = "Describe what you see in this image"
+    )]
     #[serde(default)]
-    prompt: String,
-    #[serde(default)]
-    image_data: Option<String>,
-    #[serde(default)]
-    image_url: Option<String>,
-    #[serde(default)]
-    model: Option<String>,
-    #[serde(default)]
-    max_tokens: Option<i32>,
-    #[serde(default)]
-    temperature: Option<f64>,
-    #[serde(default)]
-    output_schema: Option<Value>,
+    pub prompt: String,
+
+    #[field(
+        display_name = "Image Data",
+        description = "Base64-encoded image data (provide either image_data or image_url)",
+        example = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk..."
+    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_data: Option<String>,
+
+    #[field(
+        display_name = "Image URL",
+        description = "URL of the image to analyze (provide either image_data or image_url)",
+        example = "https://example.com/image.png"
+    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_url: Option<String>,
+
+    #[field(
+        display_name = "Model",
+        description = "Vision model to use",
+        example = "gpt-4o"
+    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+
+    #[field(
+        display_name = "Max Tokens",
+        description = "Maximum number of tokens to generate",
+        example = "1024"
+    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<i32>,
+
+    #[field(
+        display_name = "Temperature",
+        description = "Sampling temperature",
+        example = "0.7"
+    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub temperature: Option<f64>,
+
+    #[field(
+        display_name = "Output Schema",
+        description = "Optional JSON schema for structured output. When provided, the model returns JSON conforming to this schema.",
+        example = "{\"type\": \"object\", \"properties\": {\"objects\": {\"type\": \"array\"}}}"
+    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_schema: Option<Value>,
 }
 
-#[derive(Debug, Serialize)]
-struct VisionToTextOutput {
-    text: String,
-    model: String,
-    usage: LlmUsage,
+#[derive(Debug, Serialize, Deserialize, CapabilityOutput)]
+#[capability_output(display_name = "AI Vision to Text Output")]
+pub struct VisionToTextOutput {
+    #[field(
+        display_name = "Text",
+        description = "The generated text description or analysis"
+    )]
+    pub text: String,
+
+    #[field(display_name = "Model", description = "Model used for analysis")]
+    pub model: String,
+
+    #[field(display_name = "Usage", description = "Token usage statistics")]
+    pub usage: LlmUsage,
+
+    #[field(
+        display_name = "Structured Output",
+        description = "Parsed JSON output when output_schema was provided"
+    )]
     #[serde(skip_serializing_if = "Option::is_none")]
-    structured_output: Option<Value>,
+    pub structured_output: Option<Value>,
 }
 
-fn vision_to_text(
-    input_json: &str,
-    connection: Option<&ConnectionInfo>,
-) -> Result<String, ErrorInfo> {
-    let input: VisionToTextInput = serde_json::from_str(input_json)
-        .map_err(|e| permanent_err("INPUT_DESERIALIZATION_ERROR", e.to_string()))?;
-    let connection = require_connection(connection)?;
-
+#[capability(
+    module = "ai_tools",
+    display_name = "Vision to Text",
+    description = "Analyze images and generate text descriptions. Supports optional structured output via output_schema.",
+    side_effects = true,
+    idempotent = false,
+    rate_limited = true,
+    tags = "ai,llm"
+)]
+pub fn vision_to_text(input: VisionToTextInput) -> Result<VisionToTextOutput, AgentError> {
+    let connection = require_connection(input._connection.as_ref())?;
     match provider_of(connection) {
         PROVIDER_OPENAI => vision_to_text_openai(&input, connection),
         PROVIDER_BEDROCK => vision_to_text_bedrock(&input, connection),
@@ -754,10 +966,10 @@ fn vision_to_text(
 
 fn vision_to_text_openai(
     input: &VisionToTextInput,
-    connection: &ConnectionInfo,
-) -> Result<String, ErrorInfo> {
+    connection: &RawConnection,
+) -> Result<VisionToTextOutput, AgentError> {
     if input.image_data.is_none() && input.image_url.is_none() {
-        return Err(permanent_err(
+        return Err(AgentError::permanent(
             "AI_TOOLS_INVALID_INPUT",
             "Either image_data or image_url is required",
         ));
@@ -787,10 +999,10 @@ fn vision_to_text_openai(
             body["max_tokens"] = json!(max_tokens);
         }
     }
-    if let Some(temperature) = input.temperature {
-        if !is_o_series {
-            body["temperature"] = json!(temperature);
-        }
+    if let Some(temperature) = input.temperature
+        && !is_o_series
+    {
+        body["temperature"] = json!(temperature);
     }
 
     let resp = openai_post(connection, "/v1/chat/completions", body, 120_000)?;
@@ -799,21 +1011,20 @@ fn vision_to_text_openai(
     let usage = extract_openai_usage(&resp);
     let structured_output = parse_structured_output(&text, &input.output_schema);
 
-    serde_json::to_string(&VisionToTextOutput {
+    Ok(VisionToTextOutput {
         text,
         model: model_used,
         usage,
         structured_output,
     })
-    .map_err(|e| permanent_err("OUTPUT_SERIALIZATION_ERROR", e.to_string()))
 }
 
 fn vision_to_text_bedrock(
     input: &VisionToTextInput,
-    connection: &ConnectionInfo,
-) -> Result<String, ErrorInfo> {
+    connection: &RawConnection,
+) -> Result<VisionToTextOutput, AgentError> {
     if input.image_data.is_none() && input.image_url.is_none() {
-        return Err(permanent_err(
+        return Err(AgentError::permanent(
             "AI_TOOLS_INVALID_INPUT",
             "Either image_data or image_url is required",
         ));
@@ -821,7 +1032,7 @@ fn vision_to_text_bedrock(
 
     // Bedrock vision only supports base64 image data, not URLs.
     if input.image_url.is_some() && input.image_data.is_none() {
-        return Err(permanent_err(
+        return Err(AgentError::permanent(
             "AI_TOOLS_INVALID_INPUT",
             "Bedrock vision requires base64-encoded image_data, not URLs",
         ));
@@ -834,7 +1045,7 @@ fn vision_to_text_bedrock(
 
     // Only Claude 3/3.5 supports vision in Bedrock.
     if !model.starts_with("anthropic.claude-3") {
-        return Err(permanent_err(
+        return Err(AgentError::permanent(
             "AI_TOOLS_UNSUPPORTED_MODEL",
             "Bedrock vision capabilities require Claude 3 or Claude 3.5 models",
         ));
@@ -864,7 +1075,7 @@ fn vision_to_text_bedrock(
     let text = resp["content"][0]["text"]
         .as_str()
         .ok_or_else(|| {
-            permanent_err(
+            AgentError::permanent(
                 "BEDROCK_INVALID_RESPONSE",
                 "Missing text in Bedrock vision response",
             )
@@ -875,7 +1086,7 @@ fn vision_to_text_bedrock(
     let completion_tokens = resp["usage"]["output_tokens"].as_i64().unwrap_or(0) as i32;
     let structured_output = parse_structured_output(&text, &input.output_schema);
 
-    serde_json::to_string(&VisionToTextOutput {
+    Ok(VisionToTextOutput {
         text,
         model,
         usage: LlmUsage {
@@ -885,48 +1096,109 @@ fn vision_to_text_bedrock(
         },
         structured_output,
     })
-    .map_err(|e| permanent_err("OUTPUT_SERIALIZATION_ERROR", e.to_string()))
 }
 
-// -----------------------------------------------------------------------------
+// ============================================================================
 // Capability 4: Vision to Image
-// -----------------------------------------------------------------------------
+// ============================================================================
 
-#[derive(Debug, Deserialize)]
-struct VisionToImageInput {
+#[derive(Debug, Default, Serialize, Deserialize, CapabilityInput)]
+#[capability_input(display_name = "AI Vision to Image Input")]
+pub struct VisionToImageInput {
+    #[field(skip)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub _connection: Option<RawConnection>,
+
+    #[field(
+        display_name = "Prompt",
+        description = "Instructions for how to modify the image",
+        example = "Add dramatic lighting to the scene"
+    )]
     #[serde(default)]
-    prompt: String,
+    pub prompt: String,
+
+    #[field(
+        display_name = "Image Data",
+        description = "Base64-encoded source image to edit",
+        example = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk..."
+    )]
     #[serde(default)]
-    image_data: String,
-    #[serde(default)]
-    mask_data: Option<String>,
-    #[serde(default)]
-    model: Option<String>,
-    #[serde(default)]
-    width: Option<i32>,
-    #[serde(default)]
-    height: Option<i32>,
+    pub image_data: String,
+
+    #[field(
+        display_name = "Mask Data",
+        description = "Optional base64-encoded mask for selective editing",
+        example = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk..."
+    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mask_data: Option<String>,
+
+    #[field(
+        display_name = "Model",
+        description = "Image editing model to use",
+        example = "dall-e-2"
+    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+
+    #[field(
+        display_name = "Width",
+        description = "Desired output width in pixels",
+        example = "1024"
+    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub width: Option<i32>,
+
+    #[field(
+        display_name = "Height",
+        description = "Desired output height in pixels",
+        example = "1024"
+    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub height: Option<i32>,
 }
 
-#[derive(Debug, Serialize)]
-struct VisionToImageOutput {
-    image_data: String,
-    mime_type: String,
+#[derive(Debug, Serialize, Deserialize, CapabilityOutput)]
+#[capability_output(display_name = "AI Vision to Image Output")]
+pub struct VisionToImageOutput {
+    #[field(
+        display_name = "Image Data",
+        description = "Base64-encoded modified image"
+    )]
+    pub image_data: String,
+
+    #[field(
+        display_name = "MIME Type",
+        description = "Image format (e.g., 'image/png')"
+    )]
+    pub mime_type: String,
+
+    #[field(display_name = "Width", description = "Actual output width in pixels")]
     #[serde(skip_serializing_if = "Option::is_none")]
-    width: Option<i32>,
+    pub width: Option<i32>,
+
+    #[field(
+        display_name = "Height",
+        description = "Actual output height in pixels"
+    )]
     #[serde(skip_serializing_if = "Option::is_none")]
-    height: Option<i32>,
-    model: String,
+    pub height: Option<i32>,
+
+    #[field(display_name = "Model", description = "Model used for editing")]
+    pub model: String,
 }
 
-fn vision_to_image(
-    input_json: &str,
-    connection: Option<&ConnectionInfo>,
-) -> Result<String, ErrorInfo> {
-    let input: VisionToImageInput = serde_json::from_str(input_json)
-        .map_err(|e| permanent_err("INPUT_DESERIALIZATION_ERROR", e.to_string()))?;
-    let connection = require_connection(connection)?;
-
+#[capability(
+    module = "ai_tools",
+    display_name = "Vision to Image",
+    description = "Edit and manipulate images using AI models",
+    side_effects = true,
+    idempotent = false,
+    rate_limited = true,
+    tags = "ai,llm"
+)]
+pub fn vision_to_image(input: VisionToImageInput) -> Result<VisionToImageOutput, AgentError> {
+    let connection = require_connection(input._connection.as_ref())?;
     match provider_of(connection) {
         PROVIDER_OPENAI => vision_to_image_openai(&input, connection),
         PROVIDER_BEDROCK => vision_to_image_bedrock(&input, connection),
@@ -936,8 +1208,8 @@ fn vision_to_image(
 
 fn vision_to_image_openai(
     input: &VisionToImageInput,
-    connection: &ConnectionInfo,
-) -> Result<String, ErrorInfo> {
+    connection: &RawConnection,
+) -> Result<VisionToImageOutput, AgentError> {
     // NOTE: OpenAI images/edits and images/variations endpoints require
     // multipart/form-data with binary PNG payloads. The proxy currently only
     // supports JSON bodies. This sends a JSON body as best-effort; it will
@@ -961,7 +1233,7 @@ fn vision_to_image_openai(
     let image_data = resp["data"][0]["b64_json"]
         .as_str()
         .ok_or_else(|| {
-            permanent_err(
+            AgentError::permanent(
                 "OPENAI_INVALID_RESPONSE",
                 "Missing b64_json in OpenAI response",
             )
@@ -972,20 +1244,19 @@ fn vision_to_image_openai(
         .clone()
         .unwrap_or_else(|| "dall-e-2".to_string());
 
-    serde_json::to_string(&VisionToImageOutput {
+    Ok(VisionToImageOutput {
         image_data,
         mime_type: "image/png".to_string(),
         width: input.width.or(Some(1024)),
         height: input.height.or(Some(1024)),
         model,
     })
-    .map_err(|e| permanent_err("OUTPUT_SERIALIZATION_ERROR", e.to_string()))
 }
 
 fn vision_to_image_bedrock(
     input: &VisionToImageInput,
-    connection: &ConnectionInfo,
-) -> Result<String, ErrorInfo> {
+    connection: &RawConnection,
+) -> Result<VisionToImageOutput, AgentError> {
     let model = input
         .model
         .clone()
@@ -1007,92 +1278,130 @@ fn vision_to_image_bedrock(
     let image_data = resp["artifacts"][0]["base64"]
         .as_str()
         .ok_or_else(|| {
-            permanent_err(
+            AgentError::permanent(
                 "BEDROCK_INVALID_RESPONSE",
                 "Missing base64 image in Bedrock response",
             )
         })?
         .to_string();
 
-    serde_json::to_string(&VisionToImageOutput {
+    Ok(VisionToImageOutput {
         image_data,
         mime_type: "image/png".to_string(),
         width: input.width.or(Some(1024)),
         height: input.height.or(Some(1024)),
         model,
     })
-    .map_err(|e| permanent_err("OUTPUT_SERIALIZATION_ERROR", e.to_string()))
 }
 
-// -----------------------------------------------------------------------------
+// ============================================================================
 // Capability 5: Embed Text
-// -----------------------------------------------------------------------------
+// ============================================================================
 
 const AI_EMBED_TEXT_BATCH_CAP: usize = 2048;
 const AI_EMBED_TEXT_MAX_DIM: u32 = 4096;
 
-#[derive(Debug, Deserialize)]
-struct EmbedTextInput {
+#[derive(Debug, Default, Serialize, Deserialize, CapabilityInput)]
+#[capability_input(display_name = "AI Embed Text Input")]
+pub struct EmbedTextInput {
+    #[field(skip)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub _connection: Option<RawConnection>,
+
+    #[field(
+        display_name = "Texts",
+        description = "Batch of input strings to embed. Provider-specific batch limits apply (OpenAI ≤2048; Bedrock Titan loops sequentially).",
+        example = "[\"hello\", \"world\"]"
+    )]
     #[serde(default)]
-    texts: Vec<String>,
-    #[serde(default)]
-    model: Option<String>,
-    #[serde(default)]
-    dimension: Option<u32>,
+    pub texts: Vec<String>,
+
+    #[field(
+        display_name = "Model",
+        description = "Embedding model override. Defaults: OpenAI = text-embedding-3-small, Bedrock = amazon.titan-embed-text-v2:0",
+        example = "text-embedding-3-small"
+    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+
+    #[field(
+        display_name = "Dimension",
+        description = "Optional output dimension. Must match the target Vector column. Workflow author is responsible for alignment.",
+        example = "1536"
+    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dimension: Option<u32>,
 }
 
-#[derive(Debug, Serialize)]
-struct EmbedTextOutput {
-    embeddings: Vec<Vec<f32>>,
-    model: String,
-    dimension: u32,
-    usage: LlmUsage,
+#[derive(Debug, Serialize, Deserialize, CapabilityOutput)]
+#[capability_output(display_name = "AI Embed Text Output")]
+pub struct EmbedTextOutput {
+    #[field(
+        display_name = "Embeddings",
+        description = "One f32 vector per input string, in the same order as the input. Cast to f32 to match pgvector storage."
+    )]
+    pub embeddings: Vec<Vec<f32>>,
+
+    #[field(
+        display_name = "Model",
+        description = "The model that produced the embeddings"
+    )]
+    pub model: String,
+
+    #[field(
+        display_name = "Dimension",
+        description = "Dimensionality of each returned vector"
+    )]
+    pub dimension: u32,
+
+    #[field(display_name = "Usage", description = "Token usage statistics")]
+    pub usage: LlmUsage,
 }
 
-fn embed_text(input_json: &str, connection: Option<&ConnectionInfo>) -> Result<String, ErrorInfo> {
-    let input: EmbedTextInput = serde_json::from_str(input_json)
-        .map_err(|e| permanent_err("INPUT_DESERIALIZATION_ERROR", e.to_string()))?;
-    let connection = require_connection(connection)?;
+#[capability(
+    module = "ai_tools",
+    display_name = "Embed Text",
+    description = "Generate vector embeddings for one or more strings. Use the result to populate a Vector column for similarity search.",
+    side_effects = true,
+    idempotent = false,
+    rate_limited = true,
+    tags = "ai,llm"
+)]
+pub fn embed_text(input: EmbedTextInput) -> Result<EmbedTextOutput, AgentError> {
+    let connection = require_connection(input._connection.as_ref())?;
 
     // Validation (mirrors legacy ai_embed_text)
     if input.texts.is_empty() {
-        return Err(permanent_err(
+        return Err(AgentError::permanent(
             "AI_TOOLS_INVALID_INPUT",
             "`texts` must contain at least one entry",
         ));
     }
     if input.texts.iter().any(|t| t.is_empty()) {
-        return Err(permanent_err(
+        return Err(AgentError::permanent(
             "AI_TOOLS_INVALID_INPUT",
             "`texts` entries must be non-empty",
         ));
     }
     if input.texts.len() > AI_EMBED_TEXT_BATCH_CAP {
-        return Err(ErrorInfo {
-            code: "AI_TOOLS_BATCH_TOO_LARGE".into(),
-            message: format!(
+        return Err(AgentError::permanent(
+            "AI_TOOLS_BATCH_TOO_LARGE",
+            format!(
                 "`texts` batch size {} exceeds cap {}",
                 input.texts.len(),
                 AI_EMBED_TEXT_BATCH_CAP
             ),
-            category: "permanent".into(),
-            severity: "error".into(),
-            retryable: false,
-            retry_after_ms: None,
-            attributes: serde_json::to_string(&json!({
-                "batch": input.texts.len(),
-                "cap": AI_EMBED_TEXT_BATCH_CAP,
-            }))
-            .ok(),
-        });
+        )
+        .with_attr_value("batch", json!(input.texts.len()))
+        .with_attr_value("cap", json!(AI_EMBED_TEXT_BATCH_CAP)));
     }
-    if let Some(d) = input.dimension {
-        if d == 0 || d > AI_EMBED_TEXT_MAX_DIM {
-            return Err(permanent_err(
-                "AI_TOOLS_INVALID_INPUT",
-                format!("`dimension` must be in 1..={}", AI_EMBED_TEXT_MAX_DIM),
-            ));
-        }
+    if let Some(d) = input.dimension
+        && (d == 0 || d > AI_EMBED_TEXT_MAX_DIM)
+    {
+        return Err(AgentError::permanent(
+            "AI_TOOLS_INVALID_INPUT",
+            format!("`dimension` must be in 1..={}", AI_EMBED_TEXT_MAX_DIM),
+        ));
     }
 
     match provider_of(connection) {
@@ -1104,8 +1413,8 @@ fn embed_text(input_json: &str, connection: Option<&ConnectionInfo>) -> Result<S
 
 fn embed_text_openai(
     input: &EmbedTextInput,
-    connection: &ConnectionInfo,
-) -> Result<String, ErrorInfo> {
+    connection: &RawConnection,
+) -> Result<EmbedTextOutput, AgentError> {
     let model = input
         .model
         .clone()
@@ -1122,7 +1431,7 @@ fn embed_text_openai(
     let resp = openai_post(connection, "/v1/embeddings", body, 60_000)?;
 
     let data = resp["data"].as_array().ok_or_else(|| {
-        permanent_err(
+        AgentError::permanent(
             "OPENAI_INVALID_RESPONSE",
             "Missing data array in OpenAI embeddings response",
         )
@@ -1131,7 +1440,7 @@ fn embed_text_openai(
     let mut embeddings: Vec<Vec<f32>> = Vec::with_capacity(data.len());
     for item in data {
         let arr = item["embedding"].as_array().ok_or_else(|| {
-            permanent_err(
+            AgentError::permanent(
                 "OPENAI_INVALID_RESPONSE",
                 "Missing embedding array in OpenAI response item",
             )
@@ -1148,7 +1457,7 @@ fn embed_text_openai(
     let total_tokens = resp["usage"]["total_tokens"].as_i64().unwrap_or(0) as i32;
     let model_used = resp["model"].as_str().unwrap_or(&model).to_string();
 
-    serde_json::to_string(&EmbedTextOutput {
+    Ok(EmbedTextOutput {
         embeddings,
         model: model_used,
         dimension,
@@ -1158,13 +1467,12 @@ fn embed_text_openai(
             total_tokens,
         },
     })
-    .map_err(|e| permanent_err("OUTPUT_SERIALIZATION_ERROR", e.to_string()))
 }
 
 fn embed_text_bedrock(
     input: &EmbedTextInput,
-    connection: &ConnectionInfo,
-) -> Result<String, ErrorInfo> {
+    connection: &RawConnection,
+) -> Result<EmbedTextOutput, AgentError> {
     let model = input
         .model
         .clone()
@@ -1172,7 +1480,7 @@ fn embed_text_bedrock(
 
     // Anthropic models do not support embeddings in Bedrock.
     if model.starts_with("anthropic") {
-        return Err(permanent_err(
+        return Err(AgentError::permanent(
             "AI_TOOLS_UNSUPPORTED_MODEL",
             format!("Bedrock model '{}' does not support embeddings", model),
         ));
@@ -1192,7 +1500,7 @@ fn embed_text_bedrock(
         let resp = bedrock_post(connection, &path, body, 60_000)?;
 
         let arr = resp["embedding"].as_array().ok_or_else(|| {
-            permanent_err(
+            AgentError::permanent(
                 "BEDROCK_INVALID_RESPONSE",
                 "Bedrock embedding response missing `embedding` array",
             )
@@ -1209,19 +1517,19 @@ fn embed_text_bedrock(
     let dimension = embeddings.first().map(|v| v.len() as u32).unwrap_or(0);
 
     // Verify dimension matches caller's requested dimension.
-    if let Some(req_dim) = input.dimension {
-        if dimension != req_dim {
-            return Err(permanent_err(
-                "BEDROCK_DIMENSION_MISMATCH",
-                format!(
-                    "Requested dimension {} but Bedrock returned {}",
-                    req_dim, dimension
-                ),
-            ));
-        }
+    if let Some(req_dim) = input.dimension
+        && dimension != req_dim
+    {
+        return Err(AgentError::permanent(
+            "BEDROCK_DIMENSION_MISMATCH",
+            format!(
+                "Requested dimension {} but Bedrock returned {}",
+                req_dim, dimension
+            ),
+        ));
     }
 
-    serde_json::to_string(&EmbedTextOutput {
+    Ok(EmbedTextOutput {
         embeddings,
         model,
         dimension,
@@ -1231,12 +1539,11 @@ fn embed_text_bedrock(
             total_tokens: prompt_tokens,
         },
     })
-    .map_err(|e| permanent_err("OUTPUT_SERIALIZATION_ERROR", e.to_string()))
 }
 
-// -----------------------------------------------------------------------------
+// ============================================================================
 // Bedrock request builders
-// -----------------------------------------------------------------------------
+// ============================================================================
 
 /// Build a Bedrock text-generation request body. Returns `(body, is_claude)`.
 fn build_bedrock_text_request(
@@ -1247,7 +1554,7 @@ fn build_bedrock_text_request(
     temperature: Option<f64>,
     top_p: Option<f64>,
     stop_sequences: Option<&[String]>,
-) -> Result<(Value, bool), ErrorInfo> {
+) -> Result<(Value, bool), AgentError> {
     if model.starts_with("anthropic.claude") {
         let messages = vec![json!({"role": "user", "content": prompt})];
         let mut body = json!({
@@ -1291,7 +1598,7 @@ fn build_bedrock_text_request(
         });
         Ok((body, false))
     } else {
-        Err(permanent_err(
+        Err(AgentError::permanent(
             "AI_TOOLS_UNSUPPORTED_MODEL",
             format!("Unsupported Bedrock model: {}", model),
         ))
@@ -1303,12 +1610,12 @@ fn build_bedrock_text_request(
 fn extract_bedrock_text_response(
     resp: &Value,
     is_claude: bool,
-) -> Result<(String, i32, i32, String), ErrorInfo> {
+) -> Result<(String, i32, i32, String), AgentError> {
     if is_claude {
         let text = resp["content"][0]["text"]
             .as_str()
             .ok_or_else(|| {
-                permanent_err(
+                AgentError::permanent(
                     "BEDROCK_INVALID_RESPONSE",
                     "Missing text in Bedrock response",
                 )
@@ -1325,7 +1632,7 @@ fn extract_bedrock_text_response(
         let text = resp["results"][0]["outputText"]
             .as_str()
             .ok_or_else(|| {
-                permanent_err(
+                AgentError::permanent(
                     "BEDROCK_INVALID_RESPONSE",
                     "Missing outputText in Bedrock response",
                 )
@@ -1341,9 +1648,9 @@ fn extract_bedrock_text_response(
     }
 }
 
-// -----------------------------------------------------------------------------
+// ============================================================================
 // Shared utilities
-// -----------------------------------------------------------------------------
+// ============================================================================
 
 fn extract_openai_usage(resp: &Value) -> LlmUsage {
     LlmUsage {
@@ -1353,11 +1660,11 @@ fn extract_openai_usage(resp: &Value) -> LlmUsage {
     }
 }
 
-fn openai_extract_content(resp: &Value) -> Result<String, ErrorInfo> {
+fn openai_extract_content(resp: &Value) -> Result<String, AgentError> {
     resp["choices"][0]["message"]["content"]
         .as_str()
         .ok_or_else(|| {
-            permanent_err(
+            AgentError::permanent(
                 "OPENAI_INVALID_RESPONSE",
                 "Missing content in OpenAI response",
             )
@@ -1386,7 +1693,7 @@ fn classify_http_status(status: u16) -> (&'static str, &'static str) {
     }
 }
 
-fn parse_retry_after(headers: &std::collections::HashMap<String, String>) -> Option<u64> {
+fn parse_retry_after(headers: &HashMap<String, String>) -> Option<u64> {
     headers
         .iter()
         .find(|(k, _)| k.eq_ignore_ascii_case("retry-after-ms"))
@@ -1400,174 +1707,219 @@ fn parse_retry_after(headers: &std::collections::HashMap<String, String>) -> Opt
         })
 }
 
-fn unsupported_provider(integration_id: &str) -> ErrorInfo {
-    ErrorInfo {
-        code: "AI_TOOLS_UNSUPPORTED_PROVIDER".into(),
-        message: format!("LLM provider not supported: {}", integration_id),
-        category: "permanent".into(),
-        severity: "error".into(),
-        retryable: false,
-        retry_after_ms: None,
-        attributes: serde_json::to_string(&json!({"integration_id": integration_id})).ok(),
-    }
-}
-
-fn permanent_err(code: &str, message: impl Into<String>) -> ErrorInfo {
-    ErrorInfo {
-        code: code.into(),
-        message: message.into(),
-        category: "permanent".into(),
-        severity: "error".into(),
-        retryable: false,
-        retry_after_ms: None,
-        attributes: None,
-    }
-}
-
-fn transient_err(code: &str, message: impl Into<String>) -> ErrorInfo {
-    ErrorInfo {
-        code: code.into(),
-        message: message.into(),
-        category: "transient".into(),
-        severity: "warning".into(),
-        retryable: true,
-        retry_after_ms: None,
-        attributes: None,
-    }
-}
-
 fn truncate(s: &str, max: usize) -> String {
     if s.len() <= max {
         s.to_string()
     } else {
         let mut t = s[..max].to_string();
-        t.push_str("\u{2026}");
+        t.push('\u{2026}');
         t
     }
 }
 
-// -----------------------------------------------------------------------------
-// JSON Schemas — field names and defaults match the legacy file exactly
-// -----------------------------------------------------------------------------
+// ============================================================================
+// AgentInfo assembler (host-only; the wasm binary doesn't need it)
+// ============================================================================
 
-const TEXT_COMPLETION_INPUT_SCHEMA: &str = r#"{
-    "type": "object",
-    "required": ["prompt"],
-    "properties": {
-        "prompt":          { "type": "string", "description": "The user message or prompt to send to the LLM", "example": "Explain quantum computing in simple terms" },
-        "system_prompt":   { "type": "string", "description": "Optional system instructions to set the assistant's behavior", "example": "You are a helpful assistant" },
-        "model":           { "type": "string", "description": "The model identifier to use (auto-selects based on provider if not specified)", "example": "gpt-4o" },
-        "max_tokens":      { "type": "integer", "description": "Maximum number of tokens to generate in the response", "example": 1024 },
-        "temperature":     { "type": "number", "description": "Sampling temperature (0-2). Higher values increase randomness", "example": 0.7 },
-        "top_p":           { "type": "number", "description": "Nucleus sampling parameter for controlling diversity", "example": 0.9 },
-        "stop_sequences":  { "type": "array", "items": { "type": "string" }, "description": "Sequences where the model will stop generating further tokens", "example": ["END", "STOP"] },
-        "output_schema":   { "description": "Optional JSON schema for structured output. When provided, the model returns JSON conforming to this schema.", "example": {"type": "object", "properties": {"name": {"type": "string"}}} }
+/// Build the canonical `AgentInfo` for this agent by walking the macro-emitted
+/// `&'static` statics. The workspace `runtara-agent-bundle-emit` binary calls
+/// this on the host architecture and writes the JSON to disk; the wasm binary
+/// itself never executes this code, so we cfg-gate it out to keep the
+/// component small.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn agent_info() -> runtara_dsl::agent_meta::AgentInfo {
+    use runtara_dsl::agent_meta::{
+        AgentInfo, CapabilityMeta, InputTypeMeta, OutputTypeMeta, capability_to_api,
+    };
+    use std::collections::HashMap;
+
+    let caps: &[&'static CapabilityMeta] = &[
+        &__CAPABILITY_META_TEXT_COMPLETION,
+        &__CAPABILITY_META_IMAGE_GENERATION,
+        &__CAPABILITY_META_VISION_TO_TEXT,
+        &__CAPABILITY_META_VISION_TO_IMAGE,
+        &__CAPABILITY_META_EMBED_TEXT,
+    ];
+    let input_types: HashMap<&'static str, &'static InputTypeMeta> = [
+        (
+            "TextCompletionInput",
+            &__INPUT_META_TextCompletionInput as &InputTypeMeta,
+        ),
+        ("ImageGenerationInput", &__INPUT_META_ImageGenerationInput),
+        ("VisionToTextInput", &__INPUT_META_VisionToTextInput),
+        ("VisionToImageInput", &__INPUT_META_VisionToImageInput),
+        ("EmbedTextInput", &__INPUT_META_EmbedTextInput),
+    ]
+    .into_iter()
+    .collect();
+    let output_types: HashMap<&'static str, &'static OutputTypeMeta> = [
+        (
+            "TextCompletionOutput",
+            &__OUTPUT_META_TextCompletionOutput as &OutputTypeMeta,
+        ),
+        (
+            "ImageGenerationOutput",
+            &__OUTPUT_META_ImageGenerationOutput,
+        ),
+        ("VisionToTextOutput", &__OUTPUT_META_VisionToTextOutput),
+        ("VisionToImageOutput", &__OUTPUT_META_VisionToImageOutput),
+        ("EmbedTextOutput", &__OUTPUT_META_EmbedTextOutput),
+    ]
+    .into_iter()
+    .collect();
+
+    let capabilities = caps
+        .iter()
+        .map(|cap| {
+            capability_to_api(
+                cap,
+                input_types.get(cap.input_type).copied(),
+                output_types.get(cap.output_type).copied(),
+            )
+        })
+        .collect();
+
+    AgentInfo {
+        id: "ai-tools".into(),
+        name: "AI Tools".into(),
+        description: "AI tools — deterministic AI capabilities for text completion, image \
+                      generation, structured output, and vision across multiple LLM providers."
+            .into(),
+        has_side_effects: true,
+        supports_connections: true,
+        integration_ids: vec![PROVIDER_OPENAI.to_string(), PROVIDER_BEDROCK.to_string()],
+        capabilities,
     }
-}"#;
+}
 
-const TEXT_COMPLETION_OUTPUT_SCHEMA: &str = r#"{
-    "type": "object",
-    "properties": {
-        "text":             { "type": "string", "description": "The generated text response from the model" },
-        "model":            { "type": "string", "description": "The model used for generation" },
-        "usage":            { "type": "object", "description": "Token usage statistics", "properties": { "promptTokens": { "type": "integer" }, "completionTokens": { "type": "integer" }, "totalTokens": { "type": "integer" } } },
-        "finish_reason":    { "type": "string", "description": "The reason generation stopped (e.g., 'stop', 'length')" },
-        "structured_output":{ "description": "Parsed JSON output when output_schema was provided" }
+// ============================================================================
+// Wasm component plumbing
+// ============================================================================
+
+#[cfg(target_arch = "wasm32")]
+use bindings::exports::runtara::agent::capabilities::{ConnectionInfo, ErrorInfo, Guest};
+
+#[cfg(target_arch = "wasm32")]
+struct Component;
+
+#[cfg(target_arch = "wasm32")]
+impl Guest for Component {
+    fn invoke(
+        capability_id: String,
+        input: Vec<u8>,
+        connection: Option<ConnectionInfo>,
+    ) -> Result<Vec<u8>, ErrorInfo> {
+        let mut value: serde_json::Value = serde_json::from_slice(&input).map_err(bad_json)?;
+
+        // Inject the WIT `connection` arg into the input JSON under `_connection`
+        // so the macro-generated executor can deserialize it into the
+        // capability input struct's `_connection: Option<RawConnection>` field.
+        if let Some(c) = connection.as_ref() {
+            if let serde_json::Value::Object(ref mut obj) = value {
+                let parameters = serde_json::from_str::<serde_json::Value>(&c.parameters)
+                    .unwrap_or(serde_json::Value::Null);
+                let rate_limit_config = c
+                    .rate_limit_config
+                    .as_ref()
+                    .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok());
+                obj.insert(
+                    "_connection".into(),
+                    serde_json::json!({
+                        "connection_id": c.connection_id,
+                        "integration_id": c.integration_id,
+                        "connection_subtype": c.connection_subtype,
+                        "parameters": parameters,
+                        "rate_limit_config": rate_limit_config,
+                    }),
+                );
+            }
+        }
+
+        let executor_result = match capability_id.as_str() {
+            "text-completion" => __executor_text_completion(value),
+            "image-generation" => __executor_image_generation(value),
+            "vision-to-text" => __executor_vision_to_text(value),
+            "vision-to-image" => __executor_vision_to_image(value),
+            "embed-text" => __executor_embed_text(value),
+            other => {
+                return Err(ErrorInfo {
+                    code: "UNKNOWN_CAPABILITY".into(),
+                    message: format!("ai-tools agent has no capability `{other}`"),
+                    category: "permanent".into(),
+                    severity: "error".into(),
+                    retryable: false,
+                    retry_after_ms: None,
+                    attributes: None,
+                });
+            }
+        };
+        executor_result
+            .map_err(error_string_to_error_info)
+            .and_then(|out_value| serde_json::to_vec(&out_value).map_err(bad_json))
     }
-}"#;
+}
 
-const IMAGE_GENERATION_INPUT_SCHEMA: &str = r#"{
-    "type": "object",
-    "required": ["prompt"],
-    "properties": {
-        "prompt":          { "type": "string", "description": "Text description of the image to generate", "example": "A serene landscape with mountains at sunset" },
-        "negative_prompt": { "type": "string", "description": "Elements to exclude from the generated image", "example": "blurry, low quality, distorted" },
-        "model":           { "type": "string", "description": "Image generation model to use", "example": "dall-e-3" },
-        "width":           { "type": "integer", "description": "Desired image width in pixels", "example": 1024 },
-        "height":          { "type": "integer", "description": "Desired image height in pixels", "example": 1024 },
-        "quality":         { "type": "string", "description": "Image quality setting (e.g., 'standard', 'hd')", "example": "hd" },
-        "style":           { "type": "string", "description": "Image style preset (e.g., 'vivid', 'natural')", "example": "vivid" }
+#[cfg(target_arch = "wasm32")]
+fn bad_json(e: serde_json::Error) -> ErrorInfo {
+    ErrorInfo {
+        code: "INPUT_DESERIALIZATION_ERROR".into(),
+        message: e.to_string(),
+        category: "permanent".into(),
+        severity: "error".into(),
+        retryable: false,
+        retry_after_ms: None,
+        attributes: None,
     }
-}"#;
+}
 
-const IMAGE_GENERATION_OUTPUT_SCHEMA: &str = r#"{
-    "type": "object",
-    "properties": {
-        "image_data":     { "type": "string", "description": "Base64-encoded image data" },
-        "mime_type":      { "type": "string", "description": "Image format (e.g., 'image/png')" },
-        "width":          { "type": "integer", "description": "Actual image width in pixels" },
-        "height":         { "type": "integer", "description": "Actual image height in pixels" },
-        "model":          { "type": "string", "description": "Model used for generation" },
-        "revised_prompt": { "type": "string", "description": "AI-revised prompt if the model modified it" }
+/// The `#[capability]` macro packages each error as a JSON-string with
+/// `{ code, message, category, severity, ... }`. Parse it back into a typed
+/// `ErrorInfo` for the WIT result.
+#[cfg(target_arch = "wasm32")]
+fn error_string_to_error_info(s: String) -> ErrorInfo {
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(&s) {
+        let category = value
+            .get("category")
+            .and_then(|v| v.as_str())
+            .unwrap_or("permanent")
+            .to_string();
+        let retryable = value
+            .get("retryable")
+            .and_then(|v| v.as_bool())
+            .unwrap_or_else(|| category == "transient");
+        ErrorInfo {
+            code: value
+                .get("code")
+                .and_then(|v| v.as_str())
+                .unwrap_or("CAPABILITY_ERROR")
+                .into(),
+            message: value
+                .get("message")
+                .and_then(|v| v.as_str())
+                .unwrap_or(&s)
+                .into(),
+            category,
+            severity: value
+                .get("severity")
+                .and_then(|v| v.as_str())
+                .unwrap_or("error")
+                .into(),
+            retryable,
+            retry_after_ms: value.get("retry_after_ms").and_then(|v| v.as_u64()),
+            attributes: value.get("attributes").map(|v| v.to_string()),
+        }
+    } else {
+        ErrorInfo {
+            code: "CAPABILITY_ERROR".into(),
+            message: s,
+            category: "permanent".into(),
+            severity: "error".into(),
+            retryable: false,
+            retry_after_ms: None,
+            attributes: None,
+        }
     }
-}"#;
+}
 
-const VISION_TO_TEXT_INPUT_SCHEMA: &str = r#"{
-    "type": "object",
-    "required": ["prompt"],
-    "properties": {
-        "prompt":       { "type": "string", "description": "Question or instruction about the image", "example": "Describe what you see in this image" },
-        "image_data":   { "type": "string", "description": "Base64-encoded image data (provide either image_data or image_url)", "example": "iVBORw0KGgoAAAANSUhEUg..." },
-        "image_url":    { "type": "string", "description": "URL of the image to analyze (provide either image_data or image_url)", "example": "https://example.com/image.png" },
-        "model":        { "type": "string", "description": "Vision model to use", "example": "gpt-4o" },
-        "max_tokens":   { "type": "integer", "description": "Maximum number of tokens to generate", "example": 1024 },
-        "temperature":  { "type": "number", "description": "Sampling temperature", "example": 0.7 },
-        "output_schema":{ "description": "Optional JSON schema for structured output. When provided, the model returns JSON conforming to this schema.", "example": {"type": "object", "properties": {"objects": {"type": "array"}}} }
-    }
-}"#;
-
-const VISION_TO_TEXT_OUTPUT_SCHEMA: &str = r#"{
-    "type": "object",
-    "properties": {
-        "text":             { "type": "string", "description": "The generated text description or analysis" },
-        "model":            { "type": "string", "description": "Model used for analysis" },
-        "usage":            { "type": "object", "description": "Token usage statistics", "properties": { "promptTokens": { "type": "integer" }, "completionTokens": { "type": "integer" }, "totalTokens": { "type": "integer" } } },
-        "structured_output":{ "description": "Parsed JSON output when output_schema was provided" }
-    }
-}"#;
-
-const VISION_TO_IMAGE_INPUT_SCHEMA: &str = r#"{
-    "type": "object",
-    "required": ["prompt", "image_data"],
-    "properties": {
-        "prompt":     { "type": "string", "description": "Instructions for how to modify the image", "example": "Add dramatic lighting to the scene" },
-        "image_data": { "type": "string", "description": "Base64-encoded source image to edit", "example": "iVBORw0KGgoAAAANSUhEUg..." },
-        "mask_data":  { "type": "string", "description": "Optional base64-encoded mask for selective editing", "example": "iVBORw0KGgoAAAANSUhEUg..." },
-        "model":      { "type": "string", "description": "Image editing model to use", "example": "dall-e-2" },
-        "width":      { "type": "integer", "description": "Desired output width in pixels", "example": 1024 },
-        "height":     { "type": "integer", "description": "Desired output height in pixels", "example": 1024 }
-    }
-}"#;
-
-const VISION_TO_IMAGE_OUTPUT_SCHEMA: &str = r#"{
-    "type": "object",
-    "properties": {
-        "image_data": { "type": "string", "description": "Base64-encoded modified image" },
-        "mime_type":  { "type": "string", "description": "Image format (e.g., 'image/png')" },
-        "width":      { "type": "integer", "description": "Actual output width in pixels" },
-        "height":     { "type": "integer", "description": "Actual output height in pixels" },
-        "model":      { "type": "string", "description": "Model used for editing" }
-    }
-}"#;
-
-const EMBED_TEXT_INPUT_SCHEMA: &str = r#"{
-    "type": "object",
-    "required": ["texts"],
-    "properties": {
-        "texts":     { "type": "array", "items": { "type": "string" }, "description": "Batch of input strings to embed. Provider-specific batch limits apply (OpenAI ≤2048; Bedrock Titan loops sequentially).", "example": ["hello", "world"] },
-        "model":     { "type": "string", "description": "Embedding model override. Defaults: OpenAI = text-embedding-3-small, Bedrock = amazon.titan-embed-text-v2:0", "example": "text-embedding-3-small" },
-        "dimension": { "type": "integer", "description": "Optional output dimension. Must match the target Vector column. Workflow author is responsible for alignment.", "example": 1536 }
-    }
-}"#;
-
-const EMBED_TEXT_OUTPUT_SCHEMA: &str = r#"{
-    "type": "object",
-    "properties": {
-        "embeddings": { "type": "array", "items": { "type": "array", "items": { "type": "number" } }, "description": "One f32 vector per input string, in the same order as the input." },
-        "model":      { "type": "string", "description": "The model that produced the embeddings" },
-        "dimension":  { "type": "integer", "description": "Dimensionality of each returned vector" },
-        "usage":      { "type": "object", "description": "Token usage statistics", "properties": { "promptTokens": { "type": "integer" }, "completionTokens": { "type": "integer" }, "totalTokens": { "type": "integer" } } }
-    }
-}"#;
-
+#[cfg(target_arch = "wasm32")]
 bindings::export!(Component with_types_in bindings);

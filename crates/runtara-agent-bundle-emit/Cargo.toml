@@ -1,0 +1,41 @@
+[package]
+name = "runtara-agent-bundle-emit"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Walks every runtara-agent-* crate's macro-emitted metadata and writes a sibling meta.json next to each .wasm."
+keywords = ["wasm", "component", "agent", "build"]
+categories = ["development-tools::build-utils"]
+
+[[bin]]
+name = "emit-meta"
+path = "src/main.rs"
+
+[dependencies]
+runtara-dsl = { path = "../runtara-dsl" }
+runtara-agent-ai-tools = { path = "../runtara-agent-ai-tools" }
+runtara-agent-azure-blob-storage = { path = "../runtara-agent-azure-blob-storage" }
+runtara-agent-bedrock = { path = "../runtara-agent-bedrock" }
+runtara-agent-compression = { path = "../runtara-agent-compression" }
+runtara-agent-crypto = { path = "../runtara-agent-crypto" }
+runtara-agent-csv = { path = "../runtara-agent-csv" }
+runtara-agent-datetime = { path = "../runtara-agent-datetime" }
+runtara-agent-http = { path = "../runtara-agent-http" }
+runtara-agent-hubspot = { path = "../runtara-agent-hubspot" }
+runtara-agent-mailgun = { path = "../runtara-agent-mailgun" }
+runtara-agent-object-model = { path = "../runtara-agent-object-model" }
+runtara-agent-openai = { path = "../runtara-agent-openai" }
+runtara-agent-s3-storage = { path = "../runtara-agent-s3-storage" }
+runtara-agent-sftp = { path = "../runtara-agent-sftp" }
+runtara-agent-sharepoint = { path = "../runtara-agent-sharepoint" }
+runtara-agent-shopify = { path = "../runtara-agent-shopify" }
+runtara-agent-slack = { path = "../runtara-agent-slack" }
+runtara-agent-stripe = { path = "../runtara-agent-stripe" }
+runtara-agent-text = { path = "../runtara-agent-text" }
+runtara-agent-transform = { path = "../runtara-agent-transform" }
+runtara-agent-utils = { path = "../runtara-agent-utils" }
+runtara-agent-xlsx = { path = "../runtara-agent-xlsx" }
+runtara-agent-xml = { path = "../runtara-agent-xml" }
+serde_json = { workspace = true }
+anyhow = "1"
