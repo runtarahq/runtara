@@ -1,10 +1,38 @@
 // Copyright (C) 2025 SyncMyOrders Sp. z o.o.
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! Browser WASM bindings for workflow validation.
+//!
+//! Agent metadata is no longer baked into the WASM bundle. The host page
+//! fetches `GET /api/runtime/agents` once at boot and pushes the JSON
+//! array into the validator via [`init_agent_catalog`]. Subsequent
+//! `validate_*` calls read from the cached catalog. If the host forgets
+//! to call `init_agent_catalog` before validating, agent-related
+//! validations short-circuit against an empty catalog (every agent
+//! reference becomes "unknown agent") so the omission is loud.
 
 use serde::Serialize;
 use serde_json::{Value, json};
+use std::sync::{Arc, RwLock};
 use wasm_bindgen::prelude::*;
+
+/// Cached snapshot of the agent catalog, populated by the host via
+/// [`init_agent_catalog`]. Wrapped in `RwLock` (not `OnceLock`) so a
+/// long-running browser session can refresh the catalog if the server
+/// reloaded its component dir.
+static AGENT_CATALOG: RwLock<Option<Arc<runtara_dsl::agent_meta::AgentCatalog>>> =
+    RwLock::new(None);
+
+/// Read the cached catalog, or an empty one if the host hasn't pushed it
+/// yet. Returns an `Arc` so the result can be passed to
+/// `validate_workflow` without re-cloning the underlying agent list.
+fn cached_catalog() -> Arc<runtara_dsl::agent_meta::AgentCatalog> {
+    if let Ok(guard) = AGENT_CATALOG.read()
+        && let Some(c) = guard.as_ref()
+    {
+        return c.clone();
+    }
+    Arc::new(runtara_dsl::agent_meta::AgentCatalog::new())
+}
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -209,34 +237,71 @@ pub fn get_step_type_schema_json(step_type: &str) -> String {
     ))
 }
 
-/// Return statically compiled agent metadata, including capability schemas.
+/// Populate the in-WASM agent catalog from a JSON array of `AgentInfo`s.
+/// The host page fetches this once at boot from `GET /api/runtime/agents`
+/// and passes the response body in. Returns a small JSON object the host
+/// can use to confirm success or surface parse errors.
+#[wasm_bindgen(js_name = initAgentCatalog)]
+pub fn init_agent_catalog(agents_json: &str) -> String {
+    match runtara_dsl::agent_meta::AgentCatalog::from_json(agents_json) {
+        Ok(catalog) => {
+            let count = catalog.len();
+            if let Ok(mut guard) = AGENT_CATALOG.write() {
+                *guard = Some(Arc::new(catalog));
+            }
+            json!({ "success": true, "agentCount": count }).to_string()
+        }
+        Err(e) => json!({
+            "success": false,
+            "error": format!("Failed to parse agent catalog JSON: {}", e),
+        })
+        .to_string(),
+    }
+}
+
+/// True if the host has pushed a catalog via [`init_agent_catalog`].
+/// Useful for the frontend to gate the workflow editor until the catalog
+/// has loaded.
+#[wasm_bindgen(js_name = agentCatalogLoaded)]
+pub fn agent_catalog_loaded() -> bool {
+    AGENT_CATALOG.read().map(|g| g.is_some()).unwrap_or(false)
+}
+
+/// Return the cached agent metadata as JSON. Returns an empty list if the
+/// host hasn't pushed a catalog yet.
 #[wasm_bindgen(js_name = getAgentsJson)]
 pub fn get_agents_json() -> String {
     to_json_string(&json!({
-        "agents": agents()
+        "agents": cached_catalog().agents()
     }))
 }
 
-/// Return statically compiled metadata for one agent.
+/// Return cached metadata for one agent.
 #[wasm_bindgen(js_name = getAgentJson)]
 pub fn get_agent_json(agent_id: &str) -> String {
-    let agent = agents()
-        .into_iter()
-        .find(|agent| agent.id.eq_ignore_ascii_case(agent_id));
+    let catalog = cached_catalog();
+    let agent = catalog
+        .agents()
+        .iter()
+        .find(|a| a.id.eq_ignore_ascii_case(agent_id))
+        .cloned();
     to_json_string(&agent)
 }
 
-/// Return statically compiled capability metadata for one agent capability.
+/// Return cached capability metadata for one agent capability.
 #[wasm_bindgen(js_name = getCapabilitySchemaJson)]
 pub fn get_capability_schema_json(agent_id: &str, capability_id: &str) -> String {
-    let capability = agents()
-        .into_iter()
+    let catalog = cached_catalog();
+    let capability = catalog
+        .agents()
+        .iter()
         .find(|agent| agent.id.eq_ignore_ascii_case(agent_id))
         .and_then(|agent| {
             agent
                 .capabilities
-                .into_iter()
+                .iter()
                 .find(|capability| capability.id.eq_ignore_ascii_case(capability_id))
+                .cloned()
         });
     to_json_string(&capability)
 }
@@ -263,13 +328,7 @@ fn validate_execution_graph_json_impl(execution_graph_json: &str) -> ValidationR
         }
     };
 
-    // TODO(phase-d): replace with a catalog pushed by the frontend (one
-    // `GET /api/runtime/agents` on app boot, then `initAgentCatalog(json)`).
-    // For now the WASM bundle still embeds the static agent set; the
-    // catalog wrapper is just there to satisfy the post-Phase-B
-    // `validate_workflow` signature.
-    let catalog =
-        runtara_dsl::agent_meta::AgentCatalog::from_agents(runtara_agents::registry::get_agents());
+    let catalog = cached_catalog();
     let validation_result =
         runtara_workflows::validation::validate_workflow(&workflow.execution_graph, &catalog);
     let errors = validation_result
@@ -376,23 +435,6 @@ fn step_types() -> Vec<StepTypeInfo> {
 
     step_types.sort_by(|a, b| a.id.cmp(&b.id));
     step_types
-}
-
-fn agents() -> Vec<runtara_dsl::agent_meta::AgentInfo> {
-    let http_ids: Vec<String> = runtara_agents::extractors::get_http_extractor_ids()
-        .into_iter()
-        .map(String::from)
-        .collect();
-
-    runtara_agents::registry::get_agents()
-        .into_iter()
-        .map(|mut agent| {
-            if agent.id == "http" {
-                agent.integration_ids = http_ids.clone();
-            }
-            agent
-        })
-        .collect()
 }
 
 #[cfg(test)]
@@ -641,15 +683,48 @@ mod tests {
         assert!(step_types.iter().any(|step| step["id"] == "Agent"));
     }
 
+    /// A minimal `AgentInfo[]` JSON, mirroring the shape the runtime
+    /// `GET /api/runtime/agents` returns. Used to seed the in-WASM catalog
+    /// for tests that exercise the agent-lookup helpers.
+    const SAMPLE_CATALOG_JSON: &str = r#"[
+        {
+            "id": "http",
+            "name": "HTTP",
+            "description": "HTTP requests",
+            "hasSideEffects": true,
+            "supportsConnections": true,
+            "integrationIds": ["http_bearer", "http_basic"],
+            "capabilities": [
+                {
+                    "id": "http-request",
+                    "name": "HTTP Request",
+                    "inputType": "HttpRequestInput",
+                    "inputs": [
+                        {"name": "url", "type": "string", "required": true}
+                    ],
+                    "output": {"type": "HttpResponse"},
+                    "hasSideEffects": true,
+                    "isIdempotent": false,
+                    "rateLimited": false
+                }
+            ]
+        }
+    ]"#;
+
     #[test]
-    fn returns_static_agent_metadata() {
+    fn init_then_returns_pushed_agent_metadata() {
+        let init_resp: Value = serde_json::from_str(&init_agent_catalog(SAMPLE_CATALOG_JSON))
+            .expect("init response is JSON");
+        assert_eq!(init_resp["success"], true);
+        assert_eq!(init_resp["agentCount"], 1);
+        assert!(agent_catalog_loaded());
+
         let value: Value = serde_json::from_str(&get_agents_json()).unwrap();
         let agents = value["agents"].as_array().unwrap();
-
         let http = agents
             .iter()
             .find(|agent| agent["id"] == "http")
-            .expect("http agent should be present");
+            .expect("http agent should be present after init");
         assert!(!http["capabilities"].as_array().unwrap().is_empty());
         assert!(
             http["integrationIds"]
@@ -661,25 +736,27 @@ mod tests {
     }
 
     #[test]
-    fn returns_single_static_capability_metadata() {
-        let agents_value: Value = serde_json::from_str(&get_agents_json()).unwrap();
-        let first_agent = agents_value["agents"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|agent| {
-                agent["capabilities"]
-                    .as_array()
-                    .is_some_and(|capabilities| !capabilities.is_empty())
-            })
-            .expect("an agent with capabilities should be present");
-        let agent_id = first_agent["id"].as_str().unwrap();
-        let capability_id = first_agent["capabilities"][0]["id"].as_str().unwrap();
+    fn returns_pushed_capability_metadata() {
+        let init_resp: Value = serde_json::from_str(&init_agent_catalog(SAMPLE_CATALOG_JSON))
+            .expect("init response is JSON");
+        assert_eq!(init_resp["success"], true);
 
         let value: Value =
-            serde_json::from_str(&get_capability_schema_json(agent_id, capability_id)).unwrap();
-
-        assert_eq!(value["id"], capability_id);
+            serde_json::from_str(&get_capability_schema_json("http", "http-request")).unwrap();
+        assert_eq!(value["id"], "http-request");
         assert!(value["inputs"].is_array());
+    }
+
+    #[test]
+    fn init_with_invalid_json_reports_error() {
+        let resp: Value = serde_json::from_str(&init_agent_catalog("not-json"))
+            .expect("init returns JSON even on parse failure");
+        assert_eq!(resp["success"], false);
+        assert!(
+            resp["error"]
+                .as_str()
+                .unwrap()
+                .contains("Failed to parse agent catalog JSON")
+        );
     }
 }
