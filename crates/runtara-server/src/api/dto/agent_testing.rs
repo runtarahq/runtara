@@ -76,19 +76,20 @@ pub struct TestAgentErrorResponse {
 /// Which execution engine to use for the test call. Forms the value of the
 /// `?engine=` query string on `POST /api/runtime/agents/{name}/capabilities/{cap}/test`.
 ///
-/// - `Auto` (default): route through the embedded wasmtime component host
-///   when a WASM component is loaded for the agent; otherwise fall back to
-///   the legacy dispatcher image.
-/// - `Components`: force the embedded wasmtime path. Returns 404 if no
-///   component is loaded for the agent.
-/// - `Legacy`: force the dispatcher-image path (Phase 4 deletes this).
+/// The legacy rustc-compiled dispatcher image was removed in Phase 3 step 10
+/// once every agent shipped as its own WASM component. Both variants now
+/// route through the embedded wasmtime component host; the enum stays as a
+/// stable API surface so existing `?engine=...` query strings still parse.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum TestEngine {
+    /// Route through the embedded wasmtime component host. Returns 404 if no
+    /// component is loaded for the agent.
     #[default]
     Auto,
+    /// Alias for `Auto` — kept for callers that send `?engine=components`
+    /// explicitly. Behaves identically.
     Components,
-    Legacy,
 }
 
 /// Query string parameters for `test_agent_handler`.

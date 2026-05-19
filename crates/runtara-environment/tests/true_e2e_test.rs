@@ -108,7 +108,12 @@ fn check_musl_target_available() -> bool {
 
 /// Check if the workflow stdlib is compiled and available.
 fn check_workflow_stdlib_available() -> bool {
-    runtara_workflows::agents_library::get_native_library().is_ok()
+    // The pre-compiled stdlib path was removed when `runtara-workflows`
+    // switched to the components-mode compile pipeline (cargo-component
+    // + wac compose). This test exercised the rustc-direct + OCI runner
+    // chain and is now permanently skipped until rewritten against the
+    // wasm runner.
+    false
 }
 
 /// Create a minimal ExecutionGraph that just finishes with output.

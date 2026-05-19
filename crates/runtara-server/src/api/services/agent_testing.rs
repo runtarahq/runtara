@@ -1,18 +1,15 @@
 //! Agent Testing Service
 //!
-//! Business logic for testing agents. In Phase 1 of the WASM Components
-//! migration, this service supports two execution backends side-by-side:
-//!
-//! 1. **Components** — embedded wasmtime + `runtara_agent_*.wasm` components
-//!    loaded from `agent_components_dir`. See `runtara-component-host`.
-//! 2. **Legacy** — the universal dispatcher image (`__agent_dispatcher__:N`)
-//!    executed via `runtime_client.execute_sync`. Removed in Phase 4.
+//! Business logic for testing agents. Routes every call through the embedded
+//! wasmtime component host (`ComponentDispatcherService`) — the legacy
+//! rustc-compiled dispatcher image was deleted in Phase 3 step 10 once every
+//! agent shipped as its own WASM component.
 
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use tracing::{info, warn};
+use tracing::info;
 
 use opentelemetry::KeyValue;
 use runtara_component_host::{
@@ -21,8 +18,6 @@ use runtara_component_host::{
 
 use crate::api::dto::agent_testing::TestEngine;
 use crate::observability::metrics;
-
-use super::dispatcher::DispatcherService;
 
 #[derive(Debug)]
 pub enum ServiceError {
@@ -98,34 +93,33 @@ pub struct TestResult {
     pub engine: ActiveEngine,
 }
 
-/// The engine actually used for a given call — what the service decided
-/// after honoring the requested `TestEngine` and the available backends.
+/// The engine actually used for a given call. Only one backend exists today
+/// (`Components`); kept as an enum so the surfaces and telemetry stay stable
+/// if a future backend is added.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, utoipa::ToSchema,
 )]
 #[serde(rename_all = "lowercase")]
 pub enum ActiveEngine {
     Components,
-    Legacy,
 }
 
-/// Agent testing service. Holds both backends so callers can compare them.
+/// Agent testing service. Routes every call through the embedded wasmtime
+/// component dispatcher.
 #[derive(Clone)]
 pub struct AgentTestingService {
     enabled: bool,
     rate_limiter: RateLimiter,
-    dispatcher_service: Option<Arc<DispatcherService>>,
     component_dispatcher: Option<Arc<ComponentDispatcherService>>,
     connections: Option<Arc<runtara_connections::ConnectionsFacade>>,
 }
 
 impl AgentTestingService {
     /// Create a new agent testing service.
-    pub fn new(enabled: bool, dispatcher_service: Option<Arc<DispatcherService>>) -> Self {
+    pub fn new(enabled: bool) -> Self {
         Self {
             enabled,
             rate_limiter: RateLimiter::new(),
-            dispatcher_service,
             component_dispatcher: None,
             connections: None,
         }
@@ -136,9 +130,8 @@ impl AgentTestingService {
         self
     }
 
-    /// Plug in the embedded component dispatcher. When set, agents with a
-    /// loaded `.wasm` component go through it unless `engine=legacy` is
-    /// forced.
+    /// Plug in the embedded component dispatcher. Required for any actual
+    /// test execution — calls return `AgentNotFound` if it's unset.
     pub fn with_component_dispatcher(
         mut self,
         dispatcher: Arc<ComponentDispatcherService>,
@@ -152,36 +145,25 @@ impl AgentTestingService {
         self.enabled
     }
 
-    /// Resolve which engine to use given the request preference and the
-    /// agent's availability in the component dispatcher.
+    /// Resolve which engine to use. Only `Components` is supported now;
+    /// callers requesting any `TestEngine` variant land here and either get
+    /// `Components` or an `AgentNotFound` when no component is loaded.
     fn pick_engine(
         &self,
-        requested: TestEngine,
+        _requested: TestEngine,
         agent_name: &str,
     ) -> Result<ActiveEngine, ServiceError> {
-        let has_component = match self.component_dispatcher.as_deref() {
-            Some(d) => d.has_agent(agent_name),
-            None => false,
-        };
-        match requested {
-            TestEngine::Components => {
-                if has_component {
-                    Ok(ActiveEngine::Components)
-                } else {
-                    Err(ServiceError::AgentNotFound(format!(
-                        "agent `{}` has no WASM component loaded",
-                        agent_name
-                    )))
-                }
-            }
-            TestEngine::Legacy => Ok(ActiveEngine::Legacy),
-            TestEngine::Auto => {
-                if has_component {
-                    Ok(ActiveEngine::Components)
-                } else {
-                    Ok(ActiveEngine::Legacy)
-                }
-            }
+        let has_component = self
+            .component_dispatcher
+            .as_deref()
+            .is_some_and(|d| d.has_agent(agent_name));
+        if has_component {
+            Ok(ActiveEngine::Components)
+        } else {
+            Err(ServiceError::AgentNotFound(format!(
+                "agent `{}` has no WASM component loaded",
+                agent_name
+            )))
         }
     }
 
@@ -228,24 +210,13 @@ impl AgentTestingService {
                 self.run_via_components(tenant_id, agent_name, capability_id, input, connection_id)
                     .await
             }
-            ActiveEngine::Legacy => {
-                self.run_via_legacy_dispatcher(
-                    tenant_id,
-                    agent_name,
-                    capability_id,
-                    input,
-                    connection_id,
-                )
-                .await
-            }
         };
 
-        // Per-engine telemetry: count + duration histogram, labeled by
-        // engine/agent/capability so dashboards can A/B during the migration.
+        // Telemetry: count + duration histogram, labeled by
+        // engine/agent/capability.
         if let Some(m) = metrics() {
             let engine_label = match active {
                 ActiveEngine::Components => "components",
-                ActiveEngine::Legacy => "legacy",
             };
             let attrs = [
                 KeyValue::new("engine", engine_label),
@@ -311,108 +282,6 @@ impl AgentTestingService {
         })
     }
 
-    async fn run_via_legacy_dispatcher(
-        &self,
-        tenant_id: &str,
-        agent_name: &str,
-        capability_id: &str,
-        input: Value,
-        connection_id: Option<String>,
-    ) -> Result<TestResult, ServiceError> {
-        let dispatcher = self.dispatcher_service.as_ref().ok_or_else(|| {
-            ServiceError::ExecutionError(
-                "Dispatcher service not configured. Runtime client may not be available."
-                    .to_string(),
-            )
-        })?;
-
-        let image_id = dispatcher
-            .get_dispatcher_image(tenant_id)
-            .await
-            .map_err(|e| ServiceError::ExecutionError(format!("Dispatcher not ready: {}", e)))?;
-
-        let connection_data = match connection_id.as_deref() {
-            Some(id) => Some(self.load_connection_legacy_blob(tenant_id, id).await?),
-            None => None,
-        };
-
-        let dispatcher_input = serde_json::json!({
-            "agent_id": agent_name,
-            "capability_id": capability_id,
-            "agent_input": input,
-            "connection": connection_data,
-        });
-
-        let start = Instant::now();
-        let result = dispatcher
-            .runtime_client()
-            .execute_sync(
-                &image_id,
-                tenant_id,
-                "agent-dispatcher",
-                None,
-                Some(dispatcher_input),
-                Some(30),
-                false,
-            )
-            .await
-            .map_err(|e| ServiceError::ExecutionError(format!("Execution failed: {}", e)))?;
-        let execution_time_ms = start.elapsed().as_secs_f64() * 1000.0;
-
-        if !result.success {
-            let error_msg = result
-                .error
-                .unwrap_or_else(|| "Execution failed".to_string());
-            warn!(
-                tenant_id = %tenant_id,
-                agent = %agent_name,
-                error = %error_msg,
-                "Agent test execution failed (legacy)"
-            );
-            return Err(ServiceError::ExecutionError(error_msg));
-        }
-
-        let output = result.output.ok_or_else(|| {
-            ServiceError::ExecutionError("Dispatcher returned no output".to_string())
-        })?;
-        let success = output
-            .get("success")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-        let agent_output = output.get("output").cloned();
-        let agent_error = output
-            .get("error")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
-
-        if success {
-            Ok(TestResult {
-                success: true,
-                output: agent_output,
-                error: None,
-                execution_time_ms,
-                max_memory_mb: None,
-                engine: ActiveEngine::Legacy,
-            })
-        } else {
-            let err_msg = agent_error.unwrap_or_else(|| "Unknown agent error".to_string());
-            if err_msg.contains("Unknown agent") || err_msg.contains("Unknown capability") {
-                Err(ServiceError::AgentNotFound(err_msg))
-            } else if err_msg.contains("Connection") && err_msg.contains("not found") {
-                Err(ServiceError::ConnectionNotFound(err_msg))
-            } else {
-                Ok(TestResult {
-                    success: false,
-                    output: None,
-                    error: Some(err_msg),
-                    execution_time_ms,
-                    max_memory_mb: None,
-                    engine: ActiveEngine::Legacy,
-                })
-            }
-        }
-    }
-
     /// Resolve a connection record into the strongly-typed shape the
     /// component dispatcher expects.
     async fn resolve_connection(
@@ -448,22 +317,5 @@ impl AgentTestingService {
                 .unwrap_or_else(|| serde_json::json!({})),
             rate_limit_config: conn.rate_limit_config,
         })
-    }
-
-    /// Legacy path connection lookup — returns the same JSON blob shape the
-    /// dispatcher binary expects (`{integration_id, connection_subtype,
-    /// parameters, rate_limit_config}`).
-    async fn load_connection_legacy_blob(
-        &self,
-        tenant_id: &str,
-        connection_id: &str,
-    ) -> Result<Value, ServiceError> {
-        let resolved = self.resolve_connection(tenant_id, connection_id).await?;
-        Ok(serde_json::json!({
-            "integration_id": resolved.integration_id,
-            "connection_subtype": resolved.connection_subtype,
-            "parameters": resolved.parameters,
-            "rate_limit_config": resolved.rate_limit_config,
-        }))
     }
 }

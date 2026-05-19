@@ -29,7 +29,6 @@ use crate::valkey;
 use crate::workers;
 
 use api::services::agent_testing::AgentTestingService;
-use api::services::dispatcher::DispatcherService;
 
 use api::repositories::object_model::ObjectStoreManager;
 
@@ -628,25 +627,6 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
     }
     println!("✓ Runtara stdlib: {}", server_config.stdlib_name);
 
-    if let Ok(lib_dir) = std::env::var("RUNTARA_NATIVE_LIBRARY_DIR") {
-        println!("✓ Native library dir: {}", lib_dir);
-    } else {
-        // runtara-workflows checks target/native_cache by default
-        let default_cache = std::path::Path::new("target/native_cache");
-        if default_cache
-            .join("libruntara_workflow_stdlib.rlib")
-            .exists()
-        {
-            println!("✓ Native library dir: target/native_cache (default)");
-        } else {
-            println!("⚠ Native library not found in target/native_cache");
-            println!(
-                "  Run: cargo build -p runtara-workflow-stdlib --release --target x86_64-unknown-linux-musl"
-            );
-            println!("  Then copy artifacts to target/native_cache/");
-        }
-    }
-
     // Initialize OpenTelemetry with Datadog integration
     // Must be called BEFORE any tracing macros are used
     observability::init_telemetry()?;
@@ -1154,29 +1134,16 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let agent_testing: Option<AgentTestingService> = if enable_operator_testing {
-        if let Some(ref client) = runtime_client {
-            let dispatcher_service = Arc::new(DispatcherService::new(client.clone()));
-
-            // Initialize dispatcher at startup (compile and register if needed)
-            println!("Initializing agent dispatcher...");
-            match dispatcher_service.initialize(&tenant_id).await {
-                Ok(image_id) => {
-                    println!("✓ Agent dispatcher ready (image: {})", image_id);
-                    let mut service = AgentTestingService::new(true, Some(dispatcher_service))
-                        .with_connections(connections_facade.clone());
-                    if let Some(ref dispatcher) = component_dispatcher {
-                        service = service.with_component_dispatcher(dispatcher.clone());
-                    }
-                    Some(service)
-                }
-                Err(e) => {
-                    println!("⚠ Failed to initialize agent dispatcher: {}", e);
-                    println!("  Agent testing will not be available");
-                    None
-                }
-            }
+        if let Some(ref dispatcher) = component_dispatcher {
+            println!("✓ Agent testing wired to embedded component dispatcher");
+            Some(
+                AgentTestingService::new(true)
+                    .with_connections(connections_facade.clone())
+                    .with_component_dispatcher(dispatcher.clone()),
+            )
         } else {
-            println!("⚠ Agent testing requested but runtime client not available");
+            println!("⚠ Agent testing requested but no component dispatcher available");
+            println!("  (no agent .wasm components staged at $RUNTARA_AGENT_COMPONENTS_DIR)");
             None
         }
     } else {

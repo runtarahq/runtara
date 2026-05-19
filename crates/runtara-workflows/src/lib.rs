@@ -66,23 +66,19 @@
 //!
 //! # Modules
 //!
-//! - [`agents_library`]: Pre-compiled agents library management
 //! - [`codegen`]: AST code generation from execution graphs
-//! - [`compile`]: Compilation orchestration and rustc invocation
+//! - [`compile`]: Public compile entry point (routes to components-mode)
+//! - [`components_compile`]: components-mode pipeline (cargo-component + wac compose)
 //! - [`dependency_analysis`]: Dependency resolution for child workflows
 //! - [`paths`]: File path utilities for workflows and data
 
 #![deny(missing_docs)]
 
-/// Pre-compiled agents library management.
-#[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
-pub mod agents_library;
-
 /// AST code generation from execution graphs.
 #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
 pub mod codegen;
 
-/// Compilation orchestration and rustc invocation.
+/// Compile entry point (routes to components-mode).
 #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
 pub mod compile;
 
@@ -107,10 +103,6 @@ pub mod schema_fields_validation;
 pub mod validation;
 
 // Re-export main types
-#[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
-pub use agents_library::{
-    NativeLibraryInfo, get_native_library, get_stdlib_name, get_wasm_native_library,
-};
 #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
 pub use compile::{
     ChildDependency, ChildWorkflowInput, CompilationInput, NativeCompilationResult,
