@@ -15,7 +15,7 @@ use runtara_dsl::agent_meta::AgentInfo;
 use serde::{Deserialize, Serialize};
 use wasmtime::Engine;
 
-use crate::bindings::exports::runtara::agent::capabilities::ConnectionInfo;
+use crate::bindings::exports::runtara::agent::capabilities::{ConnectionInfo, ErrorInfo};
 use crate::engine::{EngineConfig, build_engine};
 use crate::host_state::{CallContext, HostState};
 use crate::registry::{LoadedAgent, build_linker, instantiate, load_agent};
@@ -206,12 +206,40 @@ impl ComponentDispatcherService {
             &self.env.core_http_url,
         ));
         let state = HostState::new(ctx);
-        let (mut store, agent_handle) = instantiate(&self.engine, &agent.pre, state).await?;
+        let (mut store, instance) = instantiate(&self.engine, &agent.pre, state).await?;
+
+        // Dynamic dispatch: look up the agent's capabilities interface by the
+        // name we cached at load time (`runtara:agent-<id>/capabilities@…` for
+        // per-agent WIT, `runtara:agent/capabilities@…` for the legacy
+        // shared-WIT layout), then resolve `invoke` inside it and call with
+        // the canonical signature.
+        let iface_idx = instance
+            .get_export_index(&mut store, None, &agent.capabilities_iface)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "agent `{}` instance is missing the `{}` interface export",
+                    req.agent_id,
+                    agent.capabilities_iface
+                )
+            })?;
+        let invoke_idx = instance
+            .get_export_index(&mut store, Some(&iface_idx), "invoke")
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "agent `{}` `{}` interface has no `invoke` export",
+                    req.agent_id,
+                    agent.capabilities_iface
+                )
+            })?;
+        type InvokeFunc = wasmtime::component::TypedFunc<
+            (String, Vec<u8>, Option<ConnectionInfo>),
+            (Result<Vec<u8>, ErrorInfo>,),
+        >;
+        let invoke: InvokeFunc = instance.get_typed_func(&mut store, invoke_idx)?;
 
         let started = std::time::Instant::now();
-        let result = agent_handle
-            .runtara_agent_capabilities()
-            .call_invoke(&mut store, &req.capability_id, &input_bytes, conn.as_ref())
+        let (result,) = invoke
+            .call_async(&mut store, (req.capability_id.clone(), input_bytes, conn))
             .await?;
         let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
 

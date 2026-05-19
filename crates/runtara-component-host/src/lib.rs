@@ -24,6 +24,7 @@ pub mod engine;
 pub mod host_state;
 pub mod registry;
 
+pub use bindings::exports::runtara::agent::capabilities::{ConnectionInfo, ErrorInfo};
 pub use dispatcher::{
     ComponentDispatcherService, DispatcherEnv, ResolvedConnection, TestCapabilityRequest,
     TestError, TestResult,

@@ -48,12 +48,32 @@ async fn crypto_invoke_hash() -> anyhow::Result<()> {
         "http://localhost:9996",
     ));
     let state = HostState::new(ctx.clone());
-    let (mut store, agent) = instantiate(&engine, &loaded.pre, state).await?;
-    let result = agent
-        .runtara_agent_capabilities()
-        .call_invoke(&mut store, "hash", br#"{"data":"hello"}"#, None)
-        .await?
-        .map_err(|e| anyhow::anyhow!("guest error: {}: {}", e.code, e.message))?;
+    let (mut store, instance) = instantiate(&engine, &loaded.pre, state).await?;
+
+    // Dynamic lookup against the interface name the registry cached at load
+    // time (per-agent or legacy shared layout).
+    let iface_idx = instance
+        .get_export_index(&mut store, None, &loaded.capabilities_iface)
+        .expect("capabilities interface export");
+    let invoke_idx = instance
+        .get_export_index(&mut store, Some(&iface_idx), "invoke")
+        .expect("invoke export inside capabilities");
+    type InvokeFunc = wasmtime::component::TypedFunc<
+        (
+            String,
+            Vec<u8>,
+            Option<runtara_component_host::ConnectionInfo>,
+        ),
+        (Result<Vec<u8>, runtara_component_host::ErrorInfo>,),
+    >;
+    let invoke: InvokeFunc = instance.get_typed_func(&mut store, invoke_idx)?;
+    let (result,) = invoke
+        .call_async(
+            &mut store,
+            ("hash".to_string(), br#"{"data":"hello"}"#.to_vec(), None),
+        )
+        .await?;
+    let result = result.map_err(|e| anyhow::anyhow!("guest error: {}: {}", e.code, e.message))?;
 
     // SHA-256("hello") = 2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824
     let out: serde_json::Value = serde_json::from_slice(&result)?;
