@@ -14,10 +14,46 @@
 
 set -euo pipefail
 
-if ! command -v cargo-component >/dev/null 2>&1; then
-    echo "error: cargo-component is required" >&2
-    echo "       install with: cargo install cargo-component" >&2
-    exit 1
+# Auto-install the host-side tools we need. Set RUNTARA_NO_INSTALL_TOOLS=1 to
+# fail fast instead of installing — useful in CI where you want the install
+# steps to be explicit.
+ensure_tool() {
+    local cmd="$1"
+    local crate="$2"
+    local version="${3:-}"
+    if command -v "$cmd" >/dev/null 2>&1; then
+        return 0
+    fi
+    if [ "${RUNTARA_NO_INSTALL_TOOLS:-}" = "1" ]; then
+        echo "error: \`$cmd\` is required but not installed (RUNTARA_NO_INSTALL_TOOLS=1)" >&2
+        if [ -n "$version" ]; then
+            echo "       install with: cargo install $crate --version $version --locked" >&2
+        else
+            echo "       install with: cargo install $crate --locked" >&2
+        fi
+        exit 1
+    fi
+    echo "==> installing $cmd via cargo install $crate${version:+ --version $version}"
+    if [ -n "$version" ]; then
+        cargo install "$crate" --version "$version" --locked
+    else
+        cargo install "$crate" --locked
+    fi
+}
+
+# cargo-component compiles each agent crate's cdylib into a Component-Model
+# .wasm. Pinned to match the version this codebase was built against.
+ensure_tool cargo-component cargo-component 0.21.1
+# wit-deps resolves the wasi:* dependencies pinned by
+# crates/runtara-agent-wit/wit/deps.toml. Only needed for first-time
+# checkouts or after a deps.toml bump; the lockfile is committed.
+ensure_tool wit-deps wit-deps-cli
+# wac-cli is reserved for the Phase 3 composition step (single bundled
+# .wasm). Not strictly needed by this script today, so we warn rather
+# than fail when it's missing.
+if ! command -v wac >/dev/null 2>&1; then
+    echo "note: \`wac\` (Phase 3 composition tool) not installed — skipping."
+    echo "      install with: cargo install wac-cli --locked"
 fi
 
 workspace="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

@@ -1391,13 +1391,16 @@ fn default_metafields_limit() -> i32 {
 // Generic GraphQL response output
 // ============================================================================
 
+/// Opaque GraphQL payload. The struct is `#[serde(transparent)]` so the wire
+/// shape stays a bare JSON value — matches what legacy shopify returned and
+/// what downstream workflow steps already expect.
 #[derive(Debug, Serialize, Deserialize, CapabilityOutput)]
+#[serde(transparent)]
 #[capability_output(
     display_name = "Shopify GraphQL Response",
     description = "Shopify GraphQL response payload (shape depends on the underlying query)."
 )]
 pub struct GenericShopifyOutput {
-    /// Opaque payload; downstream steps treat as a JSON object.
     #[field(
         display_name = "Result",
         description = "Shape varies by GraphQL query/mutation"

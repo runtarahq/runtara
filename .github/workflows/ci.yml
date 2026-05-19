@@ -361,6 +361,74 @@ jobs:
           TEST_RUNTARA_DATABASE_URL: postgres://postgres:postgres@localhost:5432/runtara_test
         run: cargo test -p runtara-environment -- --test-threads=1
 
+  # WIT-only sanity: the canonical agent contract package parses and its
+  # wasi:* dependency tree resolves. Cheap; catches deps.toml / lockfile drift
+  # before any agent crate tries to consume it.
+  wit-package:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Install wit-deps
+        run: cargo install wit-deps-cli --locked
+
+      - name: Install wasm-tools
+        run: cargo install wasm-tools --locked
+
+      - name: Lock and resolve WIT dependencies
+        working-directory: crates/runtara-agent-wit
+        run: wit-deps lock
+
+      - name: Validate WIT package
+        run: wasm-tools component wit crates/runtara-agent-wit/wit > /dev/null
+
+  # Build every runtara-agent-* crate as a WASM component, emit each agent's
+  # macro-derived meta.json sidecar, and run the dispatcher integration tests
+  # (including the full-bundle drift detector that calls every declared
+  # capability against its real .wasm and asserts no UNKNOWN_CAPABILITY).
+  components-build:
+    runs-on: ubuntu-latest
+    needs: wit-package
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Setup Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          target: wasm32-wasip2
+          cache: true
+          cache-workspaces: ". -> target"
+
+      - name: Install cargo-component
+        run: cargo install cargo-component --version 0.21.1 --locked
+
+      - name: Install wit-deps
+        run: cargo install wit-deps-cli --locked
+
+      - name: Build all 23 agent components + emit sidecar meta.json
+        env:
+          # Tools are installed explicitly above. Fail loudly if anything's
+          # missing instead of silently re-installing inside the script.
+          RUNTARA_NO_INSTALL_TOOLS: "1"
+        run: scripts/build-agent-components.sh
+
+      - name: Verify 23 .wasm + 23 .meta.json present
+        run: |
+          wasm_count=$(find target/wasm32-wasip1/release -maxdepth 1 -name 'runtara_agent_*.wasm' | wc -l)
+          meta_count=$(find target/wasm32-wasip1/release -maxdepth 1 -name 'runtara_agent_*.meta.json' | wc -l)
+          echo "wasm=$wasm_count meta=$meta_count"
+          test "$wasm_count" -eq 23
+          test "$meta_count" -eq 23
+
+      - name: Run dispatcher integration tests (incl. full-bundle drift detector)
+        run: cargo test -p runtara-component-host --tests
+
   notify-result:
     # Posts success or failure once all build/test jobs finish.
     # Skipped on cancellation (avoids spurious "failure" pings when a run is
@@ -374,6 +442,8 @@ jobs:
       - test-core
       - test-server
       - test-environment
+      - wit-package
+      - components-build
     if: |
       !cancelled() && (
         (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)

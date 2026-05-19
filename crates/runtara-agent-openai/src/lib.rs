@@ -372,7 +372,7 @@ pub struct TextCompletionOutput {
     module_description = "OpenAI LLM integration for text completion, image generation, structured output, and vision capabilities.",
     module_has_side_effects = true,
     module_supports_connections = true,
-    module_integration_ids = "openai",
+    module_integration_ids = "openai_api_key",
     module_secure = true
 )]
 pub fn text_completion(input: TextCompletionInput) -> Result<TextCompletionOutput, AgentError> {
@@ -1500,7 +1500,7 @@ pub fn agent_info() -> runtara_dsl::agent_meta::AgentInfo {
                 .into(),
         has_side_effects: true,
         supports_connections: true,
-        integration_ids: vec!["openai".to_string()],
+        integration_ids: vec!["openai_api_key".to_string()],
         capabilities,
     }
 }
