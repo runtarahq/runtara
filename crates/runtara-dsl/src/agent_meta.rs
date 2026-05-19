@@ -1453,6 +1453,238 @@ pub fn validate_agent_metadata_or_panic() {
 }
 
 // ============================================================================
+// AgentCatalog — runtime-loaded snapshot of every agent's metadata.
+// ============================================================================
+
+/// A snapshot of every agent the runtime knows about, indexed by id.
+///
+/// The catalog is the runtime replacement for `runtara-agents::static_registry`
+/// — instead of compile-time arrays baked into the server/validator binary,
+/// it's populated at startup from the `<agent>.meta.json` sidecars staged
+/// next to each `.wasm` in `$RUNTARA_AGENT_COMPONENTS_DIR`.
+///
+/// Two loaders:
+/// - [`AgentCatalog::from_meta_dir`] — server-side, walks a directory of
+///   `runtara_agent_*.meta.json` files.
+/// - [`AgentCatalog::from_json`] — browser-side, accepts a JSON array
+///   shipped over `GET /api/runtime/agents` so the WASM validator doesn't
+///   embed agents at compile time.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct AgentCatalog {
+    agents: Vec<AgentInfo>,
+}
+
+impl AgentCatalog {
+    /// Empty catalog — useful in unit tests + as a default before async load
+    /// completes.
+    pub fn new() -> Self {
+        Self { agents: Vec::new() }
+    }
+
+    /// Build a catalog directly from a list of `AgentInfo`s. Stable insertion
+    /// order is preserved.
+    pub fn from_agents(agents: Vec<AgentInfo>) -> Self {
+        Self { agents }
+    }
+
+    /// Parse a JSON document of the shape `[AgentInfo, …]`. This is the
+    /// format returned by `GET /api/runtime/agents`.
+    pub fn from_json(json: &str) -> Result<Self, serde_json::Error> {
+        let agents: Vec<AgentInfo> = serde_json::from_str(json)?;
+        Ok(Self { agents })
+    }
+
+    /// Walk a directory looking for `runtara_agent_*.meta.json` files. Pairs
+    /// of `.wasm` + `.meta.json` are staged here by
+    /// `scripts/build-agent-components.sh`. Missing or malformed meta.json is
+    /// surfaced as an error so the caller can fail fast at boot.
+    ///
+    /// This is the server-side loader; the WASM validator uses
+    /// [`from_json`](Self::from_json) instead.
+    #[cfg(feature = "fs")]
+    pub fn from_meta_dir(dir: &std::path::Path) -> std::io::Result<Self> {
+        let mut agents: Vec<AgentInfo> = Vec::new();
+        for entry in std::fs::read_dir(dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            if !name.starts_with("runtara_agent_") || !name.ends_with(".meta.json") {
+                continue;
+            }
+            let bytes = std::fs::read(&path)?;
+            let info: AgentInfo = serde_json::from_slice(&bytes).map_err(|e| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("invalid {}: {e}", path.display()),
+                )
+            })?;
+            agents.push(info);
+        }
+        // Deterministic order — keeps APIs returning the catalog stable.
+        agents.sort_by(|a, b| a.id.cmp(&b.id));
+        Ok(Self { agents })
+    }
+
+    /// Borrow every agent. Order matches the underlying storage.
+    pub fn agents(&self) -> &[AgentInfo] {
+        &self.agents
+    }
+
+    /// True if any agent has the given id.
+    pub fn has_agent(&self, agent_id: &str) -> bool {
+        self.agents.iter().any(|a| a.id == agent_id)
+    }
+
+    /// Look up an agent by id.
+    pub fn agent(&self, agent_id: &str) -> Option<&AgentInfo> {
+        self.agents.iter().find(|a| a.id == agent_id)
+    }
+
+    /// Look up a capability by `(agent_id, capability_id)`.
+    pub fn capability(&self, agent_id: &str, capability_id: &str) -> Option<&CapabilityInfo> {
+        self.agent(agent_id)?
+            .capabilities
+            .iter()
+            .find(|c| c.id == capability_id)
+    }
+
+    /// Number of agents in the catalog.
+    pub fn len(&self) -> usize {
+        self.agents.len()
+    }
+
+    /// True if the catalog has no agents (e.g. before discovery has run).
+    pub fn is_empty(&self) -> bool {
+        self.agents.is_empty()
+    }
+}
+
+#[cfg(test)]
+mod catalog_tests {
+    use super::*;
+
+    fn sample_agent(id: &str) -> AgentInfo {
+        AgentInfo {
+            id: id.into(),
+            name: id.into(),
+            description: "test".into(),
+            has_side_effects: false,
+            supports_connections: false,
+            integration_ids: vec![],
+            capabilities: vec![CapabilityInfo {
+                id: "hash".into(),
+                name: "hash".into(),
+                display_name: None,
+                description: None,
+                input_type: "HashInput".into(),
+                inputs: vec![],
+                output: FieldTypeInfo {
+                    type_name: "HashResult".into(),
+                    format: None,
+                    display_name: None,
+                    description: None,
+                    items: None,
+                    fields: None,
+                    nullable: false,
+                },
+                has_side_effects: false,
+                is_idempotent: true,
+                rate_limited: false,
+                compensation_hint: None,
+                known_errors: vec![],
+                tags: vec![],
+            }],
+        }
+    }
+
+    #[test]
+    fn empty_catalog_has_no_agents() {
+        let cat = AgentCatalog::new();
+        assert_eq!(cat.len(), 0);
+        assert!(cat.is_empty());
+        assert!(cat.agent("missing").is_none());
+    }
+
+    #[test]
+    fn from_agents_preserves_order() {
+        let cat = AgentCatalog::from_agents(vec![sample_agent("b"), sample_agent("a")]);
+        assert_eq!(
+            cat.agents()
+                .iter()
+                .map(|a| a.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["b", "a"]
+        );
+    }
+
+    #[test]
+    fn lookup_by_id_and_capability() {
+        let cat = AgentCatalog::from_agents(vec![sample_agent("crypto")]);
+        assert!(cat.has_agent("crypto"));
+        assert!(!cat.has_agent("missing"));
+        assert!(cat.agent("crypto").is_some());
+        assert!(cat.capability("crypto", "hash").is_some());
+        assert!(cat.capability("crypto", "missing").is_none());
+        assert!(cat.capability("missing", "hash").is_none());
+    }
+
+    #[test]
+    fn round_trip_json() {
+        let original = AgentCatalog::from_agents(vec![sample_agent("crypto")]);
+        let json = serde_json::to_string(&original.agents).unwrap();
+        let parsed = AgentCatalog::from_json(&json).unwrap();
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed.agent("crypto").unwrap().id, "crypto");
+    }
+
+    #[test]
+    fn from_json_rejects_garbage() {
+        assert!(AgentCatalog::from_json("not-json").is_err());
+    }
+
+    #[cfg(feature = "fs")]
+    #[test]
+    fn from_meta_dir_loads_and_sorts() {
+        use std::fs;
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let write = |id: &str| {
+            let path = dir.path().join(format!("runtara_agent_{id}.meta.json"));
+            fs::write(&path, serde_json::to_string(&sample_agent(id)).unwrap()).unwrap();
+        };
+        write("zeta");
+        write("alpha");
+        // Distractor files we should ignore.
+        fs::write(dir.path().join("not-an-agent.json"), b"{}").unwrap();
+        fs::write(
+            dir.path().join("runtara_agent_zeta.wasm"),
+            b"\0asm\x01\0\0\0",
+        )
+        .unwrap();
+
+        let cat = AgentCatalog::from_meta_dir(dir.path()).expect("load");
+        let ids: Vec<&str> = cat.agents().iter().map(|a| a.id.as_str()).collect();
+        assert_eq!(ids, vec!["alpha", "zeta"]);
+    }
+
+    #[cfg(feature = "fs")]
+    #[test]
+    fn from_meta_dir_surfaces_parse_errors() {
+        use std::fs;
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        fs::write(
+            dir.path().join("runtara_agent_broken.meta.json"),
+            b"{not json}",
+        )
+        .unwrap();
+        let err = AgentCatalog::from_meta_dir(dir.path()).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        assert!(err.to_string().contains("runtara_agent_broken.meta.json"));
+    }
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
 
