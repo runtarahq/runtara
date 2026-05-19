@@ -139,12 +139,13 @@ pub async fn create_workflow_handler(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
     State(pool): State<PgPool>,
     State(connections): State<Arc<ConnectionsFacade>>,
+    State(agent_catalog): State<Arc<runtara_dsl::agent_meta::AgentCatalog>>,
 
     Json(request): Json<CreateWorkflowRequest>,
 ) -> (StatusCode, Json<Value>) {
     // Create repository and service
     let repository = Arc::new(WorkflowRepository::new(pool.clone()));
-    let service = WorkflowService::new(repository, connections.clone());
+    let service = WorkflowService::new(repository, connections.clone(), agent_catalog.clone());
 
     // Delegate to service
     match service
@@ -189,13 +190,18 @@ pub async fn update_workflow_handler(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
     State(pool): State<PgPool>,
     State(connections): State<Arc<ConnectionsFacade>>,
+    State(agent_catalog): State<Arc<runtara_dsl::agent_meta::AgentCatalog>>,
     State(_runtime_client): State<Option<Arc<RuntimeClient>>>,
     Path(workflow_id): Path<String>,
     Json(request): Json<UpdateWorkflowRequest>,
 ) -> (StatusCode, Json<Value>) {
     // Create repositories and service
     let repository = Arc::new(WorkflowRepository::new(pool.clone()));
-    let service = WorkflowService::new(repository.clone(), connections.clone());
+    let service = WorkflowService::new(
+        repository.clone(),
+        connections.clone(),
+        agent_catalog.clone(),
+    );
 
     // Delegate to service (name/description are now inside execution_graph)
     let (version_num, warnings) = match service
@@ -284,11 +290,12 @@ pub async fn patch_version_graph_handler(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
     State(pool): State<PgPool>,
     State(connections): State<Arc<ConnectionsFacade>>,
+    State(agent_catalog): State<Arc<runtara_dsl::agent_meta::AgentCatalog>>,
     Path((workflow_id, version)): Path<(String, i32)>,
     Json(request): Json<UpdateWorkflowRequest>,
 ) -> (StatusCode, Json<Value>) {
     let repository = Arc::new(WorkflowRepository::new(pool.clone()));
-    let service = WorkflowService::new(repository, connections.clone());
+    let service = WorkflowService::new(repository, connections.clone(), agent_catalog.clone());
 
     let warnings = match service
         .patch_version_graph(&tenant_id, &workflow_id, version, request.execution_graph)
@@ -331,13 +338,14 @@ pub async fn toggle_track_events_handler(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
     State(pool): State<PgPool>,
     State(connections): State<Arc<ConnectionsFacade>>,
+    State(agent_catalog): State<Arc<runtara_dsl::agent_meta::AgentCatalog>>,
 
     Path((workflow_id, version)): Path<(String, i32)>,
     Json(request): Json<UpdateTrackEventsRequest>,
 ) -> (StatusCode, Json<Value>) {
     // Create repository and service
     let repository = Arc::new(WorkflowRepository::new(pool.clone()));
-    let service = WorkflowService::new(repository, connections.clone());
+    let service = WorkflowService::new(repository, connections.clone(), agent_catalog.clone());
 
     // Delegate to service
     match service
@@ -380,6 +388,7 @@ pub async fn list_workflows_handler(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
     State(pool): State<PgPool>,
     State(connections): State<Arc<ConnectionsFacade>>,
+    State(agent_catalog): State<Arc<runtara_dsl::agent_meta::AgentCatalog>>,
 
     Query(query): Query<ListWorkflowsQuery>,
 ) -> (StatusCode, Json<Value>) {
@@ -387,7 +396,7 @@ pub async fn list_workflows_handler(
 
     // Create repository and service
     let repository = Arc::new(WorkflowRepository::new(pool.clone()));
-    let service = WorkflowService::new(repository, connections.clone());
+    let service = WorkflowService::new(repository, connections.clone(), agent_catalog.clone());
 
     // Delegate to service with pagination
     let page = query.page.unwrap_or(1);
@@ -456,13 +465,14 @@ pub async fn get_workflow_handler(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
     State(pool): State<PgPool>,
     State(connections): State<Arc<ConnectionsFacade>>,
+    State(agent_catalog): State<Arc<runtara_dsl::agent_meta::AgentCatalog>>,
 
     Path(workflow_id): Path<String>,
     Query(query): Query<GetWorkflowQuery>,
 ) -> (StatusCode, Json<Value>) {
     // Create repository and service
     let repository = Arc::new(WorkflowRepository::new(pool.clone()));
-    let service = WorkflowService::new(repository, connections.clone());
+    let service = WorkflowService::new(repository, connections.clone(), agent_catalog.clone());
 
     // Delegate to service
     match service
@@ -498,12 +508,13 @@ pub async fn list_workflow_versions_handler(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
     State(pool): State<PgPool>,
     State(connections): State<Arc<ConnectionsFacade>>,
+    State(agent_catalog): State<Arc<runtara_dsl::agent_meta::AgentCatalog>>,
 
     Path(workflow_id): Path<String>,
 ) -> (StatusCode, Json<Value>) {
     // Create repository and service
     let repository = Arc::new(WorkflowRepository::new(pool.clone()));
-    let service = WorkflowService::new(repository, connections.clone());
+    let service = WorkflowService::new(repository, connections.clone(), agent_catalog.clone());
 
     // Delegate to service
     match service.list_versions(&tenant_id, &workflow_id).await {
@@ -536,12 +547,13 @@ pub async fn delete_workflow_handler(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
     State(pool): State<PgPool>,
     State(connections): State<Arc<ConnectionsFacade>>,
+    State(agent_catalog): State<Arc<runtara_dsl::agent_meta::AgentCatalog>>,
 
     Path(workflow_id): Path<String>,
 ) -> (StatusCode, Json<Value>) {
     // Create repository and service
     let repository = Arc::new(WorkflowRepository::new(pool.clone()));
-    let service = WorkflowService::new(repository, connections.clone());
+    let service = WorkflowService::new(repository, connections.clone(), agent_catalog.clone());
 
     // Delegate to service
     match service.delete_workflow(&tenant_id, &workflow_id).await {
@@ -579,13 +591,14 @@ pub async fn clone_workflow_handler(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
     State(pool): State<PgPool>,
     State(connections): State<Arc<ConnectionsFacade>>,
+    State(agent_catalog): State<Arc<runtara_dsl::agent_meta::AgentCatalog>>,
 
     Path(workflow_id): Path<String>,
     Json(request): Json<CloneWorkflowRequest>,
 ) -> (StatusCode, Json<Value>) {
     // Create repository and service
     let repository = Arc::new(WorkflowRepository::new(pool.clone()));
-    let service = WorkflowService::new(repository, connections.clone());
+    let service = WorkflowService::new(repository, connections.clone(), agent_catalog.clone());
 
     // Delegate to service
     match service
@@ -971,12 +984,17 @@ pub async fn validate_mappings_handler(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
     State(pool): State<PgPool>,
     State(connections): State<Arc<ConnectionsFacade>>,
+    State(agent_catalog): State<Arc<runtara_dsl::agent_meta::AgentCatalog>>,
     Path(workflow_id): Path<String>,
     Query(query): Query<ValidateMappingsQuery>,
 ) -> (StatusCode, Json<Value>) {
     // Create repositories and service
     let workflow_repository = Arc::new(WorkflowRepository::new(pool.clone()));
-    let service = WorkflowService::new(workflow_repository, connections.clone());
+    let service = WorkflowService::new(
+        workflow_repository,
+        connections.clone(),
+        agent_catalog.clone(),
+    );
 
     // Validate mappings
     match service
@@ -1679,12 +1697,13 @@ pub async fn set_current_version_handler(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
     State(pool): State<PgPool>,
     State(connections): State<Arc<ConnectionsFacade>>,
+    State(agent_catalog): State<Arc<runtara_dsl::agent_meta::AgentCatalog>>,
 
     Path((workflow_id, version_number)): Path<(String, i32)>,
 ) -> (StatusCode, Json<Value>) {
     // Create repository and service
     let repository = Arc::new(WorkflowRepository::new(pool.clone()));
-    let service = WorkflowService::new(repository, connections.clone());
+    let service = WorkflowService::new(repository, connections.clone(), agent_catalog.clone());
 
     // Delegate to service
     match service
@@ -2025,10 +2044,11 @@ pub async fn get_version_schemas_handler(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
     State(pool): State<PgPool>,
     State(connections): State<Arc<ConnectionsFacade>>,
+    State(agent_catalog): State<Arc<runtara_dsl::agent_meta::AgentCatalog>>,
     Path((workflow_id, version)): Path<(String, i32)>,
 ) -> Result<Json<VersionSchemasResponse>, (StatusCode, Json<ErrorResponse>)> {
     let repo = Arc::new(WorkflowRepository::new(pool.clone()));
-    let service = WorkflowService::new(repo, connections.clone());
+    let service = WorkflowService::new(repo, connections.clone(), agent_catalog.clone());
 
     match service
         .get_version_schemas(&tenant_id, &workflow_id, version)
@@ -2082,12 +2102,13 @@ pub async fn move_workflow_handler(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
     State(pool): State<PgPool>,
     State(connections): State<Arc<ConnectionsFacade>>,
+    State(agent_catalog): State<Arc<runtara_dsl::agent_meta::AgentCatalog>>,
     Path(id): Path<String>,
     Json(request): Json<MoveWorkflowRequest>,
 ) -> (StatusCode, Json<Value>) {
     // Create repository and service
     let repository = Arc::new(WorkflowRepository::new(pool.clone()));
-    let service = WorkflowService::new(repository, connections.clone());
+    let service = WorkflowService::new(repository, connections.clone(), agent_catalog.clone());
 
     match service.move_workflow(&tenant_id, &id, &request.path).await {
         Ok(response) => {
@@ -2116,10 +2137,11 @@ pub async fn list_folders_handler(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
     State(pool): State<PgPool>,
     State(connections): State<Arc<ConnectionsFacade>>,
+    State(agent_catalog): State<Arc<runtara_dsl::agent_meta::AgentCatalog>>,
 ) -> (StatusCode, Json<Value>) {
     // Create repository and service
     let repository = Arc::new(WorkflowRepository::new(pool.clone()));
-    let service = WorkflowService::new(repository, connections.clone());
+    let service = WorkflowService::new(repository, connections.clone(), agent_catalog.clone());
 
     match service.list_folders(&tenant_id).await {
         Ok(response) => (
@@ -2146,11 +2168,12 @@ pub async fn rename_folder_handler(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
     State(pool): State<PgPool>,
     State(connections): State<Arc<ConnectionsFacade>>,
+    State(agent_catalog): State<Arc<runtara_dsl::agent_meta::AgentCatalog>>,
     Json(request): Json<RenameFolderRequest>,
 ) -> (StatusCode, Json<Value>) {
     // Create repository and service
     let repository = Arc::new(WorkflowRepository::new(pool.clone()));
-    let service = WorkflowService::new(repository, connections.clone());
+    let service = WorkflowService::new(repository, connections.clone(), agent_catalog.clone());
 
     match service
         .rename_folder(&tenant_id, &request.old_path, &request.new_path)
