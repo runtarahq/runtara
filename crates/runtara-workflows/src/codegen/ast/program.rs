@@ -33,7 +33,7 @@ fn get_stdlib_crate_name() -> String {
 /// - AgentStep: extracts agent_id
 /// - SplitStep: recursively traverses subgraph
 /// - EmbedWorkflow: recursively traverses child graphs from EmitContext
-fn collect_used_agents(graph: &ExecutionGraph, ctx: &EmitContext) -> HashSet<String> {
+pub(crate) fn collect_used_agents(graph: &ExecutionGraph, ctx: &EmitContext) -> HashSet<String> {
     let mut agents = HashSet::new();
     collect_used_agents_recursive(graph, ctx, &mut agents);
     agents
@@ -328,7 +328,7 @@ pub fn emit_program(
 }
 
 /// Emit compile-time constants (connection service URL, tenant ID, etc.)
-fn emit_constants(ctx: &EmitContext) -> TokenStream {
+pub(crate) fn emit_constants(ctx: &EmitContext) -> TokenStream {
     // CONNECTION_SERVICE_URL: prefer runtime env var, fallback to compile-time value
     let connection_url = if let Some(url) = &ctx.connection_service_url {
         quote! {
@@ -443,7 +443,7 @@ fn emit_imports(graph: &ExecutionGraph, ctx: &EmitContext) -> TokenStream {
 }
 
 /// Emit input struct definitions.
-fn emit_input_structs() -> TokenStream {
+pub(crate) fn emit_input_structs() -> TokenStream {
     quote! {
         #[derive(Clone)]
         struct WorkflowInputs {
@@ -1435,7 +1435,7 @@ fn emit_workflow_variables(graph: &ExecutionGraph) -> TokenStream {
 /// 4. Executes the workflow asynchronously
 /// 5. Reports completion/failure/cancellation status to Core via SDK
 /// 6. Environment reads output from Core persistence after process exit
-fn emit_main(graph: &ExecutionGraph) -> TokenStream {
+pub(crate) fn emit_main(graph: &ExecutionGraph) -> TokenStream {
     // Generate variables as compile-time constants from graph.variables
     let variables_init = emit_workflow_variables(graph);
 
@@ -1591,7 +1591,7 @@ fn emit_main(graph: &ExecutionGraph) -> TokenStream {
 }
 
 /// Emit the execute_workflow function.
-fn emit_execute_workflow(
+pub(crate) fn emit_execute_workflow(
     graph: &ExecutionGraph,
     ctx: &mut EmitContext,
 ) -> Result<TokenStream, CodegenError> {
