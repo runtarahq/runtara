@@ -16,24 +16,16 @@ crate-type = ["rlib"]
 [features]
 default = ["native"]
 
-# Native platform - includes C-dependent agents (xlsx, sftp, compression)
-native = [
-    "runtara-agents/native",
-]
+# Native platform — uses the native SDK backend (blocking ureq HTTP).
+native = []
 
-# WASI target (wasm32-wasip2) - blocking I/O, HTTP transport
-wasi = [
-    "runtara-sdk/wasi",
-    "runtara-agents/wasi",
-]
+# WASI target (wasm32-wasip1/wasip2) — wasi-http transport.
+wasi = ["runtara-sdk/wasi"]
 
-# Browser/Node.js target - JS interop
-wasm-js = [
-    "runtara-sdk/wasm-js",
-    "runtara-agents/wasm-js",
-]
+# Browser/Node.js target — JS HTTP interop.
+wasm-js = ["runtara-sdk/wasm-js"]
 
-# OpenTelemetry (native only) — requires tokio for OTEL batch exporter flush
+# OpenTelemetry (native only) — requires tokio for OTEL batch exporter flush.
 telemetry = [
     "native",
     "dep:tokio",
@@ -45,9 +37,9 @@ telemetry = [
 ]
 
 [dependencies]
-# Core dependencies
-runtara-agents = { path = "../runtara-agents", version = "5.1", default-features = false, features = ["integrations"] }
-runtara-ai = { path = "../runtara-ai", version = "5.1" }
+# Core dependency: the SDK protocol wrapper. Agent dispatch happens via
+# per-agent WIT bindings injected by `wac compose`, not by linking the
+# `runtara-agents` crate into the workflow.
 runtara-sdk = { path = "../runtara-sdk", version = "5.1", default-features = false, features = ["http"] }
 
 # Re-exported for workflows

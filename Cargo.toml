@@ -15,8 +15,6 @@ members = [
     "crates/runtara-http",
     "crates/runtara-workflow-stdlib",
     "crates/runtara-agent-macro",
-    # Agent testing
-    "crates/runtara-test-harness",
     # Text parsing
     "crates/runtara-text-parser",
     # Connection management

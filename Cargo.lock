@@ -4885,16 +4885,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "runtara-test-harness"
-version = "5.1.1"
-dependencies = [
- "runtara-dsl",
- "runtara-workflow-stdlib",
- "serde",
- "serde_json",
-]
-
-[[package]]
 name = "runtara-text-parser"
 version = "5.1.1"
 dependencies = [
@@ -4913,8 +4903,6 @@ dependencies = [
  "opentelemetry-appender-tracing 0.28.1",
  "opentelemetry-otlp 0.28.0",
  "opentelemetry_sdk 0.28.0",
- "runtara-agents",
- "runtara-ai",
  "runtara-dsl",
  "runtara-http",
  "runtara-sdk",
