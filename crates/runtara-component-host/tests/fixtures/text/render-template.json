@@ -1,0 +1,10 @@
+{
+  "input": {
+    "text": "Hello {{ name }}!",
+    "context": { "name": "World" }
+  },
+  "expect": {
+    "success": true,
+    "output_equals": "Hello World!"
+  }
+}
