@@ -132,6 +132,10 @@ fn emit_components_header(_agents: &[String]) -> TokenStream {
         mod bindings;
 
         use std::process::ExitCode;
+        // Arc is used throughout emit_execute_workflow / emit_main for the
+        // WorkflowInputs handle; the legacy codegen pulls it in transitively
+        // via stdlib but explicit import is more robust.
+        use std::sync::Arc;
         use bindings::exports::wasi::cli::run::Guest as __WorkflowGuest;
 
         // Same external pieces the legacy codegen pulls in.
@@ -250,13 +254,15 @@ fn emit_components_dispatch(agents: &[String]) -> TokenStream {
 }
 
 /// `Component` + `Guest::run()` wrapper that delegates to the emitted
-/// `fn main() -> ExitCode`.
+/// `fn main() -> ExitCode`. We fully-qualify `std::result::Result` here
+/// because `runtara_workflow_stdlib::prelude::*` (imported in the header)
+/// shadows `Result` with its own 1-generic alias.
 fn emit_guest_wrapper() -> TokenStream {
     quote! {
         struct __RuntaraWorkflowComponent;
 
         impl __WorkflowGuest for __RuntaraWorkflowComponent {
-            fn run() -> Result<(), ()> {
+            fn run() -> std::result::Result<(), ()> {
                 if matches!(main(), ExitCode::SUCCESS) {
                     Ok(())
                 } else {
@@ -396,29 +402,32 @@ fn emit_wac(agents: &[String]) -> String {
          package runtara:workflow-instance@0.0.1;\n\
          \n",
     );
-    // Instantiate each agent component the workflow uses. `wac` uses snake
-    // for local-variable identifiers but kebab for the package name (which
-    // matches the agent crate's `[package.metadata.component] package`).
+    // Instantiate each agent component the workflow uses. wac's identifier
+    // grammar matches WIT (kebab-case), and the variable name has to be a
+    // legal identifier — no underscores. Each agent component is instantiated
+    // under a variable named exactly after its kebab id so the workflow
+    // wiring below reads cleanly.
     for agent in agents {
         out.push_str(&format!(
-            "let {var}_comp = new runtara:agent-{pkg} {{ ... }};\n",
-            var = agent.replace('-', "_"),
-            pkg = agent,
+            "let agent-{id} = new runtara:agent-{id} {{ ... }};\n",
+            id = agent,
         ));
     }
     out.push('\n');
 
-    // Instantiate workflow-logic, wiring each import to the corresponding
-    // agent's `capabilities` export.
-    out.push_str("let wf = new runtara:workflow-logic {\n");
+    // Wire each agent instance into the workflow via wac's spread syntax —
+    // `{ ...agent-crypto, ...agent-shopify, ... }` matches workflow-logic's
+    // `import runtara:agent-<id>/capabilities@0.3.0` against each agent's
+    // same-named export by interface name and binds them. The trailing
+    // `...` leaves *unmatched* imports (notably `runtara:agent/types@0.3.0`
+    // — the shared records each agent's capabilities `use`s, plus all
+    // wasi:* imports) as imports of the composed component, satisfied by
+    // the host at instantiation.
+    out.push_str("let wf = new runtara:workflow-logic {");
     for agent in agents {
-        out.push_str(&format!(
-            "    {agent_kebab}: {agent_snake}_comp.capabilities,\n",
-            agent_kebab = agent,
-            agent_snake = agent.replace('-', "_"),
-        ));
+        out.push_str(&format!(" ...agent-{id},", id = agent));
     }
-    out.push_str("};\n\n");
+    out.push_str(" ... };\n\n");
     out.push_str("export wf...;\n");
     out
 }
@@ -442,11 +451,10 @@ mod tests {
     #[test]
     fn wac_instantiates_each_agent_and_workflow_logic() {
         let wac = emit_wac(&["crypto".into(), "object-model".into()]);
-        assert!(wac.contains("let crypto_comp = new runtara:agent-crypto"));
-        assert!(wac.contains("let object_model_comp = new runtara:agent-object-model"));
-        assert!(wac.contains("let wf = new runtara:workflow-logic"));
-        assert!(wac.contains("crypto: crypto_comp.capabilities"));
-        assert!(wac.contains("object-model: object_model_comp.capabilities"));
+        assert!(wac.contains("let agent-crypto = new runtara:agent-crypto"));
+        assert!(wac.contains("let agent-object-model = new runtara:agent-object-model"));
+        assert!(wac.contains("...agent-crypto"));
+        assert!(wac.contains("...agent-object-model"));
         assert!(wac.contains("export wf...;"));
     }
 

@@ -88,7 +88,12 @@ pub fn compile_workflow_components(input: CompilationInput) -> io::Result<Native
     let workflow_logic_wasm = run_cargo_component_build(&build_dir)?;
 
     // 5. Compose with the agent CAS.
-    let composed_wasm = run_wac_compose(&build_dir, &cas_dir, &workflow_logic_wasm)?;
+    let composed_wasm = run_wac_compose(
+        &build_dir,
+        &cas_dir,
+        &workflow_logic_wasm,
+        &artifacts.agents_required,
+    )?;
 
     // 6. Pack the result the existing runner expects.
     let bytes = fs::read(&composed_wasm)?;
@@ -407,26 +412,33 @@ fn run_wac_compose(
     build_dir: &Path,
     cas_dir: &Path,
     workflow_logic_wasm: &Path,
+    required: &[AgentRequirement],
 ) -> io::Result<PathBuf> {
     let out = build_dir.join("workflow.wasm");
-    let status = Command::new("wac")
-        .arg("compose")
+    let mut cmd = Command::new("wac");
+    cmd.arg("compose")
         .arg(build_dir.join("workflow.wac"))
         .arg("-d")
-        .arg(cas_dir)
-        .arg("--define")
         .arg(format!(
             "runtara:workflow-logic={}",
             workflow_logic_wasm.display()
+        ));
+    // Map each required agent package to its .wasm in the CAS so wac can
+    // resolve `new runtara:agent-<id> { ... }` instantiations.
+    for req in required {
+        let agent_wasm = cas_dir.join(format!("{}.wasm", req.package.replace(':', "-")));
+        cmd.arg("-d").arg(format!(
+            "{pkg}={path}",
+            pkg = req.package,
+            path = agent_wasm.display()
+        ));
+    }
+    cmd.arg("-o").arg(&out);
+    let status = cmd.status().map_err(|e| {
+        io::Error::other(format!(
+            "wac compose failed to launch (is wac-cli installed? `cargo install wac-cli --locked`): {e}"
         ))
-        .arg("-o")
-        .arg(&out)
-        .status()
-        .map_err(|e| {
-            io::Error::other(format!(
-                "wac compose failed to launch (is wac-cli installed? `cargo install wac-cli --locked`): {e}"
-            ))
-        })?;
+    })?;
     if !status.success() {
         return Err(io::Error::other(format!(
             "wac compose returned non-zero status {} (wac script: {}, cas: {})",
