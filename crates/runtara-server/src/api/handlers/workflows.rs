@@ -1723,8 +1723,11 @@ pub async fn set_current_version_handler(
     ),
     tag = "workflow-controller"
 )]
-#[instrument(skip(body))]
-pub async fn validate_graph_handler(Json(body): Json<Value>) -> (StatusCode, Json<Value>) {
+#[instrument(skip(catalog, body))]
+pub async fn validate_graph_handler(
+    State(catalog): State<std::sync::Arc<runtara_dsl::agent_meta::AgentCatalog>>,
+    Json(body): Json<Value>,
+) -> (StatusCode, Json<Value>) {
     // Validate that it's a valid JSON object
     if !body.is_object() {
         let error_response = json!({
@@ -1741,12 +1744,6 @@ pub async fn validate_graph_handler(Json(body): Json<Value>) -> (StatusCode, Jso
         "executionGraph": body.clone()
     })) {
         Ok(workflow) => {
-            // TODO(phase-c): thread the runtime AgentCatalog from app state
-            // here. For now, build it from the statically-linked agent set —
-            // both sources contain the same agents until Phase C lands.
-            let catalog = runtara_dsl::agent_meta::AgentCatalog::from_agents(
-                runtara_agents::registry::get_agents(),
-            );
             let validation_result = runtara_workflows::validation::validate_workflow(
                 &workflow.execution_graph,
                 &catalog,

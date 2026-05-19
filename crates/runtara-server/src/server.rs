@@ -514,6 +514,10 @@ struct AppState {
     /// Metadata service for agent listings — pre-built with the component
     /// dispatcher so component-backed agents override the legacy registry.
     agents: api::services::operators::AgentsService,
+    /// Shared snapshot of every agent the runtime can route to. Validators
+    /// consume this instead of `runtara_agents::registry` so the
+    /// server-side view matches what the dispatcher actually loaded.
+    agent_catalog: Arc<runtara_dsl::agent_meta::AgentCatalog>,
 }
 
 // Implement FromRef to allow extracting PgPool from AppState
@@ -534,6 +538,13 @@ impl axum::extract::FromRef<AppState> for Arc<ObjectStoreManager> {
 impl axum::extract::FromRef<AppState> for Option<AgentTestingService> {
     fn from_ref(state: &AppState) -> Option<AgentTestingService> {
         state.agent_testing.clone()
+    }
+}
+
+// Implement FromRef to allow extracting the agent catalog from AppState.
+impl axum::extract::FromRef<AppState> for Arc<runtara_dsl::agent_meta::AgentCatalog> {
+    fn from_ref(state: &AppState) -> Arc<runtara_dsl::agent_meta::AgentCatalog> {
+        state.agent_catalog.clone()
     }
 }
 
@@ -1164,6 +1175,19 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         AgentsService::new().with_component_dispatcher(component_dispatcher.clone())
     };
 
+    // Snapshot the runtime agent catalog once at boot. Validators in app
+    // state read this instead of the statically-linked agent registry. If
+    // the component dispatcher isn't configured, fall back to the
+    // statically-linked set so the validator surface keeps working.
+    let agent_catalog: Arc<runtara_dsl::agent_meta::AgentCatalog> = component_dispatcher
+        .as_ref()
+        .map(|d| d.catalog())
+        .unwrap_or_else(|| {
+            Arc::new(runtara_dsl::agent_meta::AgentCatalog::from_agents(
+                runtara_agents::registry::get_agents(),
+            ))
+        });
+
     // Build the unified execution engine shared by handlers and workers.
     // Handlers use it directly via AppState / FromRef; the trigger worker
     // constructs its own instance (no trigger_stream) for the detached path.
@@ -1572,6 +1596,7 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
             connections: connections_facade.clone(),
             engine: execution_engine.clone(),
             agents: agents_service.clone(),
+            agent_catalog: agent_catalog.clone(),
         })
         // Apply JWT authentication middleware to all tenant-scoped routes
         .route_layer(from_fn_with_state(
@@ -1840,6 +1865,7 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
             connections: connections_facade.clone(),
             engine: execution_engine.clone(),
             agents: agents_service.clone(),
+            agent_catalog: agent_catalog.clone(),
         })
         // Defense in depth: cap the request body on these public,
         // unauthenticated webhook ingest routes. events.rs also enforces this
