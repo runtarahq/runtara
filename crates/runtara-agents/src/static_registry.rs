@@ -2555,6 +2555,12 @@ pub static OUTPUT_TYPES: &[&OutputTypeMeta] = &[
     #[cfg(feature = "integrations")]
     &crate::integrations::shopify::__OUTPUT_META_CommerceGetLocationsOutput,
     #[cfg(feature = "integrations")]
+    &crate::integrations::shopify::__OUTPUT_META_CommerceProduct,
+    #[cfg(feature = "integrations")]
+    &crate::integrations::shopify::__OUTPUT_META_CommerceInventoryLevel,
+    #[cfg(feature = "integrations")]
+    &crate::integrations::shopify::__OUTPUT_META_CommerceOrder,
+    #[cfg(feature = "integrations")]
     &crate::integrations::slack::__OUTPUT_META_SendMessageOutput,
     #[cfg(feature = "integrations")]
     &crate::integrations::slack::__OUTPUT_META_UploadFileOutput,
