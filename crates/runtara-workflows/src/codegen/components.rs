@@ -318,7 +318,11 @@ serde = {{ version = "1", features = ["derive"] }}
 serde_json = "1"
 wit-bindgen-rt = {{ version = "0.44", features = ["bitflags"] }}
 runtara-workflow-stdlib = {{ path = "{stdlib_path}", default-features = false, features = ["wasi"] }}
-runtara-sdk = {{ path = "{sdk_path}" }}
+# default features ("http", "embedded") pull runtara-core → sqlx → rustls →
+# ring, which needs wasi-sdk to compile its C code for wasm32-wasip1. The
+# workflow only needs the wasi-http transport (no embedded DB access), so we
+# turn defaults off and opt in to exactly what we need.
+runtara-sdk = {{ path = "{sdk_path}", default-features = false, features = ["http", "wasi"] }}
 tracing = "0.1"
 
 [package.metadata.component]
