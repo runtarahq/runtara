@@ -322,18 +322,15 @@ struct ErrorResponseJson {
 // Helper functions
 // ============================================================================
 
-fn runner_type_from_string(s: &str) -> RunnerType {
-    match s.to_lowercase().as_str() {
-        "native" | "1" => RunnerType::Native,
-        "wasm" | "2" => RunnerType::Wasm,
-        _ => RunnerType::Oci,
-    }
+fn runner_type_from_string(_s: &str) -> RunnerType {
+    // Only one variant is left — every wire value coerces to it. We still
+    // take the string so the signature stays stable for callers that may
+    // someday route into multiple variants again.
+    RunnerType::Wasm
 }
 
 fn runner_type_to_string(rt: RunnerType) -> &'static str {
     match rt {
-        RunnerType::Oci => "oci",
-        RunnerType::Native => "native",
         RunnerType::Wasm => "wasm",
     }
 }

@@ -483,25 +483,25 @@ impl ListInstancesOptions {
 }
 
 /// Runner type for images.
+/// Type of runner. Only `Wasm` exists today; the OCI and native
+/// variants were removed in Phase 3 step 11. The enum is kept (rather
+/// than collapsed to a unit type) so the wire field stays a stable
+/// string and future runners can slot in without a breaking change.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RunnerType {
-    /// OCI container runner.
-    Oci,
-    /// Native process runner.
-    Native,
-    /// WebAssembly runner (default). Matches the components-mode
-    /// compile path in `runtara-workflows`, which always produces
-    /// a composed `workflow.wasm`.
+    /// WebAssembly runner. Matches the components-mode compile path in
+    /// `runtara-workflows`, which always produces a composed
+    /// `workflow.wasm`.
     #[default]
     Wasm,
 }
 
 impl From<RunnerType> for i32 {
     fn from(runner: RunnerType) -> Self {
+        // Wire codes match the historical proto numbering — keep `Wasm = 2`
+        // so wire-compatible clients still parse correctly.
         match runner {
-            RunnerType::Oci => 0,
-            RunnerType::Native => 1,
             RunnerType::Wasm => 2,
         }
     }
@@ -1561,19 +1561,19 @@ mod tests {
 
     #[test]
     fn test_runner_type_to_i32() {
-        assert_eq!(i32::from(RunnerType::Oci), 0);
-        assert_eq!(i32::from(RunnerType::Native), 1);
+        // Wire codes preserved from the multi-variant era. `Wasm = 2`
+        // matches the legacy proto numbering.
         assert_eq!(i32::from(RunnerType::Wasm), 2);
     }
 
     #[test]
     fn test_runner_type_serde() {
-        let runner = RunnerType::Native;
+        let runner = RunnerType::Wasm;
         let json = serde_json::to_string(&runner).unwrap();
-        assert_eq!(json, "\"native\"");
+        assert_eq!(json, "\"wasm\"");
 
         let deserialized: RunnerType = serde_json::from_str(&json).unwrap();
-        assert_eq!(deserialized, RunnerType::Native);
+        assert_eq!(deserialized, RunnerType::Wasm);
     }
 
     // ========================================================================
@@ -1762,7 +1762,7 @@ mod tests {
     fn test_register_image_stream_options_builder() {
         let opts = RegisterImageStreamOptions::new("tenant-1", "my-image", 1024)
             .with_description("Streaming image")
-            .with_runner_type(RunnerType::Native)
+            .with_runner_type(RunnerType::Wasm)
             .with_metadata(json!({"tag": "latest"}))
             .with_sha256("abc123");
 
@@ -1770,7 +1770,7 @@ mod tests {
         assert_eq!(opts.name, "my-image");
         assert_eq!(opts.binary_size, 1024);
         assert_eq!(opts.description, Some("Streaming image".to_string()));
-        assert_eq!(opts.runner_type, RunnerType::Native);
+        assert_eq!(opts.runner_type, RunnerType::Wasm);
         assert_eq!(opts.metadata, Some(json!({"tag": "latest"})));
         assert_eq!(opts.sha256, Some("abc123".to_string()));
     }

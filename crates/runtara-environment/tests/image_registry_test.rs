@@ -39,7 +39,7 @@ async fn test_register_and_get_image() {
 
     let image = ImageBuilder::new(tenant_id, &name, "/tmp/test-binary")
         .description("Test image")
-        .runner_type(RunnerType::Native)
+        .runner_type(RunnerType::Wasm)
         .build();
 
     let image_id = image.image_id.clone();
@@ -59,7 +59,7 @@ async fn test_register_and_get_image() {
     assert_eq!(retrieved.tenant_id, tenant_id);
     assert_eq!(retrieved.name, name);
     assert_eq!(retrieved.description, Some("Test image".to_string()));
-    assert_eq!(retrieved.runner_type, RunnerType::Native);
+    assert_eq!(retrieved.runner_type, RunnerType::Wasm);
 
     // Cleanup
     registry
@@ -324,7 +324,7 @@ async fn test_runner_type_default() {
         .await
         .expect("Failed to get image")
         .expect("Image not found");
-    assert_eq!(retrieved.runner_type, RunnerType::Oci);
+    assert_eq!(retrieved.runner_type, RunnerType::Wasm);
 
     // Cleanup
     registry

@@ -12,12 +12,12 @@
 //! ```rust,ignore
 //! use std::sync::Arc;
 //! use runtara_environment::runtime::EnvironmentRuntime;
-//! use runtara_environment::runner::oci::OciRunner;
+//! use runtara_environment::runner::wasm::WasmRunner;
 //!
 //! #[tokio::main]
 //! async fn main() -> anyhow::Result<()> {
 //!     let pool = sqlx::PgPool::connect("postgres://...").await?;
-//!     let runner = Arc::new(OciRunner::from_env());
+//!     let runner = Arc::new(WasmRunner::from_env());
 //!
 //!     let runtime = EnvironmentRuntime::builder()
 //!         .pool(pool)
@@ -44,13 +44,13 @@
 //! use std::sync::Arc;
 //! use runtara_core::persistence::PostgresPersistence;
 //! use runtara_environment::runtime::EnvironmentRuntime;
-//! use runtara_environment::runner::oci::OciRunner;
+//! use runtara_environment::runner::wasm::WasmRunner;
 //!
 //! #[tokio::main]
 //! async fn main() -> anyhow::Result<()> {
 //!     let pool = sqlx::PgPool::connect("postgres://...").await?;
 //!     let persistence = Arc::new(PostgresPersistence::new(pool.clone()));
-//!     let runner = Arc::new(OciRunner::from_env());
+//!     let runner = Arc::new(WasmRunner::from_env());
 //!
 //!     let runtime = EnvironmentRuntime::builder()
 //!         .pool(pool)

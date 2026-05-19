@@ -512,20 +512,12 @@ impl CompilationService {
             image_name, tenant_id, binary_size
         );
 
-        // Create registration options with workflow variables as metadata
+        // Create registration options with workflow variables as metadata.
+        // Every compile produces a components-mode `workflow.wasm`, so the
+        // runner type is always `Wasm` now.
         let options = RegisterImageStreamOptions::new(tenant_id, &image_name, binary_size)
             .with_description(format!("Workflow {} version {}", workflow_id, version))
-            .with_runner_type(
-                if compilation_result
-                    .binary_path
-                    .extension()
-                    .is_some_and(|ext| ext == "wasm")
-                {
-                    RunnerType::Wasm
-                } else {
-                    RunnerType::Oci
-                },
-            )
+            .with_runner_type(RunnerType::Wasm)
             .with_sha256(&compilation_result.binary_checksum)
             .with_metadata(serde_json::json!({
                 "variables": compilation_result.default_variables,
