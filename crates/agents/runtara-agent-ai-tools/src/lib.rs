@@ -1923,3 +1923,95 @@ fn error_string_to_error_info(s: String) -> ErrorInfo {
 
 #[cfg(target_arch = "wasm32")]
 bindings::export!(Component with_types_in bindings);
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fake_connection(integration_id: &str) -> RawConnection {
+        RawConnection {
+            connection_id: "test-conn".into(),
+            connection_subtype: None,
+            integration_id: integration_id.into(),
+            parameters: serde_json::Value::Null,
+            rate_limit_config: None,
+        }
+    }
+
+    #[test]
+    fn embed_text_rejects_missing_connection() {
+        let input = EmbedTextInput {
+            _connection: None,
+            texts: vec!["hi".into()],
+            model: None,
+            dimension: None,
+        };
+        let err = embed_text(input).unwrap_err();
+        assert_eq!(err.code, "AI_TOOLS_MISSING_CONNECTION");
+    }
+
+    #[test]
+    fn embed_text_rejects_empty_batch() {
+        let input = EmbedTextInput {
+            _connection: Some(fake_connection("openai_api_key")),
+            texts: vec![],
+            model: None,
+            dimension: None,
+        };
+        let err = embed_text(input).unwrap_err();
+        assert_eq!(err.code, "AI_TOOLS_INVALID_INPUT");
+        assert!(err.message.contains("at least one"), "{}", err.message);
+    }
+
+    #[test]
+    fn embed_text_rejects_empty_text_entry() {
+        let input = EmbedTextInput {
+            _connection: Some(fake_connection("openai_api_key")),
+            texts: vec!["ok".into(), String::new()],
+            model: None,
+            dimension: None,
+        };
+        let err = embed_text(input).unwrap_err();
+        assert_eq!(err.code, "AI_TOOLS_INVALID_INPUT");
+        assert!(err.message.contains("non-empty"), "{}", err.message);
+    }
+
+    #[test]
+    fn embed_text_rejects_oversize_dimension() {
+        let input = EmbedTextInput {
+            _connection: Some(fake_connection("openai_api_key")),
+            texts: vec!["x".into()],
+            model: None,
+            dimension: Some(99_999),
+        };
+        let err = embed_text(input).unwrap_err();
+        assert_eq!(err.code, "AI_TOOLS_INVALID_INPUT");
+        assert!(err.message.contains("dimension"), "{}", err.message);
+    }
+
+    #[test]
+    fn embed_text_rejects_zero_dimension() {
+        let input = EmbedTextInput {
+            _connection: Some(fake_connection("openai_api_key")),
+            texts: vec!["x".into()],
+            model: None,
+            dimension: Some(0),
+        };
+        let err = embed_text(input).unwrap_err();
+        assert_eq!(err.code, "AI_TOOLS_INVALID_INPUT");
+    }
+
+    #[test]
+    fn embed_text_rejects_oversize_batch() {
+        let texts = (0..AI_EMBED_TEXT_BATCH_CAP + 1)
+            .map(|i| format!("t-{}", i))
+            .collect();
+        let input = EmbedTextInput {
+            _connection: Some(fake_connection("openai_api_key")),
+            texts,
+            model: None,
+            dimension: None,
+        };
+        let err = embed_text(input).unwrap_err();
+        assert_eq!(err.code, "AI_TOOLS_BATCH_TOO_LARGE");
+    }
+}
