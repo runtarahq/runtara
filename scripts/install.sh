@@ -466,6 +466,11 @@ ${auth_lines}
 
 WASMTIME_PATH=${RUNTARA_DIR}/bin/wasmtime
 RUNTARA_WASM_LIBRARY_DIR=${RUNTARA_DIR}/stdlib
+# Pre-built agent components (one .wasm + .meta.json per agent) staged into
+# the bundle by scripts/build-bundle.sh. The server loads each pair into the
+# runtime AgentCatalog at boot, so the validator and workflow runtime see
+# the same agent set the dispatcher can route to.
+RUNTARA_AGENT_COMPONENTS_DIR=${RUNTARA_DIR}/agents
 DATA_DIR=${DATA_DIR}
 RUST_LOG=runtara_server=info,runtara_core=info,runtara_environment=info
 CONFEOF
@@ -653,12 +658,15 @@ print_summary() {
     echo ""
     printf '%s  Runtara v%s installed successfully!%s\n' "${GREEN}${BOLD}" "$version" "$NC"
     echo ""
-    echo "  Binary:     ${RUNTARA_DIR}/bin/runtara-server"
-    echo "  Toolchain:  ${RUNTARA_DIR}/toolchain/bin/rustc"
-    echo "  Stdlib:     ${RUNTARA_DIR}/stdlib/"
-    echo "  Wasmtime:   ${RUNTARA_DIR}/bin/wasmtime"
-    echo "  Config:     ${CONFIG_DIR}/runtara-server.conf"
-    echo "  Data:       ${DATA_DIR}/"
+    echo "  Binary:        ${RUNTARA_DIR}/bin/runtara-server"
+    echo "  Toolchain:     ${RUNTARA_DIR}/toolchain/bin/rustc"
+    echo "  Stdlib:        ${RUNTARA_DIR}/stdlib/"
+    echo "  Wasmtime:      ${RUNTARA_DIR}/bin/wasmtime"
+    echo "  wac:           ${RUNTARA_DIR}/bin/wac"
+    echo "  cargo-comp.:   ${RUNTARA_DIR}/bin/cargo-component"
+    echo "  Agents:        ${RUNTARA_DIR}/agents/"
+    echo "  Config:        ${CONFIG_DIR}/runtara-server.conf"
+    echo "  Data:          ${DATA_DIR}/"
     echo ""
 
     if [ "$OS" = "linux" ]; then
