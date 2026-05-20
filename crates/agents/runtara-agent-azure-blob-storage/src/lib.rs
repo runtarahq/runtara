@@ -25,7 +25,7 @@
 use base64::Engine as _;
 use runtara_agent_macro::{CapabilityInput, CapabilityOutput, capability};
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::Value;
 use std::collections::HashMap;
 use std::time::Duration;
 
@@ -219,23 +219,49 @@ fn extract_xml_tag(xml: &str, tag: &str) -> Option<String> {
     Some(xml[start..end].to_string())
 }
 
+/// One Azure container in the `storage_list_buckets` response.
+///
+/// Field names mirror the legacy `runtara-agents::agents::integrations::
+/// azure_blob_client::ContainerInfo` and the sibling
+/// `runtara-agent-s3-storage::S3BucketEntry` (typed capability outputs,
+/// not opaque `Value`) for consistency across the storage agent family.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContainerInfo {
+    pub name: String,
+    pub last_modified: String,
+}
+
+/// One Azure blob in the `storage_list_files` response.
+///
+/// `key` (not `name`) mirrors the s3 capability surface so workflows
+/// can swap between s3 and azure-blob without remapping field names.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BlobInfo {
+    pub key: String,
+    pub size: u64,
+    pub last_modified: String,
+    pub etag: String,
+}
+
 /// Parse the Azure `?comp=list` XML response for listing containers.
-/// Returns vec of `{"name": "...", "last_modified": "..."}` objects.
-fn parse_list_containers_xml(xml: &str) -> Vec<Value> {
+fn parse_list_containers_xml(xml: &str) -> Vec<ContainerInfo> {
     let mut containers = Vec::new();
     for block in xml.split("<Container>").skip(1) {
         let name = extract_xml_tag(block, "Name").unwrap_or_default();
         let last_modified = extract_xml_tag(block, "Last-Modified").unwrap_or_default();
         if !name.is_empty() {
-            containers.push(json!({"name": name, "last_modified": last_modified}));
+            containers.push(ContainerInfo {
+                name,
+                last_modified,
+            });
         }
     }
     containers
 }
 
 /// Parse the Azure `?restype=container&comp=list` XML response for listing blobs.
-/// Returns `(files, next_marker)` where files have `key`, `size`, `last_modified`, `etag`.
-fn parse_list_blobs_xml(xml: &str) -> (Vec<Value>, Option<String>) {
+/// Returns `(blobs, next_marker)`.
+fn parse_list_blobs_xml(xml: &str) -> (Vec<BlobInfo>, Option<String>) {
     // Azure uses <NextMarker> (empty tag = no more pages).
     let next_marker = extract_xml_tag(xml, "NextMarker").filter(|s| !s.is_empty());
     let mut objects = Vec::new();
@@ -245,14 +271,19 @@ fn parse_list_blobs_xml(xml: &str) -> (Vec<Value>, Option<String>) {
             .and_then(|s| s.parse().ok())
             .unwrap_or(0);
         let last_modified = extract_xml_tag(block, "Last-Modified").unwrap_or_default();
-        let etag = extract_xml_tag(block, "Etag").unwrap_or_default();
+        // Azure's REST docs use `<Etag>` but historical responses sometimes
+        // surface `<ETag>` (capitalized "T"). Try both so the parser is
+        // robust to either form — same fallback the legacy crate had.
+        let etag = extract_xml_tag(block, "Etag")
+            .or_else(|| extract_xml_tag(block, "ETag"))
+            .unwrap_or_default();
         if !key.is_empty() {
-            objects.push(json!({
-                "key": key,
-                "size": size,
-                "last_modified": last_modified,
-                "etag": etag,
-            }));
+            objects.push(BlobInfo {
+                key,
+                size,
+                last_modified,
+                etag,
+            });
         }
     }
     (objects, next_marker)
@@ -355,7 +386,7 @@ pub struct ListBucketsOutput {
         display_name = "Containers",
         description = "List of container names and last-modified timestamps"
     )]
-    pub buckets: Vec<Value>,
+    pub buckets: Vec<ContainerInfo>,
 
     #[field(display_name = "Error")]
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -773,7 +804,7 @@ pub struct ListFilesOutput {
         display_name = "Files",
         description = "List of blob objects with key, size, last_modified, etag"
     )]
-    pub files: Vec<Value>,
+    pub files: Vec<BlobInfo>,
 
     #[field(display_name = "Count", description = "Number of blobs returned")]
     pub count: u32,
@@ -1419,3 +1450,65 @@ fn error_string_to_error_info(s: String) -> ErrorInfo {
 
 #[cfg(target_arch = "wasm32")]
 bindings::export!(Component with_types_in bindings);
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_list_containers_extracts_name() {
+        let xml = r#"<?xml version="1.0"?>
+<EnumerationResults>
+  <Containers>
+    <Container>
+      <Name>uploads</Name>
+      <Properties>
+        <Last-Modified>Mon, 27 Jul 2026 12:00:00 GMT</Last-Modified>
+      </Properties>
+    </Container>
+    <Container>
+      <Name>reports</Name>
+      <Properties>
+        <Last-Modified>Tue, 28 Jul 2026 10:00:00 GMT</Last-Modified>
+      </Properties>
+    </Container>
+  </Containers>
+</EnumerationResults>"#;
+        let containers = parse_list_containers_xml(xml);
+        assert_eq!(containers.len(), 2);
+        assert_eq!(containers[0].name, "uploads");
+        assert_eq!(containers[1].name, "reports");
+    }
+
+    #[test]
+    fn parse_list_blobs_extracts_size_and_next_marker() {
+        let xml = r#"<?xml version="1.0"?>
+<EnumerationResults>
+  <Blobs>
+    <Blob>
+      <Name>file.txt</Name>
+      <Properties>
+        <Content-Length>42</Content-Length>
+        <Last-Modified>Mon, 27 Jul 2026 12:00:00 GMT</Last-Modified>
+        <Etag>"abc123"</Etag>
+      </Properties>
+    </Blob>
+  </Blobs>
+  <NextMarker>page2</NextMarker>
+</EnumerationResults>"#;
+        let (blobs, marker) = parse_list_blobs_xml(xml);
+        assert_eq!(blobs.len(), 1);
+        assert_eq!(blobs[0].key, "file.txt");
+        assert_eq!(blobs[0].size, 42);
+        assert_eq!(marker.as_deref(), Some("page2"));
+    }
+
+    #[test]
+    fn parse_azure_error_extracts_code_and_message() {
+        let body = r#"<?xml version="1.0"?>
+<Error><Code>ContainerNotFound</Code><Message>The specified container does not exist.</Message></Error>"#;
+        assert_eq!(
+            parse_azure_error(body),
+            "ContainerNotFound: The specified container does not exist."
+        );
+    }
+}
