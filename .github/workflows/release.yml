@@ -75,6 +75,16 @@ jobs:
       - name: Install wasm-pack
         run: cargo install wasm-pack --version 0.13.1 --locked
 
+      # build-bundle.sh installs cargo-component (~5 min cold) and
+      # downloads wac + wasmtime into this directory keyed by version.
+      # Cache it so re-runs of the release matrix amortize the install.
+      # Cache key includes pinned versions so any version bump invalidates.
+      - name: Cache bundle build dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/runtara-bundle-build
+          key: bundle-build-deps-${{ runner.os }}-${{ runner.arch }}-cargo-component-0.21.1-wac-0.10.0-wasmtime-43.0.0
+
       - name: Build bundle
         run: ./scripts/build-bundle.sh --output-dir target/bundle --version "${{ steps.get_version.outputs.version }}"
 

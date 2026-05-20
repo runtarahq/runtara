@@ -405,8 +405,46 @@ jobs:
           cache: true
           cache-workspaces: ". -> target"
 
+      # `cargo install cargo-component` is a ~5 min cold build. Cache the
+      # installed binary keyed on the pinned version so subsequent CI runs
+      # are sub-second. Version bumps invalidate the cache automatically.
+      - name: Cache cargo-component binary
+        id: cache-cargo-component
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/cargo-component
+          key: cargo-component-${{ runner.os }}-${{ runner.arch }}-0.21.1
+
       - name: Install cargo-component
+        if: steps.cache-cargo-component.outputs.cache-hit != 'true'
         run: cargo install cargo-component --version 0.21.1 --locked
+
+      # wac compose is needed by the workflow-compile e2e tests
+      # (RUNTARA_RUN_COMPONENTS_E2E=1). Upstream ships prebuilt static
+      # binaries — bypass cargo install to keep this fast.
+      - name: Cache wac binary
+        id: cache-wac
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/wac
+          key: wac-${{ runner.os }}-${{ runner.arch }}-0.10.0
+
+      - name: Install wac
+        if: steps.cache-wac.outputs.cache-hit != 'true'
+        env:
+          RUNNER_ARCH_LOCAL: ${{ runner.arch }}
+        run: |
+          set -euo pipefail
+          case "$RUNNER_ARCH_LOCAL" in
+            X64) asset="wac-cli-x86_64-unknown-linux-musl" ;;
+            ARM64) asset="wac-cli-aarch64-unknown-linux-musl" ;;
+            *) echo "Unsupported runner arch: $RUNNER_ARCH_LOCAL" >&2; exit 1 ;;
+          esac
+          mkdir -p ~/.cargo/bin
+          curl -fSL -o ~/.cargo/bin/wac \
+            "https://github.com/bytecodealliance/wac/releases/download/v0.10.0/${asset}"
+          chmod +x ~/.cargo/bin/wac
+          wac --version
 
       - name: Install wit-deps
         run: cargo install wit-deps-cli --locked
@@ -428,6 +466,23 @@ jobs:
 
       - name: Run dispatcher integration tests (incl. full-bundle drift detector)
         run: cargo test -p runtara-component-host --tests
+
+      # End-to-end: drive `cargo component build` + `wac compose` against
+      # real workflows that import the freshly-staged agent components,
+      # then load and execute the composed .wasm. This is the gate that
+      # catches drift between the per-agent WIT, the workflow logic crate,
+      # and the wac composition graph — none of which the lower-level
+      # tests cover.
+      - name: Run components-mode workflow e2e tests
+        env:
+          RUNTARA_RUN_COMPONENTS_E2E: "1"
+          RUNTARA_AGENT_COMPONENTS_DIR: ${{ github.workspace }}/target/wasm32-wasip1/release
+        run: |
+          cargo test -p runtara-workflows \
+            --test components_smoke \
+            --test components_e2e \
+            --test components_execute \
+            -- --test-threads=1
 
   notify-result:
     # Posts success or failure once all build/test jobs finish.
