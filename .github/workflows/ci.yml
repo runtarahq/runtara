@@ -423,9 +423,14 @@ jobs:
           path: ~/.cargo/bin/cargo-component
           key: cargo-component-${{ runner.os }}-${{ runner.arch }}-0.21.1
 
+      # Intentionally NOT using --locked. cargo-component v0.21.1's own
+      # Cargo.lock pins wit-parser v0.219.1, which has since been yanked
+      # from crates.io. Letting cargo resolve from the Cargo.toml ranges
+      # picks a non-yanked wit-parser. cargo-component itself stays
+      # pinned via --version.
       - name: Install cargo-component
         if: steps.cache-cargo-component.outputs.cache-hit != 'true'
-        run: cargo install cargo-component --version 0.21.1 --locked
+        run: cargo install cargo-component --version 0.21.1
 
       # wac compose is needed by the workflow-compile e2e tests
       # (RUNTARA_RUN_COMPONENTS_E2E=1). Upstream ships prebuilt static

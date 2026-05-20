@@ -268,10 +268,15 @@ install_cargo_component() {
     if [ -x "$bin" ]; then
         info "Using cached cargo-component at ${bin}"
     else
-        info "cargo install cargo-component --version ${CARGO_COMPONENT_VERSION} --locked --root ${root}"
+        # Intentionally NOT using --locked. cargo-component v0.21.1's own
+        # Cargo.lock pins wit-parser v0.219.1, which has since been yanked
+        # from crates.io. Letting cargo resolve from the Cargo.toml ranges
+        # picks a non-yanked wit-parser. The primary version (cargo-
+        # component itself) is still pinned via --version so behavior
+        # stays stable; only transitive deps shift.
+        info "cargo install cargo-component --version ${CARGO_COMPONENT_VERSION} --root ${root}"
         cargo install cargo-component \
             --version "$CARGO_COMPONENT_VERSION" \
-            --locked \
             --root "$root"
     fi
 
