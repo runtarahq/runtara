@@ -2155,38 +2155,45 @@ export function WorkflowTimelineView({
       ? renderInlineAddStep?.(activeAddStepRequest)
       : null;
 
+    if (inlineAddStep) {
+      return (
+        <div
+          className="h-full overflow-auto bg-background p-6"
+          data-testid="workflow-timeline-empty"
+        >
+          <div className="mx-auto w-full max-w-3xl overflow-hidden rounded-md border border-dashed border-primary/50 bg-card shadow-sm">
+            {inlineAddStep}
+          </div>
+        </div>
+      );
+    }
+
     return (
       <div
         className="flex h-full items-center justify-center bg-background p-6"
         data-testid="workflow-timeline-empty"
       >
-        {inlineAddStep ? (
-          <div className="w-full max-w-3xl overflow-hidden rounded-md border border-dashed border-primary/50 bg-card shadow-sm">
-            {inlineAddStep}
-          </div>
-        ) : (
-          <div className="max-w-sm rounded-md border bg-card p-6 text-center">
-            <Workflow
-              className="mx-auto size-10 text-muted-foreground"
-              aria-hidden="true"
-            />
-            <h2 className="mt-4 text-base font-semibold">No workflow steps</h2>
-            <p className="mt-2 text-sm text-muted-foreground">
-              Add the first step to see the automation timeline.
-            </p>
-            {!readOnly && !debugInspectMode && onAddStep && (
-              <Button
-                type="button"
-                className="mt-4"
-                onClick={() => onAddStep({})}
-                data-testid="timeline-add-step"
-              >
-                <Plus aria-hidden="true" />
-                Add step
-              </Button>
-            )}
-          </div>
-        )}
+        <div className="max-w-sm rounded-md border bg-card p-6 text-center">
+          <Workflow
+            className="mx-auto size-10 text-muted-foreground"
+            aria-hidden="true"
+          />
+          <h2 className="mt-4 text-base font-semibold">No workflow steps</h2>
+          <p className="mt-2 text-sm text-muted-foreground">
+            Add the first step to see the automation timeline.
+          </p>
+          {!readOnly && !debugInspectMode && onAddStep && (
+            <Button
+              type="button"
+              className="mt-4"
+              onClick={() => onAddStep({})}
+              data-testid="timeline-add-step"
+            >
+              <Plus aria-hidden="true" />
+              Add step
+            </Button>
+          )}
+        </div>
       </div>
     );
   }
