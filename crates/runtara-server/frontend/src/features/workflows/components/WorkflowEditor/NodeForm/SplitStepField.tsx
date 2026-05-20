@@ -112,10 +112,6 @@ export function SplitStepField({ name }: SplitStepFieldProps) {
   });
 
   // Config options
-  const splitParallelism = useWatch({
-    name: 'splitParallelism',
-    control: form.control,
-  });
   const splitSequential = useWatch({
     name: 'splitSequential',
     control: form.control,
@@ -974,24 +970,6 @@ export function SplitStepField({ name }: SplitStepFieldProps) {
                 shouldDirty: true,
               })
             }
-          />
-        </div>
-
-        <div className="space-y-2">
-          <Label className="text-sm">Parallelism</Label>
-          <p className="text-xs text-muted-foreground">
-            Maximum concurrent iterations (0 = unlimited)
-          </p>
-          <Input
-            type="number"
-            min={0}
-            value={splitParallelism ?? 0}
-            onChange={(e) =>
-              form.setValue('splitParallelism', parseInt(e.target.value) || 0, {
-                shouldDirty: true,
-              })
-            }
-            className="w-24"
           />
         </div>
       </div>
