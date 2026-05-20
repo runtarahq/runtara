@@ -24,7 +24,6 @@ rand = "0.8"
 # artifact, never hand-edited.
 runtara-agent-macro = { path = "../../runtara-agent-macro" }
 runtara-dsl = { path = "../../runtara-dsl", default-features = false }
-strum = { version = "0.26", features = ["derive"] }
 
 [package.metadata.component]
 package = "runtara:agent-utils"
