@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use runtara_connections::crypto::noop::NoOpCipher;
@@ -5,7 +6,7 @@ use runtara_connections::repository::connections::ConnectionRepository;
 use runtara_connections::service::connections::ConnectionService;
 use runtara_connections::{
     ConnectionStatus, ConnectionsConfig, ConnectionsFacade, ConnectionsState,
-    CreateConnectionRequest,
+    CreateConnectionRequest, IntegrationCompatibility,
 };
 use runtara_server::api::dto::object_model::{
     ColumnDefinition, ColumnType, CreateSchemaRequest, TextIndexKind,
@@ -116,6 +117,18 @@ async fn create_connection_schema(pool: &PgPool) -> Result<(), sqlx::Error> {
     Ok(())
 }
 
+fn test_compatibility() -> Arc<IntegrationCompatibility> {
+    let mut by_default_for: HashMap<String, Vec<String>> = HashMap::new();
+    by_default_for.insert("object_model".to_string(), vec!["postgres".to_string()]);
+    Arc::new(IntegrationCompatibility::new(by_default_for))
+}
+
+fn test_agent_catalog() -> Arc<runtara_dsl::agent_meta::AgentCatalog> {
+    Arc::new(runtara_dsl::agent_meta::AgentCatalog::from_agents(
+        Vec::new(),
+    ))
+}
+
 fn facade(pool: PgPool) -> ConnectionsFacade {
     ConnectionsFacade::new(ConnectionsState::from_config(ConnectionsConfig {
         db_pool: pool,
@@ -123,6 +136,8 @@ fn facade(pool: PgPool) -> ConnectionsFacade {
         public_base_url: "http://localhost".to_string(),
         http_client: reqwest::Client::new(),
         cipher: Arc::new(NoOpCipher),
+        compatibility: test_compatibility(),
+        agent_catalog: test_agent_catalog(),
     }))
 }
 
@@ -167,7 +182,7 @@ async fn object_model_routes_schemas_to_selected_connection_database() {
         fixture.server_pool.clone(),
         Arc::new(NoOpCipher),
     ));
-    let connection_service = ConnectionService::new(repo);
+    let connection_service = ConnectionService::new(repo, test_compatibility());
     let alternate_connection_id = connection_service
         .create_connection(
             CreateConnectionRequest {

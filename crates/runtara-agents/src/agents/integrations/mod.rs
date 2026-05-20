@@ -7,7 +7,6 @@ pub mod ai_tools;
 pub mod azure_blob_client;
 pub mod azure_blob_storage;
 pub mod bedrock;
-pub mod commerce;
 pub mod connection_types;
 pub mod hubspot;
 pub mod integration_utils;

@@ -433,18 +433,14 @@ struct TestCapabilityJsonRequest {
 // Helper functions
 // ============================================================================
 
-fn runner_type_from_string(s: &str) -> RunnerType {
-    match s.to_lowercase().as_str() {
-        "native" | "1" => RunnerType::Native,
-        "wasm" | "2" => RunnerType::Wasm,
-        _ => RunnerType::Oci,
-    }
+fn runner_type_from_string(_s: &str) -> RunnerType {
+    // Only one variant exists today — coerce every wire value to it.
+    // See `image_registry::RunnerType` for why the enum stays.
+    RunnerType::Wasm
 }
 
 fn runner_type_to_string(rt: RunnerType) -> &'static str {
     match rt {
-        RunnerType::Oci => "oci",
-        RunnerType::Native => "native",
         RunnerType::Wasm => "wasm",
     }
 }
@@ -583,7 +579,7 @@ async fn handle_register_image(
         .runner_type
         .as_deref()
         .map(runner_type_from_string)
-        .unwrap_or(RunnerType::Oci);
+        .unwrap_or_default();
 
     let req = RegisterImageRequest {
         tenant_id: body.tenant_id,
@@ -778,28 +774,17 @@ async fn handle_register_image_upload(
         let _ = std::fs::set_permissions(&binary_path, std::fs::Permissions::from_mode(0o755));
     }
 
-    // Create OCI bundle if needed
+    // Only one runner type exists — `Wasm`. We still let callers send
+    // `runner_type` for wire compatibility (it just coerces).
     let runner_type = runner_type_str
         .as_deref()
         .map(runner_type_from_string)
-        .unwrap_or(RunnerType::Oci);
+        .unwrap_or_default();
 
-    let bundle_path_str = if runner_type == RunnerType::Oci {
-        if let Err(e) = crate::runner::oci::create_bundle_at_path(&bundle_path, &binary_path) {
-            if !replacing_existing {
-                let _ = std::fs::remove_dir_all(&images_dir);
-            }
-            return error_response(
-                "BUNDLE_ERROR",
-                &format!("Failed to create OCI bundle: {}", e),
-                StatusCode::INTERNAL_SERVER_ERROR,
-            )
-            .into_response();
-        }
-        Some(bundle_path.to_string_lossy().to_string())
-    } else {
-        None
-    };
+    // OCI bundle dir is no longer populated; keep the field unused so
+    // the unused-binding lint doesn't fire.
+    let _ = bundle_path;
+    let bundle_path_str: Option<String> = None;
 
     // Build image
     let mut builder =

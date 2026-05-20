@@ -12,24 +12,23 @@ use sqlx::PgPool;
 use crate::error::Result;
 
 /// Type of runner that should be used for an image.
+///
+/// Only `Wasm` exists today — the OCI and native runners were removed in
+/// Phase 3 step 11 once components-mode became the only compile path.
+/// The enum stays so the wire field on the image registration API + the
+/// `runner_type` DB column can grow new variants without a schema change.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
 #[sqlx(type_name = "text", rename_all = "lowercase")]
 #[serde(rename_all = "lowercase")]
 pub enum RunnerType {
-    /// OCI container runner (crun)
+    /// WebAssembly runner. Every image registered today carries this value.
     #[default]
-    Oci,
-    /// Native process runner (direct execution)
-    Native,
-    /// WebAssembly runner
     Wasm,
 }
 
 impl std::fmt::Display for RunnerType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            RunnerType::Oci => write!(f, "oci"),
-            RunnerType::Native => write!(f, "native"),
             RunnerType::Wasm => write!(f, "wasm"),
         }
     }
@@ -40,9 +39,11 @@ impl std::str::FromStr for RunnerType {
 
     fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
-            "oci" => Ok(RunnerType::Oci),
-            "native" => Ok(RunnerType::Native),
             "wasm" => Ok(RunnerType::Wasm),
+            // `oci` and `native` used to map to dedicated runners; coerce
+            // them to `Wasm` rather than erroring so old image rows + old
+            // clients still land somewhere sensible.
+            "oci" | "native" => Ok(RunnerType::Wasm),
             _ => Err(format!("Unknown runner type: {}", s)),
         }
     }
@@ -317,7 +318,7 @@ impl ImageBuilder {
             description: None,
             binary_path: binary_path.into(),
             bundle_path: None,
-            runner_type: RunnerType::Oci,
+            runner_type: RunnerType::default(),
             metadata: None,
         }
     }

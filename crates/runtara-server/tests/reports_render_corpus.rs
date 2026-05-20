@@ -20,7 +20,9 @@ use std::sync::{Arc, OnceLock};
 
 use chrono::Utc;
 use runtara_connections::crypto::noop::NoOpCipher;
-use runtara_connections::{ConnectionsConfig, ConnectionsFacade, ConnectionsState};
+use runtara_connections::{
+    ConnectionsConfig, ConnectionsFacade, ConnectionsState, IntegrationCompatibility,
+};
 use runtara_server::api::dto::reports::{
     ReportDefinition, ReportDto, ReportRenderRequest, ReportStatus,
 };
@@ -239,6 +241,10 @@ async fn render_report_snapshots() {
             public_base_url: "http://localhost".to_string(),
             http_client: reqwest::Client::new(),
             cipher: Arc::new(NoOpCipher),
+            compatibility: Arc::new(IntegrationCompatibility::default()),
+            agent_catalog: Arc::new(runtara_dsl::agent_meta::AgentCatalog::from_agents(
+                Vec::new(),
+            )),
         },
     )));
     connections

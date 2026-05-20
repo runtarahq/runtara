@@ -1,0 +1,9 @@
+[package]
+name = "runtara-agent-wit"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Canonical WIT package (runtara:agent@0.1.0) for runtara agent components"
+keywords = ["wasm", "component-model", "wit", "agent"]
+categories = ["api-bindings"]

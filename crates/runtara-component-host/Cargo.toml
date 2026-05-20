@@ -1,0 +1,49 @@
+[package]
+name = "runtara-component-host"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Embedded wasmtime host for loading and invoking runtara agent components"
+keywords = ["wasm", "component-model", "wasmtime", "agent"]
+categories = ["wasm"]
+
+[dependencies]
+runtara-agent-wit = { path = "../runtara-agent-wit" }
+# Used as the canonical AgentInfo shape for sidecar meta.json files. The host
+# parses each agent's meta.json into AgentInfo and serves it back to the
+# server unchanged.
+runtara-dsl = { path = "../runtara-dsl" }
+
+# Embedded wasmtime engine + WASI Preview 2 support.
+# wasmtime crate version is independent of the wasmtime CLI version pinned in
+# scripts/build-bundle.sh — the CLI is a separate process used by WasmRunner
+# and goes away in Phase 6.
+wasmtime = { version = "44", default-features = false, features = [
+    "std",
+    "anyhow",
+    "runtime",
+    "component-model",
+    "async",
+    "cranelift",
+    "parallel-compilation",
+    "backtrace",
+    "addr2line",
+    "demangle",
+] }
+wasmtime-wasi = "44"
+wasmtime-wasi-http = "44"
+
+# Plumbing
+anyhow = "1"
+serde = { workspace = true }
+serde_json = { workspace = true }
+http = "1"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tempfile = "3"
+# Tests build their own bundle (.wasm + sidecar meta.json) at runtime by
+# calling each agent crate's host-only `agent_info()` and serializing the
+# resulting `AgentInfo` to JSON next to the freshly-built `.wasm`.
+runtara-agent-crypto = { path = "../agents/runtara-agent-crypto" }

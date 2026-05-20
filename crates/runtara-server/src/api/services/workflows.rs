@@ -9,6 +9,7 @@ use crate::api::utils::pagination::{normalize_page, normalize_page_size};
 use crate::api::utils::validation::is_valid_identifier;
 use crate::types::MemoryTier;
 use runtara_connections::ConnectionsFacade;
+use runtara_dsl::agent_meta::AgentCatalog;
 use runtara_workflows::validation::validate_workflow;
 use serde_json::Value;
 use std::sync::Arc;
@@ -17,6 +18,10 @@ use uuid::Uuid;
 pub struct WorkflowService {
     repository: Arc<WorkflowRepository>,
     connections: Arc<ConnectionsFacade>,
+    /// Snapshot of every agent the runtime can route to. Validators read
+    /// this instead of the statically-linked `runtara_agents::registry`,
+    /// so the service-side view matches what the dispatcher loaded.
+    agent_catalog: Arc<AgentCatalog>,
 }
 
 /// Validate a folder path for workflows.
@@ -110,10 +115,15 @@ fn json_value_kind(value: &Value) -> &'static str {
 }
 
 impl WorkflowService {
-    pub fn new(repository: Arc<WorkflowRepository>, connections: Arc<ConnectionsFacade>) -> Self {
+    pub fn new(
+        repository: Arc<WorkflowRepository>,
+        connections: Arc<ConnectionsFacade>,
+        agent_catalog: Arc<AgentCatalog>,
+    ) -> Self {
         Self {
             repository,
             connections,
+            agent_catalog,
         }
     }
 
@@ -411,7 +421,7 @@ impl WorkflowService {
 
         // Run comprehensive workflow validation from runtara-workflows
         // This validates security (connection leaks), structure, and configuration
-        let validation_result = validate_workflow(&workflow.execution_graph);
+        let validation_result = validate_workflow(&workflow.execution_graph, &self.agent_catalog);
 
         // Collect errors as structured DTOs (blocking)
         if !validation_result.errors.is_empty() {
@@ -831,7 +841,7 @@ impl WorkflowService {
 
         // Run comprehensive workflow validation from runtara-workflows
         // This validates security (connection leaks), structure, and configuration
-        let validation_result = validate_workflow(&workflow.execution_graph);
+        let validation_result = validate_workflow(&workflow.execution_graph, &self.agent_catalog);
 
         // Convert workflow errors to ValidationIssue format
         for error in &validation_result.errors {

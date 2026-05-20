@@ -17,7 +17,6 @@ use crate::container_registry::{ContainerInfo, ContainerRegistry};
 use crate::db;
 use crate::error::Result;
 use crate::image_registry::{ImageBuilder, ImageRegistry, RunnerType};
-use crate::runner::oci::create_bundle_at_path;
 use crate::runner::{LaunchOptions, Runner, RunnerHandle};
 
 /// Shared drain state for the environment runtime.
@@ -299,23 +298,11 @@ pub async fn handle_register_image(
         }
     }
 
-    // Create OCI bundle if runner type is OCI
-    let bundle_path_str = if request.runner_type == RunnerType::Oci {
-        if let Err(e) = create_bundle_at_path(&bundle_path, &binary_path) {
-            error!(error = %e, "Failed to create OCI bundle");
-            if !replacing_existing {
-                let _ = std::fs::remove_dir_all(&images_dir);
-            }
-            return Ok(RegisterImageResponse {
-                success: false,
-                image_id: String::new(),
-                error: Some(format!("Failed to create OCI bundle: {}", e)),
-            });
-        }
-        Some(bundle_path.to_string_lossy().to_string())
-    } else {
-        None
-    };
+    // OCI bundles used to be created here for `RunnerType::Oci`; the OCI
+    // runner was removed in Phase 3 step 11, so every image is wasm now
+    // and `bundle_path` stays unused on disk.
+    let _ = bundle_path;
+    let bundle_path_str: Option<String> = None;
 
     // Build image
     let mut builder = ImageBuilder::new(
@@ -490,23 +477,9 @@ pub async fn handle_start_instance(
         });
     }
 
-    // Ensure bundle/binary path exists
-    // WASM images use binary_path directly; OCI images use bundle_path
-    let bundle_path = if image.runner_type == RunnerType::Wasm {
-        PathBuf::from(&image.binary_path)
-    } else {
-        match &image.bundle_path {
-            Some(path) => PathBuf::from(path),
-            None => {
-                error!(image_id = %request.image_id, "Image has no bundle path");
-                return Ok(StartInstanceResponse {
-                    success: false,
-                    instance_id: String::new(),
-                    error: Some(format!("Image '{}' has no bundle", request.image_id)),
-                });
-            }
-        }
-    };
+    // Every image is wasm now, so the launcher always reads the binary
+    // directly. OCI bundle paths are vestigial from the rustc-direct era.
+    let bundle_path = PathBuf::from(&image.binary_path);
 
     // Generate or use provided instance ID
     let instance_id = request
@@ -895,22 +868,8 @@ pub async fn handle_resume_instance(
         });
     }
 
-    // Ensure bundle/binary path exists
-    // WASM images use binary_path directly; OCI images use bundle_path
-    let bundle_path = if image.runner_type == RunnerType::Wasm {
-        PathBuf::from(&image.binary_path)
-    } else {
-        match &image.bundle_path {
-            Some(path) => PathBuf::from(path),
-            None => {
-                error!(image_id = %image_id, "Image has no bundle path");
-                return Ok(ResumeInstanceResponse {
-                    success: false,
-                    error: Some(format!("Image '{}' has no bundle", image_id)),
-                });
-            }
-        }
-    };
+    // Every image is wasm now, so always read binary directly.
+    let bundle_path = PathBuf::from(&image.binary_path);
 
     // Build launch options with checkpoint and restored env
     let options = LaunchOptions {
@@ -1024,11 +983,6 @@ pub async fn handle_resume_instance(
 // ============================================================================
 // Container Monitor
 // ============================================================================
-
-/// Check if a process is alive by checking /proc/<pid> existence.
-pub(crate) fn is_process_alive(pid: i32) -> bool {
-    std::path::Path::new(&format!("/proc/{}", pid)).exists()
-}
 
 /// True if this monitor's handle no longer owns the container registry
 /// entry for the instance.
@@ -1334,8 +1288,12 @@ pub struct TestCapabilityResponse {
 
 /// Handle test capability request.
 ///
-/// This runs the test harness binary in an OCI container. The test request is stored
-/// in runtara-core and read via SDK. Results come from the runner's LaunchResult.
+/// **Deprecated.** This used to run a `runtara-test-harness` binary inside
+/// an OCI container, but the OCI runner was removed in Phase 3 step 11.
+/// The replacement is the `ComponentDispatcherService` in `runtara-server`,
+/// reachable via `POST /api/runtime/agents/{name}/capabilities/{cap}/test`.
+/// This endpoint now returns an explanatory error so existing clients see
+/// a clear migration path instead of an opaque crash.
 #[instrument(skip(state, request), fields(
     tenant_id = %request.tenant_id,
     agent_id = %request.agent_id,
@@ -1345,187 +1303,21 @@ pub async fn handle_test_capability(
     state: &EnvironmentHandlerState,
     request: TestCapabilityRequest,
 ) -> Result<TestCapabilityResponse> {
-    let start = std::time::Instant::now();
-
-    info!(
-        tenant_id = %request.tenant_id,
-        agent_id = %request.agent_id,
-        capability_id = %request.capability_id,
-        "Test capability request received"
-    );
-
-    // Get or register the test harness image
-    let image_registry = ImageRegistry::new(state.pool.clone());
-    let test_harness_image =
-        match get_or_register_test_harness(&image_registry, &state.data_dir).await {
-            Ok(image) => image,
-            Err(e) => {
-                error!(error = %e, "Failed to get test harness image");
-                return Ok(TestCapabilityResponse {
-                    success: false,
-                    output: None,
-                    error: Some(format!("Test harness not available: {}", e)),
-                    execution_time_ms: start.elapsed().as_millis() as u64,
-                });
-            }
-        };
-
-    // Build test request JSON
-    let test_input = serde_json::json!({
-        "agent_id": request.agent_id,
-        "capability_id": request.capability_id,
-        "input": request.input,
-        "connection": request.connection,
-    });
-
-    // Ensure bundle exists
-    let bundle_path = match &test_harness_image.bundle_path {
-        Some(path) => PathBuf::from(path),
-        None => {
-            error!("Test harness image has no bundle path");
-            return Ok(TestCapabilityResponse {
-                success: false,
-                output: None,
-                error: Some("Test harness image has no bundle".to_string()),
-                execution_time_ms: start.elapsed().as_millis() as u64,
-            });
-        }
-    };
-
-    // Generate a unique instance ID for this test
-    let instance_id = format!("test-{}", uuid::Uuid::new_v4());
-    let timeout = Duration::from_millis(request.timeout_ms.unwrap_or(30000) as u64);
-
-    // Build launch options
-    let options = LaunchOptions {
-        instance_id: instance_id.clone(),
-        tenant_id: request.tenant_id.clone(),
-        bundle_path,
-        input: test_input,
-        timeout,
-        runtara_core_addr: state.core_addr.clone(),
-        checkpoint_id: None,
-        env: std::collections::HashMap::new(), // Test harness doesn't need custom env
-    };
-
-    // Run synchronously (wait for completion)
-    let launch_result = state.runner.run(&options, None).await;
-
-    let execution_time_ms = start.elapsed().as_millis() as u64;
-
-    match launch_result {
-        Ok(result) => {
-            // runner.run() reads output from runtara-core persistence
-            if result.success {
-                Ok(TestCapabilityResponse {
-                    success: true,
-                    output: result.output,
-                    error: None,
-                    execution_time_ms,
-                })
-            } else {
-                Ok(TestCapabilityResponse {
-                    success: false,
-                    output: None,
-                    error: result
-                        .error
-                        .or(Some("Capability execution failed".to_string())),
-                    execution_time_ms,
-                })
-            }
-        }
-        Err(e) => {
-            error!(error = %e, "Test harness execution failed");
-            Ok(TestCapabilityResponse {
-                success: false,
-                output: None,
-                error: Some(format!("Execution failed: {}", e)),
-                execution_time_ms,
-            })
-        }
-    }
-}
-
-/// Get the test harness image, or register it if not present.
-async fn get_or_register_test_harness(
-    image_registry: &ImageRegistry,
-    data_dir: &std::path::Path,
-) -> std::result::Result<crate::image_registry::Image, String> {
-    // System tenant for test harness
-    const SYSTEM_TENANT: &str = "__system__";
-    const TEST_HARNESS_NAME: &str = "test-harness";
-
-    // Check if already registered
-    if let Ok(Some(image)) = image_registry
-        .get_by_name(SYSTEM_TENANT, TEST_HARNESS_NAME)
-        .await
-    {
-        return Ok(image);
-    }
-
-    // Look for pre-compiled test harness binary
-    // Expected locations (in order of preference):
-    // 1. $DATA_DIR/test-harness/binary
-    // 2. /usr/share/runtara/test-harness
-    let possible_paths = [
-        data_dir.join("test-harness").join("binary"),
-        PathBuf::from("/usr/share/runtara/test-harness"),
-    ];
-
-    let binary_path = possible_paths.iter().find(|p| p.exists()).ok_or_else(|| {
-        "Test harness binary not found. Please compile and install runtara-test-harness."
-            .to_string()
-    })?;
-
-    // Read binary
-    let binary = std::fs::read(binary_path)
-        .map_err(|e| format!("Failed to read test harness binary: {}", e))?;
-
-    // Create image directory
-    let image_id = uuid::Uuid::new_v4().to_string();
-    let images_dir = data_dir.join("images").join(&image_id);
-    let image_binary_path = images_dir.join("binary");
-    let bundle_path = images_dir.join("bundle");
-
-    std::fs::create_dir_all(&images_dir)
-        .map_err(|e| format!("Failed to create image directory: {}", e))?;
-
-    std::fs::write(&image_binary_path, &binary)
-        .map_err(|e| format!("Failed to write binary: {}", e))?;
-
-    // Make executable
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ =
-            std::fs::set_permissions(&image_binary_path, std::fs::Permissions::from_mode(0o755));
-    }
-
-    // Create OCI bundle
-    create_bundle_at_path(&bundle_path, &image_binary_path)
-        .map_err(|e| format!("Failed to create OCI bundle: {}", e))?;
-
-    // Build and register image
-    let mut image = ImageBuilder::new(
-        SYSTEM_TENANT,
-        TEST_HARNESS_NAME,
-        image_binary_path.to_string_lossy(),
-    )
-    .runner_type(RunnerType::Oci)
-    .description("Agent test harness binary")
-    .bundle_path(bundle_path.to_string_lossy())
-    .build();
-
-    image.image_id = image_id.clone();
-
-    image_registry
-        .register(&image)
-        .await
-        .map_err(|e| format!("Failed to register test harness image: {}", e))?;
-
-    info!(image_id = %image_id, "Test harness image registered");
-
-    Ok(image)
+    let _ = state;
+    let _ = request;
+    Ok(TestCapabilityResponse {
+        success: false,
+        output: None,
+        error: Some(
+            "Environment-side /api/v1/agents/test was removed when the OCI \
+             test-harness runner was deleted. Use the server's in-process \
+             component dispatcher instead: POST \
+             /api/runtime/agents/{name}/capabilities/{capability}/test on \
+             runtara-server."
+                .to_string(),
+        ),
+        execution_time_ms: 0,
+    })
 }
 
 /// Response for listing agents.
@@ -1615,7 +1407,7 @@ mod tests {
             description: None,
             binary_path: "/tmp/binary".to_string(),
             bundle_path: None,
-            runner_type: RunnerType::Oci,
+            runner_type: RunnerType::Wasm,
             created_at: Utc::now(),
             updated_at: Utc::now(),
             metadata,

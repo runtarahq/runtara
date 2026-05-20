@@ -44,6 +44,11 @@ pub struct Config {
     pub object_model_url: String,
     /// Agent service URL forwarded to workflow processes for native-only capabilities.
     pub agent_service_url: String,
+    /// Directory containing per-agent WASM components (`runtara_agent_*.wasm`).
+    /// When set, `AgentTestingService` routes known agents through the
+    /// embedded wasmtime path instead of the legacy dispatcher image.
+    /// See docs/wasm-components-migration-plan.md § 6.
+    pub agent_components_dir: Option<std::path::PathBuf>,
     /// Host or host:port authorities accepted by the MCP Streamable HTTP transport.
     pub mcp_allowed_hosts: Vec<String>,
     /// Backing store for MCP Streamable HTTP session recovery.
@@ -128,6 +133,11 @@ impl Config {
         let agent_service_url = std::env::var("RUNTARA_AGENT_SERVICE_URL")
             .unwrap_or_else(|_| format!("http://127.0.0.1:{}/api/internal/agents", internal_port));
 
+        let agent_components_dir = std::env::var("RUNTARA_AGENT_COMPONENTS_DIR")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .map(std::path::PathBuf::from);
+
         let mcp_allowed_hosts = mcp_allowed_hosts_from_raw(
             std::env::var(RUNTARA_MCP_ALLOWED_HOSTS_ENV).ok().as_deref(),
         );
@@ -169,6 +179,7 @@ impl Config {
             http_proxy_url,
             object_model_url,
             agent_service_url,
+            agent_components_dir,
             mcp_allowed_hosts,
             mcp_session_store,
             mcp_session_ttl_seconds,

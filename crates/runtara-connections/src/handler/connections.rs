@@ -14,6 +14,7 @@ use std::sync::Arc;
 
 use crate::config::ConnectionsState;
 use crate::crypto::CredentialCipher;
+use crate::integration_compatibility::IntegrationCompatibility;
 use crate::repository::connections::ConnectionRepository;
 use crate::service::connections::{ConnectionService, ServiceError};
 use crate::service::rate_limits::RateLimitService;
@@ -36,11 +37,12 @@ pub async fn create_connection_handler(
     crate::tenant::TenantId(tenant_id): crate::tenant::TenantId,
     State(pool): State<PgPool>,
     State(cipher): State<Arc<dyn CredentialCipher>>,
+    State(compatibility): State<Arc<IntegrationCompatibility>>,
     Json(payload): Json<CreateConnectionRequest>,
 ) -> Result<(StatusCode, Json<CreateConnectionResponse>), (StatusCode, Json<Value>)> {
     // Create service with repository
     let repository = Arc::new(ConnectionRepository::new(pool, cipher.clone()));
-    let service = ConnectionService::new(repository);
+    let service = ConnectionService::new(repository, compatibility);
 
     match service.create_connection(payload, &tenant_id).await {
         Ok(connection_id) => Ok((
@@ -101,11 +103,12 @@ pub async fn list_connections_handler(
     crate::tenant::TenantId(tenant_id): crate::tenant::TenantId,
     State(pool): State<PgPool>,
     State(cipher): State<Arc<dyn CredentialCipher>>,
+    State(compatibility): State<Arc<IntegrationCompatibility>>,
     Query(params): Query<ListConnectionsQuery>,
 ) -> Result<Json<ListConnectionsResponse>, (StatusCode, Json<Value>)> {
     // Create service with repository
     let repository = Arc::new(ConnectionRepository::new(pool.clone(), cipher.clone()));
-    let service = ConnectionService::new(repository.clone());
+    let service = ConnectionService::new(repository.clone(), compatibility);
 
     match service
         .list_connections(&tenant_id, params.integration_id, params.status)
@@ -192,11 +195,12 @@ pub async fn get_connection_handler(
     crate::tenant::TenantId(tenant_id): crate::tenant::TenantId,
     State(pool): State<PgPool>,
     State(cipher): State<Arc<dyn CredentialCipher>>,
+    State(compatibility): State<Arc<IntegrationCompatibility>>,
     Path(id): Path<String>,
 ) -> Result<Json<ConnectionResponse>, (StatusCode, Json<Value>)> {
     // Create service with repository
     let repository = Arc::new(ConnectionRepository::new(pool, cipher.clone()));
-    let service = ConnectionService::new(repository);
+    let service = ConnectionService::new(repository, compatibility);
 
     match service.get_connection(&id, &tenant_id).await {
         Ok(connection) => Ok(Json(ConnectionResponse {
@@ -243,12 +247,13 @@ pub async fn update_connection_handler(
     crate::tenant::TenantId(tenant_id): crate::tenant::TenantId,
     State(pool): State<PgPool>,
     State(cipher): State<Arc<dyn CredentialCipher>>,
+    State(compatibility): State<Arc<IntegrationCompatibility>>,
     Path(id): Path<String>,
     Json(payload): Json<UpdateConnectionRequest>,
 ) -> Result<Json<ConnectionResponse>, (StatusCode, Json<Value>)> {
     // Create service with repository
     let repository = Arc::new(ConnectionRepository::new(pool, cipher.clone()));
-    let service = ConnectionService::new(repository);
+    let service = ConnectionService::new(repository, compatibility);
 
     match service.update_connection(&id, &tenant_id, payload).await {
         Ok(connection) => Ok(Json(ConnectionResponse {
@@ -308,11 +313,12 @@ pub async fn delete_connection_handler(
     crate::tenant::TenantId(tenant_id): crate::tenant::TenantId,
     State(pool): State<PgPool>,
     State(cipher): State<Arc<dyn CredentialCipher>>,
+    State(compatibility): State<Arc<IntegrationCompatibility>>,
     Path(id): Path<String>,
 ) -> Result<Json<DeleteConnectionResponse>, (StatusCode, Json<Value>)> {
     // Create service with repository
     let repository = Arc::new(ConnectionRepository::new(pool, cipher.clone()));
-    let service = ConnectionService::new(repository);
+    let service = ConnectionService::new(repository, compatibility);
 
     match service.delete_connection(&id, &tenant_id).await {
         Ok(()) => Ok(Json(DeleteConnectionResponse {
@@ -369,15 +375,20 @@ pub async fn get_connections_by_operator_handler(
     crate::tenant::TenantId(tenant_id): crate::tenant::TenantId,
     State(pool): State<PgPool>,
     State(cipher): State<Arc<dyn CredentialCipher>>,
+    State(compatibility): State<Arc<IntegrationCompatibility>>,
+    State(catalog): State<Arc<runtara_dsl::agent_meta::AgentCatalog>>,
     Path(operator_name): Path<String>,
     Query(params): Query<ListConnectionsQuery>,
 ) -> Result<Json<ListConnectionsResponse>, (StatusCode, Json<Value>)> {
-    // Create service with repository
+    // Translate the agent id (operator name) to its declared integration
+    // ids using the runtime catalog. The service stays agent-agnostic.
+    let integration_ids = catalog.integration_ids_for(&operator_name);
+
     let repository = Arc::new(ConnectionRepository::new(pool, cipher.clone()));
-    let service = ConnectionService::new(repository);
+    let service = ConnectionService::new(repository, compatibility);
 
     match service
-        .list_connections_by_operator(&tenant_id, &operator_name, params.status)
+        .list_connections_by_integration_ids(&tenant_id, &integration_ids, params.status)
         .await
     {
         Ok(connections) => {
@@ -597,7 +608,11 @@ pub async fn get_connection_for_runtime_handler(
         state.redis_manager.clone(),
         state.db_pool,
     ));
-    let service = ConnectionService::with_rate_limit_service(repository, rate_limit_service);
+    let service = ConnectionService::with_rate_limit_service(
+        repository,
+        state.compatibility.clone(),
+        rate_limit_service,
+    );
 
     match service
         .get_for_runtime(&connection_id, &tenant_id, metadata)

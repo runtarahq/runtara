@@ -29,7 +29,6 @@ use crate::valkey;
 use crate::workers;
 
 use api::services::agent_testing::AgentTestingService;
-use api::services::dispatcher::DispatcherService;
 
 use api::repositories::object_model::ObjectStoreManager;
 
@@ -512,6 +511,13 @@ struct AppState {
     connections: Arc<runtara_connections::ConnectionsFacade>,
     /// Unified execution engine — single orchestrator for all execution paths
     engine: Arc<workers::execution_engine::ExecutionEngine>,
+    /// Metadata service for agent listings — pre-built with the component
+    /// dispatcher so component-backed agents override the legacy registry.
+    agents: api::services::operators::AgentsService,
+    /// Shared snapshot of every agent the runtime can route to. Validators
+    /// consume this instead of `runtara_agents::registry` so the
+    /// server-side view matches what the dispatcher actually loaded.
+    agent_catalog: Arc<runtara_dsl::agent_meta::AgentCatalog>,
 }
 
 // Implement FromRef to allow extracting PgPool from AppState
@@ -532,6 +538,13 @@ impl axum::extract::FromRef<AppState> for Arc<ObjectStoreManager> {
 impl axum::extract::FromRef<AppState> for Option<AgentTestingService> {
     fn from_ref(state: &AppState) -> Option<AgentTestingService> {
         state.agent_testing.clone()
+    }
+}
+
+// Implement FromRef to allow extracting the agent catalog from AppState.
+impl axum::extract::FromRef<AppState> for Arc<runtara_dsl::agent_meta::AgentCatalog> {
+    fn from_ref(state: &AppState) -> Arc<runtara_dsl::agent_meta::AgentCatalog> {
+        state.agent_catalog.clone()
     }
 }
 
@@ -588,6 +601,13 @@ impl axum::extract::FromRef<AppState> for Arc<workers::execution_engine::Executi
     }
 }
 
+// Implement FromRef to allow extracting AgentsService from AppState
+impl axum::extract::FromRef<AppState> for api::services::operators::AgentsService {
+    fn from_ref(state: &AppState) -> api::services::operators::AgentsService {
+        state.agents.clone()
+    }
+}
+
 #[derive(Serialize)]
 struct HealthResponse {
     status: String,
@@ -618,34 +638,16 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
     }
     println!("✓ Runtara stdlib: {}", server_config.stdlib_name);
 
-    if let Ok(lib_dir) = std::env::var("RUNTARA_NATIVE_LIBRARY_DIR") {
-        println!("✓ Native library dir: {}", lib_dir);
-    } else {
-        // runtara-workflows checks target/native_cache by default
-        let default_cache = std::path::Path::new("target/native_cache");
-        if default_cache
-            .join("libruntara_workflow_stdlib.rlib")
-            .exists()
-        {
-            println!("✓ Native library dir: target/native_cache (default)");
-        } else {
-            println!("⚠ Native library not found in target/native_cache");
-            println!(
-                "  Run: cargo build -p runtara-workflow-stdlib --release --target x86_64-unknown-linux-musl"
-            );
-            println!("  Then copy artifacts to target/native_cache/");
-        }
-    }
-
     // Initialize OpenTelemetry with Datadog integration
     // Must be called BEFORE any tracing macros are used
     observability::init_telemetry()?;
 
-    // Validate agent metadata - ensures all capabilities have CapabilityInput and CapabilityOutput defined
-    // This catches missing metadata at startup rather than at runtime
-    runtara_agents::registry::validate_agent_metadata_or_panic();
-    println!("✓ Agent metadata validated");
-
+    // The agent catalog is now sourced from the component dispatcher's
+    // `<agent>.meta.json` sidecars at boot — the bundle-emit step generates
+    // those from the macro derives, so any inconsistency surfaces at build
+    // time. The boot-time `validate_agent_metadata_or_panic()` checked
+    // self-consistency of the compile-time aggregator in `runtara-agents`,
+    // which is now vestigial; the check is removed.
     println!("✓ Configured for tenant: {}", server_config.tenant_id);
     println!("✓ Object model URL: {}", server_config.object_model_url);
     println!("✓ Agent service URL: {}", server_config.agent_service_url);
@@ -777,6 +779,70 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
+    // Build the component dispatcher (embedded wasmtime) once at startup and
+    // share its Arc with every service that needs it — the compilation worker
+    // reads its catalog so compiled workflows see the same agent set the
+    // runtime can route to; `AgentTestingService` routes test invocations
+    // through it; `AgentsService` reads its metadata to override the legacy
+    // registry for component-backed agents.
+    let component_dispatcher: Option<Arc<runtara_component_host::ComponentDispatcherService>> = {
+        let cfg = config::get();
+        if let Some(ref dir) = cfg.agent_components_dir {
+            use runtara_component_host::{ComponentDispatcherService, DispatcherEnv};
+            let env = DispatcherEnv {
+                proxy_url: cfg.http_proxy_url.clone(),
+                agent_service_url: cfg.agent_service_url.clone(),
+                object_model_url: cfg.object_model_url.clone(),
+                core_http_url: format!("http://127.0.0.1:{}", cfg.internal_port),
+            };
+            match ComponentDispatcherService::from_dir(dir, env).await {
+                Ok(dispatcher) => {
+                    let loaded: Vec<&str> = dispatcher.agent_ids().collect();
+                    println!(
+                        "✓ Component dispatcher loaded {} agent(s) from {}: {}",
+                        loaded.len(),
+                        dir.display(),
+                        loaded.join(", ")
+                    );
+                    Some(Arc::new(dispatcher))
+                }
+                Err(e) => {
+                    println!(
+                        "⚠ Failed to load WASM agent components from {}: {}",
+                        dir.display(),
+                        e
+                    );
+                    println!("  Continuing with legacy dispatcher only.");
+                    None
+                }
+            }
+        } else {
+            None
+        }
+    };
+
+    // Snapshot the runtime agent catalog once at boot. Validators in app
+    // state read this instead of the statically-linked agent registry. If
+    // the component dispatcher isn't configured, fall back to the
+    // statically-linked set so the validator surface keeps working.
+    let agent_catalog: Arc<runtara_dsl::agent_meta::AgentCatalog> = component_dispatcher
+        .as_ref()
+        .map(|d| d.catalog())
+        .unwrap_or_else(|| {
+            Arc::new(runtara_dsl::agent_meta::AgentCatalog::from_agents(
+                runtara_agents::registry::get_agents(),
+            ))
+        });
+
+    // Derive the connection-defaults compatibility map from the runtime
+    // agent catalog. Encapsulates the `default_for → integration_ids` view
+    // that the connection service uses for validation, plus virtual
+    // platform-level buckets (e.g. `object_storage`) the catalog doesn't
+    // know about.
+    let integration_compatibility = Arc::new(
+        runtara_connections::IntegrationCompatibility::from_catalog(&agent_catalog),
+    );
+
     // Construct connections crate config and facade.
     // Cipher is built from RUNTARA_CONNECTIONS_ENCRYPTION_KEY env var — falls
     // back to NoOp (plaintext at rest) with a loud warning if missing. See
@@ -788,6 +854,8 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
             .unwrap_or_else(|_| "http://localhost:8080".to_string()),
         http_client: reqwest::Client::new(),
         cipher: runtara_connections::cipher_from_env(),
+        compatibility: integration_compatibility.clone(),
+        agent_catalog: agent_catalog.clone(),
     };
     let connections_state =
         runtara_connections::ConnectionsState::from_config(connections_config.clone());
@@ -1031,10 +1099,13 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         });
 
         // Start compilation worker (processes compilation queue)
-        // This worker handles async compilation requests queued by save operations
+        // This worker handles async compilation requests queued by save operations.
+        // We hand it the runtime agent catalog so compiled workflows see the
+        // same agent set the dispatcher can route to.
         let compilation_pool = pool.clone();
         let compilation_runtime_client = runtime_client.clone();
         let compilation_shutdown = shutdown_signal.clone();
+        let compilation_agent_catalog = component_dispatcher.as_ref().map(|d| d.catalog());
         tokio::spawn(async move {
             let worker_config = workers::compilation_worker::CompilationWorkerConfig::from_env(
                 compilation_worker_config.connection_url(),
@@ -1043,6 +1114,7 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
             workers::compilation_worker::run(
                 compilation_pool,
                 compilation_runtime_client,
+                compilation_agent_catalog,
                 worker_config,
                 compilation_shutdown,
             )
@@ -1104,31 +1176,28 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or(true);
 
     let agent_testing: Option<AgentTestingService> = if enable_operator_testing {
-        if let Some(ref client) = runtime_client {
-            let dispatcher_service = Arc::new(DispatcherService::new(client.clone()));
-
-            // Initialize dispatcher at startup (compile and register if needed)
-            println!("Initializing agent dispatcher...");
-            match dispatcher_service.initialize(&tenant_id).await {
-                Ok(image_id) => {
-                    println!("✓ Agent dispatcher ready (image: {})", image_id);
-                    let service = AgentTestingService::new(true, Some(dispatcher_service))
-                        .with_connections(connections_facade.clone());
-                    Some(service)
-                }
-                Err(e) => {
-                    println!("⚠ Failed to initialize agent dispatcher: {}", e);
-                    println!("  Agent testing will not be available");
-                    None
-                }
-            }
+        if let Some(ref dispatcher) = component_dispatcher {
+            println!("✓ Agent testing wired to embedded component dispatcher");
+            Some(
+                AgentTestingService::new(true)
+                    .with_connections(connections_facade.clone())
+                    .with_component_dispatcher(dispatcher.clone()),
+            )
         } else {
-            println!("⚠ Agent testing requested but runtime client not available");
+            println!("⚠ Agent testing requested but no component dispatcher available");
+            println!("  (no agent .wasm components staged at $RUNTARA_AGENT_COMPONENTS_DIR)");
             None
         }
     } else {
         println!("Agent testing disabled (ENABLE_OPERATOR_TESTING=false)");
         None
+    };
+
+    // Build the AgentsService once with the component dispatcher attached so
+    // every handler reads the same component-backed metadata view.
+    let agents_service = {
+        use crate::api::services::operators::AgentsService;
+        AgentsService::new().with_component_dispatcher(component_dispatcher.clone())
     };
 
     // Build the unified execution engine shared by handlers and workers.
@@ -1467,6 +1536,10 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
             get(api::handlers::operators::get_agent_connection_schema_handler),
         )
         .route(
+            "/api/runtime/_internal/components/status",
+            get(api::handlers::operators::components_status_handler),
+        )
+        .route(
             "/api/runtime/agents/{name}/capabilities/{capability_id}/test",
             post(api::handlers::agent_testing::test_agent_handler),
         )
@@ -1534,6 +1607,8 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
             ),
             connections: connections_facade.clone(),
             engine: execution_engine.clone(),
+            agents: agents_service.clone(),
+            agent_catalog: agent_catalog.clone(),
         })
         // Apply JWT authentication middleware to all tenant-scoped routes
         .route_layer(from_fn_with_state(
@@ -1801,6 +1876,8 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
             ),
             connections: connections_facade.clone(),
             engine: execution_engine.clone(),
+            agents: agents_service.clone(),
+            agent_catalog: agent_catalog.clone(),
         })
         // Defense in depth: cap the request body on these public,
         // unauthenticated webhook ingest routes. events.rs also enforces this

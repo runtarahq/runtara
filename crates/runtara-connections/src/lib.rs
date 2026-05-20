@@ -4,6 +4,7 @@ pub mod crypto;
 pub mod error;
 pub mod facade;
 pub mod handler;
+pub mod integration_compatibility;
 pub mod repository;
 pub mod router;
 pub mod service;
@@ -21,6 +22,7 @@ pub use crypto::{
 };
 pub use error::ConnectionsError;
 pub use facade::ConnectionsFacade;
+pub use integration_compatibility::{IntegrationCompatibility, OBJECT_STORAGE_DEFAULT_FOR};
 pub use repository::connections::{ConnectionWithParameters, ReencryptionStats};
 pub use router::{admin_router, connections_router, oauth_callback_router, runtime_router};
 pub use tenant::TenantId;

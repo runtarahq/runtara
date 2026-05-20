@@ -134,66 +134,6 @@ pub static CAPABILITY_REGISTRATIONS: &[CapabilityRegistration] = &[
         executor: &crate::datetime::__CAPABILITY_EXECUTOR_UNIX_TO_DATE,
     },
     CapabilityRegistration {
-        meta: &crate::file::__CAPABILITY_META_FILE_WRITE_FILE,
-        input_type: &crate::file::__INPUT_META_WriteFileInput,
-        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
-        executor: &crate::file::__CAPABILITY_EXECUTOR_FILE_WRITE_FILE,
-    },
-    CapabilityRegistration {
-        meta: &crate::file::__CAPABILITY_META_FILE_READ_FILE,
-        input_type: &crate::file::__INPUT_META_ReadFileInput,
-        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
-        executor: &crate::file::__CAPABILITY_EXECUTOR_FILE_READ_FILE,
-    },
-    CapabilityRegistration {
-        meta: &crate::file::__CAPABILITY_META_FILE_LIST_FILES,
-        input_type: &crate::file::__INPUT_META_ListFilesInput,
-        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
-        executor: &crate::file::__CAPABILITY_EXECUTOR_FILE_LIST_FILES,
-    },
-    CapabilityRegistration {
-        meta: &crate::file::__CAPABILITY_META_FILE_DELETE_FILE,
-        input_type: &crate::file::__INPUT_META_DeleteFileInput,
-        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
-        executor: &crate::file::__CAPABILITY_EXECUTOR_FILE_DELETE_FILE,
-    },
-    CapabilityRegistration {
-        meta: &crate::file::__CAPABILITY_META_FILE_FILE_EXISTS,
-        input_type: &crate::file::__INPUT_META_FileExistsInput,
-        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
-        executor: &crate::file::__CAPABILITY_EXECUTOR_FILE_FILE_EXISTS,
-    },
-    CapabilityRegistration {
-        meta: &crate::file::__CAPABILITY_META_FILE_COPY_FILE,
-        input_type: &crate::file::__INPUT_META_CopyFileInput,
-        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
-        executor: &crate::file::__CAPABILITY_EXECUTOR_FILE_COPY_FILE,
-    },
-    CapabilityRegistration {
-        meta: &crate::file::__CAPABILITY_META_FILE_MOVE_FILE,
-        input_type: &crate::file::__INPUT_META_MoveFileInput,
-        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
-        executor: &crate::file::__CAPABILITY_EXECUTOR_FILE_MOVE_FILE,
-    },
-    CapabilityRegistration {
-        meta: &crate::file::__CAPABILITY_META_FILE_CREATE_DIRECTORY,
-        input_type: &crate::file::__INPUT_META_CreateDirectoryInput,
-        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
-        executor: &crate::file::__CAPABILITY_EXECUTOR_FILE_CREATE_DIRECTORY,
-    },
-    CapabilityRegistration {
-        meta: &crate::file::__CAPABILITY_META_FILE_GET_FILE_INFO,
-        input_type: &crate::file::__INPUT_META_GetFileInfoInput,
-        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
-        executor: &crate::file::__CAPABILITY_EXECUTOR_FILE_GET_FILE_INFO,
-    },
-    CapabilityRegistration {
-        meta: &crate::file::__CAPABILITY_META_FILE_APPEND_FILE,
-        input_type: &crate::file::__INPUT_META_AppendFileInput,
-        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
-        executor: &crate::file::__CAPABILITY_EXECUTOR_FILE_APPEND_FILE,
-    },
-    CapabilityRegistration {
         meta: &crate::http::__CAPABILITY_META_HTTP_REQUEST,
         input_type: &crate::http::__INPUT_META_HttpRequestInput,
         #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
@@ -282,76 +222,6 @@ pub static CAPABILITY_REGISTRATIONS: &[CapabilityRegistration] = &[
         input_type: &crate::integrations::bedrock::__INPUT_META_BedrockListModelsInput,
         #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::integrations::bedrock::__CAPABILITY_EXECUTOR_BEDROCK_LIST_MODELS,
-    },
-    #[cfg(feature = "integrations")]
-    CapabilityRegistration {
-        meta: &crate::integrations::commerce::__CAPABILITY_META_GET_PRODUCTS,
-        input_type: &crate::integrations::commerce::__INPUT_META_CommerceGetProductsInput,
-        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
-        executor: &crate::integrations::commerce::__CAPABILITY_EXECUTOR_GET_PRODUCTS,
-    },
-    #[cfg(feature = "integrations")]
-    CapabilityRegistration {
-        meta: &crate::integrations::commerce::__CAPABILITY_META_GET_LOCATIONS,
-        input_type: &crate::integrations::commerce::__INPUT_META_CommerceGetLocationsInput,
-        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
-        executor: &crate::integrations::commerce::__CAPABILITY_EXECUTOR_GET_LOCATIONS,
-    },
-    #[cfg(feature = "integrations")]
-    CapabilityRegistration {
-        meta: &crate::integrations::commerce::__CAPABILITY_META_GET_PRODUCT,
-        input_type: &crate::integrations::commerce::__INPUT_META_CommerceGetProductInput,
-        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
-        executor: &crate::integrations::commerce::__CAPABILITY_EXECUTOR_GET_PRODUCT,
-    },
-    #[cfg(feature = "integrations")]
-    CapabilityRegistration {
-        meta: &crate::integrations::commerce::__CAPABILITY_META_CREATE_PRODUCT,
-        input_type: &crate::integrations::commerce::__INPUT_META_CommerceCreateProductInput,
-        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
-        executor: &crate::integrations::commerce::__CAPABILITY_EXECUTOR_CREATE_PRODUCT,
-    },
-    #[cfg(feature = "integrations")]
-    CapabilityRegistration {
-        meta: &crate::integrations::commerce::__CAPABILITY_META_UPDATE_PRODUCT,
-        input_type: &crate::integrations::commerce::__INPUT_META_CommerceUpdateProductInput,
-        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
-        executor: &crate::integrations::commerce::__CAPABILITY_EXECUTOR_UPDATE_PRODUCT,
-    },
-    #[cfg(feature = "integrations")]
-    CapabilityRegistration {
-        meta: &crate::integrations::commerce::__CAPABILITY_META_DELETE_PRODUCT,
-        input_type: &crate::integrations::commerce::__INPUT_META_CommerceDeleteProductInput,
-        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
-        executor: &crate::integrations::commerce::__CAPABILITY_EXECUTOR_DELETE_PRODUCT,
-    },
-    #[cfg(feature = "integrations")]
-    CapabilityRegistration {
-        meta: &crate::integrations::commerce::__CAPABILITY_META_GET_INVENTORY,
-        input_type: &crate::integrations::commerce::__INPUT_META_CommerceGetInventoryInput,
-        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
-        executor: &crate::integrations::commerce::__CAPABILITY_EXECUTOR_GET_INVENTORY,
-    },
-    #[cfg(feature = "integrations")]
-    CapabilityRegistration {
-        meta: &crate::integrations::commerce::__CAPABILITY_META_UPDATE_INVENTORY,
-        input_type: &crate::integrations::commerce::__INPUT_META_CommerceUpdateInventoryInput,
-        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
-        executor: &crate::integrations::commerce::__CAPABILITY_EXECUTOR_UPDATE_INVENTORY,
-    },
-    #[cfg(feature = "integrations")]
-    CapabilityRegistration {
-        meta: &crate::integrations::commerce::__CAPABILITY_META_GET_ORDERS,
-        input_type: &crate::integrations::commerce::__INPUT_META_CommerceGetOrdersInput,
-        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
-        executor: &crate::integrations::commerce::__CAPABILITY_EXECUTOR_GET_ORDERS,
-    },
-    #[cfg(feature = "integrations")]
-    CapabilityRegistration {
-        meta: &crate::integrations::commerce::__CAPABILITY_META_GET_ORDER,
-        input_type: &crate::integrations::commerce::__INPUT_META_CommerceGetOrderInput,
-        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
-        executor: &crate::integrations::commerce::__CAPABILITY_EXECUTOR_GET_ORDER,
     },
     #[cfg(feature = "integrations")]
     CapabilityRegistration {
@@ -2007,16 +1877,6 @@ pub static INPUT_TYPES: &[&InputTypeMeta] = &[
     &crate::datetime::__INPUT_META_DateToUnixInput,
     &crate::datetime::__INPUT_META_UnixToDateInput,
     &crate::datetime::__INPUT_META_RoundDateInput,
-    &crate::file::__INPUT_META_WriteFileInput,
-    &crate::file::__INPUT_META_ReadFileInput,
-    &crate::file::__INPUT_META_ListFilesInput,
-    &crate::file::__INPUT_META_DeleteFileInput,
-    &crate::file::__INPUT_META_FileExistsInput,
-    &crate::file::__INPUT_META_CopyFileInput,
-    &crate::file::__INPUT_META_MoveFileInput,
-    &crate::file::__INPUT_META_CreateDirectoryInput,
-    &crate::file::__INPUT_META_GetFileInfoInput,
-    &crate::file::__INPUT_META_AppendFileInput,
     &crate::http::__INPUT_META_HttpRequestInput,
     #[cfg(feature = "integrations")]
     &crate::integrations::ai_tools::__INPUT_META_AiTextCompletionInput,
@@ -2042,26 +1902,6 @@ pub static INPUT_TYPES: &[&InputTypeMeta] = &[
     &crate::integrations::bedrock::__INPUT_META_BedrockInvokeModelInput,
     #[cfg(feature = "integrations")]
     &crate::integrations::bedrock::__INPUT_META_BedrockListModelsInput,
-    #[cfg(feature = "integrations")]
-    &crate::integrations::commerce::__INPUT_META_CommerceGetProductsInput,
-    #[cfg(feature = "integrations")]
-    &crate::integrations::commerce::__INPUT_META_CommerceGetLocationsInput,
-    #[cfg(feature = "integrations")]
-    &crate::integrations::commerce::__INPUT_META_CommerceGetProductInput,
-    #[cfg(feature = "integrations")]
-    &crate::integrations::commerce::__INPUT_META_CommerceCreateProductInput,
-    #[cfg(feature = "integrations")]
-    &crate::integrations::commerce::__INPUT_META_CommerceUpdateProductInput,
-    #[cfg(feature = "integrations")]
-    &crate::integrations::commerce::__INPUT_META_CommerceDeleteProductInput,
-    #[cfg(feature = "integrations")]
-    &crate::integrations::commerce::__INPUT_META_CommerceGetInventoryInput,
-    #[cfg(feature = "integrations")]
-    &crate::integrations::commerce::__INPUT_META_CommerceUpdateInventoryInput,
-    #[cfg(feature = "integrations")]
-    &crate::integrations::commerce::__INPUT_META_CommerceGetOrdersInput,
-    #[cfg(feature = "integrations")]
-    &crate::integrations::commerce::__INPUT_META_CommerceGetOrderInput,
     #[cfg(feature = "integrations")]
     &crate::integrations::hubspot::__INPUT_META_ListBusinessUnitsInput,
     #[cfg(feature = "integrations")]
@@ -2491,15 +2331,6 @@ pub static OUTPUT_TYPES: &[&OutputTypeMeta] = &[
     &crate::crypto::__OUTPUT_META_HashResult,
     &crate::datetime::__OUTPUT_META_TimeBetweenResult,
     &crate::datetime::__OUTPUT_META_UnixTimestampResult,
-    &crate::file::__OUTPUT_META_WriteFileResponse,
-    &crate::file::__OUTPUT_META_WorkspaceFileInfo,
-    &crate::file::__OUTPUT_META_DeleteResponse,
-    &crate::file::__OUTPUT_META_ExistsResponse,
-    &crate::file::__OUTPUT_META_CopyResponse,
-    &crate::file::__OUTPUT_META_MoveResponse,
-    &crate::file::__OUTPUT_META_CreateDirResponse,
-    &crate::file::__OUTPUT_META_FileMetadata,
-    &crate::file::__OUTPUT_META_AppendFileResponse,
     &crate::http::__OUTPUT_META_HttpResponse,
     #[cfg(feature = "integrations")]
     &crate::integrations::ai_tools::__OUTPUT_META_AiTextCompletionOutput,
@@ -2525,22 +2356,6 @@ pub static OUTPUT_TYPES: &[&OutputTypeMeta] = &[
     &crate::integrations::bedrock::__OUTPUT_META_BedrockInvokeModelOutput,
     #[cfg(feature = "integrations")]
     &crate::integrations::bedrock::__OUTPUT_META_BedrockListModelsOutput,
-    #[cfg(feature = "integrations")]
-    &crate::integrations::commerce::__OUTPUT_META_CommerceProduct,
-    #[cfg(feature = "integrations")]
-    &crate::integrations::commerce::__OUTPUT_META_CommerceInventoryLevel,
-    #[cfg(feature = "integrations")]
-    &crate::integrations::commerce::__OUTPUT_META_CommerceOrder,
-    #[cfg(feature = "integrations")]
-    &crate::integrations::commerce::__OUTPUT_META_CommerceLocation,
-    #[cfg(feature = "integrations")]
-    &crate::integrations::commerce::__OUTPUT_META_CommerceGetProductsOutput,
-    #[cfg(feature = "integrations")]
-    &crate::integrations::commerce::__OUTPUT_META_CommerceGetLocationsOutput,
-    #[cfg(feature = "integrations")]
-    &crate::integrations::commerce::__OUTPUT_META_CommerceDeleteProductOutput,
-    #[cfg(feature = "integrations")]
-    &crate::integrations::commerce::__OUTPUT_META_CommerceGetOrdersOutput,
     #[cfg(feature = "integrations")]
     &crate::integrations::hubspot::__OUTPUT_META_ListBusinessUnitsOutput,
     #[cfg(feature = "integrations")]
@@ -2740,6 +2555,12 @@ pub static OUTPUT_TYPES: &[&OutputTypeMeta] = &[
     #[cfg(feature = "integrations")]
     &crate::integrations::shopify::__OUTPUT_META_CommerceGetLocationsOutput,
     #[cfg(feature = "integrations")]
+    &crate::integrations::shopify::__OUTPUT_META_CommerceProduct,
+    #[cfg(feature = "integrations")]
+    &crate::integrations::shopify::__OUTPUT_META_CommerceInventoryLevel,
+    #[cfg(feature = "integrations")]
+    &crate::integrations::shopify::__OUTPUT_META_CommerceOrder,
+    #[cfg(feature = "integrations")]
     &crate::integrations::slack::__OUTPUT_META_SendMessageOutput,
     #[cfg(feature = "integrations")]
     &crate::integrations::slack::__OUTPUT_META_UploadFileOutput,
@@ -2887,17 +2708,6 @@ const AGENT_MODULE_BEDROCK: AgentModuleConfig = AgentModuleConfig {
 };
 
 #[cfg(feature = "integrations")]
-const AGENT_MODULE_COMMERCE: AgentModuleConfig = AgentModuleConfig {
-    id: "commerce",
-    name: "Commerce",
-    description: "Unified interface for product, order, and inventory management across multiple e-commerce platforms",
-    has_side_effects: true,
-    supports_connections: true,
-    integration_ids: &["shopify_access_token", "shopify_client_credentials"],
-    secure: true,
-};
-
-#[cfg(feature = "integrations")]
 const AGENT_MODULE_HUBSPOT: AgentModuleConfig = AgentModuleConfig {
     id: "hubspot",
     name: "HubSpot",
@@ -3003,8 +2813,6 @@ pub static EXTRA_AGENT_MODULES: &[&AgentModuleConfig] = &[
     &AGENT_MODULE_AI_TOOLS,
     #[cfg(feature = "integrations")]
     &AGENT_MODULE_BEDROCK,
-    #[cfg(feature = "integrations")]
-    &AGENT_MODULE_COMMERCE,
     #[cfg(feature = "integrations")]
     &AGENT_MODULE_HUBSPOT,
     #[cfg(feature = "integrations")]

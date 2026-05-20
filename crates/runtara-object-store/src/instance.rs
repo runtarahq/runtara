@@ -112,9 +112,10 @@ impl UpdateInstanceRequest {
 // ============================================================================
 
 /// Behavior on unique-key conflict for bulk-create.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub enum ConflictMode {
     /// Default — any unique conflict aborts the transaction.
+    #[default]
     Error,
     /// `INSERT ... ON CONFLICT (cols) DO NOTHING` — conflicting rows are silently skipped.
     Skip { conflict_columns: Vec<String> },
@@ -122,25 +123,14 @@ pub enum ConflictMode {
     Upsert { conflict_columns: Vec<String> },
 }
 
-impl Default for ConflictMode {
-    fn default() -> Self {
-        Self::Error
-    }
-}
-
 /// Behavior on per-row validation failure for bulk-create.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 pub enum ValidationMode {
     /// Default — first validation failure aborts the whole bulk.
+    #[default]
     Stop,
     /// Invalid rows are recorded in `errors` and skipped; valid rows still insert.
     Skip,
-}
-
-impl Default for ValidationMode {
-    fn default() -> Self {
-        Self::Stop
-    }
 }
 
 #[derive(Debug, Clone, Default)]

@@ -16,7 +16,6 @@ native-agents = ["runtara-agents/native"]
 wasm-js = ["runtara-agents/wasm-js"]
 
 [dependencies]
-runtara-ai = { path = "../runtara-ai", version = "5.1" }
 runtara-agents = { path = "../runtara-agents", version = "5.1", default-features = false }
 runtara-dsl = { path = "../runtara-dsl", version = "5.1" }
 serde = { version = "1.0", features = ["derive"] }
@@ -36,3 +35,4 @@ required-features = ["compiler"]
 [dev-dependencies]
 tempfile = "3"
 syn = { version = "2.0", features = ["full", "parsing"] }
+base64 = { workspace = true }

@@ -51,13 +51,13 @@ fn test_signal_type_to_i32() {
 
 #[test]
 fn test_runner_type_default() {
-    assert_eq!(RunnerType::default(), RunnerType::Oci);
+    assert_eq!(RunnerType::default(), RunnerType::Wasm);
 }
 
 #[test]
 fn test_runner_type_to_i32() {
-    assert_eq!(i32::from(RunnerType::Oci), 0);
-    assert_eq!(i32::from(RunnerType::Native), 1);
+    // Wire codes preserved from the multi-variant era. `Wasm = 2`
+    // matches the legacy proto numbering.
     assert_eq!(i32::from(RunnerType::Wasm), 2);
 }
 
@@ -124,14 +124,14 @@ fn test_register_image_options_builder() {
     let binary = vec![0, 1, 2, 3, 4];
     let opts = RegisterImageOptions::new("tenant-abc", "my-image", binary.clone())
         .with_description("Test image")
-        .with_runner_type(RunnerType::Native)
+        .with_runner_type(RunnerType::Wasm)
         .with_metadata(serde_json::json!({"version": "1.0"}));
 
     assert_eq!(opts.tenant_id, "tenant-abc");
     assert_eq!(opts.name, "my-image");
     assert_eq!(opts.binary, binary);
     assert_eq!(opts.description, Some("Test image".to_string()));
-    assert_eq!(opts.runner_type, RunnerType::Native);
+    assert_eq!(opts.runner_type, RunnerType::Wasm);
     assert!(opts.metadata.is_some());
 }
 
@@ -196,9 +196,9 @@ fn test_signal_type_serialize() {
 
 #[test]
 fn test_runner_type_serialize() {
-    let runner = RunnerType::Native;
+    let runner = RunnerType::Wasm;
     let json = serde_json::to_string(&runner).unwrap();
-    assert_eq!(json, "\"native\"");
+    assert_eq!(json, "\"wasm\"");
 }
 
 #[test]

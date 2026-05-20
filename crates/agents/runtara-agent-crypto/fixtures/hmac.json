@@ -1,0 +1,15 @@
+{
+  "input": {
+    "data": "Hello World",
+    "secret": "secret-key",
+    "algorithm": "hmac-sha256",
+    "outputFormat": "hex"
+  },
+  "expect": {
+    "success": true,
+    "output_contains": {
+      "algorithm": "hmac-sha256",
+      "format": "hex"
+    }
+  }
+}

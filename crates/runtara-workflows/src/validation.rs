@@ -1135,7 +1135,15 @@ impl std::fmt::Display for ValidationWarning {
 ///
 /// Returns a `ValidationResult` containing errors and warnings.
 /// Compilation should fail if there are any errors.
-pub fn validate_workflow(graph: &ExecutionGraph) -> ValidationResult {
+///
+/// `catalog` is the runtime-loaded agent metadata snapshot — every agent +
+/// capability + input/output type the validator can resolve against. On the
+/// server it comes from `ComponentDispatcherService::catalog()`; the browser
+/// WASM builds it from a JSON payload pushed by the host page.
+pub fn validate_workflow(
+    graph: &ExecutionGraph,
+    catalog: &runtara_dsl::agent_meta::AgentCatalog,
+) -> ValidationResult {
     let mut result = ValidationResult::default();
 
     // Phase 1: Graph structure validation
@@ -1154,7 +1162,7 @@ pub fn validate_workflow(graph: &ExecutionGraph) -> ValidationResult {
     validate_template_static_references(graph, &mut result);
 
     // Phase 3: Agent/capability validation
-    validate_agents(graph, &mut result);
+    validate_agents(graph, catalog, &mut result);
 
     // Phase 4: Configuration warnings
     validate_configuration(graph, &mut result);
@@ -1169,7 +1177,7 @@ pub fn validate_workflow(graph: &ExecutionGraph) -> ValidationResult {
     validate_step_names(graph, &mut result);
 
     // Phase 9: Compensation validation (warnings for missing compensation)
-    validate_compensation(graph, &mut result);
+    validate_compensation(graph, catalog, &mut result);
 
     // Phase 10: Edge condition validation (unique priorities, at most one default)
     validate_edge_conditions(graph, &mut result);
@@ -1182,8 +1190,11 @@ pub fn validate_workflow(graph: &ExecutionGraph) -> ValidationResult {
 
 /// Legacy function for backward compatibility.
 /// Returns only errors (no warnings) as a Vec.
-pub fn validate_workflow_errors(graph: &ExecutionGraph) -> Vec<ValidationError> {
-    validate_workflow(graph).errors
+pub fn validate_workflow_errors(
+    graph: &ExecutionGraph,
+    catalog: &runtara_dsl::agent_meta::AgentCatalog,
+) -> Vec<ValidationError> {
+    validate_workflow(graph, catalog).errors
 }
 
 /// Validate a workflow with access to child workflow definitions.
@@ -1192,9 +1203,10 @@ pub fn validate_workflow_errors(graph: &ExecutionGraph) -> Vec<ValidationError> 
 /// against child workflow inputSchemas.
 pub fn validate_workflow_with_children(
     graph: &ExecutionGraph,
+    catalog: &runtara_dsl::agent_meta::AgentCatalog,
     child_workflows: &HashMap<String, ExecutionGraph>,
 ) -> ValidationResult {
-    let mut result = validate_workflow(graph);
+    let mut result = validate_workflow(graph, catalog);
 
     // Check for circular dependencies first
     validate_circular_dependencies(graph, child_workflows, &mut result);
@@ -2177,19 +2189,18 @@ fn has_path(adjacency: &HashMap<String, Vec<String>>, from: &str, to: &str) -> b
 // Phase 3: Agent/Capability Validation
 // ============================================================================
 
-fn validate_agents(graph: &ExecutionGraph, result: &mut ValidationResult) {
-    // Get available agents
-    let available_agents: Vec<String> = runtara_agents::registry::get_all_agent_modules()
-        .into_iter()
-        .map(|m| m.id.to_string())
-        .collect();
+fn validate_agents(
+    graph: &ExecutionGraph,
+    catalog: &runtara_dsl::agent_meta::AgentCatalog,
+    result: &mut ValidationResult,
+) {
+    // Get available agents from the runtime catalog
+    let available_agents: Vec<String> = catalog.agents().iter().map(|a| a.id.clone()).collect();
 
     for (step_id, step) in &graph.steps {
         if let Step::Agent(agent_step) = step {
-            // Validate agent exists
-            let Some(agent_module) =
-                runtara_agents::registry::find_agent_module(&agent_step.agent_id)
-            else {
+            // Validate agent exists in the runtime catalog
+            let Some(agent) = catalog.agent(&agent_step.agent_id) else {
                 result.errors.push(ValidationError::UnknownAgent {
                     step_id: step_id.clone(),
                     agent_id: agent_step.agent_id.clone(),
@@ -2199,10 +2210,7 @@ fn validate_agents(graph: &ExecutionGraph, result: &mut ValidationResult) {
             };
 
             // Validate capability exists
-            let capability_inputs = runtara_agents::registry::get_capability_inputs(
-                &agent_step.agent_id,
-                &agent_step.capability_id,
-            );
+            let capability = catalog.capability(&agent_step.agent_id, &agent_step.capability_id);
 
             if agent_step.agent_id == "object_model"
                 && let Some(mapping) = &agent_step.input_mapping
@@ -2211,18 +2219,9 @@ fn validate_agents(graph: &ExecutionGraph, result: &mut ValidationResult) {
                 validate_condition_input_mapping(step_id, "condition", condition, result);
             }
 
-            if capability_inputs.is_none() {
-                // Get available capabilities for this agent
+            if capability.is_none() {
                 let available_capabilities: Vec<String> =
-                    runtara_agents::registry::get_all_capabilities()
-                        .filter(|c| {
-                            c.module
-                                .map(|m| m.eq_ignore_ascii_case(&agent_step.agent_id))
-                                .unwrap_or(false)
-                        })
-                        .map(|c| c.capability_id.to_string())
-                        .collect();
-
+                    agent.capabilities.iter().map(|c| c.id.clone()).collect();
                 result.errors.push(ValidationError::UnknownCapability {
                     step_id: step_id.clone(),
                     agent_id: agent_step.agent_id.clone(),
@@ -2235,7 +2234,7 @@ fn validate_agents(graph: &ExecutionGraph, result: &mut ValidationResult) {
             if agent_capability_requires_connection(
                 &agent_step.agent_id,
                 &agent_step.capability_id,
-                agent_module,
+                agent,
             ) && connection_id_is_missing(agent_step.connection_id.as_ref())
             {
                 result.errors.push(ValidationError::AgentMissingConnection {
@@ -2246,7 +2245,8 @@ fn validate_agents(graph: &ExecutionGraph, result: &mut ValidationResult) {
             }
 
             // Validate required inputs are provided
-            if let Some(inputs) = capability_inputs {
+            if let Some(capability) = capability {
+                let inputs = &capability.inputs;
                 // Extract root field names from provided keys.
                 // Input mappings can use nested paths like "data.field_name" to build nested objects.
                 // We need to extract the root field name ("data") to check if it's provided.
@@ -2266,7 +2266,7 @@ fn validate_agents(graph: &ExecutionGraph, result: &mut ValidationResult) {
                 let available_fields: Vec<String> = inputs.iter().map(|f| f.name.clone()).collect();
 
                 // Check for missing required inputs
-                for input in &inputs {
+                for input in inputs {
                     if input.required && !provided_keys.contains(&input.name) {
                         // Skip _connection as it's injected automatically
                         if input.name == "_connection" {
@@ -2354,10 +2354,10 @@ fn validate_agents(graph: &ExecutionGraph, result: &mut ValidationResult) {
     for step in graph.steps.values() {
         match step {
             Step::Split(split_step) => {
-                validate_agents(&split_step.subgraph, result);
+                validate_agents(&split_step.subgraph, catalog, result);
             }
             Step::While(while_step) => {
-                validate_agents(&while_step.subgraph, result);
+                validate_agents(&while_step.subgraph, catalog, result);
             }
             _ => {}
         }
@@ -2374,12 +2374,12 @@ fn connection_id_is_missing(connection_id: Option<&String>) -> bool {
 fn agent_capability_requires_connection(
     agent_id: &str,
     _capability_id: &str,
-    agent_module: &runtara_dsl::agent_meta::AgentModuleConfig,
+    agent: &runtara_dsl::agent_meta::AgentInfo,
 ) -> bool {
     // `http` supports optional auth connections, but can still make public
-    // unauthenticated requests. Other connection-capable agent modules require
+    // unauthenticated requests. Other connection-capable agents require
     // the host to inject a concrete connection for their capabilities.
-    agent_module.supports_connections && !agent_id.eq_ignore_ascii_case("http")
+    agent.supports_connections && !agent_id.eq_ignore_ascii_case("http")
 }
 
 fn is_condition_input(
@@ -2996,21 +2996,23 @@ fn collect_step_names(graph: &ExecutionGraph, name_to_step_ids: &mut HashMap<Str
 /// - Don't have compensation defined
 ///
 /// The warning includes a suggestion if the agent provides compensation hints.
-fn validate_compensation(graph: &ExecutionGraph, result: &mut ValidationResult) {
-    validate_compensation_recursive(graph, result);
+fn validate_compensation(
+    graph: &ExecutionGraph,
+    catalog: &runtara_dsl::agent_meta::AgentCatalog,
+    result: &mut ValidationResult,
+) {
+    validate_compensation_recursive(graph, catalog, result);
 }
 
-fn validate_compensation_recursive(graph: &ExecutionGraph, result: &mut ValidationResult) {
+fn validate_compensation_recursive(
+    graph: &ExecutionGraph,
+    catalog: &runtara_dsl::agent_meta::AgentCatalog,
+    result: &mut ValidationResult,
+) {
     for (step_id, step) in &graph.steps {
         if let Step::Agent(agent_step) = step {
-            // Find the capability metadata
-            let capability = runtara_agents::registry::get_all_capabilities().find(|c| {
-                c.module
-                    .map(|m| m.eq_ignore_ascii_case(&agent_step.agent_id))
-                    .unwrap_or(false)
-                    && c.capability_id
-                        .eq_ignore_ascii_case(&agent_step.capability_id)
-            });
+            // Find the capability metadata in the runtime catalog
+            let capability = catalog.capability(&agent_step.agent_id, &agent_step.capability_id);
 
             // Check if capability has side effects and no compensation is defined
             if let Some(cap) = capability
@@ -3022,8 +3024,8 @@ fn validate_compensation_recursive(graph: &ExecutionGraph, result: &mut Validati
                     cap.compensation_hint
                         .as_ref()
                         .map(|hint| CompensationSuggestion {
-                            compensation_capability_id: hint.capability_id.to_string(),
-                            description: hint.description.map(|s| s.to_string()),
+                            compensation_capability_id: hint.capability_id.clone(),
+                            description: hint.description.clone(),
                         });
 
                 result
@@ -3040,10 +3042,10 @@ fn validate_compensation_recursive(graph: &ExecutionGraph, result: &mut Validati
         // Recursively validate subgraphs
         match step {
             Step::Split(split_step) => {
-                validate_compensation_recursive(&split_step.subgraph, result);
+                validate_compensation_recursive(&split_step.subgraph, catalog, result);
             }
             Step::While(while_step) => {
-                validate_compensation_recursive(&while_step.subgraph, result);
+                validate_compensation_recursive(&while_step.subgraph, catalog, result);
             }
             _ => {}
         }
@@ -4333,6 +4335,14 @@ mod tests {
     #[allow(unused_imports)]
     use runtara_agents as _;
 
+    /// Test helper: build an `AgentCatalog` from the statically-linked agent
+    /// registry. Production callers pass the runtime-loaded catalog from the
+    /// component dispatcher; tests use this shim so they don't have to stand
+    /// up wasmtime.
+    pub(super) fn test_catalog() -> runtara_dsl::agent_meta::AgentCatalog {
+        runtara_dsl::agent_meta::AgentCatalog::from_agents(runtara_agents::registry::get_agents())
+    }
+
     fn create_agent_step(id: &str, agent_id: &str, mapping: Option<InputMapping>) -> Step {
         // Use a real capability for the agent
         let capability_id = if agent_id == "transform" {
@@ -4442,7 +4452,7 @@ mod tests {
         );
         let graph = create_basic_graph(steps, "finish");
 
-        let result = validate_workflow(&graph);
+        let result = validate_workflow(&graph, &test_catalog());
 
         assert!(result.errors.iter().any(|error| matches!(
             error,
@@ -4462,7 +4472,7 @@ mod tests {
         );
         let graph = create_basic_graph(steps, "finish");
 
-        let result = validate_workflow(&graph);
+        let result = validate_workflow(&graph, &test_catalog());
 
         assert!(result.errors.iter().any(|error| matches!(
             error,
@@ -4490,7 +4500,7 @@ mod tests {
         );
         let graph = create_basic_graph(steps, "finish");
 
-        let result = validate_workflow(&graph);
+        let result = validate_workflow(&graph, &test_catalog());
 
         assert!(result.errors.iter().any(|error| matches!(
             error,
@@ -4518,7 +4528,7 @@ mod tests {
         );
         let graph = create_basic_graph(steps, "finish");
 
-        let result = validate_workflow(&graph);
+        let result = validate_workflow(&graph, &test_catalog());
 
         assert!(result.errors.iter().any(|error| matches!(
             error,
@@ -4534,7 +4544,7 @@ mod tests {
     #[test]
     fn test_empty_workflow() {
         let graph = create_basic_graph(HashMap::new(), "start");
-        let result = validate_workflow(&graph);
+        let result = validate_workflow(&graph, &test_catalog());
         assert!(result.has_errors());
         assert!(
             result
@@ -4550,7 +4560,7 @@ mod tests {
         steps.insert("finish".to_string(), create_finish_step("finish", None));
 
         let graph = create_basic_graph(steps, "nonexistent");
-        let result = validate_workflow(&graph);
+        let result = validate_workflow(&graph, &test_catalog());
         assert!(result.has_errors());
         assert!(result.errors.iter().any(
             |e| matches!(e, ValidationError::EntryPointNotFound { entry_point, .. } if entry_point == "nonexistent")
@@ -4563,7 +4573,7 @@ mod tests {
         steps.insert("finish".to_string(), create_finish_step("finish", None));
 
         let graph = create_basic_graph(steps, "finish");
-        let result = validate_workflow(&graph);
+        let result = validate_workflow(&graph, &test_catalog());
         // Finish step with no outgoing edges is valid
         assert!(!result.has_errors());
     }
@@ -4600,7 +4610,7 @@ mod tests {
         );
 
         let graph = create_basic_graph(steps, "query");
-        let result = validate_workflow(&graph);
+        let result = validate_workflow(&graph, &test_catalog());
 
         assert!(result.errors.iter().any(|error| matches!(
             error,
@@ -4644,7 +4654,7 @@ mod tests {
         );
 
         let graph = create_basic_graph(steps, "query");
-        let result = validate_workflow(&graph);
+        let result = validate_workflow(&graph, &test_catalog());
 
         assert!(
             !result
@@ -4684,7 +4694,7 @@ mod tests {
         );
 
         let graph = create_basic_graph(steps, "request");
-        let result = validate_workflow(&graph);
+        let result = validate_workflow(&graph, &test_catalog());
 
         assert!(
             !result
@@ -4710,7 +4720,7 @@ mod tests {
         );
 
         let graph = create_basic_graph(steps, "assistant");
-        let result = validate_workflow(&graph);
+        let result = validate_workflow(&graph, &test_catalog());
 
         assert!(result.errors.iter().any(|error| matches!(
             error,
@@ -4740,7 +4750,7 @@ mod tests {
             priority: None,
         }];
 
-        let result = validate_workflow(&graph);
+        let result = validate_workflow(&graph, &test_catalog());
         assert!(result.has_errors());
         assert!(result.errors.iter().any(
             |e| matches!(e, ValidationError::InvalidStepReference { referenced_step_id, .. } if referenced_step_id == "nonexistent")
@@ -4767,7 +4777,7 @@ mod tests {
             priority: None,
         }];
 
-        let result = validate_workflow(&graph);
+        let result = validate_workflow(&graph, &test_catalog());
         assert!(result.has_errors());
         assert!(
             result
@@ -4810,7 +4820,7 @@ mod tests {
             priority: None,
         }];
 
-        let result = validate_workflow(&graph);
+        let result = validate_workflow(&graph, &test_catalog());
         assert!(result.has_warnings());
         assert!(result.warnings.iter().any(|w| matches!(
             w,
@@ -4852,7 +4862,7 @@ mod tests {
             priority: None,
         }];
 
-        let result = validate_workflow(&graph);
+        let result = validate_workflow(&graph, &test_catalog());
         assert!(result.has_errors());
         assert!(
             result
@@ -4891,7 +4901,7 @@ mod tests {
             priority: None,
         }];
 
-        let result = validate_workflow(&graph);
+        let result = validate_workflow(&graph, &test_catalog());
         assert!(
             !result
                 .errors
@@ -5135,7 +5145,7 @@ mod tests {
         steps.insert("orphan".to_string(), create_finish_step("orphan", None));
 
         let graph = create_basic_graph(steps, "start");
-        let result = validate_workflow(&graph);
+        let result = validate_workflow(&graph, &test_catalog());
 
         // Finish steps get the more specific UnreachableFinish variant —
         // their absence is what causes the silent `null` fallback in
@@ -5156,7 +5166,7 @@ mod tests {
         // No execution plan edge from agent to anywhere
 
         let graph = create_basic_graph(steps, "agent");
-        let result = validate_workflow(&graph);
+        let result = validate_workflow(&graph, &test_catalog());
 
         // Dangling steps are now warnings, not errors
         assert!(result.warnings.iter().any(
@@ -5171,7 +5181,7 @@ mod tests {
         steps.insert("finish".to_string(), create_finish_step("finish", None));
 
         let graph = create_basic_graph(steps, "finish");
-        let result = validate_workflow(&graph);
+        let result = validate_workflow(&graph, &test_catalog());
 
         // Should not have dangling step warning for Finish
         assert!(
@@ -5283,7 +5293,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = validate_workflow(&graph);
+        let result = validate_workflow(&graph, &test_catalog());
 
         let unreachable = result
             .errors
@@ -5326,7 +5336,7 @@ mod tests {
             priority: None,
         }];
 
-        let result = validate_workflow(&graph);
+        let result = validate_workflow(&graph, &test_catalog());
         assert!(result.warnings.iter().any(
             |w| matches!(w, ValidationWarning::SelfReference { step_id, .. } if step_id == "my_step")
         ));
@@ -5365,7 +5375,7 @@ mod tests {
             priority: None,
         }];
 
-        let result = validate_workflow(&graph);
+        let result = validate_workflow(&graph, &test_catalog());
         assert!(result.warnings.iter().any(|w| matches!(
             w,
             ValidationWarning::LongRetryDelay {
@@ -5406,7 +5416,7 @@ mod tests {
             priority: None,
         }];
 
-        let result = validate_workflow(&graph);
+        let result = validate_workflow(&graph, &test_catalog());
         // Should have no configuration warnings
         let config_warnings = result.warnings.iter().any(|w| {
             matches!(
@@ -5450,7 +5460,7 @@ mod tests {
             priority: None,
         }];
 
-        let result = validate_workflow(&graph);
+        let result = validate_workflow(&graph, &test_catalog());
         assert!(
             !result
                 .errors
@@ -5488,7 +5498,7 @@ mod tests {
             priority: None,
         }];
 
-        let result = validate_workflow(&graph);
+        let result = validate_workflow(&graph, &test_catalog());
         assert!(
             !result
                 .errors
@@ -5526,7 +5536,7 @@ mod tests {
             priority: None,
         }];
 
-        let result = validate_workflow(&graph);
+        let result = validate_workflow(&graph, &test_catalog());
         assert!(result.errors.iter().any(|e| matches!(
             e,
             ValidationError::InvalidChildVersion { reason, .. } if reason.contains("positive")
@@ -5669,7 +5679,7 @@ mod tests {
             },
         ];
 
-        let result = validate_workflow(&graph);
+        let result = validate_workflow(&graph, &test_catalog());
         // Should not have reference errors for valid references
         let ref_errors = result
             .errors
@@ -5750,7 +5760,7 @@ mod tests {
             },
         ];
 
-        let result = validate_workflow(&graph);
+        let result = validate_workflow(&graph, &test_catalog());
         // Should validate subgraph steps
         // Check there's no error about the subgraph entry point
         let subgraph_errors = result.errors.iter().any(|e| {
@@ -5803,7 +5813,7 @@ mod tests {
             },
         ];
 
-        let result = validate_workflow(&graph);
+        let result = validate_workflow(&graph, &test_catalog());
         // Condition references are currently not validated at the DSL level
         // (they're evaluated at runtime). This test just ensures no panic.
         assert!(result.is_ok() || !result.errors.is_empty());
@@ -5873,7 +5883,7 @@ mod tests {
             },
         ];
 
-        let result = validate_workflow(&graph);
+        let result = validate_workflow(&graph, &test_catalog());
         // Should not have reference errors for nested conditions
         let ref_errors = result
             .errors
@@ -5953,7 +5963,7 @@ mod tests {
             },
         ];
 
-        let result = validate_workflow(&graph);
+        let result = validate_workflow(&graph, &test_catalog());
         // loop.index is a valid reference in while conditions
         // Should not have errors for this special context variable
         let loop_ref_errors = result.errors.iter().any(|e| {
@@ -6003,7 +6013,7 @@ mod tests {
             priority: None,
         }];
 
-        let result = validate_workflow(&graph);
+        let result = validate_workflow(&graph, &test_catalog());
         // Basic log step should pass
         assert!(
             !result.has_errors(),
@@ -6064,7 +6074,7 @@ mod tests {
             },
         ];
 
-        let result = validate_workflow(&graph);
+        let result = validate_workflow(&graph, &test_catalog());
         // All log levels should be valid
         assert!(!result.has_errors(), "All log levels should be valid");
     }
@@ -6111,7 +6121,7 @@ mod tests {
             },
         ];
 
-        let result = validate_workflow(&graph);
+        let result = validate_workflow(&graph, &test_catalog());
         // Valid context references should pass
         let ref_errors = result
             .errors
@@ -6146,7 +6156,7 @@ mod tests {
             priority: None,
         }];
 
-        let result = validate_workflow(&graph);
+        let result = validate_workflow(&graph, &test_catalog());
         // Should have invalid reference error
         assert!(result.errors.iter().any(|e| {
             matches!(e, ValidationError::InvalidStepReference { referenced_step_id, .. } if referenced_step_id == "nonexistent")
@@ -6175,7 +6185,7 @@ mod tests {
             priority: None,
         }];
 
-        let result = validate_workflow(&graph);
+        let result = validate_workflow(&graph, &test_catalog());
         // Empty context should be valid
         assert!(
             !result.has_errors(),
@@ -6227,7 +6237,7 @@ mod tests {
             },
         ];
 
-        let result = validate_workflow(&graph);
+        let result = validate_workflow(&graph, &test_catalog());
         assert!(
             result.errors.iter().any(|e| {
                 matches!(e, ValidationError::StepNotYetExecuted { step_id, referenced_step_id }
@@ -6275,7 +6285,7 @@ mod tests {
             },
         ];
 
-        let result = validate_workflow(&graph);
+        let result = validate_workflow(&graph, &test_catalog());
         // Should not have StepNotYetExecuted error
         assert!(
             !result
@@ -6351,7 +6361,7 @@ mod tests {
             },
         ];
 
-        let result = validate_workflow(&graph);
+        let result = validate_workflow(&graph, &test_catalog());
         assert!(
             !result
                 .errors
@@ -6385,7 +6395,7 @@ mod tests {
             priority: None,
         }];
 
-        let result = validate_workflow(&graph);
+        let result = validate_workflow(&graph, &test_catalog());
         assert!(
             result.errors.iter().any(|e| {
                 matches!(e, ValidationError::UnknownVariable { variable_name, .. }
@@ -6428,7 +6438,7 @@ mod tests {
             },
         );
 
-        let result = validate_workflow(&graph);
+        let result = validate_workflow(&graph, &test_catalog());
         // Should not have UnknownVariable error
         assert!(
             !result
@@ -6475,7 +6485,7 @@ mod tests {
             },
         );
 
-        let result = validate_workflow(&graph);
+        let result = validate_workflow(&graph, &test_catalog());
         // Should not have UnknownVariable error
         assert!(
             !result
@@ -6547,7 +6557,7 @@ mod tests {
             },
         ];
 
-        let result = validate_workflow(&graph);
+        let result = validate_workflow(&graph, &test_catalog());
         assert!(
             result.errors.iter().any(|e| {
                 matches!(e, ValidationError::DuplicateStepName { name, step_ids }
@@ -6662,7 +6672,7 @@ mod tests {
             },
         ];
 
-        let result = validate_workflow(&graph);
+        let result = validate_workflow(&graph, &test_catalog());
         assert!(
             result.errors.iter().any(|e| {
                 matches!(e, ValidationError::DuplicateStepName { name, step_ids }
@@ -6730,7 +6740,7 @@ mod tests {
             },
         ];
 
-        let result = validate_workflow(&graph);
+        let result = validate_workflow(&graph, &test_catalog());
         assert!(
             !result
                 .errors
@@ -6853,7 +6863,7 @@ mod tests {
         );
         let graph = create_basic_graph(steps, "bulk");
 
-        let result = validate_workflow(&graph);
+        let result = validate_workflow(&graph, &test_catalog());
 
         assert!(result.errors.iter().any(|error| matches!(
             error,
@@ -6880,7 +6890,7 @@ mod tests {
         );
         let graph = create_basic_graph(steps, "bulk");
 
-        let result = validate_workflow(&graph);
+        let result = validate_workflow(&graph, &test_catalog());
 
         assert!(
             !result
@@ -6961,7 +6971,7 @@ mod tests {
             priority: None,
         }];
 
-        let result = validate_workflow(&graph);
+        let result = validate_workflow(&graph, &test_catalog());
 
         assert!(
             !result.errors.iter().any(|error| matches!(
@@ -7065,7 +7075,7 @@ mod tests {
             .input_schema
             .insert("a".to_string(), object_schema_field(a_props));
 
-        let result = validate_workflow(&graph);
+        let result = validate_workflow(&graph, &test_catalog());
 
         assert!(
             !result.errors.iter().any(|error| matches!(
@@ -7098,7 +7108,7 @@ mod tests {
             .input_schema
             .insert("a".to_string(), object_schema_field(a_props));
 
-        let result = validate_workflow(&graph);
+        let result = validate_workflow(&graph, &test_catalog());
 
         assert!(
             result.errors.iter().any(|error| matches!(
@@ -7133,7 +7143,7 @@ mod tests {
             .input_schema
             .insert("a".to_string(), object_schema_field(a_props));
 
-        let result = validate_workflow(&graph);
+        let result = validate_workflow(&graph, &test_catalog());
 
         assert!(
             !result.errors.iter().any(|error| matches!(
@@ -7174,7 +7184,7 @@ mod tests {
             .input_schema
             .insert("a".to_string(), schema_field(SchemaFieldType::String));
 
-        let result = validate_workflow(&graph);
+        let result = validate_workflow(&graph, &test_catalog());
 
         assert!(
             result.errors.iter().any(|error| matches!(
@@ -7212,7 +7222,7 @@ mod tests {
             },
         );
 
-        let result = validate_workflow(&graph);
+        let result = validate_workflow(&graph, &test_catalog());
 
         assert!(
             result.errors.iter().any(|error| matches!(
@@ -7426,7 +7436,7 @@ mod tests {
             priority: None,
         }];
 
-        let result = validate_workflow(&graph);
+        let result = validate_workflow(&graph, &test_catalog());
 
         // Should NOT have UnknownVariable error for parentUserId
         let unknown_var_errors: Vec<_> = result
@@ -7529,7 +7539,7 @@ mod tests {
             priority: None,
         }];
 
-        let result = validate_workflow(&graph);
+        let result = validate_workflow(&graph, &test_catalog());
 
         // Should have UnknownVariable error for undeclaredVar
         assert!(
@@ -7644,7 +7654,7 @@ mod tests {
             priority: None,
         }];
 
-        let result = validate_workflow(&graph);
+        let result = validate_workflow(&graph, &test_catalog());
 
         // Should NOT have any UnknownVariable errors
         let unknown_var_errors: Vec<_> = result
@@ -7741,7 +7751,7 @@ mod tests {
             priority: None,
         }];
 
-        let result = validate_workflow(&graph);
+        let result = validate_workflow(&graph, &test_catalog());
 
         // Should NOT have any MissingInputSchema or UndefinedDataReference errors
         // because Split subgraphs have implicit data access
@@ -7867,7 +7877,7 @@ mod tests {
             priority: None,
         }];
 
-        let result = validate_workflow(&graph);
+        let result = validate_workflow(&graph, &test_catalog());
 
         // Should NOT have any errors - both data.* and variables.* should be valid
         let relevant_errors: Vec<_> = result
@@ -7936,7 +7946,7 @@ mod tests {
             priority: None,
         }];
 
-        let result = validate_workflow(&graph);
+        let result = validate_workflow(&graph, &test_catalog());
 
         // Should have MissingCompensation warning
         let missing_comp_warnings: Vec<_> = result
@@ -8001,7 +8011,7 @@ mod tests {
             priority: None,
         }];
 
-        let result = validate_workflow(&graph);
+        let result = validate_workflow(&graph, &test_catalog());
 
         // Should NOT have MissingCompensation warning
         let missing_comp_warnings: Vec<_> = result
@@ -8100,7 +8110,7 @@ mod tests {
             priority: None,
         }];
 
-        let result = validate_workflow(&graph);
+        let result = validate_workflow(&graph, &test_catalog());
 
         // Should NOT have MissingCompensation warning for http_call (has compensation)
         let missing_comp_for_http_call: Vec<_> = result
@@ -8237,7 +8247,7 @@ mod tests {
             },
         ];
 
-        let result = validate_workflow(&graph);
+        let result = validate_workflow(&graph, &test_catalog());
         assert!(
             !result.has_errors(),
             "Should pass: unique priorities on onError edges. Errors: {:?}",
@@ -8280,7 +8290,7 @@ mod tests {
             },
         ];
 
-        let result = validate_workflow(&graph);
+        let result = validate_workflow(&graph, &test_catalog());
         assert!(result.has_errors(), "Should fail: duplicate priorities");
         assert!(
             result
@@ -8326,7 +8336,7 @@ mod tests {
             },
         ];
 
-        let result = validate_workflow(&graph);
+        let result = validate_workflow(&graph, &test_catalog());
         assert!(
             result.has_errors(),
             "Should fail: multiple default onError edges"
@@ -8378,7 +8388,7 @@ mod tests {
             },
         ];
 
-        let result = validate_workflow(&graph);
+        let result = validate_workflow(&graph, &test_catalog());
         assert!(
             !result.has_errors(),
             "Should pass: one conditional + one default onError edge. Errors: {:?}",
@@ -8413,7 +8423,7 @@ mod tests {
             },
         ];
 
-        let result = validate_workflow(&graph);
+        let result = validate_workflow(&graph, &test_catalog());
         assert!(
             !result.has_errors(),
             "Should pass: multiple unlabeled edges can run in parallel. Errors: {:?}",
@@ -8449,7 +8459,7 @@ mod tests {
             },
         ];
 
-        let result = validate_workflow(&graph);
+        let result = validate_workflow(&graph, &test_catalog());
         assert!(
             !result.has_errors(),
             "Should pass: multiple 'next'-labeled edges can run in parallel. Errors: {:?}",
@@ -8482,7 +8492,7 @@ mod tests {
             },
         ];
 
-        let result = validate_workflow(&graph);
+        let result = validate_workflow(&graph, &test_catalog());
         assert!(
             !result.has_errors(),
             "Should pass: Conditional branches use true/false labels. Errors: {:?}",
@@ -8505,7 +8515,7 @@ mod tests {
             priority: None,
         }];
 
-        let result = validate_workflow(&graph);
+        let result = validate_workflow(&graph, &test_catalog());
         assert!(
             result
                 .errors
@@ -8531,7 +8541,7 @@ mod tests {
             priority: None,
         }];
 
-        let result = validate_workflow(&graph);
+        let result = validate_workflow(&graph, &test_catalog());
         assert!(
             result
                 .errors
@@ -8622,7 +8632,7 @@ mod tests {
         let mut children = HashMap::new();
         children.insert("child-1".to_string(), child);
 
-        let result = validate_workflow_with_children(&parent, &children);
+        let result = validate_workflow_with_children(&parent, &test_catalog(), &children);
 
         assert!(result.has_errors());
         assert!(result.errors.iter().any(|e| matches!(
@@ -8670,7 +8680,7 @@ mod tests {
         children.insert("workflow-a".to_string(), workflow_a.clone());
         children.insert("workflow-b".to_string(), workflow_b);
 
-        let result = validate_workflow_with_children(&workflow_a, &children);
+        let result = validate_workflow_with_children(&workflow_a, &test_catalog(), &children);
 
         assert!(result.has_errors());
         assert!(
@@ -8746,6 +8756,7 @@ mod reference_extraction_tests {
 
 #[cfg(test)]
 mod template_validation_tests {
+    use super::tests::test_catalog;
     use super::*;
 
     #[test]
@@ -8791,7 +8802,7 @@ mod template_validation_tests {
             ]
         }"#;
         let graph: ExecutionGraph = serde_json::from_str(json).unwrap();
-        let result = validate_workflow(&graph);
+        let result = validate_workflow(&graph, &test_catalog());
         let template_errors: Vec<_> = result
             .errors
             .iter()
@@ -8825,7 +8836,7 @@ mod template_validation_tests {
             ]
         }"#;
         let graph: ExecutionGraph = serde_json::from_str(json).unwrap();
-        let result = validate_workflow(&graph);
+        let result = validate_workflow(&graph, &test_catalog());
         assert!(
             result.errors.iter().any(|e| matches!(
                 e,
@@ -8855,7 +8866,7 @@ mod template_validation_tests {
             "entryPoint": "finish"
         }"#;
         let graph: ExecutionGraph = serde_json::from_str(json).unwrap();
-        let result = validate_workflow(&graph);
+        let result = validate_workflow(&graph, &test_catalog());
 
         assert!(
             !result
@@ -8898,7 +8909,7 @@ mod template_validation_tests {
             "entryPoint": "finish"
         }"#;
         let graph: ExecutionGraph = serde_json::from_str(json).unwrap();
-        let result = validate_workflow(&graph);
+        let result = validate_workflow(&graph, &test_catalog());
 
         assert!(
             !result
@@ -8961,7 +8972,7 @@ mod template_validation_tests {
             }
         }"#;
         let graph: ExecutionGraph = serde_json::from_str(json).unwrap();
-        let result = validate_workflow(&graph);
+        let result = validate_workflow(&graph, &test_catalog());
 
         assert!(
             !result

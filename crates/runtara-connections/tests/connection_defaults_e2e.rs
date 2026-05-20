@@ -1,9 +1,10 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use runtara_connections::crypto::noop::NoOpCipher;
 use runtara_connections::repository::connections::ConnectionRepository;
 use runtara_connections::service::connections::ConnectionService;
-use runtara_connections::{ConnectionStatus, CreateConnectionRequest};
+use runtara_connections::{ConnectionStatus, CreateConnectionRequest, IntegrationCompatibility};
 use serde_json::json;
 use sqlx::PgPool;
 use testcontainers::ContainerAsync;
@@ -93,9 +94,18 @@ async fn create_schema(pool: &PgPool) -> Result<(), sqlx::Error> {
     Ok(())
 }
 
+fn test_compatibility() -> Arc<IntegrationCompatibility> {
+    // Covers the agents exercised by these tests; the `object_storage`
+    // platform bucket is installed automatically by
+    // `IntegrationCompatibility::new`.
+    let mut by_default_for: HashMap<String, Vec<String>> = HashMap::new();
+    by_default_for.insert("object_model".to_string(), vec!["postgres".to_string()]);
+    Arc::new(IntegrationCompatibility::new(by_default_for))
+}
+
 fn service(pool: PgPool) -> (Arc<ConnectionRepository>, ConnectionService) {
     let repo = Arc::new(ConnectionRepository::new(pool, Arc::new(NoOpCipher)));
-    let service = ConnectionService::new(repo.clone());
+    let service = ConnectionService::new(repo.clone(), test_compatibility());
     (repo, service)
 }
 

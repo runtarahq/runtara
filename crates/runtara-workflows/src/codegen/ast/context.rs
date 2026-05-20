@@ -58,11 +58,30 @@ pub struct EmitContext {
     /// and embedded child workflow. Step emitters combine this with per-step
     /// `durable` flags: `effective = ctx.durable && step.durable.unwrap_or(true)`.
     pub durable: bool,
+
+    /// Runtime-loaded agent metadata snapshot. Step emitters consult it
+    /// for capability schemas (required-input lists, `rate_limited`,
+    /// `has_side_effects`, …) instead of reaching into the compile-time
+    /// `runtara_agents::registry`.
+    pub catalog: std::sync::Arc<runtara_dsl::agent_meta::AgentCatalog>,
 }
 
 impl EmitContext {
     /// Create a new emission context.
     pub fn new(track_events: bool) -> Self {
+        Self::with_catalog(
+            track_events,
+            std::sync::Arc::new(runtara_dsl::agent_meta::AgentCatalog::new()),
+        )
+    }
+
+    /// Create a new emission context with an explicit catalog. Used in tests
+    /// and on shutdown paths where the catalog is constructed from the
+    /// statically-linked agent registry.
+    pub fn with_catalog(
+        track_events: bool,
+        catalog: std::sync::Arc<runtara_dsl::agent_meta::AgentCatalog>,
+    ) -> Self {
         Self {
             step_results: HashMap::new(),
             counter: 0,
@@ -76,17 +95,14 @@ impl EmitContext {
             tenant_id: None,
             rate_limit_budget_ms: 60_000,
             durable: true,
+            catalog,
         }
     }
 
-    /// Create a new emission context with child workflows and connection configuration.
-    ///
-    /// # Arguments
-    /// * `track_events` - Enable debug logging in generated code
-    /// * `child_workflows` - Map of workflow reference key -> ExecutionGraph
-    /// * `step_to_child_ref` - Map of step_id -> (workflow_id, version_resolved)
-    /// * `connection_service_url` - Optional URL for fetching connections at runtime
-    /// * `tenant_id` - Optional tenant ID for connection service requests
+    /// Create a new emission context with child workflows and connection
+    /// configuration. The catalog defaults to empty — production callers
+    /// (the compile pipeline) overwrite it via [`Self::set_catalog`]; tests
+    /// that don't touch agent metadata leave it empty.
     pub fn with_child_workflows(
         track_events: bool,
         child_workflows: HashMap<String, ExecutionGraph>,
@@ -107,7 +123,15 @@ impl EmitContext {
             tenant_id,
             rate_limit_budget_ms: 60_000,
             durable: true,
+            catalog: std::sync::Arc::new(runtara_dsl::agent_meta::AgentCatalog::new()),
         }
+    }
+
+    /// Replace the agent catalog. Used by the compile pipeline once after
+    /// `with_child_workflows` so the caller doesn't have to thread the
+    /// catalog through every constructor argument.
+    pub fn set_catalog(&mut self, catalog: std::sync::Arc<runtara_dsl::agent_meta::AgentCatalog>) {
+        self.catalog = catalog;
     }
 
     /// Get a child workflow by workflow ID and resolved version.

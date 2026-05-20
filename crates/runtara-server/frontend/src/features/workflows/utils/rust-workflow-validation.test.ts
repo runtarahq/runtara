@@ -20,6 +20,36 @@ const wasmBytes = readFileSync(
 );
 const originalFetch = globalThis.fetch.bind(globalThis);
 
+/**
+ * Sample catalog returned by the stubbed `/api/runtime/agents`. Shape
+ * matches the real `ListAgentsResponse` shape so the validator unwraps
+ * `.agents` correctly and pushes the array into the WASM.
+ */
+const TEST_AGENT_CATALOG = {
+  agents: [
+    {
+      id: 'http',
+      name: 'HTTP',
+      description: 'HTTP requests',
+      hasSideEffects: true,
+      supportsConnections: true,
+      integrationIds: ['http_bearer', 'http_basic'],
+      capabilities: [
+        {
+          id: 'http-request',
+          name: 'HTTP Request',
+          inputType: 'HttpRequestInput',
+          inputs: [{ name: 'url', type: 'string', required: true }],
+          output: { type: 'HttpResponse' },
+          hasSideEffects: true,
+          isIdempotent: false,
+          rateLimited: false,
+        },
+      ],
+    },
+  ],
+};
+
 function stubWasmFetch() {
   vi.stubGlobal(
     'fetch',
@@ -34,6 +64,12 @@ function stubWasmFetch() {
       if (target.endsWith('runtara_workflow_validation_bg.wasm')) {
         return new Response(wasmBytes, {
           headers: { 'Content-Type': 'application/wasm' },
+        });
+      }
+
+      if (target.endsWith('/api/runtime/agents')) {
+        return new Response(JSON.stringify(TEST_AGENT_CATALOG), {
+          headers: { 'Content-Type': 'application/json' },
         });
       }
 
@@ -141,7 +177,7 @@ describe('rust workflow validation WASM', () => {
     expect(result.errors.join(' ')).toContain('count');
   });
 
-  it('returns statically compiled workflow metadata from generated WASM', async () => {
+  it('serves step types from WASM and agents from the runtime API catalog', async () => {
     const stepTypes = await getStaticStepTypesWithRust();
     const agentStepSchema = await getStaticStepTypeSchemaWithRust('Agent');
     const agents = await getStaticAgentsWithRust();

@@ -328,7 +328,7 @@ pub struct CapabilityInfo {
     pub compensation_hint: Option<CompensationHintInfo>,
     /// Known errors this capability can return.
     /// Used for tooling hints and documentation.
-    #[serde(rename = "knownErrors", skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, rename = "knownErrors", skip_serializing_if = "Vec::is_empty")]
     pub known_errors: Vec<KnownErrorInfo>,
     /// Semantic tags for capability classification and filtering.
     /// Well-known tags: "memory:read", "memory:write".
@@ -380,10 +380,12 @@ pub struct FieldTypeInfo {
     pub display_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none", skip_deserializing)]
+    /// Sidecar meta.json carries this; legacy registry populates it server-side
+    /// from `OutputTypeMeta`. Either way, the round-trip via serde is symmetric.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fields: Option<Box<Vec<OutputField>>>,
     /// For array types, describes the item type
-    #[serde(skip_serializing_if = "Option::is_none", skip_deserializing)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub items: Option<Box<FieldTypeInfo>>,
     /// Whether this field can be null
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -411,10 +413,10 @@ pub struct OutputField {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub nullable: bool,
     /// For array types, describes the item type
-    #[serde(skip_serializing_if = "Option::is_none", skip_deserializing)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub items: Option<Box<FieldTypeInfo>>,
     /// For nested object types, the fields of the nested object
-    #[serde(skip_serializing_if = "Option::is_none", skip_deserializing)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fields: Option<Box<Vec<OutputField>>>,
 }
 
@@ -529,15 +531,6 @@ pub const BUILTIN_AGENT_MODULES: &[AgentModuleConfig] = &[
         name: "Compression",
         description: "Archive capabilities for creating and extracting ZIP archives, listing contents, and extracting individual files",
         has_side_effects: false,
-        supports_connections: false,
-        integration_ids: &[],
-        secure: false,
-    },
-    AgentModuleConfig {
-        id: "file",
-        name: "File",
-        description: "File system capabilities for reading, writing, listing, copying, moving, and deleting files within the workflow workspace",
-        has_side_effects: true,
         supports_connections: false,
         integration_ids: &[],
         secure: false,
@@ -1460,6 +1453,271 @@ pub fn validate_agent_metadata_or_panic() {
 }
 
 // ============================================================================
+// AgentCatalog — runtime-loaded snapshot of every agent's metadata.
+// ============================================================================
+
+/// A snapshot of every agent the runtime knows about, indexed by id.
+///
+/// The catalog is the runtime replacement for `runtara-agents::static_registry`
+/// — instead of compile-time arrays baked into the server/validator binary,
+/// it's populated at startup from the `<agent>.meta.json` sidecars staged
+/// next to each `.wasm` in `$RUNTARA_AGENT_COMPONENTS_DIR`.
+///
+/// Two loaders:
+/// - [`AgentCatalog::from_meta_dir`] — server-side, walks a directory of
+///   `runtara_agent_*.meta.json` files.
+/// - [`AgentCatalog::from_json`] — browser-side, accepts a JSON array
+///   shipped over `GET /api/runtime/agents` so the WASM validator doesn't
+///   embed agents at compile time.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct AgentCatalog {
+    agents: Vec<AgentInfo>,
+}
+
+impl AgentCatalog {
+    /// Empty catalog — useful in unit tests + as a default before async load
+    /// completes.
+    pub fn new() -> Self {
+        Self { agents: Vec::new() }
+    }
+
+    /// Build a catalog directly from a list of `AgentInfo`s. Stable insertion
+    /// order is preserved.
+    pub fn from_agents(agents: Vec<AgentInfo>) -> Self {
+        Self { agents }
+    }
+
+    /// Parse a JSON document of the shape `[AgentInfo, …]`. This is the
+    /// format returned by `GET /api/runtime/agents`.
+    pub fn from_json(json: &str) -> Result<Self, serde_json::Error> {
+        let agents: Vec<AgentInfo> = serde_json::from_str(json)?;
+        Ok(Self { agents })
+    }
+
+    /// Walk a directory looking for `runtara_agent_*.meta.json` files. Pairs
+    /// of `.wasm` + `.meta.json` are staged here by
+    /// `scripts/build-agent-components.sh`. Missing or malformed meta.json is
+    /// surfaced as an error so the caller can fail fast at boot.
+    ///
+    /// This is the server-side loader; the WASM validator uses
+    /// [`from_json`](Self::from_json) instead.
+    #[cfg(feature = "fs")]
+    pub fn from_meta_dir(dir: &std::path::Path) -> std::io::Result<Self> {
+        let mut agents: Vec<AgentInfo> = Vec::new();
+        for entry in std::fs::read_dir(dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            if !name.starts_with("runtara_agent_") || !name.ends_with(".meta.json") {
+                continue;
+            }
+            let bytes = std::fs::read(&path)?;
+            let info: AgentInfo = serde_json::from_slice(&bytes).map_err(|e| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("invalid {}: {e}", path.display()),
+                )
+            })?;
+            agents.push(info);
+        }
+        // Deterministic order — keeps APIs returning the catalog stable.
+        agents.sort_by(|a, b| a.id.cmp(&b.id));
+        Ok(Self { agents })
+    }
+
+    /// Borrow every agent. Order matches the underlying storage.
+    pub fn agents(&self) -> &[AgentInfo] {
+        &self.agents
+    }
+
+    /// True if any agent has the given id.
+    pub fn has_agent(&self, agent_id: &str) -> bool {
+        self.agents.iter().any(|a| a.id == agent_id)
+    }
+
+    /// Look up an agent by id.
+    pub fn agent(&self, agent_id: &str) -> Option<&AgentInfo> {
+        self.agents.iter().find(|a| a.id == agent_id)
+    }
+
+    /// Look up a capability by `(agent_id, capability_id)`.
+    pub fn capability(&self, agent_id: &str, capability_id: &str) -> Option<&CapabilityInfo> {
+        self.agent(agent_id)?
+            .capabilities
+            .iter()
+            .find(|c| c.id == capability_id)
+    }
+
+    /// Return the `integration_ids` of the agent matching `agent_id`
+    /// (case-insensitive), or an empty `Vec` if the agent isn't loaded.
+    ///
+    /// Used by the connections layer to translate user-facing
+    /// "show me connections for agent <X>" queries into the
+    /// `integration_id` list that the connection service stores on
+    /// each row — so the connection service itself doesn't need to
+    /// know what an "agent" is.
+    pub fn integration_ids_for(&self, agent_id: &str) -> Vec<String> {
+        self.agents()
+            .iter()
+            .find(|a| a.id.eq_ignore_ascii_case(agent_id))
+            .map(|a| a.integration_ids.clone())
+            .unwrap_or_default()
+    }
+
+    /// Number of agents in the catalog.
+    pub fn len(&self) -> usize {
+        self.agents.len()
+    }
+
+    /// True if the catalog has no agents (e.g. before discovery has run).
+    pub fn is_empty(&self) -> bool {
+        self.agents.is_empty()
+    }
+}
+
+#[cfg(test)]
+mod catalog_tests {
+    use super::*;
+
+    fn sample_agent(id: &str) -> AgentInfo {
+        AgentInfo {
+            id: id.into(),
+            name: id.into(),
+            description: "test".into(),
+            has_side_effects: false,
+            supports_connections: false,
+            integration_ids: vec![],
+            capabilities: vec![CapabilityInfo {
+                id: "hash".into(),
+                name: "hash".into(),
+                display_name: None,
+                description: None,
+                input_type: "HashInput".into(),
+                inputs: vec![],
+                output: FieldTypeInfo {
+                    type_name: "HashResult".into(),
+                    format: None,
+                    display_name: None,
+                    description: None,
+                    items: None,
+                    fields: None,
+                    nullable: false,
+                },
+                has_side_effects: false,
+                is_idempotent: true,
+                rate_limited: false,
+                compensation_hint: None,
+                known_errors: vec![],
+                tags: vec![],
+            }],
+        }
+    }
+
+    #[test]
+    fn empty_catalog_has_no_agents() {
+        let cat = AgentCatalog::new();
+        assert_eq!(cat.len(), 0);
+        assert!(cat.is_empty());
+        assert!(cat.agent("missing").is_none());
+    }
+
+    #[test]
+    fn from_agents_preserves_order() {
+        let cat = AgentCatalog::from_agents(vec![sample_agent("b"), sample_agent("a")]);
+        assert_eq!(
+            cat.agents()
+                .iter()
+                .map(|a| a.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["b", "a"]
+        );
+    }
+
+    #[test]
+    fn lookup_by_id_and_capability() {
+        let cat = AgentCatalog::from_agents(vec![sample_agent("crypto")]);
+        assert!(cat.has_agent("crypto"));
+        assert!(!cat.has_agent("missing"));
+        assert!(cat.agent("crypto").is_some());
+        assert!(cat.capability("crypto", "hash").is_some());
+        assert!(cat.capability("crypto", "missing").is_none());
+        assert!(cat.capability("missing", "hash").is_none());
+    }
+
+    #[test]
+    fn integration_ids_for_returns_agent_integrations() {
+        let mut agent = sample_agent("slack");
+        agent.integration_ids = vec!["slack_oauth".into(), "slack_legacy".into()];
+        let cat = AgentCatalog::from_agents(vec![agent]);
+
+        assert_eq!(
+            cat.integration_ids_for("slack"),
+            vec!["slack_oauth".to_string(), "slack_legacy".to_string()],
+        );
+        assert_eq!(
+            cat.integration_ids_for("SLACK"),
+            cat.integration_ids_for("slack")
+        );
+        assert!(cat.integration_ids_for("missing").is_empty());
+    }
+
+    #[test]
+    fn round_trip_json() {
+        let original = AgentCatalog::from_agents(vec![sample_agent("crypto")]);
+        let json = serde_json::to_string(&original.agents).unwrap();
+        let parsed = AgentCatalog::from_json(&json).unwrap();
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed.agent("crypto").unwrap().id, "crypto");
+    }
+
+    #[test]
+    fn from_json_rejects_garbage() {
+        assert!(AgentCatalog::from_json("not-json").is_err());
+    }
+
+    #[cfg(feature = "fs")]
+    #[test]
+    fn from_meta_dir_loads_and_sorts() {
+        use std::fs;
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let write = |id: &str| {
+            let path = dir.path().join(format!("runtara_agent_{id}.meta.json"));
+            fs::write(&path, serde_json::to_string(&sample_agent(id)).unwrap()).unwrap();
+        };
+        write("zeta");
+        write("alpha");
+        // Distractor files we should ignore.
+        fs::write(dir.path().join("not-an-agent.json"), b"{}").unwrap();
+        fs::write(
+            dir.path().join("runtara_agent_zeta.wasm"),
+            b"\0asm\x01\0\0\0",
+        )
+        .unwrap();
+
+        let cat = AgentCatalog::from_meta_dir(dir.path()).expect("load");
+        let ids: Vec<&str> = cat.agents().iter().map(|a| a.id.as_str()).collect();
+        assert_eq!(ids, vec!["alpha", "zeta"]);
+    }
+
+    #[cfg(feature = "fs")]
+    #[test]
+    fn from_meta_dir_surfaces_parse_errors() {
+        use std::fs;
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        fs::write(
+            dir.path().join("runtara_agent_broken.meta.json"),
+            b"{not json}",
+        )
+        .unwrap();
+        let err = AgentCatalog::from_meta_dir(dir.path()).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        assert!(err.to_string().contains("runtara_agent_broken.meta.json"));
+    }
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
 
@@ -1472,8 +1730,8 @@ mod tests {
         // Verify we have the expected number of built-in modules
         assert_eq!(
             BUILTIN_AGENT_MODULES.len(),
-            12,
-            "Expected 12 built-in agent modules"
+            11,
+            "Expected 11 built-in agent modules"
         );
     }
 
@@ -1489,7 +1747,6 @@ mod tests {
         assert!(ids.contains(&"datetime"), "Missing datetime module");
         assert!(ids.contains(&"http"), "Missing http module");
         assert!(ids.contains(&"compression"), "Missing compression module");
-        assert!(ids.contains(&"file"), "Missing file module");
         assert!(ids.contains(&"sftp"), "Missing sftp module");
         assert!(ids.contains(&"object_model"), "Missing object_model module");
     }
@@ -1566,10 +1823,10 @@ mod tests {
 
     #[test]
     fn test_side_effects_modules() {
-        // http, sftp, file, and object_model have side effects
+        // http, sftp, and object_model have side effects
         for module in BUILTIN_AGENT_MODULES {
             match module.id {
-                "http" | "sftp" | "file" | "object_model" => {
+                "http" | "sftp" | "object_model" => {
                     assert!(
                         module.has_side_effects,
                         "{} module should have side effects",
@@ -1589,10 +1846,10 @@ mod tests {
 
     #[test]
     fn test_connection_supporting_modules() {
-        // Only http and sftp support connections
+        // http, sftp, and object_model support connections
         for module in BUILTIN_AGENT_MODULES {
             match module.id {
-                "http" | "sftp" => {
+                "http" | "sftp" | "object_model" => {
                     assert!(
                         module.supports_connections,
                         "{} module should support connections",

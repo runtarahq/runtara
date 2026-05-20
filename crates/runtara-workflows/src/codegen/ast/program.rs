@@ -33,10 +33,28 @@ fn get_stdlib_crate_name() -> String {
 /// - AgentStep: extracts agent_id
 /// - SplitStep: recursively traverses subgraph
 /// - EmbedWorkflow: recursively traverses child graphs from EmitContext
-fn collect_used_agents(graph: &ExecutionGraph, ctx: &EmitContext) -> HashSet<String> {
+///
+/// Agent ids are canonicalized to the kebab-case form used everywhere
+/// downstream — component WIT package names (`runtara:agent-<id>`),
+/// the dispatcher's `agent_ids()` table, and the bundle's `meta.json`.
+/// Workflows persisted under the legacy snake_case shape (e.g.
+/// `object_model`, `ai_tools`) re-compile cleanly because of this
+/// normalization. See [`canonicalize_agent_id`].
+pub(crate) fn collect_used_agents(graph: &ExecutionGraph, ctx: &EmitContext) -> HashSet<String> {
     let mut agents = HashSet::new();
     collect_used_agents_recursive(graph, ctx, &mut agents);
     agents
+}
+
+/// Canonicalize a workflow-stored `agent_id` to the kebab-case form the
+/// component model uses end-to-end. Workflows saved before the
+/// components migration may still carry snake_case ids
+/// (`object_model`, `ai_tools`, `s3_storage`, `azure_blob_storage`); the
+/// component packages are published under the kebab equivalents
+/// (`object-model`, `ai-tools`, `s3-storage`, `azure-blob-storage`).
+/// Lowercasing alone isn't enough — must also `_` → `-`.
+pub(crate) fn canonicalize_agent_id(agent_id: &str) -> String {
+    agent_id.to_lowercase().replace('_', "-")
 }
 
 fn collect_used_agents_recursive(
@@ -47,7 +65,7 @@ fn collect_used_agents_recursive(
     for step in graph.steps.values() {
         match step {
             Step::Agent(agent_step) => {
-                agents.insert(agent_step.agent_id.to_lowercase());
+                agents.insert(canonicalize_agent_id(&agent_step.agent_id));
             }
             Step::Split(split_step) => {
                 // Recursively collect from subgraph
@@ -109,7 +127,7 @@ fn collect_used_capabilities_recursive(
         match step {
             Step::Agent(agent_step) => {
                 caps.insert((
-                    agent_step.agent_id.to_lowercase(),
+                    canonicalize_agent_id(&agent_step.agent_id),
                     agent_step.capability_id.clone(),
                 ));
             }
@@ -187,8 +205,8 @@ fn collect_used_capabilities_recursive(
 fn agent_module_path(agent_id: &str) -> String {
     match agent_id {
         // Core runtara-agents
-        "utils" | "transform" | "http" | "csv" | "text" | "xml" | "datetime" | "file"
-        | "crypto" | "sftp" | "xlsx" | "compression" => {
+        "utils" | "transform" | "http" | "csv" | "text" | "xml" | "datetime" | "crypto"
+        | "sftp" | "xlsx" | "compression" => {
             format!("agents::{}", agent_id)
         }
         // All other agents are integration agents
@@ -328,7 +346,7 @@ pub fn emit_program(
 }
 
 /// Emit compile-time constants (connection service URL, tenant ID, etc.)
-fn emit_constants(ctx: &EmitContext) -> TokenStream {
+pub(crate) fn emit_constants(ctx: &EmitContext) -> TokenStream {
     // CONNECTION_SERVICE_URL: prefer runtime env var, fallback to compile-time value
     let connection_url = if let Some(url) = &ctx.connection_service_url {
         quote! {
@@ -443,7 +461,7 @@ fn emit_imports(graph: &ExecutionGraph, ctx: &EmitContext) -> TokenStream {
 }
 
 /// Emit input struct definitions.
-fn emit_input_structs() -> TokenStream {
+pub(crate) fn emit_input_structs() -> TokenStream {
     quote! {
         #[derive(Clone)]
         struct WorkflowInputs {
@@ -1435,7 +1453,7 @@ fn emit_workflow_variables(graph: &ExecutionGraph) -> TokenStream {
 /// 4. Executes the workflow asynchronously
 /// 5. Reports completion/failure/cancellation status to Core via SDK
 /// 6. Environment reads output from Core persistence after process exit
-fn emit_main(graph: &ExecutionGraph) -> TokenStream {
+pub(crate) fn emit_main(graph: &ExecutionGraph) -> TokenStream {
     // Generate variables as compile-time constants from graph.variables
     let variables_init = emit_workflow_variables(graph);
 
@@ -1452,8 +1470,7 @@ fn emit_main(graph: &ExecutionGraph) -> TokenStream {
             // Initialize SDK from environment variables.
             // Required env vars: RUNTARA_INSTANCE_ID, RUNTARA_TENANT_ID
             // HTTP: RUNTARA_HTTP_URL (defaults to http://127.0.0.1:8003)
-            let mut sdk_instance = RuntaraSdk::from_env();
-            let mut sdk_instance = match sdk_instance {
+            let mut sdk_instance = match RuntaraSdk::from_env() {
                 Ok(s) => s,
                 Err(e) => {
                     tracing::error!("Failed to initialize SDK: {}", e);
@@ -1591,7 +1608,7 @@ fn emit_main(graph: &ExecutionGraph) -> TokenStream {
 }
 
 /// Emit the execute_workflow function.
-fn emit_execute_workflow(
+pub(crate) fn emit_execute_workflow(
     graph: &ExecutionGraph,
     ctx: &mut EmitContext,
 ) -> Result<TokenStream, CodegenError> {
@@ -1944,6 +1961,73 @@ mod tests {
     use super::*;
     use runtara_dsl::*;
     use std::collections::HashMap;
+
+    #[test]
+    fn canonicalize_agent_id_converts_legacy_snake_to_kebab() {
+        // Workflows persisted before the components migration carry the
+        // legacy snake_case forms. The codegen must normalize them so
+        // generated WIT imports match the published component packages.
+        assert_eq!(canonicalize_agent_id("object_model"), "object-model");
+        assert_eq!(canonicalize_agent_id("ai_tools"), "ai-tools");
+        assert_eq!(canonicalize_agent_id("s3_storage"), "s3-storage");
+        assert_eq!(
+            canonicalize_agent_id("azure_blob_storage"),
+            "azure-blob-storage"
+        );
+        // Already-kebab is preserved.
+        assert_eq!(canonicalize_agent_id("object-model"), "object-model");
+        assert_eq!(canonicalize_agent_id("crypto"), "crypto");
+        // Mixed case is lowercased.
+        assert_eq!(canonicalize_agent_id("Object_Model"), "object-model");
+    }
+
+    #[test]
+    fn collect_used_agents_normalizes_legacy_snake_case_ids() {
+        // A workflow saved with the legacy snake_case agent id must end up
+        // in the agents set under the kebab form so component imports
+        // resolve to the published packages.
+        let mut steps = HashMap::new();
+        steps.insert(
+            "step1".to_string(),
+            Step::Agent(AgentStep {
+                id: "step1".to_string(),
+                name: None,
+                agent_id: "object_model".to_string(),
+                capability_id: "query-instances".to_string(),
+                connection_id: None,
+                input_mapping: None,
+                max_retries: None,
+                retry_delay: None,
+                timeout: None,
+                compensation: None,
+                breakpoint: None,
+                durable: None,
+            }),
+        );
+        steps.insert(
+            "f".to_string(),
+            Step::Finish(FinishStep {
+                id: "f".to_string(),
+                name: None,
+                input_mapping: None,
+                breakpoint: None,
+            }),
+        );
+        let graph = ExecutionGraph {
+            steps,
+            entry_point: "step1".to_string(),
+            execution_plan: vec![],
+            ..Default::default()
+        };
+        let ctx = EmitContext::new(false);
+        let agents = collect_used_agents(&graph, &ctx);
+        assert!(
+            agents.contains("object-model"),
+            "expected kebab form, got {:?}",
+            agents
+        );
+        assert!(!agents.contains("object_model"), "snake form leaked");
+    }
 
     /// Helper to create a minimal ExecutionGraph with a single Finish step.
     fn create_minimal_finish_graph(entry_point: &str) -> ExecutionGraph {

@@ -17,7 +17,9 @@ use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
 
 use runtara_connections::crypto::noop::NoOpCipher;
-use runtara_connections::{ConnectionsConfig, ConnectionsFacade, ConnectionsState};
+use runtara_connections::{
+    ConnectionsConfig, ConnectionsFacade, ConnectionsState, IntegrationCompatibility,
+};
 use runtara_server::api::dto::reports::ReportDefinition;
 use runtara_server::api::repositories::object_model::ObjectStoreManager;
 use runtara_server::api::services::reports::ReportService;
@@ -219,6 +221,10 @@ async fn validate_report_snapshots() {
             public_base_url: "http://localhost".to_string(),
             http_client: reqwest::Client::new(),
             cipher: Arc::new(NoOpCipher),
+            compatibility: Arc::new(IntegrationCompatibility::default()),
+            agent_catalog: Arc::new(runtara_dsl::agent_meta::AgentCatalog::from_agents(
+                Vec::new(),
+            )),
         },
     )));
 
@@ -297,6 +303,10 @@ async fn mcp_validate_report_proxies_rest_and_emits_lint() {
             public_base_url: "http://localhost".to_string(),
             http_client: reqwest::Client::new(),
             cipher: Arc::new(NoOpCipher),
+            compatibility: Arc::new(IntegrationCompatibility::default()),
+            agent_catalog: Arc::new(runtara_dsl::agent_meta::AgentCatalog::from_agents(
+                Vec::new(),
+            )),
         },
     )));
 

@@ -75,7 +75,11 @@ impl std::error::Error for CodegenError {}
 /// # Errors
 ///
 /// Returns `CodegenError` if code generation fails (e.g., missing child workflow).
-pub fn compile(graph: &ExecutionGraph, track_events: bool) -> Result<String, CodegenError> {
+pub fn compile(
+    graph: &ExecutionGraph,
+    track_events: bool,
+    catalog: std::sync::Arc<runtara_dsl::agent_meta::AgentCatalog>,
+) -> Result<String, CodegenError> {
     compile_with_children(
         graph,
         track_events,
@@ -83,6 +87,7 @@ pub fn compile(graph: &ExecutionGraph, track_events: bool) -> Result<String, Cod
         HashMap::new(),
         None,
         None,
+        catalog,
     )
 }
 
@@ -110,6 +115,7 @@ pub fn compile_with_children(
     step_to_child_ref: HashMap<String, (String, i32)>,
     connection_service_url: Option<String>,
     tenant_id: Option<String>,
+    catalog: std::sync::Arc<runtara_dsl::agent_meta::AgentCatalog>,
 ) -> Result<String, CodegenError> {
     let mut ctx = EmitContext::with_child_workflows(
         track_events,
@@ -118,6 +124,7 @@ pub fn compile_with_children(
         connection_service_url,
         tenant_id,
     );
+    ctx.set_catalog(catalog);
     ctx.rate_limit_budget_ms = graph.rate_limit_budget_ms;
     ctx.durable = graph.durable.unwrap_or(true);
     let tokens = program::emit_program(graph, &mut { ctx })?;

@@ -3,6 +3,7 @@
 //! Business logic for connection management
 //! Handles validation and error mapping
 
+use crate::integration_compatibility::{IntegrationCompatibility, OBJECT_STORAGE_DEFAULT_FOR};
 use crate::repository::connections::ConnectionRepository;
 use crate::service::rate_limits::RateLimitService;
 use crate::types::*;
@@ -11,18 +12,20 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 use uuid::Uuid;
 
-const OBJECT_STORAGE_DEFAULT_FOR: &str = "object_storage";
-const OBJECT_STORAGE_INTEGRATION_IDS: &[&str] = &["s3_compatible", "azure_blob_storage"];
-
 pub struct ConnectionService {
     repository: Arc<ConnectionRepository>,
+    compatibility: Arc<IntegrationCompatibility>,
     rate_limit_service: Option<Arc<RateLimitService>>,
 }
 
 impl ConnectionService {
-    pub fn new(repository: Arc<ConnectionRepository>) -> Self {
+    pub fn new(
+        repository: Arc<ConnectionRepository>,
+        compatibility: Arc<IntegrationCompatibility>,
+    ) -> Self {
         Self {
             repository,
+            compatibility,
             rate_limit_service: None,
         }
     }
@@ -30,10 +33,12 @@ impl ConnectionService {
     /// Create a new connection service with rate limit support for runtime API
     pub fn with_rate_limit_service(
         repository: Arc<ConnectionRepository>,
+        compatibility: Arc<IntegrationCompatibility>,
         rate_limit_service: Arc<RateLimitService>,
     ) -> Self {
         Self {
             repository,
+            compatibility,
             rate_limit_service: Some(rate_limit_service),
         }
     }
@@ -55,31 +60,16 @@ impl ConnectionService {
         values.into_iter().collect()
     }
 
-    fn is_compatible_default_for(integration_id: &str, default_for: &str) -> bool {
-        if default_for == OBJECT_STORAGE_DEFAULT_FOR {
-            return OBJECT_STORAGE_INTEGRATION_IDS
-                .iter()
-                .any(|candidate| candidate == &integration_id);
-        }
-
-        runtara_agents::registry::get_agents()
-            .into_iter()
-            .find(|agent| agent.id.eq_ignore_ascii_case(default_for))
-            .map(|agent| {
-                agent
-                    .integration_ids
-                    .iter()
-                    .any(|candidate| candidate == integration_id)
-            })
-            .unwrap_or(false)
-    }
-
     fn validate_default_for(
+        &self,
         integration_id: &str,
         default_for: &[String],
     ) -> Result<(), ServiceError> {
         for operator_id in default_for {
-            if !Self::is_compatible_default_for(integration_id, operator_id) {
+            if !self
+                .compatibility
+                .is_compatible(integration_id, operator_id)
+            {
                 return Err(ServiceError::ValidationError(format!(
                     "Connection type '{}' is not compatible with default '{}'",
                     integration_id, operator_id
@@ -143,7 +133,7 @@ impl ConnectionService {
             request.is_default_file_storage,
         );
         let integration_id = request.integration_id.clone().unwrap_or_default();
-        Self::validate_default_for(&integration_id, &default_for)?;
+        self.validate_default_for(&integration_id, &default_for)?;
 
         if default_for
             .iter()
@@ -263,7 +253,7 @@ impl ConnectionService {
             .unwrap_or_default();
 
         if let Some(ref default_for) = default_for {
-            Self::validate_default_for(&integration_id, default_for)?;
+            self.validate_default_for(&integration_id, default_for)?;
         }
 
         let mut request = request;
@@ -327,27 +317,19 @@ impl ConnectionService {
         Ok(())
     }
 
-    /// Get connections by operator name
-    /// Searches by integration_id matching the operator's supported integration_ids
-    pub async fn list_connections_by_operator(
+    /// List connections whose `integration_id` falls within the given set.
+    ///
+    /// Callers (typically API handlers) translate an agent id into the
+    /// allowed integration ids using the runtime [`AgentCatalog`]; this
+    /// service stays agent-agnostic and only filters by integration ids.
+    pub async fn list_connections_by_integration_ids(
         &self,
         tenant_id: &str,
-        operator_name: &str,
+        integration_ids: &[String],
         status: Option<String>,
     ) -> Result<Vec<ConnectionDto>, ServiceError> {
-        // Look up agent metadata to get integration_ids
-        let agents = runtara_agents::registry::get_agents();
-        let agent_info = agents
-            .into_iter()
-            .find(|agent| agent.id.eq_ignore_ascii_case(operator_name));
-
-        let integration_ids: Vec<String> = agent_info
-            .as_ref()
-            .map(|agent| agent.integration_ids.clone())
-            .unwrap_or_default();
-
         self.repository
-            .list_by_operator(tenant_id, &integration_ids, status.as_deref())
+            .list_by_operator(tenant_id, integration_ids, status.as_deref())
             .await
             .map_err(|e| ServiceError::DatabaseError(e.to_string()))
     }

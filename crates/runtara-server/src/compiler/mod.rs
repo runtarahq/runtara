@@ -105,6 +105,10 @@ pub async fn compile_with_child_workflows(
         track_events,
         child_workflows,
         connection_service_url,
+        // TODO(phase-c): inject the runtime catalog from app state once the
+        // compiler module accepts it via its config. None = falls back to
+        // the statically-linked agent registry.
+        agent_catalog: None,
     };
 
     // Compile using runtara-workflows

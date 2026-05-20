@@ -1,8 +1,15 @@
 //! Agents Handlers
 //!
-//! HTTP endpoints for querying agent metadata
+//! HTTP endpoints for querying agent metadata. The handlers read a single
+//! shared `AgentsService` from `AppState` (built once at startup with the
+//! embedded component dispatcher attached) so component-backed agents
+//! consistently override the legacy registry on every call.
 
-use axum::{extract::Path, http::StatusCode, response::Json};
+use axum::{
+    extract::{Path, State},
+    http::StatusCode,
+    response::Json,
+};
 
 use crate::api::dto::operators::{AgentInfo, CapabilityInfo, ListAgentsResponse};
 use crate::api::services::operators::{AgentsService, ServiceError};
@@ -16,8 +23,9 @@ use crate::api::services::operators::{AgentsService, ServiceError};
         (status = 200, description = "List of available agents", body = ListAgentsResponse),
     )
 )]
-pub async fn list_agents_handler() -> Result<Json<ListAgentsResponse>, StatusCode> {
-    let service = AgentsService::new();
+pub async fn list_agents_handler(
+    State(service): State<AgentsService>,
+) -> Result<Json<ListAgentsResponse>, StatusCode> {
     let agents = service.list_agents();
     Ok(Json(ListAgentsResponse { agents }))
 }
@@ -35,9 +43,10 @@ pub async fn list_agents_handler() -> Result<Json<ListAgentsResponse>, StatusCod
         (status = 404, description = "Agent not found"),
     )
 )]
-pub async fn get_agent_handler(Path(name): Path<String>) -> Result<Json<AgentInfo>, StatusCode> {
-    let service = AgentsService::new();
-
+pub async fn get_agent_handler(
+    State(service): State<AgentsService>,
+    Path(name): Path<String>,
+) -> Result<Json<AgentInfo>, StatusCode> {
     match service.get_agent(&name) {
         Ok(agent) => Ok(Json(agent)),
         Err(ServiceError::AgentNotFound) => Err(StatusCode::NOT_FOUND),
@@ -60,10 +69,9 @@ pub async fn get_agent_handler(Path(name): Path<String>) -> Result<Json<AgentInf
     )
 )]
 pub async fn get_capability_handler(
+    State(service): State<AgentsService>,
     Path((name, capability_id)): Path<(String, String)>,
 ) -> Result<Json<CapabilityInfo>, StatusCode> {
-    let service = AgentsService::new();
-
     match service.get_capability(&name, &capability_id) {
         Ok(capability) => Ok(Json(capability)),
         Err(ServiceError::AgentNotFound) | Err(ServiceError::CapabilityNotFound) => {
@@ -94,4 +102,34 @@ pub async fn get_agent_connection_schema_handler(
         "status": 501
     });
     (StatusCode::NOT_IMPLEMENTED, Json(response))
+}
+
+/// Snapshot of the embedded component dispatcher.
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub struct ComponentsStatusResponse {
+    pub loaded: bool,
+    pub agent_ids: Vec<String>,
+    pub capability_count: usize,
+}
+
+/// Get a snapshot of the embedded component dispatcher's loaded agents and
+/// total declared-capability count. Used by ops and the components A/B
+/// switching logic.
+#[utoipa::path(
+    get,
+    path = "/api/runtime/_internal/components/status",
+    tag = "agents-controller",
+    responses(
+        (status = 200, description = "Component dispatcher status", body = ComponentsStatusResponse),
+    )
+)]
+pub async fn components_status_handler(
+    State(service): State<AgentsService>,
+) -> Json<ComponentsStatusResponse> {
+    let (loaded, agent_ids, capability_count) = service.components_status();
+    Json(ComponentsStatusResponse {
+        loaded,
+        agent_ids,
+        capability_count,
+    })
 }
