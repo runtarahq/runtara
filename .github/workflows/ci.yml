@@ -9,6 +9,12 @@ on:
     branches:
       - main
 
+# Default-deny: every job reads source via actions/checkout. No job needs
+# to write to issues, PRs, releases, packages, etc. Per-job overrides go
+# at the job level if ever required.
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
   SQLX_OFFLINE: "true"
