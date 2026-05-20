@@ -12,6 +12,7 @@ use quote::quote;
 use super::super::CodegenError;
 use super::super::context::EmitContext;
 use super::super::mapping;
+use super::super::program::canonicalize_agent_id;
 use super::{
     emit_agent_span_start, emit_breakpoint_check, emit_step_debug_end, emit_step_debug_start,
 };
@@ -34,7 +35,13 @@ pub fn emit(step: &AgentStep, ctx: &mut EmitContext) -> Result<TokenStream, Code
     let step_id = &step.id;
     let step_name = step.name.as_deref();
     let step_name_display = step_name.unwrap_or("Unnamed");
-    let agent_id = &step.agent_id;
+    // Canonicalize once at the entry point — the rest of the emitter and
+    // every catalog / dispatcher lookup downstream of it expects the
+    // kebab-case form. Legacy workflows persisted with snake_case ids
+    // (`object_model`, `ai_tools`, `s3_storage`, `azure_blob_storage`) go
+    // through this normalization so they recompile cleanly.
+    let agent_id_owned = canonicalize_agent_id(&step.agent_id);
+    let agent_id = agent_id_owned.as_str();
     let capability_id = &step.capability_id;
 
     // All capabilities use #[resilient] for crash recovery.
