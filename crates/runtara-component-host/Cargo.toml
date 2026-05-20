@@ -34,16 +34,11 @@ wasmtime = { version = "44", default-features = false, features = [
 wasmtime-wasi = "44"
 wasmtime-wasi-http = "44"
 
-# Async runtime (for component instantiation + outgoing http).
-tokio = { version = "1", features = ["sync", "fs", "rt", "macros"] }
-
 # Plumbing
 anyhow = "1"
-tracing = "0.1"
 serde = { workspace = true }
 serde_json = { workspace = true }
 http = "1"
-hyper = "1"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
