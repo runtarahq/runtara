@@ -2052,3 +2052,145 @@ mod tests {
         assert_eq!(url, "/drives/X/root/search(q='')");
     }
 }
+
+// =============================================================================
+// Ported from legacy crates/runtara-agents/src/agents/integrations/sharepoint_client.rs
+// =============================================================================
+//
+// Test cohort moved alongside the component-mode rewrite. The legacy
+// `parse_drive_item` / `parse_drive` returned typed `GraphDriveItem` /
+// `GraphDrive` structs; component returns `serde_json::Value` directly
+// (see lib.rs:495-526 for rationale — collapses a two-step into one).
+// Field-shape coverage is preserved via `.get(...).and_then(...)` accessors.
+//
+// Three legacy tests intentionally dropped (helpers were inlined into the
+// network-calling capabilities, so unit-level testing is no longer the
+// right shape — e2e through the capability covers them now):
+//   - parse_upload_session_extracts_url
+//   - parse_upload_session_errors_when_url_missing
+//   - poll_monitor_url_rejects_empty_url
+#[cfg(test)]
+mod tests_sharepoint_client {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn parse_drive_item_extracts_file_metadata() {
+        let v = json!({
+            "id": "01ABCDEF",
+            "name": "report.csv",
+            "webUrl": "https://contoso.sharepoint.com/sites/x/Shared%20Documents/report.csv",
+            "size": 1234,
+            "lastModifiedDateTime": "2026-01-02T03:04:05Z",
+            "createdDateTime": "2026-01-01T00:00:00Z",
+            "eTag": "\"abc\"",
+            "@microsoft.graph.downloadUrl": "https://blob.example/abc",
+            "file": { "mimeType": "text/csv" },
+            "lastModifiedBy": { "user": { "displayName": "Alice" } }
+        });
+        let item = parse_drive_item(&v);
+        assert_eq!(item.get("id").and_then(|v| v.as_str()), Some("01ABCDEF"));
+        assert_eq!(
+            item.get("name").and_then(|v| v.as_str()),
+            Some("report.csv")
+        );
+        assert_eq!(item.get("size").and_then(|v| v.as_u64()), Some(1234));
+        assert_eq!(
+            item.get("mime_type").and_then(|v| v.as_str()),
+            Some("text/csv")
+        );
+        assert_eq!(
+            item.get("last_modified_by").and_then(|v| v.as_str()),
+            Some("Alice")
+        );
+        assert_eq!(item.get("is_folder").and_then(|v| v.as_bool()), Some(false));
+        assert_eq!(
+            item.get("download_url").and_then(|v| v.as_str()),
+            Some("https://blob.example/abc")
+        );
+    }
+
+    #[test]
+    fn parse_drive_item_detects_folder() {
+        let v = json!({
+            "id": "01FOLDER",
+            "name": "Reports",
+            "webUrl": "https://contoso.sharepoint.com/sites/x/Reports",
+            "folder": { "childCount": 7 }
+        });
+        let item = parse_drive_item(&v);
+        assert_eq!(item.get("is_folder").and_then(|v| v.as_bool()), Some(true));
+        assert_eq!(item.get("child_count").and_then(|v| v.as_u64()), Some(7));
+        assert!(item.get("mime_type").is_none_or(|v| v.is_null()));
+    }
+
+    #[test]
+    fn parse_drive_extracts_basics() {
+        let v = json!({
+            "id": "b!abc",
+            "name": "Documents",
+            "driveType": "documentLibrary",
+            "webUrl": "https://contoso.sharepoint.com/sites/x/Shared%20Documents"
+        });
+        let d = parse_drive(&v);
+        assert_eq!(d.get("id").and_then(|v| v.as_str()), Some("b!abc"));
+        assert_eq!(
+            d.get("drive_type").and_then(|v| v.as_str()),
+            Some("documentLibrary")
+        );
+    }
+
+    #[test]
+    fn extract_next_relative_path_strips_v1_prefix() {
+        let link =
+            "https://graph.microsoft.com/v1.0/drives/b!abc/items/01x/children?$skiptoken=def";
+        assert_eq!(
+            extract_next_relative_path(Some(link)),
+            Some("/drives/b!abc/items/01x/children?$skiptoken=def".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_next_relative_path_handles_missing_link() {
+        assert_eq!(extract_next_relative_path(None), None);
+        assert_eq!(extract_next_relative_path(Some("")), None);
+    }
+
+    #[test]
+    fn extract_next_relative_path_falls_back_when_no_v1_segment() {
+        let link = "https://graph.microsoft.com/foo/bar?baz=1";
+        assert_eq!(
+            extract_next_relative_path(Some(link)),
+            Some("/foo/bar?baz=1".to_string())
+        );
+    }
+
+    #[test]
+    fn encode_graph_path_handles_spaces_and_hashes() {
+        assert_eq!(
+            encode_graph_path("Reports/Q1 2026/file #1.xlsx"),
+            "Reports/Q1%202026/file%20%231.xlsx"
+        );
+    }
+
+    #[test]
+    fn encode_graph_path_preserves_slashes_and_unicode() {
+        // SharePoint allows unicode names; we shouldn't aggressively encode them.
+        assert_eq!(encode_graph_path("Reports/Año/日本"), "Reports/Año/日本");
+    }
+
+    #[test]
+    fn item_path_uses_root_alias() {
+        assert_eq!(item_path("b!abc", "root"), "/drives/b!abc/root");
+        assert_eq!(item_path("b!abc", "01x"), "/drives/b!abc/items/01x");
+    }
+
+    #[test]
+    fn upload_chunks_rejects_empty_input() {
+        // Component's upload_chunks takes `&str` directly (the upload URL),
+        // not a `&UploadSession`; the session type was dropped when the
+        // helper was inlined into sharepoint_upload_file_large.
+        let err = upload_chunks("https://upload.example/abc", &[]).unwrap_err();
+        assert_eq!(err.code, "SHAREPOINT_EMPTY_UPLOAD");
+    }
+}
