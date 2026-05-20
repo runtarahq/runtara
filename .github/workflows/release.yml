@@ -88,35 +88,15 @@ jobs:
       - name: Build bundle
         run: ./scripts/build-bundle.sh --output-dir target/bundle --version "${{ steps.get_version.outputs.version }}"
 
-      # Compile a real workflow against the EXACT stdlib cache that ships in
-      # the bundle (target/bundle/runtara-*/stdlib). This is the gate that
-      # catches bugs which only surface when rustc walks the bundled deps/
-      # dir — e.g. the parser tripping over a hash-less cdylib like
-      # libruntara_report_dsl.so. The smoke_compile suite ships a
-      # per-construct corpus, so any breakage in the `--extern` enumeration
-      # fails here before the bundle reaches the release job. Runs across
-      # the matrix so we cover all three ship targets.
-      - name: Smoke-compile workflows against bundled stdlib
-        env:
-          RUNTARA_RUN_SMOKE_COMPILE: "1"
-          RUNTARA_LTO: "off"
-        run: |
-          # `cargo test` sets the test process CWD to the crate manifest dir
-          # (crates/runtara-workflows/), not the workspace root — so
-          # RUNTARA_WASM_LIBRARY_DIR must be an absolute path or the test's
-          # `Path::new(&dir).exists()` check resolves against the wrong CWD.
-          bundle_dir="$(find "$PWD/target/bundle" -maxdepth 1 -type d -name 'runtara-*' | head -n 1)"
-          if [ -z "$bundle_dir" ]; then
-              echo "::error::Extracted bundle directory not found under target/bundle/"
-              exit 1
-          fi
-          if [ ! -f "$bundle_dir/stdlib/libruntara_workflow_stdlib.rlib" ]; then
-              echo "::error::Bundle stdlib cache missing libruntara_workflow_stdlib.rlib"
-              exit 1
-          fi
-          export RUNTARA_WASM_LIBRARY_DIR="$bundle_dir/stdlib"
-          echo "RUNTARA_WASM_LIBRARY_DIR=$RUNTARA_WASM_LIBRARY_DIR"
-          cargo test -p runtara-workflows --test smoke_compile --release -- --test-threads=1
+      # The bundle's compile-pipeline gate has moved to the components-mode
+      # path: scripts/build-bundle.sh now invokes scripts/build-agent-components.sh
+      # which drives `cargo component build` and emits the sidecar
+      # meta.json for all 23 agent crates. Any breakage there fails the
+      # bundle build itself before this step would run. The downstream
+      # `smoke:` job extracts the resulting tarball and runs the full
+      # server end-to-end (with RUNTARA_AGENT_COMPONENTS_DIR pointing at
+      # the bundled agents/) — which exercises the actual server compile
+      # path against the actual bundled stdlib.
 
       - name: Upload bundle artifact
         uses: actions/upload-artifact@v4

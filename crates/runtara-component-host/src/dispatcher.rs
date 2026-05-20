@@ -126,7 +126,7 @@ impl ComponentDispatcherService {
                     meta_path.display()
                 )
             })?;
-            let info: AgentInfo = serde_json::from_slice(&meta_bytes).with_context(|| {
+            let mut info: AgentInfo = serde_json::from_slice(&meta_bytes).with_context(|| {
                 format!(
                     "agent `{agent_id}`: failed to parse sidecar metadata {}",
                     meta_path.display()
@@ -142,6 +142,13 @@ impl ComponentDispatcherService {
                     info.id
                 );
             }
+            // Force the catalog to key on the same kebab form `agents` uses
+            // — otherwise an agent whose `agent_info().id` literal is
+            // snake_case (e.g. "azure_blob_storage") loads into `agents` as
+            // "azure-blob-storage" but registers in the catalog as
+            // "azure_blob_storage", and `agent_info_of("azure-blob-storage")`
+            // returns None while `agent_ids()` yields it.
+            info.id = agent_id.clone();
 
             let loaded = load_agent(&engine, &linker, &path, &agent_id)?;
 
