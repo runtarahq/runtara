@@ -77,7 +77,7 @@ pub struct TestAgentErrorResponse {
 /// `?engine=` query string on `POST /api/runtime/agents/{name}/capabilities/{cap}/test`.
 ///
 /// The legacy rustc-compiled dispatcher image was removed in Phase 3 step 10
-/// once every agent shipped as its own WASM component. Both variants now
+/// once every agent shipped as its own WASM component. All variants now
 /// route through the embedded wasmtime component host; the enum stays as a
 /// stable API surface so existing `?engine=...` query strings still parse.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
@@ -90,6 +90,13 @@ pub enum TestEngine {
     /// Alias for `Auto` — kept for callers that send `?engine=components`
     /// explicitly. Behaves identically.
     Components,
+    /// Alias for `Auto` — preserves backward compatibility with callers
+    /// that explicitly send `?engine=legacy`. Before the components-only
+    /// migration this selected the rustc-compiled dispatcher; that image
+    /// is gone, so the request now silently routes through the component
+    /// host. Kept as a variant rather than rejected so old SDK pins and
+    /// scripted callers don't break with 400 on query deserialization.
+    Legacy,
 }
 
 /// Query string parameters for `test_agent_handler`.
@@ -97,4 +104,37 @@ pub enum TestEngine {
 pub struct TestAgentQuery {
     #[serde(default)]
     pub engine: TestEngine,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `?engine=legacy` predates the components-only migration. Callers
+    /// (older SDK pins, hand-rolled scripts) still send it; the server
+    /// must keep parsing the value rather than failing query
+    /// deserialization with a 400. axum's `Query` extractor calls into
+    /// the type's `Deserialize` impl, same impl serde_json drives — so
+    /// covering the string-to-enum path here is sufficient.
+    #[test]
+    fn test_engine_parses_legacy_alias() {
+        let parsed: TestEngine =
+            serde_json::from_str("\"legacy\"").expect("legacy variant must parse");
+        assert_eq!(parsed, TestEngine::Legacy);
+    }
+
+    #[test]
+    fn test_engine_parses_auto_and_components() {
+        let auto: TestEngine = serde_json::from_str("\"auto\"").unwrap();
+        let components: TestEngine = serde_json::from_str("\"components\"").unwrap();
+        assert_eq!(auto, TestEngine::Auto);
+        assert_eq!(components, TestEngine::Components);
+    }
+
+    #[test]
+    fn test_engine_default_is_auto() {
+        let q: TestAgentQuery = serde_json::from_value(serde_json::json!({}))
+            .expect("empty object must parse with defaults");
+        assert_eq!(q.engine, TestEngine::Auto);
+    }
 }
