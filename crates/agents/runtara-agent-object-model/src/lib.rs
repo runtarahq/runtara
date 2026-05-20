@@ -2030,3 +2030,45 @@ fn error_string_to_error_info(s: String) -> ErrorInfo {
 
 #[cfg(target_arch = "wasm32")]
 bindings::export!(Component with_types_in bindings);
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn query_instances_score_expression_metadata_is_object_shaped() {
+        let field = __INPUT_META_QueryInstancesInput
+            .fields
+            .iter()
+            .find(|field| field.name == "score_expression")
+            .expect("score_expression metadata");
+
+        assert_eq!(field.type_name, "Value");
+    }
+
+    #[test]
+    fn query_instances_input_accepts_object_score_expression() {
+        let input: QueryInstancesInput = serde_json::from_value(json!({
+            "schema_name": "UnspscNode",
+            "score_expression": {
+                "alias": "vec_dist",
+                "expression": {
+                    "fn": "COSINE_DISTANCE",
+                    "arguments": [
+                        {"valueType": "reference", "value": "embedding"},
+                        {"valueType": "immediate", "value": [0.1, 0.2, 0.3]}
+                    ]
+                }
+            },
+            "order_by": [{
+                "expression": {"kind": "alias", "name": "vec_dist"},
+                "direction": "ASC"
+            }],
+            "limit": 25
+        }))
+        .unwrap();
+
+        let score_expression = input.score_expression.unwrap();
+        assert_eq!(score_expression["alias"], json!("vec_dist"));
+        assert_eq!(input.order_by.unwrap().as_array().unwrap().len(), 1);
+    }
+}
