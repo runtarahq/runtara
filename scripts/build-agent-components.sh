@@ -59,15 +59,12 @@ fi
 workspace="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$workspace"
 
-# Discover every workspace member named runtara-agent-* and skip the WIT
-# package, the proc-macro crate, the shared utilities crate, and the
-# build-time emit-meta binary — those aren't components.
-agents=$(grep -E '^\s*"crates/runtara-agent-' Cargo.toml \
-    | sed -E 's@.*"crates/(runtara-agent-[^"]+)".*@\1@' \
-    | grep -v '^runtara-agent-wit$' \
-    | grep -v '^runtara-agent-macro$' \
-    | grep -v '^runtara-agent-common$' \
-    | grep -v '^runtara-agent-bundle-emit$' \
+# Discover every workspace member under crates/agents/. Component agents
+# live there as a self-contained subsystem; runtara-agent-wit, -macro,
+# -bundle-emit stay at crates/ root because they're infrastructure shared
+# with the host crates, not components themselves.
+agents=$(grep -E '^\s*"crates/agents/runtara-agent-' Cargo.toml \
+    | sed -E 's@.*"crates/agents/(runtara-agent-[^"]+)".*@\1@' \
     || true)
 
 if [ -z "$agents" ]; then

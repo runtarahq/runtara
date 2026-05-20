@@ -263,7 +263,7 @@ fn stage_per_agent_wits(deps_dir: &Path, required: &[AgentRequirement]) -> io::R
     let ws = workspace_root();
     for req in required {
         let src = ws.join(format!(
-            "crates/runtara-agent-{}/wit/agent.wit",
+            "crates/agents/runtara-agent-{}/wit/agent.wit",
             req.agent_id
         ));
         if !src.exists() {
@@ -339,7 +339,7 @@ fn resolve_cargo_toml_placeholders(
             &deps_root.join("sockets").display().to_string(),
         );
     for req in required {
-        let agent_wit = ws.join(format!("crates/runtara-agent-{}/wit", req.agent_id));
+        let agent_wit = ws.join(format!("crates/agents/runtara-agent-{}/wit", req.agent_id));
         let token = format!("{{{{AGENT_PER_WIT_PATH:{}}}}}", req.agent_id);
         out = out.replace(&token, &agent_wit.display().to_string());
     }

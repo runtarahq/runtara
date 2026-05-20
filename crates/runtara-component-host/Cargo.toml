@@ -51,4 +51,4 @@ tempfile = "3"
 # Tests build their own bundle (.wasm + sidecar meta.json) at runtime by
 # calling each agent crate's host-only `agent_info()` and serializing the
 # resulting `AgentInfo` to JSON next to the freshly-built `.wasm`.
-runtara-agent-crypto = { path = "../runtara-agent-crypto" }
+runtara-agent-crypto = { path = "../agents/runtara-agent-crypto" }

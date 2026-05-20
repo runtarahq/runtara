@@ -1,10 +1,10 @@
 //! Fixture-driven capability smoke harness.
 //!
 //! Fixtures live next to the agent they exercise:
-//!   `crates/runtara-agent-<x>/fixtures/<capability_id>.json`.
+//!   `crates/agents/runtara-agent-<x>/fixtures/<capability_id>.json`.
 //! Each one describes a happy-path call: the input the dispatcher should
 //! accept and what the returned output must contain. The runner walks every
-//! `crates/runtara-agent-*/fixtures/` directory, loads the production bundle
+//! `crates/agents/runtara-agent-*/fixtures/` directory, loads the production bundle
 //! (`target/wasm32-wasip1/release/`), and invokes each fixture through
 //! `ComponentDispatcherService::test_capability`.
 //!
@@ -60,8 +60,8 @@ fn bundle_dir() -> PathBuf {
     workspace_root().join("target/wasm32-wasip1/release")
 }
 
-fn crates_dir() -> PathBuf {
-    workspace_root().join("crates")
+fn agents_crates_dir() -> PathBuf {
+    workspace_root().join("crates").join("agents")
 }
 
 fn env() -> DispatcherEnv {
@@ -210,10 +210,10 @@ async fn capability_fixtures_drive_production_bundle() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let fixtures = load_all_fixtures(&crates_dir(), &bundle);
+    let fixtures = load_all_fixtures(&agents_crates_dir(), &bundle);
     assert!(
         !fixtures.is_empty(),
-        "no fixtures found under crates/runtara-agent-*/fixtures/"
+        "no fixtures found under crates/agents/runtara-agent-*/fixtures/"
     );
 
     let dispatcher = ComponentDispatcherService::from_dir(&bundle, env()).await?;
