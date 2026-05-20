@@ -367,6 +367,61 @@ jobs:
           TEST_RUNTARA_DATABASE_URL: postgres://postgres:postgres@localhost:5432/runtara_test
         run: cargo test -p runtara-environment -- --test-threads=1
 
+  # Per-component-crate unit tests for the 23 agent crates plus the legacy
+  # `runtara-agents` parent and the shared agent infrastructure
+  # (`runtara-agent-macro` proc-macro). Distinct from components-build,
+  # which builds .wasm + .meta.json and drives the dispatcher end-to-end —
+  # this job runs the native `cargo test` for each agent crate's logic
+  # (regex, template, transform, sigv4, http response shaping, etc.).
+  #
+  # Iterates the workspace members so a newly-added agent crate is picked
+  # up without a CI edit, as long as it lands under `crates/agents/`.
+  test-agents:
+    runs-on: ubuntu-latest
+    needs: build
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Setup Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+
+      - name: Restore build cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ github.sha }}
+
+      # Legacy parent: tests for utils, http auth extractors,
+      # integration helpers that aren't owned by any single component
+      # crate.
+      - name: Run runtara-agents (legacy parent) tests
+        run: cargo test -p runtara-agents --lib
+
+      # Shared procedural macro that emits the &'static capability /
+      # input / output metadata each component crate ships.
+      - name: Run runtara-agent-macro tests
+        run: cargo test -p runtara-agent-macro
+
+      # Every component crate under crates/agents/. Looped rather than
+      # listed so adding crates/agents/runtara-agent-foo/ doesn't
+      # require touching CI. Tests run with -p so one failure doesn't
+      # short-circuit the rest; loop fails the job on any non-zero.
+      - name: Run all runtara-agent-* component crate tests
+        run: |
+          set -e
+          for crate_dir in crates/agents/runtara-agent-*; do
+            [ -d "$crate_dir" ] || continue
+            name="$(basename "$crate_dir")"
+            echo "==> $name"
+            cargo test -p "$name" --lib
+          done
+
   # WIT-only sanity: the canonical agent contract package parses and its
   # wasi:* dependency tree resolves. Cheap; catches deps.toml / lockfile drift
   # before any agent crate tries to consume it.
@@ -503,6 +558,7 @@ jobs:
       - test-core
       - test-server
       - test-environment
+      - test-agents
       - wit-package
       - components-build
     if: |
