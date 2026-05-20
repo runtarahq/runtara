@@ -15,8 +15,6 @@ members = [
     "crates/runtara-http",
     "crates/runtara-workflow-stdlib",
     "crates/runtara-agent-macro",
-    # Agent testing
-    "crates/runtara-test-harness",
     # Text parsing
     "crates/runtara-text-parser",
     # Connection management
@@ -27,6 +25,36 @@ members = [
     "crates/runtara-object-store",
     # Reports DSL: schema + minijinja + condition evaluator (server-side, also compiled to WASM)
     "crates/runtara-report-dsl",
+    # WASM Component Model migration — see docs/wasm-components-migration-plan.md
+    "crates/runtara-agent-wit",
+    "crates/runtara-component-host",
+    "crates/agents/runtara-agent-crypto",
+    "crates/agents/runtara-agent-xml",
+    "crates/agents/runtara-agent-csv",
+    "crates/agents/runtara-agent-utils",
+    "crates/agents/runtara-agent-datetime",
+    "crates/agents/runtara-agent-transform",
+    "crates/agents/runtara-agent-text",
+    "crates/agents/runtara-agent-http",
+    "crates/agents/runtara-agent-mailgun",
+    "crates/agents/runtara-agent-slack",
+    "crates/agents/runtara-agent-openai",
+    "crates/agents/runtara-agent-ai-tools",
+    "crates/agents/runtara-agent-bedrock",
+    "crates/agents/runtara-agent-object-model",
+    "crates/agents/runtara-agent-s3-storage",
+    "crates/agents/runtara-agent-azure-blob-storage",
+    "crates/agents/runtara-agent-sharepoint",
+    "crates/agents/runtara-agent-stripe",
+    "crates/agents/runtara-agent-hubspot",
+    "crates/agents/runtara-agent-shopify",
+    "crates/agents/runtara-agent-sftp",
+    "crates/agents/runtara-agent-compression",
+    "crates/agents/runtara-agent-xlsx",
+    # Build tool: emits per-agent meta.json siblings to each .wasm by walking
+    # the macro-emitted statics in every agent crate. Run by
+    # scripts/build-agent-components.sh after `cargo component build`.
+    "crates/runtara-agent-bundle-emit",
 ]
 default-members = ["crates/runtara-core"]
 

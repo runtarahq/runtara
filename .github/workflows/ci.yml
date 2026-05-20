@@ -9,6 +9,12 @@ on:
     branches:
       - main
 
+# Default-deny: every job reads source via actions/checkout. No job needs
+# to write to issues, PRs, releases, packages, etc. Per-job overrides go
+# at the job level if ever required.
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
   SQLX_OFFLINE: "true"
@@ -167,59 +173,6 @@ jobs:
       - name: Run runtara-workflows tests
         run: cargo test -p runtara-workflows
 
-  # Per-construct compile smoke tests. Builds the WASM stdlib once, stages it,
-  # then runs tests/smoke_compile.rs — each test takes a minimal workflow
-  # exercising one DSL construct all the way through codegen + rustc to a
-  # binary. Catches regressions where generated code is syntactically valid
-  # but rustc rejects it (e.g. type mismatches).
-  test-workflows-smoke-compile:
-    runs-on: ubuntu-latest
-    needs: build
-
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          submodules: true
-
-      - name: Setup Rust toolchain
-        uses: actions-rust-lang/setup-rust-toolchain@v1
-        with:
-          target: wasm32-wasip2
-
-      - name: Restore build cache
-        uses: actions/cache/restore@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ github.sha }}
-
-      - name: Build WASM stdlib
-        run: |
-          RUSTFLAGS="-C embed-bitcode=yes" \
-            cargo build -p runtara-workflow-stdlib --release \
-              --target wasm32-wasip2 --no-default-features
-          cargo build -p runtara-workflow-stdlib --release
-
-      - name: Stage native_cache_wasm
-        run: |
-          rm -rf target/native_cache_wasm
-          mkdir -p target/native_cache_wasm/deps
-          cp target/wasm32-wasip2/release/libruntara_workflow_stdlib.rlib \
-             target/native_cache_wasm/
-          cp target/wasm32-wasip2/release/deps/*.rlib target/native_cache_wasm/deps/
-          find target/wasm32-wasip2/release/build -name "*.a" \
-               -exec cp {} target/native_cache_wasm/deps/ \; 2>/dev/null || true
-          cp target/release/deps/*.so target/native_cache_wasm/deps/ 2>/dev/null || true
-
-      - name: Run per-construct smoke compile tests
-        env:
-          RUNTARA_RUN_SMOKE_COMPILE: "1"
-          RUNTARA_LTO: "off"
-          RUNTARA_WASM_LIBRARY_DIR: ${{ github.workspace }}/target/native_cache_wasm
-        run: cargo test -p runtara-workflows --test smoke_compile --release -- --test-threads=1
-
   test-core:
     runs-on: ubuntu-latest
     needs: build
@@ -361,6 +314,184 @@ jobs:
           TEST_RUNTARA_DATABASE_URL: postgres://postgres:postgres@localhost:5432/runtara_test
         run: cargo test -p runtara-environment -- --test-threads=1
 
+  # Per-component-crate unit tests for the 23 agent crates plus the legacy
+  # `runtara-agents` parent and the shared agent infrastructure
+  # (`runtara-agent-macro` proc-macro). Distinct from components-build,
+  # which builds .wasm + .meta.json and drives the dispatcher end-to-end —
+  # this job runs the native `cargo test` for each agent crate's logic
+  # (regex, template, transform, sigv4, http response shaping, etc.).
+  #
+  # Iterates the workspace members so a newly-added agent crate is picked
+  # up without a CI edit, as long as it lands under `crates/agents/`.
+  test-agents:
+    runs-on: ubuntu-latest
+    needs: build
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Setup Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+
+      - name: Restore build cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ github.sha }}
+
+      # Legacy parent: tests for utils, http auth extractors,
+      # integration helpers that aren't owned by any single component
+      # crate.
+      - name: Run runtara-agents (legacy parent) tests
+        run: cargo test -p runtara-agents --lib
+
+      # Shared procedural macro that emits the &'static capability /
+      # input / output metadata each component crate ships.
+      - name: Run runtara-agent-macro tests
+        run: cargo test -p runtara-agent-macro
+
+      # Every component crate under crates/agents/. Looped rather than
+      # listed so adding crates/agents/runtara-agent-foo/ doesn't
+      # require touching CI. Tests run with -p so one failure doesn't
+      # short-circuit the rest; loop fails the job on any non-zero.
+      - name: Run all runtara-agent-* component crate tests
+        run: |
+          set -e
+          for crate_dir in crates/agents/runtara-agent-*; do
+            [ -d "$crate_dir" ] || continue
+            name="$(basename "$crate_dir")"
+            echo "==> $name"
+            cargo test -p "$name" --lib
+          done
+
+  # WIT-only sanity: the canonical agent contract package parses and its
+  # wasi:* dependency tree resolves. Cheap; catches deps.toml / lockfile drift
+  # before any agent crate tries to consume it.
+  wit-package:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Install wit-deps
+        run: cargo install wit-deps-cli --locked
+
+      - name: Install wasm-tools
+        run: cargo install wasm-tools --locked
+
+      - name: Lock and resolve WIT dependencies
+        working-directory: crates/runtara-agent-wit
+        run: wit-deps lock
+
+      - name: Validate WIT package
+        run: wasm-tools component wit crates/runtara-agent-wit/wit > /dev/null
+
+  # Build every runtara-agent-* crate as a WASM component, emit each agent's
+  # macro-derived meta.json sidecar, and run the dispatcher integration tests
+  # (including the full-bundle drift detector that calls every declared
+  # capability against its real .wasm and asserts no UNKNOWN_CAPABILITY).
+  components-build:
+    runs-on: ubuntu-latest
+    needs: wit-package
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Setup Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          target: wasm32-wasip2
+          cache: true
+          cache-workspaces: ". -> target"
+
+      # `cargo install cargo-component` is a ~5 min cold build. Cache the
+      # installed binary keyed on the pinned version so subsequent CI runs
+      # are sub-second. Version bumps invalidate the cache automatically.
+      - name: Cache cargo-component binary
+        id: cache-cargo-component
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/cargo-component
+          key: cargo-component-${{ runner.os }}-${{ runner.arch }}-0.21.1
+
+      - name: Install cargo-component
+        if: steps.cache-cargo-component.outputs.cache-hit != 'true'
+        run: cargo install cargo-component --version 0.21.1 --locked
+
+      # wac compose is needed by the workflow-compile e2e tests
+      # (RUNTARA_RUN_COMPONENTS_E2E=1). Upstream ships prebuilt static
+      # binaries — bypass cargo install to keep this fast.
+      - name: Cache wac binary
+        id: cache-wac
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/wac
+          key: wac-${{ runner.os }}-${{ runner.arch }}-0.10.0
+
+      - name: Install wac
+        if: steps.cache-wac.outputs.cache-hit != 'true'
+        env:
+          RUNNER_ARCH_LOCAL: ${{ runner.arch }}
+        run: |
+          set -euo pipefail
+          case "$RUNNER_ARCH_LOCAL" in
+            X64) asset="wac-cli-x86_64-unknown-linux-musl" ;;
+            ARM64) asset="wac-cli-aarch64-unknown-linux-musl" ;;
+            *) echo "Unsupported runner arch: $RUNNER_ARCH_LOCAL" >&2; exit 1 ;;
+          esac
+          mkdir -p ~/.cargo/bin
+          curl -fSL -o ~/.cargo/bin/wac \
+            "https://github.com/bytecodealliance/wac/releases/download/v0.10.0/${asset}"
+          chmod +x ~/.cargo/bin/wac
+          wac --version
+
+      - name: Install wit-deps
+        run: cargo install wit-deps-cli --locked
+
+      - name: Build all 23 agent components + emit sidecar meta.json
+        env:
+          # Tools are installed explicitly above. Fail loudly if anything's
+          # missing instead of silently re-installing inside the script.
+          RUNTARA_NO_INSTALL_TOOLS: "1"
+        run: scripts/build-agent-components.sh
+
+      - name: Verify 23 .wasm + 23 .meta.json present
+        run: |
+          wasm_count=$(find target/wasm32-wasip1/release -maxdepth 1 -name 'runtara_agent_*.wasm' | wc -l)
+          meta_count=$(find target/wasm32-wasip1/release -maxdepth 1 -name 'runtara_agent_*.meta.json' | wc -l)
+          echo "wasm=$wasm_count meta=$meta_count"
+          test "$wasm_count" -eq 23
+          test "$meta_count" -eq 23
+
+      - name: Run dispatcher integration tests (incl. full-bundle drift detector)
+        run: cargo test -p runtara-component-host --tests
+
+      # End-to-end: drive `cargo component build` + `wac compose` against
+      # real workflows that import the freshly-staged agent components,
+      # then load and execute the composed .wasm. This is the gate that
+      # catches drift between the per-agent WIT, the workflow logic crate,
+      # and the wac composition graph — none of which the lower-level
+      # tests cover.
+      - name: Run components-mode workflow e2e tests
+        env:
+          RUNTARA_RUN_COMPONENTS_E2E: "1"
+          RUNTARA_AGENT_COMPONENTS_DIR: ${{ github.workspace }}/target/wasm32-wasip1/release
+        run: |
+          cargo test -p runtara-workflows \
+            --test components_smoke \
+            --test components_e2e \
+            --test components_execute \
+            -- --test-threads=1
+
   notify-result:
     # Posts success or failure once all build/test jobs finish.
     # Skipped on cancellation (avoids spurious "failure" pings when a run is
@@ -370,10 +501,12 @@ jobs:
       - build
       - test-sdk
       - test-workflows
-      - test-workflows-smoke-compile
       - test-core
       - test-server
       - test-environment
+      - test-agents
+      - wit-package
+      - components-build
     if: |
       !cancelled() && (
         (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)

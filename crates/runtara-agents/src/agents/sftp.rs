@@ -625,29 +625,3 @@ pub fn sftp_delete_file(input: SftpDeleteFileInput) -> Result<DeleteFileResponse
 // ============================================================================
 // Tests
 // ============================================================================
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_file_info_serialization() {
-        let file = FileInfo {
-            name: "test.txt".to_string(),
-            path: "/data/test.txt".to_string(),
-            size: 1024,
-            is_directory: false,
-            modified_time: Some(1609459200),
-        };
-
-        let json = serde_json::to_string(&file).unwrap();
-        assert!(json.contains("test.txt"));
-        assert!(json.contains("1024"));
-    }
-
-    #[test]
-    fn test_default_formats() {
-        assert_eq!(default_response_format(), "text");
-        assert_eq!(default_content_format(), "text");
-    }
-}

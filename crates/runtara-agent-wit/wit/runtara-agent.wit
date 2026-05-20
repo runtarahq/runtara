@@ -1,0 +1,54 @@
+// Canonical WIT contract for runtara agent components.
+//
+// 0.3.0 (this revision): the contract is now execution-only. `invoke` takes
+// and returns opaque byte buffers (`list<u8>`) — the structured shape inside
+// is JSON, but WIT no longer cares. Capability and module metadata moved out
+// of the WIT entirely; each agent ships a sidecar `<agent>.meta.json` next to
+// its `.wasm` (the host registry loads both as a pair).
+//
+// Why bytes instead of strings: skips canonical-ABI UTF-8 validation on every
+// call; keeps the contract format-agnostic (we can swap JSON for CBOR later
+// by changing one line of serde on each side, with no WIT change).
+
+package runtara:agent@0.3.0;
+
+interface types {
+    record connection-info {
+        connection-id: string,
+        integration-id: string,
+        connection-subtype: option<string>,
+        parameters: string,                  // JSON object
+        rate-limit-config: option<string>,   // JSON object
+    }
+
+    record error-info {
+        code: string,
+        message: string,
+        category: string,            // "transient" | "permanent"
+        severity: string,            // "warning" | "error" | "critical"
+        retryable: bool,
+        retry-after-ms: option<u64>,
+        attributes: option<string>,  // JSON object
+    }
+}
+
+interface capabilities {
+    use types.{connection-info, error-info};
+
+    invoke: func(
+        capability-id: string,
+        input: list<u8>,                     // JSON-encoded value
+        connection: option<connection-info>, // out-of-band, not inside input
+    ) -> result<list<u8>, error-info>;       // JSON-encoded value on success
+}
+
+// The `agent` world declares only the runtara-specific export surface.
+// WASI imports (wasi:http for outbound, wasi:cli/environment for env vars,
+// wasi:clocks, wasi:random, wasi:io, wasi:cli/stderr) are added by the
+// guest agent crate's own world via `include wasi:cli/command@0.2.0`.
+//
+// The host satisfies them at link time using add_to_linker_async from
+// wasmtime-wasi and wasmtime-wasi-http — independent of this WIT.
+world agent {
+    export capabilities;
+}

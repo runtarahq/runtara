@@ -5,12 +5,20 @@
 //! These tests validate workflows from JSON files in the examples/validation directory.
 
 use runtara_dsl::ExecutionGraph;
+use runtara_dsl::agent_meta::AgentCatalog;
 use runtara_workflows::validation::{
     ValidationError, ValidationWarning, validate_workflow, validate_workflow_with_children,
 };
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
+
+/// Build the catalog the rest of the file's `validate_workflow` calls use.
+/// The integration tests run on the host, so we can pull the agent set out
+/// of the statically-linked registry rather than a runtime dispatcher.
+fn test_catalog() -> AgentCatalog {
+    AgentCatalog::from_agents(runtara_agents::registry::get_agents())
+}
 
 fn examples_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/validation")
@@ -31,7 +39,7 @@ fn load_workflow(filename: &str) -> ExecutionGraph {
 #[test]
 fn test_valid_workflow_passes() {
     let graph = load_workflow("valid_workflow.json");
-    let result = validate_workflow(&graph);
+    let result = validate_workflow(&graph, &test_catalog());
 
     // Should have no graph structure or reference errors
     let critical_errors = result.errors.iter().any(|e| {
@@ -57,7 +65,7 @@ fn test_valid_workflow_passes() {
 #[test]
 fn test_error_missing_entry_point() {
     let graph = load_workflow("error_missing_entry_point.json");
-    let result = validate_workflow(&graph);
+    let result = validate_workflow(&graph, &test_catalog());
 
     assert!(result.has_errors(), "Should have errors");
     assert!(
@@ -81,7 +89,7 @@ fn test_error_missing_entry_point() {
 #[test]
 fn test_error_unreachable_step() {
     let graph = load_workflow("error_unreachable_step.json");
-    let result = validate_workflow(&graph);
+    let result = validate_workflow(&graph, &test_catalog());
 
     assert!(result.has_errors(), "Should have errors");
     assert!(
@@ -113,7 +121,7 @@ fn test_error_unreachable_step() {
 #[test]
 fn test_error_invalid_reference() {
     let graph = load_workflow("error_invalid_reference.json");
-    let result = validate_workflow(&graph);
+    let result = validate_workflow(&graph, &test_catalog());
 
     assert!(result.has_errors(), "Should have errors");
     assert!(
@@ -141,7 +149,7 @@ fn test_error_invalid_reference() {
 #[test]
 fn test_error_unknown_agent_with_suggestion() {
     let graph = load_workflow("error_unknown_agent.json");
-    let result = validate_workflow(&graph);
+    let result = validate_workflow(&graph, &test_catalog());
 
     assert!(result.has_errors(), "Should have errors");
     assert!(
@@ -173,7 +181,7 @@ fn test_error_unknown_agent_with_suggestion() {
 #[test]
 fn test_error_invalid_child_version() {
     let graph = load_workflow("error_invalid_child_version.json");
-    let result = validate_workflow(&graph);
+    let result = validate_workflow(&graph, &test_catalog());
 
     assert!(result.has_errors(), "Should have errors");
     assert!(
@@ -216,7 +224,8 @@ fn test_compile_time_validation_missing_child_input() {
     children.insert("child-with-schema".to_string(), child.execution_graph);
 
     // Validate with children
-    let result = validate_workflow_with_children(&parent.execution_graph, &children);
+    let result =
+        validate_workflow_with_children(&parent.execution_graph, &test_catalog(), &children);
 
     // Should fail with missing required input
     assert!(result.has_errors(), "Should have validation errors");
@@ -247,7 +256,7 @@ fn test_compile_time_validation_missing_child_input() {
 #[test]
 fn test_warning_high_retry() {
     let graph = load_workflow("warning_high_retry.json");
-    let result = validate_workflow(&graph);
+    let result = validate_workflow(&graph, &test_catalog());
 
     // Should have warnings but no critical errors (may have agent validation errors in test context)
     assert!(result.has_warnings(), "Should have warnings");
@@ -276,7 +285,7 @@ fn test_warning_high_retry() {
 #[test]
 fn test_warning_long_timeout() {
     let graph = load_workflow("warning_long_timeout.json");
-    let result = validate_workflow(&graph);
+    let result = validate_workflow(&graph, &test_catalog());
 
     assert!(result.has_warnings(), "Should have warnings");
     assert!(
@@ -309,7 +318,7 @@ fn test_warning_long_timeout() {
 fn test_validation_result_api() {
     // Test with errors
     let graph = load_workflow("error_missing_entry_point.json");
-    let result = validate_workflow(&graph);
+    let result = validate_workflow(&graph, &test_catalog());
     assert!(
         !result.is_ok(),
         "is_ok() should be false when there are errors"
@@ -318,7 +327,7 @@ fn test_validation_result_api() {
 
     // Test with only warnings
     let graph = load_workflow("warning_high_retry.json");
-    let result = validate_workflow(&graph);
+    let result = validate_workflow(&graph, &test_catalog());
     // Note: May have agent errors in test context, so we just check warnings exist
     assert!(result.has_warnings(), "has_warnings() should be true");
 }
@@ -327,7 +336,7 @@ fn test_validation_result_api() {
 fn test_multiple_errors_in_single_workflow() {
     // A workflow can have multiple validation issues
     let graph = load_workflow("error_unreachable_step.json");
-    let result = validate_workflow(&graph);
+    let result = validate_workflow(&graph, &test_catalog());
 
     // Should detect both the unreachable step and potentially a dangling step
     assert!(result.has_errors(), "Should have errors");
@@ -344,7 +353,7 @@ fn test_multiple_errors_in_single_workflow() {
 #[test]
 fn test_error_undefined_data_reference() {
     let graph = load_workflow("error_undefined_data_reference.json");
-    let result = validate_workflow(&graph);
+    let result = validate_workflow(&graph, &test_catalog());
 
     assert!(result.has_errors(), "Should have errors");
     assert!(

@@ -222,7 +222,7 @@ async fn test_register_image_success() {
         name: "test-image".to_string(),
         description: Some("Test image description".to_string()),
         binary: vec![0x7f, 0x45, 0x4c, 0x46], // ELF magic bytes
-        runner_type: RunnerType::Native,
+        runner_type: RunnerType::Wasm,
         metadata: Some(serde_json::json!({"key": "value"})),
     };
 
@@ -263,7 +263,7 @@ async fn test_register_image_empty_tenant_id() {
         name: "test-image".to_string(),
         description: None,
         binary: vec![1, 2, 3],
-        runner_type: RunnerType::Native,
+        runner_type: RunnerType::Wasm,
         metadata: None,
     };
 
@@ -289,7 +289,7 @@ async fn test_register_image_empty_name() {
         name: String::new(), // Empty
         description: None,
         binary: vec![1, 2, 3],
-        runner_type: RunnerType::Native,
+        runner_type: RunnerType::Wasm,
         metadata: None,
     };
 
@@ -315,7 +315,7 @@ async fn test_register_image_empty_binary() {
         name: "test-image".to_string(),
         description: None,
         binary: vec![], // Empty
-        runner_type: RunnerType::Native,
+        runner_type: RunnerType::Wasm,
         metadata: None,
     };
 
@@ -762,8 +762,8 @@ fn test_health_check_response_debug() {
 
 #[test]
 fn test_runner_type_values() {
-    assert_eq!(RunnerType::Native.to_string(), "native");
-    assert_eq!(RunnerType::Oci.to_string(), "oci");
+    // Only `Wasm` exists post Phase 3 step 11; the OCI / Native asserts
+    // that used to live here went with the variants they tested.
     assert_eq!(RunnerType::Wasm.to_string(), "wasm");
 }
 

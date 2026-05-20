@@ -38,12 +38,39 @@ fn image_source_checksum(image: &ImageSummary) -> Option<&str> {
         .and_then(|v| v.as_str())
 }
 
+/// `templateMajor` stored in image metadata at registration time. Used by the
+/// cache check below to invalidate every workflow on a major-version bump of
+/// the compiler (e.g. `5` → `6`); minor / patch bumps don't recompile.
+/// Returns `None` for images that pre-date the field, which forces a recompile
+/// so they pick up the components-mode pipeline.
+fn image_template_major(image: &ImageSummary) -> Option<&str> {
+    image
+        .metadata
+        .as_ref()
+        .and_then(|m| m.pointer("/workflow/templateMajor"))
+        .and_then(|v| v.as_str())
+}
+
+/// Whether `image` is a cache hit for the current source + compiler major.
+/// Both must match — pre-existing images lack `templateMajor` so they always
+/// miss, forcing a recompile through the components path.
+fn image_cache_hits(image: &ImageSummary, source_checksum: &str) -> bool {
+    image_source_checksum(image) == Some(source_checksum)
+        && image_template_major(image) == Some(runtara_workflows::TEMPLATE_MAJOR_VERSION)
+}
+
 /// Service for workflow compilation operations
 pub struct CompilationService {
     repository: Arc<WorkflowRepository>,
     connection_service_url: Option<String>,
     /// Runtime client for registering images with runtara-environment
     runtime_client: Option<Arc<RuntimeClient>>,
+    /// Runtime agent metadata catalog (snapshot of every `<agent>.meta.json`
+    /// staged at `$RUNTARA_AGENT_COMPONENTS_DIR`). When set, the compile
+    /// pipeline uses it instead of the statically-linked
+    /// `runtara_agents::registry`, making the server's compiled view of
+    /// agents match what the runtime dispatcher can actually invoke.
+    agent_catalog: Option<Arc<runtara_dsl::agent_meta::AgentCatalog>>,
 }
 
 impl CompilationService {
@@ -56,7 +83,19 @@ impl CompilationService {
             repository,
             connection_service_url,
             runtime_client,
+            agent_catalog: None,
         }
+    }
+
+    /// Plug in the runtime agent catalog. Wired up at server boot from the
+    /// `ComponentDispatcherService` so every compile sees the same agent
+    /// set the dispatcher can route to.
+    pub fn with_agent_catalog(
+        mut self,
+        catalog: Arc<runtara_dsl::agent_meta::AgentCatalog>,
+    ) -> Self {
+        self.agent_catalog = Some(catalog);
+        self
     }
 
     /// Compile a workflow to binary and optionally register with runtara-environment
@@ -141,6 +180,10 @@ impl CompilationService {
             track_events,
             child_workflows,
             connection_service_url: self.connection_service_url.clone(),
+            // When configured, the compile uses the runtime catalog from
+            // the component dispatcher so the compiled view of agents
+            // matches what the runtime can actually invoke.
+            agent_catalog: self.agent_catalog.clone(),
         };
 
         // 5. Check if already registered BEFORE compiling, unless a rebuild was requested.
@@ -192,7 +235,7 @@ impl CompilationService {
                 .await
             {
                 Ok(Some(existing_image))
-                    if image_source_checksum(&existing_image) == Some(source_checksum.as_str()) =>
+                    if image_cache_hits(&existing_image, source_checksum.as_str()) =>
                 {
                     let existing_id = existing_image.image_id;
                     info!(
@@ -491,20 +534,12 @@ impl CompilationService {
             image_name, tenant_id, binary_size
         );
 
-        // Create registration options with workflow variables as metadata
+        // Create registration options with workflow variables as metadata.
+        // Every compile produces a components-mode `workflow.wasm`, so the
+        // runner type is always `Wasm` now.
         let options = RegisterImageStreamOptions::new(tenant_id, &image_name, binary_size)
             .with_description(format!("Workflow {} version {}", workflow_id, version))
-            .with_runner_type(
-                if compilation_result
-                    .binary_path
-                    .extension()
-                    .is_some_and(|ext| ext == "wasm")
-                {
-                    RunnerType::Wasm
-                } else {
-                    RunnerType::Oci
-                },
-            )
+            .with_runner_type(RunnerType::Wasm)
             .with_sha256(&compilation_result.binary_checksum)
             .with_metadata(serde_json::json!({
                 "variables": compilation_result.default_variables,
@@ -512,6 +547,9 @@ impl CompilationService {
                     "workflowId": workflow_id,
                     "version": version,
                     "sourceChecksum": source_checksum,
+                    // Major version of `runtara-workflows`. Cache miss on major
+                    // bump invalidates every workflow on next deploy.
+                    "templateMajor": runtara_workflows::TEMPLATE_MAJOR_VERSION,
                 }
             }));
 

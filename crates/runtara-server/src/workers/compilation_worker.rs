@@ -43,10 +43,11 @@ impl CompilationWorkerConfig {
 }
 
 /// Background worker that consumes compilation requests from the queue
-#[instrument(skip(pool, runtime_client, config, shutdown))]
+#[instrument(skip(pool, runtime_client, agent_catalog, config, shutdown))]
 pub async fn run(
     pool: PgPool,
     runtime_client: Option<Arc<RuntimeClient>>,
+    agent_catalog: Option<Arc<runtara_dsl::agent_meta::AgentCatalog>>,
     config: CompilationWorkerConfig,
     shutdown: ShutdownSignal,
 ) {
@@ -97,11 +98,14 @@ pub async fn run(
     }
 
     let repository = Arc::new(WorkflowRepository::new(pool.clone()));
-    let compilation_service = CompilationService::new(
+    let mut compilation_service = CompilationService::new(
         repository.clone(),
         config.connection_service_url.clone(),
         runtime_client,
     );
+    if let Some(catalog) = agent_catalog {
+        compilation_service = compilation_service.with_agent_catalog(catalog);
+    }
 
     let dequeue_timeout = Duration::from_secs(config.dequeue_timeout_secs);
 

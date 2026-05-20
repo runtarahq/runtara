@@ -4894,7 +4894,8 @@ pub fn bulk_update_variant_prices(
 // ============================================================================
 
 /// Commerce Product Model - Platform-agnostic product representation
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, CapabilityOutput)]
+#[capability_output(display_name = "Commerce Product")]
 #[serde(rename_all = "camelCase")]
 pub struct CommerceProduct {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -4920,7 +4921,8 @@ pub struct CommerceProduct {
 }
 
 /// Commerce Inventory Level Model - Platform-agnostic inventory representation
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, CapabilityOutput)]
+#[capability_output(display_name = "Commerce Inventory Level")]
 #[serde(rename_all = "camelCase")]
 pub struct CommerceInventoryLevel {
     pub product_id: String,
@@ -4937,7 +4939,8 @@ pub struct CommerceInventoryLevel {
 }
 
 /// Commerce Order Model - Platform-agnostic order representation
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, CapabilityOutput)]
+#[capability_output(display_name = "Commerce Order")]
 #[serde(rename_all = "camelCase")]
 pub struct CommerceOrder {
     pub id: String,

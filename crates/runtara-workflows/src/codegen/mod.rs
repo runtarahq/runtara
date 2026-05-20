@@ -6,3 +6,4 @@
 //! workflow JSON definitions into executable Rust code using syn/quote.
 
 pub mod ast;
+pub mod components;

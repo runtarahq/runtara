@@ -12,7 +12,10 @@ categories = ["development-tools", "wasm"]
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-runtara-agents = { path = "../runtara-agents", version = "5.1", default-features = false, features = ["integrations", "wasm-js"] }
+# The browser validator no longer embeds the agent set — the host page
+# pushes it in via `initAgentCatalog(json)` after a one-shot
+# `GET /api/runtime/agents` on app boot. That's why we don't depend on
+# `runtara-agents` anymore.
 runtara-dsl = { path = "../runtara-dsl", version = "5.1" }
 runtara-workflows = { path = "../runtara-workflows", version = "5.1", default-features = false, features = ["integrations", "wasm-js"] }
 serde = { workspace = true }

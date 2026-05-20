@@ -18,6 +18,12 @@ on:
   release:
     types: [published]
 
+# Default-deny: this workflow only reads PR/release event payloads from
+# $GITHUB_EVENT_PATH and fires outbound Slack webhooks via curl. No
+# GitHub API writes anywhere.
+permissions:
+  contents: read
+
 jobs:
   pr-opened:
     if: |

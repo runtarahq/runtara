@@ -37,9 +37,15 @@ export RUNTARA_ENVIRONMENT_ADDR="${RUNTARA_ENVIRONMENT_ADDR:-127.0.0.1:8002}"
 export RUNTARA_SKIP_CERT_VERIFICATION="${RUNTARA_SKIP_CERT_VERIFICATION:-true}"
 export DATA_DIR="${DATA_DIR:-.data}"
 
-# Test input and expected output
-# Wrap the actual input in {"input": ...} because workflow accesses data.input
-INPUT_JSON='{"input": {"message": "Hello from E2E test", "number": 42}}'
+# Test input and expected output.
+#
+# Workflow input is enveloped as {"data": ..., "variables": ...}:
+#   - `data` is the user payload, referenced in mappings as `data.<field>`
+#   - `variables` overrides workflow variable defaults
+# The workflow's Finish step maps `data.input` to `result`, so the
+# payload sits one level under `data.input` so `result.message` ends up
+# at "Hello from E2E test".
+INPUT_JSON='{"data": {"input": {"message": "Hello from E2E test", "number": 42}}, "variables": {}}'
 EXPECTED_OUTPUT_FIELD="message"
 EXPECTED_OUTPUT_VALUE="Hello from E2E test"
 

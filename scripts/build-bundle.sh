@@ -6,6 +6,9 @@
 #   - A pruned copy of the Rust toolchain (rustc + host std + wasm32-wasip2 std)
 #   - Pre-built workflow stdlib (wasm rlibs + host proc-macros)
 #   - Wasmtime CLI binary
+#   - wac CLI binary (WebAssembly Composition — workflow compile step)
+#   - cargo-component binary (cargo subcommand — workflow compile step)
+#   - 23 pre-built agent components (.wasm + .meta.json each)
 #   - License files
 #   - VERSION and MANIFEST.json
 #
@@ -31,6 +34,15 @@ cd "$ROOT_DIR"
 SKIP_BUILD=0
 OUTPUT_DIR="${ROOT_DIR}/target/bundle"
 WASMTIME_VERSION="43.0.0"
+# wac (WebAssembly Composition) CLI: composes the workflow component with
+# its required agent components at workflow-compile time. Upstream ships
+# prebuilt binaries on the releases page.
+WAC_VERSION="0.10.0"
+# cargo-component: subcommand used to build the per-workflow logic
+# component before wac compose. No prebuilt binaries upstream — installed
+# via `cargo install` into a per-version cache dir during bundle build.
+# Must match scripts/build-agent-components.sh and .github/workflows/ci.yml.
+CARGO_COMPONENT_VERSION="0.21.1"
 DOWNLOAD_CACHE="${HOME}/.cache/runtara-bundle-build"
 
 # ─── Parse arguments ─────────────────────────────────────────────────────────
@@ -106,6 +118,8 @@ resolve_versions() {
     info "Runtara commit:  ${RUNTARA_COMMIT}"
     info "Rustc version:   ${RUSTC_VERSION}"
     info "Wasmtime version: ${WASMTIME_VERSION}"
+    info "wac version:     ${WAC_VERSION}"
+    info "cargo-component: ${CARGO_COMPONENT_VERSION}"
     info "Target dir:      ${TARGET_DIR}"
 }
 
@@ -206,6 +220,88 @@ download_wasmtime() {
     WASMTIME_TARBALL="$cached"
 }
 
+# ─── Download wac (WebAssembly Composition CLI) ─────────────────────────────
+
+download_wac() {
+    step "Fetching wac ${WAC_VERSION}"
+
+    mkdir -p "$DOWNLOAD_CACHE"
+
+    # Upstream binary naming uses linux-musl for both glibc and musl Linux —
+    # the binary is statically linked so it runs on either.
+    local wac_asset
+    case "${ARCH}-${OS}" in
+        x86_64-linux)   wac_asset="wac-cli-x86_64-unknown-linux-musl" ;;
+        aarch64-linux)  wac_asset="wac-cli-aarch64-unknown-linux-musl" ;;
+        x86_64-darwin)  wac_asset="wac-cli-x86_64-apple-darwin" ;;
+        aarch64-darwin) wac_asset="wac-cli-aarch64-apple-darwin" ;;
+        *) echo "No upstream wac binary for ${ARCH}-${OS}" >&2; exit 1 ;;
+    esac
+
+    local url="https://github.com/bytecodealliance/wac/releases/download/v${WAC_VERSION}/${wac_asset}"
+    local cached="${DOWNLOAD_CACHE}/${wac_asset}-${WAC_VERSION}"
+
+    if [ -f "$cached" ]; then
+        info "Using cached ${wac_asset}"
+    else
+        info "Downloading ${wac_asset}"
+        curl -fSL -o "$cached" "$url"
+        chmod +x "$cached"
+    fi
+
+    WAC_BINARY="$cached"
+}
+
+# ─── Install cargo-component into a versioned cache ─────────────────────────
+#
+# Upstream doesn't ship prebuilt binaries — `cargo install` is the only
+# option. We isolate by version under DOWNLOAD_CACHE so a re-run with the
+# same version is a no-op, and bumping CARGO_COMPONENT_VERSION triggers a
+# fresh install without polluting the user's ~/.cargo/bin.
+
+install_cargo_component() {
+    step "Installing cargo-component ${CARGO_COMPONENT_VERSION} (host build)"
+
+    local root="${DOWNLOAD_CACHE}/cargo-component-${CARGO_COMPONENT_VERSION}"
+    local bin="${root}/bin/cargo-component"
+
+    if [ -x "$bin" ]; then
+        info "Using cached cargo-component at ${bin}"
+    else
+        info "cargo install cargo-component --version ${CARGO_COMPONENT_VERSION} --locked --root ${root}"
+        cargo install cargo-component \
+            --version "$CARGO_COMPONENT_VERSION" \
+            --locked \
+            --root "$root"
+    fi
+
+    CARGO_COMPONENT_BINARY="$bin"
+}
+
+# ─── Build agent components ─────────────────────────────────────────────────
+#
+# Produces target/wasm32-wasip1/release/runtara_agent_<x>.wasm plus the
+# sibling .meta.json for each of the 23 agent crates. The build script
+# itself depends on cargo-component + wit-deps being on PATH; we've already
+# installed the right cargo-component into the cache, so prepend it.
+
+build_agent_components() {
+    if [ "$SKIP_BUILD" = "1" ]; then
+        if ! find "${TARGET_DIR}/wasm32-wasip1/release" -maxdepth 1 \
+                -name 'runtara_agent_*.wasm' 2>/dev/null | grep -q .; then
+            echo "Error: --skip-build but no built agent components found at \
+${TARGET_DIR}/wasm32-wasip1/release/runtara_agent_*.wasm" >&2
+            exit 1
+        fi
+        info "Skipping agent component build (--skip-build)"
+        return
+    fi
+
+    step "Building agent WASM components (23 crates)"
+    PATH="$(dirname "$CARGO_COMPONENT_BINARY"):${PATH}" \
+        "$SCRIPT_DIR/build-agent-components.sh"
+}
+
 # ─── Assemble bundle ────────────────────────────────────────────────────────
 
 assemble_bundle() {
@@ -213,7 +309,7 @@ assemble_bundle() {
 
     local bundle="${OUTPUT_DIR}/runtara-${RUNTARA_VERSION}-${ARCH}-${OS}"
     rm -rf "$bundle"
-    mkdir -p "$bundle"/{bin,toolchain/bin,toolchain/lib/rustlib,stdlib/deps,licenses}
+    mkdir -p "$bundle"/{bin,toolchain/bin,toolchain/lib/rustlib,stdlib/deps,agents,licenses}
 
     # ── runtara-server binary ──
     info "Copying runtara-server binary"
@@ -238,6 +334,41 @@ assemble_bundle() {
     tar -xJf "$WASMTIME_TARBALL" -C "$tmp_wt"
     cp "$tmp_wt/$wt_dir/wasmtime" "$bundle/bin/"
     rm -rf "$tmp_wt"
+
+    # ── wac (WebAssembly Composition CLI) ──
+    info "Copying wac binary"
+    cp "$WAC_BINARY" "$bundle/bin/wac"
+    chmod +x "$bundle/bin/wac"
+
+    # ── cargo-component ──
+    info "Copying cargo-component binary"
+    cp "$CARGO_COMPONENT_BINARY" "$bundle/bin/cargo-component"
+    chmod +x "$bundle/bin/cargo-component"
+
+    # ── Agent components ──
+    # Each of the 23 component agents ships as a .wasm + sibling .meta.json
+    # pair. At server boot, RUNTARA_AGENT_COMPONENTS_DIR points at this
+    # directory; the ComponentDispatcherService loads each pair and exposes
+    # the agents to the validator and workflow runtime.
+    info "Copying agent WASM components"
+    local agent_src="${TARGET_DIR}/wasm32-wasip1/release"
+    local wasm_count=0
+    local meta_count=0
+    for f in "$agent_src"/runtara_agent_*.wasm; do
+        [ -f "$f" ] || continue
+        cp "$f" "$bundle/agents/"
+        wasm_count=$((wasm_count + 1))
+    done
+    for f in "$agent_src"/runtara_agent_*.meta.json; do
+        [ -f "$f" ] || continue
+        cp "$f" "$bundle/agents/"
+        meta_count=$((meta_count + 1))
+    done
+    if [ "$wasm_count" -eq 0 ] || [ "$meta_count" -eq 0 ]; then
+        echo "Error: expected runtara_agent_*.{wasm,meta.json} in ${agent_src}, found ${wasm_count} wasm and ${meta_count} meta files" >&2
+        exit 1
+    fi
+    info "  Agents: ${wasm_count} .wasm + ${meta_count} .meta.json"
 
     # ── Rust toolchain (pruned) ──
     info "Copying pruned Rust toolchain"
@@ -337,6 +468,9 @@ assemble_bundle() {
   "runtara_commit": "${RUNTARA_COMMIT}",
   "rustc_version": "${RUSTC_VERSION}",
   "wasmtime_version": "${WASMTIME_VERSION}",
+  "wac_version": "${WAC_VERSION}",
+  "cargo_component_version": "${CARGO_COMPONENT_VERSION}",
+  "agent_component_count": ${wasm_count},
   "host_target": "${HOST_TARGET}",
   "os": "${OS}",
   "arch": "${ARCH}",
@@ -390,6 +524,9 @@ main() {
     build_server
     build_stdlib
     download_wasmtime
+    download_wac
+    install_cargo_component
+    build_agent_components
     assemble_bundle
     create_tarball
 }

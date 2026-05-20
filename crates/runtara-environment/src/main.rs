@@ -6,7 +6,10 @@
 //! - Image registry (create, list, delete images)
 //! - Instance lifecycle (start, stop, resume, status)
 //! - Wake queue (schedule and execute durable sleep wakes)
-//! - Container execution (OCI runner by default)
+//! - Container execution. Always uses the embedded wasmtime runner.
+//!   The OCI and native runners were removed in Phase 3 step 11 — the
+//!   components-mode compile pipeline is the only producer now and it
+//!   only emits `workflow.wasm`.
 
 use std::sync::Arc;
 use tracing::{info, warn};
@@ -14,8 +17,6 @@ use tracing::{info, warn};
 use runtara_core::persistence::postgres::PostgresPersistence;
 use runtara_environment::config::Config;
 use runtara_environment::runner::Runner;
-use runtara_environment::runner::native::NativeRunner;
-use runtara_environment::runner::oci::OciRunner;
 use runtara_environment::runner::wasm::WasmRunner;
 use runtara_environment::runtime::EnvironmentRuntime;
 
@@ -109,24 +110,22 @@ async fn main() -> anyhow::Result<()> {
 }
 
 fn build_runner(persistence: Arc<dyn runtara_core::persistence::Persistence>) -> Arc<dyn Runner> {
-    match std::env::var("RUNTARA_RUNNER")
-        .unwrap_or_else(|_| "oci".to_string())
-        .to_ascii_lowercase()
-        .as_str()
+    if let Ok(other) = std::env::var("RUNTARA_RUNNER")
+        && !matches!(
+            other.to_ascii_lowercase().as_str(),
+            "wasm" | "wasmtime" | ""
+        )
     {
-        "wasm" | "wasmtime" => Arc::new(WasmRunner::new(
-            runtara_environment::runner::wasm::WasmRunnerConfig::from_env(),
-            persistence,
-        )),
-        "native" => Arc::new(NativeRunner::new(
-            runtara_environment::runner::native::NativeRunnerConfig::from_env(),
-            persistence,
-        )),
-        _ => Arc::new(OciRunner::new(
-            runtara_environment::runner::oci::OciRunnerConfig::from_env(),
-            persistence,
-        )),
+        warn!(
+            requested = %other,
+            "RUNTARA_RUNNER is set to a non-wasm value but only the wasm runner exists \
+             after Phase 3 step 11. Using WasmRunner regardless."
+        );
     }
+    Arc::new(WasmRunner::new(
+        runtara_environment::runner::wasm::WasmRunnerConfig::from_env(),
+        persistence,
+    ))
 }
 
 /// Wait for either SIGINT (Ctrl+C) or SIGTERM on Unix; on non-Unix fall back

@@ -6,37 +6,22 @@ embedded WASM runner and Postgres.
 ## Prerequisites
 
 - Docker with a running Postgres container (any version 14+)
-- `wasm32-wasip2` Rust target installed (`rustup target add wasm32-wasip2`)
-- `wasmtime` CLI installed (`curl https://wasmtime.dev/install.sh -sSf | bash`)
+- `wasm32-wasip1` Rust target (`rustup target add wasm32-wasip1`)
+- `wasmtime` CLI (`curl https://wasmtime.dev/install.sh -sSf | bash`)
+- `cargo-component` (`cargo install cargo-component --locked`)
+- `wac-cli` (`cargo install wac-cli --locked`)
+- Pre-built agent components staged at `target/wasm32-wasip1/release/` —
+  run `scripts/build-agent-components.sh` once. The workflow compile
+  pipeline `wac compose`s these into every workflow.wasm.
 
-## 1. Build the WASM stdlib (one-time, rebuild after stdlib changes)
-
-```bash
-# Release rlibs with LTO bitcode (required for compiled workflows)
-RUSTFLAGS="-C embed-bitcode=yes" \
-  cargo build -p runtara-workflow-stdlib --release --target wasm32-wasip2 --no-default-features
-
-# Host proc-macro dylibs (needed by the compiler at link time)
-cargo build -p runtara-workflow-stdlib --release
-
-# Populate the compiler's cache directory
-rm -rf target/native_cache_wasm
-mkdir -p target/native_cache_wasm/deps
-cp target/wasm32-wasip2/release/libruntara_workflow_stdlib.rlib target/native_cache_wasm/
-cp target/wasm32-wasip2/release/deps/*.rlib target/native_cache_wasm/deps/
-find target/wasm32-wasip2/release/build -name "*.a" -exec cp {} target/native_cache_wasm/deps/ \; 2>/dev/null
-cp target/release/deps/*.dylib target/native_cache_wasm/deps/ 2>/dev/null  # macOS
-cp target/release/deps/*.so target/native_cache_wasm/deps/ 2>/dev/null     # Linux
-```
-
-## 2. Build binaries
+## 1. Build binaries
 
 ```bash
 cargo build -p runtara-server -p runtara-workflows --bin runtara-compile \
             -p runtara-management-sdk --bin runtara-ctl
 ```
 
-## 3. Create test databases
+## 2. Create test databases
 
 The server and environment use **separate databases** to avoid migration
 version collisions (both have a `20250101000000` migration with different
@@ -48,7 +33,7 @@ psql "$DB_URL" -c "CREATE DATABASE runtara_e2e_test;"    # core + environment
 psql "$DB_URL" -c "CREATE DATABASE runtara_e2e_server;"  # server tables
 ```
 
-## 4. Start the server
+## 3. Start the server
 
 ```bash
 DATABASE_URL="postgres://user:pass@localhost:5432/runtara_e2e_server" \
@@ -72,32 +57,35 @@ curl --retry 20 --retry-delay 1 --retry-connrefused \
 The embedded runtara-environment binds to `127.0.0.1:8004` and uses the
 **WasmRunner** (not OCI/crun).
 
-## 5. Compile a workflow
+## 4. Compile a workflow
+
+`runtara-compile` always produces a composed `workflow.wasm` via
+`cargo component build` + `wac compose` — there is no rustc-direct path
+anymore, so no `RUNTARA_LTO` knob.
 
 ```bash
-# Disable LTO for faster dev builds (release stdlib already has bitcode)
-RUNTARA_LTO=off target/debug/runtara-compile \
+target/debug/runtara-compile \
   --workflow e2e/workflows/simple_passthrough.json \
   --tenant test --workflow passthrough \
-  --output /tmp/test_binary
+  --output /tmp/test_binary.wasm
 ```
 
-## 6. Register as a WASM image
+## 5. Register as a WASM image
 
-The `runtara-ctl register` command defaults to OCI runner type. For WASM,
-use the multipart upload endpoint directly:
+`runtara-ctl register` defaults to `RunnerType::Wasm` now, so the simple
+form just works:
 
 ```bash
-IMAGE_ID=$(curl -s -X POST "http://127.0.0.1:8004/api/v1/images/upload" \
-  -F "binary=@/tmp/test_binary" \
-  -F "tenant_id=e2e-test" \
-  -F "name=my-test" \
-  -F "description=test" \
-  -F "runner_type=wasm" \
-  | python3 -c "import sys,json; print(json.load(sys.stdin)['image_id'])")
+IMAGE_ID=$(target/debug/runtara-ctl register \
+  --binary /tmp/test_binary.wasm \
+  --tenant e2e-test --name my-test --description "test")
 ```
 
-## 7. Start and wait
+(If you have a non-wasm binary for some reason, the server-side magic-byte
+sniff sees `\0asm` and tags wasm files automatically; otherwise it falls
+back to OCI.)
+
+## 6. Start and wait
 
 ```bash
 export RUNTARA_ENVIRONMENT_ADDR="127.0.0.1:8004"
@@ -114,7 +102,7 @@ target/debug/runtara-ctl wait "$INSTANCE_ID" --poll 200
 The compiled workflow reads `input_json.get("data")` at runtime — without
 the envelope, all `data.*` references resolve to `null`.
 
-## 8. Test graceful shutdown (SIGTERM)
+## 7. Test graceful shutdown (SIGTERM)
 
 ```bash
 # Start a long-running instance
@@ -162,10 +150,9 @@ So if your workflow references `data.input.foo`, send:
 
 | Problem | Fix |
 |---------|-----|
-| `Pre-compiled WASM library not found` | Run the stdlib build from step 1 |
-| `runtara_workflow_stdlib WASM library not found` | Symlink: `cd target/native_cache_wasm && ln -sf libruntara_workflow_stdlib-*.rlib libruntara_workflow_stdlib.rlib` |
-| `migration was previously applied but is missing` | Use separate databases for server vs environment (step 3) |
+| `cargo component build returned non-zero status` | Re-run `scripts/build-agent-components.sh`, ensure `cargo-component` is installed |
+| `agent components not staged at …/target/wasm32-wasip1/release` | Same — the workflow compose step needs every agent `.wasm` present |
+| `current package believes it's in a workspace when it's not` | Outdated compile cache — `rm -rf $DATA_DIR/workflow-builds-components` and retry |
+| `migration was previously applied but is missing` | Use separate databases for server vs environment (step 2) |
 | `migration was previously applied but has been modified` | Drop and recreate both databases |
-| `delay_in_ms: invalid type: null` | Wrap input in `{"data": {...}}` envelope |
-| `runtara-ctl register` → connection error on large files | Use `curl` with the `/api/v1/images/upload` multipart endpoint |
-| `No such capability 'delay-in-ms'` | The compile binary needs `runtara-agents` linked — rebuild `runtara-compile` |
+| `delay_in_ms: invalid type: null` or other `data.*` ref is null | Wrap input in `{"data": {...}, "variables": {}}` envelope |

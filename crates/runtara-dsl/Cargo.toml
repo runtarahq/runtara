@@ -17,9 +17,16 @@ default = ["json-schema"]
 # its tree.
 json-schema = ["dep:schemars"]
 utoipa = ["dep:utoipa"]
+# Server-side AgentCatalog loader (walks $RUNTARA_AGENT_COMPONENTS_DIR for
+# meta.json sidecars). Off in the WASM validator, which loads agents
+# from a JSON payload instead.
+fs = []
 
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 schemars = { version = "1", optional = true }
 utoipa = { version = "5.3", optional = true }
+
+[dev-dependencies]
+tempfile = "3"

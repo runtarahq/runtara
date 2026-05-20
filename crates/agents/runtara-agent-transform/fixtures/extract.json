@@ -1,0 +1,12 @@
+{
+  "input": {
+    "value": [
+      { "user": { "name": "Alice", "email": "alice@example.com" } },
+      { "user": { "name": "Bob", "email": "bob@example.com" } }
+    ],
+    "property_path": "user.email"
+  },
+  "expect": {
+    "success": true
+  }
+}

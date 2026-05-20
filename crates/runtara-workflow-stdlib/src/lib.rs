@@ -15,14 +15,13 @@
 //! ```rust
 //! extern crate runtara_workflow_stdlib;
 //! use runtara_workflow_stdlib::prelude::*;
-//! use runtara_workflow_stdlib::agents::*;
 //! ```
-
-// Re-export the agents crate
-pub use runtara_agents as agents;
-
-// Re-export the AI crate for AI Agent steps
-pub use runtara_ai as ai;
+//!
+//! Agent implementations are no longer linked into workflow binaries.
+//! Workflows dispatch to each agent through its own per-agent WIT
+//! interface (`runtara:agent-<id>/capabilities@0.3.0`), bound at
+//! `wac compose` time. The stdlib is now ~thin runtime: condition
+//! evaluators, SDK protocol wrapper, template rendering, validators.
 
 // Runtime module (wraps runtara-sdk)
 pub mod runtime;
@@ -70,10 +69,6 @@ pub mod child_input_validation;
 // Agent capability input validation (runtime)
 pub mod agent_input_validation;
 
-// Capability dispatch for generated workflow binaries
-// Product stdlibs can override with static dispatch tables
-pub mod dispatch;
-
 // Prelude for convenient imports
 pub mod prelude {
     // Runtime types
@@ -103,12 +98,6 @@ pub mod prelude {
     pub use serde::{Deserialize, Serialize};
     pub use serde_json;
 
-    // Agent registry
-    pub use runtara_agents::registry;
-
-    // Capability dispatch (static dispatch for workflow binaries)
-    pub use crate::dispatch;
-
     // Child input validation for EmbedWorkflow steps
     pub use crate::child_input_validation::{
         ChildInputSchema, ChildInputValidationError, RequiredField, validate_child_inputs,
@@ -121,7 +110,6 @@ pub mod prelude {
 }
 
 // Direct access to commonly used modules
-pub use runtara_agents::registry;
 pub use runtime::{Error, Result};
 
 // Re-export child input validation for generated code
