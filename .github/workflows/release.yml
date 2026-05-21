@@ -83,7 +83,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cache/runtara-bundle-build
-          key: bundle-build-deps-${{ runner.os }}-${{ runner.arch }}-cargo-component-0.21.1-wac-0.10.0-wasmtime-43.0.0
+          key: bundle-build-deps-${{ runner.os }}-${{ runner.arch }}-cargo-component-0.21.1-wac-0.10.0-wasmtime-43.0.0-locked
 
       - name: Build bundle
         run: ./scripts/build-bundle.sh --output-dir target/bundle --version "${{ steps.get_version.outputs.version }}"

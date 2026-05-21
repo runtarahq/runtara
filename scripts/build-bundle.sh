@@ -271,15 +271,24 @@ install_cargo_component() {
     if [ -x "$bin" ]; then
         info "Using cached cargo-component at ${bin}"
     else
-        # Intentionally NOT using --locked. cargo-component v0.21.1's own
-        # Cargo.lock pins wit-parser v0.219.1, which has since been yanked
-        # from crates.io. Letting cargo resolve from the Cargo.toml ranges
-        # picks a non-yanked wit-parser. The primary version (cargo-
-        # component itself) is still pinned via --version so behavior
-        # stays stable; only transitive deps shift.
-        info "cargo install cargo-component --version ${CARGO_COMPONENT_VERSION} --root ${root}"
+        # --locked is required for reproducibility. Without it, cargo
+        # re-resolves cargo-component's transitive deps (wit-parser,
+        # wasmparser, wit-component) to whatever's newest in the Cargo.toml
+        # range — and those versions affect the *component encoding* the
+        # tool emits. We've observed two installs of the same 0.21.1 version
+        # produce subtly different workflow.wasm bytes, causing the second
+        # to trap at runtime ("cannot leave component instance" inside the
+        # wasi:random shim) while the first runs cleanly. Locking pins all
+        # transitive deps to cargo-component's own Cargo.lock, eliminating
+        # that drift. (An earlier comment claimed --locked failed on yanked
+        # wit-parser 0.219.1; that crate is still downloadable, so cargo
+        # accepts it under --locked. If a future yank actually blocks the
+        # install, fix it by patching the crate version in cargo-component's
+        # repo, not by dropping --locked.)
+        info "cargo install cargo-component --version ${CARGO_COMPONENT_VERSION} --locked --root ${root}"
         cargo install cargo-component \
             --version "$CARGO_COMPONENT_VERSION" \
+            --locked \
             --root "$root"
     fi
 

@@ -18,5 +18,16 @@ thiserror = "2"
 ureq = { version = "2", features = ["json", "tls"] }
 
 [target.'cfg(all(target_family = "wasm", target_os = "wasi"))'.dependencies]
-# Pin to wasi 0.14.2 which uses wasip2 1.0.1 (WASI 0.2.4) matching Rust's std
-wasi = { version = "=0.14.2", features = ["std"] }
+# Pin to wasi 0.14.1 which targets WASI 0.2.3. This matches the WASI version
+# baked into the wit-component preview1 adapter that cargo-component 0.21.1
+# ships (wasi-preview1-component-adapter-provider 29.0.1 → 0.2.3). If we let
+# the resolver pick newer wasi crates (0.14.2+ → 0.2.4, 0.14.7+ → 0.2.9), the
+# composed workflow.wasm ends up with shims at one version and direct imports
+# at another. wasmtime's component linker treats each `wasi:*/*/types@X.Y.Z`
+# as a distinct nominal type — semver-compat resolution doesn't bridge across
+# 0.2.x minors for resource imports introduced by the adapter — so a call
+# through the adapter's shim traps with "resource implementation is missing".
+# Single-version pinning is the only thing that keeps the composed wasm
+# uniformly resolvable. crates/runtara-agent-wit/wit/deps.toml and the world
+# `include wasi:cli/command@0.2.3` in components codegen are already at 0.2.3.
+wasi = { version = "=0.14.1", features = ["std"] }

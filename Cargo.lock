@@ -4709,7 +4709,7 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.17",
  "ureq 2.12.1",
- "wasi 0.14.2+wasi-0.2.4",
+ "wasi 0.14.1+wasi-0.2.3",
 ]
 
 [[package]]
@@ -6734,9 +6734,9 @@ checksum = "ccf3ec651a847eb01de73ccad15eb7d99f80485de043efb2f370cd654f4ea44b"
 
 [[package]]
 name = "wasi"
-version = "0.14.2+wasi-0.2.4"
+version = "0.14.1+wasi-0.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9683f9a5a998d873c0d21fcbe3c083009670149a8fab228644b8bd36b2c48cb3"
+checksum = "ad7df608df60a1c33e247881838b0f809512086e3e3bb1c18323b77eeb1f844e"
 dependencies = [
  "wit-bindgen-rt 0.39.0",
 ]

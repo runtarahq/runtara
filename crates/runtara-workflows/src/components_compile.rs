@@ -570,18 +570,25 @@ fn run_cargo_component_build(
     let target_root = std::env::var_os("RUNTARA_COMPONENTS_TARGET_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| build_dir.join("target"));
+    // cargo-component was invoked with `--target wasm32-wasip2`, so the
+    // finalized component lands at `wasm32-wasip2/release/`. cargo-component
+    // also leaves an intermediate file at `wasm32-wasip1/release/` from the
+    // rustc step (its `--target wasm32-wasip2` is a misnomer — see
+    // `codegen/components.rs`). On darwin that intermediate happens to be a
+    // valid component wac can also link against; on linux it's a malformed
+    // Frankenstein wac silently mis-composes — the resulting workflow.wasm
+    // traps inside the preview1 adapter's `cabi_import_realloc` on the
+    // first wasi:random call. Only trust the wasip2 path. (Bumping
+    // cargo-component is the prompt to re-check whether that's still true.)
     let wasm = target_root
-        .join("wasm32-wasip1/release/workflow_logic.wasm")
+        .join("wasm32-wasip2/release/workflow_logic.wasm")
         .canonicalize()
-        .or_else(|_| {
-            target_root
-                .join("wasm32-wasip2/release/workflow_logic.wasm")
-                .canonicalize()
-        })
         .map_err(|e| {
             io::Error::other(format!(
-                "cargo component build succeeded but workflow_logic.wasm not found under {}: {e}",
-                build_dir.join("target").display()
+                "cargo component build succeeded but workflow_logic.wasm not found at {}: {e}",
+                target_root
+                    .join("wasm32-wasip2/release/workflow_logic.wasm")
+                    .display()
             ))
         })?;
     Ok(wasm)
