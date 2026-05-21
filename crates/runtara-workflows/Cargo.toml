@@ -16,8 +16,8 @@ native-agents = ["runtara-agents/native"]
 wasm-js = ["runtara-agents/wasm-js"]
 
 [dependencies]
-runtara-agents = { path = "../runtara-agents", version = "5.1", default-features = false }
-runtara-dsl = { path = "../runtara-dsl", version = "5.1" }
+runtara-agents = { path = "../runtara-agents", version = "6.0", default-features = false }
+runtara-dsl = { path = "../runtara-dsl", version = "6.0" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha2 = "0.10"
