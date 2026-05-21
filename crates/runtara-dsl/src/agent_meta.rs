@@ -383,9 +383,11 @@ pub struct FieldTypeInfo {
     /// Sidecar meta.json carries this; legacy registry populates it server-side
     /// from `OutputTypeMeta`. Either way, the round-trip via serde is symmetric.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "utoipa", schema(no_recursion))]
     pub fields: Option<Box<Vec<OutputField>>>,
     /// For array types, describes the item type
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "utoipa", schema(no_recursion))]
     pub items: Option<Box<FieldTypeInfo>>,
     /// Whether this field can be null
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -414,9 +416,11 @@ pub struct OutputField {
     pub nullable: bool,
     /// For array types, describes the item type
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "utoipa", schema(no_recursion))]
     pub items: Option<Box<FieldTypeInfo>>,
     /// For nested object types, the fields of the nested object
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "utoipa", schema(no_recursion))]
     pub fields: Option<Box<Vec<OutputField>>>,
 }
 
