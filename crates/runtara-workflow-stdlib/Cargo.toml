@@ -40,7 +40,7 @@ telemetry = [
 # Core dependency: the SDK protocol wrapper. Agent dispatch happens via
 # per-agent WIT bindings injected by `wac compose`, not by linking the
 # `runtara-agents` crate into the workflow.
-runtara-sdk = { path = "../runtara-sdk", version = "6.0", default-features = false, features = ["http"] }
+runtara-sdk = { path = "../runtara-sdk", version = "7.0", default-features = false, features = ["http"] }
 
 # Re-exported for workflows
 serde = { workspace = true }
