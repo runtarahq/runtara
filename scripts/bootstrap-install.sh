@@ -124,7 +124,6 @@ RUN curl -fsSL https://github.com/${GITHUB_REPO}/releases/download/${TAG}/instal
 
 ENV PATH="/root/.runtara/toolchain/bin:/root/.runtara/bin:\${PATH}"
 ENV LD_LIBRARY_PATH="/root/.runtara/toolchain/lib"
-ENV RUNTARA_WASM_LIBRARY_DIR="/root/.runtara/stdlib"
 ENV WASMTIME_PATH="/root/.runtara/bin/wasmtime"
 
 EXPOSE 7001

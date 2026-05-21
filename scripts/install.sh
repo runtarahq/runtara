@@ -465,7 +465,6 @@ $([ -n "$valkey_pass" ] && echo "VALKEY_PASSWORD=${valkey_pass}" || echo "# VALK
 ${auth_lines}
 
 WASMTIME_PATH=${RUNTARA_DIR}/bin/wasmtime
-RUNTARA_WASM_LIBRARY_DIR=${RUNTARA_DIR}/stdlib
 # Pre-built agent components (one .wasm + .meta.json per agent) staged into
 # the bundle by scripts/build-bundle.sh. The server loads each pair into the
 # runtime AgentCatalog at boot, so the validator and workflow runtime see
@@ -666,7 +665,7 @@ print_summary() {
     echo ""
     echo "  Binary:        ${RUNTARA_DIR}/bin/runtara-server"
     echo "  Toolchain:     ${RUNTARA_DIR}/toolchain/bin/rustc"
-    echo "  Stdlib:        ${RUNTARA_DIR}/stdlib/"
+    echo "  Compile src:   ${RUNTARA_DIR}/compile-src/"
     echo "  Wasmtime:      ${RUNTARA_DIR}/bin/wasmtime"
     echo "  wac:           ${RUNTARA_DIR}/bin/wac"
     echo "  cargo-comp.:   ${RUNTARA_DIR}/bin/cargo-component"

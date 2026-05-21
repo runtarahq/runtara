@@ -94,9 +94,10 @@ jobs:
       # meta.json for all 23 agent crates. Any breakage there fails the
       # bundle build itself before this step would run. The downstream
       # `smoke:` job extracts the resulting tarball and runs the full
-      # server end-to-end (with RUNTARA_AGENT_COMPONENTS_DIR pointing at
-      # the bundled agents/) — which exercises the actual server compile
-      # path against the actual bundled stdlib.
+      # server end-to-end (with RUNTARA_AGENT_COMPONENTS_DIR and
+      # RUNTARA_COMPILE_SOURCE_DIR pointing into the bundled tarball) —
+      # which exercises the actual server compile path against the
+      # bundled compile-src tree.
 
       - name: Upload bundle artifact
         uses: actions/upload-artifact@v4
@@ -202,12 +203,15 @@ jobs:
           mkdir -p "$DATA_DIR"
           export PATH="${RUNTARA_BUNDLE_DIR}/toolchain/bin:${RUNTARA_BUNDLE_DIR}/bin:${PATH}"
           export LD_LIBRARY_PATH="${RUNTARA_BUNDLE_DIR}/toolchain/lib:${LD_LIBRARY_PATH:-}"
-          export RUNTARA_WASM_LIBRARY_DIR="${RUNTARA_BUNDLE_DIR}/stdlib"
           export WASMTIME_PATH="${RUNTARA_BUNDLE_DIR}/bin/wasmtime"
           # Without this the dispatcher silently falls through to the
           # static-registry path and the smoke test never exercises the
           # bundled .wasm + .meta.json pairs.
           export RUNTARA_AGENT_COMPONENTS_DIR="${RUNTARA_BUNDLE_DIR}/agents"
+          # Compile-source mirror — without this cargo-component reads the
+          # CI-time CARGO_MANIFEST_DIR path baked into the binary, which
+          # doesn't exist on the smoke-test runner.
+          export RUNTARA_COMPILE_SOURCE_DIR="${RUNTARA_BUNDLE_DIR}/compile-src"
 
           "$RUNTARA_SERVER_BIN" > "$DATA_DIR/runtara-server.log" 2>&1 &
           echo "$!" > "$DATA_DIR/runtara-server.pid"

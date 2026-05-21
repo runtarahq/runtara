@@ -4,7 +4,6 @@
 # The bundle contains:
 #   - runtara-server binary
 #   - A pruned copy of the Rust toolchain (rustc + host std + wasm32-wasip2 std)
-#   - Pre-built workflow stdlib (wasm rlibs + host proc-macros)
 #   - Wasmtime CLI binary
 #   - wac CLI binary (WebAssembly Composition — workflow compile step)
 #   - cargo-component binary (cargo subcommand — workflow compile step)
@@ -318,7 +317,7 @@ assemble_bundle() {
 
     local bundle="${OUTPUT_DIR}/runtara-${RUNTARA_VERSION}-${ARCH}-${OS}"
     rm -rf "$bundle"
-    mkdir -p "$bundle"/{bin,toolchain/bin,toolchain/lib/rustlib,stdlib/deps,agents,licenses,compile-src/crates/agents}
+    mkdir -p "$bundle"/{bin,toolchain/bin,toolchain/lib/rustlib,agents,licenses,compile-src/crates/agents}
 
     # ── runtara-server binary ──
     info "Copying runtara-server binary"
@@ -425,42 +424,6 @@ assemble_bundle() {
 
     # lib/rustlib: wasm32-wasip2 target (needed for workflow compilation)
     cp -R "$sysroot/lib/rustlib/wasm32-wasip2" "$bundle/toolchain/lib/rustlib/"
-
-    # ── Stdlib library cache ──
-    info "Copying pre-built workflow stdlib"
-
-    # WASM rlibs
-    local wasm_release="${TARGET_DIR}/wasm32-wasip2/release"
-    local wasm_deps="${wasm_release}/deps"
-    cp "${wasm_release}/libruntara_workflow_stdlib.rlib" "$bundle/stdlib/"
-    for rlib in "$wasm_deps"/*.rlib; do
-        [ -f "$rlib" ] || continue
-        case "$(basename "$rlib")" in
-            *runtara_workflow_stdlib*) continue ;;
-        esac
-        cp "$rlib" "$bundle/stdlib/deps/"
-    done
-
-    # Native static archives (.a files) needed by the WASM linker (e.g., wit_bindgen_cabi_realloc).
-    # These live in the build/ directory, not deps/.
-    find "${wasm_release}/build" -name "*.a" -exec cp {} "$bundle/stdlib/deps/" \; 2>/dev/null || true
-
-    # Host proc-macro shared libraries
-    local host_deps="${TARGET_DIR}/release/deps"
-    case "$OS" in
-        darwin) local dylib_ext="dylib" ;;
-        linux)  local dylib_ext="so" ;;
-    esac
-    for pm in "$host_deps"/*."$dylib_ext"; do
-        [ -f "$pm" ] || continue
-        cp "$pm" "$bundle/stdlib/deps/"
-    done
-
-    local rlib_count
-    rlib_count=$(find "$bundle/stdlib/deps" -name "*.rlib" | wc -l | tr -d ' ')
-    local pm_count
-    pm_count=$(find "$bundle/stdlib/deps" -name "*.${dylib_ext}" | wc -l | tr -d ' ')
-    info "  Stdlib: ${rlib_count} rlibs, ${pm_count} proc-macros"
 
     # ── Compile-source tree ──
     # Required by cargo-component at workflow-compile time. Workflows are
