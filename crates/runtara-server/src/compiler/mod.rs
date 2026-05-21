@@ -109,6 +109,7 @@ pub async fn compile_with_child_workflows(
         // compiler module accepts it via its config. None = falls back to
         // the statically-linked agent registry.
         agent_catalog: None,
+        progress_callback: None,
     };
 
     // Compile using runtara-workflows

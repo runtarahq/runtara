@@ -231,8 +231,25 @@ pub async fn update_workflow_handler(
         )
         .await
         {
-            Ok(true) => "queued",
-            Ok(false) => "already_pending",
+            Ok(enqueued) => {
+                // Stamp a "queued" progress entry so the frontend's first
+                // poll sees a real stage instead of `unknown`. Cheap; only
+                // runs when the redis manager is already initialized.
+                if let Ok(m) = crate::valkey::get_or_create_manager(&redis_url).await {
+                    crate::valkey::compilation_progress::mark_queued(
+                        &m,
+                        &tenant_id,
+                        &workflow_id,
+                        version_num,
+                    )
+                    .await;
+                }
+                if enqueued {
+                    "queued"
+                } else {
+                    "already_pending"
+                }
+            }
             Err(e) => {
                 tracing::warn!(
                     tenant_id = %tenant_id,
@@ -666,6 +683,25 @@ pub async fn compile_workflow_handler(
 
     let force_recompile = query.force_recompile.unwrap_or(false);
     if force_recompile {
+        // Stamp `queued` in Redis BEFORE invalidating the DB row. Without
+        // this, the frontend's first compilation-progress poll can race
+        // the handler: Redis is empty (worker hasn't started yet) and the
+        // DB still holds the previous `success` row, so the endpoint
+        // returns the stale terminal state — the rebuild's toolbar lights
+        // up green instantly even though a real rebuild is starting. The
+        // mark_queued write is a no-op if Valkey isn't configured.
+        if let Some(valkey_config) = crate::valkey::ValkeyConfig::from_env() {
+            let redis_url = valkey_config.connection_url();
+            if let Ok(m) = crate::valkey::get_or_create_manager(&redis_url).await {
+                crate::valkey::compilation_progress::mark_queued(
+                    &m,
+                    &tenant_id,
+                    &workflow_id,
+                    version_num,
+                )
+                .await;
+            }
+        }
         let repository = WorkflowRepository::new(pool.clone());
         if let Err(e) = repository
             .invalidate_compilation(&tenant_id, &workflow_id, version_num)
@@ -882,6 +918,195 @@ pub async fn compile_workflow_handler(
                 "message": msg,
                 "workflowId": workflow_id,
                 "version": version
+            });
+            (StatusCode::INTERNAL_SERVER_ERROR, Json(error_response))
+        }
+    }
+}
+
+/// Response body for the compilation-progress endpoint. Mirrors the Redis
+/// hash plus terminal state from `workflow_compilations`.
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct CompilationProgressResponse {
+    /// One of `queued`, `in_progress`, `success`, `failed`, `unknown`.
+    pub status: String,
+    /// Stage name when status is `queued` or `in_progress`, else `null`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stage: Option<String>,
+    /// 1-based stage index when in progress.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stage_index: Option<u8>,
+    /// Total number of stages (constant for now).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total_stages: Option<u8>,
+    /// Free-text message ("Compiling agent-foo", "Linking workflow components", …).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    /// Epoch millis when this compilation entered the queue.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<i64>,
+    /// Epoch millis of the last stage update.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<i64>,
+    /// Image ID after successful registration.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image_id: Option<String>,
+    /// Error message when status is `failed`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_message: Option<String>,
+}
+
+/// Get current compilation progress for a workflow version. Reads Redis for
+/// intermediate state (queued, preparing, generating, building, composing,
+/// registering); falls through to the DB for terminal state (success or
+/// failed); returns `unknown` if neither has it. Designed for polling
+/// (~1s) from the frontend save flow.
+#[utoipa::path(
+    get,
+    path = "/api/runtime/workflows/{id}/versions/{version}/compilation-progress",
+    params(
+        ("id" = String, Path, description = "Workflow identifier"),
+        ("version" = i32, Path, description = "Version number")
+    ),
+    responses(
+        (status = 200, description = "Current compilation state", body = CompilationProgressResponse),
+        (status = 400, description = "Invalid version format", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
+    ),
+    tag = "workflow-controller"
+)]
+pub async fn compilation_progress_handler(
+    crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
+    State(pool): State<PgPool>,
+    Path((workflow_id, version)): Path<(String, String)>,
+) -> (StatusCode, Json<Value>) {
+    let version_num = match version.parse::<i32>() {
+        Ok(v) if v > 0 => v,
+        _ => {
+            let error_response = json!({
+                "success": false,
+                "error": "Invalid version format",
+                "message": "Version must be a positive integer",
+            });
+            return (StatusCode::BAD_REQUEST, Json(error_response));
+        }
+    };
+
+    // Redis first — covers every state from `queued` through `registering`.
+    if let Some(valkey_config) = crate::valkey::ValkeyConfig::from_env() {
+        let redis_url = valkey_config.connection_url();
+        if let Ok(manager) = crate::valkey::get_or_create_manager(&redis_url).await
+            && let Some(p) = crate::valkey::compilation_progress::read_progress(
+                &manager,
+                &tenant_id,
+                &workflow_id,
+                version_num,
+            )
+            .await
+        {
+            let status = if p.stage == "queued" {
+                "queued"
+            } else {
+                "in_progress"
+            };
+            let response = CompilationProgressResponse {
+                status: status.to_string(),
+                stage: Some(p.stage),
+                stage_index: Some(p.stage_index),
+                total_stages: Some(p.total_stages),
+                message: Some(p.message),
+                started_at: Some(p.started_at),
+                updated_at: Some(p.updated_at),
+                image_id: None,
+                error_message: None,
+            };
+            return (
+                StatusCode::OK,
+                Json(serde_json::to_value(response).unwrap()),
+            );
+        }
+    }
+
+    // Fall through to the DB for terminal state. `query_compilation_result`
+    // synthesizes a fake error for the no-row case, which would look like a
+    // real failure here — so we query the row directly to keep the three
+    // outcomes (success / failed / unknown) distinct.
+    let row: Result<Option<CompilationRow>, sqlx::Error> = sqlx::query_as(
+        "SELECT compilation_status, registered_image_id, wasm_size, error_message \
+         FROM workflow_compilations \
+         WHERE tenant_id = $1 AND workflow_id = $2 AND version = $3",
+    )
+    .bind(&tenant_id)
+    .bind(&workflow_id)
+    .bind(version_num)
+    .fetch_optional(&pool)
+    .await;
+
+    match row {
+        Ok(Some(row))
+            if row.compilation_status == "success" && row.registered_image_id.is_some() =>
+        {
+            let response = CompilationProgressResponse {
+                status: "success".to_string(),
+                stage: None,
+                stage_index: None,
+                total_stages: None,
+                message: None,
+                started_at: None,
+                updated_at: None,
+                image_id: row.registered_image_id,
+                error_message: None,
+            };
+            (
+                StatusCode::OK,
+                Json(serde_json::to_value(response).unwrap()),
+            )
+        }
+        Ok(Some(row)) if row.compilation_status == "failed" => {
+            let response = CompilationProgressResponse {
+                status: "failed".to_string(),
+                stage: None,
+                stage_index: None,
+                total_stages: None,
+                message: None,
+                started_at: None,
+                updated_at: None,
+                image_id: None,
+                error_message: row
+                    .error_message
+                    .or_else(|| Some("Compilation failed".to_string())),
+            };
+            (
+                StatusCode::OK,
+                Json(serde_json::to_value(response).unwrap()),
+            )
+        }
+        Ok(_) => {
+            // Either no row at all, or a partial row (no image yet, no
+            // failure recorded). From the frontend's perspective, no
+            // useful state — keep polling.
+            let response = CompilationProgressResponse {
+                status: "unknown".to_string(),
+                stage: None,
+                stage_index: None,
+                total_stages: None,
+                message: None,
+                started_at: None,
+                updated_at: None,
+                image_id: None,
+                error_message: None,
+            };
+            (
+                StatusCode::OK,
+                Json(serde_json::to_value(response).unwrap()),
+            )
+        }
+        Err(e) => {
+            let error_response = json!({
+                "success": false,
+                "error": "Database error",
+                "message": format!("Failed to read compilation status: {}", e),
             });
             (StatusCode::INTERNAL_SERVER_ERROR, Json(error_response))
         }

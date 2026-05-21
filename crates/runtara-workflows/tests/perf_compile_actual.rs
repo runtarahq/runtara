@@ -122,6 +122,7 @@ fn compile_actual_large_embedded_workflow() {
             child_workflows,
             connection_service_url: input.connection_service_url,
             agent_catalog: None,
+            progress_callback: None,
         };
 
         let compile_start = Instant::now();

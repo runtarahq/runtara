@@ -107,6 +107,24 @@ pub async fn run(
         compilation_service = compilation_service.with_agent_catalog(catalog);
     }
 
+    // Reuse the shared (non-blocking) manager for progress writes — they're
+    // small HSET/EXPIRE ops, not blocking commands, so they belong on the
+    // shared manager rather than the dedicated BLPOP one.
+    let progress_manager = match crate::valkey::get_or_create_manager(&config.redis_url).await {
+        Ok(m) => Some(m),
+        Err(e) => {
+            warn!(
+                worker_id = %worker_id,
+                error = %e,
+                "Failed to obtain shared Redis manager for progress reporting; compilations will run without progress events"
+            );
+            None
+        }
+    };
+    if let Some(m) = progress_manager.clone() {
+        compilation_service = compilation_service.with_redis_manager(m);
+    }
+
     let dequeue_timeout = Duration::from_secs(config.dequeue_timeout_secs);
 
     loop {
@@ -231,6 +249,19 @@ pub async fn run(
                             .await
                             {
                                 error!(error = %db_err, "Failed to record compilation failure");
+                            }
+                            // Terminal state (failed) is now in the DB.
+                            // Clear the Redis progress entry so polling
+                            // clients fall through and pick up the failure.
+                            if let Some(m) = &progress_manager {
+                                crate::valkey::compilation_progress::ProgressReporter::new(
+                                    m.clone(),
+                                    &request.tenant_id,
+                                    &request.workflow_id,
+                                    request.version,
+                                )
+                                .clear()
+                                .await;
                             }
                         }
                     }

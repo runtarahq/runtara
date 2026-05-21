@@ -14,6 +14,10 @@ type WorkflowVersionRow = (
     Option<DateTime<Utc>>, // compiled_at
     Option<i32>,           // current_version
     Option<i32>,           // latest_version
+    Option<i32>,           // wasm_size (composed .wasm bytes)
+    Option<i32>,           // package_size (generated crate source bytes)
+    Option<String>,        // compilation_status ('success' | 'failed' | 'pending')
+    Option<String>,        // error_message (populated when status='failed')
 );
 
 pub fn workflow_definition_checksum(definition: &Value) -> String {
@@ -27,6 +31,10 @@ pub struct CompilationSuccessRecord<'a> {
     pub version: i32,
     pub build_dir: &'a std::path::Path,
     pub binary_size: i32,
+    /// Size of the generated workflow-logic crate source files (lib.rs,
+    /// Cargo.toml, world.wit, workflow.wac). Distinct from `binary_size`,
+    /// which is the composed `.wasm` output.
+    pub package_size: i32,
     pub binary_checksum: &'a str,
     pub source_checksum: &'a str,
 }
@@ -720,6 +728,14 @@ impl WorkflowRepository {
         tenant_id: &str,
         workflow_id: &str,
     ) -> Result<Vec<WorkflowVersionInfoDto>, sqlx::Error> {
+        // JOIN to workflow_compilations is unconditional now (previously
+        // filtered to `compilation_status = 'success'`, which collapsed
+        // failed and never-attempted into the same shape and stranded the
+        // user with no way to retry a failed row from the UI). We expose
+        // the raw status + error_message so the frontend can distinguish.
+        // wasm/package sizes are only meaningful for successful rows;
+        // failed rows have wasm_size = NULL in the DB so they fall through
+        // to "—" naturally without an explicit guard here.
         let rows: Vec<WorkflowVersionRow> = sqlx::query_as(
             r#"
             SELECT
@@ -729,13 +745,16 @@ impl WorkflowRepository {
                 sd.track_events,
                 sc.compiled_at as "compiled_at?",
                 s.current_version,
-                s.latest_version
+                s.latest_version,
+                sc.wasm_size as "wasm_size?",
+                sc.package_size as "package_size?",
+                sc.compilation_status as "compilation_status?",
+                sc.error_message as "error_message?"
             FROM workflow_definitions sd
             LEFT JOIN workflow_compilations sc
                 ON sd.tenant_id = sc.tenant_id
                 AND sd.workflow_id = sc.workflow_id
                 AND sd.version = sc.version
-                AND sc.compilation_status = 'success'
             JOIN workflows s
                 ON sd.tenant_id = s.tenant_id
                 AND sd.workflow_id = s.workflow_id
@@ -756,6 +775,11 @@ impl WorkflowRepository {
                 // Determine current version (current_version takes precedence, fallback to latest_version)
                 let current_version = row.5.unwrap_or_else(|| row.6.unwrap_or(0));
                 let is_active = row.0 == current_version;
+                let compilation_status = row.9.clone();
+                // `compiled = true` only on actual success. Previously the
+                // JOIN filter handled this; now we derive it explicitly so
+                // failed/pending rows stay false.
+                let is_compiled = compilation_status.as_deref() == Some("success");
 
                 WorkflowVersionInfoDto {
                     workflow_id: workflow_id.to_string(),
@@ -765,8 +789,18 @@ impl WorkflowRepository {
                     updated_at: row.2.to_rfc3339(),
                     track_events: row.3,
                     is_active,
-                    compiled: row.4.is_some(),
-                    compiled_at: row.4.map(|t| t.to_rfc3339()),
+                    compiled: is_compiled,
+                    // compiled_at is also stamped on failure, so only emit
+                    // it when the row genuinely compiled to avoid mislabeling.
+                    compiled_at: if is_compiled {
+                        row.4.map(|t| t.to_rfc3339())
+                    } else {
+                        None
+                    },
+                    wasm_size: row.7,
+                    package_size: row.8,
+                    compilation_status,
+                    error_message: row.10.clone(),
                 }
             })
             .collect();
@@ -941,8 +975,8 @@ impl WorkflowRepository {
         sqlx::query(
             r#"
             INSERT INTO workflow_compilations
-                (tenant_id, workflow_id, version, compiled_at, translated_path, compilation_status, wasm_size, wasm_checksum, runtara_version, source_checksum)
-            VALUES ($1, $2, $3, NOW(), $4, 'success', $5, $6, $7, $8)
+                (tenant_id, workflow_id, version, compiled_at, translated_path, compilation_status, wasm_size, wasm_checksum, runtara_version, source_checksum, package_size)
+            VALUES ($1, $2, $3, NOW(), $4, 'success', $5, $6, $7, $8, $9)
             ON CONFLICT (tenant_id, workflow_id, version)
             DO UPDATE SET
                 compiled_at = NOW(),
@@ -952,7 +986,8 @@ impl WorkflowRepository {
                 wasm_size = $5,
                 wasm_checksum = $6,
                 runtara_version = $7,
-                source_checksum = $8
+                source_checksum = $8,
+                package_size = $9
             "#,
         )
         .bind(record.tenant_id)
@@ -963,6 +998,7 @@ impl WorkflowRepository {
         .bind(record.binary_checksum)
         .bind(env!("BUILD_VERSION"))
         .bind(record.source_checksum)
+        .bind(record.package_size)
         .execute(&self.pool)
         .await?;
 

@@ -39,6 +39,11 @@ import { ExecutionStatus } from '@/generated/RuntaraRuntimeApi';
 
 import { useNavigationBlockerStore } from '@/shared/stores/navigationBlockerStore';
 import { UnsavedChangesDialog } from '@/shared/components/unsaved-changes-dialog';
+import {
+  getCompilationProgress,
+  rebuildWorkflowVersion,
+} from '@/features/workflows/queries';
+import type { CompilationToolbarStatus } from '@/features/workflows/pages/Workflow/WorkflowActionsForm';
 import { ValidationPanel } from '@/features/workflows/components/ValidationPanel';
 import { useValidationStore } from '@/features/workflows/stores/validationStore';
 import {
@@ -100,6 +105,23 @@ export function Workflow() {
 
   const [executeDialogOpen, setExecuteDialogOpen] = useState(false);
   const [executeError, setExecuteError] = useState<string | null>(null);
+
+  // The version we just saved and want to surface compilation progress for.
+  // Set in the save mutation's onSuccess; cleared after the user has had a
+  // moment to see the terminal state so the toolbar slot frees up again.
+  const [watchedCompilationVersion, setWatchedCompilationVersion] = useState<
+    number | undefined
+  >(undefined);
+
+  // Version the user explicitly clicked Rebuild on. Set immediately at click
+  // time (not derived from polling) so the row's Rebuild button can become
+  // "Rebuilding" and disable itself before the first poll arrives — the
+  // warm-cache case where compile finishes in <1 s and polling would only
+  // ever see the terminal state. Cleared by the same effect that clears
+  // `watchedCompilationVersion` after terminal.
+  const [pendingRebuildVersion, setPendingRebuildVersion] = useState<
+    number | undefined
+  >(undefined);
 
   const [isUnsavedChangesDialogOpen, setIsUnsavedChangesDialogOpen] =
     useState(false);
@@ -231,6 +253,110 @@ export function Workflow() {
     enabled: !!workflowId,
     placeholderData: { data: [], message: '', success: true } as any,
   });
+
+  // Poll compilation progress for the version the user just saved. Stops on
+  // terminal status; the auto-clear effect below frees the toolbar slot a
+  // beat after success so the user sees the green check before it vanishes.
+  const { data: compilationProgress } = useCustomQuery({
+    queryKey: queryKeys.workflows.compilationProgress(
+      workflowId ?? '',
+      watchedCompilationVersion ?? 0
+    ),
+    queryFn: (token: string) =>
+      getCompilationProgress(token, workflowId!, watchedCompilationVersion!),
+    enabled: !!workflowId && watchedCompilationVersion !== undefined,
+    refetchInterval: (q) => {
+      const last = q.state.data as { status?: string } | undefined;
+      if (!last) return 1000;
+      if (last.status === 'success' || last.status === 'failed') return false;
+      return 1000;
+    },
+    // Headless browsers (and users who Alt-tab) shouldn't see a stuck
+    // "preparing" indicator while the build is long done — keep polling
+    // in background until terminal.
+    refetchIntervalInBackground: true,
+    staleTime: 0,
+  });
+
+  // Compose the toolbar status. `unknown` from the endpoint means no Redis
+  // hash and no DB row yet — render nothing rather than a misleading slot.
+  //
+  // Memoized by content so the post-terminal effect below sees a stable
+  // identity once polling stops at success/failed. Without this memo the
+  // effect re-runs on every parent re-render (each call returns a fresh
+  // object), the timer's cleanup keeps killing it, and the rebuild state
+  // never clears — that was the "Rebuild button disappeared and Not
+  // compiled badge stuck until refresh" bug.
+  const compilationToolbarStatus: CompilationToolbarStatus | undefined =
+    useMemo(() => {
+      if (
+        watchedCompilationVersion === undefined ||
+        !compilationProgress ||
+        compilationProgress.status === 'unknown'
+      ) {
+        return undefined;
+      }
+      return {
+        status: compilationProgress.status as CompilationToolbarStatus['status'],
+        stage: compilationProgress.stage ?? null,
+        stageIndex: compilationProgress.stageIndex ?? null,
+        totalStages: compilationProgress.totalStages ?? null,
+        message: compilationProgress.message ?? null,
+        errorMessage: compilationProgress.errorMessage ?? null,
+      };
+    }, [watchedCompilationVersion, compilationProgress]);
+
+  // Auto-clear the watched version a beat after terminal so the toolbar
+  // slot frees up. Also refresh the versions list so the badge picks up
+  // the new state (especially important after a force-rebuild, where the
+  // version number doesn't change but the badge state does).
+  //
+  // We `await refetchQueries` inside the timer rather than firing
+  // `invalidateQueries` and hoping: without the await, the versions list
+  // may still be mid-refetch when `isRebuilding` flips false, so the row
+  // briefly reads the API's mid-rebuild snapshot (compiled=false, because
+  // the handler deletes the row before the worker re-inserts it).
+  // Success: 2.5 s — long enough to register the green check.
+  // Failure: 8 s + toast so the user has time to read the error.
+  useEffect(() => {
+    if (!compilationToolbarStatus) return;
+    const status = compilationToolbarStatus.status;
+    if (status !== 'success' && status !== 'failed') return;
+
+    const isSuccess = status === 'success';
+    // Kick off a refetch immediately so the badge can update as soon as
+    // possible; the awaited refetch in the timer is the safety net.
+    queryClient.invalidateQueries({
+      queryKey: queryKeys.workflows.versions(workflowId ?? ''),
+    });
+    if (!isSuccess) {
+      toast.error('Compilation failed', {
+        description:
+          compilationToolbarStatus.errorMessage ??
+          'See the Versions tab for prior compiled builds.',
+      });
+    }
+
+    let cancelled = false;
+    const id = window.setTimeout(async () => {
+      try {
+        await queryClient.refetchQueries({
+          queryKey: queryKeys.workflows.versions(workflowId ?? ''),
+        });
+      } catch {
+        // refetch failure is non-fatal — the user can hit reload
+      }
+      if (!cancelled) {
+        setWatchedCompilationVersion(undefined);
+        setPendingRebuildVersion(undefined);
+      }
+    }, isSuccess ? 2500 : 8000);
+
+    return () => {
+      cancelled = true;
+      window.clearTimeout(id);
+    };
+  }, [compilationToolbarStatus, workflowId]);
 
   // Extract versions from wrapped response
   const versions = useMemo(
@@ -407,6 +533,8 @@ export function Workflow() {
       const savedStagedChanges = stagedWorkflowChangesRef.current;
 
       if (newVersionNumber) {
+        // Surface compilation progress for the just-saved version.
+        setWatchedCompilationVersion(newVersionNumber);
         // Update selectedVersion to show the new version in the selectbox
         setSelectedVersion(newVersionNumber);
 
@@ -1215,21 +1343,17 @@ export function Workflow() {
       validateSchemaFieldsWithRust('Input schema', inputSchemaFieldsToUse),
       validateSchemaFieldsWithRust('Output schema', outputSchemaFieldsToUse),
     ]);
-    const schemaFieldUnavailableErrors = [
-      inputSchemaValidation,
-      outputSchemaValidation,
-    ]
-      .filter((result) => result.status === 'unavailable')
-      .map((result) => result.message);
-
-    if (schemaFieldUnavailableErrors.length > 0) {
-      useValidationStore
-        .getState()
-        .setMessages(
-          convertClientErrors(schemaFieldUnavailableErrors, finalState.nodes)
-        );
-      return;
-    }
+    // WASM unavailability is an unknown state, not a failure — surface it as
+    // a warning and continue. The backend validator is authoritative for
+    // schema fields, so blocking save here just on missing WASM punishes
+    // users for an environment problem (e.g. agent components not staged).
+    // Mirrors the execution-graph path's treatment of `unavailable` below.
+    const schemaFieldUnavailableWarnings = convertClientWarnings(
+      [inputSchemaValidation, outputSchemaValidation]
+        .filter((result) => result.status === 'unavailable')
+        .map((result) => result.message),
+      finalState.nodes
+    );
 
     const schemaFieldErrors = [
       ...(inputSchemaValidation.status === 'invalid'
@@ -1247,7 +1371,10 @@ export function Workflow() {
     if (schemaFieldErrors.length > 0) {
       useValidationStore
         .getState()
-        .setMessages(convertClientErrors(schemaFieldErrors, finalState.nodes));
+        .setMessages([
+          ...convertClientErrors(schemaFieldErrors, finalState.nodes),
+          ...schemaFieldUnavailableWarnings,
+        ]);
       return;
     }
 
@@ -1308,7 +1435,11 @@ export function Workflow() {
       rustValidation.status === 'unavailable'
         ? convertClientWarnings([rustValidation.message], finalState.nodes)
         : [];
-    const preSaveWarnings = [...rustWarnings, ...wasmUnavailableWarnings];
+    const preSaveWarnings = [
+      ...rustWarnings,
+      ...wasmUnavailableWarnings,
+      ...schemaFieldUnavailableWarnings,
+    ];
 
     if (rustValidation.status === 'invalid') {
       useValidationStore
@@ -1565,6 +1696,32 @@ export function Workflow() {
       }
     );
   };
+
+  // Force-rebuild a compiled version. Fire-and-forget — the backend's
+  // /compile?forceRecompile=true handler runs `invalidate_compilation`
+  // (drops checksum + image_id) and re-enqueues with force_recompile=true,
+  // so both cache layers miss. Progress is reflected via the existing
+  // toolbar poll keyed on `watchedCompilationVersion`.
+  const rebuildMutation = useCustomMutation<
+    void,
+    { workflowId: string; version: number }
+  >({
+    mutationFn: (token, { workflowId: wid, version }) =>
+      rebuildWorkflowVersion(token, wid, version),
+  });
+
+  const handleVersionRebuild = useCallback(
+    (version: number) => {
+      if (!workflowId) {
+        toast.error('Workflow ID is missing');
+        return;
+      }
+      setPendingRebuildVersion(version);
+      setWatchedCompilationVersion(version);
+      rebuildMutation.mutate({ workflowId, version });
+    },
+    [workflowId, rebuildMutation]
+  );
 
   const handleExportJSON = () => {
     // Get the current state from Zustand store
@@ -1873,6 +2030,7 @@ export function Workflow() {
               onResume={handleResume}
               isResuming={resumeMutation.isPending}
               hasBreakpoints={hasBreakpoints}
+              compilationStatus={compilationToolbarStatus}
             />
           </div>
         </div>
@@ -1913,6 +2071,8 @@ export function Workflow() {
         currentVersionNumber={data.currentVersionNumber}
         onVersionChange={handleVersionChange}
         onVersionActivate={handleVersionActivate}
+        onVersionRebuild={handleVersionRebuild}
+        rebuildingVersion={pendingRebuildVersion}
         isVersionLoading={isLoading}
       />
 

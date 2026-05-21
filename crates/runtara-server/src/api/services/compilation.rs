@@ -1,5 +1,6 @@
 use std::sync::{Arc, OnceLock};
 use tokio::sync::Semaphore;
+use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
 use crate::api::repositories::workflows::{
@@ -7,8 +8,11 @@ use crate::api::repositories::workflows::{
 };
 use crate::compiler::child_workflows::load_child_workflows;
 use crate::runtime_client::RuntimeClient;
+use crate::valkey::compilation_progress::{CompilationStage, ProgressReporter};
+use redis::aio::ConnectionManager;
 use runtara_dsl::parse_execution_graph;
 use runtara_management_sdk::{ImageSummary, RegisterImageStreamOptions, RunnerType};
+use runtara_workflows::compile::ProgressCallback;
 use runtara_workflows::{ChildWorkflowInput, CompilationInput, compile_workflow};
 
 /// Global semaphore limiting concurrent compilations across all code paths.
@@ -71,6 +75,11 @@ pub struct CompilationService {
     /// `runtara_agents::registry`, making the server's compiled view of
     /// agents match what the runtime dispatcher can actually invoke.
     agent_catalog: Option<Arc<runtara_dsl::agent_meta::AgentCatalog>>,
+    /// Optional Redis manager for streaming compilation progress. When set,
+    /// each compile_workflow call publishes stage transitions to Redis under
+    /// `runtara:compilation:progress:*` for the frontend's progress UI.
+    /// `None` (e.g. CLI / Valkey-disabled paths) is a no-op.
+    redis_manager: Option<ConnectionManager>,
 }
 
 impl CompilationService {
@@ -84,6 +93,7 @@ impl CompilationService {
             connection_service_url,
             runtime_client,
             agent_catalog: None,
+            redis_manager: None,
         }
     }
 
@@ -95,6 +105,14 @@ impl CompilationService {
         catalog: Arc<runtara_dsl::agent_meta::AgentCatalog>,
     ) -> Self {
         self.agent_catalog = Some(catalog);
+        self
+    }
+
+    /// Plug in a Redis manager for streaming compilation progress events.
+    /// Without it, compile_workflow runs as before but writes no progress
+    /// state — the frontend will see `unknown` until the DB row lands.
+    pub fn with_redis_manager(mut self, manager: ConnectionManager) -> Self {
+        self.redis_manager = Some(manager);
         self
     }
 
@@ -125,6 +143,22 @@ impl CompilationService {
             force_recompile = force_recompile,
             "Starting compilation for workflow {} version {}", workflow_id, version
         );
+
+        // Build a progress reporter scoped to this compile if Redis is wired up.
+        // Every stage transition below routes through this; cache-hit short
+        // circuits clear it explicitly so the frontend stops polling.
+        let progress_reporter = self.redis_manager.as_ref().map(|m| {
+            ProgressReporter::new(
+                m.clone(),
+                tenant_id.to_string(),
+                workflow_id.to_string(),
+                version,
+            )
+        });
+        if let Some(r) = &progress_reporter {
+            r.report(CompilationStage::Preparing, "Loading workflow definition")
+                .await;
+        }
 
         // 1. Fetch workflow definition and track-events mode
         let step_start = std::time::Instant::now();
@@ -171,6 +205,33 @@ impl CompilationService {
             "compile: step 3 completed - child workflows loaded"
         );
 
+        // Set up the sync→async progress bridge. The inner compile pipeline
+        // runs in `spawn_blocking` and can't `.await` Redis writes directly,
+        // so it fires events through a channel that a tokio task drains and
+        // forwards to the reporter. When the reporter is `None` (e.g. CLI
+        // path), we skip the channel entirely and pass `None` as the
+        // callback — zero overhead.
+        let (progress_callback, drain_handle, outer_tx) = match progress_reporter.clone() {
+            Some(reporter) => {
+                let (tx, mut rx) = mpsc::unbounded_channel::<(String, String)>();
+                let drain = tokio::spawn(async move {
+                    while let Some((stage_str, msg)) = rx.recv().await {
+                        if let Some(stage) = CompilationStage::parse(&stage_str) {
+                            reporter.report(stage, &msg).await;
+                        }
+                    }
+                });
+                let tx_cb = tx.clone();
+                let cb: ProgressCallback = Arc::new(move |stage: &str, msg: &str| {
+                    // Drop on closed channel is fine — the drain task may
+                    // have exited if the compile already finished.
+                    let _ = tx_cb.send((stage.to_string(), msg.to_string()));
+                });
+                (Some(cb), Some(drain), Some(tx))
+            }
+            None => (None, None, None),
+        };
+
         // 4. Build compilation input
         let compilation_input = CompilationInput {
             tenant_id: tenant_id.to_string(),
@@ -184,6 +245,7 @@ impl CompilationService {
             // the component dispatcher so the compiled view of agents
             // matches what the runtime can actually invoke.
             agent_catalog: self.agent_catalog.clone(),
+            progress_callback,
         };
 
         // 5. Check if already registered BEFORE compiling, unless a rebuild was requested.
@@ -214,6 +276,9 @@ impl CompilationService {
                 version,
                 existing_id
             );
+            if let Some(r) = &progress_reporter {
+                r.clear().await;
+            }
             return Ok(CompilationResultDto {
                 workflow_id: workflow_id.to_string(),
                 version,
@@ -257,6 +322,9 @@ impl CompilationService {
                             Some(&source_checksum),
                         )
                         .await;
+                    if let Some(r) = &progress_reporter {
+                        r.clear().await;
+                    }
                     return Ok(CompilationResultDto {
                         workflow_id: workflow_id.to_string(),
                         version,
@@ -317,6 +385,16 @@ impl CompilationService {
             "compile: step 6 completed - native binary compiled"
         );
 
+        // spawn_blocking returned, so the build callbacks are done firing.
+        // Drop the outer sender to close the channel, then wait for the
+        // drain task to flush remaining events into Redis. Without this
+        // flush a tail of "Compiling X" events from late in the build could
+        // outlive the Registering report below.
+        drop(outer_tx);
+        if let Some(handle) = drain_handle {
+            let _ = handle.await;
+        }
+
         // 7. Record compilation success in database FIRST (before registration)
         // This ensures we have a record even if registration fails, preventing
         // orphaned images in runtara-environment with no local record
@@ -329,6 +407,7 @@ impl CompilationService {
                 version,
                 build_dir: &result.build_dir,
                 binary_size: result.binary_size as i32,
+                package_size: result.package_size as i32,
                 binary_checksum: &result.binary_checksum,
                 source_checksum: &source_checksum,
             })
@@ -355,6 +434,13 @@ impl CompilationService {
             binary_size = result.binary_size,
             "compile: step 8 - registering image with runtara-environment"
         );
+        if let Some(r) = &progress_reporter {
+            r.report(
+                CompilationStage::Registering,
+                "Registering compiled workflow",
+            )
+            .await;
+        }
         let image_id = self
             .register_image(
                 client,
@@ -445,6 +531,13 @@ impl CompilationService {
             result.binary_size,
             image_id
         );
+
+        // Terminal state (success) is now in scenario_compilations; clear
+        // the Redis progress entry so polling clients fall through to the
+        // DB read.
+        if let Some(r) = &progress_reporter {
+            r.clear().await;
+        }
 
         Ok(CompilationResultDto {
             workflow_id: workflow_id.to_string(),

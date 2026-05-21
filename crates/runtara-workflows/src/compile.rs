@@ -121,8 +121,18 @@ pub struct ChildWorkflowInput {
     pub execution_graph: ExecutionGraph,
 }
 
+/// Sync progress callback invoked from inside `compile_workflow_components`
+/// at coarse stage boundaries ("generating", "building", "composing") and
+/// for sub-progress ("Compiling agent-foo") parsed out of cargo-component's
+/// JSON output. Called on the blocking thread that runs the build, so
+/// implementations should be cheap (a channel send is ideal — drain it on
+/// the async side).
+///
+/// Wrapped in `Option` so callers that don't care about progress can leave
+/// it `None` with no overhead.
+pub type ProgressCallback = std::sync::Arc<dyn Fn(&str, &str) + Send + Sync>;
+
 /// Input for compilation (all data pre-loaded, no DB access needed).
-#[derive(Debug)]
 pub struct CompilationInput {
     /// Tenant ID for multi-tenant isolation.
     pub tenant_id: String,
@@ -146,6 +156,24 @@ pub struct CompilationInput {
     /// (the server) passes the dispatcher's catalog so the compile picks
     /// up exactly the agents the runtime can dispatch.
     pub agent_catalog: Option<std::sync::Arc<runtara_dsl::agent_meta::AgentCatalog>>,
+    /// Optional progress callback. See [`ProgressCallback`].
+    pub progress_callback: Option<ProgressCallback>,
+}
+
+impl std::fmt::Debug for CompilationInput {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CompilationInput")
+            .field("tenant_id", &self.tenant_id)
+            .field("workflow_id", &self.workflow_id)
+            .field("version", &self.version)
+            .field("execution_graph", &self.execution_graph)
+            .field("track_events", &self.track_events)
+            .field("child_workflows", &self.child_workflows)
+            .field("connection_service_url", &self.connection_service_url)
+            .field("agent_catalog", &self.agent_catalog)
+            .field("progress_callback", &self.progress_callback.is_some())
+            .finish()
+    }
 }
 
 /// Result of native binary compilation.
@@ -159,6 +187,12 @@ pub struct NativeCompilationResult {
     pub binary_checksum: String,
     /// Path to the per-workflow build directory.
     pub build_dir: std::path::PathBuf,
+    /// Size of the generated crate's source files in bytes — sums
+    /// `Cargo.toml`, `src/lib.rs`, `wit/world.wit`, and `workflow.wac`.
+    /// Excludes the staged WIT deps (shared across workflows) and the
+    /// `target/` directory (build artifacts). Lets the frontend show how
+    /// large the codegen output is for a given workflow.
+    pub package_size: usize,
     /// Whether the workflow has side effects (e.g., HTTP calls, external actions).
     pub has_side_effects: bool,
     /// Child workflow dependencies.

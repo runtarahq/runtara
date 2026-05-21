@@ -19,6 +19,9 @@ import {
   Bug,
   SkipForward,
   Pause,
+  Loader2,
+  CheckCircle2,
+  XCircle,
 } from 'lucide-react';
 
 const { schema, initialValues } = form;
@@ -31,6 +34,20 @@ type ExecutionStats = {
   executionDuration?: number;
   maxMemory?: number;
   terminationType?: string;
+};
+
+/** Live compilation status surfaced inside the floating toolbar — drives a
+ *  small inline indicator that mirrors the execution-status block. The page
+ *  owns the polling; this component is presentational. */
+export type CompilationToolbarStatus = {
+  status: 'queued' | 'in_progress' | 'success' | 'failed';
+  stage?: string | null;
+  stageIndex?: number | null;
+  totalStages?: number | null;
+  /** Sub-stage line, e.g. "Building dependencies (3/45)". */
+  message?: string | null;
+  /** Populated only on failure. */
+  errorMessage?: string | null;
 };
 
 type Props = {
@@ -49,6 +66,10 @@ type Props = {
   onClearExecution?: () => void;
   onViewExecutionDetails?: () => void;
   executionStats?: ExecutionStats;
+  /** Optional compilation progress — when present, renders the inline
+   *  compile indicator slot. The page clears this on terminal + auto-dismiss
+   *  so the slot disappears once the user has seen the outcome. */
+  compilationStatus?: CompilationToolbarStatus;
   onDebugExecute?: () => void;
   isSuspended?: boolean;
   onResume?: () => void;
@@ -73,6 +94,7 @@ export function WorkflowActionsForm(props: Props) {
     onClearExecution,
     onViewExecutionDetails,
     executionStats,
+    compilationStatus,
     onDebugExecute,
     isSuspended,
     onResume,
@@ -133,6 +155,61 @@ export function WorkflowActionsForm(props: Props) {
               accept=".json"
               onChange={handleFileChange}
             />
+
+            {/* Compilation status indicator — mirrors the execution slot
+                below so the toolbar stays narrow. Hidden when execution is
+                active (the run takes the slot) since terminal compile state
+                is shown in the Versions tab anyway. */}
+            {compilationStatus && !isExecuting && (
+              <>
+                <div className="flex items-center gap-2 px-1">
+                  {compilationStatus.status === 'failed' ? (
+                    <XCircle className="h-3.5 w-3.5 text-destructive" />
+                  ) : compilationStatus.status === 'success' ? (
+                    <CheckCircle2 className="h-3.5 w-3.5 text-emerald-600" />
+                  ) : (
+                    <Loader2 className="h-3.5 w-3.5 animate-spin text-blue-600" />
+                  )}
+                  <span className="text-xs font-medium text-slate-700">
+                    {compilationStatus.status === 'success'
+                      ? 'Compiled'
+                      : compilationStatus.status === 'failed'
+                        ? 'Compile failed'
+                        : compilationStatus.status === 'queued'
+                          ? 'Waiting for compiler'
+                          : 'Compiling'}
+                  </span>
+                  {compilationStatus.status === 'in_progress' &&
+                    compilationStatus.stageIndex != null &&
+                    compilationStatus.totalStages != null && (
+                      <span className="text-xs text-muted-foreground">
+                        {compilationStatus.stageIndex}/
+                        {compilationStatus.totalStages}
+                      </span>
+                    )}
+                  {(compilationStatus.status === 'in_progress' ||
+                    compilationStatus.status === 'queued') &&
+                    compilationStatus.message && (
+                      <span
+                        className="max-w-[220px] truncate text-xs text-muted-foreground"
+                        title={compilationStatus.message}
+                      >
+                        — {compilationStatus.message}
+                      </span>
+                    )}
+                  {compilationStatus.status === 'failed' &&
+                    compilationStatus.errorMessage && (
+                      <span
+                        className="max-w-[220px] truncate text-xs text-destructive"
+                        title={compilationStatus.errorMessage}
+                      >
+                        — {compilationStatus.errorMessage}
+                      </span>
+                    )}
+                </div>
+                <div className="mx-1 h-4 w-px bg-border" />
+              </>
+            )}
 
             {/* Execution status indicator */}
             {isExecuting && (
