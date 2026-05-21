@@ -180,6 +180,10 @@ pub async fn run(
                     .await;
                 }
             }
+            Err(e) if is_consumer_group_missing(&e) => {
+                warn!(error = %e, "Trigger consumer group missing (Valkey restarted?)");
+                recreate_consumer_group(&mut consumer, &mut autoclaim_start_id).await;
+            }
             Err(e) => {
                 // Log but continue to process new events
                 warn!(error = %e, "Failed to claim pending events");
@@ -205,10 +209,33 @@ pub async fn run(
                     .await;
                 }
             }
+            Err(e) if is_consumer_group_missing(&e) => {
+                warn!(error = %e, "Trigger consumer group missing (Valkey restarted?)");
+                recreate_consumer_group(&mut consumer, &mut autoclaim_start_id).await;
+            }
             Err(e) => {
                 error!(error = %e, "Error reading from Valkey stream, retrying in 5 seconds");
                 tokio::time::sleep(Duration::from_secs(5)).await;
             }
+        }
+    }
+}
+
+/// `true` when Valkey replied `NOGROUP` — the stream/consumer group is gone, as after a restart that lost its dataset.
+fn is_consumer_group_missing(err: &redis::RedisError) -> bool {
+    err.code() == Some("NOGROUP")
+}
+
+/// Rebuilds the consumer group after a Valkey restart dropped it; the cursor resets because the new group's PEL is empty.
+async fn recreate_consumer_group(consumer: &mut StreamConsumer, autoclaim_start_id: &mut String) {
+    match consumer.initialize_consumer_group().await {
+        Ok(()) => {
+            *autoclaim_start_id = "0-0".to_string();
+            info!("Trigger consumer group re-established after Valkey restart");
+        }
+        Err(e) => {
+            error!(error = %e, "Failed to re-create consumer group, retrying in 5 seconds");
+            tokio::time::sleep(Duration::from_secs(5)).await;
         }
     }
 }
