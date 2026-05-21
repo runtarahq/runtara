@@ -297,17 +297,17 @@ install_cargo_component() {
 
 # ─── Build agent components ─────────────────────────────────────────────────
 #
-# Produces target/wasm32-wasip1/release/runtara_agent_<x>.wasm plus the
+# Produces target/wasm32-wasip2/release/runtara_agent_<x>.wasm plus the
 # sibling .meta.json for each of the 23 agent crates. The build script
 # itself depends on cargo-component + wit-deps being on PATH; we've already
 # installed the right cargo-component into the cache, so prepend it.
 
 build_agent_components() {
     if [ "$SKIP_BUILD" = "1" ]; then
-        if ! find "${TARGET_DIR}/wasm32-wasip1/release" -maxdepth 1 \
+        if ! find "${TARGET_DIR}/wasm32-wasip2/release" -maxdepth 1 \
                 -name 'runtara_agent_*.wasm' 2>/dev/null | grep -q .; then
             echo "Error: --skip-build but no built agent components found at \
-${TARGET_DIR}/wasm32-wasip1/release/runtara_agent_*.wasm" >&2
+${TARGET_DIR}/wasm32-wasip2/release/runtara_agent_*.wasm" >&2
             exit 1
         fi
         info "Skipping agent component build (--skip-build)"
@@ -368,7 +368,11 @@ assemble_bundle() {
     # directory; the ComponentDispatcherService loads each pair and exposes
     # the agents to the validator and workflow runtime.
     info "Copying agent WASM components"
-    local agent_src="${TARGET_DIR}/wasm32-wasip1/release"
+    # `wasm32-wasip2/release/` is cargo-component's finalized component output.
+    # Same as for workflow-logic: do NOT read from wasm32-wasip1/, which is the
+    # intermediate rustc pass cargo-component leaves behind — that file is the
+    # malformed Frankenstein wac silently mis-composes on linux.
+    local agent_src="${TARGET_DIR}/wasm32-wasip2/release"
     local wasm_count=0
     local meta_count=0
     for f in "$agent_src"/runtara_agent_*.wasm; do

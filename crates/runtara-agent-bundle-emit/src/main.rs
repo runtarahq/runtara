@@ -6,7 +6,7 @@
 //!     emit-meta <output-dir>
 //!
 //! Example:
-//!     emit-meta target/wasm32-wasip1/release
+//!     emit-meta target/wasm32-wasip2/release
 //!
 //! Run by `scripts/build-agent-components.sh` after `cargo component build`.
 //! The agent dispatcher loads each pair (`.wasm` + `.meta.json`) at boot.

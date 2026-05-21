@@ -443,7 +443,7 @@ fn agent_bundle_dir() -> PathBuf {
     if let Ok(env_dir) = std::env::var("RUNTARA_AGENT_COMPONENTS_DIR") {
         return PathBuf::from(env_dir);
     }
-    workspace_root().join("target/wasm32-wasip1/release")
+    workspace_root().join("target/wasm32-wasip2/release")
 }
 
 /// Copy each required agent's `.wasm` from the bundle dir into the persistent

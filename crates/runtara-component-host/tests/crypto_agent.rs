@@ -17,12 +17,10 @@ fn agent_wasm_path() -> PathBuf {
         .parent()
         .unwrap()
         .to_path_buf();
-    // cargo-component drops the output under wasm32-wasip1 even though the
-    // target triple we asked for is wasm32-wasip2 — see cargo-component
-    // adapter behavior. Both names are checked.
-    let p1 = workspace.join("target/wasm32-wasip1/release/runtara_agent_crypto.wasm");
-    let p2 = workspace.join("target/wasm32-wasip2/release/runtara_agent_crypto.wasm");
-    if p1.exists() { p1 } else { p2 }
+    // cargo-component drops the finalized component under wasm32-wasip2/
+    // (it also leaves a malformed intermediate under wasm32-wasip1/ — don't
+    // touch that one).
+    workspace.join("target/wasm32-wasip2/release/runtara_agent_crypto.wasm")
 }
 
 #[tokio::test(flavor = "multi_thread")]

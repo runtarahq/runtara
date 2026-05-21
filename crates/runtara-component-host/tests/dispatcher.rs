@@ -20,16 +20,8 @@ fn workspace_root() -> PathBuf {
 }
 
 fn crypto_wasm_path() -> Option<PathBuf> {
-    let workspace = workspace_root();
-    let p1 = workspace.join("target/wasm32-wasip1/release/runtara_agent_crypto.wasm");
-    let p2 = workspace.join("target/wasm32-wasip2/release/runtara_agent_crypto.wasm");
-    if p1.exists() {
-        Some(p1)
-    } else if p2.exists() {
-        Some(p2)
-    } else {
-        None
-    }
+    let p = workspace_root().join("target/wasm32-wasip2/release/runtara_agent_crypto.wasm");
+    p.exists().then_some(p)
 }
 
 /// Build a one-agent bundle dir (mirrors the production layout) and return its
@@ -192,13 +184,13 @@ async fn dispatcher_drift_detector_every_declared_cap_is_routed() -> anyhow::Res
 }
 
 /// Production bundle-shaped load: point the dispatcher at
-/// `target/wasm32-wasip1/release/` (where the bundle script stages all 23
+/// `target/wasm32-wasip2/release/` (where the bundle script stages all 23
 /// `.wasm` + `.meta.json` pairs), verify every loaded capability is routed,
 /// and assert the count matches expectations. Skipped if the bundle hasn't
 /// been built — run `scripts/build-agent-components.sh` first.
 #[tokio::test(flavor = "multi_thread")]
 async fn dispatcher_loads_full_production_bundle() -> anyhow::Result<()> {
-    let bundle_dir = workspace_root().join("target/wasm32-wasip1/release");
+    let bundle_dir = workspace_root().join("target/wasm32-wasip2/release");
     let crypto_wasm = bundle_dir.join("runtara_agent_crypto.wasm");
     let crypto_meta = bundle_dir.join("runtara_agent_crypto.meta.json");
     if !crypto_wasm.exists() || !crypto_meta.exists() {

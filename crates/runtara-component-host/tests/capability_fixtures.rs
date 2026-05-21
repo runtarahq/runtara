@@ -5,7 +5,7 @@
 //! Each one describes a happy-path call: the input the dispatcher should
 //! accept and what the returned output must contain. The runner walks every
 //! `crates/agents/runtara-agent-*/fixtures/` directory, loads the production bundle
-//! (`target/wasm32-wasip1/release/`), and invokes each fixture through
+//! (`target/wasm32-wasip2/release/`), and invokes each fixture through
 //! `ComponentDispatcherService::test_capability`.
 //!
 //! Keeping fixtures inside the agent crate keeps each agent self-contained —
@@ -57,7 +57,7 @@ fn workspace_root() -> PathBuf {
 }
 
 fn bundle_dir() -> PathBuf {
-    workspace_root().join("target/wasm32-wasip1/release")
+    workspace_root().join("target/wasm32-wasip2/release")
 }
 
 fn agents_crates_dir() -> PathBuf {

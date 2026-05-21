@@ -55,7 +55,7 @@ fn workspace_root() -> PathBuf {
 fn agent_wasm_staged() -> bool {
     let dir = std::env::var("RUNTARA_AGENT_COMPONENTS_DIR")
         .map(PathBuf::from)
-        .unwrap_or_else(|_| workspace_root().join("target/wasm32-wasip1/release"));
+        .unwrap_or_else(|_| workspace_root().join("target/wasm32-wasip2/release"));
     dir.join("runtara_agent_crypto.wasm").exists()
 }
 

@@ -5,11 +5,17 @@
 # Build every runtara-agent-* crate as a WebAssembly Component and emit the
 # sibling meta.json (derived from each agent's macro-emitted statics) next to
 # the .wasm. Each agent ships as a pair:
-#   target/wasm32-wasip1/release/runtara_agent_<id>.wasm
-#   target/wasm32-wasip1/release/runtara_agent_<id>.meta.json
-# (cargo-component drops binaries under wasip1 even though the target is wasip2.)
+#   target/wasm32-wasip2/release/runtara_agent_<id>.wasm
+#   target/wasm32-wasip2/release/runtara_agent_<id>.meta.json
 #
-# Set RUNTARA_AGENT_COMPONENTS_DIR=<workspace>/target/wasm32-wasip1/release in
+# cargo-component's `--target wasm32-wasip2` writes the finalized component
+# under `wasm32-wasip2/`. It also leaves an intermediate file under
+# `wasm32-wasip1/` (rustc's core wasm output, before component encoding); on
+# darwin that intermediate is coincidentally usable, but on linux it's a
+# malformed Frankenstein that traps at runtime inside the preview1 adapter's
+# `cabi_import_realloc`. Always read from `wasm32-wasip2/`.
+#
+# Set RUNTARA_AGENT_COMPONENTS_DIR=<workspace>/target/wasm32-wasip2/release in
 # the server env to load them at boot. See docs/wasm-components-migration-plan.md.
 
 set -euo pipefail
@@ -78,7 +84,7 @@ fi
 # $CARGO_TARGET_DIR/..., and the downstream bundle assembly errors out with
 # "expected runtara_agent_*.{wasm,meta.json}, found N wasm and 0 meta files".
 target_dir="${CARGO_TARGET_DIR:-$workspace/target}"
-out_dir="$target_dir/wasm32-wasip1/release"
+out_dir="$target_dir/wasm32-wasip2/release"
 mkdir -p "$out_dir"
 
 count=0

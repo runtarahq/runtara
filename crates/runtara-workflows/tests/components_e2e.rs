@@ -11,7 +11,7 @@
 //!   - `cargo-component` and `wac` on PATH (auto-installed by
 //!     scripts/build-agent-components.sh under RUNTARA_NO_INSTALL_TOOLS=0).
 //!   - All 23 agent components staged at `$RUNTARA_AGENT_COMPONENTS_DIR`
-//!     (defaults to `target/wasm32-wasip1/release/`).
+//!     (defaults to `target/wasm32-wasip2/release/`).
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -51,7 +51,7 @@ fn agent_components_dir() -> PathBuf {
         .and_then(Path::parent)
         .map(Path::to_path_buf)
         .unwrap_or_else(|| PathBuf::from("."));
-    ws.join("target/wasm32-wasip1/release")
+    ws.join("target/wasm32-wasip2/release")
 }
 
 fn agent_wasm_staged() -> bool {
