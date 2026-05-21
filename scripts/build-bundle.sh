@@ -437,8 +437,16 @@ assemble_bundle() {
     # scripts/install.sh).
     info "Assembling compile-source mirror"
     local cs="$bundle/compile-src"
-    local ws_version
+    local ws_version ws_major_minor
     ws_version="$(grep '^version' "${ROOT_DIR}/Cargo.toml" | head -1 | sed 's/.*"\(.*\)".*/\1/')"
+    # Path deps in cargo need a version constraint compatible with the
+    # underlying crate. The bundled crates inherit version.workspace = true
+    # which expands to ws_version (e.g. "7.0.0"); the workspace dep entry
+    # needs to be ^MAJOR.MINOR (cargo's caret-default) so cargo accepts the
+    # match. Just stripping to MAJOR.MINOR keeps the constraint loose enough
+    # to survive patch bumps but tight enough to reject a stale bundle
+    # paired with a fresh source tree.
+    ws_major_minor="$(printf '%s' "$ws_version" | cut -d. -f1-2)"
 
     # Synthesized workspace root. Its sole job is resolving the
     # `version.workspace = true` / `runtara-http = { workspace = true }`
@@ -466,7 +474,7 @@ license = "AGPL-3.0-or-later"
 repository = "https://github.com/runtarahq/runtara"
 
 [workspace.dependencies]
-runtara-http = { path = "crates/runtara-http", version = "6.0" }
+runtara-http = { path = "crates/runtara-http", version = "${ws_major_minor}" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 chrono = { version = "0.4", features = ["serde"] }

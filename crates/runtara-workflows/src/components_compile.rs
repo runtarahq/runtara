@@ -267,17 +267,34 @@ fn agent_cas_dir() -> PathBuf {
 /// Workspace root used to resolve absolute paths to the stdlib / sdk /
 /// agent-wit sources cargo-component needs when building workflow-logic.
 ///
-/// Two layers, in order:
-///   1. `$RUNTARA_COMPILE_SOURCE_DIR` — set by `scripts/install.sh` to the
-///      bundle's `compile-src/` mirror. Required on hosts that received only
-///      the released tarball, since the tarball ships no source tree of its
-///      own and `env!("CARGO_MANIFEST_DIR")` would point at the CI runner's
-///      path (`/home/runner/...`) that doesn't exist on the install host.
-///   2. `env!("CARGO_MANIFEST_DIR")` — compile-time fallback for `cargo run`
-///      against an in-tree checkout. Two levels up from this crate.
+/// Three layers, in order:
+///   1. `$RUNTARA_COMPILE_SOURCE_DIR` — explicit override. Honored above
+///      everything else so custom deployments can point at a non-default
+///      layout. `scripts/install.sh` sets this in the systemd
+///      EnvironmentFile, but other deployments (Docker without the
+///      install-test Dockerfile, ECS, manual launches) frequently don't —
+///      hence the auto-detect below.
+///   2. `<install>/compile-src/` next to the binary — the released bundle
+///      layout is `<install>/bin/runtara-server` + `<install>/compile-src/`,
+///      so the binary can find its own bundle without anyone setting an
+///      env var. Resolved from `current_exe()`, which is the canonical
+///      path on Linux/macOS (symlinks like `/usr/local/bin/runtara-server`
+///      still resolve back to the install root).
+///   3. `env!("CARGO_MANIFEST_DIR")` — compile-time fallback for `cargo run`
+///      against an in-tree checkout. The CI-baked path
+///      (`/home/runner/work/runtara/runtara/...`) shows up here on a
+///      released binary, which is why steps 1+2 exist.
 fn workspace_root() -> PathBuf {
     if let Ok(dir) = std::env::var("RUNTARA_COMPILE_SOURCE_DIR") {
         return PathBuf::from(dir);
+    }
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(install_root) = exe.parent().and_then(Path::parent)
+    {
+        let candidate = install_root.join("compile-src");
+        if candidate.is_dir() {
+            return candidate;
+        }
     }
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
