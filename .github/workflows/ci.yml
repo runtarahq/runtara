@@ -471,8 +471,8 @@ jobs:
 
       - name: Verify 23 .wasm + 23 .meta.json present
         run: |
-          wasm_count=$(find target/wasm32-wasip1/release -maxdepth 1 -name 'runtara_agent_*.wasm' | wc -l)
-          meta_count=$(find target/wasm32-wasip1/release -maxdepth 1 -name 'runtara_agent_*.meta.json' | wc -l)
+          wasm_count=$(find target/wasm32-wasip2/release -maxdepth 1 -name 'runtara_agent_*.wasm' | wc -l)
+          meta_count=$(find target/wasm32-wasip2/release -maxdepth 1 -name 'runtara_agent_*.meta.json' | wc -l)
           echo "wasm=$wasm_count meta=$meta_count"
           test "$wasm_count" -eq 23
           test "$meta_count" -eq 23
@@ -489,7 +489,7 @@ jobs:
       - name: Run components-mode workflow e2e tests
         env:
           RUNTARA_RUN_COMPONENTS_E2E: "1"
-          RUNTARA_AGENT_COMPONENTS_DIR: ${{ github.workspace }}/target/wasm32-wasip1/release
+          RUNTARA_AGENT_COMPONENTS_DIR: ${{ github.workspace }}/target/wasm32-wasip2/release
         run: |
           cargo test -p runtara-workflows \
             --test components_smoke \
