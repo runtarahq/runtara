@@ -1004,3 +1004,151 @@ impl HttpConnectionExtractor for StripeExtractor {
         })
     }
 }
+
+// ============================================================================
+// MCP (Model Context Protocol) Connection Type
+// ============================================================================
+
+/// Parameters for connecting to an external MCP (Model Context Protocol) server.
+///
+/// The connection is used by the `runtara-agent-mcp` WASM agent (see
+/// `crates/agents/runtara-agent-mcp`). Each AI Agent step that wants to call
+/// an MCP server gets one labeled edge `mcp.<toolset>` to an Agent step
+/// pointing at the `mcp` agent, parameterized with this connection.
+///
+/// Auth is configured via `auth_mode`:
+///   - `none`   — no Authorization header is injected.
+///   - `bearer` — `Authorization: Bearer <bearer_token>` is injected by the proxy.
+///   - `api_key` — `<api_key_header>: <api_key_value>` is injected by the proxy.
+///
+/// `tool_hints` is a free-form map of `tool_name → extra description text` that
+/// the search ranker treats as additional documentation per tool. Use it to
+/// nudge the LLM toward (or away from) specific tools without renaming them.
+///
+/// `tool_scope`, when non-empty, restricts the agent to that allowlist of
+/// tool names. The agent-side enforces this on both search and invoke.
+///
+/// OAuth2 is intentionally NOT supported in v1 — extend `auth_mode` later.
+#[derive(Debug, Deserialize, ConnectionParams)]
+#[connection(
+    integration_id = "mcp",
+    display_name = "MCP Server",
+    description = "Connect to an external MCP (Model Context Protocol) server for dynamic tool discovery and invocation from AI Agent steps.",
+    category = "api",
+    auth_type = "api_key"
+)]
+pub struct McpConnectionParams {
+    /// Streamable-HTTP endpoint URL of the MCP server.
+    #[field(
+        display_name = "Server URL",
+        description = "Streamable-HTTP endpoint URL of the MCP server (e.g. https://mcp.example.com/jsonrpc).",
+        placeholder = "https://mcp.example.com/jsonrpc"
+    )]
+    pub url: String,
+
+    /// Authentication mode: `none`, `bearer`, or `api_key`.
+    #[serde(default = "default_mcp_auth_mode")]
+    #[field(
+        display_name = "Auth Mode",
+        description = "Authentication mode: none, bearer, or api_key.",
+        default = "none"
+    )]
+    pub auth_mode: String,
+
+    /// Bearer token (only used when auth_mode = "bearer").
+    #[serde(default)]
+    #[field(
+        display_name = "Bearer Token",
+        description = "Bearer token (when auth_mode = \"bearer\").",
+        secret
+    )]
+    pub bearer_token: Option<String>,
+
+    /// API key header name (only used when auth_mode = "api_key"). Defaults to X-API-Key.
+    #[serde(default)]
+    #[field(
+        display_name = "API Key Header",
+        description = "Header name for the API key (when auth_mode = \"api_key\"). Defaults to X-API-Key.",
+        placeholder = "X-API-Key"
+    )]
+    pub api_key_header: Option<String>,
+
+    /// API key value (only used when auth_mode = "api_key").
+    #[serde(default)]
+    #[field(
+        display_name = "API Key",
+        description = "API key value (when auth_mode = \"api_key\").",
+        secret
+    )]
+    pub api_key_value: Option<String>,
+
+    /// Extra static headers to forward on every request.
+    #[serde(default)]
+    #[field(
+        display_name = "Extra Headers",
+        description = "Extra static headers to forward on every request (header_name → value)."
+    )]
+    pub extra_headers: HashMap<String, String>,
+
+    /// Optional per-tool hint strings to bias the tool_search ranker.
+    #[serde(default)]
+    #[field(
+        display_name = "Tool Hints",
+        description = "Optional per-tool hint strings (tool_name → extra description) used by the search ranker."
+    )]
+    pub tool_hints: HashMap<String, String>,
+
+    /// Optional allowlist of tool names — empty allows everything.
+    #[serde(default)]
+    #[field(
+        display_name = "Tool Scope",
+        description = "Optional allowlist of tool names. Empty = allow all tools advertised by the MCP server."
+    )]
+    pub tool_scope: Vec<String>,
+}
+
+fn default_mcp_auth_mode() -> String {
+    "none".to_string()
+}
+
+/// HTTP extractor for MCP connections. The agent embeds the auth choice in
+/// the parameters JSON; the proxy reads `auth_mode` + matching fields at
+/// request time and injects the right `Authorization` / api-key header.
+pub struct McpExtractor;
+
+impl HttpConnectionExtractor for McpExtractor {
+    fn integration_id(&self) -> &'static str {
+        "mcp"
+    }
+
+    fn extract(&self, params: &Value) -> Result<HttpConnectionConfig, String> {
+        let p: McpConnectionParams = serde_json::from_value(params.clone())
+            .map_err(|e| format!("Invalid mcp connection parameters: {}", e))?;
+
+        let url = p.url.trim();
+        if url.is_empty() {
+            return Err("MCP connection: `url` is required".to_string());
+        }
+        // Allow http(s) for local dev / loopback; the proxy is server-side so
+        // there's no risk of leaking the request out of the cluster.
+        if !(url.starts_with("http://") || url.starts_with("https://")) {
+            return Err(format!(
+                "MCP connection: `url` must start with http:// or https://, got `{}`",
+                url
+            ));
+        }
+
+        let mut headers = HashMap::new();
+        headers.insert("Content-Type".to_string(), "application/json".to_string());
+        for (k, v) in &p.extra_headers {
+            headers.insert(k.clone(), v.clone());
+        }
+
+        Ok(HttpConnectionConfig {
+            headers,
+            query_parameters: HashMap::new(),
+            url_prefix: url.to_string(),
+            rate_limit_config: None,
+        })
+    }
+}
