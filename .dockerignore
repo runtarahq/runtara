@@ -1,0 +1,12 @@
+.claude
+.git
+target
+target-*
+crates/*/target
+crates/runtara-server/frontend/node_modules
+crates/runtara-server/frontend/dist
+e2e/install-test/runtara-*.tar.gz
+e2e/install-test/runtara-*.sha256
+e2e/install-test/install.sh
+*.log
+.DS_Store

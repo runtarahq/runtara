@@ -35,6 +35,12 @@ services:
         build:
             context: .
             dockerfile: Dockerfile
+            args:
+                # Default: install from GitHub releases. Set
+                # INSTALL_SOURCE=local in the environment before running
+                # docker compose to use a locally-staged install.sh +
+                # runtara-*-linux.tar.gz in this directory instead.
+                INSTALL_SOURCE: ${INSTALL_SOURCE:-github}
         depends_on:
             postgres:
                 condition: service_healthy

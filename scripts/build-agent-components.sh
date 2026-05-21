@@ -72,7 +72,13 @@ if [ -z "$agents" ]; then
     exit 1
 fi
 
-out_dir="$workspace/target/wasm32-wasip1/release"
+# Honor $CARGO_TARGET_DIR so docker-mounted / out-of-tree builds land where
+# cargo actually wrote the .wasm files. Without this the meta.json siblings
+# end up under $workspace/target/... while cargo dropped the binaries under
+# $CARGO_TARGET_DIR/..., and the downstream bundle assembly errors out with
+# "expected runtara_agent_*.{wasm,meta.json}, found N wasm and 0 meta files".
+target_dir="${CARGO_TARGET_DIR:-$workspace/target}"
+out_dir="$target_dir/wasm32-wasip1/release"
 mkdir -p "$out_dir"
 
 count=0
