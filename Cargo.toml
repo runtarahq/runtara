@@ -50,6 +50,7 @@ members = [
     "crates/agents/runtara-agent-shopify",
     "crates/agents/runtara-agent-sftp",
     "crates/agents/runtara-agent-compression",
+    "crates/agents/runtara-agent-mcp",
     "crates/agents/runtara-agent-xlsx",
     # Build tool: emits per-agent meta.json siblings to each .wasm by walking
     # the macro-emitted statics in every agent crate. Run by
