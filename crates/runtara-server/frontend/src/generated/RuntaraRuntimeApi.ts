@@ -1188,6 +1188,39 @@ export interface CompensationHintInfo {
   description?: string | null;
 }
 
+export interface CompilationProgressResponse {
+  /** Error message when status is `failed`. */
+  errorMessage?: string | null;
+  /** Image ID after successful registration. */
+  imageId?: string | null;
+  /** Free-text message ("Compiling agent-foo", "Linking workflow components", …). */
+  message?: string | null;
+  /** Stage name when status is `queued` or `in_progress`, else `null`. */
+  stage?: string | null;
+  /**
+   * 1-based stage index when in progress.
+   * @min 0
+   */
+  stageIndex?: number | null;
+  /**
+   * Epoch millis when this compilation entered the queue.
+   * @format int64
+   */
+  startedAt?: number | null;
+  /** One of `queued`, `in_progress`, `success`, `failed`, `unknown`. */
+  status: string;
+  /**
+   * Total number of stages (constant for now).
+   * @min 0
+   */
+  totalStages?: number | null;
+  /**
+   * Epoch millis of the last stage update.
+   * @format int64
+   */
+  updatedAt?: number | null;
+}
+
 export interface CompileWorkflowResponse {
   binaryChecksum: string;
   /** @min 0 */
@@ -5347,6 +5380,14 @@ export interface WorkflowVersionInfoDto {
   createdAt: string;
   /** Whether this is the current/active version used for execution */
   isActive: boolean;
+  /** Size of the composed workflow.wasm binary in bytes (null if not compiled) */
+  wasmSize?: number | null;
+  /** Size of the generated workflow-logic crate source files in bytes (null if not compiled) */
+  packageSize?: number | null;
+  /** Raw compilation status: 'success' | 'failed' | 'pending'. Null when the worker has never run for this version (brand-new save). */
+  compilationStatus?: string | null;
+  /** Error message recorded by the worker when compilation failed. */
+  errorMessage?: string | null;
   /** Whether step-event tracking is enabled for this version */
   trackEvents: boolean;
   updatedAt: string;
@@ -7685,6 +7726,25 @@ export class Api<
       this.request<CompileWorkflowResponse, ErrorResponse>({
         path: `/api/runtime/workflows/${id}/versions/${version}/compile`,
         method: "POST",
+        format: "json",
+        ...params,
+      }),
+
+    /**
+     * @description Get current compilation progress for a workflow version. Reads Redis for intermediate state (queued, preparing, generating, building, composing, registering); falls through to the DB for terminal state (success or failed); returns `unknown` if neither has it. Designed for polling (~1s) from the frontend save flow.
+     *
+     * @tags workflow-controller
+     * @name CompilationProgressHandler
+     * @request GET:/api/runtime/workflows/{id}/versions/{version}/compilation-progress
+     */
+    compilationProgressHandler: (
+      id: string,
+      version: number,
+      params: RequestParams = {},
+    ) =>
+      this.request<CompilationProgressResponse, ErrorResponse>({
+        path: `/api/runtime/workflows/${id}/versions/${version}/compilation-progress`,
+        method: "GET",
         format: "json",
         ...params,
       }),

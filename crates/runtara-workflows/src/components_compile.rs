@@ -22,8 +22,9 @@
 use std::collections::HashMap;
 use std::fs;
 use std::io;
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use runtara_dsl::ExecutionGraph;
 use sha2::{Digest, Sha256};
@@ -32,7 +33,15 @@ use crate::codegen::ast::context::EmitContext;
 use crate::codegen::components::{self, AgentRequirement, CodegenArtifacts};
 use crate::compile::{
     ChildDependency, ChildWorkflowInput, CompilationInput, NativeCompilationResult,
+    ProgressCallback,
 };
+
+/// Fire a progress event if a callback is attached. Cheap no-op otherwise.
+fn report(progress: &Option<ProgressCallback>, stage: &str, message: &str) {
+    if let Some(cb) = progress {
+        cb(stage, message);
+    }
+}
 
 /// Compile a workflow under `CompileMode::Components`. Mirrors
 /// `compile_workflow`'s public contract — same input, same `NativeCompilationResult`.
@@ -46,6 +55,7 @@ pub fn compile_workflow_components(input: CompilationInput) -> io::Result<Native
         child_workflows,
         connection_service_url,
         agent_catalog,
+        progress_callback,
     } = input;
 
     // Fall back to the statically-linked agent registry if the caller didn't
@@ -57,6 +67,8 @@ pub fn compile_workflow_components(input: CompilationInput) -> io::Result<Native
             runtara_agents::registry::get_agents(),
         ))
     });
+
+    report(&progress_callback, "generating", "Generating workflow code");
 
     // 1. Codegen — produce the four artifacts.
     let artifacts = run_codegen(
@@ -95,8 +107,20 @@ pub fn compile_workflow_components(input: CompilationInput) -> io::Result<Native
     // 3. Stage the agent-cas (copies missing .wasm files from the bundle dir).
     let cas_dir = stage_agent_cas(&artifacts.agents_required)?;
 
+    report(
+        &progress_callback,
+        "building",
+        "Compiling workflow components",
+    );
+
     // 4. Build the workflow-logic component.
-    let workflow_logic_wasm = run_cargo_component_build(&build_dir)?;
+    let workflow_logic_wasm = run_cargo_component_build(&build_dir, &progress_callback)?;
+
+    report(
+        &progress_callback,
+        "composing",
+        "Linking workflow components",
+    );
 
     // 5. Compose with the agent CAS.
     let composed_wasm = run_wac_compose(
@@ -125,16 +149,38 @@ pub fn compile_workflow_components(input: CompilationInput) -> io::Result<Native
     let graph_json = serde_json::to_value(&execution_graph).unwrap_or(serde_json::Value::Null);
     let has_side_effects = crate::compile::workflow_has_side_effects(&graph_json);
 
+    // Crate source size = the per-workflow files we materialized in step 2.
+    // Sums Cargo.toml, src/lib.rs, wit/world.wit, workflow.wac. Excludes
+    // `wit/deps/` (staged copies of shared WIT, identical across workflows)
+    // and `target/` (build artifacts).
+    let package_size = package_source_size(&build_dir);
+
     Ok(NativeCompilationResult {
         binary_size: bytes.len(),
         binary_path: composed_wasm,
         binary_checksum: checksum,
         build_dir,
+        package_size,
         has_side_effects,
         child_dependencies,
         default_variables: serde_json::to_value(&execution_graph.variables)
             .unwrap_or(serde_json::Value::Null),
     })
+}
+
+/// Sum the byte size of the workflow-specific source files. Failures on
+/// individual files are silent (count as 0) — this is a UX metric, not a
+/// load-bearing number, so a missing file shouldn't fail the compile.
+fn package_source_size(build_dir: &Path) -> usize {
+    const PACKAGE_FILES: &[&str] = &["Cargo.toml", "src/lib.rs", "wit/world.wit", "workflow.wac"];
+    PACKAGE_FILES
+        .iter()
+        .map(|rel| {
+            fs::metadata(build_dir.join(rel))
+                .map(|m| m.len() as usize)
+                .unwrap_or(0)
+        })
+        .sum()
 }
 
 // ---------------------------------------------------------------------------
@@ -395,9 +441,18 @@ fn stage_agent_cas(required: &[AgentRequirement]) -> io::Result<PathBuf> {
 // `cargo component build` + `wac compose`
 // ---------------------------------------------------------------------------
 
-fn run_cargo_component_build(build_dir: &Path) -> io::Result<PathBuf> {
-    let status = Command::new("cargo")
-        .current_dir(build_dir)
+fn run_cargo_component_build(
+    build_dir: &Path,
+    progress: &Option<ProgressCallback>,
+) -> io::Result<PathBuf> {
+    // When a progress callback is wired up, stream cargo's JSON message
+    // format so we can surface per-crate "Compiling foo" events to the user.
+    // No callback? Inherit stdio and let the user see the usual cargo
+    // output, matching prior behavior for CLI / test callers.
+    let want_progress = progress.is_some();
+
+    let mut cmd = Command::new("cargo");
+    cmd.current_dir(build_dir)
         .arg("component")
         .arg("build")
         .arg("--release")
@@ -411,13 +466,57 @@ fn run_cargo_component_build(build_dir: &Path) -> io::Result<PathBuf> {
             std::env::var_os("RUNTARA_COMPONENTS_TARGET_DIR")
                 .map(PathBuf::from)
                 .unwrap_or_else(|| build_dir.join("target")),
-        )
-        .status()
-        .map_err(|e| {
+        );
+
+    let status = if want_progress {
+        // Resolve the total package count up front so the progress message
+        // can be a fraction. `cargo metadata` over the in-tree manifest is
+        // cheap (~100 ms warm) and gives us every transitive dep — close
+        // enough for a ticking denominator. If it fails we fall back to a
+        // bare running count rather than blocking the build.
+        let total_packages = count_workflow_packages(build_dir);
+
+        cmd.arg("--message-format=json-render-diagnostics")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit());
+        let mut child = cmd.spawn().map_err(|e| {
             io::Error::other(format!(
                 "cargo component build failed to launch (is cargo-component installed?): {e}"
             ))
         })?;
+
+        if let Some(stdout) = child.stdout.take() {
+            let reader = BufReader::new(stdout);
+            let mut compiled: usize = 0;
+            for line in reader.lines() {
+                let Ok(line) = line else { continue };
+                // Only `compiler-artifact` events carry a crate name; other
+                // messages (warnings, build-finished, …) we let pass. We
+                // don't surface the crate name itself — too noisy — just a
+                // ticking count of dependencies that have finished building.
+                if parse_cargo_artifact_name(&line).is_some() {
+                    compiled += 1;
+                    let msg = match total_packages {
+                        Some(total) if total > 0 => {
+                            format!("Building dependencies ({}/{})", compiled.min(total), total)
+                        }
+                        _ => format!("Building dependencies ({})", compiled),
+                    };
+                    report(progress, "building", &msg);
+                }
+            }
+        }
+
+        child
+            .wait()
+            .map_err(|e| io::Error::other(format!("cargo component build wait failed: {e}")))?
+    } else {
+        cmd.status().map_err(|e| {
+            io::Error::other(format!(
+                "cargo component build failed to launch (is cargo-component installed?): {e}"
+            ))
+        })?
+    };
     if !status.success() {
         return Err(io::Error::other(format!(
             "cargo component build returned non-zero status {} (build dir: {})",
@@ -485,4 +584,72 @@ fn run_wac_compose(
         )));
     }
     Ok(out)
+}
+
+// ---------------------------------------------------------------------------
+// Cargo JSON message parsing
+// ---------------------------------------------------------------------------
+
+/// Pull the crate name out of a `cargo --message-format=json` line if it's a
+/// `compiler-artifact` event. Anything else (diagnostics, build-script-executed,
+/// build-finished, …) returns `None`. Done manually to avoid pulling in
+/// `cargo_metadata` for one field.
+fn parse_cargo_artifact_name(line: &str) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(line).ok()?;
+    if v.get("reason")?.as_str()? != "compiler-artifact" {
+        return None;
+    }
+    let name = v.get("target")?.get("name")?.as_str()?;
+    Some(name.to_string())
+}
+
+/// Count packages (incl. transitive deps) cargo will resolve for the
+/// generated workflow-logic crate. Used purely as a denominator for the
+/// "Building dependencies (3/N)" progress message — best-effort, returns
+/// `None` and we degrade to a bare count if anything goes wrong. Subtracts
+/// 1 to exclude `workflow-logic` itself.
+fn count_workflow_packages(build_dir: &Path) -> Option<usize> {
+    // `--no-deps` is a flag (no `=false` form); omitting it means cargo
+    // emits every transitive package, which is what we want for the
+    // denominator. Run with the same CARGO_TARGET_DIR as the build so
+    // metadata uses the populated lockfile rather than regenerating one.
+    let target_dir = std::env::var_os("RUNTARA_COMPONENTS_TARGET_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| build_dir.join("target"));
+    let output = Command::new("cargo")
+        .current_dir(build_dir)
+        .arg("metadata")
+        .arg("--format-version=1")
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).ok()?;
+    let total = json.get("packages")?.as_array()?.len();
+    Some(total.saturating_sub(1))
+}
+
+#[cfg(test)]
+mod cargo_parse_tests {
+    use super::parse_cargo_artifact_name;
+
+    #[test]
+    fn extracts_crate_name_from_compiler_artifact() {
+        let line = r#"{"reason":"compiler-artifact","package_id":"foo 0.1.0","manifest_path":"/x/Cargo.toml","target":{"kind":["lib"],"crate_types":["lib"],"name":"foo","src_path":"/x/src/lib.rs","edition":"2024","doc":true,"doctest":true,"test":true},"profile":{"opt_level":"3","debuginfo":0,"debug_assertions":false,"overflow_checks":false,"test":false},"features":[],"filenames":[],"executable":null,"fresh":false}"#;
+        assert_eq!(parse_cargo_artifact_name(line), Some("foo".to_string()));
+    }
+
+    #[test]
+    fn ignores_non_artifact_messages() {
+        let line = r#"{"reason":"build-finished","success":true}"#;
+        assert!(parse_cargo_artifact_name(line).is_none());
+    }
+
+    #[test]
+    fn handles_malformed_json() {
+        assert!(parse_cargo_artifact_name("not json").is_none());
+    }
 }

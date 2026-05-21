@@ -677,6 +677,31 @@ pub struct WorkflowVersionInfoDto {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(rename = "compiledAt")]
     pub compiled_at: Option<String>,
+    /// Size of the composed `workflow.wasm` binary in bytes. Populated on
+    /// successful compile; null if the version isn't compiled.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "wasmSize")]
+    pub wasm_size: Option<i32>,
+    /// Size of the generated workflow-logic crate source files in bytes
+    /// (Cargo.toml + src/lib.rs + wit/world.wit + workflow.wac). Useful for
+    /// gauging how large the codegen output is for a workflow. Null when
+    /// the version pre-dates the column being added.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "packageSize")]
+    pub package_size: Option<i32>,
+    /// Raw compilation status from `workflow_compilations.compilation_status`.
+    /// `"success"`, `"failed"`, or `"pending"`. Null when the worker has
+    /// never written a row for this version (brand-new save). Lets the UI
+    /// distinguish "build failed, retry available" from "compile worker
+    /// hasn't picked it up yet".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "compilationStatus")]
+    pub compilation_status: Option<String>,
+    /// Error message recorded by the worker when compilation failed. Only
+    /// populated when `compilationStatus == "failed"`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "errorMessage")]
+    pub error_message: Option<String>,
 }
 
 // ============================================================================

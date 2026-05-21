@@ -29,6 +29,12 @@ interface ValidationPanelProps {
   onVersionChange?: (version: number | undefined) => void;
   /** Callback when user activates a version */
   onVersionActivate?: (version: number) => void;
+  /** Callback when user requests a force-rebuild of an already-compiled
+   *  version. The page kicks off `/compile?forceRecompile=true` and lets
+   *  the toolbar progress indicator drive feedback. */
+  onVersionRebuild?: (version: number) => void;
+  /** Version currently mid-rebuild — drives the spinner on its row. */
+  rebuildingVersion?: number;
   /** Whether version operations are loading */
   isVersionLoading?: boolean;
 }
@@ -52,6 +58,8 @@ export function ValidationPanel({
   currentVersionNumber,
   onVersionChange,
   onVersionActivate,
+  onVersionRebuild,
+  rebuildingVersion,
   isVersionLoading = false,
 }: ValidationPanelProps) {
   const isPanelExpanded = useValidationStore((s) => s.isPanelExpanded);
@@ -87,6 +95,8 @@ export function ValidationPanel({
               currentVersionNumber={currentVersionNumber}
               onVersionChange={onVersionChange ?? (() => {})}
               onVersionActivate={onVersionActivate ?? (() => {})}
+              onVersionRebuild={onVersionRebuild}
+              rebuildingVersion={rebuildingVersion}
               isLoading={isVersionLoading}
             />
           )}

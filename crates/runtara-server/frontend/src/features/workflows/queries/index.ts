@@ -2,6 +2,7 @@ import {
   AgentInfo,
   ApiResponseWorkflowDto,
   CapabilityInfo,
+  CompilationProgressResponse,
   FoldersResponse,
   ListStepTypesResponse,
   MoveWorkflowRequest,
@@ -283,6 +284,46 @@ export async function removeWorkflow(token: string, workflowId: string) {
     workflowId,
     createAuthHeaders(token)
   );
+}
+
+export async function getCompilationProgress(
+  token: string,
+  workflowId: string,
+  version: number
+): Promise<CompilationProgressResponse> {
+  const result = await RuntimeREST.api.compilationProgressHandler(
+    workflowId,
+    version,
+    createAuthHeaders(token)
+  );
+  return result.data;
+}
+
+/**
+ * Force-recompile a specific workflow version. The backend handler clears the
+ * `workflow_compilations` row (drops checksum + image_id) and enqueues with
+ * `force_recompile=true`, which also skips the runtime-side image cache —
+ * both layers miss, so we get a real rebuild even when source is unchanged.
+ *
+ * Fire-and-forget: the backend handler blocks the HTTP response until the
+ * compile finishes (~30 s), but the frontend doesn't await it. The toolbar
+ * progress poll keyed on `watchedCompilationVersion` reflects status live.
+ */
+export async function rebuildWorkflowVersion(
+  token: string,
+  workflowId: string,
+  version: number
+): Promise<void> {
+  const base = getRuntimeBaseUrl();
+  const url = `${base}/workflows/${encodeURIComponent(
+    workflowId
+  )}/versions/${version}/compile?forceRecompile=true`;
+  // Intentionally not awaiting on the UI thread — the backend blocks its
+  // HTTP response until the compile finishes (~30 s), but the toolbar
+  // polling endpoint already drives status, including the failure case.
+  const headers: Record<string, string> = {};
+  if (token) headers.Authorization = `Bearer ${token}`;
+  void fetch(url, { method: 'POST', headers });
 }
 
 export async function scheduleWorkflow(

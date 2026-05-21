@@ -49,6 +49,7 @@ use runtime_client::RuntimeClient;
         api::handlers::workflows::get_workflow_handler,
         api::handlers::workflows::list_workflow_versions_handler,
         api::handlers::workflows::compile_workflow_handler,
+        api::handlers::workflows::compilation_progress_handler,
         api::handlers::workflows::execute_workflow_handler,
         api::handlers::workflows_sync::capture_http_event_sync,
         api::handlers::workflows::get_execution_metrics_handler,
@@ -175,6 +176,7 @@ use runtime_client::RuntimeClient;
             api::dto::workflows::WorkflowVersionInfoDto,
             api::dto::workflows::WorkflowInstanceDto,
             api::dto::workflows::CompileWorkflowResponse,
+            api::handlers::workflows::CompilationProgressResponse,
             api::dto::workflows::ExecuteWorkflowRequest,
             api::dto::workflows::UpdateTrackEventsRequest,
             api::dto::workflows::ExecuteWorkflowResponse,
@@ -1258,6 +1260,10 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         .route(
             "/api/runtime/workflows/{id}/versions/{version}/compile",
             post(api::handlers::workflows::compile_workflow_handler),
+        )
+        .route(
+            "/api/runtime/workflows/{id}/versions/{version}/compilation-progress",
+            get(api::handlers::workflows::compilation_progress_handler),
         )
         .route(
             "/api/runtime/workflows/{id}/execute",

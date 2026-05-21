@@ -147,6 +147,7 @@ fn components_e2e_compiles_trivial_workflow() {
         child_workflows: vec![],
         connection_service_url: None,
         agent_catalog: None,
+        progress_callback: None,
     };
 
     // The original Phase-3 blocker — cargo-component 0.21.1 rejecting

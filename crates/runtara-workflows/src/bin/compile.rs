@@ -495,6 +495,7 @@ fn main() -> ExitCode {
         child_workflows: vec![],
         connection_service_url: None,
         agent_catalog: None,
+        progress_callback: None,
     };
 
     if args.verbose {
