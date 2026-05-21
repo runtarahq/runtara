@@ -3,7 +3,7 @@
 #
 # The bundle contains:
 #   - runtara-server binary
-#   - A pruned copy of the Rust toolchain (rustc + host std + wasm32-wasip2 std)
+#   - A pruned copy of the Rust toolchain (rustc + host std + wasm32-wasip1 + wasm32-wasip2 stds)
 #   - Wasmtime CLI binary
 #   - wac CLI binary (WebAssembly Composition — workflow compile step)
 #   - cargo-component binary (cargo subcommand — workflow compile step)
@@ -22,7 +22,7 @@
 #
 # Prerequisites:
 #   - rustup with the version from rust-toolchain.toml installed
-#   - wasm32-wasip2 target installed (rust-toolchain.toml handles this)
+#   - wasm32-wasip1 + wasm32-wasip2 targets installed (rust-toolchain.toml handles this)
 #   - curl (for downloading wasmtime if not cached)
 
 set -euo pipefail
@@ -422,7 +422,17 @@ assemble_bundle() {
           "$bundle/toolchain/lib/"*tsan* \
           "$bundle/toolchain/lib/"*lsan* 2>/dev/null || true
 
-    # lib/rustlib: wasm32-wasip2 target (needed for workflow compilation)
+    # lib/rustlib: wasm targets needed for workflow compilation.
+    # cargo-component v0.21.1's `--target wasm32-wasip2` is a misnomer: it
+    # invokes rustc with --target wasm32-wasip1 to compile the workflow + all
+    # transitive deps as core wasm, then post-processes the resulting .wasm
+    # into a wasip2 Component via wit-bindgen + the component encoder. Both
+    # sysroots are needed at compile time — wasip1 for rustc, wasip2 for
+    # `cargo build -p runtara-workflow-stdlib --target wasm32-wasip2` (the
+    # build_stdlib step). On a clean install with no system Rust, missing
+    # either sysroot fails the compile with "can't find crate `core` for
+    # `wasm32-wasip<N>`".
+    cp -R "$sysroot/lib/rustlib/wasm32-wasip1" "$bundle/toolchain/lib/rustlib/"
     cp -R "$sysroot/lib/rustlib/wasm32-wasip2" "$bundle/toolchain/lib/rustlib/"
 
     # ── Compile-source tree ──
