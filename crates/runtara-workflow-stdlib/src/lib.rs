@@ -51,6 +51,12 @@ pub use serde_json;
 // Re-export runtara-sdk for direct use
 pub use runtara_sdk;
 
+// Re-export runtara-ai as `ai` for AI Agent step codegen.
+// Generated workflow code references `runtara_workflow_stdlib::ai::completion`,
+// `::message`, `::types`, `::provider`, and `OneOrMany`. Keep this until the
+// AI Agent codegen is migrated to dispatch through the `ai-tools` WIT agent.
+pub use runtara_ai as ai;
+
 // Re-export tracing for structured logging in generated workflows
 pub use tracing;
 pub use tracing_subscriber;

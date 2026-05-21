@@ -42,6 +42,13 @@ telemetry = [
 # `runtara-agents` crate into the workflow.
 runtara-sdk = { path = "../runtara-sdk", version = "7.0", default-features = false, features = ["http"] }
 
+# AI/LLM helpers consumed directly by codegen for AI Agent steps
+# (CompletionModel, ToolDefinition, Message, provider dispatch). Re-exported
+# below as `ai` so generated code can write `runtara_workflow_stdlib::ai::*`.
+# TODO: migrate AI Agent codegen to dispatch through the `ai-tools` WIT agent
+# and drop this dep again (would shrink workflow.wasm).
+runtara-ai = { path = "../runtara-ai", version = "7.0" }
+
 # Re-exported for workflows
 serde = { workspace = true }
 serde_json = { workspace = true }

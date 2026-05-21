@@ -4881,6 +4881,7 @@ dependencies = [
  "opentelemetry-appender-tracing 0.28.1",
  "opentelemetry-otlp 0.28.0",
  "opentelemetry_sdk 0.28.0",
+ "runtara-ai",
  "runtara-http",
  "runtara-sdk",
  "serde",
