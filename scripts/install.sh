@@ -471,6 +471,12 @@ RUNTARA_WASM_LIBRARY_DIR=${RUNTARA_DIR}/stdlib
 # runtime AgentCatalog at boot, so the validator and workflow runtime see
 # the same agent set the dispatcher can route to.
 RUNTARA_AGENT_COMPONENTS_DIR=${RUNTARA_DIR}/agents
+# Source mirror for the workflow compile pipeline. cargo-component reads
+# the bundled stdlib/sdk/agent-wit crates from here when materializing the
+# per-workflow logic component. Without this the binary's
+# compile-time-baked CARGO_MANIFEST_DIR (the CI runner's path) is used,
+# which doesn't exist on the install host.
+RUNTARA_COMPILE_SOURCE_DIR=${RUNTARA_DIR}/compile-src
 DATA_DIR=${DATA_DIR}
 RUST_LOG=runtara_server=info,runtara_core=info,runtara_environment=info
 CONFEOF

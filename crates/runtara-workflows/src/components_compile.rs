@@ -264,11 +264,21 @@ fn agent_cas_dir() -> PathBuf {
     data_dir().join("agent-cas")
 }
 
-/// Compile-time workspace root, captured at build of `runtara-workflows`.
-/// Used to resolve absolute paths to the in-tree stdlib / sdk / agent-wit
-/// when materializing the workflow-logic Cargo.toml.
+/// Workspace root used to resolve absolute paths to the stdlib / sdk /
+/// agent-wit sources cargo-component needs when building workflow-logic.
+///
+/// Two layers, in order:
+///   1. `$RUNTARA_COMPILE_SOURCE_DIR` — set by `scripts/install.sh` to the
+///      bundle's `compile-src/` mirror. Required on hosts that received only
+///      the released tarball, since the tarball ships no source tree of its
+///      own and `env!("CARGO_MANIFEST_DIR")` would point at the CI runner's
+///      path (`/home/runner/...`) that doesn't exist on the install host.
+///   2. `env!("CARGO_MANIFEST_DIR")` — compile-time fallback for `cargo run`
+///      against an in-tree checkout. Two levels up from this crate.
 fn workspace_root() -> PathBuf {
-    // Two levels up from this crate (`crates/runtara-workflows`).
+    if let Ok(dir) = std::env::var("RUNTARA_COMPILE_SOURCE_DIR") {
+        return PathBuf::from(dir);
+    }
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(Path::parent)
@@ -283,6 +293,22 @@ fn workspace_root() -> PathBuf {
 fn stage_wit_deps(deps_dir: &Path) -> io::Result<()> {
     fs::create_dir_all(deps_dir)?;
     let src_root = workspace_root().join("crates/runtara-agent-wit/wit");
+
+    // Hard-fail with a setup-actionable message if the compile-source tree
+    // isn't where we expect it. Without this, a misconfigured deployment
+    // surfaces as `Compilation failed: No such file or directory (os error 2)`
+    // ~50 ms in, with no clue about which file is missing.
+    if !src_root.is_dir() {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!(
+                "agent-wit source tree missing at {} — set RUNTARA_COMPILE_SOURCE_DIR \
+                 to point at the bundle's `compile-src/` directory (e.g. \
+                 /opt/runtara-<ver>/compile-src), or run from an in-tree checkout",
+                src_root.display()
+            ),
+        ));
+    }
 
     // Copy the runtara-agent.wit file itself into deps/runtara-agent/.
     let runtara_dst = deps_dir.join("runtara-agent");
