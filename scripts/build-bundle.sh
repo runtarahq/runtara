@@ -452,9 +452,9 @@ assemble_bundle() {
     # Required by cargo-component at workflow-compile time. Workflows are
     # built by materializing a `workflow-logic` crate whose generated
     # Cargo.toml has absolute `path = "..."` deps into the runtara workspace
-    # (runtara-workflow-stdlib, runtara-sdk, runtara-sdk-macros, runtara-http
-    # + per-agent wit/ dirs). Without this tree the released tarball can only
-    # compile on the CI host that produced it. See
+    # (runtara-workflow-stdlib, runtara-sdk, runtara-sdk-macros, runtara-http,
+    # runtara-ai + per-agent wit/ dirs). Without this tree the released
+    # tarball can only compile on the CI host that produced it. See
     # crates/runtara-workflows/src/components_compile.rs::workspace_root() —
     # the server picks this up via $RUNTARA_COMPILE_SOURCE_DIR (set by
     # scripts/install.sh).
@@ -485,6 +485,7 @@ assemble_bundle() {
 resolver = "2"
 members = [
     "crates/runtara-http",
+    "crates/runtara-ai",
     "crates/runtara-sdk",
     "crates/runtara-sdk-macros",
     "crates/runtara-workflow-stdlib",
@@ -507,7 +508,7 @@ COMPILESRCEOF
     # Source-bearing crates: copy Cargo.toml + src/. Skip tests/, benches/,
     # README — they don't affect the build and just add weight.
     local crate
-    for crate in runtara-workflow-stdlib runtara-sdk runtara-sdk-macros runtara-http; do
+    for crate in runtara-workflow-stdlib runtara-sdk runtara-sdk-macros runtara-http runtara-ai; do
         local dst="$cs/crates/$crate"
         mkdir -p "$dst"
         cp "${ROOT_DIR}/crates/$crate/Cargo.toml" "$dst/"
@@ -538,7 +539,7 @@ COMPILESRCEOF
         echo "Error: no per-agent wit/agent.wit files found under ${ROOT_DIR}/crates/agents/ — run a host build first so each agent's build.rs emits its wit/agent.wit" >&2
         exit 1
     fi
-    info "  Compile-src: 4 crates + ${agent_wit_count} per-agent WIT"
+    info "  Compile-src: 5 crates + ${agent_wit_count} per-agent WIT"
 
     # ── Licenses ──
     info "Copying licenses"
