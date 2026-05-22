@@ -207,8 +207,16 @@ pub fn init_telemetry() -> Result<(), Box<dyn std::error::Error>> {
         .to_lowercase()
         == "true"
     {
+        // Same fallback as the OTEL path below — mute wasmtime/cranelift to
+        // prevent per-wasm-function compile spans from drowning the logs.
+        let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+            EnvFilter::new(
+                "info,sqlx=warn,wasmtime=warn,wasmtime_cranelift=warn,\
+                 cranelift_codegen=warn,cranelift_wasm=warn",
+            )
+        });
         tracing_subscriber::fmt()
-            .with_env_filter(EnvFilter::from_default_env())
+            .with_env_filter(env_filter)
             .with_target(true)
             .with_thread_ids(false)
             .with_file(false)
@@ -294,10 +302,21 @@ pub fn init_telemetry() -> Result<(), Box<dyn std::error::Error>> {
     // Setup OpenTelemetry tracing layer
     let otel_trace_layer = tracing_opentelemetry::layer().with_tracer(tracer);
 
-    // Production default: info level, with sqlx at warn to suppress query logs
-    // Debug logs can be enabled via RUST_LOG env var when needed
-    let env_filter =
-        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info,sqlx=warn"));
+    // Production default: info level, with sqlx at warn to suppress query logs.
+    // Debug logs can be enabled via RUST_LOG env var when needed.
+    //
+    // `wasmtime`/`cranelift` are explicitly muted because `FmtSpan::NEW` below
+    // logs span creation, and wasmtime emits one `compile`/`translate-to-clif`
+    // span per wasm function — a typical workflow has hundreds of these and
+    // they bomb the log volume on every workflow startup. We never use those
+    // spans for anything; our own spans (workflow.execute, step.*) carry the
+    // tenant_id/version context we care about.
+    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+        EnvFilter::new(
+            "info,sqlx=warn,wasmtime=warn,wasmtime_cranelift=warn,\
+             cranelift_codegen=warn,cranelift_wasm=warn",
+        )
+    });
 
     tracing_subscriber::registry()
         .with(env_filter)
