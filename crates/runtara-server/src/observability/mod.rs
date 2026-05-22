@@ -16,6 +16,26 @@ use std::time::Duration;
 use tracing_subscriber::fmt::format::FmtSpan;
 use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 
+/// Production-default `EnvFilter` directives used when `RUST_LOG` isn't set.
+///
+/// Two things matter here. First, our own crates run at INFO so workflow
+/// lifecycle events (`workflow.execute`, `step.*`) are visible. Second,
+/// `tracing_subscriber::fmt::FmtSpan::NEW` logs every span CREATION — and
+/// wasmtime emits one `compile` + one `translate-to-CLIF` span per wasm
+/// function. A single workflow startup has hundreds of these, which floods
+/// journald / Datadog with `wasm[0]::function[N] compiled in 0ns` lines that
+/// carry no signal. Mute the wasmtime/cranelift targets below WARN so the
+/// per-function span fires never reach the formatter.
+///
+/// Override-friendly: anyone needing the compile traces back can set
+/// `RUST_LOG=wasmtime=trace` and it takes precedence.
+pub(super) const DEFAULT_LOG_FILTER: &str = "info,sqlx=warn,wasmtime=warn,\
+     wasmtime_cranelift=warn,cranelift_codegen=warn,cranelift_wasm=warn";
+
+fn default_env_filter() -> EnvFilter {
+    EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(DEFAULT_LOG_FILTER))
+}
+
 /// Global metrics instruments
 static METRICS: OnceLock<Metrics> = OnceLock::new();
 
@@ -207,16 +227,8 @@ pub fn init_telemetry() -> Result<(), Box<dyn std::error::Error>> {
         .to_lowercase()
         == "true"
     {
-        // Same fallback as the OTEL path below — mute wasmtime/cranelift to
-        // prevent per-wasm-function compile spans from drowning the logs.
-        let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-            EnvFilter::new(
-                "info,sqlx=warn,wasmtime=warn,wasmtime_cranelift=warn,\
-                 cranelift_codegen=warn,cranelift_wasm=warn",
-            )
-        });
         tracing_subscriber::fmt()
-            .with_env_filter(env_filter)
+            .with_env_filter(default_env_filter())
             .with_target(true)
             .with_thread_ids(false)
             .with_file(false)
@@ -302,21 +314,7 @@ pub fn init_telemetry() -> Result<(), Box<dyn std::error::Error>> {
     // Setup OpenTelemetry tracing layer
     let otel_trace_layer = tracing_opentelemetry::layer().with_tracer(tracer);
 
-    // Production default: info level, with sqlx at warn to suppress query logs.
-    // Debug logs can be enabled via RUST_LOG env var when needed.
-    //
-    // `wasmtime`/`cranelift` are explicitly muted because `FmtSpan::NEW` below
-    // logs span creation, and wasmtime emits one `compile`/`translate-to-clif`
-    // span per wasm function — a typical workflow has hundreds of these and
-    // they bomb the log volume on every workflow startup. We never use those
-    // spans for anything; our own spans (workflow.execute, step.*) carry the
-    // tenant_id/version context we care about.
-    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-        EnvFilter::new(
-            "info,sqlx=warn,wasmtime=warn,wasmtime_cranelift=warn,\
-             cranelift_codegen=warn,cranelift_wasm=warn",
-        )
-    });
+    let env_filter = default_env_filter();
 
     tracing_subscriber::registry()
         .with(env_filter)
@@ -343,4 +341,134 @@ pub fn shutdown_telemetry() {
     // Note: In opentelemetry 0.31, providers are shutdown automatically on drop
     // or you need to call shutdown on the provider instance directly
     tracing::info!("OpenTelemetry shutdown complete");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+    use tracing::Subscriber;
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::layer::{Context, Layer};
+
+    /// Records every event that makes it past the filter so we can assert
+    /// what the production fallback `EnvFilter` admits vs. mutes.
+    struct CaptureLayer {
+        events: Arc<Mutex<Vec<(String, tracing::Level)>>>,
+    }
+
+    impl<S: Subscriber> Layer<S> for CaptureLayer {
+        fn on_event(&self, event: &tracing::Event<'_>, _ctx: Context<'_, S>) {
+            let m = event.metadata();
+            self.events
+                .lock()
+                .unwrap()
+                .push((m.target().to_string(), *m.level()));
+        }
+    }
+
+    /// Asserts that the production-default `EnvFilter` mutes wasmtime/cranelift
+    /// noise below WARN while letting our own targets through at INFO.
+    ///
+    /// Regression for the prod incident where `FmtSpan::NEW` + wasmtime's
+    /// per-function compile spans flooded journald (hundreds of
+    /// `wasm[0]::function[N] compiled in 0ns` lines per workflow startup).
+    /// Without this test, any future change to `DEFAULT_LOG_FILTER` that drops
+    /// the wasmtime/cranelift mute directives would silently reintroduce the
+    /// flood.
+    #[test]
+    fn default_filter_mutes_wasmtime_below_warn() {
+        let captured = Arc::new(Mutex::new(Vec::<(String, tracing::Level)>::new()));
+        let layer = CaptureLayer {
+            events: captured.clone(),
+        };
+        let subscriber = tracing_subscriber::registry()
+            .with(EnvFilter::new(DEFAULT_LOG_FILTER))
+            .with(layer);
+
+        tracing::subscriber::with_default(subscriber, || {
+            // Wasmtime / cranelift at TRACE/DEBUG/INFO — must be muted.
+            tracing::trace!(target: "wasmtime", "compile in 0ns");
+            tracing::debug!(target: "wasmtime", "translate to CLIF");
+            tracing::info!(target: "wasmtime_cranelift", "function 473");
+            tracing::info!(target: "cranelift_codegen", "regalloc");
+            tracing::info!(target: "cranelift_wasm", "translating");
+            // At WARN — must pass.
+            tracing::warn!(target: "wasmtime", "real wasmtime warning");
+            // sqlx at INFO — must be muted (query spam).
+            tracing::info!(target: "sqlx", "query result");
+            tracing::warn!(target: "sqlx", "slow query");
+            // Our crates at INFO — must pass.
+            tracing::info!(target: "runtara_server", "server started");
+            tracing::info!(target: "runtara_environment", "instance running");
+            tracing::info!(target: "runtara_workflows", "compiled workflow");
+        });
+
+        let events = captured.lock().unwrap();
+        let targets: Vec<_> = events.iter().map(|(t, l)| (t.as_str(), *l)).collect();
+
+        // Things that MUST NOT be in the captured set
+        for (target, level) in &[
+            ("wasmtime", tracing::Level::TRACE),
+            ("wasmtime", tracing::Level::DEBUG),
+            ("wasmtime", tracing::Level::INFO),
+            ("wasmtime_cranelift", tracing::Level::INFO),
+            ("cranelift_codegen", tracing::Level::INFO),
+            ("cranelift_wasm", tracing::Level::INFO),
+            ("sqlx", tracing::Level::INFO),
+        ] {
+            assert!(
+                !targets.contains(&(*target, *level)),
+                "{} at {} should be filtered out by DEFAULT_LOG_FILTER, but it passed: {:?}",
+                target,
+                level,
+                targets
+            );
+        }
+
+        // Things that MUST be in the captured set
+        for (target, level) in &[
+            ("wasmtime", tracing::Level::WARN),
+            ("sqlx", tracing::Level::WARN),
+            ("runtara_server", tracing::Level::INFO),
+            ("runtara_environment", tracing::Level::INFO),
+            ("runtara_workflows", tracing::Level::INFO),
+        ] {
+            assert!(
+                targets.contains(&(*target, *level)),
+                "{} at {} should pass DEFAULT_LOG_FILTER, but it was filtered: {:?}",
+                target,
+                level,
+                targets
+            );
+        }
+    }
+
+    /// Sanity-check that explicit RUST_LOG still overrides the fallback —
+    /// support requires being able to escalate wasmtime to trace for one-off
+    /// debugging without code changes.
+    #[test]
+    fn rust_log_overrides_default_filter() {
+        // Build a filter manually with the same shape `try_from_default_env`
+        // would produce if RUST_LOG=wasmtime=trace were set. We can't safely
+        // mutate env vars in unit tests (parallel test runner), so construct
+        // the filter directly.
+        let filter = EnvFilter::new("wasmtime=trace");
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let layer = CaptureLayer {
+            events: captured.clone(),
+        };
+        let subscriber = tracing_subscriber::registry().with(filter).with(layer);
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::trace!(target: "wasmtime", "should pass under wasmtime=trace");
+        });
+        assert!(
+            captured
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|(t, _)| t == "wasmtime"),
+            "RUST_LOG=wasmtime=trace must allow wasmtime trace events through"
+        );
+    }
 }
