@@ -252,19 +252,9 @@ fn generate_no_retry_wrapper(
                         drop(__sdk_guard);
                         match ::serde_json::from_slice::<#ok_type>(&cached_bytes) {
                             Ok(cached_value) => {
-                                ::tracing::debug!(
-                                    function = #fn_name_str,
-                                    cache_key = %__cache_key,
-                                    "Returning cached result from checkpoint"
-                                );
                                 return Ok(cached_value);
                             }
                             Err(e) => {
-                                ::tracing::warn!(
-                                    function = #fn_name_str,
-                                    error = %e,
-                                    "Failed to deserialize cached result, re-executing"
-                                );
                             }
                         }
                     }
@@ -273,11 +263,6 @@ fn generate_no_retry_wrapper(
                     }
                     Err(e) => {
                         // Checkpoint lookup error - log and continue with execution
-                        ::tracing::warn!(
-                            function = #fn_name_str,
-                            error = %e,
-                            "Checkpoint lookup failed, executing function"
-                        );
                     }
                 }
             }
@@ -295,11 +280,6 @@ fn generate_no_retry_wrapper(
                         // Use checkpoint to save - it won't overwrite if already exists
                         match __sdk_guard.checkpoint(&__cache_key, &result_bytes) {
                             Ok(checkpoint_result) => {
-                                ::tracing::debug!(
-                                    function = #fn_name_str,
-                                    cache_key = %__cache_key,
-                                    "Result cached via checkpoint"
-                                );
 
                                 // Release SDK mutex BEFORE calling acknowledge_cancellation()
                                 // to prevent deadlock (it needs to acquire the same mutex)
@@ -307,50 +287,26 @@ fn generate_no_retry_wrapper(
 
                                 // Check for pending pause/cancel/shutdown signals
                                 if checkpoint_result.should_cancel() {
-                                    ::tracing::info!(
-                                        function = #fn_name_str,
-                                        "Cancel signal detected - exiting"
-                                    );
                                     // Acknowledge cancellation to core (sets status to "cancelled")
                                     // and trigger local cancellation flag
                                     ::runtara_sdk::acknowledge_cancellation();
                                     // Return error immediately to stop execution
                                     return Err("Instance cancelled".to_string().into());
                                 } else if checkpoint_result.should_suspend_on_shutdown() {
-                                    ::tracing::info!(
-                                        function = #fn_name_str,
-                                        "Shutdown signal detected - suspending at checkpoint"
-                                    );
                                     // Ack to core (status -> suspended, termination_reason="shutdown_requested")
                                     // and flip local cancellation flag so remaining cooperative work exits
                                     ::runtara_sdk::acknowledge_shutdown();
                                     return Err("Instance suspended for shutdown".to_string().into());
                                 } else if checkpoint_result.should_pause() {
-                                    ::tracing::info!(
-                                        function = #fn_name_str,
-                                        "Pause signal detected - exiting"
-                                    );
                                     // Return error to trigger exit; caller should call sdk.suspended()
                                     return Err("Instance paused".to_string().into());
                                 }
                             }
                             Err(e) => {
-                                ::tracing::warn!(
-                                    function = #fn_name_str,
-                                    cache_key = %__cache_key,
-                                    error = %e,
-                                    "Failed to cache result via checkpoint"
-                                );
                             }
                         }
                     }
                     Err(e) => {
-                        ::tracing::warn!(
-                            function = #fn_name_str,
-                            cache_key = %__cache_key,
-                            error = %e,
-                            "Failed to serialize result for caching"
-                        );
                     }
                 }
             }
@@ -445,16 +401,6 @@ fn generate_retry_wrapper(
                             )
                         };
 
-                        ::tracing::info!(
-                            function = #fn_name_str,
-                            attempt = __attempt,
-                            max_retries = __max_retries,
-                            delay_ms = __delay.as_millis() as u64,
-                            retry_after_override = ?__retry_after_override,
-                            rate_limit_wait_total_ms = __rate_limit_wait_total_ms,
-                            last_error = ?__last_error,
-                            "Retrying after backoff (non-durable)"
-                        );
 
                         ::std::thread::sleep(__delay);
                     }
@@ -484,14 +430,6 @@ fn generate_retry_wrapper(
                                 .unwrap_or(true);
 
                             if __is_permanent || (__is_rate_limited && !__auto_retry_429) {
-                                ::tracing::warn!(
-                                    function = #fn_name_str,
-                                    attempt = __attempt,
-                                    error = %e,
-                                    is_rate_limited = __is_rate_limited,
-                                    auto_retry_429 = __auto_retry_429,
-                                    "Non-retryable error detected, skipping retries"
-                                );
                                 return __result;
                             }
 
@@ -504,45 +442,15 @@ fn generate_retry_wrapper(
                                 __rate_limit_wait_total_ms += __wait;
 
                                 if __rate_limit_wait_total_ms <= __max_retry_delay_ms {
-                                    ::tracing::info!(
-                                        function = #fn_name_str,
-                                        attempt = __attempt,
-                                        rate_limit_wait_total_ms = __rate_limit_wait_total_ms,
-                                        max_wait_ms = __max_retry_delay_ms,
-                                        error = %e,
-                                        "Rate limited, will thread::sleep and retry (non-durable)"
-                                    );
                                     continue;
                                 } else {
-                                    ::tracing::error!(
-                                        function = #fn_name_str,
-                                        attempt = __attempt,
-                                        rate_limit_wait_total_ms = __rate_limit_wait_total_ms,
-                                        max_wait_ms = __max_retry_delay_ms,
-                                        error = %e,
-                                        "Rate limit wait budget exhausted"
-                                    );
                                     return __result;
                                 }
                             }
 
                             if __attempt < __total_attempts {
-                                ::tracing::warn!(
-                                    function = #fn_name_str,
-                                    attempt = __attempt,
-                                    max_retries = __max_retries,
-                                    error = %e,
-                                    "Attempt failed, will retry (non-durable)"
-                                );
                                 continue;
                             } else {
-                                ::tracing::error!(
-                                    function = #fn_name_str,
-                                    attempt = __attempt,
-                                    max_retries = __max_retries,
-                                    error = %e,
-                                    "All retry attempts exhausted"
-                                );
                                 return __result;
                             }
                         }
@@ -570,19 +478,9 @@ fn generate_retry_wrapper(
                         drop(__sdk_guard);
                         match ::serde_json::from_slice::<#ok_type>(&cached_bytes) {
                             Ok(cached_value) => {
-                                ::tracing::debug!(
-                                    function = #fn_name_str,
-                                    cache_key = %__cache_key,
-                                    "Returning cached result from checkpoint"
-                                );
                                 return Ok(cached_value);
                             }
                             Err(e) => {
-                                ::tracing::warn!(
-                                    function = #fn_name_str,
-                                    error = %e,
-                                    "Failed to deserialize cached result, re-executing"
-                                );
                             }
                         }
                     }
@@ -591,11 +489,6 @@ fn generate_retry_wrapper(
                     }
                     Err(e) => {
                         // Checkpoint lookup error - log and continue with execution
-                        ::tracing::warn!(
-                            function = #fn_name_str,
-                            error = %e,
-                            "Checkpoint lookup failed, executing function"
-                        );
                     }
                 }
             }
@@ -647,17 +540,6 @@ fn generate_retry_wrapper(
                         )
                     };
 
-                    ::tracing::info!(
-                        function = #fn_name_str,
-                        cache_key = %__cache_key,
-                        attempt = __attempt,
-                        max_retries = __max_retries,
-                        delay_ms = __delay.as_millis() as u64,
-                        retry_after_override = ?__retry_after_override,
-                        rate_limit_wait_total_ms = __rate_limit_wait_total_ms,
-                        last_error = ?__last_error,
-                        "Retrying after backoff"
-                    );
 
                     // Use durable sleep for rate-limited retries (suspendable/resumable).
                     // For normal exponential backoff (short waits), use thread::sleep.
@@ -666,12 +548,6 @@ fn generate_retry_wrapper(
                         let __sdk = ::runtara_sdk::sdk();
                         let __sdk_guard = __sdk.lock().unwrap();
                         if let Err(e) = __sdk_guard.sleep(__delay, &__sleep_key, b"rate_limit_wait") {
-                            ::tracing::warn!(
-                                function = #fn_name_str,
-                                cache_key = %__cache_key,
-                                error = %e,
-                                "Durable sleep failed, falling back to thread::sleep"
-                            );
                             drop(__sdk_guard);
                             ::std::thread::sleep(__delay);
                         }
@@ -688,12 +564,6 @@ fn generate_retry_wrapper(
                             __attempt,
                             __last_error.as_deref(),
                         ) {
-                            ::tracing::warn!(
-                                function = #fn_name_str,
-                                cache_key = %__cache_key,
-                                error = %e,
-                                "Failed to record retry attempt"
-                            );
                         }
                     }
                 }
@@ -711,12 +581,6 @@ fn generate_retry_wrapper(
 
                                 match __sdk_guard.checkpoint(&__cache_key, &result_bytes) {
                                     Ok(checkpoint_result) => {
-                                        ::tracing::debug!(
-                                            function = #fn_name_str,
-                                            cache_key = %__cache_key,
-                                            attempt = __attempt,
-                                            "Result cached via checkpoint"
-                                        );
 
                                         // Release SDK mutex BEFORE calling acknowledge_cancellation()
                                         // to prevent deadlock (it needs to acquire the same mutex)
@@ -724,51 +588,25 @@ fn generate_retry_wrapper(
 
                                         // Check for pending pause/cancel/shutdown signals
                                         if checkpoint_result.should_cancel() {
-                                            ::tracing::info!(
-                                                function = #fn_name_str,
-                                                "Cancel signal detected - exiting"
-                                            );
                                             // Acknowledge cancellation to core (sets status to "cancelled")
                                             // and trigger local cancellation flag
                                             ::runtara_sdk::acknowledge_cancellation();
                                             // Return error immediately to stop execution
                                             return Err("Instance cancelled".to_string().into());
                                         } else if checkpoint_result.should_suspend_on_shutdown() {
-                                            ::tracing::info!(
-                                                function = #fn_name_str,
-                                                "Shutdown signal detected - suspending at checkpoint"
-                                            );
                                             // Ack to core (status -> suspended, termination_reason="shutdown_requested")
                                             ::runtara_sdk::acknowledge_shutdown();
                                             return Err("Instance suspended for shutdown".to_string().into());
                                         } else if checkpoint_result.should_pause() {
-                                            ::tracing::info!(
-                                                function = #fn_name_str,
-                                                "Pause signal detected - exiting"
-                                            );
                                             // Return error to trigger exit; caller should call sdk.suspended()
                                             return Err("Instance paused".to_string().into());
                                         }
                                     }
                                     Err(e) => {
-                                        ::tracing::warn!(
-                                            function = #fn_name_str,
-                                            cache_key = %__cache_key,
-                                            attempt = __attempt,
-                                            error = %e,
-                                            "Failed to cache result via checkpoint"
-                                        );
                                     }
                                 }
                             }
                             Err(e) => {
-                                ::tracing::warn!(
-                                    function = #fn_name_str,
-                                    cache_key = %__cache_key,
-                                    attempt = __attempt,
-                                    error = %e,
-                                    "Failed to serialize result for caching"
-                                );
                             }
                         }
                         return __result;
@@ -794,15 +632,6 @@ fn generate_retry_wrapper(
                             .unwrap_or(true);
 
                         if __is_permanent || (__is_rate_limited && !__auto_retry_429) {
-                            ::tracing::warn!(
-                                function = #fn_name_str,
-                                cache_key = %__cache_key,
-                                attempt = __attempt,
-                                error = %e,
-                                is_rate_limited = __is_rate_limited,
-                                auto_retry_429 = __auto_retry_429,
-                                "Non-retryable error detected, skipping retries"
-                            );
                             return __result;
                         }
 
@@ -818,49 +647,15 @@ fn generate_retry_wrapper(
                             __rate_limit_wait_total_ms += __wait;
 
                             if __rate_limit_wait_total_ms <= __max_retry_delay_ms {
-                                ::tracing::info!(
-                                    function = #fn_name_str,
-                                    cache_key = %__cache_key,
-                                    attempt = __attempt,
-                                    rate_limit_wait_total_ms = __rate_limit_wait_total_ms,
-                                    max_wait_ms = __max_retry_delay_ms,
-                                    error = %e,
-                                    "Rate limited, will durable-sleep and retry (not counting against retry budget)"
-                                );
                                 continue;
                             } else {
-                                ::tracing::error!(
-                                    function = #fn_name_str,
-                                    cache_key = %__cache_key,
-                                    attempt = __attempt,
-                                    rate_limit_wait_total_ms = __rate_limit_wait_total_ms,
-                                    max_wait_ms = __max_retry_delay_ms,
-                                    error = %e,
-                                    "Rate limit wait budget exhausted"
-                                );
                                 return __result;
                             }
                         }
 
                         if __attempt < __total_attempts {
-                            ::tracing::warn!(
-                                function = #fn_name_str,
-                                cache_key = %__cache_key,
-                                attempt = __attempt,
-                                max_retries = __max_retries,
-                                error = %e,
-                                "Attempt failed, will retry"
-                            );
                             continue;
                         } else {
-                            ::tracing::error!(
-                                function = #fn_name_str,
-                                cache_key = %__cache_key,
-                                attempt = __attempt,
-                                max_retries = __max_retries,
-                                error = %e,
-                                "All retry attempts exhausted"
-                            );
                             return __result;
                         }
                     }

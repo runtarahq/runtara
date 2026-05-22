@@ -8,9 +8,25 @@ description = "AI/LLM integration for runtara workflows — synchronous, ureq-ba
 keywords = ["durable", "workflow", "ai", "llm", "agents"]
 categories = ["development-tools"]
 
+[features]
+default = ["tracing"]
+
+# Structured logging via the tracing ecosystem. Off for wasm workflow
+# builds that re-export runtara-ai via runtara-workflow-stdlib — those
+# builds have no subscriber and shouldn't carry tracing in the .wasm.
+tracing = ["dep:tracing"]
+
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 thiserror = "2"
-tracing = "0.1"
-runtara-http = { workspace = true, features = ["native"] }
+tracing = { version = "0.1", optional = true }
+
+# Backend selected per target so wasm workflows (which re-export runtara-ai
+# via runtara-workflow-stdlib) don't drag ureq + rustls + ring + url + icu_*
+# into their .wasm. Same pattern as the per-agent crates.
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+runtara-http = { workspace = true, default-features = false, features = ["native"] }
+
+[target.'cfg(target_family = "wasm")'.dependencies]
+runtara-http = { workspace = true, default-features = false, features = ["wasi"] }
