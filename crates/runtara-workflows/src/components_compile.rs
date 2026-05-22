@@ -91,6 +91,24 @@ pub fn compile_workflow_components(input: CompilationInput) -> io::Result<Native
     fs::write(build_dir.join("wit/world.wit"), &artifacts.world_wit)?;
     fs::write(build_dir.join("workflow.wac"), &artifacts.wac_source)?;
 
+    // If the deployment shipped a prebuilt vendor + canonical lockfile, lay
+    // them into the build dir so cargo can resolve entirely from local sources.
+    // Required for air-gapped envs; harmless when the prebuilt dir isn't
+    // present (build just falls back to online crates.io).
+    if let Some(prebuilt) = workflow_prebuilt_dir() {
+        fs::copy(prebuilt.join("Cargo.lock"), build_dir.join("Cargo.lock"))?;
+        fs::create_dir_all(build_dir.join(".cargo"))?;
+        let vendor_abs = prebuilt.join("vendor");
+        fs::write(
+            build_dir.join(".cargo/config.toml"),
+            format!(
+                "[source.crates-io]\nreplace-with = \"vendored-sources\"\n\n\
+                 [source.vendored-sources]\ndirectory = \"{}\"\n",
+                vendor_abs.display()
+            ),
+        )?;
+    }
+
     // cargo-component's wit-parser resolves `runtara:agent` (and the wasi:*
     // package set the world `include`s) by reading `wit/deps/`. Mirror the
     // whole tree from the agent-wit crate so the worker's wit/ is
@@ -262,6 +280,48 @@ fn build_dir_for(tenant_id: &str, workflow_id: &str, version: u32) -> PathBuf {
 
 fn agent_cas_dir() -> PathBuf {
     data_dir().join("agent-cas")
+}
+
+/// Shared `CARGO_TARGET_DIR` used for every workflow build in this env.
+///
+/// Sits next to `workflow-builds-components/` on the same disk. Each
+/// workflow's source still lives in its own per-version dir (we need that to
+/// keep `lib.rs` / `wit/` / `Cargo.toml` isolated), but the build artifacts —
+/// the 36 `.rmeta` / `.rlib` files for the transitive deps, the proc-macro
+/// `.dylib`s, the build-script binaries — are all cached here.
+///
+/// Cargo handles concurrency via a file lock on the target dir. If two builds
+/// race, the second blocks briefly; with single-tenant envs this is rare.
+fn workflow_build_cache_dir() -> PathBuf {
+    data_dir().join("workflow-build-cache")
+}
+
+/// Optional prebuilt vendor + canonical Cargo.lock used for hermetic
+/// (air-gapped) workflow builds.
+///
+/// Layout:
+///   `<workspace_root>/workflow-build-prebuilt/`
+///     ├── `Cargo.lock`            — generated once against the canonical
+///     │                             workflow Cargo.toml, captures exact
+///     │                             versions of every transitive crates.io dep.
+///     └── `vendor/`               — output of `cargo vendor`, contains the
+///                                   full source of every crates.io dep.
+///
+/// Refreshed by `scripts/regenerate-workflow-vendor.sh` whenever the codegen
+/// template's deps or runtara-* deps change versions. The release pipeline
+/// is responsible for shipping this dir alongside `compile-src/`.
+///
+/// Returns `None` if either piece is missing — in which case the build falls
+/// back to online resolution against crates.io (current behavior). Returns
+/// `Some` only when both pieces are present and the build can run with
+/// `--frozen --offline`.
+fn workflow_prebuilt_dir() -> Option<PathBuf> {
+    let dir = workspace_root().join("workflow-build-prebuilt");
+    if dir.join("Cargo.lock").is_file() && dir.join("vendor").is_dir() {
+        Some(dir)
+    } else {
+        None
+    }
 }
 
 /// Workspace root used to resolve absolute paths to the stdlib / sdk /
@@ -500,15 +560,39 @@ fn run_cargo_component_build(
         .arg("build")
         .arg("--release")
         .arg("--target")
-        .arg("wasm32-wasip2")
-        // Per-tenant shared target dir if RUNTARA_COMPONENTS_TARGET_DIR is set
-        // (used by test fixtures to amortize the ~30s cold build across many
-        // workflows in one process). Otherwise default to per-workflow.
+        .arg("wasm32-wasip2");
+
+    // Hermetic build when a prebuilt vendor + canonical lockfile are
+    // present (compile_workflow_components has already laid them into the
+    // build dir). `--frozen` refuses any Cargo.lock mutation; `CARGO_NET_OFFLINE=true`
+    // refuses any network access — between them, builds either succeed
+    // entirely from local sources or fail loud rather than silently
+    // reaching for crates.io.
+    //
+    // We use the env var rather than the `--offline` flag because
+    // cargo-component spawns internal `cargo` invocations during bindings
+    // generation that don't inherit the flag — but they do inherit env vars,
+    // which keeps every step of the pipeline offline.
+    if workflow_prebuilt_dir().is_some() {
+        cmd.arg("--frozen").env("CARGO_NET_OFFLINE", "true");
+    }
+
+    cmd
+        // Shared CARGO_TARGET_DIR across every workflow in this env so deps
+        // are cached. Each env is single-tenant, so the cache scope and the
+        // tenant scope coincide — no cross-tenant leakage. Cargo's fingerprint
+        // already keys per (source, features, rustflags); only `workflow-logic`
+        // itself recompiles per build, transitive deps hit cache.
+        //
+        // Cold first build: ~25s. Warm subsequent builds: ~2-5s.
+        //
+        // `RUNTARA_COMPONENTS_TARGET_DIR` still overrides — test fixtures use
+        // it to point at a per-test-process scratch dir.
         .env(
             "CARGO_TARGET_DIR",
             std::env::var_os("RUNTARA_COMPONENTS_TARGET_DIR")
                 .map(PathBuf::from)
-                .unwrap_or_else(|| build_dir.join("target")),
+                .unwrap_or_else(workflow_build_cache_dir),
         );
 
     let status = if want_progress {
@@ -569,7 +653,7 @@ fn run_cargo_component_build(
     }
     let target_root = std::env::var_os("RUNTARA_COMPONENTS_TARGET_DIR")
         .map(PathBuf::from)
-        .unwrap_or_else(|| build_dir.join("target"));
+        .unwrap_or_else(workflow_build_cache_dir);
     // cargo-component was invoked with `--target wasm32-wasip2`, so the
     // finalized component lands at `wasm32-wasip2/release/`. cargo-component
     // also leaves an intermediate file at `wasm32-wasip1/release/` from the
@@ -665,11 +749,16 @@ fn count_workflow_packages(build_dir: &Path) -> Option<usize> {
     // metadata uses the populated lockfile rather than regenerating one.
     let target_dir = std::env::var_os("RUNTARA_COMPONENTS_TARGET_DIR")
         .map(PathBuf::from)
-        .unwrap_or_else(|| build_dir.join("target"));
+        .unwrap_or_else(workflow_build_cache_dir);
+    // Filter to the same target the build uses so the denominator counts
+    // crates that will actually compile. Without this, the lockfile's native
+    // cfg branch (ureq + rustls + ring + icu_* + …) inflates the total ~3x
+    // and the progress bar stalls partway through.
     let output = Command::new("cargo")
         .current_dir(build_dir)
         .arg("metadata")
         .arg("--format-version=1")
+        .arg("--filter-platform=wasm32-wasip2")
         .env("CARGO_TARGET_DIR", &target_dir)
         .stderr(Stdio::null())
         .output()

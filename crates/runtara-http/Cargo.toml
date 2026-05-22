@@ -8,16 +8,30 @@ description = "HTTP client abstraction for runtara — native (ureq) and WASI ba
 keywords = ["http", "wasi", "client"]
 categories = ["web-programming::http-client"]
 
+[features]
+# No default backend — every consumer must opt in to exactly one. This is
+# deliberate: a cfg-target-gated `ureq` dep would land in every transitive
+# consumer's Cargo.lock (rustls, ring, icu_*, …) even for builds that
+# never compile it. Feature-gating keeps wasm consumers' lockfiles clean.
+default = []
+
+# Native blocking HTTP via ureq (any non-wasm target).
+native = ["dep:ureq"]
+
+# WASI HTTP via wasi:http/outgoing-handler (wasm32-wasip1/wasip2).
+wasi = ["dep:wasi"]
+
+# Browser/Node JS placeholder backend — link-only, calls fail at runtime.
+wasm-js = []
+
 [dependencies]
 base64 = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = "2"
 
-[target.'cfg(not(target_family = "wasm"))'.dependencies]
-ureq = { version = "2", features = ["json", "tls"] }
+ureq = { version = "2", features = ["json", "tls"], optional = true }
 
-[target.'cfg(all(target_family = "wasm", target_os = "wasi"))'.dependencies]
 # Pin to wasi 0.14.1 which targets WASI 0.2.3. This matches the WASI version
 # baked into the wit-component preview1 adapter that cargo-component 0.21.1
 # ships (wasi-preview1-component-adapter-provider 29.0.1 → 0.2.3). If we let
@@ -30,4 +44,4 @@ ureq = { version = "2", features = ["json", "tls"] }
 # Single-version pinning is the only thing that keeps the composed wasm
 # uniformly resolvable. crates/runtara-agent-wit/wit/deps.toml and the world
 # `include wasi:cli/command@0.2.3` in components codegen are already at 0.2.3.
-wasi = { version = "=0.14.1", features = ["std"] }
+wasi = { version = "=0.14.1", features = ["std"], optional = true }

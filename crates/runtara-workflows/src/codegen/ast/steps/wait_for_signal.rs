@@ -248,8 +248,6 @@ pub fn emit(step: &WaitForSignalStep, ctx: &mut EmitContext) -> Result<TokenStre
                 format!("{}/{}/{}{}", __instance_id, workflow_id, #step_id, indices_suffix)
             };
 
-            tracing::debug!(signal_id = %__signal_id, "WaitForSignal: computed signal_id");
-
             // Evaluate timeout
             #timeout_code
 
@@ -298,11 +296,6 @@ pub fn emit(step: &WaitForSignalStep, ctx: &mut EmitContext) -> Result<TokenStre
                             let err_str = format!("{}", e);
                             if err_str.contains("connection") || err_str.contains("IO error") {
                                 __poll_errors += 1;
-                                tracing::warn!(
-                                    step_id = #step_id,
-                                    errors = __poll_errors,
-                                    "WaitForSignal: transient connection error, retrying"
-                                );
                                 if __poll_errors > 10 {
                                     return Err(format!(
                                         "WaitForSignal step '{}': too many connection errors: {}",
@@ -327,11 +320,6 @@ pub fn emit(step: &WaitForSignalStep, ctx: &mut EmitContext) -> Result<TokenStre
                             let err_str = format!("{}", e);
                             if err_str.contains("connection") || err_str.contains("IO error") {
                                 __poll_errors += 1;
-                                tracing::warn!(
-                                    step_id = #step_id,
-                                    errors = __poll_errors,
-                                    "WaitForSignal: poll connection error, retrying"
-                                );
                                 if __poll_errors > 10 {
                                     return Err(format!(
                                         "WaitForSignal step '{}' poll failed after retries: {}",
@@ -353,7 +341,6 @@ pub fn emit(step: &WaitForSignalStep, ctx: &mut EmitContext) -> Result<TokenStre
                         .unwrap_or_else(|_| serde_json::Value::String(
                             String::from_utf8_lossy(&payload).to_string()
                         ));
-                    tracing::info!(signal_id = %__signal_id, "WaitForSignal: signal received");
                     break;
                 }
 

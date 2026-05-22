@@ -9,7 +9,7 @@ keywords = ["durable", "workflow", "sdk", "checkpoint"]
 categories = ["development-tools"]
 
 [features]
-default = ["http", "embedded"]
+default = ["http", "embedded", "native", "tracing"]
 
 # Embedded mode - direct persistence layer access
 # Note: This feature is only available when building from source (runtara-core is not published)
@@ -17,15 +17,28 @@ embedded = ["dep:runtara-core", "dep:tokio"]
 
 # HTTP-based communication with runtara-core
 # Uses runtara-http for HTTP calls. For WASM transition and simpler deployments.
+# Note: `http` only gates the dep presence — a backend feature
+# (`native` / `wasi` / `wasm-js`) must also be enabled to pick a transport.
 http = ["dep:runtara-http", "dep:percent-encoding"]
+
+# Native backend forwarded to runtara-http. The `?` means "only enable on
+# runtara-http if it's already in the build via `http`" — never pulls it
+# in by itself.
+native = ["runtara-http?/native"]
 
 # WASI target - HTTP-based communication (wasm32-wasip2)
 # Uses wasi-http for checkpointing, blocking I/O for sequential workflows
-wasi = []
+wasi = ["runtara-http?/wasi"]
 
 # Browser/Node.js target - JS interop via wasm-bindgen (wasm32-unknown-unknown)
 # Uses fetch API for HTTP, localStorage/IndexedDB for local state
-wasm-js = []
+wasm-js = ["runtara-http?/wasm-js"]
+
+# Structured logging via the tracing ecosystem.
+# On by default for native consumers. WASI workflow builds disable this
+# (via default-features = false) to shed ~3 transitive crates from the .wasm
+# (tracing, tracing-core, tracing-attributes, pin-project-lite).
+tracing = ["dep:tracing", "dep:tracing-attributes"]
 
 [dependencies]
 # Core (optional, for embedded mode)
@@ -49,8 +62,9 @@ base64 = "0.22"
 # Error handling
 thiserror = "2"
 
-# Observability
-tracing = "0.1"
+# Observability (optional — off for WASI workflow builds, on by default for native)
+tracing = { version = "0.1", optional = true }
+tracing-attributes = { version = "0.1", optional = true }
 
 # Time
 chrono = { workspace = true }

@@ -57,15 +57,6 @@ pub use runtara_sdk;
 // AI Agent codegen is migrated to dispatch through the `ai-tools` WIT agent.
 pub use runtara_ai as ai;
 
-// Re-export tracing for structured logging in generated workflows
-pub use tracing;
-pub use tracing_subscriber;
-
-// Note: tracing::Instrument is no longer needed — generated workflows use sync span scoping.
-
-// Telemetry support (OpenTelemetry integration)
-pub mod telemetry;
-
 // Template rendering for MappingValue::Template
 pub mod template;
 
@@ -91,11 +82,9 @@ pub mod prelude {
     // Switch step output processing for generated switch steps
     pub use crate::switch_helpers::process_switch_output;
 
-    // Connection types
-    pub use crate::connections::{
-        ConnectionError, ConnectionRequestContext, ConnectionResponse, RateLimitState,
-        fetch_connection,
-    };
+    // Connection envelope types (codegen builds these as stubs; credentials
+    // are injected server-side via the runtara-http proxy, not in-workflow).
+    pub use crate::connections::{ConnectionResponse, RateLimitState};
 
     // Note: instance_output removed from prelude - SDK events are now the single source
     // of truth for instance state. Test harness can import directly if needed.

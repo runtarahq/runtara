@@ -329,7 +329,9 @@ fn emit_template_value(tmpl_val: &TemplateValue, source_var: &proc_macro2::Ident
             match __tmpl_result {
                 Ok(rendered) => serde_json::Value::String(rendered),
                 Err(e) => {
-                    tracing::error!(error = %e, "Template rendering failed");
+                    // Render failure is visible in the rendered output and in any
+                    // surrounding agent error. Drop the stderr noise — observability
+                    // lives in checkpoints + SDK events, not tracing.
                     serde_json::Value::String(format!("Template error: {}", e))
                 }
             }

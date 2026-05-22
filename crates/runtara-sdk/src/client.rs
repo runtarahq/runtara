@@ -5,7 +5,7 @@
 use std::time::Duration;
 use std::time::Instant;
 
-use tracing::{debug, info, instrument};
+use crate::tracing_compat::{debug, info};
 
 use crate::backend::SdkBackend;
 use crate::error::{Result, SdkError};
@@ -195,7 +195,7 @@ impl RuntaraSdk {
     ///     Ok(())
     /// }
     /// ```
-    #[instrument(skip(self), fields(instance_id = %self.backend.instance_id()))]
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip(self), fields(instance_id = %self.backend.instance_id())))]
     pub fn init(mut self, checkpoint_id: Option<&str>) -> Result<()> {
         self.connect()?;
         self.register(checkpoint_id)?;
@@ -207,7 +207,7 @@ impl RuntaraSdk {
     // ========== Connection ==========
 
     /// Connect to runtara-core.
-    #[instrument(skip(self), fields(instance_id = %self.backend.instance_id()))]
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip(self), fields(instance_id = %self.backend.instance_id())))]
     pub fn connect(&self) -> Result<()> {
         info!("Connecting to runtara-core");
         self.backend.connect()?;
@@ -231,7 +231,7 @@ impl RuntaraSdk {
     ///
     /// This should be called at instance startup. If `checkpoint_id` is provided,
     /// the instance is resuming from a checkpoint.
-    #[instrument(skip(self), fields(instance_id = %self.backend.instance_id()))]
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip(self), fields(instance_id = %self.backend.instance_id())))]
     pub fn register(&mut self, checkpoint_id: Option<&str>) -> Result<()> {
         self.backend.register(checkpoint_id)?;
         self.registered = true;
@@ -251,7 +251,7 @@ impl RuntaraSdk {
     ///
     /// The returned [`CheckpointResult`] also includes any pending signal (cancel, pause)
     /// that the instance should handle after processing the checkpoint.
-    #[instrument(skip(self, state), fields(instance_id = %self.backend.instance_id(), checkpoint_id = %checkpoint_id, state_size = state.len()))]
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip(self, state), fields(instance_id = %self.backend.instance_id(), checkpoint_id = %checkpoint_id, state_size = state.len())))]
     pub fn checkpoint(&self, checkpoint_id: &str, state: &[u8]) -> Result<CheckpointResult> {
         self.backend.checkpoint(checkpoint_id, state)
     }
@@ -259,7 +259,7 @@ impl RuntaraSdk {
     /// Get a checkpoint by ID without saving (read-only lookup).
     ///
     /// Returns the checkpoint state if found, or None if not found.
-    #[instrument(skip(self), fields(instance_id = %self.backend.instance_id(), checkpoint_id = %checkpoint_id))]
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip(self), fields(instance_id = %self.backend.instance_id(), checkpoint_id = %checkpoint_id)))]
     pub fn get_checkpoint(&self, checkpoint_id: &str) -> Result<Option<Vec<u8>>> {
         self.backend.get_checkpoint(checkpoint_id)
     }
@@ -272,7 +272,7 @@ impl RuntaraSdk {
     /// - Saves a checkpoint with the provided state
     /// - Records the wake time (`sleep_until`) in the database
     /// - On resume, calculates remaining time and only sleeps for the remainder
-    #[instrument(skip(self, state), fields(instance_id = %self.backend.instance_id(), duration_ms = duration.as_millis() as u64))]
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip(self, state), fields(instance_id = %self.backend.instance_id(), duration_ms = duration.as_millis() as u64)))]
     pub fn sleep(&self, duration: Duration, checkpoint_id: &str, state: &[u8]) -> Result<()> {
         self.backend.durable_sleep(duration, checkpoint_id, state)
     }
@@ -280,7 +280,7 @@ impl RuntaraSdk {
     // ========== Events ==========
 
     /// Send a heartbeat event (simple "I'm alive" signal).
-    #[instrument(skip(self), fields(instance_id = %self.backend.instance_id()))]
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip(self), fields(instance_id = %self.backend.instance_id())))]
     pub fn heartbeat(&self) -> Result<()> {
         self.backend.heartbeat()
     }
@@ -294,25 +294,25 @@ impl RuntaraSdk {
     }
 
     /// Send a completed event with output.
-    #[instrument(skip(self, output), fields(instance_id = %self.backend.instance_id(), output_size = output.len()))]
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip(self, output), fields(instance_id = %self.backend.instance_id(), output_size = output.len())))]
     pub fn completed(&self, output: &[u8]) -> Result<()> {
         self.backend.completed(output)
     }
 
     /// Send a failed event with error message.
-    #[instrument(skip(self), fields(instance_id = %self.backend.instance_id()))]
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip(self), fields(instance_id = %self.backend.instance_id())))]
     pub fn failed(&self, error: &str) -> Result<()> {
         self.backend.failed(error)
     }
 
     /// Send a suspended event (for pause signals).
-    #[instrument(skip(self), fields(instance_id = %self.backend.instance_id()))]
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip(self), fields(instance_id = %self.backend.instance_id())))]
     pub fn suspended(&self) -> Result<()> {
         self.backend.suspended()
     }
 
     /// Suspend with durable sleep - saves checkpoint and schedules wake.
-    #[instrument(skip(self, state), fields(instance_id = %self.backend.instance_id(), checkpoint_id = %checkpoint_id))]
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip(self, state), fields(instance_id = %self.backend.instance_id(), checkpoint_id = %checkpoint_id)))]
     pub fn sleep_until(
         &self,
         checkpoint_id: &str,
@@ -323,7 +323,7 @@ impl RuntaraSdk {
     }
 
     /// Send a custom event with arbitrary subtype and payload.
-    #[instrument(skip(self, payload), fields(instance_id = %self.backend.instance_id(), subtype = %subtype))]
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip(self, payload), fields(instance_id = %self.backend.instance_id(), subtype = %subtype)))]
     pub fn custom_event(&self, subtype: &str, payload: Vec<u8>) -> Result<()> {
         self.backend.send_custom_event(subtype, payload)
     }
@@ -334,7 +334,7 @@ impl RuntaraSdk {
     ///
     /// Rate-limited to avoid hammering the server.
     /// Returns `Some(Signal)` if a signal is pending, `None` otherwise.
-    #[instrument(skip(self), fields(instance_id = %self.backend.instance_id()))]
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip(self), fields(instance_id = %self.backend.instance_id())))]
     pub fn poll_signal(&mut self) -> Result<Option<Signal>> {
         // Check cached signal first
         if self.pending_signal.is_some() {
@@ -375,7 +375,7 @@ impl RuntaraSdk {
     }
 
     /// Poll for a custom signal scoped to a specific checkpoint/signal ID.
-    #[instrument(skip(self), fields(instance_id = %self.backend.instance_id(), signal_id = %signal_id))]
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip(self), fields(instance_id = %self.backend.instance_id(), signal_id = %signal_id)))]
     pub fn poll_custom_signal(&mut self, signal_id: &str) -> Result<Option<Vec<u8>>> {
         let (_signal, custom) = self.backend.poll_signals(Some(signal_id))?;
 
@@ -387,7 +387,7 @@ impl RuntaraSdk {
     }
 
     /// Acknowledge a received signal.
-    #[instrument(skip(self), fields(instance_id = %self.backend.instance_id()))]
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip(self), fields(instance_id = %self.backend.instance_id())))]
     pub fn acknowledge_signal(&self, signal_type: SignalType) -> Result<()> {
         self.backend.acknowledge_signal(signal_type)?;
         debug!("Signal acknowledged");
@@ -439,7 +439,7 @@ impl RuntaraSdk {
     // ========== Retry Tracking ==========
 
     /// Record a retry attempt for audit trail.
-    #[instrument(skip(self), fields(instance_id = %self.backend.instance_id(), checkpoint_id = %checkpoint_id, attempt = attempt_number))]
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip(self), fields(instance_id = %self.backend.instance_id(), checkpoint_id = %checkpoint_id, attempt = attempt_number)))]
     pub fn record_retry_attempt(
         &self,
         checkpoint_id: &str,
@@ -453,7 +453,7 @@ impl RuntaraSdk {
     // ========== Status ==========
 
     /// Get the current status of this instance.
-    #[instrument(skip(self), fields(instance_id = %self.backend.instance_id()))]
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip(self), fields(instance_id = %self.backend.instance_id())))]
     pub fn get_status(&self) -> Result<StatusResponse> {
         self.backend.get_status()
     }

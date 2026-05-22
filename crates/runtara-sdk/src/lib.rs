@@ -90,6 +90,7 @@ mod backend;
 mod client;
 mod error;
 mod registry;
+mod tracing_compat;
 mod types;
 
 // Main types

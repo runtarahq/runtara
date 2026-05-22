@@ -142,7 +142,7 @@ dotenvy = "0.15"
 [build-dependencies]
 runtara-dsl = { path = "../runtara-dsl" }
 runtara-agents = { path = "../runtara-agents", default-features = false, features = ["integrations", "native"] }
-runtara-workflow-stdlib = { path = "../runtara-workflow-stdlib", default-features = false }
+runtara-workflow-stdlib = { path = "../runtara-workflow-stdlib", default-features = false, features = ["native"] }
 serde_json = "1.0"
 
 [dev-dependencies]

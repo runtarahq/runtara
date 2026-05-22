@@ -668,12 +668,9 @@ pub fn emit(step: &SplitStep, ctx: &mut EmitContext) -> Result<TokenStream, Code
             if parallelism <= 1 || cfg!(target_family = "wasm") {
                 // Sequential execution (always used for WASM, or when parallelism <= 1)
                 for (idx, item) in split_array.iter().enumerate() {
-                    let __iter_span = tracing::info_span!(
-                        "split.iteration",
-                        step.id = step_id,
-                        iteration.index = idx,
-                        otel.kind = "INTERNAL"
-                    );
+                    // Span ZST stub — preserves the .in_scope(...) shape used below
+                    // without pulling tracing into the workflow binary.
+                    let __iter_span = __make_split_iteration_span(step_id, idx);
 
                     __iter_span.in_scope(|| -> std::result::Result<(), String> {
                         if runtara_sdk::is_cancelled() {
@@ -696,7 +693,6 @@ pub fn emit(step: &SplitStep, ctx: &mut EmitContext) -> Result<TokenStream, Code
                                 if dont_stop_on_failed {
                                     errors.push(serde_json::json!({"error": e, "index": idx}));
                                 } else {
-                                    tracing::error!("Split iteration {} failed: {}", idx, e);
                                     return Err(format!("Split step failed at index {}: {}", idx, e));
                                 }
                             }
@@ -738,12 +734,9 @@ pub fn emit(step: &SplitStep, ctx: &mut EmitContext) -> Result<TokenStream, Code
                             #par_output_clone
 
                             s.spawn(move || {
-                                let __iter_span = tracing::info_span!(
-                                    "split.iteration",
-                                    step.id = %step_id,
-                                    iteration.index = idx,
-                                    otel.kind = "INTERNAL"
-                                );
+                                // Span ZST stub — preserves the .in_scope(...) shape used below
+                                // without pulling tracing into the workflow binary.
+                                let __iter_span = __make_split_iteration_span(&step_id, idx);
 
                                 __iter_span.in_scope(|| {
                                     if cancel_token.load(Ordering::Relaxed) || runtara_sdk::is_cancelled() {
@@ -792,7 +785,6 @@ pub fn emit(step: &SplitStep, ctx: &mut EmitContext) -> Result<TokenStream, Code
                             if dont_stop_on_failed {
                                 errors.push(serde_json::json!({"error": e, "index": idx}));
                             } else {
-                                tracing::error!("Split iteration {} failed: {}", idx, e);
                                 return Err(format!("Split step failed at index {}: {}", idx, e));
                             }
                         }

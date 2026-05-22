@@ -12,6 +12,9 @@
 #     cargo-component can build the per-workflow logic component on hosts
 #     that received only the released tarball (the workflow-logic Cargo.toml
 #     has absolute path = "..." deps into this tree).
+#   - workflow-build-prebuilt/: canonical Cargo.lock + vendored crates.io
+#     deps. Lets the runtime compile workflows in fully air-gapped envs
+#     (no network access at all). Auto-detected by components_compile.rs.
 #   - License files
 #   - VERSION and MANIFEST.json
 #
@@ -498,7 +501,9 @@ license = "AGPL-3.0-or-later"
 repository = "https://github.com/runtarahq/runtara"
 
 [workspace.dependencies]
-runtara-http = { path = "crates/runtara-http", version = "${ws_major_minor}" }
+# default-features = false so consumers explicitly pick a backend
+# (native / wasi / wasm-js). Matches the source workspace Cargo.toml.
+runtara-http = { path = "crates/runtara-http", version = "${ws_major_minor}", default-features = false }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 chrono = { version = "0.4", features = ["serde"] }
@@ -540,6 +545,23 @@ COMPILESRCEOF
         exit 1
     fi
     info "  Compile-src: 5 crates + ${agent_wit_count} per-agent WIT"
+
+    # ── Workflow-build-prebuilt: vendored crates.io deps + canonical Cargo.lock ──
+    #
+    # Lets the runtime compile workflows in fully air-gapped envs. When
+    # components_compile.rs sees this dir under workspace_root(), it copies
+    # Cargo.lock into each per-workflow build dir, writes a .cargo/config.toml
+    # redirecting crates-io to vendor/, and runs the build with `--frozen` +
+    # `CARGO_NET_OFFLINE=true`. Without this dir, builds fall back to crates.io.
+    info "Generating workflow-build-prebuilt (cargo vendor)"
+    if "${SCRIPT_DIR}/regenerate-workflow-vendor.sh" >/dev/null 2>&1; then
+        cp -R "${ROOT_DIR}/workflow-build-prebuilt" "$bundle/workflow-build-prebuilt"
+        local prebuilt_size
+        prebuilt_size="$(du -sh "$bundle/workflow-build-prebuilt" | cut -f1)"
+        info "  Workflow-build-prebuilt: ${prebuilt_size}"
+    else
+        echo "Warning: regenerate-workflow-vendor.sh failed — bundle will NOT support air-gapped workflow builds" >&2
+    fi
 
     # ── Licenses ──
     info "Copying licenses"

@@ -19,7 +19,6 @@ serde_json = { workspace = true }
 # posts each capability call to the host's internal native agent endpoint where
 # the real SFTP work (libssh2 etc.) happens — this component never opens SSH
 # sockets itself.
-runtara-http = { path = "../../runtara-http" }
 # Capability metadata stays beside the code: `#[capability_input]`,
 # `#[capability_output]`, `#[capability]` emit `&'static CapabilityMeta` /
 # `&'static InputTypeMeta` / `&'static OutputTypeMeta` items, and the host-only
@@ -41,3 +40,9 @@ world = "agent"
 # records. Point cargo-component at the shared package so the `use` resolves.
 [package.metadata.component.target.dependencies]
 "runtara:agent" = { path = "../../runtara-agent-wit/wit" }
+
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+runtara-http = { path = "../../runtara-http", default-features = false, features = ["native"] }
+
+[target.'cfg(target_family = "wasm")'.dependencies]
+runtara-http = { path = "../../runtara-http", default-features = false, features = ["wasi"] }

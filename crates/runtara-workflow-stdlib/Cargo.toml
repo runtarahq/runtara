@@ -17,24 +17,13 @@ crate-type = ["rlib"]
 default = ["native"]
 
 # Native platform — uses the native SDK backend (blocking ureq HTTP).
-native = []
+native = ["runtara-sdk/native", "runtara-sdk/tracing", "runtara-http/native"]
 
 # WASI target (wasm32-wasip1/wasip2) — wasi-http transport.
-wasi = ["runtara-sdk/wasi"]
+wasi = ["runtara-sdk/wasi", "runtara-http/wasi"]
 
 # Browser/Node.js target — JS HTTP interop.
-wasm-js = ["runtara-sdk/wasm-js"]
-
-# OpenTelemetry (native only) — requires tokio for OTEL batch exporter flush.
-telemetry = [
-    "native",
-    "dep:tokio",
-    "opentelemetry",
-    "opentelemetry_sdk",
-    "opentelemetry-otlp",
-    "tracing-opentelemetry",
-    "opentelemetry-appender-tracing",
-]
+wasm-js = ["runtara-sdk/wasm-js", "runtara-http/wasm-js"]
 
 [dependencies]
 # Core dependency: the SDK protocol wrapper. Agent dispatch happens via
@@ -53,25 +42,10 @@ runtara-ai = { path = "../runtara-ai", version = "7.0" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 
-# Tokio kept optional for telemetry OTEL batch exporter (needs async runtime for flush)
-tokio = { version = "1", features = ["full"], optional = true }
-
-# HTTP client for connection fetching (native only)
-runtara-http = { workspace = true }
+# HTTP client for connection fetching. Backend is selected via this crate's
+# `native` / `wasi` / `wasm-js` features, which forward to runtara-http.
+# default-features = false keeps the consumer in charge of the backend.
+runtara-http = { workspace = true, default-features = false }
 
 # Template rendering for MappingValue::Template
 minijinja = "2.5"
-
-# URL encoding for query parameters
-urlencoding = "2"
-
-# Tracing for structured logging
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-
-# OpenTelemetry (optional - enabled via telemetry feature)
-opentelemetry = { version = "0.28", features = ["trace", "logs"], optional = true }
-opentelemetry_sdk = { version = "0.28", features = ["rt-tokio", "trace", "logs"], optional = true }
-opentelemetry-otlp = { version = "0.28", features = ["grpc-tonic", "trace", "logs"], optional = true }
-tracing-opentelemetry = { version = "0.29", optional = true }
-opentelemetry-appender-tracing = { version = "0.28", optional = true }

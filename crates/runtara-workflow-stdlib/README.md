@@ -34,7 +34,7 @@ For real workflows, author DSL and let `runtara-workflows` generate the Rust.
 - Consumed by `runtara-workflows` codegen — every generated workflow `main.rs` starts with `use runtara_workflow_stdlib::prelude::*;` (the crate name is overridable via `RUNTARA_STDLIB_NAME`).
 - Linked into `runtara-test-harness` (embedded test runner) and `runtara-server` (workflow compilation at the edge).
 - Core deps: `runtara-agents` (integration library), `runtara-sdk` (durable execution protocol), `runtara-ai` (AI Agent steps); optional OpenTelemetry stack behind the `telemetry` feature.
-- `connections::fetch_connection` calls the connection service over HTTP using `runtara-http`, keyed by `tenant_id`/`connection_id` with optional rate-limit state passthrough.
+- `connections` module exposes only the `ConnectionResponse` envelope used by codegen stubs; credentials are injected server-side via the `runtara-http` proxy and never enter the workflow `.wasm`.
 - Runs primarily as a WASI guest (`wasm32-wasip2`) inside the runtara environment; the `native` feature exists for local testing and for agents with C deps (xlsx, sftp, compression).
 - `dispatch` module is designed for static capability tables so product stdlibs can override agent dispatch without dynamic registration.
 
