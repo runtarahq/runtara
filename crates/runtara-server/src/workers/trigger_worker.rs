@@ -511,6 +511,28 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
 
+    fn redis_err(resp: &[u8]) -> redis::RedisError {
+        match redis::parse_redis_value(resp) {
+            Ok(redis::Value::ServerError(se)) => se.into(),
+            Err(e) => e,
+            Ok(other) => panic!("expected an error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn nogroup_reply_is_detected() {
+        let err = redis_err(b"-NOGROUP dummy error text\r\n");
+        assert!(is_consumer_group_missing(&err));
+    }
+
+    #[test]
+    fn unrelated_replies_are_not_treated_as_missing_group() {
+        let err = redis_err(b"-WRONGTYPE dummy error text\r\n");
+        assert!(!is_consumer_group_missing(&err));
+        let io: redis::RedisError = (redis::ErrorKind::IoError, "broken pipe").into();
+        assert!(!is_consumer_group_missing(&io));
+    }
+
     #[test]
     fn test_trigger_worker_config_struct() {
         // Test explicit configuration (don't rely on env vars due to Rust 2024 safety)
