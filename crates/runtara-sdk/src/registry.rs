@@ -194,6 +194,7 @@ pub fn reset_cancellation() {
 ///     return Err("Instance cancelled".into());
 /// }
 /// ```
+#[cfg_attr(not(feature = "tracing"), allow(unused_variables))]
 pub fn acknowledge_cancellation() {
     use crate::types::SignalType;
 
@@ -229,6 +230,7 @@ pub fn acknowledge_cancellation() {
 ///     return Ok(());
 /// }
 /// ```
+#[cfg_attr(not(feature = "tracing"), allow(unused_variables))]
 pub fn acknowledge_pause() {
     use crate::types::SignalType;
 
@@ -263,6 +265,7 @@ pub fn acknowledge_pause() {
 ///     return Ok(());
 /// }
 /// ```
+#[cfg_attr(not(feature = "tracing"), allow(unused_variables))]
 pub fn acknowledge_shutdown() {
     use crate::types::SignalType;
 

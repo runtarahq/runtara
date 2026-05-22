@@ -172,6 +172,7 @@ impl HttpBackend {
     }
 
     /// POST JSON fire-and-forget (ignore response body, just check status).
+    #[cfg_attr(not(feature = "tracing"), allow(unused_variables))]
     fn post_fire_and_forget<T: Serialize>(&self, url: &str, body: &T) -> Result<()> {
         let json_value = serde_json::to_value(body)
             .map_err(|e| SdkError::Internal(format!("Failed to serialize request body: {}", e)))?;
