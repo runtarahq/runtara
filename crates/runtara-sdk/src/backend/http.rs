@@ -12,10 +12,10 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+use crate::tracing_compat::{debug, info, warn};
 use base64::Engine;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use tracing::{debug, info, warn};
 
 use crate::backend::SdkBackend;
 use crate::error::{Result, SdkError};

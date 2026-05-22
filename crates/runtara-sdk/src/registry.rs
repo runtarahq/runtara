@@ -20,8 +20,8 @@
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use crate::tracing_compat::{info, warn};
 use once_cell::sync::OnceCell;
-use tracing::{info, warn};
 
 use crate::RuntaraSdk;
 

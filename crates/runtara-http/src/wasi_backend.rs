@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! WASI HTTP backend using `wasi:http/outgoing-handler`.
 //!
-//! This module is only compiled when targeting `wasm32-wasip2` (or any
-//! `target_family = "wasm"` target). It implements the same public API as the
+//! This module is only compiled when the `wasi` feature is enabled (and
+//! the `native` feature is not). It implements the same public API as the
 //! native ureq backend so that callers are unaware of the underlying transport.
 
 use std::collections::HashMap;

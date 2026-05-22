@@ -125,17 +125,12 @@ pub fn emit(step: &WhileStep, ctx: &mut EmitContext) -> Result<TokenStream, Code
                 loop {
                     // Check max iterations limit
                     if __loop_index >= __max_iterations {
-                        tracing::warn!("While step '{}' reached max iterations limit ({})", #step_id, __max_iterations);
                         break;
                     }
 
-                    // Create iteration span for tracing
-                    let __iter_span = tracing::info_span!(
-                        "while.iteration",
-                        step.id = #step_id,
-                        iteration.index = __loop_index,
-                        otel.kind = "INTERNAL"
-                    );
+                    // Span ZST stub — preserves the .in_scope(...) shape used below
+                    // without pulling tracing into the workflow binary.
+                    let __iter_span = __make_while_iteration_span(#step_id, __loop_index as usize);
 
                     // Inject loop context into source IN PLACE (no clone).
                     // The "loop" key is replaced each iteration with the

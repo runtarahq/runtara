@@ -5,19 +5,29 @@
 //! Provides a blocking HTTP client that works on both native (via ureq)
 //! and WASI (via wasi-http, future) targets.
 
-#[cfg(not(target_family = "wasm"))]
+// Exactly one backend feature must be enabled by the consumer. `native`
+// pulls ureq + the Rust TLS stack; `wasi` pulls the wasi crate; `wasm-js`
+// is a link-only stub. The cfg gates below are written so multiple
+// backends cannot accidentally co-link.
+#[cfg(not(any(feature = "native", feature = "wasi", feature = "wasm-js")))]
+compile_error!(
+    "runtara-http requires exactly one backend feature: `native`, `wasi`, or `wasm-js`. \
+     Native consumers should enable `native`; WASI workflows/agents should enable `wasi`."
+);
+
+#[cfg(feature = "native")]
 mod native;
-#[cfg(not(target_family = "wasm"))]
+#[cfg(feature = "native")]
 pub use native::NativeHttpClient as HttpClient;
 
-#[cfg(all(target_family = "wasm", target_os = "wasi"))]
+#[cfg(all(feature = "wasi", not(feature = "native")))]
 mod wasi_backend;
-#[cfg(all(target_family = "wasm", target_os = "wasi"))]
+#[cfg(all(feature = "wasi", not(feature = "native")))]
 pub use wasi_backend::WasiHttpClient as HttpClient;
 
-#[cfg(all(target_family = "wasm", not(target_os = "wasi")))]
+#[cfg(all(feature = "wasm-js", not(feature = "native"), not(feature = "wasi")))]
 mod wasm_js_backend;
-#[cfg(all(target_family = "wasm", not(target_os = "wasi")))]
+#[cfg(all(feature = "wasm-js", not(feature = "native"), not(feature = "wasi")))]
 pub use wasm_js_backend::WasmJsHttpClient as HttpClient;
 
 use std::collections::HashMap;
@@ -32,7 +42,7 @@ pub struct RequestBuilder {
     pub(crate) query_params: Vec<(String, String)>,
     pub(crate) body: Option<Body>,
     pub(crate) timeout: Option<Duration>,
-    #[cfg(not(target_family = "wasm"))]
+    #[cfg(feature = "native")]
     pub(crate) agent: Option<ureq::Agent>,
 }
 
@@ -98,7 +108,7 @@ impl RequestBuilder {
             query_params: Vec::new(),
             body: None,
             timeout: None,
-            #[cfg(not(target_family = "wasm"))]
+            #[cfg(feature = "native")]
             agent: None,
         }
     }
@@ -144,11 +154,11 @@ impl RequestBuilder {
     /// executed directly.
     /// Execute the request directly (no proxy). Used by SDK and internal APIs.
     pub fn call(self) -> Result<HttpResponse, HttpError> {
-        #[cfg(not(target_family = "wasm"))]
+        #[cfg(feature = "native")]
         return native::execute(self);
-        #[cfg(all(target_family = "wasm", target_os = "wasi"))]
+        #[cfg(all(feature = "wasi", not(feature = "native")))]
         return wasi_backend::execute(self);
-        #[cfg(all(target_family = "wasm", not(target_os = "wasi")))]
+        #[cfg(all(feature = "wasm-js", not(feature = "native"), not(feature = "wasi")))]
         return wasm_js_backend::execute(self);
     }
 
@@ -238,11 +248,11 @@ impl RequestBuilder {
         }
 
         // Execute directly (bypass proxy check to avoid recursion)
-        #[cfg(not(target_family = "wasm"))]
+        #[cfg(feature = "native")]
         let proxy_response = native::execute(proxy_request)?;
-        #[cfg(all(target_family = "wasm", target_os = "wasi"))]
+        #[cfg(all(feature = "wasi", not(feature = "native")))]
         let proxy_response = wasi_backend::execute(proxy_request)?;
-        #[cfg(all(target_family = "wasm", not(target_os = "wasi")))]
+        #[cfg(all(feature = "wasm-js", not(feature = "native"), not(feature = "wasi")))]
         let proxy_response = wasm_js_backend::execute(proxy_request)?;
 
         // Parse proxy response
@@ -372,11 +382,11 @@ pub fn presign(
             .push(("X-Org-Id".to_string(), tenant_id.clone()));
     }
 
-    #[cfg(not(target_family = "wasm"))]
+    #[cfg(feature = "native")]
     let response = native::execute(request)?;
-    #[cfg(all(target_family = "wasm", target_os = "wasi"))]
+    #[cfg(all(feature = "wasi", not(feature = "native")))]
     let response = wasi_backend::execute(request)?;
-    #[cfg(all(target_family = "wasm", not(target_os = "wasi")))]
+    #[cfg(all(feature = "wasm-js", not(feature = "native"), not(feature = "wasi")))]
     let response = wasm_js_backend::execute(request)?;
 
     if !(200..300).contains(&response.status) {

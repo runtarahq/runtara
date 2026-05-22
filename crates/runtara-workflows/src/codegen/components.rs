@@ -335,7 +335,6 @@ runtara-workflow-stdlib = {{ path = "{stdlib_path}", default-features = false, f
 # workflow only needs the wasi-http transport (no embedded DB access), so we
 # turn defaults off and opt in to exactly what we need.
 runtara-sdk = {{ path = "{sdk_path}", default-features = false, features = ["http", "wasi"] }}
-tracing = "0.1"
 
 [package.metadata.component]
 package = "runtara:workflow-logic"

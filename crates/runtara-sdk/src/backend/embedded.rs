@@ -8,9 +8,9 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::tracing_compat::{debug, info};
 use chrono::{DateTime, Utc};
 use runtara_core::persistence::{CompleteInstanceParams, EventRecord, Persistence};
-use tracing::{debug, info, instrument};
 
 use super::SdkBackend;
 use crate::error::{Result, SdkError};
@@ -77,7 +77,7 @@ impl SdkBackend for EmbeddedBackend {
         debug!("Embedded backend: close is a no-op");
     }
 
-    #[instrument(skip(self), fields(instance_id = %self.instance_id))]
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip(self), fields(instance_id = %self.instance_id)))]
     fn register(&self, _checkpoint_id: Option<&str>) -> Result<()> {
         self.rt
             .block_on(
@@ -99,7 +99,7 @@ impl SdkBackend for EmbeddedBackend {
         Ok(())
     }
 
-    #[instrument(skip(self, state), fields(instance_id = %self.instance_id, checkpoint_id = %checkpoint_id, state_size = state.len()))]
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip(self, state), fields(instance_id = %self.instance_id, checkpoint_id = %checkpoint_id, state_size = state.len())))]
     fn checkpoint(&self, checkpoint_id: &str, state: &[u8]) -> Result<CheckpointResult> {
         // Check if checkpoint exists
         let existing = self
@@ -149,7 +149,7 @@ impl SdkBackend for EmbeddedBackend {
         })
     }
 
-    #[instrument(skip(self), fields(instance_id = %self.instance_id, checkpoint_id = %checkpoint_id))]
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip(self), fields(instance_id = %self.instance_id, checkpoint_id = %checkpoint_id)))]
     fn get_checkpoint(&self, checkpoint_id: &str) -> Result<Option<Vec<u8>>> {
         let result = self
             .rt
@@ -162,7 +162,7 @@ impl SdkBackend for EmbeddedBackend {
         Ok(result.map(|c| c.state))
     }
 
-    #[instrument(skip(self), fields(instance_id = %self.instance_id))]
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip(self), fields(instance_id = %self.instance_id)))]
     fn heartbeat(&self) -> Result<()> {
         let event = EventRecord {
             id: None,
@@ -182,7 +182,7 @@ impl SdkBackend for EmbeddedBackend {
         Ok(())
     }
 
-    #[instrument(skip(self, output), fields(instance_id = %self.instance_id, output_size = output.len()))]
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip(self, output), fields(instance_id = %self.instance_id, output_size = output.len())))]
     fn completed(&self, output: &[u8]) -> Result<()> {
         self.rt
             .block_on(self.persistence.complete_instance(
@@ -208,7 +208,7 @@ impl SdkBackend for EmbeddedBackend {
         Ok(())
     }
 
-    #[instrument(skip(self), fields(instance_id = %self.instance_id))]
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip(self), fields(instance_id = %self.instance_id)))]
     fn failed(&self, error: &str) -> Result<()> {
         self.rt
             .block_on(self.persistence.complete_instance(
@@ -234,7 +234,7 @@ impl SdkBackend for EmbeddedBackend {
         Ok(())
     }
 
-    #[instrument(skip(self), fields(instance_id = %self.instance_id))]
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip(self), fields(instance_id = %self.instance_id)))]
     fn suspended(&self) -> Result<()> {
         self.rt
             .block_on(
@@ -261,7 +261,7 @@ impl SdkBackend for EmbeddedBackend {
         Ok(())
     }
 
-    #[instrument(skip(self, state), fields(instance_id = %self.instance_id, checkpoint_id = %checkpoint_id))]
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip(self, state), fields(instance_id = %self.instance_id, checkpoint_id = %checkpoint_id)))]
     fn sleep_until(&self, checkpoint_id: &str, wake_at: DateTime<Utc>, state: &[u8]) -> Result<()> {
         // Save checkpoint first
         self.rt
@@ -314,7 +314,7 @@ impl SdkBackend for EmbeddedBackend {
         Ok(())
     }
 
-    #[instrument(skip(self, payload), fields(instance_id = %self.instance_id, subtype = %subtype, payload_size = payload.len()))]
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip(self, payload), fields(instance_id = %self.instance_id, subtype = %subtype, payload_size = payload.len())))]
     fn send_custom_event(&self, subtype: &str, payload: Vec<u8>) -> Result<()> {
         let event = EventRecord {
             id: None,
@@ -334,7 +334,7 @@ impl SdkBackend for EmbeddedBackend {
         Ok(())
     }
 
-    #[instrument(skip(self), fields(instance_id = %self.instance_id, checkpoint_id = %checkpoint_id, attempt = attempt_number))]
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip(self), fields(instance_id = %self.instance_id, checkpoint_id = %checkpoint_id, attempt = attempt_number)))]
     fn record_retry_attempt(
         &self,
         checkpoint_id: &str,
@@ -354,7 +354,7 @@ impl SdkBackend for EmbeddedBackend {
         Ok(())
     }
 
-    #[instrument(skip(self), fields(instance_id = %self.instance_id))]
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip(self), fields(instance_id = %self.instance_id)))]
     fn get_status(&self) -> Result<StatusResponse> {
         let instance = self
             .rt
@@ -455,7 +455,7 @@ impl SdkBackend for EmbeddedBackend {
         &self.tenant_id
     }
 
-    #[instrument(skip(self), fields(instance_id = %self.instance_id))]
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip(self), fields(instance_id = %self.instance_id)))]
     fn set_sleep_until(&self, sleep_until: DateTime<Utc>) -> Result<()> {
         self.rt
             .block_on(
@@ -468,7 +468,7 @@ impl SdkBackend for EmbeddedBackend {
         Ok(())
     }
 
-    #[instrument(skip(self), fields(instance_id = %self.instance_id))]
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip(self), fields(instance_id = %self.instance_id)))]
     fn clear_sleep(&self) -> Result<()> {
         self.rt
             .block_on(self.persistence.clear_instance_sleep(&self.instance_id))
@@ -478,7 +478,7 @@ impl SdkBackend for EmbeddedBackend {
         Ok(())
     }
 
-    #[instrument(skip(self), fields(instance_id = %self.instance_id))]
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip(self), fields(instance_id = %self.instance_id)))]
     fn get_sleep_until(&self) -> Result<Option<DateTime<Utc>>> {
         let instance = self
             .rt
@@ -488,7 +488,7 @@ impl SdkBackend for EmbeddedBackend {
         Ok(instance.and_then(|i| i.sleep_until))
     }
 
-    #[instrument(skip(self, state), fields(instance_id = %self.instance_id, duration_ms = duration.as_millis() as u64))]
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip(self, state), fields(instance_id = %self.instance_id, duration_ms = duration.as_millis() as u64)))]
     fn durable_sleep(&self, duration: Duration, checkpoint_id: &str, state: &[u8]) -> Result<()> {
         let now = Utc::now();
         let wake_at =

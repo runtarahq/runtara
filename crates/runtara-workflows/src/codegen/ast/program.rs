@@ -452,7 +452,6 @@ fn emit_imports(graph: &ExecutionGraph, ctx: &EmitContext) -> TokenStream {
         use std::process::ExitCode;
         // prelude includes: RuntimeContext, Deserialize, Serialize, serde_json, registry, dispatch, SDK types
         use #stdlib_ident::prelude::*;
-        use #stdlib_ident::tracing;
         #hashmap_import
 
         // Import only agents used by this workflow
@@ -804,211 +803,48 @@ pub(crate) fn emit_input_structs() -> TokenStream {
                 .unwrap_or_else(|| serde_json::Value::Array(vec![]))
         }
 
+        // Span helpers were the workflow's tracing/OTEL surface. Tracing has been
+        // removed (observability lives in checkpoints + SDK events, not stderr).
+        // These stubs preserve the existing `let __step_span = …; __step_span.in_scope(|| body)`
+        // (and `.entered()` for sync control-flow steps) call shape so the per-step
+        // emitters in codegen/ast/steps/*.rs don't need to change; they're ZSTs and
+        // the closure inlines with zero runtime overhead.
         #[allow(dead_code)]
-        fn __make_generic_step_span(
-            step_id: &str,
-            step_name: &str,
-            step_type: &str,
-        ) -> tracing::Span {
-            tracing::info_span!(
-                "step",
-                step.id = step_id,
-                step.name = step_name,
-                step.type = step_type,
-                otel.kind = "INTERNAL"
-            )
-        }
+        struct __StepSpan;
 
         #[allow(dead_code)]
-        fn __make_agent_span(
-            step_id: &str,
-            step_name: &str,
-            agent_id: &str,
-            capability_id: &str,
-        ) -> tracing::Span {
-            tracing::info_span!(
-                "step.agent",
-                step.id = step_id,
-                step.name = step_name,
-                step.type = "Agent",
-                agent.id = agent_id,
-                capability.id = capability_id,
-                otel.kind = "INTERNAL"
-            )
-        }
+        struct __StepSpanGuard;
 
         #[allow(dead_code)]
-        fn __make_ai_agent_step_span(step_id: &str, step_name: &str) -> tracing::Span {
-            tracing::info_span!(
-                "step.aiagent",
-                step.id = step_id,
-                step.name = step_name,
-                step.type = "AiAgent",
-                otel.kind = "INTERNAL"
-            )
+        impl __StepSpan {
+            #[inline(always)]
+            fn in_scope<F: FnOnce() -> R, R>(self, f: F) -> R {
+                f()
+            }
+            #[inline(always)]
+            fn entered(self) -> __StepSpanGuard {
+                __StepSpanGuard
+            }
         }
 
-        #[allow(dead_code)]
-        fn __make_conditional_step_span(step_id: &str, step_name: &str) -> tracing::Span {
-            tracing::info_span!(
-                "step.conditional",
-                step.id = step_id,
-                step.name = step_name,
-                step.type = "Conditional",
-                otel.kind = "INTERNAL"
-            )
-        }
-
-        #[allow(dead_code)]
-        fn __make_delay_step_span(step_id: &str, step_name: &str) -> tracing::Span {
-            tracing::info_span!(
-                "step.delay",
-                step.id = step_id,
-                step.name = step_name,
-                step.type = "Delay",
-                otel.kind = "INTERNAL"
-            )
-        }
-
-        #[allow(dead_code)]
-        fn __make_embed_workflow_step_span(step_id: &str, step_name: &str) -> tracing::Span {
-            tracing::info_span!(
-                "step.embedworkflow",
-                step.id = step_id,
-                step.name = step_name,
-                step.type = "EmbedWorkflow",
-                otel.kind = "INTERNAL"
-            )
-        }
-
-        #[allow(dead_code)]
-        fn __make_error_step_span(step_id: &str, step_name: &str) -> tracing::Span {
-            tracing::info_span!(
-                "step.error",
-                step.id = step_id,
-                step.name = step_name,
-                step.type = "Error",
-                otel.kind = "INTERNAL"
-            )
-        }
-
-        #[allow(dead_code)]
-        fn __make_filter_step_span(step_id: &str, step_name: &str) -> tracing::Span {
-            tracing::info_span!(
-                "step.filter",
-                step.id = step_id,
-                step.name = step_name,
-                step.type = "Filter",
-                otel.kind = "INTERNAL"
-            )
-        }
-
-        #[allow(dead_code)]
-        fn __make_finish_step_span(step_id: &str, step_name: &str) -> tracing::Span {
-            tracing::info_span!(
-                "step.finish",
-                step.id = step_id,
-                step.name = step_name,
-                step.type = "Finish",
-                otel.kind = "INTERNAL"
-            )
-        }
-
-        #[allow(dead_code)]
-        fn __make_group_by_step_span(step_id: &str, step_name: &str) -> tracing::Span {
-            tracing::info_span!(
-                "step.groupby",
-                step.id = step_id,
-                step.name = step_name,
-                step.type = "GroupBy",
-                otel.kind = "INTERNAL"
-            )
-        }
-
-        #[allow(dead_code)]
-        fn __make_log_step_span(step_id: &str, step_name: &str) -> tracing::Span {
-            tracing::info_span!(
-                "step.log",
-                step.id = step_id,
-                step.name = step_name,
-                step.type = "Log",
-                otel.kind = "INTERNAL"
-            )
-        }
-
-        #[allow(dead_code)]
-        fn __make_split_step_span(step_id: &str, step_name: &str) -> tracing::Span {
-            tracing::info_span!(
-                "step.split",
-                step.id = step_id,
-                step.name = step_name,
-                step.type = "Split",
-                otel.kind = "INTERNAL"
-            )
-        }
-
-        #[allow(dead_code)]
-        fn __make_switch_step_span(step_id: &str, step_name: &str) -> tracing::Span {
-            tracing::info_span!(
-                "step.switch",
-                step.id = step_id,
-                step.name = step_name,
-                step.type = "Switch",
-                otel.kind = "INTERNAL"
-            )
-        }
-
-        #[allow(dead_code)]
-        fn __make_wait_for_signal_step_span(step_id: &str, step_name: &str) -> tracing::Span {
-            tracing::info_span!(
-                "step.waitforsignal",
-                step.id = step_id,
-                step.name = step_name,
-                step.type = "WaitForSignal",
-                otel.kind = "INTERNAL"
-            )
-        }
-
-        #[allow(dead_code)]
-        fn __make_while_step_span(step_id: &str, step_name: &str) -> tracing::Span {
-            tracing::info_span!(
-                "step.while",
-                step.id = step_id,
-                step.name = step_name,
-                step.type = "While",
-                otel.kind = "INTERNAL"
-            )
-        }
-
-        #[allow(dead_code)]
-        fn __make_split_iteration_span(step_id: &str, iteration_index: usize) -> tracing::Span {
-            tracing::info_span!(
-                "split.iteration",
-                step.id = step_id,
-                iteration.index = iteration_index,
-                otel.kind = "INTERNAL"
-            )
-        }
-
-        #[allow(dead_code)]
-        fn __make_while_iteration_span(step_id: &str, iteration_index: usize) -> tracing::Span {
-            tracing::info_span!(
-                "while.iteration",
-                step.id = step_id,
-                iteration.index = iteration_index,
-                otel.kind = "INTERNAL"
-            )
-        }
-
-        #[allow(dead_code)]
-        fn __make_child_workflow_span(parent_step_id: &str, child_workflow_id: &str) -> tracing::Span {
-            tracing::info_span!(
-                "workflow.child",
-                workflow.id = child_workflow_id,
-                parent_step.id = parent_step_id,
-                otel.kind = "INTERNAL"
-            )
-        }
+        #[allow(dead_code)] fn __make_generic_step_span(_step_id: &str, _step_name: &str, _step_type: &str) -> __StepSpan { __StepSpan }
+        #[allow(dead_code)] fn __make_agent_span(_step_id: &str, _step_name: &str, _agent_id: &str, _capability_id: &str) -> __StepSpan { __StepSpan }
+        #[allow(dead_code)] fn __make_ai_agent_step_span(_step_id: &str, _step_name: &str) -> __StepSpan { __StepSpan }
+        #[allow(dead_code)] fn __make_conditional_step_span(_step_id: &str, _step_name: &str) -> __StepSpan { __StepSpan }
+        #[allow(dead_code)] fn __make_delay_step_span(_step_id: &str, _step_name: &str) -> __StepSpan { __StepSpan }
+        #[allow(dead_code)] fn __make_embed_workflow_step_span(_step_id: &str, _step_name: &str) -> __StepSpan { __StepSpan }
+        #[allow(dead_code)] fn __make_error_step_span(_step_id: &str, _step_name: &str) -> __StepSpan { __StepSpan }
+        #[allow(dead_code)] fn __make_filter_step_span(_step_id: &str, _step_name: &str) -> __StepSpan { __StepSpan }
+        #[allow(dead_code)] fn __make_finish_step_span(_step_id: &str, _step_name: &str) -> __StepSpan { __StepSpan }
+        #[allow(dead_code)] fn __make_group_by_step_span(_step_id: &str, _step_name: &str) -> __StepSpan { __StepSpan }
+        #[allow(dead_code)] fn __make_log_step_span(_step_id: &str, _step_name: &str) -> __StepSpan { __StepSpan }
+        #[allow(dead_code)] fn __make_split_step_span(_step_id: &str, _step_name: &str) -> __StepSpan { __StepSpan }
+        #[allow(dead_code)] fn __make_switch_step_span(_step_id: &str, _step_name: &str) -> __StepSpan { __StepSpan }
+        #[allow(dead_code)] fn __make_wait_for_signal_step_span(_step_id: &str, _step_name: &str) -> __StepSpan { __StepSpan }
+        #[allow(dead_code)] fn __make_while_step_span(_step_id: &str, _step_name: &str) -> __StepSpan { __StepSpan }
+        #[allow(dead_code)] fn __make_split_iteration_span(_step_id: &str, _iteration_index: usize) -> __StepSpan { __StepSpan }
+        #[allow(dead_code)] fn __make_while_iteration_span(_step_id: &str, _iteration_index: usize) -> __StepSpan { __StepSpan }
+        #[allow(dead_code)] fn __make_child_workflow_span(_parent_step_id: &str, _child_workflow_id: &str) -> __StepSpan { __StepSpan }
 
         #[allow(dead_code)]
         fn __pointer_tail<'a>(pointer: &'a str, prefix: &str) -> Option<&'a str> {
@@ -1459,34 +1295,26 @@ pub(crate) fn emit_main(graph: &ExecutionGraph) -> TokenStream {
 
     quote! {
         fn main() -> ExitCode {
-            // Initialize tracing subscriber with optional OpenTelemetry layer.
-            // The telemetry module handles:
-            // - EnvFilter setup (respects RUST_LOG, default: info)
-            // - Fmt layer to stderr
-            // - OTEL layer if OTEL_EXPORTER_OTLP_ENDPOINT is set and telemetry feature is enabled
-            // Returns a guard that flushes telemetry on drop.
-            let _telemetry_guard = runtara_workflow_stdlib::telemetry::init_subscriber();
-
             // Initialize SDK from environment variables.
             // Required env vars: RUNTARA_INSTANCE_ID, RUNTARA_TENANT_ID
             // HTTP: RUNTARA_HTTP_URL (defaults to http://127.0.0.1:8003)
             let mut sdk_instance = match RuntaraSdk::from_env() {
                 Ok(s) => s,
                 Err(e) => {
-                    tracing::error!("Failed to initialize SDK: {}", e);
+                    eprintln!("Failed to initialize SDK: {}", e);
                     return ExitCode::FAILURE;
                 }
             };
 
             // Connect to runtara-core
             if let Err(e) = sdk_instance.connect() {
-                tracing::error!("Failed to connect to runtara-core: {}", e);
+                eprintln!("Failed to connect to runtara-core: {}", e);
                 return ExitCode::FAILURE;
             }
 
             // Register the instance
             if let Err(e) = sdk_instance.register(None) {
-                tracing::error!("Failed to register instance: {}", e);
+                eprintln!("Failed to register instance: {}", e);
                 return ExitCode::FAILURE;
             }
 
@@ -1503,7 +1331,7 @@ pub(crate) fn emit_main(graph: &ExecutionGraph) -> TokenStream {
                         .unwrap_or_else(|_| serde_json::json!({})),
                     Ok(None) => serde_json::json!({}),
                     Err(e) => {
-                        tracing::warn!("Failed to load input from Core: {}", e);
+                        eprintln!("Failed to load input from Core: {}", e);
                         serde_json::json!({})
                     }
                 }
@@ -1557,11 +1385,7 @@ pub(crate) fn emit_main(graph: &ExecutionGraph) -> TokenStream {
                 parent_scope_id: None, // Top-level has no parent scope
             };
 
-            let __root_span = tracing::info_span!(
-                "workflow.execute",
-                workflow.id = %workflow_id,
-                otel.kind = "INTERNAL"
-            );
+            let __root_span = __StepSpan;
 
             // Execute the workflow within the root span
             match __root_span.in_scope(|| execute_workflow(Arc::new(workflow_inputs))) {
@@ -1570,7 +1394,7 @@ pub(crate) fn emit_main(graph: &ExecutionGraph) -> TokenStream {
                     let sdk_guard = sdk().lock().unwrap();
                     let output_bytes = serde_json::to_vec(&output).unwrap_or_default();
                     if let Err(e) = sdk_guard.completed(&output_bytes) {
-                        tracing::error!("Failed to report completion: {}", e);
+                        eprintln!("Failed to report completion: {}", e);
                         return ExitCode::FAILURE;
                     }
                     ExitCode::SUCCESS
@@ -1581,7 +1405,6 @@ pub(crate) fn emit_main(graph: &ExecutionGraph) -> TokenStream {
                         // Acknowledge cancellation to runtara-core (sends SignalAck)
                         // This updates instance status to "cancelled" in the database
                         runtara_sdk::acknowledge_cancellation();
-                        tracing::info!("Workflow execution was cancelled");
                         return ExitCode::SUCCESS;
                     }
 
@@ -1592,14 +1415,13 @@ pub(crate) fn emit_main(graph: &ExecutionGraph) -> TokenStream {
                         runtara_sdk::acknowledge_pause();
                         let sdk_guard = sdk().lock().unwrap();
                         let _ = sdk_guard.suspended();
-                        tracing::info!("Workflow execution was paused");
                         return ExitCode::SUCCESS;
                     }
 
                     // Report failure to runtara-core via SDK
                     let sdk_guard = sdk().lock().unwrap();
                     let _ = sdk_guard.failed(&e);
-                    tracing::error!("Workflow execution failed: {}", e);
+                    eprintln!("Workflow execution failed: {}", e);
                     ExitCode::FAILURE
                 }
             }
@@ -2470,8 +2292,8 @@ mod tests {
         );
         assert!(code.contains("prelude"), "Should import prelude");
         // tokio no longer imported — generated workflows are synchronous
-        assert!(code.contains("tracing"), "Should import tracing");
-        // Instrument trait no longer imported — generated workflows use sync span scoping
+        // tracing no longer imported — observability lives in checkpoints + SDK events,
+        // not stderr; per-step __StepSpan stubs are ZSTs with no runtime surface.
     }
 
     #[test]
@@ -2840,29 +2662,30 @@ mod tests {
             "Should call execute_workflow"
         );
         assert!(
-            code.contains("telemetry :: init_subscriber"),
-            "Should initialize telemetry subscriber"
-        );
-        assert!(
             code.contains("__root_span"),
             "Should create root span for workflow execution"
         );
     }
 
     #[test]
-    fn test_emit_main_uses_tracing_for_errors() {
+    fn test_emit_main_uses_eprintln_for_bootstrap_errors() {
         let graph = create_minimal_finish_graph("finish");
         let tokens = emit_main(&graph);
         let code = tokens.to_string();
 
-        // Should use tracing for error logging instead of eprintln!
+        // Tracing was removed; bootstrap/lifecycle errors that fire when the SDK
+        // can't be reached still need a debuggability net, so they fall back to
+        // stderr via eprintln!. Normal cancel/pause paths don't log — the SDK
+        // already records the state via signals.
         assert!(
-            code.contains("tracing :: error"),
-            "Should use tracing::error for error logging"
+            code.contains("eprintln !"),
+            "Should use eprintln! for bootstrap/lifecycle error logging"
         );
         assert!(
-            !code.contains("eprintln"),
-            "Should not use eprintln (use tracing instead)"
+            !code.contains("tracing :: error")
+                && !code.contains("tracing :: warn")
+                && !code.contains("tracing :: info"),
+            "Should not reference tracing in generated code"
         );
     }
 

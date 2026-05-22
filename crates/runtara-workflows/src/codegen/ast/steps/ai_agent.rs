@@ -458,8 +458,10 @@ pub fn emit(
                 #mem_agent_id,
                 "load-memory",
                 "memory_load",
-            ).unwrap_or_else(|e| {
-                tracing::warn!("AI Agent step '{}': memory load failed: {}", #step_id, e);
+            ).unwrap_or_else(|_e| {
+                // Memory-load failures degrade gracefully: continue with an empty
+                // history. The error is captured in the cache value and surfaces
+                // through SDK events; no need for an additional tracing call.
                 serde_json::json!({"messages": [], "message_count": 0})
             });
             let __mem_load_duration_ms = __mem_load_start_time.elapsed().as_millis() as u64;
@@ -470,18 +472,9 @@ pub fn emit(
                 for msg_val in messages {
                     if let Ok(msg) = serde_json::from_value::<RigMessage>(msg_val.clone()) {
                         __chat_history.push(msg);
-                    } else {
-                        tracing::warn!(
-                            "AI Agent step '{}': skipped malformed message in memory",
-                            #step_id
-                        );
                     }
-                }
-                if !messages.is_empty() {
-                    tracing::info!(
-                        "AI Agent step '{}': loaded {} messages from memory (conversation: {})",
-                        #step_id, messages.len(), &__conversation_id
-                    );
+                    // Silently skip malformed messages — their absence is visible
+                    // in the resulting history length.
                 }
                 count
             } else {
@@ -507,13 +500,7 @@ pub fn emit(
                         break;
                     }
                 }
-                let __removed = __pre_sanitize_len - __chat_history.len();
-                if __removed > 0 {
-                    tracing::warn!(
-                        "AI Agent step '{}': removed {} orphaned tool_call message(s) from memory",
-                        #step_id, __removed
-                    );
-                }
+                let _ = __pre_sanitize_len; // sanitization is silent; debug events report the resulting history
             }
 
             // Sanitize loaded history: convert orphaned tool_results to plain
@@ -575,12 +562,7 @@ pub fn emit(
                     }
                 }
 
-                if __converted > 0 {
-                    tracing::warn!(
-                        "AI Agent step '{}': converted {} orphaned tool_result message(s) to text in memory",
-                        #step_id, __converted
-                    );
-                }
+                let _ = __converted; // silent — orphan rewriting is recorded in subsequent debug events
             }
 
             // Emit step_debug_end for memory load
@@ -731,8 +713,9 @@ pub fn emit(
                             });
                             __compact_success = true;
                         }
-                        Err(e) => {
-                            tracing::error!("AI Agent step '{}': compaction LLM call failed: {}", #step_id, e);
+                        Err(_e) => {
+                            // Compaction failure is recorded in the AiAgentMemoryCompaction
+                            // debug event below (success=false). Stderr noise dropped.
                             __compact_success = false;
                         }
                     }
@@ -892,8 +875,9 @@ pub fn emit(
             let __mem_save_start_time = std::time::Instant::now();
             let __mem_save_key = format!("{}/memory_save/{}", __ai_cache_key_base, __iterations);
             let __messages_to_save = serde_json::to_value(&__chat_history)
-                .unwrap_or_else(|e| {
-                    tracing::error!("AI Agent step '{}': failed to serialize history: {}", #step_id, e);
+                .unwrap_or_else(|_e| {
+                    // History-serialize failure: persist an empty array so save_memory
+                    // remains durable. Failure surfaces through the save_memory result.
                     serde_json::json!([])
                 });
             let __mem_save_inputs = {
@@ -916,8 +900,9 @@ pub fn emit(
                 "memory_save",
             ) {
                 Ok(_) => true,
-                Err(e) => {
-                    tracing::error!("AI Agent step '{}': memory save failed: {}", #step_id, e);
+                Err(_e) => {
+                    // Save failure is captured in __mem_save_success and reflected in
+                    // the AiAgentMemorySave debug event below.
                     false
                 }
             };
@@ -1150,7 +1135,8 @@ pub fn emit(
 
             loop {
                 if __iterations >= #max_iter_lit {
-                    tracing::warn!("AI Agent step '{}': max iterations ({}) reached", #step_id, #max_iter_lit);
+                    // Reaching the iteration cap is recorded as the agent's final
+                    // result (the loop breaks and emits via debug events).
                     break;
                 }
                 __iterations += 1;
@@ -1578,7 +1564,10 @@ fn build_tool_dispatch(
     if tool_edges.is_empty() {
         return Ok(quote! {
             {
-                tracing::warn!("AI Agent '{}': received tool call '{}' but no tools are defined", #step_id, __tool_name);
+                // No tools wired up — return a structured error to the LLM. The
+                // error payload is sufficient context for both the model and any
+                // debug event consumer.
+                let _ = #step_id;
                 serde_json::json!({"error": format!("Unknown tool: {}", __tool_name)})
             }
         });
@@ -1596,30 +1585,26 @@ fn build_tool_dispatch(
                     emit_agent_tool_arm(label_str, agent_step, step_id)
                 }
                 // EmbedWorkflow step: call pre-emitted child workflow function
-                Some(Step::EmbedWorkflow(_start_step)) => {
-                    emit_embed_workflow_tool_arm(
-                        label_str,
-                        target_step_id,
-                        child_fn_names,
-                        workflow_inputs_var,
-                        step_id,
-                    )
-                }
+                Some(Step::EmbedWorkflow(_start_step)) => emit_embed_workflow_tool_arm(
+                    label_str,
+                    target_step_id,
+                    child_fn_names,
+                    workflow_inputs_var,
+                    step_id,
+                ),
                 // WaitForSignal step: human-in-the-loop via durable signal polling
-                Some(Step::WaitForSignal(wait_step)) => {
-                    emit_wait_for_signal_tool_arm(
-                        label_str,
-                        wait_step,
-                        ctx,
-                        workflow_inputs_var,
-                        step_id,
-                    )
-                }
+                Some(Step::WaitForSignal(wait_step)) => emit_wait_for_signal_tool_arm(
+                    label_str,
+                    wait_step,
+                    ctx,
+                    workflow_inputs_var,
+                    step_id,
+                ),
                 // Other step types: not yet supported as tools
                 _ => {
                     quote! {
                         #label_str => {
-                            tracing::debug!("AI Agent '{}': dispatching to non-agent tool '{}'", #step_id, #label_str);
+                            let _ = #step_id;
                             serde_json::json!({"status": "dispatched", "tool": #label_str})
                         }
                     }
@@ -1634,7 +1619,7 @@ fn build_tool_dispatch(
         match __tool_name.as_str() {
             #(#match_arms)*
             __unknown => {
-                tracing::warn!("AI Agent '{}': unknown tool '{}'", #step_id_str, __unknown);
+                let _ = #step_id_str;
                 serde_json::json!({"error": format!("Unknown tool: {}", __unknown)})
             }
         }
@@ -1712,7 +1697,7 @@ fn emit_embed_workflow_tool_arm(
     let Some(child_fn) = child_fn_names.get(target_step_id) else {
         return quote! {
             #label_str => {
-                tracing::error!("AI Agent '{}': EmbedWorkflow tool '{}' has no compiled child function", #step_id, #label_str);
+                let _ = #step_id;
                 serde_json::json!({"error": format!("EmbedWorkflow tool '{}' not compiled", #label_str)})
             }
         };
@@ -1846,12 +1831,6 @@ fn emit_wait_for_signal_tool_arm(
                 )
             };
 
-            tracing::info!(
-                signal_id = %__wait_signal_id,
-                tool = #label_str,
-                "AI Agent: waiting for human input"
-            );
-
             // Emit a custom event so the frontend knows to show a human input form
             {
                 let #source_var = #build_source;
@@ -1895,12 +1874,6 @@ fn emit_wait_for_signal_tool_arm(
                             let err_str = format!("{}", e);
                             if err_str.contains("connection") || err_str.contains("IO error") {
                                 __poll_errors += 1;
-                                tracing::warn!(
-                                    signal_id = %__wait_signal_id,
-                                    attempt = __poll_errors,
-                                    error = %err_str,
-                                    "WaitForSignal: transient connection error, retrying"
-                                );
                                 if __poll_errors > 10 {
                                     break serde_json::json!({"error": format!("Connection lost after {} retries: {}", __poll_errors, err_str)});
                                 }
@@ -1928,10 +1901,6 @@ fn emit_wait_for_signal_tool_arm(
                             .unwrap_or_else(|_| serde_json::Value::String(
                                 String::from_utf8_lossy(&payload).to_string()
                             ));
-                        tracing::info!(
-                            signal_id = %__wait_signal_id,
-                            "AI Agent: human input received"
-                        );
                         break parsed;
                     }
                     Ok(None) => {
@@ -1947,12 +1916,6 @@ fn emit_wait_for_signal_tool_arm(
                         // Retry transient connection errors
                         if e.contains("connection") || e.contains("IO error") {
                             __poll_errors += 1;
-                            tracing::warn!(
-                                signal_id = %__wait_signal_id,
-                                attempt = __poll_errors,
-                                error = %e,
-                                "WaitForSignal: transient poll error, retrying"
-                            );
                             if __poll_errors > 10 {
                                 break serde_json::json!({"error": format!("Poll failed after {} retries: {}", __poll_errors, e)});
                             }
@@ -2129,8 +2092,10 @@ mod tests {
             "Should use CompletionModel trait"
         );
         assert!(
-            code.contains("max iterations"),
-            "Should check max iterations"
+            code.contains("__iterations >= 5u32")
+                || code.contains("__iterations >= 10u32")
+                || code.contains("__iterations >="),
+            "Should check max iterations cap (break loop when reached)"
         );
         assert!(code.contains("AiAgent"), "Should have stepType AiAgent");
     }
