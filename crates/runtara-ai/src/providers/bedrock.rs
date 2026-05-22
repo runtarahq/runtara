@@ -78,6 +78,7 @@ impl CompletionModel for BedrockCompletionModel {
 
         if response.status >= 400 {
             let error_body = String::from_utf8_lossy(&response.body).to_string();
+            #[cfg(feature = "tracing")]
             tracing::error!(
                 target: "runtara_ai",
                 status = response.status,
@@ -93,6 +94,7 @@ impl CompletionModel for BedrockCompletionModel {
         let response_text = response.into_string().map_err(|e| {
             CompletionError::HttpError(format!("Failed to read response body: {e}"))
         })?;
+        #[cfg(feature = "tracing")]
         tracing::debug!(target: "runtara_ai", "Bedrock raw response: {}", response_text);
 
         let response_json: Value = serde_json::from_str(&response_text)?;

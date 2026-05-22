@@ -124,6 +124,7 @@ impl CompletionModel for OpenAICompletionModel {
 
         if response.status >= 400 {
             let error_body = String::from_utf8_lossy(&response.body).to_string();
+            #[cfg(feature = "tracing")]
             tracing::error!(
                 target: "runtara_ai",
                 status = response.status,
@@ -140,6 +141,7 @@ impl CompletionModel for OpenAICompletionModel {
             CompletionError::HttpError(format!("Failed to read response body: {e}"))
         })?;
 
+        #[cfg(feature = "tracing")]
         tracing::debug!(target: "runtara_ai", "OpenAI raw response: {}", response_text);
 
         let api_resp: ApiCompletionResponse = serde_json::from_str(&response_text)?;
