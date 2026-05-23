@@ -4168,14 +4168,14 @@ dependencies = [
 
 [[package]]
 name = "runtara-agent-mcp"
-version = "5.1.1"
+version = "7.0.8"
 dependencies = [
  "runtara-agent-macro",
  "runtara-dsl",
  "runtara-http",
  "serde",
  "serde_json",
- "thiserror 2.0.17",
+ "thiserror 2.0.18",
  "wit-bindgen-rt 0.44.0",
 ]
 
