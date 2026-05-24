@@ -5,6 +5,7 @@ import { PasswordField } from '../password-field';
 import { CheckboxInput } from '../checkbox-input.tsx';
 import { TextareaInput } from '../textarea-input.tsx';
 import { TagInputField } from '../tag-input-field.tsx';
+import { KeyValueInputField } from '../key-value-input-field.tsx';
 
 interface Props {
   className: string;
@@ -138,6 +139,16 @@ export function FormField(props: Props) {
   } else if (type === 'tags') {
     return (
       <TagInputField
+        name={name}
+        label={label}
+        placeholder={placeholder}
+        onChange={handleChange}
+        description={description}
+      />
+    );
+  } else if (type === 'keyvalue') {
+    return (
+      <KeyValueInputField
         name={name}
         label={label}
         placeholder={placeholder}

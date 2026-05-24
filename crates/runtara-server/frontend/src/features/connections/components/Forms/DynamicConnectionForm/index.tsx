@@ -33,6 +33,16 @@ type FieldConfig = {
 // Type names that indicate an array of strings
 const ARRAY_TYPE_NAMES = ['vec<string>', 'array', 'list', 'string[]', 'tags'];
 
+// Type names that indicate a string→string map (e.g. extra HTTP headers,
+// per-tool hint maps on the MCP connection). Rendered as a key/value editor.
+const KEYVALUE_TYPE_NAMES = [
+  'hashmap<string, string>',
+  'hashmap<string,string>',
+  'map<string, string>',
+  'map<string,string>',
+  'record<string, string>',
+];
+
 // Field names that hint at key/certificate content (multiline)
 const MULTILINE_FIELD_NAMES = [
   'privatekey',
@@ -56,6 +66,11 @@ function getFieldType(field: ConnectionFieldDto): string {
   // Array types → tag input
   if (ARRAY_TYPE_NAMES.includes(typeName)) {
     return 'tags';
+  }
+
+  // String→string maps → key/value editor
+  if (KEYVALUE_TYPE_NAMES.includes(typeName)) {
+    return 'keyvalue';
   }
 
   // Multiline secret fields (keys, certs) → textarea
@@ -112,6 +127,13 @@ function buildSchema(
               `${field.displayName || field.name} requires at least one item`
             );
       shape[field.name] = fieldSchema;
+      continue;
+    }
+
+    // String→string maps
+    if (KEYVALUE_TYPE_NAMES.includes(typeName)) {
+      const record = z.record(z.string(), z.string());
+      shape[field.name] = field.isOptional ? record.optional() : record;
       continue;
     }
 
@@ -204,6 +226,7 @@ function buildFieldsConfig(fields: ConnectionFieldDto[]): FieldConfig[] {
     const isNumericField = ['u16', 'u32', 'i32', 'number'].includes(typeName);
     const isBoolField = typeName === 'bool';
     const isArrayField = ARRAY_TYPE_NAMES.includes(typeName);
+    const isKeyValueField = KEYVALUE_TYPE_NAMES.includes(typeName);
     let initialValue: unknown = '';
     if (isBoolField) {
       initialValue = field.defaultValue === 'true' ? true : false;
@@ -215,6 +238,10 @@ function buildFieldsConfig(fields: ConnectionFieldDto[]): FieldConfig[] {
             .map((s) => s.trim())
             .filter(Boolean)
         : [];
+    } else if (isKeyValueField) {
+      // HashMap defaults to an empty object; defaultValue strings from the
+      // backend aren't parsed here — keyvalue defaults are always empty.
+      initialValue = {};
     } else if (field.defaultValue) {
       initialValue = field.defaultValue;
     } else if (isNumericField && field.placeholder) {
@@ -334,6 +361,7 @@ function buildInitialValues(
     const typeName = field.typeName?.toLowerCase() ?? '';
     const isNumericField = ['u16', 'u32', 'i32', 'number'].includes(typeName);
     const isArrayField = ARRAY_TYPE_NAMES.includes(typeName);
+    const isKeyValueField = KEYVALUE_TYPE_NAMES.includes(typeName);
 
     if (typeName === 'bool') {
       values[field.name] = field.defaultValue === 'true' ? true : false;
@@ -344,6 +372,8 @@ function buildInitialValues(
             .map((s) => s.trim())
             .filter(Boolean)
         : [];
+    } else if (isKeyValueField) {
+      values[field.name] = {};
     } else if (field.defaultValue) {
       values[field.name] = field.defaultValue;
     } else if (isNumericField && field.placeholder) {
