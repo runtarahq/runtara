@@ -469,13 +469,13 @@ jobs:
           RUNTARA_NO_INSTALL_TOOLS: "1"
         run: scripts/build-agent-components.sh
 
-      - name: Verify 23 .wasm + 23 .meta.json present
+      - name: Verify 24 .wasm + 24 .meta.json present
         run: |
           wasm_count=$(find target/wasm32-wasip2/release -maxdepth 1 -name 'runtara_agent_*.wasm' | wc -l)
           meta_count=$(find target/wasm32-wasip2/release -maxdepth 1 -name 'runtara_agent_*.meta.json' | wc -l)
           echo "wasm=$wasm_count meta=$meta_count"
-          test "$wasm_count" -eq 23
-          test "$meta_count" -eq 23
+          test "$wasm_count" -eq 24
+          test "$meta_count" -eq 24
 
       - name: Run dispatcher integration tests (incl. full-bundle drift detector)
         run: cargo test -p runtara-component-host --tests
