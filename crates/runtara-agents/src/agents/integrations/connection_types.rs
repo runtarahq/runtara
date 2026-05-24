@@ -1051,7 +1051,8 @@ pub struct McpConnectionParams {
     #[field(
         display_name = "Auth Mode",
         description = "Authentication mode: none, bearer, or api_key.",
-        default = "none"
+        default = "none",
+        enum_values = "none,bearer,api_key"
     )]
     pub auth_mode: String,
 

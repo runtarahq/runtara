@@ -492,6 +492,11 @@ export async function testAgent(
     agentId,
     capabilityId,
     { input, connectionId },
+    // The generated signature now exposes an optional `engine` query param
+    // ahead of `params` — we always want the default engine selection, so
+    // pass `undefined` to skip it and slot the auth headers into the right
+    // arg position.
+    undefined,
     createAuthHeaders(token)
   );
 

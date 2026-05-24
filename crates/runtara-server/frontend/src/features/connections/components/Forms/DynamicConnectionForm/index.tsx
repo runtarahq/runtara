@@ -28,7 +28,53 @@ type FieldConfig = {
   isSecret?: boolean;
   isOptional?: boolean;
   fieldName?: string; // Original field name for smarter grouping
+  /** Populated when the backend declared `enumValues` for this field —
+   * triggers select rendering via the FormField switch. */
+  options?: Array<{ value: string; label: string }>;
 };
+
+/**
+ * Derive a human-readable label for an enum option value.
+ *
+ * `"none"` → `"None"`, `"api_key"` → `"API Key"`, `"snake_case_thing"`
+ * → `"Snake Case Thing"`. Known acronyms are upper-cased so the select
+ * looks right without per-value backend metadata.
+ */
+const ENUM_LABEL_ACRONYMS = new Set([
+  'api',
+  'url',
+  'uri',
+  'sql',
+  'ssh',
+  'ssl',
+  'tls',
+  'json',
+  'xml',
+  'html',
+  'http',
+  'https',
+  'csv',
+  'pdf',
+  'aws',
+  'gcp',
+  'mcp',
+  'oauth',
+  'oauth2',
+  'jwt',
+  'id',
+]);
+
+function enumValueToLabel(value: string): string {
+  return value
+    .split(/[_\s-]+/)
+    .filter(Boolean)
+    .map((token) =>
+      ENUM_LABEL_ACRONYMS.has(token.toLowerCase())
+        ? token.toUpperCase()
+        : token.charAt(0).toUpperCase() + token.slice(1).toLowerCase()
+    )
+    .join(' ');
+}
 
 // Type names that indicate an array of strings
 const ARRAY_TYPE_NAMES = ['vec<string>', 'array', 'list', 'string[]', 'tags'];
@@ -62,6 +108,13 @@ const FILE_STORAGE_CATEGORIES = new Set(['file_storage', 'storage']);
 function getFieldType(field: ConnectionFieldDto): string {
   const typeName = field.typeName?.toLowerCase() ?? '';
   const fieldNameLower = field.name.toLowerCase().replace(/[_-]/g, '');
+
+  // Bounded-set fields → select. Takes precedence over secret/text fallback
+  // so an enum-typed secret (rare) would still render as a select; we don't
+  // expect that combination in practice.
+  if (field.enumValues && field.enumValues.length > 0) {
+    return 'select';
+  }
 
   // Array types → tag input
   if (ARRAY_TYPE_NAMES.includes(typeName)) {
@@ -227,8 +280,17 @@ function buildFieldsConfig(fields: ConnectionFieldDto[]): FieldConfig[] {
     const isBoolField = typeName === 'bool';
     const isArrayField = ARRAY_TYPE_NAMES.includes(typeName);
     const isKeyValueField = KEYVALUE_TYPE_NAMES.includes(typeName);
+    const hasEnumValues = !!field.enumValues && field.enumValues.length > 0;
     let initialValue: unknown = '';
-    if (isBoolField) {
+    if (hasEnumValues) {
+      // Default to the declared default if it's one of the allowed values,
+      // otherwise fall back to the first enum value so the select isn't blank.
+      const defaults = field.enumValues ?? [];
+      initialValue =
+        field.defaultValue && defaults.includes(field.defaultValue)
+          ? field.defaultValue
+          : defaults[0] ?? '';
+    } else if (isBoolField) {
       initialValue = field.defaultValue === 'true' ? true : false;
     } else if (isArrayField) {
       // Parse default value as comma-separated for arrays
@@ -259,6 +321,12 @@ function buildFieldsConfig(fields: ConnectionFieldDto[]): FieldConfig[] {
       isSecret: field.isSecret || false,
       isOptional: field.isOptional || false,
       fieldName: field.name,
+      options: hasEnumValues
+        ? (field.enumValues ?? []).map((value) => ({
+            value,
+            label: enumValueToLabel(value),
+          }))
+        : undefined,
     };
   });
 
@@ -362,8 +430,15 @@ function buildInitialValues(
     const isNumericField = ['u16', 'u32', 'i32', 'number'].includes(typeName);
     const isArrayField = ARRAY_TYPE_NAMES.includes(typeName);
     const isKeyValueField = KEYVALUE_TYPE_NAMES.includes(typeName);
+    const hasEnumValues = !!field.enumValues && field.enumValues.length > 0;
 
-    if (typeName === 'bool') {
+    if (hasEnumValues) {
+      const defaults = field.enumValues ?? [];
+      values[field.name] =
+        field.defaultValue && defaults.includes(field.defaultValue)
+          ? field.defaultValue
+          : defaults[0] ?? '';
+    } else if (typeName === 'bool') {
       values[field.name] = field.defaultValue === 'true' ? true : false;
     } else if (isArrayField) {
       values[field.name] = field.defaultValue
