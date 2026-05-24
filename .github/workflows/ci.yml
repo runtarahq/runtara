@@ -314,7 +314,7 @@ jobs:
           TEST_RUNTARA_DATABASE_URL: postgres://postgres:postgres@localhost:5432/runtara_test
         run: cargo test -p runtara-environment -- --test-threads=1
 
-  # Per-component-crate unit tests for the 23 agent crates plus the legacy
+  # Per-component-crate unit tests for the 24 agent crates plus the legacy
   # `runtara-agents` parent and the shared agent infrastructure
   # (`runtara-agent-macro` proc-macro). Distinct from components-build,
   # which builds .wasm + .meta.json and drives the dispatcher end-to-end —
@@ -462,7 +462,7 @@ jobs:
       - name: Install wit-deps
         run: cargo install wit-deps-cli --locked
 
-      - name: Build all 23 agent components + emit sidecar meta.json
+      - name: Build all 24 agent components + emit sidecar meta.json
         env:
           # Tools are installed explicitly above. Fail loudly if anything's
           # missing instead of silently re-installing inside the script.

@@ -204,8 +204,8 @@ async fn dispatcher_loads_full_production_bundle() -> anyhow::Result<()> {
         .map(str::to_string)
         .collect::<Vec<_>>();
     assert!(
-        loaded.len() >= 23,
-        "expected at least 23 agents in the bundle, got {}: {:?}",
+        loaded.len() >= 24,
+        "expected at least 24 agents in the bundle, got {}: {:?}",
         loaded.len(),
         loaded
     );
