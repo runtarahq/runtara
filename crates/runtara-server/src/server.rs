@@ -150,6 +150,8 @@ use runtime_client::RuntimeClient;
         api::handlers::api_keys::create_api_key,
         api::handlers::api_keys::list_api_keys,
         api::handlers::api_keys::revoke_api_key,
+        // Entitlements endpoint
+        api::handlers::entitlements::get_entitlements_handler,
         // Event Capture endpoints
         api::handlers::events::capture_http_event,
         // Specification endpoints
@@ -171,6 +173,11 @@ use runtime_client::RuntimeClient;
             api::handlers::api_keys::ApiKey,
             api::handlers::api_keys::CreateApiKeyRequest,
             api::handlers::api_keys::CreateApiKeyResponse,
+            // Entitlement DTOs
+            api::dto::entitlements::EntitlementsDto,
+            crate::entitlements::FeatureKey,
+            crate::entitlements::EntitlementLimits,
+            crate::entitlements::Tier,
             // Workflow DTOs (refactored)
             api::dto::workflows::WorkflowDto,
             api::dto::workflows::WorkflowVersionInfoDto,
@@ -1518,6 +1525,11 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         .route(
             "/api/runtime/api-keys/{id}",
             delete(api::handlers::api_keys::revoke_api_key),
+        )
+        // Entitlements snapshot endpoint
+        .route(
+            "/api/runtime/entitlements",
+            get(api::handlers::entitlements::get_entitlements_handler),
         )
         // Agent execution endpoint (host-mediated, for WASM transition)
         .route(

@@ -423,6 +423,13 @@ pub fn dev_mode() -> bool {
     get().dev_mode
 }
 
+/// Resolved entitlement snapshot for the process's single tenant. Built once
+/// at startup by `Config::from_env()`; readers see the same value for the
+/// lifetime of the process.
+pub fn entitlements() -> &'static EntitlementSnapshot {
+    &get().entitlement_snapshot
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
