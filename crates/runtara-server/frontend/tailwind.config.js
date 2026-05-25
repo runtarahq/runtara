@@ -11,7 +11,6 @@ export default {
     './src/features/**/*.{js,ts,tsx}',
     './src/lib/**/*.{js,ts,tsx}',
     './src/*.{js,ts,tsx}',
-    './.storybook/**/*.{js,ts,tsx}',
   ],
   theme: {
     fontFamily: {

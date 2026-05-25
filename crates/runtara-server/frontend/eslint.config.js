@@ -10,7 +10,6 @@ export default tseslint.config(
     ignores: [
       'dist',
       'dev-dist',
-      'storybook-static',
       'e2e-report',
       'e2e-results',
       'playwright-report',
