@@ -469,8 +469,17 @@ pub fn emit(
                         "query": __query,
                         "limit": __limit,
                     });
-                    if !__mcp_connection_json.is_null() {
+                    // Set top-level connection_id so the internal-agents
+                    // handler resolves real credentials and fills in
+                    // `_connection.parameters` before the WASM agent runs.
+                    // Without this, `mcp_tool_search` sees an empty
+                    // parameters object and `extract_url` returns MCP_NO_URL.
+                    if !__mcp_connection_id.is_empty() {
                         if let serde_json::Value::Object(ref mut m) = __search_inputs {
+                            m.insert(
+                                "connection_id".to_string(),
+                                serde_json::Value::String(__mcp_connection_id.clone()),
+                            );
                             m.insert("_connection".to_string(), __mcp_connection_json.clone());
                         }
                     }
@@ -508,8 +517,16 @@ pub fn emit(
                         "tool_name": __tool_name_arg,
                         "args": __args_arg,
                     });
-                    if !__mcp_connection_json.is_null() {
+                    // Set top-level connection_id so the internal-agents
+                    // handler resolves real credentials and fills in
+                    // `_connection.parameters` before the WASM agent runs.
+                    // See the matching note on the search arm above.
+                    if !__mcp_connection_id.is_empty() {
                         if let serde_json::Value::Object(ref mut m) = __invoke_inputs {
+                            m.insert(
+                                "connection_id".to_string(),
+                                serde_json::Value::String(__mcp_connection_id.clone()),
+                            );
                             m.insert("_connection".to_string(), __mcp_connection_json.clone());
                         }
                     }
@@ -2813,6 +2830,35 @@ mod tests {
         assert!(
             code.contains("mcp-tool-invoke"),
             "Dispatch arm should call mcp-tool-invoke capability"
+        );
+    }
+
+    #[test]
+    fn test_mcp_dispatch_injects_top_level_connection_id() {
+        // Regression: the internal-agents handler resolves connection
+        // credentials only when `input.connection_id` is set at the top
+        // level. Earlier the codegen only nested it inside `_connection`,
+        // so `mcp_tool_search`/`mcp_tool_invoke` ran with an empty
+        // parameters object and `extract_url` returned MCP_NO_URL on
+        // every call. See PR #65 review for the failure trace.
+        let graph = create_graph_with_mcp_edge("linear");
+        let mut ctx = EmitContext::new(false);
+        let step = create_ai_agent_step("ai_agent");
+        let tokens = emit(&step, &mut ctx, &graph).unwrap();
+        let code = tokens.to_string();
+
+        // Both arms must insert `connection_id` at the top level of the
+        // inputs map alongside the `_connection` placeholder.
+        assert!(
+            code.contains("\"connection_id\"") && code.contains("__mcp_connection_id"),
+            "MCP dispatch arms must insert top-level connection_id so the \
+             internal handler resolves credentials"
+        );
+        // Sanity check that the fixture's connection_id is the string the
+        // codegen embeds; if the fixture changes, update this constant.
+        assert!(
+            code.contains("conn-mcp-1"),
+            "Codegen should embed the edge target's connection_id literal"
         );
     }
 
