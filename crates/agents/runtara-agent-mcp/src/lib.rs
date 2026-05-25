@@ -34,8 +34,12 @@
 //!     → server-side: resolve connection → inject Authorization → forward
 //!     → MCP server: respond with tools/list or tools/call payload
 //!
-//! v1 has NO session continuity: each capability invocation is one stateless
-//! POST. If a server demands an `initialize` handshake we add it later.
+//! Each capability invocation runs the full Streamable-HTTP handshake in
+//! one ephemeral session: `initialize` → `notifications/initialized` →
+//! real request, all under the `Mcp-Session-Id` the server hands back on
+//! init. No session reuse across capability calls — short-lived, cheap,
+//! and side-steps the question of how to persist session state across
+//! WASM invocations.
 #![allow(clippy::result_large_err)]
 
 use runtara_agent_macro::{CapabilityInput, CapabilityOutput, capability};
@@ -147,11 +151,103 @@ pub struct RawConnection {
 // runtara-agents/integrations/mcp.rs for the ConnectionParams macro).
 // ============================================================================
 
+/// Return a connection whose `parameters` are guaranteed non-empty.
+///
+/// Components-mode workflow dispatch hands the agent a `_connection` with
+/// empty `parameters` (the codegen only fills in connection_id +
+/// integration_id; real credentials live in the connections service). When
+/// the input parameters are empty, fall back to fetching the full record
+/// from `CONNECTION_SERVICE_URL/{tenant}/{conn_id}` using the env vars the
+/// wasmtime host injects (see `runtara-component-host::host_state`). The
+/// proxy uses the same endpoint internally — this just gives the agent
+/// the same view so it can read `url` / `tool_hints` / `tool_scope` /
+/// `extra_headers` directly.
+fn resolve_connection_params(connection: &RawConnection) -> Result<RawConnection, AgentError> {
+    let params_is_empty = connection
+        .parameters
+        .as_object()
+        .map(|o| o.is_empty())
+        .unwrap_or(true);
+    if !params_is_empty {
+        return Ok(connection.clone());
+    }
+
+    if connection.connection_id.is_empty() {
+        return Err(AgentError::permanent(
+            "MCP_NO_PARAMS",
+            "MCP connection has no parameters and no connection_id to look them up",
+        )
+        .with_attr("integration", "MCP"));
+    }
+
+    let base = std::env::var("CONNECTION_SERVICE_URL").map_err(|_| {
+        AgentError::permanent(
+            "MCP_NO_PARAMS",
+            "MCP connection has empty parameters and CONNECTION_SERVICE_URL env var \
+             is unset; cannot resolve at runtime",
+        )
+        .with_attr("integration", "MCP")
+    })?;
+    let tenant = std::env::var("RUNTARA_TENANT_ID").map_err(|_| {
+        AgentError::permanent(
+            "MCP_NO_PARAMS",
+            "MCP connection has empty parameters and RUNTARA_TENANT_ID env var \
+             is unset; cannot resolve at runtime",
+        )
+        .with_attr("integration", "MCP")
+    })?;
+
+    let endpoint = format!(
+        "{}/{}/{}",
+        base.trim_end_matches('/'),
+        tenant,
+        connection.connection_id
+    );
+    let client = runtara_http::HttpClient::with_timeout(std::time::Duration::from_millis(10_000));
+    let resp = client.request("GET", &endpoint).call().map_err(|e| {
+        AgentError::permanent(
+            "MCP_NO_PARAMS",
+            format!("fallback fetch of connection params from {endpoint} failed: {e}"),
+        )
+        .with_attr("integration", "MCP")
+    })?;
+    if !(200..300).contains(&resp.status) {
+        return Err(AgentError::permanent(
+            "MCP_NO_PARAMS",
+            format!(
+                "fallback fetch of connection params from {endpoint} returned HTTP {}",
+                resp.status
+            ),
+        )
+        .with_attr("integration", "MCP"));
+    }
+    let body: Value = serde_json::from_slice(&resp.body).map_err(|e| {
+        AgentError::permanent(
+            "MCP_NO_PARAMS",
+            format!("connection-service response was not JSON: {e}"),
+        )
+        .with_attr("integration", "MCP")
+    })?;
+    let parameters = body
+        .get("parameters")
+        .cloned()
+        .unwrap_or_else(|| Value::Object(Default::default()));
+
+    Ok(RawConnection {
+        connection_id: connection.connection_id.clone(),
+        connection_subtype: connection.connection_subtype.clone(),
+        integration_id: connection.integration_id.clone(),
+        parameters,
+        rate_limit_config: connection.rate_limit_config.clone(),
+    })
+}
+
 fn extract_url(connection: &RawConnection) -> Result<String, AgentError> {
     connection
         .parameters
         .get("url")
         .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
         .map(|s| s.to_string())
         .ok_or_else(|| {
             AgentError::permanent(
@@ -272,11 +368,12 @@ pub struct McpToolSearchOutput {
     tags = "mcp:search"
 )]
 pub fn mcp_tool_search(input: McpToolSearchInput) -> Result<McpToolSearchOutput, AgentError> {
-    let connection = require_connection(input._connection.as_ref())?;
-    let url = extract_url(connection)?;
-    let hints = extract_hints(connection);
-    let scope = extract_scope(connection);
-    let extra_headers = extract_extra_headers(connection);
+    let raw = require_connection(input._connection.as_ref())?;
+    let connection = resolve_connection_params(raw)?;
+    let url = extract_url(&connection)?;
+    let hints = extract_hints(&connection);
+    let scope = extract_scope(&connection);
+    let extra_headers = extract_extra_headers(&connection);
     let limit = input.limit.map(|n| n as usize).unwrap_or(5).clamp(1, 20);
 
     let tools: Vec<Tool> = client::list_tools(&url, &connection.connection_id, &extra_headers)?;
@@ -354,10 +451,11 @@ pub struct McpToolInvokeOutput {
     tags = "mcp:invoke"
 )]
 pub fn mcp_tool_invoke(input: McpToolInvokeInput) -> Result<McpToolInvokeOutput, AgentError> {
-    let connection = require_connection(input._connection.as_ref())?;
-    let url = extract_url(connection)?;
-    let scope = extract_scope(connection);
-    let extra_headers = extract_extra_headers(connection);
+    let raw = require_connection(input._connection.as_ref())?;
+    let connection = resolve_connection_params(raw)?;
+    let url = extract_url(&connection)?;
+    let scope = extract_scope(&connection);
+    let extra_headers = extract_extra_headers(&connection);
 
     if !scope.is_empty() && !scope.contains(&input.tool_name) {
         return Err(AgentError::permanent(
