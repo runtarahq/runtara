@@ -61,9 +61,6 @@ export default defineConfig({
     // Video on failure
     video: 'on-first-retry',
 
-    // Block service workers to prevent Workbox from intercepting API requests
-    serviceWorkers: 'block',
-
     // Accept self-signed certificates from Vite's basicSsl plugin
     ignoreHTTPSErrors: true,
   },
