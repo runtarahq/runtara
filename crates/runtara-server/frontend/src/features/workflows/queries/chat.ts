@@ -167,6 +167,81 @@ export async function fetchChatHistory(
 }
 
 /**
+ * Pull the AI Agent's final prose reply out of a workflow `completed`
+ * event payload. Returns `null` when there's no chat-shaped output (the
+ * caller should fall back to a generic "Completed" system message).
+ *
+ * Recognised shapes:
+ *   - `payload.answer.response: string`  — Finish step receives the
+ *     full AiAgent outputs object (`{iterations, response, toolCalls}`).
+ *     This is the convention the demo workflows use.
+ *   - `payload.answer: string`           — Finish maps `answer` directly
+ *     to a single string (e.g. `steps.agent.outputs.response`).
+ *   - `payload.response: string`         — Finish exposes `response` at
+ *     the top level.
+ *   - `payload.message: string`          — same convention as channel
+ *     adapters (telegram/slack) use for their reply field.
+ */
+function extractAssistantText(
+  payload: Record<string, unknown> | undefined
+): string | null {
+  if (!payload) return null;
+  const answer = payload.answer as Record<string, unknown> | string | undefined;
+  if (typeof answer === 'string' && answer.trim()) return answer;
+  if (answer && typeof answer === 'object') {
+    const resp = (answer as Record<string, unknown>).response;
+    if (typeof resp === 'string' && resp.trim()) return resp;
+  }
+  const top = payload.response ?? payload.message;
+  if (typeof top === 'string' && top.trim()) return top;
+  return null;
+}
+
+/**
+ * Resolve a human-friendly tool label for an `AiAgentToolCall`
+ * step_debug_end event.
+ *
+ * The AI-Agent codegen names tool-call sub-steps in two flavours:
+ *   - `"Tool: <toolName>"`                  — regular edge-tools, set
+ *     from the workflow author's step name.
+ *   - `"<agent>.tool.<toolName>.<counter>"` — synthetic MCP tools
+ *     (e.g. `agent.tool.runtara_search.1`) where step_id IS the label.
+ * In the synthetic case `step_name.replace('Tool: ', '')` returns the
+ * raw step_id, so we parse the toolName out of the structured id
+ * instead.
+ */
+function extractToolLabel(
+  payload: Record<string, unknown>,
+  stepName: string | undefined
+): string {
+  // 1. Tool args may carry the literal tool_name for MCP `_invoke`-style
+  //    dispatches (the meta-tool wraps the real tool name as an arg).
+  const inputs = payload.inputs as Record<string, unknown> | undefined;
+  const fromArgs = inputs?.tool_name;
+  if (typeof fromArgs === 'string' && fromArgs.trim()) return fromArgs;
+
+  // 2. "Tool: foo" → "foo" (regular edge tools).
+  if (stepName && stepName.startsWith('Tool: ')) {
+    return stepName.slice('Tool: '.length);
+  }
+
+  // 3. Synthetic MCP step ids: "<agent>.tool.<toolName>.<counter>".
+  const stepId = payload.step_id as string | undefined;
+  if (stepId) {
+    const idx = stepId.indexOf('.tool.');
+    if (idx >= 0) {
+      const after = stepId.slice(idx + '.tool.'.length);
+      const dot = after.lastIndexOf('.');
+      const tool = dot > 0 ? after.slice(0, dot) : after;
+      if (tool) return tool;
+    }
+  }
+
+  // 4. Last resort: the bare step name or a generic placeholder.
+  return stepName ?? 'tool';
+}
+
+/**
  * Convert raw step events from the step-events API into ChatMessage objects.
  * Each significant event becomes its own message in the chat timeline.
  *
@@ -215,9 +290,27 @@ function reconstructMessagesFromEvents(
       continue;
     }
 
-    // Execution completed
+    // Execution completed — surface the AI Agent's prose reply as an
+    // assistant bubble when the workflow output looks chat-shaped.
+    //
+    // Workflows authored for chat typically route the AI Agent step's
+    // outputs into a Finish step's `answer` field, so the completion
+    // payload's `answer.response` carries the model's final text.
+    // We also accept `answer` being a plain string for simpler shapes,
+    // and fall through to a generic "Completed" line otherwise.
     if (eventType === 'completed') {
-      addSystem('Completed', createdAt);
+      const completionText = extractAssistantText(payload);
+      if (completionText) {
+        messages.push({
+          id: makeId(),
+          role: 'assistant',
+          content: completionText,
+          timestamp: createdAt,
+          events: [],
+        });
+      } else {
+        addSystem('Completed', createdAt);
+      }
       continue;
     }
 
@@ -286,7 +379,13 @@ function reconstructMessagesFromEvents(
             createdAt
           );
         } else if (stepType === 'AiAgentToolCall') {
-          const toolLabel = (stepName ?? 'Tool').replace('Tool: ', '');
+          // The codegen names tool-call sub-steps either "Tool: <name>"
+          // (regular edge-tools) or `<agent>.tool.<toolName>.<counter>`
+          // (MCP synthetic tools — `agent.tool.runtara_search.1` etc).
+          // Fall back from the human label to the structured id so the
+          // synthetic case shows the actual tool name rather than
+          // "unknown".
+          const toolLabel = extractToolLabel(payload, stepName);
           addSystem(`${toolLabel} completed${durationStr}`, createdAt);
         } else if (stepType === 'AiAgentMemorySave') {
           addSystem(`Memory saved${durationStr}`, createdAt);

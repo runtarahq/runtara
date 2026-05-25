@@ -19,7 +19,9 @@ use tokio::time::sleep;
 use tracing::{debug, error, info};
 use uuid::Uuid;
 
-use crate::api::handlers::chat::{ChatEvent, chat_event_type, make_event, parse_debug_event};
+use crate::api::handlers::chat::{
+    ChatEvent, chat_event_type, extract_message_from_outputs, make_event, parse_debug_event,
+};
 use crate::api::handlers::common::execution_error_response;
 use crate::api::repositories::trigger_stream::TriggerStreamPublisher;
 use crate::api::services::{session_queue, session_token};
@@ -651,6 +653,15 @@ fn build_session_event_stream(
                                         (Some(s), Some(f)) => Some((f - s).num_milliseconds() as f64 / 1000.0),
                                         _ => None,
                                     };
+                                    // Surface the agent's prose reply as an
+                                    // assistant message. Step events truncate
+                                    // large AiAgent outputs, so we lift the
+                                    // response off the workflow's final
+                                    // `outputs` (not truncated) — see
+                                    // `extract_message_from_outputs`.
+                                    if let Some(msg) = extract_message_from_outputs(info.output.as_ref()) {
+                                        yield Ok(make_event("message", &msg));
+                                    }
                                     yield Ok(make_event("done", &ChatEvent::Done {
                                         outputs: info.output,
                                         duration_seconds: duration,
