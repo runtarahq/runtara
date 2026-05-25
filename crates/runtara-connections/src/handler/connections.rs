@@ -437,6 +437,9 @@ fn meta_to_dto(meta: &runtara_dsl::agent_meta::ConnectionTypeMeta) -> Connection
                 placeholder: f.placeholder.map(|s| s.to_string()),
                 default_value: f.default_value.map(|s| s.to_string()),
                 is_secret: f.is_secret,
+                enum_values: f
+                    .enum_values
+                    .map(|vs| vs.iter().map(|s| s.to_string()).collect()),
             })
             .collect(),
         default_rate_limit_config: get_default_rate_limit_config(meta.integration_id),

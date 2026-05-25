@@ -861,6 +861,11 @@ pub struct ConnectionFieldDto {
     pub default_value: Option<String>,
     /// Whether this is a secret field (password, API key, etc.)
     pub is_secret: bool,
+    /// Allowed values for select-style rendering. `None` means free-form.
+    /// When present, the UI renders a dropdown with these literal values
+    /// (labels are derived client-side from the value).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enum_values: Option<Vec<String>>,
 }
 
 /// OAuth2 configuration for a connection type (authorization code flow)

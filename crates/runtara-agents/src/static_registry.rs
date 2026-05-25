@@ -2672,6 +2672,8 @@ pub static CONNECTION_TYPES: &[&ConnectionTypeMeta] = &[
     &crate::integrations::connection_types::__CONNECTION_META_AzureBlobStorageParams,
     #[cfg(feature = "integrations")]
     &crate::integrations::connection_types::__CONNECTION_META_StripeApiKeyParams,
+    #[cfg(feature = "integrations")]
+    &crate::integrations::connection_types::__CONNECTION_META_McpConnectionParams,
 ];
 
 #[cfg(feature = "native")]

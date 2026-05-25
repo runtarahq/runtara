@@ -57,17 +57,55 @@ pub fn emit(
     // Collect labeled edges (tools) from execution plan.
     // "next" is a reserved label meaning "continue to next step" — not a tool.
     // "memory" is a reserved label for the memory provider — not a tool.
+    // "mcp.<toolset>" is a reserved label for an MCP server connection —
+    // not a tool itself; the codegen synthesizes two meta-tools
+    // (<toolset>_search and <toolset>_invoke) from each such edge below.
     let tool_edges: Vec<(&str, &str)> = execution_plan
         .iter()
         .filter(|e| e.from_step == step.id && e.label.is_some())
         .filter_map(|e| {
             let label = e.label.as_deref()?;
-            if label == "next" || label == "memory" {
+            if label == "next" || label == "memory" || label.starts_with("mcp.") {
                 return None; // Reserved labels
             }
             Some((label, e.to_step.as_str()))
         })
         .collect();
+
+    // Collect MCP edges (one per external MCP server). Each generates two
+    // synthetic tools — `<toolset_id>_search` and `<toolset_id>_invoke` —
+    // that the LLM uses to discover and call tools on the server.
+    // Validation (Phase 3) guarantees: target is Agent, agent_id == "mcp",
+    // suffix is non-empty, suffixes are unique per AI Agent.
+    struct McpEdge<'a> {
+        toolset_id: &'a str,
+        target_step_id: &'a str,
+        connection_id: Option<&'a str>,
+    }
+    let mcp_edges: Vec<McpEdge<'_>> = execution_plan
+        .iter()
+        .filter(|e| {
+            e.from_step == step.id
+                && e.label
+                    .as_deref()
+                    .is_some_and(|l| l.starts_with("mcp.") && l.len() > 4)
+        })
+        .filter_map(|e| {
+            let label = e.label.as_deref()?;
+            let toolset_id = &label[4..]; // strip "mcp."
+            let target = graph.steps.get(&e.to_step)?;
+            let connection_id = match target {
+                Step::Agent(a) => a.connection_id.as_deref(),
+                _ => None,
+            };
+            Some(McpEdge {
+                toolset_id,
+                target_step_id: e.to_step.as_str(),
+                connection_id,
+            })
+        })
+        .collect();
+    let has_mcp_edges = !mcp_edges.is_empty();
 
     // Find the "memory" edge (at most one, validated elsewhere)
     let memory_edge: Option<&str> = execution_plan
@@ -102,6 +140,32 @@ pub fn emit(
             message: "AI Agent provider is required".to_string(),
         })?;
     let output_schema = step.config.as_ref().and_then(|c| c.output_schema.as_ref());
+
+    // System-prompt addition for MCP edges. When the AI Agent has at least one
+    // `mcp.<toolset>` edge, we append a short explanation listing the toolset
+    // names and the search→invoke pattern so the LLM understands how to use
+    // the synthetic meta-tools.
+    let mcp_prompt_addition: String = if has_mcp_edges {
+        let toolset_names: Vec<String> = mcp_edges
+            .iter()
+            .map(|e| format!("`{}`", e.toolset_id))
+            .collect();
+        format!(
+            "\n\nExternal toolsets are available: {names}. To use one, first call \
+             `<toolset>_search` with a description of what you need to find available \
+             tools, then call `<toolset>_invoke` with the exact tool name and args \
+             from the search result. Do not guess tool names.",
+            names = toolset_names.join(", ")
+        )
+    } else {
+        String::new()
+    };
+    let mcp_prompt_addition_tokens = if mcp_prompt_addition.is_empty() {
+        quote! { "" }
+    } else {
+        let s = mcp_prompt_addition.as_str();
+        quote! { #s }
+    };
 
     // Do all mutable operations first
     let step_var = ctx.declare_step(step_id);
@@ -280,10 +344,213 @@ pub fn emit(
         }
     }
 
-    // Build tool definitions at codegen time
-    let tool_def_tokens = build_tool_definitions(&tool_edges, graph);
+    // Build tool definitions at codegen time. The MCP synthetic tools
+    // (`<toolset>_search` + `<toolset>_invoke`) are appended to the
+    // edge-derived list so the LLM sees them alongside any regular tools.
+    let mcp_tool_def_tokens: Vec<TokenStream> = mcp_edges
+        .iter()
+        .flat_map(|edge| {
+            let toolset = edge.toolset_id;
+            let search_name = format!("{}_search", toolset);
+            let invoke_name = format!("{}_invoke", toolset);
+            let search_desc = format!(
+                "Search the `{}` MCP toolset for tools matching a free-text query. \
+                 Use this before `{}_invoke` to discover tool names and argument shapes.",
+                toolset, toolset,
+            );
+            let invoke_desc = format!(
+                "Invoke a specific tool from the `{}` MCP toolset. The `tool_name` must be \
+                 one returned by `{}_search`; `args` must match its input schema.",
+                toolset, toolset,
+            );
+            let search_params = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Free-text description of what you need."
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum number of tools to return (default 5, max 20)."
+                    }
+                },
+                "required": ["query"]
+            });
+            let invoke_params = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "tool_name": {
+                        "type": "string",
+                        "description": "Exact tool name from the search result."
+                    },
+                    "args": {
+                        "type": "object",
+                        "description": "Tool arguments matching the tool's input schema."
+                    }
+                },
+                "required": ["tool_name", "args"]
+            });
+            let search_params_str = serde_json::to_string(&search_params).unwrap_or_default();
+            let invoke_params_str = serde_json::to_string(&invoke_params).unwrap_or_default();
 
-    // Build tool dispatch match arms
+            vec![
+                quote! {
+                    ToolDefinition {
+                        name: #search_name.to_string(),
+                        description: #search_desc.to_string(),
+                        parameters: serde_json::from_str(#search_params_str).unwrap_or(serde_json::json!({})),
+                    }
+                },
+                quote! {
+                    ToolDefinition {
+                        name: #invoke_name.to_string(),
+                        description: #invoke_desc.to_string(),
+                        parameters: serde_json::from_str(#invoke_params_str).unwrap_or(serde_json::json!({})),
+                    }
+                },
+            ]
+        })
+        .collect();
+    let tool_def_tokens = build_tool_definitions(&tool_edges, graph);
+    let tool_def_tokens = if mcp_tool_def_tokens.is_empty() {
+        tool_def_tokens
+    } else {
+        quote! {
+            {
+                let mut __defs: Vec<ToolDefinition> = #tool_def_tokens;
+                __defs.extend(vec![#(#mcp_tool_def_tokens),*]);
+                __defs
+            }
+        }
+    };
+
+    // Build tool dispatch match arms. MCP toolset dispatch arms are appended
+    // alongside the regular edge-derived arms.
+    let mcp_dispatch_arms: Vec<TokenStream> = mcp_edges
+        .iter()
+        .flat_map(|edge| {
+            let toolset = edge.toolset_id;
+            let search_label = format!("{}_search", toolset);
+            let invoke_label = format!("{}_invoke", toolset);
+            let target_step_id = edge.target_step_id;
+            let conn_id = edge.connection_id.unwrap_or_default();
+            let conn_id_str = conn_id;
+            let conn_setup = if conn_id.is_empty() {
+                quote! {
+                    let __mcp_connection_json = serde_json::Value::Null;
+                    let __mcp_connection_id = String::new();
+                }
+            } else {
+                quote! {
+                    let __mcp_connection_id = #conn_id_str.to_string();
+                    let __mcp_connection_json = serde_json::json!({
+                        "connection_id": &__mcp_connection_id,
+                        "integration_id": "mcp",
+                        "connection_subtype": serde_json::Value::Null,
+                        "parameters": serde_json::Value::Object(serde_json::Map::new())
+                    });
+                }
+            };
+
+            let search_arm = quote! {
+                #search_label => {
+                    #conn_setup
+                    let __query = __tool_args
+                        .get("query")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let __limit = __tool_args
+                        .get("limit")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(5);
+                    let mut __search_inputs = serde_json::json!({
+                        "query": __query,
+                        "limit": __limit,
+                    });
+                    // Set top-level connection_id so the internal-agents
+                    // handler resolves real credentials and fills in
+                    // `_connection.parameters` before the WASM agent runs.
+                    // Without this, `mcp_tool_search` sees an empty
+                    // parameters object and `extract_url` returns MCP_NO_URL.
+                    if !__mcp_connection_id.is_empty() {
+                        if let serde_json::Value::Object(ref mut m) = __search_inputs {
+                            m.insert(
+                                "connection_id".to_string(),
+                                serde_json::Value::String(__mcp_connection_id.clone()),
+                            );
+                            m.insert("_connection".to_string(), __mcp_connection_json.clone());
+                        }
+                    }
+                    let __mcp_search_key = format!(
+                        "{}::mcp_search::{}::{}",
+                        __ai_cache_key_base, #toolset, __tool_call_counter
+                    );
+                    let _ = #target_step_id; // suppress unused warning
+                    match __ai_tool_durable(
+                        &__mcp_search_key,
+                        __search_inputs,
+                        "mcp",
+                        "mcp-tool-search",
+                        #search_label,
+                    ) {
+                        Ok(result) => result,
+                        Err(e) => serde_json::json!({"error": e}),
+                    }
+                }
+            };
+
+            let invoke_arm = quote! {
+                #invoke_label => {
+                    #conn_setup
+                    let __tool_name_arg = __tool_args
+                        .get("tool_name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let __args_arg = __tool_args
+                        .get("args")
+                        .cloned()
+                        .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
+                    let mut __invoke_inputs = serde_json::json!({
+                        "tool_name": __tool_name_arg,
+                        "args": __args_arg,
+                    });
+                    // Set top-level connection_id so the internal-agents
+                    // handler resolves real credentials and fills in
+                    // `_connection.parameters` before the WASM agent runs.
+                    // See the matching note on the search arm above.
+                    if !__mcp_connection_id.is_empty() {
+                        if let serde_json::Value::Object(ref mut m) = __invoke_inputs {
+                            m.insert(
+                                "connection_id".to_string(),
+                                serde_json::Value::String(__mcp_connection_id.clone()),
+                            );
+                            m.insert("_connection".to_string(), __mcp_connection_json.clone());
+                        }
+                    }
+                    let __mcp_invoke_key = format!(
+                        "{}::mcp_invoke::{}::{}",
+                        __ai_cache_key_base, #toolset, __tool_call_counter
+                    );
+                    match __ai_tool_durable(
+                        &__mcp_invoke_key,
+                        __invoke_inputs,
+                        "mcp",
+                        "mcp-tool-invoke",
+                        #invoke_label,
+                    ) {
+                        Ok(result) => result,
+                        Err(e) => serde_json::json!({"error": e}),
+                    }
+                }
+            };
+
+            vec![search_arm, invoke_arm]
+        })
+        .collect();
+
     let tool_dispatch = build_tool_dispatch(
         step,
         &tool_edges,
@@ -291,6 +558,7 @@ pub fn emit(
         ctx,
         &child_fn_names,
         &workflow_inputs_var,
+        &mcp_dispatch_arms,
     )?;
 
     // Debug events — AI Agent emits debug_start AFTER prompts are resolved so we can
@@ -989,7 +1257,13 @@ pub fn emit(
             // Resolve prompts from mappings (before debug_start so inputs are available)
             let __system_prompt = {
                 let v = #system_prompt_code;
-                v.as_str().unwrap_or("").to_string()
+                let mut s = v.as_str().unwrap_or("").to_string();
+                // When the AI Agent has any `mcp.*` edges, the codegen
+                // appends a generated string explaining the search→invoke
+                // protocol for the synthetic meta-tools. Empty string when
+                // there are no MCP edges.
+                s.push_str(#mcp_prompt_addition_tokens);
+                s
             };
             let __user_prompt = {
                 let v = #user_prompt_code;
@@ -1558,10 +1832,11 @@ fn build_tool_dispatch(
     ctx: &mut EmitContext,
     child_fn_names: &HashMap<String, proc_macro2::Ident>,
     workflow_inputs_var: &proc_macro2::Ident,
+    mcp_arms: &[TokenStream],
 ) -> Result<TokenStream, CodegenError> {
     let step_id = &step.id;
 
-    if tool_edges.is_empty() {
+    if tool_edges.is_empty() && mcp_arms.is_empty() {
         return Ok(quote! {
             {
                 // No tools wired up — return a structured error to the LLM. The
@@ -1618,6 +1893,7 @@ fn build_tool_dispatch(
     Ok(quote! {
         match __tool_name.as_str() {
             #(#match_arms)*
+            #(#mcp_arms)*
             __unknown => {
                 let _ = #step_id_str;
                 serde_json::json!({"error": format!("Unknown tool: {}", __unknown)})
@@ -2432,6 +2708,189 @@ mod tests {
         assert!(
             code.contains("fn child_weather_workflow_id_1"),
             "Should emit child workflow function"
+        );
+    }
+
+    // ========================================================================
+    // MCP Edge Codegen Tests
+    // ========================================================================
+
+    fn create_graph_with_mcp_edge(toolset: &str) -> ExecutionGraph {
+        let mut steps = HashMap::new();
+        steps.insert(
+            "ai_agent".to_string(),
+            Step::AiAgent(create_ai_agent_step("ai_agent")),
+        );
+        steps.insert(
+            "mcp_target".to_string(),
+            Step::Agent(AgentStep {
+                id: "mcp_target".to_string(),
+                name: Some(format!("MCP: {}", toolset)),
+                agent_id: "mcp".to_string(),
+                capability_id: "mcp-tool-search".to_string(),
+                connection_id: Some("conn-mcp-1".to_string()),
+                input_mapping: None,
+                max_retries: None,
+                retry_delay: None,
+                timeout: None,
+                compensation: None,
+                breakpoint: None,
+                durable: None,
+            }),
+        );
+        steps.insert(
+            "finish".to_string(),
+            Step::Finish(FinishStep {
+                id: "finish".to_string(),
+                name: Some("Done".to_string()),
+                input_mapping: None,
+                breakpoint: None,
+            }),
+        );
+
+        let label = format!("mcp.{}", toolset);
+        ExecutionGraph {
+            name: Some("test_mcp".to_string()),
+            description: None,
+            entry_point: "ai_agent".to_string(),
+            steps,
+            execution_plan: vec![
+                ExecutionPlanEdge {
+                    from_step: "ai_agent".to_string(),
+                    to_step: "mcp_target".to_string(),
+                    label: Some(label),
+                    condition: None,
+                    priority: None,
+                },
+                ExecutionPlanEdge {
+                    from_step: "ai_agent".to_string(),
+                    to_step: "finish".to_string(),
+                    label: None,
+                    condition: None,
+                    priority: None,
+                },
+            ],
+            input_schema: HashMap::new(),
+            output_schema: HashMap::new(),
+            variables: HashMap::new(),
+            notes: None,
+            nodes: None,
+            edges: None,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn test_mcp_edge_not_in_regular_tool_list() {
+        let graph = create_graph_with_mcp_edge("linear");
+        let mut ctx = EmitContext::new(false);
+        let step = create_ai_agent_step("ai_agent");
+        let tokens = emit(&step, &mut ctx, &graph).unwrap();
+        let code = tokens.to_string();
+
+        // The raw `mcp.linear` label must NOT appear as a tool def name.
+        // The synthetic meta-tools (linear_search/linear_invoke) take its place.
+        assert!(
+            !code.contains("\"mcp.linear\""),
+            "Raw mcp.* label should be filtered from tool list"
+        );
+    }
+
+    #[test]
+    fn test_mcp_edge_emits_search_and_invoke_tool_defs() {
+        let graph = create_graph_with_mcp_edge("linear");
+        let mut ctx = EmitContext::new(false);
+        let step = create_ai_agent_step("ai_agent");
+        let tokens = emit(&step, &mut ctx, &graph).unwrap();
+        let code = tokens.to_string();
+
+        assert!(
+            code.contains("linear_search"),
+            "Should emit linear_search synthetic tool"
+        );
+        assert!(
+            code.contains("linear_invoke"),
+            "Should emit linear_invoke synthetic tool"
+        );
+    }
+
+    #[test]
+    fn test_mcp_edge_emits_dispatch_arms() {
+        let graph = create_graph_with_mcp_edge("linear");
+        let mut ctx = EmitContext::new(false);
+        let step = create_ai_agent_step("ai_agent");
+        let tokens = emit(&step, &mut ctx, &graph).unwrap();
+        let code = tokens.to_string();
+
+        // The dispatcher must route to the mcp agent's capabilities by id.
+        assert!(
+            code.contains("mcp-tool-search"),
+            "Dispatch arm should call mcp-tool-search capability"
+        );
+        assert!(
+            code.contains("mcp-tool-invoke"),
+            "Dispatch arm should call mcp-tool-invoke capability"
+        );
+    }
+
+    #[test]
+    fn test_mcp_dispatch_injects_top_level_connection_id() {
+        // Regression: the internal-agents handler resolves connection
+        // credentials only when `input.connection_id` is set at the top
+        // level. Earlier the codegen only nested it inside `_connection`,
+        // so `mcp_tool_search`/`mcp_tool_invoke` ran with an empty
+        // parameters object and `extract_url` returned MCP_NO_URL on
+        // every call. See PR #65 review for the failure trace.
+        let graph = create_graph_with_mcp_edge("linear");
+        let mut ctx = EmitContext::new(false);
+        let step = create_ai_agent_step("ai_agent");
+        let tokens = emit(&step, &mut ctx, &graph).unwrap();
+        let code = tokens.to_string();
+
+        // Both arms must insert `connection_id` at the top level of the
+        // inputs map alongside the `_connection` placeholder.
+        assert!(
+            code.contains("\"connection_id\"") && code.contains("__mcp_connection_id"),
+            "MCP dispatch arms must insert top-level connection_id so the \
+             internal handler resolves credentials"
+        );
+        // Sanity check that the fixture's connection_id is the string the
+        // codegen embeds; if the fixture changes, update this constant.
+        assert!(
+            code.contains("conn-mcp-1"),
+            "Codegen should embed the edge target's connection_id literal"
+        );
+    }
+
+    #[test]
+    fn test_mcp_edge_appends_system_prompt() {
+        let graph = create_graph_with_mcp_edge("linear");
+        let mut ctx = EmitContext::new(false);
+        let step = create_ai_agent_step("ai_agent");
+        let tokens = emit(&step, &mut ctx, &graph).unwrap();
+        let code = tokens.to_string();
+
+        assert!(
+            code.contains("External toolsets are available"),
+            "Should append the MCP system-prompt explanation"
+        );
+        assert!(
+            code.contains("`linear`"),
+            "Should mention the linear toolset by name"
+        );
+    }
+
+    #[test]
+    fn test_no_mcp_edges_no_system_prompt_addition() {
+        let graph = create_simple_graph_with_ai_agent();
+        let mut ctx = EmitContext::new(false);
+        let step = create_ai_agent_step("ai_agent");
+        let tokens = emit(&step, &mut ctx, &graph).unwrap();
+        let code = tokens.to_string();
+
+        assert!(
+            !code.contains("External toolsets are available"),
+            "Should not inject the MCP prompt when there are no mcp.* edges"
         );
     }
 }

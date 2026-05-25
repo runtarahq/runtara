@@ -24,6 +24,7 @@ runtara-agent-datetime = { path = "../agents/runtara-agent-datetime" }
 runtara-agent-http = { path = "../agents/runtara-agent-http" }
 runtara-agent-hubspot = { path = "../agents/runtara-agent-hubspot" }
 runtara-agent-mailgun = { path = "../agents/runtara-agent-mailgun" }
+runtara-agent-mcp = { path = "../agents/runtara-agent-mcp" }
 runtara-agent-object-model = { path = "../agents/runtara-agent-object-model" }
 runtara-agent-openai = { path = "../agents/runtara-agent-openai" }
 runtara-agent-s3-storage = { path = "../agents/runtara-agent-s3-storage" }

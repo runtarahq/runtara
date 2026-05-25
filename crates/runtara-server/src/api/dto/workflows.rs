@@ -534,6 +534,55 @@ impl ValidationErrorDto {
                 Some("memory".to_string()),
                 None,
             ),
+            ValidationError::AiAgentMcpEdgeNotAgent {
+                step_id,
+                target_step_id,
+                label,
+            } => (
+                "E120".to_string(),
+                format!(
+                    "AI Agent step '{}' has an '{}' edge pointing to '{}', which is not an Agent step",
+                    step_id, label, target_step_id
+                ),
+                Some(step_id.clone()),
+                Some(label.clone()),
+                Some(vec![target_step_id.clone()]),
+            ),
+            ValidationError::AiAgentMcpEdgeWrongAgentId {
+                step_id,
+                target_step_id,
+                label,
+                actual_agent_id,
+            } => (
+                "E121".to_string(),
+                format!(
+                    "AI Agent step '{}' has an '{}' edge pointing to Agent step '{}' (agent_id = '{}'); MCP edges must target the 'mcp' agent",
+                    step_id, label, target_step_id, actual_agent_id
+                ),
+                Some(step_id.clone()),
+                Some(label.clone()),
+                Some(vec![target_step_id.clone()]),
+            ),
+            ValidationError::AiAgentMcpEdgeEmptySuffix { step_id, label } => (
+                "E122".to_string(),
+                format!(
+                    "AI Agent step '{}' has an MCP edge with empty toolset suffix ('{}')",
+                    step_id, label
+                ),
+                Some(step_id.clone()),
+                Some(label.clone()),
+                None,
+            ),
+            ValidationError::AiAgentMcpEdgeDuplicateSuffix { step_id, toolset } => (
+                "E123".to_string(),
+                format!(
+                    "AI Agent step '{}' has multiple MCP edges with the same toolset suffix '{}'",
+                    step_id, toolset
+                ),
+                Some(step_id.clone()),
+                Some(format!("mcp.{}", toolset)),
+                None,
+            ),
         };
 
         Self {

@@ -91,7 +91,7 @@ jobs:
       # The bundle's compile-pipeline gate has moved to the components-mode
       # path: scripts/build-bundle.sh now invokes scripts/build-agent-components.sh
       # which drives `cargo component build` and emits the sidecar
-      # meta.json for all 23 agent crates. Any breakage there fails the
+      # meta.json for all 24 agent crates. Any breakage there fails the
       # bundle build itself before this step would run. The downstream
       # `smoke:` job extracts the resulting tarball and runs the full
       # server end-to-end (with RUNTARA_AGENT_COMPONENTS_DIR and

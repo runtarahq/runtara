@@ -383,9 +383,11 @@ pub struct FieldTypeInfo {
     /// Sidecar meta.json carries this; legacy registry populates it server-side
     /// from `OutputTypeMeta`. Either way, the round-trip via serde is symmetric.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "utoipa", schema(no_recursion))]
     pub fields: Option<Box<Vec<OutputField>>>,
     /// For array types, describes the item type
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "utoipa", schema(no_recursion))]
     pub items: Option<Box<FieldTypeInfo>>,
     /// Whether this field can be null
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -414,9 +416,11 @@ pub struct OutputField {
     pub nullable: bool,
     /// For array types, describes the item type
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "utoipa", schema(no_recursion))]
     pub items: Option<Box<FieldTypeInfo>>,
     /// For nested object types, the fields of the nested object
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "utoipa", schema(no_recursion))]
     pub fields: Option<Box<Vec<OutputField>>>,
 }
 
@@ -845,6 +849,12 @@ pub struct ConnectionFieldMeta {
     pub default_value: Option<&'static str>,
     /// Whether this is a secret field (password, API key, etc.)
     pub is_secret: bool,
+    /// Allowed values when this field is one-of a fixed set. `None` means
+    /// free-form input; `Some(&[…])` makes the UI render a select. Values are
+    /// the literal strings sent on the wire (e.g. `"none"`, `"bearer"`,
+    /// `"api_key"`); labels are derived client-side from the value
+    /// (snake_case → Title Case) unless richer metadata is added later.
+    pub enum_values: Option<&'static [&'static str]>,
 }
 
 /// OAuth2 configuration for connection types that use the authorization code flow.

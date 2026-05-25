@@ -203,6 +203,46 @@ fn describe_connection_auth(
                 deferred_auth: None,
             }
         }
+        // ── MCP (Model Context Protocol) ─────────────────────────
+        // The agent (runtara-agent-mcp) sends its JSON-RPC bodies through
+        // the proxy; this arm injects the right Authorization / api-key
+        // header for the three v1 auth modes. OAuth2 is reserved for a
+        // follow-up — extend `auth_mode` then.
+        "mcp" => {
+            let auth_mode = params["auth_mode"].as_str().unwrap_or("none");
+            match auth_mode {
+                "bearer" => {
+                    if let Some(token) = params["bearer_token"].as_str() {
+                        headers.insert("Authorization".into(), format!("Bearer {}", token));
+                    }
+                }
+                "api_key" => {
+                    if let Some(value) = params["api_key_value"].as_str() {
+                        let header_name = params["api_key_header"]
+                            .as_str()
+                            .filter(|s| !s.is_empty())
+                            .unwrap_or("X-API-Key")
+                            .to_string();
+                        headers.insert(header_name, value.to_string());
+                    }
+                }
+                _ => { /* "none" — no auth header injected */ }
+            }
+            // Extra static headers configured on the connection.
+            if let Some(extras) = params["extra_headers"].as_object() {
+                for (k, v) in extras {
+                    if let Some(s) = v.as_str() {
+                        headers.insert(k.clone(), s.to_string());
+                    }
+                }
+            }
+            ConnectionAuthDescriptor {
+                base_url: params["url"].as_str().map(|u| u.to_string()),
+                aws_signing: None,
+                azure_signing: None,
+                deferred_auth: None,
+            }
+        }
         "aws_credentials" | "s3_compatible" => {
             let access_key_id = first_string_param(params, &["access_key_id", "aws_access_key_id"])
                 .unwrap_or_default();
@@ -571,5 +611,75 @@ mod tests {
         assert_eq!(aws.access_key_id, "AKIA_TEST");
         assert_eq!(aws.region, "ap-southeast-2");
         assert!(aws.session_token.is_none());
+    }
+
+    #[test]
+    fn mcp_bearer_injects_authorization_header() {
+        let params = json!({
+            "url": "https://mcp.example.com/jsonrpc",
+            "auth_mode": "bearer",
+            "bearer_token": "tkn_abc"
+        });
+        let mut headers = HashMap::new();
+        let descriptor = describe_connection_auth("c", "mcp", &params, &mut headers);
+        assert_eq!(
+            headers.get("Authorization"),
+            Some(&"Bearer tkn_abc".to_string())
+        );
+        assert_eq!(
+            descriptor.base_url.as_deref(),
+            Some("https://mcp.example.com/jsonrpc")
+        );
+    }
+
+    #[test]
+    fn mcp_api_key_injects_custom_header() {
+        let params = json!({
+            "url": "https://mcp.example.com/jsonrpc",
+            "auth_mode": "api_key",
+            "api_key_header": "X-Linear-Token",
+            "api_key_value": "lin_xyz"
+        });
+        let mut headers = HashMap::new();
+        let _ = describe_connection_auth("c", "mcp", &params, &mut headers);
+        assert_eq!(headers.get("X-Linear-Token"), Some(&"lin_xyz".to_string()));
+        assert!(!headers.contains_key("Authorization"));
+    }
+
+    #[test]
+    fn mcp_api_key_defaults_to_x_api_key_header() {
+        let params = json!({
+            "url": "https://mcp.example.com/jsonrpc",
+            "auth_mode": "api_key",
+            "api_key_value": "secret"
+        });
+        let mut headers = HashMap::new();
+        let _ = describe_connection_auth("c", "mcp", &params, &mut headers);
+        assert_eq!(headers.get("X-API-Key"), Some(&"secret".to_string()));
+    }
+
+    #[test]
+    fn mcp_none_injects_no_auth_header() {
+        let params = json!({
+            "url": "https://mcp.example.com/jsonrpc",
+            "auth_mode": "none"
+        });
+        let mut headers = HashMap::new();
+        let _ = describe_connection_auth("c", "mcp", &params, &mut headers);
+        assert!(!headers.contains_key("Authorization"));
+        assert!(!headers.contains_key("X-API-Key"));
+    }
+
+    #[test]
+    fn mcp_extra_headers_are_forwarded() {
+        let params = json!({
+            "url": "https://mcp.example.com/jsonrpc",
+            "auth_mode": "none",
+            "extra_headers": {"X-Custom": "yes", "Mcp-Session-Id": "sess1"}
+        });
+        let mut headers = HashMap::new();
+        let _ = describe_connection_auth("c", "mcp", &params, &mut headers);
+        assert_eq!(headers.get("X-Custom"), Some(&"yes".to_string()));
+        assert_eq!(headers.get("Mcp-Session-Id"), Some(&"sess1".to_string()));
     }
 }

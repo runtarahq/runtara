@@ -409,3 +409,59 @@ fn test_extractor_with_wrong_type_token() {
     let result = extractor.extract(&params);
     assert!(result.is_err(), "Should fail with wrong type for token");
 }
+
+// ============================================================================
+// MCP Extractor Tests
+// ============================================================================
+
+#[cfg(feature = "integrations")]
+#[test]
+fn test_mcp_extractor_registered() {
+    let ids = get_http_extractor_ids();
+    assert!(ids.contains(&"mcp"), "should contain mcp, got: {:?}", ids);
+}
+
+#[cfg(feature = "integrations")]
+#[test]
+fn test_extract_http_config_mcp_minimal() {
+    let params = json!({
+        "url": "https://mcp.example.com/jsonrpc"
+    });
+    let config = extract_http_config("mcp", &params, None).expect("extract mcp config");
+    assert_eq!(config.url_prefix, "https://mcp.example.com/jsonrpc");
+    assert_eq!(
+        config.headers.get("Content-Type"),
+        Some(&"application/json".to_string())
+    );
+}
+
+#[cfg(feature = "integrations")]
+#[test]
+fn test_extract_http_config_mcp_with_extra_headers() {
+    let params = json!({
+        "url": "https://mcp.example.com/jsonrpc",
+        "extra_headers": {"X-Custom": "yes"}
+    });
+    let config = extract_http_config("mcp", &params, None).expect("extract mcp config");
+    assert_eq!(config.headers.get("X-Custom"), Some(&"yes".to_string()));
+}
+
+#[cfg(feature = "integrations")]
+#[test]
+fn test_extract_http_config_mcp_rejects_non_http_url() {
+    let params = json!({
+        "url": "ftp://mcp.example.com/jsonrpc"
+    });
+    let err =
+        extract_http_config("mcp", &params, None).expect_err("non-http urls should be rejected");
+    assert!(err.contains("http://"), "{err}");
+}
+
+#[cfg(feature = "integrations")]
+#[test]
+fn test_extract_http_config_mcp_requires_url() {
+    let params = json!({});
+    let err = extract_http_config("mcp", &params, None).expect_err("missing url should fail");
+    // Either fails at serde (missing field) or at the explicit url-required check.
+    assert!(err.contains("url") || err.contains("Invalid mcp"), "{err}");
+}

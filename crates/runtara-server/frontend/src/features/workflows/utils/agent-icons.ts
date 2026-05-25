@@ -17,6 +17,7 @@ import {
   FlaskConical,
   Brain,
   ShoppingBag,
+  Plug,
   Bot,
   type LucideIcon,
 } from 'lucide-react';
@@ -40,6 +41,7 @@ const agentIconMap: Record<string, LucideIcon> = {
   'smo-test': FlaskConical,
   hdm_llm: Brain,
   shopify: ShoppingBag,
+  mcp: Plug,
 };
 
 export function getAgentIcon(agentId: string | null | undefined): LucideIcon {

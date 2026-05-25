@@ -340,6 +340,13 @@ export type AggregateFn =
   | "VAR_SAMP"
   | "EXPR";
 
+/**
+ * The engine actually used for a given call. Only one backend exists today
+ * (`Components`); kept as an enum so the surfaces and telemetry stay stable
+ * if a future backend is added.
+ */
+export type ActiveEngine = "components";
+
 /** API-compatible agent info */
 export interface AgentInfo {
   capabilities: CapabilityInfo[];
@@ -406,6 +413,14 @@ export interface AgentStep {
  * `get_agent` round-trip per agent.
  */
 export interface AgentSummary {
+  /**
+   * True when a WebAssembly component is loaded for this agent. Set by the
+   * server when `ComponentDispatcherService` is configured and knows about
+   * the agent. The capability surface itself is unchanged; this flag
+   * surfaces which execution backend a test_capability call would auto-pick
+   * (`engine=auto`).
+   */
+  componentBacked: boolean;
   description: string;
   id: string;
   /**
@@ -562,6 +577,22 @@ export interface AiAgentMemory {
  * final text response or reaches max_iterations.
  *
  * Without tool edges, it acts as a simple LLM completion step.
+ *
+ * # Reserved edge labels
+ *
+ * Some outgoing edge labels carry special meaning to the AI Agent step and
+ * are NOT exposed as tools to the LLM:
+ *
+ * - `next` — the default continuation edge taken after the LLM finishes.
+ * - `memory` — points to a memory-provider Agent step. The codegen emits
+ *   `load_memory` / `save_memory` calls against that target's `agent_id`,
+ *   so the Agent step's own `capability_id` is effectively ignored for
+ *   this edge.
+ * - `mcp.<toolset>` — points to an Agent step with `agent_id == "mcp"`
+ *   carrying an `McpConnection`. The codegen emits two synthetic tools
+ *   per such edge — `<toolset>_search` and `<toolset>_invoke` — that the
+ *   LLM uses to dynamically discover and call tools on an external MCP
+ *   server. Each `<toolset>` suffix must be unique within one AI Agent.
  *
  * Example:
  * ```json
@@ -786,19 +817,46 @@ export interface ApiResponseVecInvocationTrigger {
 /** Generic API response wrapper */
 export interface ApiResponseVecWorkflowVersionInfoDto {
   data: {
+    /**
+     * Raw compilation status from `workflow_compilations.compilation_status`.
+     * `"success"`, `"failed"`, or `"pending"`. Null when the worker has
+     * never written a row for this version (brand-new save). Lets the UI
+     * distinguish "build failed, retry available" from "compile worker
+     * hasn't picked it up yet".
+     */
+    compilationStatus?: string | null;
     /** Whether this version has been compiled */
     compiled: boolean;
     /** Timestamp when this version was compiled (RFC3339 format, null if not compiled) */
     compiledAt?: string | null;
     createdAt: string;
+    /**
+     * Error message recorded by the worker when compilation failed. Only
+     * populated when `compilationStatus == "failed"`.
+     */
+    errorMessage?: string | null;
     /** Whether this is the current/active version used for execution */
     isActive: boolean;
+    /**
+     * Size of the generated workflow-logic crate source files in bytes
+     * (Cargo.toml + src/lib.rs + wit/world.wit + workflow.wac). Useful for
+     * gauging how large the codegen output is for a workflow. Null when
+     * the version pre-dates the column being added.
+     * @format int32
+     */
+    packageSize?: number | null;
     /** Whether step-event tracking is enabled for this version */
     trackEvents: boolean;
     updatedAt: string;
     versionId: string;
     /** @format int32 */
     versionNumber: number;
+    /**
+     * Size of the composed `workflow.wasm` binary in bytes. Populated on
+     * successful compile; null if the version isn't compiled.
+     * @format int32
+     */
+    wasmSize?: number | null;
     workflowId: string;
   }[];
   message: string;
@@ -1188,6 +1246,10 @@ export interface CompensationHintInfo {
   description?: string | null;
 }
 
+/**
+ * Response body for the compilation-progress endpoint. Mirrors the Redis
+ * hash plus terminal state from `workflow_compilations`.
+ */
 export interface CompilationProgressResponse {
   /** Error message when status is `failed`. */
   errorMessage?: string | null;
@@ -1199,6 +1261,7 @@ export interface CompilationProgressResponse {
   stage?: string | null;
   /**
    * 1-based stage index when in progress.
+   * @format int32
    * @min 0
    */
   stageIndex?: number | null;
@@ -1211,6 +1274,7 @@ export interface CompilationProgressResponse {
   status: string;
   /**
    * Total number of stages (constant for now).
+   * @format int32
    * @min 0
    */
   totalStages?: number | null;
@@ -1345,6 +1409,12 @@ export interface ConnectionFieldDto {
   description?: string | null;
   /** Display name for UI */
   displayName?: string | null;
+  /**
+   * Allowed values for select-style rendering. `None` means free-form.
+   * When present, the UI renders a dropdown with these literal values
+   * (labels are derived client-side from the value).
+   */
+  enumValues?: string[] | null;
   /** Whether this field is optional */
   isOptional: boolean;
   /** Whether this is a secret field (password, API key, etc.) */
@@ -1989,7 +2059,14 @@ export interface ExecutionPlanEdge {
 export interface FieldTypeInfo {
   description?: string | null;
   displayName?: string | null;
+  /**
+   * Sidecar meta.json carries this; legacy registry populates it server-side
+   * from `OutputTypeMeta`. Either way, the round-trip via serde is symmetric.
+   */
+  fields?: OutputField[] | null;
   format?: string | null;
+  /** For array types, describes the item type */
+  items?: null | FieldTypeInfo;
   /** Whether this field can be null */
   nullable?: boolean;
   type: string;
@@ -2655,7 +2732,11 @@ export interface OutputField {
   description?: string | null;
   displayName?: string | null;
   example?: any;
+  /** For nested object types, the fields of the nested object */
+  fields?: OutputField[] | null;
   format?: string | null;
+  /** For array types, describes the item type */
+  items?: null | FieldTypeInfo;
   name: string;
   /** Whether this field can be null */
   nullable?: boolean;
@@ -4701,6 +4782,11 @@ export interface TestAgentRequest {
 
 /** Response from testing an agent */
 export interface TestAgentResponse {
+  /**
+   * Which engine actually executed this call ("components" or "legacy").
+   * Omitted on legacy paths that don't surface it yet.
+   */
+  engine?: null | ActiveEngine;
   error?: string | null;
   /** @format double */
   executionTimeMs: number;
@@ -5373,27 +5459,46 @@ export interface WorkflowValidationErrorResponse {
 }
 
 export interface WorkflowVersionInfoDto {
+  /**
+   * Raw compilation status from `workflow_compilations.compilation_status`.
+   * `"success"`, `"failed"`, or `"pending"`. Null when the worker has
+   * never written a row for this version (brand-new save). Lets the UI
+   * distinguish "build failed, retry available" from "compile worker
+   * hasn't picked it up yet".
+   */
+  compilationStatus?: string | null;
   /** Whether this version has been compiled */
   compiled: boolean;
   /** Timestamp when this version was compiled (RFC3339 format, null if not compiled) */
   compiledAt?: string | null;
   createdAt: string;
+  /**
+   * Error message recorded by the worker when compilation failed. Only
+   * populated when `compilationStatus == "failed"`.
+   */
+  errorMessage?: string | null;
   /** Whether this is the current/active version used for execution */
   isActive: boolean;
-  /** Size of the composed workflow.wasm binary in bytes (null if not compiled) */
-  wasmSize?: number | null;
-  /** Size of the generated workflow-logic crate source files in bytes (null if not compiled) */
+  /**
+   * Size of the generated workflow-logic crate source files in bytes
+   * (Cargo.toml + src/lib.rs + wit/world.wit + workflow.wac). Useful for
+   * gauging how large the codegen output is for a workflow. Null when
+   * the version pre-dates the column being added.
+   * @format int32
+   */
   packageSize?: number | null;
-  /** Raw compilation status: 'success' | 'failed' | 'pending'. Null when the worker has never run for this version (brand-new save). */
-  compilationStatus?: string | null;
-  /** Error message recorded by the worker when compilation failed. */
-  errorMessage?: string | null;
   /** Whether step-event tracking is enabled for this version */
   trackEvents: boolean;
   updatedAt: string;
   versionId: string;
   /** @format int32 */
   versionNumber: number;
+  /**
+   * Size of the composed `workflow.wasm` binary in bytes. Populated on
+   * successful compile; null if the version isn't compiled.
+   * @format int32
+   */
+  wasmSize?: number | null;
   workflowId: string;
 }
 
@@ -5688,7 +5793,7 @@ export class Api<
       }),
 
     /**
-     * @description This endpoint allows testing agents in isolation using sandboxed container execution. Agent testing must be enabled via ENABLE_OPERATOR_TESTING=true environment variable.
+     * @description This endpoint allows testing agents in isolation. Pass `?engine=components` to force the embedded wasmtime path or `?engine=legacy` to force the dispatcher image; the default `auto` routes to components when a WASM component is loaded for the agent.
      *
      * @tags agents-controller
      * @name TestAgentHandler
@@ -5699,11 +5804,16 @@ export class Api<
       name: string,
       capabilityId: string,
       data: TestAgentRequest,
+      query?: {
+        /** Engine: auto | components | legacy (default: auto) */
+        engine?: string;
+      },
       params: RequestParams = {},
     ) =>
       this.request<TestAgentResponse, TestAgentErrorResponse>({
         path: `/api/runtime/agents/${name}/capabilities/${capabilityId}/test`,
         method: "POST",
+        query: query,
         body: data,
         type: ContentType.Json,
         format: "json",
@@ -7713,6 +7823,26 @@ export class Api<
      * No description
      *
      * @tags workflow-controller
+     * @name CompilationProgressHandler
+     * @summary Get current compilation progress for a workflow version. Reads Redis for intermediate state (queued, preparing, generating, building, composing, registering); falls through to the DB for terminal state (success or failed); returns `unknown` if neither has it. Designed for polling (~1s) from the frontend save flow.
+     * @request GET:/api/runtime/workflows/{id}/versions/{version}/compilation-progress
+     */
+    compilationProgressHandler: (
+      id: string,
+      version: number,
+      params: RequestParams = {},
+    ) =>
+      this.request<CompilationProgressResponse, ErrorResponse>({
+        path: `/api/runtime/workflows/${id}/versions/${version}/compilation-progress`,
+        method: "GET",
+        format: "json",
+        ...params,
+      }),
+
+    /**
+     * No description
+     *
+     * @tags workflow-controller
      * @name CompileWorkflowHandler
      * @summary Compile a specific workflow by tenant ID, workflow ID, and version
      * @request POST:/api/runtime/workflows/{id}/versions/{version}/compile
@@ -7726,25 +7856,6 @@ export class Api<
       this.request<CompileWorkflowResponse, ErrorResponse>({
         path: `/api/runtime/workflows/${id}/versions/${version}/compile`,
         method: "POST",
-        format: "json",
-        ...params,
-      }),
-
-    /**
-     * @description Get current compilation progress for a workflow version. Reads Redis for intermediate state (queued, preparing, generating, building, composing, registering); falls through to the DB for terminal state (success or failed); returns `unknown` if neither has it. Designed for polling (~1s) from the frontend save flow.
-     *
-     * @tags workflow-controller
-     * @name CompilationProgressHandler
-     * @request GET:/api/runtime/workflows/{id}/versions/{version}/compilation-progress
-     */
-    compilationProgressHandler: (
-      id: string,
-      version: number,
-      params: RequestParams = {},
-    ) =>
-      this.request<CompilationProgressResponse, ErrorResponse>({
-        path: `/api/runtime/workflows/${id}/versions/${version}/compilation-progress`,
-        method: "GET",
         format: "json",
         ...params,
       }),
