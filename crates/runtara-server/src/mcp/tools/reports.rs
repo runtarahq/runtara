@@ -4,6 +4,8 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::api::services::reports::ReportService;
+use crate::entitlements::FeatureKey;
+use crate::mcp::entitlement::require_feature;
 
 use super::super::server::SmoMcpServer;
 use super::internal_api::{
@@ -153,6 +155,7 @@ pub async fn get_report_authoring_schema(
     server: &SmoMcpServer,
     params: GetReportAuthoringSchemaParams,
 ) -> Result<CallToolResult, rmcp::ErrorData> {
+    require_feature(server, FeatureKey::Reports)?;
     let mut result = report_authoring_schema();
 
     if let Some(object_schema) = params.object_schema {
@@ -169,9 +172,10 @@ pub async fn get_report_authoring_schema(
 }
 
 pub async fn get_report_definition_schema(
-    _server: &SmoMcpServer,
+    server: &SmoMcpServer,
     _params: GetReportDefinitionSchemaParams,
 ) -> Result<CallToolResult, rmcp::ErrorData> {
+    require_feature(server, FeatureKey::Reports)?;
     json_result(json!({
         "success": true,
         "kind": "json_schema",
@@ -184,6 +188,7 @@ pub async fn list_reports(
     server: &SmoMcpServer,
     _params: ListReportsParams,
 ) -> Result<CallToolResult, rmcp::ErrorData> {
+    require_feature(server, FeatureKey::Reports)?;
     let result = api_get(server, "/api/runtime/reports").await?;
     json_result(result)
 }
@@ -200,6 +205,7 @@ pub async fn list_reports_needing_re_authoring(
     server: &SmoMcpServer,
     _params: ListReportsNeedingReAuthoringParams,
 ) -> Result<CallToolResult, rmcp::ErrorData> {
+    require_feature(server, FeatureKey::Reports)?;
     let result = api_get(server, "/api/runtime/reports").await?;
     let reports = result
         .get("reports")
@@ -227,6 +233,7 @@ pub async fn get_report(
     server: &SmoMcpServer,
     params: GetReportParams,
 ) -> Result<CallToolResult, rmcp::ErrorData> {
+    require_feature(server, FeatureKey::Reports)?;
     validate_path_param("report_id", &params.report_id)?;
     let result = api_get(
         server,
@@ -240,6 +247,7 @@ pub async fn create_report(
     server: &SmoMcpServer,
     params: CreateReportParams,
 ) -> Result<CallToolResult, rmcp::ErrorData> {
+    require_feature(server, FeatureKey::Reports)?;
     let definition = normalize_json_arg(params.definition, "definition")?;
 
     let mut body = json!({
@@ -265,6 +273,7 @@ pub async fn update_report(
     server: &SmoMcpServer,
     params: UpdateReportParams,
 ) -> Result<CallToolResult, rmcp::ErrorData> {
+    require_feature(server, FeatureKey::Reports)?;
     validate_path_param("report_id", &params.report_id)?;
     let definition = normalize_json_arg(params.definition, "definition")?;
 
@@ -292,6 +301,7 @@ pub async fn delete_report(
     server: &SmoMcpServer,
     params: DeleteReportParams,
 ) -> Result<CallToolResult, rmcp::ErrorData> {
+    require_feature(server, FeatureKey::Reports)?;
     validate_path_param("report_id", &params.report_id)?;
     let result = api_delete(
         server,
@@ -305,6 +315,7 @@ pub async fn validate_report(
     server: &SmoMcpServer,
     params: ValidateReportParams,
 ) -> Result<CallToolResult, rmcp::ErrorData> {
+    require_feature(server, FeatureKey::Reports)?;
     let mode = params.mode.unwrap_or(ReportValidationMode::All);
     let definition = normalize_json_arg(params.definition, "definition")?;
     if mode == ReportValidationMode::Syntax {
@@ -364,6 +375,7 @@ pub async fn render_report(
     server: &SmoMcpServer,
     params: RenderReportParams,
 ) -> Result<CallToolResult, rmcp::ErrorData> {
+    require_feature(server, FeatureKey::Reports)?;
     validate_path_param("report_id", &params.report_id)?;
     let mut body = json!({});
     if let Some(filters) = params.filters {
@@ -389,6 +401,7 @@ pub async fn get_report_block_data(
     server: &SmoMcpServer,
     params: GetReportBlockDataParams,
 ) -> Result<CallToolResult, rmcp::ErrorData> {
+    require_feature(server, FeatureKey::Reports)?;
     validate_path_param("report_id", &params.report_id)?;
     validate_path_param("block_id", &params.block_id)?;
     let mut body = json!({});
@@ -449,6 +462,7 @@ pub async fn edit_report(
     server: &SmoMcpServer,
     params: EditReportParams,
 ) -> Result<CallToolResult, rmcp::ErrorData> {
+    require_feature(server, FeatureKey::Reports)?;
     validate_path_param("report_id", &params.report_id)?;
     let ops = normalize_json_array_arg(params.ops, "ops")?;
     let result = api_post(

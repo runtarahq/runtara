@@ -3,6 +3,7 @@
 //! Exposes workflow management, execution monitoring, object model,
 //! and agent discovery capabilities via Streamable HTTP transport.
 
+pub mod entitlement;
 pub mod server;
 mod session_store;
 pub mod tools;
