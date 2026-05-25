@@ -1,22 +1,27 @@
 //! REST entitlement gates.
 //!
-//! Phase 3.2 of `docs/entitlements.md`. Each `require_*` function is an
-//! Axum middleware that checks the process's resolved entitlement snapshot
-//! and short-circuits with a 403 + stable `code` (built by
-//! [`crate::entitlement_error::EntitlementDenial`]) when the feature is
-//! disabled.
+//! Phase 3.2 + 3.3 of `docs/entitlements.md`.
 //!
-//! Gates are mounted in `server.rs` on the smallest sub-router that exactly
-//! contains the routes that surface the feature, so the gate is visible at
-//! the mount point and cannot leak to neighboring routes.
+//! - **3.2 — feature gates (`require_reports` etc.)**: per-feature middleware
+//!   that short-circuits with a 403 + stable `code` when the feature is off.
+//!   Mounted on the smallest sub-router that exactly contains the routes
+//!   surfacing the feature, so the gate is visible at the mount point and
+//!   cannot leak to neighbouring routes.
+//! - **3.3 — API-key auth bypass guard ([`api_key_auth_guard`])**: post-auth
+//!   middleware that rejects API-key-authenticated requests on *every*
+//!   tenant route when `api` is disabled, regardless of which route is hit.
+//!   Session-cookie / JWT users on the same routes are unaffected — that's
+//!   the entire point. Wraps every authenticated route group; mounted
+//!   between `authenticate` (outer) and the feature gates (inner).
 //!
-//! Out of scope for 3.2:
-//! - API-key auth bypass on non-management routes (3.3).
+//! Out of scope for 3.2 / 3.3:
 //! - Per-agent allowlist (3.4).
 //! - MCP tool-level checks beyond the transport gate (3.5).
+//! - Numeric tier limits (3.6).
 
 use axum::{extract::Request, middleware::Next, response::IntoResponse, response::Response};
 
+use crate::auth::{AuthContext, AuthMethod};
 use crate::entitlement_error::EntitlementDenial;
 use crate::entitlements::{EntitlementSnapshot, FeatureKey};
 
@@ -57,6 +62,43 @@ pub async fn require_api(req: Request, next: Next) -> Response {
 
 pub async fn require_mcp(req: Request, next: Next) -> Response {
     require_feature(FeatureKey::Mcp, req, next).await
+}
+
+/// Pure decision for the API-key auth bypass guard.
+///
+/// Returns `Ok(())` for non-API-key auth methods (JWT, session, unauthenticated
+/// in-process calls) regardless of the `api` feature — those callers are not
+/// what the gate is about. For `AuthMethod::ApiKey`, defers to the snapshot:
+/// if `api` is enabled the request continues; otherwise we surface the
+/// standard `ENTITLEMENT_REQUIRED` denial for the `api` feature.
+///
+/// Pulled out as a free function so unit tests can cover every
+/// (auth_method × feature_state) combination without booting the global
+/// `OnceLock<Config>`.
+pub fn api_key_decision(
+    snapshot: &EntitlementSnapshot,
+    auth_method: &AuthMethod,
+) -> Result<(), EntitlementDenial> {
+    match auth_method {
+        AuthMethod::ApiKey => gate_decision(snapshot, FeatureKey::Api),
+        AuthMethod::Jwt | AuthMethod::Unauthenticated => Ok(()),
+    }
+}
+
+/// Post-auth guard that denies API-key-authenticated requests on every
+/// tenant route when `api` is disabled.
+///
+/// Must run **after** the auth middleware that populates `AuthContext` in
+/// request extensions; if the extension is missing we let the request through
+/// rather than 403'ing on a downstream failure mode (auth misconfiguration
+/// surfaces elsewhere).
+pub async fn api_key_auth_guard(req: Request, next: Next) -> Response {
+    if let Some(ctx) = req.extensions().get::<AuthContext>().cloned() {
+        if let Err(denial) = api_key_decision(crate::config::entitlements(), &ctx.auth_method) {
+            return denial.into_response();
+        }
+    }
+    next.run(req).await
 }
 
 #[cfg(test)]
@@ -180,5 +222,74 @@ mod tests {
         let body: serde_json::Value = serde_json::from_slice(&bytes).expect("json body");
         assert_eq!(body["code"], codes::ENTITLEMENT_REQUIRED);
         assert_eq!(body["feature"], "reports");
+    }
+
+    // ────────────────────────────────────────────────────────────────────
+    // Phase 3.3: API-key auth bypass guard.
+    //
+    // Matrix: (auth_method × `api` feature state) → expected decision.
+    // The control case is the third row — `Jwt` users on a tenant with
+    // `api` off must NOT be denied; only ApiKey auth triggers the guard.
+    // ────────────────────────────────────────────────────────────────────
+
+    use crate::auth::AuthMethod;
+
+    fn snapshot_api_off() -> EntitlementSnapshot {
+        snapshot_with(None, Some(r#"{"features":{"api":false}}"#))
+    }
+
+    fn snapshot_api_on() -> EntitlementSnapshot {
+        snapshot_with(None, None)
+    }
+
+    #[test]
+    fn api_key_with_api_disabled_denies_with_entitlement_required() {
+        let snap = snapshot_api_off();
+        let denial =
+            api_key_decision(&snap, &AuthMethod::ApiKey).expect_err("should deny api-key auth");
+        assert_eq!(denial.code(), codes::ENTITLEMENT_REQUIRED);
+        assert_eq!(denial.json_body()["feature"], "api");
+    }
+
+    #[test]
+    fn api_key_with_api_enabled_passes_through() {
+        let snap = snapshot_api_on();
+        assert!(api_key_decision(&snap, &AuthMethod::ApiKey).is_ok());
+    }
+
+    #[test]
+    fn jwt_with_api_disabled_still_passes_through() {
+        // ★ Control case from docs/entitlements.md:450 — the entire purpose
+        // of the guard is that JWT/session callers are unaffected by `api`.
+        let snap = snapshot_api_off();
+        assert!(api_key_decision(&snap, &AuthMethod::Jwt).is_ok());
+    }
+
+    #[test]
+    fn jwt_with_api_enabled_passes_through() {
+        let snap = snapshot_api_on();
+        assert!(api_key_decision(&snap, &AuthMethod::Jwt).is_ok());
+    }
+
+    #[test]
+    fn unauthenticated_in_process_calls_pass_through_regardless_of_api() {
+        // In-process MCP / trust-proxy calls carry `Unauthenticated` and must
+        // not be denied by this guard — they were already trusted upstream
+        // and the guard targets external automation, not internal traffic.
+        for snap in [snapshot_api_off(), snapshot_api_on()] {
+            assert!(api_key_decision(&snap, &AuthMethod::Unauthenticated).is_ok());
+        }
+    }
+
+    #[test]
+    fn api_key_decision_only_inspects_api_feature() {
+        // If another feature is off but `api` is on, ApiKey auth still passes.
+        // Confirms the guard is exactly one boolean check, not a confused fold
+        // over the whole snapshot.
+        let snap = snapshot_with(
+            None,
+            Some(r#"{"features":{"reports":false,"database":false,"mcp":false}}"#),
+        );
+        assert!(api_key_decision(&snap, &AuthMethod::ApiKey).is_ok());
     }
 }
