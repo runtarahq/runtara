@@ -1,6 +1,7 @@
 use crate::config::ConfigError;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
+use utoipa::ToSchema;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EntitlementError {
@@ -8,7 +9,9 @@ pub enum EntitlementError {
     AgentNotEnabled(String),     // → AGENT_NOT_ENABLED
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Ord, PartialOrd)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Ord, PartialOrd, ToSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum FeatureKey {
     Reports,
@@ -27,7 +30,7 @@ impl FeatureKey {
     ];
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, ToSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct EntitlementLimits {
     pub max_workflows: Option<u32>,
@@ -124,6 +127,21 @@ impl EntitlementSnapshot {
             Err(EntitlementError::AgentNotEnabled(agent.to_string()))
         }
     }
+
+    pub fn features(&self) -> &BTreeMap<FeatureKey, bool> {
+        &self.features
+    }
+
+    /// Wire-shape agent allowlist: `enabled_agents` collapsed against the
+    /// registered dispatcher modules. `None` ("all known") materialises to
+    /// the full registered set so the frontend never sees an implicit-all
+    /// sentinel.
+    pub fn materialised_agents(&self) -> BTreeSet<String> {
+        match &self.enabled_agents {
+            Some(allowed) => allowed.clone(),
+            None => self.registered_agents.clone(),
+        }
+    }
 }
 
 /// One partial entitlement layer, as deserialized from a `RUNTARA_ENTITLEMENT*_JSON`
@@ -206,7 +224,8 @@ fn validate_agents(
     Ok(())
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, ToSchema)]
+#[serde(rename_all = "lowercase")]
 pub enum Tier {
     Default,
     Starter,

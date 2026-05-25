@@ -7,6 +7,7 @@ pub mod analytics;
 pub mod common;
 
 pub mod csv_import_export;
+pub mod entitlements;
 pub mod executions;
 pub mod metrics;
 pub mod object_model;
