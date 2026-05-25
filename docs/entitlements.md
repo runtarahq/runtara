@@ -404,12 +404,50 @@ Since MCP internally calls REST routes through `Router::oneshot()`, REST enforce
 
 ### Phase 3 - Backend Gates
 
-- Add shared HTTP entitlement error helpers for `ENTITLEMENT_REQUIRED`, `AGENT_NOT_ENABLED`, and `ENTITLEMENT_LIMIT_EXCEEDED`.
-- Enforce `reports`, `database`, `api`, and `mcp` on REST handlers and MCP tools.
-- Enforce `enabled_agents` on every handler / tool that references a specific agent module.
-- Implement the API-key bypass guard (post-auth check gated on `auth_method == ApiKey`).
-- Apply numeric limits to workflow, object schema, API key, and bulk operation create paths.
-- Add integration tests for representative denied and allowed paths, including a session-authenticated control case to confirm the `api` gate doesn't affect non-API-key auth.
+Split into six PR-sized sub-phases, layered so each one builds on the previous. The full goal is unchanged: every disabled feature, every disallowed agent, and every exceeded tier limit must produce a stable 403 response on every authenticated entry point.
+
+#### Phase 3.1 - Error helpers (foundation)
+
+- Add a shared module that builds the three documented 403 responses by `code` (`ENTITLEMENT_REQUIRED`, `AGENT_NOT_ENABLED`, `ENTITLEMENT_LIMIT_EXCEEDED`).
+- Provide both an HTTP variant (for REST handlers) and an `rmcp::ErrorData` variant (for MCP tools), so 3.5 doesn't have to reinvent the wire shape.
+- Unit tests assert status, stable `code`, and JSON shape for each helper.
+- **Out of scope:** any actual gate; nothing changes route behavior in this phase.
+
+#### Phase 3.2 - REST feature gates
+
+- Apply `reports`, `database`, `mcp` (transport only), and `api` (management routes only — `/api/runtime/api-keys*`) gates on the matching REST handlers using the 3.1 helpers.
+- Per-handler explicit checks, not route-layer middleware (see "Backend Enforcement Points" above).
+- Integration tests: denied + allowed for each surface.
+- **Out of scope:** API-key auth bypass on non-admin routes (3.3); per-agent allowlist (3.4); MCP tool-level checks (3.5); numeric limits (3.6).
+
+#### Phase 3.3 - API-key bypass guard
+
+- Add a post-auth check that rejects any request whose `AuthContext.auth_method == ApiKey` when `api` is disabled, on every tenant route — not only `/api/runtime/api-keys*`.
+- Session-cookie / OAuth users on the same routes must still pass.
+- Integration tests cover both the deny path and a session-authenticated control case.
+- **Out of scope:** anything other than the API-key bypass.
+
+#### Phase 3.4 - Agent allowlist on REST + workflow compile
+
+- Add `enabled_agents` membership checks on every REST handler that references a specific agent module (test, execute, metadata, capability call).
+- At workflow create / update / compile, walk the step graph and reject any step whose `agent.module` is not in `enabled_agents`. Return `AGENT_NOT_ENABLED` so the UI sees the same code as runtime rejections.
+- Integration tests for both the static (graph-walk) and per-request (handler) checks.
+- **Out of scope:** MCP tool-level enforcement (3.5); dynamic dispatcher rejection at `/api/internal/agents/{module}/{capability}` (Phase 5).
+
+#### Phase 3.5 - MCP tool gates
+
+- Add tool-level helpers `require_feature(server, feature)` and `require_agent(server, module_id)` returning `rmcp::ErrorData` built from 3.1.
+- Apply: report tools → `reports`; object-model tools → `database`; agent metadata/test tools → allowlist for the targeted module; workflow mutation tools that add or test agent steps → allowlist per referenced module.
+- Translate 403 responses bubbling out of in-process `Router::oneshot()` calls into `rmcp::ErrorData` with the original `code` preserved.
+- **Out of scope:** transport-level `/mcp` gate (already in 3.2); per-internal-route enforcement (Phase 5).
+
+#### Phase 3.6 - Numeric limits
+
+- Apply the five caps (`maxWorkflows`, `maxObjectSchemas`, `maxApiKeys`, `objectModelBulkRequestLimit`, `maxConcurrentExecutions`) at the enforcement points listed under "Limit Composition".
+- Composition rule is `effective_limit = min(configured_infra_limit, entitlement_limit)`.
+- Returns `ENTITLEMENT_LIMIT_EXCEEDED` (helper from 3.1). Do not silently truncate.
+- Integration tests on the "limited" fixture from the Test Matrix.
+- **Out of scope:** anything other than numeric caps.
 
 ### Phase 4 - Frontend Gating
 
