@@ -371,6 +371,17 @@ pub(crate) fn build_event_stream(
                                     _ => None,
                                 };
 
+                                // The AiAgent step's debug_end event carries
+                                // the prose response, but step events truncate
+                                // large outputs and the response is often
+                                // longer than the per-event cap. The workflow's
+                                // final `outputs` is the authoritative copy —
+                                // surface it as a Message so the chat UI shows
+                                // the assistant's reply.
+                                if let Some(msg) = extract_message_from_outputs(info.output.as_ref()) {
+                                    yield Ok(make_event("message", &msg));
+                                }
+
                                 yield Ok(make_event("done", &ChatEvent::Done {
                                     outputs: info.output,
                                     duration_seconds: duration,
@@ -457,6 +468,72 @@ pub(crate) fn build_event_stream(
 }
 
 /// Parse a step debug event into chat-friendly events
+/// Pull `runtara_<toolset>` out of a synthetic MCP tool step id of the form
+/// `<agent>.tool.<toolName>.<counter>`. Returns `None` for step ids that
+/// don't match that shape (e.g. regular edge-tool dispatch).
+fn extract_tool_name_from_step_id(step_id: &str) -> Option<String> {
+    let after = step_id.split_once(".tool.")?.1;
+    let tool = match after.rsplit_once('.') {
+        Some((name, _counter)) => name,
+        None => after,
+    };
+    if tool.is_empty() {
+        None
+    } else {
+        Some(tool.to_string())
+    }
+}
+
+/// Recognise chat-shaped workflow outputs and surface the assistant's
+/// final prose as a `ChatEvent::Message`.
+///
+/// Chat workflows route the AI Agent step's `outputs` through a Finish
+/// step's `answer` field, so the workflow's final `outputs.answer.response`
+/// carries the model's reply. We also accept simpler shapes
+/// (`outputs.response`, `outputs.message`, or `outputs.answer` as a bare
+/// string) so non-canonical Finish mappings still light up the bubble.
+/// Returns `None` when no string field looks like a chat reply — the
+/// caller falls through to emitting just a `Done` event.
+pub(crate) fn extract_message_from_outputs(outputs: Option<&Value>) -> Option<ChatEvent> {
+    let outputs = outputs?.as_object()?;
+    let answer = outputs.get("answer");
+
+    // Most common shape: Finish maps `answer` to the full AiAgent outputs.
+    if let Some(answer_obj) = answer.and_then(|v| v.as_object()) {
+        let response = answer_obj
+            .get("response")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.trim().is_empty());
+        if let Some(content) = response {
+            let iterations = answer_obj
+                .get("iterations")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0) as u32;
+            let tool_calls = answer_obj
+                .get("toolCalls")
+                .and_then(|v| v.as_array())
+                .cloned();
+            return Some(ChatEvent::Message {
+                content: content.to_string(),
+                iterations,
+                tool_calls,
+            });
+        }
+    }
+
+    // Simpler shapes the workflow author might have chosen.
+    let bare = answer
+        .and_then(|v| v.as_str())
+        .or_else(|| outputs.get("response").and_then(|v| v.as_str()))
+        .or_else(|| outputs.get("message").and_then(|v| v.as_str()))
+        .filter(|s| !s.trim().is_empty())?;
+    Some(ChatEvent::Message {
+        content: bare.to_string(),
+        iterations: 0,
+        tool_calls: None,
+    })
+}
+
 pub(crate) fn parse_debug_event(subtype: Option<&str>, payload: &Value) -> Vec<ChatEvent> {
     let step_type = payload
         .get("step_type")
@@ -615,11 +692,23 @@ fn parse_debug_end(
             }]
         }
         "AiAgentToolCall" => {
+            // Step events truncate large outputs into a {_truncated, _preview,
+            // _original_size} stub, so `inner_outputs` is often missing. Fall
+            // back to data we always have: tool_name lives in the step id
+            // (`<agent>.tool.<toolName>.<counter>`) and in step_name as
+            // "Tool: <toolName>".
             let tool_name = inner_outputs
                 .and_then(|o| o.get("tool_name"))
                 .and_then(|v| v.as_str())
-                .unwrap_or("unknown")
-                .to_string();
+                .map(|s| s.to_string())
+                .or_else(|| extract_tool_name_from_step_id(step_id))
+                .or_else(|| {
+                    step_name
+                        .as_deref()
+                        .and_then(|n| n.strip_prefix("Tool: "))
+                        .map(|s| s.to_string())
+                })
+                .unwrap_or_else(|| "unknown".to_string());
             let iteration = inner_outputs
                 .and_then(|o| o.get("iteration"))
                 .and_then(|v| v.as_u64())

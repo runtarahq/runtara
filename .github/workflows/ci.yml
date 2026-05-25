@@ -314,7 +314,7 @@ jobs:
           TEST_RUNTARA_DATABASE_URL: postgres://postgres:postgres@localhost:5432/runtara_test
         run: cargo test -p runtara-environment -- --test-threads=1
 
-  # Per-component-crate unit tests for the 23 agent crates plus the legacy
+  # Per-component-crate unit tests for the 24 agent crates plus the legacy
   # `runtara-agents` parent and the shared agent infrastructure
   # (`runtara-agent-macro` proc-macro). Distinct from components-build,
   # which builds .wasm + .meta.json and drives the dispatcher end-to-end —
@@ -462,20 +462,20 @@ jobs:
       - name: Install wit-deps
         run: cargo install wit-deps-cli --locked
 
-      - name: Build all 23 agent components + emit sidecar meta.json
+      - name: Build all 24 agent components + emit sidecar meta.json
         env:
           # Tools are installed explicitly above. Fail loudly if anything's
           # missing instead of silently re-installing inside the script.
           RUNTARA_NO_INSTALL_TOOLS: "1"
         run: scripts/build-agent-components.sh
 
-      - name: Verify 23 .wasm + 23 .meta.json present
+      - name: Verify 24 .wasm + 24 .meta.json present
         run: |
           wasm_count=$(find target/wasm32-wasip2/release -maxdepth 1 -name 'runtara_agent_*.wasm' | wc -l)
           meta_count=$(find target/wasm32-wasip2/release -maxdepth 1 -name 'runtara_agent_*.meta.json' | wc -l)
           echo "wasm=$wasm_count meta=$meta_count"
-          test "$wasm_count" -eq 23
-          test "$meta_count" -eq 23
+          test "$wasm_count" -eq 24
+          test "$meta_count" -eq 24
 
       - name: Run dispatcher integration tests (incl. full-bundle drift detector)
         run: cargo test -p runtara-component-host --tests

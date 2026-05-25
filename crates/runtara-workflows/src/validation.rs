@@ -336,6 +336,24 @@ pub enum ValidationError {
     AiAgentMemoryConfigWithoutEdge { step_id: String },
     /// AI Agent step has a "memory" edge but no memory config.
     AiAgentMemoryEdgeWithoutConfig { step_id: String },
+    /// AI Agent step has an `mcp.*` edge whose target is not an Agent step.
+    AiAgentMcpEdgeNotAgent {
+        step_id: String,
+        target_step_id: String,
+        label: String,
+    },
+    /// AI Agent step has an `mcp.*` edge whose target Agent step has
+    /// `agent_id != "mcp"`.
+    AiAgentMcpEdgeWrongAgentId {
+        step_id: String,
+        target_step_id: String,
+        label: String,
+        actual_agent_id: String,
+    },
+    /// AI Agent step has an `mcp.*` edge with an empty toolset suffix.
+    AiAgentMcpEdgeEmptySuffix { step_id: String, label: String },
+    /// AI Agent step has two `mcp.*` edges with the same toolset suffix.
+    AiAgentMcpEdgeDuplicateSuffix { step_id: String, toolset: String },
 }
 
 /// Information about a missing required input field.
@@ -857,6 +875,49 @@ impl std::fmt::Display for ValidationError {
                     "[E116] AI Agent step '{}' has a 'memory' edge but no memory config. \
                      Add a memory configuration with at least a conversation_id.",
                     step_id
+                )
+            }
+            ValidationError::AiAgentMcpEdgeNotAgent {
+                step_id,
+                target_step_id,
+                label,
+            } => {
+                write!(
+                    f,
+                    "[E120] AI Agent step '{}' has an '{}' edge pointing to '{}', \
+                     which is not an Agent step. MCP toolsets must be Agent steps \
+                     (with agent_id = 'mcp').",
+                    step_id, label, target_step_id
+                )
+            }
+            ValidationError::AiAgentMcpEdgeWrongAgentId {
+                step_id,
+                target_step_id,
+                label,
+                actual_agent_id,
+            } => {
+                write!(
+                    f,
+                    "[E121] AI Agent step '{}' has an '{}' edge pointing to Agent step '{}', \
+                     which uses agent_id = '{}'. MCP toolsets must target the 'mcp' agent.",
+                    step_id, label, target_step_id, actual_agent_id
+                )
+            }
+            ValidationError::AiAgentMcpEdgeEmptySuffix { step_id, label } => {
+                write!(
+                    f,
+                    "[E122] AI Agent step '{}' has an MCP edge with empty toolset suffix \
+                     ('{}'). Use a non-empty name like 'mcp.linear' or 'mcp.slack'.",
+                    step_id, label
+                )
+            }
+            ValidationError::AiAgentMcpEdgeDuplicateSuffix { step_id, toolset } => {
+                write!(
+                    f,
+                    "[E123] AI Agent step '{}' has multiple MCP edges with the same \
+                     toolset suffix '{}'. Each mcp.<toolset> name must be unique \
+                     within one AI Agent step.",
+                    step_id, toolset
                 )
             }
         }
@@ -4207,6 +4268,9 @@ fn validate_ai_agent_steps(graph: &ExecutionGraph, result: &mut ValidationResult
 
             // Collect labeled edges for this step.
             // "next" is a reserved label meaning "continue to next step" — skip it.
+            // "memory" and "mcp.<toolset>" are also reserved (validated below) but
+            // we still want them in the duplicate-label check, so they go through
+            // a separate name-format gate.
             let mut seen_labels: HashSet<String> = HashSet::new();
             for edge in &graph.execution_plan {
                 if edge.from_step == *step_id
@@ -4227,8 +4291,12 @@ fn validate_ai_agent_steps(graph: &ExecutionGraph, result: &mut ValidationResult
                             });
                     }
 
-                    // Check label format (alphanumeric + underscore)
-                    if !label.chars().all(|c| c.is_alphanumeric() || c == '_') {
+                    // Check label format (alphanumeric + underscore).
+                    // Reserved labels with a different shape are exempted:
+                    //   - "memory" — handled by the memory rule below.
+                    //   - "mcp.<toolset>" — handled by the MCP rule below.
+                    let is_reserved = label == "memory" || label.starts_with("mcp.");
+                    if !is_reserved && !label.chars().all(|c| c.is_alphanumeric() || c == '_') {
                         result
                             .errors
                             .push(ValidationError::AiAgentInvalidToolLabel {
@@ -4288,6 +4356,71 @@ fn validate_ai_agent_steps(graph: &ExecutionGraph, result: &mut ValidationResult
                     .push(ValidationError::AiAgentMemoryEdgeWithoutConfig {
                         step_id: step_id.clone(),
                     });
+            }
+
+            // === MCP edge validation ===
+            // Each `mcp.<toolset>` edge must:
+            //   1. point to an Agent step
+            //   2. that Agent's `agent_id` must be "mcp"
+            //   3. the suffix after "mcp." must be non-empty
+            //   4. no two edges from this AI Agent may share the same suffix
+            let mcp_edges: Vec<&runtara_dsl::ExecutionPlanEdge> = graph
+                .execution_plan
+                .iter()
+                .filter(|e| {
+                    e.from_step == *step_id
+                        && e.label.as_deref().is_some_and(|l| l.starts_with("mcp."))
+                })
+                .collect();
+
+            let mut seen_suffixes: HashSet<String> = HashSet::new();
+            for edge in &mcp_edges {
+                let label = edge
+                    .label
+                    .as_deref()
+                    .expect("filtered to Some(label) above");
+                let suffix = &label[4..]; // strip "mcp."
+
+                if suffix.is_empty() {
+                    result
+                        .errors
+                        .push(ValidationError::AiAgentMcpEdgeEmptySuffix {
+                            step_id: step_id.clone(),
+                            label: label.to_string(),
+                        });
+                    continue;
+                }
+
+                if !seen_suffixes.insert(suffix.to_string()) {
+                    result
+                        .errors
+                        .push(ValidationError::AiAgentMcpEdgeDuplicateSuffix {
+                            step_id: step_id.clone(),
+                            toolset: suffix.to_string(),
+                        });
+                }
+
+                match graph.steps.get(&edge.to_step) {
+                    Some(Step::Agent(agent_step)) => {
+                        if agent_step.agent_id != "mcp" {
+                            result
+                                .errors
+                                .push(ValidationError::AiAgentMcpEdgeWrongAgentId {
+                                    step_id: step_id.clone(),
+                                    target_step_id: edge.to_step.clone(),
+                                    label: label.to_string(),
+                                    actual_agent_id: agent_step.agent_id.clone(),
+                                });
+                        }
+                    }
+                    _ => {
+                        result.errors.push(ValidationError::AiAgentMcpEdgeNotAgent {
+                            step_id: step_id.clone(),
+                            target_step_id: edge.to_step.clone(),
+                            label: label.to_string(),
+                        });
+                    }
+                }
             }
         }
     }
@@ -4725,6 +4858,171 @@ mod tests {
         assert!(result.errors.iter().any(|error| matches!(
             error,
             ValidationError::AiAgentMissingConnection { step_id } if step_id == "assistant"
+        )));
+    }
+
+    // === MCP Edge Validation Tests ===
+
+    fn ai_agent_with_connection(id: &str) -> Step {
+        use runtara_dsl::{AiAgentConfig, AiAgentProvider, ImmediateValue, MappingValue};
+        Step::AiAgent(AiAgentStep {
+            id: id.to_string(),
+            name: None,
+            connection_id: Some("conn-openai".to_string()),
+            config: Some(AiAgentConfig {
+                system_prompt: MappingValue::Immediate(ImmediateValue {
+                    value: serde_json::json!("you are helpful"),
+                }),
+                user_prompt: MappingValue::Immediate(ImmediateValue {
+                    value: serde_json::json!("hi"),
+                }),
+                provider: AiAgentProvider::OpenAi,
+                model: Some("gpt-4o".to_string()),
+                max_iterations: None,
+                temperature: None,
+                max_tokens: None,
+                memory: None,
+                output_schema: None,
+            }),
+            breakpoint: None,
+            durable: None,
+        })
+    }
+
+    fn mcp_agent_step(id: &str) -> Step {
+        Step::Agent(AgentStep {
+            id: id.to_string(),
+            name: None,
+            agent_id: "mcp".to_string(),
+            capability_id: "mcp-tool-search".to_string(),
+            connection_id: Some("conn-mcp".to_string()),
+            input_mapping: None,
+            max_retries: None,
+            retry_delay: None,
+            timeout: None,
+            compensation: None,
+            breakpoint: None,
+            durable: None,
+        })
+    }
+
+    fn edge(from: &str, to: &str, label: Option<&str>) -> runtara_dsl::ExecutionPlanEdge {
+        runtara_dsl::ExecutionPlanEdge {
+            from_step: from.to_string(),
+            to_step: to.to_string(),
+            label: label.map(|s| s.to_string()),
+            condition: None,
+            priority: None,
+        }
+    }
+
+    #[test]
+    fn test_mcp_edge_to_valid_target_is_ok() {
+        let mut steps = HashMap::new();
+        steps.insert("ai".to_string(), ai_agent_with_connection("ai"));
+        steps.insert("linear".to_string(), mcp_agent_step("linear"));
+        steps.insert("finish".to_string(), create_finish_step("finish", None));
+
+        let mut graph = create_basic_graph(steps, "ai");
+        graph.execution_plan = vec![
+            edge("ai", "linear", Some("mcp.linear")),
+            edge("ai", "finish", Some("next")),
+        ];
+
+        let result = validate_workflow(&graph, &test_catalog());
+        assert!(
+            !result.errors.iter().any(|e| matches!(
+                e,
+                ValidationError::AiAgentMcpEdgeNotAgent { .. }
+                    | ValidationError::AiAgentMcpEdgeWrongAgentId { .. }
+                    | ValidationError::AiAgentMcpEdgeEmptySuffix { .. }
+                    | ValidationError::AiAgentMcpEdgeDuplicateSuffix { .. }
+            )),
+            "no MCP errors expected, got: {:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn test_mcp_edge_with_empty_suffix_fails() {
+        let mut steps = HashMap::new();
+        steps.insert("ai".to_string(), ai_agent_with_connection("ai"));
+        steps.insert("linear".to_string(), mcp_agent_step("linear"));
+        steps.insert("finish".to_string(), create_finish_step("finish", None));
+
+        let mut graph = create_basic_graph(steps, "ai");
+        graph.execution_plan = vec![
+            edge("ai", "linear", Some("mcp.")),
+            edge("ai", "finish", Some("next")),
+        ];
+
+        let result = validate_workflow(&graph, &test_catalog());
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::AiAgentMcpEdgeEmptySuffix { .. }))
+        );
+    }
+
+    #[test]
+    fn test_mcp_edge_to_non_agent_step_fails() {
+        let mut steps = HashMap::new();
+        steps.insert("ai".to_string(), ai_agent_with_connection("ai"));
+        steps.insert("finish".to_string(), create_finish_step("finish", None));
+
+        let mut graph = create_basic_graph(steps, "ai");
+        graph.execution_plan = vec![edge("ai", "finish", Some("mcp.linear"))];
+
+        let result = validate_workflow(&graph, &test_catalog());
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::AiAgentMcpEdgeNotAgent { .. }))
+        );
+    }
+
+    #[test]
+    fn test_mcp_edge_to_wrong_agent_id_fails() {
+        let mut steps = HashMap::new();
+        steps.insert("ai".to_string(), ai_agent_with_connection("ai"));
+        // An Agent step targeting transform, NOT mcp.
+        steps.insert("tx".to_string(), create_agent_step("tx", "transform", None));
+        steps.insert("finish".to_string(), create_finish_step("finish", None));
+
+        let mut graph = create_basic_graph(steps, "ai");
+        graph.execution_plan = vec![
+            edge("ai", "tx", Some("mcp.something")),
+            edge("ai", "finish", Some("next")),
+        ];
+
+        let result = validate_workflow(&graph, &test_catalog());
+        assert!(result.errors.iter().any(|e| matches!(
+            e,
+            ValidationError::AiAgentMcpEdgeWrongAgentId { actual_agent_id, .. } if actual_agent_id == "transform"
+        )));
+    }
+
+    #[test]
+    fn test_mcp_edge_duplicate_suffix_fails() {
+        let mut steps = HashMap::new();
+        steps.insert("ai".to_string(), ai_agent_with_connection("ai"));
+        steps.insert("linear_a".to_string(), mcp_agent_step("linear_a"));
+        steps.insert("linear_b".to_string(), mcp_agent_step("linear_b"));
+        steps.insert("finish".to_string(), create_finish_step("finish", None));
+
+        let mut graph = create_basic_graph(steps, "ai");
+        graph.execution_plan = vec![
+            edge("ai", "linear_a", Some("mcp.linear")),
+            edge("ai", "linear_b", Some("mcp.linear")),
+            edge("ai", "finish", Some("next")),
+        ];
+
+        let result = validate_workflow(&graph, &test_catalog());
+        assert!(result.errors.iter().any(|e| matches!(
+            e,
+            ValidationError::AiAgentMcpEdgeDuplicateSuffix { toolset, .. } if toolset == "linear"
         )));
     }
 

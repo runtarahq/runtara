@@ -1130,6 +1130,22 @@ pub struct WaitForSignalActionConfig {
 ///
 /// Without tool edges, it acts as a simple LLM completion step.
 ///
+/// # Reserved edge labels
+///
+/// Some outgoing edge labels carry special meaning to the AI Agent step and
+/// are NOT exposed as tools to the LLM:
+///
+/// - `next` — the default continuation edge taken after the LLM finishes.
+/// - `memory` — points to a memory-provider Agent step. The codegen emits
+///   `load_memory` / `save_memory` calls against that target's `agent_id`,
+///   so the Agent step's own `capability_id` is effectively ignored for
+///   this edge.
+/// - `mcp.<toolset>` — points to an Agent step with `agent_id == "mcp"`
+///   carrying an `McpConnection`. The codegen emits two synthetic tools
+///   per such edge — `<toolset>_search` and `<toolset>_invoke` — that the
+///   LLM uses to dynamically discover and call tools on an external MCP
+///   server. Each `<toolset>` suffix must be unique within one AI Agent.
+///
 /// Example:
 /// ```json
 /// {

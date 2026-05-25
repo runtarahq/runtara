@@ -67,6 +67,8 @@ static HTTP_EXTRACTORS: &[&dyn HttpConnectionExtractor] = &[
     &crate::integrations::connection_types::HubSpotAccessTokenExtractor,
     #[cfg(feature = "integrations")]
     &crate::integrations::connection_types::StripeExtractor,
+    #[cfg(feature = "integrations")]
+    &crate::integrations::connection_types::McpExtractor,
 ];
 
 /// Returns all integration_ids that have a registered `HttpConnectionExtractor`.

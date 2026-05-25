@@ -719,6 +719,11 @@ struct ConnectionFieldArgs {
     /// Mark this field as a secret (password, API key, etc.)
     #[darling(default)]
     secret: bool,
+    /// Comma-separated list of allowed values. When set, the UI renders
+    /// the field as a select with these options instead of a text input.
+    /// Example: `#[field(enum_values = "none,bearer,api_key")]`.
+    #[darling(default)]
+    enum_values: Option<String>,
 }
 
 /// Container attributes for ConnectionParams derive
@@ -811,6 +816,22 @@ pub fn derive_connection_params(input: TokenStream) -> TokenStream {
             let placeholder_token = option_to_tokens(&f.placeholder);
             let default_token = option_to_tokens(&f.default);
             let is_secret = f.secret;
+            let enum_values_token = match &f.enum_values {
+                Some(raw) => {
+                    let values: Vec<String> = raw
+                        .split(',')
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .collect();
+                    if values.is_empty() {
+                        quote! { None }
+                    } else {
+                        let lits = values.iter().map(|v| quote! { #v });
+                        quote! { Some(&[#(#lits),*]) }
+                    }
+                }
+                None => quote! { None },
+            };
 
             quote! {
                 runtara_dsl::agent_meta::ConnectionFieldMeta {
@@ -822,6 +843,7 @@ pub fn derive_connection_params(input: TokenStream) -> TokenStream {
                     placeholder: #placeholder_token,
                     default_value: #default_token,
                     is_secret: #is_secret,
+                    enum_values: #enum_values_token,
                 }
             }
         })

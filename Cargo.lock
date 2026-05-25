@@ -4040,6 +4040,7 @@ dependencies = [
  "runtara-agent-http",
  "runtara-agent-hubspot",
  "runtara-agent-mailgun",
+ "runtara-agent-mcp",
  "runtara-agent-object-model",
  "runtara-agent-openai",
  "runtara-agent-s3-storage",
@@ -4162,6 +4163,19 @@ dependencies = [
  "runtara-http",
  "serde",
  "serde_json",
+ "wit-bindgen-rt 0.44.0",
+]
+
+[[package]]
+name = "runtara-agent-mcp"
+version = "7.0.8"
+dependencies = [
+ "runtara-agent-macro",
+ "runtara-dsl",
+ "runtara-http",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
  "wit-bindgen-rt 0.44.0",
 ]
 
