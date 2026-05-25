@@ -1,3 +1,5 @@
+use crate::entitlements::EntitlementSnapshot;
+use std::collections::BTreeSet;
 use std::sync::OnceLock;
 
 const DEFAULT_MCP_ALLOWED_HOSTS: [&str; 3] = ["localhost", "127.0.0.1", "::1"];
@@ -59,6 +61,7 @@ pub struct Config {
     /// builds so `cargo run` exits promptly; production release builds keep
     /// the full drain unless `RUNTARA_DEV_MODE=true` is set explicitly.
     pub dev_mode: bool,
+    pub entitlement_snapshot: EntitlementSnapshot,
 }
 
 /// Backing store for MCP Streamable HTTP session recovery.
@@ -162,6 +165,21 @@ impl Config {
 
         let dev_mode: bool = parse_bool_or("RUNTARA_DEV_MODE", cfg!(debug_assertions))?;
 
+        let registered_agents: BTreeSet<String> = runtara_agents::registry::get_all_agent_modules()
+            .iter()
+            .map(|m| m.id.to_string())
+            .collect();
+
+        let entitlement_snapshot: EntitlementSnapshot = EntitlementSnapshot::parse_entitlements(
+            &tenant_id,
+            std::env::var("RUNTARA_PRICING_TIER").ok().as_deref(),
+            std::env::var("RUNTARA_ENTITLEMENTS_JSON").ok().as_deref(),
+            std::env::var("RUNTARA_ENTITLEMENT_OVERRIDES_JSON")
+                .ok()
+                .as_deref(),
+            &registered_agents,
+        )?;
+
         Ok(Self {
             tenant_id,
             max_concurrent_executions,
@@ -184,6 +202,7 @@ impl Config {
             mcp_session_store,
             mcp_session_ttl_seconds,
             dev_mode,
+            entitlement_snapshot,
         })
     }
 }
@@ -205,6 +224,10 @@ pub enum ConfigError {
     /// An environment variable has an invalid value.
     #[error("invalid value for {0}: {1}")]
     Invalid(&'static str, &'static str),
+
+    /// An environment variable has an invalid value, with dynamic detail.
+    #[error("invalid value for {0}: {1}")]
+    InvalidValue(&'static str, String),
 }
 
 fn parse_bool_or(name: &'static str, default: bool) -> Result<bool, ConfigError> {
