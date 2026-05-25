@@ -148,10 +148,10 @@ pub fn api_key_decision(
 /// rather than 403'ing on a downstream failure mode (auth misconfiguration
 /// surfaces elsewhere).
 pub async fn api_key_auth_guard(req: Request, next: Next) -> Response {
-    if let Some(ctx) = req.extensions().get::<AuthContext>().cloned() {
-        if let Err(denial) = api_key_decision(crate::config::entitlements(), &ctx.auth_method) {
-            return denial.into_response();
-        }
+    if let Some(ctx) = req.extensions().get::<AuthContext>().cloned()
+        && let Err(denial) = api_key_decision(crate::config::entitlements(), &ctx.auth_method)
+    {
+        return denial.into_response();
     }
     next.run(req).await
 }

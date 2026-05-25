@@ -102,8 +102,8 @@ mod tests {
             Some(r#"{"features":{"reports":false}}"#),
             None,
         ));
-        assert_eq!(dto.features[&FeatureKey::Reports], false);
-        assert_eq!(dto.features[&FeatureKey::Database], true);
+        assert!(!dto.features[&FeatureKey::Reports]);
+        assert!(dto.features[&FeatureKey::Database]);
     }
 
     #[test]

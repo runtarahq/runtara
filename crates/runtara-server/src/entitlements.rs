@@ -138,7 +138,7 @@ impl EntitlementSnapshot {
             && self
                 .enabled_agents
                 .as_ref()
-                .map_or(true, |allowed| allowed.contains(agent))
+                .is_none_or(|allowed| allowed.contains(agent))
     }
 
     pub fn require_agent(&self, agent: &str) -> Result<(), EntitlementError> {
@@ -294,7 +294,6 @@ struct TierBase {
 impl TierBase {
     /// Everything on, no caps. Used when `RUNTARA_PRICING_TIER` is unset —
     /// preserves the historical local-dev default.
-
     fn all_enabled() -> Self {
         TierBase {
             features: TierFeatures {
@@ -636,7 +635,7 @@ mod tests {
             assert!(
                 snap.enabled_agents
                     .as_ref()
-                    .map_or(true, |allowed| allowed.contains(agent)),
+                    .is_none_or(|allowed| allowed.contains(agent)),
                 "premium tier should allow agent '{agent}', got {:?}",
                 snap.enabled_agents,
             );
