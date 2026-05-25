@@ -1,98 +1,13 @@
 import path from 'path';
 import react from '@vitejs/plugin-react';
 import { defineConfig } from 'vite';
-import { VitePWA } from 'vite-plugin-pwa';
 
 export default defineConfig({
   // Relative base so the emitted bundle works under any mount path
   // (`/ui/`, `/ui/<tenant-id>/`, etc.) without rebuilding. The runtime
   // base href is injected into index.html by the Rust server.
   base: './',
-  plugins: [
-    react(),
-    VitePWA({
-      registerType: 'prompt',
-      includeAssets: ['logo-icon.png', 'log.png'],
-      manifest: {
-        name: 'Runtara',
-        short_name: 'Runtara',
-        description: 'Durable workflow runtime',
-        theme_color: '#3b82f6',
-        background_color: '#ffffff',
-        display: 'standalone',
-        orientation: 'portrait-primary',
-        scope: './',
-        start_url: './',
-        icons: [
-          {
-            src: 'icons/icon-192x192.png',
-            sizes: '192x192',
-            type: 'image/png',
-          },
-          {
-            src: 'icons/icon-512x512.png',
-            sizes: '512x512',
-            type: 'image/png',
-          },
-          {
-            src: 'icons/icon-512x512-maskable.png',
-            sizes: '512x512',
-            type: 'image/png',
-            purpose: 'maskable',
-          },
-        ],
-      },
-      workbox: {
-        // `index.html` is deliberately excluded from precaching: the Rust
-        // server rewrites it at request time to inject
-        // `window.__RUNTARA_CONFIG__` (including `authMode` / `tenantId`).
-        // A precached copy would pin the first-seen state and stop the SPA
-        // from ever seeing a changed auth mode after a server redeploy.
-        globPatterns: ['**/*.{js,css,ico,png,svg,woff,woff2}'],
-        // Ensure new service worker takes control immediately
-        skipWaiting: true,
-        clientsClaim: true,
-        // Clean old caches on update
-        cleanupOutdatedCaches: true,
-        // Don't cache navigation requests - let them go to network
-        // This prevents issues with OAuth redirects and other navigation redirects
-        navigateFallback: null,
-        runtimeCaching: [
-          {
-            urlPattern: /^https:\/\/.+\/api\/.*/i,
-            handler: 'NetworkFirst',
-            options: {
-              cacheName: 'api-cache',
-              networkTimeoutSeconds: 10,
-              expiration: {
-                maxEntries: 50,
-                maxAgeSeconds: 60 * 5, // 5 minutes - short cache for API
-              },
-              cacheableResponse: {
-                statuses: [200],
-              },
-            },
-          },
-          {
-            urlPattern: /^https:\/\/fonts\.googleapis\.com\/.*/i,
-            handler: 'CacheFirst',
-            options: {
-              cacheName: 'google-fonts-cache',
-              expiration: {
-                maxEntries: 10,
-                maxAgeSeconds: 60 * 60 * 24 * 365,
-              },
-            },
-          },
-        ],
-        navigateFallbackDenylist: [/^\/api/, /^\/oauth/],
-      },
-      devOptions: {
-        enabled: true,
-        type: 'module',
-      },
-    }),
-  ],
+  plugins: [react()],
 
   resolve: {
     alias: {

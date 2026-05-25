@@ -8,7 +8,6 @@ import { useUserGroups } from '@/shared/hooks/useUserGroups';
 import { useEffect } from 'react';
 import { cleanupPointerEvents } from '@/lib/utils';
 import { useThemeStore } from '@/shared/stores/themeStore';
-import { OfflineIndicator, PWAUpdatePrompt } from '@/shared/components/pwa';
 import { MaintenancePage } from '@/shared/components/maintenance-page';
 import { useHealthCheck } from '@/shared/hooks/useHealthCheck';
 
@@ -59,13 +58,7 @@ function App() {
     return <MaintenancePage />;
   }
 
-  return (
-    <>
-      <OfflineIndicator />
-      <RouterProvider router={router} />
-      <PWAUpdatePrompt />
-    </>
-  );
+  return <RouterProvider router={router} />;
 }
 
 export default App;

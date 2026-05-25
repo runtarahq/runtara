@@ -391,7 +391,7 @@
   min-height: 132px !important;
 }
 
-/* PWA Safe area utilities */
+/* Safe area utilities */
 @layer utilities {
   .pt-safe {
     padding-top: var(--safe-area-inset-top);
