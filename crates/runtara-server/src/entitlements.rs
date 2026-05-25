@@ -28,6 +28,27 @@ impl FeatureKey {
         FeatureKey::Api,
         FeatureKey::Mcp,
     ];
+
+    /// Wire identifier — the snake_case string used in error bodies and the
+    /// `features` map keys. Mirrors the serde rename so the two never drift.
+    pub const fn name(self) -> &'static str {
+        match self {
+            FeatureKey::Reports => "reports",
+            FeatureKey::Database => "database",
+            FeatureKey::Api => "api",
+            FeatureKey::Mcp => "mcp",
+        }
+    }
+
+    /// Human-readable label used in default error messages.
+    pub const fn display_name(self) -> &'static str {
+        match self {
+            FeatureKey::Reports => "Reports",
+            FeatureKey::Database => "Database",
+            FeatureKey::Api => "API access",
+            FeatureKey::Mcp => "MCP",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, ToSchema)]
