@@ -8,11 +8,12 @@
 use axum::{
     extract::{Path, State},
     http::StatusCode,
-    response::Json,
+    response::{IntoResponse, Json, Response},
 };
 
 use crate::api::dto::operators::{AgentInfo, CapabilityInfo, ListAgentsResponse};
 use crate::api::services::operators::{AgentsService, ServiceError};
+use crate::entitlement_error::EntitlementDenial;
 
 /// Get all available agents (without capabilities details)
 #[utoipa::path(
@@ -46,11 +47,18 @@ pub async fn list_agents_handler(
 pub async fn get_agent_handler(
     State(service): State<AgentsService>,
     Path(name): Path<String>,
-) -> Result<Json<AgentInfo>, StatusCode> {
+) -> Result<Json<AgentInfo>, Response> {
+    // Phase 3.4 — per-agent allowlist check. Surfaces AGENT_NOT_ENABLED
+    // with the same stable code the workflow compile gate emits.
+    if let Err(err) = crate::config::entitlements().require_agent(&name) {
+        return Err(EntitlementDenial::from(err).into_response());
+    }
     match service.get_agent(&name) {
         Ok(agent) => Ok(Json(agent)),
-        Err(ServiceError::AgentNotFound) => Err(StatusCode::NOT_FOUND),
-        Err(ServiceError::CapabilityNotFound) => Err(StatusCode::INTERNAL_SERVER_ERROR),
+        Err(ServiceError::AgentNotFound) => Err(StatusCode::NOT_FOUND.into_response()),
+        Err(ServiceError::CapabilityNotFound) => {
+            Err(StatusCode::INTERNAL_SERVER_ERROR.into_response())
+        }
     }
 }
 
@@ -71,11 +79,15 @@ pub async fn get_agent_handler(
 pub async fn get_capability_handler(
     State(service): State<AgentsService>,
     Path((name, capability_id)): Path<(String, String)>,
-) -> Result<Json<CapabilityInfo>, StatusCode> {
+) -> Result<Json<CapabilityInfo>, Response> {
+    // Phase 3.4 — per-agent allowlist check.
+    if let Err(err) = crate::config::entitlements().require_agent(&name) {
+        return Err(EntitlementDenial::from(err).into_response());
+    }
     match service.get_capability(&name, &capability_id) {
         Ok(capability) => Ok(Json(capability)),
         Err(ServiceError::AgentNotFound) | Err(ServiceError::CapabilityNotFound) => {
-            Err(StatusCode::NOT_FOUND)
+            Err(StatusCode::NOT_FOUND.into_response())
         }
     }
 }
@@ -92,16 +104,18 @@ pub async fn get_capability_handler(
         (status = 501, description = "Not implemented"),
     )
 )]
-pub async fn get_agent_connection_schema_handler(
-    Path(name): Path<String>,
-) -> (StatusCode, Json<serde_json::Value>) {
+pub async fn get_agent_connection_schema_handler(Path(name): Path<String>) -> Response {
+    // Phase 3.4 — per-agent allowlist check.
+    if let Err(err) = crate::config::entitlements().require_agent(&name) {
+        return EntitlementDenial::from(err).into_response();
+    }
     let response = serde_json::json!({
         "success": false,
         "message": "This endpoint is not yet implemented",
         "endpoint": format!("/api/runtime/agents/{}/connection-schema", name),
         "status": 501
     });
-    (StatusCode::NOT_IMPLEMENTED, Json(response))
+    (StatusCode::NOT_IMPLEMENTED, Json(response)).into_response()
 }
 
 /// Snapshot of the embedded component dispatcher.

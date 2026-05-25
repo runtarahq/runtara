@@ -1284,7 +1284,7 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
             "/api/runtime/reports/{report_id}/edit",
             post(api::handlers::reports::edit_report),
         )
-        .route_layer(from_fn(crate::middleware::entitlement::require_reports));
+        .route_layer(from_fn(middleware::entitlement::require_reports));
 
     let api_keys_router: Router<AppState> = Router::new()
         .route(
@@ -1296,7 +1296,7 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
             "/api/runtime/api-keys/{id}",
             delete(api::handlers::api_keys::revoke_api_key),
         )
-        .route_layer(from_fn(crate::middleware::entitlement::require_api));
+        .route_layer(from_fn(middleware::entitlement::require_api));
 
     // Create router for tenant-scoped endpoints (requires JWT authentication)
     let tenant_routes = Router::new()

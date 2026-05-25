@@ -431,8 +431,25 @@ Split into six PR-sized sub-phases, layered so each one builds on the previous. 
 
 - Add `enabled_agents` membership checks on every REST handler that references a specific agent module (test, execute, metadata, capability call).
 - At workflow create / update / compile, walk the step graph and reject any step whose `agent.module` is not in `enabled_agents`. Return `AGENT_NOT_ENABLED` so the UI sees the same code as runtime rejections.
+- **Compile-time walk is mandatory, not just defensive.** The update/patch gate prevents *new* forbidden graphs from being persisted, but a graph that was valid at write time can become invalid after an entitlement change across a restart (see "Stale workflows after entitlement changes" below). The compile handler re-walks the persisted graph *before* the "already compiled" fast path so a cached binary cannot keep a now-forbidden agent running.
 - Integration tests for both the static (graph-walk) and per-request (handler) checks.
 - **Out of scope:** MCP tool-level enforcement (3.5); dynamic dispatcher rejection at `/api/internal/agents/{module}/{capability}` (Phase 5).
+
+##### Stale workflows after entitlement changes (expected behavior)
+
+When `enabled_agents` shrinks across a restart (or a JSON-layer override removes an agent), previously-persisted workflows that reference the now-forbidden agent **remain in the database unchanged**. This is intentional — we do not retroactively mutate or delete tenant-owned resources on a config change. The behavior surfaces as follows:
+
+| Action on a stale workflow | Behavior | Why |
+| --- | --- | --- |
+| `GET /workflows`, `GET /workflows/{id}` | Returns the workflow normally | Read-only access to existing tenant data is not gated; entitlement changes don't make resources disappear. |
+| `POST /workflows/{id}/update` (any change) | `403 AGENT_NOT_ENABLED` | The 3.4 graph walk runs over the whole graph, not just the diff. The workflow is **effectively frozen for editing** until either the entitlement is restored or the forbidden step is removed in a separate write that *also* fails the walk — i.e. removal requires temporary entitlement restoration. |
+| `PUT /workflows/{id}/versions/{v}/graph` (incremental patch) | `403 AGENT_NOT_ENABLED` | Same walk, same outcome. |
+| `POST /workflows/{id}/compile` | `403 AGENT_NOT_ENABLED` | Compile-time walk runs *before* the "already compiled" check, so even a cached binary cannot be reused. The workflow becomes **uncompilable** until entitlements are restored. |
+| Execute an already-compiled stale workflow | Succeeds in 3.4; fails with `AGENT_NOT_ENABLED` after 3.5 + Phase 5 land | 3.4 only gates the management plane. The runtime dispatcher gate at `/api/internal/agents/{module}/{capability}` is Phase 5. Until then, an existing compiled binary keeps working. |
+
+This is the intended end-state: a stale workflow is **visible** (so the tenant doesn't lose data), **uneditable**, and (after Phase 5) **unrunnable**. Restoring the entitlement re-enables both. The frontend will surface this state explicitly once Phase 4 inlines the snapshot — the workflow editor can mark forbidden steps and the workflow list can flag affected workflows.
+
+A workflow's removal of a forbidden step requires a brief entitlement restoration: change the env, restart, edit, restart again with the restricted entitlements. This is friction we accept rather than build a "destructive update bypass" path that could be misused.
 
 #### Phase 3.5 - MCP tool gates
 

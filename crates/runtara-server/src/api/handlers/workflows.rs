@@ -681,6 +681,40 @@ pub async fn compile_workflow_handler(
         Ok(v) => v,
     };
 
+    // Phase 3.4 — re-walk the persisted graph against the current
+    // entitlement snapshot. Update/patch already gate at write time, but a
+    // graph that was valid when persisted can later become invalid if the
+    // tenant's `enabled_agents` allowlist changes across a restart. We must
+    // reject here even when a cached compiled binary exists; otherwise the
+    // "already compiled" fast path below would let a stale workflow keep
+    // running with a now-forbidden agent.
+    {
+        let repository = WorkflowRepository::new(pool.clone());
+        match repository
+            .get_definition(&tenant_id, &workflow_id, version_num)
+            .await
+        {
+            Ok(Some(definition)) => {
+                let workflow_wrapper = serde_json::json!({ "executionGraph": definition });
+                if let Ok(workflow) =
+                    serde_json::from_value::<runtara_dsl::Workflow>(workflow_wrapper)
+                    && let Err(denial) = crate::middleware::entitlement::walk_graph_for_agents(
+                        crate::config::entitlements(),
+                        &workflow.execution_graph,
+                    )
+                {
+                    return (StatusCode::FORBIDDEN, Json(denial.json_body()));
+                }
+                // If the persisted graph fails to parse, fall through —
+                // the existing compile path will surface a meaningful error.
+            }
+            Ok(None) => {} // Not found; existing flow returns 404.
+            Err(e) => {
+                tracing::warn!(error = %e, "Failed to fetch definition for entitlement gate, falling through");
+            }
+        }
+    }
+
     let force_recompile = query.force_recompile.unwrap_or(false);
     if force_recompile {
         // Stamp `queued` in Redis BEFORE invalidating the DB row. Without
@@ -1883,6 +1917,12 @@ fn map_service_error_to_response(error: ServiceError) -> (StatusCode, Json<Value
                 "message": format!("Execution error: {}", msg)
             });
             (StatusCode::INTERNAL_SERVER_ERROR, Json(response))
+        }
+        ServiceError::EntitlementDenied(denial) => {
+            // Phase 3.4 — surface AGENT_NOT_ENABLED with the stable `code`
+            // that the UI / MCP clients switch on. Body matches what the
+            // per-handler agent gates emit, so callers see one shape.
+            (StatusCode::FORBIDDEN, Json(denial.json_body()))
         }
         ServiceError::CompilationTimeout(msg) => {
             let response = json!({

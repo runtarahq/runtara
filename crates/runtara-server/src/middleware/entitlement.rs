@@ -64,6 +64,61 @@ pub async fn require_mcp(req: Request, next: Next) -> Response {
     require_feature(FeatureKey::Mcp, req, next).await
 }
 
+/// Pure decision for the per-agent allowlist check.
+///
+/// Returns `AGENT_NOT_ENABLED` if the snapshot rejects the agent module —
+/// either because it isn't a registered dispatcher module or because the
+/// tenant's `enabled_agents` allowlist doesn't include it.
+///
+/// Mirrors [`gate_decision`] / [`api_key_decision`]: pure, no global state,
+/// so unit tests can exercise it against constructed snapshots.
+pub fn agent_decision(
+    snapshot: &EntitlementSnapshot,
+    module_id: &str,
+) -> Result<(), EntitlementDenial> {
+    snapshot
+        .require_agent(module_id)
+        .map_err(EntitlementDenial::from)
+}
+
+/// Walk an `ExecutionGraph` and return the first `AGENT_NOT_ENABLED` denial
+/// for any `AgentStep` whose `agent_id` is not allowed by the snapshot, or
+/// `Ok(())` if every agent step references an allowed module.
+///
+/// Recurses into nested subgraphs (`Split.subgraph`, `While.subgraph`,
+/// `WaitForSignal.on_wait`) so workflows with deeply nested agents are not
+/// silently let through.
+pub fn walk_graph_for_agents(
+    snapshot: &EntitlementSnapshot,
+    graph: &runtara_dsl::ExecutionGraph,
+) -> Result<(), EntitlementDenial> {
+    for step in graph.steps.values() {
+        match step {
+            runtara_dsl::Step::Agent(agent_step) => {
+                agent_decision(snapshot, &agent_step.agent_id)?;
+            }
+            runtara_dsl::Step::Split(split) => {
+                walk_graph_for_agents(snapshot, &split.subgraph)?;
+            }
+            runtara_dsl::Step::While(w) => {
+                walk_graph_for_agents(snapshot, &w.subgraph)?;
+            }
+            runtara_dsl::Step::WaitForSignal(s) => {
+                if let Some(on_wait) = &s.on_wait {
+                    walk_graph_for_agents(snapshot, on_wait)?;
+                }
+            }
+            // Other step kinds carry no agent module reference: Finish,
+            // Conditional, Switch, EmbedWorkflow, Log, Error, Filter,
+            // GroupBy, Delay, AiAgent (LLM-driven; gated by provider, not
+            // by the `enabled_agents` allowlist — left for a follow-up
+            // if/when LLM providers join the per-agent gate).
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
 /// Pure decision for the API-key auth bypass guard.
 ///
 /// Returns `Ok(())` for non-API-key auth methods (JWT, session, unauthenticated
@@ -291,5 +346,164 @@ mod tests {
             Some(r#"{"features":{"reports":false,"database":false,"mcp":false}}"#),
         );
         assert!(api_key_decision(&snap, &AuthMethod::ApiKey).is_ok());
+    }
+
+    // ────────────────────────────────────────────────────────────────────
+    // Phase 3.4: per-agent allowlist + workflow graph walk.
+    //
+    // Graph fixtures are built from JSON literals via `serde_json::from_value`
+    // so the tests stay readable and don't drift if the DSL types grow new
+    // fields. We only assert on the gate's behaviour, not on the DSL shape.
+    // ────────────────────────────────────────────────────────────────────
+
+    use runtara_dsl::ExecutionGraph;
+
+    // ── agent_decision ──────────────────────────────────────────────────
+
+    #[test]
+    fn agent_decision_allows_registered_when_no_explicit_allowlist() {
+        // Default snapshot: enabled_agents = None → every registered agent
+        // is allowed. `http` and `csv` are in registered_agents().
+        let snap = snapshot_with(None, None);
+        assert!(agent_decision(&snap, "http").is_ok());
+        assert!(agent_decision(&snap, "csv").is_ok());
+    }
+
+    #[test]
+    fn agent_decision_denies_unregistered_agents() {
+        // `nosuch` isn't a registered dispatcher module — even with no
+        // allowlist, the snapshot rejects unknown agent ids.
+        let snap = snapshot_with(None, None);
+        let denial = agent_decision(&snap, "nosuch").expect_err("unregistered must deny");
+        assert_eq!(denial.code(), codes::AGENT_NOT_ENABLED);
+        assert_eq!(denial.json_body()["agent"], "nosuch");
+    }
+
+    #[test]
+    fn agent_decision_denies_allowed_but_not_in_explicit_allowlist() {
+        // enabled_agents = ["http"]. `csv` is registered but not in this
+        // tenant's allowlist → denied with AGENT_NOT_ENABLED.
+        let snap = snapshot_with(None, Some(r#"{"agents":["http"]}"#));
+        assert!(agent_decision(&snap, "http").is_ok());
+        let denial = agent_decision(&snap, "csv").expect_err("csv must be denied");
+        assert_eq!(denial.code(), codes::AGENT_NOT_ENABLED);
+        assert_eq!(denial.json_body()["agent"], "csv");
+    }
+
+    // ── walk_graph_for_agents ───────────────────────────────────────────
+
+    /// Deserialize an ExecutionGraph from a JSON literal. Panics if the
+    /// fixture is malformed — that's a test-author bug, not a runtime case.
+    fn parse_graph(value: serde_json::Value) -> ExecutionGraph {
+        serde_json::from_value(value).expect("test fixture parses as ExecutionGraph")
+    }
+
+    #[test]
+    fn graph_with_only_allowed_agents_passes() {
+        let snap = snapshot_with(None, Some(r#"{"agents":["http","csv"]}"#));
+        let graph = parse_graph(serde_json::json!({
+            "entryPoint": "s1",
+            "steps": {
+                "s1": {"stepType": "Agent", "id": "s1", "agentId": "http", "capabilityId": "request"},
+                "s2": {"stepType": "Agent", "id": "s2", "agentId": "csv", "capabilityId": "parse"}
+            }
+        }));
+        assert!(walk_graph_for_agents(&snap, &graph).is_ok());
+    }
+
+    #[test]
+    fn graph_with_disallowed_agent_is_rejected() {
+        let snap = snapshot_with(None, Some(r#"{"agents":["http"]}"#));
+        let graph = parse_graph(serde_json::json!({
+            "entryPoint": "s1",
+            "steps": {
+                "s1": {"stepType": "Agent", "id": "s1", "agentId": "http", "capabilityId": "request"},
+                "s2": {"stepType": "Agent", "id": "s2", "agentId": "csv", "capabilityId": "parse"}
+            }
+        }));
+        let denial = walk_graph_for_agents(&snap, &graph).expect_err("csv step must fail walk");
+        assert_eq!(denial.code(), codes::AGENT_NOT_ENABLED);
+        assert_eq!(denial.json_body()["agent"], "csv");
+    }
+
+    #[test]
+    fn graph_walk_recurses_into_split_subgraph() {
+        // Disallowed agent buried inside a Split's subgraph — the walk
+        // must descend, not just check top-level steps.
+        let snap = snapshot_with(None, Some(r#"{"agents":["http"]}"#));
+        let graph = parse_graph(serde_json::json!({
+            "entryPoint": "split",
+            "steps": {
+                "split": {
+                    "stepType": "Split",
+                    "id": "split",
+                    "subgraph": {
+                        "entryPoint": "inner",
+                        "steps": {
+                            "inner": {
+                                "stepType": "Agent",
+                                "id": "inner",
+                                "agentId": "csv",
+                                "capabilityId": "parse"
+                            }
+                        }
+                    }
+                }
+            }
+        }));
+        let denial = walk_graph_for_agents(&snap, &graph)
+            .expect_err("inner csv must be reached by recursion");
+        assert_eq!(denial.code(), codes::AGENT_NOT_ENABLED);
+        assert_eq!(denial.json_body()["agent"], "csv");
+    }
+
+    #[test]
+    fn graph_walk_recurses_into_while_subgraph() {
+        let snap = snapshot_with(None, Some(r#"{"agents":["http"]}"#));
+        let graph = parse_graph(serde_json::json!({
+            "entryPoint": "loop",
+            "steps": {
+                "loop": {
+                    "stepType": "While",
+                    "id": "loop",
+                    "condition": {
+                        "type": "operation",
+                        "op": "EQ",
+                        "arguments": [
+                            {"valueType": "immediate", "value": 1},
+                            {"valueType": "immediate", "value": 1}
+                        ]
+                    },
+                    "subgraph": {
+                        "entryPoint": "inner",
+                        "steps": {
+                            "inner": {
+                                "stepType": "Agent",
+                                "id": "inner",
+                                "agentId": "csv",
+                                "capabilityId": "parse"
+                            }
+                        }
+                    }
+                }
+            }
+        }));
+        assert!(walk_graph_for_agents(&snap, &graph).is_err());
+    }
+
+    #[test]
+    fn graph_without_agent_steps_passes_even_when_allowlist_is_empty() {
+        // No AgentStep in the graph → nothing to gate, walk is a no-op.
+        let snap = snapshot_with(None, Some(r#"{"agents":[]}"#));
+        let graph = parse_graph(serde_json::json!({
+            "entryPoint": "done",
+            "steps": {
+                "done": {
+                    "stepType": "Finish",
+                    "id": "done"
+                }
+            }
+        }));
+        assert!(walk_graph_for_agents(&snap, &graph).is_ok());
     }
 }
