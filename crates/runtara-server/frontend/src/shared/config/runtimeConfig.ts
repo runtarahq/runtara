@@ -6,32 +6,9 @@
 // rebuilding. When a key is missing (e.g. running via `vite dev` or in tests),
 // we fall back to the build-time `VITE_*` values.
 
+import type { EntitlementsSnapshot } from '@/shared/entitlements';
+
 export type AuthMode = 'oidc' | 'local' | 'trust_proxy';
-
-/** Feature key — mirrors `FeatureKey` in `crates/runtara-server/src/entitlements.rs`.
- *  Interim handwritten type for Phase 4.1; Phase 4.2 swaps this for the
- *  regenerated `EntitlementsDto` type from `generated/RuntaraRuntimeApi.ts`. */
-export type EntitlementFeatureKey = 'reports' | 'database' | 'api' | 'mcp';
-
-/** Resolved entitlement snapshot inlined into `window.__RUNTARA_CONFIG__` by
- *  the server's UI handler. Wire shape matches `EntitlementsDto` —
- *  see `crates/runtara-server/src/api/dto/entitlements.rs` and the
- *  Phase 4 plan in `docs/entitlements.md`. */
-export type EntitlementsSnapshot = {
-  tenantId: string;
-  pricingTier: string;
-  features: Partial<Record<EntitlementFeatureKey, boolean>>;
-  /** Materialised agent allowlist — always a concrete array (the backend
-   *  resolves the implicit-all sentinel before serialising). */
-  agents: string[];
-  limits: {
-    maxWorkflows?: number | null;
-    maxObjectSchemas?: number | null;
-    maxApiKeys?: number | null;
-    objectModelBulkRequestLimit?: number | null;
-    maxConcurrentExecutions?: number | null;
-  };
-};
 
 type RuntimeConfig = {
   oidcAuthority?: string;
