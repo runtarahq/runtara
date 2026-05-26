@@ -75,6 +75,34 @@ pub async fn create_api_key(
     State(pool): State<PgPool>,
     Json(request): Json<CreateApiKeyRequest>,
 ) -> (StatusCode, Json<Value>) {
+    let snapshot = crate::config::entitlements();
+    match sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM public.api_keys WHERE org_id = $1 AND is_revoked = false",
+    )
+    .bind(&tenant_id)
+    .fetch_one(&pool)
+    .await
+    {
+        Ok(current) => {
+            if let Err(denial) = crate::middleware::entitlement::limit_decision(
+                current as u64,
+                snapshot.limits.max_api_keys,
+                "maxApiKeys",
+            ) {
+                return (StatusCode::FORBIDDEN, Json(denial.json_body()));
+            }
+        }
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "error": "Failed to enforce API key limit",
+                    "message": e.to_string()
+                })),
+            );
+        }
+    }
+
     let created_by = Some("jwt-user".to_string());
 
     let random_bytes: [u8; 24] = rand::random();

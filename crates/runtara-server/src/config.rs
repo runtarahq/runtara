@@ -337,9 +337,13 @@ pub fn tenant_id() -> &'static str {
     &get().tenant_id
 }
 
-/// Get the maximum concurrent executions.
+/// Returns `min(infra, entitlement)`; entitlement values can only lower the cap, never
+/// raise it. See `docs/entitlements.md` § Limit Composition.
 pub fn max_concurrent_executions() -> usize {
-    get().max_concurrent_executions
+    crate::middleware::entitlement::effective_limit(
+        get().max_concurrent_executions,
+        entitlements().limits.max_concurrent_executions,
+    )
 }
 
 /// Get checkpoint TTL in hours.
@@ -399,7 +403,10 @@ pub fn object_model_soft_delete() -> bool {
 
 /// Maximum number of items accepted per bulk request (create/upsert/update-by-ids).
 pub fn object_model_bulk_request_limit() -> usize {
-    get().object_model_bulk_request_limit
+    crate::middleware::entitlement::effective_limit(
+        get().object_model_bulk_request_limit,
+        entitlements().limits.object_model_bulk_request_limit,
+    )
 }
 
 /// Host or host:port authorities accepted by the MCP Streamable HTTP transport.

@@ -158,6 +158,27 @@ impl WorkflowService {
             ));
         }
 
+        // Phase 3.6 — count-before-create against `maxWorkflows`. Counts
+        // non-deleted workflow rows for this tenant.
+        let snapshot = crate::config::entitlements();
+        if let Some(cap) = snapshot.limits.max_workflows {
+            let current: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM workflows WHERE tenant_id = $1 AND deleted_at IS NULL",
+            )
+            .bind(tenant_id)
+            .fetch_one(self.repository.pool())
+            .await
+            .map_err(|e| {
+                ServiceError::DatabaseError(format!("Failed to enforce workflow limit: {}", e))
+            })?;
+            crate::middleware::entitlement::limit_decision(
+                current as u64,
+                Some(cap),
+                "maxWorkflows",
+            )
+            .map_err(ServiceError::EntitlementDenied)?;
+        }
+
         // Generate new workflow ID
         let workflow_id = Uuid::new_v4().to_string();
 
@@ -696,6 +717,26 @@ impl WorkflowService {
         source_workflow_id: &str,
         new_name: &str,
     ) -> Result<(String, i32), ServiceError> {
+        // Phase 3.6 — clones count toward `maxWorkflows` like fresh creates.
+        let snapshot = crate::config::entitlements();
+        if let Some(cap) = snapshot.limits.max_workflows {
+            let current: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM workflows WHERE tenant_id = $1 AND deleted_at IS NULL",
+            )
+            .bind(tenant_id)
+            .fetch_one(self.repository.pool())
+            .await
+            .map_err(|e| {
+                ServiceError::DatabaseError(format!("Failed to enforce workflow limit: {}", e))
+            })?;
+            crate::middleware::entitlement::limit_decision(
+                current as u64,
+                Some(cap),
+                "maxWorkflows",
+            )
+            .map_err(ServiceError::EntitlementDenied)?;
+        }
+
         // Generate new workflow ID
         let new_workflow_id = Uuid::new_v4().to_string();
 

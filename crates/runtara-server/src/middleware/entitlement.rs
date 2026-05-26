@@ -14,10 +14,15 @@
 //!   the entire point. Wraps every authenticated route group; mounted
 //!   between `authenticate` (outer) and the feature gates (inner).
 //!
-//! Out of scope for 3.2 / 3.3:
-//! - Per-agent allowlist (3.4).
-//! - MCP tool-level checks beyond the transport gate (3.5).
-//! - Numeric tier limits (3.6).
+//! - **3.4 — per-agent allowlist** ([`agent_decision`], [`walk_graph_for_agents`]):
+//!   reject handlers / workflow steps referencing a module not in the tenant's
+//!   `enabled_agents` allowlist.
+//! - **3.6 — numeric tier limits** ([`limit_decision`], [`effective_limit`]):
+//!   count-before-create gates for `maxApiKeys` / `maxObjectSchemas` /
+//!   `maxWorkflows`, plus `min(infra, tier)` composition for the two
+//!   infra-shared caps (`objectModelBulkRequestLimit`,
+//!   `maxConcurrentExecutions`). Used directly by service handlers — there is
+//!   no middleware layer, since the check needs a tenant-scoped row count.
 
 use axum::{extract::Request, middleware::Next, response::IntoResponse, response::Response};
 
@@ -117,6 +122,43 @@ pub fn walk_graph_for_agents(
         }
     }
     Ok(())
+}
+
+/// Compose an infra-shared limit with the tenant's tier cap, using the
+/// stricter of the two. Per docs/entitlements.md § Limit Composition:
+/// `effective_limit = min(configured_infra_limit, entitlement_limit)`.
+///
+/// `None` from the entitlement side means "no tenant cap" — infrastructure
+/// retains full control, mirroring the historical behavior before tier
+/// limits existed.
+pub fn effective_limit(infra: usize, entitlement: Option<usize>) -> usize {
+    match entitlement {
+        Some(tier) => infra.min(tier),
+        None => infra,
+    }
+}
+
+/// Pure decision for a count-before-create tier limit. Returns
+/// `ENTITLEMENT_LIMIT_EXCEEDED` when the tenant already holds `current` items
+/// of a kind capped at `max`. `None` for `max` means no tier cap → always Ok.
+///
+/// The caller passes the **current count** (rows already owned by the
+/// tenant), not the post-insert count, so the check is
+/// `current >= max → reject` (a create would push the total to `max + 1`).
+/// `limit_name` is the stable camelCase wire identifier (e.g. `"maxApiKeys"`).
+pub fn limit_decision(
+    current: u64,
+    max: Option<u32>,
+    limit_name: &'static str,
+) -> Result<(), EntitlementDenial> {
+    match max {
+        None => Ok(()),
+        Some(cap) if current >= u64::from(cap) => Err(EntitlementDenial::LimitExceeded {
+            limit: limit_name,
+            maximum: u64::from(cap),
+        }),
+        Some(_) => Ok(()),
+    }
 }
 
 /// Pure decision for the API-key auth bypass guard.
@@ -505,5 +547,87 @@ mod tests {
             }
         }));
         assert!(walk_graph_for_agents(&snap, &graph).is_ok());
+    }
+
+    // ────────────────────────────────────────────────────────────────────
+    // Phase 3.6: numeric tier limits.
+    // ────────────────────────────────────────────────────────────────────
+
+    // ── effective_limit ─────────────────────────────────────────────────
+
+    #[test]
+    fn effective_limit_uses_infra_when_tier_unset() {
+        // `None` from the entitlement → infra alone governs (legacy behavior).
+        assert_eq!(effective_limit(1000, None), 1000);
+    }
+
+    #[test]
+    fn effective_limit_uses_tier_when_stricter() {
+        // Tier cap below the infra cap → tier wins.
+        assert_eq!(effective_limit(1000, Some(100)), 100);
+    }
+
+    #[test]
+    fn effective_limit_uses_infra_when_tier_looser() {
+        // Tier cap above the infra cap → infra still wins. The composition
+        // rule is `min`, so pricing tiers can never raise the infra ceiling.
+        assert_eq!(effective_limit(50, Some(1000)), 50);
+    }
+
+    #[test]
+    fn effective_limit_zero_tier_collapses_to_zero() {
+        // A tier explicitly capping at 0 effectively disables the resource.
+        assert_eq!(effective_limit(1000, Some(0)), 0);
+    }
+
+    // ── limit_decision ──────────────────────────────────────────────────
+
+    #[test]
+    fn limit_decision_passes_when_no_cap() {
+        assert!(limit_decision(99_999, None, "maxApiKeys").is_ok());
+    }
+
+    #[test]
+    fn limit_decision_passes_below_cap() {
+        // Current count < max → an insert would put us at current + 1 ≤ max.
+        assert!(limit_decision(4, Some(5), "maxApiKeys").is_ok());
+    }
+
+    #[test]
+    fn limit_decision_rejects_at_cap() {
+        // current == max → an insert would exceed → reject.
+        let denial = limit_decision(5, Some(5), "maxApiKeys").expect_err("at-cap must reject");
+        assert_eq!(denial.code(), codes::ENTITLEMENT_LIMIT_EXCEEDED);
+        let body = denial.json_body();
+        assert_eq!(body["limit"], "maxApiKeys");
+        assert_eq!(body["maximum"], 5);
+    }
+
+    #[test]
+    fn limit_decision_rejects_over_cap() {
+        // Pathological case: somehow we already have more than the cap (e.g.
+        // tier shrank). Reject any further inserts.
+        let denial = limit_decision(10, Some(5), "maxWorkflows").expect_err("over-cap must reject");
+        assert_eq!(denial.code(), codes::ENTITLEMENT_LIMIT_EXCEEDED);
+        assert_eq!(denial.json_body()["limit"], "maxWorkflows");
+    }
+
+    #[test]
+    fn limit_decision_with_zero_cap_rejects_immediately() {
+        // A tier with `Some(0)` means "this resource is fully disabled".
+        // Even the very first insert must fail.
+        let denial = limit_decision(0, Some(0), "maxObjectSchemas")
+            .expect_err("zero cap means no inserts allowed");
+        assert_eq!(denial.code(), codes::ENTITLEMENT_LIMIT_EXCEEDED);
+        assert_eq!(denial.json_body()["maximum"], 0);
+    }
+
+    #[test]
+    fn limit_decision_handles_large_current_count() {
+        // Sanity: a count over u32::MAX still works (we hold current as u64).
+        // The cap is u32 so the comparison up-casts cleanly.
+        let huge = u64::from(u32::MAX) + 10;
+        let denial = limit_decision(huge, Some(u32::MAX), "maxWorkflows").expect_err("must reject");
+        assert_eq!(denial.json_body()["maximum"], u64::from(u32::MAX));
     }
 }
