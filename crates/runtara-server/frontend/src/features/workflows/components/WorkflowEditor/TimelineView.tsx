@@ -45,6 +45,7 @@ import { useCustomQuery } from '@/shared/hooks/api';
 import { queryKeys } from '@/shared/queries/query-keys';
 import { getAgents, type ExtendedAgent } from '@/features/workflows/queries';
 import { canStepHaveErrorHandler } from '@/features/workflows/utils/step-error-support';
+import { useEntitlements } from '@/shared/hooks/useEntitlements';
 import {
   type NodeExecutionStatus,
   useExecutionStore,
@@ -1876,9 +1877,17 @@ export function WorkflowTimelineView({
     (state) => state.flipConditionalBranches
   );
   const moveSwitchCase = useWorkflowStore((state) => state.moveSwitchCase);
+  // Phase 4.6 — share the same getAgents filter as NodeFormProvider /
+  // BasicNode. All three callers share the queryKeys.agents.all cache key,
+  // so they must pass identical filters to avoid cache-result drift.
+  const entitlements = useEntitlements();
+  const enabledAgentIds = useMemo(
+    () => new Set(entitlements.agents),
+    [entitlements]
+  );
   const agentsQuery = useCustomQuery({
     queryKey: queryKeys.agents.all,
-    queryFn: getAgents,
+    queryFn: (token: string) => getAgents(token, enabledAgentIds),
     placeholderData: { agents: [] },
   });
   const agents =

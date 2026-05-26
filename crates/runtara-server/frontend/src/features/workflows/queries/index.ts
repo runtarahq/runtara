@@ -405,7 +405,6 @@ export async function getWorkflowStepTypes(
 // Helper function to fetch agent details using path parameter
 async function fetchAgentDetails(token: string, agentId: string) {
   const url = `${getRuntimeBaseUrl()}/agents/${encodeURIComponent(agentId)}`;
-  console.log('[fetchAgentDetails] URL:', url, 'agentId:', agentId);
   const response = await fetch(url, {
     method: 'GET',
     headers: {
@@ -421,19 +420,36 @@ async function fetchAgentDetails(token: string, agentId: string) {
   return response.json();
 }
 
-export async function getAgents(token: string) {
+export async function getAgents(
+  token: string,
+  // Optional entitlement allowlist. When provided, the per-agent details
+  // fan-out skips any agent whose module ID is not in the set. Without this,
+  // the HTTP fallback below fires `GET /api/runtime/agents/<id>` for *every*
+  // registered agent — and disabled ones return 403, polluting the console
+  // and burning round-trips. Caller passes the snapshot's `agents` array;
+  // when omitted (e.g. static-WASM path or non-React callers), no filtering
+  // happens — preserves backward compatibility.
+  enabledAgentIds?: ReadonlySet<string>
+) {
+  const isEnabled = (agentId: string) =>
+    enabledAgentIds === undefined || enabledAgentIds.has(agentId);
+
   try {
     const agents = await getStaticAgentsWithRust();
-    return { agents: agents.map(toExtendedAgent) };
+    return {
+      agents: agents.filter((a) => isEnabled(a.id)).map(toExtendedAgent),
+    };
   } catch (error) {
     console.warn('Static WASM agent metadata unavailable; using HTTP', error);
     const result = await RuntimeREST.api.listAgentsHandler(
       createAuthHeaders(token)
     );
 
-    // Fetch full details for each agent to get capability schemas
-    // Use agent ID (not name) as the API identifier
-    const agentDetailsPromises = result.data.agents.map((agentSummary) =>
+    // Fetch full details for each *enabled* agent to get capability schemas.
+    // Disabled agents would 403 here (Phase 3.4 management-plane gate) — skip
+    // them to avoid the round-trip and the console noise.
+    const enabledSummaries = result.data.agents.filter((a) => isEnabled(a.id));
+    const agentDetailsPromises = enabledSummaries.map((agentSummary) =>
       fetchAgentDetails(token, agentSummary.id)
     );
 
