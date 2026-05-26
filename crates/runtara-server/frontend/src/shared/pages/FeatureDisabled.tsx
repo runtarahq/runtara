@@ -1,21 +1,7 @@
 import { Lock } from 'lucide-react';
 import { Link } from 'react-router';
 import { Button } from '@/shared/components/ui/button';
-import type { FeatureKey } from '@/shared/entitlements';
-
-/**
- * Human-readable label for each feature key. Kept colocated with the page
- * because this is the only surface in the SPA that needs to *display* a
- * feature name to the user — the rest of the codebase passes keys around
- * programmatically. If a second consumer appears, extract this map into
- * `shared/entitlements/`.
- */
-const FEATURE_LABELS: Record<FeatureKey, string> = {
-  reports: 'Reports',
-  database: 'Database',
-  api: 'API access',
-  mcp: 'MCP',
-};
+import { FEATURE_LABELS, type FeatureKey } from '@/shared/entitlements';
 
 type FeatureDisabledProps = {
   feature: FeatureKey;

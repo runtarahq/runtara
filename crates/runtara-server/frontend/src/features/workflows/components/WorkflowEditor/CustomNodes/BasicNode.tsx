@@ -26,6 +26,8 @@ import { useCustomQuery } from '@/shared/hooks/api';
 import { queryKeys } from '@/shared/queries/query-keys';
 import { getAgents, ExtendedAgent } from '@/features/workflows/queries';
 import { canStepHaveErrorHandler } from '@/features/workflows/utils/step-error-support';
+import { useEntitlements } from '@/shared/hooks/useEntitlements';
+import { agentEnabled } from '@/shared/entitlements';
 
 // Note: Node editing is now handled by the sidebar (EditorSidebar) via double-click on ReactFlow.
 // The dialogs below are only for creating new nodes via the + button handles.
@@ -96,6 +98,17 @@ function BasicNodeComponent({
     const agent = agents.find((a) => a.id.toLowerCase() === agentIdLower);
     return agent?.name;
   }, [data.stepType, data.agentId, agentsQuery.data]);
+
+  // Phase 4.6 — stale-agent flag. Set when an existing Agent step references
+  // a module that's no longer in the entitlement allowlist. Surfaces as a
+  // canvas badge + disabled Test control; save/run will be rejected by the
+  // backend (Phase 3.4/3.5). Restoring the entitlement clears it without any
+  // workflow mutation.
+  const entitlements = useEntitlements();
+  const hasStaleAgent =
+    data.stepType === 'Agent' &&
+    !!data.agentId &&
+    !agentEnabled(entitlements, data.agentId);
 
   // Toggle breakpoint on this step — read current value from store at click time to avoid stale closures
   const handleToggleBreakpoint = useCallback(() => {
@@ -380,6 +393,7 @@ function BasicNodeComponent({
         hasValidationError={showValidationError}
         hasValidationWarning={hasValidationWarning}
         validationMessage={showValidationError ? validationMessage : null}
+        hasStaleAgent={hasStaleAgent}
         isExecutionReadOnly={isExecuting}
         breakpoint={!!(data as any).breakpoint}
         onToggleBreakpoint={isStartStep ? undefined : handleToggleBreakpoint}

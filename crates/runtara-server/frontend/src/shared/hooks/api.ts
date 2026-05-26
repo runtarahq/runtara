@@ -10,6 +10,7 @@ import {
 import { useAuth } from 'react-oidc-context';
 import { toast } from 'sonner';
 import { isOidcAuth } from '@/shared/config/runtimeConfig';
+import { FEATURE_LABELS, isFeatureKey } from '@/shared/entitlements';
 
 // Shared interfaces
 interface PaginatedResponse<T = unknown> {
@@ -85,6 +86,16 @@ export interface ValidationError {
   relatedStepIds?: string[] | null;
 }
 
+/**
+ * Stable error codes returned by the backend for entitlement denials —
+ * mirrors `crates/runtara-server/src/entitlement_error.rs`. Switching on
+ * `data.code` is the SPA's contract for entitlement-shaped 403 bodies.
+ */
+type EntitlementErrorCode =
+  | 'ENTITLEMENT_REQUIRED'
+  | 'AGENT_NOT_ENABLED'
+  | 'ENTITLEMENT_LIMIT_EXCEEDED';
+
 interface ApiError extends Error {
   /** Axios error code (e.g., 'ERR_NETWORK', 'ERR_BAD_REQUEST') */
   code?: string;
@@ -97,6 +108,17 @@ interface ApiError extends Error {
       success?: boolean;
       /** New format: WorkflowValidationErrorResponse */
       validationErrors?: ValidationError[];
+      /** Stable entitlement-denial code (one of `EntitlementErrorCode`). */
+      code?: EntitlementErrorCode | string;
+      /** ENTITLEMENT_REQUIRED only — the snake_case feature key
+       *  ("reports" | "database" | "api" | "mcp"). */
+      feature?: string;
+      /** AGENT_NOT_ENABLED only — the agent module ID (e.g. "openai"). */
+      agent?: string;
+      /** ENTITLEMENT_LIMIT_EXCEEDED only — limit name (e.g. "maxApiKeys"). */
+      limit?: string;
+      /** ENTITLEMENT_LIMIT_EXCEEDED only — numeric cap. */
+      maximum?: number;
     };
   };
 }
@@ -110,6 +132,65 @@ interface CustomMutationOptions<TData = unknown, TVariables = unknown>
    * Other errors will still show toasts.
    */
   suppressValidationToasts?: boolean;
+}
+
+/**
+ * Map a 403 entitlement-denial response to a user-readable toast.
+ *
+ * Returns `true` when the error was a recognised entitlement denial and a
+ * toast was shown (the generic 403 fallback should be skipped). Returns
+ * `false` for any other 403 shape — caller falls through to the default
+ * "Error: 403" toast.
+ *
+ * Exported for tests. The three codes (`ENTITLEMENT_REQUIRED`,
+ * `AGENT_NOT_ENABLED`, `ENTITLEMENT_LIMIT_EXCEEDED`) match the backend's
+ * stable wire contract — see `crates/runtara-server/src/entitlement_error.rs`.
+ */
+export function handleEntitlementDenial(error: ApiError): boolean {
+  const data = error.response?.data;
+  if (!data?.code) return false;
+
+  const fallbackMessage = data.message;
+
+  switch (data.code) {
+    case 'ENTITLEMENT_REQUIRED': {
+      const label = isFeatureKey(data.feature)
+        ? FEATURE_LABELS[data.feature]
+        : data.feature ?? 'This feature';
+      toast.error(`${label} not enabled`, {
+        description:
+          fallbackMessage ?? `${label} is not enabled for this tenant.`,
+        duration: 8000,
+      });
+      return true;
+    }
+    case 'AGENT_NOT_ENABLED': {
+      const agent = data.agent ?? 'unknown';
+      toast.error(`Agent '${agent}' not enabled`, {
+        description:
+          fallbackMessage ??
+          `Agent '${agent}' is not enabled for this tenant.`,
+        duration: 8000,
+      });
+      return true;
+    }
+    case 'ENTITLEMENT_LIMIT_EXCEEDED': {
+      const limit = data.limit ?? 'a tier limit';
+      const max = data.maximum;
+      const description =
+        fallbackMessage ??
+        (max !== undefined
+          ? `${limit}: maximum ${max}`
+          : `${limit} has been reached.`);
+      toast.error('Tier limit reached', {
+        description,
+        duration: 8000,
+      });
+      return true;
+    }
+    default:
+      return false;
+  }
 }
 
 export function useCustomMutation<TData = unknown, TVariables = unknown>({
@@ -183,6 +264,11 @@ export function useCustomMutation<TData = unknown, TVariables = unknown>({
           duration: 8000,
         });
       }
+    } else if (
+      error.response?.status === 403 &&
+      handleEntitlementDenial(error)
+    ) {
+      // Entitlement-shaped 403 — handled inside, generic 403 fallback skipped.
     } else if (error.response?.status === 413 || error.status === 413) {
       // Handle 413 Payload Too Large specifically
       toast.error('File too large', {

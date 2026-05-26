@@ -2,7 +2,12 @@ import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
 import { renderHook, waitFor } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import React from 'react';
-import { useCustomQuery, useCustomMutation, useTableQuery } from './api';
+import {
+  useCustomQuery,
+  useCustomMutation,
+  useTableQuery,
+  handleEntitlementDenial,
+} from './api';
 
 // Mock react-oidc-context
 vi.mock('react-oidc-context', () => ({
@@ -544,5 +549,186 @@ describe('useTableQuery', () => {
     expect(result.current.data).toEqual([]);
     expect(result.current.totalElements).toBe(0);
     expect(result.current.totalPages).toBe(0);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────
+// Phase 4.5 — 403 entitlement-denial → toast mapping.
+// ─────────────────────────────────────────────────────────────────────────
+
+function entitlementError(data: Record<string, unknown>): Parameters<
+  typeof handleEntitlementDenial
+>[0] {
+  return {
+    name: 'ApiError',
+    message: 'Forbidden',
+    response: { status: 403, data },
+  } as Parameters<typeof handleEntitlementDenial>[0];
+}
+
+describe('handleEntitlementDenial — 403 toast mapping', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('maps ENTITLEMENT_REQUIRED to a feature-named toast', () => {
+    const handled = handleEntitlementDenial(
+      entitlementError({
+        code: 'ENTITLEMENT_REQUIRED',
+        feature: 'reports',
+        message: 'Reports are not enabled for this tenant.',
+      })
+    );
+
+    expect(handled).toBe(true);
+    expect(mockToastError).toHaveBeenCalledTimes(1);
+    const [title, opts] = mockToastError.mock.calls[0];
+    expect(title).toBe('Reports not enabled');
+    expect(opts?.description).toBe('Reports are not enabled for this tenant.');
+  });
+
+  it('falls back to the raw feature string when it is not a known FeatureKey', () => {
+    // Forward-compat: server may add a new FeatureKey before the SPA
+    // regenerates types. We surface the raw key rather than crashing.
+    const handled = handleEntitlementDenial(
+      entitlementError({
+        code: 'ENTITLEMENT_REQUIRED',
+        feature: 'newfeature',
+        message: 'newfeature is not enabled for this tenant.',
+      })
+    );
+
+    expect(handled).toBe(true);
+    expect(mockToastError).toHaveBeenCalledWith(
+      'newfeature not enabled',
+      expect.objectContaining({
+        description: 'newfeature is not enabled for this tenant.',
+      })
+    );
+  });
+
+  it('maps AGENT_NOT_ENABLED to an agent-named toast', () => {
+    const handled = handleEntitlementDenial(
+      entitlementError({
+        code: 'AGENT_NOT_ENABLED',
+        agent: 'openai',
+        message: "Agent 'openai' is not enabled for this tenant.",
+      })
+    );
+
+    expect(handled).toBe(true);
+    expect(mockToastError).toHaveBeenCalledWith(
+      "Agent 'openai' not enabled",
+      expect.objectContaining({
+        description: "Agent 'openai' is not enabled for this tenant.",
+      })
+    );
+  });
+
+  it('maps ENTITLEMENT_LIMIT_EXCEEDED to a tier-limit toast', () => {
+    const handled = handleEntitlementDenial(
+      entitlementError({
+        code: 'ENTITLEMENT_LIMIT_EXCEEDED',
+        limit: 'maxApiKeys',
+        maximum: 10,
+        message: 'Tenant has reached the maxApiKeys limit (maximum 10).',
+      })
+    );
+
+    expect(handled).toBe(true);
+    expect(mockToastError).toHaveBeenCalledWith(
+      'Tier limit reached',
+      expect.objectContaining({
+        description: 'Tenant has reached the maxApiKeys limit (maximum 10).',
+      })
+    );
+  });
+
+  it('synthesises a description when the backend message is missing', () => {
+    // Defensive — the backend always sends `message`, but the SPA shouldn't
+    // toast `undefined` if it ever doesn't.
+    const handled = handleEntitlementDenial(
+      entitlementError({
+        code: 'ENTITLEMENT_LIMIT_EXCEEDED',
+        limit: 'maxApiKeys',
+        maximum: 10,
+      })
+    );
+
+    expect(handled).toBe(true);
+    expect(mockToastError).toHaveBeenCalledWith(
+      'Tier limit reached',
+      expect.objectContaining({
+        description: 'maxApiKeys: maximum 10',
+      })
+    );
+  });
+
+  it('returns false (and shows no toast) when the 403 body has no code', () => {
+    // Non-entitlement 403s — e.g. legacy "Forbidden" handlers — must fall
+    // through to the generic 403 toast, not get silently swallowed.
+    const handled = handleEntitlementDenial(
+      entitlementError({ message: 'Generic forbidden' })
+    );
+
+    expect(handled).toBe(false);
+    expect(mockToastError).not.toHaveBeenCalled();
+  });
+
+  it('returns false for an unknown code so the generic fallback still fires', () => {
+    const handled = handleEntitlementDenial(
+      entitlementError({
+        code: 'SOME_UNKNOWN_CODE',
+        message: 'Unfamiliar denial',
+      })
+    );
+
+    expect(handled).toBe(false);
+    expect(mockToastError).not.toHaveBeenCalled();
+  });
+});
+
+describe('useCustomMutation — 403 entitlement integration', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockUseAuth.mockReturnValue({
+      user: { access_token: 'test-token-123' },
+    } as ReturnType<typeof useAuth>);
+  });
+
+  it('shows the entitlement toast (and suppresses the generic 403 toast) end-to-end', async () => {
+    const error = {
+      name: 'ApiError',
+      message: 'Forbidden',
+      response: {
+        status: 403,
+        data: {
+          code: 'ENTITLEMENT_REQUIRED',
+          feature: 'reports',
+          message: 'Reports are not enabled for this tenant.',
+        },
+      },
+    };
+    const mockMutationFn = vi.fn().mockRejectedValue(error);
+
+    const { result } = renderHook(
+      () => useCustomMutation({ mutationFn: mockMutationFn }),
+      { wrapper: createWrapper() }
+    );
+
+    result.current.mutate(undefined as never);
+
+    await waitFor(() => {
+      expect(result.current.isError).toBe(true);
+    });
+
+    // Exactly one toast — the entitlement-specific one. No generic fallback.
+    expect(mockToastError).toHaveBeenCalledTimes(1);
+    expect(mockToastError).toHaveBeenCalledWith(
+      'Reports not enabled',
+      expect.objectContaining({
+        description: 'Reports are not enabled for this tenant.',
+      })
+    );
   });
 });

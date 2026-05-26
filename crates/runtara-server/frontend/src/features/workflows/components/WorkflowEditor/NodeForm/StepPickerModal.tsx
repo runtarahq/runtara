@@ -23,6 +23,8 @@ import { NodeFormContext } from './NodeFormContext';
 import { useMultipleAgentDetails } from '@/features/workflows/hooks';
 import { StepTypeIcon } from '@/features/workflows/components/StepTypeIcon';
 import { getAgentIcon } from '@/features/workflows/utils/agent-icons';
+import { useEntitlements } from '@/shared/hooks/useEntitlements';
+import { agentEnabled } from '@/shared/entitlements';
 
 interface CapabilitySearchResult {
   agentId: string;
@@ -94,7 +96,18 @@ export function StepPickerPanel({
   contentScrollable = true,
   autoFocus = true,
 }: StepPickerPanelProps) {
-  const { agents, stepTypes } = useContext(NodeFormContext);
+  const { agents: rawAgents, stepTypes } = useContext(NodeFormContext);
+  const entitlements = useEntitlements();
+
+  // Phase 4.6 — filter the agent list against the entitlement allowlist
+  // before *any* downstream picker logic runs (browse, search, capability
+  // expansion, agent-details prefetch). UX decision: hide disabled agents
+  // entirely rather than gray-out — see `docs/entitlements.md#phase-46-...`.
+  const agents = useMemo(() => {
+    const all = (rawAgents || []) as ExtendedAgent[];
+    return all.filter((agent) => agentEnabled(entitlements, agent.id || ''));
+  }, [rawAgents, entitlements]);
+
   const [viewMode, setViewMode] = useState<ViewMode>('browse');
   const [selectedAgent, setSelectedAgent] = useState<{
     id: string;

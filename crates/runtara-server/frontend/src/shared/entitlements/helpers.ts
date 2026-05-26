@@ -1,6 +1,28 @@
 import type { EntitlementsSnapshot, FeatureKey } from './types';
 
 /**
+ * Human-readable label for each feature key. Used wherever a feature is shown
+ * to the user — disabled-state page (Phase 4.4), 403 toast titles (Phase 4.5),
+ * etc. Mirrors `FeatureKey::display_name` in
+ * `crates/runtara-server/src/entitlements.rs`.
+ */
+export const FEATURE_LABELS: Record<FeatureKey, string> = {
+  reports: 'Reports',
+  database: 'Database',
+  api: 'API access',
+  mcp: 'MCP',
+};
+
+/** True when `value` is a valid `FeatureKey` string from the wire. Use to
+ *  narrow `string | undefined` from error bodies before indexing FEATURE_LABELS. */
+export function isFeatureKey(value: unknown): value is FeatureKey {
+  return (
+    typeof value === 'string' &&
+    Object.prototype.hasOwnProperty.call(FEATURE_LABELS, value)
+  );
+}
+
+/**
  * Permissive fallback used when neither `window.__RUNTARA_CONFIG__.entitlements`
  * nor `GET /api/runtime/entitlements` is available — see Phase 4.2 in
  * `docs/entitlements.md`. Matches the backend's "no entitlement env set"
