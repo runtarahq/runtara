@@ -31,7 +31,11 @@ import {
 import { ReportDeleteButton } from '../components/ReportDeleteButton';
 import { ReportFilterBar } from '../components/ReportFilterBar';
 import { ReportRenderer } from '../components/ReportRenderer';
-import { ReportBlockResult, ReportDefinition, ReportInteractionOptions } from '../types';
+import {
+  ReportBlockResult,
+  ReportDefinition,
+  ReportInteractionOptions,
+} from '../types';
 import {
   decodeFilterValue,
   encodeFilterValue,
@@ -105,9 +109,7 @@ export function ReportPage() {
   // (a) so the banner stays sticky after the user opts into
   // re-authoring; (b) so the wizard never starts from the empty stub
   // until the operator explicitly chooses to.
-  const [needsReAuthoring, setNeedsReAuthoring] = useState<string | null>(
-    null
-  );
+  const [needsReAuthoring, setNeedsReAuthoring] = useState<string | null>(null);
   const [reAuthoringAccepted, setReAuthoringAccepted] = useState(false);
 
   useEffect(() => {
@@ -407,6 +409,13 @@ export function ReportPage() {
             <RefreshCw className="mr-2 h-4 w-4" />
             Refresh
           </Button>
+          {isExisting && reportId && existingReport ? (
+            <ReportDeleteButton
+              reportId={reportId}
+              reportName={existingReport.name}
+              className="h-11 rounded-full sm:px-5"
+            />
+          ) : null}
           <Link to={`/reports/${reportId}?edit=1`} className="w-full sm:w-auto">
             <Button
               variant="outline"
@@ -453,10 +462,10 @@ export function ReportPage() {
           <AlertTitle>This report needs re-authoring</AlertTitle>
           <AlertDescription>
             <p className="mb-2 text-sm">
-              The stored definition no longer fits the current schema and
-              has been replaced with an empty stub. Saving now will
-              <strong> overwrite the stored JSON</strong> — the previous
-              content is preserved on the server until you do.
+              The stored definition no longer fits the current schema and has
+              been replaced with an empty stub. Saving now will
+              <strong> overwrite the stored JSON</strong> — the previous content
+              is preserved on the server until you do.
             </p>
             <p className="mb-3 text-xs text-muted-foreground">
               Reason: <code>{needsReAuthoring}</code>
@@ -484,9 +493,9 @@ export function ReportPage() {
             className="rounded-md border border-dashed bg-muted/20 p-6 text-sm text-muted-foreground"
             data-testid="reauthoring-editor-locked"
           >
-            Editing is disabled until you click "Re-author from scratch"
-            above. This protects the stored definition from being
-            overwritten by the empty stub the loader fell back to.
+            Editing is disabled until you click "Re-author from scratch" above.
+            This protects the stored definition from being overwritten by the
+            empty stub the loader fell back to.
           </div>
         ) : (
           <Suspense
@@ -515,8 +524,8 @@ export function ReportPage() {
           className="rounded-md border border-dashed bg-muted/20 p-6 text-sm text-muted-foreground"
           data-testid="reauthoring-viewer-locked"
         >
-          The report can't be rendered until it's re-authored. Open it in
-          edit mode to start.
+          The report can't be rendered until it's re-authored. Open it in edit
+          mode to start.
         </div>
       ) : reportId ? (
         <ReportRenderer

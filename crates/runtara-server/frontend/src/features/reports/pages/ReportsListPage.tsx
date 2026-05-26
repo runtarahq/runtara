@@ -1,11 +1,12 @@
 import { Link } from 'react-router';
-import { BarChart3, PlusIcon } from 'lucide-react';
+import { BarChart3, Edit, PlusIcon } from 'lucide-react';
 import { Button } from '@/shared/components/ui/button';
 import { Badge } from '@/shared/components/ui/badge';
 import { Icons } from '@/shared/components/icons';
 import { TileList, TilesPage } from '@/shared/components/tiles-page';
 import { usePageTitle } from '@/shared/hooks/usePageTitle';
 import { useReports } from '../hooks/useReports';
+import { ReportDeleteButton } from '../components/ReportDeleteButton';
 
 export function ReportsListPage() {
   usePageTitle('Reports');
@@ -68,29 +69,56 @@ export function ReportsListPage() {
       ) : (
         <TileList>
           {reports.map((report) => (
-            <Link
+            <div
               key={report.id}
-              to={`/reports/${report.id}`}
               className="flex items-center gap-4 rounded-xl border bg-background p-4 transition-colors hover:bg-muted/40"
             >
-              <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-blue-50 text-blue-600 dark:bg-blue-950 dark:text-blue-300">
-                <BarChart3 className="h-5 w-5" />
-              </div>
-              <div className="min-w-0 flex-1">
-                <div className="flex flex-wrap items-center gap-2">
-                  <p className="truncate text-sm font-semibold text-foreground">
-                    {report.name}
-                  </p>
-                  <Badge variant="secondary">{report.status}</Badge>
+              <Link
+                to={`/reports/${report.id}`}
+                className="flex min-w-0 flex-1 items-center gap-4"
+              >
+                <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-blue-50 text-blue-600 dark:bg-blue-950 dark:text-blue-300">
+                  <BarChart3 className="h-5 w-5" />
                 </div>
-                <p className="mt-1 truncate text-sm text-muted-foreground">
-                  {report.description || report.slug}
+                <div className="min-w-0 flex-1">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <p className="truncate text-sm font-semibold text-foreground">
+                      {report.name}
+                    </p>
+                    <Badge variant="secondary">{report.status}</Badge>
+                  </div>
+                  <p className="mt-1 truncate text-sm text-muted-foreground">
+                    {report.description || report.slug}
+                  </p>
+                </div>
+              </Link>
+              <div className="flex shrink-0 items-center gap-1">
+                <p className="mr-2 hidden text-xs text-muted-foreground md:block">
+                  {new Date(report.updatedAt).toLocaleString()}
                 </p>
+                <Link to={`/reports/${report.id}?edit=1`}>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon"
+                    className="text-muted-foreground hover:text-foreground"
+                    aria-label={`Edit ${report.name}`}
+                    title={`Edit ${report.name}`}
+                  >
+                    <Edit className="h-4 w-4" />
+                  </Button>
+                </Link>
+                <ReportDeleteButton
+                  reportId={report.id}
+                  reportName={report.name}
+                  iconOnly
+                  navigateAfterDelete={false}
+                  triggerVariant="ghost"
+                  triggerSize="icon"
+                  className="text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
+                />
               </div>
-              <p className="hidden text-xs text-muted-foreground sm:block">
-                {new Date(report.updatedAt).toLocaleString()}
-              </p>
-            </Link>
+            </div>
           ))}
         </TileList>
       )}

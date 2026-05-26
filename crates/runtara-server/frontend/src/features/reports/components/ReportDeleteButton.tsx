@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { type ComponentProps, useState } from 'react';
 import { useNavigate } from 'react-router';
 import { Loader2, Trash2 } from 'lucide-react';
 import { Button } from '@/shared/components/ui/button';
@@ -16,12 +16,20 @@ type ReportDeleteButtonProps = {
   reportId: string;
   reportName: string;
   className?: string;
+  iconOnly?: boolean;
+  navigateAfterDelete?: boolean;
+  triggerSize?: ComponentProps<typeof Button>['size'];
+  triggerVariant?: ComponentProps<typeof Button>['variant'];
 };
 
 export function ReportDeleteButton({
   reportId,
   reportName,
   className,
+  iconOnly = false,
+  navigateAfterDelete = true,
+  triggerSize,
+  triggerVariant = 'destructive',
 }: ReportDeleteButtonProps) {
   const navigate = useNavigate();
   const deleteReport = useDeleteReport();
@@ -31,7 +39,9 @@ export function ReportDeleteButton({
     try {
       await deleteReport.mutateAsync(reportId);
       setOpen(false);
-      navigate('/reports');
+      if (navigateAfterDelete) {
+        navigate('/reports');
+      }
     } catch {
       // Global mutation error handling shows the failure toast.
     }
@@ -41,17 +51,24 @@ export function ReportDeleteButton({
     <>
       <Button
         type="button"
-        variant="destructive"
+        variant={triggerVariant}
+        size={triggerSize}
         className={className}
         disabled={deleteReport.isPending}
         onClick={() => setOpen(true)}
+        aria-label={iconOnly ? `Delete ${reportName}` : undefined}
+        title={iconOnly ? `Delete ${reportName}` : undefined}
       >
         {deleteReport.isPending ? (
-          <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+          <Loader2
+            className={
+              iconOnly ? 'h-4 w-4 animate-spin' : 'mr-2 h-4 w-4 animate-spin'
+            }
+          />
         ) : (
-          <Trash2 className="mr-2 h-4 w-4" />
+          <Trash2 className={iconOnly ? 'h-4 w-4' : 'mr-2 h-4 w-4'} />
         )}
-        Delete
+        {iconOnly ? null : 'Delete'}
       </Button>
 
       <ModalDialog open={open} onClose={() => setOpen(false)}>

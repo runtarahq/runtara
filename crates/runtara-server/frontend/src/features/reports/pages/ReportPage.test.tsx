@@ -84,6 +84,7 @@ vi.mock('../hooks/useReports', () => ({
   useReportPreview: () => ({ data: undefined, isFetching: false }),
   useCreateReport: () => ({ isPending: false, mutateAsync: vi.fn() }),
   useUpdateReport: () => ({ isPending: false, mutateAsync: vi.fn() }),
+  useDeleteReport: () => ({ isPending: false, mutateAsync: vi.fn() }),
   useValidateReport: () => ({
     isPending: false,
     mutateAsync: vi.fn(),
@@ -167,6 +168,7 @@ describe('ReportPage existing-report load', () => {
     expect(
       screen.queryByText('Add at least one block')
     ).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Delete' })).toBeInTheDocument();
   });
 
   it('shows a friendly empty-state message when a viewed report has no blocks', async () => {
