@@ -15,12 +15,12 @@ import {
   SidebarTrigger,
   useSidebar,
 } from '@/shared/components/ui/sidebar.tsx';
-import { menu } from '@/shared/config';
+import { menu, filterMenu } from '@/shared/config';
 import { config } from '@/shared/config/runtimeConfig';
+import { useEntitlements } from '@/shared/hooks/useEntitlements';
 import Logo from '@/assets/logo/runtara-logo-icon.svg';
 import { AuthSidebar } from './AuthSidebar.tsx';
 import { useAuthStore } from '@/shared/stores/authStore.ts';
-import { checkUserGroup } from '@/lib/utils.ts';
 import { ThemeSwitcher } from '@/shared/components/theme-switcher.tsx';
 import { DollarSign, Folder, Settings } from 'lucide-react';
 import { Button } from '@/shared/components/ui/button';
@@ -93,13 +93,12 @@ function AppMenu() {
   const { data: foldersData } = useFolders();
 
   const userGroups = useAuthStore((state) => state.userGroups);
+  const entitlements = useEntitlements();
 
-  const allowedMenu = useMemo(() => {
-    return menu.filter((menuItem) => {
-      const { allowedGroups } = menuItem;
-      return checkUserGroup(allowedGroups, userGroups);
-    });
-  }, [userGroups]);
+  const allowedMenu = useMemo(
+    () => filterMenu(menu, userGroups, entitlements),
+    [userGroups, entitlements]
+  );
 
   const menuWithFolders = useMemo(() => {
     return allowedMenu.map((menuItem) => {

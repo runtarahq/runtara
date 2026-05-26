@@ -7,8 +7,57 @@ import {
   Workflow,
   Zap,
 } from 'lucide-react';
+import {
+  isEnabled,
+  type EntitlementsSnapshot,
+  type FeatureKey,
+} from '@/shared/entitlements';
+import { checkUserGroup } from '@/lib/utils';
 
-export const menu = [
+export type MenuChild = {
+  key: string;
+  title: string;
+  to: string;
+  icon?: React.ReactNode;
+};
+
+export type MenuItem = {
+  key: string;
+  title: string;
+  to: string;
+  icon: React.ReactNode;
+  allowedGroups: string[];
+  /** When set, this entry is hidden unless the resolved entitlement snapshot
+   *  has the feature enabled. Workflows / Triggers / Connections / Analytics
+   *  / Invocation History are intentionally always-on per
+   *  `docs/entitlements.md` ("Files / Connections / Triggers / Analytics /
+   *  Invocation History" decision). */
+  requiresFeature?: FeatureKey;
+  children?: MenuChild[];
+};
+
+/**
+ * Filter menu items by group ACL and entitlement gate. Pure function so the
+ * filter logic is testable without rendering the whole Sidebar tree.
+ *
+ * Order: group ACL first (cheaper and matches the pre-entitlement behavior),
+ * then entitlement check. An entry without `requiresFeature` always passes
+ * the entitlement gate.
+ */
+export function filterMenu(
+  items: readonly MenuItem[],
+  userGroups: string[],
+  entitlements: EntitlementsSnapshot
+): MenuItem[] {
+  return items.filter((item) => {
+    if (!checkUserGroup(item.allowedGroups, userGroups)) return false;
+    if (item.requiresFeature && !isEnabled(entitlements, item.requiresFeature))
+      return false;
+    return true;
+  });
+}
+
+export const menu: MenuItem[] = [
   {
     key: 'workflows',
     title: 'Workflows',
@@ -29,6 +78,7 @@ export const menu = [
     to: '/objects/types',
     icon: <Database size={16} />,
     allowedGroups: [],
+    requiresFeature: 'database',
   },
   {
     key: 'reports',
@@ -36,6 +86,7 @@ export const menu = [
     to: '/reports',
     icon: <LineChart size={16} />,
     allowedGroups: [],
+    requiresFeature: 'reports',
   },
   {
     key: 'triggers',
