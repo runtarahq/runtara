@@ -8,6 +8,31 @@
 
 export type AuthMode = 'oidc' | 'local' | 'trust_proxy';
 
+/** Feature key — mirrors `FeatureKey` in `crates/runtara-server/src/entitlements.rs`.
+ *  Interim handwritten type for Phase 4.1; Phase 4.2 swaps this for the
+ *  regenerated `EntitlementsDto` type from `generated/RuntaraRuntimeApi.ts`. */
+export type EntitlementFeatureKey = 'reports' | 'database' | 'api' | 'mcp';
+
+/** Resolved entitlement snapshot inlined into `window.__RUNTARA_CONFIG__` by
+ *  the server's UI handler. Wire shape matches `EntitlementsDto` —
+ *  see `crates/runtara-server/src/api/dto/entitlements.rs` and the
+ *  Phase 4 plan in `docs/entitlements.md`. */
+export type EntitlementsSnapshot = {
+  tenantId: string;
+  pricingTier: string;
+  features: Partial<Record<EntitlementFeatureKey, boolean>>;
+  /** Materialised agent allowlist — always a concrete array (the backend
+   *  resolves the implicit-all sentinel before serialising). */
+  agents: string[];
+  limits: {
+    maxWorkflows?: number | null;
+    maxObjectSchemas?: number | null;
+    maxApiKeys?: number | null;
+    objectModelBulkRequestLimit?: number | null;
+    maxConcurrentExecutions?: number | null;
+  };
+};
+
 type RuntimeConfig = {
   oidcAuthority?: string;
   oidcClientId?: string;
@@ -26,6 +51,11 @@ type RuntimeConfig = {
   /** When "true", stop prefixing /api/runtime/ paths with org_id. Set by the
    * server from RUNTARA_UI_STRIP_ORG_ID for single-tenant deployments. */
   stripOrgId?: string;
+  /** Per-process entitlement snapshot. Always present when served by the
+   *  embedded Rust UI handler; absent when running under `vite dev` or in
+   *  tests, in which case consumers fall back to `GET /api/runtime/entitlements`
+   *  (Phase 4.2). */
+  entitlements?: EntitlementsSnapshot;
 };
 
 declare global {

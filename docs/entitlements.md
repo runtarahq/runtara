@@ -468,14 +468,60 @@ A workflow's removal of a forbidden step requires a brief entitlement restoratio
 
 ### Phase 4 - Frontend Gating
 
-- Inline the snapshot into `window.__RUNTARA_CONFIG__.entitlements` in `api/handlers/ui.rs`.
-- Add generated or handwritten entitlement types.
-- Add entitlement read hook (prefers inlined snapshot, falls back to `GET /api/runtime/entitlements`).
-- Add `isEnabled(feature)` and `agentEnabled(moduleId)` helpers.
-- Filter static menu items.
-- Add route guard for gated pages.
-- Map `403` responses by error `code` to user-readable messages.
-- Add frontend tests for hidden menu entries, direct-route blocked states, and the inlined-vs-fetched fallback path.
+Split into six PR-sized sub-phases mirroring Phase 3's layering. Each builds on the previous and is independently shippable — 4.1 ships the snapshot but adds no behavior, so the SPA continues to work end-to-end even if 4.2+ slip.
+
+Only 4.1 touches Rust (`api/handlers/ui.rs`); everything else is SPA-only. `GET /api/runtime/entitlements` already exists from Phase 2, so no new REST routes are added in Phase 4.
+
+#### Phase 4.1 - Snapshot delivery
+
+- Extend `runtime_config_json()` in `api/handlers/ui.rs` to add an `entitlements` key whose value is `EntitlementsDto::from(crate::config::entitlements())` serialised as JSON.
+- The existing CSP-hash chain (`build_index_html` → SHA-256 over the inline script body) covers the new payload automatically; the inline script body still depends only on `OnceLock`-stable env, so the "compute once at startup" invariant holds.
+- Update `runtimeConfig.ts`'s `RuntimeConfig` type with `entitlements?: EntitlementsSnapshot` (interim handwritten type — 4.2 swaps it for the generated one).
+- Backend tests: `inlined_script_contains_entitlements_payload` and `csp_hash_covers_entitlements_payload`.
+- **Out of scope:** any consumer of the snapshot; any gating behavior.
+
+#### Phase 4.2 - Types, hook, and helpers
+
+- Regen the frontend API client via the `regen-frontend-api` skill so `EntitlementsDto` lands in `generated/RuntaraRuntimeApi.ts`.
+- Add pure helpers `isEnabled(snapshot, feature)` and `agentEnabled(snapshot, moduleId)`.
+- Add `useEntitlements()` hook: returns the inlined snapshot synchronously when `window.__RUNTARA_CONFIG__.entitlements` is present; falls back to `GET /api/runtime/entitlements` via TanStack Query when absent; falls back to a permissive default (everything on, all agents allowed) when both are missing. Permissive default matches the backend's "no entitlement env set" behavior, so a misconfigured server doesn't black-screen the UI.
+- Unit tests for helpers and for all three hook paths (inlined / fetched / fallback).
+- **Out of scope:** any UI consumer of the hook.
+
+#### Phase 4.3 - Sidebar / menu filtering
+
+- Extend `shared/config/index.tsx` menu entries with an optional `requiresFeature?: FeatureKey`. Wire `objects → database`, `reports → reports`. Workflows / Triggers / Connections / Analytics / Invocation History stay always-on (consistent with "Files / Connections / Triggers / Analytics / Invocation History" decision above).
+- In `Sidebar.tsx#AppMenu`, call `useEntitlements()` and filter the menu by `isEnabled`.
+- The settings gear stays visible regardless of `api`; the API-keys sub-page itself is route-guarded in 4.4.
+- RTL tests for hidden / shown menu entries against fixture snapshots.
+- **Out of scope:** route guards (4.4); workflow-editor surfacing (4.6).
+
+#### Phase 4.4 - Route guards + disabled-state page
+
+- Add `router/EntitlementRoute.tsx` — wrapper around a feature key that renders a `FeatureDisabled` page when `isEnabled` is false and `children` otherwise.
+- Add `shared/pages/FeatureDisabled.tsx` — minimal "not enabled for this tenant" page with a back-to-workflows link. No upgrade CTA in MVP (single-tenant, no billing flow yet).
+- Compose order in `router/index.tsx`: `PrivateRoute > EntitlementRoute > Suspense > Component`, so unauthenticated users still hit the login flow on gated URLs.
+- Apply to `/reports*` → `reports`, `/objects/*` → `database`, `/settings/api-keys` → `api`.
+- Tests: direct navigation to each gated path under a disabling fixture shows `FeatureDisabled`; same path under an enabling fixture renders the real page.
+- **Out of scope:** 403-toast mapping (4.5); workflow-step gating (4.6).
+
+#### Phase 4.5 - 403 error-code mapping
+
+- Extend `handleError` in `shared/hooks/api.ts` to branch on `error.response?.status === 403 && error.response?.data?.code` for the three stable codes:
+  - `ENTITLEMENT_REQUIRED` → "{Feature} not enabled" toast with the body's `message`.
+  - `AGENT_NOT_ENABLED` → "Agent '{agent}' not enabled" toast.
+  - `ENTITLEMENT_LIMIT_EXCEEDED` → "Tier limit reached" toast naming `limit` and `maximum`.
+- Narrow `ApiError` to expose the three code-specific body fields (`feature`, `agent`, `limit`, `maximum`).
+- Unit tests in the existing `api.test.ts` — one case per code — assert the right toast copy and that the generic "Error: 403" fallback is suppressed.
+- **Out of scope:** anything other than the toast mapping.
+
+#### Phase 4.6 - Stale-workflow surfacing
+
+- Workflow editor: for each step whose `agent.module` is not in `useEntitlements().agents`, render an inline "Agent disabled" warning badge and disable the per-step Test control. This is the UI feedback for the management-plane lock from Phase 3.4 (see "Stale workflows after entitlement changes" above).
+- Workflow list: surface a "needs attention" pill on rows that reference a forbidden agent — scoped to the workflow detail page if the list endpoint doesn't carry agent module IDs (defer a list-side change to a follow-up if so).
+- No new save-time error handling — the 4.5 toast already covers the `AGENT_NOT_ENABLED` graph-walk response.
+- Tests: RTL editor test under a snapshot that excludes one agent; Playwright smoke under a server started with the same fixture.
+- **Out of scope:** any auto-fix or destructive UI on stale workflows — fixing requires the manual entitlement-restore flow documented above.
 
 ### Phase 5 - Runtime/Internal Enforcement
 

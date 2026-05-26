@@ -11,6 +11,9 @@ use axum::{
 use bytes::Bytes;
 use rust_embed::{EmbeddedFile, RustEmbed};
 
+use crate::api::dto::entitlements::EntitlementsDto;
+use crate::entitlements::EntitlementSnapshot;
+
 #[derive(RustEmbed)]
 #[folder = "frontend/dist/"]
 struct UiAssets;
@@ -49,7 +52,8 @@ pub fn router(mount: &str, base_href: &str) -> Router {
     // pinned to the inline script body). In release the rewritten HTML is
     // reused for every request; in debug we throw it away and rebuild per
     // request so `npm run build:watch` output is picked up without a restart.
-    let (_built_index_html, inline_script_hash) = build_index_html(base_href);
+    let (_built_index_html, inline_script_hash) =
+        build_index_html(base_href, crate::config::entitlements());
     let state = UiState {
         #[cfg(not(debug_assertions))]
         index_html: _built_index_html,
@@ -70,7 +74,13 @@ pub fn router(mount: &str, base_href: &str) -> Router {
 /// Returns the rewritten HTML and the base64-encoded SHA-256 of the inline
 /// `window.__RUNTARA_CONFIG__` script body. The hash goes into the
 /// `script-src` CSP directive so the browser allows the inline script to run.
-fn build_index_html(base_href: &str) -> (Bytes, String) {
+///
+/// `entitlements` is threaded through so the inlined snapshot in the
+/// `window.__RUNTARA_CONFIG__` body matches the process-wide
+/// `crate::config::entitlements()`. Taking it as an argument (rather than
+/// reading the `OnceLock` here) lets tests pass a fixture snapshot without
+/// initialising the global config.
+fn build_index_html(base_href: &str, entitlements: &EntitlementSnapshot) -> (Bytes, String) {
     use base64::Engine;
     use sha2::Digest;
 
@@ -89,13 +99,16 @@ fn build_index_html(base_href: &str) -> (Bytes, String) {
     let step_one = html.replacen(base_needle, &base_replacement, 1);
 
     // 2. Populate `window.__RUNTARA_CONFIG__` so the SPA can read tenant-specific
-    //    OIDC/API/analytics values at runtime without per-tenant rebuilds.
+    //    OIDC/API/analytics/entitlement values at runtime without per-tenant rebuilds.
     let config_needle = "window.__RUNTARA_CONFIG__={};";
     assert!(
         step_one.contains(config_needle),
         "embed-ui: expected `{config_needle}` placeholder in index.html. Check frontend/index.html."
     );
-    let inline_script = format!("window.__RUNTARA_CONFIG__={};", runtime_config_json());
+    let inline_script = format!(
+        "window.__RUNTARA_CONFIG__={};",
+        runtime_config_json(entitlements)
+    );
     let rewritten = step_one.replacen(config_needle, &inline_script, 1);
 
     // CSP `script-src 'sha256-...'` matches the hash of the inline script body
@@ -183,7 +196,12 @@ fn normalize_plausible_script_src(raw: &str) -> Option<String> {
 ///
 /// `authMode` and `tenantId` are always emitted: the SPA needs them to decide
 /// whether to initiate an OIDC redirect and how to prefix tenant-scoped URLs.
-fn runtime_config_json() -> String {
+///
+/// `entitlements` is the resolved per-process snapshot, inlined as a nested
+/// JSON object (not a stringified blob) so the SPA can branch on features
+/// before any network request completes — see Phase 4.1 in
+/// `docs/entitlements.md`.
+fn runtime_config_json(entitlements: &EntitlementSnapshot) -> String {
     use std::fmt::Write;
 
     let pairs = [
@@ -248,8 +266,29 @@ fn runtime_config_json() -> String {
         // Keys are fixed identifiers, values are untrusted env content — JSON-escape.
         let _ = write!(out, "\"{}\":{}", key, json_string(val));
     }
+    // `version`, `commit`, and `authMode` are pushed unconditionally above, so
+    // `entries` is never empty in practice — but guard the leading comma anyway
+    // to keep the function safe if the unconditional pushes ever change.
+    if !entries.is_empty() {
+        out.push(',');
+    }
+    out.push_str("\"entitlements\":");
+    out.push_str(&entitlements_inline_json(entitlements));
     out.push('}');
     out
+}
+
+/// Serialise the entitlement snapshot as a JSON object literal suitable for
+/// inlining inside a `<script>` tag. Defangs `<`/`>` in any string value so a
+/// `</script>` token inside e.g. `tenantId` can't break out of the inline
+/// script. JSON syntax doesn't use `<` or `>` outside string literals, so a
+/// blanket replace is safe.
+fn entitlements_inline_json(entitlements: &EntitlementSnapshot) -> String {
+    let dto = EntitlementsDto::from(entitlements);
+    serde_json::to_string(&dto)
+        .expect("EntitlementsDto serialises to JSON")
+        .replace('<', "\\u003c")
+        .replace('>', "\\u003e")
 }
 
 /// Minimal JSON string encoder — escapes the small set of chars that are illegal
@@ -310,7 +349,8 @@ async fn serve(uri: Uri, State(state): State<UiState>) -> Response {
 fn current_index_html(state: &UiState) -> Bytes {
     #[cfg(debug_assertions)]
     {
-        let (html, _hash) = build_index_html(state.base_href.as_ref());
+        let (html, _hash) =
+            build_index_html(state.base_href.as_ref(), crate::config::entitlements());
         html
     }
     #[cfg(not(debug_assertions))]
@@ -407,5 +447,133 @@ mod tests {
     #[test]
     fn plausible_script_source_ignores_same_origin_path() {
         assert_eq!(normalize_plausible_script_src("/plausible/"), None);
+    }
+
+    use crate::entitlements::{EntitlementSnapshot, parse_agents};
+    use std::collections::BTreeSet;
+
+    fn registered_agents() -> BTreeSet<String> {
+        parse_agents(&["http", "csv", "xml", "openai", "anthropic"])
+    }
+
+    fn fixture_snapshot(tenant_id: &str, entitlements_json: Option<&str>) -> EntitlementSnapshot {
+        EntitlementSnapshot::parse_entitlements(
+            tenant_id,
+            None,
+            entitlements_json,
+            None,
+            &registered_agents(),
+        )
+        .expect("fixture snapshot parses")
+    }
+
+    #[test]
+    fn entitlements_inline_json_is_a_camel_case_object() {
+        let snap = fixture_snapshot("tenant-abc", None);
+        let json = entitlements_inline_json(&snap);
+
+        let value: serde_json::Value = serde_json::from_str(&json).expect("valid JSON object");
+        let obj = value.as_object().expect("object");
+        for key in ["tenantId", "pricingTier", "features", "agents", "limits"] {
+            assert!(obj.contains_key(key), "missing key {key}: {json}");
+        }
+        // Sanity-check nested camelCase from EntitlementsDto.
+        assert_eq!(obj["tenantId"], serde_json::json!("tenant-abc"));
+        assert_eq!(obj["features"]["reports"], serde_json::json!(true));
+    }
+
+    #[test]
+    fn entitlements_inline_json_defangs_script_breakouts() {
+        // Tenant id contains `</script>` — must be escaped so the inline script
+        // body can't be terminated early in the HTML.
+        let snap = fixture_snapshot("</script>evil", None);
+        let json = entitlements_inline_json(&snap);
+
+        assert!(
+            !json.contains("</script>"),
+            "raw </script> must not appear in inline JSON: {json}"
+        );
+        assert!(
+            json.contains("\\u003c/script\\u003e"),
+            "expected defanged </script> token: {json}"
+        );
+        // Still parses as JSON — defanging is inside a string literal, so
+        // round-trips back to the original value.
+        let value: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+        assert_eq!(value["tenantId"], serde_json::json!("</script>evil"));
+    }
+
+    #[test]
+    fn runtime_config_json_embeds_entitlements_as_nested_object() {
+        let snap = fixture_snapshot("tenant-xyz", Some(r#"{"features":{"reports":false}}"#));
+        let raw = runtime_config_json(&snap);
+
+        let value: serde_json::Value = serde_json::from_str(&raw).expect("valid JSON object");
+        let ents = value
+            .get("entitlements")
+            .expect("entitlements key present in runtime config");
+        assert!(
+            ents.is_object(),
+            "entitlements must be an object, not a string"
+        );
+        assert_eq!(ents["tenantId"], serde_json::json!("tenant-xyz"));
+        assert_eq!(ents["features"]["reports"], serde_json::json!(false));
+        assert_eq!(ents["features"]["database"], serde_json::json!(true));
+    }
+
+    #[test]
+    fn inlined_script_contains_entitlements_payload() {
+        let snap = fixture_snapshot("tenant-html", None);
+        let (html_bytes, _hash) = build_index_html("/ui/", &snap);
+        let html = std::str::from_utf8(&html_bytes).expect("utf-8");
+
+        // The inline script is `window.__RUNTARA_CONFIG__={...};` — locate the body
+        // between the assignment and the trailing semicolon.
+        let prefix = "window.__RUNTARA_CONFIG__=";
+        let start = html.find(prefix).expect("inline config script present");
+        let after = &html[start + prefix.len()..];
+        let end = after.find(";</script>").or_else(|| after.find(";")).expect(
+            "inline script terminator present (expected `;</script>` or `;` from build output)",
+        );
+        let body = &after[..end];
+
+        let value: serde_json::Value = serde_json::from_str(body)
+            .unwrap_or_else(|e| panic!("inline body should be JSON: {e}\nbody: {body}"));
+        let ents = value
+            .get("entitlements")
+            .expect("entitlements key inlined into window.__RUNTARA_CONFIG__");
+        assert_eq!(ents["tenantId"], serde_json::json!("tenant-html"));
+        assert!(ents["features"].is_object());
+        assert!(ents["agents"].is_array());
+        assert!(ents["limits"].is_object());
+    }
+
+    #[test]
+    fn csp_hash_covers_entitlements_payload() {
+        use base64::Engine;
+        use sha2::Digest;
+
+        let snap = fixture_snapshot("tenant-csp", None);
+        let (html_bytes, hash_b64) = build_index_html("/ui/", &snap);
+        let html = std::str::from_utf8(&html_bytes).expect("utf-8");
+
+        // Locate the exact inline script body — everything between
+        // `window.__RUNTARA_CONFIG__=` and the terminating `;` that build_index_html
+        // splices in. The hash in the CSP must equal SHA-256 of THIS string,
+        // including the trailing semicolon (see build_index_html's `inline_script`).
+        let needle_start = "window.__RUNTARA_CONFIG__=";
+        let start_idx = html.find(needle_start).expect("config assignment present");
+        // The script body in build_index_html ends at the `;` that closes the
+        // statement — find the first `;` after the start.
+        let after = &html[start_idx..];
+        let semi = after.find(';').expect("semicolon terminator present");
+        let inline_script = &after[..=semi];
+
+        let expected = base64::engine::general_purpose::STANDARD
+            .encode(sha2::Sha256::digest(inline_script.as_bytes()));
+        assert_eq!(
+            hash_b64, expected,
+            "CSP hash must match SHA-256 of the inlined script body — drift would break CSP"
+        );
     }
 }
