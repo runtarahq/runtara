@@ -515,12 +515,16 @@ Only 4.1 touches Rust (`api/handlers/ui.rs`); everything else is SPA-only. `GET 
 - Unit tests in the existing `api.test.ts` — one case per code — assert the right toast copy and that the generic "Error: 403" fallback is suppressed.
 - **Out of scope:** anything other than the toast mapping.
 
-#### Phase 4.6 - Stale-workflow surfacing
+#### Phase 4.6 - Agent visibility (Step Picker, editor, and any agent-test surfaces)
 
-- Workflow editor: for each step whose `agent.module` is not in `useEntitlements().agents`, render an inline "Agent disabled" warning badge and disable the per-step Test control. This is the UI feedback for the management-plane lock from Phase 3.4 (see "Stale workflows after entitlement changes" above).
-- Workflow list: surface a "needs attention" pill on rows that reference a forbidden agent — scoped to the workflow detail page if the list endpoint doesn't carry agent module IDs (defer a list-side change to a follow-up if so).
-- No new save-time error handling — the 4.5 toast already covers the `AGENT_NOT_ENABLED` graph-walk response.
-- Tests: RTL editor test under a snapshot that excludes one agent; Playwright smoke under a server started with the same fixture.
+All UI surfaces that mention a specific agent module consult `agentEnabled()` from the resolved snapshot. Phases 4.3 and 4.4 covered *feature*-level gating; this sub-phase covers *agent*-level gating, which is finer-grained and shows up in more places. The deliverable is consistent behavior: a disabled agent should never appear as a pickable option, and any existing reference to a disabled agent should be visibly flagged.
+
+- **Step Picker (`features/workflows/components/WorkflowEditor/NodeForm/StepPickerModal.tsx`):** filter the listed capabilities so agent modules absent from `useEntitlements().agents` are **hidden entirely**. Decision made up-front: hide rather than gray-out, matching the sidebar-filtering pattern in Phase 4.3. Rationale: prevents users from picking a step they can't save and keeps the picker free of upsell noise in a single-tenant deployment without a billing flow. If/when a multi-tenant billing model lands, revisit and add a tier-aware "available at higher tiers" hint.
+- **Workflow editor (existing steps):** for each step whose `agent.module` is not in the allowlist, render an inline "Agent disabled" warning badge and disable the per-step Test control. This is the UI feedback for the management-plane lock from Phase 3.4 (see "Stale workflows after entitlement changes" above).
+- **Workflow list:** surface a "needs attention" pill on rows that reference a forbidden agent. Scoped to the workflow detail page if the list endpoint doesn't carry agent module IDs (defer a list-side change to a follow-up if so).
+- **Other agent-test surfaces:** audit `features/` for places that invoke a specific agent module (test buttons in settings, dev panels, capability previews) and gate them with `agentEnabled()`. Disable the control + show a short tooltip explaining why.
+- **No new save-time error handling** — Phase 4.5's toast already covers any `AGENT_NOT_ENABLED` response from the backend that slips past the UI hints.
+- **Tests:** RTL editor test under a snapshot that excludes one agent; RTL Step Picker test that asserts disabled modules are filtered out; Playwright smoke under a server started with the same fixture so the full end-to-end (env → snapshot → picker → editor) is covered once.
 - **Out of scope:** any auto-fix or destructive UI on stale workflows — fixing requires the manual entitlement-restore flow documented above.
 
 ### Phase 5 - Runtime/Internal Enforcement
