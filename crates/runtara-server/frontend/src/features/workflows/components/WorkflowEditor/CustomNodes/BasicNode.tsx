@@ -82,8 +82,8 @@ function BasicNodeComponent({
   // Combine error states from both stores
   const showValidationError = hasValidationError || hasValidationErrorFromPanel;
 
-  // Phase 4.6 — share the entitlement snapshot for both the stale-agent flag
-  // (below) and the agents-list query filter. All getAgents() callers share
+  // Share the entitlement snapshot for both the stale-agent flag (below)
+  // and the agents-list query filter. All getAgents() callers share
   // queryKeys.agents.all in TanStack's cache; they must all pass the same
   // filter so the cached result is consistent. The snapshot is process-stable
   // so `enabledAgentIds` is stable across renders too.
@@ -95,7 +95,7 @@ function BasicNodeComponent({
 
   // Fetch agents for agent name lookup. The filter ensures the HTTP fallback
   // path in getAgents() doesn't fan out per-agent-detail requests for
-  // disabled modules (which would 403 per Phase 3.4).
+  // disabled modules (which would 403 at the management-plane gate).
   const agentsQuery = useCustomQuery({
     queryKey: queryKeys.agents.all,
     queryFn: (token: string) => getAgents(token, enabledAgentIds),
@@ -112,10 +112,10 @@ function BasicNodeComponent({
     return agent?.name;
   }, [data.stepType, data.agentId, agentsQuery.data]);
 
-  // Phase 4.6 — stale-agent flag. Set when an existing Agent step references
-  // a module that's no longer in the entitlement allowlist. Surfaces as a
-  // canvas badge + disabled Test control; save/run will be rejected by the
-  // backend (Phase 3.4/3.5). Restoring the entitlement clears it without any
+  // Stale-agent flag. Set when an existing Agent step references a module
+  // that's no longer in the entitlement allowlist. Surfaces as a canvas
+  // badge + disabled Test control; save/run will be rejected by the backend
+  // management-plane gate. Restoring the entitlement clears it without any
   // workflow mutation.
   const hasStaleAgent =
     data.stepType === 'Agent' &&

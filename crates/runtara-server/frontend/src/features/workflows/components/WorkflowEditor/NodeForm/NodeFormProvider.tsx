@@ -79,9 +79,9 @@ export const NodeFormProvider = ({
   inputSchemaFields,
   variables,
 }: Props) => {
-  // Phase 4.6 — pass the entitlement allowlist into getAgents so the HTTP
-  // fallback path doesn't fire `GET /api/runtime/agents/<id>` for disabled
-  // agents (which would 403 per Phase 3.4). The set is process-stable so
+  // Pass the entitlement allowlist into getAgents so the HTTP fallback path
+  // doesn't fire `GET /api/runtime/agents/<id>` for disabled agents (which
+  // would 403 at the management-plane gate). The set is process-stable so
   // memoising it keeps the query key stable.
   const entitlements = useEntitlements();
   const enabledAgentIds = useMemo(

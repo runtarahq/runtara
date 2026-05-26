@@ -1,8 +1,8 @@
 //! Shared entitlement denial responses.
 //!
-//! Phase 3.1 of `docs/entitlements.md`. Every place where an entitlement gate
-//! denies a request goes through this module, so the stable error `code`,
-//! status, and JSON body shape are defined in exactly one spot. REST handlers
+//! Every place where an entitlement gate denies a request goes through this
+//! module, so the stable error `code`, status, and JSON body shape are
+//! defined in exactly one spot — see `docs/entitlements.md`. REST handlers
 //! return `EntitlementDenial` (it implements `IntoResponse`); MCP tools call
 //! [`EntitlementDenial::to_rmcp_error`] to surface the same structured
 //! information through the JSON-RPC envelope with `code` preserved in `data`.

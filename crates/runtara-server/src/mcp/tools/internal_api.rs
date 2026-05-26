@@ -18,11 +18,11 @@ fn err(msg: impl Into<String>) -> rmcp::ErrorData {
 
 /// Translate a non-success in-process response into `rmcp::ErrorData`.
 ///
-/// Phase 3.5: when the response looks like an entitlement denial — 403 plus a
-/// stable application-level `code` string in the body — surface the body
-/// verbatim in `data` so MCP clients see the same shape they'd get from a
-/// tool-level [`crate::mcp::entitlement`] gate. Otherwise fall back to the
-/// flat "API error (status): message" shape this layer has always emitted.
+/// When the response looks like an entitlement denial — 403 plus a stable
+/// application-level `code` string in the body — surface the body verbatim
+/// in `data` so MCP clients see the same shape they'd get from a tool-level
+/// [`crate::mcp::entitlement`] gate. Otherwise fall back to the flat
+/// "API error (status): message" shape this layer has always emitted.
 fn translate_api_error_response(
     status: axum::http::StatusCode,
     body: serde_json::Value,
@@ -419,7 +419,7 @@ mod tests {
     use axum::http::StatusCode;
     use serde_json::json;
 
-    // ── Phase 3.5: 403 entitlement-shape preservation ─────────────────
+    // ── 403 entitlement-shape preservation ─────────────────────────────
 
     #[test]
     fn translate_preserves_entitlement_required_body_on_403() {

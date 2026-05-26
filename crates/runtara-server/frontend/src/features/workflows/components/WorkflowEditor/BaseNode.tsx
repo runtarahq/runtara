@@ -38,8 +38,8 @@ export const BaseNode = forwardRef<
     hasValidationWarning?: boolean;
     validationMessage?: string | null;
     /** True when this step's `agentId` is not in the current entitlement
-     *  allowlist (Phase 4.6). Surfaces an "Agent disabled" badge on the
-     *  canvas — the management plane (Phase 3.4) already blocks save. */
+     *  allowlist. Surfaces an "Agent disabled" badge on the canvas — the
+     *  management-plane allowlist already blocks save. */
     hasStaleAgent?: boolean;
     isExecutionReadOnly?: boolean;
     subtitle?: string | null;

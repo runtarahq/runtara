@@ -48,8 +48,8 @@ pub async fn get_agent_handler(
     State(service): State<AgentsService>,
     Path(name): Path<String>,
 ) -> Result<Json<AgentInfo>, Response> {
-    // Phase 3.4 — per-agent allowlist check. Surfaces AGENT_NOT_ENABLED
-    // with the same stable code the workflow compile gate emits.
+    // Per-agent allowlist check. Surfaces AGENT_NOT_ENABLED with the same
+    // stable code the workflow compile gate emits.
     if let Err(err) = crate::config::entitlements().require_agent(&name) {
         return Err(EntitlementDenial::from(err).into_response());
     }
@@ -80,7 +80,7 @@ pub async fn get_capability_handler(
     State(service): State<AgentsService>,
     Path((name, capability_id)): Path<(String, String)>,
 ) -> Result<Json<CapabilityInfo>, Response> {
-    // Phase 3.4 — per-agent allowlist check.
+    // Per-agent allowlist check.
     if let Err(err) = crate::config::entitlements().require_agent(&name) {
         return Err(EntitlementDenial::from(err).into_response());
     }
@@ -105,7 +105,7 @@ pub async fn get_capability_handler(
     )
 )]
 pub async fn get_agent_connection_schema_handler(Path(name): Path<String>) -> Response {
-    // Phase 3.4 — per-agent allowlist check.
+    // Per-agent allowlist check.
     if let Err(err) = crate::config::entitlements().require_agent(&name) {
         return EntitlementDenial::from(err).into_response();
     }

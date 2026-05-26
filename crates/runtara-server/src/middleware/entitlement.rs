@@ -1,13 +1,11 @@
-//! REST entitlement gates.
+//! REST entitlement gates — see `docs/entitlements.md`.
 //!
-//! Phase 3.2 + 3.3 of `docs/entitlements.md`.
-//!
-//! - **3.2 — feature gates (`require_reports` etc.)**: per-feature middleware
+//! - **Feature gates (`require_reports` etc.)**: per-feature middleware
 //!   that short-circuits with a 403 + stable `code` when the feature is off.
 //!   Mounted on the smallest sub-router that exactly contains the routes
 //!   surfacing the feature, so the gate is visible at the mount point and
 //!   cannot leak to neighbouring routes.
-//! - **3.3 — API-key auth bypass guard ([`api_key_auth_guard`])**: post-auth
+//! - **API-key auth bypass guard ([`api_key_auth_guard`])**: post-auth
 //!   middleware that rejects API-key-authenticated requests on *every*
 //!   tenant route when `api` is disabled, regardless of which route is hit.
 //!   Session-cookie / JWT users on the same routes are unaffected — that's
@@ -204,7 +202,7 @@ mod tests {
     //! constructed snapshots. The Axum glue (`require_*`) is a one-line
     //! delegate; its end-to-end HTTP behavior depends on the global
     //! `OnceLock<Config>` and is better covered by a future server-fixture
-    //! integration test (Phase 3.2 follow-up).
+    //! integration test.
 
     use super::*;
 
@@ -322,7 +320,7 @@ mod tests {
     }
 
     // ────────────────────────────────────────────────────────────────────
-    // Phase 3.3: API-key auth bypass guard.
+    // API-key auth bypass guard.
     //
     // Matrix: (auth_method × `api` feature state) → expected decision.
     // The control case is the third row — `Jwt` users on a tenant with
@@ -391,7 +389,7 @@ mod tests {
     }
 
     // ────────────────────────────────────────────────────────────────────
-    // Phase 3.4: per-agent allowlist + workflow graph walk.
+    // Per-agent allowlist + workflow graph walk.
     //
     // Graph fixtures are built from JSON literals via `serde_json::from_value`
     // so the tests stay readable and don't drift if the DSL types grow new
@@ -550,7 +548,7 @@ mod tests {
     }
 
     // ────────────────────────────────────────────────────────────────────
-    // Phase 3.6: numeric tier limits.
+    // Numeric tier limits.
     // ────────────────────────────────────────────────────────────────────
 
     // ── effective_limit ─────────────────────────────────────────────────

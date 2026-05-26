@@ -11,7 +11,7 @@ function renderNode(props: Parameters<typeof BaseNode>[0] = {}) {
   );
 }
 
-describe('BaseNode — stale-agent badge (Phase 4.6)', () => {
+describe('BaseNode — stale-agent badge', () => {
   it('shows the badge when hasStaleAgent is true', () => {
     renderNode({
       name: 'Fetch user',

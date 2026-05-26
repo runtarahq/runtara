@@ -96,7 +96,7 @@ function renderPicker(
   );
 }
 
-describe('StepPickerPanel — entitlement-aware agent filter (Phase 4.6)', () => {
+describe('StepPickerPanel — entitlement-aware agent filter', () => {
   beforeEach(() => {
     delete window.__RUNTARA_CONFIG__;
   });

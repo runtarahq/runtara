@@ -133,10 +133,10 @@ pub async fn create_schema(
 ) -> Result<(StatusCode, Json<CreateSchemaResponse>), (StatusCode, Json<Value>)> {
     let service = SchemaService::new(state.manager.clone(), state.connections.clone());
 
-    // Phase 3.6 — count-before-create against `maxObjectSchemas`. The check
-    // lives in the handler (not the service) so the new ENTITLEMENT_LIMIT_EXCEEDED
-    // outcome doesn't need a new ServiceError variant and the 19 unrelated
-    // match sites on object-model ServiceError don't move.
+    // Count-before-create against `maxObjectSchemas`. The check lives in the
+    // handler (not the service) so the new ENTITLEMENT_LIMIT_EXCEEDED outcome
+    // doesn't need a new ServiceError variant and the 19 unrelated match
+    // sites on object-model ServiceError don't move.
     let snapshot = crate::config::entitlements();
     if let Some(cap) = snapshot.limits.max_object_schemas {
         match service

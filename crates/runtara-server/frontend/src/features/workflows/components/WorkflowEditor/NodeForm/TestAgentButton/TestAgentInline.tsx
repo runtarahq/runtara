@@ -192,9 +192,9 @@ export function TestAgentInline() {
   };
 
   // Check if agent testing is available.
-  // Phase 4.6 — also require the step's agent module to be in the entitlement
-  // allowlist. Otherwise the backend would reject the call with
-  // AGENT_NOT_ENABLED, and disabling the Test button up-front is the better UX.
+  // Also require the step's agent module to be in the entitlement allowlist.
+  // Otherwise the backend would reject the call with AGENT_NOT_ENABLED, and
+  // disabling the Test button up-front is the better UX.
   const agentAllowed = !agentId || agentEnabled(entitlements, agentId);
   const isAvailable =
     stepType === 'Agent' && !!agentId && !!capabilityId && agentAllowed;

@@ -675,9 +675,9 @@ function getHiddenNodeIds(nodes: Node[], edges: Edge[]): Set<string> {
 }
 
 function isRenderableNode(node: Node, hiddenNodeIds: Set<string>): boolean {
-  if (hiddenNodeIds.has(node.id)) return false;
-  if (excludedNodeTypes.has(node.type || '')) return false;
-  return true;
+  return (
+    !hiddenNodeIds.has(node.id) && !excludedNodeTypes.has(node.type || '')
+  );
 }
 
 function orderNodesInScope(
@@ -1877,9 +1877,9 @@ export function WorkflowTimelineView({
     (state) => state.flipConditionalBranches
   );
   const moveSwitchCase = useWorkflowStore((state) => state.moveSwitchCase);
-  // Phase 4.6 — share the same getAgents filter as NodeFormProvider /
-  // BasicNode. All three callers share the queryKeys.agents.all cache key,
-  // so they must pass identical filters to avoid cache-result drift.
+  // All `getAgents()` callers in the editor share the queryKeys.agents.all
+  // cache key, so they must pass the same entitlement filter — otherwise an
+  // un-filtered caller would poison the shared cache for everyone.
   const entitlements = useEntitlements();
   const enabledAgentIds = useMemo(
     () => new Set(entitlements.agents),

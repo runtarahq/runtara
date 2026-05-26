@@ -49,7 +49,7 @@ pub async fn test_agent_handler(
     Query(query): Query<TestAgentQuery>,
     Json(request): Json<TestAgentRequest>,
 ) -> Result<Json<TestAgentResponse>, Response> {
-    // Phase 3.4 — per-agent allowlist check.
+    // Per-agent allowlist check.
     if let Err(err) = crate::config::entitlements().require_agent(&agent_name) {
         return Err(EntitlementDenial::from(err).into_response());
     }

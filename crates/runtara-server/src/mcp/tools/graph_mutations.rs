@@ -2853,10 +2853,10 @@ pub async fn add_agent_step(
     params: AddAgentStepParams,
 ) -> Result<CallToolResult, rmcp::ErrorData> {
     validate_path_param("workflow_id", &params.workflow_id)?;
-    // Phase 3.5 — fast-fail on disallowed agent modules before any DB lookup.
-    // The REST update/patch handlers also enforce this on persistence, but
-    // checking here surfaces AGENT_NOT_ENABLED to the MCP caller without
-    // the round-trip.
+    // Fast-fail on disallowed agent modules before any DB lookup. The REST
+    // update/patch handlers also enforce this on persistence, but checking
+    // here surfaces AGENT_NOT_ENABLED to the MCP caller without the
+    // round-trip.
     require_agent(server, &params.agent_id)?;
 
     // Validate agent/capability exist and get capability info

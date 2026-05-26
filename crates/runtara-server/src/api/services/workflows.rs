@@ -158,8 +158,8 @@ impl WorkflowService {
             ));
         }
 
-        // Phase 3.6 — count-before-create against `maxWorkflows`. Counts
-        // non-deleted workflow rows for this tenant.
+        // Count-before-create against `maxWorkflows`. Counts non-deleted
+        // workflow rows for this tenant.
         let snapshot = crate::config::entitlements();
         if let Some(cap) = snapshot.limits.max_workflows {
             let current: i64 = sqlx::query_scalar(
@@ -440,10 +440,10 @@ impl WorkflowService {
                 ServiceError::ValidationError(format!("Invalid workflow format: {}", e))
             })?;
 
-        // Phase 3.4 — reject any step whose agent module is not in this
-        // tenant's `enabled_agents` allowlist. Runs *before* the structural
-        // validator so the rejection is surfaced with AGENT_NOT_ENABLED
-        // rather than as a generic workflow validation error.
+        // Reject any step whose agent module is not in this tenant's
+        // `enabled_agents` allowlist. Runs *before* the structural validator
+        // so the rejection is surfaced with AGENT_NOT_ENABLED rather than as
+        // a generic workflow validation error.
         crate::middleware::entitlement::walk_graph_for_agents(
             crate::config::entitlements(),
             &workflow.execution_graph,
@@ -603,8 +603,8 @@ impl WorkflowService {
                 ServiceError::ValidationError(format!("Invalid workflow format: {}", e))
             })?;
 
-        // Phase 3.4 — reject any step whose agent module is disallowed even
-        // during incremental graph patches, so a forbidden agent can never be
+        // Reject any step whose agent module is disallowed even during
+        // incremental graph patches, so a forbidden agent can never be
         // persisted into the version row.
         crate::middleware::entitlement::walk_graph_for_agents(
             crate::config::entitlements(),
@@ -717,7 +717,7 @@ impl WorkflowService {
         source_workflow_id: &str,
         new_name: &str,
     ) -> Result<(String, i32), ServiceError> {
-        // Phase 3.6 — clones count toward `maxWorkflows` like fresh creates.
+        // Clones count toward `maxWorkflows` like fresh creates.
         let snapshot = crate::config::entitlements();
         if let Some(cap) = snapshot.limits.max_workflows {
             let current: i64 = sqlx::query_scalar(
@@ -1068,8 +1068,8 @@ pub enum ServiceError {
     ExecutionError(String),
     /// Compilation timed out while waiting
     CompilationTimeout(String),
-    /// Phase 3.4 — workflow graph references an agent module that this
-    /// tenant's `enabled_agents` allowlist doesn't permit. Carries the
+    /// Workflow graph references an agent module that this tenant's
+    /// `enabled_agents` allowlist doesn't permit. Carries the
     /// `AGENT_NOT_ENABLED` denial so the handler surfaces the same stable
     /// `code` as the per-handler agent gates.
     EntitlementDenied(crate::entitlement_error::EntitlementDenial),

@@ -426,9 +426,9 @@ export async function getAgents(
   // fan-out skips any agent whose module ID is not in the set. Without this,
   // the HTTP fallback below fires `GET /api/runtime/agents/<id>` for *every*
   // registered agent — and disabled ones return 403, polluting the console
-  // and burning round-trips. Caller passes the snapshot's `agents` array;
-  // when omitted (e.g. static-WASM path or non-React callers), no filtering
-  // happens — preserves backward compatibility.
+  // and burning round-trips. Caller passes the entitlement snapshot's
+  // `agents` array; when omitted (e.g. non-React callers), no filtering
+  // happens — preserves the unentitled call path.
   enabledAgentIds?: ReadonlySet<string>
 ) {
   const isEnabled = (agentId: string) =>
@@ -446,8 +446,8 @@ export async function getAgents(
     );
 
     // Fetch full details for each *enabled* agent to get capability schemas.
-    // Disabled agents would 403 here (Phase 3.4 management-plane gate) — skip
-    // them to avoid the round-trip and the console noise.
+    // Disabled agents would 403 here (the management-plane allowlist gate) —
+    // skip them to avoid the round-trip and the console noise.
     const enabledSummaries = result.data.agents.filter((a) => isEnabled(a.id));
     const agentDetailsPromises = enabledSummaries.map((agentSummary) =>
       fetchAgentDetails(token, agentSummary.id)

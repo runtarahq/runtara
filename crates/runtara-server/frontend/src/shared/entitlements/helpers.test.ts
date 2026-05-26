@@ -82,4 +82,24 @@ describe('PERMISSIVE_FALLBACK', () => {
     expect(isEnabled(PERMISSIVE_FALLBACK, 'api')).toBe(true);
     expect(isEnabled(PERMISSIVE_FALLBACK, 'mcp')).toBe(true);
   });
+
+  it('treats every agent as enabled despite the empty agents array', () => {
+    // Regression guard. Without the identity-based short-circuit in
+    // `agentEnabled`, the fallback's empty `agents` array would deny every
+    // agent — flipping the documented "permissive" contract on its head and
+    // collapsing the Step Picker in `vite dev`, Storybook, and tests that
+    // don't provide a snapshot.
+    expect(agentEnabled(PERMISSIVE_FALLBACK, 'http')).toBe(true);
+    expect(agentEnabled(PERMISSIVE_FALLBACK, 'openai')).toBe(true);
+    expect(agentEnabled(PERMISSIVE_FALLBACK, 'anything-at-all')).toBe(true);
+  });
+
+  it('does not extend permissive semantics to *copies* of the fallback', () => {
+    // The short-circuit is identity-based on purpose: a real snapshot that
+    // happens to have an empty agents array (explicit "deny all" allowlist)
+    // must keep denying every agent. Only the singleton constant exported
+    // from this module gets the permissive treatment.
+    const copy = { ...PERMISSIVE_FALLBACK };
+    expect(agentEnabled(copy, 'http')).toBe(false);
+  });
 });

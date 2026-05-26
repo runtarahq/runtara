@@ -108,6 +108,21 @@ is added in the same patch, use this precedence:
 
 All parsing happens in `Config::from_env()` or a helper it calls. Invalid JSON, unknown feature keys, non-boolean feature values, unknown agent module IDs, negative limits, and overflowing numeric values fail startup with `ConfigError::Invalid`.
 
+### Limit merge semantics (current state)
+
+The merge function on `EntitlementLimits` treats missing keys and explicit JSON `null` identically: both leave the lower-precedence layer's value in place. This means higher layers can only *impose* a stricter cap, not *lift* a cap set by a lower layer back to "uncapped".
+
+Concretely, given a `RUNTARA_PRICING_TIER=starter` baseline with `maxApiKeys = 2`, neither of these `RUNTARA_ENTITLEMENT_OVERRIDES_JSON` payloads will uncap the limit:
+
+```json
+{ "limits": {} }
+{ "limits": { "maxApiKeys": null } }
+```
+
+Both resolve to `Some(2)`. To effectively remove a cap, operators must restate the limit as a large explicit value (e.g. `"maxApiKeys": 4294967295`). This is a known limitation — implementing a proper tri-state (`missing` / `null` / `value`) would require custom deserialization for ~100 lines of code, and no operator flow today reaches it (tier definitions are placeholders pending product input, and the override layer is rare in practice).
+
+Revisit when real tiers ship and operators need a non-workaround way to express "lift this cap". Until then, treat `null` in any entitlement-JSON layer as "inherit from below", not "clear".
+
 Local development default:
 
 - If no entitlement env is set, default to all features `true` and `enabled_agents = None` (i.e. all known agents allowed).

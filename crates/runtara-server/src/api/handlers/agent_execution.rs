@@ -51,8 +51,8 @@ pub async fn execute_agent_handler(
     Path((agent_id, capability_id)): Path<(String, String)>,
     Json(request): Json<ExecuteAgentRequest>,
 ) -> Result<Json<ExecuteAgentResponse>, Response> {
-    // Phase 3.4 — per-agent allowlist check. Surfaces AGENT_NOT_ENABLED
-    // before the host even attempts to dispatch the capability.
+    // Per-agent allowlist check. Surfaces AGENT_NOT_ENABLED before the host
+    // even attempts to dispatch the capability.
     if let Err(err) = crate::config::entitlements().require_agent(&agent_id) {
         return Err(EntitlementDenial::from(err).into_response());
     }

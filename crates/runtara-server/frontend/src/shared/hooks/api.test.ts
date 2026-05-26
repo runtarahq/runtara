@@ -553,7 +553,7 @@ describe('useTableQuery', () => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────
-// Phase 4.5 — 403 entitlement-denial → toast mapping.
+// 403 entitlement-denial → toast mapping.
 // ─────────────────────────────────────────────────────────────────────────
 
 function entitlementError(data: Record<string, unknown>): Parameters<

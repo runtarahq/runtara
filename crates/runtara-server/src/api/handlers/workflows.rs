@@ -681,11 +681,11 @@ pub async fn compile_workflow_handler(
         Ok(v) => v,
     };
 
-    // Phase 3.4 — re-walk the persisted graph against the current
-    // entitlement snapshot. Update/patch already gate at write time, but a
-    // graph that was valid when persisted can later become invalid if the
-    // tenant's `enabled_agents` allowlist changes across a restart. We must
-    // reject here even when a cached compiled binary exists; otherwise the
+    // Re-walk the persisted graph against the current entitlement snapshot.
+    // Update/patch already gate at write time, but a graph that was valid
+    // when persisted can later become invalid if the tenant's
+    // `enabled_agents` allowlist changes across a restart. We must reject
+    // here even when a cached compiled binary exists; otherwise the
     // "already compiled" fast path below would let a stale workflow keep
     // running with a now-forbidden agent.
     {
@@ -1919,9 +1919,9 @@ fn map_service_error_to_response(error: ServiceError) -> (StatusCode, Json<Value
             (StatusCode::INTERNAL_SERVER_ERROR, Json(response))
         }
         ServiceError::EntitlementDenied(denial) => {
-            // Phase 3.4 — surface AGENT_NOT_ENABLED with the stable `code`
-            // that the UI / MCP clients switch on. Body matches what the
-            // per-handler agent gates emit, so callers see one shape.
+            // Surface AGENT_NOT_ENABLED with the stable `code` that the UI
+            // / MCP clients switch on. Body matches what the per-handler
+            // agent gates emit, so callers see one shape.
             (StatusCode::FORBIDDEN, Json(denial.json_body()))
         }
         ServiceError::CompilationTimeout(msg) => {

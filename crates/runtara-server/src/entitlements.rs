@@ -307,13 +307,6 @@ impl TierBase {
         }
     }
 
-    // ─────────────────────────────────────────────────────────────────────
-    // PLACEHOLDER tier definitions (SYN-433). The product values for Starter
-    // / Premium / Enterprise are not decided yet — the gradient below exists
-    // only so tier resolution is testable against the JSON layers. Replace
-    // each field with the real catalog once the product decides.
-    // ─────────────────────────────────────────────────────────────────────
-
     fn starter() -> Self {
         TierBase {
             features: TierFeatures {
@@ -341,7 +334,7 @@ impl TierBase {
                 api: true,
                 mcp: false,
             },
-            enabled_agents: Some(parse_agents(&["http", "csv", "xml", "openai", "anthropic"])),
+            enabled_agents: None,
             limits: EntitlementLimits {
                 max_workflows: Some(100),
                 max_object_schemas: Some(50),

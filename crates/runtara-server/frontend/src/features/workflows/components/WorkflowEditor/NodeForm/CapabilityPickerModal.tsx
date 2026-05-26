@@ -64,10 +64,10 @@ export function CapabilityPickerModal({
   const { agents: rawAgents } = useContext(NodeFormContext);
   const entitlements = useEntitlements();
 
-  // Phase 4.6 — hide disabled agents from the picker and avoid firing
-  // `GET /api/runtime/agents/<module>` for them. Mirrors the filter in
-  // StepPickerModal; without this, the modal opens and useMultipleAgentDetails
-  // fires a 403-bound request for every disabled agent in the registry.
+  // Hide disabled agents from the picker and avoid firing
+  // `GET /api/runtime/agents/<module>` for them. Without this, the modal
+  // opens and useMultipleAgentDetails fires a 403-bound request for every
+  // disabled agent in the registry.
   const agents = useMemo(() => {
     const all = (rawAgents || []) as ExtendedAgent[];
     return all.filter((agent) => agentEnabled(entitlements, agent.id || ''));
@@ -126,8 +126,8 @@ export function CapabilityPickerModal({
   const { data: agentDetails, isFetching } = useCustomQuery({
     queryKey: queryKeys.agents.byId(selectedAgent?.id ?? ''),
     queryFn: (token: string) => getAgentDetails(token, selectedAgent!.id),
-    // Phase 4.6 — also gate on entitlement so a stale-agent step (selected
-    // from the raw list but disabled in the snapshot) doesn't fire a 403 here.
+    // Also gate on entitlement so a stale-agent step (selected from the raw
+    // list but disabled in the snapshot) doesn't fire a 403 here.
     enabled:
       !!selectedAgent?.id &&
       viewMode === 'capabilities' &&
@@ -247,10 +247,10 @@ export function CapabilityPickerModal({
   }, [searchQuery, agents, agentCapabilitiesMap, allAgentsLoaded]);
 
   // Filter capabilities for selected agent
-  const filteredCapabilities = useMemo(() => {
-    const capabilities = agentDetails?.capabilities || [];
-    return capabilities;
-  }, [agentDetails?.capabilities]);
+  const filteredCapabilities = useMemo(
+    () => agentDetails?.capabilities || [],
+    [agentDetails?.capabilities]
+  );
 
   const handleAgentSelect = (agentId: string, agentName: string) => {
     setSelectedAgent({ id: agentId, name: agentName });

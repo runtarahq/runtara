@@ -30,8 +30,7 @@ type RuntimeConfig = {
   stripOrgId?: string;
   /** Per-process entitlement snapshot. Always present when served by the
    *  embedded Rust UI handler; absent when running under `vite dev` or in
-   *  tests, in which case consumers fall back to `GET /api/runtime/entitlements`
-   *  (Phase 4.2). */
+   *  tests, in which case consumers fall back to `GET /api/runtime/entitlements`. */
   entitlements?: EntitlementsSnapshot;
 };
 

@@ -99,10 +99,10 @@ export function StepPickerPanel({
   const { agents: rawAgents, stepTypes } = useContext(NodeFormContext);
   const entitlements = useEntitlements();
 
-  // Phase 4.6 — filter the agent list against the entitlement allowlist
-  // before *any* downstream picker logic runs (browse, search, capability
-  // expansion, agent-details prefetch). UX decision: hide disabled agents
-  // entirely rather than gray-out — see `docs/entitlements.md#phase-46-...`.
+  // Filter the agent list against the entitlement allowlist before *any*
+  // downstream picker logic runs (browse, search, capability expansion,
+  // agent-details prefetch). UX decision: hide disabled agents entirely
+  // rather than gray-out.
   const agents = useMemo(() => {
     const all = (rawAgents || []) as ExtendedAgent[];
     return all.filter((agent) => agentEnabled(entitlements, agent.id || ''));
@@ -125,8 +125,7 @@ export function StepPickerPanel({
       ) {
         return false;
       }
-      if (mode === 'memory') return false;
-      return true;
+      return mode !== 'memory';
     });
   }, [stepTypes, allowFinish, mode]);
 

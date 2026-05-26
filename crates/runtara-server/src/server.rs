@@ -1644,11 +1644,12 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
             agents: agents_service.clone(),
             agent_catalog: agent_catalog.clone(),
         })
-        // Phase 3.3 — reject API-key-authenticated requests when the `api`
-        // feature is off. Sits *between* auth (outermost) and the per-feature
-        // gates (innermost), so the AuthContext is already populated when this
-        // runs but feature gates haven't yet decided whether the route itself
-        // is open. Session/JWT users on the same routes are unaffected.
+        // Reject API-key-authenticated requests when the `api` feature is
+        // off. Sits *between* auth (outermost) and the per-feature gates
+        // (innermost), so the AuthContext is already populated when this
+        // runs but feature gates haven't yet decided whether the route
+        // itself is open. Session/JWT users on the same routes are
+        // unaffected.
         .route_layer(from_fn(crate::middleware::entitlement::api_key_auth_guard))
         // Apply JWT authentication middleware to all tenant-scoped routes
         .route_layer(from_fn_with_state(
@@ -1781,8 +1782,8 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         // feature short-circuits with 403 ENTITLEMENT_REQUIRED before any
         // object-model / SQL / CSV handler runs. JWT auth wraps around this.
         .route_layer(from_fn(crate::middleware::entitlement::require_database))
-        // Phase 3.3 — reject API-key-authenticated requests when `api` is off.
-        // Lives between the `database` gate (inner) and auth (outer).
+        // Reject API-key-authenticated requests when `api` is off. Lives
+        // between the `database` gate (inner) and auth (outer).
         .route_layer(from_fn(crate::middleware::entitlement::api_key_auth_guard))
         // Apply JWT authentication middleware to object model routes
         .route_layer(from_fn_with_state(
@@ -1991,13 +1992,14 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
     )
     // Apply the `mcp` entitlement gate at the transport entry. Disabling
     // the feature short-circuits with 403 ENTITLEMENT_REQUIRED before any
-    // MCP tool handler is reached. Per-tool gates land in Phase 3.5.
-    // Uses .layer() (not .route_layer()) for the same reason as auth above:
-    // the MCP transport is a fallback_service that route_layer would skip.
+    // MCP tool handler is reached. Per-tool gates also exist as a second
+    // line of defense — see `mcp::entitlement`. Uses .layer() (not
+    // .route_layer()) for the same reason as auth above: the MCP transport
+    // is a fallback_service that route_layer would skip.
     .layer(from_fn(crate::middleware::entitlement::require_mcp))
-    // Phase 3.3 — reject API-key-authenticated MCP requests when `api` is off.
-    // Between `mcp` gate (inner) and auth (outer); same shape as on tenant
-    // and object-model routes.
+    // Reject API-key-authenticated MCP requests when `api` is off. Between
+    // `mcp` gate (inner) and auth (outer); same shape as on tenant and
+    // object-model routes.
     .layer(from_fn(crate::middleware::entitlement::api_key_auth_guard))
     .layer(from_fn_with_state(
         mcp_auth_state,

@@ -10,7 +10,7 @@ type FeatureDisabledProps = {
 /**
  * Shown when a tenant navigates to a route whose feature is disabled in the
  * resolved entitlement snapshot. Mounted by `<EntitlementRoute>` — see
- * Phase 4.4 in `docs/entitlements.md`.
+ * `docs/entitlements.md`.
  *
  * Intentionally minimal: no upgrade CTA (single-tenant deployments don't have
  * a billing flow yet), no branching by tier, no support link. The point is
