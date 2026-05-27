@@ -36,7 +36,7 @@ psql "$DB_URL" -c "CREATE DATABASE runtara_e2e_server;"  # server tables
 ## 3. Start the server
 
 ```bash
-DATABASE_URL="postgres://user:pass@localhost:5432/runtara_e2e_server" \
+RUNTARA_SERVER_DATABASE_URL="postgres://user:pass@localhost:5432/runtara_e2e_server" \
 OBJECT_MODEL_DATABASE_URL="postgres://user:pass@localhost:5432/runtara_e2e_server" \
 RUNTARA_DATABASE_URL="postgres://user:pass@localhost:5432/runtara_e2e_test" \
 RUNTARA_ENVIRONMENT_ADDR="127.0.0.1:18002" \

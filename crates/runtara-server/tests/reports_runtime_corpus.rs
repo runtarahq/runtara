@@ -6,7 +6,7 @@
 //!
 //! Requires a running Postgres with `pgvector` and `pg_trgm` extensions.
 //! Reads `TEST_REPORTS_DATABASE_URL` or falls back to `RUNTARA_DATABASE_URL`
-//! / `DATABASE_URL`. Skips gracefully when none is set or unreachable.
+//! / `RUNTARA_SERVER_DATABASE_URL`. Skips gracefully when none is set or unreachable.
 //!
 //! The test creates a UUID-suffixed throwaway database for each run, applies
 //! server migrations, runs the corpus, and drops the database on success.
@@ -53,7 +53,7 @@ fn base_database_url() -> Option<String> {
     for var in [
         "TEST_REPORTS_DATABASE_URL",
         "RUNTARA_DATABASE_URL",
-        "DATABASE_URL",
+        "RUNTARA_SERVER_DATABASE_URL",
     ] {
         if let Ok(value) = std::env::var(var)
             && !value.is_empty()

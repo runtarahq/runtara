@@ -391,6 +391,9 @@ write_config() {
 
     local db_url="${RUNTARA_DATABASE_URL:-postgres://runtara:password@localhost/runtara}"
     local obj_db_url="${OBJECT_MODEL_DATABASE_URL:-postgres://runtara:password@localhost/runtara_objects}"
+    # Server tables (workflows, connections, API keys) live in their own
+    # database, distinct from the object-model and environment databases.
+    local server_db_url="${RUNTARA_SERVER_DATABASE_URL:-postgres://runtara:password@localhost/runtara_server}"
     local valkey_host="${VALKEY_HOST:-127.0.0.1}"
     local valkey_port="${VALKEY_PORT:-6379}"
     local valkey_pass="${VALKEY_PASSWORD:-}"
@@ -455,6 +458,7 @@ $([ -n "$mcp_allowed_hosts" ] && echo "RUNTARA_MCP_ALLOWED_HOSTS=${mcp_allowed_h
 RUNTARA_MCP_SESSION_STORE=${mcp_session_store}
 RUNTARA_MCP_SESSION_TTL_SECONDS=${mcp_session_ttl_seconds}
 
+RUNTARA_SERVER_DATABASE_URL=${server_db_url}
 OBJECT_MODEL_DATABASE_URL=${obj_db_url}
 RUNTARA_DATABASE_URL=${db_url}
 

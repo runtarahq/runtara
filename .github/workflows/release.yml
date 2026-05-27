@@ -117,7 +117,7 @@ jobs:
       PLAYWRIGHT_BASE_URL: http://127.0.0.1:7001
       E2E_UI_BASE_PATH: /ui
       E2E_SMOKE_AUTH_MODE: local
-      DATABASE_URL: postgresql://smo_worker:GueUkDKea0CjKP4Rn5Bk0FDV@127.0.0.1:5432/smo_object_model
+      RUNTARA_SERVER_DATABASE_URL: postgresql://smo_worker:GueUkDKea0CjKP4Rn5Bk0FDV@127.0.0.1:5432/smo_object_model
       OBJECT_MODEL_DATABASE_URL: postgresql://smo_worker:GueUkDKea0CjKP4Rn5Bk0FDV@127.0.0.1:5432/smo_object_model
       RUNTARA_DATABASE_URL: postgresql://smo_worker:GueUkDKea0CjKP4Rn5Bk0FDV@127.0.0.1:5432/runtara
       AUTH_PROVIDER: local

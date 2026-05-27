@@ -58,7 +58,7 @@ info "Server is healthy"
 info "Creating API key in database..."
 API_KEY_HASH=$(echo -n "$API_KEY" | sha256sum | cut -d' ' -f1)
 
-docker compose exec -T postgres psql -U runtara -d runtara_objects -c "
+docker compose exec -T postgres psql -U runtara -d runtara_server -c "
 INSERT INTO public.api_keys (id, org_id, name, key_prefix, key_hash, created_by, created_at, is_revoked)
 VALUES (
     gen_random_uuid(),

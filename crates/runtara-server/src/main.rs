@@ -7,15 +7,12 @@ use sqlx::postgres::PgPoolOptions;
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     dotenvy::dotenv().ok();
 
-    // Support both DATABASE_URL (legacy smo-runtime configs) and
-    // OBJECT_MODEL_DATABASE_URL (runtara install script configs).
-    let database_url = std::env::var("DATABASE_URL")
-        .or_else(|_| std::env::var("OBJECT_MODEL_DATABASE_URL"))
-        .expect(
-            "Database URL is required.\n\
-             Set DATABASE_URL or OBJECT_MODEL_DATABASE_URL to your PostgreSQL connection string, e.g.:\n\
-             export DATABASE_URL=postgres://runtara:password@localhost/runtara",
-        );
+    // The server's primary database: workflows, connections, API keys, triggers.
+    let database_url = std::env::var("RUNTARA_SERVER_DATABASE_URL").expect(
+        "RUNTARA_SERVER_DATABASE_URL is required.\n\
+         Set it to your PostgreSQL connection string, e.g.:\n\
+         export RUNTARA_SERVER_DATABASE_URL=postgres://runtara:password@localhost/runtara",
+    );
 
     let max_connections: u32 = std::env::var("OBJECT_MODEL_MAX_CONNECTIONS")
         .ok()
@@ -52,17 +49,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 eprintln!("Warning: Migration failed: {}", e);
                 println!("Continuing without migrations...");
             }
-        }
-    }
-
-    // Ensure OBJECT_MODEL_DATABASE_URL is set for the server internals.
-    // If only DATABASE_URL was provided (legacy), forward it.
-    if std::env::var("OBJECT_MODEL_DATABASE_URL").is_err()
-        && let Ok(url) = std::env::var("DATABASE_URL")
-    {
-        // SAFETY: called before any threads are spawned
-        unsafe {
-            std::env::set_var("OBJECT_MODEL_DATABASE_URL", &url);
         }
     }
 

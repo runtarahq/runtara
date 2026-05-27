@@ -67,7 +67,7 @@ The server runs migrations on startup, so a fresh DB will be populated automatic
 
 ```bash
 RUST_LOG="sqlx=info,runtara_server=info" \
-DATABASE_URL="postgres://user:pass@localhost:5432/runtara_e2e_server" \
+RUNTARA_SERVER_DATABASE_URL="postgres://user:pass@localhost:5432/runtara_e2e_server" \
 OBJECT_MODEL_DATABASE_URL="postgres://user:pass@localhost:5432/runtara_e2e_server" \
 RUNTARA_DATABASE_URL="postgres://user:pass@localhost:5432/runtara_e2e_test" \
 RUNTARA_ENVIRONMENT_ADDR="127.0.0.1:18002" \
