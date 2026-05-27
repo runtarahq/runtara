@@ -87,3 +87,23 @@ export function agentEnabled(
   if (snapshot === PERMISSIVE_FALLBACK) return true;
   return snapshot.agents.includes(moduleId);
 }
+
+/**
+ * Build an allowlist set suitable for passing to `getAgents()` as the
+ * `enabledAgentIds` filter. Returns `undefined` for the permissive fallback
+ * — `getAgents()` treats `undefined` as "no filter", i.e. accept every
+ * registered module. Any other snapshot collapses to a concrete
+ * `ReadonlySet<string>` of the explicit allowlist.
+ *
+ * This is the structural counterpart to `agentEnabled`: anywhere code
+ * *builds* an allowlist (rather than asking "is X allowed?") must go
+ * through this helper so the permissive-fallback contract holds. Without
+ * it, callers that do `new Set(snap.agents)` would collapse the fallback's
+ * empty array into a deny-all set, flipping the documented semantics.
+ */
+export function enabledAgentSet(
+  snapshot: EntitlementsSnapshot
+): ReadonlySet<string> | undefined {
+  if (snapshot === PERMISSIVE_FALLBACK) return undefined;
+  return new Set(snapshot.agents);
+}

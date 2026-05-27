@@ -46,6 +46,7 @@ import { queryKeys } from '@/shared/queries/query-keys';
 import { getAgents, type ExtendedAgent } from '@/features/workflows/queries';
 import { canStepHaveErrorHandler } from '@/features/workflows/utils/step-error-support';
 import { useEntitlements } from '@/shared/hooks/useEntitlements';
+import { enabledAgentSet } from '@/shared/entitlements';
 import {
   type NodeExecutionStatus,
   useExecutionStore,
@@ -1880,9 +1881,11 @@ export function WorkflowTimelineView({
   // All `getAgents()` callers in the editor share the queryKeys.agents.all
   // cache key, so they must pass the same entitlement filter — otherwise an
   // un-filtered caller would poison the shared cache for everyone.
+  // `enabledAgentSet` returns `undefined` for the permissive fallback so
+  // the "no filter" path is preserved in `vite dev`/test contexts.
   const entitlements = useEntitlements();
   const enabledAgentIds = useMemo(
-    () => new Set(entitlements.agents),
+    () => enabledAgentSet(entitlements),
     [entitlements]
   );
   const agentsQuery = useCustomQuery({

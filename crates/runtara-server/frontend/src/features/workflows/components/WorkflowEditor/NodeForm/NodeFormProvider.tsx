@@ -15,6 +15,7 @@ import {
 } from '@/features/workflows/queries';
 import { SchemaField } from '../EditorSidebar/SchemaFieldsEditor';
 import { useEntitlements } from '@/shared/hooks/useEntitlements';
+import { enabledAgentSet } from '@/shared/entitlements';
 
 /** Simple variable type matching the WorkflowEditor prop type */
 interface SimpleVariable {
@@ -81,11 +82,12 @@ export const NodeFormProvider = ({
 }: Props) => {
   // Pass the entitlement allowlist into getAgents so the HTTP fallback path
   // doesn't fire `GET /api/runtime/agents/<id>` for disabled agents (which
-  // would 403 at the management-plane gate). The set is process-stable so
-  // memoising it keeps the query key stable.
+  // would 403 at the management-plane gate). The helper returns `undefined`
+  // for the permissive fallback so that path doesn't collapse to "deny all
+  // agents" — see `enabledAgentSet` in `@/shared/entitlements`.
   const entitlements = useEntitlements();
   const enabledAgentIds = useMemo(
-    () => new Set(entitlements.agents),
+    () => enabledAgentSet(entitlements),
     [entitlements]
   );
   const agentsQuery = useCustomQuery({

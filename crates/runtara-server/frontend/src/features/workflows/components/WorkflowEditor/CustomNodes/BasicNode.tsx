@@ -27,7 +27,7 @@ import { queryKeys } from '@/shared/queries/query-keys';
 import { getAgents, ExtendedAgent } from '@/features/workflows/queries';
 import { canStepHaveErrorHandler } from '@/features/workflows/utils/step-error-support';
 import { useEntitlements } from '@/shared/hooks/useEntitlements';
-import { agentEnabled } from '@/shared/entitlements';
+import { agentEnabled, enabledAgentSet } from '@/shared/entitlements';
 
 // Note: Node editing is now handled by the sidebar (EditorSidebar) via double-click on ReactFlow.
 // The dialogs below are only for creating new nodes via the + button handles.
@@ -85,11 +85,12 @@ function BasicNodeComponent({
   // Share the entitlement snapshot for both the stale-agent flag (below)
   // and the agents-list query filter. All getAgents() callers share
   // queryKeys.agents.all in TanStack's cache; they must all pass the same
-  // filter so the cached result is consistent. The snapshot is process-stable
-  // so `enabledAgentIds` is stable across renders too.
+  // filter so the cached result is consistent. `enabledAgentSet` returns
+  // `undefined` for the permissive fallback so `vite dev`/test contexts
+  // don't accidentally collapse the agent list to empty.
   const entitlements = useEntitlements();
   const enabledAgentIds = useMemo(
-    () => new Set(entitlements.agents),
+    () => enabledAgentSet(entitlements),
     [entitlements]
   );
 

@@ -737,4 +737,133 @@ mod tests {
             .expect("read body");
         assert_eq!(&bytes[..], b"ok");
     }
+
+    // ── api_key_auth_guard composition ─────────────────────────────────
+    //
+    // Mirror of the database-gate tests above, but for the post-auth guard
+    // that rejects ApiKey callers on every tenant route when `api` is off.
+    // The guard reads `AuthContext` from request extensions; tests inject
+    // a synthetic AuthContext via a wrapping `from_fn` middleware so we
+    // don't have to spin up the real auth chain.
+
+    fn inject_auth_context(
+        ctx: AuthContext,
+    ) -> impl Clone
+    + Send
+    + Sync
+    + 'static
+    + Fn(Request<Body>, Next) -> futures::future::BoxFuture<'static, Response> {
+        use futures::FutureExt;
+        move |mut req: Request<Body>, next: Next| {
+            req.extensions_mut().insert(ctx.clone());
+            async move { next.run(req).await }.boxed()
+        }
+    }
+
+    fn make_test_api_key_guard(
+        snapshot: EntitlementSnapshot,
+    ) -> impl Clone
+    + Send
+    + Sync
+    + 'static
+    + Fn(Request<Body>, Next) -> futures::future::BoxFuture<'static, Response> {
+        use futures::FutureExt;
+        move |req: Request<Body>, next: Next| {
+            let snapshot = snapshot.clone();
+            async move {
+                if let Some(ctx) = req.extensions().get::<AuthContext>().cloned()
+                    && let Err(denial) = api_key_decision(&snapshot, &ctx.auth_method)
+                {
+                    return denial.into_response();
+                }
+                next.run(req).await
+            }
+            .boxed()
+        }
+    }
+
+    fn ctx_with(method: AuthMethod) -> AuthContext {
+        AuthContext {
+            org_id: "tenant-test".to_string(),
+            user_id: "user-test".to_string(),
+            auth_method: method,
+        }
+    }
+
+    #[tokio::test]
+    async fn api_key_guard_denies_api_key_when_api_disabled() {
+        // The Connections gap that prompted this test: an ApiKey caller on
+        // a tenant with `api=false` must be rejected with ENTITLEMENT_REQUIRED
+        // regardless of which tenant sub-router serves the request.
+        let snapshot = snapshot_with(None, Some(r#"{"features":{"api":false}}"#));
+        let guard = make_test_api_key_guard(snapshot);
+        let inject = inject_auth_context(ctx_with(AuthMethod::ApiKey));
+
+        let app = Router::new()
+            .route(
+                "/api/runtime/connections",
+                post(|| async { dummy_handler() }),
+            )
+            .route_layer(from_fn(guard))
+            .route_layer(from_fn(inject));
+
+        let req = Request::post("/api/runtime/connections")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        let body = body_json(resp).await;
+        assert_eq!(body["code"], codes::ENTITLEMENT_REQUIRED);
+        assert_eq!(body["feature"], "api");
+    }
+
+    #[tokio::test]
+    async fn api_key_guard_allows_jwt_callers_when_api_disabled() {
+        // Control case: same `api=false` snapshot, but the request is JWT-
+        // authenticated. Session/OAuth users on the same routes must NOT be
+        // denied — that's the whole point of the bypass guard scoping.
+        let snapshot = snapshot_with(None, Some(r#"{"features":{"api":false}}"#));
+        let guard = make_test_api_key_guard(snapshot);
+        let inject = inject_auth_context(ctx_with(AuthMethod::Jwt));
+
+        let app = Router::new()
+            .route(
+                "/api/runtime/connections",
+                post(|| async { dummy_handler() }),
+            )
+            .route_layer(from_fn(guard))
+            .route_layer(from_fn(inject));
+
+        let req = Request::post("/api/runtime/connections")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn api_key_guard_allows_api_key_when_api_enabled() {
+        // Sanity: the guard must not be a hard "ApiKey denied" — it gates on
+        // the feature, not on the auth method itself.
+        let snapshot = snapshot_with(None, Some(r#"{"features":{"api":true}}"#));
+        let guard = make_test_api_key_guard(snapshot);
+        let inject = inject_auth_context(ctx_with(AuthMethod::ApiKey));
+
+        let app = Router::new()
+            .route(
+                "/api/runtime/connections",
+                post(|| async { dummy_handler() }),
+            )
+            .route_layer(from_fn(guard))
+            .route_layer(from_fn(inject));
+
+        let req = Request::post("/api/runtime/connections")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
 }

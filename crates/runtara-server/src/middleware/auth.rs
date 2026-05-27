@@ -5,6 +5,7 @@ use axum::{
     response::{IntoResponse, Json, Response},
 };
 use serde_json::json;
+use tracing::Instrument;
 
 use crate::auth::{AuthContext, AuthMethod, AuthState};
 
@@ -26,8 +27,8 @@ pub async fn authenticate(
     mut request: Request,
     next: Next,
 ) -> Response {
-    if request.extensions().get::<AuthContext>().is_some() {
-        return next.run(request).await;
+    if let Some(ctx) = request.extensions().get::<AuthContext>().cloned() {
+        return next.run(request).instrument(auth_span(&ctx)).await;
     }
 
     // Fast path: RUNTARA-issued API key. Works in every provider mode.
@@ -36,8 +37,9 @@ pub async fn authenticate(
             Ok(ctx) => ctx,
             Err(response) => return response,
         };
+        let span = auth_span(&auth_context);
         request.extensions_mut().insert(auth_context);
-        return next.run(request).await;
+        return next.run(request).instrument(span).await;
     }
 
     // Delegate everything else to the configured provider.
@@ -46,8 +48,24 @@ pub async fn authenticate(
         Err(e) => return e.into_http_response(),
     };
 
+    let span = auth_span(&auth_context);
     request.extensions_mut().insert(auth_context);
-    next.run(request).await
+    next.run(request).instrument(span).await
+}
+
+/// Span carrying the resolved auth identity, used to wrap the rest of the
+/// request future so any downstream `tracing` event inherits `user_id` and
+/// `auth_method` fields. Subscribers that flatten parent-span fields onto
+/// each emitted event (JSON formatter, OTLP exporter) surface these
+/// alongside entitlement-denial warns, satisfying the Phase 6 audit
+/// requirement that denial logs identify the caller without per-line
+/// plumbing through every gate.
+fn auth_span(ctx: &AuthContext) -> tracing::Span {
+    tracing::info_span!(
+        "request_auth",
+        user_id = %ctx.user_id,
+        auth_method = ?ctx.auth_method,
+    )
 }
 
 /// Extract a Bearer token from the `Authorization` header if and only if it looks like

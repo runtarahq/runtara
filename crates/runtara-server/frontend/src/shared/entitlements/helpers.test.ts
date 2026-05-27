@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   agentEnabled,
+  enabledAgentSet,
   isEnabled,
   PERMISSIVE_FALLBACK,
 } from './helpers';
@@ -101,5 +102,35 @@ describe('PERMISSIVE_FALLBACK', () => {
     // from this module gets the permissive treatment.
     const copy = { ...PERMISSIVE_FALLBACK };
     expect(agentEnabled(copy, 'http')).toBe(false);
+  });
+});
+
+describe('enabledAgentSet', () => {
+  it('returns undefined for the PERMISSIVE_FALLBACK so callers do not filter', () => {
+    // The whole point of this helper: callers like `getAgents(token, set)`
+    // treat `undefined` as "no filter, accept everything". Without it, the
+    // fallback's empty `agents` array would collapse the agent registry to
+    // an empty list in `vite dev` / Storybook / failed-fetch contexts.
+    expect(enabledAgentSet(PERMISSIVE_FALLBACK)).toBeUndefined();
+  });
+
+  it('returns a concrete Set for any real snapshot', () => {
+    const snap = snapshot({ agents: ['http', 'csv'] });
+    const set = enabledAgentSet(snap);
+    expect(set).toBeInstanceOf(Set);
+    expect(set?.has('http')).toBe(true);
+    expect(set?.has('csv')).toBe(true);
+    expect(set?.has('openai')).toBe(false);
+  });
+
+  it('preserves explicit deny-all semantics for a real empty allowlist', () => {
+    // A real snapshot with `agents: []` is the explicit "deny everything"
+    // case — must NOT be treated like the permissive fallback. The
+    // identity-based short-circuit means copies of the fallback do not
+    // count; only the singleton triggers the undefined return.
+    const denyAll: EntitlementsSnapshot = { ...PERMISSIVE_FALLBACK, agents: [] };
+    const set = enabledAgentSet(denyAll);
+    expect(set).toBeInstanceOf(Set);
+    expect(set?.size).toBe(0);
   });
 });

@@ -175,20 +175,32 @@ Two checks:
 
 ## Audit logging
 
-Every entitlement denial — REST, MCP, internal — emits one structured `WARN` line. Fields always present:
+Every entitlement denial — REST, MCP, internal — emits one structured `WARN` line. The fields are split across two layers: ones on the denial event itself, and ones inherited from surrounding tracing spans.
+
+### On the denial event
+
+Always present:
 
 - `code` — one of `ENTITLEMENT_REQUIRED`, `AGENT_NOT_ENABLED`, `ENTITLEMENT_LIMIT_EXCEEDED`. Same stable string the client sees in the 403/MCP error body, so a tenant report with a specific code maps directly to log lines.
 - `tenant_id` — the process's configured tenant.
 
-Variant-specific fields populate one of:
+Variant-specific (exactly one set populates per denial):
 
 - `feature` — for `ENTITLEMENT_REQUIRED`.
 - `agent` — for `AGENT_NOT_ENABLED`.
 - `limit` + `maximum` — for `ENTITLEMENT_LIMIT_EXCEEDED`.
 
-Request URI and request-id travel in the surrounding tracing span; no extra wiring needed in the log filter.
+### From surrounding spans (subscriber-dependent)
 
-The denial log is at `WARN` level by design — operators can grep / dashboard for it without lowering log verbosity globally.
+These travel in parent spans created by other middleware. JSON formatters and OTLP exporters typically flatten them onto each emitted event; the default text formatter does not. If your subscriber doesn't flatten, correlate via request-id instead.
+
+- `method`, `uri` — from `TraceLayer`'s per-request span.
+- `user_id`, `auth_method` — from the `request_auth` span the auth middleware wraps every authenticated request future with.
+- MCP tool name is not yet on the line — each tool function knows its name but doesn't attach it to a span today. Tracked as a follow-up if denial-line tool attribution becomes a real support need.
+
+### Level + correlation
+
+The denial log is at `WARN` level by design — operators can grep / dashboard for it without lowering log verbosity globally. For long-running diagnostics, join `code` + `tenant_id` (per-line) with `user_id` + `auth_method` + `uri` (parent span) via request-id from the structured-log envelope.
 
 ### Privacy note
 

@@ -11,7 +11,7 @@ use axum::{
     response::{IntoResponse, Json, Response},
 };
 
-use crate::api::dto::operators::{AgentInfo, CapabilityInfo, ListAgentsResponse};
+use crate::api::dto::operators::{AgentInfo, AgentSummary, CapabilityInfo, ListAgentsResponse};
 use crate::api::services::operators::{AgentsService, ServiceError};
 use crate::entitlement_error::EntitlementDenial;
 
@@ -27,8 +27,25 @@ use crate::entitlement_error::EntitlementDenial;
 pub async fn list_agents_handler(
     State(service): State<AgentsService>,
 ) -> Result<Json<ListAgentsResponse>, StatusCode> {
-    let agents = service.list_agents();
+    // Filter against the tenant's materialised allowlist so discovery matches
+    // invocation: an agent the per-handler gates would deny must not appear
+    // in the listing the SPA and MCP `list_agents` tool render from.
+    let allowlist = crate::config::entitlements().materialised_agents();
+    let agents = filter_agents_by_allowlist(service.list_agents(), &allowlist);
     Ok(Json(ListAgentsResponse { agents }))
+}
+
+/// Drop agents that aren't in the tenant's materialised allowlist. Pure
+/// function so the filtering rule is unit-testable without booting the
+/// global config snapshot.
+fn filter_agents_by_allowlist(
+    agents: Vec<AgentSummary>,
+    allowlist: &std::collections::BTreeSet<String>,
+) -> Vec<AgentSummary> {
+    agents
+        .into_iter()
+        .filter(|a| allowlist.contains(&a.id))
+        .collect()
 }
 
 /// Get a specific agent by name
@@ -146,4 +163,60 @@ pub async fn components_status_handler(
         agent_ids,
         capability_count,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeSet;
+
+    fn summary(id: &str) -> AgentSummary {
+        AgentSummary {
+            id: id.to_string(),
+            name: id.to_string(),
+            description: String::new(),
+            supports_connections: false,
+            integration_ids: Vec::new(),
+            component_backed: false,
+        }
+    }
+
+    #[test]
+    fn filter_drops_agents_outside_allowlist() {
+        // Regression guard: discovery must mirror invocation. An agent the
+        // per-handler gates would deny must not appear in `list_agents`.
+        let allowlist: BTreeSet<String> = ["http", "csv"].into_iter().map(String::from).collect();
+        let input = vec![summary("http"), summary("openai"), summary("csv")];
+        let kept: Vec<String> = filter_agents_by_allowlist(input, &allowlist)
+            .into_iter()
+            .map(|a| a.id)
+            .collect();
+        assert_eq!(kept, vec!["http".to_string(), "csv".to_string()]);
+    }
+
+    #[test]
+    fn filter_with_empty_allowlist_returns_empty() {
+        // Explicit empty allowlist (`agents: []` in the entitlement JSON) is
+        // the documented "deny everything" case. List must collapse to empty.
+        let allowlist: BTreeSet<String> = BTreeSet::new();
+        let input = vec![summary("http"), summary("csv")];
+        assert!(filter_agents_by_allowlist(input, &allowlist).is_empty());
+    }
+
+    #[test]
+    fn filter_with_full_allowlist_is_identity() {
+        // The materialised allowlist contains every registered module under
+        // the implicit-all default. The filter must be a no-op then —
+        // otherwise the default-tier deployment would silently lose agents.
+        let allowlist: BTreeSet<String> = ["http", "csv", "openai"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+        let input = vec![summary("http"), summary("csv"), summary("openai")];
+        let kept: Vec<String> = filter_agents_by_allowlist(input, &allowlist)
+            .into_iter()
+            .map(|a| a.id)
+            .collect();
+        assert_eq!(kept.len(), 3);
+    }
 }

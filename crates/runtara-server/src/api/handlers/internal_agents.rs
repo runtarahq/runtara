@@ -14,34 +14,43 @@ use axum::{extract::Path, http::StatusCode, response::Json};
 use serde_json::{Value, json};
 use std::time::Duration;
 
+use crate::entitlement_error::EntitlementDenial;
 use crate::entitlements::EntitlementSnapshot;
 
 /// Pure decision for the internal agent allowlist gate.
 ///
-/// Returns `Ok(())` when the snapshot allows the module; otherwise returns the
-/// response body to surface back to the WASM workflow runtime. Unlike the REST
-/// agent gates (which emit a 403 + `EntitlementDenial`), this route preserves
-/// its long-standing `HTTP 200` envelope so the runtime treats the denial like
-/// any other agent failure — the `code: "AGENT_NOT_ENABLED"` field is the
-/// discriminator callers can switch on.
+/// Returns the typed [`EntitlementDenial`] when the snapshot rejects the
+/// module. Pure: no logging, no envelope construction, no global state.
+/// The caller (`execute_agent_capability`) attaches the standard audit log
+/// and wraps the denial in the WASM-runtime-flavoured response envelope.
 ///
 /// Free function so tests can exercise the decision without booting the global
 /// `OnceLock<Config>` or the agents registry.
 pub fn gate_internal_agent(
     snapshot: &EntitlementSnapshot,
     module: &str,
-) -> Result<(), (StatusCode, Json<Value>)> {
-    if snapshot.require_agent(module).is_ok() {
-        return Ok(());
-    }
-    Err((
+) -> Result<(), EntitlementDenial> {
+    snapshot
+        .require_agent(module)
+        .map_err(EntitlementDenial::from)
+}
+
+/// Build the WASM-runtime-flavoured 200 envelope for an entitlement denial.
+///
+/// Unlike the REST agent gates (which emit `403 + EntitlementDenial::json_body`),
+/// this route preserves its long-standing `HTTP 200` envelope so the runtime
+/// treats the denial like any other agent failure — the `code` field is the
+/// discriminator callers switch on. Centralised here so future internal
+/// routes can reuse the same envelope and stay consistent.
+fn internal_denial_response(denial: &EntitlementDenial) -> (StatusCode, Json<Value>) {
+    (
         StatusCode::OK,
         Json(json!({
             "success": false,
-            "error": format!("Agent '{module}' is not enabled for this tenant."),
-            "code": "AGENT_NOT_ENABLED",
+            "error": denial.message(),
+            "code": denial.code(),
         })),
-    ))
+    )
 }
 
 /// Internal endpoint — no authentication, localhost only.
@@ -54,7 +63,11 @@ pub async fn execute_agent_capability(
     // capability dispatch — a disabled module must never see input payloads,
     // connection credentials, or runtime cycles.
     if let Err(denial) = gate_internal_agent(crate::config::entitlements(), &module) {
-        return denial;
+        // Same audit-log chokepoint as every other entitlement denial in the
+        // process. The 200 envelope is the WASM runtime contract, but the
+        // observability story matches REST and MCP.
+        denial.audit_log(crate::config::try_tenant_id().unwrap_or("<unset>"));
+        return internal_denial_response(&denial);
     }
 
     let tenant_id = headers
@@ -197,19 +210,13 @@ mod tests {
 
     #[test]
     fn rejects_modules_outside_allowlist() {
-        // Explicit allowlist of two agents — others must be denied.
+        // Explicit allowlist of two agents — others must be denied with the
+        // standard EntitlementDenial::AgentNotEnabled, which preserves the
+        // stable `code` string and feeds the shared audit-log path.
         let snap = snapshot(Some(r#"{"agents":["http","csv"]}"#));
-        let err = gate_internal_agent(&snap, "openai").expect_err("openai must be denied");
-        let (status, body) = err;
-        assert_eq!(status, StatusCode::OK, "envelope stays 200 by design");
-        let body = body.0;
-        assert_eq!(body["success"], json!(false));
-        assert_eq!(body["code"], json!("AGENT_NOT_ENABLED"));
-        let error_msg = body["error"].as_str().expect("error string");
-        assert!(
-            error_msg.contains("openai"),
-            "error mentions the denied module: {error_msg}"
-        );
+        let denial = gate_internal_agent(&snap, "openai").expect_err("openai must be denied");
+        assert_eq!(denial, EntitlementDenial::AgentNotEnabled("openai".into()));
+        assert_eq!(denial.code(), "AGENT_NOT_ENABLED");
     }
 
     #[test]
@@ -218,10 +225,9 @@ mod tests {
         // also be denied — `require_agent` covers both "not in allowlist" and
         // "unknown to dispatcher".
         let snap = snapshot(None);
-        let err = gate_internal_agent(&snap, "nonexistent-module")
+        let denial = gate_internal_agent(&snap, "nonexistent-module")
             .expect_err("unknown module must be denied");
-        let body = err.1.0;
-        assert_eq!(body["code"], json!("AGENT_NOT_ENABLED"));
+        assert_eq!(denial.code(), "AGENT_NOT_ENABLED");
     }
 
     #[test]
@@ -231,5 +237,23 @@ mod tests {
         let snap = snapshot(Some(r#"{"agents":[]}"#));
         assert!(gate_internal_agent(&snap, "http").is_err());
         assert!(gate_internal_agent(&snap, "csv").is_err());
+    }
+
+    #[test]
+    fn internal_denial_response_preserves_200_envelope_and_code() {
+        // Regression guard for the WASM-runtime contract: the *envelope* is
+        // always HTTP 200 with `{success: false, code: ..., error: ...}`,
+        // even though the denial type is the same one the REST gates emit
+        // as 403. The audit log fires from the caller, not this helper.
+        let denial = EntitlementDenial::AgentNotEnabled("openai".into());
+        let (status, body) = internal_denial_response(&denial);
+        assert_eq!(status, StatusCode::OK);
+        let body = body.0;
+        assert_eq!(body["success"], json!(false));
+        assert_eq!(body["code"], json!("AGENT_NOT_ENABLED"));
+        assert!(
+            body["error"].as_str().unwrap().contains("openai"),
+            "error message names the denied module"
+        );
     }
 }

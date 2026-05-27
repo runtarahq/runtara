@@ -1663,12 +1663,20 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         ));
 
     // Connections crate routes (CRUD, OAuth authorize, type discovery, rate limit analytics)
-    // Mounted as a separate router with tenant bridge middleware
+    // Mounted as a separate router with tenant bridge middleware.
+    //
+    // Layer order matters — the last `.layer` is the outermost / first to run.
+    // Execution per request: authenticate → api_key_auth_guard → inject_tenant → handler.
+    // The api_key_auth_guard belongs *between* auth and tenant injection so that
+    // (a) AuthContext is populated when the guard inspects auth_method, and
+    // (b) Connections handlers see the same denial shape as every other tenant
+    //     route when `api` is off and the caller used an API key.
     let connections_tenant_routes =
         runtara_connections::connections_router(connections_config.clone())
             .layer(axum::middleware::from_fn(
                 crate::middleware::tenant_auth::inject_connections_tenant_id,
             ))
+            .layer(from_fn(crate::middleware::entitlement::api_key_auth_guard))
             .layer(from_fn_with_state(
                 auth_state.clone(),
                 crate::middleware::auth::authenticate,

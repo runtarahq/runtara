@@ -251,6 +251,23 @@ Tier-limit exhaustion:
 
 Keep codes (`ENTITLEMENT_REQUIRED`, `AGENT_NOT_ENABLED`, `ENTITLEMENT_LIMIT_EXCEEDED`) stable so the UI and MCP clients can switch on them.
 
+### Exception: `/api/internal/agents/{module}/{capability_id}` returns 200
+
+One route deliberately breaks the "always 403" rule above: the internal agent dispatcher at `/api/internal/agents/{module}/{capability_id}`. When a module is denied by the allowlist, the response is:
+
+```
+HTTP/1.1 200 OK
+content-type: application/json
+
+{"success": false, "code": "AGENT_NOT_ENABLED", "error": "Agent '<module>' is not enabled for this tenant."}
+```
+
+The `code` value is the same stable string every other denial uses, but the HTTP status is 200 and the body is wrapped in the `{success, error|output}` envelope that the WASM workflow runtime has always used for *any* agent failure (normal errors, panics, denials). This is a private contract between the server and the in-process WASM runtime: the runtime treats every non-2xx response as a transport failure, so emitting a 403 here would force a runtime-side change to recognise denial as a distinct channel. We chose to keep the envelope stable instead.
+
+Callers MUST discriminate on `code`, not on HTTP status, for this route. The audit log (`WARN entitlement denial code=AGENT_NOT_ENABLED ...`) fires the same way as every other denial, so the observability story is unchanged.
+
+This exception applies *only* to `/api/internal/agents/{module}/{capability_id}`. REST routes under `/api/runtime/`, MCP tools, and all other internal routes (including `/api/internal/object-model/*`) follow the 403 contract above.
+
 ## Backend Enforcement Points
 
 ### Middleware Helpers
@@ -565,7 +582,10 @@ Two PR-sized sub-phases. Each is independently shippable.
 
 - Document env examples in deployment docs.
 - Add startup log line summarizing pricing tier, enabled features, and the materialised agent allowlist size.
-- Add audit logs for entitlement-denied requests with tenant, feature or agent ID, route/tool, and user/auth method.
+- Add audit logs for entitlement-denied requests. Fields split across two layers:
+  - **On the denial event itself** (emitted by `EntitlementDenial::audit_log`): the stable `code`, `tenant_id`, and one of `feature` / `agent` / `limit`+`maximum` per variant. These are the fields a denial line carries unconditionally.
+  - **On the surrounding request span** (picked up by subscribers that flatten parent-span fields onto each event — JSON formatter, OTLP exporter): `method`, `uri` (from `TraceLayer`), plus `user_id` and `auth_method` (from the `request_auth` span the auth middleware wraps the request future with). Operators using a text formatter that doesn't flatten will need to correlate via request-id instead.
+  - **MCP tool name** is not yet on the audit line. Each tool function knows its name but doesn't attach it to a span today; track as a follow-up if operators need denial-line tool attribution. The parent MCP request span provides indirect context in the meantime.
 - Add a local test matrix script or fixture set for common tiers.
 
 ## Test Matrix
