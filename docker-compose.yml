@@ -1,0 +1,117 @@
+# Runtara — single-command evaluation stack.
+#
+#   docker compose up
+#   open http://localhost:7001/ui
+#
+# Brings up the published Runtara server image plus the PostgreSQL and Valkey
+# it needs, wired for password-free **local auth** so evaluators land straight
+# in the UI with no identity provider to configure. This is a turnkey trial
+# stack, NOT a production deployment — local auth has no authentication.
+#
+# Self-contained: everything (including DB bootstrap) lives in this one file,
+# so it can be downloaded and run on its own without cloning the repo.
+#
+# Until the first tagged release publishes :latest, point at the rolling dev
+# image:  RUNTARA_IMAGE_TAG=dev docker compose up
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg18
+    environment:
+      POSTGRES_USER: runtara
+      POSTGRES_PASSWORD: runtara
+      # Core/environment DB. The two application DBs (server, objects) are
+      # created by the init script below.
+      POSTGRES_DB: runtara
+    configs:
+      - source: pg-init
+        target: /docker-entrypoint-initdb.d/10-runtara-init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U runtara -d runtara"]
+      interval: 2s
+      timeout: 5s
+      retries: 15
+    volumes:
+      # Postgres 18+ stores data under a major-version subdir
+      # (/var/lib/postgresql/<major>/docker); mount the parent so the volume
+      # covers the active subdir. See docker-library/postgres#1259.
+      - postgres_data:/var/lib/postgresql
+
+  valkey:
+    image: valkey/valkey:8-alpine
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 2s
+      timeout: 5s
+      retries: 15
+    volumes:
+      - valkey_data:/data
+
+  runtara:
+    image: ghcr.io/runtarahq/runtara:${RUNTARA_IMAGE_TAG:-latest}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      valkey:
+        condition: service_healthy
+    environment:
+      # Password-free local auth. The SPA reads authMode from the server at
+      # runtime (window.__RUNTARA_CONFIG__), so no rebuild is needed.
+      AUTH_PROVIDER: local
+      # Local/trust-proxy auth refuse to bind a non-loopback address (an
+      # unauthenticated listener must not be exposed directly). So the server
+      # binds loopback and the `proxy` sidecar below fronts it. Overrides the
+      # image's default SERVER_HOST=0.0.0.0.
+      SERVER_HOST: 127.0.0.1
+      SERVER_PORT: "7001"
+      TENANT_ID: evaluation
+      # Single-tenant: stop the SPA from prefixing API calls with an org id.
+      RUNTARA_UI_STRIP_ORG_ID: "true"
+      # No OTLP collector in this stack — silence the exporter.
+      OTEL_SDK_DISABLED: "true"
+      RUNTARA_SERVER_DATABASE_URL: postgres://runtara:runtara@postgres/runtara_server
+      RUNTARA_DATABASE_URL: postgres://runtara:runtara@postgres/runtara
+      OBJECT_MODEL_DATABASE_URL: postgres://runtara:runtara@postgres/runtara_objects
+      VALKEY_HOST: valkey
+      VALKEY_PORT: "6379"
+    # Publish the *proxy's* listen port (8080). Ports must be declared on the
+    # network-namespace owner, which the sidecar joins via network_mode below.
+    ports:
+      - "7001:8080"
+    volumes:
+      - runtara_data:/data
+
+  # Minimal TCP front for the loopback-bound server. Shares the runtara
+  # container's network namespace so 127.0.0.1:7001 reaches the server, and
+  # accepts host traffic on :8080 (published above as host :7001).
+  proxy:
+    image: alpine/socat
+    depends_on:
+      runtara:
+        condition: service_healthy
+    network_mode: "service:runtara"
+    command: ["TCP-LISTEN:8080,fork,reuseaddr", "TCP:127.0.0.1:7001"]
+
+configs:
+  pg-init:
+    content: |
+      CREATE DATABASE runtara_server OWNER runtara;
+      CREATE DATABASE runtara_objects OWNER runtara;
+
+      -- The server and object-model stores use pg_trgm / pgvector /
+      -- fuzzystrmatch. The pgvector image ships these but does not install
+      -- them per-database, and the runtime no longer auto-creates them.
+      \c runtara_server
+      CREATE EXTENSION IF NOT EXISTS "pg_trgm";
+      CREATE EXTENSION IF NOT EXISTS "vector";
+      CREATE EXTENSION IF NOT EXISTS "fuzzystrmatch";
+
+      \c runtara_objects
+      CREATE EXTENSION IF NOT EXISTS "pg_trgm";
+      CREATE EXTENSION IF NOT EXISTS "vector";
+      CREATE EXTENSION IF NOT EXISTS "fuzzystrmatch";
+
+volumes:
+  postgres_data:
+  valkey_data:
+  runtara_data:

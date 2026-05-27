@@ -153,30 +153,27 @@ Default local ports:
 
 ### Run With Docker
 
-Each release also publishes a multi-arch (amd64 + arm64) server image to the
-GitHub Container Registry:
+Each release publishes a multi-arch (amd64 + arm64) server image to the GitHub
+Container Registry: `ghcr.io/runtarahq/runtara` (tags `:X.Y.Z`, `:latest`, and
+a rolling `:dev`).
+
+**Evaluating? One command brings up the whole stack:**
 
 ```bash
-docker pull ghcr.io/runtarahq/runtara:latest      # or a pinned :X.Y.Z, or :dev
+docker compose up          # then open http://localhost:7001/ui
 ```
 
-The image contains `runtara-server` plus its bundled toolchain and agent
-components. It is a server image, not all-in-one — supply PostgreSQL, Valkey,
-and config via environment (same variables as a native run):
+The root `docker-compose.yml` starts the server image plus PostgreSQL and
+Valkey, wired for password-free local auth so you land straight in the UI — no
+identity provider to configure. It is a turnkey trial stack, not a production
+deployment. (Before the first tagged release, use the rolling dev image:
+`RUNTARA_IMAGE_TAG=dev docker compose up`.)
 
-```bash
-docker run --rm -p 7001:7001 \
-  -e RUNTARA_SERVER_DATABASE_URL=postgres://runtara:runtara@db/runtara_server \
-  -e RUNTARA_DATABASE_URL=postgres://runtara:runtara@db/runtara \
-  -e OBJECT_MODEL_DATABASE_URL=postgres://runtara:runtara@db/runtara_objects \
-  -e VALKEY_HOST=valkey \
-  -e TENANT_ID=my-tenant \
-  -v runtara-data:/data \
-  ghcr.io/runtarahq/runtara:latest
-```
-
-For a runnable Postgres + Valkey stack to point it at, see
-`dev/docker-compose.yml`.
+**Running the image yourself:** it contains `runtara-server` plus its bundled
+toolchain and agent components — a server image, not all-in-one. Supply
+PostgreSQL, Valkey, and config via environment (same variables as a native
+run); the `docker-compose.yml` above is the reference for the full set. All
+runtime state is written under `/data`, which is exposed as a volume.
 
 ### Build And Test
 
