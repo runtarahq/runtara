@@ -134,7 +134,7 @@ pub struct CompileWorkflowQuery {
     ),
     tag = "workflow-controller"
 )]
-#[instrument(skip(pool, connections, request), fields(workflow_name = %request.name))]
+#[instrument(skip(pool, connections, request, agent_catalog), fields(workflow_name = %request.name))]
 pub async fn create_workflow_handler(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
     State(pool): State<PgPool>,
@@ -350,7 +350,7 @@ pub async fn patch_version_graph_handler(
     ),
     tag = "workflow-controller"
 )]
-#[instrument(skip(pool, connections, request), fields(workflow_id = %workflow_id, version = %version))]
+#[instrument(skip(pool, connections, request, agent_catalog), fields(workflow_id = %workflow_id, version = %version))]
 pub async fn toggle_track_events_handler(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
     State(pool): State<PgPool>,
@@ -1204,7 +1204,7 @@ pub struct ValidateMappingsQuery {
     ),
     tag = "workflow-controller"
 )]
-#[instrument(skip(pool, connections), fields(workflow_id = %workflow_id))]
+#[instrument(skip(pool, connections, agent_catalog), fields(workflow_id = %workflow_id))]
 pub async fn validate_mappings_handler(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
     State(pool): State<PgPool>,
@@ -1917,7 +1917,7 @@ fn map_service_error_to_response(error: ServiceError) -> (StatusCode, Json<Value
     ),
     tag = "workflow-controller"
 )]
-#[instrument(skip(pool, connections), fields(workflow_id = %workflow_id, version_number = %version_number))]
+#[instrument(skip(pool, connections, agent_catalog), fields(workflow_id = %workflow_id, version_number = %version_number))]
 pub async fn set_current_version_handler(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
     State(pool): State<PgPool>,

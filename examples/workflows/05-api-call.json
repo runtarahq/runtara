@@ -1,18 +1,18 @@
 {
   "name": "Example: Public API call",
-  "description": "Calls a public REST API (JSONPlaceholder) with the HTTP agent and returns fields from the JSON response. Demonstrates an Agent step + reading into a parsed JSON body. Input: {}.",
+  "description": "Makes an outbound HTTP GET with the HTTP agent and returns the response status. Demonstrates an Agent step calling an external endpoint. Input: {}.",
   "entryPoint": "fetch",
   "steps": {
     "fetch": {
       "id": "fetch",
-      "name": "Fetch a todo",
+      "name": "Fetch a URL",
       "stepType": "Agent",
       "agentId": "http",
       "capabilityId": "http-request",
       "inputMapping": {
         "method": { "valueType": "immediate", "value": "GET" },
-        "url": { "valueType": "immediate", "value": "https://jsonplaceholder.typicode.com/todos/1" },
-        "response_type": { "valueType": "immediate", "value": "json" }
+        "url": { "valueType": "immediate", "value": "https://example.com" },
+        "response_type": { "valueType": "immediate", "value": "text" }
       }
     },
     "done": {
@@ -21,8 +21,7 @@
       "stepType": "Finish",
       "inputMapping": {
         "status": { "valueType": "reference", "value": "steps.fetch.outputs.status_code" },
-        "title": { "valueType": "reference", "value": "steps.fetch.outputs.body.title" },
-        "completed": { "valueType": "reference", "value": "steps.fetch.outputs.body.completed" }
+        "success": { "valueType": "reference", "value": "steps.fetch.outputs.success" }
       }
     }
   },
