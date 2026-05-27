@@ -1,0 +1,45 @@
+{
+  "name": "Example: Conditional branching",
+  "description": "Routes execution down a true/false branch based on a numeric threshold. Demonstrates the Conditional step and 'true'/'false' edge labels. Input: { \"amount\": 150 }.",
+  "inputSchema": {
+    "amount": { "type": "number", "required": true }
+  },
+  "entryPoint": "check",
+  "steps": {
+    "check": {
+      "id": "check",
+      "name": "Amount over 100?",
+      "stepType": "Conditional",
+      "condition": {
+        "type": "operation",
+        "op": "GT",
+        "arguments": [
+          { "valueType": "reference", "value": "data.amount" },
+          { "valueType": "immediate", "value": 100 }
+        ]
+      }
+    },
+    "high": {
+      "id": "high",
+      "name": "High tier",
+      "stepType": "Finish",
+      "inputMapping": {
+        "tier": { "valueType": "immediate", "value": "high" },
+        "amount": { "valueType": "reference", "value": "data.amount" }
+      }
+    },
+    "low": {
+      "id": "low",
+      "name": "Low tier",
+      "stepType": "Finish",
+      "inputMapping": {
+        "tier": { "valueType": "immediate", "value": "low" },
+        "amount": { "valueType": "reference", "value": "data.amount" }
+      }
+    }
+  },
+  "executionPlan": [
+    { "fromStep": "check", "toStep": "high", "label": "true" },
+    { "fromStep": "check", "toStep": "low", "label": "false" }
+  ]
+}

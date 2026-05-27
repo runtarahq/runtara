@@ -1,0 +1,10 @@
+{
+  "description": "Runtara example workflows, seeded into a fresh instance by seed.py.",
+  "workflows": [
+    "01-conditional.json",
+    "02-error-handling.json",
+    "03-split.json",
+    "04-while.json",
+    "05-api-call.json"
+  ]
+}

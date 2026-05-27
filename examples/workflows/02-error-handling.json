@@ -1,0 +1,40 @@
+{
+  "name": "Example: Error handling",
+  "description": "Calls a flaky endpoint that returns HTTP 500. The 'onError' edge routes to a recovery step so the workflow completes gracefully instead of failing. Demonstrates onError routing. Input: {}.",
+  "entryPoint": "call",
+  "steps": {
+    "call": {
+      "id": "call",
+      "name": "Call flaky API",
+      "stepType": "Agent",
+      "agentId": "http",
+      "capabilityId": "http-request",
+      "inputMapping": {
+        "method": { "valueType": "immediate", "value": "GET" },
+        "url": { "valueType": "immediate", "value": "https://httpbin.org/status/500" }
+      }
+    },
+    "ok": {
+      "id": "ok",
+      "name": "Succeeded",
+      "stepType": "Finish",
+      "inputMapping": {
+        "handled": { "valueType": "immediate", "value": false },
+        "status": { "valueType": "reference", "value": "steps.call.outputs.status_code" }
+      }
+    },
+    "recover": {
+      "id": "recover",
+      "name": "Recovered from error",
+      "stepType": "Finish",
+      "inputMapping": {
+        "handled": { "valueType": "immediate", "value": true },
+        "message": { "valueType": "immediate", "value": "The API call failed; the 'onError' edge routed here instead of failing the workflow." }
+      }
+    }
+  },
+  "executionPlan": [
+    { "fromStep": "call", "toStep": "ok" },
+    { "fromStep": "call", "toStep": "recover", "label": "onError" }
+  ]
+}

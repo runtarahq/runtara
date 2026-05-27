@@ -1,0 +1,32 @@
+{
+  "name": "Example: Public API call",
+  "description": "Calls a public REST API (JSONPlaceholder) with the HTTP agent and returns fields from the JSON response. Demonstrates an Agent step + reading into a parsed JSON body. Input: {}.",
+  "entryPoint": "fetch",
+  "steps": {
+    "fetch": {
+      "id": "fetch",
+      "name": "Fetch a todo",
+      "stepType": "Agent",
+      "agentId": "http",
+      "capabilityId": "http-request",
+      "inputMapping": {
+        "method": { "valueType": "immediate", "value": "GET" },
+        "url": { "valueType": "immediate", "value": "https://jsonplaceholder.typicode.com/todos/1" },
+        "response_type": { "valueType": "immediate", "value": "json" }
+      }
+    },
+    "done": {
+      "id": "done",
+      "name": "Return result",
+      "stepType": "Finish",
+      "inputMapping": {
+        "status": { "valueType": "reference", "value": "steps.fetch.outputs.status_code" },
+        "title": { "valueType": "reference", "value": "steps.fetch.outputs.body.title" },
+        "completed": { "valueType": "reference", "value": "steps.fetch.outputs.body.completed" }
+      }
+    }
+  },
+  "executionPlan": [
+    { "fromStep": "fetch", "toStep": "done" }
+  ]
+}

@@ -1,0 +1,44 @@
+{
+  "name": "Example: Split (iterate array)",
+  "description": "Iterates over an input array, runs a subgraph for each element, and collects the per-item results into an array. Within the subgraph the current element is referenced as 'item'. Input: { \"items\": [\"a\", \"b\", \"c\"] }.",
+  "inputSchema": {
+    "items": { "type": "array", "required": true }
+  },
+  "entryPoint": "split",
+  "steps": {
+    "split": {
+      "id": "split",
+      "name": "For each item",
+      "stepType": "Split",
+      "config": {
+        "value": { "valueType": "reference", "value": "data.items" },
+        "sequential": true
+      },
+      "subgraph": {
+        "entryPoint": "emit",
+        "steps": {
+          "emit": {
+            "id": "emit",
+            "name": "Emit item",
+            "stepType": "Finish",
+            "inputMapping": {
+              "value": { "valueType": "reference", "value": "item" }
+            }
+          }
+        },
+        "executionPlan": []
+      }
+    },
+    "done": {
+      "id": "done",
+      "name": "Collect results",
+      "stepType": "Finish",
+      "inputMapping": {
+        "results": { "valueType": "reference", "value": "steps.split.outputs" }
+      }
+    }
+  },
+  "executionPlan": [
+    { "fromStep": "split", "toStep": "done" }
+  ]
+}

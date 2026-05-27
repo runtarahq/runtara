@@ -51,6 +51,11 @@ services:
 
   runtara:
     image: ghcr.io/runtarahq/runtara:${RUNTARA_IMAGE_TAG:-latest}
+    # :latest / :dev are mutable rolling tags. Without this, `docker compose up`
+    # reuses whatever image is cached locally and never re-checks the registry.
+    # `always` makes each `up` pull the newest published image (downloads layers
+    # only when they actually changed).
+    pull_policy: always
     depends_on:
       postgres:
         condition: service_healthy
@@ -95,6 +100,38 @@ services:
         condition: service_healthy
     network_mode: "service:runtara"
     command: ["TCP-LISTEN:8080,fork,reuseaddr", "TCP:127.0.0.1:${RUNTARA_PORT:-3000}"]
+
+  # Optional one-shot example seeder. Runs ONLY when FETCH_EXAMPLES=yes;
+  # otherwise it starts, prints a notice, and exits 0. When enabled it fetches
+  # seed.py + the example workflows from GitHub (examples/ at $EXAMPLES_REF) and
+  # installs them (create -> compile -> set-current). Shares the runtara network
+  # namespace so it can reach the loopback-bound server at 127.0.0.1:$SERVER_PORT
+  # (same reason as the proxy), while still having outbound internet for GitHub.
+  #
+  #   FETCH_EXAMPLES=yes docker compose up
+  seeder:
+    image: python:3-alpine
+    depends_on:
+      runtara:
+        condition: service_healthy
+    network_mode: "service:runtara"
+    restart: "no"
+    environment:
+      FETCH_EXAMPLES: "${FETCH_EXAMPLES:-no}"
+      EXAMPLES_REF: "${EXAMPLES_REF:-main}"
+      SERVER_PORT: "${RUNTARA_PORT:-3000}"
+    command:
+      - sh
+      - -c
+      - |
+        if [ "$$FETCH_EXAMPLES" != "yes" ]; then
+          echo "seeder: FETCH_EXAMPLES != yes — skipping example seeding."
+          exit 0
+        fi
+        base="https://raw.githubusercontent.com/runtarahq/runtara/$$EXAMPLES_REF/examples"
+        echo "seeder: fetching seed.py from $$base"
+        wget -qO /tmp/seed.py "$$base/seed.py" || { echo "seeder: failed to fetch seed.py"; exit 1; }
+        RUNTARA_API_BASE="http://127.0.0.1:$$SERVER_PORT" EXAMPLES_BASE_URL="$$base" python3 /tmp/seed.py
 
 configs:
   pg-init:

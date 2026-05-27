@@ -1,0 +1,50 @@
+{
+  "name": "Example: While loop",
+  "description": "Repeats a subgraph while the loop index is below a target. Inside the loop, 'loop.index' is the current iteration (0-based) and 'loop.outputs' is the previous iteration's output. The While step output is { iterations, outputs }, capped by maxIterations. Input: { \"target\": 3 }.",
+  "inputSchema": {
+    "target": { "type": "number", "required": true }
+  },
+  "entryPoint": "loop",
+  "steps": {
+    "loop": {
+      "id": "loop",
+      "name": "While index < target",
+      "stepType": "While",
+      "condition": {
+        "type": "operation",
+        "op": "LT",
+        "arguments": [
+          { "valueType": "reference", "value": "loop.index" },
+          { "valueType": "reference", "value": "data.target" }
+        ]
+      },
+      "config": { "maxIterations": 10 },
+      "subgraph": {
+        "entryPoint": "tick",
+        "steps": {
+          "tick": {
+            "id": "tick",
+            "name": "One iteration",
+            "stepType": "Finish",
+            "inputMapping": {
+              "iteration": { "valueType": "reference", "value": "loop.index" }
+            }
+          }
+        },
+        "executionPlan": []
+      }
+    },
+    "done": {
+      "id": "done",
+      "name": "Done",
+      "stepType": "Finish",
+      "inputMapping": {
+        "iterations": { "valueType": "reference", "value": "steps.loop.outputs.iterations" },
+        "lastIteration": { "valueType": "reference", "value": "steps.loop.outputs.outputs.iteration" }
+      }
+    }
+  },
+  "executionPlan": [
+    { "fromStep": "loop", "toStep": "done" }
+  ]
+}
