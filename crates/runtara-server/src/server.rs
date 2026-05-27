@@ -1860,7 +1860,13 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
             "/api/internal/object-model/schemas",
             post(api::handlers::internal_object_model::create_schema),
         )
-        .with_state(internal_object_model_state);
+        .with_state(internal_object_model_state)
+        // Apply the `database` entitlement gate. Disabling the feature
+        // short-circuits with 403 ENTITLEMENT_REQUIRED before any handler
+        // runs — so a WASM workflow that calls object-model on a tenant
+        // without `database` sees the same denial shape the tenant-facing
+        // routes already emit. Mirrors the tenant-side gate above.
+        .route_layer(from_fn(crate::middleware::entitlement::require_database));
 
     // Internal HTTP proxy routes (called by WASM workflows for credential injection)
     // NO authentication — tenant_id is passed via X-Org-Id header without JWT validation.

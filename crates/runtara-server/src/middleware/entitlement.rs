@@ -628,4 +628,113 @@ mod tests {
         let denial = limit_decision(huge, Some(u32::MAX), "maxWorkflows").expect_err("must reject");
         assert_eq!(denial.json_body()["maximum"], u64::from(u32::MAX));
     }
+
+    // ────────────────────────────────────────────────────────────────────
+    // Route-layer composition (HTTP-level).
+    //
+    // The `require_*` glue functions read the global `OnceLock<Config>`,
+    // which makes them awkward to drive in tests. The composition pattern
+    // they form together with `route_layer` IS testable though — these
+    // tests mount a snapshot-parameterised closure with the same shape as
+    // `require_feature`, exercise it via `tower::ServiceExt::oneshot`, and
+    // verify that a request hitting a gated path short-circuits with the
+    // documented denial body before the handler runs.
+    // ────────────────────────────────────────────────────────────────────
+
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use axum::routing::post;
+    use axum::{Router, middleware::from_fn};
+    use tower::ServiceExt;
+
+    /// Mirror of `require_feature` that takes the snapshot as a parameter
+    /// instead of reading the global. Tests use this to assert the route
+    /// composition emits the expected denial body. Production code stays
+    /// on the global-reading variant.
+    fn make_test_gate(
+        snapshot: EntitlementSnapshot,
+        feature: FeatureKey,
+    ) -> impl Clone
+    + Send
+    + Sync
+    + 'static
+    + Fn(Request<Body>, Next) -> futures::future::BoxFuture<'static, Response> {
+        use futures::FutureExt;
+        move |req: Request<Body>, next: Next| {
+            let snapshot = snapshot.clone();
+            async move {
+                match gate_decision(&snapshot, feature) {
+                    Ok(()) => next.run(req).await,
+                    Err(d) => d.into_response(),
+                }
+            }
+            .boxed()
+        }
+    }
+
+    fn dummy_handler() -> axum::response::Response {
+        // If the gate lets the request through, the response body is "ok" —
+        // tests assert this is *not* what they see when the gate denies.
+        axum::response::Response::new(Body::from("ok"))
+    }
+
+    async fn body_json(resp: Response) -> serde_json::Value {
+        let bytes = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+            .await
+            .expect("read body");
+        serde_json::from_slice(&bytes).expect("parse JSON body")
+    }
+
+    #[tokio::test]
+    async fn database_gate_short_circuits_internal_object_model_path() {
+        // Snapshot: `database` disabled. Any /api/internal/object-model/*
+        // path must 403 with ENTITLEMENT_REQUIRED before reaching the
+        // handler. This is the Phase 5.1 wiring under test.
+        let snapshot = snapshot_with(None, Some(r#"{"features":{"database":false}}"#));
+        let gate = make_test_gate(snapshot, FeatureKey::Database);
+
+        let app = Router::new()
+            .route(
+                "/api/internal/object-model/instances/query",
+                post(|| async { dummy_handler() }),
+            )
+            .route_layer(from_fn(gate));
+
+        let request = Request::post("/api/internal/object-model/instances/query")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(request).await.unwrap();
+
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        let body = body_json(resp).await;
+        assert_eq!(body["code"], codes::ENTITLEMENT_REQUIRED);
+        assert_eq!(body["feature"], "database");
+    }
+
+    #[tokio::test]
+    async fn database_gate_lets_request_through_when_enabled() {
+        // Control case: same wiring, same path, but the feature is on. The
+        // request must reach the handler — proving the gate is the only
+        // thing standing between request and execution.
+        let snapshot = snapshot_with(None, Some(r#"{"features":{"database":true}}"#));
+        let gate = make_test_gate(snapshot, FeatureKey::Database);
+
+        let app = Router::new()
+            .route(
+                "/api/internal/object-model/instances/query",
+                post(|| async { dummy_handler() }),
+            )
+            .route_layer(from_fn(gate));
+
+        let request = Request::post("/api/internal/object-model/instances/query")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(request).await.unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), 1024)
+            .await
+            .expect("read body");
+        assert_eq!(&bytes[..], b"ok");
+    }
 }

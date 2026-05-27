@@ -544,10 +544,30 @@ All UI surfaces that mention a specific agent module consult `agentEnabled()` fr
 
 ### Phase 5 - Runtime/Internal Enforcement
 
-- Gate `/api/internal/object-model/*` with `database`.
-- Gate `/api/internal/agents/{module}/{capability}` with `enabled_agents` membership for `module`. Reject with `AGENT_NOT_ENABLED`.
-- In workflow create/update/compile, walk the step graph and reject any step whose `agent.module` is not in `enabled_agents`. Surface the same `AGENT_NOT_ENABLED` error so the UI can show a consistent message.
-- Add tests for both the static (compile-time) rejection of forbidden agent steps and the dynamic (execution-time) rejection at the internal dispatcher route.
+Closes the last open acceptance criterion: "Disabled features cannot be accessed via internal workflow runtime routes." The compile-time graph-walk bullet that was originally listed here was delivered earlier in Phase 3.4 (see `walk_graph_for_agents` in `crate::middleware::entitlement` and its invocation sites in `api/services/workflows.rs`), so Phase 5 narrows to the runtime side plus one orthogonal hardening sub-phase.
+
+Three PR-sized sub-phases. Each is independently shippable.
+
+#### Phase 5.1 - Internal object-model gate
+
+- Apply the existing `require_database` middleware as a `route_layer` on the `internal_object_model_routes` builder in `server.rs`. No handler changes — the gate short-circuits with `403 ENTITLEMENT_REQUIRED` before any handler runs. Mirrors the tenant-side `object_model_routes` setup.
+- Integration test: hit any `/api/internal/object-model/*` path under a `database=false` snapshot and assert the standard `ENTITLEMENT_REQUIRED` body; control case under `database=true` reaches the underlying handler.
+
+#### Phase 5.2 - Internal agent dispatcher allowlist
+
+- In-handler check at the top of `execute_agent_capability` (`api/handlers/internal_agents.rs`): call `entitlements().require_agent(&module)` before any connection lookup or `spawn_blocking`. One route, one explicit line — easier to grep than a custom extractor.
+- **Response shape** stays consistent with the existing handler's failure contract: `HTTP 200` with body `{ "success": false, "error": "Agent '<module>' is not enabled for this tenant.", "code": "AGENT_NOT_ENABLED" }`. The `code` field is the discriminator for callers; the HTTP envelope is unchanged so the WASM workflow runtime treats this as any other agent failure. Rationale: the internal route is a private contract with the WASM runtime, and changing the HTTP status would change observed behaviour for previously-working modules.
+- Extracted helper `gate_internal_agent(module, snapshot)` (or similar) is unit-testable without spinning up the agents registry. Integration test hits `/api/internal/agents/<excluded-module>/<cap>` under a snapshot that excludes the module and asserts the 200 + `AGENT_NOT_ENABLED` shape; control case with the module enabled reaches the registry.
+- **Out of scope:** structured-error mapping in the workflow runtime that would let the execution-history view show "Agent disabled" instead of generic "execution failed". Owned by the runtime/UI side, not platform-core.
+
+#### Phase 5.3 - `X-Org-Id == TENANT_ID` validation on internal routes
+
+Orthogonal to entitlements but adjacent enough to bundle into Phase 5. The four internal handlers (`internal_object_model.rs`, `internal_agents.rs`, `internal_proxy.rs`, `internal_presign.rs`) each call a local `extract_tenant_id` that pulls the `X-Org-Id` header value without validating it against the configured `TENANT_ID`. Localhost-only deployment makes this "fine in practice", but the docs above incorrectly claim the equality check "already runs" — this sub-phase makes that claim true.
+
+- Replace per-handler `extract_tenant_id` helpers with a single shared utility that validates against `crate::config::tenant_id()`; reject mismatched requests with `403` (or `400` — operator choice) and a stable error body.
+- Internal-agents handler reads `TENANT_ID` from env directly today (`internal_agents.rs:27`) as a fallback when the header is missing; the shared helper unifies that.
+- Tests: matrix of `(header set / not set, header matches / doesn't match)` for each of the four routes. The "header matches" path keeps current behaviour; the other three are denials.
+- **Out of scope:** changing the auth model for internal routes (still no JWT). Phase 5.3 only enforces the tenant identity claim that the routes already accept; it doesn't add new auth surfaces.
 
 ### Phase 6 - Hardening and Operator Docs
 
