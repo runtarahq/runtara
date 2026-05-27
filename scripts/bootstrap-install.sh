@@ -172,6 +172,7 @@ $([ -n "$vk_volume" ] && printf '        volumes:\n            - %s\n' "$vk_volu
             valkey:
                 condition: service_healthy
         environment:
+            RUNTARA_SERVER_DATABASE_URL: postgres://runtara:runtara@postgres/runtara_objects
             RUNTARA_DATABASE_URL: postgres://runtara:runtara@postgres/runtara
             OBJECT_MODEL_DATABASE_URL: postgres://runtara:runtara@postgres/runtara_objects
             DATA_DIR: /tmp/runtara-data
