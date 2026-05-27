@@ -2099,6 +2099,32 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         "Internal API server started"
     );
 
+    // Ready banner with a clickable UI link. Printed to stdout (not via
+    // tracing) so it shows regardless of RUST_LOG — the first thing a local
+    // or `docker compose up` user looks for once the listeners are bound.
+    {
+        // Wildcard / loopback binds aren't useful as clickable links; show
+        // localhost instead so the printed URL is something you can open.
+        let shown_host = if host == "0.0.0.0" || host == "::" || crate::bind::is_loopback(&host) {
+            "localhost"
+        } else {
+            host.as_str()
+        };
+        let origin = format!("http://{shown_host}:{port}");
+        println!("\n  Runtara {} is ready.\n", env!("BUILD_VERSION"));
+        #[cfg(feature = "embed-ui")]
+        {
+            // Mirrors the RUNTARA_UI_BASE_PATH normalization used at the UI
+            // mount above (default `/ui`).
+            let raw = std::env::var("RUNTARA_UI_BASE_PATH").unwrap_or_else(|_| "/ui".to_string());
+            let trimmed = raw.trim_end_matches('/');
+            let ui = if trimmed.is_empty() { "/ui" } else { trimmed };
+            println!("    UI:      {origin}{ui}");
+        }
+        println!("    API:     {origin}");
+        println!("    Health:  {origin}/health\n");
+    }
+
     // Spawn heartbeat task for log pipeline monitoring
     tokio::spawn(async {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(3600)); // 1 hour

@@ -160,14 +160,15 @@ a rolling `:dev`).
 **Evaluating? One command brings up the whole stack:**
 
 ```bash
-docker compose up          # then open http://localhost:7001/ui
+docker compose up          # then open http://localhost:3000/ui
 ```
 
 The root `docker-compose.yml` starts the server image plus PostgreSQL and
 Valkey, wired for password-free local auth so you land straight in the UI — no
 identity provider to configure. It is a turnkey trial stack, not a production
-deployment. (Before the first tagged release, use the rolling dev image:
-`RUNTARA_IMAGE_TAG=dev docker compose up`.)
+deployment. The host port defaults to 3000; if it's taken, override it with
+`RUNTARA_PORT=3030 docker compose up`. (Before the first tagged release, use the
+rolling dev image: `RUNTARA_IMAGE_TAG=dev docker compose up`.)
 
 **Running the image yourself:** it contains `runtara-server` plus its bundled
 toolchain and agent components — a server image, not all-in-one. Supply

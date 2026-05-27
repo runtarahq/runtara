@@ -1,7 +1,7 @@
 # Runtara — single-command evaluation stack.
 #
 #   docker compose up
-#   open http://localhost:7001/ui
+#   open http://localhost:3000/ui
 #
 # Brings up the published Runtara server image plus the PostgreSQL and Valkey
 # it needs, wired for password-free **local auth** so evaluators land straight
@@ -11,6 +11,8 @@
 # Self-contained: everything (including DB bootstrap) lives in this one file,
 # so it can be downloaded and run on its own without cloning the repo.
 #
+# Host port defaults to 3000; override if it's taken:
+#   RUNTARA_PORT=3030 docker compose up
 # Until the first tagged release publishes :latest, point at the rolling dev
 # image:  RUNTARA_IMAGE_TAG=dev docker compose up
 
@@ -63,7 +65,9 @@ services:
       # binds loopback and the `proxy` sidecar below fronts it. Overrides the
       # image's default SERVER_HOST=0.0.0.0.
       SERVER_HOST: 127.0.0.1
-      SERVER_PORT: "7001"
+      # Match the published host port so the server's ready-banner link is
+      # correct. Drives the in-image healthcheck (curls 127.0.0.1:$SERVER_PORT).
+      SERVER_PORT: "${RUNTARA_PORT:-3000}"
       TENANT_ID: evaluation
       # Single-tenant: stop the SPA from prefixing API calls with an org id.
       RUNTARA_UI_STRIP_ORG_ID: "true"
@@ -77,20 +81,20 @@ services:
     # Publish the *proxy's* listen port (8080). Ports must be declared on the
     # network-namespace owner, which the sidecar joins via network_mode below.
     ports:
-      - "7001:8080"
+      - "${RUNTARA_PORT:-3000}:8080"
     volumes:
       - runtara_data:/data
 
   # Minimal TCP front for the loopback-bound server. Shares the runtara
-  # container's network namespace so 127.0.0.1:7001 reaches the server, and
-  # accepts host traffic on :8080 (published above as host :7001).
+  # container's network namespace so 127.0.0.1:$SERVER_PORT reaches the server,
+  # and accepts host traffic on :8080 (published above as the host port).
   proxy:
     image: alpine/socat
     depends_on:
       runtara:
         condition: service_healthy
     network_mode: "service:runtara"
-    command: ["TCP-LISTEN:8080,fork,reuseaddr", "TCP:127.0.0.1:7001"]
+    command: ["TCP-LISTEN:8080,fork,reuseaddr", "TCP:127.0.0.1:${RUNTARA_PORT:-3000}"]
 
 configs:
   pg-init:
