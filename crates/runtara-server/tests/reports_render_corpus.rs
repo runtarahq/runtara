@@ -55,7 +55,7 @@ fn base_database_url() -> Option<String> {
     for var in [
         "TEST_REPORTS_DATABASE_URL",
         "RUNTARA_DATABASE_URL",
-        "DATABASE_URL",
+        "RUNTARA_SERVER_DATABASE_URL",
     ] {
         if let Ok(value) = std::env::var(var)
             && !value.is_empty()

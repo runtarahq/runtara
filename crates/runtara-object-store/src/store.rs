@@ -45,7 +45,12 @@ impl ObjectStore {
     /// This will:
     /// 1. Connect to the database
     /// 2. Create the metadata table if it doesn't exist
-    /// 3. Try to enable required extensions (e.g. `pg_trgm`)
+    ///
+    /// Required Postgres extensions (`pg_trgm`, `vector`, `fuzzystrmatch`) are
+    /// **not** created here. Provisioning the database with those extensions is
+    /// the operator's responsibility — managed Postgres typically withholds the
+    /// superuser/`CREATE EXTENSION` privilege from application roles, so doing
+    /// it at runtime fails even when a DBA has already installed them.
     pub async fn new(config: StoreConfig) -> Result<Self> {
         let pool = PgPool::connect(&config.database_url).await.map_err(|e| {
             ObjectStoreError::Connection(format!("Database connection failed: {}", e))
@@ -53,7 +58,6 @@ impl ObjectStore {
 
         let store = Self { pool, config };
         store.ensure_metadata_table().await?;
-        store.ensure_extensions().await?;
 
         Ok(store)
     }
@@ -65,30 +69,7 @@ impl ObjectStore {
     pub async fn from_pool(pool: PgPool, config: StoreConfig) -> Result<Self> {
         let store = Self { pool, config };
         store.ensure_metadata_table().await?;
-        store.ensure_extensions().await?;
         Ok(store)
-    }
-
-    /// Enable required Postgres extensions on this database. Fails hard if
-    /// any extension is unavailable — provisioning must use a Postgres
-    /// image that ships `pg_trgm`, `vector` (pgvector), and `fuzzystrmatch`
-    /// (e.g. `pgvector/pgvector:pg16+`). Migration runner does the same for
-    /// the metadata DB; this covers per-tenant DBs that bootstrap via
-    /// `from_pool` outside the migration path.
-    async fn ensure_extensions(&self) -> Result<()> {
-        for ext in ["pg_trgm", "vector", "fuzzystrmatch"] {
-            let stmt = format!(r#"CREATE EXTENSION IF NOT EXISTS "{}""#, ext);
-            sqlx::query(&stmt).execute(&self.pool).await.map_err(|e| {
-                ObjectStoreError::Connection(format!(
-                    "failed to enable required Postgres extension '{}': {}. \
-                     Provisioning must install this extension (e.g. use the \
-                     `pgvector/pgvector:pg16+` image which ships pgvector + \
-                     contrib).",
-                    ext, e
-                ))
-            })?;
-        }
-        Ok(())
     }
 
     /// Get a reference to the connection pool

@@ -59,7 +59,7 @@ pkill -x runtara-server
 
 # relaunch with the focused filter (full env block from e2e-verify)
 RUST_LOG="runtara_environment=debug,runtara_agents=debug,runtara_workflows=info,runtara_server=warn" \
-DATABASE_URL="postgres://user:pass@localhost:5432/runtara_e2e_server" \
+RUNTARA_SERVER_DATABASE_URL="postgres://user:pass@localhost:5432/runtara_e2e_server" \
 OBJECT_MODEL_DATABASE_URL="postgres://user:pass@localhost:5432/runtara_e2e_server" \
 RUNTARA_DATABASE_URL="postgres://user:pass@localhost:5432/runtara_e2e_test" \
 RUNTARA_ENVIRONMENT_ADDR="127.0.0.1:18002" \

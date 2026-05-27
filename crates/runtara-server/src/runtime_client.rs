@@ -234,14 +234,6 @@ impl RuntimeClient {
         let effective_timeout = timeout_secs.unwrap_or(self.config.default_timeout_secs);
         options = options.with_timeout(effective_timeout);
 
-        // Pass database URLs to workflow for object_model agent
-        if let Ok(url) = std::env::var("OBJECT_STORE_DATABASE_URL") {
-            options = options.with_env_var("OBJECT_STORE_DATABASE_URL", &url);
-        } else if let Ok(url) = std::env::var("OBJECT_MODEL_DATABASE_URL") {
-            // Fallback: use OBJECT_MODEL_DATABASE_URL if OBJECT_STORE is not set
-            options = options.with_env_var("OBJECT_STORE_DATABASE_URL", &url);
-        }
-
         // Pass OpenTelemetry configuration for distributed tracing (if enabled)
         if trace_context::is_otel_enabled() {
             // OTEL endpoint

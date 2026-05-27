@@ -27,7 +27,7 @@ cargo run -p runtara-server --release
 ```
 
 The binary reads `.env` via `dotenvy`, then requires a PostgreSQL connection
-string in either `DATABASE_URL` or `OBJECT_MODEL_DATABASE_URL`. On start it
+string in `RUNTARA_SERVER_DATABASE_URL`. On start it
 runs the SQL migrations shipped under `crates/runtara-server/migrations`; set
 `SKIP_MIGRATIONS=true` to bypass on pre-migrated databases. All other knobs —
 bind address, Valkey URL, JWT secrets, OTLP endpoint, worker concurrency — are
