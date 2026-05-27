@@ -14,12 +14,49 @@ use axum::{extract::Path, http::StatusCode, response::Json};
 use serde_json::{Value, json};
 use std::time::Duration;
 
+use crate::entitlements::EntitlementSnapshot;
+
+/// Pure decision for the internal agent allowlist gate.
+///
+/// Returns `Ok(())` when the snapshot allows the module; otherwise returns the
+/// response body to surface back to the WASM workflow runtime. Unlike the REST
+/// agent gates (which emit a 403 + `EntitlementDenial`), this route preserves
+/// its long-standing `HTTP 200` envelope so the runtime treats the denial like
+/// any other agent failure — the `code: "AGENT_NOT_ENABLED"` field is the
+/// discriminator callers can switch on.
+///
+/// Free function so tests can exercise the decision without booting the global
+/// `OnceLock<Config>` or the agents registry.
+pub fn gate_internal_agent(
+    snapshot: &EntitlementSnapshot,
+    module: &str,
+) -> Result<(), (StatusCode, Json<Value>)> {
+    if snapshot.require_agent(module).is_ok() {
+        return Ok(());
+    }
+    Err((
+        StatusCode::OK,
+        Json(json!({
+            "success": false,
+            "error": format!("Agent '{module}' is not enabled for this tenant."),
+            "code": "AGENT_NOT_ENABLED",
+        })),
+    ))
+}
+
 /// Internal endpoint — no authentication, localhost only.
 pub async fn execute_agent_capability(
     headers: axum::http::HeaderMap,
     Path((module, capability_id)): Path<(String, String)>,
     Json(input): Json<Value>,
 ) -> (StatusCode, Json<Value>) {
+    // Allowlist check runs before connection resolution and the blocking
+    // capability dispatch — a disabled module must never see input payloads,
+    // connection credentials, or runtime cycles.
+    if let Err(denial) = gate_internal_agent(crate::config::entitlements(), &module) {
+        return denial;
+    }
+
     let tenant_id = headers
         .get("X-Org-Id")
         .and_then(|v| v.to_str().ok())
@@ -124,4 +161,75 @@ async fn fetch_connection_async(
         "parameters": body.get("parameters").cloned().unwrap_or(json!({})),
         "rate_limit_config": body.get("rate_limit_config"),
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use std::collections::BTreeSet;
+
+    use crate::entitlements::parse_agents;
+
+    fn registered() -> BTreeSet<String> {
+        parse_agents(&["http", "csv", "xml", "openai"])
+    }
+
+    fn snapshot(entitlements_json: Option<&str>) -> EntitlementSnapshot {
+        EntitlementSnapshot::parse_entitlements(
+            "tenant-test",
+            None,
+            entitlements_json,
+            None,
+            &registered(),
+        )
+        .expect("snapshot parses")
+    }
+
+    #[test]
+    fn allows_modules_in_allowlist() {
+        // Default snapshot (no entitlement env) → all registered agents allowed.
+        let snap = snapshot(None);
+        assert!(gate_internal_agent(&snap, "http").is_ok());
+        assert!(gate_internal_agent(&snap, "csv").is_ok());
+        assert!(gate_internal_agent(&snap, "openai").is_ok());
+    }
+
+    #[test]
+    fn rejects_modules_outside_allowlist() {
+        // Explicit allowlist of two agents — others must be denied.
+        let snap = snapshot(Some(r#"{"agents":["http","csv"]}"#));
+        let err = gate_internal_agent(&snap, "openai").expect_err("openai must be denied");
+        let (status, body) = err;
+        assert_eq!(status, StatusCode::OK, "envelope stays 200 by design");
+        let body = body.0;
+        assert_eq!(body["success"], json!(false));
+        assert_eq!(body["code"], json!("AGENT_NOT_ENABLED"));
+        let error_msg = body["error"].as_str().expect("error string");
+        assert!(
+            error_msg.contains("openai"),
+            "error mentions the denied module: {error_msg}"
+        );
+    }
+
+    #[test]
+    fn rejects_unregistered_modules() {
+        // A module that isn't registered at all (typo or stale workflow) must
+        // also be denied — `require_agent` covers both "not in allowlist" and
+        // "unknown to dispatcher".
+        let snap = snapshot(None);
+        let err = gate_internal_agent(&snap, "nonexistent-module")
+            .expect_err("unknown module must be denied");
+        let body = err.1.0;
+        assert_eq!(body["code"], json!("AGENT_NOT_ENABLED"));
+    }
+
+    #[test]
+    fn empty_allowlist_denies_every_module() {
+        // `agents=[]` is the "deny everything" explicit allowlist — no agent
+        // module may pass, including ones that were enabled by default.
+        let snap = snapshot(Some(r#"{"agents":[]}"#));
+        assert!(gate_internal_agent(&snap, "http").is_err());
+        assert!(gate_internal_agent(&snap, "csv").is_err());
+    }
 }
