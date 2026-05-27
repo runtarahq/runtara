@@ -1,0 +1,4 @@
+# Bundle staged into the build context by CI (and by local docker builds).
+# Never committed — it's a ~hundreds-of-MB extracted release bundle.
+/runtara/
+/bundle/
