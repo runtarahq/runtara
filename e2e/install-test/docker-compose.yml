@@ -50,7 +50,7 @@ services:
                 condition: service_healthy
         environment:
             RUNTARA_NONINTERACTIVE: "1"
-            RUNTARA_SERVER_DATABASE_URL: postgres://runtara:runtara@postgres/runtara_objects
+            RUNTARA_SERVER_DATABASE_URL: postgres://runtara:runtara@postgres/runtara_server
             RUNTARA_DATABASE_URL: postgres://runtara:runtara@postgres/runtara
             OBJECT_MODEL_DATABASE_URL: postgres://runtara:runtara@postgres/runtara_objects
             DATA_DIR: /tmp/runtara-data

@@ -391,10 +391,9 @@ write_config() {
 
     local db_url="${RUNTARA_DATABASE_URL:-postgres://runtara:password@localhost/runtara}"
     local obj_db_url="${OBJECT_MODEL_DATABASE_URL:-postgres://runtara:password@localhost/runtara_objects}"
-    # Server tables (workflows, connections, API keys) live in the object-model
-    # database by default — preserving the pre-7.1 behavior where the server
-    # fell back to OBJECT_MODEL_DATABASE_URL. Override with RUNTARA_SERVER_DATABASE_URL.
-    local server_db_url="${RUNTARA_SERVER_DATABASE_URL:-$obj_db_url}"
+    # Server tables (workflows, connections, API keys) live in their own
+    # database, distinct from the object-model and environment databases.
+    local server_db_url="${RUNTARA_SERVER_DATABASE_URL:-postgres://runtara:password@localhost/runtara_server}"
     local valkey_host="${VALKEY_HOST:-127.0.0.1}"
     local valkey_port="${VALKEY_PORT:-6379}"
     local valkey_pass="${VALKEY_PASSWORD:-}"

@@ -108,7 +108,22 @@ volumes:
 
     # init SQL
     cat > "${dir}/init-db.sql" <<'SQLEOF'
+CREATE DATABASE runtara_server OWNER runtara;
 CREATE DATABASE runtara_objects OWNER runtara;
+
+-- The server and object-model stores use pg_trgm / pgvector / fuzzystrmatch
+-- for trigram, vector, and fuzzy-match schemas. The pgvector image ships these
+-- extensions but does not install them per-database, and the runtime no longer
+-- auto-creates them, so provision them up front on each application database.
+\c runtara_server
+CREATE EXTENSION IF NOT EXISTS "pg_trgm";
+CREATE EXTENSION IF NOT EXISTS "vector";
+CREATE EXTENSION IF NOT EXISTS "fuzzystrmatch";
+
+\c runtara_objects
+CREATE EXTENSION IF NOT EXISTS "pg_trgm";
+CREATE EXTENSION IF NOT EXISTS "vector";
+CREATE EXTENSION IF NOT EXISTS "fuzzystrmatch";
 SQLEOF
 
     # Dockerfile — uses the released install.sh to install the bundle
@@ -172,7 +187,7 @@ $([ -n "$vk_volume" ] && printf '        volumes:\n            - %s\n' "$vk_volu
             valkey:
                 condition: service_healthy
         environment:
-            RUNTARA_SERVER_DATABASE_URL: postgres://runtara:runtara@postgres/runtara_objects
+            RUNTARA_SERVER_DATABASE_URL: postgres://runtara:runtara@postgres/runtara_server
             RUNTARA_DATABASE_URL: postgres://runtara:runtara@postgres/runtara
             OBJECT_MODEL_DATABASE_URL: postgres://runtara:runtara@postgres/runtara_objects
             DATA_DIR: /tmp/runtara-data
