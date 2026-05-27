@@ -296,16 +296,15 @@ Always enabled. These are not entitlement-gated and do not have feature keys. De
 
 Internal routes are reached either from in-process MCP (`Router::oneshot()` with pre-injected `AuthContext`) or from workflow runtime callbacks with `X-Org-Id`.
 
-Because the process is per-tenant and the entitlement snapshot is per-process, enforcement is straightforward — **there is no per-request entitlement lookup**:
-
-1. The existing `X-Org-Id == TENANT_ID` check already runs.
-2. Then check the single global `entitlements()` snapshot.
+Because the process is per-tenant and the entitlement snapshot is per-process, enforcement is straightforward — **there is no per-request entitlement lookup**. The route layer / handler simply consults the single global `entitlements()` snapshot.
 
 Apply:
 
 - `/api/internal/object-model/*` → `database`.
 - `/api/internal/agents/{module}/{capability}` → `enabled_agents` membership for `module`. Reject with `AGENT_NOT_ENABLED`.
 - `/api/internal/proxy` → not gated in first pass (Connections deferred).
+
+**Note on `X-Org-Id`:** internal handlers read this header to scope SQL queries and connection lookups, but they do **not** validate it against the configured `TENANT_ID`. The security boundary for internal routes is the localhost socket, not the header value — these routes have no JWT auth and assume the caller has already cleared the OS-level perimeter (workflow containers via pasta networking, in-process MCP calls via `Router::oneshot()`). In a single-tenant runtime, a mismatched `X-Org-Id` results in queries against an empty scope (no data leak); the entitlement gate above is unaffected because the snapshot is process-global. A strict `X-Org-Id == TENANT_ID` check would be load-bearing under a future multi-tenant model and is tracked as a follow-up there.
 
 ## Frontend Plan
 
@@ -544,9 +543,9 @@ All UI surfaces that mention a specific agent module consult `agentEnabled()` fr
 
 ### Phase 5 - Runtime/Internal Enforcement
 
-Closes the last open acceptance criterion: "Disabled features cannot be accessed via internal workflow runtime routes." The compile-time graph-walk bullet that was originally listed here was delivered earlier in Phase 3.4 (see `walk_graph_for_agents` in `crate::middleware::entitlement` and its invocation sites in `api/services/workflows.rs`), so Phase 5 narrows to the runtime side plus one orthogonal hardening sub-phase.
+Closes the last open acceptance criterion: "Disabled features cannot be accessed via internal workflow runtime routes." The compile-time graph-walk bullet that was originally listed here was delivered earlier in Phase 3.4 (see `walk_graph_for_agents` in `crate::middleware::entitlement` and its invocation sites in `api/services/workflows.rs`), so Phase 5 narrows to the runtime side only.
 
-Three PR-sized sub-phases. Each is independently shippable.
+Two PR-sized sub-phases. Each is independently shippable.
 
 #### Phase 5.1 - Internal object-model gate
 
@@ -560,14 +559,7 @@ Three PR-sized sub-phases. Each is independently shippable.
 - Extracted helper `gate_internal_agent(module, snapshot)` (or similar) is unit-testable without spinning up the agents registry. Integration test hits `/api/internal/agents/<excluded-module>/<cap>` under a snapshot that excludes the module and asserts the 200 + `AGENT_NOT_ENABLED` shape; control case with the module enabled reaches the registry.
 - **Out of scope:** structured-error mapping in the workflow runtime that would let the execution-history view show "Agent disabled" instead of generic "execution failed". Owned by the runtime/UI side, not platform-core.
 
-#### Phase 5.3 - `X-Org-Id == TENANT_ID` validation on internal routes
-
-Orthogonal to entitlements but adjacent enough to bundle into Phase 5. The four internal handlers (`internal_object_model.rs`, `internal_agents.rs`, `internal_proxy.rs`, `internal_presign.rs`) each call a local `extract_tenant_id` that pulls the `X-Org-Id` header value without validating it against the configured `TENANT_ID`. Localhost-only deployment makes this "fine in practice", but the docs above incorrectly claim the equality check "already runs" — this sub-phase makes that claim true.
-
-- Replace per-handler `extract_tenant_id` helpers with a single shared utility that validates against `crate::config::tenant_id()`; reject mismatched requests with `403` (or `400` — operator choice) and a stable error body.
-- Internal-agents handler reads `TENANT_ID` from env directly today (`internal_agents.rs:27`) as a fallback when the header is missing; the shared helper unifies that.
-- Tests: matrix of `(header set / not set, header matches / doesn't match)` for each of the four routes. The "header matches" path keeps current behaviour; the other three are denials.
-- **Out of scope:** changing the auth model for internal routes (still no JWT). Phase 5.3 only enforces the tenant identity claim that the routes already accept; it doesn't add new auth surfaces.
+`X-Org-Id` validation on internal routes (originally drafted as Phase 5.3) is tracked separately under future multi-tenant work — see the note in "Internal Runtime Routes" above. In a single-tenant runtime, a mismatched header produces empty-scope queries rather than data leakage, the entitlement gate is unaffected (the snapshot is process-global), and the OS-level localhost perimeter is the actual boundary. The check becomes load-bearing only when one server process serves more than one tenant.
 
 ### Phase 6 - Hardening and Operator Docs
 
