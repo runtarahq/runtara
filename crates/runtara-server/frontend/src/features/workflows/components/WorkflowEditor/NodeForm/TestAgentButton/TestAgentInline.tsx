@@ -23,6 +23,8 @@ import {
 } from '@/features/workflows/stores/nodeFormStore';
 import { NodeFormContext } from '../NodeFormContext';
 import { parseTestAgentInputs } from '@/features/workflows/types/agent-metadata';
+import { useEntitlements } from '@/shared/hooks/useEntitlements';
+import { agentEnabled } from '@/shared/entitlements';
 
 // Stable empty object to avoid creating new references on each render
 const EMPTY_NODE_DATA: Record<string, InputMappingEntry> = {};
@@ -54,6 +56,7 @@ export function TestAgentInline() {
   const { toast } = useToast();
   const { watch } = useFormContext();
   const { agents } = useContext(NodeFormContext);
+  const entitlements = useEntitlements();
 
   // Zustand store for test form values
   // Subscribe to the actual node data to trigger re-renders when it changes
@@ -188,8 +191,13 @@ export function TestAgentInline() {
     }
   };
 
-  // Check if agent testing is available
-  const isAvailable = stepType === 'Agent' && !!agentId && !!capabilityId;
+  // Check if agent testing is available.
+  // Also require the step's agent module to be in the entitlement allowlist.
+  // Otherwise the backend would reject the call with AGENT_NOT_ENABLED, and
+  // disabling the Test button up-front is the better UX.
+  const agentAllowed = !agentId || agentEnabled(entitlements, agentId);
+  const isAvailable =
+    stepType === 'Agent' && !!agentId && !!capabilityId && agentAllowed;
 
   // Register the test handler for external access
   useEffect(() => {
@@ -204,6 +212,16 @@ export function TestAgentInline() {
   }, [testMutation.isPending, isAvailable, nodeData]);
 
   if (!isAvailable) {
+    // Differentiate "agent disabled" from "nothing selected yet" so the user
+    // understands why the panel is inert.
+    if (stepType === 'Agent' && agentId && !agentAllowed) {
+      return (
+        <div className="text-center text-muted-foreground py-8">
+          Agent <span className="font-medium">{agentId}</span> is not enabled
+          for this tenant. Testing is unavailable.
+        </div>
+      );
+    }
     return (
       <div className="text-center text-muted-foreground py-8">
         Select an agent and capability to test

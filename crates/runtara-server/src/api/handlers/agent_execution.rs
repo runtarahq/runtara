@@ -11,13 +11,14 @@
 use axum::{
     extract::{Path, State},
     http::StatusCode,
-    response::Json,
+    response::{IntoResponse, Json, Response},
 };
 
 use crate::api::dto::agent_execution::{
     ExecuteAgentErrorResponse, ExecuteAgentRequest, ExecuteAgentResponse,
 };
 use crate::api::services::agent_execution::{AgentExecutionError, AgentExecutionService};
+use crate::entitlement_error::EntitlementDenial;
 use crate::middleware::tenant_auth::OrgId;
 
 /// Execute an agent capability on the host
@@ -49,7 +50,13 @@ pub async fn execute_agent_handler(
     State(service): State<AgentExecutionService>,
     Path((agent_id, capability_id)): Path<(String, String)>,
     Json(request): Json<ExecuteAgentRequest>,
-) -> Result<Json<ExecuteAgentResponse>, (StatusCode, Json<ExecuteAgentErrorResponse>)> {
+) -> Result<Json<ExecuteAgentResponse>, Response> {
+    // Per-agent allowlist check. Surfaces AGENT_NOT_ENABLED before the host
+    // even attempts to dispatch the capability.
+    if let Err(err) = crate::config::entitlements().require_agent(&agent_id) {
+        return Err(EntitlementDenial::from(err).into_response());
+    }
+
     let result = service
         .execute(
             &tenant_id,
@@ -98,7 +105,8 @@ pub async fn execute_agent_handler(
                     error,
                     message,
                 }),
-            ))
+            )
+                .into_response())
         }
     }
 }

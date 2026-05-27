@@ -26,6 +26,8 @@ import { useCustomQuery } from '@/shared/hooks/api';
 import { queryKeys } from '@/shared/queries/query-keys';
 import { getAgents, ExtendedAgent } from '@/features/workflows/queries';
 import { canStepHaveErrorHandler } from '@/features/workflows/utils/step-error-support';
+import { useEntitlements } from '@/shared/hooks/useEntitlements';
+import { agentEnabled, enabledAgentSet } from '@/shared/entitlements';
 
 // Note: Node editing is now handled by the sidebar (EditorSidebar) via double-click on ReactFlow.
 // The dialogs below are only for creating new nodes via the + button handles.
@@ -80,10 +82,24 @@ function BasicNodeComponent({
   // Combine error states from both stores
   const showValidationError = hasValidationError || hasValidationErrorFromPanel;
 
-  // Fetch agents for agent name lookup
+  // Share the entitlement snapshot for both the stale-agent flag (below)
+  // and the agents-list query filter. All getAgents() callers share
+  // queryKeys.agents.all in TanStack's cache; they must all pass the same
+  // filter so the cached result is consistent. `enabledAgentSet` returns
+  // `undefined` for the permissive fallback so `vite dev`/test contexts
+  // don't accidentally collapse the agent list to empty.
+  const entitlements = useEntitlements();
+  const enabledAgentIds = useMemo(
+    () => enabledAgentSet(entitlements),
+    [entitlements]
+  );
+
+  // Fetch agents for agent name lookup. The filter ensures the HTTP fallback
+  // path in getAgents() doesn't fan out per-agent-detail requests for
+  // disabled modules (which would 403 at the management-plane gate).
   const agentsQuery = useCustomQuery({
     queryKey: queryKeys.agents.all,
-    queryFn: getAgents,
+    queryFn: (token: string) => getAgents(token, enabledAgentIds),
     placeholderData: { agents: [] },
   });
 
@@ -96,6 +112,16 @@ function BasicNodeComponent({
     const agent = agents.find((a) => a.id.toLowerCase() === agentIdLower);
     return agent?.name;
   }, [data.stepType, data.agentId, agentsQuery.data]);
+
+  // Stale-agent flag. Set when an existing Agent step references a module
+  // that's no longer in the entitlement allowlist. Surfaces as a canvas
+  // badge + disabled Test control; save/run will be rejected by the backend
+  // management-plane gate. Restoring the entitlement clears it without any
+  // workflow mutation.
+  const hasStaleAgent =
+    data.stepType === 'Agent' &&
+    !!data.agentId &&
+    !agentEnabled(entitlements, data.agentId);
 
   // Toggle breakpoint on this step — read current value from store at click time to avoid stale closures
   const handleToggleBreakpoint = useCallback(() => {
@@ -380,6 +406,7 @@ function BasicNodeComponent({
         hasValidationError={showValidationError}
         hasValidationWarning={hasValidationWarning}
         validationMessage={showValidationError ? validationMessage : null}
+        hasStaleAgent={hasStaleAgent}
         isExecutionReadOnly={isExecuting}
         breakpoint={!!(data as any).breakpoint}
         onToggleBreakpoint={isStartStep ? undefined : handleToggleBreakpoint}

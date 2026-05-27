@@ -9,6 +9,8 @@ import { getAgentDetails, ExtendedAgent } from '@/features/workflows/queries';
 import { CapabilityInfo } from '@/generated/RuntaraRuntimeApi';
 import { NodeFormContext } from './NodeFormContext';
 import { useMultipleAgentDetails } from '@/features/workflows/hooks';
+import { useEntitlements } from '@/shared/hooks/useEntitlements';
+import { agentEnabled } from '@/shared/entitlements';
 
 interface CapabilitySearchResult {
   agentId: string;
@@ -59,23 +61,37 @@ export function CapabilityPickerModal({
   onSelect,
   currentAgentId,
 }: CapabilityPickerModalProps) {
-  const { agents } = useContext(NodeFormContext);
+  const { agents: rawAgents } = useContext(NodeFormContext);
+  const entitlements = useEntitlements();
+
+  // Hide disabled agents from the picker and avoid firing
+  // `GET /api/runtime/agents/<module>` for them. Without this, the modal
+  // opens and useMultipleAgentDetails fires a 403-bound request for every
+  // disabled agent in the registry.
+  const agents = useMemo(() => {
+    const all = (rawAgents || []) as ExtendedAgent[];
+    return all.filter((agent) => agentEnabled(entitlements, agent.id || ''));
+  }, [rawAgents, entitlements]);
+
   const [viewMode, setViewMode] = useState<ViewMode>('browse');
   const [selectedAgent, setSelectedAgent] = useState<{
     id: string;
     name: string;
   } | null>(() => {
     if (!currentAgentId) return null;
-    const ag = (agents as ExtendedAgent[])?.find(
+    // Look up against the raw list — if the current step references a
+    // now-disabled agent we still want to keep it visually selected (the
+    // editor surfaces the stale state separately via the canvas badge).
+    const ag = (rawAgents as ExtendedAgent[])?.find(
       (a) => a.id === currentAgentId
     );
     return ag ? { id: ag.id, name: ag.name || '' } : null;
   });
   const [searchQuery, setSearchQuery] = useState('');
 
-  // Get agent IDs for fetching details
+  // Get agent IDs for fetching details — only for the filtered (enabled) list.
   const agentIds = useMemo(
-    () => ((agents || []) as ExtendedAgent[]).map((a) => a.id),
+    () => agents.map((a) => a.id),
     [agents]
   );
 
@@ -110,7 +126,12 @@ export function CapabilityPickerModal({
   const { data: agentDetails, isFetching } = useCustomQuery({
     queryKey: queryKeys.agents.byId(selectedAgent?.id ?? ''),
     queryFn: (token: string) => getAgentDetails(token, selectedAgent!.id),
-    enabled: !!selectedAgent?.id && viewMode === 'capabilities',
+    // Also gate on entitlement so a stale-agent step (selected from the raw
+    // list but disabled in the snapshot) doesn't fire a 403 here.
+    enabled:
+      !!selectedAgent?.id &&
+      viewMode === 'capabilities' &&
+      agentEnabled(entitlements, selectedAgent.id),
   });
 
   // Reset state when modal closes
@@ -226,10 +247,10 @@ export function CapabilityPickerModal({
   }, [searchQuery, agents, agentCapabilitiesMap, allAgentsLoaded]);
 
   // Filter capabilities for selected agent
-  const filteredCapabilities = useMemo(() => {
-    const capabilities = agentDetails?.capabilities || [];
-    return capabilities;
-  }, [agentDetails?.capabilities]);
+  const filteredCapabilities = useMemo(
+    () => agentDetails?.capabilities || [],
+    [agentDetails?.capabilities]
+  );
 
   const handleAgentSelect = (agentId: string, agentName: string) => {
     setSelectedAgent({ id: agentId, name: agentName });

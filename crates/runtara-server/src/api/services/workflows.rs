@@ -158,6 +158,27 @@ impl WorkflowService {
             ));
         }
 
+        // Count-before-create against `maxWorkflows`. Counts non-deleted
+        // workflow rows for this tenant.
+        let snapshot = crate::config::entitlements();
+        if let Some(cap) = snapshot.limits.max_workflows {
+            let current: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM workflows WHERE tenant_id = $1 AND deleted_at IS NULL",
+            )
+            .bind(tenant_id)
+            .fetch_one(self.repository.pool())
+            .await
+            .map_err(|e| {
+                ServiceError::DatabaseError(format!("Failed to enforce workflow limit: {}", e))
+            })?;
+            crate::middleware::entitlement::limit_decision(
+                current as u64,
+                Some(cap),
+                "maxWorkflows",
+            )
+            .map_err(ServiceError::EntitlementDenied)?;
+        }
+
         // Generate new workflow ID
         let workflow_id = Uuid::new_v4().to_string();
 
@@ -419,6 +440,16 @@ impl WorkflowService {
                 ServiceError::ValidationError(format!("Invalid workflow format: {}", e))
             })?;
 
+        // Reject any step whose agent module is not in this tenant's
+        // `enabled_agents` allowlist. Runs *before* the structural validator
+        // so the rejection is surfaced with AGENT_NOT_ENABLED rather than as
+        // a generic workflow validation error.
+        crate::middleware::entitlement::walk_graph_for_agents(
+            crate::config::entitlements(),
+            &workflow.execution_graph,
+        )
+        .map_err(ServiceError::EntitlementDenied)?;
+
         // Run comprehensive workflow validation from runtara-workflows
         // This validates security (connection leaks), structure, and configuration
         let validation_result = validate_workflow(&workflow.execution_graph, &self.agent_catalog);
@@ -567,10 +598,19 @@ impl WorkflowService {
         // atomic mutations, so intermediate states will have unreachable steps.
         // Full validation happens at compile time.
         let workflow_wrapper = serde_json::json!({ "executionGraph": definition });
-        let _workflow =
+        let workflow =
             serde_json::from_value::<runtara_dsl::Workflow>(workflow_wrapper).map_err(|e| {
                 ServiceError::ValidationError(format!("Invalid workflow format: {}", e))
             })?;
+
+        // Reject any step whose agent module is disallowed even during
+        // incremental graph patches, so a forbidden agent can never be
+        // persisted into the version row.
+        crate::middleware::entitlement::walk_graph_for_agents(
+            crate::config::entitlements(),
+            &workflow.execution_graph,
+        )
+        .map_err(ServiceError::EntitlementDenied)?;
 
         // Update in-place
         let rows = self
@@ -677,6 +717,26 @@ impl WorkflowService {
         source_workflow_id: &str,
         new_name: &str,
     ) -> Result<(String, i32), ServiceError> {
+        // Clones count toward `maxWorkflows` like fresh creates.
+        let snapshot = crate::config::entitlements();
+        if let Some(cap) = snapshot.limits.max_workflows {
+            let current: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM workflows WHERE tenant_id = $1 AND deleted_at IS NULL",
+            )
+            .bind(tenant_id)
+            .fetch_one(self.repository.pool())
+            .await
+            .map_err(|e| {
+                ServiceError::DatabaseError(format!("Failed to enforce workflow limit: {}", e))
+            })?;
+            crate::middleware::entitlement::limit_decision(
+                current as u64,
+                Some(cap),
+                "maxWorkflows",
+            )
+            .map_err(ServiceError::EntitlementDenied)?;
+        }
+
         // Generate new workflow ID
         let new_workflow_id = Uuid::new_v4().to_string();
 
@@ -1008,6 +1068,11 @@ pub enum ServiceError {
     ExecutionError(String),
     /// Compilation timed out while waiting
     CompilationTimeout(String),
+    /// Workflow graph references an agent module that this tenant's
+    /// `enabled_agents` allowlist doesn't permit. Carries the
+    /// `AGENT_NOT_ENABLED` denial so the handler surfaces the same stable
+    /// `code` as the per-handler agent gates.
+    EntitlementDenied(crate::entitlement_error::EntitlementDenial),
 }
 
 impl std::fmt::Display for ServiceError {
@@ -1022,6 +1087,9 @@ impl std::fmt::Display for ServiceError {
             ServiceError::DatabaseError(msg) => write!(f, "Database error: {}", msg),
             ServiceError::ExecutionError(msg) => write!(f, "Execution error: {}", msg),
             ServiceError::CompilationTimeout(msg) => write!(f, "Compilation timeout: {}", msg),
+            ServiceError::EntitlementDenied(denial) => {
+                write!(f, "Entitlement denied: {}", denial.message())
+            }
         }
     }
 }

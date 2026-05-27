@@ -45,6 +45,8 @@ import { useCustomQuery } from '@/shared/hooks/api';
 import { queryKeys } from '@/shared/queries/query-keys';
 import { getAgents, type ExtendedAgent } from '@/features/workflows/queries';
 import { canStepHaveErrorHandler } from '@/features/workflows/utils/step-error-support';
+import { useEntitlements } from '@/shared/hooks/useEntitlements';
+import { enabledAgentSet } from '@/shared/entitlements';
 import {
   type NodeExecutionStatus,
   useExecutionStore,
@@ -674,9 +676,9 @@ function getHiddenNodeIds(nodes: Node[], edges: Edge[]): Set<string> {
 }
 
 function isRenderableNode(node: Node, hiddenNodeIds: Set<string>): boolean {
-  if (hiddenNodeIds.has(node.id)) return false;
-  if (excludedNodeTypes.has(node.type || '')) return false;
-  return true;
+  return (
+    !hiddenNodeIds.has(node.id) && !excludedNodeTypes.has(node.type || '')
+  );
 }
 
 function orderNodesInScope(
@@ -1876,9 +1878,19 @@ export function WorkflowTimelineView({
     (state) => state.flipConditionalBranches
   );
   const moveSwitchCase = useWorkflowStore((state) => state.moveSwitchCase);
+  // All `getAgents()` callers in the editor share the queryKeys.agents.all
+  // cache key, so they must pass the same entitlement filter — otherwise an
+  // un-filtered caller would poison the shared cache for everyone.
+  // `enabledAgentSet` returns `undefined` for the permissive fallback so
+  // the "no filter" path is preserved in `vite dev`/test contexts.
+  const entitlements = useEntitlements();
+  const enabledAgentIds = useMemo(
+    () => enabledAgentSet(entitlements),
+    [entitlements]
+  );
   const agentsQuery = useCustomQuery({
     queryKey: queryKeys.agents.all,
-    queryFn: getAgents,
+    queryFn: (token: string) => getAgents(token, enabledAgentIds),
     placeholderData: { agents: [] },
   });
   const agents =

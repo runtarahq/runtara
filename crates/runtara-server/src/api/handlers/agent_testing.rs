@@ -7,13 +7,14 @@
 use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
-    response::Json,
+    response::{IntoResponse, Json, Response},
 };
 
 use crate::api::dto::agent_testing::{
     TestAgentErrorResponse, TestAgentQuery, TestAgentRequest, TestAgentResponse,
 };
 use crate::api::services::agent_testing::{AgentTestingService, ServiceError};
+use crate::entitlement_error::EntitlementDenial;
 use crate::middleware::tenant_auth::OrgId;
 
 /// Test an agent capability with given input
@@ -47,7 +48,12 @@ pub async fn test_agent_handler(
     Path((agent_name, capability_id)): Path<(String, String)>,
     Query(query): Query<TestAgentQuery>,
     Json(request): Json<TestAgentRequest>,
-) -> Result<Json<TestAgentResponse>, (StatusCode, Json<TestAgentErrorResponse>)> {
+) -> Result<Json<TestAgentResponse>, Response> {
+    // Per-agent allowlist check.
+    if let Err(err) = crate::config::entitlements().require_agent(&agent_name) {
+        return Err(EntitlementDenial::from(err).into_response());
+    }
+
     let service = service.ok_or_else(|| {
         (
             StatusCode::NOT_FOUND,
@@ -60,6 +66,7 @@ pub async fn test_agent_handler(
                 ),
             }),
         )
+            .into_response()
     })?;
 
     match service
@@ -125,7 +132,8 @@ pub async fn test_agent_handler(
                     error,
                     message,
                 }),
-            ))
+            )
+                .into_response())
         }
     }
 }

@@ -16,6 +16,34 @@ fn err(msg: impl Into<String>) -> rmcp::ErrorData {
     rmcp::ErrorData::internal_error(msg.into(), None)
 }
 
+/// Translate a non-success in-process response into `rmcp::ErrorData`.
+///
+/// When the response looks like an entitlement denial — 403 plus a stable
+/// application-level `code` string in the body — surface the body verbatim
+/// in `data` so MCP clients see the same shape they'd get from a tool-level
+/// [`crate::mcp::entitlement`] gate. Otherwise fall back to the flat
+/// "API error (status): message" shape this layer has always emitted.
+fn translate_api_error_response(
+    status: axum::http::StatusCode,
+    body: serde_json::Value,
+) -> rmcp::ErrorData {
+    let has_stable_code = body.get("code").and_then(|v| v.as_str()).is_some();
+    if status == axum::http::StatusCode::FORBIDDEN && has_stable_code {
+        let message = body
+            .get("message")
+            .and_then(|v| v.as_str())
+            .unwrap_or("Entitlement denied")
+            .to_string();
+        return rmcp::ErrorData::new(rmcp::model::ErrorCode::INVALID_REQUEST, message, Some(body));
+    }
+    let msg = body
+        .get("message")
+        .or(body.get("error"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("Unknown error");
+    err(format!("API error ({}): {}", status, msg))
+}
+
 /// JSON Schema for arbitrary object-shaped MCP arguments that are stored as
 /// `serde_json::Value` at runtime so stringified client payloads can be recovered.
 pub fn json_object_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
@@ -193,12 +221,7 @@ pub async fn api_get(
     });
 
     if !status.is_success() {
-        let msg = body
-            .get("message")
-            .or(body.get("error"))
-            .and_then(|v| v.as_str())
-            .unwrap_or("Unknown error");
-        return Err(err(format!("API error ({}): {}", status, msg)));
+        return Err(translate_api_error_response(status, body));
     }
 
     Ok(body)
@@ -233,12 +256,7 @@ pub async fn api_post(
     });
 
     if !status.is_success() {
-        let msg = body
-            .get("message")
-            .or(body.get("error"))
-            .and_then(|v| v.as_str())
-            .unwrap_or("Unknown error");
-        return Err(err(format!("API error ({}): {}", status, msg)));
+        return Err(translate_api_error_response(status, body));
     }
 
     Ok(body)
@@ -273,12 +291,7 @@ pub async fn api_put(
     });
 
     if !status.is_success() {
-        let msg = body
-            .get("message")
-            .or(body.get("error"))
-            .and_then(|v| v.as_str())
-            .unwrap_or("Unknown error");
-        return Err(err(format!("API error ({}): {}", status, msg)));
+        return Err(translate_api_error_response(status, body));
     }
 
     Ok(body)
@@ -313,12 +326,7 @@ pub async fn api_patch(
     });
 
     if !status.is_success() {
-        let msg = body
-            .get("message")
-            .or(body.get("error"))
-            .and_then(|v| v.as_str())
-            .unwrap_or("Unknown error");
-        return Err(err(format!("API error ({}): {}", status, msg)));
+        return Err(translate_api_error_response(status, body));
     }
 
     Ok(body)
@@ -357,12 +365,7 @@ pub async fn api_delete(
     });
 
     if !status.is_success() {
-        let msg = body
-            .get("message")
-            .or(body.get("error"))
-            .and_then(|v| v.as_str())
-            .unwrap_or("Unknown error");
-        return Err(err(format!("API error ({}): {}", status, msg)));
+        return Err(translate_api_error_response(status, body));
     }
 
     Ok(body)
@@ -401,12 +404,7 @@ pub async fn api_delete_with_body(
     });
 
     if !status.is_success() {
-        let msg = body
-            .get("message")
-            .or(body.get("error"))
-            .and_then(|v| v.as_str())
-            .unwrap_or("Unknown error");
-        return Err(err(format!("API error ({}): {}", status, msg)));
+        return Err(translate_api_error_response(status, body));
     }
 
     Ok(body)
@@ -415,8 +413,90 @@ pub async fn api_delete_with_body(
 #[cfg(test)]
 mod tests {
     use super::{
-        encode_path_param, normalize_json_arg, validate_identifier_param, validate_path_param,
+        encode_path_param, normalize_json_arg, translate_api_error_response,
+        validate_identifier_param, validate_path_param,
     };
+    use axum::http::StatusCode;
+    use serde_json::json;
+
+    // ── 403 entitlement-shape preservation ─────────────────────────────
+
+    #[test]
+    fn translate_preserves_entitlement_required_body_on_403() {
+        // Body shape mirrors what EntitlementDenial::FeatureRequired emits.
+        let body = json!({
+            "error": "Entitlement required",
+            "code": "ENTITLEMENT_REQUIRED",
+            "feature": "reports",
+            "message": "Reports is not enabled for this tenant."
+        });
+        let err = translate_api_error_response(StatusCode::FORBIDDEN, body.clone());
+
+        // JSON-RPC code is INVALID_REQUEST (the rmcp envelope shape);
+        // application-level code rides in `data`.
+        assert_eq!(err.code, rmcp::model::ErrorCode::INVALID_REQUEST);
+        assert_eq!(err.message.as_ref(), body["message"].as_str().unwrap());
+        let data = err.data.expect("data populated");
+        assert_eq!(data["code"], json!("ENTITLEMENT_REQUIRED"));
+        assert_eq!(data["feature"], json!("reports"));
+    }
+
+    #[test]
+    fn translate_preserves_agent_not_enabled_body_on_403() {
+        let body = json!({
+            "error": "Agent not enabled",
+            "code": "AGENT_NOT_ENABLED",
+            "agent": "openai",
+            "message": "Agent 'openai' is not enabled for this tenant."
+        });
+        let err = translate_api_error_response(StatusCode::FORBIDDEN, body.clone());
+        assert_eq!(err.code, rmcp::model::ErrorCode::INVALID_REQUEST);
+        let data = err.data.expect("data populated");
+        assert_eq!(data["code"], json!("AGENT_NOT_ENABLED"));
+        assert_eq!(data["agent"], json!("openai"));
+    }
+
+    #[test]
+    fn translate_falls_back_for_403_without_stable_code() {
+        // A 403 whose body lacks a `code` string is a non-entitlement 403
+        // (e.g. a route-level auth rejection). Fall back to the legacy
+        // "API error" wrapping so we don't accidentally claim it's an
+        // entitlement denial.
+        let body = json!({
+            "error": "Forbidden",
+            "message": "You shall not pass"
+        });
+        let err = translate_api_error_response(StatusCode::FORBIDDEN, body);
+        assert_eq!(err.code, rmcp::model::ErrorCode::INTERNAL_ERROR);
+        assert!(err.message.contains("API error (403"));
+        assert!(err.data.is_none());
+    }
+
+    #[test]
+    fn translate_falls_back_for_non_403_status_with_code_field() {
+        // A 500 that happens to include a `code` field in its body is NOT
+        // an entitlement denial — only 403 triggers the preservation path.
+        let body = json!({
+            "code": "UNEXPECTED_ERROR",
+            "message": "Database timeout"
+        });
+        let err = translate_api_error_response(StatusCode::INTERNAL_SERVER_ERROR, body);
+        assert_eq!(err.code, rmcp::model::ErrorCode::INTERNAL_ERROR);
+        assert!(err.message.contains("API error (500"));
+    }
+
+    #[test]
+    fn translate_handles_missing_message_field_gracefully() {
+        // Defensive: an entitlement-looking 403 without a `message` field
+        // shouldn't panic. Default to a generic fallback string.
+        let body = json!({
+            "code": "ENTITLEMENT_REQUIRED",
+            "feature": "reports"
+        });
+        let err = translate_api_error_response(StatusCode::FORBIDDEN, body);
+        assert_eq!(err.code, rmcp::model::ErrorCode::INVALID_REQUEST);
+        assert_eq!(err.message.as_ref(), "Entitlement denied");
+    }
 
     #[test]
     fn identifier_param_allows_canonical_runtime_signal_ids() {

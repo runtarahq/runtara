@@ -6,6 +6,8 @@
 // rebuilding. When a key is missing (e.g. running via `vite dev` or in tests),
 // we fall back to the build-time `VITE_*` values.
 
+import type { EntitlementsSnapshot } from '@/shared/entitlements';
+
 export type AuthMode = 'oidc' | 'local' | 'trust_proxy';
 
 type RuntimeConfig = {
@@ -26,6 +28,10 @@ type RuntimeConfig = {
   /** When "true", stop prefixing /api/runtime/ paths with org_id. Set by the
    * server from RUNTARA_UI_STRIP_ORG_ID for single-tenant deployments. */
   stripOrgId?: string;
+  /** Per-process entitlement snapshot. Always present when served by the
+   *  embedded Rust UI handler; absent when running under `vite dev` or in
+   *  tests, in which case consumers fall back to `GET /api/runtime/entitlements`. */
+  entitlements?: EntitlementsSnapshot;
 };
 
 declare global {

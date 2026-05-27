@@ -44,6 +44,8 @@ export type ValueType =
 /** Trigger type for invocation triggers */
 export type TriggerType = "HTTP" | "CRON" | "EMAIL" | "APPLICATION" | "CHANNEL";
 
+export type Tier = "default" | "starter" | "premium" | "enterprise";
+
 /**
  * Optional secondary text-index annotation for string-typed columns.
  *
@@ -218,6 +220,8 @@ export type IssueCategory =
   | "unknown_field_path"
   | "invalid_reference_path"
   | "missing_connection";
+
+export type FeatureKey = "reports" | "database" | "api" | "mcp";
 
 /** Execution status representing the current state of a workflow execution */
 export type ExecutionStatus =
@@ -1782,6 +1786,36 @@ export interface EmbedWorkflowStep {
    * @min 0
    */
   timeout?: number | null;
+}
+
+export interface EntitlementLimits {
+  /**
+   * @format int32
+   * @min 0
+   */
+  maxApiKeys?: number | null;
+  /** @min 0 */
+  maxConcurrentExecutions?: number | null;
+  /**
+   * @format int32
+   * @min 0
+   */
+  maxObjectSchemas?: number | null;
+  /**
+   * @format int32
+   * @min 0
+   */
+  maxWorkflows?: number | null;
+  /** @min 0 */
+  objectModelBulkRequestLimit?: number | null;
+}
+
+export interface EntitlementsDto {
+  agents: string[];
+  features: Partial<Record<"reports" | "database" | "api" | "mcp", boolean>>;
+  limits: EntitlementLimits;
+  pricingTier: Tier;
+  tenantId: string;
 }
 
 /**
@@ -6203,6 +6237,23 @@ export class Api<
         path: `/api/runtime/connections/${id}/rate-limit-timeline`,
         method: "GET",
         query: query,
+        format: "json",
+        ...params,
+      }),
+
+    /**
+     * No description
+     *
+     * @tags entitlements-controller
+     * @name GetEntitlementsHandler
+     * @request GET:/api/runtime/entitlements
+     * @secure
+     */
+    getEntitlementsHandler: (params: RequestParams = {}) =>
+      this.request<EntitlementsDto, void>({
+        path: `/api/runtime/entitlements`,
+        method: "GET",
+        secure: true,
         format: "json",
         ...params,
       }),

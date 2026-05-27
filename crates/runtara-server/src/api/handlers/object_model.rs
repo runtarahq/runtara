@@ -133,6 +133,37 @@ pub async fn create_schema(
 ) -> Result<(StatusCode, Json<CreateSchemaResponse>), (StatusCode, Json<Value>)> {
     let service = SchemaService::new(state.manager.clone(), state.connections.clone());
 
+    // Count-before-create against `maxObjectSchemas`. The check lives in the
+    // handler (not the service) so the new ENTITLEMENT_LIMIT_EXCEEDED outcome
+    // doesn't need a new ServiceError variant and the 19 unrelated match
+    // sites on object-model ServiceError don't move.
+    let snapshot = crate::config::entitlements();
+    if let Some(cap) = snapshot.limits.max_object_schemas {
+        match service
+            .list_schemas(&tenant_id, 0, 0, params.connection_id.as_deref())
+            .await
+        {
+            Ok((_, total)) => {
+                if let Err(denial) = crate::middleware::entitlement::limit_decision(
+                    total as u64,
+                    Some(cap),
+                    "maxObjectSchemas",
+                ) {
+                    return Err((StatusCode::FORBIDDEN, Json(denial.json_body())));
+                }
+            }
+            Err(e) => {
+                return Err((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({
+                        "success": false,
+                        "error": format!("Failed to enforce object-schema limit: {}", e)
+                    })),
+                ));
+            }
+        }
+    }
+
     match service
         .create_schema(request, &tenant_id, params.connection_id.as_deref())
         .await

@@ -4,6 +4,7 @@
 import { createBrowserRouter, Navigate, useParams } from 'react-router';
 import { lazy, Suspense } from 'react';
 import { PrivateRoute } from '@/router/PrivateRoute';
+import { EntitlementRoute } from '@/router/EntitlementRoute';
 import { Layout } from '@/shared/layouts/layout';
 import { Login } from '@/shared/pages/login';
 import { ErrorBoundary } from '@/shared/components/error-boundary.tsx';
@@ -315,9 +316,11 @@ export const router = createBrowserRouter(
           path: '/objects/types',
           element: (
             <PrivateRoute>
-              <Suspense fallback={<PageLoader />}>
-                <ObjectSchemas />
-              </Suspense>
+              <EntitlementRoute feature="database">
+                <Suspense fallback={<PageLoader />}>
+                  <ObjectSchemas />
+                </Suspense>
+              </EntitlementRoute>
             </PrivateRoute>
           ),
         },
@@ -325,9 +328,11 @@ export const router = createBrowserRouter(
           path: '/objects/types/create',
           element: (
             <PrivateRoute>
-              <Suspense fallback={<PageLoader />}>
-                <CreateObjectSchema />
-              </Suspense>
+              <EntitlementRoute feature="database">
+                <Suspense fallback={<PageLoader />}>
+                  <CreateObjectSchema />
+                </Suspense>
+              </EntitlementRoute>
             </PrivateRoute>
           ),
         },
@@ -335,9 +340,11 @@ export const router = createBrowserRouter(
           path: '/objects/types/:id',
           element: (
             <PrivateRoute>
-              <Suspense fallback={<PageLoader />}>
-                <EditObjectSchema />
-              </Suspense>
+              <EntitlementRoute feature="database">
+                <Suspense fallback={<PageLoader />}>
+                  <EditObjectSchema />
+                </Suspense>
+              </EntitlementRoute>
             </PrivateRoute>
           ),
         },
@@ -345,9 +352,11 @@ export const router = createBrowserRouter(
           path: '/objects/:typeName',
           element: (
             <PrivateRoute>
-              <Suspense fallback={<PageLoader />}>
-                <ManageInstances />
-              </Suspense>
+              <EntitlementRoute feature="database">
+                <Suspense fallback={<PageLoader />}>
+                  <ManageInstances />
+                </Suspense>
+              </EntitlementRoute>
             </PrivateRoute>
           ),
         },
@@ -355,9 +364,11 @@ export const router = createBrowserRouter(
           path: '/objects/:typeName/create',
           element: (
             <PrivateRoute>
-              <Suspense fallback={<PageLoader />}>
-                <CreateObjectInstance />
-              </Suspense>
+              <EntitlementRoute feature="database">
+                <Suspense fallback={<PageLoader />}>
+                  <CreateObjectInstance />
+                </Suspense>
+              </EntitlementRoute>
             </PrivateRoute>
           ),
         },
@@ -365,9 +376,11 @@ export const router = createBrowserRouter(
           path: '/objects/:typeName/:id',
           element: (
             <PrivateRoute>
-              <Suspense fallback={<PageLoader />}>
-                <EditObjectInstance />
-              </Suspense>
+              <EntitlementRoute feature="database">
+                <Suspense fallback={<PageLoader />}>
+                  <EditObjectInstance />
+                </Suspense>
+              </EntitlementRoute>
             </PrivateRoute>
           ),
         },
@@ -423,9 +436,11 @@ export const router = createBrowserRouter(
           path: '/reports',
           element: (
             <PrivateRoute>
-              <Suspense fallback={<PageLoader />}>
-                <ReportsListPage />
-              </Suspense>
+              <EntitlementRoute feature="reports">
+                <Suspense fallback={<PageLoader />}>
+                  <ReportsListPage />
+                </Suspense>
+              </EntitlementRoute>
             </PrivateRoute>
           ),
         },
@@ -433,9 +448,11 @@ export const router = createBrowserRouter(
           path: '/reports/new',
           element: (
             <PrivateRoute>
-              <Suspense fallback={<PageLoader />}>
-                <ReportPage />
-              </Suspense>
+              <EntitlementRoute feature="reports">
+                <Suspense fallback={<PageLoader />}>
+                  <ReportPage />
+                </Suspense>
+              </EntitlementRoute>
             </PrivateRoute>
           ),
         },
@@ -443,9 +460,11 @@ export const router = createBrowserRouter(
           path: '/reports/:reportId',
           element: (
             <PrivateRoute>
-              <Suspense fallback={<PageLoader />}>
-                <ReportPage />
-              </Suspense>
+              <EntitlementRoute feature="reports">
+                <Suspense fallback={<PageLoader />}>
+                  <ReportPage />
+                </Suspense>
+              </EntitlementRoute>
             </PrivateRoute>
           ),
         },
@@ -453,15 +472,20 @@ export const router = createBrowserRouter(
           path: '/reports/:reportId/explore',
           element: (
             <PrivateRoute>
-              <Suspense fallback={<PageLoader />}>
-                <ReportExplorePage />
-              </Suspense>
+              <EntitlementRoute feature="reports">
+                <Suspense fallback={<PageLoader />}>
+                  <ReportExplorePage />
+                </Suspense>
+              </EntitlementRoute>
             </PrivateRoute>
           ),
         },
         {
           // Legacy /edit route — keep it working but redirect to the
           // unified ReportPage with ?edit=1 so URL is the only mode toggle.
+          // The redirect target (/reports/:reportId) is itself gated, so we
+          // don't need to gate the redirect path — `reports=false` will block
+          // the redirected URL.
           path: '/reports/:reportId/edit',
           element: <ReportEditRedirect />,
         },
@@ -477,9 +501,11 @@ export const router = createBrowserRouter(
           path: '/settings/api-keys',
           element: (
             <PrivateRoute>
-              <Suspense fallback={<PageLoader />}>
-                <Settings />
-              </Suspense>
+              <EntitlementRoute feature="api">
+                <Suspense fallback={<PageLoader />}>
+                  <Settings />
+                </Suspense>
+              </EntitlementRoute>
             </PrivateRoute>
           ),
         },

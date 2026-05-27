@@ -2,6 +2,8 @@ use rmcp::model::{CallToolResult, Content};
 use schemars::JsonSchema;
 use serde::Deserialize;
 
+use crate::mcp::entitlement::require_agent;
+
 use super::super::server::SmoMcpServer;
 use super::internal_api::{api_get, api_post, validate_path_param};
 
@@ -101,6 +103,7 @@ pub async fn get_agent(
     params: GetAgentParams,
 ) -> Result<CallToolResult, rmcp::ErrorData> {
     validate_path_param("agent_id", &params.agent_id)?;
+    require_agent(server, &params.agent_id)?;
     let mut result = api_get(server, &format!("/api/runtime/agents/{}", params.agent_id)).await?;
 
     // Slim down capabilities and reduce id/name confusion.
@@ -131,6 +134,7 @@ pub async fn get_capability(
 ) -> Result<CallToolResult, rmcp::ErrorData> {
     validate_path_param("agent_id", &params.agent_id)?;
     validate_path_param("capability_id", &params.capability_id)?;
+    require_agent(server, &params.agent_id)?;
     let result = api_get(
         server,
         &format!(
@@ -148,6 +152,7 @@ pub async fn test_capability(
 ) -> Result<CallToolResult, rmcp::ErrorData> {
     validate_path_param("agent_id", &params.agent_id)?;
     validate_path_param("capability_id", &params.capability_id)?;
+    require_agent(server, &params.agent_id)?;
     let mut body = serde_json::json!({
         "input": params.inputs,
     });

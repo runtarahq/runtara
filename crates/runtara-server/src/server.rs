@@ -150,6 +150,8 @@ use runtime_client::RuntimeClient;
         api::handlers::api_keys::create_api_key,
         api::handlers::api_keys::list_api_keys,
         api::handlers::api_keys::revoke_api_key,
+        // Entitlements endpoint
+        api::handlers::entitlements::get_entitlements_handler,
         // Event Capture endpoints
         api::handlers::events::capture_http_event,
         // Specification endpoints
@@ -171,6 +173,11 @@ use runtime_client::RuntimeClient;
             api::handlers::api_keys::ApiKey,
             api::handlers::api_keys::CreateApiKeyRequest,
             api::handlers::api_keys::CreateApiKeyResponse,
+            // Entitlement DTOs
+            api::dto::entitlements::EntitlementsDto,
+            crate::entitlements::FeatureKey,
+            crate::entitlements::EntitlementLimits,
+            crate::entitlements::Tier,
             // Workflow DTOs (refactored)
             api::dto::workflows::WorkflowDto,
             api::dto::workflows::WorkflowVersionInfoDto,
@@ -675,6 +682,11 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         service = "runtara-server"
     );
     let _guard = root_span.enter();
+
+    // Operator-visible summary of the resolved entitlement snapshot — what
+    // this process will actually enforce. Logged once at boot so an operator
+    // never has to re-derive it from env vars and JSON layers.
+    config::entitlements().log_summary();
 
     // Validate Redis configuration (required for checkpoints)
     if let Err(e) = config::validate_checkpoint_config() {
@@ -1221,6 +1233,76 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
     // Supports: "*" (any origin), comma-separated origins, or defaults to localhost for dev.
     let cors = middleware::cors::build_cors_layer();
 
+    // Entitlement-gated sub-routers: each one is mounted with a route-layer
+    // that short-circuits with 403 ENTITLEMENT_REQUIRED when the corresponding
+    // feature is disabled for the running tenant. Built separately so the gate
+    // is colocated with the routes it protects; merged into tenant_routes
+    // below so they pick up the same JWT auth layer and AppState.
+    let reports_router: Router<AppState> = Router::new()
+        .route(
+            "/api/runtime/reports",
+            get(api::handlers::reports::list_reports).post(api::handlers::reports::create_report),
+        )
+        .route(
+            "/api/runtime/reports/validate",
+            post(api::handlers::reports::validate_report),
+        )
+        .route(
+            "/api/runtime/reports/preview",
+            post(api::handlers::reports::preview_report),
+        )
+        .route(
+            "/api/runtime/reports/schema",
+            get(api::handlers::reports::get_report_definition_schema),
+        )
+        .route(
+            "/api/runtime/reports/{report_id}",
+            get(api::handlers::reports::get_report)
+                .put(api::handlers::reports::update_report)
+                .delete(api::handlers::reports::delete_report),
+        )
+        .route(
+            "/api/runtime/reports/{report_id}/render",
+            post(api::handlers::reports::render_report),
+        )
+        .route(
+            "/api/runtime/reports/{report_id}/blocks/{block_id}/data",
+            post(api::handlers::reports::get_report_block_data),
+        )
+        .route(
+            "/api/runtime/reports/{report_id}/blocks/{block_id}/actions/{action_id}/submit",
+            post(api::handlers::reports::submit_report_workflow_action),
+        )
+        .route(
+            "/api/runtime/reports/{report_id}/filters/{filter_id}/options",
+            post(api::handlers::reports::get_report_filter_options),
+        )
+        .route(
+            "/api/runtime/reports/{report_id}/blocks/{block_id}/fields/{field}/lookup-options",
+            post(api::handlers::reports::get_report_lookup_options),
+        )
+        .route(
+            "/api/runtime/reports/{report_id}/datasets/{dataset_id}/query",
+            post(api::handlers::reports::query_report_dataset),
+        )
+        .route(
+            "/api/runtime/reports/{report_id}/edit",
+            post(api::handlers::reports::edit_report),
+        )
+        .route_layer(from_fn(middleware::entitlement::require_reports));
+
+    let api_keys_router: Router<AppState> = Router::new()
+        .route(
+            "/api/runtime/api-keys",
+            post(api::handlers::api_keys::create_api_key)
+                .get(api::handlers::api_keys::list_api_keys),
+        )
+        .route(
+            "/api/runtime/api-keys/{id}",
+            delete(api::handlers::api_keys::revoke_api_key),
+        )
+        .route_layer(from_fn(middleware::entitlement::require_api));
+
     // Create router for tenant-scoped endpoints (requires JWT authentication)
     let tenant_routes = Router::new()
         // Execution listing endpoint
@@ -1436,57 +1518,7 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
             "/api/runtime/analytics/system",
             get(api::analytics::get_system_analytics_handler),
         )
-        // Reporting endpoints
-        .route(
-            "/api/runtime/reports",
-            get(api::handlers::reports::list_reports).post(api::handlers::reports::create_report),
-        )
-        .route(
-            "/api/runtime/reports/validate",
-            post(api::handlers::reports::validate_report),
-        )
-        .route(
-            "/api/runtime/reports/preview",
-            post(api::handlers::reports::preview_report),
-        )
-        .route(
-            "/api/runtime/reports/schema",
-            get(api::handlers::reports::get_report_definition_schema),
-        )
-        .route(
-            "/api/runtime/reports/{report_id}",
-            get(api::handlers::reports::get_report)
-                .put(api::handlers::reports::update_report)
-                .delete(api::handlers::reports::delete_report),
-        )
-        .route(
-            "/api/runtime/reports/{report_id}/render",
-            post(api::handlers::reports::render_report),
-        )
-        .route(
-            "/api/runtime/reports/{report_id}/blocks/{block_id}/data",
-            post(api::handlers::reports::get_report_block_data),
-        )
-        .route(
-            "/api/runtime/reports/{report_id}/blocks/{block_id}/actions/{action_id}/submit",
-            post(api::handlers::reports::submit_report_workflow_action),
-        )
-        .route(
-            "/api/runtime/reports/{report_id}/filters/{filter_id}/options",
-            post(api::handlers::reports::get_report_filter_options),
-        )
-        .route(
-            "/api/runtime/reports/{report_id}/blocks/{block_id}/fields/{field}/lookup-options",
-            post(api::handlers::reports::get_report_lookup_options),
-        )
-        .route(
-            "/api/runtime/reports/{report_id}/datasets/{dataset_id}/query",
-            post(api::handlers::reports::query_report_dataset),
-        )
-        .route(
-            "/api/runtime/reports/{report_id}/edit",
-            post(api::handlers::reports::edit_report),
-        )
+        // Reporting endpoints — defined in `reports_router` above and merged below.
         // NOTE: Rate limit analytics routes are now served by runtara-connections crate.
         // Invocation Trigger endpoints
         .route(
@@ -1509,15 +1541,11 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
             "/api/runtime/triggers/{id}",
             delete(api::handlers::triggers::delete_invocation_trigger),
         )
-        // API Key management endpoints
+        // API Key management endpoints — defined in `api_keys_router` above and merged below.
+        // Entitlements snapshot endpoint
         .route(
-            "/api/runtime/api-keys",
-            post(api::handlers::api_keys::create_api_key)
-                .get(api::handlers::api_keys::list_api_keys),
-        )
-        .route(
-            "/api/runtime/api-keys/{id}",
-            delete(api::handlers::api_keys::revoke_api_key),
+            "/api/runtime/entitlements",
+            get(api::handlers::entitlements::get_entitlements_handler),
         )
         // Agent execution endpoint (host-mediated, for WASM transition)
         .route(
@@ -1600,6 +1628,11 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
             "/api/runtime/specs/agents/{version}",
             get(api::handlers::specs::get_agents_spec_version),
         )
+        // Entitlement-gated sub-routers: each carries its own ENTITLEMENT_REQUIRED
+        // layer (see `reports_router` / `api_keys_router` above) so disabling
+        // `reports` or `api` short-circuits before the inner handlers run.
+        .merge(reports_router)
+        .merge(api_keys_router)
         .with_state(AppState {
             pool: pool.clone(),
             object_store_manager: object_store_manager.clone(),
@@ -1616,6 +1649,13 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
             agents: agents_service.clone(),
             agent_catalog: agent_catalog.clone(),
         })
+        // Reject API-key-authenticated requests when the `api` feature is
+        // off. Sits *between* auth (outermost) and the per-feature gates
+        // (innermost), so the AuthContext is already populated when this
+        // runs but feature gates haven't yet decided whether the route
+        // itself is open. Session/JWT users on the same routes are
+        // unaffected.
+        .route_layer(from_fn(crate::middleware::entitlement::api_key_auth_guard))
         // Apply JWT authentication middleware to all tenant-scoped routes
         .route_layer(from_fn_with_state(
             auth_state.clone(),
@@ -1623,12 +1663,20 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         ));
 
     // Connections crate routes (CRUD, OAuth authorize, type discovery, rate limit analytics)
-    // Mounted as a separate router with tenant bridge middleware
+    // Mounted as a separate router with tenant bridge middleware.
+    //
+    // Layer order matters — the last `.layer` is the outermost / first to run.
+    // Execution per request: authenticate → api_key_auth_guard → inject_tenant → handler.
+    // The api_key_auth_guard belongs *between* auth and tenant injection so that
+    // (a) AuthContext is populated when the guard inspects auth_method, and
+    // (b) Connections handlers see the same denial shape as every other tenant
+    //     route when `api` is off and the caller used an API key.
     let connections_tenant_routes =
         runtara_connections::connections_router(connections_config.clone())
             .layer(axum::middleware::from_fn(
                 crate::middleware::tenant_auth::inject_connections_tenant_id,
             ))
+            .layer(from_fn(crate::middleware::entitlement::api_key_auth_guard))
             .layer(from_fn_with_state(
                 auth_state.clone(),
                 crate::middleware::auth::authenticate,
@@ -1743,6 +1791,13 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
             post(api::handlers::csv_import_export::import_csv),
         )
         .with_state(object_model_state)
+        // Apply the `database` entitlement gate (innermost). Disabling the
+        // feature short-circuits with 403 ENTITLEMENT_REQUIRED before any
+        // object-model / SQL / CSV handler runs. JWT auth wraps around this.
+        .route_layer(from_fn(crate::middleware::entitlement::require_database))
+        // Reject API-key-authenticated requests when `api` is off. Lives
+        // between the `database` gate (inner) and auth (outer).
+        .route_layer(from_fn(crate::middleware::entitlement::api_key_auth_guard))
         // Apply JWT authentication middleware to object model routes
         .route_layer(from_fn_with_state(
             auth_state.clone(),
@@ -1818,7 +1873,13 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
             "/api/internal/object-model/schemas",
             post(api::handlers::internal_object_model::create_schema),
         )
-        .with_state(internal_object_model_state);
+        .with_state(internal_object_model_state)
+        // Apply the `database` entitlement gate. Disabling the feature
+        // short-circuits with 403 ENTITLEMENT_REQUIRED before any handler
+        // runs — so a WASM workflow that calls object-model on a tenant
+        // without `database` sees the same denial shape the tenant-facing
+        // routes already emit. Mirrors the tenant-side gate above.
+        .route_layer(from_fn(crate::middleware::entitlement::require_database));
 
     // Internal HTTP proxy routes (called by WASM workflows for credential injection)
     // NO authentication — tenant_id is passed via X-Org-Id header without JWT validation.
@@ -1948,6 +2009,17 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         config::mcp_allowed_hosts().to_vec(),
         mcp_session_store,
     )
+    // Apply the `mcp` entitlement gate at the transport entry. Disabling
+    // the feature short-circuits with 403 ENTITLEMENT_REQUIRED before any
+    // MCP tool handler is reached. Per-tool gates also exist as a second
+    // line of defense — see `mcp::entitlement`. Uses .layer() (not
+    // .route_layer()) for the same reason as auth above: the MCP transport
+    // is a fallback_service that route_layer would skip.
+    .layer(from_fn(crate::middleware::entitlement::require_mcp))
+    // Reject API-key-authenticated MCP requests when `api` is off. Between
+    // `mcp` gate (inner) and auth (outer); same shape as on tenant and
+    // object-model routes.
+    .layer(from_fn(crate::middleware::entitlement::api_key_auth_guard))
     .layer(from_fn_with_state(
         mcp_auth_state,
         crate::middleware::auth::authenticate,

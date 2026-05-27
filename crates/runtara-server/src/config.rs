@@ -1,3 +1,5 @@
+use crate::entitlements::EntitlementSnapshot;
+use std::collections::BTreeSet;
 use std::sync::OnceLock;
 
 const DEFAULT_MCP_ALLOWED_HOSTS: [&str; 3] = ["localhost", "127.0.0.1", "::1"];
@@ -59,6 +61,7 @@ pub struct Config {
     /// builds so `cargo run` exits promptly; production release builds keep
     /// the full drain unless `RUNTARA_DEV_MODE=true` is set explicitly.
     pub dev_mode: bool,
+    pub entitlement_snapshot: EntitlementSnapshot,
 }
 
 /// Backing store for MCP Streamable HTTP session recovery.
@@ -162,6 +165,21 @@ impl Config {
 
         let dev_mode: bool = parse_bool_or("RUNTARA_DEV_MODE", cfg!(debug_assertions))?;
 
+        let registered_agents: BTreeSet<String> = runtara_agents::registry::get_all_agent_modules()
+            .iter()
+            .map(|m| m.id.to_string())
+            .collect();
+
+        let entitlement_snapshot: EntitlementSnapshot = EntitlementSnapshot::parse_entitlements(
+            &tenant_id,
+            std::env::var("RUNTARA_PRICING_TIER").ok().as_deref(),
+            std::env::var("RUNTARA_ENTITLEMENTS_JSON").ok().as_deref(),
+            std::env::var("RUNTARA_ENTITLEMENT_OVERRIDES_JSON")
+                .ok()
+                .as_deref(),
+            &registered_agents,
+        )?;
+
         Ok(Self {
             tenant_id,
             max_concurrent_executions,
@@ -184,6 +202,7 @@ impl Config {
             mcp_session_store,
             mcp_session_ttl_seconds,
             dev_mode,
+            entitlement_snapshot,
         })
     }
 }
@@ -205,6 +224,10 @@ pub enum ConfigError {
     /// An environment variable has an invalid value.
     #[error("invalid value for {0}: {1}")]
     Invalid(&'static str, &'static str),
+
+    /// An environment variable has an invalid value, with dynamic detail.
+    #[error("invalid value for {0}: {1}")]
+    InvalidValue(&'static str, String),
 }
 
 fn parse_bool_or(name: &'static str, default: bool) -> Result<bool, ConfigError> {
@@ -314,9 +337,21 @@ pub fn tenant_id() -> &'static str {
     &get().tenant_id
 }
 
-/// Get the maximum concurrent executions.
+/// Get the tenant ID, or `None` when the global config hasn't been
+/// initialised yet. Use this from code paths that may run before
+/// [`init`] — for example, structured-log call sites that want to
+/// degrade gracefully rather than panic in unit tests.
+pub fn try_tenant_id() -> Option<&'static str> {
+    CONFIG.get().map(|c| c.tenant_id.as_str())
+}
+
+/// Returns `min(infra, entitlement)`; entitlement values can only lower the cap, never
+/// raise it. See `docs/entitlements.md` § Limit Composition.
 pub fn max_concurrent_executions() -> usize {
-    get().max_concurrent_executions
+    crate::middleware::entitlement::effective_limit(
+        get().max_concurrent_executions,
+        entitlements().limits.max_concurrent_executions,
+    )
 }
 
 /// Get checkpoint TTL in hours.
@@ -376,7 +411,10 @@ pub fn object_model_soft_delete() -> bool {
 
 /// Maximum number of items accepted per bulk request (create/upsert/update-by-ids).
 pub fn object_model_bulk_request_limit() -> usize {
-    get().object_model_bulk_request_limit
+    crate::middleware::entitlement::effective_limit(
+        get().object_model_bulk_request_limit,
+        entitlements().limits.object_model_bulk_request_limit,
+    )
 }
 
 /// Host or host:port authorities accepted by the MCP Streamable HTTP transport.
@@ -398,6 +436,13 @@ pub fn mcp_session_ttl_seconds() -> u64 {
 /// skips the graceful execution/instance drain so Ctrl+C exits promptly.
 pub fn dev_mode() -> bool {
     get().dev_mode
+}
+
+/// Resolved entitlement snapshot for the process's single tenant. Built once
+/// at startup by `Config::from_env()`; readers see the same value for the
+/// lifetime of the process.
+pub fn entitlements() -> &'static EntitlementSnapshot {
+    &get().entitlement_snapshot
 }
 
 #[cfg(test)]

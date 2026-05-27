@@ -7,6 +7,7 @@ import {
   CheckCircle2,
   XCircle,
   AlertCircle,
+  AlertTriangle,
   Pause,
   Circle,
 } from 'lucide-react';
@@ -36,6 +37,10 @@ export const BaseNode = forwardRef<
     hasValidationError?: boolean;
     hasValidationWarning?: boolean;
     validationMessage?: string | null;
+    /** True when this step's `agentId` is not in the current entitlement
+     *  allowlist. Surfaces an "Agent disabled" badge on the canvas — the
+     *  management-plane allowlist already blocks save. */
+    hasStaleAgent?: boolean;
     isExecutionReadOnly?: boolean;
     subtitle?: string | null;
     /** Reserved width on the right side for additional content (e.g., case labels in SwitchNode) */
@@ -62,6 +67,7 @@ export const BaseNode = forwardRef<
       hasValidationError,
       hasValidationWarning,
       validationMessage,
+      hasStaleAgent,
       isExecutionReadOnly,
       subtitle,
       rightReservedWidth,
@@ -324,6 +330,20 @@ export const BaseNode = forwardRef<
                 ) : (
                   <span className="text-[11px] font-normal text-muted-foreground italic flex-1 leading-tight">
                     Unnamed step
+                  </span>
+                )}
+                {/* Stale-agent badge — entitlement allowlist excludes this
+                    step's agent. Workflow can't be saved/run until either the
+                    entitlement is restored or the step is swapped. */}
+                {hasStaleAgent && (
+                  <span
+                    title="Agent disabled — workflow can't be saved"
+                    aria-label="Agent disabled"
+                    data-testid="stale-agent-badge"
+                    className="flex items-center gap-0.5 rounded bg-amber-100 dark:bg-amber-950/60 text-amber-700 dark:text-amber-300 px-1 py-0.5 text-[9px] font-medium leading-none shrink-0"
+                  >
+                    <AlertTriangle className="h-2.5 w-2.5" />
+                    <span className="hidden md:inline">Agent disabled</span>
                   </span>
                 )}
                 {/* Inline status pill */}

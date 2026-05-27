@@ -7,6 +7,8 @@ pub mod config;
 pub mod conn_limit;
 pub mod dsl;
 pub mod embedded_runtara;
+pub mod entitlement_error;
+pub mod entitlements;
 pub mod mcp;
 pub mod metrics;
 pub mod middleware;

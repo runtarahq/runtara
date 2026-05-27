@@ -3,6 +3,8 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet, VecDeque};
 
+use crate::mcp::entitlement::require_agent;
+
 use super::super::server::SmoMcpServer;
 use super::internal_api::{
     api_get, api_post, api_put, json_object_schema, normalize_json_arg, validate_path_param,
@@ -2851,6 +2853,11 @@ pub async fn add_agent_step(
     params: AddAgentStepParams,
 ) -> Result<CallToolResult, rmcp::ErrorData> {
     validate_path_param("workflow_id", &params.workflow_id)?;
+    // Fast-fail on disallowed agent modules before any DB lookup. The REST
+    // update/patch handlers also enforce this on persistence, but checking
+    // here surfaces AGENT_NOT_ENABLED to the MCP caller without the
+    // round-trip.
+    require_agent(server, &params.agent_id)?;
 
     // Validate agent/capability exist and get capability info
     let cap_result = api_get(

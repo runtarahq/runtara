@@ -3,6 +3,9 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::Value;
 
+use crate::entitlements::FeatureKey;
+use crate::mcp::entitlement::require_feature;
+
 use super::super::server::SmoMcpServer;
 use super::internal_api::{
     api_delete, api_delete_with_body, api_get, api_patch, api_post, api_put, encode_path_param,
@@ -675,6 +678,7 @@ pub struct BulkDeleteInstancesParams {
 // ===== Tool Implementations =====
 
 pub async fn list_object_schemas(server: &SmoMcpServer) -> Result<CallToolResult, rmcp::ErrorData> {
+    require_feature(server, FeatureKey::Database)?;
     let result = api_get(server, "/api/runtime/object-model/schemas").await?;
     json_result(result)
 }
@@ -683,6 +687,7 @@ pub async fn get_object_schema(
     server: &SmoMcpServer,
     params: GetObjectSchemaParams,
 ) -> Result<CallToolResult, rmcp::ErrorData> {
+    require_feature(server, FeatureKey::Database)?;
     validate_path_param("name", &params.name)?;
     let result = api_get(
         server,
@@ -696,6 +701,7 @@ pub async fn create_object_schema(
     server: &SmoMcpServer,
     params: CreateObjectSchemaParams,
 ) -> Result<CallToolResult, rmcp::ErrorData> {
+    require_feature(server, FeatureKey::Database)?;
     // Derive tableName from name: "ShopifyProduct" → "shopify_product"
     let table_name = params
         .table_name
@@ -762,6 +768,7 @@ pub async fn update_object_schema(
     server: &SmoMcpServer,
     params: UpdateObjectSchemaParams,
 ) -> Result<CallToolResult, rmcp::ErrorData> {
+    require_feature(server, FeatureKey::Database)?;
     let id = resolve_schema_id_by_name(server, &params.name).await?;
     let mut body = serde_json::json!({});
     if let Some(n) = params.new_name {
@@ -793,6 +800,7 @@ pub async fn delete_object_schema(
     server: &SmoMcpServer,
     params: DeleteObjectSchemaParams,
 ) -> Result<CallToolResult, rmcp::ErrorData> {
+    require_feature(server, FeatureKey::Database)?;
     let id = resolve_schema_id_by_name(server, &params.name).await?;
     let result = api_delete(server, &format!("/api/runtime/object-model/schemas/{}", id)).await?;
     json_result(result)
@@ -802,6 +810,7 @@ pub async fn list_object_instances(
     server: &SmoMcpServer,
     params: ListObjectInstancesParams,
 ) -> Result<CallToolResult, rmcp::ErrorData> {
+    require_feature(server, FeatureKey::Database)?;
     validate_path_param("schema_name", &params.schema_name)?;
     let mut path = format!(
         "/api/runtime/object-model/instances/schema/name/{}",
@@ -835,6 +844,7 @@ pub async fn query_object_instances(
     server: &SmoMcpServer,
     params: QueryObjectInstancesParams,
 ) -> Result<CallToolResult, rmcp::ErrorData> {
+    require_feature(server, FeatureKey::Database)?;
     validate_path_param("schema_name", &params.schema_name)?;
     let body = build_query_object_instances_body(&params)?;
     let result = with_payload_too_large_guidance(
@@ -886,6 +896,7 @@ pub async fn query_aggregate(
     server: &SmoMcpServer,
     params: QueryAggregateParams,
 ) -> Result<CallToolResult, rmcp::ErrorData> {
+    require_feature(server, FeatureKey::Database)?;
     validate_path_param("schema_name", &params.schema_name)?;
     let mut body = serde_json::json!({ "aggregates": params.aggregates });
     if let Some(condition) = params.condition {
@@ -952,6 +963,7 @@ pub async fn query_sql(
     server: &SmoMcpServer,
     params: QuerySqlParams,
 ) -> Result<CallToolResult, rmcp::ErrorData> {
+    require_feature(server, FeatureKey::Database)?;
     let path = with_connection_id_query(
         "/api/runtime/object-model/sql/query",
         params.connection_id.as_deref(),
@@ -974,6 +986,7 @@ pub async fn query_sql_one(
     server: &SmoMcpServer,
     params: QuerySqlParams,
 ) -> Result<CallToolResult, rmcp::ErrorData> {
+    require_feature(server, FeatureKey::Database)?;
     let path = with_connection_id_query(
         "/api/runtime/object-model/sql/query-one",
         params.connection_id.as_deref(),
@@ -991,6 +1004,7 @@ pub async fn query_sql_raw(
     server: &SmoMcpServer,
     params: QuerySqlRawParams,
 ) -> Result<CallToolResult, rmcp::ErrorData> {
+    require_feature(server, FeatureKey::Database)?;
     let path = with_connection_id_query(
         "/api/runtime/object-model/sql/query-raw",
         params.connection_id.as_deref(),
@@ -1015,6 +1029,7 @@ pub async fn execute_sql(
     server: &SmoMcpServer,
     params: ExecuteSqlParams,
 ) -> Result<CallToolResult, rmcp::ErrorData> {
+    require_feature(server, FeatureKey::Database)?;
     let path = with_connection_id_query(
         "/api/runtime/object-model/sql/execute",
         params.connection_id.as_deref(),
@@ -1030,6 +1045,7 @@ pub async fn create_object_instance(
     server: &SmoMcpServer,
     params: CreateObjectInstanceParams,
 ) -> Result<CallToolResult, rmcp::ErrorData> {
+    require_feature(server, FeatureKey::Database)?;
     let body = serde_json::json!({
         "schemaName": params.schema_name,
         "properties": params.properties,
@@ -1046,6 +1062,7 @@ pub async fn update_object_instance(
     server: &SmoMcpServer,
     params: UpdateObjectInstanceParams,
 ) -> Result<CallToolResult, rmcp::ErrorData> {
+    require_feature(server, FeatureKey::Database)?;
     validate_path_param("schema_id", &params.schema_id)?;
     validate_path_param("instance_id", &params.instance_id)?;
     let body = serde_json::json!({
@@ -1071,6 +1088,7 @@ pub async fn bulk_create_instances(
     server: &SmoMcpServer,
     params: BulkCreateInstancesParams,
 ) -> Result<CallToolResult, rmcp::ErrorData> {
+    require_feature(server, FeatureKey::Database)?;
     let schema_id = resolve_schema_id_by_name(server, &params.schema_name).await?;
 
     let mut body = serde_json::Map::new();
@@ -1123,6 +1141,7 @@ pub async fn bulk_update_instances(
     server: &SmoMcpServer,
     params: BulkUpdateInstancesParams,
 ) -> Result<CallToolResult, rmcp::ErrorData> {
+    require_feature(server, FeatureKey::Database)?;
     let schema_id = resolve_schema_id_by_name(server, &params.schema_name).await?;
 
     let body = match params.mode.as_str() {
@@ -1180,6 +1199,7 @@ pub async fn bulk_delete_instances(
     server: &SmoMcpServer,
     params: BulkDeleteInstancesParams,
 ) -> Result<CallToolResult, rmcp::ErrorData> {
+    require_feature(server, FeatureKey::Database)?;
     let schema_id = resolve_schema_id_by_name(server, &params.schema_name).await?;
     let body = serde_json::json!({ "instanceIds": params.instance_ids });
     ensure_request_payload_reasonable("bulk_delete_instances", &body)?;

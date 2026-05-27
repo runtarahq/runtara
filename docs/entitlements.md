@@ -108,6 +108,21 @@ is added in the same patch, use this precedence:
 
 All parsing happens in `Config::from_env()` or a helper it calls. Invalid JSON, unknown feature keys, non-boolean feature values, unknown agent module IDs, negative limits, and overflowing numeric values fail startup with `ConfigError::Invalid`.
 
+### Limit merge semantics (current state)
+
+The merge function on `EntitlementLimits` treats missing keys and explicit JSON `null` identically: both leave the lower-precedence layer's value in place. This means higher layers can only *impose* a stricter cap, not *lift* a cap set by a lower layer back to "uncapped".
+
+Concretely, given a `RUNTARA_PRICING_TIER=starter` baseline with `maxApiKeys = 2`, neither of these `RUNTARA_ENTITLEMENT_OVERRIDES_JSON` payloads will uncap the limit:
+
+```json
+{ "limits": {} }
+{ "limits": { "maxApiKeys": null } }
+```
+
+Both resolve to `Some(2)`. To effectively remove a cap, operators must restate the limit as a large explicit value (e.g. `"maxApiKeys": 4294967295`). This is a known limitation — implementing a proper tri-state (`missing` / `null` / `value`) would require custom deserialization for ~100 lines of code, and no operator flow today reaches it (tier definitions are placeholders pending product input, and the override layer is rare in practice).
+
+Revisit when real tiers ship and operators need a non-workaround way to express "lift this cap". Until then, treat `null` in any entitlement-JSON layer as "inherit from below", not "clear".
+
 Local development default:
 
 - If no entitlement env is set, default to all features `true` and `enabled_agents = None` (i.e. all known agents allowed).
@@ -236,6 +251,23 @@ Tier-limit exhaustion:
 
 Keep codes (`ENTITLEMENT_REQUIRED`, `AGENT_NOT_ENABLED`, `ENTITLEMENT_LIMIT_EXCEEDED`) stable so the UI and MCP clients can switch on them.
 
+### Exception: `/api/internal/agents/{module}/{capability_id}` returns 200
+
+One route deliberately breaks the "always 403" rule above: the internal agent dispatcher at `/api/internal/agents/{module}/{capability_id}`. When a module is denied by the allowlist, the response is:
+
+```
+HTTP/1.1 200 OK
+content-type: application/json
+
+{"success": false, "code": "AGENT_NOT_ENABLED", "error": "Agent '<module>' is not enabled for this tenant."}
+```
+
+The `code` value is the same stable string every other denial uses, but the HTTP status is 200 and the body is wrapped in the `{success, error|output}` envelope that the WASM workflow runtime has always used for *any* agent failure (normal errors, panics, denials). This is a private contract between the server and the in-process WASM runtime: the runtime treats every non-2xx response as a transport failure, so emitting a 403 here would force a runtime-side change to recognise denial as a distinct channel. We chose to keep the envelope stable instead.
+
+Callers MUST discriminate on `code`, not on HTTP status, for this route. The audit log (`WARN entitlement denial code=AGENT_NOT_ENABLED ...`) fires the same way as every other denial, so the observability story is unchanged.
+
+This exception applies *only* to `/api/internal/agents/{module}/{capability_id}`. REST routes under `/api/runtime/`, MCP tools, and all other internal routes (including `/api/internal/object-model/*`) follow the 403 contract above.
+
 ## Backend Enforcement Points
 
 ### Middleware Helpers
@@ -281,16 +313,15 @@ Always enabled. These are not entitlement-gated and do not have feature keys. De
 
 Internal routes are reached either from in-process MCP (`Router::oneshot()` with pre-injected `AuthContext`) or from workflow runtime callbacks with `X-Org-Id`.
 
-Because the process is per-tenant and the entitlement snapshot is per-process, enforcement is straightforward — **there is no per-request entitlement lookup**:
-
-1. The existing `X-Org-Id == TENANT_ID` check already runs.
-2. Then check the single global `entitlements()` snapshot.
+Because the process is per-tenant and the entitlement snapshot is per-process, enforcement is straightforward — **there is no per-request entitlement lookup**. The route layer / handler simply consults the single global `entitlements()` snapshot.
 
 Apply:
 
 - `/api/internal/object-model/*` → `database`.
 - `/api/internal/agents/{module}/{capability}` → `enabled_agents` membership for `module`. Reject with `AGENT_NOT_ENABLED`.
 - `/api/internal/proxy` → not gated in first pass (Connections deferred).
+
+**Note on `X-Org-Id`:** internal handlers read this header to scope SQL queries and connection lookups, but they do **not** validate it against the configured `TENANT_ID`. The security boundary for internal routes is the localhost socket, not the header value — these routes have no JWT auth and assume the caller has already cleared the OS-level perimeter (workflow containers via pasta networking, in-process MCP calls via `Router::oneshot()`). In a single-tenant runtime, a mismatched `X-Org-Id` results in queries against an empty scope (no data leak); the entitlement gate above is unaffected because the snapshot is process-global. A strict `X-Org-Id == TENANT_ID` check would be load-bearing under a future multi-tenant model and is tracked as a follow-up there.
 
 ## Frontend Plan
 
@@ -404,36 +435,157 @@ Since MCP internally calls REST routes through `Router::oneshot()`, REST enforce
 
 ### Phase 3 - Backend Gates
 
-- Add shared HTTP entitlement error helpers for `ENTITLEMENT_REQUIRED`, `AGENT_NOT_ENABLED`, and `ENTITLEMENT_LIMIT_EXCEEDED`.
-- Enforce `reports`, `database`, `api`, and `mcp` on REST handlers and MCP tools.
-- Enforce `enabled_agents` on every handler / tool that references a specific agent module.
-- Implement the API-key bypass guard (post-auth check gated on `auth_method == ApiKey`).
-- Apply numeric limits to workflow, object schema, API key, and bulk operation create paths.
-- Add integration tests for representative denied and allowed paths, including a session-authenticated control case to confirm the `api` gate doesn't affect non-API-key auth.
+Split into six PR-sized sub-phases, layered so each one builds on the previous. The full goal is unchanged: every disabled feature, every disallowed agent, and every exceeded tier limit must produce a stable 403 response on every authenticated entry point.
+
+#### Phase 3.1 - Error helpers (foundation)
+
+- Add a shared module that builds the three documented 403 responses by `code` (`ENTITLEMENT_REQUIRED`, `AGENT_NOT_ENABLED`, `ENTITLEMENT_LIMIT_EXCEEDED`).
+- Provide both an HTTP variant (for REST handlers) and an `rmcp::ErrorData` variant (for MCP tools), so 3.5 doesn't have to reinvent the wire shape.
+- Unit tests assert status, stable `code`, and JSON shape for each helper.
+- **Out of scope:** any actual gate; nothing changes route behavior in this phase.
+
+#### Phase 3.2 - REST feature gates
+
+- Apply `reports`, `database`, `mcp` (transport only), and `api` (management routes only — `/api/runtime/api-keys*`) gates on the matching REST handlers using the 3.1 helpers.
+- Per-handler explicit checks, not route-layer middleware (see "Backend Enforcement Points" above).
+- Integration tests: denied + allowed for each surface.
+- **Out of scope:** API-key auth bypass on non-admin routes (3.3); per-agent allowlist (3.4); MCP tool-level checks (3.5); numeric limits (3.6).
+
+#### Phase 3.3 - API-key bypass guard
+
+- Add a post-auth check that rejects any request whose `AuthContext.auth_method == ApiKey` when `api` is disabled, on every tenant route — not only `/api/runtime/api-keys*`.
+- Session-cookie / OAuth users on the same routes must still pass.
+- Integration tests cover both the deny path and a session-authenticated control case.
+- **Out of scope:** anything other than the API-key bypass.
+
+#### Phase 3.4 - Agent allowlist on REST + workflow compile
+
+- Add `enabled_agents` membership checks on every REST handler that references a specific agent module (test, execute, metadata, capability call).
+- At workflow create / update / compile, walk the step graph and reject any step whose `agent.module` is not in `enabled_agents`. Return `AGENT_NOT_ENABLED` so the UI sees the same code as runtime rejections.
+- **Compile-time walk is mandatory, not just defensive.** The update/patch gate prevents *new* forbidden graphs from being persisted, but a graph that was valid at write time can become invalid after an entitlement change across a restart (see "Stale workflows after entitlement changes" below). The compile handler re-walks the persisted graph *before* the "already compiled" fast path so a cached binary cannot keep a now-forbidden agent running.
+- Integration tests for both the static (graph-walk) and per-request (handler) checks.
+- **Out of scope:** MCP tool-level enforcement (3.5); dynamic dispatcher rejection at `/api/internal/agents/{module}/{capability}` (Phase 5).
+
+##### Stale workflows after entitlement changes (expected behavior)
+
+When `enabled_agents` shrinks across a restart (or a JSON-layer override removes an agent), previously-persisted workflows that reference the now-forbidden agent **remain in the database unchanged**. This is intentional — we do not retroactively mutate or delete tenant-owned resources on a config change. The behavior surfaces as follows:
+
+| Action on a stale workflow | Behavior | Why |
+| --- | --- | --- |
+| `GET /workflows`, `GET /workflows/{id}` | Returns the workflow normally | Read-only access to existing tenant data is not gated; entitlement changes don't make resources disappear. |
+| `POST /workflows/{id}/update` (any change) | `403 AGENT_NOT_ENABLED` | The 3.4 graph walk runs over the whole graph, not just the diff. The workflow is **effectively frozen for editing** until either the entitlement is restored or the forbidden step is removed in a separate write that *also* fails the walk — i.e. removal requires temporary entitlement restoration. |
+| `PUT /workflows/{id}/versions/{v}/graph` (incremental patch) | `403 AGENT_NOT_ENABLED` | Same walk, same outcome. |
+| `POST /workflows/{id}/compile` | `403 AGENT_NOT_ENABLED` | Compile-time walk runs *before* the "already compiled" check, so even a cached binary cannot be reused. The workflow becomes **uncompilable** until entitlements are restored. |
+| Execute an already-compiled stale workflow | Succeeds in 3.4; fails with `AGENT_NOT_ENABLED` after 3.5 + Phase 5 land | 3.4 only gates the management plane. The runtime dispatcher gate at `/api/internal/agents/{module}/{capability}` is Phase 5. Until then, an existing compiled binary keeps working. |
+
+This is the intended end-state: a stale workflow is **visible** (so the tenant doesn't lose data), **uneditable**, and (after Phase 5) **unrunnable**. Restoring the entitlement re-enables both. The frontend will surface this state explicitly once Phase 4 inlines the snapshot — the workflow editor can mark forbidden steps and the workflow list can flag affected workflows.
+
+A workflow's removal of a forbidden step requires a brief entitlement restoration: change the env, restart, edit, restart again with the restricted entitlements. This is friction we accept rather than build a "destructive update bypass" path that could be misused.
+
+#### Phase 3.5 - MCP tool gates
+
+- Add tool-level helpers `require_feature(server, feature)` and `require_agent(server, module_id)` returning `rmcp::ErrorData` built from 3.1.
+- Apply: report tools → `reports`; object-model tools → `database`; agent metadata/test tools → allowlist for the targeted module; workflow mutation tools that add or test agent steps → allowlist per referenced module.
+- Translate 403 responses bubbling out of in-process `Router::oneshot()` calls into `rmcp::ErrorData` with the original `code` preserved.
+- **Out of scope:** transport-level `/mcp` gate (already in 3.2); per-internal-route enforcement (Phase 5).
+
+#### Phase 3.6 - Numeric limits
+
+- Apply the five caps (`maxWorkflows`, `maxObjectSchemas`, `maxApiKeys`, `objectModelBulkRequestLimit`, `maxConcurrentExecutions`) at the enforcement points listed under "Limit Composition".
+- Composition rule is `effective_limit = min(configured_infra_limit, entitlement_limit)`.
+- Returns `ENTITLEMENT_LIMIT_EXCEEDED` (helper from 3.1). Do not silently truncate.
+- Integration tests on the "limited" fixture from the Test Matrix.
+- **Out of scope:** anything other than numeric caps.
 
 ### Phase 4 - Frontend Gating
 
-- Inline the snapshot into `window.__RUNTARA_CONFIG__.entitlements` in `api/handlers/ui.rs`.
-- Add generated or handwritten entitlement types.
-- Add entitlement read hook (prefers inlined snapshot, falls back to `GET /api/runtime/entitlements`).
-- Add `isEnabled(feature)` and `agentEnabled(moduleId)` helpers.
-- Filter static menu items.
-- Add route guard for gated pages.
-- Map `403` responses by error `code` to user-readable messages.
-- Add frontend tests for hidden menu entries, direct-route blocked states, and the inlined-vs-fetched fallback path.
+Split into six PR-sized sub-phases mirroring Phase 3's layering. Each builds on the previous and is independently shippable — 4.1 ships the snapshot but adds no behavior, so the SPA continues to work end-to-end even if 4.2+ slip.
+
+Only 4.1 touches Rust (`api/handlers/ui.rs`); everything else is SPA-only. `GET /api/runtime/entitlements` already exists from Phase 2, so no new REST routes are added in Phase 4.
+
+#### Phase 4.1 - Snapshot delivery
+
+- Extend `runtime_config_json()` in `api/handlers/ui.rs` to add an `entitlements` key whose value is `EntitlementsDto::from(crate::config::entitlements())` serialised as JSON.
+- The existing CSP-hash chain (`build_index_html` → SHA-256 over the inline script body) covers the new payload automatically; the inline script body still depends only on `OnceLock`-stable env, so the "compute once at startup" invariant holds.
+- Update `runtimeConfig.ts`'s `RuntimeConfig` type with `entitlements?: EntitlementsSnapshot` (interim handwritten type — 4.2 swaps it for the generated one).
+- Backend tests: `inlined_script_contains_entitlements_payload` and `csp_hash_covers_entitlements_payload`.
+- **Out of scope:** any consumer of the snapshot; any gating behavior.
+
+#### Phase 4.2 - Types, hook, and helpers
+
+- Regen the frontend API client via the `regen-frontend-api` skill so `EntitlementsDto` lands in `generated/RuntaraRuntimeApi.ts`.
+- Add pure helpers `isEnabled(snapshot, feature)` and `agentEnabled(snapshot, moduleId)`.
+- Add `useEntitlements()` hook: returns the inlined snapshot synchronously when `window.__RUNTARA_CONFIG__.entitlements` is present; falls back to `GET /api/runtime/entitlements` via TanStack Query when absent; falls back to a permissive default (everything on, all agents allowed) when both are missing. Permissive default matches the backend's "no entitlement env set" behavior, so a misconfigured server doesn't black-screen the UI.
+- Unit tests for helpers and for all three hook paths (inlined / fetched / fallback).
+- **Out of scope:** any UI consumer of the hook.
+
+#### Phase 4.3 - Sidebar / menu filtering
+
+- Extend `shared/config/index.tsx` menu entries with an optional `requiresFeature?: FeatureKey`. Wire `objects → database`, `reports → reports`. Workflows / Triggers / Connections / Analytics / Invocation History stay always-on (consistent with "Files / Connections / Triggers / Analytics / Invocation History" decision above).
+- In `Sidebar.tsx#AppMenu`, call `useEntitlements()` and filter the menu by `isEnabled`.
+- The settings gear stays visible regardless of `api`; the API-keys sub-page itself is route-guarded in 4.4.
+- RTL tests for hidden / shown menu entries against fixture snapshots.
+- **Out of scope:** route guards (4.4); workflow-editor surfacing (4.6).
+
+#### Phase 4.4 - Route guards + disabled-state page
+
+- Add `router/EntitlementRoute.tsx` — wrapper around a feature key that renders a `FeatureDisabled` page when `isEnabled` is false and `children` otherwise.
+- Add `shared/pages/FeatureDisabled.tsx` — minimal "not enabled for this tenant" page with a back-to-workflows link. No upgrade CTA in MVP (single-tenant, no billing flow yet).
+- Compose order in `router/index.tsx`: `PrivateRoute > EntitlementRoute > Suspense > Component`, so unauthenticated users still hit the login flow on gated URLs.
+- Apply to `/reports*` → `reports`, `/objects/*` → `database`, `/settings/api-keys` → `api`.
+- Tests: direct navigation to each gated path under a disabling fixture shows `FeatureDisabled`; same path under an enabling fixture renders the real page.
+- **Out of scope:** 403-toast mapping (4.5); workflow-step gating (4.6).
+
+#### Phase 4.5 - 403 error-code mapping
+
+- Extend `handleError` in `shared/hooks/api.ts` to branch on `error.response?.status === 403 && error.response?.data?.code` for the three stable codes:
+  - `ENTITLEMENT_REQUIRED` → "{Feature} not enabled" toast with the body's `message`.
+  - `AGENT_NOT_ENABLED` → "Agent '{agent}' not enabled" toast.
+  - `ENTITLEMENT_LIMIT_EXCEEDED` → "Tier limit reached" toast naming `limit` and `maximum`.
+- Narrow `ApiError` to expose the three code-specific body fields (`feature`, `agent`, `limit`, `maximum`).
+- Unit tests in the existing `api.test.ts` — one case per code — assert the right toast copy and that the generic "Error: 403" fallback is suppressed.
+- **Out of scope:** anything other than the toast mapping.
+
+#### Phase 4.6 - Agent visibility (Step Picker, editor, and any agent-test surfaces)
+
+All UI surfaces that mention a specific agent module consult `agentEnabled()` from the resolved snapshot. Phases 4.3 and 4.4 covered *feature*-level gating; this sub-phase covers *agent*-level gating, which is finer-grained and shows up in more places. The deliverable is consistent behavior: a disabled agent should never appear as a pickable option, and any existing reference to a disabled agent should be visibly flagged.
+
+- **Step Picker (`features/workflows/components/WorkflowEditor/NodeForm/StepPickerModal.tsx`):** filter the listed capabilities so agent modules absent from `useEntitlements().agents` are **hidden entirely**. Decision made up-front: hide rather than gray-out, matching the sidebar-filtering pattern in Phase 4.3. Rationale: prevents users from picking a step they can't save and keeps the picker free of upsell noise in a single-tenant deployment without a billing flow. If/when a multi-tenant billing model lands, revisit and add a tier-aware "available at higher tiers" hint.
+- **Workflow editor (existing steps):** for each step whose `agent.module` is not in the allowlist, render an inline "Agent disabled" warning badge and disable the per-step Test control. This is the UI feedback for the management-plane lock from Phase 3.4 (see "Stale workflows after entitlement changes" above).
+- **Workflow list:** surface a "needs attention" pill on rows that reference a forbidden agent. Scoped to the workflow detail page if the list endpoint doesn't carry agent module IDs (defer a list-side change to a follow-up if so).
+- **Other agent-test surfaces:** audit `features/` for places that invoke a specific agent module (test buttons in settings, dev panels, capability previews) and gate them with `agentEnabled()`. Disable the control + show a short tooltip explaining why.
+- **No new save-time error handling** — Phase 4.5's toast already covers any `AGENT_NOT_ENABLED` response from the backend that slips past the UI hints.
+- **Tests:** RTL editor test under a snapshot that excludes one agent; RTL Step Picker test that asserts disabled modules are filtered out; Playwright smoke under a server started with the same fixture so the full end-to-end (env → snapshot → picker → editor) is covered once.
+- **Out of scope:** any auto-fix or destructive UI on stale workflows — fixing requires the manual entitlement-restore flow documented above.
 
 ### Phase 5 - Runtime/Internal Enforcement
 
-- Gate `/api/internal/object-model/*` with `database`.
-- Gate `/api/internal/agents/{module}/{capability}` with `enabled_agents` membership for `module`. Reject with `AGENT_NOT_ENABLED`.
-- In workflow create/update/compile, walk the step graph and reject any step whose `agent.module` is not in `enabled_agents`. Surface the same `AGENT_NOT_ENABLED` error so the UI can show a consistent message.
-- Add tests for both the static (compile-time) rejection of forbidden agent steps and the dynamic (execution-time) rejection at the internal dispatcher route.
+Closes the last open acceptance criterion: "Disabled features cannot be accessed via internal workflow runtime routes." The compile-time graph-walk bullet that was originally listed here was delivered earlier in Phase 3.4 (see `walk_graph_for_agents` in `crate::middleware::entitlement` and its invocation sites in `api/services/workflows.rs`), so Phase 5 narrows to the runtime side only.
+
+Two PR-sized sub-phases. Each is independently shippable.
+
+#### Phase 5.1 - Internal object-model gate
+
+- Apply the existing `require_database` middleware as a `route_layer` on the `internal_object_model_routes` builder in `server.rs`. No handler changes — the gate short-circuits with `403 ENTITLEMENT_REQUIRED` before any handler runs. Mirrors the tenant-side `object_model_routes` setup.
+- Integration test: hit any `/api/internal/object-model/*` path under a `database=false` snapshot and assert the standard `ENTITLEMENT_REQUIRED` body; control case under `database=true` reaches the underlying handler.
+
+#### Phase 5.2 - Internal agent dispatcher allowlist
+
+- In-handler check at the top of `execute_agent_capability` (`api/handlers/internal_agents.rs`): call `entitlements().require_agent(&module)` before any connection lookup or `spawn_blocking`. One route, one explicit line — easier to grep than a custom extractor.
+- **Response shape** stays consistent with the existing handler's failure contract: `HTTP 200` with body `{ "success": false, "error": "Agent '<module>' is not enabled for this tenant.", "code": "AGENT_NOT_ENABLED" }`. The `code` field is the discriminator for callers; the HTTP envelope is unchanged so the WASM workflow runtime treats this as any other agent failure. Rationale: the internal route is a private contract with the WASM runtime, and changing the HTTP status would change observed behaviour for previously-working modules.
+- Extracted helper `gate_internal_agent(module, snapshot)` (or similar) is unit-testable without spinning up the agents registry. Integration test hits `/api/internal/agents/<excluded-module>/<cap>` under a snapshot that excludes the module and asserts the 200 + `AGENT_NOT_ENABLED` shape; control case with the module enabled reaches the registry.
+- **Out of scope:** structured-error mapping in the workflow runtime that would let the execution-history view show "Agent disabled" instead of generic "execution failed". Owned by the runtime/UI side, not platform-core.
+
+`X-Org-Id` validation on internal routes (originally drafted as Phase 5.3) is tracked separately under future multi-tenant work — see the note in "Internal Runtime Routes" above. In a single-tenant runtime, a mismatched header produces empty-scope queries rather than data leakage, the entitlement gate is unaffected (the snapshot is process-global), and the OS-level localhost perimeter is the actual boundary. The check becomes load-bearing only when one server process serves more than one tenant.
 
 ### Phase 6 - Hardening and Operator Docs
 
 - Document env examples in deployment docs.
 - Add startup log line summarizing pricing tier, enabled features, and the materialised agent allowlist size.
-- Add audit logs for entitlement-denied requests with tenant, feature or agent ID, route/tool, and user/auth method.
+- Add audit logs for entitlement-denied requests. Fields split across two layers:
+  - **On the denial event itself** (emitted by `EntitlementDenial::audit_log`): the stable `code`, `tenant_id`, and one of `feature` / `agent` / `limit`+`maximum` per variant. These are the fields a denial line carries unconditionally.
+  - **On the surrounding request span** (picked up by subscribers that flatten parent-span fields onto each event — JSON formatter, OTLP exporter): `method`, `uri` (from `TraceLayer`), plus `user_id` and `auth_method` (from the `request_auth` span the auth middleware wraps the request future with). Operators using a text formatter that doesn't flatten will need to correlate via request-id instead.
+  - **MCP tool name** is not yet on the audit line. Each tool function knows its name but doesn't attach it to a span today; track as a follow-up if operators need denial-line tool attribution. The parent MCP request span provides indirect context in the meantime.
 - Add a local test matrix script or fixture set for common tiers.
 
 ## Test Matrix
