@@ -337,6 +337,14 @@ pub fn tenant_id() -> &'static str {
     &get().tenant_id
 }
 
+/// Get the tenant ID, or `None` when the global config hasn't been
+/// initialised yet. Use this from code paths that may run before
+/// [`init`] — for example, structured-log call sites that want to
+/// degrade gracefully rather than panic in unit tests.
+pub fn try_tenant_id() -> Option<&'static str> {
+    CONFIG.get().map(|c| c.tenant_id.as_str())
+}
+
 /// Returns `min(infra, entitlement)`; entitlement values can only lower the cap, never
 /// raise it. See `docs/entitlements.md` § Limit Composition.
 pub fn max_concurrent_executions() -> usize {

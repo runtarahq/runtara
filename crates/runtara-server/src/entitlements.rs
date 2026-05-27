@@ -163,6 +163,93 @@ impl EntitlementSnapshot {
             None => self.registered_agents.clone(),
         }
     }
+
+    /// Build the operator-facing summary of the resolved snapshot.
+    ///
+    /// Pure function so unit tests can pin down the exact strings emitted
+    /// at startup without spinning up `tracing`. The returned struct is
+    /// the single source of truth for the fields that
+    /// [`log_summary`](Self::log_summary) hands to `tracing::info!`.
+    pub fn summarize(&self) -> EntitlementSummary {
+        let (mut enabled, mut disabled): (Vec<&str>, Vec<&str>) = (Vec::new(), Vec::new());
+        for (key, on) in &self.features {
+            if *on {
+                enabled.push(key.name());
+            } else {
+                disabled.push(key.name());
+            }
+        }
+        // BTreeMap iteration is already sorted by key — explicit join keeps
+        // the field stable to grep against.
+        EntitlementSummary {
+            tenant_id: self.tenant_id.clone(),
+            pricing_tier: self.pricing_tier.clone(),
+            features_enabled: enabled.join(","),
+            features_disabled: disabled.join(","),
+            // Whether the operator explicitly listed an allowlist. `false`
+            // means `enabled_agents = None`, i.e. every registered module
+            // is implicitly enabled — the historical default. Operators
+            // who can't reproduce the materialised list from their env
+            // alone want this signal.
+            agents_explicit: self.enabled_agents.is_some(),
+            agents_allowlist_size: self.materialised_agents().len(),
+            max_workflows: self.limits.max_workflows,
+            max_object_schemas: self.limits.max_object_schemas,
+            max_api_keys: self.limits.max_api_keys,
+            object_model_bulk_request_limit: self.limits.object_model_bulk_request_limit,
+            max_concurrent_executions: self.limits.max_concurrent_executions,
+        }
+    }
+
+    /// Emit one structured `tracing::info!` line describing the active
+    /// snapshot. Called once during server startup so operators can verify
+    /// what's actually enforced without re-deriving it from env. Logs at
+    /// `info` level — denial events use `warn` (see Phase 6.2).
+    pub fn log_summary(&self) {
+        let s = self.summarize();
+        tracing::info!(
+            tenant_id = %s.tenant_id,
+            pricing_tier = ?s.pricing_tier,
+            features_enabled = %s.features_enabled,
+            features_disabled = %s.features_disabled,
+            agents_explicit = s.agents_explicit,
+            agents_allowlist_size = s.agents_allowlist_size,
+            max_workflows = ?s.max_workflows,
+            max_object_schemas = ?s.max_object_schemas,
+            max_api_keys = ?s.max_api_keys,
+            object_model_bulk_request_limit = ?s.object_model_bulk_request_limit,
+            max_concurrent_executions = ?s.max_concurrent_executions,
+            "entitlement snapshot resolved"
+        );
+    }
+}
+
+/// Plain-data shape of the startup entitlement summary. Returned by
+/// [`EntitlementSnapshot::summarize`] and consumed by
+/// [`EntitlementSnapshot::log_summary`]. Kept separate from the snapshot
+/// itself so the log-formatting choices (CSV vs. `Vec`, `Option<u32>` vs.
+/// `String "—"`, etc.) stay in one place and are independently testable.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EntitlementSummary {
+    pub tenant_id: String,
+    pub pricing_tier: Tier,
+    /// Comma-separated list of feature keys (snake_case) with value `true`.
+    pub features_enabled: String,
+    /// Complement of `features_enabled`.
+    pub features_disabled: String,
+    /// `true` when the operator explicitly set an `agents` allowlist
+    /// (including `agents = []`); `false` when the snapshot inherits the
+    /// implicit-all default.
+    pub agents_explicit: bool,
+    /// Size of the materialised allowlist — i.e. how many agent modules
+    /// this process will actually accept. With `agents_explicit = false`
+    /// this is the count of registered modules.
+    pub agents_allowlist_size: usize,
+    pub max_workflows: Option<u32>,
+    pub max_object_schemas: Option<u32>,
+    pub max_api_keys: Option<u32>,
+    pub object_model_bulk_request_limit: Option<usize>,
+    pub max_concurrent_executions: Option<usize>,
 }
 
 /// One partial entitlement layer, as deserialized from a `RUNTARA_ENTITLEMENT*_JSON`
@@ -690,5 +777,61 @@ mod tests {
         assert!(snap.is_feature_enabled(Reports));
         assert!(!snap.is_feature_enabled(Api));
         assert!(!snap.is_feature_enabled(Mcp));
+    }
+
+    #[test]
+    fn summarize_reports_all_enabled_default() {
+        let snap = parse(None, None, None).unwrap();
+        let s = snap.summarize();
+
+        assert_eq!(s.tenant_id, "tenant-123");
+        assert_eq!(s.pricing_tier, Tier::Default);
+        // BTreeMap iteration is sorted, so the CSV order is stable.
+        assert_eq!(s.features_enabled, "reports,database,api,mcp");
+        assert_eq!(s.features_disabled, "");
+        // Default snapshot has `enabled_agents = None` → implicit-all.
+        assert!(!s.agents_explicit);
+        // ... and materialises to the registered set, which the test
+        // fixture seeds with five agents.
+        assert_eq!(s.agents_allowlist_size, 5);
+        // No tier caps in the default.
+        assert_eq!(s.max_workflows, None);
+        assert_eq!(s.max_api_keys, None);
+    }
+
+    #[test]
+    fn summarize_reports_restrictive_snapshot() {
+        // Reports off, database on, explicit two-agent allowlist, a tier
+        // cap on api keys.
+        let snap = parse(
+            None,
+            Some(
+                r#"{"features":{"reports":false},"agents":["http","csv"],"limits":{"maxApiKeys":5}}"#,
+            ),
+            None,
+        )
+        .unwrap();
+        let s = snap.summarize();
+
+        assert_eq!(s.features_enabled, "database,api,mcp");
+        assert_eq!(s.features_disabled, "reports");
+        assert!(s.agents_explicit);
+        assert_eq!(s.agents_allowlist_size, 2);
+        assert_eq!(s.max_api_keys, Some(5));
+        // Limits not mentioned in JSON stay None.
+        assert_eq!(s.max_workflows, None);
+    }
+
+    #[test]
+    fn summarize_distinguishes_explicit_empty_from_implicit_all() {
+        // `agents = []` is the explicit "deny everything" allowlist. The
+        // summary must mark it as explicit and report zero size — operators
+        // need to be able to tell at a glance that a tenant has zero agents
+        // available vs. the implicit-all default.
+        let snap = parse(None, Some(r#"{"agents":[]}"#), None).unwrap();
+        let s = snap.summarize();
+
+        assert!(s.agents_explicit);
+        assert_eq!(s.agents_allowlist_size, 0);
     }
 }

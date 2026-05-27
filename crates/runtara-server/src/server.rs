@@ -683,6 +683,11 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
     );
     let _guard = root_span.enter();
 
+    // Operator-visible summary of the resolved entitlement snapshot — what
+    // this process will actually enforce. Logged once at boot so an operator
+    // never has to re-derive it from env vars and JSON layers.
+    config::entitlements().log_summary();
+
     // Validate Redis configuration (required for checkpoints)
     if let Err(e) = config::validate_checkpoint_config() {
         eprintln!("❌ Configuration error: {}", e);

@@ -112,16 +112,84 @@ impl EntitlementDenial {
     /// HTTP-shaped body (including the stable `code` string) in `data`. MCP
     /// clients switch on `data.code`, not on the JSON-RPC code.
     pub fn to_rmcp_error(&self) -> rmcp::ErrorData {
+        self.audit_log(crate::config::try_tenant_id().unwrap_or("<unset>"));
         rmcp::ErrorData::new(
             rmcp::model::ErrorCode::INVALID_REQUEST,
             self.message(),
             Some(self.json_body()),
         )
     }
+
+    /// Build the operator-facing audit fields for this denial. Pure function
+    /// so unit tests can pin down the exact field values without spinning up
+    /// `tracing`. Mirrors the shape `audit_log` hands to `tracing::warn!`.
+    pub fn audit_fields<'a>(&'a self, tenant_id: &'a str) -> DenialAuditFields<'a> {
+        let mut fields = DenialAuditFields {
+            code: self.code(),
+            tenant_id,
+            feature: None,
+            agent: None,
+            limit: None,
+            maximum: None,
+        };
+        match self {
+            EntitlementDenial::FeatureRequired(feature) => {
+                fields.feature = Some(feature.name());
+            }
+            EntitlementDenial::AgentNotEnabled(agent) => {
+                fields.agent = Some(agent.as_str());
+            }
+            EntitlementDenial::LimitExceeded { limit, maximum } => {
+                fields.limit = Some(*limit);
+                fields.maximum = Some(*maximum);
+            }
+        }
+        fields
+    }
+
+    /// Emit one structured `tracing::warn!` line describing this denial.
+    /// Called from both [`IntoResponse`] and [`Self::to_rmcp_error`] so every
+    /// entitlement denial in the process produces exactly one log entry.
+    ///
+    /// Per-variant fields (`feature` / `agent` / `limit` + `maximum`) are
+    /// emitted as `Option`s — only the relevant one is `Some` for any given
+    /// denial. Operators can grep by `code` for any denial class, or by
+    /// the variant-specific field for a more targeted slice.
+    pub fn audit_log(&self, tenant_id: &str) {
+        let f = self.audit_fields(tenant_id);
+        tracing::warn!(
+            code = f.code,
+            tenant_id = f.tenant_id,
+            feature = ?f.feature,
+            agent = ?f.agent,
+            limit = ?f.limit,
+            maximum = ?f.maximum,
+            "entitlement denial"
+        );
+    }
+}
+
+/// Plain-data shape of the audit-log fields for an entitlement denial.
+/// Returned by [`EntitlementDenial::audit_fields`] and consumed by
+/// [`EntitlementDenial::audit_log`]. Per-variant fields are `Option` because
+/// only one applies at a time; `code` and `tenant_id` are always populated.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DenialAuditFields<'a> {
+    pub code: &'static str,
+    pub tenant_id: &'a str,
+    /// `Some(snake_case key)` only for `FeatureRequired`.
+    pub feature: Option<&'static str>,
+    /// `Some(module id)` only for `AgentNotEnabled`.
+    pub agent: Option<&'a str>,
+    /// `Some(camelCase limit name)` only for `LimitExceeded`.
+    pub limit: Option<&'static str>,
+    /// `Some(numeric cap)` only for `LimitExceeded`.
+    pub maximum: Option<u64>,
 }
 
 impl IntoResponse for EntitlementDenial {
     fn into_response(self) -> Response {
+        self.audit_log(crate::config::try_tenant_id().unwrap_or("<unset>"));
         (StatusCode::FORBIDDEN, Json(self.json_body())).into_response()
     }
 }
@@ -301,6 +369,68 @@ mod tests {
         for key in FeatureKey::ALL {
             let from_serde = serde_json::to_value(key).unwrap();
             assert_eq!(from_serde.as_str().unwrap(), key.name());
+        }
+    }
+
+    // ── audit_fields() — operator-facing denial log shape ──────────────
+
+    #[test]
+    fn audit_fields_feature_required() {
+        let d = EntitlementDenial::FeatureRequired(FeatureKey::Reports);
+        let f = d.audit_fields("tenant-xyz");
+        assert_eq!(f.code, "ENTITLEMENT_REQUIRED");
+        assert_eq!(f.tenant_id, "tenant-xyz");
+        assert_eq!(f.feature, Some("reports"));
+        // Variant-specific fields for the other denial kinds stay None so
+        // operators don't grep through stale data.
+        assert_eq!(f.agent, None);
+        assert_eq!(f.limit, None);
+        assert_eq!(f.maximum, None);
+    }
+
+    #[test]
+    fn audit_fields_agent_not_enabled() {
+        let d = EntitlementDenial::AgentNotEnabled("openai".into());
+        let f = d.audit_fields("tenant-xyz");
+        assert_eq!(f.code, "AGENT_NOT_ENABLED");
+        assert_eq!(f.tenant_id, "tenant-xyz");
+        assert_eq!(f.agent, Some("openai"));
+        assert_eq!(f.feature, None);
+        assert_eq!(f.limit, None);
+        assert_eq!(f.maximum, None);
+    }
+
+    #[test]
+    fn audit_fields_limit_exceeded() {
+        let d = EntitlementDenial::LimitExceeded {
+            limit: "maxApiKeys",
+            maximum: 10,
+        };
+        let f = d.audit_fields("tenant-xyz");
+        assert_eq!(f.code, "ENTITLEMENT_LIMIT_EXCEEDED");
+        assert_eq!(f.tenant_id, "tenant-xyz");
+        assert_eq!(f.limit, Some("maxApiKeys"));
+        assert_eq!(f.maximum, Some(10));
+        assert_eq!(f.feature, None);
+        assert_eq!(f.agent, None);
+    }
+
+    #[test]
+    fn audit_fields_code_matches_body_code() {
+        // The `code` in the audit log MUST match the `code` in the wire
+        // body — otherwise operators correlating a 403 a tenant reports
+        // with server logs would find divergent codes and waste time.
+        for d in [
+            EntitlementDenial::FeatureRequired(FeatureKey::Database),
+            EntitlementDenial::AgentNotEnabled("xml".into()),
+            EntitlementDenial::LimitExceeded {
+                limit: "maxWorkflows",
+                maximum: 100,
+            },
+        ] {
+            let body_code = d.json_body()["code"].as_str().unwrap().to_string();
+            let fields = d.audit_fields("t");
+            assert_eq!(fields.code, body_code);
         }
     }
 }
