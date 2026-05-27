@@ -151,6 +151,33 @@ Default local ports:
 | `runtara-environment` API | `8002` |
 | `runtara-core` instance API | `8001` |
 
+### Run With Docker
+
+Each release also publishes a multi-arch (amd64 + arm64) server image to the
+GitHub Container Registry:
+
+```bash
+docker pull ghcr.io/runtarahq/runtara:latest      # or a pinned :X.Y.Z, or :dev
+```
+
+The image contains `runtara-server` plus its bundled toolchain and agent
+components. It is a server image, not all-in-one — supply PostgreSQL, Valkey,
+and config via environment (same variables as a native run):
+
+```bash
+docker run --rm -p 7001:7001 \
+  -e RUNTARA_SERVER_DATABASE_URL=postgres://runtara:runtara@db/runtara_server \
+  -e RUNTARA_DATABASE_URL=postgres://runtara:runtara@db/runtara \
+  -e OBJECT_MODEL_DATABASE_URL=postgres://runtara:runtara@db/runtara_objects \
+  -e VALKEY_HOST=valkey \
+  -e TENANT_ID=my-tenant \
+  -v runtara-data:/data \
+  ghcr.io/runtarahq/runtara:latest
+```
+
+For a runnable Postgres + Valkey stack to point it at, see
+`dev/docker-compose.yml`.
+
 ### Build And Test
 
 ```bash
