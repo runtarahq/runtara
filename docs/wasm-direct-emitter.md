@@ -34,7 +34,9 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   `Finish`/`Error` leaves,
   normal-edge `Filter`/value `Switch`/`GroupBy`/`Log` chains ending in
   `Finish`/`Error` leaves, and routing `Switch` dispatch trees with one static
-  edge per route plus a `default` edge whose leaves can be `Finish` or `Error`.
+  edge per route plus a `default` edge whose leaves can be `Finish` or `Error`,
+  plus sequential `Split` subgraphs, including `dontStopOnFailed` per-iteration
+  aggregation.
   Supported normal/`next` edges can now either be a single unconditioned edge or
   a priority-ordered conditional edge set with exactly one unconditioned default
   fallback. Breakpoints remain outside the supported direct-control subset.
@@ -1728,8 +1730,9 @@ Implementation steps:
    - `dontStopOnFailed`: stdlib accumulator/result shape, direct-core
      validation-failure collection, nested Agent failure collection, explicit
      Error-step failure collection, and mapping/source/control-stdlib failure
-     routing done; remaining generic runtime/checkpoint failure catch/continue
-     lowering pending;
+     routing done; support gate enabled. Runtime cancellation, pause/shutdown,
+     and checkpoint infrastructure failures remain fail-fast control flow,
+     matching the generated-code split behavior rather than item aggregation;
    - Split retry/timeout/breakpoint semantics: pending.
 3. Implement `While`:
    - max iterations;

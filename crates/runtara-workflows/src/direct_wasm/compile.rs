@@ -6554,6 +6554,32 @@ mod tests {
     }
 
     #[test]
+    fn direct_compile_supports_split_dont_stop_on_failed_graph() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let result = compile_direct_workflow(DirectCompilationInput {
+            workflow_id: "split-dont-stop".to_string(),
+            version: 1,
+            execution_graph: fixture("split_with_schemas_failing"),
+            output_dir: temp.path().to_path_buf(),
+            track_events: false,
+            agent_catalog: None,
+        })
+        .expect("direct Split dontStopOnFailed compile should succeed");
+
+        let wasm = fs::read(&result.wasm_path).expect("wasm");
+        Validator::new()
+            .validate_all(&wasm)
+            .expect("direct Split dontStopOnFailed artifact should validate");
+        assert!(result.support_report.supported);
+        assert_eq!(result.support_report.unsupported, vec![]);
+
+        let manifest: DirectWorkflowManifest =
+            serde_json::from_slice(&fs::read(&result.manifest_path).expect("manifest"))
+                .expect("manifest json");
+        assert_eq!(manifest.graph.splits[0].value["dontStopOnFailed"], true);
+    }
+
+    #[test]
     fn direct_compile_supports_durable_delay_finish_graph() {
         let temp = tempfile::tempdir().expect("tempdir");
         let result = compile_direct_workflow(DirectCompilationInput {

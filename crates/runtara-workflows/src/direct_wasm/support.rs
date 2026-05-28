@@ -339,10 +339,9 @@ fn supports_split_step_baseline(step: &SplitStep) -> bool {
     let config = step.config.as_ref();
     !step.breakpoint.unwrap_or(false)
         && config.is_none_or(|config| {
-            !config.dont_stop_on_failed.unwrap_or(false)
-                && config
-                    .max_retries
-                    .is_none_or(|max_retries| max_retries == 0)
+            config
+                .max_retries
+                .is_none_or(|max_retries| max_retries == 0)
                 && config.retry_delay.is_none()
                 && config.timeout.is_none()
         })
@@ -861,12 +860,6 @@ fn collect_split_step_unsupported(
         );
     }
     if let Some(config) = step.config.as_ref() {
-        if config.dont_stop_on_failed.unwrap_or(false) {
-            push(
-                "split-dont-stop-on-failed",
-                "Split dontStopOnFailed requires direct per-iteration error aggregation",
-            );
-        }
         if config
             .max_retries
             .is_some_and(|max_retries| max_retries > 0)
@@ -960,7 +953,11 @@ mod tests {
             "error" => include_str!("../../tests/fixtures/error_direct_simple.json"),
             "edge_condition" => include_str!("../../tests/fixtures/edge_condition_priority.json"),
             "split" => include_str!("../../tests/fixtures/split_workflow.json"),
+            "split_with_error" => include_str!("../../tests/fixtures/split_with_error.json"),
             "split_with_schemas" => include_str!("../../tests/fixtures/split_with_schemas.json"),
+            "split_with_schemas_failing" => {
+                include_str!("../../tests/fixtures/split_with_schemas_failing.json")
+            }
             "transform" => include_str!("../../tests/fixtures/transform_workflow.json"),
             "wait" => include_str!("../../tests/fixtures/wait_for_signal_with_callback.json"),
             other => panic!("unknown fixture {other}"),
@@ -1386,7 +1383,21 @@ mod tests {
     }
 
     #[test]
-    fn split_error_aggregation_retry_timeout_and_breakpoint_are_rejected() {
+    fn split_dont_stop_on_failed_is_supported() {
+        for fixture_name in ["split_with_schemas_failing", "split_with_error"] {
+            let report = analyze_direct_wasm_support(&fixture(fixture_name));
+
+            assert!(report.supported, "{fixture_name}: {:?}", report.unsupported);
+            assert!(
+                report.unsupported.is_empty(),
+                "{fixture_name}: {:?}",
+                report.unsupported
+            );
+        }
+    }
+
+    #[test]
+    fn split_retry_timeout_and_breakpoint_are_rejected() {
         let mut graph = fixture("split");
         let Some(Step::Split(split)) = graph.steps.get_mut("split") else {
             panic!("expected Split fixture step");
@@ -1401,12 +1412,7 @@ mod tests {
         let report = analyze_direct_wasm_support(&graph);
 
         assert!(!report.supported);
-        for feature in [
-            "split-breakpoint",
-            "split-dont-stop-on-failed",
-            "split-retry",
-            "split-timeout",
-        ] {
+        for feature in ["split-breakpoint", "split-retry", "split-timeout"] {
             assert!(
                 report.unsupported.iter().any(|unsupported| {
                     unsupported.step_id.as_deref() == Some("split")
