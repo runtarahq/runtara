@@ -265,6 +265,16 @@ mod component {
             })
         }
 
+        fn split_initial_results(split_id: u32) -> Result<Vec<u8>, String> {
+            MANIFEST.with(|slot| {
+                let slot = slot.borrow();
+                let manifest = slot
+                    .as_ref()
+                    .ok_or_else(|| "direct stdlib manifest was not initialized".to_string())?;
+                manifest.split_initial_results(split_id)
+            })
+        }
+
         fn split_append_output(
             split_id: u32,
             results: Vec<u8>,
@@ -276,6 +286,21 @@ mod component {
                     .as_ref()
                     .ok_or_else(|| "direct stdlib manifest was not initialized".to_string())?;
                 manifest.split_append_output(split_id, &results, &output)
+            })
+        }
+
+        fn split_append_error(
+            split_id: u32,
+            results: Vec<u8>,
+            error: String,
+            index: u32,
+        ) -> Result<Vec<u8>, String> {
+            MANIFEST.with(|slot| {
+                let slot = slot.borrow();
+                let manifest = slot
+                    .as_ref()
+                    .ok_or_else(|| "direct stdlib manifest was not initialized".to_string())?;
+                manifest.split_append_error(split_id, &results, error, index)
             })
         }
 

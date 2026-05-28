@@ -77,10 +77,21 @@ interface json {
         index: u32,
     ) -> result<_, string>;
 
+    split-initial-results: func(
+        split-id: u32,
+    ) -> result<list<u8>, string>;
+
     split-append-output: func(
         split-id: u32,
         results: list<u8>,
         output: list<u8>,
+    ) -> result<list<u8>, string>;
+
+    split-append-error: func(
+        split-id: u32,
+        results: list<u8>,
+        error: string,
+        index: u32,
     ) -> result<list<u8>, string>;
 
     split-output: func(

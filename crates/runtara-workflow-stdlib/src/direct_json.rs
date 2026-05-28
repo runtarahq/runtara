@@ -223,6 +223,27 @@ impl DirectJsonManifest {
         )
     }
 
+    /// Build a Split result accumulator matching the step's failure policy.
+    pub fn split_initial_results(&self, split_id: u32) -> Result<Vec<u8>, String> {
+        let split = self
+            .splits
+            .get(&split_id)
+            .ok_or_else(|| format!("unknown direct Split id {split_id}"))?;
+        let value = if split_dont_stop_on_failed(split) {
+            serde_json::json!({
+                "success": [],
+                "error": [],
+                "aborted": [],
+                "unknown": [],
+                "skipped": []
+            })
+        } else {
+            Value::Array(Vec::new())
+        };
+        serde_json::to_vec(&value)
+            .map_err(|err| format!("failed to serialize Split result accumulator: {err}"))
+    }
+
     /// Append one Split iteration output to a JSON result array.
     pub fn split_append_output(
         &self,
@@ -238,14 +259,47 @@ impl DirectJsonManifest {
             .map_err(|err| format!("failed to parse Split results: {err}"))?;
         let output: Value = serde_json::from_slice(output)
             .map_err(|err| format!("failed to parse Split iteration output: {err}"))?;
-        let results = results.as_array_mut().ok_or_else(|| {
-            format!(
-                "Split step '{}' internal result accumulator must be an array",
+        if split_dont_stop_on_failed(split) {
+            split_accumulator_array_mut(&mut results, split, "success")?.push(output);
+            serde_json::to_vec(&results)
+        } else {
+            let results = results.as_array_mut().ok_or_else(|| {
+                format!(
+                    "Split step '{}' internal result accumulator must be an array",
+                    split.step_id
+                )
+            })?;
+            results.push(output);
+            serde_json::to_vec(results)
+        }
+        .map_err(|err| format!("failed to serialize Split result accumulator: {err}"))
+    }
+
+    /// Append one generated-code-compatible Split iteration failure.
+    pub fn split_append_error(
+        &self,
+        split_id: u32,
+        results: &[u8],
+        error: String,
+        index: u32,
+    ) -> Result<Vec<u8>, String> {
+        let split = self
+            .splits
+            .get(&split_id)
+            .ok_or_else(|| format!("unknown direct Split id {split_id}"))?;
+        if !split_dont_stop_on_failed(split) {
+            return Err(format!(
+                "Split step '{}' cannot append errors when dontStopOnFailed is false",
                 split.step_id
-            )
-        })?;
-        results.push(output);
-        serde_json::to_vec(results)
+            ));
+        }
+        let mut results: Value = serde_json::from_slice(results)
+            .map_err(|err| format!("failed to parse Split results: {err}"))?;
+        split_accumulator_array_mut(&mut results, split, "error")?.push(serde_json::json!({
+            "error": error,
+            "index": index
+        }));
+        serde_json::to_vec(&results)
             .map_err(|err| format!("failed to serialize Split result accumulator: {err}"))
     }
 
@@ -264,14 +318,27 @@ impl DirectJsonManifest {
             .splits
             .get(&split_id)
             .ok_or_else(|| format!("unknown direct Split id {split_id}"))?;
-        let steps = insert_step_output(
-            &source,
-            &split.step_id,
-            split.name.as_deref(),
-            "Split",
-            results,
-            None,
-        );
+        let steps = if split_dont_stop_on_failed(split) {
+            let mut steps = source
+                .get("steps")
+                .and_then(Value::as_object)
+                .cloned()
+                .unwrap_or_default();
+            steps.insert(
+                split.step_id.clone(),
+                split_dont_stop_result(split, &source, results)?,
+            );
+            steps
+        } else {
+            insert_step_output(
+                &source,
+                &split.step_id,
+                split.name.as_deref(),
+                "Split",
+                results,
+                None,
+            )
+        };
         serde_json::to_vec(&Value::Object(steps))
             .map_err(|err| format!("failed to serialize Split steps context: {err}"))
     }
@@ -1422,6 +1489,99 @@ fn split_iteration_variables(
     variables.insert("_scope_id".to_string(), Value::String(scope_id));
 
     Ok(variables)
+}
+
+fn split_dont_stop_on_failed(split: &DirectJsonSplit) -> bool {
+    split_bool_config(&split.value, "dontStopOnFailed")
+}
+
+fn split_accumulator_array_mut<'a>(
+    results: &'a mut Value,
+    split: &DirectJsonSplit,
+    key: &str,
+) -> Result<&'a mut Vec<Value>, String> {
+    results
+        .as_object_mut()
+        .and_then(|object| object.get_mut(key))
+        .and_then(Value::as_array_mut)
+        .ok_or_else(|| {
+            format!(
+                "Split step '{}' internal result accumulator must contain a '{key}' array",
+                split.step_id
+            )
+        })
+}
+
+fn split_dont_stop_result(
+    split: &DirectJsonSplit,
+    source: &Value,
+    results: Value,
+) -> Result<Value, String> {
+    let object = results.as_object().ok_or_else(|| {
+        format!(
+            "Split step '{}' internal result accumulator must be an object",
+            split.step_id
+        )
+    })?;
+    let success = object
+        .get("success")
+        .and_then(Value::as_array)
+        .ok_or_else(|| {
+            format!(
+                "Split step '{}' internal result accumulator must contain a 'success' array",
+                split.step_id
+            )
+        })?;
+    let error = object
+        .get("error")
+        .and_then(Value::as_array)
+        .ok_or_else(|| {
+            format!(
+                "Split step '{}' internal result accumulator must contain an 'error' array",
+                split.step_id
+            )
+        })?;
+    let aborted = object
+        .get("aborted")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let unknown = object
+        .get("unknown")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let skipped = object
+        .get("skipped")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let total = split_items(split, source)?
+        .as_array()
+        .map(Vec::len)
+        .expect("split_items always returns a JSON array");
+
+    Ok(serde_json::json!({
+        "stepId": split.step_id,
+        "stepName": split.name.as_deref().unwrap_or("Unnamed"),
+        "stepType": "Split",
+        "data": {
+            "success": success,
+            "error": error,
+            "aborted": aborted,
+            "unknown": unknown,
+            "skipped": skipped
+        },
+        "stats": {
+            "success": success.len(),
+            "error": error.len(),
+            "aborted": aborted.len(),
+            "unknown": unknown.len(),
+            "skipped": skipped.len(),
+            "total": total
+        },
+        "outputs": success
+    }))
 }
 
 fn validate_split_schema(value: &Value, schema: &Value, ctx: &str) -> Result<(), String> {
@@ -3292,6 +3452,74 @@ mod tests {
         let results: Value = serde_json::from_slice(&results).expect("results json");
 
         assert_eq!(results, json!([{ "id": 1 }, { "id": 2 }]));
+    }
+
+    #[test]
+    fn split_dont_stop_accumulator_records_successes_and_errors() {
+        let manifest = DirectJsonManifest::parse(&split_manifest(json!({
+            "value": { "valueType": "reference", "value": "data.items" },
+            "dontStopOnFailed": true
+        })))
+        .expect("manifest");
+
+        let results = manifest
+            .split_initial_results(0)
+            .expect("initial accumulator");
+        let results = manifest
+            .split_append_output(0, &results, br#"{"id":1}"#)
+            .expect("success append");
+        let results = manifest
+            .split_append_error(0, &results, "bad item".to_string(), 1)
+            .expect("error append");
+        let results: Value = serde_json::from_slice(&results).expect("results json");
+
+        assert_eq!(results["success"], json!([{ "id": 1 }]));
+        assert_eq!(
+            results["error"],
+            json!([{ "error": "bad item", "index": 1 }])
+        );
+        assert_eq!(results["aborted"], json!([]));
+        assert_eq!(results["unknown"], json!([]));
+        assert_eq!(results["skipped"], json!([]));
+    }
+
+    #[test]
+    fn split_dont_stop_output_records_generated_step_result_shape() {
+        let manifest = DirectJsonManifest::parse(&split_manifest(json!({
+            "value": { "valueType": "reference", "value": "data.items" },
+            "dontStopOnFailed": true
+        })))
+        .expect("manifest");
+        let source = build_source(br#"{"items":[1,2]}"#, b"{}", br#"{"prev":{"outputs":1}}"#)
+            .expect("source");
+
+        let results = manifest
+            .split_initial_results(0)
+            .expect("initial accumulator");
+        let results = manifest
+            .split_append_output(0, &results, br#"{"id":1}"#)
+            .expect("success append");
+        let results = manifest
+            .split_append_error(0, &results, "bad item".to_string(), 1)
+            .expect("error append");
+        let steps = manifest
+            .split_output(0, &source, &results)
+            .expect("Split steps context");
+        let steps: Value = serde_json::from_slice(&steps).expect("steps json");
+
+        assert_eq!(steps["prev"]["outputs"], json!(1));
+        assert_eq!(steps["split"]["stepId"], json!("split"));
+        assert_eq!(steps["split"]["stepName"], json!("Process Items"));
+        assert_eq!(steps["split"]["stepType"], json!("Split"));
+        assert_eq!(steps["split"]["data"]["success"], json!([{ "id": 1 }]));
+        assert_eq!(
+            steps["split"]["data"]["error"],
+            json!([{ "error": "bad item", "index": 1 }])
+        );
+        assert_eq!(steps["split"]["stats"]["success"], json!(1));
+        assert_eq!(steps["split"]["stats"]["error"], json!(1));
+        assert_eq!(steps["split"]["stats"]["total"], json!(2));
+        assert_eq!(steps["split"]["outputs"], json!([{ "id": 1 }]));
     }
 
     #[test]
