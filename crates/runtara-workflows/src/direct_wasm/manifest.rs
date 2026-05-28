@@ -56,6 +56,8 @@ pub struct DirectGraphManifest {
     pub entry_point: String,
     /// Effective graph durability. `None` in the DSL inherits from the parent.
     pub durable: bool,
+    /// Maximum cumulative rate-limit retry wait budget for this graph.
+    pub rate_limit_budget_ms: u64,
     /// Graph-level constant variables as canonical JSON.
     pub variables: serde_json::Value,
     /// Graph input schema as canonical JSON.
@@ -488,6 +490,7 @@ fn graph_manifest(
         name: graph.name.clone(),
         entry_point: graph.entry_point.clone(),
         durable,
+        rate_limit_budget_ms: graph.rate_limit_budget_ms,
         variables: canonical_json(&graph.variables)?,
         input_schema: canonical_json(&graph.input_schema)?,
         output_schema: canonical_json(&graph.output_schema)?,
@@ -916,6 +919,7 @@ mod tests {
         );
         assert_eq!(first.version, DIRECT_WORKFLOW_MANIFEST_VERSION);
         assert_eq!(first.graph.entry_point, "finish");
+        assert_eq!(first.graph.rate_limit_budget_ms, graph.rate_limit_budget_ms);
     }
 
     #[test]

@@ -97,6 +97,7 @@ const DIRECT_AGENT_RETRY_ERROR_PTR_LOCAL: u32 = 11;
 const DIRECT_AGENT_RETRY_ERROR_LEN_LOCAL: u32 = 12;
 const DIRECT_AGENT_RETRY_SLEEP_TAG_LOCAL: u32 = 13;
 const DIRECT_AGENT_RETRY_SLEEP_MS_LOCAL: u32 = 14;
+const DIRECT_AGENT_RATE_LIMIT_WAIT_TOTAL_LOCAL: u32 = 15;
 const DIRECT_EMPTY_STEPS_CONTEXT: &[u8] = b"{}";
 const DIRECT_WORKFLOW_LOG_KIND: &[u8] = b"workflow_log";
 const DIRECT_WORKFLOW_ERROR_KIND: &[u8] = b"workflow_error";
@@ -570,6 +571,8 @@ enum DirectRunPlan {
         input_mapping_id: u32,
         durable_checkpoint: bool,
         max_retries: u32,
+        retry_delay_ms: u64,
+        rate_limit_budget_ms: u64,
         next_plan: Box<DirectRunPlan>,
         error_plan: Option<DirectErrorRoutePlan>,
     },
@@ -922,6 +925,8 @@ fn step_run_plan_inner(
             } else {
                 0
             };
+            let retry_delay_ms = agent_effective_retry_delay_ms(agent);
+            let rate_limit_budget_ms = graph.rate_limit_budget_ms;
             let next_plan = normal_flow_plan(graph, step_id, stack, include_on_error)?;
             let error_plan = if include_on_error {
                 on_error_plan(graph, step_id, stack)?
@@ -936,6 +941,8 @@ fn step_run_plan_inner(
                 input_mapping_id: agent.input_mapping_id,
                 durable_checkpoint,
                 max_retries,
+                retry_delay_ms,
+                rate_limit_budget_ms,
                 next_plan: Box::new(next_plan),
                 error_plan,
             })
@@ -1347,6 +1354,12 @@ fn agent_effective_max_retries(agent: &DirectAgentManifest) -> u32 {
     agent
         .max_retries
         .unwrap_or(if agent.rate_limited { 5 } else { 3 })
+}
+
+fn agent_effective_retry_delay_ms(agent: &DirectAgentManifest) -> u64 {
+    agent
+        .retry_delay
+        .unwrap_or(if agent.rate_limited { 2_000 } else { 1_000 })
 }
 
 fn finish_mapping_id(
@@ -2006,7 +2019,7 @@ fn direct_run_function(
     const ROUTE_PTR_LOCAL: u32 = 8;
     const ROUTE_LEN_LOCAL: u32 = 9;
 
-    let mut body = WasmFunction::new([(14, ValType::I32), (1, ValType::I64)]);
+    let mut body = WasmFunction::new([(14, ValType::I32), (2, ValType::I64)]);
 
     push_segment_args(&mut body, &config.static_data.manifest);
     push_retptr_arg(&mut body);
@@ -2298,6 +2311,8 @@ fn emit_run_plan_mapping(
             input_mapping_id,
             durable_checkpoint,
             max_retries,
+            retry_delay_ms,
+            rate_limit_budget_ms,
             next_plan,
             error_plan,
         } => {
@@ -2313,6 +2328,8 @@ fn emit_run_plan_mapping(
                 *input_mapping_id,
                 *durable_checkpoint,
                 *max_retries,
+                *retry_delay_ms,
+                *rate_limit_budget_ms,
                 next_plan,
                 error_plan.as_ref(),
                 data_ptr_local,
@@ -2768,6 +2785,8 @@ fn emit_agent_plan(
     input_mapping_id: u32,
     durable_checkpoint: bool,
     max_retries: u32,
+    _retry_delay_ms: u64,
+    rate_limit_budget_ms: u64,
     next_plan: &DirectRunPlan,
     error_plan: Option<&DirectErrorRoutePlan>,
     data_ptr_local: u32,
@@ -2882,7 +2901,7 @@ fn emit_agent_plan(
         );
         load_retptr_tag(body);
         body.instruction(&Instruction::If(BlockType::Empty));
-        emit_agent_retry_condition(body, max_retries);
+        emit_agent_retry_condition(body, max_retries, rate_limit_budget_ms);
         body.instruction(&Instruction::If(BlockType::Empty));
         emit_agent_advance_retry_attempt(body);
         emit_agent_capture_retry_sleep(body);
@@ -3522,12 +3541,36 @@ fn emit_agent_checkpoint_save(
     body.instruction(&Instruction::Call(indices.runtime_checkpoint));
 }
 
-fn emit_agent_retry_condition(body: &mut WasmFunction, max_retries: u32) {
+fn emit_agent_retry_condition(
+    body: &mut WasmFunction,
+    max_retries: u32,
+    rate_limit_budget_ms: u64,
+) {
     push_retptr_u8_load(body, DIRECT_AGENT_RESULT_ERR_RETRYABLE_OFFSET);
+    body.instruction(&Instruction::If(BlockType::Result(ValType::I32)));
+    push_retptr_u8_load(body, DIRECT_AGENT_RESULT_ERR_RETRY_AFTER_TAG_OFFSET);
+    body.instruction(&Instruction::If(BlockType::Result(ValType::I32)));
+    body.instruction(&Instruction::LocalGet(
+        DIRECT_AGENT_RATE_LIMIT_WAIT_TOTAL_LOCAL,
+    ));
+    push_retptr_i64_load(body, DIRECT_AGENT_RESULT_ERR_RETRY_AFTER_VALUE_OFFSET);
+    body.instruction(&Instruction::I64Add);
+    body.instruction(&Instruction::LocalSet(
+        DIRECT_AGENT_RATE_LIMIT_WAIT_TOTAL_LOCAL,
+    ));
+    body.instruction(&Instruction::LocalGet(
+        DIRECT_AGENT_RATE_LIMIT_WAIT_TOTAL_LOCAL,
+    ));
+    body.instruction(&Instruction::I64Const(rate_limit_budget_ms as i64));
+    body.instruction(&Instruction::I64LeU);
+    body.instruction(&Instruction::Else);
     body.instruction(&Instruction::LocalGet(DIRECT_AGENT_RETRY_ATTEMPT_LOCAL));
     body.instruction(&Instruction::I32Const(max_retries as i32));
     body.instruction(&Instruction::I32LeU);
-    body.instruction(&Instruction::I32And);
+    body.instruction(&Instruction::End);
+    body.instruction(&Instruction::Else);
+    body.instruction(&Instruction::I32Const(0));
+    body.instruction(&Instruction::End);
 }
 
 fn emit_agent_advance_retry_attempt(body: &mut WasmFunction) {
@@ -4530,10 +4573,12 @@ mod tests {
     fn durable_agent_retry_graph() -> ExecutionGraph {
         let mut graph = non_durable_agent_graph();
         graph.durable = Some(true);
+        graph.rate_limit_budget_ms = 2_500;
         let Some(runtara_dsl::Step::Agent(agent)) = graph.steps.get_mut("agent") else {
             panic!("expected Agent step");
         };
         agent.max_retries = Some(2);
+        agent.retry_delay = Some(750);
         agent.durable = Some(true);
         graph
     }
@@ -4764,6 +4809,7 @@ mod tests {
     fn direct_agent_manifest_with_retry_defaults(
         rate_limited: bool,
         max_retries: Option<u32>,
+        retry_delay: Option<u64>,
     ) -> DirectAgentManifest {
         DirectAgentManifest {
             id: 0,
@@ -4779,24 +4825,52 @@ mod tests {
             input_mapping_id: 0,
             required_inputs: vec![],
             max_retries,
-            retry_delay: None,
+            retry_delay,
             timeout: None,
         }
     }
 
     #[test]
-    fn direct_agent_effective_max_retries_matches_generated_defaults() {
+    fn direct_agent_effective_retry_policy_matches_generated_defaults() {
         assert_eq!(
-            agent_effective_max_retries(&direct_agent_manifest_with_retry_defaults(false, None)),
+            agent_effective_max_retries(&direct_agent_manifest_with_retry_defaults(
+                false, None, None,
+            )),
             3
         );
         assert_eq!(
-            agent_effective_max_retries(&direct_agent_manifest_with_retry_defaults(true, None)),
+            agent_effective_retry_delay_ms(&direct_agent_manifest_with_retry_defaults(
+                false, None, None,
+            )),
+            1_000
+        );
+        assert_eq!(
+            agent_effective_max_retries(&direct_agent_manifest_with_retry_defaults(
+                true, None, None,
+            )),
             5
         );
         assert_eq!(
-            agent_effective_max_retries(&direct_agent_manifest_with_retry_defaults(true, Some(2))),
+            agent_effective_retry_delay_ms(&direct_agent_manifest_with_retry_defaults(
+                true, None, None,
+            )),
+            2_000
+        );
+        assert_eq!(
+            agent_effective_max_retries(&direct_agent_manifest_with_retry_defaults(
+                true,
+                Some(2),
+                Some(750),
+            )),
             2
+        );
+        assert_eq!(
+            agent_effective_retry_delay_ms(&direct_agent_manifest_with_retry_defaults(
+                true,
+                Some(2),
+                Some(750),
+            )),
+            750
         );
     }
 
@@ -6199,6 +6273,8 @@ mod tests {
         let DirectRunPlan::Agent {
             durable_checkpoint,
             max_retries,
+            retry_delay_ms,
+            rate_limit_budget_ms,
             ..
         } = &core_config.run_plan
         else {
@@ -6206,6 +6282,8 @@ mod tests {
         };
         assert!(*durable_checkpoint);
         assert_eq!(*max_retries, 2);
+        assert_eq!(*retry_delay_ms, 750);
+        assert_eq!(*rate_limit_budget_ms, 2_500);
         assert!(manifest.graph.agents[0].durable);
 
         let (resolve, world) =
@@ -6233,6 +6311,9 @@ mod tests {
         let mut saw_retryable_load = false;
         let mut saw_retry_after_tag_load = false;
         let mut saw_retry_after_value_load = false;
+        let mut saw_rate_limit_wait_accumulator = false;
+        let mut saw_rate_limit_budget_const = false;
+        let mut saw_rate_limit_budget_compare = false;
         let mut saw_retry_bound = false;
         let mut saw_lookup_before_invoke = false;
         let mut saw_error_info_after_invoke = false;
@@ -6367,6 +6448,11 @@ mod tests {
                                 {
                                     saw_retry_after_value_load = true;
                                 }
+                                Operator::I64Add => saw_rate_limit_wait_accumulator = true,
+                                Operator::I64Const { value: 2_500 } => {
+                                    saw_rate_limit_budget_const = true;
+                                }
+                                Operator::I64LeU => saw_rate_limit_budget_compare = true,
                                 Operator::I32Const { value: 2 } => {
                                     saw_retry_bound = true;
                                 }
@@ -6414,6 +6500,14 @@ mod tests {
         assert!(
             saw_retry_after_tag_load && saw_retry_after_value_load,
             "retry path should inspect typed retryAfterMs hints"
+        );
+        assert!(
+            saw_rate_limit_wait_accumulator,
+            "retryAfterMs path should accumulate rate-limit wait time"
+        );
+        assert!(
+            saw_rate_limit_budget_const && saw_rate_limit_budget_compare,
+            "retryAfterMs path should compare against graph rateLimitBudgetMs"
         );
         assert!(
             saw_retry_bound,
