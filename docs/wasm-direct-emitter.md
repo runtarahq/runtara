@@ -30,9 +30,11 @@ Current implementation progress on `codex/wasm-direct-emitter`:
 - `direct_wasm::support` produces deterministic unsupported-feature reports.
   The current production-shaped direct path supports a single entry `Finish`
   step, pure `Conditional` true/false decision trees ending in `Finish` leaves,
-  and normal-edge `Filter`/value `Switch`/`GroupBy` chains ending in `Finish`
-  leaves, with no breakpoints or other routing. `Finish.inputMapping` forms
-  remain broadly supported because mapping semantics are delegated to the shared
+  normal-edge `Filter`/value `Switch`/`GroupBy` chains ending in `Finish`
+  leaves, and routing `Switch` dispatch trees with one static edge per route
+  plus a `default` edge. Breakpoints and dynamic edge conditions remain outside
+  the supported direct-control subset. `Finish.inputMapping` forms remain
+  broadly supported because mapping semantics are delegated to the shared
   stdlib.
 - `direct_wasm::compile::compile_direct_workflow` is an opt-in entry point that
   emits a valid component-format artifact for the currently supported direct
@@ -79,12 +81,13 @@ Current implementation progress on `codex/wasm-direct-emitter`:
 - `tests/direct_wasm_execute.rs` now provides gated direct execution smoke
   tests. With `RUNTARA_RUN_DIRECT_WASM_E2E=1`, it compiles and statically
   composes the simple `Finish` fixture plus flat and nested `Conditional`
-  fixtures plus simple `Filter -> Finish`, value `Switch -> Finish`, and
-  `GroupBy -> Finish` fixtures, runs each final
+  fixtures plus simple `Filter -> Finish`, value `Switch -> Finish`, routing
+  `Switch`, and `GroupBy -> Finish` fixtures, runs each final
   `workflow.wasm` under
   `wasmtime run --wasi http --wasi inherit-network`, and asserts the fake SDK
   receives the expected mapped completion payloads for the Finish path,
-  conditional branches, Filter output, value Switch output, and GroupBy output.
+  conditional branches, Filter output, value Switch output, routing Switch route
+  leaves, and GroupBy output.
 - `tests/direct_wasm_finish_parity.rs` now compares direct `Finish` mapping
   output against the current Rust-generated mapping contract for representative
   fixture shapes: data passthrough, dotted `outputs.*` unwrap, templates,
@@ -102,9 +105,10 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   evaluation against `item`, and step-context insertion.
 - `direct_wasm::manifest` now assigns manifest-wide Switch IDs for
   `Switch.config`, and `runtara-workflow-stdlib::direct_json` implements the
-  shared `value-switch` helper for non-routing Switch cases, first-match
-  selection, default output, output reference resolution, array equality
-  shorthand, `BETWEEN`, `RANGE`, and step-context insertion.
+  shared `process-switch` and `value-switch` helpers for Switch cases:
+  first-match selection, default output, selected routing label, route insertion
+  into routing Switch step context, output reference resolution, array equality
+  shorthand, `BETWEEN`, and `RANGE`.
 - `direct_wasm::manifest` now assigns manifest-wide GroupBy IDs for
   `GroupBy.config`, and `runtara-workflow-stdlib::direct_json` implements the
   shared `group-by` helper for simple keys, nested keys, null keys, non-array
@@ -115,11 +119,13 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   `stdlib.eval-condition`, branches on the returned bool, applies the selected
   `Finish` mapping, and completes through the runtime component. Other routing
   shapes remain rejected by the support gate.
-- The direct core emitter now also supports the first normal-edge JSON steps:
-  `Filter -> Finish`, value `Switch -> Finish`, and `GroupBy -> Finish`. It
+- The direct core emitter now also supports the first JSON transformation and
+  dispatch steps: `Filter -> Finish`, value `Switch -> Finish`,
+  `GroupBy -> Finish`, and routing `Switch` trees with static route labels. It
   calls the relevant stdlib helper, uses the returned `steps` context to rebuild
-  the mapping source, then applies the terminal `Finish` mapping against
-  `steps.<step>.outputs.*`.
+  the mapping source, then applies the selected terminal `Finish` mapping
+  against `steps.<step>.outputs.*` and, for routing Switches,
+  `steps.<switch>.route`.
 - `tests/direct_wasm_condition_parity.rs` now compares direct conditional
   branch selection and selected `Finish` output against the current
   generated-code condition semantics for representative fixtures, including
@@ -131,9 +137,10 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   helper against current generated-code Filter semantics for simple equality,
   `NOT`, and nested boolean conditions.
 - `tests/direct_wasm_switch_value_parity.rs` now compares the direct
-  value-switch stdlib helper against current generated-code value Switch
-  semantics for first-match behavior, array equality shorthand, default output,
-  `BETWEEN`, and `RANGE`.
+  value-switch and process-switch stdlib helpers against current generated-code
+  Switch semantics for first-match behavior, array equality shorthand, default
+  output, selected route labels, route context insertion, `BETWEEN`, and
+  `RANGE`.
 
 ## Final Goal
 
@@ -843,8 +850,8 @@ Current status:
 - `runtara-workflow-stdlib` includes generated WIT bindings and a
   `direct-component` implementation for the JSON stdlib surface. Implemented
   functions are `init-manifest`, `build-source`, `apply-mapping`,
-  `eval-condition`, `value-switch`, `filter`, and `group-by`; `process-switch`
-  remains reserved for routing Switch dispatch.
+  `eval-condition`, `process-switch`, `value-switch`, `filter`, and
+  `group-by`.
 - `runtara-workflow-runtime` includes generated WIT bindings and implements
   the runtime lifecycle surface against `runtara-sdk`.
 - Remaining work: add host-side bindings smoke tests that instantiate and call
@@ -1032,16 +1039,17 @@ Current status:
 - Filter config IDs are now in the manifest and the direct stdlib component can
   evaluate Filter configs through the checked WIT surface; parity fixtures cover
   simple equality, `NOT`, nested boolean behavior, and non-array input handling.
-- Value Switch config IDs are now in the manifest and the direct stdlib
-  component can evaluate non-routing Switch configs through the checked
-  `value-switch` WIT surface; parity fixtures cover first-match behavior, array
-  equality shorthand, default output, `BETWEEN`, and `RANGE`.
+- Switch config IDs are now in the manifest and the direct stdlib component can
+  evaluate value and routing Switch configs through the checked
+  `process-switch` and `value-switch` WIT surfaces; parity fixtures cover
+  first-match behavior, selected routes, route insertion into the `steps`
+  context, array equality shorthand, default output, `BETWEEN`, and `RANGE`.
 - GroupBy config IDs are now in the manifest and the direct stdlib component
   can evaluate GroupBy configs through the checked WIT surface; parity fixtures
   cover simple, nested-key, expected-key, null-key, and non-array behavior. The
   direct core now consumes helper-updated `steps` contexts for `Filter`,
-  value `Switch`, and `GroupBy` normal-edge workflows before rebuilding the
-  source and reaching `Finish`.
+  value `Switch`, routing `Switch`, and `GroupBy` workflows before rebuilding
+  the source and reaching the selected `Finish`.
 - The first direct Wasm branching path is implemented for
   `Conditional -> true/false Finish`, and the run-plan lowering now recurses
   through nested pure `Conditional` trees until each branch reaches a `Finish`
@@ -1052,8 +1060,8 @@ Current status:
   evaluation and branch output against current generated-code condition
   semantics for simple equality, `LENGTH` comparisons, and nested branch paths.
 - Remaining work: broaden graph lowering across more pure JSON/control
-  workflows by lowering switch routing, log/error behavior, and edge-condition
-  priority handling.
+  workflows by lowering log/error behavior and edge-condition priority
+  handling.
 
 Implementation steps:
 
@@ -1100,12 +1108,12 @@ Current progress:
 - `Conditional` lowering now supports pure true/false decision trees that end
   in `Finish` leaves. It evaluates each condition through `stdlib.eval-condition`
   and emits nested Wasm `if` control flow in the workflow-specific module.
-- `Filter -> Finish`, value `Switch -> Finish`, and `GroupBy -> Finish`
-  normal-edge lowering now run end to end. The shared direct stdlib returns an
-  updated `steps` context from the step helper, and the direct core rebuilds the
-  source before applying the final `Finish` mapping.
-- Remaining parity work in this phase starts with switch routing, then broadens
-  to `Log`, `Error`, edge conditions, and debug event behavior.
+- `Filter -> Finish`, value `Switch -> Finish`, routing `Switch` trees, and
+  `GroupBy -> Finish` lowering now run end to end. The shared direct stdlib
+  returns an updated `steps` context from the step helper, and the direct core
+  rebuilds the source before applying the selected final `Finish` mapping.
+- Remaining parity work in this phase starts with `Log`, `Error`, edge
+  conditions, and debug event behavior.
 
 Implementation steps:
 

@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! Direct-emitter support reporting.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use runtara_dsl::{ExecutionGraph, Step};
 
@@ -79,7 +79,7 @@ fn collect_graph_support(
                     .map(step_type_name)
                     .map(str::to_string),
                 feature: "execution-plan-routing".to_string(),
-                reason: "direct emitter currently lowers only a single entry Finish step, pure Conditional true/false trees, and normal Filter/Switch/GroupBy edges ending in Finish leaves".to_string(),
+                reason: "direct emitter currently lowers only a single entry Finish step, pure Conditional true/false trees, normal Filter/value Switch/GroupBy edges, and routing Switch dispatch trees ending in Finish leaves".to_string(),
             });
         }
     }
@@ -223,8 +223,11 @@ fn supports_direct_control_step(
             if step
                 .config
                 .as_ref()
-                .is_none_or(|config| !config.is_routing()) =>
+                .is_some_and(|config| config.is_routing()) =>
         {
+            supports_routing_switch_step(graph, step_id, step, reachable, used_edges, stack)
+        }
+        Step::Switch(_) => {
             supports_single_normal_edge_step(graph, step_id, reachable, used_edges, stack)
         }
         Step::GroupBy(_) => {
@@ -260,6 +263,68 @@ fn supports_single_normal_edge_step(
     stack.push(step_id.to_string());
     let supported =
         supports_direct_control_step(graph, &edge.to_step, reachable, used_edges, stack);
+    stack.pop();
+
+    supported
+}
+
+fn supports_routing_switch_step(
+    graph: &ExecutionGraph,
+    step_id: &str,
+    step: &runtara_dsl::SwitchStep,
+    reachable: &mut BTreeSet<String>,
+    used_edges: &mut BTreeSet<usize>,
+    stack: &mut Vec<String>,
+) -> bool {
+    let Some(config) = step.config.as_ref() else {
+        return false;
+    };
+    let mut expected_labels = config
+        .route_labels()
+        .into_iter()
+        .filter(|label| *label != "default")
+        .map(str::to_string)
+        .collect::<BTreeSet<_>>();
+    expected_labels.insert("default".to_string());
+
+    let mut labeled_edges = BTreeMap::new();
+    for (index, edge) in graph.execution_plan.iter().enumerate() {
+        if edge.from_step != step_id {
+            continue;
+        }
+        if edge.condition.is_some() {
+            return false;
+        }
+        let Some(label) = edge.label.as_deref() else {
+            return false;
+        };
+        if !expected_labels.contains(label) {
+            return false;
+        }
+        if labeled_edges
+            .insert(label.to_string(), (index, edge))
+            .is_some()
+        {
+            return false;
+        }
+    }
+
+    if labeled_edges.len() != expected_labels.len() {
+        return false;
+    }
+
+    stack.push(step_id.to_string());
+    let mut supported = true;
+    for label in expected_labels {
+        let Some((edge_index, edge)) = labeled_edges.get(&label) else {
+            supported = false;
+            continue;
+        };
+        used_edges.insert(*edge_index);
+        if !supports_direct_control_step(graph, &edge.to_step, reachable, used_edges, stack) {
+            supported = false;
+        }
+    }
     stack.pop();
 
     supported
@@ -304,13 +369,7 @@ fn collect_step_support(
                 });
             }
         }
-        Step::Switch(step)
-            if direct_control
-                && step
-                    .config
-                    .as_ref()
-                    .is_none_or(|config| !config.is_routing()) =>
-        {
+        Step::Switch(step) if direct_control => {
             if step.breakpoint.unwrap_or(false) {
                 unsupported.push(UnsupportedWorkflowFeature {
                     step_id: Some(step.id.clone()),
@@ -488,6 +547,7 @@ mod tests {
             }
             "filter" => include_str!("../../tests/fixtures/filter_simple.json"),
             "switch_value" => include_str!("../../tests/fixtures/switch_value_simple.json"),
+            "switch_routing" => include_str!("../../tests/fixtures/switch_routing_simple.json"),
             "group_by" => include_str!("../../tests/fixtures/group_by_simple.json"),
             "transform" => include_str!("../../tests/fixtures/transform_workflow.json"),
             "wait" => include_str!("../../tests/fixtures/wait_for_signal_with_callback.json"),
@@ -662,41 +722,42 @@ mod tests {
     }
 
     #[test]
-    fn routing_switch_is_rejected_until_route_dispatch_is_lowered() {
-        let graph = serde_json::from_value::<ExecutionGraph>(serde_json::json!({
-            "steps": {
-                "switch": {
-                    "stepType": "Switch",
-                    "id": "switch",
-                    "config": {
-                        "value": { "valueType": "reference", "value": "data.status" },
-                        "cases": [{
-                            "matchType": "EQ",
-                            "match": "active",
-                            "output": { "bucket": "active" },
-                            "route": "active"
-                        }],
-                        "default": { "bucket": "other" }
-                    }
-                },
-                "finish": { "stepType": "Finish", "id": "finish" }
-            },
-            "entryPoint": "switch",
-            "executionPlan": [
-                { "fromStep": "switch", "toStep": "finish", "label": "active" },
-                { "fromStep": "switch", "toStep": "finish", "label": "default" }
-            ],
-            "variables": {},
-            "inputSchema": {},
-            "outputSchema": {}
-        }))
-        .expect("graph parses");
+    fn routing_switch_finish_branches_are_supported() {
+        let report = analyze_direct_wasm_support(&fixture("switch_routing"));
+
+        assert!(report.supported, "{:?}", report.unsupported);
+        assert!(report.unsupported.is_empty());
+    }
+
+    #[test]
+    fn routing_switch_breakpoints_are_rejected_until_debug_events_are_lowered() {
+        let mut graph = fixture("switch_routing");
+        let Some(Step::Switch(switch)) = graph.steps.get_mut("switch") else {
+            panic!("expected Switch fixture step");
+        };
+        switch.breakpoint = Some(true);
 
         let report = analyze_direct_wasm_support(&graph);
 
         assert!(!report.supported);
         assert!(report.unsupported.iter().any(|feature| {
-            feature.step_id.as_deref() == Some("switch") && feature.feature == "switch-routing"
+            feature.step_id.as_deref() == Some("switch") && feature.feature == "switch-breakpoint"
+        }));
+    }
+
+    #[test]
+    fn routing_switch_missing_default_edge_is_rejected() {
+        let mut graph = fixture("switch_routing");
+        graph
+            .execution_plan
+            .retain(|edge| edge.label.as_deref() != Some("default"));
+
+        let report = analyze_direct_wasm_support(&graph);
+
+        assert!(!report.supported);
+        assert!(report.unsupported.iter().any(|feature| {
+            feature.step_id.as_deref() == Some("switch")
+                && feature.feature == "execution-plan-routing"
         }));
     }
 

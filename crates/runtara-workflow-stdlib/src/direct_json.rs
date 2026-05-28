@@ -80,6 +80,17 @@ impl DirectJsonManifest {
         eval_condition_expression(condition, &source)
     }
 
+    /// Execute a manifest routing Switch config and return the selected route.
+    pub fn process_switch(&self, switch_id: u32, source: &[u8]) -> Result<String, String> {
+        let source: Value = serde_json::from_slice(source)
+            .map_err(|err| format!("failed to parse process-switch source: {err}"))?;
+        let switch = self
+            .switches
+            .get(&switch_id)
+            .ok_or_else(|| format!("unknown direct Switch id {switch_id}"))?;
+        apply_switch(&switch.value, &source).map(|result| result.route)
+    }
+
     /// Execute a manifest Filter config and return an updated steps context.
     pub fn filter(&self, filter_id: u32, source: &[u8]) -> Result<Vec<u8>, String> {
         let source: Value = serde_json::from_slice(source)
@@ -95,6 +106,7 @@ impl DirectJsonManifest {
             filter.name.as_deref(),
             "Filter",
             output,
+            None,
         );
         serde_json::to_vec(&Value::Object(steps))
             .map_err(|err| format!("failed to serialize filter steps context: {err}"))
@@ -108,13 +120,15 @@ impl DirectJsonManifest {
             .switches
             .get(&switch_id)
             .ok_or_else(|| format!("unknown direct Switch id {switch_id}"))?;
-        let output = apply_value_switch(&switch.value, &source)?;
+        let result = apply_switch(&switch.value, &source)?;
+        let route = switch_is_routing(&switch.value).then_some(result.route.as_str());
         let steps = insert_step_output(
             &source,
             &switch.step_id,
             switch.name.as_deref(),
             "Switch",
-            output,
+            result.output,
+            route,
         );
         serde_json::to_vec(&Value::Object(steps))
             .map_err(|err| format!("failed to serialize value-switch steps context: {err}"))
@@ -135,6 +149,7 @@ impl DirectJsonManifest {
             group_by.name.as_deref(),
             "GroupBy",
             output,
+            None,
         );
         serde_json::to_vec(&Value::Object(steps))
             .map_err(|err| format!("failed to serialize group-by steps context: {err}"))
@@ -295,13 +310,22 @@ fn apply_filter(config: &Value, source: &Value) -> Result<Value, String> {
     }))
 }
 
-fn apply_value_switch(config: &Value, source: &Value) -> Result<Value, String> {
+#[derive(Debug, Clone)]
+struct DirectSwitchResult {
+    output: Value,
+    route: String,
+}
+
+fn apply_switch(config: &Value, source: &Value) -> Result<DirectSwitchResult, String> {
     let Some(switch_value) = config.get("value") else {
         let default = config
             .get("default")
             .cloned()
             .unwrap_or_else(|| Value::Object(Map::new()));
-        return Ok(process_switch_output(&default, source));
+        return Ok(DirectSwitchResult {
+            output: process_switch_output(&default, source),
+            route: "default".to_string(),
+        });
     };
 
     if let Some(cases) = config.get("cases").and_then(Value::as_array) {
@@ -311,7 +335,14 @@ fn apply_value_switch(config: &Value, source: &Value) -> Result<Value, String> {
                 let output = case
                     .get("output")
                     .ok_or_else(|| "Switch case missing output".to_string())?;
-                return Ok(process_switch_output(output, source));
+                return Ok(DirectSwitchResult {
+                    output: process_switch_output(output, source),
+                    route: case
+                        .get("route")
+                        .and_then(Value::as_str)
+                        .unwrap_or("default")
+                        .to_string(),
+                });
             }
         }
     }
@@ -320,7 +351,17 @@ fn apply_value_switch(config: &Value, source: &Value) -> Result<Value, String> {
         .get("default")
         .cloned()
         .unwrap_or_else(|| Value::Object(Map::new()));
-    Ok(process_switch_output(&default, source))
+    Ok(DirectSwitchResult {
+        output: process_switch_output(&default, source),
+        route: "default".to_string(),
+    })
+}
+
+fn switch_is_routing(config: &Value) -> bool {
+    config
+        .get("cases")
+        .and_then(Value::as_array)
+        .is_some_and(|cases| cases.iter().any(|case| case.get("route").is_some()))
 }
 
 fn switch_case_condition(switch_value: &Value, case: &Value) -> Result<Value, String> {
@@ -464,21 +505,25 @@ fn insert_step_output(
     step_name: Option<&str>,
     step_type: &str,
     output: Value,
+    route: Option<&str>,
 ) -> Map<String, Value> {
     let mut steps = source
         .get("steps")
         .and_then(Value::as_object)
         .cloned()
         .unwrap_or_default();
-    steps.insert(
-        step_id.to_string(),
-        serde_json::json!({
-            "stepId": step_id,
-            "stepName": step_name.unwrap_or("Unnamed"),
-            "stepType": step_type,
-            "outputs": output,
-        }),
-    );
+    let mut envelope = serde_json::json!({
+        "stepId": step_id,
+        "stepName": step_name.unwrap_or("Unnamed"),
+        "stepType": step_type,
+        "outputs": output,
+    });
+    if let Some(route) = route
+        && let Some(envelope) = envelope.as_object_mut()
+    {
+        envelope.insert("route".to_string(), Value::String(route.to_string()));
+    }
+    steps.insert(step_id.to_string(), envelope);
     steps
 }
 
@@ -1398,6 +1443,7 @@ mod tests {
         assert_eq!(output, &json!({ "bucket": "ready", "echo": "active" }));
         assert_eq!(steps["switch"]["stepName"], json!("Classify Status"));
         assert_eq!(steps["switch"]["stepType"], json!("Switch"));
+        assert!(steps["switch"].get("route").is_none());
     }
 
     #[test]
@@ -1462,6 +1508,70 @@ mod tests {
             let steps: Value = serde_json::from_slice(&steps).expect("steps json");
             assert_eq!(steps["switch"]["outputs"], expected);
         }
+    }
+
+    #[test]
+    fn routing_switch_returns_route_and_records_route_in_steps_context() {
+        let manifest = DirectJsonManifest::parse(&switch_manifest(json!({
+            "value": { "valueType": "reference", "value": "data.status" },
+            "cases": [
+                {
+                    "matchType": "EQ",
+                    "match": "active",
+                    "output": {
+                        "bucket": { "valueType": "immediate", "value": "ready" },
+                        "echo": { "valueType": "reference", "value": "data.status" }
+                    },
+                    "route": "active"
+                },
+                {
+                    "matchType": "EQ",
+                    "match": ["queued", "retry"],
+                    "output": { "bucket": "pending" },
+                    "route": "pending"
+                }
+            ],
+            "default": { "bucket": "other" }
+        })))
+        .expect("manifest");
+        let source = build_source(br#"{"status":"active"}"#, b"{}", b"{}").expect("source");
+
+        let route = manifest.process_switch(0, &source).expect("switch route");
+        let steps = manifest.value_switch(0, &source).expect("steps context");
+        let steps: Value = serde_json::from_slice(&steps).expect("steps json");
+
+        assert_eq!(route, "active");
+        assert_eq!(
+            steps["switch"]["outputs"],
+            json!({ "bucket": "ready", "echo": "active" })
+        );
+        assert_eq!(steps["switch"]["route"], json!("active"));
+    }
+
+    #[test]
+    fn routing_switch_default_route_is_recorded() {
+        let manifest = DirectJsonManifest::parse(&switch_manifest(json!({
+            "value": { "valueType": "reference", "value": "data.status" },
+            "cases": [
+                {
+                    "matchType": "EQ",
+                    "match": "active",
+                    "output": { "bucket": "ready" },
+                    "route": "active"
+                }
+            ],
+            "default": { "bucket": "other" }
+        })))
+        .expect("manifest");
+        let source = build_source(br#"{"status":"done"}"#, b"{}", b"{}").expect("source");
+
+        let route = manifest.process_switch(0, &source).expect("switch route");
+        let steps = manifest.value_switch(0, &source).expect("steps context");
+        let steps: Value = serde_json::from_slice(&steps).expect("steps json");
+
+        assert_eq!(route, "default");
+        assert_eq!(steps["switch"]["outputs"], json!({ "bucket": "other" }));
+        assert_eq!(steps["switch"]["route"], json!("default"));
     }
 
     #[test]

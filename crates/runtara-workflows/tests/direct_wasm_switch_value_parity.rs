@@ -1,7 +1,7 @@
-//! Direct value Switch parity fixtures.
+//! Direct Switch parity fixtures.
 //!
-//! These tests compare the shared direct JSON stdlib value-switch helper with
-//! the current generated-code value Switch semantics for non-routing switches.
+//! These tests compare the shared direct JSON stdlib Switch helpers with the
+//! current generated-code Switch semantics for value and routing switches.
 
 use runtara_workflow_stdlib::conditions::{is_truthy, to_number, values_equal};
 use runtara_workflow_stdlib::direct_json::{DirectJsonManifest, build_source};
@@ -13,6 +13,7 @@ use serde_json::{Value, json};
 
 const SWITCH_VALUE_SIMPLE: &str = include_str!("fixtures/switch_value_simple.json");
 const SWITCH_VALUE_RANGE: &str = include_str!("fixtures/switch_value_range.json");
+const SWITCH_ROUTING_SIMPLE: &str = include_str!("fixtures/switch_routing_simple.json");
 
 #[test]
 fn direct_value_switch_matches_current_semantics() {
@@ -67,6 +68,45 @@ fn direct_value_switch_matches_current_semantics() {
     }
 }
 
+#[test]
+fn direct_routing_switch_matches_current_semantics() {
+    let cases = [
+        (
+            "first matching route",
+            json!({ "status": "active" }),
+            "active",
+            json!({ "bucket": "ready", "echo": "active" }),
+        ),
+        (
+            "array equality route",
+            json!({ "status": "queued" }),
+            "pending",
+            json!({ "bucket": "pending" }),
+        ),
+        (
+            "default route",
+            json!({ "status": "done" }),
+            "default",
+            json!({ "bucket": "other" }),
+        ),
+    ];
+
+    for (name, data, expected_route, expected_output) in cases {
+        let direct_result = direct_routing_switch_route_and_output(SWITCH_ROUTING_SIMPLE, &data);
+        let current_result = current_routing_switch_route_and_output(SWITCH_ROUTING_SIMPLE, &data);
+
+        assert_eq!(
+            direct_result, current_result,
+            "routing switch case `{name}`"
+        );
+        assert_eq!(
+            direct_result,
+            (expected_route.to_string(), expected_output),
+            "fixture expectation `{name}`"
+        );
+    }
+}
+
 fn direct_value_switch_output(graph_json: &str, data: &Value) -> Value {
     let graph: ExecutionGraph = serde_json::from_str(graph_json).expect("fixture parses");
     let manifest = build_direct_workflow_manifest(&graph).expect("manifest");
@@ -83,6 +123,29 @@ fn direct_value_switch_output(graph_json: &str, data: &Value) -> Value {
     steps[&manifest.graph.entry_point]["outputs"].clone()
 }
 
+fn direct_routing_switch_route_and_output(graph_json: &str, data: &Value) -> (String, Value) {
+    let graph: ExecutionGraph = serde_json::from_str(graph_json).expect("fixture parses");
+    let manifest = build_direct_workflow_manifest(&graph).expect("manifest");
+    let manifest_json = manifest.to_canonical_json().expect("manifest json");
+    let direct_manifest = DirectJsonManifest::parse(&manifest_json).expect("direct manifest");
+    let source = source_bytes(data, &manifest.graph.variables);
+
+    let switch_id = switch_id(&manifest.graph, &manifest.graph.entry_point);
+    let route = direct_manifest
+        .process_switch(switch_id, &source)
+        .expect("process-switch route");
+    let output = direct_manifest
+        .value_switch(switch_id, &source)
+        .expect("value-switch output");
+    let steps: Value = serde_json::from_slice(&output).expect("steps json");
+
+    assert_eq!(
+        steps[&manifest.graph.entry_point]["route"],
+        json!(route.clone())
+    );
+    (route, steps[&manifest.graph.entry_point]["outputs"].clone())
+}
+
 fn current_value_switch_output(graph_json: &str, data: &Value) -> Value {
     let graph_value: Value = serde_json::from_str(graph_json).expect("graph json");
     let graph: ExecutionGraph = serde_json::from_str(graph_json).expect("fixture parses");
@@ -93,6 +156,18 @@ fn current_value_switch_output(graph_json: &str, data: &Value) -> Value {
     let entry = graph_value["entryPoint"].as_str().expect("entry point");
     let config = &graph_value["steps"][entry]["config"];
     apply_current_value_switch(config, &source)
+}
+
+fn current_routing_switch_route_and_output(graph_json: &str, data: &Value) -> (String, Value) {
+    let graph_value: Value = serde_json::from_str(graph_json).expect("graph json");
+    let graph: ExecutionGraph = serde_json::from_str(graph_json).expect("fixture parses");
+    let manifest = build_direct_workflow_manifest(&graph).expect("manifest");
+    let source_bytes = source_bytes(data, &manifest.graph.variables);
+    let source: Value = serde_json::from_slice(&source_bytes).expect("source json");
+
+    let entry = graph_value["entryPoint"].as_str().expect("entry point");
+    let config = &graph_value["steps"][entry]["config"];
+    apply_current_routing_switch(config, &source)
 }
 
 fn apply_current_value_switch(config: &Value, source: &Value) -> Value {
@@ -118,6 +193,42 @@ fn apply_current_value_switch(config: &Value, source: &Value) -> Value {
         .cloned()
         .unwrap_or_else(|| Value::Object(serde_json::Map::new()));
     process_switch_output(&default, source)
+}
+
+fn apply_current_routing_switch(config: &Value, source: &Value) -> (String, Value) {
+    let Some(switch_value) = config.get("value") else {
+        let default = config
+            .get("default")
+            .cloned()
+            .unwrap_or_else(|| Value::Object(serde_json::Map::new()));
+        return (
+            "default".to_string(),
+            process_switch_output(&default, source),
+        );
+    };
+
+    if let Some(cases) = config.get("cases").and_then(Value::as_array) {
+        for case in cases {
+            let condition = switch_case_condition(switch_value, case);
+            if eval_current_condition(&condition, source) {
+                let route = case
+                    .get("route")
+                    .and_then(Value::as_str)
+                    .unwrap_or("default")
+                    .to_string();
+                return (route, process_switch_output(&case["output"], source));
+            }
+        }
+    }
+
+    let default = config
+        .get("default")
+        .cloned()
+        .unwrap_or_else(|| Value::Object(serde_json::Map::new()));
+    (
+        "default".to_string(),
+        process_switch_output(&default, source),
+    )
 }
 
 fn source_bytes(data: &Value, variables: &Value) -> Vec<u8> {

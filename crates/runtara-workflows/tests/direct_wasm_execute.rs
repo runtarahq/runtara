@@ -23,6 +23,7 @@ const CONDITIONAL_WORKFLOW: &str = include_str!("fixtures/conditional_workflow.j
 const CONDITIONAL_NESTED: &str = include_str!("fixtures/conditional_nested.json");
 const FILTER_SIMPLE: &str = include_str!("fixtures/filter_simple.json");
 const SWITCH_VALUE_SIMPLE: &str = include_str!("fixtures/switch_value_simple.json");
+const SWITCH_ROUTING_SIMPLE: &str = include_str!("fixtures/switch_routing_simple.json");
 const GROUP_BY_SIMPLE: &str = include_str!("fixtures/group_by_simple.json");
 
 #[derive(Debug)]
@@ -514,6 +515,44 @@ fn direct_wasm_execute_value_switch_finish_reports_completion() {
         serde_json::json!({
             "bucket": "ready",
             "echo": "active"
+        })
+    );
+}
+
+#[test]
+fn direct_wasm_execute_routing_switch_finish_reports_completion() {
+    let Some(components_dir) = direct_e2e_components_dir() else {
+        return;
+    };
+
+    let active_output = run_direct_workflow(
+        &components_dir,
+        "direct-wasm-execute-routing-switch-active",
+        SWITCH_ROUTING_SIMPLE,
+        br#"{"status":"active"}"#,
+    );
+    assert_eq!(
+        active_output,
+        serde_json::json!({
+            "path": "active",
+            "bucket": "ready",
+            "echo": "active",
+            "route": "active"
+        })
+    );
+
+    let default_output = run_direct_workflow(
+        &components_dir,
+        "direct-wasm-execute-routing-switch-default",
+        SWITCH_ROUTING_SIMPLE,
+        br#"{"status":"done"}"#,
+    );
+    assert_eq!(
+        default_output,
+        serde_json::json!({
+            "path": "default",
+            "bucket": "other",
+            "route": "default"
         })
     );
 }

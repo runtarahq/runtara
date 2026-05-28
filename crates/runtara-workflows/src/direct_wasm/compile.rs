@@ -432,6 +432,11 @@ enum DirectRunPlan {
         switch_id: u32,
         next_plan: Box<DirectRunPlan>,
     },
+    SwitchRoute {
+        switch_id: u32,
+        branches: Vec<DirectSwitchRoutePlan>,
+        default_plan: Box<DirectRunPlan>,
+    },
     GroupBy {
         group_id: u32,
         next_plan: Box<DirectRunPlan>,
@@ -441,6 +446,12 @@ enum DirectRunPlan {
         true_plan: Box<DirectRunPlan>,
         false_plan: Box<DirectRunPlan>,
     },
+}
+
+#[derive(Debug, Clone)]
+struct DirectSwitchRoutePlan {
+    label: String,
+    plan: Box<DirectRunPlan>,
 }
 
 impl DirectCoreConfig {
@@ -576,16 +587,40 @@ fn step_run_plan(
         }
         "Switch" => {
             let switch_id = switch_id(graph, step_id)?;
-            let next_step = normal_target(graph, step_id)?.to_string();
+            if switch_is_routing(graph, step_id)? {
+                let route_labels = switch_route_labels(graph, step_id)?;
+                let mut branches = Vec::new();
 
-            stack.push(step_id.to_string());
-            let next_plan = step_run_plan(graph, &next_step, stack)?;
-            stack.pop();
+                stack.push(step_id.to_string());
+                for label in route_labels {
+                    let target = branch_target(graph, step_id, &label)?.to_string();
+                    let plan = step_run_plan(graph, &target, stack)?;
+                    branches.push(DirectSwitchRoutePlan {
+                        label,
+                        plan: Box::new(plan),
+                    });
+                }
+                let default_target = branch_target(graph, step_id, "default")?.to_string();
+                let default_plan = step_run_plan(graph, &default_target, stack)?;
+                stack.pop();
 
-            Ok(DirectRunPlan::SwitchValue {
-                switch_id,
-                next_plan: Box::new(next_plan),
-            })
+                Ok(DirectRunPlan::SwitchRoute {
+                    switch_id,
+                    branches,
+                    default_plan: Box::new(default_plan),
+                })
+            } else {
+                let next_step = normal_target(graph, step_id)?.to_string();
+
+                stack.push(step_id.to_string());
+                let next_plan = step_run_plan(graph, &next_step, stack)?;
+                stack.pop();
+
+                Ok(DirectRunPlan::SwitchValue {
+                    switch_id,
+                    next_plan: Box::new(next_plan),
+                })
+            }
         }
         "GroupBy" => {
             let group_id = group_by_id(graph, step_id)?;
@@ -709,6 +744,48 @@ fn switch_id(graph: &DirectGraphManifest, step_id: &str) -> Result<u32, DirectCo
         .ok_or_else(|| {
             DirectCompileError::Component(format!("missing Switch config for step '{step_id}'"))
         })
+}
+
+fn switch_config<'a>(
+    graph: &'a DirectGraphManifest,
+    step_id: &str,
+) -> Result<&'a serde_json::Value, DirectCompileError> {
+    graph
+        .switches
+        .iter()
+        .find(|switch| switch.step_id == step_id && switch.purpose == "switch.config")
+        .map(|switch| &switch.value)
+        .ok_or_else(|| {
+            DirectCompileError::Component(format!("missing Switch config for step '{step_id}'"))
+        })
+}
+
+fn switch_is_routing(
+    graph: &DirectGraphManifest,
+    step_id: &str,
+) -> Result<bool, DirectCompileError> {
+    Ok(switch_config(graph, step_id)?
+        .get("cases")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|cases| cases.iter().any(|case| case.get("route").is_some())))
+}
+
+fn switch_route_labels(
+    graph: &DirectGraphManifest,
+    step_id: &str,
+) -> Result<Vec<String>, DirectCompileError> {
+    let mut labels = switch_config(graph, step_id)?
+        .get("cases")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|case| case.get("route").and_then(serde_json::Value::as_str))
+        .filter(|label| *label != "default")
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+    labels.sort();
+    labels.dedup();
+    Ok(labels)
 }
 
 fn group_by_id(graph: &DirectGraphManifest, step_id: &str) -> Result<u32, DirectCompileError> {
@@ -957,6 +1034,7 @@ struct DirectCoreImportIndices {
     stdlib_build_source: Option<u32>,
     stdlib_apply_mapping: Option<u32>,
     stdlib_eval_condition: Option<u32>,
+    stdlib_process_switch: Option<u32>,
     stdlib_filter: Option<u32>,
     stdlib_value_switch: Option<u32>,
     stdlib_group_by: Option<u32>,
@@ -980,6 +1058,10 @@ impl DirectCoreImportIndices {
                 self.stdlib_eval_condition,
                 "stdlib.eval-condition",
             )?,
+            stdlib_process_switch: require_import(
+                self.stdlib_process_switch,
+                "stdlib.process-switch",
+            )?,
             stdlib_filter: require_import(self.stdlib_filter, "stdlib.filter")?,
             stdlib_value_switch: require_import(self.stdlib_value_switch, "stdlib.value-switch")?,
             stdlib_group_by: require_import(self.stdlib_group_by, "stdlib.group-by")?,
@@ -995,6 +1077,7 @@ struct DirectCoreFunctionIndices {
     stdlib_build_source: u32,
     stdlib_apply_mapping: u32,
     stdlib_eval_condition: u32,
+    stdlib_process_switch: u32,
     stdlib_filter: u32,
     stdlib_value_switch: u32,
     stdlib_group_by: u32,
@@ -1041,6 +1124,8 @@ fn import_core_function(
         import_indices.stdlib_apply_mapping = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "eval-condition") {
         import_indices.stdlib_eval_condition = Some(function_index);
+    } else if is_stdlib_import(resolve, interface, function, "process-switch") {
+        import_indices.stdlib_process_switch = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "filter") {
         import_indices.stdlib_filter = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "value-switch") {
@@ -1203,8 +1288,10 @@ fn direct_run_function(
     const OUTPUT_LEN_LOCAL: u32 = 5;
     const STEPS_PTR_LOCAL: u32 = 6;
     const STEPS_LEN_LOCAL: u32 = 7;
+    const ROUTE_PTR_LOCAL: u32 = 8;
+    const ROUTE_LEN_LOCAL: u32 = 9;
 
-    let mut body = WasmFunction::new([(8, ValType::I32)]);
+    let mut body = WasmFunction::new([(10, ValType::I32)]);
 
     push_segment_args(&mut body, &config.static_data.manifest);
     push_retptr_arg(&mut body);
@@ -1246,6 +1333,8 @@ fn direct_run_function(
         SOURCE_LEN_LOCAL,
         OUTPUT_PTR_LOCAL,
         OUTPUT_LEN_LOCAL,
+        ROUTE_PTR_LOCAL,
+        ROUTE_LEN_LOCAL,
     );
 
     body.instruction(&Instruction::LocalGet(OUTPUT_PTR_LOCAL));
@@ -1271,6 +1360,8 @@ fn emit_run_plan_mapping(
     source_len_local: u32,
     output_ptr_local: u32,
     output_len_local: u32,
+    route_ptr_local: u32,
+    route_len_local: u32,
 ) {
     match run_plan {
         DirectRunPlan::Finish { mapping_id } => {
@@ -1303,6 +1394,8 @@ fn emit_run_plan_mapping(
                 source_len_local,
                 output_ptr_local,
                 output_len_local,
+                route_ptr_local,
+                route_len_local,
             );
         }
         DirectRunPlan::SwitchValue {
@@ -1324,6 +1417,32 @@ fn emit_run_plan_mapping(
                 source_len_local,
                 output_ptr_local,
                 output_len_local,
+                route_ptr_local,
+                route_len_local,
+            );
+        }
+        DirectRunPlan::SwitchRoute {
+            switch_id,
+            branches,
+            default_plan,
+        } => {
+            emit_switch_route_plan(
+                body,
+                indices,
+                variables,
+                *switch_id,
+                branches,
+                default_plan,
+                data_ptr_local,
+                data_len_local,
+                steps_ptr_local,
+                steps_len_local,
+                source_ptr_local,
+                source_len_local,
+                output_ptr_local,
+                output_len_local,
+                route_ptr_local,
+                route_len_local,
             );
         }
         DirectRunPlan::GroupBy {
@@ -1345,6 +1464,8 @@ fn emit_run_plan_mapping(
                 source_len_local,
                 output_ptr_local,
                 output_len_local,
+                route_ptr_local,
+                route_len_local,
             );
         }
         DirectRunPlan::Conditional {
@@ -1379,6 +1500,8 @@ fn emit_run_plan_mapping(
                 source_len_local,
                 output_ptr_local,
                 output_len_local,
+                route_ptr_local,
+                route_len_local,
             );
             body.instruction(&Instruction::Else);
             emit_run_plan_mapping(
@@ -1394,6 +1517,8 @@ fn emit_run_plan_mapping(
                 source_len_local,
                 output_ptr_local,
                 output_len_local,
+                route_ptr_local,
+                route_len_local,
             );
             body.instruction(&Instruction::End);
         }
@@ -1416,6 +1541,8 @@ fn emit_step_context_plan(
     source_len_local: u32,
     output_ptr_local: u32,
     output_len_local: u32,
+    route_ptr_local: u32,
+    route_len_local: u32,
 ) {
     body.instruction(&Instruction::I32Const(step_config_id as i32));
     body.instruction(&Instruction::LocalGet(source_ptr_local));
@@ -1450,7 +1577,180 @@ fn emit_step_context_plan(
         source_len_local,
         output_ptr_local,
         output_len_local,
+        route_ptr_local,
+        route_len_local,
     );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_switch_route_plan(
+    body: &mut WasmFunction,
+    indices: &DirectCoreFunctionIndices,
+    variables: &DirectDataSegment,
+    switch_id: u32,
+    branches: &[DirectSwitchRoutePlan],
+    default_plan: &DirectRunPlan,
+    data_ptr_local: u32,
+    data_len_local: u32,
+    steps_ptr_local: u32,
+    steps_len_local: u32,
+    source_ptr_local: u32,
+    source_len_local: u32,
+    output_ptr_local: u32,
+    output_len_local: u32,
+    route_ptr_local: u32,
+    route_len_local: u32,
+) {
+    body.instruction(&Instruction::I32Const(switch_id as i32));
+    body.instruction(&Instruction::LocalGet(source_ptr_local));
+    body.instruction(&Instruction::LocalGet(source_len_local));
+    push_retptr_arg(body);
+    body.instruction(&Instruction::Call(indices.stdlib_process_switch));
+    return_if_retptr_error(body);
+    load_retptr_list(body, route_ptr_local, route_len_local);
+
+    body.instruction(&Instruction::I32Const(switch_id as i32));
+    body.instruction(&Instruction::LocalGet(source_ptr_local));
+    body.instruction(&Instruction::LocalGet(source_len_local));
+    push_retptr_arg(body);
+    body.instruction(&Instruction::Call(indices.stdlib_value_switch));
+    return_if_retptr_error(body);
+    load_retptr_list(body, steps_ptr_local, steps_len_local);
+
+    emit_build_source(
+        body,
+        indices,
+        variables,
+        data_ptr_local,
+        data_len_local,
+        steps_ptr_local,
+        steps_len_local,
+        source_ptr_local,
+        source_len_local,
+    );
+
+    emit_switch_route_dispatch(
+        body,
+        indices,
+        variables,
+        branches,
+        default_plan,
+        data_ptr_local,
+        data_len_local,
+        steps_ptr_local,
+        steps_len_local,
+        source_ptr_local,
+        source_len_local,
+        output_ptr_local,
+        output_len_local,
+        route_ptr_local,
+        route_len_local,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_switch_route_dispatch(
+    body: &mut WasmFunction,
+    indices: &DirectCoreFunctionIndices,
+    variables: &DirectDataSegment,
+    branches: &[DirectSwitchRoutePlan],
+    default_plan: &DirectRunPlan,
+    data_ptr_local: u32,
+    data_len_local: u32,
+    steps_ptr_local: u32,
+    steps_len_local: u32,
+    source_ptr_local: u32,
+    source_len_local: u32,
+    output_ptr_local: u32,
+    output_len_local: u32,
+    route_ptr_local: u32,
+    route_len_local: u32,
+) {
+    let Some((branch, remaining)) = branches.split_first() else {
+        emit_run_plan_mapping(
+            body,
+            indices,
+            variables,
+            default_plan,
+            data_ptr_local,
+            data_len_local,
+            steps_ptr_local,
+            steps_len_local,
+            source_ptr_local,
+            source_len_local,
+            output_ptr_local,
+            output_len_local,
+            route_ptr_local,
+            route_len_local,
+        );
+        return;
+    };
+
+    emit_route_equals(body, route_ptr_local, route_len_local, &branch.label);
+    body.instruction(&Instruction::If(BlockType::Empty));
+    emit_run_plan_mapping(
+        body,
+        indices,
+        variables,
+        &branch.plan,
+        data_ptr_local,
+        data_len_local,
+        steps_ptr_local,
+        steps_len_local,
+        source_ptr_local,
+        source_len_local,
+        output_ptr_local,
+        output_len_local,
+        route_ptr_local,
+        route_len_local,
+    );
+    body.instruction(&Instruction::Else);
+    emit_switch_route_dispatch(
+        body,
+        indices,
+        variables,
+        remaining,
+        default_plan,
+        data_ptr_local,
+        data_len_local,
+        steps_ptr_local,
+        steps_len_local,
+        source_ptr_local,
+        source_len_local,
+        output_ptr_local,
+        output_len_local,
+        route_ptr_local,
+        route_len_local,
+    );
+    body.instruction(&Instruction::End);
+}
+
+fn emit_route_equals(
+    body: &mut WasmFunction,
+    route_ptr_local: u32,
+    route_len_local: u32,
+    label: &str,
+) {
+    body.instruction(&Instruction::LocalGet(route_len_local));
+    body.instruction(&Instruction::I32Const(label.len() as i32));
+    body.instruction(&Instruction::I32Eq);
+    body.instruction(&Instruction::If(BlockType::Result(ValType::I32)));
+    body.instruction(&Instruction::I32Const(1));
+
+    for (offset, byte) in label.as_bytes().iter().enumerate() {
+        body.instruction(&Instruction::LocalGet(route_ptr_local));
+        body.instruction(&Instruction::I32Load8U(MemArg {
+            offset: offset as u64,
+            align: 0,
+            memory_index: 0,
+        }));
+        body.instruction(&Instruction::I32Const(i32::from(*byte)));
+        body.instruction(&Instruction::I32Eq);
+        body.instruction(&Instruction::I32And);
+    }
+    body.instruction(&Instruction::Else);
+    body.instruction(&Instruction::I32Const(0));
+    body.instruction(&Instruction::End);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1700,6 +2000,7 @@ mod tests {
             }
             "filter" => include_str!("../../tests/fixtures/filter_simple.json"),
             "switch_value" => include_str!("../../tests/fixtures/switch_value_simple.json"),
+            "switch_routing" => include_str!("../../tests/fixtures/switch_routing_simple.json"),
             "group_by" => include_str!("../../tests/fixtures/group_by_simple.json"),
             "transform" => include_str!("../../tests/fixtures/transform_workflow.json"),
             other => panic!("unknown fixture {other}"),
@@ -1719,6 +2020,16 @@ mod tests {
             }
             DirectRunPlan::SwitchValue { next_plan, .. } => {
                 collect_run_plan_ids(next_plan, condition_ids, mapping_ids);
+            }
+            DirectRunPlan::SwitchRoute {
+                branches,
+                default_plan,
+                ..
+            } => {
+                for branch in branches {
+                    collect_run_plan_ids(&branch.plan, condition_ids, mapping_ids);
+                }
+                collect_run_plan_ids(default_plan, condition_ids, mapping_ids);
             }
             DirectRunPlan::GroupBy { next_plan, .. } => {
                 collect_run_plan_ids(next_plan, condition_ids, mapping_ids);
@@ -2069,6 +2380,31 @@ mod tests {
     }
 
     #[test]
+    fn direct_compile_supports_routing_switch_finish_graph() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let result = compile_direct_workflow(DirectCompilationInput {
+            workflow_id: "switch-routing".to_string(),
+            version: 1,
+            execution_graph: fixture("switch_routing"),
+            output_dir: temp.path().to_path_buf(),
+        })
+        .expect("direct routing Switch compile should succeed");
+
+        let wasm = fs::read(&result.wasm_path).expect("wasm");
+        Validator::new()
+            .validate_all(&wasm)
+            .expect("direct routing Switch artifact should validate");
+        assert!(result.support_report.supported);
+        assert_eq!(result.support_report.unsupported, vec![]);
+
+        let manifest: DirectWorkflowManifest =
+            serde_json::from_slice(&fs::read(&result.manifest_path).expect("manifest"))
+                .expect("manifest json");
+        assert_eq!(manifest.graph.switches.len(), 1);
+        assert_eq!(manifest.graph.mappings.len(), 3);
+    }
+
+    #[test]
     fn direct_core_run_lowers_finish_mapping_through_stdlib() {
         let graph = fixture("simple");
         let manifest = build_direct_workflow_manifest(&graph).expect("manifest");
@@ -2144,6 +2480,18 @@ mod tests {
                 ],
             ),
             (
+                "stdlib.process-switch",
+                "runtara:workflow-stdlib/json",
+                "cm32p2|runtara:workflow-stdlib/json@0.1",
+                "process-switch",
+                vec![
+                    WasmType::I32,
+                    WasmType::Pointer,
+                    WasmType::Length,
+                    WasmType::Pointer,
+                ],
+            ),
+            (
                 "stdlib.value-switch",
                 "runtara:workflow-stdlib/json",
                 "cm32p2|runtara:workflow-stdlib/json@0.1",
@@ -2207,6 +2555,7 @@ mod tests {
         let mut build_source_index = None;
         let mut apply_mapping_index = None;
         let mut eval_condition_index = None;
+        let mut process_switch_index = None;
         let mut complete_index = None;
         let mut saw_manifest_data = false;
         let mut saw_variables_data = false;
@@ -2237,6 +2586,9 @@ mod tests {
                                 }
                                 ("cm32p2|runtara:workflow-stdlib/json@0.1", "eval-condition") => {
                                     eval_condition_index = Some(next_function_index)
+                                }
+                                ("cm32p2|runtara:workflow-stdlib/json@0.1", "process-switch") => {
+                                    process_switch_index = Some(next_function_index)
                                 }
                                 ("cm32p2|runtara:workflow-runtime/runtime@0.1", "complete") => {
                                     complete_index = Some(next_function_index)
@@ -2295,6 +2647,10 @@ mod tests {
         assert!(
             eval_condition_index.is_some(),
             "eval-condition import should exist for conditional lowering"
+        );
+        assert!(
+            process_switch_index.is_some(),
+            "process-switch import should exist for routing Switch lowering"
         );
         assert_eq!(
             run_calls, expected_call_order,
@@ -2865,6 +3221,161 @@ mod tests {
         assert!(
             saw_mapping_id,
             "Finish mapping id should be passed to stdlib"
+        );
+    }
+
+    #[test]
+    fn direct_core_run_lowers_routing_switch_finish_through_stdlib() {
+        let graph = fixture("switch_routing");
+        let manifest = build_direct_workflow_manifest(&graph).expect("manifest");
+        let manifest_json = manifest.to_canonical_json().expect("manifest json");
+        let core_config = DirectCoreConfig::new(&manifest, &manifest_json).expect("core config");
+        let DirectRunPlan::SwitchRoute {
+            switch_id,
+            branches,
+            default_plan,
+        } = &core_config.run_plan
+        else {
+            panic!("expected routing Switch run plan");
+        };
+        assert_eq!(
+            branches
+                .iter()
+                .map(|branch| branch.label.as_str())
+                .collect::<Vec<_>>(),
+            vec!["active", "pending"]
+        );
+        let DirectRunPlan::Finish {
+            mapping_id: default_mapping_id,
+        } = default_plan.as_ref()
+        else {
+            panic!("expected routing Switch default branch to Finish");
+        };
+        let mut mapping_ids = branches
+            .iter()
+            .map(|branch| match branch.plan.as_ref() {
+                DirectRunPlan::Finish { mapping_id } => *mapping_id,
+                other => panic!("expected routing Switch branch to Finish, got {other:?}"),
+            })
+            .collect::<Vec<_>>();
+        mapping_ids.push(*default_mapping_id);
+
+        let (resolve, world) = build_direct_component_resolve().expect("resolve");
+        let core = emit_direct_core_module(&resolve, world, &core_config).expect("core module");
+        Validator::new()
+            .validate_all(&core)
+            .expect("routing Switch core module validates");
+
+        let mut next_function_index = 0;
+        let mut build_source_index = None;
+        let mut process_switch_index = None;
+        let mut value_switch_index = None;
+        let mut apply_mapping_index = None;
+        let mut saw_switch_id = false;
+        let mut seen_mapping_ids = Vec::new();
+        let mut saw_active_label_len = false;
+        let mut saw_pending_label_len = false;
+        let mut run_calls = Vec::new();
+        let mut code_body_index = 0;
+
+        for payload in Parser::new(0).parse_all(&core) {
+            match payload.expect("core wasm payload") {
+                Payload::ImportSection(reader) => {
+                    for import in reader.into_imports() {
+                        let import = import.expect("core import");
+                        if matches!(import.ty, TypeRef::Func(_)) {
+                            match (import.module, import.name) {
+                                ("cm32p2|runtara:workflow-stdlib/json@0.1", "build-source") => {
+                                    build_source_index = Some(next_function_index)
+                                }
+                                ("cm32p2|runtara:workflow-stdlib/json@0.1", "process-switch") => {
+                                    process_switch_index = Some(next_function_index)
+                                }
+                                ("cm32p2|runtara:workflow-stdlib/json@0.1", "value-switch") => {
+                                    value_switch_index = Some(next_function_index)
+                                }
+                                ("cm32p2|runtara:workflow-stdlib/json@0.1", "apply-mapping") => {
+                                    apply_mapping_index = Some(next_function_index)
+                                }
+                                _ => {}
+                            }
+                            next_function_index += 1;
+                        }
+                    }
+                }
+                Payload::CodeSectionEntry(body) => {
+                    if code_body_index == 0 {
+                        for operator in body.get_operators_reader().expect("operators") {
+                            match operator.expect("operator") {
+                                Operator::Call { function_index } => run_calls.push(function_index),
+                                Operator::I32Const { value } => {
+                                    if value == *switch_id as i32 {
+                                        saw_switch_id = true;
+                                    }
+                                    if mapping_ids.contains(&(value as u32)) {
+                                        seen_mapping_ids.push(value as u32);
+                                    }
+                                    saw_active_label_len |= value == "active".len() as i32;
+                                    saw_pending_label_len |= value == "pending".len() as i32;
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                    code_body_index += 1;
+                }
+                _ => {}
+            }
+        }
+
+        let build_source_index = build_source_index.expect("build-source import");
+        let process_switch_index = process_switch_index.expect("process-switch import");
+        let value_switch_index = value_switch_index.expect("value-switch import");
+        let apply_mapping_index = apply_mapping_index.expect("apply-mapping import");
+        assert_eq!(
+            run_calls
+                .iter()
+                .filter(|&&index| index == build_source_index)
+                .count(),
+            2,
+            "routing Switch run should rebuild source after updating steps context"
+        );
+        assert_eq!(
+            run_calls
+                .iter()
+                .filter(|&&index| index == process_switch_index)
+                .count(),
+            1,
+            "routing Switch run should call process-switch once"
+        );
+        assert_eq!(
+            run_calls
+                .iter()
+                .filter(|&&index| index == value_switch_index)
+                .count(),
+            1,
+            "routing Switch run should call value-switch once"
+        );
+        assert_eq!(
+            run_calls
+                .iter()
+                .filter(|&&index| index == apply_mapping_index)
+                .count(),
+            3,
+            "routing Switch run should apply one Finish mapping per route leaf"
+        );
+        mapping_ids.sort_unstable();
+        seen_mapping_ids.sort_unstable();
+        seen_mapping_ids.dedup();
+        assert_eq!(seen_mapping_ids, mapping_ids);
+        assert!(saw_switch_id, "Switch id should be passed to stdlib");
+        assert!(
+            saw_active_label_len,
+            "active route comparison should be emitted"
+        );
+        assert!(
+            saw_pending_label_len,
+            "pending route comparison should be emitted"
         );
     }
 
