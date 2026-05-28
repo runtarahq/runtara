@@ -69,6 +69,12 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   condition evaluation, generated-code-compatible iteration variables including
   `_loop_indices`, `_index`, `_previousOutputs`, `_loop`, and `_scope_id`, and
   final While step-output envelopes.
+- The direct core emitter now has internal structural lowering for While loops:
+  it initializes While state through stdlib, checks max iterations, injects loop
+  context before condition evaluation, builds iteration variables, runs the
+  nested direct run plan, advances loop state, and writes the final While step
+  envelope before continuing normal flow. Public While support remains gated
+  until heartbeat/cancellation/pause-shutdown lifecycle parity is implemented.
 - `runtara-workflow-stdlib` now has a `direct-component` feature and
   component metadata for `runtara:workflow-stdlib`. That feature builds a
   `wasm32-wasip2` stdlib component without pulling in SDK/runtime, HTTP, AI,
@@ -1741,16 +1747,17 @@ Implementation steps:
    - Split retry/timeout/breakpoint semantics: pending.
 3. Implement `While`:
    - config/condition manifest records and nested graph link: done;
-   - max iterations: stdlib helper and WIT export done, direct lowering
-     pending;
+   - max iterations: stdlib helper, WIT export, and internal direct-core
+     lowering done;
    - loop state initialization/advance and final output envelope: stdlib
-     helpers and WIT exports done, direct lowering pending;
+     helpers, WIT exports, and internal direct-core lowering done;
    - condition evaluation before each iteration: stdlib source-injection and
-     condition-evaluation helpers done, direct lowering pending;
+     condition-evaluation helpers plus internal direct-core lowering done;
    - `_previousOutputs`, `_loop_indices`, `_index`, `_loop`, and `_scope_id`
-     iteration variable shape: stdlib helper and WIT export done, direct
-     lowering pending;
-   - heartbeat/cancellation checks;
+     iteration variable shape: stdlib helper, WIT export, and internal
+     direct-core lowering done;
+   - heartbeat/cancellation checks: pending; public While support remains
+     gated until lifecycle parity is complete;
    - onError routing.
 4. Defer parallel split until runtime support and test coverage are explicit.
 

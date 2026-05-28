@@ -122,6 +122,14 @@ const DIRECT_SPLIT_PARENT_SOURCE_PTR_LOCAL: u32 = 24;
 const DIRECT_SPLIT_PARENT_SOURCE_LEN_LOCAL: u32 = 25;
 const DIRECT_SPLIT_VARIABLES_PTR_LOCAL: u32 = 26;
 const DIRECT_SPLIT_VARIABLES_LEN_LOCAL: u32 = 27;
+const DIRECT_WHILE_MAX_ITERATIONS_LOCAL: u32 = DIRECT_SPLIT_COUNT_LOCAL;
+const DIRECT_WHILE_INDEX_LOCAL: u32 = DIRECT_SPLIT_INDEX_LOCAL;
+const DIRECT_WHILE_STATE_PTR_LOCAL: u32 = DIRECT_SPLIT_RESULTS_PTR_LOCAL;
+const DIRECT_WHILE_STATE_LEN_LOCAL: u32 = DIRECT_SPLIT_RESULTS_LEN_LOCAL;
+const DIRECT_WHILE_PARENT_SOURCE_PTR_LOCAL: u32 = DIRECT_SPLIT_PARENT_SOURCE_PTR_LOCAL;
+const DIRECT_WHILE_PARENT_SOURCE_LEN_LOCAL: u32 = DIRECT_SPLIT_PARENT_SOURCE_LEN_LOCAL;
+const DIRECT_WHILE_VARIABLES_PTR_LOCAL: u32 = DIRECT_SPLIT_VARIABLES_PTR_LOCAL;
+const DIRECT_WHILE_VARIABLES_LEN_LOCAL: u32 = DIRECT_SPLIT_VARIABLES_LEN_LOCAL;
 const DIRECT_EMPTY_STEPS_CONTEXT: &[u8] = b"{}";
 const DIRECT_EMPTY_SPLIT_RESULTS: &[u8] = b"[]";
 const DIRECT_WORKFLOW_LOG_KIND: &[u8] = b"workflow_log";
@@ -601,6 +609,12 @@ enum DirectRunPlan {
         nested_plan: Box<DirectRunPlan>,
         next_plan: Box<DirectRunPlan>,
     },
+    While {
+        step_id: String,
+        while_id: u32,
+        nested_plan: Box<DirectRunPlan>,
+        next_plan: Box<DirectRunPlan>,
+    },
     Delay {
         step_id: String,
         delay_id: u32,
@@ -962,8 +976,8 @@ fn direct_run_plan(manifest: &DirectWorkflowManifest) -> Result<DirectRunPlan, D
         })?;
 
     match entry.step_type.as_str() {
-        "Finish" | "Filter" | "Switch" | "GroupBy" | "Split" | "Delay" | "Log" | "Agent"
-        | "Error" | "Conditional" => step_run_plan(
+        "Finish" | "Filter" | "Switch" | "GroupBy" | "Split" | "While" | "Delay" | "Log"
+        | "Agent" | "Error" | "Conditional" => step_run_plan(
             &manifest.graph,
             &manifest.graph.entry_point,
             &mut Vec::new(),
@@ -1081,6 +1095,20 @@ fn step_run_plan_inner(
                 step_id: step_id.to_string(),
                 split_id,
                 dont_stop_on_failed,
+                nested_plan: Box::new(nested_plan),
+                next_plan: Box::new(next_plan),
+            })
+        }
+        "While" => {
+            let while_id = while_id(graph, step_id)?;
+            let nested_graph = while_subgraph(graph, step_id)?;
+            let nested_plan =
+                step_run_plan(nested_graph, &nested_graph.entry_point, &mut Vec::new())?;
+            let next_plan = normal_flow_plan(graph, step_id, stack, include_on_error)?;
+
+            Ok(DirectRunPlan::While {
+                step_id: step_id.to_string(),
+                while_id,
                 nested_plan: Box::new(nested_plan),
                 next_plan: Box::new(next_plan),
             })
@@ -1533,6 +1561,46 @@ fn split_subgraph<'a>(
         })
 }
 
+fn while_id(graph: &DirectGraphManifest, step_id: &str) -> Result<u32, DirectCompileError> {
+    if !graph
+        .steps
+        .iter()
+        .any(|step| step.id == step_id && step.step_type == "While")
+    {
+        return Err(DirectCompileError::Component(format!(
+            "direct step '{step_id}' is not a While step"
+        )));
+    }
+
+    graph
+        .whiles
+        .iter()
+        .find(|while_step| while_step.step_id == step_id && while_step.purpose == "while.config")
+        .map(|while_step| while_step.id)
+        .ok_or_else(|| {
+            DirectCompileError::Component(format!("missing While config for step '{step_id}'"))
+        })
+}
+
+fn while_subgraph<'a>(
+    graph: &'a DirectGraphManifest,
+    step_id: &str,
+) -> Result<&'a DirectGraphManifest, DirectCompileError> {
+    graph
+        .steps
+        .iter()
+        .find(|step| step.id == step_id && step.step_type == "While")
+        .and_then(|step| {
+            step.nested_graphs
+                .iter()
+                .find(|nested| nested.role == "while.subgraph")
+        })
+        .map(|nested| nested.graph.as_ref())
+        .ok_or_else(|| {
+            DirectCompileError::Component(format!("missing While subgraph for step '{step_id}'"))
+        })
+}
+
 fn delay_config<'a>(
     graph: &'a DirectGraphManifest,
     step_id: &str,
@@ -1901,6 +1969,13 @@ struct DirectCoreImportIndices {
     stdlib_split_append_output: Option<u32>,
     stdlib_split_append_error: Option<u32>,
     stdlib_split_output: Option<u32>,
+    stdlib_while_max_iterations: Option<u32>,
+    stdlib_while_initial_state: Option<u32>,
+    stdlib_while_condition_source: Option<u32>,
+    stdlib_while_condition: Option<u32>,
+    stdlib_while_iteration_variables: Option<u32>,
+    stdlib_while_advance_state: Option<u32>,
+    stdlib_while_output: Option<u32>,
     stdlib_delay_duration_ms: Option<u32>,
     stdlib_delay: Option<u32>,
     stdlib_agent_output: Option<u32>,
@@ -2011,6 +2086,31 @@ impl DirectCoreImportIndices {
                 "stdlib.split-append-error",
             )?,
             stdlib_split_output: require_import(self.stdlib_split_output, "stdlib.split-output")?,
+            stdlib_while_max_iterations: require_import(
+                self.stdlib_while_max_iterations,
+                "stdlib.while-max-iterations",
+            )?,
+            stdlib_while_initial_state: require_import(
+                self.stdlib_while_initial_state,
+                "stdlib.while-initial-state",
+            )?,
+            stdlib_while_condition_source: require_import(
+                self.stdlib_while_condition_source,
+                "stdlib.while-condition-source",
+            )?,
+            stdlib_while_condition: require_import(
+                self.stdlib_while_condition,
+                "stdlib.while-condition",
+            )?,
+            stdlib_while_iteration_variables: require_import(
+                self.stdlib_while_iteration_variables,
+                "stdlib.while-iteration-variables",
+            )?,
+            stdlib_while_advance_state: require_import(
+                self.stdlib_while_advance_state,
+                "stdlib.while-advance-state",
+            )?,
+            stdlib_while_output: require_import(self.stdlib_while_output, "stdlib.while-output")?,
             stdlib_delay_duration_ms: require_import(
                 self.stdlib_delay_duration_ms,
                 "stdlib.delay-duration-ms",
@@ -2098,6 +2198,13 @@ struct DirectCoreFunctionIndices {
     stdlib_split_append_output: u32,
     stdlib_split_append_error: u32,
     stdlib_split_output: u32,
+    stdlib_while_max_iterations: u32,
+    stdlib_while_initial_state: u32,
+    stdlib_while_condition_source: u32,
+    stdlib_while_condition: u32,
+    stdlib_while_iteration_variables: u32,
+    stdlib_while_advance_state: u32,
+    stdlib_while_output: u32,
     stdlib_delay_duration_ms: u32,
     stdlib_delay: u32,
     stdlib_agent_output: u32,
@@ -2216,6 +2323,20 @@ fn import_core_function(
         import_indices.stdlib_split_append_error = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "split-output") {
         import_indices.stdlib_split_output = Some(function_index);
+    } else if is_stdlib_import(resolve, interface, function, "while-max-iterations") {
+        import_indices.stdlib_while_max_iterations = Some(function_index);
+    } else if is_stdlib_import(resolve, interface, function, "while-initial-state") {
+        import_indices.stdlib_while_initial_state = Some(function_index);
+    } else if is_stdlib_import(resolve, interface, function, "while-condition-source") {
+        import_indices.stdlib_while_condition_source = Some(function_index);
+    } else if is_stdlib_import(resolve, interface, function, "while-condition") {
+        import_indices.stdlib_while_condition = Some(function_index);
+    } else if is_stdlib_import(resolve, interface, function, "while-iteration-variables") {
+        import_indices.stdlib_while_iteration_variables = Some(function_index);
+    } else if is_stdlib_import(resolve, interface, function, "while-advance-state") {
+        import_indices.stdlib_while_advance_state = Some(function_index);
+    } else if is_stdlib_import(resolve, interface, function, "while-output") {
+        import_indices.stdlib_while_output = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "delay-duration-ms") {
         import_indices.stdlib_delay_duration_ms = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "delay") {
@@ -2702,6 +2823,37 @@ fn emit_run_plan_mapping(
                 step_id,
                 *split_id,
                 *dont_stop_on_failed,
+                nested_plan,
+                next_plan,
+                data_ptr_local,
+                data_len_local,
+                steps_ptr_local,
+                steps_len_local,
+                source_ptr_local,
+                source_len_local,
+                output_ptr_local,
+                output_len_local,
+                route_ptr_local,
+                route_len_local,
+                workflow_log_kind,
+                workflow_error_kind,
+                failure_target,
+            );
+        }
+        DirectRunPlan::While {
+            step_id,
+            while_id,
+            nested_plan,
+            next_plan,
+        } => {
+            emit_while_plan(
+                body,
+                indices,
+                static_data,
+                track_events,
+                variables,
+                step_id,
+                *while_id,
                 nested_plan,
                 next_plan,
                 data_ptr_local,
@@ -3421,6 +3573,233 @@ fn emit_split_plan(
     body.instruction(&Instruction::LocalGet(DIRECT_SPLIT_RESULTS_LEN_LOCAL));
     push_retptr_arg(body);
     body.instruction(&Instruction::Call(indices.stdlib_split_output));
+    return_if_retptr_error(body);
+    load_retptr_list(body, steps_ptr_local, steps_len_local);
+
+    emit_build_source(
+        body,
+        indices,
+        variables,
+        data_ptr_local,
+        data_len_local,
+        steps_ptr_local,
+        steps_len_local,
+        source_ptr_local,
+        source_len_local,
+        failure_target,
+    );
+
+    emit_step_debug_event(
+        body,
+        indices,
+        static_data,
+        track_events,
+        false,
+        step_id,
+        source_ptr_local,
+        source_len_local,
+        output_ptr_local,
+        output_len_local,
+    );
+
+    emit_run_plan_mapping(
+        body,
+        indices,
+        static_data,
+        track_events,
+        variables,
+        next_plan,
+        data_ptr_local,
+        data_len_local,
+        steps_ptr_local,
+        steps_len_local,
+        source_ptr_local,
+        source_len_local,
+        output_ptr_local,
+        output_len_local,
+        route_ptr_local,
+        route_len_local,
+        workflow_log_kind,
+        workflow_error_kind,
+        failure_target,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_while_plan(
+    body: &mut WasmFunction,
+    indices: &DirectCoreFunctionIndices,
+    static_data: &DirectCoreStaticData,
+    track_events: bool,
+    variables: DirectVariables<'_>,
+    step_id: &str,
+    while_id: u32,
+    nested_plan: &DirectRunPlan,
+    next_plan: &DirectRunPlan,
+    data_ptr_local: u32,
+    data_len_local: u32,
+    steps_ptr_local: u32,
+    steps_len_local: u32,
+    source_ptr_local: u32,
+    source_len_local: u32,
+    output_ptr_local: u32,
+    output_len_local: u32,
+    route_ptr_local: u32,
+    route_len_local: u32,
+    workflow_log_kind: &DirectDataSegment,
+    workflow_error_kind: &DirectDataSegment,
+    failure_target: Option<DirectFailureTarget>,
+) {
+    emit_step_debug_event(
+        body,
+        indices,
+        static_data,
+        track_events,
+        true,
+        step_id,
+        source_ptr_local,
+        source_len_local,
+        output_ptr_local,
+        output_len_local,
+    );
+
+    body.instruction(&Instruction::LocalGet(source_ptr_local));
+    body.instruction(&Instruction::LocalSet(DIRECT_WHILE_PARENT_SOURCE_PTR_LOCAL));
+    body.instruction(&Instruction::LocalGet(source_len_local));
+    body.instruction(&Instruction::LocalSet(DIRECT_WHILE_PARENT_SOURCE_LEN_LOCAL));
+
+    body.instruction(&Instruction::I32Const(while_id as i32));
+    push_retptr_arg(body);
+    body.instruction(&Instruction::Call(indices.stdlib_while_max_iterations));
+    return_if_retptr_error(body);
+    push_retptr_i32_load(body, DIRECT_RET_U32_OK_OFFSET);
+    body.instruction(&Instruction::LocalSet(DIRECT_WHILE_MAX_ITERATIONS_LOCAL));
+
+    body.instruction(&Instruction::I32Const(while_id as i32));
+    push_retptr_arg(body);
+    body.instruction(&Instruction::Call(indices.stdlib_while_initial_state));
+    return_if_retptr_error(body);
+    load_retptr_list(
+        body,
+        DIRECT_WHILE_STATE_PTR_LOCAL,
+        DIRECT_WHILE_STATE_LEN_LOCAL,
+    );
+
+    body.instruction(&Instruction::I32Const(0));
+    body.instruction(&Instruction::LocalSet(DIRECT_WHILE_INDEX_LOCAL));
+    body.instruction(&Instruction::Block(BlockType::Empty));
+    body.instruction(&Instruction::Loop(BlockType::Empty));
+    body.instruction(&Instruction::LocalGet(DIRECT_WHILE_INDEX_LOCAL));
+    body.instruction(&Instruction::LocalGet(DIRECT_WHILE_MAX_ITERATIONS_LOCAL));
+    body.instruction(&Instruction::I32GeU);
+    body.instruction(&Instruction::BrIf(1));
+
+    body.instruction(&Instruction::I32Const(while_id as i32));
+    body.instruction(&Instruction::LocalGet(DIRECT_WHILE_PARENT_SOURCE_PTR_LOCAL));
+    body.instruction(&Instruction::LocalGet(DIRECT_WHILE_PARENT_SOURCE_LEN_LOCAL));
+    body.instruction(&Instruction::LocalGet(DIRECT_WHILE_STATE_PTR_LOCAL));
+    body.instruction(&Instruction::LocalGet(DIRECT_WHILE_STATE_LEN_LOCAL));
+    push_retptr_arg(body);
+    body.instruction(&Instruction::Call(indices.stdlib_while_condition_source));
+    return_if_retptr_error(body);
+    load_retptr_list(body, source_ptr_local, source_len_local);
+
+    body.instruction(&Instruction::I32Const(while_id as i32));
+    body.instruction(&Instruction::LocalGet(source_ptr_local));
+    body.instruction(&Instruction::LocalGet(source_len_local));
+    push_retptr_arg(body);
+    body.instruction(&Instruction::Call(indices.stdlib_while_condition));
+    return_if_retptr_error(body);
+    push_retptr_u8_load(body, DIRECT_RET_BOOL_OK_OFFSET);
+    body.instruction(&Instruction::I32Eqz);
+    body.instruction(&Instruction::BrIf(1));
+
+    body.instruction(&Instruction::I32Const(while_id as i32));
+    push_variables_args(body, variables);
+    body.instruction(&Instruction::LocalGet(DIRECT_WHILE_STATE_PTR_LOCAL));
+    body.instruction(&Instruction::LocalGet(DIRECT_WHILE_STATE_LEN_LOCAL));
+    push_retptr_arg(body);
+    body.instruction(&Instruction::Call(indices.stdlib_while_iteration_variables));
+    return_if_retptr_error(body);
+    load_retptr_list(
+        body,
+        DIRECT_WHILE_VARIABLES_PTR_LOCAL,
+        DIRECT_WHILE_VARIABLES_LEN_LOCAL,
+    );
+
+    body.instruction(&Instruction::I32Const(static_data.steps.offset));
+    body.instruction(&Instruction::LocalSet(steps_ptr_local));
+    body.instruction(&Instruction::I32Const(static_data.steps.len_i32()));
+    body.instruction(&Instruction::LocalSet(steps_len_local));
+
+    let iteration_variables = DirectVariables::Locals {
+        ptr_local: DIRECT_WHILE_VARIABLES_PTR_LOCAL,
+        len_local: DIRECT_WHILE_VARIABLES_LEN_LOCAL,
+    };
+    emit_build_source(
+        body,
+        indices,
+        iteration_variables,
+        data_ptr_local,
+        data_len_local,
+        steps_ptr_local,
+        steps_len_local,
+        source_ptr_local,
+        source_len_local,
+        failure_target,
+    );
+
+    emit_run_plan_mapping(
+        body,
+        indices,
+        static_data,
+        track_events,
+        iteration_variables,
+        nested_plan,
+        data_ptr_local,
+        data_len_local,
+        steps_ptr_local,
+        steps_len_local,
+        source_ptr_local,
+        source_len_local,
+        output_ptr_local,
+        output_len_local,
+        route_ptr_local,
+        route_len_local,
+        workflow_log_kind,
+        workflow_error_kind,
+        failure_target,
+    );
+
+    body.instruction(&Instruction::I32Const(while_id as i32));
+    body.instruction(&Instruction::LocalGet(DIRECT_WHILE_STATE_PTR_LOCAL));
+    body.instruction(&Instruction::LocalGet(DIRECT_WHILE_STATE_LEN_LOCAL));
+    body.instruction(&Instruction::LocalGet(output_ptr_local));
+    body.instruction(&Instruction::LocalGet(output_len_local));
+    push_retptr_arg(body);
+    body.instruction(&Instruction::Call(indices.stdlib_while_advance_state));
+    return_if_retptr_error(body);
+    load_retptr_list(
+        body,
+        DIRECT_WHILE_STATE_PTR_LOCAL,
+        DIRECT_WHILE_STATE_LEN_LOCAL,
+    );
+
+    body.instruction(&Instruction::LocalGet(DIRECT_WHILE_INDEX_LOCAL));
+    body.instruction(&Instruction::I32Const(1));
+    body.instruction(&Instruction::I32Add);
+    body.instruction(&Instruction::LocalSet(DIRECT_WHILE_INDEX_LOCAL));
+    body.instruction(&Instruction::Br(0));
+    body.instruction(&Instruction::End);
+    body.instruction(&Instruction::End);
+
+    body.instruction(&Instruction::I32Const(while_id as i32));
+    body.instruction(&Instruction::LocalGet(DIRECT_WHILE_PARENT_SOURCE_PTR_LOCAL));
+    body.instruction(&Instruction::LocalGet(DIRECT_WHILE_PARENT_SOURCE_LEN_LOCAL));
+    body.instruction(&Instruction::LocalGet(DIRECT_WHILE_STATE_PTR_LOCAL));
+    body.instruction(&Instruction::LocalGet(DIRECT_WHILE_STATE_LEN_LOCAL));
+    push_retptr_arg(body);
+    body.instruction(&Instruction::Call(indices.stdlib_while_output));
     return_if_retptr_error(body);
     load_retptr_list(body, steps_ptr_local, steps_len_local);
 
@@ -5766,6 +6145,7 @@ mod tests {
             "split_with_schemas_failing" => {
                 include_str!("../../tests/fixtures/split_with_schemas_failing.json")
             }
+            "while_simple" => include_str!("../../tests/fixtures/while_simple.json"),
             "transform" => include_str!("../../tests/fixtures/transform_workflow.json"),
             other => panic!("unknown fixture {other}"),
         };
@@ -6009,6 +6389,14 @@ mod tests {
                 collect_run_plan_ids(next_plan, condition_ids, mapping_ids);
             }
             DirectRunPlan::Split {
+                nested_plan,
+                next_plan,
+                ..
+            } => {
+                collect_run_plan_ids(nested_plan, condition_ids, mapping_ids);
+                collect_run_plan_ids(next_plan, condition_ids, mapping_ids);
+            }
+            DirectRunPlan::While {
                 nested_plan,
                 next_plan,
                 ..
@@ -9746,6 +10134,162 @@ mod tests {
             "Split run should call split-append-output"
         );
         assert!(saw_split_output_call, "Split run should call split-output");
+    }
+
+    #[test]
+    fn direct_core_run_lowers_while_loop_through_stdlib() {
+        let graph = fixture("while_simple");
+        let manifest = build_direct_workflow_manifest(&graph).expect("manifest");
+        let manifest_json = manifest.to_canonical_json().expect("manifest json");
+        let core_config =
+            DirectCoreConfig::new(&manifest, &manifest_json, false).expect("core config");
+
+        let DirectRunPlan::Agent { next_plan, .. } = &core_config.run_plan else {
+            panic!("expected root Agent run plan");
+        };
+        let DirectRunPlan::While {
+            while_id,
+            nested_plan,
+            next_plan,
+            ..
+        } = next_plan.as_ref()
+        else {
+            panic!("expected While run plan after init Agent");
+        };
+        assert_eq!(*while_id, 0);
+        assert!(matches!(nested_plan.as_ref(), DirectRunPlan::Agent { .. }));
+        assert!(matches!(next_plan.as_ref(), DirectRunPlan::Finish { .. }));
+
+        let (resolve, world) =
+            build_direct_component_resolve_with_agents(&manifest.feature_summary.agent_ids)
+                .expect("agent resolve");
+        let core = emit_direct_core_module(&resolve, world, &core_config).expect("core module");
+        Validator::new()
+            .validate_all(&core)
+            .expect("While core module validates");
+
+        let mut next_function_index = 0;
+        let mut while_max_iterations_index = None;
+        let mut while_initial_state_index = None;
+        let mut while_condition_source_index = None;
+        let mut while_condition_index = None;
+        let mut while_iteration_variables_index = None;
+        let mut while_advance_state_index = None;
+        let mut while_output_index = None;
+        let mut saw_loop = false;
+        let mut saw_while_id = false;
+        let mut saw_while_max_iterations_call = false;
+        let mut saw_while_initial_state_call = false;
+        let mut saw_while_condition_source_call = false;
+        let mut saw_while_condition_call = false;
+        let mut saw_while_iteration_variables_call = false;
+        let mut saw_while_advance_state_call = false;
+        let mut saw_while_output_call = false;
+        let mut code_body_index = 0;
+
+        for payload in Parser::new(0).parse_all(&core) {
+            match payload.expect("core wasm payload") {
+                Payload::ImportSection(reader) => {
+                    for import in reader.into_imports() {
+                        let import = import.expect("core import");
+                        if import.module.contains("runtara:workflow-stdlib/json") {
+                            match import.name {
+                                "while-max-iterations" => {
+                                    while_max_iterations_index = Some(next_function_index)
+                                }
+                                "while-initial-state" => {
+                                    while_initial_state_index = Some(next_function_index)
+                                }
+                                "while-condition-source" => {
+                                    while_condition_source_index = Some(next_function_index)
+                                }
+                                "while-condition" => {
+                                    while_condition_index = Some(next_function_index)
+                                }
+                                "while-iteration-variables" => {
+                                    while_iteration_variables_index = Some(next_function_index)
+                                }
+                                "while-advance-state" => {
+                                    while_advance_state_index = Some(next_function_index)
+                                }
+                                "while-output" => while_output_index = Some(next_function_index),
+                                _ => {}
+                            }
+                        }
+                        if matches!(import.ty, TypeRef::Func(_)) {
+                            next_function_index += 1;
+                        }
+                    }
+                }
+                Payload::CodeSectionEntry(body) => {
+                    if code_body_index == 0 {
+                        for operator in body.get_operators_reader().expect("operators").into_iter()
+                        {
+                            match operator.expect("operator") {
+                                Operator::Loop { .. } => saw_loop = true,
+                                Operator::I32Const { value } if value == *while_id as i32 => {
+                                    saw_while_id = true;
+                                }
+                                Operator::Call { function_index } => {
+                                    if Some(function_index) == while_max_iterations_index {
+                                        saw_while_max_iterations_call = true;
+                                    }
+                                    if Some(function_index) == while_initial_state_index {
+                                        saw_while_initial_state_call = true;
+                                    }
+                                    if Some(function_index) == while_condition_source_index {
+                                        saw_while_condition_source_call = true;
+                                    }
+                                    if Some(function_index) == while_condition_index {
+                                        saw_while_condition_call = true;
+                                    }
+                                    if Some(function_index) == while_iteration_variables_index {
+                                        saw_while_iteration_variables_call = true;
+                                    }
+                                    if Some(function_index) == while_advance_state_index {
+                                        saw_while_advance_state_call = true;
+                                    }
+                                    if Some(function_index) == while_output_index {
+                                        saw_while_output_call = true;
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                    code_body_index += 1;
+                }
+                _ => {}
+            }
+        }
+
+        assert!(saw_loop, "While run should emit a Wasm loop");
+        assert!(saw_while_id, "While id should be passed to stdlib");
+        assert!(
+            saw_while_max_iterations_call,
+            "While run should call while-max-iterations"
+        );
+        assert!(
+            saw_while_initial_state_call,
+            "While run should call while-initial-state"
+        );
+        assert!(
+            saw_while_condition_source_call,
+            "While run should call while-condition-source"
+        );
+        assert!(
+            saw_while_condition_call,
+            "While run should call while-condition"
+        );
+        assert!(
+            saw_while_iteration_variables_call,
+            "While run should call while-iteration-variables"
+        );
+        assert!(
+            saw_while_advance_state_call,
+            "While run should call while-advance-state"
+        );
+        assert!(saw_while_output_call, "While run should call while-output");
     }
 
     #[test]

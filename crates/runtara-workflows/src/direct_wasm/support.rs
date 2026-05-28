@@ -958,6 +958,7 @@ mod tests {
             "split_with_schemas_failing" => {
                 include_str!("../../tests/fixtures/split_with_schemas_failing.json")
             }
+            "while_simple" => include_str!("../../tests/fixtures/while_simple.json"),
             "transform" => include_str!("../../tests/fixtures/transform_workflow.json"),
             "wait" => include_str!("../../tests/fixtures/wait_for_signal_with_callback.json"),
             other => panic!("unknown fixture {other}"),
@@ -1422,6 +1423,20 @@ mod tests {
                 report.unsupported
             );
         }
+    }
+
+    #[test]
+    fn while_remains_gated_until_lifecycle_lowering_is_complete() {
+        let report = analyze_direct_wasm_support(&fixture("while_simple"));
+
+        assert!(!report.supported);
+        assert!(
+            report.unsupported.iter().any(|unsupported| {
+                unsupported.step_id.as_deref() == Some("loop") && unsupported.feature == "while"
+            }),
+            "{:?}",
+            report.unsupported
+        );
     }
 
     #[test]
