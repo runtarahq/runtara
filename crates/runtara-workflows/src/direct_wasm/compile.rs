@@ -597,6 +597,7 @@ enum DirectRunPlan {
     Split {
         step_id: String,
         split_id: u32,
+        dont_stop_on_failed: bool,
         nested_plan: Box<DirectRunPlan>,
         next_plan: Box<DirectRunPlan>,
     },
@@ -1055,6 +1056,7 @@ fn step_run_plan_inner(
         }
         "Split" => {
             let split_id = split_id(graph, step_id)?;
+            let dont_stop_on_failed = split_dont_stop_on_failed(graph, step_id)?;
             let nested_graph = split_subgraph(graph, step_id)?;
             let nested_plan =
                 step_run_plan(nested_graph, &nested_graph.entry_point, &mut Vec::new())?;
@@ -1063,6 +1065,7 @@ fn step_run_plan_inner(
             Ok(DirectRunPlan::Split {
                 step_id: step_id.to_string(),
                 split_id,
+                dont_stop_on_failed,
                 nested_plan: Box::new(nested_plan),
                 next_plan: Box::new(next_plan),
             })
@@ -1472,6 +1475,30 @@ fn split_id(graph: &DirectGraphManifest, step_id: &str) -> Result<u32, DirectCom
         })
 }
 
+fn split_config<'a>(
+    graph: &'a DirectGraphManifest,
+    step_id: &str,
+) -> Result<&'a serde_json::Value, DirectCompileError> {
+    graph
+        .splits
+        .iter()
+        .find(|split| split.step_id == step_id && split.purpose == "split.config")
+        .map(|split| &split.value)
+        .ok_or_else(|| {
+            DirectCompileError::Component(format!("missing Split config for step '{step_id}'"))
+        })
+}
+
+fn split_dont_stop_on_failed(
+    graph: &DirectGraphManifest,
+    step_id: &str,
+) -> Result<bool, DirectCompileError> {
+    Ok(split_config(graph, step_id)?
+        .get("dontStopOnFailed")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false))
+}
+
 fn split_subgraph<'a>(
     graph: &'a DirectGraphManifest,
     step_id: &str,
@@ -1855,7 +1882,9 @@ struct DirectCoreImportIndices {
     stdlib_split_iteration_variables: Option<u32>,
     stdlib_split_validate_input: Option<u32>,
     stdlib_split_validate_output: Option<u32>,
+    stdlib_split_initial_results: Option<u32>,
     stdlib_split_append_output: Option<u32>,
+    stdlib_split_append_error: Option<u32>,
     stdlib_split_output: Option<u32>,
     stdlib_delay_duration_ms: Option<u32>,
     stdlib_delay: Option<u32>,
@@ -1954,9 +1983,17 @@ impl DirectCoreImportIndices {
                 self.stdlib_split_validate_output,
                 "stdlib.split-validate-output",
             )?,
+            stdlib_split_initial_results: require_import(
+                self.stdlib_split_initial_results,
+                "stdlib.split-initial-results",
+            )?,
             stdlib_split_append_output: require_import(
                 self.stdlib_split_append_output,
                 "stdlib.split-append-output",
+            )?,
+            stdlib_split_append_error: require_import(
+                self.stdlib_split_append_error,
+                "stdlib.split-append-error",
             )?,
             stdlib_split_output: require_import(self.stdlib_split_output, "stdlib.split-output")?,
             stdlib_delay_duration_ms: require_import(
@@ -2042,7 +2079,9 @@ struct DirectCoreFunctionIndices {
     stdlib_split_iteration_variables: u32,
     stdlib_split_validate_input: u32,
     stdlib_split_validate_output: u32,
+    stdlib_split_initial_results: u32,
     stdlib_split_append_output: u32,
+    stdlib_split_append_error: u32,
     stdlib_split_output: u32,
     stdlib_delay_duration_ms: u32,
     stdlib_delay: u32,
@@ -2154,8 +2193,12 @@ fn import_core_function(
         import_indices.stdlib_split_validate_input = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "split-validate-output") {
         import_indices.stdlib_split_validate_output = Some(function_index);
+    } else if is_stdlib_import(resolve, interface, function, "split-initial-results") {
+        import_indices.stdlib_split_initial_results = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "split-append-output") {
         import_indices.stdlib_split_append_output = Some(function_index);
+    } else if is_stdlib_import(resolve, interface, function, "split-append-error") {
+        import_indices.stdlib_split_append_error = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "split-output") {
         import_indices.stdlib_split_output = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "delay-duration-ms") {
@@ -2622,6 +2665,7 @@ fn emit_run_plan_mapping(
         DirectRunPlan::Split {
             step_id,
             split_id,
+            dont_stop_on_failed,
             nested_plan,
             next_plan,
         } => {
@@ -2633,6 +2677,7 @@ fn emit_run_plan_mapping(
                 variables,
                 step_id,
                 *split_id,
+                *dont_stop_on_failed,
                 nested_plan,
                 next_plan,
                 data_ptr_local,
@@ -3100,6 +3145,7 @@ fn emit_split_plan(
     variables: DirectVariables<'_>,
     step_id: &str,
     split_id: u32,
+    dont_stop_on_failed: bool,
     nested_plan: &DirectRunPlan,
     next_plan: &DirectRunPlan,
     data_ptr_local: u32,
@@ -3142,9 +3188,15 @@ fn emit_split_plan(
     push_retptr_i32_load(body, DIRECT_RET_U32_OK_OFFSET);
     body.instruction(&Instruction::LocalSet(DIRECT_SPLIT_COUNT_LOCAL));
 
-    push_segment_args(body, &static_data.split_empty_results);
-    body.instruction(&Instruction::LocalSet(DIRECT_SPLIT_RESULTS_LEN_LOCAL));
-    body.instruction(&Instruction::LocalSet(DIRECT_SPLIT_RESULTS_PTR_LOCAL));
+    body.instruction(&Instruction::I32Const(split_id as i32));
+    push_retptr_arg(body);
+    body.instruction(&Instruction::Call(indices.stdlib_split_initial_results));
+    return_if_retptr_error(body);
+    load_retptr_list(
+        body,
+        DIRECT_SPLIT_RESULTS_PTR_LOCAL,
+        DIRECT_SPLIT_RESULTS_LEN_LOCAL,
+    );
 
     body.instruction(&Instruction::I32Const(0));
     body.instruction(&Instruction::LocalSet(DIRECT_SPLIT_INDEX_LOCAL));
@@ -3174,7 +3226,17 @@ fn emit_split_plan(
     body.instruction(&Instruction::LocalGet(DIRECT_SPLIT_INDEX_LOCAL));
     push_retptr_arg(body);
     body.instruction(&Instruction::Call(indices.stdlib_split_validate_input));
-    return_if_retptr_error(body);
+    if dont_stop_on_failed {
+        emit_split_append_retptr_error_and_continue(
+            body,
+            indices,
+            split_id,
+            route_ptr_local,
+            route_len_local,
+        );
+    } else {
+        return_if_retptr_error(body);
+    }
 
     body.instruction(&Instruction::I32Const(split_id as i32));
     body.instruction(&Instruction::LocalGet(DIRECT_SPLIT_PARENT_SOURCE_PTR_LOCAL));
@@ -3239,7 +3301,17 @@ fn emit_split_plan(
     body.instruction(&Instruction::LocalGet(DIRECT_SPLIT_INDEX_LOCAL));
     push_retptr_arg(body);
     body.instruction(&Instruction::Call(indices.stdlib_split_validate_output));
-    return_if_retptr_error(body);
+    if dont_stop_on_failed {
+        emit_split_append_retptr_error_and_continue(
+            body,
+            indices,
+            split_id,
+            route_ptr_local,
+            route_len_local,
+        );
+    } else {
+        return_if_retptr_error(body);
+    }
 
     body.instruction(&Instruction::I32Const(split_id as i32));
     body.instruction(&Instruction::LocalGet(DIRECT_SPLIT_RESULTS_PTR_LOCAL));
@@ -3318,6 +3390,38 @@ fn emit_split_plan(
         workflow_log_kind,
         workflow_error_kind,
     );
+}
+
+fn emit_split_append_retptr_error_and_continue(
+    body: &mut WasmFunction,
+    indices: &DirectCoreFunctionIndices,
+    split_id: u32,
+    error_ptr_local: u32,
+    error_len_local: u32,
+) {
+    load_retptr_tag(body);
+    body.instruction(&Instruction::If(BlockType::Empty));
+    load_retptr_list(body, error_ptr_local, error_len_local);
+    body.instruction(&Instruction::I32Const(split_id as i32));
+    body.instruction(&Instruction::LocalGet(DIRECT_SPLIT_RESULTS_PTR_LOCAL));
+    body.instruction(&Instruction::LocalGet(DIRECT_SPLIT_RESULTS_LEN_LOCAL));
+    body.instruction(&Instruction::LocalGet(error_ptr_local));
+    body.instruction(&Instruction::LocalGet(error_len_local));
+    body.instruction(&Instruction::LocalGet(DIRECT_SPLIT_INDEX_LOCAL));
+    push_retptr_arg(body);
+    body.instruction(&Instruction::Call(indices.stdlib_split_append_error));
+    return_if_retptr_error(body);
+    load_retptr_list(
+        body,
+        DIRECT_SPLIT_RESULTS_PTR_LOCAL,
+        DIRECT_SPLIT_RESULTS_LEN_LOCAL,
+    );
+    body.instruction(&Instruction::LocalGet(DIRECT_SPLIT_INDEX_LOCAL));
+    body.instruction(&Instruction::I32Const(1));
+    body.instruction(&Instruction::I32Add);
+    body.instruction(&Instruction::LocalSet(DIRECT_SPLIT_INDEX_LOCAL));
+    body.instruction(&Instruction::Br(1));
+    body.instruction(&Instruction::End);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -5450,6 +5554,9 @@ mod tests {
             "edge_condition" => include_str!("../../tests/fixtures/edge_condition_priority.json"),
             "split" => include_str!("../../tests/fixtures/split_workflow.json"),
             "split_with_schemas" => include_str!("../../tests/fixtures/split_with_schemas.json"),
+            "split_with_schemas_failing" => {
+                include_str!("../../tests/fixtures/split_with_schemas_failing.json")
+            }
             "transform" => include_str!("../../tests/fixtures/transform_workflow.json"),
             other => panic!("unknown fixture {other}"),
         };
@@ -9286,6 +9393,7 @@ mod tests {
         let mut split_iteration_variables_index = None;
         let mut split_validate_input_index = None;
         let mut split_validate_output_index = None;
+        let mut split_initial_results_index = None;
         let mut split_append_output_index = None;
         let mut split_output_index = None;
         let mut saw_loop = false;
@@ -9294,6 +9402,7 @@ mod tests {
         let mut saw_split_iteration_variables_call = false;
         let mut saw_split_validate_input_call = false;
         let mut saw_split_validate_output_call = false;
+        let mut saw_split_initial_results_call = false;
         let mut saw_split_append_output_call = false;
         let mut saw_split_output_call = false;
         let mut code_body_index = 0;
@@ -9317,6 +9426,9 @@ mod tests {
                                 }
                                 "split-validate-output" => {
                                     split_validate_output_index = Some(next_function_index)
+                                }
+                                "split-initial-results" => {
+                                    split_initial_results_index = Some(next_function_index)
                                 }
                                 "split-append-output" => {
                                     split_append_output_index = Some(next_function_index)
@@ -9351,6 +9463,9 @@ mod tests {
                                     }
                                     if Some(function_index) == split_validate_output_index {
                                         saw_split_validate_output_call = true;
+                                    }
+                                    if Some(function_index) == split_initial_results_index {
+                                        saw_split_initial_results_call = true;
                                     }
                                     if Some(function_index) == split_append_output_index {
                                         saw_split_append_output_call = true;
@@ -9388,10 +9503,95 @@ mod tests {
             "Split run should call split-validate-output"
         );
         assert!(
+            saw_split_initial_results_call,
+            "Split run should call split-initial-results"
+        );
+        assert!(
             saw_split_append_output_call,
             "Split run should call split-append-output"
         );
         assert!(saw_split_output_call, "Split run should call split-output");
+    }
+
+    #[test]
+    fn direct_core_run_collects_split_validation_errors_when_dont_stop_is_enabled() {
+        let graph = fixture("split_with_schemas_failing");
+        let manifest = build_direct_workflow_manifest(&graph).expect("manifest");
+        let manifest_json = manifest.to_canonical_json().expect("manifest json");
+        let core_config =
+            DirectCoreConfig::new(&manifest, &manifest_json, false).expect("core config");
+
+        let DirectRunPlan::Split {
+            dont_stop_on_failed,
+            ..
+        } = &core_config.run_plan
+        else {
+            panic!("expected Split run plan");
+        };
+        assert!(*dont_stop_on_failed);
+
+        let (resolve, world) =
+            build_direct_component_resolve_with_agents(&manifest.feature_summary.agent_ids)
+                .expect("agent resolve");
+        let core = emit_direct_core_module(&resolve, world, &core_config).expect("core module");
+        Validator::new()
+            .validate_all(&core)
+            .expect("Split dontStop core module validates");
+
+        let mut next_function_index = 0;
+        let mut split_append_error_index = None;
+        let mut saw_split_append_error_call = false;
+        let mut saw_continue_after_split_append_error = false;
+        let mut code_body_index = 0;
+
+        for payload in Parser::new(0).parse_all(&core) {
+            match payload.expect("core wasm payload") {
+                Payload::ImportSection(reader) => {
+                    for import in reader.into_imports() {
+                        let import = import.expect("core import");
+                        if import.module.contains("runtara:workflow-stdlib/json")
+                            && import.name == "split-append-error"
+                        {
+                            split_append_error_index = Some(next_function_index);
+                        }
+                        if matches!(import.ty, TypeRef::Func(_)) {
+                            next_function_index += 1;
+                        }
+                    }
+                }
+                Payload::CodeSectionEntry(body) => {
+                    if code_body_index == 0 {
+                        for operator in body.get_operators_reader().expect("operators").into_iter()
+                        {
+                            match operator.expect("operator") {
+                                Operator::Call { function_index }
+                                    if Some(function_index) == split_append_error_index =>
+                                {
+                                    saw_split_append_error_call = true;
+                                }
+                                Operator::Br { relative_depth: 1 }
+                                    if saw_split_append_error_call =>
+                                {
+                                    saw_continue_after_split_append_error = true;
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                    code_body_index += 1;
+                }
+                _ => {}
+            }
+        }
+
+        assert!(
+            saw_split_append_error_call,
+            "Split dontStop run should append validation failures"
+        );
+        assert!(
+            saw_continue_after_split_append_error,
+            "Split dontStop validation failure path should continue the loop"
+        );
     }
 
     #[test]

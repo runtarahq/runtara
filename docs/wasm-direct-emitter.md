@@ -58,9 +58,9 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   lookup, source-envelope construction, mapping application, template rendering,
   type hints, Finish `outputs` unwrapping, and Split helpers for item
   normalization, indexed item access, per-iteration variable construction,
-  per-iteration input/output schema validation, result accumulation, and result
-  step envelopes, including the generated-code-compatible
-  `dontStopOnFailed` accumulator/result shape.
+  per-iteration input/output schema validation, validation-failure collection,
+  result accumulation, and result step envelopes, including the
+  generated-code-compatible `dontStopOnFailed` accumulator/result shape.
 - `runtara-workflow-stdlib` now has a `direct-component` feature and
   component metadata for `runtara:workflow-stdlib`. That feature builds a
   `wasm32-wasip2` stdlib component without pulling in SDK/runtime, HTTP, AI,
@@ -1715,14 +1715,16 @@ Implementation steps:
    - direct loop lowering: schema-free sequential Split done, including nested
      direct run-plan emission, per-item source construction, output
      accumulation, duplicate nested step-id manifest parsing, schema validation
-     calls, and structural core-Wasm lowering tests.
+     calls, validation-failure accumulation for `dontStopOnFailed`, and
+     structural core-Wasm lowering tests.
 2. Preserve split behavior:
    - null and non-array handling: done in stdlib;
    - item variable injection: done in stdlib;
    - `_loop_indices`: done in stdlib;
    - output collection shape: done for fail-fast sequential Split;
    - input/output schema validation: done;
-   - `dontStopOnFailed`: stdlib accumulator/result shape done; direct-core
+   - `dontStopOnFailed`: stdlib accumulator/result shape and direct-core
+     validation-failure collection done; nested subgraph failure
      catch/continue lowering pending;
    - Split retry/timeout/breakpoint semantics: pending.
 3. Implement `While`:
