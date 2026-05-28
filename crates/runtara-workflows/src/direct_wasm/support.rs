@@ -104,8 +104,17 @@ fn collect_graph_support(
     }
 
     for edge in &graph.execution_plan {
-        if edge.condition.is_some() && !edge_condition_route_shape_supported(graph, &edge.from_step)
-        {
+        let condition_route_supported = if edge.label.as_deref() == Some("onError") {
+            on_error_route_shape_supported(graph, &edge.from_step)
+        } else {
+            edge_condition_route_shape_supported(graph, &edge.from_step)
+        };
+        if edge.condition.is_some() && !condition_route_supported {
+            let reason = if edge.label.as_deref() == Some("onError") {
+                "direct emitter supports onError edge conditions only for non-durable Agent sources with at most one default fallback"
+            } else {
+                "direct emitter supports edge-condition routing only for normal/next edges with exactly one default fallback"
+            };
             unsupported.push(UnsupportedWorkflowFeature {
                 step_id: Some(edge.from_step.clone()),
                 step_type: graph
@@ -114,10 +123,12 @@ fn collect_graph_support(
                     .map(step_type_name)
                     .map(str::to_string),
                 feature: "edge-condition".to_string(),
-                reason: "direct emitter supports edge-condition routing only for normal/next edges with exactly one default fallback".to_string(),
+                reason: reason.to_string(),
             });
         }
-        if edge.label.as_deref() == Some("onError") {
+        if edge.label.as_deref() == Some("onError")
+            && !on_error_route_shape_supported(graph, &edge.from_step)
+        {
             unsupported.push(UnsupportedWorkflowFeature {
                 step_id: Some(edge.from_step.clone()),
                 step_type: graph
@@ -126,7 +137,7 @@ fn collect_graph_support(
                     .map(step_type_name)
                     .map(str::to_string),
                 feature: "error-handler-edge".to_string(),
-                reason: "onError routing requires runtime error-source propagation".to_string(),
+                reason: "direct onError routing currently supports non-durable Agent sources with at most one default handler".to_string(),
             });
         }
     }
@@ -159,6 +170,17 @@ fn supports_direct_control_step(
     reachable: &mut BTreeSet<String>,
     used_edges: &mut BTreeSet<usize>,
     stack: &mut Vec<String>,
+) -> bool {
+    supports_direct_control_step_inner(graph, step_id, reachable, used_edges, stack, true)
+}
+
+fn supports_direct_control_step_inner(
+    graph: &ExecutionGraph,
+    step_id: &str,
+    reachable: &mut BTreeSet<String>,
+    used_edges: &mut BTreeSet<usize>,
+    stack: &mut Vec<String>,
+    include_on_error: bool,
 ) -> bool {
     if stack.iter().any(|visited| visited == step_id) {
         return false;
@@ -199,39 +221,86 @@ fn supports_direct_control_step(
             used_edges.insert(true_index);
             used_edges.insert(false_index);
             stack.push(step_id.to_string());
-            let true_supported = supports_direct_control_step(
+            let true_supported = supports_direct_control_step_inner(
                 graph,
                 &true_edge.to_step,
                 reachable,
                 used_edges,
                 stack,
+                include_on_error,
             );
-            let false_supported = supports_direct_control_step(
+            let false_supported = supports_direct_control_step_inner(
                 graph,
                 &false_edge.to_step,
                 reachable,
                 used_edges,
                 stack,
+                include_on_error,
             );
             stack.pop();
 
             true_supported && false_supported
         }
-        Step::Filter(_) => supports_normal_flow_step(graph, step_id, reachable, used_edges, stack),
+        Step::Filter(_) => supports_normal_flow_step(
+            graph,
+            step_id,
+            reachable,
+            used_edges,
+            stack,
+            include_on_error,
+        ),
         Step::Switch(step)
             if step
                 .config
                 .as_ref()
                 .is_some_and(|config| config.is_routing()) =>
         {
-            supports_routing_switch_step(graph, step_id, step, reachable, used_edges, stack)
+            supports_routing_switch_step(
+                graph,
+                step_id,
+                step,
+                reachable,
+                used_edges,
+                stack,
+                include_on_error,
+            )
         }
-        Step::Switch(_) => supports_normal_flow_step(graph, step_id, reachable, used_edges, stack),
-        Step::GroupBy(_) => supports_normal_flow_step(graph, step_id, reachable, used_edges, stack),
-        Step::Log(_) => supports_normal_flow_step(graph, step_id, reachable, used_edges, stack),
+        Step::Switch(_) => supports_normal_flow_step(
+            graph,
+            step_id,
+            reachable,
+            used_edges,
+            stack,
+            include_on_error,
+        ),
+        Step::GroupBy(_) => supports_normal_flow_step(
+            graph,
+            step_id,
+            reachable,
+            used_edges,
+            stack,
+            include_on_error,
+        ),
+        Step::Log(_) => supports_normal_flow_step(
+            graph,
+            step_id,
+            reachable,
+            used_edges,
+            stack,
+            include_on_error,
+        ),
         Step::Agent(step) => {
             supports_agent_step_baseline(graph, step)
-                && supports_normal_flow_step(graph, step_id, reachable, used_edges, stack)
+                && supports_normal_flow_step(
+                    graph,
+                    step_id,
+                    reachable,
+                    used_edges,
+                    stack,
+                    include_on_error,
+                )
+                && (!include_on_error
+                    || supports_on_error_flow_step(graph, step_id, reachable, used_edges, stack))
         }
         _ => false,
     }
@@ -257,6 +326,7 @@ fn supports_normal_flow_step(
     reachable: &mut BTreeSet<String>,
     used_edges: &mut BTreeSet<usize>,
     stack: &mut Vec<String>,
+    include_on_error: bool,
 ) -> bool {
     let edges = normal_flow_edges(graph, step_id);
     if edges.is_empty() {
@@ -280,8 +350,14 @@ fn supports_normal_flow_step(
         };
         used_edges.insert(*edge_index);
         stack.push(step_id.to_string());
-        let supported =
-            supports_direct_control_step(graph, &edge.to_step, reachable, used_edges, stack);
+        let supported = supports_direct_control_step_inner(
+            graph,
+            &edge.to_step,
+            reachable,
+            used_edges,
+            stack,
+            include_on_error,
+        );
         stack.pop();
         return supported;
     }
@@ -294,12 +370,26 @@ fn supports_normal_flow_step(
     let mut supported = true;
     for (edge_index, edge) in conditional_edges {
         used_edges.insert(edge_index);
-        if !supports_direct_control_step(graph, &edge.to_step, reachable, used_edges, stack) {
+        if !supports_direct_control_step_inner(
+            graph,
+            &edge.to_step,
+            reachable,
+            used_edges,
+            stack,
+            include_on_error,
+        ) {
             supported = false;
         }
     }
     used_edges.insert(*default_index);
-    if !supports_direct_control_step(graph, &default_edge.to_step, reachable, used_edges, stack) {
+    if !supports_direct_control_step_inner(
+        graph,
+        &default_edge.to_step,
+        reachable,
+        used_edges,
+        stack,
+        include_on_error,
+    ) {
         supported = false;
     }
     stack.pop();
@@ -316,6 +406,18 @@ fn normal_flow_edges<'a>(
         .iter()
         .enumerate()
         .filter(|(_, edge)| edge.from_step == step_id && is_normal_label(edge.label.as_deref()))
+        .collect()
+}
+
+fn on_error_edges<'a>(
+    graph: &'a ExecutionGraph,
+    step_id: &str,
+) -> Vec<(usize, &'a runtara_dsl::ExecutionPlanEdge)> {
+    graph
+        .execution_plan
+        .iter()
+        .enumerate()
+        .filter(|(_, edge)| edge.from_step == step_id && edge.label.as_deref() == Some("onError"))
         .collect()
 }
 
@@ -363,6 +465,61 @@ fn edge_condition_route_shape_supported(graph: &ExecutionGraph, step_id: &str) -
     conditional_count > 0 && default_count == 1
 }
 
+fn on_error_route_shape_supported(graph: &ExecutionGraph, step_id: &str) -> bool {
+    let Some(Step::Agent(step)) = graph.steps.get(step_id) else {
+        return false;
+    };
+    if !supports_agent_step_baseline(graph, step) {
+        return false;
+    }
+
+    let edges = on_error_edges(graph, step_id);
+    if edges.is_empty() {
+        return false;
+    }
+
+    edges
+        .iter()
+        .filter(|(_, edge)| edge.condition.is_none())
+        .count()
+        <= 1
+}
+
+fn supports_on_error_flow_step(
+    graph: &ExecutionGraph,
+    step_id: &str,
+    reachable: &mut BTreeSet<String>,
+    used_edges: &mut BTreeSet<usize>,
+    stack: &mut Vec<String>,
+) -> bool {
+    let edges = on_error_edges(graph, step_id);
+    if edges.is_empty() {
+        return true;
+    }
+    if !on_error_route_shape_supported(graph, step_id) {
+        return false;
+    }
+
+    let mut supported = true;
+    stack.push(step_id.to_string());
+    for (edge_index, edge) in edges {
+        used_edges.insert(edge_index);
+        if !supports_direct_control_step_inner(
+            graph,
+            &edge.to_step,
+            reachable,
+            used_edges,
+            stack,
+            false,
+        ) {
+            supported = false;
+        }
+    }
+    stack.pop();
+
+    supported
+}
+
 fn supports_routing_switch_step(
     graph: &ExecutionGraph,
     step_id: &str,
@@ -370,6 +527,7 @@ fn supports_routing_switch_step(
     reachable: &mut BTreeSet<String>,
     used_edges: &mut BTreeSet<usize>,
     stack: &mut Vec<String>,
+    include_on_error: bool,
 ) -> bool {
     let Some(config) = step.config.as_ref() else {
         return false;
@@ -416,7 +574,14 @@ fn supports_routing_switch_step(
             continue;
         };
         used_edges.insert(*edge_index);
-        if !supports_direct_control_step(graph, &edge.to_step, reachable, used_edges, stack) {
+        if !supports_direct_control_step_inner(
+            graph,
+            &edge.to_step,
+            reachable,
+            used_edges,
+            stack,
+            include_on_error,
+        ) {
             supported = false;
         }
     }
@@ -1195,6 +1360,112 @@ mod tests {
         let report = analyze_direct_wasm_support(&graph);
 
         assert!(report.supported, "{:?}", report.unsupported);
+    }
+
+    #[test]
+    fn non_durable_agent_default_on_error_is_supported() {
+        let graph = serde_json::from_value::<ExecutionGraph>(serde_json::json!({
+            "durable": false,
+            "steps": {
+                "agent": {
+                    "stepType": "Agent",
+                    "id": "agent",
+                    "agentId": "utils",
+                    "capabilityId": "normalize",
+                    "inputMapping": {
+                        "value": { "valueType": "reference", "value": "data.value" }
+                    }
+                },
+                "finish": { "stepType": "Finish", "id": "finish" },
+                "handled": { "stepType": "Finish", "id": "handled" }
+            },
+            "entryPoint": "agent",
+            "executionPlan": [
+                { "fromStep": "agent", "toStep": "finish" },
+                { "fromStep": "agent", "toStep": "handled", "label": "onError" }
+            ],
+            "variables": {},
+            "inputSchema": {},
+            "outputSchema": {}
+        }))
+        .expect("graph parses");
+
+        let report = analyze_direct_wasm_support(&graph);
+
+        assert!(report.supported, "{:?}", report.unsupported);
+    }
+
+    #[test]
+    fn non_durable_agent_conditional_on_error_is_supported() {
+        let graph = serde_json::from_value::<ExecutionGraph>(serde_json::json!({
+            "durable": false,
+            "steps": {
+                "agent": {
+                    "stepType": "Agent",
+                    "id": "agent",
+                    "agentId": "utils",
+                    "capabilityId": "normalize",
+                    "inputMapping": {
+                        "value": { "valueType": "reference", "value": "data.value" }
+                    }
+                },
+                "finish": { "stepType": "Finish", "id": "finish" },
+                "handled": { "stepType": "Finish", "id": "handled" },
+                "fail": {
+                    "stepType": "Error",
+                    "id": "fail",
+                    "code": "AGENT_FAILED",
+                    "message": "Unhandled agent failure"
+                }
+            },
+            "entryPoint": "agent",
+            "executionPlan": [
+                { "fromStep": "agent", "toStep": "finish" },
+                {
+                    "fromStep": "agent",
+                    "toStep": "handled",
+                    "label": "onError",
+                    "priority": 10,
+                    "condition": {
+                        "type": "operation",
+                        "op": "EQ",
+                        "arguments": [
+                            { "valueType": "reference", "value": "steps.__error.category" },
+                            { "valueType": "immediate", "value": "unknown" }
+                        ]
+                    }
+                },
+                { "fromStep": "agent", "toStep": "fail", "label": "onError" }
+            ],
+            "variables": {},
+            "inputSchema": {},
+            "outputSchema": {}
+        }))
+        .expect("graph parses");
+
+        let report = analyze_direct_wasm_support(&graph);
+
+        assert!(report.supported, "{:?}", report.unsupported);
+    }
+
+    #[test]
+    fn non_agent_on_error_remains_rejected() {
+        let mut graph = fixture("log");
+        graph.execution_plan.push(runtara_dsl::ExecutionPlanEdge {
+            from_step: "simple_log".to_string(),
+            to_step: "finish".to_string(),
+            label: Some("onError".to_string()),
+            condition: None,
+            priority: None,
+        });
+
+        let report = analyze_direct_wasm_support(&graph);
+
+        assert!(!report.supported);
+        assert!(report.unsupported.iter().any(|feature| {
+            feature.step_id.as_deref() == Some("simple_log")
+                && feature.feature == "error-handler-edge"
+        }));
     }
 
     #[test]

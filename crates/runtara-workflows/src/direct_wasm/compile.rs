@@ -560,6 +560,7 @@ enum DirectRunPlan {
         agent_component_id: String,
         input_mapping_id: u32,
         next_plan: Box<DirectRunPlan>,
+        error_plan: Option<DirectErrorRoutePlan>,
     },
     Error {
         step_id: String,
@@ -583,6 +584,12 @@ struct DirectSwitchRoutePlan {
 struct DirectEdgeConditionPlan {
     condition_id: u32,
     plan: Box<DirectRunPlan>,
+}
+
+#[derive(Debug, Clone)]
+struct DirectErrorRoutePlan {
+    branches: Vec<DirectEdgeConditionPlan>,
+    default_plan: Option<Box<DirectRunPlan>>,
 }
 
 impl DirectCoreConfig {
@@ -789,6 +796,23 @@ fn step_run_plan(
     step_id: &str,
     stack: &mut Vec<String>,
 ) -> Result<DirectRunPlan, DirectCompileError> {
+    step_run_plan_inner(graph, step_id, stack, true)
+}
+
+fn step_run_plan_without_on_error(
+    graph: &DirectGraphManifest,
+    step_id: &str,
+    stack: &mut Vec<String>,
+) -> Result<DirectRunPlan, DirectCompileError> {
+    step_run_plan_inner(graph, step_id, stack, false)
+}
+
+fn step_run_plan_inner(
+    graph: &DirectGraphManifest,
+    step_id: &str,
+    stack: &mut Vec<String>,
+    include_on_error: bool,
+) -> Result<DirectRunPlan, DirectCompileError> {
     if stack.iter().any(|visited| visited == step_id) {
         return Err(DirectCompileError::Component(format!(
             "direct run plan contains a cycle at step '{step_id}'"
@@ -808,7 +832,7 @@ fn step_run_plan(
         }),
         "Filter" => {
             let filter_id = filter_id(graph, step_id)?;
-            let next_plan = normal_flow_plan(graph, step_id, stack)?;
+            let next_plan = normal_flow_plan(graph, step_id, stack, include_on_error)?;
 
             Ok(DirectRunPlan::Filter {
                 step_id: step_id.to_string(),
@@ -825,14 +849,15 @@ fn step_run_plan(
                 stack.push(step_id.to_string());
                 for label in route_labels {
                     let target = branch_target(graph, step_id, &label)?.to_string();
-                    let plan = step_run_plan(graph, &target, stack)?;
+                    let plan = step_run_plan_inner(graph, &target, stack, include_on_error)?;
                     branches.push(DirectSwitchRoutePlan {
                         label,
                         plan: Box::new(plan),
                     });
                 }
                 let default_target = branch_target(graph, step_id, "default")?.to_string();
-                let default_plan = step_run_plan(graph, &default_target, stack)?;
+                let default_plan =
+                    step_run_plan_inner(graph, &default_target, stack, include_on_error)?;
                 stack.pop();
 
                 Ok(DirectRunPlan::SwitchRoute {
@@ -842,7 +867,7 @@ fn step_run_plan(
                     default_plan: Box::new(default_plan),
                 })
             } else {
-                let next_plan = normal_flow_plan(graph, step_id, stack)?;
+                let next_plan = normal_flow_plan(graph, step_id, stack, include_on_error)?;
 
                 Ok(DirectRunPlan::SwitchValue {
                     step_id: step_id.to_string(),
@@ -853,7 +878,7 @@ fn step_run_plan(
         }
         "GroupBy" => {
             let group_id = group_by_id(graph, step_id)?;
-            let next_plan = normal_flow_plan(graph, step_id, stack)?;
+            let next_plan = normal_flow_plan(graph, step_id, stack, include_on_error)?;
 
             Ok(DirectRunPlan::GroupBy {
                 step_id: step_id.to_string(),
@@ -863,7 +888,7 @@ fn step_run_plan(
         }
         "Log" => {
             let log_id = log_id(graph, step_id)?;
-            let next_plan = normal_flow_plan(graph, step_id, stack)?;
+            let next_plan = normal_flow_plan(graph, step_id, stack, include_on_error)?;
 
             Ok(DirectRunPlan::Log {
                 log_id,
@@ -872,7 +897,12 @@ fn step_run_plan(
         }
         "Agent" => {
             let agent = agent_config(graph, step_id)?;
-            let next_plan = normal_flow_plan(graph, step_id, stack)?;
+            let next_plan = normal_flow_plan(graph, step_id, stack, include_on_error)?;
+            let error_plan = if include_on_error {
+                on_error_plan(graph, step_id, stack)?
+            } else {
+                None
+            };
 
             Ok(DirectRunPlan::Agent {
                 step_id: step_id.to_string(),
@@ -880,6 +910,7 @@ fn step_run_plan(
                 agent_component_id: canonicalize_direct_agent_id(&agent.agent_id),
                 input_mapping_id: agent.input_mapping_id,
                 next_plan: Box::new(next_plan),
+                error_plan,
             })
         }
         "Error" => Ok(DirectRunPlan::Error {
@@ -904,8 +935,8 @@ fn step_run_plan(
             let false_step = branch_target(graph, step_id, "false")?.to_string();
 
             stack.push(step_id.to_string());
-            let true_plan = step_run_plan(graph, &true_step, stack)?;
-            let false_plan = step_run_plan(graph, &false_step, stack)?;
+            let true_plan = step_run_plan_inner(graph, &true_step, stack, include_on_error)?;
+            let false_plan = step_run_plan_inner(graph, &false_step, stack, include_on_error)?;
             stack.pop();
 
             Ok(DirectRunPlan::Conditional {
@@ -925,6 +956,7 @@ fn normal_flow_plan(
     graph: &DirectGraphManifest,
     from_step: &str,
     stack: &mut Vec<String>,
+    include_on_error: bool,
 ) -> Result<DirectRunPlan, DirectCompileError> {
     let edges = normal_flow_edges(graph, from_step);
     if edges.is_empty() {
@@ -951,7 +983,7 @@ fn normal_flow_plan(
             )));
         };
         stack.push(from_step.to_string());
-        let next_plan = step_run_plan(graph, &edge.to_step, stack)?;
+        let next_plan = step_run_plan_inner(graph, &edge.to_step, stack, include_on_error)?;
         stack.pop();
         return Ok(next_plan);
     }
@@ -984,20 +1016,91 @@ fn normal_flow_plan(
                     "missing edge condition id for direct step '{from_step}'"
                 ))
             })?;
-            let plan = step_run_plan(graph, &edge.to_step, stack)?;
+            let plan = step_run_plan_inner(graph, &edge.to_step, stack, include_on_error)?;
             Ok(DirectEdgeConditionPlan {
                 condition_id,
                 plan: Box::new(plan),
             })
         })
         .collect::<Result<Vec<_>, DirectCompileError>>()?;
-    let default_plan = step_run_plan(graph, &default_edge.to_step, stack)?;
+    let default_plan = step_run_plan_inner(graph, &default_edge.to_step, stack, include_on_error)?;
     stack.pop();
 
     Ok(DirectRunPlan::EdgeRoute {
         branches,
         default_plan: Box::new(default_plan),
     })
+}
+
+fn on_error_plan(
+    graph: &DirectGraphManifest,
+    from_step: &str,
+    stack: &mut Vec<String>,
+) -> Result<Option<DirectErrorRoutePlan>, DirectCompileError> {
+    let edges = on_error_edges(graph, from_step);
+    if edges.is_empty() {
+        return Ok(None);
+    }
+
+    let mut conditional_edges = edges
+        .iter()
+        .filter(|edge| edge.condition_id.is_some())
+        .copied()
+        .collect::<Vec<_>>();
+    let default_edges = edges
+        .iter()
+        .filter(|edge| edge.condition_id.is_none())
+        .copied()
+        .collect::<Vec<_>>();
+    let default_edge = match default_edges.as_slice() {
+        [] => None,
+        [edge] => Some(*edge),
+        _ => {
+            return Err(DirectCompileError::Component(format!(
+                "direct step '{from_step}' onError routing supports at most one default branch"
+            )));
+        }
+    };
+
+    conditional_edges.sort_by(|left, right| {
+        (
+            -i64::from(left.priority.unwrap_or(0)),
+            left.ordinal,
+            left.to_step.as_str(),
+        )
+            .cmp(&(
+                -i64::from(right.priority.unwrap_or(0)),
+                right.ordinal,
+                right.to_step.as_str(),
+            ))
+    });
+
+    stack.push(from_step.to_string());
+    let branches = conditional_edges
+        .into_iter()
+        .map(|edge| {
+            let condition_id = edge.condition_id.ok_or_else(|| {
+                DirectCompileError::Component(format!(
+                    "missing onError condition id for direct step '{from_step}'"
+                ))
+            })?;
+            let plan = step_run_plan_without_on_error(graph, &edge.to_step, stack)?;
+            Ok(DirectEdgeConditionPlan {
+                condition_id,
+                plan: Box::new(plan),
+            })
+        })
+        .collect::<Result<Vec<_>, DirectCompileError>>()?;
+    let default_plan = default_edge
+        .map(|edge| step_run_plan_without_on_error(graph, &edge.to_step, stack))
+        .transpose()?
+        .map(Box::new);
+    stack.pop();
+
+    Ok(Some(DirectErrorRoutePlan {
+        branches,
+        default_plan,
+    }))
 }
 
 fn normal_flow_edges<'a>(
@@ -1008,6 +1111,17 @@ fn normal_flow_edges<'a>(
         .edges
         .iter()
         .filter(|edge| edge.from_step == from_step && is_normal_label(edge.label.as_deref()))
+        .collect()
+}
+
+fn on_error_edges<'a>(
+    graph: &'a DirectGraphManifest,
+    from_step: &str,
+) -> Vec<&'a DirectEdgeManifest> {
+    graph
+        .edges
+        .iter()
+        .filter(|edge| edge.from_step == from_step && edge.label.as_deref() == Some("onError"))
         .collect()
 }
 
@@ -1449,6 +1563,7 @@ struct DirectCoreImportIndices {
     stdlib_log: Option<u32>,
     stdlib_error_event: Option<u32>,
     stdlib_error: Option<u32>,
+    stdlib_error_steps: Option<u32>,
     stdlib_value_switch: Option<u32>,
     stdlib_group_by: Option<u32>,
     stdlib_agent_output: Option<u32>,
@@ -1493,6 +1608,7 @@ impl DirectCoreImportIndices {
             stdlib_log: require_import(self.stdlib_log, "stdlib.log")?,
             stdlib_error_event: require_import(self.stdlib_error_event, "stdlib.error-event")?,
             stdlib_error: require_import(self.stdlib_error, "stdlib.error")?,
+            stdlib_error_steps: require_import(self.stdlib_error_steps, "stdlib.error-steps")?,
             stdlib_value_switch: require_import(self.stdlib_value_switch, "stdlib.value-switch")?,
             stdlib_group_by: require_import(self.stdlib_group_by, "stdlib.group-by")?,
             stdlib_agent_output: require_import(self.stdlib_agent_output, "stdlib.agent-output")?,
@@ -1538,6 +1654,7 @@ struct DirectCoreFunctionIndices {
     stdlib_log: u32,
     stdlib_error_event: u32,
     stdlib_error: u32,
+    stdlib_error_steps: u32,
     stdlib_value_switch: u32,
     stdlib_group_by: u32,
     stdlib_agent_output: u32,
@@ -1613,6 +1730,8 @@ fn import_core_function(
         import_indices.stdlib_error_event = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "error") {
         import_indices.stdlib_error = Some(function_index);
+    } else if is_stdlib_import(resolve, interface, function, "error-steps") {
+        import_indices.stdlib_error_steps = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "value-switch") {
         import_indices.stdlib_value_switch = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "group-by") {
@@ -2091,6 +2210,7 @@ fn emit_run_plan_mapping(
             agent_component_id,
             input_mapping_id,
             next_plan,
+            error_plan,
         } => {
             emit_agent_plan(
                 body,
@@ -2103,6 +2223,7 @@ fn emit_run_plan_mapping(
                 agent_component_id,
                 *input_mapping_id,
                 next_plan,
+                error_plan.as_ref(),
                 data_ptr_local,
                 data_len_local,
                 steps_ptr_local,
@@ -2555,6 +2676,7 @@ fn emit_agent_plan(
     agent_component_id: &str,
     input_mapping_id: u32,
     next_plan: &DirectRunPlan,
+    error_plan: Option<&DirectErrorRoutePlan>,
     data_ptr_local: u32,
     data_len_local: u32,
     steps_ptr_local: u32,
@@ -2597,10 +2719,21 @@ fn emit_agent_plan(
         static_data,
         track_events,
         agent_id,
+        step_id,
         output_ptr_local,
         output_len_local,
+        source_ptr_local,
+        source_len_local,
+        steps_ptr_local,
+        steps_len_local,
+        error_plan,
         route_ptr_local,
         route_len_local,
+        variables,
+        data_ptr_local,
+        data_len_local,
+        workflow_log_kind,
+        workflow_error_kind,
     );
 
     emit_agent_connection_input(
@@ -2634,10 +2767,21 @@ fn emit_agent_plan(
         static_data,
         track_events,
         agent_id,
+        step_id,
         output_ptr_local,
         output_len_local,
+        source_ptr_local,
+        source_len_local,
+        steps_ptr_local,
+        steps_len_local,
+        error_plan,
         route_ptr_local,
         route_len_local,
+        variables,
+        data_ptr_local,
+        data_len_local,
+        workflow_log_kind,
+        workflow_error_kind,
     );
     load_agent_retptr_list(body, output_ptr_local, output_len_local);
 
@@ -3036,10 +3180,21 @@ fn emit_agent_input_validation(
     static_data: &DirectCoreStaticData,
     track_events: bool,
     agent_id: u32,
+    step_id: &str,
     input_ptr_local: u32,
     input_len_local: u32,
-    error_ptr_local: u32,
-    error_len_local: u32,
+    source_ptr_local: u32,
+    source_len_local: u32,
+    steps_ptr_local: u32,
+    steps_len_local: u32,
+    error_plan: Option<&DirectErrorRoutePlan>,
+    route_ptr_local: u32,
+    route_len_local: u32,
+    variables: &DirectDataSegment,
+    data_ptr_local: u32,
+    data_len_local: u32,
+    workflow_log_kind: &DirectDataSegment,
+    workflow_error_kind: &DirectDataSegment,
 ) {
     body.instruction(&Instruction::I32Const(agent_id as i32));
     body.instruction(&Instruction::LocalGet(input_ptr_local));
@@ -3047,9 +3202,9 @@ fn emit_agent_input_validation(
     push_retptr_arg(body);
     body.instruction(&Instruction::Call(indices.stdlib_agent_validate_input));
     return_if_retptr_error(body);
-    load_retptr_list(body, error_ptr_local, error_len_local);
+    load_retptr_list(body, route_ptr_local, route_len_local);
 
-    body.instruction(&Instruction::LocalGet(error_len_local));
+    body.instruction(&Instruction::LocalGet(route_len_local));
     body.instruction(&Instruction::I32Const(0));
     body.instruction(&Instruction::I32Ne);
     body.instruction(&Instruction::If(BlockType::Empty));
@@ -3059,17 +3214,38 @@ fn emit_agent_input_validation(
         static_data,
         track_events,
         agent_id,
-        error_ptr_local,
-        error_len_local,
+        route_ptr_local,
+        route_len_local,
         input_ptr_local,
         input_len_local,
     );
-    body.instruction(&Instruction::LocalGet(error_ptr_local));
-    body.instruction(&Instruction::LocalGet(error_len_local));
-    push_retptr_arg(body);
-    body.instruction(&Instruction::Call(indices.runtime_fail));
-    body.instruction(&Instruction::I32Const(1));
-    body.instruction(&Instruction::Return);
+    body.instruction(&Instruction::LocalGet(route_ptr_local));
+    body.instruction(&Instruction::LocalSet(input_ptr_local));
+    body.instruction(&Instruction::LocalGet(route_len_local));
+    body.instruction(&Instruction::LocalSet(input_len_local));
+    emit_agent_error_route_or_fail(
+        body,
+        indices,
+        static_data,
+        track_events,
+        variables,
+        step_id,
+        input_ptr_local,
+        input_len_local,
+        steps_ptr_local,
+        steps_len_local,
+        source_ptr_local,
+        source_len_local,
+        input_ptr_local,
+        input_len_local,
+        route_ptr_local,
+        route_len_local,
+        error_plan,
+        data_ptr_local,
+        data_len_local,
+        workflow_log_kind,
+        workflow_error_kind,
+    );
     body.instruction(&Instruction::End);
 }
 
@@ -3177,10 +3353,21 @@ fn emit_agent_invoke_error_branch(
     static_data: &DirectCoreStaticData,
     track_events: bool,
     agent_id: u32,
+    step_id: &str,
     output_ptr_local: u32,
     output_len_local: u32,
-    debug_ptr_local: u32,
-    debug_len_local: u32,
+    source_ptr_local: u32,
+    source_len_local: u32,
+    steps_ptr_local: u32,
+    steps_len_local: u32,
+    error_plan: Option<&DirectErrorRoutePlan>,
+    route_ptr_local: u32,
+    route_len_local: u32,
+    variables: &DirectDataSegment,
+    data_ptr_local: u32,
+    data_len_local: u32,
+    workflow_log_kind: &DirectDataSegment,
+    workflow_error_kind: &DirectDataSegment,
 ) {
     load_retptr_tag(body);
     body.instruction(&Instruction::If(BlockType::Empty));
@@ -3193,17 +3380,344 @@ fn emit_agent_invoke_error_branch(
         agent_id,
         output_ptr_local,
         output_len_local,
-        debug_ptr_local,
-        debug_len_local,
+        route_ptr_local,
+        route_len_local,
+    );
+    emit_agent_error_route_or_fail(
+        body,
+        indices,
+        static_data,
+        track_events,
+        variables,
+        step_id,
+        output_ptr_local,
+        output_len_local,
+        steps_ptr_local,
+        steps_len_local,
+        source_ptr_local,
+        source_len_local,
+        output_ptr_local,
+        output_len_local,
+        route_ptr_local,
+        route_len_local,
+        error_plan,
+        data_ptr_local,
+        data_len_local,
+        workflow_log_kind,
+        workflow_error_kind,
+    );
+    body.instruction(&Instruction::End);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_agent_error_route_or_fail(
+    body: &mut WasmFunction,
+    indices: &DirectCoreFunctionIndices,
+    static_data: &DirectCoreStaticData,
+    track_events: bool,
+    variables: &DirectDataSegment,
+    step_id: &str,
+    error_ptr_local: u32,
+    error_len_local: u32,
+    steps_ptr_local: u32,
+    steps_len_local: u32,
+    source_ptr_local: u32,
+    source_len_local: u32,
+    output_ptr_local: u32,
+    output_len_local: u32,
+    route_ptr_local: u32,
+    route_len_local: u32,
+    error_plan: Option<&DirectErrorRoutePlan>,
+    data_ptr_local: u32,
+    data_len_local: u32,
+    workflow_log_kind: &DirectDataSegment,
+    workflow_error_kind: &DirectDataSegment,
+) {
+    if let Some(error_plan) = error_plan {
+        emit_error_steps(
+            body,
+            indices,
+            static_data,
+            step_id,
+            error_ptr_local,
+            error_len_local,
+            steps_ptr_local,
+            steps_len_local,
+        );
+        emit_build_source(
+            body,
+            indices,
+            variables,
+            data_ptr_local,
+            data_len_local,
+            steps_ptr_local,
+            steps_len_local,
+            source_ptr_local,
+            source_len_local,
+        );
+        emit_error_route_dispatch(
+            body,
+            indices,
+            static_data,
+            track_events,
+            variables,
+            error_plan,
+            data_ptr_local,
+            data_len_local,
+            steps_ptr_local,
+            steps_len_local,
+            source_ptr_local,
+            source_len_local,
+            output_ptr_local,
+            output_len_local,
+            route_ptr_local,
+            route_len_local,
+            workflow_log_kind,
+            workflow_error_kind,
+        );
+    }
+
+    emit_runtime_fail_return(body, indices, error_ptr_local, error_len_local);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_error_steps(
+    body: &mut WasmFunction,
+    indices: &DirectCoreFunctionIndices,
+    static_data: &DirectCoreStaticData,
+    step_id: &str,
+    error_ptr_local: u32,
+    error_len_local: u32,
+    steps_ptr_local: u32,
+    steps_len_local: u32,
+) {
+    let step_id = static_data
+        .step_id(step_id)
+        .expect("run plan step ids are present in static data");
+    push_segment_args(body, step_id);
+    body.instruction(&Instruction::LocalGet(error_ptr_local));
+    body.instruction(&Instruction::LocalGet(error_len_local));
+    body.instruction(&Instruction::LocalGet(steps_ptr_local));
+    body.instruction(&Instruction::LocalGet(steps_len_local));
+    push_retptr_arg(body);
+    body.instruction(&Instruction::Call(indices.stdlib_error_steps));
+    return_if_retptr_error(body);
+    load_retptr_list(body, steps_ptr_local, steps_len_local);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_error_route_dispatch(
+    body: &mut WasmFunction,
+    indices: &DirectCoreFunctionIndices,
+    static_data: &DirectCoreStaticData,
+    track_events: bool,
+    variables: &DirectDataSegment,
+    error_plan: &DirectErrorRoutePlan,
+    data_ptr_local: u32,
+    data_len_local: u32,
+    steps_ptr_local: u32,
+    steps_len_local: u32,
+    source_ptr_local: u32,
+    source_len_local: u32,
+    output_ptr_local: u32,
+    output_len_local: u32,
+    route_ptr_local: u32,
+    route_len_local: u32,
+    workflow_log_kind: &DirectDataSegment,
+    workflow_error_kind: &DirectDataSegment,
+) {
+    emit_error_route_dispatch_inner(
+        body,
+        indices,
+        static_data,
+        track_events,
+        variables,
+        &error_plan.branches,
+        error_plan.default_plan.as_deref(),
+        data_ptr_local,
+        data_len_local,
+        steps_ptr_local,
+        steps_len_local,
+        source_ptr_local,
+        source_len_local,
+        output_ptr_local,
+        output_len_local,
+        route_ptr_local,
+        route_len_local,
+        workflow_log_kind,
+        workflow_error_kind,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_error_route_dispatch_inner(
+    body: &mut WasmFunction,
+    indices: &DirectCoreFunctionIndices,
+    static_data: &DirectCoreStaticData,
+    track_events: bool,
+    variables: &DirectDataSegment,
+    branches: &[DirectEdgeConditionPlan],
+    default_plan: Option<&DirectRunPlan>,
+    data_ptr_local: u32,
+    data_len_local: u32,
+    steps_ptr_local: u32,
+    steps_len_local: u32,
+    source_ptr_local: u32,
+    source_len_local: u32,
+    output_ptr_local: u32,
+    output_len_local: u32,
+    route_ptr_local: u32,
+    route_len_local: u32,
+    workflow_log_kind: &DirectDataSegment,
+    workflow_error_kind: &DirectDataSegment,
+) {
+    let Some((branch, remaining)) = branches.split_first() else {
+        if let Some(default_plan) = default_plan {
+            emit_terminal_run_plan_mapping(
+                body,
+                indices,
+                static_data,
+                track_events,
+                variables,
+                default_plan,
+                data_ptr_local,
+                data_len_local,
+                steps_ptr_local,
+                steps_len_local,
+                source_ptr_local,
+                source_len_local,
+                output_ptr_local,
+                output_len_local,
+                route_ptr_local,
+                route_len_local,
+                workflow_log_kind,
+                workflow_error_kind,
+            );
+        }
+        return;
+    };
+
+    body.instruction(&Instruction::I32Const(branch.condition_id as i32));
+    body.instruction(&Instruction::LocalGet(source_ptr_local));
+    body.instruction(&Instruction::LocalGet(source_len_local));
+    push_retptr_arg(body);
+    body.instruction(&Instruction::Call(indices.stdlib_eval_condition));
+    return_if_retptr_error(body);
+
+    body.instruction(&Instruction::I32Const(DIRECT_RUN_RETPTR_OFFSET));
+    body.instruction(&Instruction::I32Load8U(MemArg {
+        offset: 4,
+        align: 0,
+        memory_index: 0,
+    }));
+    body.instruction(&Instruction::If(BlockType::Empty));
+    emit_terminal_run_plan_mapping(
+        body,
+        indices,
+        static_data,
+        track_events,
+        variables,
+        &branch.plan,
+        data_ptr_local,
+        data_len_local,
+        steps_ptr_local,
+        steps_len_local,
+        source_ptr_local,
+        source_len_local,
+        output_ptr_local,
+        output_len_local,
+        route_ptr_local,
+        route_len_local,
+        workflow_log_kind,
+        workflow_error_kind,
+    );
+    body.instruction(&Instruction::Else);
+    emit_error_route_dispatch_inner(
+        body,
+        indices,
+        static_data,
+        track_events,
+        variables,
+        remaining,
+        default_plan,
+        data_ptr_local,
+        data_len_local,
+        steps_ptr_local,
+        steps_len_local,
+        source_ptr_local,
+        source_len_local,
+        output_ptr_local,
+        output_len_local,
+        route_ptr_local,
+        route_len_local,
+        workflow_log_kind,
+        workflow_error_kind,
+    );
+    body.instruction(&Instruction::End);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_terminal_run_plan_mapping(
+    body: &mut WasmFunction,
+    indices: &DirectCoreFunctionIndices,
+    static_data: &DirectCoreStaticData,
+    track_events: bool,
+    variables: &DirectDataSegment,
+    run_plan: &DirectRunPlan,
+    data_ptr_local: u32,
+    data_len_local: u32,
+    steps_ptr_local: u32,
+    steps_len_local: u32,
+    source_ptr_local: u32,
+    source_len_local: u32,
+    output_ptr_local: u32,
+    output_len_local: u32,
+    route_ptr_local: u32,
+    route_len_local: u32,
+    workflow_log_kind: &DirectDataSegment,
+    workflow_error_kind: &DirectDataSegment,
+) {
+    emit_run_plan_mapping(
+        body,
+        indices,
+        static_data,
+        track_events,
+        variables,
+        run_plan,
+        data_ptr_local,
+        data_len_local,
+        steps_ptr_local,
+        steps_len_local,
+        source_ptr_local,
+        source_len_local,
+        output_ptr_local,
+        output_len_local,
+        route_ptr_local,
+        route_len_local,
+        workflow_log_kind,
+        workflow_error_kind,
     );
 
     body.instruction(&Instruction::LocalGet(output_ptr_local));
     body.instruction(&Instruction::LocalGet(output_len_local));
     push_retptr_arg(body);
+    body.instruction(&Instruction::Call(indices.runtime_complete));
+    load_retptr_tag(body);
+    body.instruction(&Instruction::Return);
+}
+
+fn emit_runtime_fail_return(
+    body: &mut WasmFunction,
+    indices: &DirectCoreFunctionIndices,
+    error_ptr_local: u32,
+    error_len_local: u32,
+) {
+    body.instruction(&Instruction::LocalGet(error_ptr_local));
+    body.instruction(&Instruction::LocalGet(error_len_local));
+    push_retptr_arg(body);
     body.instruction(&Instruction::Call(indices.runtime_fail));
     body.instruction(&Instruction::I32Const(1));
     body.instruction(&Instruction::Return);
-    body.instruction(&Instruction::End);
 }
 
 fn emit_agent_error(
@@ -3587,6 +4101,109 @@ mod tests {
         graph
     }
 
+    fn non_durable_agent_on_error_finish_graph() -> ExecutionGraph {
+        serde_json::from_value(serde_json::json!({
+            "durable": false,
+            "steps": {
+                "agent": {
+                    "stepType": "Agent",
+                    "id": "agent",
+                    "agentId": "utils",
+                    "capabilityId": "normalize",
+                    "inputMapping": {
+                        "value": { "valueType": "reference", "value": "data.value" }
+                    }
+                },
+                "finish": {
+                    "stepType": "Finish",
+                    "id": "finish",
+                    "inputMapping": {
+                        "result": { "valueType": "reference", "value": "steps.agent.outputs.value" }
+                    }
+                },
+                "handled": {
+                    "stepType": "Finish",
+                    "id": "handled",
+                    "inputMapping": {
+                        "handled": { "valueType": "immediate", "value": true },
+                        "message": { "valueType": "reference", "value": "steps.__error.message" }
+                    }
+                }
+            },
+            "entryPoint": "agent",
+            "executionPlan": [
+                { "fromStep": "agent", "toStep": "finish" },
+                { "fromStep": "agent", "toStep": "handled", "label": "onError" }
+            ],
+            "variables": {},
+            "inputSchema": {},
+            "outputSchema": {}
+        }))
+        .expect("agent onError graph parses")
+    }
+
+    fn non_durable_agent_conditional_on_error_graph() -> ExecutionGraph {
+        serde_json::from_value(serde_json::json!({
+            "durable": false,
+            "steps": {
+                "agent": {
+                    "stepType": "Agent",
+                    "id": "agent",
+                    "agentId": "utils",
+                    "capabilityId": "normalize",
+                    "inputMapping": {
+                        "value": { "valueType": "reference", "value": "data.value" }
+                    }
+                },
+                "finish": {
+                    "stepType": "Finish",
+                    "id": "finish",
+                    "inputMapping": {
+                        "result": { "valueType": "reference", "value": "steps.agent.outputs.value" }
+                    }
+                },
+                "handled": {
+                    "stepType": "Finish",
+                    "id": "handled",
+                    "inputMapping": {
+                        "handled": { "valueType": "immediate", "value": true }
+                    }
+                },
+                "fail": {
+                    "stepType": "Error",
+                    "id": "fail",
+                    "code": "AGENT_FAILED",
+                    "message": "Unhandled agent failure",
+                    "category": "permanent",
+                    "severity": "error"
+                }
+            },
+            "entryPoint": "agent",
+            "executionPlan": [
+                { "fromStep": "agent", "toStep": "finish" },
+                {
+                    "fromStep": "agent",
+                    "toStep": "handled",
+                    "label": "onError",
+                    "priority": 10,
+                    "condition": {
+                        "type": "operation",
+                        "op": "EQ",
+                        "arguments": [
+                            { "valueType": "reference", "value": "steps.__error.category" },
+                            { "valueType": "immediate", "value": "unknown" }
+                        ]
+                    }
+                },
+                { "fromStep": "agent", "toStep": "fail", "label": "onError" }
+            ],
+            "variables": {},
+            "inputSchema": {},
+            "outputSchema": {}
+        }))
+        .expect("agent conditional onError graph parses")
+    }
+
     fn collect_run_plan_ids(
         plan: &DirectRunPlan,
         condition_ids: &mut Vec<u32>,
@@ -3629,10 +4246,20 @@ mod tests {
             DirectRunPlan::Agent {
                 input_mapping_id,
                 next_plan,
+                error_plan,
                 ..
             } => {
                 mapping_ids.push(*input_mapping_id);
                 collect_run_plan_ids(next_plan, condition_ids, mapping_ids);
+                if let Some(error_plan) = error_plan {
+                    for branch in &error_plan.branches {
+                        condition_ids.push(branch.condition_id);
+                        collect_run_plan_ids(&branch.plan, condition_ids, mapping_ids);
+                    }
+                    if let Some(default_plan) = &error_plan.default_plan {
+                        collect_run_plan_ids(default_plan, condition_ids, mapping_ids);
+                    }
+                }
             }
             DirectRunPlan::Error { .. } => {}
             DirectRunPlan::Conditional {
@@ -4162,6 +4789,71 @@ mod tests {
             manifest.graph.agents[0].connection_id.as_deref(),
             Some("shopify-main")
         );
+    }
+
+    #[test]
+    fn direct_compile_supports_non_durable_agent_default_on_error_graph() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let result = compile_direct_workflow(DirectCompilationInput {
+            workflow_id: "agent-on-error".to_string(),
+            version: 1,
+            execution_graph: non_durable_agent_on_error_finish_graph(),
+            output_dir: temp.path().to_path_buf(),
+            track_events: false,
+            agent_catalog: None,
+        })
+        .expect("direct Agent onError compile should succeed");
+
+        let wasm = fs::read(&result.wasm_path).expect("wasm");
+        Validator::new()
+            .validate_all(&wasm)
+            .expect("direct Agent onError artifact should validate");
+        assert!(result.support_report.supported);
+        assert_eq!(result.support_report.unsupported, vec![]);
+
+        let manifest: DirectWorkflowManifest =
+            serde_json::from_slice(&fs::read(&result.manifest_path).expect("manifest"))
+                .expect("manifest json");
+        assert_eq!(manifest.graph.agents.len(), 1);
+        assert!(
+            manifest
+                .graph
+                .edges
+                .iter()
+                .any(|edge| edge.label.as_deref() == Some("onError"))
+        );
+    }
+
+    #[test]
+    fn direct_compile_supports_non_durable_agent_conditional_on_error_graph() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let result = compile_direct_workflow(DirectCompilationInput {
+            workflow_id: "agent-conditional-on-error".to_string(),
+            version: 1,
+            execution_graph: non_durable_agent_conditional_on_error_graph(),
+            output_dir: temp.path().to_path_buf(),
+            track_events: false,
+            agent_catalog: None,
+        })
+        .expect("direct Agent conditional onError compile should succeed");
+
+        let wasm = fs::read(&result.wasm_path).expect("wasm");
+        Validator::new()
+            .validate_all(&wasm)
+            .expect("direct Agent conditional onError artifact should validate");
+        assert!(result.support_report.supported);
+        assert_eq!(result.support_report.unsupported, vec![]);
+
+        let manifest: DirectWorkflowManifest =
+            serde_json::from_slice(&fs::read(&result.manifest_path).expect("manifest"))
+                .expect("manifest json");
+        let on_error_condition = manifest
+            .graph
+            .edges
+            .iter()
+            .find(|edge| edge.label.as_deref() == Some("onError") && edge.condition_id.is_some())
+            .expect("conditioned onError edge");
+        assert_eq!(on_error_condition.priority, Some(10));
     }
 
     #[test]
@@ -4942,6 +5634,116 @@ mod tests {
         assert!(
             saw_connection_some_tag_store,
             "Agent connection lowering should store option<connection-info> discriminant 1"
+        );
+    }
+
+    #[test]
+    fn direct_core_lowers_non_durable_agent_on_error_route() {
+        let graph = non_durable_agent_conditional_on_error_graph();
+        let manifest = build_direct_workflow_manifest(&graph).expect("manifest");
+        let manifest_json = manifest.to_canonical_json().expect("manifest json");
+        let core_config =
+            DirectCoreConfig::new(&manifest, &manifest_json, false).expect("core config");
+
+        let DirectRunPlan::Agent { error_plan, .. } = &core_config.run_plan else {
+            panic!("expected Agent run plan");
+        };
+        let error_plan = error_plan.as_ref().expect("Agent onError plan");
+        assert_eq!(error_plan.branches.len(), 1);
+        assert!(error_plan.default_plan.is_some());
+
+        let (resolve, world) =
+            build_direct_component_resolve_with_agents(&manifest.feature_summary.agent_ids)
+                .expect("agent resolve");
+        let core = emit_direct_core_module(&resolve, world, &core_config).expect("core module");
+        Validator::new()
+            .validate_all(&core)
+            .expect("Agent onError core module validates");
+
+        let mut error_steps_index = None;
+        let mut eval_condition_index = None;
+        let mut complete_index = None;
+        let mut fail_index = None;
+        let mut saw_error_steps_call = false;
+        let mut saw_condition_after_error_steps = false;
+        let mut saw_complete_after_error_steps = false;
+        let mut code_body_index = 0;
+        let mut next_function_index = 0;
+
+        for payload in Parser::new(0).parse_all(&core) {
+            match payload.expect("core wasm payload") {
+                Payload::ImportSection(reader) => {
+                    for import in reader.into_imports() {
+                        let import = import.expect("core import");
+                        if import.module.contains("runtara:workflow-stdlib/json")
+                            && import.name == "error-steps"
+                        {
+                            error_steps_index = Some(next_function_index);
+                        }
+                        if import.module.contains("runtara:workflow-stdlib/json")
+                            && import.name == "eval-condition"
+                        {
+                            eval_condition_index = Some(next_function_index);
+                        }
+                        if import.module.contains("runtara:workflow-runtime/runtime")
+                            && import.name == "complete"
+                        {
+                            complete_index = Some(next_function_index);
+                        }
+                        if import.module.contains("runtara:workflow-runtime/runtime")
+                            && import.name == "fail"
+                        {
+                            fail_index = Some(next_function_index);
+                        }
+                        if matches!(import.ty, TypeRef::Func(_)) {
+                            next_function_index += 1;
+                        }
+                    }
+                }
+                Payload::CodeSectionEntry(body) => {
+                    if code_body_index == 0 {
+                        for operator in body.get_operators_reader().expect("operators").into_iter()
+                        {
+                            if let Operator::Call { function_index } = operator.expect("operator") {
+                                if Some(function_index) == error_steps_index {
+                                    saw_error_steps_call = true;
+                                }
+                                if saw_error_steps_call
+                                    && Some(function_index) == eval_condition_index
+                                {
+                                    saw_condition_after_error_steps = true;
+                                }
+                                if saw_error_steps_call && Some(function_index) == complete_index {
+                                    saw_complete_after_error_steps = true;
+                                }
+                            }
+                        }
+                    }
+                    code_body_index += 1;
+                }
+                _ => {}
+            }
+        }
+
+        assert!(
+            error_steps_index.is_some(),
+            "core should import stdlib.error-steps"
+        );
+        assert!(
+            fail_index.is_some(),
+            "core should retain runtime.fail fallback for unmatched onError routes"
+        );
+        assert!(
+            saw_error_steps_call,
+            "Agent error path should insert __error into steps context"
+        );
+        assert!(
+            saw_condition_after_error_steps,
+            "conditional onError route should evaluate after error source construction"
+        );
+        assert!(
+            saw_complete_after_error_steps,
+            "handled onError Finish branch should complete the workflow"
         );
     }
 

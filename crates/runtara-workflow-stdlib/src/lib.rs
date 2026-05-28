@@ -250,6 +250,10 @@ mod component {
             })
         }
 
+        fn error_steps(step_id: String, error: Vec<u8>, steps: Vec<u8>) -> Result<Vec<u8>, String> {
+            direct_json::error_steps(&step_id, &error, &steps)
+        }
+
         fn group_by(group_id: u32, source: Vec<u8>) -> Result<Vec<u8>, String> {
             MANIFEST.with(|slot| {
                 let slot = slot.borrow();

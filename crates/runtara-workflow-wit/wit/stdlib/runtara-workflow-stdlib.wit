@@ -61,6 +61,12 @@ interface json {
         source: list<u8>,
     ) -> result<list<u8>, string>;
 
+    error-steps: func(
+        step-id: string,
+        error: list<u8>,
+        steps: list<u8>,
+    ) -> result<list<u8>, string>;
+
     group-by: func(
         group-id: u32,
         source: list<u8>,

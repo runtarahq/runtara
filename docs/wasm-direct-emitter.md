@@ -216,8 +216,14 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   the generated Rust-compatible `connection_id` and `_connection` fields into
   Agent JSON input, and the direct core writes the canonical ABI
   `some(connection-info)` record with the connection id, empty integration id,
-  `{}` parameters, and no subtype/rate-limit config. Durable Agent calls,
-  retry/timeout policy, compensation, and on-error routing remain rejected.
+  `{}` parameters, and no subtype/rate-limit config.
+- Non-durable Agent `onError` routing is now supported for default handlers and
+  priority-ordered conditional handlers with at most one default fallback. The
+  direct stdlib exposes `error-steps` to insert generated-code-compatible
+  `steps.__error`/`steps.error` context, and direct core routes validation and
+  capability failures through the handler branch before falling back to
+  `runtime.fail` when no condition matches. Durable Agent calls, retry/timeout
+  policy, and compensation remain rejected.
 
 ## Final Goal
 
@@ -1342,6 +1348,11 @@ Current status:
 - `agent-connection-input` injects the same JSON connection fields as generated
   Rust, and direct core writes the current `option<connection-info>` ABI layout
   for static connection ids.
+- `error-steps` now builds the generated-code-compatible `onError` source
+  context for Agent failures, and direct core lowers non-durable Agent
+  `onError` edges with condition priority/default routing. Handler branches are
+  emitted as terminal direct run plans; an unmatched conditional handler
+  propagates through `runtime.fail`.
 
 Implementation steps:
 
@@ -1360,8 +1371,11 @@ Implementation steps:
    - agent input validation: done for required-field missing/null checks;
    - connection JSON injection and WIT `connection-info` envelope: done for
      static `connectionId`;
+   - `onError` routing: done for non-durable Agent validation/capability
+     failures with conditional priority/default handlers;
    - durable retry/timeout behavior: pending.
-5. Implement `onError` routing for agent failures.
+5. Extend `onError` routing beyond the first non-durable Agent subset when
+   additional failing step types are lowered.
 6. Preserve current retry policy shape by delegating durable retry behavior to
    stdlib/runtime. Non-durable calls can be supported first if needed.
 

@@ -418,6 +418,16 @@ impl DirectJsonManifest {
         .map_err(|err| format!("failed to serialize error failure payload: {err}"))
     }
 
+    /// Insert generated-code-compatible `onError` context into the steps map.
+    pub fn error_steps(
+        &self,
+        step_id: &str,
+        error: &[u8],
+        steps: &[u8],
+    ) -> Result<Vec<u8>, String> {
+        error_steps(step_id, error, steps)
+    }
+
     /// Build a generated-code-compatible `step_debug_start` payload.
     pub fn step_debug_start(&self, step_id: &str, source: &[u8]) -> Result<Vec<u8>, String> {
         let source: Value = serde_json::from_slice(source)
@@ -713,6 +723,30 @@ pub fn build_source(data: &[u8], variables: &[u8], steps: &[u8]) -> Result<Vec<u
 
     serde_json::to_vec(&Value::Object(source))
         .map_err(|err| format!("failed to serialize source: {err}"))
+}
+
+/// Insert generated-code-compatible `onError` context into the steps map.
+pub fn error_steps(step_id: &str, error: &[u8], steps: &[u8]) -> Result<Vec<u8>, String> {
+    let mut steps: Map<String, Value> = serde_json::from_slice::<Value>(steps)
+        .map_err(|err| format!("failed to parse error steps context: {err}"))?
+        .as_object()
+        .cloned()
+        .ok_or_else(|| "error steps context must be a JSON object".to_string())?;
+    let error = serde_json::from_slice::<Value>(error).unwrap_or_else(|_| {
+        serde_json::json!({
+            "message": String::from_utf8_lossy(error).to_string(),
+            "stepId": step_id,
+            "code": null,
+            "category": "unknown",
+            "severity": "error"
+        })
+    });
+
+    steps.insert("__error".to_string(), error.clone());
+    steps.insert("error".to_string(), error);
+
+    serde_json::to_vec(&Value::Object(steps))
+        .map_err(|err| format!("failed to serialize error steps context: {err}"))
 }
 
 #[derive(Default)]
@@ -2759,6 +2793,35 @@ mod tests {
             })
         );
         assert_eq!(input["value"], json!("present"));
+    }
+
+    #[test]
+    fn error_steps_inserts_structured_error_context() {
+        let steps = error_steps(
+            "agent",
+            br#"{"code":"BAD","category":"permanent","message":"bad"}"#,
+            br#"{"previous":{"outputs":{"ok":true}}}"#,
+        )
+        .expect("error steps");
+        let steps: Value = serde_json::from_slice(&steps).expect("steps json");
+
+        assert_eq!(steps["previous"]["outputs"]["ok"], json!(true));
+        assert_eq!(steps["__error"]["code"], json!("BAD"));
+        assert_eq!(steps["__error"]["category"], json!("permanent"));
+        assert_eq!(steps["error"], steps["__error"]);
+    }
+
+    #[test]
+    fn error_steps_matches_generated_fallback_error_context() {
+        let steps = error_steps("agent", b"Step agent failed", b"{}").expect("error steps");
+        let steps: Value = serde_json::from_slice(&steps).expect("steps json");
+
+        assert_eq!(steps["__error"]["message"], json!("Step agent failed"));
+        assert_eq!(steps["__error"]["stepId"], json!("agent"));
+        assert_eq!(steps["__error"]["code"], Value::Null);
+        assert_eq!(steps["__error"]["category"], json!("unknown"));
+        assert_eq!(steps["__error"]["severity"], json!("error"));
+        assert_eq!(steps["error"], steps["__error"]);
     }
 
     #[test]
