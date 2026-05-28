@@ -67,6 +67,38 @@ fn collect_graph_support(
     unsupported: &mut Vec<UnsupportedWorkflowFeature>,
 ) {
     for edge in &graph.execution_plan {
+        unsupported.push(UnsupportedWorkflowFeature {
+            step_id: Some(edge.from_step.clone()),
+            step_type: graph
+                .steps
+                .get(&edge.from_step)
+                .map(step_type_name)
+                .map(str::to_string),
+            feature: "execution-plan-routing".to_string(),
+            reason: "direct emitter currently lowers only a single entry Finish step".to_string(),
+        });
+    }
+
+    let finish_steps = graph
+        .steps
+        .values()
+        .filter_map(|step| match step {
+            Step::Finish(step) => Some(step),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if finish_steps.len() > 1 {
+        for step in finish_steps {
+            unsupported.push(UnsupportedWorkflowFeature {
+                step_id: Some(step.id.clone()),
+                step_type: Some("Finish".to_string()),
+                feature: "multiple-finish-steps".to_string(),
+                reason: "direct emitter currently lowers only the entry Finish step".to_string(),
+            });
+        }
+    }
+
+    for edge in &graph.execution_plan {
         if edge.condition.is_some() {
             unsupported.push(UnsupportedWorkflowFeature {
                 step_id: Some(edge.from_step.clone()),
@@ -100,7 +132,16 @@ fn collect_graph_support(
 
 fn collect_step_support(step: &Step, unsupported: &mut Vec<UnsupportedWorkflowFeature>) {
     match step {
-        Step::Finish(_) => {}
+        Step::Finish(step) => {
+            if step.breakpoint.unwrap_or(false) {
+                unsupported.push(UnsupportedWorkflowFeature {
+                    step_id: Some(step.id.clone()),
+                    step_type: Some("Finish".to_string()),
+                    feature: "finish-breakpoint".to_string(),
+                    reason: "Finish breakpoints require direct debug event emission".to_string(),
+                });
+            }
+        }
         Step::Agent(_) => unsupported_step(
             step,
             "agent-call",
@@ -266,6 +307,107 @@ mod tests {
 
         assert!(report.supported);
         assert!(report.unsupported.is_empty());
+    }
+
+    #[test]
+    fn finish_mapping_forms_remain_supported_for_stdlib_lowering() {
+        let graph = serde_json::from_value::<ExecutionGraph>(serde_json::json!({
+            "steps": {
+                "finish": {
+                    "stepType": "Finish",
+                    "id": "finish",
+                    "inputMapping": {
+                        "literal": { "valueType": "immediate", "value": "ok" },
+                        "fallback": {
+                            "valueType": "reference",
+                            "value": "data.missing",
+                            "type": "string",
+                            "default": "n/a"
+                        },
+                        "nested": {
+                            "valueType": "composite",
+                            "value": {
+                                "message": {
+                                    "valueType": "template",
+                                    "value": "hello {{ data.name }}"
+                                },
+                                "items": {
+                                    "valueType": "composite",
+                                    "value": [
+                                        { "valueType": "reference", "value": "data.item" },
+                                        { "valueType": "immediate", "value": 7 }
+                                    ]
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            "entryPoint": "finish",
+            "executionPlan": [],
+            "variables": {},
+            "inputSchema": {},
+            "outputSchema": {}
+        }))
+        .expect("graph parses");
+
+        let report = analyze_direct_wasm_support(&graph);
+
+        assert!(report.supported, "{:?}", report.unsupported);
+    }
+
+    #[test]
+    fn finish_breakpoints_are_rejected_until_debug_events_are_lowered() {
+        let graph = serde_json::from_value::<ExecutionGraph>(serde_json::json!({
+            "steps": {
+                "finish": {
+                    "stepType": "Finish",
+                    "id": "finish",
+                    "breakpoint": true
+                }
+            },
+            "entryPoint": "finish",
+            "executionPlan": [],
+            "variables": {},
+            "inputSchema": {},
+            "outputSchema": {}
+        }))
+        .expect("graph parses");
+
+        let report = analyze_direct_wasm_support(&graph);
+
+        assert!(!report.supported);
+        assert!(report.unsupported.iter().any(|feature| {
+            feature.step_id.as_deref() == Some("finish") && feature.feature == "finish-breakpoint"
+        }));
+    }
+
+    #[test]
+    fn multiple_finish_steps_are_rejected_until_control_flow_is_lowered() {
+        let graph = serde_json::from_value::<ExecutionGraph>(serde_json::json!({
+            "steps": {
+                "finish_a": { "stepType": "Finish", "id": "finish_a" },
+                "finish_b": { "stepType": "Finish", "id": "finish_b" }
+            },
+            "entryPoint": "finish_a",
+            "executionPlan": [],
+            "variables": {},
+            "inputSchema": {},
+            "outputSchema": {}
+        }))
+        .expect("graph parses");
+
+        let report = analyze_direct_wasm_support(&graph);
+
+        assert!(!report.supported);
+        assert_eq!(
+            report
+                .unsupported
+                .iter()
+                .filter(|feature| feature.feature == "multiple-finish-steps")
+                .count(),
+            2
+        );
     }
 
     #[test]

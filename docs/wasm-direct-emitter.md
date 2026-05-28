@@ -26,16 +26,18 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   checksum, sorted steps, sorted edges, nested graph manifests, schemas,
   variables, manifest-wide mapping IDs, and a feature summary.
 - `direct_wasm::support` produces deterministic unsupported-feature reports.
-  The current production-shaped direct path intentionally supports only
-  finish-only graphs.
+  The current production-shaped direct path intentionally supports only a
+  single entry `Finish` step with no routing/breakpoints. `Finish.inputMapping`
+  forms remain broadly supported because mapping semantics are delegated to the
+  shared stdlib.
 - `direct_wasm::compile::compile_direct_workflow` is an opt-in entry point that
-  emits a valid component-format artifact for finish-only graphs, imports the
-  workflow stdlib/runtime interfaces, exports `wasi:cli/run@0.2.3`, writes
+  emits a valid component-format artifact for single-entry `Finish` graphs,
+  imports the workflow stdlib/runtime interfaces, exports `wasi:cli/run@0.2.3`, writes
   `workflow.wasm`, `manifest.json`, `support-report.json`, `wit/world.wit`,
   and `workflow.wac`, and does not generate a Rust crate. The exported run entry
-  now calls `runtara:workflow-runtime/runtime.complete` with a static empty JSON
-  payload. Finish output lowering from the workflow manifest is still pending,
-  so this is not the final component-model runtime artifact.
+  now initializes the stdlib with the manifest, loads runtime input, builds the
+  mapping source, applies the entry `Finish` mapping by manifest mapping ID, and
+  calls `runtara:workflow-runtime/runtime.complete`.
 - `runtara-workflow-wit` now defines the first checked-in workflow WIT
   contracts: `runtara:workflow-stdlib/json@0.1.0` for shared JSON semantics and
   `runtara:workflow-runtime/runtime@0.1.0` for SDK/runtime lifecycle calls.
@@ -823,17 +825,18 @@ Current status:
 - The current finish-only direct component proves the direct compile entry,
   sidecars, support-gating, artifact validation, canonical run export, and
   "no generated Rust crate" behavior. The `run` dispatcher calls
-  `runtime.complete` with a static empty JSON payload.
+  `stdlib.init-manifest`, `runtime.load-input`, `stdlib.build-source`,
+  `stdlib.apply-mapping`, and `runtime.complete`.
 - `direct_wasm::component` emits `wit/world.wit` and `workflow.wac` sidecars
   that import `runtara:workflow-stdlib/json@0.1.0`,
   `runtara:workflow-runtime/runtime@0.1.0`, export `wasi:cli/run@0.2.3`,
   and statically compose stdlib, runtime, workflow logic, and required agents.
-- The current run entry still has placeholder `Finish` output semantics. It
-  must lower the real Finish mapping/output envelope before direct mode has
-  behavior parity under the environment runner.
-- The manifest now assigns deterministic manifest-wide mapping IDs. The next
-  run-lowering step can call `stdlib.apply-mapping(mapping-id, source)` without
-  relying on implicit step ordering.
+- The current run entry delegates `Finish.inputMapping` semantics to the shared
+  stdlib. The stdlib implementation must honor mapping purpose metadata,
+  including the existing Finish-specific top-level `outputs` unwrap.
+- The manifest now assigns deterministic manifest-wide mapping IDs, and run
+  lowering calls `stdlib.apply-mapping(mapping-id, source)` without relying on
+  implicit step ordering.
 
 Implementation steps:
 
@@ -879,13 +882,16 @@ Current status:
   tests across parseable workflow fixtures.
 - Unsupported reports exist and name exact step ids, step types, feature keys,
   and actionable reasons.
-- Finish-only graphs can be compiled through the opt-in direct entry point into
-  a component-format artifact and sidecar files without generating
+- Single-entry `Finish` graphs can be compiled through the opt-in direct entry
+  point into a component-format artifact and sidecar files without generating
   `Cargo.toml`, `src/lib.rs`, or any per-workflow Rust crate.
-- The current run dispatcher calls `runtime.complete` and propagates the
-  `result<_, string>` tag back through `wasi:cli/run`.
-- Remaining work: replace the static empty JSON output with real Finish output
-  lowering through manifest data and stdlib/runtime imports.
+- The current run dispatcher lowers the entry `Finish` path through
+  `runtime.load-input`, `stdlib.build-source`, `stdlib.apply-mapping`, and
+  `runtime.complete`, then propagates the `result<_, string>` tag back through
+  `wasi:cli/run`.
+- Remaining work: implement and compose the shared stdlib/runtime components,
+  add Finish parity fixtures against the Rust-generated path, and broaden graph
+  lowering beyond the single-entry Finish shape.
 
 Implementation steps:
 

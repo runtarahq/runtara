@@ -15,7 +15,7 @@ use runtara_dsl::ExecutionGraph;
 use runtara_workflow_wit::{RUNTIME_WIT, STDLIB_WIT, WORKFLOW_WIT_VERSION};
 use sha2::{Digest, Sha256};
 use wasm_encoder::{
-    CodeSection, ConstExpr, CustomSection, DataSection, Encode, EntityType, ExportKind,
+    BlockType, CodeSection, ConstExpr, CustomSection, DataSection, Encode, EntityType, ExportKind,
     ExportSection, Function as WasmFunction, FunctionSection, GlobalSection, GlobalType, Ieee32,
     Ieee64, ImportSection, Instruction, MemArg, MemorySection, MemoryType, Module, Section,
     TypeSection, ValType,
@@ -57,10 +57,10 @@ world command {
 }
 "#;
 
-const DIRECT_RUNTIME_RETPTR_OFFSET: i32 = 0;
-const DIRECT_STATIC_OUTPUT_OFFSET: i32 = 16;
-const DIRECT_STATIC_OUTPUT: &[u8] = b"{}";
-const DIRECT_HEAP_BASE: i32 = 4096;
+const DIRECT_RUN_RETPTR_OFFSET: i32 = 0;
+const DIRECT_STATIC_DATA_OFFSET: i32 = 64;
+const DIRECT_EMPTY_STEPS_CONTEXT: &[u8] = b"{}";
+const WASM_PAGE_SIZE: i32 = 65_536;
 
 /// Input for the opt-in direct compiler.
 #[derive(Debug, Clone)]
@@ -235,13 +235,13 @@ fn emit_finish_only_artifact(
         "componentRunExport": "wasi:cli/run@0.2.3",
         "entryPointExecutable": true,
         "runtimeExecutable": true,
-        "finishOutputMode": "static-empty-json",
+        "finishOutputMode": "stdlib-apply-mapping",
         "manifestVersion": DIRECT_WORKFLOW_MANIFEST_VERSION,
         "stepCount": manifest.feature_summary.total_steps,
-        "note": "direct compiler component with canonical run export and runtime.complete call; Finish output lowering comes next"
+        "note": "direct compiler component with canonical run export, stdlib Finish mapping, and runtime.complete call"
     }))?;
 
-    let mut component = emit_finish_only_component()?;
+    let mut component = emit_finish_only_component(manifest, manifest_json)?;
     append_component_custom_section(&mut component, DIRECT_WORKFLOW_ABI_SECTION, &abi_json);
     append_component_custom_section(
         &mut component,
@@ -257,9 +257,13 @@ fn emit_finish_only_artifact(
     Ok(component)
 }
 
-fn emit_finish_only_component() -> Result<Vec<u8>, DirectCompileError> {
+fn emit_finish_only_component(
+    manifest: &DirectWorkflowManifest,
+    manifest_json: &[u8],
+) -> Result<Vec<u8>, DirectCompileError> {
     let (resolve, world) = build_direct_component_resolve()?;
-    let mut core_module = emit_direct_core_module(&resolve, world)?;
+    let core_config = DirectCoreConfig::new(manifest, manifest_json)?;
+    let mut core_module = emit_direct_core_module(&resolve, world, &core_config)?;
     embed_component_metadata(&mut core_module, &resolve, world, StringEncoding::UTF8)
         .map_err(component_error)?;
 
@@ -302,9 +306,128 @@ fn build_direct_component_resolve() -> Result<(Resolve, WorldId), DirectCompileE
     Ok((resolve, world))
 }
 
+#[derive(Debug, Clone)]
+struct DirectCoreConfig {
+    finish_mapping_id: u32,
+    static_data: DirectCoreStaticData,
+}
+
+impl DirectCoreConfig {
+    fn new(
+        manifest: &DirectWorkflowManifest,
+        manifest_json: &[u8],
+    ) -> Result<Self, DirectCompileError> {
+        let variables_json = serde_json::to_vec(&manifest.graph.variables)?;
+        Ok(Self {
+            finish_mapping_id: entry_finish_mapping_id(manifest)?,
+            static_data: DirectCoreStaticData::new(
+                manifest_json,
+                &variables_json,
+                DIRECT_EMPTY_STEPS_CONTEXT,
+            )?,
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
+struct DirectCoreStaticData {
+    manifest: DirectDataSegment,
+    variables: DirectDataSegment,
+    steps: DirectDataSegment,
+    heap_base: i32,
+    memory_min_pages: u64,
+}
+
+impl DirectCoreStaticData {
+    fn new(
+        manifest_json: &[u8],
+        variables_json: &[u8],
+        steps_json: &[u8],
+    ) -> Result<Self, DirectCompileError> {
+        let mut offset = DIRECT_STATIC_DATA_OFFSET;
+        let manifest = DirectDataSegment::new(offset, manifest_json);
+        offset = align_i32(checked_offset_add(offset, manifest_json.len())?, 4);
+
+        let variables = DirectDataSegment::new(offset, variables_json);
+        offset = align_i32(checked_offset_add(offset, variables_json.len())?, 4);
+
+        let steps = DirectDataSegment::new(offset, steps_json);
+        offset = align_i32(checked_offset_add(offset, steps_json.len())?, 16);
+
+        let memory_min_pages = wasm_pages_for_bytes(offset)?;
+        Ok(Self {
+            manifest,
+            variables,
+            steps,
+            heap_base: offset,
+            memory_min_pages,
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
+struct DirectDataSegment {
+    offset: i32,
+    data: Vec<u8>,
+}
+
+impl DirectDataSegment {
+    fn new(offset: i32, data: &[u8]) -> Self {
+        Self {
+            offset,
+            data: data.to_vec(),
+        }
+    }
+
+    fn len_i32(&self) -> i32 {
+        i32::try_from(self.data.len()).expect("direct data length already checked")
+    }
+}
+
+fn entry_finish_mapping_id(manifest: &DirectWorkflowManifest) -> Result<u32, DirectCompileError> {
+    manifest
+        .graph
+        .mappings
+        .iter()
+        .find(|mapping| {
+            mapping.step_id == manifest.graph.entry_point
+                && mapping.purpose == "finish.inputMapping"
+        })
+        .map(|mapping| mapping.id)
+        .ok_or_else(|| {
+            DirectCompileError::Component(format!(
+                "missing Finish input mapping for entry point '{}'",
+                manifest.graph.entry_point
+            ))
+        })
+}
+
+fn checked_offset_add(offset: i32, len: usize) -> Result<i32, DirectCompileError> {
+    let len = i32::try_from(len).map_err(|_| {
+        DirectCompileError::Component(
+            "direct workflow static data exceeds i32 address space".into(),
+        )
+    })?;
+    offset.checked_add(len).ok_or_else(|| {
+        DirectCompileError::Component("direct workflow static data offset overflow".into())
+    })
+}
+
+fn align_i32(value: i32, align: i32) -> i32 {
+    debug_assert!(align > 0 && (align & (align - 1)) == 0);
+    (value + align - 1) & !(align - 1)
+}
+
+fn wasm_pages_for_bytes(bytes: i32) -> Result<u64, DirectCompileError> {
+    let bytes = u64::try_from(bytes)
+        .map_err(|_| DirectCompileError::Component("negative direct memory size".into()))?;
+    Ok(bytes.div_ceil(WASM_PAGE_SIZE as u64).max(1))
+}
+
 fn emit_direct_core_module(
     resolve: &Resolve,
     world: WorldId,
+    config: &DirectCoreConfig,
 ) -> Result<Vec<u8>, DirectCompileError> {
     let mangling = ManglingAndAbi::Standard32;
     let world = &resolve.worlds[world];
@@ -355,9 +478,7 @@ fn emit_direct_core_module(
         }
     }
 
-    let runtime_complete_index = import_indices.runtime_complete.ok_or_else(|| {
-        DirectCompileError::Component("missing runtime.complete import in direct world".to_string())
-    })?;
+    let import_indices = import_indices.require_all()?;
 
     for (name, export) in &world.exports {
         match export {
@@ -374,7 +495,8 @@ fn emit_direct_core_module(
                     &mut code,
                     imported_function_count,
                     &mut next_defined_function,
-                    runtime_complete_index,
+                    &import_indices,
+                    config,
                 );
             }
             WorldItem::Interface { id, .. } => {
@@ -391,7 +513,8 @@ fn emit_direct_core_module(
                         &mut code,
                         imported_function_count,
                         &mut next_defined_function,
-                        runtime_complete_index,
+                        &import_indices,
+                        config,
                     );
                 }
             }
@@ -401,7 +524,7 @@ fn emit_direct_core_module(
 
     let mut memories = MemorySection::new();
     memories.memory(MemoryType {
-        minimum: 1,
+        minimum: config.static_data.memory_min_pages,
         maximum: None,
         memory64: false,
         shared: false,
@@ -417,7 +540,7 @@ fn emit_direct_core_module(
             mutable: true,
             shared: false,
         },
-        &ConstExpr::i32_const(DIRECT_HEAP_BASE),
+        &ConstExpr::i32_const(config.static_data.heap_base),
     );
 
     export_realloc(
@@ -444,11 +567,17 @@ fn emit_direct_core_module(
     );
 
     let mut data = DataSection::new();
-    data.active(
-        0,
-        &ConstExpr::i32_const(DIRECT_STATIC_OUTPUT_OFFSET),
-        DIRECT_STATIC_OUTPUT.iter().copied(),
-    );
+    for segment in [
+        &config.static_data.manifest,
+        &config.static_data.variables,
+        &config.static_data.steps,
+    ] {
+        data.active(
+            0,
+            &ConstExpr::i32_const(segment.offset),
+            segment.data.iter().copied(),
+        );
+    }
 
     let mut module = Module::new();
     module.section(&types);
@@ -466,7 +595,44 @@ fn emit_direct_core_module(
 
 #[derive(Debug, Default)]
 struct DirectCoreImportIndices {
+    runtime_load_input: Option<u32>,
     runtime_complete: Option<u32>,
+    stdlib_init_manifest: Option<u32>,
+    stdlib_build_source: Option<u32>,
+    stdlib_apply_mapping: Option<u32>,
+}
+
+impl DirectCoreImportIndices {
+    fn require_all(self) -> Result<DirectCoreFunctionIndices, DirectCompileError> {
+        Ok(DirectCoreFunctionIndices {
+            runtime_load_input: require_import(self.runtime_load_input, "runtime.load-input")?,
+            runtime_complete: require_import(self.runtime_complete, "runtime.complete")?,
+            stdlib_init_manifest: require_import(
+                self.stdlib_init_manifest,
+                "stdlib.init-manifest",
+            )?,
+            stdlib_build_source: require_import(self.stdlib_build_source, "stdlib.build-source")?,
+            stdlib_apply_mapping: require_import(
+                self.stdlib_apply_mapping,
+                "stdlib.apply-mapping",
+            )?,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct DirectCoreFunctionIndices {
+    runtime_load_input: u32,
+    runtime_complete: u32,
+    stdlib_init_manifest: u32,
+    stdlib_build_source: u32,
+    stdlib_apply_mapping: u32,
+}
+
+fn require_import(value: Option<u32>, name: &str) -> Result<u32, DirectCompileError> {
+    value.ok_or_else(|| {
+        DirectCompileError::Component(format!("missing {name} import in direct world"))
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -492,8 +658,16 @@ fn import_core_function(
     );
     imports.import(&module, &name, EntityType::Function(type_index));
 
-    if is_runtime_complete_import(resolve, interface, function) {
+    if is_runtime_import(resolve, interface, function, "load-input") {
+        import_indices.runtime_load_input = Some(function_index);
+    } else if is_runtime_import(resolve, interface, function, "complete") {
         import_indices.runtime_complete = Some(function_index);
+    } else if is_stdlib_import(resolve, interface, function, "init-manifest") {
+        import_indices.stdlib_init_manifest = Some(function_index);
+    } else if is_stdlib_import(resolve, interface, function, "build-source") {
+        import_indices.stdlib_build_source = Some(function_index);
+    } else if is_stdlib_import(resolve, interface, function, "apply-mapping") {
+        import_indices.stdlib_apply_mapping = Some(function_index);
     }
 }
 
@@ -510,7 +684,8 @@ fn export_core_function(
     code: &mut CodeSection,
     imported_function_count: u32,
     next_defined_function: &mut u32,
-    runtime_complete_index: u32,
+    import_indices: &DirectCoreFunctionIndices,
+    config: &DirectCoreConfig,
 ) {
     let signature = resolve.wasm_signature(mangling.export_variant(), function);
     let type_index = push_core_type(types, type_count, &signature.params, &signature.results);
@@ -529,7 +704,7 @@ fn export_core_function(
     exports.export(&export_name, ExportKind::Func, function_index);
 
     let body = if is_wasi_cli_run_export(resolve, interface, function) {
-        runtime_complete_run_function(runtime_complete_index)
+        finish_mapping_run_function(import_indices, config)
     } else {
         zero_return_function(&signature.results)
     };
@@ -580,12 +755,32 @@ fn export_realloc(
     let realloc_name = resolve.wasm_export_name(mangling, WasmExport::Realloc);
     exports.export(&realloc_name, ExportKind::Func, function_index);
 
-    let mut body = WasmFunction::new([(1, ValType::I32)]);
+    let mut body = WasmFunction::new([(3, ValType::I32)]);
     body.instruction(&Instruction::GlobalGet(0));
     body.instruction(&Instruction::LocalSet(4));
     body.instruction(&Instruction::GlobalGet(0));
     body.instruction(&Instruction::LocalGet(3));
     body.instruction(&Instruction::I32Add);
+    body.instruction(&Instruction::LocalSet(5));
+    body.instruction(&Instruction::LocalGet(5));
+    body.instruction(&Instruction::MemorySize(0));
+    body.instruction(&Instruction::I32Const(WASM_PAGE_SIZE));
+    body.instruction(&Instruction::I32Mul);
+    body.instruction(&Instruction::I32GtU);
+    body.instruction(&Instruction::If(BlockType::Empty));
+    body.instruction(&Instruction::LocalGet(5));
+    body.instruction(&Instruction::MemorySize(0));
+    body.instruction(&Instruction::I32Const(WASM_PAGE_SIZE));
+    body.instruction(&Instruction::I32Mul);
+    body.instruction(&Instruction::I32Sub);
+    body.instruction(&Instruction::I32Const(WASM_PAGE_SIZE - 1));
+    body.instruction(&Instruction::I32Add);
+    body.instruction(&Instruction::I32Const(WASM_PAGE_SIZE));
+    body.instruction(&Instruction::I32DivU);
+    body.instruction(&Instruction::MemoryGrow(0));
+    body.instruction(&Instruction::Drop);
+    body.instruction(&Instruction::End);
+    body.instruction(&Instruction::LocalGet(5));
     body.instruction(&Instruction::GlobalSet(0));
     body.instruction(&Instruction::LocalGet(4));
     body.instruction(&Instruction::End);
@@ -617,20 +812,96 @@ fn export_initialize(
     code.function(&body);
 }
 
-fn runtime_complete_run_function(runtime_complete_index: u32) -> WasmFunction {
-    let mut body = WasmFunction::new([]);
-    body.instruction(&Instruction::I32Const(DIRECT_STATIC_OUTPUT_OFFSET));
-    body.instruction(&Instruction::I32Const(DIRECT_STATIC_OUTPUT.len() as i32));
-    body.instruction(&Instruction::I32Const(DIRECT_RUNTIME_RETPTR_OFFSET));
-    body.instruction(&Instruction::Call(runtime_complete_index));
-    body.instruction(&Instruction::I32Const(DIRECT_RUNTIME_RETPTR_OFFSET));
-    body.instruction(&Instruction::I32Load8U(MemArg {
+fn finish_mapping_run_function(
+    indices: &DirectCoreFunctionIndices,
+    config: &DirectCoreConfig,
+) -> WasmFunction {
+    const DATA_PTR_LOCAL: u32 = 0;
+    const DATA_LEN_LOCAL: u32 = 1;
+    const SOURCE_PTR_LOCAL: u32 = 2;
+    const SOURCE_LEN_LOCAL: u32 = 3;
+    const OUTPUT_PTR_LOCAL: u32 = 4;
+    const OUTPUT_LEN_LOCAL: u32 = 5;
+
+    let mut body = WasmFunction::new([(6, ValType::I32)]);
+
+    push_segment_args(&mut body, &config.static_data.manifest);
+    push_retptr_arg(&mut body);
+    body.instruction(&Instruction::Call(indices.stdlib_init_manifest));
+    return_if_retptr_error(&mut body);
+
+    push_retptr_arg(&mut body);
+    body.instruction(&Instruction::Call(indices.runtime_load_input));
+    return_if_retptr_error(&mut body);
+    load_retptr_list(&mut body, DATA_PTR_LOCAL, DATA_LEN_LOCAL);
+
+    body.instruction(&Instruction::LocalGet(DATA_PTR_LOCAL));
+    body.instruction(&Instruction::LocalGet(DATA_LEN_LOCAL));
+    push_segment_args(&mut body, &config.static_data.variables);
+    push_segment_args(&mut body, &config.static_data.steps);
+    push_retptr_arg(&mut body);
+    body.instruction(&Instruction::Call(indices.stdlib_build_source));
+    return_if_retptr_error(&mut body);
+    load_retptr_list(&mut body, SOURCE_PTR_LOCAL, SOURCE_LEN_LOCAL);
+
+    body.instruction(&Instruction::I32Const(config.finish_mapping_id as i32));
+    body.instruction(&Instruction::LocalGet(SOURCE_PTR_LOCAL));
+    body.instruction(&Instruction::LocalGet(SOURCE_LEN_LOCAL));
+    push_retptr_arg(&mut body);
+    body.instruction(&Instruction::Call(indices.stdlib_apply_mapping));
+    return_if_retptr_error(&mut body);
+    load_retptr_list(&mut body, OUTPUT_PTR_LOCAL, OUTPUT_LEN_LOCAL);
+
+    body.instruction(&Instruction::LocalGet(OUTPUT_PTR_LOCAL));
+    body.instruction(&Instruction::LocalGet(OUTPUT_LEN_LOCAL));
+    push_retptr_arg(&mut body);
+    body.instruction(&Instruction::Call(indices.runtime_complete));
+    load_retptr_tag(&mut body);
+    body.instruction(&Instruction::End);
+    body
+}
+
+fn push_segment_args(function: &mut WasmFunction, segment: &DirectDataSegment) {
+    function.instruction(&Instruction::I32Const(segment.offset));
+    function.instruction(&Instruction::I32Const(segment.len_i32()));
+}
+
+fn push_retptr_arg(function: &mut WasmFunction) {
+    function.instruction(&Instruction::I32Const(DIRECT_RUN_RETPTR_OFFSET));
+}
+
+fn return_if_retptr_error(function: &mut WasmFunction) {
+    load_retptr_tag(function);
+    function.instruction(&Instruction::If(BlockType::Empty));
+    function.instruction(&Instruction::I32Const(1));
+    function.instruction(&Instruction::Return);
+    function.instruction(&Instruction::End);
+}
+
+fn load_retptr_tag(function: &mut WasmFunction) {
+    function.instruction(&Instruction::I32Const(DIRECT_RUN_RETPTR_OFFSET));
+    function.instruction(&Instruction::I32Load8U(MemArg {
         offset: 0,
         align: 0,
         memory_index: 0,
     }));
-    body.instruction(&Instruction::End);
-    body
+}
+
+fn load_retptr_list(function: &mut WasmFunction, ptr_local: u32, len_local: u32) {
+    function.instruction(&Instruction::I32Const(DIRECT_RUN_RETPTR_OFFSET));
+    function.instruction(&Instruction::I32Load(MemArg {
+        offset: 4,
+        align: 2,
+        memory_index: 0,
+    }));
+    function.instruction(&Instruction::LocalSet(ptr_local));
+    function.instruction(&Instruction::I32Const(DIRECT_RUN_RETPTR_OFFSET));
+    function.instruction(&Instruction::I32Load(MemArg {
+        offset: 8,
+        align: 2,
+        memory_index: 0,
+    }));
+    function.instruction(&Instruction::LocalSet(len_local));
 }
 
 fn zero_return_function(results: &[WasmType]) -> WasmFunction {
@@ -683,15 +954,28 @@ fn push_zero_value(function: &mut WasmFunction, ty: &WasmType) {
     };
 }
 
-fn is_runtime_complete_import(
+fn is_runtime_import(
     resolve: &Resolve,
     interface: Option<&WorldKey>,
     function: &WitFunction,
+    function_name: &str,
 ) -> bool {
-    function.name == "complete"
+    function.name == function_name
         && interface
             .map(|key| resolve.name_world_key(key))
             .is_some_and(|name| name.starts_with("runtara:workflow-runtime/runtime"))
+}
+
+fn is_stdlib_import(
+    resolve: &Resolve,
+    interface: Option<&WorldKey>,
+    function: &WitFunction,
+    function_name: &str,
+) -> bool {
+    function.name == function_name
+        && interface
+            .map(|key| resolve.name_world_key(key))
+            .is_some_and(|name| name.starts_with("runtara:workflow-stdlib/json"))
 }
 
 fn is_wasi_cli_run_export(
@@ -782,6 +1066,26 @@ mod tests {
         serde_json::from_str(json).expect("fixture should parse")
     }
 
+    fn imported_wit_function<'a>(
+        resolve: &'a Resolve,
+        world: WorldId,
+        interface_prefix: &str,
+        function_name: &str,
+    ) -> (&'a WorldKey, &'a WitFunction) {
+        resolve.worlds[world]
+            .imports
+            .iter()
+            .find_map(|(key, item)| match item {
+                WorldItem::Interface { id, .. }
+                    if resolve.name_world_key(key).starts_with(interface_prefix) =>
+                {
+                    Some((key, &resolve.interfaces[*id].functions[function_name]))
+                }
+                _ => None,
+            })
+            .expect("imported WIT function")
+    }
+
     #[test]
     fn direct_compile_emits_finish_only_artifact_without_rust_crate() {
         let temp = tempfile::tempdir().expect("tempdir");
@@ -844,7 +1148,7 @@ mod tests {
                     assert_eq!(abi["componentRunExport"], "wasi:cli/run@0.2.3");
                     assert_eq!(abi["entryPointExecutable"].as_bool(), Some(true));
                     assert_eq!(abi["runtimeExecutable"].as_bool(), Some(true));
-                    assert_eq!(abi["finishOutputMode"], "static-empty-json");
+                    assert_eq!(abi["finishOutputMode"], "stdlib-apply-mapping");
                     assert_eq!(
                         abi["manifestVersion"].as_u64(),
                         Some(u64::from(DIRECT_WORKFLOW_MANIFEST_VERSION))
@@ -928,54 +1232,102 @@ mod tests {
     }
 
     #[test]
-    fn direct_core_run_calls_runtime_complete() {
+    fn direct_core_run_lowers_finish_mapping_through_stdlib() {
+        let graph = fixture("simple");
+        let manifest = build_direct_workflow_manifest(&graph).expect("manifest");
+        let manifest_json = manifest.to_canonical_json().expect("manifest json");
+        let core_config = DirectCoreConfig::new(&manifest, &manifest_json).expect("core config");
+        let variables_json = serde_json::to_vec(&manifest.graph.variables).expect("variables json");
+
         let (resolve, world) = build_direct_component_resolve().expect("resolve");
-        let world_ref = &resolve.worlds[world];
-        let (runtime_key, complete_function) = world_ref
-            .imports
-            .iter()
-            .find_map(|(key, item)| match item {
-                WorldItem::Interface { id, .. }
-                    if resolve
-                        .name_world_key(key)
-                        .starts_with("runtara:workflow-runtime/runtime") =>
-                {
-                    Some((key, &resolve.interfaces[*id].functions["complete"]))
-                }
-                _ => None,
-            })
-            .expect("runtime.complete import");
-        let complete_signature = resolve.wasm_signature(
-            ManglingAndAbi::Standard32.import_variant(),
-            complete_function,
-        );
-        assert_eq!(
-            complete_signature.params,
-            vec![WasmType::Pointer, WasmType::Length, WasmType::Pointer]
-        );
-        assert!(complete_signature.retptr);
-        assert!(complete_signature.results.is_empty());
+        let expected_imports = [
+            (
+                "runtime.load-input",
+                "runtara:workflow-runtime/runtime",
+                "cm32p2|runtara:workflow-runtime/runtime@0.1",
+                "load-input",
+                vec![WasmType::Pointer],
+            ),
+            (
+                "stdlib.init-manifest",
+                "runtara:workflow-stdlib/json",
+                "cm32p2|runtara:workflow-stdlib/json@0.1",
+                "init-manifest",
+                vec![WasmType::Pointer, WasmType::Length, WasmType::Pointer],
+            ),
+            (
+                "stdlib.build-source",
+                "runtara:workflow-stdlib/json",
+                "cm32p2|runtara:workflow-stdlib/json@0.1",
+                "build-source",
+                vec![
+                    WasmType::Pointer,
+                    WasmType::Length,
+                    WasmType::Pointer,
+                    WasmType::Length,
+                    WasmType::Pointer,
+                    WasmType::Length,
+                    WasmType::Pointer,
+                ],
+            ),
+            (
+                "stdlib.apply-mapping",
+                "runtara:workflow-stdlib/json",
+                "cm32p2|runtara:workflow-stdlib/json@0.1",
+                "apply-mapping",
+                vec![
+                    WasmType::I32,
+                    WasmType::Pointer,
+                    WasmType::Length,
+                    WasmType::Pointer,
+                ],
+            ),
+            (
+                "runtime.complete",
+                "runtara:workflow-runtime/runtime",
+                "cm32p2|runtara:workflow-runtime/runtime@0.1",
+                "complete",
+                vec![WasmType::Pointer, WasmType::Length, WasmType::Pointer],
+            ),
+        ];
 
-        let (module, name) = resolve.wasm_import_name(
-            ManglingAndAbi::Standard32,
-            WasmImport::Func {
-                interface: Some(runtime_key),
-                func: complete_function,
-            },
-        );
-        assert_eq!(module, "cm32p2|runtara:workflow-runtime/runtime@0.1");
-        assert_eq!(name, "complete");
+        for (label, interface_prefix, module, name, params) in &expected_imports {
+            let (interface_key, function) =
+                imported_wit_function(&resolve, world, interface_prefix, name);
+            let signature =
+                resolve.wasm_signature(ManglingAndAbi::Standard32.import_variant(), function);
+            assert_eq!(&signature.params, params, "{label} params");
+            assert!(signature.retptr, "{label} should use retptr");
+            assert!(signature.results.is_empty(), "{label} has no core results");
 
-        let core = emit_direct_core_module(&resolve, world).expect("core module");
+            let (actual_module, actual_name) = resolve.wasm_import_name(
+                ManglingAndAbi::Standard32,
+                WasmImport::Func {
+                    interface: Some(interface_key),
+                    func: function,
+                },
+            );
+            assert_eq!(actual_module, *module, "{label} module");
+            assert_eq!(actual_name, *name, "{label} name");
+        }
+
+        let core = emit_direct_core_module(&resolve, world, &core_config).expect("core module");
         Validator::new()
             .validate_all(&core)
             .expect("core module validates");
 
         let mut next_function_index = 0;
-        let mut runtime_complete_index = None;
-        let mut saw_static_output = false;
-        let mut saw_run_complete_call = false;
+        let mut init_manifest_index = None;
+        let mut load_input_index = None;
+        let mut build_source_index = None;
+        let mut apply_mapping_index = None;
+        let mut complete_index = None;
+        let mut saw_manifest_data = false;
+        let mut saw_variables_data = false;
+        let mut saw_steps_data = false;
+        let mut saw_mapping_id = false;
         let mut saw_run_retptr_tag_load = false;
+        let mut run_calls = Vec::new();
         let mut code_body_index = 0;
 
         for payload in Parser::new(0).parse_all(&core) {
@@ -984,8 +1336,23 @@ mod tests {
                     for import in reader.into_imports() {
                         let import = import.expect("core import");
                         if matches!(import.ty, TypeRef::Func(_)) {
-                            if import.module == module && import.name == name {
-                                runtime_complete_index = Some(next_function_index);
+                            match (import.module, import.name) {
+                                ("cm32p2|runtara:workflow-stdlib/json@0.1", "init-manifest") => {
+                                    init_manifest_index = Some(next_function_index)
+                                }
+                                ("cm32p2|runtara:workflow-runtime/runtime@0.1", "load-input") => {
+                                    load_input_index = Some(next_function_index)
+                                }
+                                ("cm32p2|runtara:workflow-stdlib/json@0.1", "build-source") => {
+                                    build_source_index = Some(next_function_index)
+                                }
+                                ("cm32p2|runtara:workflow-stdlib/json@0.1", "apply-mapping") => {
+                                    apply_mapping_index = Some(next_function_index)
+                                }
+                                ("cm32p2|runtara:workflow-runtime/runtime@0.1", "complete") => {
+                                    complete_index = Some(next_function_index)
+                                }
+                                _ => {}
                             }
                             next_function_index += 1;
                         }
@@ -993,15 +1360,14 @@ mod tests {
                 }
                 Payload::CodeSectionEntry(body) => {
                     if code_body_index == 0 {
-                        let complete_index =
-                            runtime_complete_index.expect("runtime.complete import index");
                         for operator in body.get_operators_reader().expect("operators").into_iter()
                         {
                             match operator.expect("operator") {
-                                Operator::Call { function_index }
-                                    if function_index == complete_index =>
+                                Operator::Call { function_index } => run_calls.push(function_index),
+                                Operator::I32Const { value }
+                                    if value == core_config.finish_mapping_id as i32 =>
                                 {
-                                    saw_run_complete_call = true;
+                                    saw_mapping_id = true;
                                 }
                                 Operator::I32Load8U { memarg }
                                     if memarg.offset == 0 && memarg.memory == 0 =>
@@ -1017,22 +1383,30 @@ mod tests {
                 Payload::DataSection(reader) => {
                     for data in reader {
                         let data = data.expect("data segment");
-                        saw_static_output |= data.data == DIRECT_STATIC_OUTPUT;
+                        saw_manifest_data |= data.data == manifest_json;
+                        saw_variables_data |= data.data == variables_json;
+                        saw_steps_data |= data.data == DIRECT_EMPTY_STEPS_CONTEXT;
                     }
                 }
                 _ => {}
             }
         }
 
-        assert!(
-            runtime_complete_index.is_some(),
-            "runtime.complete import should be present"
+        let expected_call_order = [
+            init_manifest_index.expect("init-manifest import"),
+            load_input_index.expect("load-input import"),
+            build_source_index.expect("build-source import"),
+            apply_mapping_index.expect("apply-mapping import"),
+            complete_index.expect("complete import"),
+        ];
+        assert_eq!(
+            run_calls, expected_call_order,
+            "run body should lower Finish through stdlib/runtime calls in order"
         );
-        assert!(saw_static_output, "static finish output should be present");
-        assert!(
-            saw_run_complete_call,
-            "run body should call runtime.complete"
-        );
+        assert!(saw_manifest_data, "manifest JSON should be static data");
+        assert!(saw_variables_data, "variables JSON should be static data");
+        assert!(saw_steps_data, "empty steps context should be static data");
+        assert!(saw_mapping_id, "run body should pass manifest mapping id");
         assert!(
             saw_run_retptr_tag_load,
             "run body should return runtime.complete result tag"
