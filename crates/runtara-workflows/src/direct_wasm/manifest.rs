@@ -81,6 +81,9 @@ pub struct DirectGraphManifest {
     /// GroupBy definitions addressable by generated direct Wasm.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub group_bys: Vec<DirectGroupByManifest>,
+    /// Delay definitions addressable by generated direct Wasm.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub delays: Vec<DirectDelayManifest>,
     /// Log definitions addressable by generated direct Wasm.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub logs: Vec<DirectLogManifest>,
@@ -209,6 +212,27 @@ pub struct DirectGroupByManifest {
     pub purpose: String,
     /// Canonical JSON serialization of the DSL GroupBy config.
     pub value: serde_json::Value,
+}
+
+/// Deterministic Delay definition referenced by direct-emitted Wasm.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DirectDelayManifest {
+    /// Manifest-wide Delay identifier.
+    pub id: u32,
+    /// Step that owns this Delay config.
+    pub step_id: String,
+    /// Human-readable step name.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Step type that owns this Delay config.
+    pub step_type: String,
+    /// Config role within the step.
+    pub purpose: String,
+    /// Effective Delay durability after graph-level inheritance is applied.
+    pub durable: bool,
+    /// Canonical JSON serialization of `DelayStep.durationMs`.
+    pub duration_ms: serde_json::Value,
 }
 
 /// Deterministic Log definition referenced by direct-emitted Wasm.
@@ -382,6 +406,7 @@ struct DirectManifestBuildState {
     next_filter_id: u32,
     next_switch_id: u32,
     next_group_by_id: u32,
+    next_delay_id: u32,
     next_log_id: u32,
     next_error_id: u32,
     next_agent_id: u32,
@@ -415,6 +440,12 @@ impl DirectManifestBuildState {
     fn allocate_group_by_id(&mut self) -> u32 {
         let id = self.next_group_by_id;
         self.next_group_by_id += 1;
+        id
+    }
+
+    fn allocate_delay_id(&mut self) -> u32 {
+        let id = self.next_delay_id;
+        self.next_delay_id += 1;
         id
     }
 
@@ -469,6 +500,9 @@ fn graph_manifest(
         .group_bys
         .sort_by(|left, right| left.id.cmp(&right.id));
     collections
+        .delays
+        .sort_by(|left, right| left.id.cmp(&right.id));
+    collections
         .logs
         .sort_by(|left, right| left.id.cmp(&right.id));
     collections
@@ -500,6 +534,7 @@ fn graph_manifest(
         filters: collections.filters,
         switches: collections.switches,
         group_bys: collections.group_bys,
+        delays: collections.delays,
         logs: collections.logs,
         errors: collections.errors,
         agents: collections.agents,
@@ -514,6 +549,7 @@ struct DirectGraphManifestCollections {
     filters: Vec<DirectFilterManifest>,
     switches: Vec<DirectSwitchManifest>,
     group_bys: Vec<DirectGroupByManifest>,
+    delays: Vec<DirectDelayManifest>,
     logs: Vec<DirectLogManifest>,
     errors: Vec<DirectErrorManifest>,
     agents: Vec<DirectAgentManifest>,
@@ -608,6 +644,17 @@ fn step_manifest(
                 step_type: "GroupBy".to_string(),
                 purpose: "groupBy.config".to_string(),
                 value: canonical_json(&step.config)?,
+            });
+        }
+        Step::Delay(step) => {
+            collections.delays.push(DirectDelayManifest {
+                id: state.allocate_delay_id(),
+                step_id: step.id.clone(),
+                name: step.name.clone(),
+                step_type: "Delay".to_string(),
+                purpose: "delay.config".to_string(),
+                durable: inherited_durable && step.durable.unwrap_or(true),
+                duration_ms: canonical_json(&step.duration_ms)?,
             });
         }
         Step::Log(step) => {
@@ -895,6 +942,7 @@ mod tests {
             "filter" => include_str!("../../tests/fixtures/filter_simple.json"),
             "switch_value" => include_str!("../../tests/fixtures/switch_value_simple.json"),
             "group_by" => include_str!("../../tests/fixtures/group_by_simple.json"),
+            "delay_simple" => include_str!("../../tests/fixtures/delay_simple.json"),
             "log" => include_str!("../../tests/fixtures/log_no_context.json"),
             "error" => include_str!("../../tests/fixtures/error_direct_simple.json"),
             "edge_condition" => include_str!("../../tests/fixtures/edge_condition_priority.json"),
@@ -996,6 +1044,22 @@ mod tests {
         assert_eq!(group_by.value["key"], "status");
         assert_eq!(group_by.value["value"]["valueType"], "reference");
         assert_eq!(group_by.value["value"]["value"], "data.items");
+    }
+
+    #[test]
+    fn manifest_assigns_delay_id() {
+        let manifest = build_direct_workflow_manifest(&fixture("delay_simple")).expect("manifest");
+
+        assert_eq!(manifest.graph.delays.len(), 1);
+        let delay = &manifest.graph.delays[0];
+        assert_eq!(delay.id, 0);
+        assert_eq!(delay.step_id, "delay");
+        assert_eq!(delay.name.as_deref(), Some("Wait 1 second"));
+        assert_eq!(delay.step_type, "Delay");
+        assert_eq!(delay.purpose, "delay.config");
+        assert!(delay.durable);
+        assert_eq!(delay.duration_ms["valueType"], "immediate");
+        assert_eq!(delay.duration_ms["value"], 1000);
     }
 
     #[test]

@@ -30,6 +30,7 @@ pub struct DirectJsonManifest {
     filters: BTreeMap<u32, DirectJsonFilter>,
     switches: BTreeMap<u32, DirectJsonSwitch>,
     group_bys: BTreeMap<u32, DirectJsonGroupBy>,
+    delays: BTreeMap<u32, DirectJsonDelay>,
     logs: BTreeMap<u32, DirectJsonLog>,
     errors: BTreeMap<u32, DirectJsonError>,
     agents: BTreeMap<u32, DirectJsonAgent>,
@@ -58,6 +59,7 @@ impl DirectJsonManifest {
             filters: collections.filters,
             switches: collections.switches,
             group_bys: collections.group_bys,
+            delays: collections.delays,
             logs: collections.logs,
             errors: collections.errors,
             agents: collections.agents,
@@ -165,6 +167,44 @@ impl DirectJsonManifest {
         );
         serde_json::to_vec(&Value::Object(steps))
             .map_err(|err| format!("failed to serialize group-by steps context: {err}"))
+    }
+
+    /// Resolve a Delay duration mapping to milliseconds.
+    pub fn delay_duration_ms(&self, delay_id: u32, source: &[u8]) -> Result<u64, String> {
+        let source: Value = serde_json::from_slice(source)
+            .map_err(|err| format!("failed to parse delay source: {err}"))?;
+        let delay = self
+            .delays
+            .get(&delay_id)
+            .ok_or_else(|| format!("unknown direct Delay id {delay_id}"))?;
+        let duration = apply_mapping_value(&delay.duration_ms, &source)?;
+        duration
+            .as_u64()
+            .or_else(|| duration.as_f64().map(|ms| ms as u64))
+            .ok_or_else(|| {
+                format!(
+                    "Delay step '{}': duration_ms must be a number, got: {}",
+                    delay.step_id, duration
+                )
+            })
+    }
+
+    /// Store a Delay output in the generated-code-compatible steps context.
+    pub fn delay(&self, delay_id: u32, source: &[u8], duration_ms: u64) -> Result<Vec<u8>, String> {
+        let source: Value = serde_json::from_slice(source)
+            .map_err(|err| format!("failed to parse delay source: {err}"))?;
+        let delay = self
+            .delays
+            .get(&delay_id)
+            .ok_or_else(|| format!("unknown direct Delay id {delay_id}"))?;
+        let mut steps = source
+            .get("steps")
+            .and_then(Value::as_object)
+            .cloned()
+            .unwrap_or_default();
+        steps.insert(delay.step_id.clone(), delay_step_value(delay, duration_ms));
+        serde_json::to_vec(&Value::Object(steps))
+            .map_err(|err| format!("failed to serialize delay steps context: {err}"))
     }
 
     /// Store an Agent capability output in the generated-code-compatible steps context.
@@ -647,6 +687,16 @@ impl DirectJsonManifest {
                     .and_then(|value| apply_mapping_value(value, source))?;
                 Ok((input, None))
             }
+            "Delay" => {
+                let delay = self
+                    .delay_by_step(step.id.as_str())
+                    .ok_or_else(|| format!("missing direct Delay config for '{}'", step.id))?;
+                let duration_ms = apply_mapping_value(&delay.duration_ms, source)?;
+                Ok((
+                    serde_json::json!({ "duration_ms": duration_ms }),
+                    Some(delay.duration_ms.clone()),
+                ))
+            }
             "Agent" => {
                 let agent = self
                     .agent_by_step(step.id.as_str())
@@ -723,6 +773,19 @@ impl DirectJsonManifest {
                 let output = apply_group_by(&group_by.value, source)?;
                 Ok(step_output_envelope(step, output, None))
             }
+            "Delay" => source
+                .pointer(&format!("/steps/{}", escape_json_pointer_token(&step.id)))
+                .cloned()
+                .or_else(|| {
+                    self.delay_by_step(step.id.as_str()).and_then(|delay| {
+                        let duration = apply_mapping_value(&delay.duration_ms, source).ok()?;
+                        let duration_ms = duration
+                            .as_u64()
+                            .or_else(|| duration.as_f64().map(|ms| ms as u64))?;
+                        Some(delay_step_value(delay, duration_ms))
+                    })
+                })
+                .ok_or_else(|| format!("missing direct Delay output for '{}'", step.id)),
             "Log" => {
                 let log = self
                     .log_by_step(step.id.as_str())
@@ -791,6 +854,10 @@ impl DirectJsonManifest {
         self.group_bys
             .values()
             .find(|group_by| group_by.step_id == step_id)
+    }
+
+    fn delay_by_step(&self, step_id: &str) -> Option<&DirectJsonDelay> {
+        self.delays.values().find(|delay| delay.step_id == step_id)
     }
 
     fn log_by_step(&self, step_id: &str) -> Option<&DirectJsonLog> {
@@ -902,6 +969,7 @@ struct DirectJsonManifestCollections {
     filters: BTreeMap<u32, DirectJsonFilter>,
     switches: BTreeMap<u32, DirectJsonSwitch>,
     group_bys: BTreeMap<u32, DirectJsonGroupBy>,
+    delays: BTreeMap<u32, DirectJsonDelay>,
     logs: BTreeMap<u32, DirectJsonLog>,
     errors: BTreeMap<u32, DirectJsonError>,
     agents: BTreeMap<u32, DirectJsonAgent>,
@@ -1005,6 +1073,22 @@ fn collect_graph_manifest(
             .is_some()
         {
             return Err(format!("duplicate direct GroupBy id {}", group_by.id));
+        }
+    }
+    for delay in &graph.delays {
+        if collections
+            .delays
+            .insert(
+                delay.id,
+                DirectJsonDelay {
+                    step_id: delay.step_id.clone(),
+                    name: delay.name.clone(),
+                    duration_ms: delay.duration_ms.clone(),
+                },
+            )
+            .is_some()
+        {
+            return Err(format!("duplicate direct Delay id {}", delay.id));
         }
     }
     for log in &graph.logs {
@@ -1509,6 +1593,15 @@ fn insert_step_output(
     steps
 }
 
+fn delay_step_value(delay: &DirectJsonDelay, duration_ms: u64) -> Value {
+    serde_json::json!({
+        "stepId": delay.step_id,
+        "stepName": delay.name.as_deref().unwrap_or("Unnamed"),
+        "stepType": "Delay",
+        "duration_ms": duration_ms,
+    })
+}
+
 fn group_key_string(value: &Value) -> String {
     match value {
         Value::String(value) => value.clone(),
@@ -1947,6 +2040,8 @@ struct GraphWire {
     #[serde(default)]
     group_bys: Vec<GroupByWire>,
     #[serde(default)]
+    delays: Vec<DelayWire>,
+    #[serde(default)]
     logs: Vec<LogWire>,
     #[serde(default)]
     errors: Vec<ErrorWire>,
@@ -2025,6 +2120,16 @@ struct GroupByWire {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct DelayWire {
+    id: u32,
+    step_id: String,
+    #[serde(default)]
+    name: Option<String>,
+    duration_ms: Value,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct LogWire {
     id: u32,
     step_id: String,
@@ -2099,6 +2204,13 @@ struct DirectJsonGroupBy {
     step_id: String,
     name: Option<String>,
     value: Value,
+}
+
+#[derive(Debug, Clone)]
+struct DirectJsonDelay {
+    step_id: String,
+    name: Option<String>,
+    duration_ms: Value,
 }
 
 #[derive(Debug, Clone)]
@@ -2218,6 +2330,32 @@ mod tests {
                     "value": config
                 }],
                 "steps": []
+            }
+        }))
+        .expect("manifest json")
+    }
+
+    fn delay_manifest(duration_ms: Value) -> Vec<u8> {
+        serde_json::to_vec(&json!({
+            "graph": {
+                "delays": [{
+                    "id": 0,
+                    "stepId": "delay",
+                    "name": "Wait",
+                    "stepType": "Delay",
+                    "purpose": "delay.config",
+                    "durationMs": duration_ms
+                }],
+                "steps": [{
+                    "id": "delay",
+                    "stepType": "Delay",
+                    "name": "Wait",
+                    "body": {
+                        "id": "delay",
+                        "stepType": "Delay",
+                        "name": "Wait"
+                    }
+                }]
             }
         }))
         .expect("manifest json")
@@ -2837,6 +2975,74 @@ mod tests {
         assert_eq!(output["counts"], json!({ "active": 0 }));
         assert_eq!(output["groups"], json!({ "active": [] }));
         assert_eq!(output["total_groups"], json!(1));
+    }
+
+    #[test]
+    fn delay_resolves_duration_and_stores_generated_step_shape() {
+        let manifest = DirectJsonManifest::parse(&delay_manifest(json!({
+            "valueType": "reference",
+            "value": "data.waitTime"
+        })))
+        .expect("manifest");
+        let source = build_source(br#"{"waitTime":250}"#, b"{}", b"{}").expect("source");
+
+        let duration_ms = manifest
+            .delay_duration_ms(0, &source)
+            .expect("delay duration");
+        let steps = manifest
+            .delay(0, &source, duration_ms)
+            .expect("Delay steps context");
+        let steps: Value = serde_json::from_slice(&steps).expect("steps json");
+
+        assert_eq!(duration_ms, 250);
+        assert_eq!(steps["delay"]["stepId"], json!("delay"));
+        assert_eq!(steps["delay"]["stepName"], json!("Wait"));
+        assert_eq!(steps["delay"]["stepType"], json!("Delay"));
+        assert_eq!(steps["delay"]["duration_ms"], json!(250));
+        assert!(steps["delay"].get("outputs").is_none());
+    }
+
+    #[test]
+    fn delay_rejects_non_numeric_duration() {
+        let manifest = DirectJsonManifest::parse(&delay_manifest(json!({
+            "valueType": "reference",
+            "value": "data.waitTime"
+        })))
+        .expect("manifest");
+        let source = build_source(br#"{"waitTime":"slow"}"#, b"{}", b"{}").expect("source");
+
+        let err = manifest
+            .delay_duration_ms(0, &source)
+            .expect_err("string delay should fail");
+
+        assert_eq!(
+            err,
+            "Delay step 'delay': duration_ms must be a number, got: \"slow\""
+        );
+    }
+
+    #[test]
+    fn delay_debug_end_uses_generated_step_shape() {
+        let manifest = DirectJsonManifest::parse(&delay_manifest(json!({
+            "valueType": "immediate",
+            "value": 10
+        })))
+        .expect("manifest");
+        let source = build_source(br#"{}"#, b"{}", b"{}").expect("source");
+
+        let start = manifest
+            .step_debug_start("delay", &source)
+            .expect("debug start");
+        let start: Value = serde_json::from_slice(&start).expect("start json");
+        let end = manifest
+            .step_debug_end("delay", &source)
+            .expect("debug end");
+        let end: Value = serde_json::from_slice(&end).expect("end json");
+
+        assert_eq!(start["inputs"], json!({ "duration_ms": 10 }));
+        assert_eq!(start["input_mapping"]["value"], json!(10));
+        assert_eq!(end["outputs"]["duration_ms"], json!(10));
+        assert!(end["outputs"].get("outputs").is_none());
     }
 
     #[test]

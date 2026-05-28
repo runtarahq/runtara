@@ -930,6 +930,127 @@ pub mod exports {
                 }
                 #[doc(hidden)]
                 #[allow(non_snake_case)]
+                pub unsafe fn _export_delay_duration_ms_cabi<T: Guest>(
+                    arg0: i32,
+                    arg1: *mut u8,
+                    arg2: usize,
+                ) -> *mut u8 {
+                    #[cfg(target_arch = "wasm32")] _rt::run_ctors_once();
+                    let len0 = arg2;
+                    let result1 = T::delay_duration_ms(
+                        arg0 as u32,
+                        _rt::Vec::from_raw_parts(arg1.cast(), len0, len0),
+                    );
+                    let ptr2 = (&raw mut _RET_AREA.0).cast::<u8>();
+                    match result1 {
+                        Ok(e) => {
+                            *ptr2.add(0).cast::<u8>() = (0i32) as u8;
+                            *ptr2.add(8).cast::<i64>() = _rt::as_i64(e);
+                        }
+                        Err(e) => {
+                            *ptr2.add(0).cast::<u8>() = (1i32) as u8;
+                            let vec3 = (e.into_bytes()).into_boxed_slice();
+                            let ptr3 = vec3.as_ptr().cast::<u8>();
+                            let len3 = vec3.len();
+                            ::core::mem::forget(vec3);
+                            *ptr2
+                                .add(8 + 1 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>() = len3;
+                            *ptr2.add(8).cast::<*mut u8>() = ptr3.cast_mut();
+                        }
+                    };
+                    ptr2
+                }
+                #[doc(hidden)]
+                #[allow(non_snake_case)]
+                pub unsafe fn __post_return_delay_duration_ms<T: Guest>(arg0: *mut u8) {
+                    let l0 = i32::from(*arg0.add(0).cast::<u8>());
+                    match l0 {
+                        0 => {}
+                        _ => {
+                            let l1 = *arg0.add(8).cast::<*mut u8>();
+                            let l2 = *arg0
+                                .add(8 + 1 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>();
+                            _rt::cabi_dealloc(l1, l2, 1);
+                        }
+                    }
+                }
+                #[doc(hidden)]
+                #[allow(non_snake_case)]
+                pub unsafe fn _export_delay_cabi<T: Guest>(
+                    arg0: i32,
+                    arg1: *mut u8,
+                    arg2: usize,
+                    arg3: i64,
+                ) -> *mut u8 {
+                    #[cfg(target_arch = "wasm32")] _rt::run_ctors_once();
+                    let len0 = arg2;
+                    let result1 = T::delay(
+                        arg0 as u32,
+                        _rt::Vec::from_raw_parts(arg1.cast(), len0, len0),
+                        arg3 as u64,
+                    );
+                    let ptr2 = (&raw mut _RET_AREA.0).cast::<u8>();
+                    match result1 {
+                        Ok(e) => {
+                            *ptr2.add(0).cast::<u8>() = (0i32) as u8;
+                            let vec3 = (e).into_boxed_slice();
+                            let ptr3 = vec3.as_ptr().cast::<u8>();
+                            let len3 = vec3.len();
+                            ::core::mem::forget(vec3);
+                            *ptr2
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>() = len3;
+                            *ptr2
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>() = ptr3.cast_mut();
+                        }
+                        Err(e) => {
+                            *ptr2.add(0).cast::<u8>() = (1i32) as u8;
+                            let vec4 = (e.into_bytes()).into_boxed_slice();
+                            let ptr4 = vec4.as_ptr().cast::<u8>();
+                            let len4 = vec4.len();
+                            ::core::mem::forget(vec4);
+                            *ptr2
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>() = len4;
+                            *ptr2
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>() = ptr4.cast_mut();
+                        }
+                    };
+                    ptr2
+                }
+                #[doc(hidden)]
+                #[allow(non_snake_case)]
+                pub unsafe fn __post_return_delay<T: Guest>(arg0: *mut u8) {
+                    let l0 = i32::from(*arg0.add(0).cast::<u8>());
+                    match l0 {
+                        0 => {
+                            let l1 = *arg0
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>();
+                            let l2 = *arg0
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>();
+                            let base3 = l1;
+                            let len3 = l2;
+                            _rt::cabi_dealloc(base3, len3 * 1, 1);
+                        }
+                        _ => {
+                            let l4 = *arg0
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>();
+                            let l5 = *arg0
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>();
+                            _rt::cabi_dealloc(l4, l5, 1);
+                        }
+                    }
+                }
+                #[doc(hidden)]
+                #[allow(non_snake_case)]
                 pub unsafe fn _export_agent_output_cabi<T: Guest>(
                     arg0: i32,
                     arg1: *mut u8,
@@ -2069,6 +2190,15 @@ pub mod exports {
                         group_id: u32,
                         source: _rt::Vec<u8>,
                     ) -> Result<_rt::Vec<u8>, _rt::String>;
+                    fn delay_duration_ms(
+                        delay_id: u32,
+                        source: _rt::Vec<u8>,
+                    ) -> Result<u64, _rt::String>;
+                    fn delay(
+                        delay_id: u32,
+                        source: _rt::Vec<u8>,
+                        duration_ms: u64,
+                    ) -> Result<_rt::Vec<u8>, _rt::String>;
                     fn agent_output(
                         agent_id: u32,
                         source: _rt::Vec<u8>,
@@ -2263,6 +2393,24 @@ pub mod exports {
                         extern "C" fn _post_return_group_by(arg0 : * mut u8,) { unsafe {
                         $($path_to_types)*:: __post_return_group_by::<$ty > (arg0) } }
                         #[unsafe (export_name =
+                        "runtara:workflow-stdlib/json@0.1.0#delay-duration-ms")] unsafe
+                        extern "C" fn export_delay_duration_ms(arg0 : i32, arg1 : * mut
+                        u8, arg2 : usize,) -> * mut u8 { unsafe { $($path_to_types)*::
+                        _export_delay_duration_ms_cabi::<$ty > (arg0, arg1, arg2) } }
+                        #[unsafe (export_name =
+                        "cabi_post_runtara:workflow-stdlib/json@0.1.0#delay-duration-ms")]
+                        unsafe extern "C" fn _post_return_delay_duration_ms(arg0 : * mut
+                        u8,) { unsafe { $($path_to_types)*::
+                        __post_return_delay_duration_ms::<$ty > (arg0) } } #[unsafe
+                        (export_name = "runtara:workflow-stdlib/json@0.1.0#delay")]
+                        unsafe extern "C" fn export_delay(arg0 : i32, arg1 : * mut u8,
+                        arg2 : usize, arg3 : i64,) -> * mut u8 { unsafe {
+                        $($path_to_types)*:: _export_delay_cabi::<$ty > (arg0, arg1,
+                        arg2, arg3) } } #[unsafe (export_name =
+                        "cabi_post_runtara:workflow-stdlib/json@0.1.0#delay")] unsafe
+                        extern "C" fn _post_return_delay(arg0 : * mut u8,) { unsafe {
+                        $($path_to_types)*:: __post_return_delay::<$ty > (arg0) } }
+                        #[unsafe (export_name =
                         "runtara:workflow-stdlib/json@0.1.0#agent-output")] unsafe extern
                         "C" fn export_agent_output(arg0 : i32, arg1 : * mut u8, arg2 :
                         usize, arg3 : * mut u8, arg4 : usize,) -> * mut u8 { unsafe {
@@ -2443,13 +2591,6 @@ mod _rt {
             String::from_utf8_unchecked(bytes)
         }
     }
-    pub unsafe fn invalid_enum_discriminant<T>() -> T {
-        if cfg!(debug_assertions) {
-            panic!("invalid enum discriminant")
-        } else {
-            unsafe { core::hint::unreachable_unchecked() }
-        }
-    }
     pub fn as_i64<T: AsI64>(t: T) -> i64 {
         t.as_i64()
     }
@@ -2471,6 +2612,13 @@ mod _rt {
         #[inline]
         fn as_i64(self) -> i64 {
             self as i64
+        }
+    }
+    pub unsafe fn invalid_enum_discriminant<T>() -> T {
+        if cfg!(debug_assertions) {
+            panic!("invalid enum discriminant")
+        } else {
+            unsafe { core::hint::unreachable_unchecked() }
         }
     }
     pub unsafe fn bool_lift(val: u8) -> bool {
@@ -2521,9 +2669,9 @@ pub(crate) use __export_workflow_stdlib_impl as export;
 #[unsafe(link_section = "component-type:wit-bindgen:0.41.0:runtara:workflow-stdlib@0.1.0:workflow-stdlib:encoded world")]
 #[doc(hidden)]
 #[allow(clippy::octal_escapes)]
-pub static __WIT_BINDGEN_COMPONENT_TYPE: [u8; 1599] = *b"\
-\0asm\x0d\0\x01\0\0\x19\x16wit-component-encoding\x04\0\x07\xb9\x0b\x01A\x02\x01\
-A\x02\x01B;\x01p}\x01r\x03\x07payload\0\x09retryable\x7f\x0crate-limited\x7f\x04\
+pub static __WIT_BINDGEN_COMPONENT_TYPE: [u8; 1690] = *b"\
+\0asm\x0d\0\x01\0\0\x19\x16wit-component-encoding\x04\0\x07\x94\x0c\x01A\x02\x01\
+A\x02\x01B?\x01p}\x01r\x03\x07payload\0\x09retryable\x7f\x0crate-limited\x7f\x04\
 \0\x11agent-retry-error\x03\0\x01\x01j\0\x01s\x01@\x01\x08manifest\0\0\x03\x04\0\
 \x0dinit-manifest\x01\x04\x01j\x01\0\x01s\x01@\x03\x04data\0\x09variables\0\x05s\
 teps\0\0\x05\x04\0\x0cbuild-source\x01\x06\x01@\x02\x0amapping-idy\x06source\0\0\
@@ -2535,26 +2683,28 @@ source\0\0\x05\x04\0\x0cvalue-switch\x01\x0c\x01@\x02\x09filter-idy\x06source\0\
 event\x01\x0e\x04\0\x03log\x01\x0e\x01@\x02\x08error-idy\x06source\0\0\x05\x04\0\
 \x0berror-event\x01\x0f\x04\0\x05error\x01\x0f\x01@\x03\x07step-ids\x05error\0\x05\
 steps\0\0\x05\x04\0\x0berror-steps\x01\x10\x01@\x02\x08group-idy\x06source\0\0\x05\
-\x04\0\x08group-by\x01\x11\x01@\x03\x08agent-idy\x06source\0\x06output\0\0\x05\x04\
-\0\x0cagent-output\x01\x12\x01@\x02\x08agent-idy\x05input\0\0\x05\x04\0\x14agent\
--validate-input\x01\x13\x04\0\x16agent-connection-input\x01\x13\x01@\x02\x08agen\
-t-idy\x06source\0\0\x05\x04\0\x0fagent-cache-key\x01\x14\x01@\x02\x0dcheckpoint-\
-ids\x0eattempt-numbery\0\x05\x04\0\x15agent-retry-sleep-key\x01\x15\x01kw\x01j\x01\
-w\x01s\x01@\x05\x0eattempt-numbery\x0etotal-attemptsy\x0dbase-delay-msw\x0cmax-d\
-elay-msw\x0eretry-after-ms\x16\0\x17\x04\0\x14agent-retry-delay-ms\x01\x18\x01ks\
-\x01@\x07\x04codes\x07messages\x08categorys\x08severitys\x09retryable\x7f\x0eret\
-ry-after-ms\x16\x0aattributes\x19\0\x05\x04\0\x10agent-error-info\x01\x1a\x01j\x01\
-\x02\x01s\x01@\x07\x04codes\x07messages\x08categorys\x08severitys\x09retryable\x7f\
-\x0eretry-after-ms\x16\x0aattributes\x19\0\x1b\x04\0\x16agent-retry-error-info\x01\
-\x1c\x01@\x08\x08agent-idy\x04codes\x07messages\x08categorys\x08severitys\x09ret\
-ryable\x7f\x0eretry-after-ms\x16\x0aattributes\x19\0\x05\x04\0\x0bagent-error\x01\
-\x1d\x01@\x02\x08agent-idy\x0aerror-info\0\0\x05\x04\0\x15agent-error-from-info\x01\
-\x1e\x01@\x02\x08agent-idy\x05error\0\0\x05\x04\0\x11agent-debug-error\x01\x1f\x01\
-@\x02\x07step-ids\x06source\0\0\x05\x04\0\x10step-debug-start\x01\x20\x04\0\x0es\
-tep-debug-end\x01\x20\x04\0\"runtara:workflow-stdlib/json@0.1.0\x05\0\x04\0-runt\
-ara:workflow-stdlib/workflow-stdlib@0.1.0\x04\0\x0b\x15\x01\0\x0fworkflow-stdlib\
-\x03\0\0\0G\x09producers\x01\x0cprocessed-by\x02\x0dwit-component\x070.227.1\x10\
-wit-bindgen-rust\x060.41.0";
+\x04\0\x08group-by\x01\x11\x01j\x01w\x01s\x01@\x02\x08delay-idy\x06source\0\0\x12\
+\x04\0\x11delay-duration-ms\x01\x13\x01@\x03\x08delay-idy\x06source\0\x0bduratio\
+n-msw\0\x05\x04\0\x05delay\x01\x14\x01@\x03\x08agent-idy\x06source\0\x06output\0\
+\0\x05\x04\0\x0cagent-output\x01\x15\x01@\x02\x08agent-idy\x05input\0\0\x05\x04\0\
+\x14agent-validate-input\x01\x16\x04\0\x16agent-connection-input\x01\x16\x01@\x02\
+\x08agent-idy\x06source\0\0\x05\x04\0\x0fagent-cache-key\x01\x17\x01@\x02\x0dche\
+ckpoint-ids\x0eattempt-numbery\0\x05\x04\0\x15agent-retry-sleep-key\x01\x18\x01k\
+w\x01@\x05\x0eattempt-numbery\x0etotal-attemptsy\x0dbase-delay-msw\x0cmax-delay-\
+msw\x0eretry-after-ms\x19\0\x12\x04\0\x14agent-retry-delay-ms\x01\x1a\x01ks\x01@\
+\x07\x04codes\x07messages\x08categorys\x08severitys\x09retryable\x7f\x0eretry-af\
+ter-ms\x19\x0aattributes\x1b\0\x05\x04\0\x10agent-error-info\x01\x1c\x01j\x01\x02\
+\x01s\x01@\x07\x04codes\x07messages\x08categorys\x08severitys\x09retryable\x7f\x0e\
+retry-after-ms\x19\x0aattributes\x1b\0\x1d\x04\0\x16agent-retry-error-info\x01\x1e\
+\x01@\x08\x08agent-idy\x04codes\x07messages\x08categorys\x08severitys\x09retryab\
+le\x7f\x0eretry-after-ms\x19\x0aattributes\x1b\0\x05\x04\0\x0bagent-error\x01\x1f\
+\x01@\x02\x08agent-idy\x0aerror-info\0\0\x05\x04\0\x15agent-error-from-info\x01\x20\
+\x01@\x02\x08agent-idy\x05error\0\0\x05\x04\0\x11agent-debug-error\x01!\x01@\x02\
+\x07step-ids\x06source\0\0\x05\x04\0\x10step-debug-start\x01\"\x04\0\x0estep-deb\
+ug-end\x01\"\x04\0\"runtara:workflow-stdlib/json@0.1.0\x05\0\x04\0-runtara:workf\
+low-stdlib/workflow-stdlib@0.1.0\x04\0\x0b\x15\x01\0\x0fworkflow-stdlib\x03\0\0\0\
+G\x09producers\x01\x0cprocessed-by\x02\x0dwit-component\x070.227.1\x10wit-bindge\
+n-rust\x060.41.0";
 #[inline(never)]
 #[doc(hidden)]
 pub fn __link_custom_section_describing_imports() {

@@ -31,8 +31,9 @@ use wit_parser::{
 
 use super::component::{DirectComponentArtifacts, emit_direct_component_artifacts};
 use super::manifest::{
-    DIRECT_WORKFLOW_MANIFEST_VERSION, DirectAgentManifest, DirectEdgeManifest, DirectGraphManifest,
-    DirectManifestError, DirectWorkflowManifest, build_direct_workflow_manifest_with_agent_catalog,
+    DIRECT_WORKFLOW_MANIFEST_VERSION, DirectAgentManifest, DirectDelayManifest, DirectEdgeManifest,
+    DirectGraphManifest, DirectManifestError, DirectWorkflowManifest,
+    build_direct_workflow_manifest_with_agent_catalog,
 };
 use super::support::{
     DirectWorkflowSupportReport, UnsupportedWorkflowFeature, analyze_direct_wasm_support,
@@ -109,6 +110,7 @@ const DIRECT_AGENT_RETRYABLE_LOCAL: u32 = 14;
 const DIRECT_AGENT_RATE_LIMITED_LOCAL: u32 = 15;
 const DIRECT_AGENT_RETRY_SLEEP_MS_LOCAL: u32 = 16;
 const DIRECT_AGENT_RATE_LIMIT_WAIT_TOTAL_LOCAL: u32 = 17;
+const DIRECT_DELAY_DURATION_MS_LOCAL: u32 = DIRECT_AGENT_RETRY_SLEEP_MS_LOCAL;
 const DIRECT_EMPTY_STEPS_CONTEXT: &[u8] = b"{}";
 const DIRECT_WORKFLOW_LOG_KIND: &[u8] = b"workflow_log";
 const DIRECT_WORKFLOW_ERROR_KIND: &[u8] = b"workflow_error";
@@ -571,6 +573,11 @@ enum DirectRunPlan {
         group_id: u32,
         next_plan: Box<DirectRunPlan>,
     },
+    Delay {
+        step_id: String,
+        delay_id: u32,
+        next_plan: Box<DirectRunPlan>,
+    },
     Log {
         log_id: u32,
         next_plan: Box<DirectRunPlan>,
@@ -811,13 +818,12 @@ fn direct_run_plan(manifest: &DirectWorkflowManifest) -> Result<DirectRunPlan, D
         })?;
 
     match entry.step_type.as_str() {
-        "Finish" | "Filter" | "Switch" | "GroupBy" | "Log" | "Agent" | "Error" | "Conditional" => {
-            step_run_plan(
-                &manifest.graph,
-                &manifest.graph.entry_point,
-                &mut Vec::new(),
-            )
-        }
+        "Finish" | "Filter" | "Switch" | "GroupBy" | "Delay" | "Log" | "Agent" | "Error"
+        | "Conditional" => step_run_plan(
+            &manifest.graph,
+            &manifest.graph.entry_point,
+            &mut Vec::new(),
+        ),
         other => Err(DirectCompileError::Component(format!(
             "direct run plan does not support entry step type '{other}'"
         ))),
@@ -916,6 +922,21 @@ fn step_run_plan_inner(
             Ok(DirectRunPlan::GroupBy {
                 step_id: step_id.to_string(),
                 group_id,
+                next_plan: Box::new(next_plan),
+            })
+        }
+        "Delay" => {
+            let delay = delay_config(graph, step_id)?;
+            if !delay.durable {
+                return Err(DirectCompileError::Component(format!(
+                    "direct Delay step '{step_id}' is non-durable"
+                )));
+            }
+            let next_plan = normal_flow_plan(graph, step_id, stack, include_on_error)?;
+
+            Ok(DirectRunPlan::Delay {
+                step_id: step_id.to_string(),
+                delay_id: delay.id,
                 next_plan: Box::new(next_plan),
             })
         }
@@ -1296,6 +1317,29 @@ fn group_by_id(graph: &DirectGraphManifest, step_id: &str) -> Result<u32, Direct
         })
 }
 
+fn delay_config<'a>(
+    graph: &'a DirectGraphManifest,
+    step_id: &str,
+) -> Result<&'a DirectDelayManifest, DirectCompileError> {
+    if !graph
+        .steps
+        .iter()
+        .any(|step| step.id == step_id && step.step_type == "Delay")
+    {
+        return Err(DirectCompileError::Component(format!(
+            "direct step '{step_id}' is not a Delay step"
+        )));
+    }
+
+    graph
+        .delays
+        .iter()
+        .find(|delay| delay.step_id == step_id && delay.purpose == "delay.config")
+        .ok_or_else(|| {
+            DirectCompileError::Component(format!("missing Delay config for step '{step_id}'"))
+        })
+}
+
 fn log_id(graph: &DirectGraphManifest, step_id: &str) -> Result<u32, DirectCompileError> {
     if !graph
         .steps
@@ -1630,6 +1674,8 @@ struct DirectCoreImportIndices {
     stdlib_error_steps: Option<u32>,
     stdlib_value_switch: Option<u32>,
     stdlib_group_by: Option<u32>,
+    stdlib_delay_duration_ms: Option<u32>,
+    stdlib_delay: Option<u32>,
     stdlib_agent_output: Option<u32>,
     stdlib_agent_validate_input: Option<u32>,
     stdlib_agent_connection_input: Option<u32>,
@@ -1704,6 +1750,11 @@ impl DirectCoreImportIndices {
             stdlib_error_steps: require_import(self.stdlib_error_steps, "stdlib.error-steps")?,
             stdlib_value_switch: require_import(self.stdlib_value_switch, "stdlib.value-switch")?,
             stdlib_group_by: require_import(self.stdlib_group_by, "stdlib.group-by")?,
+            stdlib_delay_duration_ms: require_import(
+                self.stdlib_delay_duration_ms,
+                "stdlib.delay-duration-ms",
+            )?,
+            stdlib_delay: require_import(self.stdlib_delay, "stdlib.delay")?,
             stdlib_agent_output: require_import(self.stdlib_agent_output, "stdlib.agent-output")?,
             stdlib_agent_validate_input: require_import(
                 self.stdlib_agent_validate_input,
@@ -1776,6 +1827,8 @@ struct DirectCoreFunctionIndices {
     stdlib_error_steps: u32,
     stdlib_value_switch: u32,
     stdlib_group_by: u32,
+    stdlib_delay_duration_ms: u32,
+    stdlib_delay: u32,
     stdlib_agent_output: u32,
     stdlib_agent_validate_input: u32,
     stdlib_agent_connection_input: u32,
@@ -1872,6 +1925,10 @@ fn import_core_function(
         import_indices.stdlib_value_switch = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "group-by") {
         import_indices.stdlib_group_by = Some(function_index);
+    } else if is_stdlib_import(resolve, interface, function, "delay-duration-ms") {
+        import_indices.stdlib_delay_duration_ms = Some(function_index);
+    } else if is_stdlib_import(resolve, interface, function, "delay") {
+        import_indices.stdlib_delay = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "agent-output") {
         import_indices.stdlib_agent_output = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "agent-validate-input") {
@@ -2329,6 +2386,34 @@ fn emit_run_plan_mapping(
                 workflow_error_kind,
             );
         }
+        DirectRunPlan::Delay {
+            step_id,
+            delay_id,
+            next_plan,
+        } => {
+            emit_delay_plan(
+                body,
+                indices,
+                static_data,
+                track_events,
+                variables,
+                step_id,
+                *delay_id,
+                next_plan,
+                data_ptr_local,
+                data_len_local,
+                steps_ptr_local,
+                steps_len_local,
+                source_ptr_local,
+                source_len_local,
+                output_ptr_local,
+                output_len_local,
+                route_ptr_local,
+                route_len_local,
+                workflow_log_kind,
+                workflow_error_kind,
+            );
+        }
         DirectRunPlan::Log { log_id, next_plan } => {
             emit_log_plan(
                 body,
@@ -2694,6 +2779,118 @@ fn emit_step_context_plan(
     body.instruction(&Instruction::Call(step_function_index));
     return_if_retptr_error(body);
     load_retptr_list(body, steps_ptr_local, steps_len_local);
+    emit_step_debug_event(
+        body,
+        indices,
+        static_data,
+        track_events,
+        false,
+        step_id,
+        source_ptr_local,
+        source_len_local,
+        output_ptr_local,
+        output_len_local,
+    );
+
+    emit_build_source(
+        body,
+        indices,
+        variables,
+        data_ptr_local,
+        data_len_local,
+        steps_ptr_local,
+        steps_len_local,
+        source_ptr_local,
+        source_len_local,
+    );
+
+    emit_run_plan_mapping(
+        body,
+        indices,
+        static_data,
+        track_events,
+        variables,
+        next_plan,
+        data_ptr_local,
+        data_len_local,
+        steps_ptr_local,
+        steps_len_local,
+        source_ptr_local,
+        source_len_local,
+        output_ptr_local,
+        output_len_local,
+        route_ptr_local,
+        route_len_local,
+        workflow_log_kind,
+        workflow_error_kind,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_delay_plan(
+    body: &mut WasmFunction,
+    indices: &DirectCoreFunctionIndices,
+    static_data: &DirectCoreStaticData,
+    track_events: bool,
+    variables: &DirectDataSegment,
+    step_id: &str,
+    delay_id: u32,
+    next_plan: &DirectRunPlan,
+    data_ptr_local: u32,
+    data_len_local: u32,
+    steps_ptr_local: u32,
+    steps_len_local: u32,
+    source_ptr_local: u32,
+    source_len_local: u32,
+    output_ptr_local: u32,
+    output_len_local: u32,
+    route_ptr_local: u32,
+    route_len_local: u32,
+    workflow_log_kind: &DirectDataSegment,
+    workflow_error_kind: &DirectDataSegment,
+) {
+    emit_step_debug_event(
+        body,
+        indices,
+        static_data,
+        track_events,
+        true,
+        step_id,
+        source_ptr_local,
+        source_len_local,
+        output_ptr_local,
+        output_len_local,
+    );
+
+    body.instruction(&Instruction::I32Const(delay_id as i32));
+    body.instruction(&Instruction::LocalGet(source_ptr_local));
+    body.instruction(&Instruction::LocalGet(source_len_local));
+    push_retptr_arg(body);
+    body.instruction(&Instruction::Call(indices.stdlib_delay_duration_ms));
+    return_if_retptr_error(body);
+    push_retptr_i64_load(body, DIRECT_RET_U64_OK_OFFSET);
+    body.instruction(&Instruction::LocalSet(DIRECT_DELAY_DURATION_MS_LOCAL));
+
+    let step_id_segment = static_data
+        .step_id(step_id)
+        .expect("run plan step ids are present in static data");
+    push_segment_args(body, step_id_segment);
+    body.instruction(&Instruction::I32Const(0));
+    body.instruction(&Instruction::I32Const(0));
+    body.instruction(&Instruction::LocalGet(DIRECT_DELAY_DURATION_MS_LOCAL));
+    push_retptr_arg(body);
+    body.instruction(&Instruction::Call(indices.runtime_durable_sleep_checkpoint));
+    return_if_retptr_error(body);
+
+    body.instruction(&Instruction::I32Const(delay_id as i32));
+    body.instruction(&Instruction::LocalGet(source_ptr_local));
+    body.instruction(&Instruction::LocalGet(source_len_local));
+    body.instruction(&Instruction::LocalGet(DIRECT_DELAY_DURATION_MS_LOCAL));
+    push_retptr_arg(body);
+    body.instruction(&Instruction::Call(indices.stdlib_delay));
+    return_if_retptr_error(body);
+    load_retptr_list(body, steps_ptr_local, steps_len_local);
+
     emit_step_debug_event(
         body,
         indices,
@@ -4715,6 +4912,8 @@ mod tests {
             "switch_value" => include_str!("../../tests/fixtures/switch_value_simple.json"),
             "switch_routing" => include_str!("../../tests/fixtures/switch_routing_simple.json"),
             "group_by" => include_str!("../../tests/fixtures/group_by_simple.json"),
+            "delay_simple" => include_str!("../../tests/fixtures/delay_simple.json"),
+            "delay_dynamic" => include_str!("../../tests/fixtures/delay_dynamic.json"),
             "log" => include_str!("../../tests/fixtures/log_no_context.json"),
             "error" => include_str!("../../tests/fixtures/error_direct_simple.json"),
             "edge_condition" => include_str!("../../tests/fixtures/edge_condition_priority.json"),
@@ -4960,6 +5159,9 @@ mod tests {
             DirectRunPlan::GroupBy { next_plan, .. } => {
                 collect_run_plan_ids(next_plan, condition_ids, mapping_ids);
             }
+            DirectRunPlan::Delay { next_plan, .. } => {
+                collect_run_plan_ids(next_plan, condition_ids, mapping_ids);
+            }
             DirectRunPlan::Log { next_plan, .. } => {
                 collect_run_plan_ids(next_plan, condition_ids, mapping_ids);
             }
@@ -5028,6 +5230,7 @@ mod tests {
                 b"agent-retry-delay-ms",
                 b"agent-retry-error-info",
                 b"agent-error-from-info",
+                b"delay-duration-ms",
             ] {
                 if !stdlib_bytes
                     .windows(marker.len())
@@ -5376,6 +5579,91 @@ mod tests {
                 .expect("manifest json");
         assert_eq!(manifest.graph.group_bys.len(), 1);
         assert_eq!(manifest.graph.mappings.len(), 1);
+    }
+
+    #[test]
+    fn direct_compile_supports_durable_delay_finish_graph() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let result = compile_direct_workflow(DirectCompilationInput {
+            workflow_id: "delay".to_string(),
+            version: 1,
+            execution_graph: fixture("delay_simple"),
+            output_dir: temp.path().to_path_buf(),
+            track_events: false,
+            agent_catalog: None,
+        })
+        .expect("direct Delay compile should succeed");
+
+        let wasm = fs::read(&result.wasm_path).expect("wasm");
+        Validator::new()
+            .validate_all(&wasm)
+            .expect("direct Delay artifact should validate");
+        assert!(result.support_report.supported);
+        assert_eq!(result.support_report.unsupported, vec![]);
+
+        let manifest: DirectWorkflowManifest =
+            serde_json::from_slice(&fs::read(&result.manifest_path).expect("manifest"))
+                .expect("manifest json");
+        assert_eq!(manifest.graph.delays.len(), 1);
+        assert_eq!(manifest.graph.delays[0].step_id, "delay");
+        assert!(manifest.graph.delays[0].durable);
+        assert_eq!(manifest.graph.delays[0].duration_ms["value"], 1000);
+        assert_eq!(manifest.graph.mappings.len(), 1);
+    }
+
+    #[test]
+    fn direct_compile_supports_dynamic_durable_delay_finish_graph() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let result = compile_direct_workflow(DirectCompilationInput {
+            workflow_id: "delay-dynamic".to_string(),
+            version: 1,
+            execution_graph: fixture("delay_dynamic"),
+            output_dir: temp.path().to_path_buf(),
+            track_events: false,
+            agent_catalog: None,
+        })
+        .expect("direct dynamic Delay compile should succeed");
+
+        let wasm = fs::read(&result.wasm_path).expect("wasm");
+        Validator::new()
+            .validate_all(&wasm)
+            .expect("direct dynamic Delay artifact should validate");
+        assert!(result.support_report.supported);
+        assert_eq!(result.support_report.unsupported, vec![]);
+
+        let manifest: DirectWorkflowManifest =
+            serde_json::from_slice(&fs::read(&result.manifest_path).expect("manifest"))
+                .expect("manifest json");
+        assert_eq!(manifest.graph.delays.len(), 1);
+        assert_eq!(
+            manifest.graph.delays[0].duration_ms["value"],
+            "data.waitTime"
+        );
+    }
+
+    #[test]
+    fn direct_compile_rejects_non_durable_delay() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let mut graph = fixture("delay_simple");
+        graph.durable = Some(false);
+
+        let err = compile_direct_workflow(DirectCompilationInput {
+            workflow_id: "delay-non-durable".to_string(),
+            version: 1,
+            execution_graph: graph,
+            output_dir: temp.path().to_path_buf(),
+            track_events: false,
+            agent_catalog: None,
+        })
+        .expect_err("non-durable Delay should remain gated");
+
+        let DirectCompileError::Unsupported { report } = err else {
+            panic!("expected unsupported error");
+        };
+        assert!(!report.supported);
+        assert!(report.unsupported.iter().any(|feature| {
+            feature.step_id.as_deref() == Some("delay") && feature.feature == "delay-non-durable"
+        }));
     }
 
     #[test]
@@ -5936,6 +6224,31 @@ mod tests {
                     WasmType::I32,
                     WasmType::Pointer,
                     WasmType::Length,
+                    WasmType::Pointer,
+                ],
+            ),
+            (
+                "stdlib.delay-duration-ms",
+                "runtara:workflow-stdlib/json",
+                "cm32p2|runtara:workflow-stdlib/json@0.1",
+                "delay-duration-ms",
+                vec![
+                    WasmType::I32,
+                    WasmType::Pointer,
+                    WasmType::Length,
+                    WasmType::Pointer,
+                ],
+            ),
+            (
+                "stdlib.delay",
+                "runtara:workflow-stdlib/json",
+                "cm32p2|runtara:workflow-stdlib/json@0.1",
+                "delay",
+                vec![
+                    WasmType::I32,
+                    WasmType::Pointer,
+                    WasmType::Length,
+                    WasmType::I64,
                     WasmType::Pointer,
                 ],
             ),
@@ -7939,6 +8252,145 @@ mod tests {
             "GroupBy run should apply the terminal Finish mapping once"
         );
         assert!(saw_group_id, "GroupBy id should be passed to stdlib");
+        assert!(
+            saw_mapping_id,
+            "Finish mapping id should be passed to stdlib"
+        );
+    }
+
+    #[test]
+    fn direct_core_run_lowers_durable_delay_finish_through_stdlib_and_runtime() {
+        let graph = fixture("delay_simple");
+        let manifest = build_direct_workflow_manifest(&graph).expect("manifest");
+        let manifest_json = manifest.to_canonical_json().expect("manifest json");
+        let core_config =
+            DirectCoreConfig::new(&manifest, &manifest_json, false).expect("core config");
+        let DirectRunPlan::Delay {
+            delay_id,
+            next_plan,
+            ..
+        } = &core_config.run_plan
+        else {
+            panic!("expected Delay run plan");
+        };
+        let DirectRunPlan::Finish { mapping_id, .. } = next_plan.as_ref() else {
+            panic!("expected Delay to flow into Finish");
+        };
+
+        let (resolve, world) = build_direct_component_resolve().expect("resolve");
+        let core = emit_direct_core_module(&resolve, world, &core_config).expect("core module");
+        Validator::new()
+            .validate_all(&core)
+            .expect("Delay core module validates");
+
+        let mut next_function_index = 0;
+        let mut build_source_index = None;
+        let mut delay_duration_index = None;
+        let mut durable_sleep_checkpoint_index = None;
+        let mut delay_index = None;
+        let mut apply_mapping_index = None;
+        let mut saw_delay_id = false;
+        let mut saw_mapping_id = false;
+        let mut run_calls = Vec::new();
+        let mut code_body_index = 0;
+
+        for payload in Parser::new(0).parse_all(&core) {
+            match payload.expect("core wasm payload") {
+                Payload::ImportSection(reader) => {
+                    for import in reader.into_imports() {
+                        let import = import.expect("core import");
+                        if matches!(import.ty, TypeRef::Func(_)) {
+                            match (import.module, import.name) {
+                                ("cm32p2|runtara:workflow-stdlib/json@0.1", "build-source") => {
+                                    build_source_index = Some(next_function_index)
+                                }
+                                (
+                                    "cm32p2|runtara:workflow-stdlib/json@0.1",
+                                    "delay-duration-ms",
+                                ) => delay_duration_index = Some(next_function_index),
+                                (
+                                    "cm32p2|runtara:workflow-runtime/runtime@0.1",
+                                    "durable-sleep-checkpoint",
+                                ) => durable_sleep_checkpoint_index = Some(next_function_index),
+                                ("cm32p2|runtara:workflow-stdlib/json@0.1", "delay") => {
+                                    delay_index = Some(next_function_index)
+                                }
+                                ("cm32p2|runtara:workflow-stdlib/json@0.1", "apply-mapping") => {
+                                    apply_mapping_index = Some(next_function_index)
+                                }
+                                _ => {}
+                            }
+                            next_function_index += 1;
+                        }
+                    }
+                }
+                Payload::CodeSectionEntry(body) => {
+                    if code_body_index == 0 {
+                        for operator in body.get_operators_reader().expect("operators") {
+                            match operator.expect("operator") {
+                                Operator::Call { function_index } => run_calls.push(function_index),
+                                Operator::I32Const { value } => {
+                                    if value == *delay_id as i32 {
+                                        saw_delay_id = true;
+                                    }
+                                    if value == *mapping_id as i32 {
+                                        saw_mapping_id = true;
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                    code_body_index += 1;
+                }
+                _ => {}
+            }
+        }
+
+        let build_source_index = build_source_index.expect("build-source import");
+        let delay_duration_index = delay_duration_index.expect("delay-duration-ms import");
+        let durable_sleep_checkpoint_index =
+            durable_sleep_checkpoint_index.expect("durable-sleep-checkpoint import");
+        let delay_index = delay_index.expect("delay import");
+        let apply_mapping_index = apply_mapping_index.expect("apply-mapping import");
+        let delay_duration_position = run_calls
+            .iter()
+            .position(|&index| index == delay_duration_index)
+            .expect("Delay duration call");
+        let durable_sleep_position = run_calls
+            .iter()
+            .position(|&index| index == durable_sleep_checkpoint_index)
+            .expect("durable sleep checkpoint call");
+        let delay_position = run_calls
+            .iter()
+            .position(|&index| index == delay_index)
+            .expect("Delay output call");
+        let finish_position = run_calls
+            .iter()
+            .position(|&index| index == apply_mapping_index)
+            .expect("Finish mapping call");
+
+        assert_eq!(
+            run_calls
+                .iter()
+                .filter(|&&index| index == build_source_index)
+                .count(),
+            2,
+            "Delay run should rebuild source after updating steps context"
+        );
+        assert!(
+            delay_duration_position < durable_sleep_position,
+            "Delay duration must be resolved before durable sleep"
+        );
+        assert!(
+            durable_sleep_position < delay_position,
+            "Delay output should be stored after durable sleep"
+        );
+        assert!(
+            delay_position < finish_position,
+            "Finish mapping should run after Delay updates steps context"
+        );
+        assert!(saw_delay_id, "Delay id should be passed to stdlib");
         assert!(
             saw_mapping_id,
             "Finish mapping id should be passed to stdlib"

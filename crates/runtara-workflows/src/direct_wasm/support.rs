@@ -4,7 +4,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use runtara_dsl::{AgentStep, ExecutionGraph, Step};
+use runtara_dsl::{AgentStep, DelayStep, ExecutionGraph, Step};
 
 use crate::workflow_features::{WorkflowFeatureSummary, analyze_workflow_features};
 
@@ -281,6 +281,16 @@ fn supports_direct_control_step_inner(
             stack,
             include_on_error,
         ),
+        Step::Delay(step) if supports_delay_step_baseline(graph, step) => {
+            supports_normal_flow_step(
+                graph,
+                step_id,
+                reachable,
+                used_edges,
+                stack,
+                include_on_error,
+            )
+        }
         Step::Log(_) => supports_normal_flow_step(
             graph,
             step_id,
@@ -318,6 +328,15 @@ fn supports_agent_retry_baseline(graph: &ExecutionGraph, step: &AgentStep) -> bo
 }
 
 fn agent_step_is_durable(graph: &ExecutionGraph, step: &AgentStep) -> bool {
+    let graph_durable = graph.durable.unwrap_or(true);
+    graph_durable && step.durable.unwrap_or(true)
+}
+
+fn supports_delay_step_baseline(graph: &ExecutionGraph, step: &DelayStep) -> bool {
+    delay_step_is_durable(graph, step) && !step.breakpoint.unwrap_or(false)
+}
+
+fn delay_step_is_durable(graph: &ExecutionGraph, step: &DelayStep) -> bool {
     let graph_durable = graph.durable.unwrap_or(true);
     graph_durable && step.durable.unwrap_or(true)
 }
@@ -741,12 +760,7 @@ fn collect_step_support(
             "GroupBy steps require stdlib grouping semantics",
             unsupported,
         ),
-        Step::Delay(_) => unsupported_step(
-            step,
-            "delay",
-            "Delay steps require suspend/resume runtime support",
-            unsupported,
-        ),
+        Step::Delay(step) => collect_delay_step_unsupported(graph, step, unsupported),
         Step::WaitForSignal(wait) => {
             unsupported_step(
                 step,
@@ -803,6 +817,34 @@ fn collect_agent_step_unsupported(
         push(
             "agent-breakpoint",
             "Agent breakpoints require a direct runtime checkpoint/pause ABI",
+        );
+    }
+}
+
+fn collect_delay_step_unsupported(
+    graph: &ExecutionGraph,
+    step: &DelayStep,
+    unsupported: &mut Vec<UnsupportedWorkflowFeature>,
+) {
+    let mut push = |feature: &str, reason: &str| {
+        unsupported.push(UnsupportedWorkflowFeature {
+            step_id: Some(step.id.clone()),
+            step_type: Some("Delay".to_string()),
+            feature: feature.to_string(),
+            reason: reason.to_string(),
+        });
+    };
+
+    if !delay_step_is_durable(graph, step) {
+        push(
+            "delay-non-durable",
+            "Non-durable Delay direct lowering needs non-checkpointing sleep parity",
+        );
+    }
+    if step.breakpoint.unwrap_or(false) {
+        push(
+            "delay-breakpoint",
+            "Delay breakpoints require a direct runtime checkpoint/pause ABI",
         );
     }
 }
@@ -875,6 +917,8 @@ mod tests {
             "switch_value" => include_str!("../../tests/fixtures/switch_value_simple.json"),
             "switch_routing" => include_str!("../../tests/fixtures/switch_routing_simple.json"),
             "group_by" => include_str!("../../tests/fixtures/group_by_simple.json"),
+            "delay_simple" => include_str!("../../tests/fixtures/delay_simple.json"),
+            "delay_dynamic" => include_str!("../../tests/fixtures/delay_dynamic.json"),
             "log" => include_str!("../../tests/fixtures/log_no_context.json"),
             "error" => include_str!("../../tests/fixtures/error_direct_simple.json"),
             "edge_condition" => include_str!("../../tests/fixtures/edge_condition_priority.json"),
@@ -1283,6 +1327,55 @@ mod tests {
         assert!(!report.supported);
         assert!(report.unsupported.iter().any(|feature| {
             feature.step_id.as_deref() == Some("group") && feature.feature == "group-by-breakpoint"
+        }));
+    }
+
+    #[test]
+    fn durable_delay_normal_flow_is_supported() {
+        let report = analyze_direct_wasm_support(&fixture("delay_simple"));
+
+        assert!(report.supported, "{:?}", report.unsupported);
+        assert!(report.unsupported.is_empty());
+    }
+
+    #[test]
+    fn durable_dynamic_delay_normal_flow_is_supported() {
+        let report = analyze_direct_wasm_support(&fixture("delay_dynamic"));
+
+        assert!(report.supported, "{:?}", report.unsupported);
+        assert!(report.unsupported.is_empty());
+    }
+
+    #[test]
+    fn non_durable_delay_is_rejected_until_blocking_sleep_parity_is_lowered() {
+        let mut graph = fixture("delay_simple");
+        graph.durable = Some(false);
+
+        let report = analyze_direct_wasm_support(&graph);
+
+        assert!(!report.supported);
+        assert!(report.unsupported.iter().any(|feature| {
+            feature.step_id.as_deref() == Some("delay")
+                && feature.step_type.as_deref() == Some("Delay")
+                && feature.feature == "delay-non-durable"
+        }));
+    }
+
+    #[test]
+    fn delay_breakpoints_are_rejected_until_checkpoint_abi_is_lowered() {
+        let mut graph = fixture("delay_simple");
+        let Some(Step::Delay(delay)) = graph.steps.get_mut("delay") else {
+            panic!("expected Delay fixture step");
+        };
+        delay.breakpoint = Some(true);
+
+        let report = analyze_direct_wasm_support(&graph);
+
+        assert!(!report.supported);
+        assert!(report.unsupported.iter().any(|feature| {
+            feature.step_id.as_deref() == Some("delay")
+                && feature.step_type.as_deref() == Some("Delay")
+                && feature.feature == "delay-breakpoint"
         }));
     }
 

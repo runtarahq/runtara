@@ -264,6 +264,26 @@ mod component {
             })
         }
 
+        fn delay_duration_ms(delay_id: u32, source: Vec<u8>) -> Result<u64, String> {
+            MANIFEST.with(|slot| {
+                let slot = slot.borrow();
+                let manifest = slot
+                    .as_ref()
+                    .ok_or_else(|| "direct stdlib manifest was not initialized".to_string())?;
+                manifest.delay_duration_ms(delay_id, &source)
+            })
+        }
+
+        fn delay(delay_id: u32, source: Vec<u8>, duration_ms: u64) -> Result<Vec<u8>, String> {
+            MANIFEST.with(|slot| {
+                let slot = slot.borrow();
+                let manifest = slot
+                    .as_ref()
+                    .ok_or_else(|| "direct stdlib manifest was not initialized".to_string())?;
+                manifest.delay(delay_id, &source, duration_ms)
+            })
+        }
+
         fn agent_output(
             agent_id: u32,
             source: Vec<u8>,

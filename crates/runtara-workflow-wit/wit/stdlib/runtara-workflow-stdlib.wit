@@ -78,6 +78,17 @@ interface json {
         source: list<u8>,
     ) -> result<list<u8>, string>;
 
+    delay-duration-ms: func(
+        delay-id: u32,
+        source: list<u8>,
+    ) -> result<u64, string>;
+
+    delay: func(
+        delay-id: u32,
+        source: list<u8>,
+        duration-ms: u64,
+    ) -> result<list<u8>, string>;
+
     agent-output: func(
         agent-id: u32,
         source: list<u8>,

@@ -53,6 +53,8 @@ mod tests {
             "error",
             "error-steps",
             "group-by",
+            "delay-duration-ms",
+            "delay",
             "agent-output",
             "agent-validate-input",
             "agent-connection-input",

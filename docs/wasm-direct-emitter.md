@@ -236,8 +236,8 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   workflow completion. Direct Agent lowering now uses these checkpoint,
   retry-attempt, and lifecycle-signal pieces internally. Durable Agent public
   support is enabled for workflows without Agent timeout, compensation, or
-  breakpoints; Delay support and crash/resume differential tests remain
-  pending.
+  breakpoints; durable Delay support is now lowered, while non-durable Delay,
+  Delay breakpoints, and crash/resume differential tests remain pending.
 - The shared stdlib now exposes `agent-cache-key`, which centralizes the
   generated Rust-compatible durable Agent key shape using `_workflow_id`,
   `_cache_key_prefix`, and `_loop_indices`. The direct core has an internal
@@ -268,6 +268,14 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   payload skips both `capabilities.invoke` and `runtime.checkpoint`, while the
   fresh branch still invokes the Agent and checkpoints only after success.
   Full host-level crash/resume differential tests remain pending.
+- Durable Delay normal flow is now public in the direct emitter. The manifest
+  records `Delay` configs, the shared stdlib resolves `durationMs` through the
+  same mapping evaluator and emits the generated Rust-compatible
+  `steps.<stepId>.duration_ms` shape, and the direct core calls
+  `runtime.durable-sleep-checkpoint(stepId, [], durationMs)` before rebuilding
+  source and continuing to the next step. Dynamic durations are covered.
+  Non-durable Delay remains gated because generated Rust uses blocking
+  `std::thread::sleep`; Delay breakpoints remain gated.
 
 ## Final Goal
 
@@ -749,7 +757,7 @@ durable-sleep-checkpoint: func(
 ) -> result<_, string>;
 ```
 
-Current direct stdlib Agent durability helpers:
+Current direct stdlib durability helpers:
 
 ```wit
 agent-cache-key: func(agent-id: u32, source: list<u8>) -> result<list<u8>, string>;
@@ -790,6 +798,15 @@ agent-retry-error-info: func(
 agent-error-from-info: func(
   agent-id: u32,
   error-info: list<u8>,
+) -> result<list<u8>, string>;
+delay-duration-ms: func(
+  delay-id: u32,
+  source: list<u8>,
+) -> result<u64, string>;
+delay: func(
+  delay-id: u32,
+  source: list<u8>,
+  duration-ms: u64,
 ) -> result<list<u8>, string>;
 ```
 
@@ -1609,7 +1626,19 @@ Implementation steps:
    - pause/cancel/shutdown acknowledgement parity after Agent checkpoint save:
      internal lowering done;
    - crash/resume differential tests: pending.
-5. Migrate `Delay`.
+5. Migrate `Delay`:
+   - manifest config records: done;
+   - immediate and dynamic `durationMs` mapping: done through
+     `stdlib.delay-duration-ms`;
+   - generated Rust-compatible step output shape
+     (`steps.<stepId>.duration_ms`): done through `stdlib.delay`;
+   - durable sleep: done through
+     `runtime.durable-sleep-checkpoint(stepId, [], durationMs)`;
+   - public support gate: enabled for graph/step durable Delay without
+     breakpoints;
+   - non-durable blocking sleep parity: pending and gated;
+   - Delay breakpoints: pending and gated;
+   - host-level crash/resume differential tests: pending.
 6. Add crash/resume tests:
    - resume after checkpoint: structural core replay test done; host-level
      differential test pending;
