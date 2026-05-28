@@ -4734,6 +4734,7 @@ mod tests {
                     "name": "Normalize Data",
                     "agentId": "utils",
                     "capabilityId": "normalize",
+                    "maxRetries": 0,
                     "inputMapping": {
                         "value": { "valueType": "reference", "value": "data.value" }
                     }
@@ -4755,6 +4756,15 @@ mod tests {
             "outputSchema": {}
         }))
         .expect("agent graph parses")
+    }
+
+    fn non_durable_agent_default_retry_graph() -> ExecutionGraph {
+        let mut graph = non_durable_agent_graph();
+        let Some(runtara_dsl::Step::Agent(agent)) = graph.steps.get_mut("agent") else {
+            panic!("expected Agent step");
+        };
+        agent.max_retries = None;
+        graph
     }
 
     fn non_durable_agent_connection_graph() -> ExecutionGraph {
@@ -4808,6 +4818,7 @@ mod tests {
                     "id": "agent",
                     "agentId": "utils",
                     "capabilityId": "normalize",
+                    "maxRetries": 0,
                     "inputMapping": {
                         "value": { "valueType": "reference", "value": "data.value" }
                     }
@@ -4849,6 +4860,7 @@ mod tests {
                     "id": "agent",
                     "agentId": "utils",
                     "capabilityId": "normalize",
+                    "maxRetries": 0,
                     "inputMapping": {
                         "value": { "valueType": "reference", "value": "data.value" }
                     }
@@ -5555,7 +5567,31 @@ mod tests {
         assert_eq!(manifest.graph.agents.len(), 1);
         assert_eq!(manifest.graph.agents[0].agent_id, "utils");
         assert_eq!(manifest.graph.agents[0].capability_id, "normalize");
+        assert!(!manifest.graph.agents[0].durable);
+        assert_eq!(manifest.graph.agents[0].max_retries, Some(0));
         assert_eq!(manifest.graph.mappings.len(), 2);
+    }
+
+    #[test]
+    fn direct_compile_rejects_non_durable_agent_default_retry() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let err = compile_direct_workflow(DirectCompilationInput {
+            workflow_id: "agent-non-durable-default-retry".to_string(),
+            version: 1,
+            execution_graph: non_durable_agent_default_retry_graph(),
+            output_dir: temp.path().to_path_buf(),
+            track_events: false,
+            agent_catalog: None,
+        })
+        .expect_err("non-durable Agent default retry should remain gated");
+
+        let DirectCompileError::Unsupported { report } = err else {
+            panic!("expected unsupported error");
+        };
+        assert!(!report.supported);
+        assert!(report.unsupported.iter().any(|feature| {
+            feature.step_id.as_deref() == Some("agent") && feature.feature == "agent-retry"
+        }));
     }
 
     #[test]

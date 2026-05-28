@@ -191,9 +191,11 @@ Current implementation progress on `codex/wasm-direct-emitter`:
 - The workflow-logic component resolver can now include concrete per-agent WIT
   imports (`runtara:agent-<id>/capabilities@0.3.0`) and validates core module
   metadata with those imports present.
-- The first Agent execution slice is implemented for non-durable normal-flow
-  Agent steps with no retry override, timeout, compensation, or
-  breakpoint. The direct core applies the Agent input mapping through stdlib,
+- The first Agent execution slice is implemented for Agent normal-flow steps.
+  Non-durable Agent support is intentionally limited to explicit
+  `maxRetries = 0`, because generated Rust still retries non-durable Agent
+  calls by default and the direct path has not yet lowered that non-durable
+  retry loop. The direct core applies the Agent input mapping through stdlib,
   calls the statically imported per-agent `capabilities.invoke`, stores the
   success output through `stdlib.agent-output`, rebuilds the source, and
   continues to the next direct run-plan node. The WIT canonical ABI lowers
@@ -212,11 +214,12 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   validation JSON used by generated Rust, emits Agent failure debug payloads
   when `track_events` is enabled, calls `runtime.fail`, and returns failed
   `wasi:cli/run`.
-- Non-durable Agent connection ids are now supported. The direct stdlib injects
-  the generated Rust-compatible `connection_id` and `_connection` fields into
-  Agent JSON input, and the direct core writes the canonical ABI
-  `some(connection-info)` record with the connection id, empty integration id,
-  `{}` parameters, and no subtype/rate-limit config.
+- Non-durable Agent connection ids are now supported within the explicit
+  `maxRetries = 0` subset. The direct stdlib injects the generated
+  Rust-compatible `connection_id` and `_connection` fields into Agent JSON
+  input, and the direct core writes the canonical ABI `some(connection-info)`
+  record with the connection id, empty integration id, `{}` parameters, and no
+  subtype/rate-limit config.
 - Agent `onError` routing is now supported for default handlers and
   priority-ordered conditional handlers with at most one default fallback. The
   direct stdlib exposes `error-steps` to insert generated-code-compatible
@@ -1434,10 +1437,10 @@ Current status:
   imports, and the workflow-logic component resolver now includes matching
   per-agent WIT imports in component metadata.
 - Non-durable Agent normal-flow lowering now compiles and validates as a
-  direct component, including steps with a static `connectionId`. The support
-  gate allows only this first subset and emits exact rejection reasons for
-  durable Agent calls, retry overrides, timeouts, compensation, and
-  breakpoints.
+  direct component for explicit `maxRetries = 0`, including steps with a static
+  `connectionId`. Non-durable Agent default retry behavior remains gated until
+  the direct path lowers the generated Rust retry loop without checkpoint I/O.
+  Durable Agent retry support is enabled for the subset described below.
 - The shared stdlib WIT now includes `agent-output`, implemented by
   `runtara-workflow-stdlib::direct_json`, to store Agent success outputs using
   the same `steps.<id>` envelope shape as generated Rust code.
@@ -1534,6 +1537,8 @@ Implementation steps:
    - pause/cancel/shutdown acknowledgement after checkpoint save: internal
      lowering in place through `runtime.handle-checkpoint-signal`, public
      support enabled for the durable Agent subset;
+   - non-durable retry loop parity: pending; public non-durable Agent support
+     requires explicit `maxRetries = 0`;
    - timeout behavior: pending.
 5. Extend `onError` routing beyond Agent when additional failing step types are
    lowered.

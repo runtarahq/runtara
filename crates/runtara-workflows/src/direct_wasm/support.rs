@@ -306,8 +306,20 @@ fn supports_direct_control_step_inner(
     }
 }
 
-fn supports_agent_step_baseline(_graph: &ExecutionGraph, step: &AgentStep) -> bool {
-    step.timeout.is_none() && step.compensation.is_none() && !step.breakpoint.unwrap_or(false)
+fn supports_agent_step_baseline(graph: &ExecutionGraph, step: &AgentStep) -> bool {
+    step.timeout.is_none()
+        && step.compensation.is_none()
+        && !step.breakpoint.unwrap_or(false)
+        && supports_agent_retry_baseline(graph, step)
+}
+
+fn supports_agent_retry_baseline(graph: &ExecutionGraph, step: &AgentStep) -> bool {
+    agent_step_is_durable(graph, step) || step.max_retries == Some(0)
+}
+
+fn agent_step_is_durable(graph: &ExecutionGraph, step: &AgentStep) -> bool {
+    let graph_durable = graph.durable.unwrap_or(true);
+    graph_durable && step.durable.unwrap_or(true)
 }
 
 fn supports_normal_flow_step(
@@ -756,7 +768,7 @@ fn collect_step_support(
 }
 
 fn collect_agent_step_unsupported(
-    _graph: &ExecutionGraph,
+    graph: &ExecutionGraph,
     step: &AgentStep,
     unsupported: &mut Vec<UnsupportedWorkflowFeature>,
 ) {
@@ -769,6 +781,12 @@ fn collect_agent_step_unsupported(
         });
     };
 
+    if !supports_agent_retry_baseline(graph, step) {
+        push(
+            "agent-retry",
+            "Non-durable Agent direct lowering currently requires maxRetries = 0 because generated Rust retries non-durable Agent calls by default",
+        );
+    }
     if step.timeout.is_some() {
         push(
             "agent-timeout",
@@ -1320,6 +1338,7 @@ mod tests {
                     "id": "agent",
                     "agentId": "utils",
                     "capabilityId": "normalize",
+                    "maxRetries": 0,
                     "inputMapping": {
                         "value": { "valueType": "reference", "value": "data.value" }
                     }
@@ -1342,6 +1361,42 @@ mod tests {
     }
 
     #[test]
+    fn non_durable_agent_default_retry_is_rejected_until_retry_loop_is_lowered() {
+        let graph = serde_json::from_value::<ExecutionGraph>(serde_json::json!({
+            "durable": false,
+            "steps": {
+                "agent": {
+                    "stepType": "Agent",
+                    "id": "agent",
+                    "agentId": "utils",
+                    "capabilityId": "normalize",
+                    "inputMapping": {
+                        "value": { "valueType": "reference", "value": "data.value" }
+                    }
+                },
+                "finish": { "stepType": "Finish", "id": "finish" }
+            },
+            "entryPoint": "agent",
+            "executionPlan": [
+                { "fromStep": "agent", "toStep": "finish" }
+            ],
+            "variables": {},
+            "inputSchema": {},
+            "outputSchema": {}
+        }))
+        .expect("graph parses");
+
+        let report = analyze_direct_wasm_support(&graph);
+
+        assert!(!report.supported);
+        assert!(report.unsupported.iter().any(|feature| {
+            feature.step_id.as_deref() == Some("agent")
+                && feature.step_type.as_deref() == Some("Agent")
+                && feature.feature == "agent-retry"
+        }));
+    }
+
+    #[test]
     fn non_durable_agent_default_on_error_is_supported() {
         let graph = serde_json::from_value::<ExecutionGraph>(serde_json::json!({
             "durable": false,
@@ -1351,6 +1406,7 @@ mod tests {
                     "id": "agent",
                     "agentId": "utils",
                     "capabilityId": "normalize",
+                    "maxRetries": 0,
                     "inputMapping": {
                         "value": { "valueType": "reference", "value": "data.value" }
                     }
@@ -1384,6 +1440,7 @@ mod tests {
                     "id": "agent",
                     "agentId": "utils",
                     "capabilityId": "normalize",
+                    "maxRetries": 0,
                     "inputMapping": {
                         "value": { "valueType": "reference", "value": "data.value" }
                     }
@@ -1511,6 +1568,7 @@ mod tests {
             panic!("expected Agent fixture step");
         };
         agent.connection_id = Some("shopify-main".to_string());
+        agent.max_retries = Some(0);
 
         let report = analyze_direct_wasm_support(&graph);
 
