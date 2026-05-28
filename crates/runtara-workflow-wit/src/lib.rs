@@ -122,6 +122,7 @@ mod tests {
             "custom-event",
             "heartbeat",
             "is-cancelled",
+            "check-signals",
             "durable-sleep",
             "blocking-sleep",
             "get-checkpoint",

@@ -1940,6 +1940,9 @@ struct DirectCoreImportIndices {
     runtime_complete: Option<u32>,
     runtime_fail: Option<u32>,
     runtime_custom_event: Option<u32>,
+    runtime_heartbeat: Option<u32>,
+    runtime_is_cancelled: Option<u32>,
+    runtime_check_signals: Option<u32>,
     runtime_get_checkpoint: Option<u32>,
     runtime_checkpoint: Option<u32>,
     runtime_handle_checkpoint_signal: Option<u32>,
@@ -2005,6 +2008,15 @@ impl DirectCoreImportIndices {
             runtime_custom_event: require_import(
                 self.runtime_custom_event,
                 "runtime.custom-event",
+            )?,
+            runtime_heartbeat: require_import(self.runtime_heartbeat, "runtime.heartbeat")?,
+            runtime_is_cancelled: require_import(
+                self.runtime_is_cancelled,
+                "runtime.is-cancelled",
+            )?,
+            runtime_check_signals: require_import(
+                self.runtime_check_signals,
+                "runtime.check-signals",
             )?,
             runtime_get_checkpoint: require_import(
                 self.runtime_get_checkpoint,
@@ -2169,6 +2181,9 @@ struct DirectCoreFunctionIndices {
     runtime_complete: u32,
     runtime_fail: u32,
     runtime_custom_event: u32,
+    runtime_heartbeat: u32,
+    runtime_is_cancelled: u32,
+    runtime_check_signals: u32,
     runtime_get_checkpoint: u32,
     runtime_checkpoint: u32,
     runtime_handle_checkpoint_signal: u32,
@@ -2265,6 +2280,12 @@ fn import_core_function(
         import_indices.runtime_fail = Some(function_index);
     } else if is_runtime_import(resolve, interface, function, "custom-event") {
         import_indices.runtime_custom_event = Some(function_index);
+    } else if is_runtime_import(resolve, interface, function, "heartbeat") {
+        import_indices.runtime_heartbeat = Some(function_index);
+    } else if is_runtime_import(resolve, interface, function, "is-cancelled") {
+        import_indices.runtime_is_cancelled = Some(function_index);
+    } else if is_runtime_import(resolve, interface, function, "check-signals") {
+        import_indices.runtime_check_signals = Some(function_index);
     } else if is_runtime_import(resolve, interface, function, "get-checkpoint") {
         import_indices.runtime_get_checkpoint = Some(function_index);
     } else if is_runtime_import(resolve, interface, function, "checkpoint") {
@@ -3714,6 +3735,15 @@ fn emit_while_plan(
     body.instruction(&Instruction::I32Eqz);
     body.instruction(&Instruction::BrIf(1));
 
+    push_retptr_arg(body);
+    body.instruction(&Instruction::Call(indices.runtime_is_cancelled));
+    return_if_retptr_error(body);
+    push_retptr_u8_load(body, DIRECT_RET_BOOL_OK_OFFSET);
+    body.instruction(&Instruction::If(BlockType::Empty));
+    body.instruction(&Instruction::I32Const(0));
+    body.instruction(&Instruction::Return);
+    body.instruction(&Instruction::End);
+
     body.instruction(&Instruction::I32Const(while_id as i32));
     push_variables_args(body, variables);
     body.instruction(&Instruction::LocalGet(DIRECT_WHILE_STATE_PTR_LOCAL));
@@ -3770,6 +3800,19 @@ fn emit_while_plan(
         workflow_error_kind,
         failure_target,
     );
+
+    push_retptr_arg(body);
+    body.instruction(&Instruction::Call(indices.runtime_heartbeat));
+    return_if_retptr_error(body);
+
+    push_retptr_arg(body);
+    body.instruction(&Instruction::Call(indices.runtime_check_signals));
+    return_if_retptr_error(body);
+    push_retptr_u8_load(body, DIRECT_RET_BOOL_OK_OFFSET);
+    body.instruction(&Instruction::If(BlockType::Empty));
+    body.instruction(&Instruction::I32Const(0));
+    body.instruction(&Instruction::Return);
+    body.instruction(&Instruction::End);
 
     body.instruction(&Instruction::I32Const(while_id as i32));
     body.instruction(&Instruction::LocalGet(DIRECT_WHILE_STATE_PTR_LOCAL));
@@ -10176,6 +10219,9 @@ mod tests {
         let mut while_iteration_variables_index = None;
         let mut while_advance_state_index = None;
         let mut while_output_index = None;
+        let mut runtime_heartbeat_index = None;
+        let mut runtime_is_cancelled_index = None;
+        let mut runtime_check_signals_index = None;
         let mut saw_loop = false;
         let mut saw_while_id = false;
         let mut saw_while_max_iterations_call = false;
@@ -10185,6 +10231,9 @@ mod tests {
         let mut saw_while_iteration_variables_call = false;
         let mut saw_while_advance_state_call = false;
         let mut saw_while_output_call = false;
+        let mut saw_runtime_heartbeat_call = false;
+        let mut saw_runtime_is_cancelled_call = false;
+        let mut saw_runtime_check_signals_call = false;
         let mut code_body_index = 0;
 
         for payload in Parser::new(0).parse_all(&core) {
@@ -10192,29 +10241,48 @@ mod tests {
                 Payload::ImportSection(reader) => {
                     for import in reader.into_imports() {
                         let import = import.expect("core import");
-                        if import.module.contains("runtara:workflow-stdlib/json") {
-                            match import.name {
-                                "while-max-iterations" => {
-                                    while_max_iterations_index = Some(next_function_index)
+                        match import.module {
+                            module if module.contains("runtara:workflow-stdlib/json") => {
+                                match import.name {
+                                    "while-max-iterations" => {
+                                        while_max_iterations_index = Some(next_function_index)
+                                    }
+                                    "while-initial-state" => {
+                                        while_initial_state_index = Some(next_function_index)
+                                    }
+                                    "while-condition-source" => {
+                                        while_condition_source_index = Some(next_function_index)
+                                    }
+                                    "while-condition" => {
+                                        while_condition_index = Some(next_function_index)
+                                    }
+                                    "while-iteration-variables" => {
+                                        while_iteration_variables_index = Some(next_function_index)
+                                    }
+                                    "while-advance-state" => {
+                                        while_advance_state_index = Some(next_function_index)
+                                    }
+                                    "while-output" => {
+                                        while_output_index = Some(next_function_index)
+                                    }
+                                    _ => {}
                                 }
-                                "while-initial-state" => {
-                                    while_initial_state_index = Some(next_function_index)
-                                }
-                                "while-condition-source" => {
-                                    while_condition_source_index = Some(next_function_index)
-                                }
-                                "while-condition" => {
-                                    while_condition_index = Some(next_function_index)
-                                }
-                                "while-iteration-variables" => {
-                                    while_iteration_variables_index = Some(next_function_index)
-                                }
-                                "while-advance-state" => {
-                                    while_advance_state_index = Some(next_function_index)
-                                }
-                                "while-output" => while_output_index = Some(next_function_index),
-                                _ => {}
                             }
+                            module if module.contains("runtara:workflow-runtime/runtime") => {
+                                match import.name {
+                                    "heartbeat" => {
+                                        runtime_heartbeat_index = Some(next_function_index)
+                                    }
+                                    "is-cancelled" => {
+                                        runtime_is_cancelled_index = Some(next_function_index)
+                                    }
+                                    "check-signals" => {
+                                        runtime_check_signals_index = Some(next_function_index)
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            _ => {}
                         }
                         if matches!(import.ty, TypeRef::Func(_)) {
                             next_function_index += 1;
@@ -10251,6 +10319,15 @@ mod tests {
                                     }
                                     if Some(function_index) == while_output_index {
                                         saw_while_output_call = true;
+                                    }
+                                    if Some(function_index) == runtime_heartbeat_index {
+                                        saw_runtime_heartbeat_call = true;
+                                    }
+                                    if Some(function_index) == runtime_is_cancelled_index {
+                                        saw_runtime_is_cancelled_call = true;
+                                    }
+                                    if Some(function_index) == runtime_check_signals_index {
+                                        saw_runtime_check_signals_call = true;
                                     }
                                 }
                                 _ => {}
@@ -10290,6 +10367,18 @@ mod tests {
             "While run should call while-advance-state"
         );
         assert!(saw_while_output_call, "While run should call while-output");
+        assert!(
+            saw_runtime_is_cancelled_call,
+            "While run should check cancellation before each iteration body"
+        );
+        assert!(
+            saw_runtime_heartbeat_call,
+            "While run should heartbeat after each iteration body"
+        );
+        assert!(
+            saw_runtime_check_signals_call,
+            "While run should check lifecycle signals after each iteration body"
+        );
     }
 
     #[test]

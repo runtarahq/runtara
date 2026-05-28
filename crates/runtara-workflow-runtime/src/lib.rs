@@ -163,6 +163,31 @@ pub fn is_cancelled() -> Result<bool, String> {
     Ok(cancelled)
 }
 
+pub fn check_signals() -> Result<bool, String> {
+    let signal = with_sdk_mut(|sdk| sdk.poll_signal().map_err(sdk_error))?;
+    let Some(signal) = signal else {
+        return Ok(false);
+    };
+
+    match signal.signal_type {
+        SignalType::Cancel => {
+            runtara_sdk::acknowledge_cancellation();
+            Ok(true)
+        }
+        SignalType::Pause => {
+            runtara_sdk::acknowledge_pause();
+            with_sdk(|sdk| sdk.suspended().map_err(sdk_error))?;
+            Ok(true)
+        }
+        SignalType::Shutdown => {
+            runtara_sdk::acknowledge_shutdown();
+            with_sdk(|sdk| sdk.suspended().map_err(sdk_error))?;
+            Ok(true)
+        }
+        SignalType::Resume => Ok(false),
+    }
+}
+
 pub fn durable_sleep(ms: u64) -> Result<(), String> {
     durable_sleep_checkpoint("__direct_workflow_runtime_durable_sleep", &[], ms)
 }
@@ -277,6 +302,10 @@ mod component {
 
         fn is_cancelled() -> Result<bool, String> {
             super::is_cancelled()
+        }
+
+        fn check_signals() -> Result<bool, String> {
+            super::check_signals()
         }
 
         fn durable_sleep(ms: u64) -> Result<(), String> {

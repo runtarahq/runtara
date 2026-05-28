@@ -40,6 +40,8 @@ interface runtime {
 
     is-cancelled: func() -> result<bool, string>;
 
+    check-signals: func() -> result<bool, string>;
+
     durable-sleep: func(ms: u64) -> result<_, string>;
 
     blocking-sleep: func(ms: u64) -> result<_, string>;

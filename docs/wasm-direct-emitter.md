@@ -73,8 +73,9 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   it initializes While state through stdlib, checks max iterations, injects loop
   context before condition evaluation, builds iteration variables, runs the
   nested direct run plan, advances loop state, and writes the final While step
-  envelope before continuing normal flow. Public While support remains gated
-  until heartbeat/cancellation/pause-shutdown lifecycle parity is implemented.
+  envelope before continuing normal flow. It also calls runtime cancellation,
+  heartbeat, and signal-check helpers around each iteration body. Public While
+  support remains gated until the support report opens a conservative subset.
 - `runtara-workflow-stdlib` now has a `direct-component` feature and
   component metadata for `runtara:workflow-stdlib`. That feature builds a
   `wasm32-wasip2` stdlib component without pulling in SDK/runtime, HTTP, AI,
@@ -1756,8 +1757,9 @@ Implementation steps:
    - `_previousOutputs`, `_loop_indices`, `_index`, `_loop`, and `_scope_id`
      iteration variable shape: stdlib helper, WIT export, and internal
      direct-core lowering done;
-   - heartbeat/cancellation checks: pending; public While support remains
-     gated until lifecycle parity is complete;
+   - heartbeat/cancellation/pause-shutdown signal checks: runtime ABI and
+     internal direct-core lowering done; public While support remains gated
+     until the support report opens a conservative subset;
    - onError routing.
 4. Defer parallel split until runtime support and test coverage are explicit.
 
