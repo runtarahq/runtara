@@ -2442,6 +2442,7 @@ fn direct_run_function(
         STEPS_LEN_LOCAL,
         SOURCE_PTR_LOCAL,
         SOURCE_LEN_LOCAL,
+        None,
     );
 
     emit_run_plan_mapping(
@@ -2522,6 +2523,7 @@ fn emit_run_plan_mapping(
                 source_len_local,
                 output_ptr_local,
                 output_len_local,
+                failure_target,
             );
             emit_step_debug_event(
                 body,
@@ -2854,7 +2856,13 @@ fn emit_run_plan_mapping(
             body.instruction(&Instruction::LocalGet(source_len_local));
             push_retptr_arg(body);
             body.instruction(&Instruction::Call(indices.stdlib_eval_condition));
-            return_if_retptr_error(body);
+            emit_retptr_error_or_return(
+                body,
+                indices,
+                failure_target,
+                route_ptr_local,
+                route_len_local,
+            );
             emit_step_debug_event(
                 body,
                 indices,
@@ -3023,7 +3031,13 @@ fn emit_edge_route_dispatch(
     body.instruction(&Instruction::LocalGet(source_len_local));
     push_retptr_arg(body);
     body.instruction(&Instruction::Call(indices.stdlib_eval_condition));
-    return_if_retptr_error(body);
+    emit_retptr_error_or_return(
+        body,
+        indices,
+        failure_target,
+        route_ptr_local,
+        route_len_local,
+    );
 
     body.instruction(&Instruction::I32Const(DIRECT_RUN_RETPTR_OFFSET));
     body.instruction(&Instruction::I32Load8U(MemArg {
@@ -3121,7 +3135,13 @@ fn emit_step_context_plan(
     body.instruction(&Instruction::LocalGet(source_len_local));
     push_retptr_arg(body);
     body.instruction(&Instruction::Call(step_function_index));
-    return_if_retptr_error(body);
+    emit_retptr_error_or_return(
+        body,
+        indices,
+        failure_target,
+        route_ptr_local,
+        route_len_local,
+    );
     load_retptr_list(body, steps_ptr_local, steps_len_local);
     emit_step_debug_event(
         body,
@@ -3146,6 +3166,7 @@ fn emit_step_context_plan(
         steps_len_local,
         source_ptr_local,
         source_len_local,
+        failure_target,
     );
 
     emit_run_plan_mapping(
@@ -3311,6 +3332,14 @@ fn emit_split_plan(
         steps_len_local,
         source_ptr_local,
         source_len_local,
+        if dont_stop_on_failed {
+            Some(DirectFailureTarget {
+                split_id,
+                branch_depth: 0,
+            })
+        } else {
+            failure_target
+        },
     );
 
     emit_run_plan_mapping(
@@ -3405,6 +3434,7 @@ fn emit_split_plan(
         steps_len_local,
         source_ptr_local,
         source_len_local,
+        failure_target,
     );
 
     emit_step_debug_event(
@@ -3587,6 +3617,7 @@ fn emit_delay_plan(
         steps_len_local,
         source_ptr_local,
         source_len_local,
+        failure_target,
     );
 
     emit_run_plan_mapping(
@@ -3668,6 +3699,7 @@ fn emit_log_plan(
         steps_len_local,
         source_ptr_local,
         source_len_local,
+        failure_target,
     );
 
     emit_run_plan_mapping(
@@ -3745,6 +3777,7 @@ fn emit_agent_plan(
         source_len_local,
         output_ptr_local,
         output_len_local,
+        failure_target,
     );
 
     emit_agent_input_validation(
@@ -3948,7 +3981,13 @@ fn emit_agent_plan(
     body.instruction(&Instruction::LocalGet(output_len_local));
     push_retptr_arg(body);
     body.instruction(&Instruction::Call(indices.stdlib_agent_output));
-    return_if_retptr_error(body);
+    emit_retptr_error_or_return(
+        body,
+        indices,
+        failure_target,
+        route_ptr_local,
+        route_len_local,
+    );
     load_retptr_list(body, steps_ptr_local, steps_len_local);
 
     emit_build_source(
@@ -3961,6 +4000,7 @@ fn emit_agent_plan(
         steps_len_local,
         source_ptr_local,
         source_len_local,
+        failure_target,
     );
 
     emit_step_debug_event(
@@ -4122,7 +4162,13 @@ fn emit_switch_route_plan(
     body.instruction(&Instruction::LocalGet(source_len_local));
     push_retptr_arg(body);
     body.instruction(&Instruction::Call(indices.stdlib_process_switch));
-    return_if_retptr_error(body);
+    emit_retptr_error_or_return(
+        body,
+        indices,
+        failure_target,
+        route_ptr_local,
+        route_len_local,
+    );
     load_retptr_list(body, route_ptr_local, route_len_local);
 
     body.instruction(&Instruction::I32Const(switch_id as i32));
@@ -4130,7 +4176,13 @@ fn emit_switch_route_plan(
     body.instruction(&Instruction::LocalGet(source_len_local));
     push_retptr_arg(body);
     body.instruction(&Instruction::Call(indices.stdlib_value_switch));
-    return_if_retptr_error(body);
+    emit_retptr_error_or_return(
+        body,
+        indices,
+        failure_target,
+        route_ptr_local,
+        route_len_local,
+    );
     load_retptr_list(body, steps_ptr_local, steps_len_local);
     emit_step_debug_event(
         body,
@@ -4155,6 +4207,7 @@ fn emit_switch_route_plan(
         steps_len_local,
         source_ptr_local,
         source_len_local,
+        failure_target,
     );
 
     emit_switch_route_dispatch(
@@ -4317,6 +4370,7 @@ fn emit_build_source(
     steps_len_local: u32,
     source_ptr_local: u32,
     source_len_local: u32,
+    failure_target: Option<DirectFailureTarget>,
 ) {
     body.instruction(&Instruction::LocalGet(data_ptr_local));
     body.instruction(&Instruction::LocalGet(data_len_local));
@@ -4325,10 +4379,17 @@ fn emit_build_source(
     body.instruction(&Instruction::LocalGet(steps_len_local));
     push_retptr_arg(body);
     body.instruction(&Instruction::Call(indices.stdlib_build_source));
-    return_if_retptr_error(body);
+    emit_retptr_error_or_return(
+        body,
+        indices,
+        failure_target,
+        source_ptr_local,
+        source_len_local,
+    );
     load_retptr_list(body, source_ptr_local, source_len_local);
 }
 
+#[allow(clippy::too_many_arguments)]
 fn emit_apply_mapping(
     body: &mut WasmFunction,
     indices: &DirectCoreFunctionIndices,
@@ -4337,13 +4398,20 @@ fn emit_apply_mapping(
     source_len_local: u32,
     output_ptr_local: u32,
     output_len_local: u32,
+    failure_target: Option<DirectFailureTarget>,
 ) {
     body.instruction(&Instruction::I32Const(mapping_id as i32));
     body.instruction(&Instruction::LocalGet(source_ptr_local));
     body.instruction(&Instruction::LocalGet(source_len_local));
     push_retptr_arg(body);
     body.instruction(&Instruction::Call(indices.stdlib_apply_mapping));
-    return_if_retptr_error(body);
+    emit_retptr_error_or_return(
+        body,
+        indices,
+        failure_target,
+        output_ptr_local,
+        output_len_local,
+    );
     load_retptr_list(body, output_ptr_local, output_len_local);
 }
 
@@ -4376,7 +4444,13 @@ fn emit_agent_input_validation(
     body.instruction(&Instruction::LocalGet(input_len_local));
     push_retptr_arg(body);
     body.instruction(&Instruction::Call(indices.stdlib_agent_validate_input));
-    return_if_retptr_error(body);
+    emit_retptr_error_or_return(
+        body,
+        indices,
+        failure_target,
+        route_ptr_local,
+        route_len_local,
+    );
     load_retptr_list(body, route_ptr_local, route_len_local);
 
     body.instruction(&Instruction::LocalGet(route_len_local));
@@ -4972,6 +5046,7 @@ fn emit_agent_error_route_or_fail(
             steps_len_local,
             source_ptr_local,
             source_len_local,
+            failure_target,
         );
         emit_error_route_dispatch(
             body,
@@ -5408,6 +5483,26 @@ fn return_if_retptr_error(function: &mut WasmFunction) {
     function.instruction(&Instruction::I32Const(1));
     function.instruction(&Instruction::Return);
     function.instruction(&Instruction::End);
+}
+
+fn emit_retptr_error_or_return(
+    function: &mut WasmFunction,
+    indices: &DirectCoreFunctionIndices,
+    failure_target: Option<DirectFailureTarget>,
+    error_ptr_local: u32,
+    error_len_local: u32,
+) {
+    if let Some(failure_target) = failure_target {
+        emit_split_append_retptr_error_and_continue(
+            function,
+            indices,
+            failure_target,
+            error_ptr_local,
+            error_len_local,
+        );
+    } else {
+        return_if_retptr_error(function);
+    }
 }
 
 fn load_retptr_tag(function: &mut WasmFunction) {
@@ -9654,9 +9749,13 @@ mod tests {
 
         let mut next_function_index = 0;
         let mut agent_failure_index = None;
+        let mut agent_validate_input_index = None;
+        let mut apply_mapping_index = None;
         let mut split_append_error_index = None;
         let mut saw_split_append_error_call = false;
         let mut saw_agent_failure_call = false;
+        let mut saw_apply_mapping_failure_path = false;
+        let mut pending_apply_mapping_failure_path = false;
         let mut saw_split_append_error_after_agent_failure = false;
         let mut saw_continue_after_split_append_error = false;
         let mut code_body_index = 0;
@@ -9670,6 +9769,16 @@ mod tests {
                             && import.name == "split-append-error"
                         {
                             split_append_error_index = Some(next_function_index);
+                        }
+                        if import.module.contains("runtara:workflow-stdlib/json")
+                            && import.name == "apply-mapping"
+                        {
+                            apply_mapping_index = Some(next_function_index);
+                        }
+                        if import.module.contains("runtara:workflow-stdlib/json")
+                            && import.name == "agent-validate-input"
+                        {
+                            agent_validate_input_index = Some(next_function_index);
                         }
                         if import.module.contains("runtara:workflow-stdlib/json")
                             && matches!(import.name, "agent-error" | "agent-error-from-info")
@@ -9687,6 +9796,16 @@ mod tests {
                         {
                             match operator.expect("operator") {
                                 Operator::Call { function_index }
+                                    if Some(function_index) == apply_mapping_index =>
+                                {
+                                    pending_apply_mapping_failure_path = true;
+                                }
+                                Operator::Call { function_index }
+                                    if Some(function_index) == agent_validate_input_index =>
+                                {
+                                    pending_apply_mapping_failure_path = false;
+                                }
+                                Operator::Call { function_index }
                                     if Some(function_index) == agent_failure_index =>
                                 {
                                     saw_agent_failure_call = true;
@@ -9696,6 +9815,9 @@ mod tests {
                                 {
                                     if saw_agent_failure_call {
                                         saw_split_append_error_after_agent_failure = true;
+                                    }
+                                    if pending_apply_mapping_failure_path {
+                                        saw_apply_mapping_failure_path = true;
                                     }
                                     saw_split_append_error_call = true;
                                 }
@@ -9721,6 +9843,10 @@ mod tests {
         assert!(
             saw_split_append_error_after_agent_failure,
             "Split dontStop run should append nested Agent failures"
+        );
+        assert!(
+            saw_apply_mapping_failure_path,
+            "Split dontStop run should append nested mapping failures"
         );
         assert!(
             saw_continue_after_split_append_error,
