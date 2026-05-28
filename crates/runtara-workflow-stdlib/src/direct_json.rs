@@ -27,6 +27,7 @@ pub struct DirectJsonManifest {
     steps: BTreeMap<String, DirectJsonStep>,
     mappings: BTreeMap<u32, DirectJsonMapping>,
     conditions: BTreeMap<u32, DirectJsonCondition>,
+    splits: BTreeMap<u32, DirectJsonSplit>,
     filters: BTreeMap<u32, DirectJsonFilter>,
     switches: BTreeMap<u32, DirectJsonSwitch>,
     group_bys: BTreeMap<u32, DirectJsonGroupBy>,
@@ -56,6 +57,7 @@ impl DirectJsonManifest {
             steps: collections.steps,
             mappings: collections.mappings,
             conditions: collections.conditions,
+            splits: collections.splits,
             filters: collections.filters,
             switches: collections.switches,
             group_bys: collections.group_bys,
@@ -103,6 +105,66 @@ impl DirectJsonManifest {
             .get(&switch_id)
             .ok_or_else(|| format!("unknown direct Switch id {switch_id}"))?;
         apply_switch(&switch.value, &source).map(|result| result.route)
+    }
+
+    /// Resolve and normalize a Split step's iteration items.
+    pub fn split_items(&self, split_id: u32, source: &[u8]) -> Result<Vec<u8>, String> {
+        let source: Value = serde_json::from_slice(source)
+            .map_err(|err| format!("failed to parse split source: {err}"))?;
+        let split = self
+            .splits
+            .get(&split_id)
+            .ok_or_else(|| format!("unknown direct Split id {split_id}"))?;
+        let items = split_items(split, &source)?;
+        serde_json::to_vec(&items).map_err(|err| format!("failed to serialize Split items: {err}"))
+    }
+
+    /// Build generated-code-compatible variables for one Split iteration.
+    pub fn split_iteration_variables(
+        &self,
+        split_id: u32,
+        source: &[u8],
+        item: &[u8],
+        index: u32,
+    ) -> Result<Vec<u8>, String> {
+        let source: Value = serde_json::from_slice(source)
+            .map_err(|err| format!("failed to parse split source: {err}"))?;
+        let item: Value = serde_json::from_slice(item)
+            .map_err(|err| format!("failed to parse Split item: {err}"))?;
+        let split = self
+            .splits
+            .get(&split_id)
+            .ok_or_else(|| format!("unknown direct Split id {split_id}"))?;
+        let variables = split_iteration_variables(split, &source, item, index)?;
+        serde_json::to_vec(&Value::Object(variables))
+            .map_err(|err| format!("failed to serialize Split iteration variables: {err}"))
+    }
+
+    /// Store Split iteration results in the generated-code-compatible steps context.
+    pub fn split_output(
+        &self,
+        split_id: u32,
+        source: &[u8],
+        results: &[u8],
+    ) -> Result<Vec<u8>, String> {
+        let source: Value = serde_json::from_slice(source)
+            .map_err(|err| format!("failed to parse split source: {err}"))?;
+        let results: Value = serde_json::from_slice(results)
+            .map_err(|err| format!("failed to parse Split results: {err}"))?;
+        let split = self
+            .splits
+            .get(&split_id)
+            .ok_or_else(|| format!("unknown direct Split id {split_id}"))?;
+        let steps = insert_step_output(
+            &source,
+            &split.step_id,
+            split.name.as_deref(),
+            "Split",
+            results,
+            None,
+        );
+        serde_json::to_vec(&Value::Object(steps))
+            .map_err(|err| format!("failed to serialize Split steps context: {err}"))
     }
 
     /// Execute a manifest Filter config and return an updated steps context.
@@ -966,6 +1028,7 @@ struct DirectJsonManifestCollections {
     steps: BTreeMap<String, DirectJsonStep>,
     mappings: BTreeMap<u32, DirectJsonMapping>,
     conditions: BTreeMap<u32, DirectJsonCondition>,
+    splits: BTreeMap<u32, DirectJsonSplit>,
     filters: BTreeMap<u32, DirectJsonFilter>,
     switches: BTreeMap<u32, DirectJsonSwitch>,
     group_bys: BTreeMap<u32, DirectJsonGroupBy>,
@@ -1025,6 +1088,22 @@ fn collect_graph_manifest(
             .is_some()
         {
             return Err(format!("duplicate direct condition id {}", condition.id));
+        }
+    }
+    for split in &graph.splits {
+        if collections
+            .splits
+            .insert(
+                split.id,
+                DirectJsonSplit {
+                    step_id: split.step_id.clone(),
+                    name: split.name.clone(),
+                    value: split.value.clone(),
+                },
+            )
+            .is_some()
+        {
+            return Err(format!("duplicate direct Split id {}", split.id));
         }
     }
     for filter in &graph.filters {
@@ -1149,6 +1228,110 @@ fn collect_graph_manifest(
         }
     }
     Ok(())
+}
+
+fn split_items(split: &DirectJsonSplit, source: &Value) -> Result<Value, String> {
+    let value_mapping = split
+        .value
+        .get("value")
+        .ok_or_else(|| format!("Split step '{}' config missing value", split.step_id))?;
+    let input = apply_mapping_value(value_mapping, source)?;
+    let allow_null = split_bool_config(&split.value, "allowNull");
+    let convert_single_value = split_bool_config(&split.value, "convertSingleValue");
+
+    let mut items = match input {
+        Value::Array(items) => items,
+        Value::Null => {
+            if allow_null {
+                Vec::new()
+            } else {
+                return Err(format!(
+                    "Split step '{}' received null value. Set 'allowNull: true' to allow empty iterations, or use 'transform/ensure-array' agent.",
+                    split.step_id
+                ));
+            }
+        }
+        other => {
+            if convert_single_value {
+                vec![other]
+            } else {
+                return Err(format!(
+                    "Split step '{}' expected array, got {}. Set 'convertSingleValue: true' to auto-wrap, or use 'transform/ensure-array' agent.",
+                    split.step_id,
+                    json_type_name(&other)
+                ));
+            }
+        }
+    };
+
+    let batch_size = split
+        .value
+        .get("batchSize")
+        .and_then(Value::as_u64)
+        .unwrap_or(0) as usize;
+    if batch_size > 0 {
+        items = items
+            .chunks(batch_size)
+            .map(|chunk| Value::Array(chunk.to_vec()))
+            .collect();
+    }
+
+    Ok(Value::Array(items))
+}
+
+fn split_iteration_variables(
+    split: &DirectJsonSplit,
+    source: &Value,
+    item: Value,
+    index: u32,
+) -> Result<Map<String, Value>, String> {
+    let mut variables = source
+        .get("variables")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+
+    if let Some(extra_variables_mapping) = split.value.get("variables") {
+        let extra_variables = apply_input_mapping(extra_variables_mapping, source)?;
+        if let Value::Object(extra_variables) = extra_variables {
+            variables.extend(extra_variables);
+        }
+    }
+
+    let parent_indices = variables
+        .get("_loop_indices")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let mut loop_indices = parent_indices;
+    loop_indices.push(serde_json::json!(index));
+    variables.insert("_loop_indices".to_string(), Value::Array(loop_indices));
+    variables.insert("_index".to_string(), serde_json::json!(index));
+    variables.insert("_item".to_string(), item);
+
+    let scope_id = variables
+        .get("_scope_id")
+        .and_then(Value::as_str)
+        .map(|parent| format!("{}_{}_{}", parent, split.step_id, index))
+        .unwrap_or_else(|| format!("sc_{}_{}", split.step_id, index));
+    variables.insert("_scope_id".to_string(), Value::String(scope_id));
+
+    Ok(variables)
+}
+
+fn split_bool_config(config: &Value, key: &str) -> bool {
+    config.get(key).and_then(Value::as_bool).unwrap_or(false)
+}
+
+fn json_type_name(value: &Value) -> &'static str {
+    match value {
+        Value::Object(_) => "object",
+        Value::String(_) => "string",
+        Value::Number(_) => "number",
+        Value::Bool(_) => "boolean",
+        Value::Array(_) => "array",
+        Value::Null => "null",
+    }
 }
 
 fn apply_filter(config: &Value, source: &Value) -> Result<Value, String> {
@@ -2034,6 +2217,8 @@ struct GraphWire {
     #[serde(default)]
     conditions: Vec<ConditionWire>,
     #[serde(default)]
+    splits: Vec<SplitWire>,
+    #[serde(default)]
     filters: Vec<FilterWire>,
     #[serde(default)]
     switches: Vec<SwitchWire>,
@@ -2085,6 +2270,16 @@ struct ConditionWire {
     id: u32,
     owner_id: String,
     purpose: String,
+    value: Value,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SplitWire {
+    id: u32,
+    step_id: String,
+    #[serde(default)]
+    name: Option<String>,
     value: Value,
 }
 
@@ -2175,6 +2370,13 @@ struct DirectJsonMapping {
 struct DirectJsonCondition {
     owner_id: String,
     purpose: String,
+    value: Value,
+}
+
+#[derive(Debug, Clone)]
+struct DirectJsonSplit {
+    step_id: String,
+    name: Option<String>,
     value: Value,
 }
 
@@ -2296,6 +2498,35 @@ mod tests {
                     "value": config
                 }],
                 "steps": []
+            }
+        }))
+        .expect("manifest json")
+    }
+
+    fn split_manifest(config: Value) -> Vec<u8> {
+        serde_json::to_vec(&json!({
+            "graph": {
+                "splits": [{
+                    "id": 0,
+                    "stepId": "split",
+                    "name": "Process Items",
+                    "stepType": "Split",
+                    "purpose": "split.config",
+                    "durable": true,
+                    "value": config,
+                    "inputSchema": {},
+                    "outputSchema": {}
+                }],
+                "steps": [{
+                    "id": "split",
+                    "stepType": "Split",
+                    "name": "Process Items",
+                    "body": {
+                        "id": "split",
+                        "stepType": "Split",
+                        "name": "Process Items"
+                    }
+                }]
             }
         }))
         .expect("manifest json")
@@ -2624,6 +2855,110 @@ mod tests {
         let source = build_source(br#"{"present":"yes"}"#, b"{}", b"{}").expect("source");
 
         assert!(manifest.eval_condition(0, &source).expect("condition"));
+    }
+
+    #[test]
+    fn split_items_normalizes_arrays_single_values_nulls_and_batches() {
+        let manifest = DirectJsonManifest::parse(&split_manifest(json!({
+            "value": { "valueType": "reference", "value": "data.items" },
+            "allowNull": true,
+            "convertSingleValue": true,
+            "batchSize": 2
+        })))
+        .expect("manifest");
+        let array_source = build_source(br#"{"items":[1,2,3]}"#, b"{}", b"{}").expect("source");
+        let single_source = build_source(br#"{"items":"one"}"#, b"{}", b"{}").expect("source");
+        let null_source = build_source(br#"{"items":null}"#, b"{}", b"{}").expect("source");
+
+        let array_items = manifest.split_items(0, &array_source).expect("array items");
+        let array_items: Value = serde_json::from_slice(&array_items).expect("array json");
+        let single_items = manifest
+            .split_items(0, &single_source)
+            .expect("single items");
+        let single_items: Value = serde_json::from_slice(&single_items).expect("single json");
+        let null_items = manifest.split_items(0, &null_source).expect("null items");
+        let null_items: Value = serde_json::from_slice(&null_items).expect("null json");
+
+        assert_eq!(array_items, json!([[1, 2], [3]]));
+        assert_eq!(single_items, json!([["one"]]));
+        assert_eq!(null_items, json!([]));
+    }
+
+    #[test]
+    fn split_items_rejects_null_and_non_array_without_flags() {
+        let manifest = DirectJsonManifest::parse(&split_manifest(json!({
+            "value": { "valueType": "reference", "value": "data.items" }
+        })))
+        .expect("manifest");
+        let null_source = build_source(br#"{"items":null}"#, b"{}", b"{}").expect("source");
+        let object_source = build_source(br#"{"items":{"id":1}}"#, b"{}", b"{}").expect("source");
+
+        let null_err = manifest
+            .split_items(0, &null_source)
+            .expect_err("null should fail");
+        let object_err = manifest
+            .split_items(0, &object_source)
+            .expect_err("object should fail");
+
+        assert_eq!(
+            null_err,
+            "Split step 'split' received null value. Set 'allowNull: true' to allow empty iterations, or use 'transform/ensure-array' agent."
+        );
+        assert_eq!(
+            object_err,
+            "Split step 'split' expected array, got object. Set 'convertSingleValue: true' to auto-wrap, or use 'transform/ensure-array' agent."
+        );
+    }
+
+    #[test]
+    fn split_iteration_variables_match_generated_scope_shape() {
+        let manifest = DirectJsonManifest::parse(&split_manifest(json!({
+            "value": { "valueType": "reference", "value": "data.items" },
+            "variables": {
+                "tenant": { "valueType": "reference", "value": "data.tenant" }
+            }
+        })))
+        .expect("manifest");
+        let source = build_source(
+            br#"{"tenant":"acme","items":[{"id":7}]}"#,
+            br#"{"_workflow_id":"wf-1","_scope_id":"parent","_loop_indices":[2],"existing":true}"#,
+            b"{}",
+        )
+        .expect("source");
+
+        let variables = manifest
+            .split_iteration_variables(0, &source, br#"{"id":7}"#, 3)
+            .expect("iteration variables");
+        let variables: Value = serde_json::from_slice(&variables).expect("variables json");
+
+        assert_eq!(variables["_workflow_id"], json!("wf-1"));
+        assert_eq!(variables["existing"], json!(true));
+        assert_eq!(variables["tenant"], json!("acme"));
+        assert_eq!(variables["_loop_indices"], json!([2, 3]));
+        assert_eq!(variables["_index"], json!(3));
+        assert_eq!(variables["_item"], json!({ "id": 7 }));
+        assert_eq!(variables["_scope_id"], json!("parent_split_3"));
+    }
+
+    #[test]
+    fn split_output_records_generated_step_envelope() {
+        let manifest = DirectJsonManifest::parse(&split_manifest(json!({
+            "value": { "valueType": "reference", "value": "data.items" }
+        })))
+        .expect("manifest");
+        let source =
+            build_source(br#"{"items":[1]}"#, b"{}", br#"{"prev":{"outputs":1}}"#).expect("source");
+
+        let steps = manifest
+            .split_output(0, &source, br#"[{"ok":true}]"#)
+            .expect("Split steps context");
+        let steps: Value = serde_json::from_slice(&steps).expect("steps json");
+
+        assert_eq!(steps["prev"]["outputs"], json!(1));
+        assert_eq!(steps["split"]["stepId"], json!("split"));
+        assert_eq!(steps["split"]["stepName"], json!("Process Items"));
+        assert_eq!(steps["split"]["stepType"], json!("Split"));
+        assert_eq!(steps["split"]["outputs"], json!([{ "ok": true }]));
     }
 
     #[test]

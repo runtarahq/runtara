@@ -56,7 +56,9 @@ Current implementation progress on `codex/wasm-direct-emitter`:
 - `runtara-workflow-stdlib::direct_json` now contains the pure Rust
   implementation behind the direct JSON stdlib contract: manifest mapping
   lookup, source-envelope construction, mapping application, template rendering,
-  type hints, and Finish `outputs` unwrapping.
+  type hints, Finish `outputs` unwrapping, and the first Split helpers for
+  item normalization, per-iteration variable construction, and result step
+  envelopes.
 - `runtara-workflow-stdlib` now has a `direct-component` feature and
   component metadata for `runtara:workflow-stdlib`. That feature builds a
   `wasm32-wasip2` stdlib component without pulling in SDK/runtime, HTTP, AI,
@@ -1703,7 +1705,10 @@ Implementation steps:
 1. Implement sequential `Split` first.
    - config manifest records with input/output schemas and nested graph link:
      done;
-   - stdlib split-input/source helpers: pending;
+   - stdlib split-input/source helpers: pure Rust helpers done for null,
+     single-value, batching, `_loop_indices`, `_item`, `_index`, `_scope_id`,
+     extra variables, and result envelopes; WIT export and direct lowering
+     pending;
    - direct loop lowering: pending.
 2. Preserve split behavior:
    - null and non-array handling;
