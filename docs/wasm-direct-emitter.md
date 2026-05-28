@@ -30,9 +30,16 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   finish-only graphs.
 - `direct_wasm::compile::compile_direct_workflow` is an opt-in entry point that
   emits a valid core-Wasm metadata envelope for finish-only graphs, writes
-  `workflow.wasm`, `manifest.json`, and `support-report.json`, and does not
-  generate a Rust crate. This is a temporary artifact envelope for migration
-  tests, not the final component-model runtime artifact.
+  `workflow.wasm`, `manifest.json`, `support-report.json`, `wit/world.wit`,
+  and `workflow.wac`, and does not generate a Rust crate. This is a temporary
+  artifact envelope for migration tests, not the final component-model runtime
+  artifact.
+- `runtara-workflow-wit` now defines the first checked-in workflow WIT
+  contracts: `runtara:workflow-stdlib/json@0.1.0` for shared JSON semantics and
+  `runtara:workflow-runtime/runtime@0.1.0` for SDK/runtime lifecycle calls.
+- `direct_wasm::component` emits component-facing sidecars for static
+  composition with separate stdlib and runtime components plus any required
+  agents.
 
 ## Final Goal
 
@@ -725,9 +732,20 @@ Rollback:
 
 Goal: commit to the first production WIT ABI for shared workflow stdlib.
 
+Current status:
+
+- The initial WIT contracts are checked in under `crates/runtara-workflow-wit`.
+- Stdlib and runtime are separate WIT packages:
+  - `runtara:workflow-stdlib/json@0.1.0`;
+  - `runtara:workflow-runtime/runtime@0.1.0`.
+- Unit tests parse both packages with `wit-parser` and assert the expected
+  exported worlds and functions.
+- Remaining work: add generated bindings smoke tests and implement/build the
+  actual stdlib/runtime components.
+
 Implementation steps:
 
-1. Add `crates/runtara-workflow-stdlib/wit/workflow-stdlib.wit`.
+1. Add canonical workflow WIT packages.
 2. Define byte-buffer JSON interfaces for:
    - manifest initialization;
    - source construction;
@@ -802,6 +820,10 @@ Current status:
   `direct_wasm::compile` to prove the direct compile entry, sidecars,
   support-gating, and "no generated Rust crate" behavior before component ABI
   emission lands.
+- `direct_wasm::component` emits `wit/world.wit` and `workflow.wac` sidecars
+  that import `runtara:workflow-stdlib/json@0.1.0`,
+  `runtara:workflow-runtime/runtime@0.1.0`, include `wasi:cli/command@0.2.3`,
+  and statically compose stdlib, runtime, workflow logic, and required agents.
 - This temporary envelope must be replaced by a real component exporting
   `wasi:cli/run` before direct mode can execute under the environment runner.
 
