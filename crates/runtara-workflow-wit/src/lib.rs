@@ -106,6 +106,7 @@ mod tests {
             "durable-sleep",
             "get-checkpoint",
             "checkpoint",
+            "handle-checkpoint-signal",
             "record-retry-attempt",
             "durable-sleep-checkpoint",
         ] {

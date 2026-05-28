@@ -62,10 +62,14 @@ const AGENT_TYPES_WIT: &str = include_str!("../../../runtara-agent-wit/wit/runta
 const AGENT_WIT_VERSION: &str = "0.3.0";
 
 const DIRECT_RUN_RETPTR_OFFSET: i32 = 0;
+const DIRECT_RET_BOOL_OK_OFFSET: u64 = 4;
 const DIRECT_RET_U64_OK_OFFSET: u64 = 8;
 const DIRECT_RESULT_OPTION_TAG_OFFSET: u64 = 4;
 const DIRECT_RESULT_OPTION_LIST_PTR_OFFSET: u64 = 8;
 const DIRECT_RESULT_OPTION_LIST_LEN_OFFSET: u64 = 12;
+const DIRECT_CHECKPOINT_PENDING_SIGNAL_TAG_OFFSET: u64 = 16;
+const DIRECT_CHECKPOINT_SIGNAL_TYPE_PTR_OFFSET: u64 = 20;
+const DIRECT_CHECKPOINT_SIGNAL_TYPE_LEN_OFFSET: u64 = 24;
 const DIRECT_AGENT_ARGS_OFFSET: i32 = 128;
 const DIRECT_AGENT_ARG_CONNECTION_TAG_OFFSET: i32 = DIRECT_AGENT_ARGS_OFFSET + 16;
 const DIRECT_AGENT_ARG_CONNECTION_ID_PTR_OFFSET: i32 = DIRECT_AGENT_ARGS_OFFSET + 20;
@@ -1609,6 +1613,7 @@ struct DirectCoreImportIndices {
     runtime_custom_event: Option<u32>,
     runtime_get_checkpoint: Option<u32>,
     runtime_checkpoint: Option<u32>,
+    runtime_handle_checkpoint_signal: Option<u32>,
     runtime_record_retry_attempt: Option<u32>,
     runtime_durable_sleep: Option<u32>,
     runtime_durable_sleep_checkpoint: Option<u32>,
@@ -1658,6 +1663,10 @@ impl DirectCoreImportIndices {
                 "runtime.get-checkpoint",
             )?,
             runtime_checkpoint: require_import(self.runtime_checkpoint, "runtime.checkpoint")?,
+            runtime_handle_checkpoint_signal: require_import(
+                self.runtime_handle_checkpoint_signal,
+                "runtime.handle-checkpoint-signal",
+            )?,
             runtime_record_retry_attempt: require_import(
                 self.runtime_record_retry_attempt,
                 "runtime.record-retry-attempt",
@@ -1750,6 +1759,7 @@ struct DirectCoreFunctionIndices {
     runtime_custom_event: u32,
     runtime_get_checkpoint: u32,
     runtime_checkpoint: u32,
+    runtime_handle_checkpoint_signal: u32,
     runtime_record_retry_attempt: u32,
     runtime_durable_sleep: u32,
     runtime_durable_sleep_checkpoint: u32,
@@ -1828,6 +1838,8 @@ fn import_core_function(
         import_indices.runtime_get_checkpoint = Some(function_index);
     } else if is_runtime_import(resolve, interface, function, "checkpoint") {
         import_indices.runtime_checkpoint = Some(function_index);
+    } else if is_runtime_import(resolve, interface, function, "handle-checkpoint-signal") {
+        import_indices.runtime_handle_checkpoint_signal = Some(function_index);
     } else if is_runtime_import(resolve, interface, function, "record-retry-attempt") {
         import_indices.runtime_record_retry_attempt = Some(function_index);
     } else if is_runtime_import(resolve, interface, function, "durable-sleep") {
@@ -3584,6 +3596,30 @@ fn emit_agent_checkpoint_save(
     body.instruction(&Instruction::LocalGet(output_len_local));
     push_retptr_arg(body);
     body.instruction(&Instruction::Call(indices.runtime_checkpoint));
+    emit_agent_checkpoint_signal_handling(body, indices);
+}
+
+fn emit_agent_checkpoint_signal_handling(
+    body: &mut WasmFunction,
+    indices: &DirectCoreFunctionIndices,
+) {
+    load_retptr_tag(body);
+    body.instruction(&Instruction::I32Eqz);
+    body.instruction(&Instruction::If(BlockType::Empty));
+    push_retptr_u8_load(body, DIRECT_CHECKPOINT_PENDING_SIGNAL_TAG_OFFSET);
+    body.instruction(&Instruction::If(BlockType::Empty));
+    push_retptr_i32_load(body, DIRECT_CHECKPOINT_SIGNAL_TYPE_PTR_OFFSET);
+    push_retptr_i32_load(body, DIRECT_CHECKPOINT_SIGNAL_TYPE_LEN_OFFSET);
+    push_retptr_arg(body);
+    body.instruction(&Instruction::Call(indices.runtime_handle_checkpoint_signal));
+    return_if_retptr_error(body);
+    push_retptr_u8_load(body, DIRECT_RET_BOOL_OK_OFFSET);
+    body.instruction(&Instruction::If(BlockType::Empty));
+    body.instruction(&Instruction::I32Const(0));
+    body.instruction(&Instruction::Return);
+    body.instruction(&Instruction::End);
+    body.instruction(&Instruction::End);
+    body.instruction(&Instruction::End);
 }
 
 fn emit_agent_retry_condition(
@@ -6303,13 +6339,19 @@ mod tests {
         let mut agent_cache_key_index = None;
         let mut get_checkpoint_index = None;
         let mut checkpoint_index = None;
+        let mut handle_checkpoint_signal_index = None;
         let mut agent_invoke_index = None;
         let mut saw_cache_key_import = false;
         let mut saw_get_checkpoint_import = false;
         let mut saw_checkpoint_import = false;
+        let mut saw_handle_checkpoint_signal_import = false;
         let mut saw_get_checkpoint_option_tag_load = false;
         let mut saw_cached_payload_ptr_load = false;
         let mut saw_cached_payload_len_load = false;
+        let mut saw_checkpoint_signal_tag_load = false;
+        let mut saw_checkpoint_signal_handled = false;
+        let mut saw_checkpoint_signal_bool_load = false;
+        let mut saw_checkpoint_signal_early_return = false;
         let mut saw_cache_key_before_lookup = false;
         let mut saw_lookup_before_invoke = false;
         let mut saw_checkpoint_after_invoke = false;
@@ -6340,6 +6382,12 @@ mod tests {
                                     saw_checkpoint_import = true;
                                     checkpoint_index = Some(next_function_index);
                                 }
+                                (module, "handle-checkpoint-signal")
+                                    if module.contains("runtara:workflow-runtime/runtime") =>
+                                {
+                                    saw_handle_checkpoint_signal_import = true;
+                                    handle_checkpoint_signal_index = Some(next_function_index);
+                                }
                                 (module, "invoke")
                                     if module.contains("runtara:agent-utils/capabilities") =>
                                 {
@@ -6356,6 +6404,9 @@ mod tests {
                         let mut saw_cache_key_call = false;
                         let mut saw_lookup_call = false;
                         let mut saw_invoke_call = false;
+                        let mut saw_checkpoint_call = false;
+                        let mut saw_handle_checkpoint_signal_call = false;
+                        let mut last_i32_const_after_signal_handler = None;
                         for operator in body.get_operators_reader().expect("operators") {
                             match operator.expect("operator") {
                                 Operator::Call { function_index }
@@ -6379,11 +6430,13 @@ mod tests {
                                     if Some(function_index) == checkpoint_index =>
                                 {
                                     saw_checkpoint_after_invoke = saw_invoke_call;
+                                    saw_checkpoint_call = true;
                                 }
-                                Operator::I32Load8U { memarg }
-                                    if memarg.offset == DIRECT_RESULT_OPTION_TAG_OFFSET =>
+                                Operator::Call { function_index }
+                                    if Some(function_index) == handle_checkpoint_signal_index =>
                                 {
-                                    saw_get_checkpoint_option_tag_load = true;
+                                    saw_checkpoint_signal_handled = saw_checkpoint_call;
+                                    saw_handle_checkpoint_signal_call = true;
                                 }
                                 Operator::I32Load { memarg }
                                     if memarg.offset == DIRECT_RESULT_OPTION_LIST_PTR_OFFSET =>
@@ -6394,6 +6447,32 @@ mod tests {
                                     if memarg.offset == DIRECT_RESULT_OPTION_LIST_LEN_OFFSET =>
                                 {
                                     saw_cached_payload_len_load = true;
+                                }
+                                Operator::I32Load8U { memarg }
+                                    if memarg.offset
+                                        == DIRECT_CHECKPOINT_PENDING_SIGNAL_TAG_OFFSET =>
+                                {
+                                    saw_checkpoint_signal_tag_load = true;
+                                }
+                                Operator::I32Load8U { memarg }
+                                    if memarg.offset == DIRECT_RET_BOOL_OK_OFFSET
+                                        && saw_handle_checkpoint_signal_call =>
+                                {
+                                    saw_checkpoint_signal_bool_load = true;
+                                }
+                                Operator::I32Load8U { memarg }
+                                    if memarg.offset == DIRECT_RESULT_OPTION_TAG_OFFSET =>
+                                {
+                                    saw_get_checkpoint_option_tag_load = true;
+                                }
+                                Operator::I32Const { value }
+                                    if saw_handle_checkpoint_signal_call =>
+                                {
+                                    last_i32_const_after_signal_handler = Some(value);
+                                }
+                                Operator::Return if saw_handle_checkpoint_signal_call => {
+                                    saw_checkpoint_signal_early_return |=
+                                        last_i32_const_after_signal_handler == Some(0);
                                 }
                                 _ => {}
                             }
@@ -6418,6 +6497,10 @@ mod tests {
             "core should import runtime.checkpoint"
         );
         assert!(
+            saw_handle_checkpoint_signal_import,
+            "core should import runtime.handle-checkpoint-signal"
+        );
+        assert!(
             saw_get_checkpoint_option_tag_load,
             "core should inspect get-checkpoint option tag"
         );
@@ -6436,6 +6519,22 @@ mod tests {
         assert!(
             saw_checkpoint_after_invoke,
             "successful capability output should be checkpointed after invoke"
+        );
+        assert!(
+            saw_checkpoint_signal_tag_load,
+            "checkpoint result should inspect the pending signal option tag"
+        );
+        assert!(
+            saw_checkpoint_signal_handled,
+            "checkpoint pending signals should be handled after checkpoint save"
+        );
+        assert!(
+            saw_checkpoint_signal_bool_load,
+            "checkpoint signal handler result should decide whether to stop execution"
+        );
+        assert!(
+            saw_checkpoint_signal_early_return,
+            "handled checkpoint signals should return success before workflow completion"
         );
     }
 
@@ -6474,6 +6573,7 @@ mod tests {
         let mut next_function_index = 0;
         let mut get_checkpoint_index = None;
         let mut checkpoint_index = None;
+        let mut handle_checkpoint_signal_index = None;
         let mut durable_sleep_index = None;
         let mut durable_sleep_checkpoint_index = None;
         let mut agent_retry_sleep_key_index = None;
@@ -6484,6 +6584,7 @@ mod tests {
         let mut agent_invoke_index = None;
         let mut saw_durable_sleep_import = false;
         let mut saw_durable_sleep_checkpoint_import = false;
+        let mut saw_handle_checkpoint_signal_import = false;
         let mut saw_agent_retry_sleep_key_import = false;
         let mut saw_agent_retry_delay_import = false;
         let mut saw_agent_retry_error_info_import = false;
@@ -6512,6 +6613,7 @@ mod tests {
         let mut saw_record_after_invoke = false;
         let mut saw_error_from_info_after_retry_info = false;
         let mut saw_checkpoint_after_invoke = false;
+        let mut saw_checkpoint_signal_after_checkpoint = false;
         let mut saw_rate_limit_wait_state = false;
         let mut code_body_index = 0;
 
@@ -6531,6 +6633,12 @@ mod tests {
                                     if module.contains("runtara:workflow-runtime/runtime") =>
                                 {
                                     checkpoint_index = Some(next_function_index);
+                                }
+                                (module, "handle-checkpoint-signal")
+                                    if module.contains("runtara:workflow-runtime/runtime") =>
+                                {
+                                    saw_handle_checkpoint_signal_import = true;
+                                    handle_checkpoint_signal_index = Some(next_function_index);
                                 }
                                 (module, "durable-sleep")
                                     if module.contains("runtara:workflow-runtime/runtime") =>
@@ -6594,6 +6702,7 @@ mod tests {
                         let mut saw_sleep_key_call = false;
                         let mut saw_durable_sleep_call = false;
                         let mut saw_generic_sleep_call = false;
+                        let mut saw_checkpoint_call = false;
                         for operator in body.get_operators_reader().expect("operators") {
                             match operator.expect("operator") {
                                 Operator::Call { function_index }
@@ -6653,6 +6762,12 @@ mod tests {
                                     if Some(function_index) == checkpoint_index =>
                                 {
                                     saw_checkpoint_after_invoke = saw_invoke_call;
+                                    saw_checkpoint_call = true;
+                                }
+                                Operator::Call { function_index }
+                                    if Some(function_index) == handle_checkpoint_signal_index =>
+                                {
+                                    saw_checkpoint_signal_after_checkpoint = saw_checkpoint_call;
                                 }
                                 Operator::Loop { .. } => saw_retry_loop = true,
                                 Operator::Br { relative_depth: 2 } => {
@@ -6726,6 +6841,10 @@ mod tests {
         assert!(
             saw_durable_sleep_checkpoint_import,
             "core should import runtime.durable-sleep-checkpoint"
+        );
+        assert!(
+            saw_handle_checkpoint_signal_import,
+            "core should import runtime.handle-checkpoint-signal"
         );
         assert!(
             saw_agent_retry_sleep_key_import,
@@ -6823,6 +6942,10 @@ mod tests {
         assert!(
             saw_checkpoint_after_invoke,
             "successful retry output should be checkpointed after invoke"
+        );
+        assert!(
+            saw_checkpoint_signal_after_checkpoint,
+            "successful retry checkpoint should handle pending lifecycle signals"
         );
     }
 

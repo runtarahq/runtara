@@ -227,9 +227,12 @@ Current implementation progress on `codex/wasm-direct-emitter`:
 - The first Phase 8 runtime lifecycle ABI slice is in place. The
   `runtara:workflow-runtime` WIT and runtime component now expose checkpoint
   lookup/write, retry-attempt recording, checkpointed durable sleep, and a
-  signal-aware checkpoint result wire shape. Direct Agent lowering now uses the
-  checkpoint and retry-attempt pieces internally; public durable Agent and Delay
-  support remain gated until the rest of the lifecycle semantics and
+  signal-aware checkpoint result wire shape. The runtime also exposes
+  `handle-checkpoint-signal`, which acknowledges checkpoint-returned
+  `cancel`/`pause`/`shutdown` signals and suspends or cancels without reporting
+  workflow completion. Direct Agent lowering now uses these checkpoint,
+  retry-attempt, and lifecycle-signal pieces internally; public durable Agent
+  and Delay support remain gated until the rest of the lifecycle semantics and
   differential crash/resume tests exist.
 - The shared stdlib now exposes `agent-cache-key`, which centralizes the
   generated Rust-compatible durable Agent key shape using `_workflow_id`,
@@ -249,8 +252,11 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   charges rate-limited errors without `retryAfterMs` against the budget using
   the effective base retry delay. Generic retry backoff delay calculation now
   lives in stdlib and direct core sleeps through `runtime.durable-sleep` before
-  recording retry attempts. Public support remains gated until timeout,
-  pause/cancel/shutdown acknowledgement, and crash/resume parity are covered.
+  recording retry attempts. Successful durable Agent checkpoint saves now route
+  pending `cancel`/`pause`/`shutdown` signals through the runtime lifecycle
+  handler and return before `runtime.complete` when the instance is stopped.
+  Public support remains gated until timeout and crash/resume parity are
+  covered.
 
 ## Final Goal
 
@@ -719,6 +725,7 @@ record checkpoint-result {
 
 get-checkpoint: func(checkpoint-id: string) -> result<option<list<u8>>, string>;
 checkpoint: func(checkpoint-id: string, state: list<u8>) -> result<checkpoint-result, string>;
+handle-checkpoint-signal: func(signal-type: string) -> result<bool, string>;
 record-retry-attempt: func(
   checkpoint-id: string,
   attempt-number: u32,
@@ -1480,9 +1487,12 @@ Current status:
   exponential backoff and cap formula; direct core calls
   `runtime.durable-sleep` for generic backoff retries and
   `runtime.durable-sleep-checkpoint` for typed `retryAfterMs` waits before
-  retry-attempt recording. Support remains gated because timeout,
-  pause/cancel/shutdown acknowledgement, and crash/resume parity are still
-  pending.
+  retry-attempt recording. Direct Agent checkpoint saves now inspect the
+  runtime checkpoint result's pending-signal option and call
+  `runtime.handle-checkpoint-signal`; handled `cancel`, `pause`, and
+  `shutdown` signals stop before `runtime.complete`, while `resume`/unknown
+  signals continue. Support remains gated because timeout and crash/resume
+  parity are still pending.
 
 Implementation steps:
 
@@ -1519,6 +1529,9 @@ Implementation steps:
    - generic exponential backoff sleep: internal lowering in place through
      `stdlib.agent-retry-delay-ms` and `runtime.durable-sleep`, still gated
      from public support;
+   - pause/cancel/shutdown acknowledgement after checkpoint save: internal
+     lowering in place through `runtime.handle-checkpoint-signal`, still gated
+     from public support;
    - timeout behavior: pending.
 5. Extend `onError` routing beyond the first non-durable Agent subset when
    additional failing step types are lowered.
@@ -1547,6 +1560,8 @@ Implementation steps:
 1. Specify checkpoint/runtime WIT:
    - checkpoint lookup/write: done;
    - signal-aware checkpoint result: done;
+   - checkpoint signal acknowledgement/suspension helper: done for
+     `cancel`/`pause`/`shutdown`;
    - retry-attempt recording: done;
    - checkpointed durable sleep: done;
    - heartbeat: already exposed;
@@ -1573,7 +1588,8 @@ Implementation steps:
    - rate-limit classification and no-`retryAfterMs` budget accounting:
      internal lowering done;
    - generic backoff sleep parity: internal lowering done;
-   - pause/cancel/shutdown acknowledgement parity: pending;
+   - pause/cancel/shutdown acknowledgement parity after Agent checkpoint save:
+     internal lowering done;
    - crash/resume differential tests: pending.
 5. Migrate `Delay`.
 6. Add crash/resume tests:

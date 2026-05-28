@@ -51,6 +51,10 @@ interface runtime {
         state: list<u8>,
     ) -> result<checkpoint-result, string>;
 
+    handle-checkpoint-signal: func(
+        signal-type: string,
+    ) -> result<bool, string>;
+
     record-retry-attempt: func(
         checkpoint-id: string,
         attempt-number: u32,

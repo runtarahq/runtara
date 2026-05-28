@@ -54,6 +54,13 @@ fn signal_is_cancel(signal: Option<Signal>) -> bool {
     signal.is_some_and(|signal| signal.signal_type == SignalType::Cancel)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CheckpointSignalAction {
+    Cancel,
+    Pause,
+    Shutdown,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeSignalInfo {
     pub signal_type: String,
@@ -81,6 +88,15 @@ fn signal_type_name(signal_type: SignalType) -> &'static str {
         SignalType::Pause => "pause",
         SignalType::Resume => "resume",
         SignalType::Shutdown => "shutdown",
+    }
+}
+
+fn checkpoint_signal_action(signal_type: &str) -> Option<CheckpointSignalAction> {
+    match signal_type {
+        "cancel" => Some(CheckpointSignalAction::Cancel),
+        "pause" => Some(CheckpointSignalAction::Pause),
+        "shutdown" => Some(CheckpointSignalAction::Shutdown),
+        _ => None,
     }
 }
 
@@ -161,6 +177,26 @@ pub fn checkpoint(checkpoint_id: &str, state: &[u8]) -> Result<RuntimeCheckpoint
             .map(runtime_checkpoint_result)
             .map_err(sdk_error)
     })
+}
+
+pub fn handle_checkpoint_signal(signal_type: &str) -> Result<bool, String> {
+    match checkpoint_signal_action(signal_type) {
+        Some(CheckpointSignalAction::Cancel) => {
+            runtara_sdk::acknowledge_cancellation();
+            Ok(true)
+        }
+        Some(CheckpointSignalAction::Pause) => {
+            runtara_sdk::acknowledge_pause();
+            with_sdk(|sdk| sdk.suspended().map_err(sdk_error))?;
+            Ok(true)
+        }
+        Some(CheckpointSignalAction::Shutdown) => {
+            runtara_sdk::acknowledge_shutdown();
+            with_sdk(|sdk| sdk.suspended().map_err(sdk_error))?;
+            Ok(true)
+        }
+        None => Ok(false),
+    }
 }
 
 pub fn record_retry_attempt(
@@ -250,6 +286,10 @@ mod component {
             super::checkpoint(&checkpoint_id, &state).map(checkpoint_result)
         }
 
+        fn handle_checkpoint_signal(signal_type: String) -> Result<bool, String> {
+            super::handle_checkpoint_signal(&signal_type)
+        }
+
         fn record_retry_attempt(
             checkpoint_id: String,
             attempt_number: u32,
@@ -274,7 +314,10 @@ mod component {
 mod tests {
     use runtara_sdk::{CheckpointResult, CustomSignal, Signal, SignalType};
 
-    use super::{runtime_checkpoint_result, sdk_error, signal_is_cancel, signal_type_name};
+    use super::{
+        CheckpointSignalAction, checkpoint_signal_action, runtime_checkpoint_result, sdk_error,
+        signal_is_cancel, signal_type_name,
+    };
 
     #[test]
     fn sdk_errors_are_exposed_as_strings() {
@@ -307,6 +350,24 @@ mod tests {
         assert_eq!(signal_type_name(SignalType::Pause), "pause");
         assert_eq!(signal_type_name(SignalType::Resume), "resume");
         assert_eq!(signal_type_name(SignalType::Shutdown), "shutdown");
+    }
+
+    #[test]
+    fn checkpoint_signal_actions_match_lifecycle_signals() {
+        assert_eq!(
+            checkpoint_signal_action("cancel"),
+            Some(CheckpointSignalAction::Cancel)
+        );
+        assert_eq!(
+            checkpoint_signal_action("pause"),
+            Some(CheckpointSignalAction::Pause)
+        );
+        assert_eq!(
+            checkpoint_signal_action("shutdown"),
+            Some(CheckpointSignalAction::Shutdown)
+        );
+        assert_eq!(checkpoint_signal_action("resume"), None);
+        assert_eq!(checkpoint_signal_action("custom"), None);
     }
 
     #[test]
