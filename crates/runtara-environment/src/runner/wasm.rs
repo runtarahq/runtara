@@ -10,6 +10,7 @@ use async_trait::async_trait;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::process::Command as StdCommand;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
@@ -44,6 +45,137 @@ fn wasmtime_process_log_filter(override_filter: Option<&str>) -> String {
         .filter(|value| !value.is_empty())
         .unwrap_or(WASMTIME_PROCESS_LOG_FILTER)
         .to_string()
+}
+
+fn merge_process_metrics(target: &mut ContainerMetrics, sample: ContainerMetrics) {
+    if let Some(sample_peak) = sample.memory_peak_bytes {
+        target.memory_peak_bytes = Some(
+            target
+                .memory_peak_bytes
+                .map_or(sample_peak, |current_peak| current_peak.max(sample_peak)),
+        );
+    }
+    if let Some(current) = sample.memory_current_bytes {
+        target.memory_current_bytes = Some(current);
+    }
+    if let Some(cpu) = sample.cpu_usage_usec {
+        target.cpu_usage_usec = Some(
+            target
+                .cpu_usage_usec
+                .map_or(cpu, |current_cpu| current_cpu.max(cpu)),
+        );
+    }
+    if let Some(user) = sample.cpu_user_usec {
+        target.cpu_user_usec = Some(
+            target
+                .cpu_user_usec
+                .map_or(user, |current_user| current_user.max(user)),
+        );
+    }
+    if let Some(system) = sample.cpu_system_usec {
+        target.cpu_system_usec = Some(
+            target
+                .cpu_system_usec
+                .map_or(system, |current_system| current_system.max(system)),
+        );
+    }
+}
+
+fn sample_process_metrics(pid: u32) -> Option<ContainerMetrics> {
+    #[cfg(target_os = "linux")]
+    {
+        sample_linux_proc_metrics(pid).or_else(|| sample_ps_rss_metrics(pid))
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        sample_ps_rss_metrics(pid)
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn sample_linux_proc_metrics(pid: u32) -> Option<ContainerMetrics> {
+    let status = std::fs::read_to_string(format!("/proc/{}/status", pid)).ok()?;
+    let (peak, current) = parse_proc_status_memory(&status);
+    if peak.is_none() && current.is_none() {
+        return None;
+    }
+
+    Some(ContainerMetrics {
+        memory_peak_bytes: peak.or(current),
+        memory_current_bytes: current,
+        ..Default::default()
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn parse_proc_status_memory(status: &str) -> (Option<u64>, Option<u64>) {
+    let mut peak = None;
+    let mut current = None;
+
+    for line in status.lines() {
+        if line.starts_with("VmHWM:") {
+            peak = parse_proc_status_kb_value(line);
+        } else if line.starts_with("VmRSS:") {
+            current = parse_proc_status_kb_value(line);
+        }
+    }
+
+    (peak, current)
+}
+
+#[cfg(target_os = "linux")]
+fn parse_proc_status_kb_value(line: &str) -> Option<u64> {
+    line.split_whitespace()
+        .nth(1)
+        .and_then(|value| value.parse::<u64>().ok())
+        .map(|kb| kb.saturating_mul(1024))
+}
+
+fn sample_ps_rss_metrics(pid: u32) -> Option<ContainerMetrics> {
+    let output = StdCommand::new("ps")
+        .args(["-o", "rss=", "-p", &pid.to_string()])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let rss_kb = stdout
+        .split_whitespace()
+        .next()
+        .and_then(|value| value.parse::<u64>().ok())?;
+    let rss_bytes = rss_kb.saturating_mul(1024);
+
+    Some(ContainerMetrics {
+        memory_peak_bytes: Some(rss_bytes),
+        memory_current_bytes: Some(rss_bytes),
+        ..Default::default()
+    })
+}
+
+async fn sample_process_metrics_into(
+    pid: u32,
+    metrics: &Arc<tokio::sync::Mutex<ContainerMetrics>>,
+) -> bool {
+    let Some(sample) = sample_process_metrics(pid) else {
+        return false;
+    };
+
+    let mut guard = metrics.lock().await;
+    merge_process_metrics(&mut guard, sample);
+    true
+}
+
+fn spawn_process_metrics_sampler(pid: u32, metrics: Arc<tokio::sync::Mutex<ContainerMetrics>>) {
+    tokio::spawn(async move {
+        loop {
+            if !sample_process_metrics_into(pid, &metrics).await {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    });
 }
 
 /// WebAssembly runner configuration.
@@ -353,6 +485,12 @@ impl WasmRunner {
         };
 
         let stderr_handle = child.stderr.take();
+        let mut metrics = ContainerMetrics::default();
+        if let Some(pid) = child.id()
+            && let Some(sample) = sample_process_metrics(pid)
+        {
+            merge_process_metrics(&mut metrics, sample);
+        }
 
         let result = self
             .wait_with_cancellation(
@@ -361,11 +499,11 @@ impl WasmRunner {
                 cancel_token,
                 timeout,
                 stderr_handle,
+                &mut metrics,
             )
             .await;
 
-        // No cgroup metrics available for WASM processes
-        (result, ContainerMetrics::default())
+        (result, metrics)
     }
 
     /// Wait for child process with timeout and cancellation support.
@@ -376,6 +514,7 @@ impl WasmRunner {
         cancel_token: Option<CancelToken>,
         timeout_duration: Duration,
         stderr_handle: Option<tokio::process::ChildStderr>,
+        metrics: &mut ContainerMetrics,
     ) -> Result<()> {
         use tokio::io::AsyncReadExt;
 
@@ -383,6 +522,12 @@ impl WasmRunner {
         let start = std::time::Instant::now();
 
         loop {
+            if let Some(pid) = child.id()
+                && let Some(sample) = sample_process_metrics(pid)
+            {
+                merge_process_metrics(metrics, sample);
+            }
+
             // Check cancellation
             if let Some(ref flag) = cancel_token
                 && flag.load(Ordering::Relaxed)
@@ -502,6 +647,10 @@ impl WasmRunner {
         );
 
         let child_handle = std::sync::Arc::new(tokio::sync::Mutex::new(Some(child)));
+        let metrics = std::sync::Arc::new(tokio::sync::Mutex::new(ContainerMetrics::default()));
+        if let Some(pid) = spawned_pid {
+            spawn_process_metrics_sampler(pid, metrics.clone());
+        }
 
         Ok(RunnerHandle {
             handle_id: format!("wasm_{}", instance_id),
@@ -510,6 +659,7 @@ impl WasmRunner {
             started_at: chrono::Utc::now(),
             spawned_pid,
             child: Some(child_handle),
+            metrics: Some(metrics),
         })
     }
 }
@@ -685,8 +835,13 @@ impl Runner for WasmRunner {
             .load_stderr(&handle.tenant_id, &handle.instance_id)
             .await;
 
-        // No cgroup metrics for WASM processes
-        (None, stderr, ContainerMetrics::default())
+        let metrics = if let Some(metrics) = &handle.metrics {
+            metrics.lock().await.clone()
+        } else {
+            ContainerMetrics::default()
+        };
+
+        (None, stderr, metrics)
     }
 
     async fn get_pid(&self, handle: &RunnerHandle) -> Option<u32> {
@@ -711,5 +866,52 @@ mod tests {
             wasmtime_process_log_filter(Some("wasmtime=trace,cranelift_codegen=trace")),
             "wasmtime=trace,cranelift_codegen=trace"
         );
+    }
+
+    #[test]
+    fn merge_process_metrics_keeps_memory_peak() {
+        let mut metrics = ContainerMetrics {
+            memory_peak_bytes: Some(1024),
+            memory_current_bytes: Some(1024),
+            ..Default::default()
+        };
+
+        merge_process_metrics(
+            &mut metrics,
+            ContainerMetrics {
+                memory_peak_bytes: Some(512),
+                memory_current_bytes: Some(512),
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(metrics.memory_peak_bytes, Some(1024));
+        assert_eq!(metrics.memory_current_bytes, Some(512));
+
+        merge_process_metrics(
+            &mut metrics,
+            ContainerMetrics {
+                memory_peak_bytes: Some(2048),
+                memory_current_bytes: Some(2048),
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(metrics.memory_peak_bytes, Some(2048));
+        assert_eq!(metrics.memory_current_bytes, Some(2048));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn parse_proc_status_memory_reads_hwm_and_rss() {
+        let status = "\
+Name:\twasmtime\n\
+VmHWM:\t   1234 kB\n\
+VmRSS:\t    456 kB\n";
+
+        let (peak, current) = parse_proc_status_memory(status);
+
+        assert_eq!(peak, Some(1234 * 1024));
+        assert_eq!(current, Some(456 * 1024));
     }
 }

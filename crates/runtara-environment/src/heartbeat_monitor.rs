@@ -310,6 +310,7 @@ impl HeartbeatMonitor {
             started_at: container.started_at,
             spawned_pid: container.pid.map(|p| p as u32),
             child: None,
+            metrics: None,
         };
         let runner_stopped = match self.runner.stop(&handle).await {
             Ok(()) => true,

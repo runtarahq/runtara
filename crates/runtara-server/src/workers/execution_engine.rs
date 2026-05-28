@@ -534,6 +534,9 @@ impl ExecutionEngine {
                     .duration_ms
                     .map(|ms| ms as f64 / 1000.0)
                     .unwrap_or(0.0);
+                let max_memory_mb = result
+                    .memory_peak_bytes
+                    .map(|bytes| bytes as f64 / (1024.0 * 1024.0));
 
                 let _ = metrics_service
                     .record_execution_completion(
@@ -542,7 +545,7 @@ impl ExecutionEngine {
                         version,
                         result.success,
                         execution_duration_secs,
-                        None,
+                        max_memory_mb,
                     )
                     .await;
 
@@ -562,7 +565,7 @@ impl ExecutionEngine {
                     stderr: result.stderr,
                     metrics: SyncExecutionMetrics {
                         execution_duration_seconds: execution_duration_secs,
-                        max_memory_mb: 0.0, // Not available via SDK
+                        max_memory_mb: max_memory_mb.unwrap_or(0.0),
                         total_duration_seconds: total_duration,
                     },
                 })

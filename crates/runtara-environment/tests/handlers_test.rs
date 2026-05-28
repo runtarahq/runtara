@@ -1264,6 +1264,7 @@ async fn test_spawn_container_monitor_timeout_enforcement() {
         started_at: Utc::now(),
         spawned_pid: None,
         child: None,
+        metrics: None,
     };
 
     // Register the mock instance in the runner

@@ -11,6 +11,10 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::error::CoreError;
+use crate::observability::{
+    InstanceCompletionMetrics, is_recorded_terminal_status, record_instance_completion,
+    record_instance_resources,
+};
 
 /// PostgreSQL-backed persistence implementation.
 #[derive(Clone)]
@@ -22,6 +26,100 @@ impl PostgresPersistence {
     /// Create a new Postgres-backed persistence implementation.
     pub fn new(pool: PgPool) -> Self {
         Self { pool }
+    }
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct InstanceMetricRow {
+    tenant_id: String,
+    status: String,
+    termination_reason: Option<String>,
+    started_at: Option<DateTime<Utc>>,
+    finished_at: Option<DateTime<Utc>>,
+    memory_peak_bytes: Option<i64>,
+    cpu_usage_usec: Option<i64>,
+}
+
+impl From<InstanceMetricRow> for InstanceCompletionMetrics {
+    fn from(row: InstanceMetricRow) -> Self {
+        Self {
+            tenant_id: row.tenant_id,
+            status: row.status,
+            termination_reason: row.termination_reason,
+            started_at: row.started_at,
+            finished_at: row.finished_at,
+            memory_peak_bytes: row.memory_peak_bytes.and_then(|v| u64::try_from(v).ok()),
+            cpu_usage_usec: row.cpu_usage_usec.and_then(|v| u64::try_from(v).ok()),
+        }
+    }
+}
+
+async fn fetch_instance_status(
+    pool: &PgPool,
+    instance_id: &str,
+) -> Result<Option<String>, sqlx::Error> {
+    sqlx::query_scalar(
+        r#"
+        SELECT status::text
+        FROM instances
+        WHERE instance_id = $1
+        "#,
+    )
+    .bind(instance_id)
+    .fetch_optional(pool)
+    .await
+}
+
+async fn fetch_instance_metric_row(
+    pool: &PgPool,
+    instance_id: &str,
+) -> Result<Option<InstanceMetricRow>, sqlx::Error> {
+    sqlx::query_as::<_, InstanceMetricRow>(
+        r#"
+        SELECT
+            tenant_id,
+            status::text AS status,
+            termination_reason::text AS termination_reason,
+            started_at,
+            finished_at,
+            memory_peak_bytes,
+            cpu_usage_usec
+        FROM instances
+        WHERE instance_id = $1
+        "#,
+    )
+    .bind(instance_id)
+    .fetch_optional(pool)
+    .await
+}
+
+async fn record_completion_from_db(pool: &PgPool, instance_id: &str) {
+    match fetch_instance_metric_row(pool, instance_id).await {
+        Ok(Some(row)) => record_instance_completion(&row.into()),
+        Ok(None) => tracing::warn!(
+            instance_id = %instance_id,
+            "Skipped OTLP workflow completion metric because instance row was not found"
+        ),
+        Err(error) => tracing::warn!(
+            instance_id = %instance_id,
+            error = %error,
+            "Skipped OTLP workflow completion metric"
+        ),
+    }
+}
+
+async fn record_resources_from_db(pool: &PgPool, instance_id: &str) {
+    match fetch_instance_metric_row(pool, instance_id).await {
+        Ok(Some(row)) => record_instance_resources(&row.into()),
+        Ok(None) => tracing::warn!(
+            instance_id = %instance_id,
+            "Skipped OTLP workflow resource metric because instance row was not found"
+        ),
+        Err(error) => tracing::warn!(
+            instance_id = %instance_id,
+            error = %error,
+            "Skipped OTLP workflow resource metric"
+        ),
     }
 }
 
@@ -458,7 +556,27 @@ impl Persistence for PostgresPersistence {
         &self,
         params: CompleteInstanceParams<'_>,
     ) -> Result<bool, CoreError> {
-        Self::op_complete_instance_unified(&self.pool, params).await
+        let instance_id = params.instance_id.to_string();
+        let target_status = params.status.to_string();
+        let previous_was_terminal = match fetch_instance_status(&self.pool, &instance_id).await {
+            Ok(Some(status)) => is_recorded_terminal_status(&status),
+            Ok(None) => false,
+            Err(error) => {
+                tracing::warn!(
+                    instance_id = %instance_id,
+                    error = %error,
+                    "Could not read previous instance status before OTLP metric recording"
+                );
+                false
+            }
+        };
+
+        let applied = Self::op_complete_instance_unified(&self.pool, params).await?;
+        if applied && is_recorded_terminal_status(&target_status) && !previous_was_terminal {
+            record_completion_from_db(&self.pool, &instance_id).await;
+        }
+
+        Ok(applied)
     }
 
     async fn save_checkpoint(
@@ -653,7 +771,15 @@ impl Persistence for PostgresPersistence {
         memory_peak_bytes: Option<u64>,
         cpu_usage_usec: Option<u64>,
     ) -> Result<(), CoreError> {
-        update_instance_metrics(&self.pool, instance_id, memory_peak_bytes, cpu_usage_usec).await
+        let result =
+            update_instance_metrics(&self.pool, instance_id, memory_peak_bytes, cpu_usage_usec)
+                .await;
+
+        if result.is_ok() && (memory_peak_bytes.is_some() || cpu_usage_usec.is_some()) {
+            record_resources_from_db(&self.pool, instance_id).await;
+        }
+
+        result
     }
 
     async fn update_instance_stderr(

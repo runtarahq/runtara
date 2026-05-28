@@ -15,7 +15,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::sqlite::SqlitePoolOptions;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 use runtara_core::config::Config;
 use runtara_core::persistence::{Persistence, PostgresPersistence, SqlitePersistence};
@@ -33,6 +33,9 @@ async fn main() -> Result<()> {
                 .add_directive("runtara_core=info".parse().unwrap()),
         )
         .init();
+    if let Err(error) = runtara_core::observability::init_metrics_telemetry("runtara-core") {
+        warn!(%error, "Failed to initialize OTLP metrics exporter");
+    }
 
     info!("Starting Runtara Core");
 
