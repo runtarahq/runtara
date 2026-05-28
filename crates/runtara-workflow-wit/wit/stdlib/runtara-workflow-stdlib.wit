@@ -42,6 +42,24 @@ interface json {
         source: list<u8>,
     ) -> result<list<u8>, string>;
 
+    split-items: func(
+        split-id: u32,
+        source: list<u8>,
+    ) -> result<list<u8>, string>;
+
+    split-iteration-variables: func(
+        split-id: u32,
+        source: list<u8>,
+        item: list<u8>,
+        index: u32,
+    ) -> result<list<u8>, string>;
+
+    split-output: func(
+        split-id: u32,
+        source: list<u8>,
+        results: list<u8>,
+    ) -> result<list<u8>, string>;
+
     filter: func(
         filter-id: u32,
         source: list<u8>,

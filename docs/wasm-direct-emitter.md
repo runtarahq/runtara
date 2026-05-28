@@ -1705,9 +1705,9 @@ Implementation steps:
 1. Implement sequential `Split` first.
    - config manifest records with input/output schemas and nested graph link:
      done;
-   - stdlib split-input/source helpers: pure Rust helpers done for null,
-     single-value, batching, `_loop_indices`, `_item`, `_index`, `_scope_id`,
-     extra variables, and result envelopes; WIT export and direct lowering
+   - stdlib split-input/source helpers: pure Rust helpers and WIT exports done
+     for null, single-value, batching, `_loop_indices`, `_item`, `_index`,
+     `_scope_id`, extra variables, and result envelopes; direct lowering
      pending;
    - direct loop lowering: pending.
 2. Preserve split behavior:

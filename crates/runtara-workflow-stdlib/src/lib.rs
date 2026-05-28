@@ -200,6 +200,45 @@ mod component {
             })
         }
 
+        fn split_items(split_id: u32, source: Vec<u8>) -> Result<Vec<u8>, String> {
+            MANIFEST.with(|slot| {
+                let slot = slot.borrow();
+                let manifest = slot
+                    .as_ref()
+                    .ok_or_else(|| "direct stdlib manifest was not initialized".to_string())?;
+                manifest.split_items(split_id, &source)
+            })
+        }
+
+        fn split_iteration_variables(
+            split_id: u32,
+            source: Vec<u8>,
+            item: Vec<u8>,
+            index: u32,
+        ) -> Result<Vec<u8>, String> {
+            MANIFEST.with(|slot| {
+                let slot = slot.borrow();
+                let manifest = slot
+                    .as_ref()
+                    .ok_or_else(|| "direct stdlib manifest was not initialized".to_string())?;
+                manifest.split_iteration_variables(split_id, &source, &item, index)
+            })
+        }
+
+        fn split_output(
+            split_id: u32,
+            source: Vec<u8>,
+            results: Vec<u8>,
+        ) -> Result<Vec<u8>, String> {
+            MANIFEST.with(|slot| {
+                let slot = slot.borrow();
+                let manifest = slot
+                    .as_ref()
+                    .ok_or_else(|| "direct stdlib manifest was not initialized".to_string())?;
+                manifest.split_output(split_id, &source, &results)
+            })
+        }
+
         fn filter(filter_id: u32, source: Vec<u8>) -> Result<Vec<u8>, String> {
             MANIFEST.with(|slot| {
                 let slot = slot.borrow();
