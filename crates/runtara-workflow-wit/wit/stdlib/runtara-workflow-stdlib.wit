@@ -47,11 +47,28 @@ interface json {
         source: list<u8>,
     ) -> result<list<u8>, string>;
 
+    split-item-count: func(
+        split-id: u32,
+        source: list<u8>,
+    ) -> result<u32, string>;
+
+    split-item: func(
+        split-id: u32,
+        source: list<u8>,
+        index: u32,
+    ) -> result<list<u8>, string>;
+
     split-iteration-variables: func(
         split-id: u32,
         source: list<u8>,
         item: list<u8>,
         index: u32,
+    ) -> result<list<u8>, string>;
+
+    split-append-output: func(
+        split-id: u32,
+        results: list<u8>,
+        output: list<u8>,
     ) -> result<list<u8>, string>;
 
     split-output: func(

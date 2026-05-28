@@ -497,6 +497,133 @@ pub mod exports {
                 }
                 #[doc(hidden)]
                 #[allow(non_snake_case)]
+                pub unsafe fn _export_split_item_count_cabi<T: Guest>(
+                    arg0: i32,
+                    arg1: *mut u8,
+                    arg2: usize,
+                ) -> *mut u8 {
+                    #[cfg(target_arch = "wasm32")] _rt::run_ctors_once();
+                    let len0 = arg2;
+                    let result1 = T::split_item_count(
+                        arg0 as u32,
+                        _rt::Vec::from_raw_parts(arg1.cast(), len0, len0),
+                    );
+                    let ptr2 = (&raw mut _RET_AREA.0).cast::<u8>();
+                    match result1 {
+                        Ok(e) => {
+                            *ptr2.add(0).cast::<u8>() = (0i32) as u8;
+                            *ptr2
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<i32>() = _rt::as_i32(e);
+                        }
+                        Err(e) => {
+                            *ptr2.add(0).cast::<u8>() = (1i32) as u8;
+                            let vec3 = (e.into_bytes()).into_boxed_slice();
+                            let ptr3 = vec3.as_ptr().cast::<u8>();
+                            let len3 = vec3.len();
+                            ::core::mem::forget(vec3);
+                            *ptr2
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>() = len3;
+                            *ptr2
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>() = ptr3.cast_mut();
+                        }
+                    };
+                    ptr2
+                }
+                #[doc(hidden)]
+                #[allow(non_snake_case)]
+                pub unsafe fn __post_return_split_item_count<T: Guest>(arg0: *mut u8) {
+                    let l0 = i32::from(*arg0.add(0).cast::<u8>());
+                    match l0 {
+                        0 => {}
+                        _ => {
+                            let l1 = *arg0
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>();
+                            let l2 = *arg0
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>();
+                            _rt::cabi_dealloc(l1, l2, 1);
+                        }
+                    }
+                }
+                #[doc(hidden)]
+                #[allow(non_snake_case)]
+                pub unsafe fn _export_split_item_cabi<T: Guest>(
+                    arg0: i32,
+                    arg1: *mut u8,
+                    arg2: usize,
+                    arg3: i32,
+                ) -> *mut u8 {
+                    #[cfg(target_arch = "wasm32")] _rt::run_ctors_once();
+                    let len0 = arg2;
+                    let result1 = T::split_item(
+                        arg0 as u32,
+                        _rt::Vec::from_raw_parts(arg1.cast(), len0, len0),
+                        arg3 as u32,
+                    );
+                    let ptr2 = (&raw mut _RET_AREA.0).cast::<u8>();
+                    match result1 {
+                        Ok(e) => {
+                            *ptr2.add(0).cast::<u8>() = (0i32) as u8;
+                            let vec3 = (e).into_boxed_slice();
+                            let ptr3 = vec3.as_ptr().cast::<u8>();
+                            let len3 = vec3.len();
+                            ::core::mem::forget(vec3);
+                            *ptr2
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>() = len3;
+                            *ptr2
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>() = ptr3.cast_mut();
+                        }
+                        Err(e) => {
+                            *ptr2.add(0).cast::<u8>() = (1i32) as u8;
+                            let vec4 = (e.into_bytes()).into_boxed_slice();
+                            let ptr4 = vec4.as_ptr().cast::<u8>();
+                            let len4 = vec4.len();
+                            ::core::mem::forget(vec4);
+                            *ptr2
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>() = len4;
+                            *ptr2
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>() = ptr4.cast_mut();
+                        }
+                    };
+                    ptr2
+                }
+                #[doc(hidden)]
+                #[allow(non_snake_case)]
+                pub unsafe fn __post_return_split_item<T: Guest>(arg0: *mut u8) {
+                    let l0 = i32::from(*arg0.add(0).cast::<u8>());
+                    match l0 {
+                        0 => {
+                            let l1 = *arg0
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>();
+                            let l2 = *arg0
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>();
+                            let base3 = l1;
+                            let len3 = l2;
+                            _rt::cabi_dealloc(base3, len3 * 1, 1);
+                        }
+                        _ => {
+                            let l4 = *arg0
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>();
+                            let l5 = *arg0
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>();
+                            _rt::cabi_dealloc(l4, l5, 1);
+                        }
+                    }
+                }
+                #[doc(hidden)]
+                #[allow(non_snake_case)]
                 pub unsafe fn _export_split_iteration_variables_cabi<T: Guest>(
                     arg0: i32,
                     arg1: *mut u8,
@@ -548,6 +675,83 @@ pub mod exports {
                 #[doc(hidden)]
                 #[allow(non_snake_case)]
                 pub unsafe fn __post_return_split_iteration_variables<T: Guest>(
+                    arg0: *mut u8,
+                ) {
+                    let l0 = i32::from(*arg0.add(0).cast::<u8>());
+                    match l0 {
+                        0 => {
+                            let l1 = *arg0
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>();
+                            let l2 = *arg0
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>();
+                            let base3 = l1;
+                            let len3 = l2;
+                            _rt::cabi_dealloc(base3, len3 * 1, 1);
+                        }
+                        _ => {
+                            let l4 = *arg0
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>();
+                            let l5 = *arg0
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>();
+                            _rt::cabi_dealloc(l4, l5, 1);
+                        }
+                    }
+                }
+                #[doc(hidden)]
+                #[allow(non_snake_case)]
+                pub unsafe fn _export_split_append_output_cabi<T: Guest>(
+                    arg0: i32,
+                    arg1: *mut u8,
+                    arg2: usize,
+                    arg3: *mut u8,
+                    arg4: usize,
+                ) -> *mut u8 {
+                    #[cfg(target_arch = "wasm32")] _rt::run_ctors_once();
+                    let len0 = arg2;
+                    let len1 = arg4;
+                    let result2 = T::split_append_output(
+                        arg0 as u32,
+                        _rt::Vec::from_raw_parts(arg1.cast(), len0, len0),
+                        _rt::Vec::from_raw_parts(arg3.cast(), len1, len1),
+                    );
+                    let ptr3 = (&raw mut _RET_AREA.0).cast::<u8>();
+                    match result2 {
+                        Ok(e) => {
+                            *ptr3.add(0).cast::<u8>() = (0i32) as u8;
+                            let vec4 = (e).into_boxed_slice();
+                            let ptr4 = vec4.as_ptr().cast::<u8>();
+                            let len4 = vec4.len();
+                            ::core::mem::forget(vec4);
+                            *ptr3
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>() = len4;
+                            *ptr3
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>() = ptr4.cast_mut();
+                        }
+                        Err(e) => {
+                            *ptr3.add(0).cast::<u8>() = (1i32) as u8;
+                            let vec5 = (e.into_bytes()).into_boxed_slice();
+                            let ptr5 = vec5.as_ptr().cast::<u8>();
+                            let len5 = vec5.len();
+                            ::core::mem::forget(vec5);
+                            *ptr3
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>() = len5;
+                            *ptr3
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>() = ptr5.cast_mut();
+                        }
+                    };
+                    ptr3
+                }
+                #[doc(hidden)]
+                #[allow(non_snake_case)]
+                pub unsafe fn __post_return_split_append_output<T: Guest>(
                     arg0: *mut u8,
                 ) {
                     let l0 = i32::from(*arg0.add(0).cast::<u8>());
@@ -2390,11 +2594,25 @@ pub mod exports {
                         split_id: u32,
                         source: _rt::Vec<u8>,
                     ) -> Result<_rt::Vec<u8>, _rt::String>;
+                    fn split_item_count(
+                        split_id: u32,
+                        source: _rt::Vec<u8>,
+                    ) -> Result<u32, _rt::String>;
+                    fn split_item(
+                        split_id: u32,
+                        source: _rt::Vec<u8>,
+                        index: u32,
+                    ) -> Result<_rt::Vec<u8>, _rt::String>;
                     fn split_iteration_variables(
                         split_id: u32,
                         source: _rt::Vec<u8>,
                         item: _rt::Vec<u8>,
                         index: u32,
+                    ) -> Result<_rt::Vec<u8>, _rt::String>;
+                    fn split_append_output(
+                        split_id: u32,
+                        results: _rt::Vec<u8>,
+                        output: _rt::Vec<u8>,
                     ) -> Result<_rt::Vec<u8>, _rt::String>;
                     fn split_output(
                         split_id: u32,
@@ -2582,6 +2800,24 @@ pub mod exports {
                         unsafe extern "C" fn _post_return_split_items(arg0 : * mut u8,) {
                         unsafe { $($path_to_types)*:: __post_return_split_items::<$ty >
                         (arg0) } } #[unsafe (export_name =
+                        "runtara:workflow-stdlib/json@0.1.0#split-item-count")] unsafe
+                        extern "C" fn export_split_item_count(arg0 : i32, arg1 : * mut
+                        u8, arg2 : usize,) -> * mut u8 { unsafe { $($path_to_types)*::
+                        _export_split_item_count_cabi::<$ty > (arg0, arg1, arg2) } }
+                        #[unsafe (export_name =
+                        "cabi_post_runtara:workflow-stdlib/json@0.1.0#split-item-count")]
+                        unsafe extern "C" fn _post_return_split_item_count(arg0 : * mut
+                        u8,) { unsafe { $($path_to_types)*::
+                        __post_return_split_item_count::<$ty > (arg0) } } #[unsafe
+                        (export_name = "runtara:workflow-stdlib/json@0.1.0#split-item")]
+                        unsafe extern "C" fn export_split_item(arg0 : i32, arg1 : * mut
+                        u8, arg2 : usize, arg3 : i32,) -> * mut u8 { unsafe {
+                        $($path_to_types)*:: _export_split_item_cabi::<$ty > (arg0, arg1,
+                        arg2, arg3) } } #[unsafe (export_name =
+                        "cabi_post_runtara:workflow-stdlib/json@0.1.0#split-item")]
+                        unsafe extern "C" fn _post_return_split_item(arg0 : * mut u8,) {
+                        unsafe { $($path_to_types)*:: __post_return_split_item::<$ty >
+                        (arg0) } } #[unsafe (export_name =
                         "runtara:workflow-stdlib/json@0.1.0#split-iteration-variables")]
                         unsafe extern "C" fn export_split_iteration_variables(arg0 : i32,
                         arg1 : * mut u8, arg2 : usize, arg3 : * mut u8, arg4 : usize,
@@ -2593,6 +2829,17 @@ pub mod exports {
                         : * mut u8,) { unsafe { $($path_to_types)*::
                         __post_return_split_iteration_variables::<$ty > (arg0) } }
                         #[unsafe (export_name =
+                        "runtara:workflow-stdlib/json@0.1.0#split-append-output")] unsafe
+                        extern "C" fn export_split_append_output(arg0 : i32, arg1 : * mut
+                        u8, arg2 : usize, arg3 : * mut u8, arg4 : usize,) -> * mut u8 {
+                        unsafe { $($path_to_types)*::
+                        _export_split_append_output_cabi::<$ty > (arg0, arg1, arg2, arg3,
+                        arg4) } } #[unsafe (export_name =
+                        "cabi_post_runtara:workflow-stdlib/json@0.1.0#split-append-output")]
+                        unsafe extern "C" fn _post_return_split_append_output(arg0 : *
+                        mut u8,) { unsafe { $($path_to_types)*::
+                        __post_return_split_append_output::<$ty > (arg0) } } #[unsafe
+                        (export_name =
                         "runtara:workflow-stdlib/json@0.1.0#split-output")] unsafe extern
                         "C" fn export_split_output(arg0 : i32, arg1 : * mut u8, arg2 :
                         usize, arg3 : * mut u8, arg4 : usize,) -> * mut u8 { unsafe {
@@ -2853,6 +3100,65 @@ mod _rt {
         alloc::dealloc(ptr, layout);
     }
     pub use alloc_crate::string::String;
+    pub fn as_i32<T: AsI32>(t: T) -> i32 {
+        t.as_i32()
+    }
+    pub trait AsI32 {
+        fn as_i32(self) -> i32;
+    }
+    impl<'a, T: Copy + AsI32> AsI32 for &'a T {
+        fn as_i32(self) -> i32 {
+            (*self).as_i32()
+        }
+    }
+    impl AsI32 for i32 {
+        #[inline]
+        fn as_i32(self) -> i32 {
+            self as i32
+        }
+    }
+    impl AsI32 for u32 {
+        #[inline]
+        fn as_i32(self) -> i32 {
+            self as i32
+        }
+    }
+    impl AsI32 for i16 {
+        #[inline]
+        fn as_i32(self) -> i32 {
+            self as i32
+        }
+    }
+    impl AsI32 for u16 {
+        #[inline]
+        fn as_i32(self) -> i32 {
+            self as i32
+        }
+    }
+    impl AsI32 for i8 {
+        #[inline]
+        fn as_i32(self) -> i32 {
+            self as i32
+        }
+    }
+    impl AsI32 for u8 {
+        #[inline]
+        fn as_i32(self) -> i32 {
+            self as i32
+        }
+    }
+    impl AsI32 for char {
+        #[inline]
+        fn as_i32(self) -> i32 {
+            self as i32
+        }
+    }
+    impl AsI32 for usize {
+        #[inline]
+        fn as_i32(self) -> i32 {
+            self as i32
+        }
+    }
     pub unsafe fn string_lift(bytes: Vec<u8>) -> String {
         if cfg!(debug_assertions) {
             String::from_utf8(bytes).unwrap()
@@ -2938,9 +3244,9 @@ pub(crate) use __export_workflow_stdlib_impl as export;
 #[unsafe(link_section = "component-type:wit-bindgen:0.41.0:runtara:workflow-stdlib@0.1.0:workflow-stdlib:encoded world")]
 #[doc(hidden)]
 #[allow(clippy::octal_escapes)]
-pub static __WIT_BINDGEN_COMPONENT_TYPE: [u8; 1844] = *b"\
-\0asm\x0d\0\x01\0\0\x19\x16wit-component-encoding\x04\0\x07\xae\x0d\x01A\x02\x01\
-A\x02\x01BE\x01p}\x01r\x03\x07payload\0\x09retryable\x7f\x0crate-limited\x7f\x04\
+pub static __WIT_BINDGEN_COMPONENT_TYPE: [u8; 1995] = *b"\
+\0asm\x0d\0\x01\0\0\x19\x16wit-component-encoding\x04\0\x07\xc5\x0e\x01A\x02\x01\
+A\x02\x01BL\x01p}\x01r\x03\x07payload\0\x09retryable\x7f\x0crate-limited\x7f\x04\
 \0\x11agent-retry-error\x03\0\x01\x01j\0\x01s\x01@\x01\x08manifest\0\0\x03\x04\0\
 \x0dinit-manifest\x01\x04\x01j\x01\0\x01s\x01@\x03\x04data\0\x09variables\0\x05s\
 teps\0\0\x05\x04\0\x0cbuild-source\x01\x06\x01@\x02\x0amapping-idy\x06source\0\0\
@@ -2948,35 +3254,38 @@ teps\0\0\x05\x04\0\x0cbuild-source\x01\x06\x01@\x02\x0amapping-idy\x06source\0\0
 source\0\0\x08\x04\0\x0eeval-condition\x01\x09\x01j\x01s\x01s\x01@\x02\x09switch\
 -idy\x06source\0\0\x0a\x04\0\x0eprocess-switch\x01\x0b\x01@\x02\x09switch-idy\x06\
 source\0\0\x05\x04\0\x0cvalue-switch\x01\x0c\x01@\x02\x08split-idy\x06source\0\0\
-\x05\x04\0\x0bsplit-items\x01\x0d\x01@\x04\x08split-idy\x06source\0\x04item\0\x05\
-indexy\0\x05\x04\0\x19split-iteration-variables\x01\x0e\x01@\x03\x08split-idy\x06\
-source\0\x07results\0\0\x05\x04\0\x0csplit-output\x01\x0f\x01@\x02\x09filter-idy\
-\x06source\0\0\x05\x04\0\x06filter\x01\x10\x01@\x02\x06log-idy\x06source\0\0\x05\
-\x04\0\x09log-event\x01\x11\x04\0\x03log\x01\x11\x01@\x02\x08error-idy\x06source\
-\0\0\x05\x04\0\x0berror-event\x01\x12\x04\0\x05error\x01\x12\x01@\x03\x07step-id\
-s\x05error\0\x05steps\0\0\x05\x04\0\x0berror-steps\x01\x13\x01@\x02\x08group-idy\
-\x06source\0\0\x05\x04\0\x08group-by\x01\x14\x01j\x01w\x01s\x01@\x02\x08delay-id\
-y\x06source\0\0\x15\x04\0\x11delay-duration-ms\x01\x16\x01@\x03\x08delay-idy\x06\
-source\0\x0bduration-msw\0\x05\x04\0\x05delay\x01\x17\x01@\x03\x08agent-idy\x06s\
-ource\0\x06output\0\0\x05\x04\0\x0cagent-output\x01\x18\x01@\x02\x08agent-idy\x05\
-input\0\0\x05\x04\0\x14agent-validate-input\x01\x19\x04\0\x16agent-connection-in\
-put\x01\x19\x01@\x02\x08agent-idy\x06source\0\0\x05\x04\0\x0fagent-cache-key\x01\
-\x1a\x01@\x02\x0dcheckpoint-ids\x0eattempt-numbery\0\x05\x04\0\x15agent-retry-sl\
-eep-key\x01\x1b\x01kw\x01@\x05\x0eattempt-numbery\x0etotal-attemptsy\x0dbase-del\
-ay-msw\x0cmax-delay-msw\x0eretry-after-ms\x1c\0\x15\x04\0\x14agent-retry-delay-m\
-s\x01\x1d\x01ks\x01@\x07\x04codes\x07messages\x08categorys\x08severitys\x09retry\
-able\x7f\x0eretry-after-ms\x1c\x0aattributes\x1e\0\x05\x04\0\x10agent-error-info\
-\x01\x1f\x01j\x01\x02\x01s\x01@\x07\x04codes\x07messages\x08categorys\x08severit\
-ys\x09retryable\x7f\x0eretry-after-ms\x1c\x0aattributes\x1e\0\x20\x04\0\x16agent\
--retry-error-info\x01!\x01@\x08\x08agent-idy\x04codes\x07messages\x08categorys\x08\
-severitys\x09retryable\x7f\x0eretry-after-ms\x1c\x0aattributes\x1e\0\x05\x04\0\x0b\
-agent-error\x01\"\x01@\x02\x08agent-idy\x0aerror-info\0\0\x05\x04\0\x15agent-err\
-or-from-info\x01#\x01@\x02\x08agent-idy\x05error\0\0\x05\x04\0\x11agent-debug-er\
-ror\x01$\x01@\x02\x07step-ids\x06source\0\0\x05\x04\0\x10step-debug-start\x01%\x04\
-\0\x0estep-debug-end\x01%\x04\0\"runtara:workflow-stdlib/json@0.1.0\x05\0\x04\0-\
-runtara:workflow-stdlib/workflow-stdlib@0.1.0\x04\0\x0b\x15\x01\0\x0fworkflow-st\
-dlib\x03\0\0\0G\x09producers\x01\x0cprocessed-by\x02\x0dwit-component\x070.227.1\
-\x10wit-bindgen-rust\x060.41.0";
+\x05\x04\0\x0bsplit-items\x01\x0d\x01j\x01y\x01s\x01@\x02\x08split-idy\x06source\
+\0\0\x0e\x04\0\x10split-item-count\x01\x0f\x01@\x03\x08split-idy\x06source\0\x05\
+indexy\0\x05\x04\0\x0asplit-item\x01\x10\x01@\x04\x08split-idy\x06source\0\x04it\
+em\0\x05indexy\0\x05\x04\0\x19split-iteration-variables\x01\x11\x01@\x03\x08spli\
+t-idy\x07results\0\x06output\0\0\x05\x04\0\x13split-append-output\x01\x12\x01@\x03\
+\x08split-idy\x06source\0\x07results\0\0\x05\x04\0\x0csplit-output\x01\x13\x01@\x02\
+\x09filter-idy\x06source\0\0\x05\x04\0\x06filter\x01\x14\x01@\x02\x06log-idy\x06\
+source\0\0\x05\x04\0\x09log-event\x01\x15\x04\0\x03log\x01\x15\x01@\x02\x08error\
+-idy\x06source\0\0\x05\x04\0\x0berror-event\x01\x16\x04\0\x05error\x01\x16\x01@\x03\
+\x07step-ids\x05error\0\x05steps\0\0\x05\x04\0\x0berror-steps\x01\x17\x01@\x02\x08\
+group-idy\x06source\0\0\x05\x04\0\x08group-by\x01\x18\x01j\x01w\x01s\x01@\x02\x08\
+delay-idy\x06source\0\0\x19\x04\0\x11delay-duration-ms\x01\x1a\x01@\x03\x08delay\
+-idy\x06source\0\x0bduration-msw\0\x05\x04\0\x05delay\x01\x1b\x01@\x03\x08agent-\
+idy\x06source\0\x06output\0\0\x05\x04\0\x0cagent-output\x01\x1c\x01@\x02\x08agen\
+t-idy\x05input\0\0\x05\x04\0\x14agent-validate-input\x01\x1d\x04\0\x16agent-conn\
+ection-input\x01\x1d\x01@\x02\x08agent-idy\x06source\0\0\x05\x04\0\x0fagent-cach\
+e-key\x01\x1e\x01@\x02\x0dcheckpoint-ids\x0eattempt-numbery\0\x05\x04\0\x15agent\
+-retry-sleep-key\x01\x1f\x01kw\x01@\x05\x0eattempt-numbery\x0etotal-attemptsy\x0d\
+base-delay-msw\x0cmax-delay-msw\x0eretry-after-ms\x20\0\x19\x04\0\x14agent-retry\
+-delay-ms\x01!\x01ks\x01@\x07\x04codes\x07messages\x08categorys\x08severitys\x09\
+retryable\x7f\x0eretry-after-ms\x20\x0aattributes\"\0\x05\x04\0\x10agent-error-i\
+nfo\x01#\x01j\x01\x02\x01s\x01@\x07\x04codes\x07messages\x08categorys\x08severit\
+ys\x09retryable\x7f\x0eretry-after-ms\x20\x0aattributes\"\0$\x04\0\x16agent-retr\
+y-error-info\x01%\x01@\x08\x08agent-idy\x04codes\x07messages\x08categorys\x08sev\
+eritys\x09retryable\x7f\x0eretry-after-ms\x20\x0aattributes\"\0\x05\x04\0\x0bage\
+nt-error\x01&\x01@\x02\x08agent-idy\x0aerror-info\0\0\x05\x04\0\x15agent-error-f\
+rom-info\x01'\x01@\x02\x08agent-idy\x05error\0\0\x05\x04\0\x11agent-debug-error\x01\
+(\x01@\x02\x07step-ids\x06source\0\0\x05\x04\0\x10step-debug-start\x01)\x04\0\x0e\
+step-debug-end\x01)\x04\0\"runtara:workflow-stdlib/json@0.1.0\x05\0\x04\0-runtar\
+a:workflow-stdlib/workflow-stdlib@0.1.0\x04\0\x0b\x15\x01\0\x0fworkflow-stdlib\x03\
+\0\0\0G\x09producers\x01\x0cprocessed-by\x02\x0dwit-component\x070.227.1\x10wit-\
+bindgen-rust\x060.41.0";
 #[inline(never)]
 #[doc(hidden)]
 pub fn __link_custom_section_describing_imports() {

@@ -210,6 +210,26 @@ mod component {
             })
         }
 
+        fn split_item_count(split_id: u32, source: Vec<u8>) -> Result<u32, String> {
+            MANIFEST.with(|slot| {
+                let slot = slot.borrow();
+                let manifest = slot
+                    .as_ref()
+                    .ok_or_else(|| "direct stdlib manifest was not initialized".to_string())?;
+                manifest.split_item_count(split_id, &source)
+            })
+        }
+
+        fn split_item(split_id: u32, source: Vec<u8>, index: u32) -> Result<Vec<u8>, String> {
+            MANIFEST.with(|slot| {
+                let slot = slot.borrow();
+                let manifest = slot
+                    .as_ref()
+                    .ok_or_else(|| "direct stdlib manifest was not initialized".to_string())?;
+                manifest.split_item(split_id, &source, index)
+            })
+        }
+
         fn split_iteration_variables(
             split_id: u32,
             source: Vec<u8>,
@@ -222,6 +242,20 @@ mod component {
                     .as_ref()
                     .ok_or_else(|| "direct stdlib manifest was not initialized".to_string())?;
                 manifest.split_iteration_variables(split_id, &source, &item, index)
+            })
+        }
+
+        fn split_append_output(
+            split_id: u32,
+            results: Vec<u8>,
+            output: Vec<u8>,
+        ) -> Result<Vec<u8>, String> {
+            MANIFEST.with(|slot| {
+                let slot = slot.borrow();
+                let manifest = slot
+                    .as_ref()
+                    .ok_or_else(|| "direct stdlib manifest was not initialized".to_string())?;
+                manifest.split_append_output(split_id, &results, &output)
             })
         }
 

@@ -119,6 +119,49 @@ impl DirectJsonManifest {
         serde_json::to_vec(&items).map_err(|err| format!("failed to serialize Split items: {err}"))
     }
 
+    /// Return the normalized Split iteration item count.
+    pub fn split_item_count(&self, split_id: u32, source: &[u8]) -> Result<u32, String> {
+        let source: Value = serde_json::from_slice(source)
+            .map_err(|err| format!("failed to parse split source: {err}"))?;
+        let split = self
+            .splits
+            .get(&split_id)
+            .ok_or_else(|| format!("unknown direct Split id {split_id}"))?;
+        let items = split_items(split, &source)?;
+        let count = items
+            .as_array()
+            .map(Vec::len)
+            .expect("split_items always returns a JSON array");
+        u32::try_from(count).map_err(|_| {
+            format!(
+                "Split step '{}' produced too many iteration items for direct Wasm",
+                split.step_id
+            )
+        })
+    }
+
+    /// Return one normalized Split iteration item by index.
+    pub fn split_item(&self, split_id: u32, source: &[u8], index: u32) -> Result<Vec<u8>, String> {
+        let source: Value = serde_json::from_slice(source)
+            .map_err(|err| format!("failed to parse split source: {err}"))?;
+        let split = self
+            .splits
+            .get(&split_id)
+            .ok_or_else(|| format!("unknown direct Split id {split_id}"))?;
+        let items = split_items(split, &source)?;
+        let items = items
+            .as_array()
+            .expect("split_items always returns a JSON array");
+        let item = items.get(index as usize).ok_or_else(|| {
+            format!(
+                "Split step '{}' item index {index} is out of bounds for {} item(s)",
+                split.step_id,
+                items.len()
+            )
+        })?;
+        serde_json::to_vec(item).map_err(|err| format!("failed to serialize Split item: {err}"))
+    }
+
     /// Build generated-code-compatible variables for one Split iteration.
     pub fn split_iteration_variables(
         &self,
@@ -138,6 +181,32 @@ impl DirectJsonManifest {
         let variables = split_iteration_variables(split, &source, item, index)?;
         serde_json::to_vec(&Value::Object(variables))
             .map_err(|err| format!("failed to serialize Split iteration variables: {err}"))
+    }
+
+    /// Append one Split iteration output to a JSON result array.
+    pub fn split_append_output(
+        &self,
+        split_id: u32,
+        results: &[u8],
+        output: &[u8],
+    ) -> Result<Vec<u8>, String> {
+        let split = self
+            .splits
+            .get(&split_id)
+            .ok_or_else(|| format!("unknown direct Split id {split_id}"))?;
+        let mut results: Value = serde_json::from_slice(results)
+            .map_err(|err| format!("failed to parse Split results: {err}"))?;
+        let output: Value = serde_json::from_slice(output)
+            .map_err(|err| format!("failed to parse Split iteration output: {err}"))?;
+        let results = results.as_array_mut().ok_or_else(|| {
+            format!(
+                "Split step '{}' internal result accumulator must be an array",
+                split.step_id
+            )
+        })?;
+        results.push(output);
+        serde_json::to_vec(results)
+            .map_err(|err| format!("failed to serialize Split result accumulator: {err}"))
     }
 
     /// Store Split iteration results in the generated-code-compatible steps context.
@@ -2885,6 +2954,52 @@ mod tests {
     }
 
     #[test]
+    fn split_item_count_and_item_use_normalized_items() {
+        let manifest = DirectJsonManifest::parse(&split_manifest(json!({
+            "value": { "valueType": "reference", "value": "data.items" },
+            "batchSize": 2
+        })))
+        .expect("manifest");
+        let source = build_source(br#"{"items":[1,2,3]}"#, b"{}", b"{}").expect("source");
+
+        assert_eq!(
+            manifest
+                .split_item_count(0, &source)
+                .expect("split item count"),
+            2
+        );
+        let first = manifest
+            .split_item(0, &source, 0)
+            .expect("first split item");
+        let second = manifest
+            .split_item(0, &source, 1)
+            .expect("second split item");
+        let first: Value = serde_json::from_slice(&first).expect("first item json");
+        let second: Value = serde_json::from_slice(&second).expect("second item json");
+
+        assert_eq!(first, json!([1, 2]));
+        assert_eq!(second, json!([3]));
+    }
+
+    #[test]
+    fn split_item_rejects_out_of_bounds_index() {
+        let manifest = DirectJsonManifest::parse(&split_manifest(json!({
+            "value": { "valueType": "reference", "value": "data.items" }
+        })))
+        .expect("manifest");
+        let source = build_source(br#"{"items":[1]}"#, b"{}", b"{}").expect("source");
+
+        let err = manifest
+            .split_item(0, &source, 1)
+            .expect_err("index should fail");
+
+        assert_eq!(
+            err,
+            "Split step 'split' item index 1 is out of bounds for 1 item(s)"
+        );
+    }
+
+    #[test]
     fn split_items_rejects_null_and_non_array_without_flags() {
         let manifest = DirectJsonManifest::parse(&split_manifest(json!({
             "value": { "valueType": "reference", "value": "data.items" }
@@ -2938,6 +3053,41 @@ mod tests {
         assert_eq!(variables["_index"], json!(3));
         assert_eq!(variables["_item"], json!({ "id": 7 }));
         assert_eq!(variables["_scope_id"], json!("parent_split_3"));
+    }
+
+    #[test]
+    fn split_append_output_accumulates_iteration_outputs() {
+        let manifest = DirectJsonManifest::parse(&split_manifest(json!({
+            "value": { "valueType": "reference", "value": "data.items" }
+        })))
+        .expect("manifest");
+
+        let results = manifest
+            .split_append_output(0, b"[]", br#"{"id":1}"#)
+            .expect("first append");
+        let results = manifest
+            .split_append_output(0, &results, br#"{"id":2}"#)
+            .expect("second append");
+        let results: Value = serde_json::from_slice(&results).expect("results json");
+
+        assert_eq!(results, json!([{ "id": 1 }, { "id": 2 }]));
+    }
+
+    #[test]
+    fn split_append_output_rejects_non_array_accumulator() {
+        let manifest = DirectJsonManifest::parse(&split_manifest(json!({
+            "value": { "valueType": "reference", "value": "data.items" }
+        })))
+        .expect("manifest");
+
+        let err = manifest
+            .split_append_output(0, br#"{"not":"array"}"#, br#"{"id":1}"#)
+            .expect_err("non-array accumulator should fail");
+
+        assert_eq!(
+            err,
+            "Split step 'split' internal result accumulator must be an array"
+        );
     }
 
     #[test]
