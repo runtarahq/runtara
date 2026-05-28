@@ -7,7 +7,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::mpsc;
+use std::sync::{Arc, mpsc};
 use std::thread;
 use std::time::Duration;
 
@@ -19,7 +19,7 @@ use runtara_workflows::direct_wasm::{
 use serde_json::Value;
 
 const SIMPLE_PASSTHROUGH: &str = include_str!("fixtures/simple_passthrough.json");
-const WORKFLOW_INPUT: &[u8] = br#"{"input":"direct-finish"}"#;
+const CONDITIONAL_WORKFLOW: &str = include_str!("fixtures/conditional_workflow.json");
 
 #[derive(Debug)]
 struct Completed {
@@ -95,6 +95,7 @@ fn wasmtime_installed() -> bool {
 fn handle_request(
     stream: &mut std::net::TcpStream,
     sink: &mpsc::Sender<Completed>,
+    workflow_input: &[u8],
 ) -> std::io::Result<bool> {
     stream.set_read_timeout(Some(Duration::from_secs(10)))?;
     stream.set_write_timeout(Some(Duration::from_secs(10)))?;
@@ -147,7 +148,7 @@ fn handle_request(
         buf
     };
 
-    let (status, response_json) = route(&method, &path, &body, sink);
+    let (status, response_json) = route(&method, &path, &body, sink, workflow_input);
     let response_bytes = response_json.to_string();
     let response = format!(
         "HTTP/1.1 {status} OK\r\nContent-Type: application/json\r\nContent-Length: {len}\r\nConnection: keep-alive\r\n\r\n{body}",
@@ -188,7 +189,13 @@ fn read_chunked_body(reader: &mut BufReader<std::net::TcpStream>) -> std::io::Re
     Ok(out)
 }
 
-fn route(method: &str, path: &str, body: &[u8], sink: &mpsc::Sender<Completed>) -> (u16, Value) {
+fn route(
+    method: &str,
+    path: &str,
+    body: &[u8],
+    sink: &mpsc::Sender<Completed>,
+    workflow_input: &[u8],
+) -> (u16, Value) {
     let path = path.split('?').next().unwrap_or(path);
 
     if method == "GET" && path == "/health" {
@@ -203,7 +210,7 @@ fn route(method: &str, path: &str, body: &[u8], sink: &mpsc::Sender<Completed>) 
         match (method, endpoint) {
             ("POST", "register") => return (200, serde_json::json!({"success": true})),
             ("GET", "input") => {
-                let input = base64::engine::general_purpose::STANDARD.encode(WORKFLOW_INPUT);
+                let input = base64::engine::general_purpose::STANDARD.encode(workflow_input);
                 return (200, serde_json::json!({ "input": input }));
             }
             ("POST", "completed") => {
@@ -230,7 +237,12 @@ fn capture_completed(body: &[u8], sink: &mpsc::Sender<Completed>) {
     }
 }
 
-fn serve(listener: TcpListener, sink: mpsc::Sender<Completed>, stop: mpsc::Receiver<()>) {
+fn serve(
+    listener: TcpListener,
+    sink: mpsc::Sender<Completed>,
+    stop: mpsc::Receiver<()>,
+    workflow_input: Arc<Vec<u8>>,
+) {
     listener
         .set_nonblocking(true)
         .expect("set_nonblocking on listener");
@@ -241,8 +253,11 @@ fn serve(listener: TcpListener, sink: mpsc::Sender<Completed>, stop: mpsc::Recei
         match listener.accept() {
             Ok((mut stream, _)) => {
                 let sink = sink.clone();
+                let workflow_input = workflow_input.clone();
                 thread::spawn(move || {
-                    while let Ok(true) = handle_request(&mut stream, &sink) {
+                    while let Ok(true) =
+                        handle_request(&mut stream, &sink, workflow_input.as_slice())
+                    {
                         // Keep serving the same connection while the SDK reuses it.
                     }
                 });
@@ -255,37 +270,43 @@ fn serve(listener: TcpListener, sink: mpsc::Sender<Completed>, stop: mpsc::Recei
     }
 }
 
-#[test]
-fn direct_wasm_execute_finish_passthrough_reports_completion() {
+fn direct_e2e_components_dir() -> Option<PathBuf> {
     if !e2e_enabled() {
         eprintln!(
             "SKIP: direct_wasm_execute — set RUNTARA_RUN_DIRECT_WASM_E2E=1 to run \
              (needs wac, wasmtime, and staged direct workflow components)."
         );
-        return;
+        return None;
     }
     if !tool_installed("wac") {
         eprintln!("SKIP: wac not installed.");
-        return;
+        return None;
     }
     if !wasmtime_installed() {
         eprintln!("SKIP: wasmtime not installed.");
-        return;
+        return None;
     }
-    let Some(components_dir) = shared_components_dir() else {
-        return;
-    };
+    let components_dir = shared_components_dir()?;
 
+    Some(components_dir)
+}
+
+fn run_direct_workflow(
+    components_dir: &Path,
+    workflow_id: &str,
+    graph_json: &str,
+    workflow_input: &[u8],
+) -> Value {
     let temp = tempfile::tempdir().expect("tempdir");
-    let graph: ExecutionGraph = serde_json::from_str(SIMPLE_PASSTHROUGH).expect("fixture parses");
+    let graph: ExecutionGraph = serde_json::from_str(graph_json).expect("fixture parses");
     let compiled = compile_direct_workflow_composed(
         DirectCompilationInput {
-            workflow_id: "direct_wasm_execute_finish_passthrough".to_string(),
+            workflow_id: workflow_id.to_string(),
             version: 1,
             execution_graph: graph,
             output_dir: temp.path().to_path_buf(),
         },
-        &components_dir,
+        components_dir,
     )
     .expect("direct composed compile");
     assert_eq!(compiled.wasm_path, compiled.build_dir.join("workflow.wasm"));
@@ -294,7 +315,9 @@ fn direct_wasm_execute_finish_passthrough_reports_completion() {
     let addr = listener.local_addr().expect("local_addr");
     let (completion_tx, completion_rx) = mpsc::channel::<Completed>();
     let (stop_tx, stop_rx) = mpsc::channel::<()>();
-    let server_handle = thread::spawn(move || serve(listener, completion_tx, stop_rx));
+    let workflow_input = Arc::new(workflow_input.to_vec());
+    let server_handle =
+        thread::spawn(move || serve(listener, completion_tx, stop_rx, workflow_input));
 
     let output = Command::new(wasmtime_binary())
         .arg("run")
@@ -307,7 +330,7 @@ fn direct_wasm_execute_finish_passthrough_reports_completion() {
         .arg("--env")
         .arg(format!("RUNTARA_SERVER_ADDR={addr}"))
         .arg("--env")
-        .arg("RUNTARA_INSTANCE_ID=direct-test-instance")
+        .arg(format!("RUNTARA_INSTANCE_ID={workflow_id}"))
         .arg("--env")
         .arg("RUNTARA_TENANT_ID=direct-wasm-execute")
         .arg("--env")
@@ -331,8 +354,44 @@ fn direct_wasm_execute_finish_passthrough_reports_completion() {
     let completion = completion_rx.try_iter().last().unwrap_or_else(|| {
         panic!("direct workflow exited but never POSTed /completed.\n--- stderr ---\n{stderr}")
     });
-    assert_eq!(
-        completion.output_json,
-        serde_json::json!({ "result": "direct-finish" })
+    completion.output_json
+}
+
+#[test]
+fn direct_wasm_execute_finish_passthrough_reports_completion() {
+    let Some(components_dir) = direct_e2e_components_dir() else {
+        return;
+    };
+
+    let output = run_direct_workflow(
+        &components_dir,
+        "direct-wasm-execute-finish-passthrough",
+        SIMPLE_PASSTHROUGH,
+        br#"{"input":"direct-finish"}"#,
     );
+
+    assert_eq!(output, serde_json::json!({ "result": "direct-finish" }));
+}
+
+#[test]
+fn direct_wasm_execute_conditional_finish_branches_report_completion() {
+    let Some(components_dir) = direct_e2e_components_dir() else {
+        return;
+    };
+
+    let true_output = run_direct_workflow(
+        &components_dir,
+        "direct-wasm-execute-conditional-true",
+        CONDITIONAL_WORKFLOW,
+        br#"{"flag":true}"#,
+    );
+    assert_eq!(true_output, serde_json::json!({ "result": "yes" }));
+
+    let false_output = run_direct_workflow(
+        &components_dir,
+        "direct-wasm-execute-conditional-false",
+        CONDITIONAL_WORKFLOW,
+        br#"{"flag":false}"#,
+    );
+    assert_eq!(false_output, serde_json::json!({ "result": "no" }));
 }

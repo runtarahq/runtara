@@ -71,11 +71,13 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   first finish-only direct compile entry that returns the final static
   `workflow.wasm` artifact shape while retaining `workflow-logic.wasm` for
   debugging and manifest validation.
-- `tests/direct_wasm_execute.rs` now provides a gated direct execution smoke
-  test. With `RUNTARA_RUN_DIRECT_WASM_E2E=1`, it compiles and statically
-  composes the simple `Finish` fixture, runs the final `workflow.wasm` under
+- `tests/direct_wasm_execute.rs` now provides gated direct execution smoke
+  tests. With `RUNTARA_RUN_DIRECT_WASM_E2E=1`, it compiles and statically
+  composes the simple `Finish` fixture plus the entry `Conditional -> Finish`
+  fixture, runs each final `workflow.wasm` under
   `wasmtime run --wasi http --wasi inherit-network`, and asserts the fake SDK
-  receives the expected mapped completion payload.
+  receives the expected mapped completion payloads for the Finish path and both
+  conditional branches.
 - `tests/direct_wasm_finish_parity.rs` now compares direct `Finish` mapping
   output against the current Rust-generated mapping contract for representative
   fixture shapes: data passthrough, dotted `outputs.*` unwrap, templates,
@@ -985,8 +987,10 @@ Current status:
   component can evaluate those conditions through the checked WIT surface.
 - The first direct Wasm branching path is implemented for
   `Conditional -> true/false Finish`, with support gating kept narrow.
-- Remaining work: add execution/parity coverage for composed conditional
-  artifacts, then broaden graph lowering to multi-step pure JSON/control
+- Gated execution coverage now runs the composed conditional artifact for both
+  true and false inputs and verifies the selected Finish output.
+- Remaining work: add direct-vs-Rust parity coverage for conditional branch
+  behavior, then broaden graph lowering to multi-step pure JSON/control
   workflows.
 
 Implementation steps:
