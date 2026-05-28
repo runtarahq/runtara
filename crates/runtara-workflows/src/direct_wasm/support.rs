@@ -320,13 +320,8 @@ fn supports_agent_step_baseline(_graph: &ExecutionGraph, step: &AgentStep) -> bo
     step.timeout.is_none() && step.compensation.is_none() && !step.breakpoint.unwrap_or(false)
 }
 
-fn supports_delay_step_baseline(graph: &ExecutionGraph, step: &DelayStep) -> bool {
-    delay_step_is_durable(graph, step) && !step.breakpoint.unwrap_or(false)
-}
-
-fn delay_step_is_durable(graph: &ExecutionGraph, step: &DelayStep) -> bool {
-    let graph_durable = graph.durable.unwrap_or(true);
-    graph_durable && step.durable.unwrap_or(true)
+fn supports_delay_step_baseline(_graph: &ExecutionGraph, step: &DelayStep) -> bool {
+    !step.breakpoint.unwrap_or(false)
 }
 
 fn supports_normal_flow_step(
@@ -804,7 +799,7 @@ fn collect_agent_step_unsupported(
 }
 
 fn collect_delay_step_unsupported(
-    graph: &ExecutionGraph,
+    _graph: &ExecutionGraph,
     step: &DelayStep,
     unsupported: &mut Vec<UnsupportedWorkflowFeature>,
 ) {
@@ -817,12 +812,6 @@ fn collect_delay_step_unsupported(
         });
     };
 
-    if !delay_step_is_durable(graph, step) {
-        push(
-            "delay-non-durable",
-            "Non-durable Delay direct lowering needs non-checkpointing sleep parity",
-        );
-    }
     if step.breakpoint.unwrap_or(false) {
         push(
             "delay-breakpoint",
@@ -1329,18 +1318,14 @@ mod tests {
     }
 
     #[test]
-    fn non_durable_delay_is_rejected_until_blocking_sleep_parity_is_lowered() {
+    fn non_durable_delay_normal_flow_is_supported() {
         let mut graph = fixture("delay_simple");
         graph.durable = Some(false);
 
         let report = analyze_direct_wasm_support(&graph);
 
-        assert!(!report.supported);
-        assert!(report.unsupported.iter().any(|feature| {
-            feature.step_id.as_deref() == Some("delay")
-                && feature.step_type.as_deref() == Some("Delay")
-                && feature.feature == "delay-non-durable"
-        }));
+        assert!(report.supported, "{:?}", report.unsupported);
+        assert!(report.unsupported.is_empty());
     }
 
     #[test]

@@ -576,6 +576,7 @@ enum DirectRunPlan {
     Delay {
         step_id: String,
         delay_id: u32,
+        durable: bool,
         next_plan: Box<DirectRunPlan>,
     },
     Log {
@@ -927,16 +928,12 @@ fn step_run_plan_inner(
         }
         "Delay" => {
             let delay = delay_config(graph, step_id)?;
-            if !delay.durable {
-                return Err(DirectCompileError::Component(format!(
-                    "direct Delay step '{step_id}' is non-durable"
-                )));
-            }
             let next_plan = normal_flow_plan(graph, step_id, stack, include_on_error)?;
 
             Ok(DirectRunPlan::Delay {
                 step_id: step_id.to_string(),
                 delay_id: delay.id,
+                durable: delay.durable,
                 next_plan: Box::new(next_plan),
             })
         }
@@ -2393,6 +2390,7 @@ fn emit_run_plan_mapping(
         DirectRunPlan::Delay {
             step_id,
             delay_id,
+            durable,
             next_plan,
         } => {
             emit_delay_plan(
@@ -2403,6 +2401,7 @@ fn emit_run_plan_mapping(
                 variables,
                 step_id,
                 *delay_id,
+                *durable,
                 next_plan,
                 data_ptr_local,
                 data_len_local,
@@ -2839,6 +2838,7 @@ fn emit_delay_plan(
     variables: &DirectDataSegment,
     step_id: &str,
     delay_id: u32,
+    durable: bool,
     next_plan: &DirectRunPlan,
     data_ptr_local: u32,
     data_len_local: u32,
@@ -2875,15 +2875,21 @@ fn emit_delay_plan(
     push_retptr_i64_load(body, DIRECT_RET_U64_OK_OFFSET);
     body.instruction(&Instruction::LocalSet(DIRECT_DELAY_DURATION_MS_LOCAL));
 
-    let step_id_segment = static_data
-        .step_id(step_id)
-        .expect("run plan step ids are present in static data");
-    push_segment_args(body, step_id_segment);
-    body.instruction(&Instruction::I32Const(0));
-    body.instruction(&Instruction::I32Const(0));
+    if durable {
+        let step_id_segment = static_data
+            .step_id(step_id)
+            .expect("run plan step ids are present in static data");
+        push_segment_args(body, step_id_segment);
+        body.instruction(&Instruction::I32Const(0));
+        body.instruction(&Instruction::I32Const(0));
+    }
     body.instruction(&Instruction::LocalGet(DIRECT_DELAY_DURATION_MS_LOCAL));
     push_retptr_arg(body);
-    body.instruction(&Instruction::Call(indices.runtime_durable_sleep_checkpoint));
+    body.instruction(&Instruction::Call(if durable {
+        indices.runtime_durable_sleep_checkpoint
+    } else {
+        indices.runtime_blocking_sleep
+    }));
     return_if_retptr_error(body);
 
     body.instruction(&Instruction::I32Const(delay_id as i32));
@@ -5663,12 +5669,12 @@ mod tests {
     }
 
     #[test]
-    fn direct_compile_rejects_non_durable_delay() {
+    fn direct_compile_supports_non_durable_delay() {
         let temp = tempfile::tempdir().expect("tempdir");
         let mut graph = fixture("delay_simple");
         graph.durable = Some(false);
 
-        let err = compile_direct_workflow(DirectCompilationInput {
+        let result = compile_direct_workflow(DirectCompilationInput {
             workflow_id: "delay-non-durable".to_string(),
             version: 1,
             execution_graph: graph,
@@ -5676,15 +5682,20 @@ mod tests {
             track_events: false,
             agent_catalog: None,
         })
-        .expect_err("non-durable Delay should remain gated");
+        .expect("non-durable Delay should compile");
 
-        let DirectCompileError::Unsupported { report } = err else {
-            panic!("expected unsupported error");
-        };
-        assert!(!report.supported);
-        assert!(report.unsupported.iter().any(|feature| {
-            feature.step_id.as_deref() == Some("delay") && feature.feature == "delay-non-durable"
-        }));
+        let wasm = fs::read(&result.wasm_path).expect("wasm");
+        Validator::new()
+            .validate_all(&wasm)
+            .expect("direct non-durable Delay artifact should validate");
+        assert!(result.support_report.supported);
+        assert_eq!(result.support_report.unsupported, vec![]);
+
+        let manifest: DirectWorkflowManifest =
+            serde_json::from_slice(&fs::read(&result.manifest_path).expect("manifest"))
+                .expect("manifest json");
+        assert_eq!(manifest.graph.delays.len(), 1);
+        assert!(!manifest.graph.delays[0].durable);
     }
 
     #[test]
@@ -8620,12 +8631,14 @@ mod tests {
             DirectCoreConfig::new(&manifest, &manifest_json, false).expect("core config");
         let DirectRunPlan::Delay {
             delay_id,
+            durable,
             next_plan,
             ..
         } = &core_config.run_plan
         else {
             panic!("expected Delay run plan");
         };
+        assert!(*durable);
         let DirectRunPlan::Finish { mapping_id, .. } = next_plan.as_ref() else {
             panic!("expected Delay to flow into Finish");
         };
@@ -8738,6 +8751,158 @@ mod tests {
         assert!(
             durable_sleep_position < delay_position,
             "Delay output should be stored after durable sleep"
+        );
+        assert!(
+            delay_position < finish_position,
+            "Finish mapping should run after Delay updates steps context"
+        );
+        assert!(saw_delay_id, "Delay id should be passed to stdlib");
+        assert!(
+            saw_mapping_id,
+            "Finish mapping id should be passed to stdlib"
+        );
+    }
+
+    #[test]
+    fn direct_core_run_lowers_non_durable_delay_finish_through_blocking_sleep() {
+        let mut graph = fixture("delay_simple");
+        graph.durable = Some(false);
+        let manifest = build_direct_workflow_manifest(&graph).expect("manifest");
+        let manifest_json = manifest.to_canonical_json().expect("manifest json");
+        let core_config =
+            DirectCoreConfig::new(&manifest, &manifest_json, false).expect("core config");
+        let DirectRunPlan::Delay {
+            delay_id,
+            durable,
+            next_plan,
+            ..
+        } = &core_config.run_plan
+        else {
+            panic!("expected Delay run plan");
+        };
+        assert!(!*durable);
+        let DirectRunPlan::Finish { mapping_id, .. } = next_plan.as_ref() else {
+            panic!("expected Delay to flow into Finish");
+        };
+
+        let (resolve, world) = build_direct_component_resolve().expect("resolve");
+        let core = emit_direct_core_module(&resolve, world, &core_config).expect("core module");
+        Validator::new()
+            .validate_all(&core)
+            .expect("non-durable Delay core module validates");
+
+        let mut next_function_index = 0;
+        let mut build_source_index = None;
+        let mut delay_duration_index = None;
+        let mut durable_sleep_checkpoint_index = None;
+        let mut blocking_sleep_index = None;
+        let mut delay_index = None;
+        let mut apply_mapping_index = None;
+        let mut saw_delay_id = false;
+        let mut saw_mapping_id = false;
+        let mut run_calls = Vec::new();
+        let mut code_body_index = 0;
+
+        for payload in Parser::new(0).parse_all(&core) {
+            match payload.expect("core wasm payload") {
+                Payload::ImportSection(reader) => {
+                    for import in reader.into_imports() {
+                        let import = import.expect("core import");
+                        if matches!(import.ty, TypeRef::Func(_)) {
+                            match (import.module, import.name) {
+                                ("cm32p2|runtara:workflow-stdlib/json@0.1", "build-source") => {
+                                    build_source_index = Some(next_function_index)
+                                }
+                                (
+                                    "cm32p2|runtara:workflow-stdlib/json@0.1",
+                                    "delay-duration-ms",
+                                ) => delay_duration_index = Some(next_function_index),
+                                (
+                                    "cm32p2|runtara:workflow-runtime/runtime@0.1",
+                                    "durable-sleep-checkpoint",
+                                ) => durable_sleep_checkpoint_index = Some(next_function_index),
+                                (
+                                    "cm32p2|runtara:workflow-runtime/runtime@0.1",
+                                    "blocking-sleep",
+                                ) => blocking_sleep_index = Some(next_function_index),
+                                ("cm32p2|runtara:workflow-stdlib/json@0.1", "delay") => {
+                                    delay_index = Some(next_function_index)
+                                }
+                                ("cm32p2|runtara:workflow-stdlib/json@0.1", "apply-mapping") => {
+                                    apply_mapping_index = Some(next_function_index)
+                                }
+                                _ => {}
+                            }
+                            next_function_index += 1;
+                        }
+                    }
+                }
+                Payload::CodeSectionEntry(body) => {
+                    if code_body_index == 0 {
+                        for operator in body.get_operators_reader().expect("operators") {
+                            match operator.expect("operator") {
+                                Operator::Call { function_index } => run_calls.push(function_index),
+                                Operator::I32Const { value } => {
+                                    if value == *delay_id as i32 {
+                                        saw_delay_id = true;
+                                    }
+                                    if value == *mapping_id as i32 {
+                                        saw_mapping_id = true;
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                    code_body_index += 1;
+                }
+                _ => {}
+            }
+        }
+
+        let build_source_index = build_source_index.expect("build-source import");
+        let delay_duration_index = delay_duration_index.expect("delay-duration-ms import");
+        let durable_sleep_checkpoint_index =
+            durable_sleep_checkpoint_index.expect("durable-sleep-checkpoint import");
+        let blocking_sleep_index = blocking_sleep_index.expect("blocking-sleep import");
+        let delay_index = delay_index.expect("delay import");
+        let apply_mapping_index = apply_mapping_index.expect("apply-mapping import");
+        let delay_duration_position = run_calls
+            .iter()
+            .position(|&index| index == delay_duration_index)
+            .expect("Delay duration call");
+        let blocking_sleep_position = run_calls
+            .iter()
+            .position(|&index| index == blocking_sleep_index)
+            .expect("blocking sleep call");
+        let delay_position = run_calls
+            .iter()
+            .position(|&index| index == delay_index)
+            .expect("Delay output call");
+        let finish_position = run_calls
+            .iter()
+            .position(|&index| index == apply_mapping_index)
+            .expect("Finish mapping call");
+
+        assert_eq!(
+            run_calls
+                .iter()
+                .filter(|&&index| index == build_source_index)
+                .count(),
+            2,
+            "Delay run should rebuild source after updating steps context"
+        );
+        assert!(
+            !run_calls.contains(&durable_sleep_checkpoint_index),
+            "non-durable Delay must not call durable sleep checkpoint"
+        );
+        assert!(
+            delay_duration_position < blocking_sleep_position,
+            "Delay duration must be resolved before blocking sleep"
+        );
+        assert!(
+            blocking_sleep_position < delay_position,
+            "Delay output should be stored after blocking sleep"
         );
         assert!(
             delay_position < finish_position,

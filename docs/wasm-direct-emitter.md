@@ -233,8 +233,9 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   workflow completion. Direct Agent lowering now uses these checkpoint,
   retry-attempt, and lifecycle-signal pieces internally. Durable Agent public
   support is enabled for workflows without Agent timeout, compensation, or
-  breakpoints; durable Delay support is now lowered, while non-durable Delay,
-  Delay breakpoints, and crash/resume differential tests remain pending.
+  breakpoints; Delay support is now lowered for durable and non-durable normal
+  flow, while Delay breakpoints and crash/resume differential tests remain
+  pending.
 - The shared stdlib now exposes `agent-cache-key`, which centralizes the
   generated Rust-compatible durable Agent key shape using `_workflow_id`,
   `_cache_key_prefix`, and `_loop_indices`. The direct core has an internal
@@ -272,14 +273,14 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   `runtime.blocking-sleep`. The emitted non-durable path does not call
   checkpoint lookup/write, durable sleep, retry sleep-key construction, or
   retry-attempt recording, matching `#[resilient(durable = false)]`.
-- Durable Delay normal flow is now public in the direct emitter. The manifest
-  records `Delay` configs, the shared stdlib resolves `durationMs` through the
-  same mapping evaluator and emits the generated Rust-compatible
-  `steps.<stepId>.duration_ms` shape, and the direct core calls
-  `runtime.durable-sleep-checkpoint(stepId, [], durationMs)` before rebuilding
-  source and continuing to the next step. Dynamic durations are covered.
-  Non-durable Delay remains gated because generated Rust uses blocking
-  `std::thread::sleep`; Delay breakpoints remain gated.
+- Delay normal flow is now public in the direct emitter for durable and
+  non-durable workflows. The manifest records `Delay` configs, the shared
+  stdlib resolves `durationMs` through the same mapping evaluator and emits the
+  generated Rust-compatible `steps.<stepId>.duration_ms` shape. Durable Delay
+  calls `runtime.durable-sleep-checkpoint(stepId, [], durationMs)`;
+  non-durable Delay calls `runtime.blocking-sleep(durationMs)`. Both paths
+  rebuild source and continue to the next step. Dynamic durations are covered.
+  Delay breakpoints remain gated.
 
 ## Final Goal
 
@@ -1645,9 +1646,10 @@ Implementation steps:
      (`steps.<stepId>.duration_ms`): done through `stdlib.delay`;
    - durable sleep: done through
      `runtime.durable-sleep-checkpoint(stepId, [], durationMs)`;
-   - public support gate: enabled for graph/step durable Delay without
+   - non-durable blocking sleep parity: done through
+     `runtime.blocking-sleep(durationMs)`;
+   - public support gate: enabled for durable and non-durable Delay without
      breakpoints;
-   - non-durable blocking sleep parity: pending and gated;
    - Delay breakpoints: pending and gated;
    - host-level crash/resume differential tests: pending.
 6. Add crash/resume tests:
