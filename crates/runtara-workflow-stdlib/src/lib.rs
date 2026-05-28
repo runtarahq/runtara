@@ -318,6 +318,22 @@ mod component {
             ))
         }
 
+        fn agent_retry_delay_ms(
+            attempt_number: u32,
+            total_attempts: u32,
+            base_delay_ms: u64,
+            max_delay_ms: u64,
+            retry_after_ms: Option<u64>,
+        ) -> Result<u64, String> {
+            Ok(direct_json::DirectJsonManifest::agent_retry_delay_ms(
+                attempt_number,
+                total_attempts,
+                base_delay_ms,
+                max_delay_ms,
+                retry_after_ms,
+            ))
+        }
+
         fn agent_error_info(
             code: String,
             message: String,

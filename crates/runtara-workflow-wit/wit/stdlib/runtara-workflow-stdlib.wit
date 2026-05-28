@@ -104,6 +104,14 @@ interface json {
         attempt-number: u32,
     ) -> result<list<u8>, string>;
 
+    agent-retry-delay-ms: func(
+        attempt-number: u32,
+        total-attempts: u32,
+        base-delay-ms: u64,
+        max-delay-ms: u64,
+        retry-after-ms: option<u64>,
+    ) -> result<u64, string>;
+
     agent-error-info: func(
         code: string,
         message: string,

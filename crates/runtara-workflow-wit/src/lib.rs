@@ -58,6 +58,7 @@ mod tests {
             "agent-connection-input",
             "agent-cache-key",
             "agent-retry-sleep-key",
+            "agent-retry-delay-ms",
             "agent-error-info",
             "agent-retry-error-info",
             "agent-error",

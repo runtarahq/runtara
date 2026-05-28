@@ -1296,6 +1296,68 @@ pub mod exports {
                 }
                 #[doc(hidden)]
                 #[allow(non_snake_case)]
+                pub unsafe fn _export_agent_retry_delay_ms_cabi<T: Guest>(
+                    arg0: i32,
+                    arg1: i32,
+                    arg2: i64,
+                    arg3: i64,
+                    arg4: i32,
+                    arg5: i64,
+                ) -> *mut u8 {
+                    #[cfg(target_arch = "wasm32")] _rt::run_ctors_once();
+                    let result0 = T::agent_retry_delay_ms(
+                        arg0 as u32,
+                        arg1 as u32,
+                        arg2 as u64,
+                        arg3 as u64,
+                        match arg4 {
+                            0 => None,
+                            1 => {
+                                let e = arg5 as u64;
+                                Some(e)
+                            }
+                            _ => _rt::invalid_enum_discriminant(),
+                        },
+                    );
+                    let ptr1 = (&raw mut _RET_AREA.0).cast::<u8>();
+                    match result0 {
+                        Ok(e) => {
+                            *ptr1.add(0).cast::<u8>() = (0i32) as u8;
+                            *ptr1.add(8).cast::<i64>() = _rt::as_i64(e);
+                        }
+                        Err(e) => {
+                            *ptr1.add(0).cast::<u8>() = (1i32) as u8;
+                            let vec2 = (e.into_bytes()).into_boxed_slice();
+                            let ptr2 = vec2.as_ptr().cast::<u8>();
+                            let len2 = vec2.len();
+                            ::core::mem::forget(vec2);
+                            *ptr1
+                                .add(8 + 1 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>() = len2;
+                            *ptr1.add(8).cast::<*mut u8>() = ptr2.cast_mut();
+                        }
+                    };
+                    ptr1
+                }
+                #[doc(hidden)]
+                #[allow(non_snake_case)]
+                pub unsafe fn __post_return_agent_retry_delay_ms<T: Guest>(
+                    arg0: *mut u8,
+                ) {
+                    let l0 = i32::from(*arg0.add(0).cast::<u8>());
+                    match l0 {
+                        0 => {}
+                        _ => {
+                            let l1 = *arg0.add(8).cast::<*mut u8>();
+                            let l2 = *arg0
+                                .add(8 + 1 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>();
+                            _rt::cabi_dealloc(l1, l2, 1);
+                        }
+                    }
+                }
+                #[doc(hidden)]
+                #[allow(non_snake_case)]
                 pub unsafe fn _export_agent_error_info_cabi<T: Guest>(
                     arg0: *mut u8,
                     arg1: usize,
@@ -2028,6 +2090,13 @@ pub mod exports {
                         checkpoint_id: _rt::String,
                         attempt_number: u32,
                     ) -> Result<_rt::Vec<u8>, _rt::String>;
+                    fn agent_retry_delay_ms(
+                        attempt_number: u32,
+                        total_attempts: u32,
+                        base_delay_ms: u64,
+                        max_delay_ms: u64,
+                        retry_after_ms: Option<u64>,
+                    ) -> Result<u64, _rt::String>;
                     fn agent_error_info(
                         code: _rt::String,
                         message: _rt::String,
@@ -2243,6 +2312,17 @@ pub mod exports {
                         mut u8,) { unsafe { $($path_to_types)*::
                         __post_return_agent_retry_sleep_key::<$ty > (arg0) } } #[unsafe
                         (export_name =
+                        "runtara:workflow-stdlib/json@0.1.0#agent-retry-delay-ms")]
+                        unsafe extern "C" fn export_agent_retry_delay_ms(arg0 : i32, arg1
+                        : i32, arg2 : i64, arg3 : i64, arg4 : i32, arg5 : i64,) -> * mut
+                        u8 { unsafe { $($path_to_types)*::
+                        _export_agent_retry_delay_ms_cabi::<$ty > (arg0, arg1, arg2,
+                        arg3, arg4, arg5) } } #[unsafe (export_name =
+                        "cabi_post_runtara:workflow-stdlib/json@0.1.0#agent-retry-delay-ms")]
+                        unsafe extern "C" fn _post_return_agent_retry_delay_ms(arg0 : *
+                        mut u8,) { unsafe { $($path_to_types)*::
+                        __post_return_agent_retry_delay_ms::<$ty > (arg0) } } #[unsafe
+                        (export_name =
                         "runtara:workflow-stdlib/json@0.1.0#agent-error-info")] unsafe
                         extern "C" fn export_agent_error_info(arg0 : * mut u8, arg1 :
                         usize, arg2 : * mut u8, arg3 : usize, arg4 : * mut u8, arg5 :
@@ -2326,8 +2406,7 @@ pub mod exports {
                 }
                 #[doc(hidden)]
                 pub(crate) use __export_runtara_workflow_stdlib_json_0_1_0_cabi;
-                #[cfg_attr(target_pointer_width = "64", repr(align(8)))]
-                #[cfg_attr(target_pointer_width = "32", repr(align(4)))]
+                #[repr(align(8))]
                 struct _RetArea(
                     [::core::mem::MaybeUninit<
                         u8,
@@ -2364,6 +2443,36 @@ mod _rt {
             String::from_utf8_unchecked(bytes)
         }
     }
+    pub unsafe fn invalid_enum_discriminant<T>() -> T {
+        if cfg!(debug_assertions) {
+            panic!("invalid enum discriminant")
+        } else {
+            unsafe { core::hint::unreachable_unchecked() }
+        }
+    }
+    pub fn as_i64<T: AsI64>(t: T) -> i64 {
+        t.as_i64()
+    }
+    pub trait AsI64 {
+        fn as_i64(self) -> i64;
+    }
+    impl<'a, T: Copy + AsI64> AsI64 for &'a T {
+        fn as_i64(self) -> i64 {
+            (*self).as_i64()
+        }
+    }
+    impl AsI64 for i64 {
+        #[inline]
+        fn as_i64(self) -> i64 {
+            self as i64
+        }
+    }
+    impl AsI64 for u64 {
+        #[inline]
+        fn as_i64(self) -> i64 {
+            self as i64
+        }
+    }
     pub unsafe fn bool_lift(val: u8) -> bool {
         if cfg!(debug_assertions) {
             match val {
@@ -2373,13 +2482,6 @@ mod _rt {
             }
         } else {
             val != 0
-        }
-    }
-    pub unsafe fn invalid_enum_discriminant<T>() -> T {
-        if cfg!(debug_assertions) {
-            panic!("invalid enum discriminant")
-        } else {
-            unsafe { core::hint::unreachable_unchecked() }
         }
     }
     extern crate alloc as alloc_crate;
@@ -2419,9 +2521,9 @@ pub(crate) use __export_workflow_stdlib_impl as export;
 #[unsafe(link_section = "component-type:wit-bindgen:0.41.0:runtara:workflow-stdlib@0.1.0:workflow-stdlib:encoded world")]
 #[doc(hidden)]
 #[allow(clippy::octal_escapes)]
-pub static __WIT_BINDGEN_COMPONENT_TYPE: [u8; 1486] = *b"\
-\0asm\x0d\0\x01\0\0\x19\x16wit-component-encoding\x04\0\x07\xc8\x0a\x01A\x02\x01\
-A\x02\x01B8\x01p}\x01r\x03\x07payload\0\x09retryable\x7f\x0crate-limited\x7f\x04\
+pub static __WIT_BINDGEN_COMPONENT_TYPE: [u8; 1599] = *b"\
+\0asm\x0d\0\x01\0\0\x19\x16wit-component-encoding\x04\0\x07\xb9\x0b\x01A\x02\x01\
+A\x02\x01B;\x01p}\x01r\x03\x07payload\0\x09retryable\x7f\x0crate-limited\x7f\x04\
 \0\x11agent-retry-error\x03\0\x01\x01j\0\x01s\x01@\x01\x08manifest\0\0\x03\x04\0\
 \x0dinit-manifest\x01\x04\x01j\x01\0\x01s\x01@\x03\x04data\0\x09variables\0\x05s\
 teps\0\0\x05\x04\0\x0cbuild-source\x01\x06\x01@\x02\x0amapping-idy\x06source\0\0\
@@ -2437,20 +2539,22 @@ steps\0\0\x05\x04\0\x0berror-steps\x01\x10\x01@\x02\x08group-idy\x06source\0\0\x
 \0\x0cagent-output\x01\x12\x01@\x02\x08agent-idy\x05input\0\0\x05\x04\0\x14agent\
 -validate-input\x01\x13\x04\0\x16agent-connection-input\x01\x13\x01@\x02\x08agen\
 t-idy\x06source\0\0\x05\x04\0\x0fagent-cache-key\x01\x14\x01@\x02\x0dcheckpoint-\
-ids\x0eattempt-numbery\0\x05\x04\0\x15agent-retry-sleep-key\x01\x15\x01kw\x01ks\x01\
-@\x07\x04codes\x07messages\x08categorys\x08severitys\x09retryable\x7f\x0eretry-a\
-fter-ms\x16\x0aattributes\x17\0\x05\x04\0\x10agent-error-info\x01\x18\x01j\x01\x02\
-\x01s\x01@\x07\x04codes\x07messages\x08categorys\x08severitys\x09retryable\x7f\x0e\
-retry-after-ms\x16\x0aattributes\x17\0\x19\x04\0\x16agent-retry-error-info\x01\x1a\
-\x01@\x08\x08agent-idy\x04codes\x07messages\x08categorys\x08severitys\x09retryab\
-le\x7f\x0eretry-after-ms\x16\x0aattributes\x17\0\x05\x04\0\x0bagent-error\x01\x1b\
-\x01@\x02\x08agent-idy\x0aerror-info\0\0\x05\x04\0\x15agent-error-from-info\x01\x1c\
-\x01@\x02\x08agent-idy\x05error\0\0\x05\x04\0\x11agent-debug-error\x01\x1d\x01@\x02\
-\x07step-ids\x06source\0\0\x05\x04\0\x10step-debug-start\x01\x1e\x04\0\x0estep-d\
-ebug-end\x01\x1e\x04\0\"runtara:workflow-stdlib/json@0.1.0\x05\0\x04\0-runtara:w\
-orkflow-stdlib/workflow-stdlib@0.1.0\x04\0\x0b\x15\x01\0\x0fworkflow-stdlib\x03\0\
-\0\0G\x09producers\x01\x0cprocessed-by\x02\x0dwit-component\x070.227.1\x10wit-bi\
-ndgen-rust\x060.41.0";
+ids\x0eattempt-numbery\0\x05\x04\0\x15agent-retry-sleep-key\x01\x15\x01kw\x01j\x01\
+w\x01s\x01@\x05\x0eattempt-numbery\x0etotal-attemptsy\x0dbase-delay-msw\x0cmax-d\
+elay-msw\x0eretry-after-ms\x16\0\x17\x04\0\x14agent-retry-delay-ms\x01\x18\x01ks\
+\x01@\x07\x04codes\x07messages\x08categorys\x08severitys\x09retryable\x7f\x0eret\
+ry-after-ms\x16\x0aattributes\x19\0\x05\x04\0\x10agent-error-info\x01\x1a\x01j\x01\
+\x02\x01s\x01@\x07\x04codes\x07messages\x08categorys\x08severitys\x09retryable\x7f\
+\x0eretry-after-ms\x16\x0aattributes\x19\0\x1b\x04\0\x16agent-retry-error-info\x01\
+\x1c\x01@\x08\x08agent-idy\x04codes\x07messages\x08categorys\x08severitys\x09ret\
+ryable\x7f\x0eretry-after-ms\x16\x0aattributes\x19\0\x05\x04\0\x0bagent-error\x01\
+\x1d\x01@\x02\x08agent-idy\x0aerror-info\0\0\x05\x04\0\x15agent-error-from-info\x01\
+\x1e\x01@\x02\x08agent-idy\x05error\0\0\x05\x04\0\x11agent-debug-error\x01\x1f\x01\
+@\x02\x07step-ids\x06source\0\0\x05\x04\0\x10step-debug-start\x01\x20\x04\0\x0es\
+tep-debug-end\x01\x20\x04\0\"runtara:workflow-stdlib/json@0.1.0\x05\0\x04\0-runt\
+ara:workflow-stdlib/workflow-stdlib@0.1.0\x04\0\x0b\x15\x01\0\x0fworkflow-stdlib\
+\x03\0\0\0G\x09producers\x01\x0cprocessed-by\x02\x0dwit-component\x070.227.1\x10\
+wit-bindgen-rust\x060.41.0";
 #[inline(never)]
 #[doc(hidden)]
 pub fn __link_custom_section_describing_imports() {

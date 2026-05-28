@@ -247,9 +247,10 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   calls gated by graph `rateLimitBudgetMs`, and checkpoints successful output.
   It also classifies generated-Rust-compatible rate-limit error codes and
   charges rate-limited errors without `retryAfterMs` against the budget using
-  the effective base retry delay. Public support remains gated until generic
-  exponential backoff sleep, timeout, pause/cancel/shutdown acknowledgement,
-  and crash/resume parity are covered.
+  the effective base retry delay. Generic retry backoff delay calculation now
+  lives in stdlib and direct core sleeps through `runtime.durable-sleep` before
+  recording retry attempts. Public support remains gated until timeout,
+  pause/cancel/shutdown acknowledgement, and crash/resume parity are covered.
 
 ## Final Goal
 
@@ -738,6 +739,13 @@ agent-retry-sleep-key: func(
   checkpoint-id: string,
   attempt-number: u32,
 ) -> result<list<u8>, string>;
+agent-retry-delay-ms: func(
+  attempt-number: u32,
+  total-attempts: u32,
+  base-delay-ms: u64,
+  max-delay-ms: u64,
+  retry-after-ms: option<u64>,
+) -> result<u64, string>;
 agent-error-info: func(
   code: string,
   message: string,
@@ -1467,9 +1475,14 @@ Current status:
   classifying `RATE_LIMITED`/`HTTP_RATE_LIMITED` codes and permanent
   categories. The direct retry decision uses that classification so
   rate-limited errors without `retryAfterMs` consume the effective base retry
-  delay from the same `rateLimitBudgetMs` budget. Support remains gated because
-  generic backoff sleeping, timeout, pause/cancel/shutdown acknowledgement, and
-  crash/resume parity are still pending.
+  delay from the same `rateLimitBudgetMs` budget. The shared stdlib also
+  exposes `agent-retry-delay-ms`, which centralizes the generated Rust
+  exponential backoff and cap formula; direct core calls
+  `runtime.durable-sleep` for generic backoff retries and
+  `runtime.durable-sleep-checkpoint` for typed `retryAfterMs` waits before
+  retry-attempt recording. Support remains gated because timeout,
+  pause/cancel/shutdown acknowledgement, and crash/resume parity are still
+  pending.
 
 Implementation steps:
 
@@ -1503,7 +1516,10 @@ Implementation steps:
    - rate-limit classification and base-delay budget accounting without
      `retryAfterMs`: internal lowering in place, still gated from public
      support;
-   - generic exponential backoff sleep and timeout behavior: pending.
+   - generic exponential backoff sleep: internal lowering in place through
+     `stdlib.agent-retry-delay-ms` and `runtime.durable-sleep`, still gated
+     from public support;
+   - timeout behavior: pending.
 5. Extend `onError` routing beyond the first non-durable Agent subset when
    additional failing step types are lowered.
 6. Preserve current retry policy shape with direct control flow plus
@@ -1547,7 +1563,7 @@ Implementation steps:
      `retryAfterMs`;
    - rate-limit classification and base-delay budget scope: done for Agent
      typed WIT errors;
-   - generic backoff sleep scope: pending.
+   - generic backoff sleep scope: done for Agent typed WIT errors.
 4. Migrate durable `Agent`:
    - no-retry checkpoint lookup/write: internal lowering done;
    - retry loop and retry-attempt recording: internal lowering done;
@@ -1556,7 +1572,7 @@ Implementation steps:
    - typed `retryAfterMs` cumulative budget: internal lowering done;
    - rate-limit classification and no-`retryAfterMs` budget accounting:
      internal lowering done;
-   - generic backoff sleep parity: pending;
+   - generic backoff sleep parity: internal lowering done;
    - pause/cancel/shutdown acknowledgement parity: pending;
    - crash/resume differential tests: pending.
 5. Migrate `Delay`.

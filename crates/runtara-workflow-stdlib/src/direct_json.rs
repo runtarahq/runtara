@@ -287,6 +287,25 @@ impl DirectJsonManifest {
         format!("{checkpoint_id}::retry_sleep::{attempt_number}").into_bytes()
     }
 
+    /// Compute the generated-code-compatible delay for the next Agent retry.
+    pub fn agent_retry_delay_ms(
+        attempt_number: u32,
+        total_attempts: u32,
+        base_delay_ms: u64,
+        max_delay_ms: u64,
+        retry_after_ms: Option<u64>,
+    ) -> u64 {
+        if let Some(retry_after_ms) = retry_after_ms {
+            return retry_after_ms.min(max_delay_ms);
+        }
+
+        let backoff_attempt = attempt_number.min(total_attempts);
+        let delay_multiplier = 2u64.pow(backoff_attempt.saturating_sub(2));
+        base_delay_ms
+            .saturating_mul(delay_multiplier)
+            .min(max_delay_ms)
+    }
+
     /// Convert a WIT `error-info` into the raw JSON envelope used for retries.
     #[allow(clippy::too_many_arguments)]
     pub fn agent_error_info(
@@ -2984,6 +3003,34 @@ mod tests {
         assert_eq!(
             String::from_utf8(key).expect("utf8"),
             "wf-42::agent::utils::normalize::agent::[1]::retry_sleep::2"
+        );
+    }
+
+    #[test]
+    fn agent_retry_delay_matches_generated_backoff_shape() {
+        assert_eq!(
+            DirectJsonManifest::agent_retry_delay_ms(2, 4, 1_000, 60_000, None),
+            1_000
+        );
+        assert_eq!(
+            DirectJsonManifest::agent_retry_delay_ms(3, 4, 1_000, 60_000, None),
+            2_000
+        );
+        assert_eq!(
+            DirectJsonManifest::agent_retry_delay_ms(4, 4, 1_000, 60_000, None),
+            4_000
+        );
+        assert_eq!(
+            DirectJsonManifest::agent_retry_delay_ms(10, 4, 1_000, 3_000, None),
+            3_000
+        );
+        assert_eq!(
+            DirectJsonManifest::agent_retry_delay_ms(2, 4, 1_000, 60_000, Some(1_500)),
+            1_500
+        );
+        assert_eq!(
+            DirectJsonManifest::agent_retry_delay_ms(2, 4, 1_000, 1_000, Some(1_500)),
+            1_000
         );
     }
 
