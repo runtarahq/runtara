@@ -723,6 +723,7 @@ pub async fn handle_stop_instance(
         started_at: container.started_at,
         spawned_pid: container.pid.map(|p| p as u32),
         child: None,
+        metrics: None,
     };
 
     if let Err(e) = state.runner.stop(&handle).await {

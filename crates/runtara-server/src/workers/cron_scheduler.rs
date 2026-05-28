@@ -174,10 +174,19 @@ fn should_trigger_run(trigger: &InvocationTrigger, now: DateTime<Utc>) -> Result
         .and_then(|e| e.as_str())
         .ok_or_else(|| "Missing 'expression' in trigger configuration".to_string())?;
 
+    let normalized_cron_expr = normalize_cron_expression(cron_expr)?;
+
     // Parse cron expression
-    let cron = Cron::new(cron_expr)
-        .parse()
-        .map_err(|e| format!("Invalid cron expression '{}': {}", cron_expr, e))?;
+    let cron = Cron::new(&normalized_cron_expr).parse().map_err(|e| {
+        if normalized_cron_expr == cron_expr {
+            format!("Invalid cron expression '{}': {}", cron_expr, e)
+        } else {
+            format!(
+                "Invalid cron expression '{}' (normalized to '{}'): {}",
+                cron_expr, normalized_cron_expr, e
+            )
+        }
+    })?;
 
     // Determine the reference time for finding next occurrence
     let reference_time = trigger.last_run.unwrap_or(trigger.created_at);
@@ -189,6 +198,20 @@ fn should_trigger_run(trigger: &InvocationTrigger, now: DateTime<Utc>) -> Result
 
     // Trigger should run if the next occurrence is at or before now
     Ok(next_occurrence <= now)
+}
+
+fn normalize_cron_expression(cron_expr: &str) -> Result<String, String> {
+    let fields: Vec<&str> = cron_expr.split_whitespace().collect();
+
+    match fields.len() {
+        5 => Ok(fields.join(" ")),
+        6 if fields[0] == "0" => Ok(fields[1..].join(" ")),
+        6 => Err(format!(
+            "Invalid cron expression '{}': seconds field '{}' is not supported; only leading zero seconds can be normalized",
+            cron_expr, fields[0]
+        )),
+        _ => Ok(cron_expr.trim().to_string()),
+    }
 }
 
 /// Publish a cron trigger event to the stream
@@ -290,5 +313,45 @@ mod tests {
         // Should be 10:31
         assert_eq!(next.hour(), 10);
         assert_eq!(next.minute(), 31);
+    }
+
+    #[test]
+    fn normalizes_zero_seconds_six_field_cron() {
+        assert_eq!(
+            normalize_cron_expression("0 0 6 * * *").unwrap(),
+            "0 6 * * *"
+        );
+    }
+
+    #[test]
+    fn leaves_five_field_cron_unchanged() {
+        assert_eq!(normalize_cron_expression("0 6 * * *").unwrap(), "0 6 * * *");
+    }
+
+    #[test]
+    fn rejects_non_zero_seconds_six_field_cron() {
+        let error = normalize_cron_expression("30 0 6 * * *").unwrap_err();
+        assert!(error.contains("seconds field '30' is not supported"));
+    }
+
+    #[test]
+    fn should_trigger_run_accepts_zero_seconds_six_field_cron() {
+        let created_at = Utc.with_ymd_and_hms(2026, 5, 28, 5, 59, 0).unwrap();
+        let now = Utc.with_ymd_and_hms(2026, 5, 28, 6, 0, 0).unwrap();
+        let trigger = InvocationTrigger {
+            id: "trigger-1".to_string(),
+            tenant_id: Some("tenant-1".to_string()),
+            workflow_id: "workflow-1".to_string(),
+            trigger_type: crate::api::dto::triggers::TriggerType::Cron,
+            active: true,
+            configuration: Some(json!({"expression": "0 0 6 * * *"})),
+            created_at,
+            last_run: None,
+            updated_at: created_at,
+            remote_tenant_id: None,
+            single_instance: false,
+        };
+
+        assert!(should_trigger_run(&trigger, now).unwrap());
     }
 }

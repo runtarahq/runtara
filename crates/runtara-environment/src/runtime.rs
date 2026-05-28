@@ -636,6 +636,7 @@ impl EnvironmentRuntime {
                 started_at: info.started_at,
                 spawned_pid: info.pid.map(|p| p as u32),
                 child: None,
+                metrics: None,
             };
             if let Err(e) = self.state.runner.stop(&handle).await {
                 warn!(

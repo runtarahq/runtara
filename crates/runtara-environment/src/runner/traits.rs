@@ -110,6 +110,8 @@ pub struct RunnerHandle {
     /// to detect process exit. This ensures the exit code is available and
     /// the process has fully completed before crash detection runs.
     pub child: Option<std::sync::Arc<tokio::sync::Mutex<Option<tokio::process::Child>>>>,
+    /// Resource metrics sampled while the process is alive.
+    pub metrics: Option<std::sync::Arc<tokio::sync::Mutex<ContainerMetrics>>>,
 }
 
 /// Resource metrics collected from the instance execution.

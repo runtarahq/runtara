@@ -156,6 +156,7 @@ impl Runner for MockRunner {
             started_at: Utc::now(),
             spawned_pid: None, // Mock doesn't spawn real processes
             child: None,
+            metrics: None,
         };
 
         let running = Arc::new(AtomicBool::new(true));

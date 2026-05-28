@@ -22,6 +22,9 @@ use runtara_environment::runtime::EnvironmentRuntime;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // Load .env before observability so OTEL_* and RUST_LOG settings apply.
+    let dotenv_result = dotenvy::dotenv();
+
     // Initialize logging
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -29,9 +32,12 @@ async fn main() -> anyhow::Result<()> {
                 .unwrap_or_else(|_| "runtara_environment=info".into()),
         )
         .init();
+    if let Err(error) = runtara_core::observability::init_metrics_telemetry("runtara-environment") {
+        warn!(%error, "Failed to initialize OTLP metrics exporter");
+    }
 
     // Load .env file if present
-    if let Err(e) = dotenvy::dotenv() {
+    if let Err(e) = dotenv_result {
         warn!("No .env file loaded: {}", e);
     }
 
