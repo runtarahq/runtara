@@ -2828,6 +2828,7 @@ fn emit_run_plan_mapping(
                 output_ptr_local,
                 output_len_local,
                 workflow_error_kind,
+                failure_target,
             );
         }
         DirectRunPlan::Conditional {
@@ -4011,6 +4012,7 @@ fn emit_error_plan(
     output_ptr_local: u32,
     output_len_local: u32,
     workflow_error_kind: &DirectDataSegment,
+    failure_target: Option<DirectFailureTarget>,
 ) {
     emit_step_debug_event(
         body,
@@ -4060,12 +4062,22 @@ fn emit_error_plan(
     return_if_retptr_error(body);
     load_retptr_list(body, output_ptr_local, output_len_local);
 
-    body.instruction(&Instruction::LocalGet(output_ptr_local));
-    body.instruction(&Instruction::LocalGet(output_len_local));
-    push_retptr_arg(body);
-    body.instruction(&Instruction::Call(indices.runtime_fail));
-    body.instruction(&Instruction::I32Const(1));
-    body.instruction(&Instruction::Return);
+    if let Some(failure_target) = failure_target {
+        emit_split_append_error_payload_and_continue(
+            body,
+            indices,
+            failure_target,
+            output_ptr_local,
+            output_len_local,
+        );
+    } else {
+        body.instruction(&Instruction::LocalGet(output_ptr_local));
+        body.instruction(&Instruction::LocalGet(output_len_local));
+        push_retptr_arg(body);
+        body.instruction(&Instruction::Call(indices.runtime_fail));
+        body.instruction(&Instruction::I32Const(1));
+        body.instruction(&Instruction::Return);
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -5654,6 +5666,7 @@ mod tests {
             "error" => include_str!("../../tests/fixtures/error_direct_simple.json"),
             "edge_condition" => include_str!("../../tests/fixtures/edge_condition_priority.json"),
             "split" => include_str!("../../tests/fixtures/split_workflow.json"),
+            "split_with_error" => include_str!("../../tests/fixtures/split_with_error.json"),
             "split_with_schemas" => include_str!("../../tests/fixtures/split_with_schemas.json"),
             "split_with_schemas_failing" => {
                 include_str!("../../tests/fixtures/split_with_schemas_failing.json")
@@ -9712,6 +9725,93 @@ mod tests {
         assert!(
             saw_continue_after_split_append_error,
             "Split dontStop validation failure path should continue the loop"
+        );
+    }
+
+    #[test]
+    fn direct_core_run_collects_split_error_steps_when_dont_stop_is_enabled() {
+        let graph = fixture("split_with_error");
+        let manifest = build_direct_workflow_manifest(&graph).expect("manifest");
+        let manifest_json = manifest.to_canonical_json().expect("manifest json");
+        let core_config =
+            DirectCoreConfig::new(&manifest, &manifest_json, false).expect("core config");
+
+        let DirectRunPlan::Split {
+            dont_stop_on_failed,
+            nested_plan,
+            ..
+        } = &core_config.run_plan
+        else {
+            panic!("expected Split run plan");
+        };
+        assert!(*dont_stop_on_failed);
+        assert!(matches!(nested_plan.as_ref(), DirectRunPlan::Error { .. }));
+
+        let (resolve, world) =
+            build_direct_component_resolve_with_agents(&manifest.feature_summary.agent_ids)
+                .expect("agent resolve");
+        let core = emit_direct_core_module(&resolve, world, &core_config).expect("core module");
+        Validator::new()
+            .validate_all(&core)
+            .expect("Split Error dontStop core module validates");
+
+        let mut next_function_index = 0;
+        let mut error_index = None;
+        let mut split_append_error_index = None;
+        let mut saw_error_call = false;
+        let mut saw_split_append_error_after_error = false;
+        let mut code_body_index = 0;
+
+        for payload in Parser::new(0).parse_all(&core) {
+            match payload.expect("core wasm payload") {
+                Payload::ImportSection(reader) => {
+                    for import in reader.into_imports() {
+                        let import = import.expect("core import");
+                        if import.module.contains("runtara:workflow-stdlib/json")
+                            && import.name == "error"
+                        {
+                            error_index = Some(next_function_index);
+                        }
+                        if import.module.contains("runtara:workflow-stdlib/json")
+                            && import.name == "split-append-error"
+                        {
+                            split_append_error_index = Some(next_function_index);
+                        }
+                        if matches!(import.ty, TypeRef::Func(_)) {
+                            next_function_index += 1;
+                        }
+                    }
+                }
+                Payload::CodeSectionEntry(body) => {
+                    if code_body_index == 0 {
+                        for operator in body.get_operators_reader().expect("operators").into_iter()
+                        {
+                            match operator.expect("operator") {
+                                Operator::Call { function_index }
+                                    if Some(function_index) == error_index =>
+                                {
+                                    saw_error_call = true;
+                                }
+                                Operator::Call { function_index }
+                                    if Some(function_index) == split_append_error_index =>
+                                {
+                                    if saw_error_call {
+                                        saw_split_append_error_after_error = true;
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                    code_body_index += 1;
+                }
+                _ => {}
+            }
+        }
+
+        assert!(
+            saw_split_append_error_after_error,
+            "Split dontStop run should append explicit Error step failures"
         );
     }
 
