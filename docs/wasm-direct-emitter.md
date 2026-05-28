@@ -87,13 +87,15 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   composes the simple `Finish` fixture plus flat and nested `Conditional`
   fixtures plus simple `Filter -> Finish`, value `Switch -> Finish`, routing
   `Switch`, `GroupBy -> Finish`, durable/non-durable `Delay -> Finish`,
+  durable/non-durable `Agent -> Finish`, cached durable Agent replay,
   `Log -> Finish`, terminal `Error`, and normal-edge condition-priority
   fixtures, runs each final
   `workflow.wasm` under
   `wasmtime run --wasi http --wasi inherit-network`, and asserts the fake SDK
   receives the expected mapped completion payloads for the Finish path,
   conditional branches, Filter output, value Switch output, routing Switch route
-  leaves, GroupBy output, Delay output plus durable sleep traffic, Log custom
+  leaves, GroupBy output, Delay output plus durable sleep traffic, Agent output
+  plus durable checkpoint traffic, cached Agent checkpoint replay, Log custom
   events, Error custom-event/failure payloads, and condition-priority/default
   routing.
 - `tests/direct_wasm_finish_parity.rs` now compares direct `Finish` mapping
@@ -271,8 +273,10 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   `runtime.checkpoint`, while the fresh branch still invokes the Agent and
   checkpoints only after success. The direct execution smoke server can preload
   SDK checkpoint responses and verifies cached Agent output flows through
-  `Finish` without a fresh Agent invocation. Full host-level crash/resume
-  differential tests remain pending.
+  `Finish` without a fresh Agent invocation. It also verifies a fresh durable
+  Agent performs lookup/invoke/save and a non-durable Agent performs no
+  checkpoint calls. Full host-level crash/resume differential tests remain
+  pending.
 - Non-durable Agent retry-loop lowering is now implemented. The direct core
   uses the same default retry counts and base delays as generated Rust, calls
   `stdlib.agent-retry-error-info` and `stdlib.agent-retry-delay-ms` for retry
@@ -1540,11 +1544,13 @@ Current status:
   signals continue. The public support gate accepts this durable Agent subset;
   timeout, compensation, and breakpoints remain rejected, and crash/resume
   differential tests remain pending.
-- Structural core Wasm coverage and a gated direct execution smoke now cover
-  the durable Agent cached-checkpoint replay branch. They prove the cached
-  branch does not invoke the Agent or save another checkpoint, that cached raw
-  Agent output still feeds the generated-compatible `steps` context, and that
-  fresh execution still saves only after invoke.
+- Structural core Wasm coverage and gated direct execution smokes now cover
+  durable and non-durable Agent execution. They prove the cached branch does
+  not invoke the Agent or save another checkpoint, that cached raw Agent output
+  still feeds the generated-compatible `steps` context, that fresh durable
+  execution performs lookup/invoke/save in order, that fresh execution still
+  saves only after invoke, and that non-durable Agent execution omits
+  checkpoint calls.
 - A structural core Wasm test now covers non-durable Agent default retry
   lowering. It proves the direct retry loop uses `runtime.blocking-sleep` and
   omits checkpoint, durable sleep, retry sleep-key, and retry-attempt calls.
@@ -1588,6 +1594,9 @@ Implementation steps:
    - non-durable retry loop parity: done through
      `stdlib.agent-retry-error-info`, `stdlib.agent-retry-delay-ms`, and
      `runtime.blocking-sleep`;
+   - fresh/cached host-level Agent execution smokes: done for durable
+     lookup/invoke/save, durable cached replay, and non-durable no-checkpoint
+     execution;
    - cached-checkpoint replay branch test: done at the emitted core Wasm level
      and in a gated direct execution smoke with preloaded SDK checkpoint state;
    - timeout behavior: pending.

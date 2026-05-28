@@ -940,6 +940,69 @@ fn direct_wasm_execute_non_durable_delay_reports_completion_without_sleep() {
 }
 
 #[test]
+fn direct_wasm_execute_durable_agent_invokes_and_saves_checkpoint() {
+    let Some(components_dir) = direct_e2e_components_dir() else {
+        return;
+    };
+    let workflow_id = "direct-wasm-execute-agent-fresh-checkpoint";
+    let checkpoint_id = format!("{workflow_id}::agent::utils::return-input::agent");
+
+    let result = run_direct_workflow_with_events(
+        &components_dir,
+        workflow_id,
+        AGENT_CACHED_REPLAY,
+        br#"{"value":"fresh-agent"}"#,
+    );
+
+    assert_eq!(
+        result.output_json,
+        serde_json::json!({ "result": "fresh-agent" })
+    );
+    assert_eq!(result.checkpoints.len(), 2);
+    let lookup = &result.checkpoints[0];
+    assert_eq!(lookup.checkpoint_id, checkpoint_id);
+    assert!(
+        lookup.state.is_empty(),
+        "fresh durable Agent should first perform a read-only checkpoint lookup"
+    );
+    let save = &result.checkpoints[1];
+    assert_eq!(save.checkpoint_id, checkpoint_id);
+    assert_eq!(save.state, br#"{"value":"fresh-agent"}"#);
+    assert!(
+        result.sleeps.is_empty(),
+        "successful durable Agent should not use durable sleep without retries"
+    );
+}
+
+#[test]
+fn direct_wasm_execute_non_durable_agent_invokes_without_checkpoint() {
+    let Some(components_dir) = direct_e2e_components_dir() else {
+        return;
+    };
+    let graph_json = non_durable_graph_json(AGENT_CACHED_REPLAY);
+
+    let result = run_direct_workflow_with_events(
+        &components_dir,
+        "direct-wasm-execute-agent-non-durable",
+        &graph_json,
+        br#"{"value":"fresh-agent"}"#,
+    );
+
+    assert_eq!(
+        result.output_json,
+        serde_json::json!({ "result": "fresh-agent" })
+    );
+    assert!(
+        result.checkpoints.is_empty(),
+        "non-durable Agent should not call runtime checkpoint APIs"
+    );
+    assert!(
+        result.sleeps.is_empty(),
+        "non-durable successful Agent should not sleep"
+    );
+}
+
+#[test]
 fn direct_wasm_execute_durable_agent_uses_cached_checkpoint() {
     let Some(components_dir) = direct_e2e_components_dir() else {
         return;
