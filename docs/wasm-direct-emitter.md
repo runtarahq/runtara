@@ -76,6 +76,11 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   composes the simple `Finish` fixture, runs the final `workflow.wasm` under
   `wasmtime run --wasi http --wasi inherit-network`, and asserts the fake SDK
   receives the expected mapped completion payload.
+- `tests/direct_wasm_finish_parity.rs` now compares direct `Finish` mapping
+  output against the current Rust-generated mapping contract for representative
+  fixture shapes: data passthrough, dotted `outputs.*` unwrap, templates,
+  composites, variables, step references, type hints, and defaults for missing
+  or `null` references.
 
 ## Final Goal
 
@@ -962,8 +967,10 @@ Current status:
 - A gated direct execution test now runs the composed finish-only artifact
   through the current environment runner shape and verifies the SDK completion
   payload.
-- Remaining work: add Finish parity fixtures against the Rust-generated path
-  and broaden graph lowering beyond the single-entry Finish shape.
+- Finish mapping parity fixtures now compare direct stdlib output against the
+  current Rust-generated mapping contract and cover the default-on-null
+  behavior that direct stdlib must preserve.
+- Remaining work: broaden graph lowering beyond the single-entry Finish shape.
 
 Implementation steps:
 

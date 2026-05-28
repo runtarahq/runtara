@@ -4759,6 +4759,7 @@ dependencies = [
  "quote",
  "runtara-agents",
  "runtara-dsl",
+ "runtara-workflow-stdlib",
  "runtara-workflow-wit",
  "serde",
  "serde_json",

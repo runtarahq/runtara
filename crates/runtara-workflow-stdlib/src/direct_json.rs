@@ -149,7 +149,10 @@ fn apply_reference(map: &Map<String, Value>, source: &Value) -> Result<Value, St
         .and_then(Value::as_str)
         .ok_or_else(|| "reference mapping value must be a string path".to_string())?;
     let default = map.get("default").cloned();
-    let value = lookup_source_path(source, path).unwrap_or_else(|| default.unwrap_or(Value::Null));
+    let value = match lookup_source_path(source, path) {
+        Some(Value::Null) | None => default.unwrap_or(Value::Null),
+        Some(value) => value,
+    };
     Ok(apply_type_hint(
         value,
         map.get("type").and_then(Value::as_str),
@@ -421,6 +424,11 @@ mod tests {
                 "type": "string",
                 "default": 42
             },
+            "nullFallback": {
+                "valueType": "reference",
+                "value": "data.nullish",
+                "default": "defaulted"
+            },
             "message": {
                 "valueType": "template",
                 "value": "hello {{ data.name }}"
@@ -441,7 +449,7 @@ mod tests {
         })))
         .expect("manifest");
         let source = build_source(
-            br#"{"name":"Ada"}"#,
+            br#"{"name":"Ada","nullish":null}"#,
             b"{}",
             br#"{"prev":{"outputs":{"first":"alpha"}}}"#,
         )
@@ -454,6 +462,7 @@ mod tests {
             output,
             json!({
                 "fallback": "42",
+                "nullFallback": "defaulted",
                 "message": "hello Ada",
                 "nested": {
                     "first": "alpha",
