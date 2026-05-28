@@ -41,6 +41,10 @@ Current implementation progress on `codex/wasm-direct-emitter`:
 - `runtara-workflow-wit` now defines the first checked-in workflow WIT
   contracts: `runtara:workflow-stdlib/json@0.1.0` for shared JSON semantics and
   `runtara:workflow-runtime/runtime@0.1.0` for SDK/runtime lifecycle calls.
+- `runtara-workflow-stdlib::direct_json` now contains the pure Rust
+  implementation behind the direct JSON stdlib contract: manifest mapping
+  lookup, source-envelope construction, mapping application, template rendering,
+  type hints, and Finish `outputs` unwrapping.
 - `direct_wasm::component` emits component-facing sidecars for static
   composition with separate stdlib and runtime components plus any required
   agents.
@@ -832,7 +836,7 @@ Current status:
   `runtara:workflow-runtime/runtime@0.1.0`, export `wasi:cli/run@0.2.3`,
   and statically compose stdlib, runtime, workflow logic, and required agents.
 - The current run entry delegates `Finish.inputMapping` semantics to the shared
-  stdlib. The stdlib implementation must honor mapping purpose metadata,
+  stdlib. The pure stdlib implementation now honors mapping purpose metadata,
   including the existing Finish-specific top-level `outputs` unwrap.
 - The manifest now assigns deterministic manifest-wide mapping IDs, and run
   lowering calls `stdlib.apply-mapping(mapping-id, source)` without relying on
@@ -889,9 +893,10 @@ Current status:
   `runtime.load-input`, `stdlib.build-source`, `stdlib.apply-mapping`, and
   `runtime.complete`, then propagates the `result<_, string>` tag back through
   `wasi:cli/run`.
-- Remaining work: implement and compose the shared stdlib/runtime components,
-  add Finish parity fixtures against the Rust-generated path, and broaden graph
-  lowering beyond the single-entry Finish shape.
+- Remaining work: add the WIT component wrapper around the stdlib helpers,
+  implement/compose the runtime component, add Finish parity fixtures against
+  the Rust-generated path, and broaden graph lowering beyond the single-entry
+  Finish shape.
 
 Implementation steps:
 

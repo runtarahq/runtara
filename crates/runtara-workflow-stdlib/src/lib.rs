@@ -60,6 +60,9 @@ pub use runtara_ai as ai;
 // Template rendering for MappingValue::Template
 pub mod template;
 
+// JSON helpers for direct-emitted workflow components
+pub mod direct_json;
+
 // Child workflow input validation (runtime)
 pub mod child_input_validation;
 
