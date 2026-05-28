@@ -62,6 +62,10 @@ Current implementation progress on `codex/wasm-direct-emitter`:
 - `direct_wasm::component` emits component-facing sidecars for static
   composition with separate stdlib and runtime components plus any required
   agents.
+- `direct_wasm::compile::compose_direct_workflow` now performs the first
+  direct static composition smoke path: it maps the direct workflow-logic
+  component plus prebuilt stdlib/runtime components into `wac compose` and
+  writes `workflow-composed.wasm`.
 
 ## Final Goal
 
@@ -938,8 +942,11 @@ Current status:
 - The runtime WIT component wrapper now builds as a standalone
   `workflow_runtime.wasm` component under the `wasi` feature and delegates SDK
   lifecycle calls to `runtara-sdk`.
-- Remaining work: compose the direct workflow with both shared components, add
-  Finish parity fixtures against the Rust-generated path, and broaden graph
+- The first direct composition helper and test can compose a finish-only direct
+  workflow component with the prebuilt shared stdlib/runtime components through
+  `wac compose`.
+- Remaining work: promote the composed artifact into the direct compile result,
+  add Finish parity fixtures against the Rust-generated path, and broaden graph
   lowering beyond the single-entry Finish shape.
 
 Implementation steps:

@@ -9,7 +9,8 @@
 use std::borrow::Cow;
 use std::fmt;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use runtara_dsl::ExecutionGraph;
 use runtara_workflow_wit::{RUNTIME_WIT, STDLIB_WIT, WORKFLOW_WIT_VERSION};
@@ -163,6 +164,69 @@ impl From<std::io::Error> for DirectCompileError {
     fn from(value: std::io::Error) -> Self {
         Self::Io(value)
     }
+}
+
+/// Compose a direct workflow logic component with prebuilt shared components.
+///
+/// `compile_direct_workflow` intentionally stops after direct workflow logic
+/// emission. This explicit step performs the static composition that will
+/// eventually produce the runnable `workflow.wasm` artifact for direct mode.
+pub fn compose_direct_workflow(
+    result: &DirectCompilationResult,
+    components_dir: impl AsRef<Path>,
+) -> Result<PathBuf, DirectCompileError> {
+    let components_dir = components_dir.as_ref();
+    let composed_path = result.build_dir.join("workflow-composed.wasm");
+
+    let mut cmd = Command::new("wac");
+    cmd.arg("compose")
+        .arg(&result.wac_path)
+        .arg("-d")
+        .arg(format!(
+            "runtara:workflow-logic={}",
+            result.wasm_path.display()
+        ));
+
+    for component in &result.component_artifacts.shared_components {
+        let wasm = components_dir.join(component.bundle_wasm_filename);
+        if !wasm.exists() {
+            return Err(DirectCompileError::Io(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!(
+                    "direct shared component `{}` missing at {}",
+                    component.package,
+                    wasm.display()
+                ),
+            )));
+        }
+        cmd.arg("-d")
+            .arg(format!("{}={}", component.package, wasm.display()));
+    }
+
+    cmd.arg("-o").arg(&composed_path);
+    let status = cmd.status().map_err(|err| {
+        DirectCompileError::Component(format!(
+            "wac compose failed to launch for direct workflow (is wac-cli installed?): {err}"
+        ))
+    })?;
+    if !status.success() {
+        return Err(DirectCompileError::Component(format!(
+            "wac compose returned non-zero status {} for direct workflow (wac script: {})",
+            status,
+            result.wac_path.display()
+        )));
+    }
+    if !composed_path.exists() {
+        return Err(DirectCompileError::Io(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!(
+                "wac compose succeeded but direct composed artifact was not written at {}",
+                composed_path.display()
+            ),
+        )));
+    }
+
+    Ok(composed_path)
 }
 
 /// Compile a finish-only workflow through the direct path.
@@ -1051,6 +1115,7 @@ fn sha256_hex(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::process::Stdio;
 
     use super::*;
     use wasmparser::{
@@ -1064,6 +1129,41 @@ mod tests {
             other => panic!("unknown fixture {other}"),
         };
         serde_json::from_str(json).expect("fixture should parse")
+    }
+
+    fn tool_installed(tool: &str) -> bool {
+        Command::new(tool)
+            .arg("--version")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success())
+    }
+
+    fn shared_components_dir() -> Option<PathBuf> {
+        let dir = std::env::var_os("RUNTARA_AGENT_COMPONENTS_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .join("../..")
+                    .join("target/wasm32-wasip2/release")
+            });
+        let missing: Vec<_> = super::super::component::DIRECT_SHARED_COMPONENT_REQUIREMENTS
+            .iter()
+            .filter_map(|component| {
+                let wasm = dir.join(component.bundle_wasm_filename);
+                (!wasm.exists()).then_some(wasm)
+            })
+            .collect();
+        if missing.is_empty() {
+            Some(dir)
+        } else {
+            eprintln!(
+                "SKIP: direct shared workflow components are not staged: {:?}",
+                missing
+            );
+            None
+        }
     }
 
     fn imported_wit_function<'a>(
@@ -1436,6 +1536,34 @@ mod tests {
         assert!(wac.contains("new runtara:workflow-runtime"));
         assert!(wac.contains("new runtara:workflow-logic"));
         assert!(wac.contains("export wf...;"));
+    }
+
+    #[test]
+    fn direct_compile_composes_finish_with_shared_components_when_available() {
+        if !tool_installed("wac") {
+            eprintln!("SKIP: wac not installed. `cargo install wac-cli --locked` first.");
+            return;
+        }
+        let Some(components_dir) = shared_components_dir() else {
+            return;
+        };
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let result = compile_direct_workflow(DirectCompilationInput {
+            workflow_id: "simple".to_string(),
+            version: 1,
+            execution_graph: fixture("simple"),
+            output_dir: temp.path().to_path_buf(),
+        })
+        .expect("direct compile should succeed");
+
+        let composed = compose_direct_workflow(&result, &components_dir)
+            .expect("direct workflow composition should succeed");
+        let wasm = fs::read(&composed).expect("composed wasm");
+        assert!(!wasm.is_empty());
+        Validator::new()
+            .validate_all(&wasm)
+            .expect("composed direct workflow should validate");
     }
 
     #[test]
