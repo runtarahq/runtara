@@ -1,10 +1,19 @@
 # Runtara
 
-> Beta software. Product behavior, APIs, crate boundaries, and runtime behavior are still evolving.
-
 **Secure AI automation from workflow design to live operations.**
 
 Runtara is an end-to-end platform for building, running, and operating AI workflows. It brings workflow design, triggers, connections, operational data, files, reports, analytics, and durable execution into one workspace so teams can ship automations as production systems instead of loose prompt chains.
+
+## Local deployment using Docker Compose:
+
+``` bash
+curl -fsSL https://raw.githubusercontent.com/runtarahq/runtara/refs/heads/main/docker-compose.yml \
+    -o docker-compose.yml  \
+    && FETCH_EXAMPLES=yes RUNTARA_PORT=3030 docker compose up
+```
+
+Go to **http://localhost:3030/ui** and it will have the platform and example workflows.
+
 
 [Website](https://runtara.com) | [Product docs](https://runtara.com/docs/runtara-platform) | [Runtara Cloud](https://tally.so/r/81qE5o)
 
