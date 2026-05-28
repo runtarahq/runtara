@@ -1,8 +1,9 @@
 //! Direct Conditional branch parity fixtures.
 //!
 //! These tests compare direct stdlib condition evaluation and branch selection
-//! with the current generated-code condition semantics for the first supported
-//! direct branching shape: entry `Conditional` with true/false `Finish` edges.
+//! with the current generated-code condition semantics for the supported pure
+//! direct branching shapes: `Conditional` true/false trees ending in `Finish`
+//! leaves.
 
 use runtara_workflow_stdlib::conditions::{is_truthy, to_number, values_equal};
 use runtara_workflow_stdlib::direct_json::{DirectJsonManifest, build_source};
@@ -13,6 +14,7 @@ use serde_json::{Map, Value, json};
 
 const CONDITIONAL_WORKFLOW: &str = include_str!("fixtures/conditional_workflow.json");
 const CONDITIONAL_LENGTH: &str = include_str!("fixtures/conditional_length_comparison.json");
+const CONDITIONAL_NESTED: &str = include_str!("fixtures/conditional_nested.json");
 
 #[test]
 fn direct_conditional_branch_matches_current_semantics() {
@@ -41,13 +43,31 @@ fn direct_conditional_branch_matches_current_semantics() {
             json!({ "description": "short" }),
             json!({ "result": "short" }),
         ),
+        (
+            "nested true true branch",
+            CONDITIONAL_NESTED,
+            json!({ "flag": true, "kind": "a" }),
+            json!({ "result": "flag-kind-a" }),
+        ),
+        (
+            "nested true false branch",
+            CONDITIONAL_NESTED,
+            json!({ "flag": true, "kind": "b" }),
+            json!({ "result": "flag-kind-other" }),
+        ),
+        (
+            "nested false branch",
+            CONDITIONAL_NESTED,
+            json!({ "flag": false, "kind": "a" }),
+            json!({ "result": "flag-false" }),
+        ),
     ];
 
     for (name, graph_json, data, expected_output) in cases {
-        let (direct_branch, direct_output) = direct_branch_output(graph_json, &data);
-        let (expected_branch, expected_current_output) = current_branch_output(graph_json, &data);
+        let (direct_branches, direct_output) = direct_branch_output(graph_json, &data);
+        let (expected_branches, expected_current_output) = current_branch_output(graph_json, &data);
 
-        assert_eq!(direct_branch, expected_branch, "branch case `{name}`");
+        assert_eq!(direct_branches, expected_branches, "branch case `{name}`");
         assert_eq!(
             direct_output, expected_current_output,
             "output case `{name}`"
@@ -59,44 +79,94 @@ fn direct_conditional_branch_matches_current_semantics() {
     }
 }
 
-fn direct_branch_output(graph_json: &str, data: &Value) -> (bool, Value) {
+fn direct_branch_output(graph_json: &str, data: &Value) -> (Vec<bool>, Value) {
     let graph = parse_graph(graph_json);
     let manifest = build_direct_workflow_manifest(&graph).expect("manifest");
     let manifest_json = manifest.to_canonical_json().expect("manifest json");
     let direct_manifest = DirectJsonManifest::parse(&manifest_json).expect("direct manifest");
     let source = source_bytes(data, &manifest.graph.variables);
 
-    let condition_id = manifest.graph.conditions[0].id;
-    let branch = direct_manifest
-        .eval_condition(condition_id, &source)
-        .expect("condition eval");
-    let target = branch_target(&manifest.graph, branch);
-    let mapping_id = finish_mapping_id(&manifest.graph, target);
-    let output = direct_manifest
-        .apply_mapping(mapping_id, &source)
-        .expect("finish mapping");
-
-    (
-        branch,
-        serde_json::from_slice(&output).expect("output json"),
+    direct_step_output(
+        &manifest.graph,
+        &direct_manifest,
+        &source,
+        &manifest.graph.entry_point,
     )
 }
 
-fn current_branch_output(graph_json: &str, data: &Value) -> (bool, Value) {
+fn direct_step_output(
+    graph: &DirectGraphManifest,
+    direct_manifest: &DirectJsonManifest,
+    source: &[u8],
+    step_id: &str,
+) -> (Vec<bool>, Value) {
+    let step = graph
+        .steps
+        .iter()
+        .find(|step| step.id == step_id)
+        .expect("direct step");
+    match step.step_type.as_str() {
+        "Finish" => {
+            let mapping_id = finish_mapping_id(graph, step_id);
+            let output = direct_manifest
+                .apply_mapping(mapping_id, source)
+                .expect("finish mapping");
+            (
+                vec![],
+                serde_json::from_slice(&output).expect("output json"),
+            )
+        }
+        "Conditional" => {
+            let condition_id = condition_id(graph, step_id);
+            let branch = direct_manifest
+                .eval_condition(condition_id, source)
+                .expect("condition eval");
+            let target = branch_target(graph, step_id, branch).to_string();
+            let (mut branches, output) =
+                direct_step_output(graph, direct_manifest, source, &target);
+            branches.insert(0, branch);
+            (branches, output)
+        }
+        other => panic!("unsupported direct parity step `{step_id}` type `{other}`"),
+    }
+}
+
+fn current_branch_output(graph_json: &str, data: &Value) -> (Vec<bool>, Value) {
     let graph_value: Value = serde_json::from_str(graph_json).expect("graph json");
     let graph = parse_graph(graph_json);
     let manifest = build_direct_workflow_manifest(&graph).expect("manifest");
     let source_bytes = source_bytes(data, &manifest.graph.variables);
     let source: Value = serde_json::from_slice(&source_bytes).expect("source json");
 
-    let entry = manifest.graph.entry_point.as_str();
-    let condition = &graph_value["steps"][entry]["condition"];
-    let branch = eval_current_condition(condition, &source);
-    let target = branch_target(&manifest.graph, branch);
-    let mapping = &graph_value["steps"][target]["inputMapping"];
-    let output = apply_current_input_mapping(mapping, &source);
+    current_step_output(
+        &graph_value,
+        &manifest.graph,
+        &source,
+        &manifest.graph.entry_point,
+    )
+}
 
-    (branch, output.get("outputs").cloned().unwrap_or(output))
+fn current_step_output(
+    graph_value: &Value,
+    graph: &DirectGraphManifest,
+    source: &Value,
+    step_id: &str,
+) -> (Vec<bool>, Value) {
+    let step = &graph_value["steps"][step_id];
+    match step["stepType"].as_str().expect("stepType") {
+        "Finish" => {
+            let output = apply_current_input_mapping(&step["inputMapping"], source);
+            (vec![], output.get("outputs").cloned().unwrap_or(output))
+        }
+        "Conditional" => {
+            let branch = eval_current_condition(&step["condition"], source);
+            let target = branch_target(graph, step_id, branch).to_string();
+            let (mut branches, output) = current_step_output(graph_value, graph, source, &target);
+            branches.insert(0, branch);
+            (branches, output)
+        }
+        other => panic!("unsupported current parity step `{step_id}` type `{other}`"),
+    }
 }
 
 fn parse_graph(graph_json: &str) -> ExecutionGraph {
@@ -112,14 +182,25 @@ fn source_bytes(data: &Value, variables: &Value) -> Vec<u8> {
     .expect("source")
 }
 
-fn branch_target(graph: &DirectGraphManifest, branch: bool) -> &str {
+fn branch_target<'a>(graph: &'a DirectGraphManifest, step_id: &str, branch: bool) -> &'a str {
     let label = if branch { "true" } else { "false" };
     graph
         .edges
         .iter()
-        .find(|edge| edge.from_step == graph.entry_point && edge.label.as_deref() == Some(label))
+        .find(|edge| edge.from_step == step_id && edge.label.as_deref() == Some(label))
         .map(|edge| edge.to_step.as_str())
         .expect("branch target")
+}
+
+fn condition_id(graph: &DirectGraphManifest, step_id: &str) -> u32 {
+    graph
+        .conditions
+        .iter()
+        .find(|condition| {
+            condition.owner_id == step_id && condition.purpose == "conditional.condition"
+        })
+        .expect("conditional condition")
+        .id
 }
 
 fn finish_mapping_id(graph: &DirectGraphManifest, step_id: &str) -> u32 {

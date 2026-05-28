@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! Direct-emitter support reporting.
 
+use std::collections::BTreeSet;
+
 use runtara_dsl::{ExecutionGraph, Step};
 
 use crate::workflow_features::{WorkflowFeatureSummary, analyze_workflow_features};
@@ -66,8 +68,8 @@ fn collect_graph_support(
     graph: &ExecutionGraph,
     unsupported: &mut Vec<UnsupportedWorkflowFeature>,
 ) {
-    let conditional_finish = supports_conditional_finish_graph(graph);
-    if !conditional_finish {
+    let direct_control = supports_direct_control_graph(graph);
+    if !direct_control {
         for edge in &graph.execution_plan {
             unsupported.push(UnsupportedWorkflowFeature {
                 step_id: Some(edge.from_step.clone()),
@@ -77,7 +79,7 @@ fn collect_graph_support(
                     .map(step_type_name)
                     .map(str::to_string),
                 feature: "execution-plan-routing".to_string(),
-                reason: "direct emitter currently lowers only a single entry Finish step or a Conditional with true/false Finish branches".to_string(),
+                reason: "direct emitter currently lowers only a single entry Finish step or pure Conditional true/false trees ending in Finish leaves".to_string(),
             });
         }
     }
@@ -90,7 +92,7 @@ fn collect_graph_support(
             _ => None,
         })
         .collect::<Vec<_>>();
-    if finish_steps.len() > 1 && !conditional_finish {
+    if finish_steps.len() > 1 && !direct_control {
         for step in finish_steps {
             unsupported.push(UnsupportedWorkflowFeature {
                 step_id: Some(step.id.clone()),
@@ -129,40 +131,98 @@ fn collect_graph_support(
     }
 
     for step in graph.steps.values() {
-        collect_step_support(step, conditional_finish, unsupported);
+        collect_step_support(step, direct_control, unsupported);
     }
 }
 
-fn supports_conditional_finish_graph(graph: &ExecutionGraph) -> bool {
-    let Some(Step::Conditional(_)) = graph.steps.get(&graph.entry_point) else {
+fn supports_direct_control_graph(graph: &ExecutionGraph) -> bool {
+    let mut reachable = BTreeSet::new();
+    let mut used_edges = BTreeSet::new();
+    let mut stack = Vec::new();
+    if !supports_direct_control_step(
+        graph,
+        &graph.entry_point,
+        &mut reachable,
+        &mut used_edges,
+        &mut stack,
+    ) {
+        return false;
+    }
+
+    reachable.len() == graph.steps.len() && used_edges.len() == graph.execution_plan.len()
+}
+
+fn supports_direct_control_step(
+    graph: &ExecutionGraph,
+    step_id: &str,
+    reachable: &mut BTreeSet<String>,
+    used_edges: &mut BTreeSet<usize>,
+    stack: &mut Vec<String>,
+) -> bool {
+    if stack.iter().any(|visited| visited == step_id) {
+        return false;
+    }
+    let Some(step) = graph.steps.get(step_id) else {
         return false;
     };
-    if graph.steps.len() != 3 || graph.execution_plan.len() != 2 {
-        return false;
-    }
+    reachable.insert(step_id.to_string());
 
-    let mut saw_true = false;
-    let mut saw_false = false;
-    for edge in &graph.execution_plan {
-        if edge.from_step != graph.entry_point || edge.condition.is_some() {
-            return false;
-        }
-        let Some(Step::Finish(_)) = graph.steps.get(&edge.to_step) else {
-            return false;
-        };
-        match edge.label.as_deref() {
-            Some("true") if !saw_true => saw_true = true,
-            Some("false") if !saw_false => saw_false = true,
-            _ => return false,
-        }
-    }
+    match step {
+        Step::Finish(_) => graph
+            .execution_plan
+            .iter()
+            .all(|edge| edge.from_step != step_id),
+        Step::Conditional(_) => {
+            let mut true_edge = None;
+            let mut false_edge = None;
+            for (index, edge) in graph.execution_plan.iter().enumerate() {
+                if edge.from_step != step_id {
+                    continue;
+                }
+                if edge.condition.is_some() {
+                    return false;
+                }
+                match edge.label.as_deref() {
+                    Some("true") if true_edge.is_none() => true_edge = Some((index, edge)),
+                    Some("false") if false_edge.is_none() => false_edge = Some((index, edge)),
+                    _ => return false,
+                }
+            }
 
-    saw_true && saw_false
+            let (Some((true_index, true_edge)), Some((false_index, false_edge))) =
+                (true_edge, false_edge)
+            else {
+                return false;
+            };
+
+            used_edges.insert(true_index);
+            used_edges.insert(false_index);
+            stack.push(step_id.to_string());
+            let true_supported = supports_direct_control_step(
+                graph,
+                &true_edge.to_step,
+                reachable,
+                used_edges,
+                stack,
+            );
+            let false_supported = supports_direct_control_step(
+                graph,
+                &false_edge.to_step,
+                reachable,
+                used_edges,
+                stack,
+            );
+            stack.pop();
+
+            true_supported && false_supported
+        }
+        _ => false,
+    }
 }
 
 fn collect_step_support(
     step: &Step,
-    conditional_finish: bool,
+    direct_control: bool,
     unsupported: &mut Vec<UnsupportedWorkflowFeature>,
 ) {
     match step {
@@ -182,7 +242,7 @@ fn collect_step_support(
             "Agent steps require static composition with agent imports and stdlib mapping",
             unsupported,
         ),
-        Step::Conditional(_) if conditional_finish => {}
+        Step::Conditional(_) if direct_control => {}
         Step::Conditional(_) => unsupported_step(
             step,
             "conditional",
@@ -329,6 +389,9 @@ mod tests {
         let json = match name {
             "simple" => include_str!("../../tests/fixtures/simple_passthrough.json"),
             "conditional" => include_str!("../../tests/fixtures/conditional_workflow.json"),
+            "conditional_nested" => {
+                include_str!("../../tests/fixtures/conditional_nested.json")
+            }
             "transform" => include_str!("../../tests/fixtures/transform_workflow.json"),
             "wait" => include_str!("../../tests/fixtures/wait_for_signal_with_callback.json"),
             other => panic!("unknown fixture {other}"),
@@ -448,6 +511,14 @@ mod tests {
     #[test]
     fn conditional_finish_branches_are_supported() {
         let report = analyze_direct_wasm_support(&fixture("conditional"));
+
+        assert!(report.supported, "{:?}", report.unsupported);
+        assert!(report.unsupported.is_empty());
+    }
+
+    #[test]
+    fn nested_conditional_finish_branches_are_supported() {
+        let report = analyze_direct_wasm_support(&fixture("conditional_nested"));
 
         assert!(report.supported, "{:?}", report.unsupported);
         assert!(report.unsupported.is_empty());

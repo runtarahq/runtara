@@ -26,12 +26,14 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   checksum, sorted steps, sorted edges, nested graph manifests, schemas,
   variables, manifest-wide mapping IDs, and a feature summary.
 - `direct_wasm::support` produces deterministic unsupported-feature reports.
-  The current production-shaped direct path intentionally supports only a
-  single entry `Finish` step with no routing/breakpoints. `Finish.inputMapping`
-  forms remain broadly supported because mapping semantics are delegated to the
-  shared stdlib.
+  The current production-shaped direct path supports a single entry `Finish`
+  step and pure `Conditional` true/false decision trees ending in `Finish`
+  leaves, with no breakpoints or other routing. `Finish.inputMapping` forms
+  remain broadly supported because mapping semantics are delegated to the shared
+  stdlib.
 - `direct_wasm::compile::compile_direct_workflow` is an opt-in entry point that
-  emits a valid component-format artifact for single-entry `Finish` graphs,
+  emits a valid component-format artifact for the currently supported direct
+  graph shapes,
   imports the workflow stdlib/runtime interfaces, exports `wasi:cli/run@0.2.3`,
   writes `workflow-logic.wasm`, `manifest.json`, `support-report.json`,
   `wit/world.wit`, and `workflow.wac`, and does not generate a Rust crate. The
@@ -68,15 +70,15 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   the runtime-facing `workflow.wasm`, and promotes the primary direct compile
   result metadata to the composed artifact.
 - `direct_wasm::compile::compile_direct_workflow_composed` now provides the
-  first finish-only direct compile entry that returns the final static
+  first direct compile entry that returns the final static
   `workflow.wasm` artifact shape while retaining `workflow-logic.wasm` for
   debugging and manifest validation.
 - `tests/direct_wasm_execute.rs` now provides gated direct execution smoke
   tests. With `RUNTARA_RUN_DIRECT_WASM_E2E=1`, it compiles and statically
-  composes the simple `Finish` fixture plus the entry `Conditional -> Finish`
-  fixture, runs each final `workflow.wasm` under
+  composes the simple `Finish` fixture plus flat and nested `Conditional`
+  fixtures, runs each final `workflow.wasm` under
   `wasmtime run --wasi http --wasi inherit-network`, and asserts the fake SDK
-  receives the expected mapped completion payloads for the Finish path and both
+  receives the expected mapped completion payloads for the Finish path and all
   conditional branches.
 - `tests/direct_wasm_finish_parity.rs` now compares direct `Finish` mapping
   output against the current Rust-generated mapping contract for representative
@@ -89,15 +91,16 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   including logical operators, comparisons, equality, string/array operators,
   `LENGTH`, emptiness checks, truthy value expressions, and server-side-only
   operators falling back to `false`.
-- The direct core emitter now supports the first conditional graph shape:
-  an entry `Conditional` with exactly two labeled `true`/`false` edges to
-  `Finish` steps. It calls `stdlib.eval-condition`, branches on the returned
-  bool, applies the selected `Finish` mapping, and completes through the runtime
-  component. Other routing shapes remain rejected by the support gate.
+- The direct core emitter now supports pure conditional decision trees:
+  each `Conditional` has exactly two labeled `true`/`false` edges to another
+  supported direct-control step, and all leaves are `Finish` steps. It calls
+  `stdlib.eval-condition`, branches on the returned bool, applies the selected
+  `Finish` mapping, and completes through the runtime component. Other routing
+  shapes remain rejected by the support gate.
 - `tests/direct_wasm_condition_parity.rs` now compares direct conditional
   branch selection and selected `Finish` output against the current
   generated-code condition semantics for representative fixtures, including
-  boolean equality and `LENGTH`-based numeric comparison.
+  boolean equality, `LENGTH`-based numeric comparison, and nested conditionals.
 
 ## Final Goal
 
@@ -974,30 +977,31 @@ Current status:
 - The runtime WIT component wrapper now builds as a standalone
   `workflow_runtime.wasm` component under the `wasi` feature and delegates SDK
   lifecycle calls to `runtara-sdk`.
-- The first direct composition helper and test can compose a finish-only direct
-  workflow component with the prebuilt shared stdlib/runtime components through
-  `wac compose`.
+- The direct composition helper can compose supported direct workflow components
+  with the prebuilt shared stdlib/runtime components through `wac compose`.
 - The composed artifact is now represented in the direct compile result:
   logic-only compilation keeps `wasm_path == workflow_logic_wasm_path`, while
   composition updates `wasm_path` to the final `workflow.wasm` and records
   composed size/checksum metadata.
-- A gated direct execution test now runs the composed finish-only artifact
-  through the current environment runner shape and verifies the SDK completion
-  payload.
+- Gated direct execution tests now run composed artifacts through the current
+  environment runner shape and verify the SDK completion payload.
 - Finish mapping parity fixtures now compare direct stdlib output against the
   current Rust-generated mapping contract and cover the default-on-null
   behavior that direct stdlib must preserve.
 - Conditional condition IDs are now in the manifest and the direct stdlib
   component can evaluate those conditions through the checked WIT surface.
 - The first direct Wasm branching path is implemented for
-  `Conditional -> true/false Finish`, with support gating kept narrow.
-- Gated execution coverage now runs the composed conditional artifact for both
-  true and false inputs and verifies the selected Finish output.
+  `Conditional -> true/false Finish`, and the run-plan lowering now recurses
+  through nested pure `Conditional` trees until each branch reaches a `Finish`
+  leaf, with support gating kept narrow.
+- Gated execution coverage now runs composed conditional artifacts for flat and
+  nested branch inputs and verifies the selected Finish output.
 - Direct conditional branch parity fixtures now compare direct stdlib
   evaluation and branch output against current generated-code condition
-  semantics for both simple equality and `LENGTH` comparisons.
+  semantics for simple equality, `LENGTH` comparisons, and nested branch paths.
 - Remaining work: broaden graph lowering to multi-step pure JSON/control
-  workflows.
+  workflows with non-branch sequential steps, switch routing, filter/grouping,
+  log/error behavior, and edge-condition priority handling.
 
 Implementation steps:
 
@@ -1025,7 +1029,8 @@ Checkpoint 5:
 
 - Direct compiler emits manifest for every fixture.
 - Unsupported fixture reports are deterministic and actionable.
-- Pure finish-only workflows run through direct component path.
+- Pure finish-only workflows and pure conditional `Finish` trees run through the
+  direct component path.
 - Manifest round-trip tests pass.
 
 Rollback:
@@ -1035,6 +1040,17 @@ Rollback:
 ### Phase 6: Pure JSON and Control-Flow Step Parity
 
 Goal: support non-agent, non-durable workflows end to end.
+
+Current progress:
+
+- `Finish` is implemented for direct execution through the shared mapping
+  stdlib and runtime completion surface.
+- `Conditional` lowering now supports pure true/false decision trees that end
+  in `Finish` leaves. It evaluates each condition through `stdlib.eval-condition`
+  and emits nested Wasm `if` control flow in the workflow-specific module.
+- Remaining parity work in this phase starts with normal sequential edges and
+  then broadens to `Switch`, `Filter`, `GroupBy`, `Log`, `Error`, edge
+  conditions, and debug event behavior.
 
 Implementation steps:
 

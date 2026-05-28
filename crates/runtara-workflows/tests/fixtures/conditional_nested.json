@@ -1,0 +1,98 @@
+{
+  "name": "Nested Conditional Workflow",
+  "description": "A pure control workflow with two conditional decisions before Finish",
+  "steps": {
+    "check_flag": {
+      "stepType": "Conditional",
+      "id": "check_flag",
+      "condition": {
+        "type": "operation",
+        "op": "EQ",
+        "arguments": [
+          {
+            "valueType": "reference",
+            "value": "data.flag"
+          },
+          {
+            "valueType": "immediate",
+            "value": true
+          }
+        ]
+      }
+    },
+    "check_kind": {
+      "stepType": "Conditional",
+      "id": "check_kind",
+      "condition": {
+        "type": "operation",
+        "op": "EQ",
+        "arguments": [
+          {
+            "valueType": "reference",
+            "value": "data.kind"
+          },
+          {
+            "valueType": "immediate",
+            "value": "a"
+          }
+        ]
+      }
+    },
+    "finish_a": {
+      "stepType": "Finish",
+      "id": "finish_a",
+      "inputMapping": {
+        "result": {
+          "valueType": "immediate",
+          "value": "flag-kind-a"
+        }
+      }
+    },
+    "finish_b": {
+      "stepType": "Finish",
+      "id": "finish_b",
+      "inputMapping": {
+        "result": {
+          "valueType": "immediate",
+          "value": "flag-kind-other"
+        }
+      }
+    },
+    "finish_f": {
+      "stepType": "Finish",
+      "id": "finish_f",
+      "inputMapping": {
+        "result": {
+          "valueType": "immediate",
+          "value": "flag-false"
+        }
+      }
+    }
+  },
+  "entryPoint": "check_flag",
+  "executionPlan": [
+    {
+      "fromStep": "check_flag",
+      "toStep": "check_kind",
+      "label": "true"
+    },
+    {
+      "fromStep": "check_flag",
+      "toStep": "finish_f",
+      "label": "false"
+    },
+    {
+      "fromStep": "check_kind",
+      "toStep": "finish_a",
+      "label": "true"
+    },
+    {
+      "fromStep": "check_kind",
+      "toStep": "finish_b",
+      "label": "false"
+    }
+  ],
+  "variables": {},
+  "inputSchema": {},
+  "outputSchema": {}
+}

@@ -419,15 +419,15 @@ struct DirectCoreConfig {
     static_data: DirectCoreStaticData,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 enum DirectRunPlan {
     Finish {
         mapping_id: u32,
     },
-    ConditionalFinish {
+    Conditional {
         condition_id: u32,
-        true_mapping_id: u32,
-        false_mapping_id: u32,
+        true_plan: Box<DirectRunPlan>,
+        false_plan: Box<DirectRunPlan>,
     },
 }
 
@@ -517,56 +517,85 @@ fn direct_run_plan(manifest: &DirectWorkflowManifest) -> Result<DirectRunPlan, D
         })?;
 
     match entry.step_type.as_str() {
-        "Finish" => Ok(DirectRunPlan::Finish {
-            mapping_id: finish_mapping_id(&manifest.graph, &manifest.graph.entry_point)?,
-        }),
-        "Conditional" => conditional_finish_run_plan(&manifest.graph),
+        "Finish" | "Conditional" => step_run_plan(
+            &manifest.graph,
+            &manifest.graph.entry_point,
+            &mut Vec::new(),
+        ),
         other => Err(DirectCompileError::Component(format!(
             "direct run plan does not support entry step type '{other}'"
         ))),
     }
 }
 
-fn conditional_finish_run_plan(
+fn step_run_plan(
     graph: &DirectGraphManifest,
+    step_id: &str,
+    stack: &mut Vec<String>,
 ) -> Result<DirectRunPlan, DirectCompileError> {
-    let condition_id = graph
-        .conditions
+    if stack.iter().any(|visited| visited == step_id) {
+        return Err(DirectCompileError::Component(format!(
+            "direct run plan contains a cycle at step '{step_id}'"
+        )));
+    }
+
+    let step = graph
+        .steps
         .iter()
-        .find(|condition| {
-            condition.owner_id == graph.entry_point && condition.purpose == "conditional.condition"
-        })
-        .map(|condition| condition.id)
-        .ok_or_else(|| {
-            DirectCompileError::Component(format!(
-                "missing Conditional condition for entry point '{}'",
-                graph.entry_point
-            ))
-        })?;
+        .find(|step| step.id == step_id)
+        .ok_or_else(|| DirectCompileError::Component(format!("missing direct step '{step_id}'")))?;
 
-    let true_step = branch_target(graph, "true")?;
-    let false_step = branch_target(graph, "false")?;
+    match step.step_type.as_str() {
+        "Finish" => Ok(DirectRunPlan::Finish {
+            mapping_id: finish_mapping_id(graph, step_id)?,
+        }),
+        "Conditional" => {
+            let condition_id = graph
+                .conditions
+                .iter()
+                .find(|condition| {
+                    condition.owner_id == step_id && condition.purpose == "conditional.condition"
+                })
+                .map(|condition| condition.id)
+                .ok_or_else(|| {
+                    DirectCompileError::Component(format!(
+                        "missing Conditional condition for step '{step_id}'"
+                    ))
+                })?;
 
-    Ok(DirectRunPlan::ConditionalFinish {
-        condition_id,
-        true_mapping_id: finish_mapping_id(graph, true_step)?,
-        false_mapping_id: finish_mapping_id(graph, false_step)?,
-    })
+            let true_step = branch_target(graph, step_id, "true")?.to_string();
+            let false_step = branch_target(graph, step_id, "false")?.to_string();
+
+            stack.push(step_id.to_string());
+            let true_plan = step_run_plan(graph, &true_step, stack)?;
+            let false_plan = step_run_plan(graph, &false_step, stack)?;
+            stack.pop();
+
+            Ok(DirectRunPlan::Conditional {
+                condition_id,
+                true_plan: Box::new(true_plan),
+                false_plan: Box::new(false_plan),
+            })
+        }
+        other => Err(DirectCompileError::Component(format!(
+            "direct run plan does not support step '{step_id}' with type '{other}'"
+        ))),
+    }
 }
 
 fn branch_target<'a>(
     graph: &'a DirectGraphManifest,
+    from_step: &str,
     label: &str,
 ) -> Result<&'a str, DirectCompileError> {
     graph
         .edges
         .iter()
-        .find(|edge| edge.from_step == graph.entry_point && edge.label.as_deref() == Some(label))
+        .find(|edge| edge.from_step == from_step && edge.label.as_deref() == Some(label))
         .map(|edge| edge.to_step.as_str())
         .ok_or_else(|| {
             DirectCompileError::Component(format!(
-                "missing '{label}' branch for Conditional entry point '{}'",
-                graph.entry_point
+                "missing '{label}' branch for Conditional step '{from_step}'"
             ))
         })
 }
@@ -1087,10 +1116,10 @@ fn emit_run_plan_mapping(
                 output_len_local,
             );
         }
-        DirectRunPlan::ConditionalFinish {
+        DirectRunPlan::Conditional {
             condition_id,
-            true_mapping_id,
-            false_mapping_id,
+            true_plan,
+            false_plan,
         } => {
             body.instruction(&Instruction::I32Const(*condition_id as i32));
             body.instruction(&Instruction::LocalGet(source_ptr_local));
@@ -1106,20 +1135,20 @@ fn emit_run_plan_mapping(
                 memory_index: 0,
             }));
             body.instruction(&Instruction::If(BlockType::Empty));
-            emit_apply_mapping(
+            emit_run_plan_mapping(
                 body,
                 indices,
-                *true_mapping_id,
+                true_plan,
                 source_ptr_local,
                 source_len_local,
                 output_ptr_local,
                 output_len_local,
             );
             body.instruction(&Instruction::Else);
-            emit_apply_mapping(
+            emit_run_plan_mapping(
                 body,
                 indices,
-                *false_mapping_id,
+                false_plan,
                 source_ptr_local,
                 source_len_local,
                 output_ptr_local,
@@ -1349,10 +1378,32 @@ mod tests {
         let json = match name {
             "simple" => include_str!("../../tests/fixtures/simple_passthrough.json"),
             "conditional" => include_str!("../../tests/fixtures/conditional_workflow.json"),
+            "conditional_nested" => {
+                include_str!("../../tests/fixtures/conditional_nested.json")
+            }
             "transform" => include_str!("../../tests/fixtures/transform_workflow.json"),
             other => panic!("unknown fixture {other}"),
         };
         serde_json::from_str(json).expect("fixture should parse")
+    }
+
+    fn collect_run_plan_ids(
+        plan: &DirectRunPlan,
+        condition_ids: &mut Vec<u32>,
+        mapping_ids: &mut Vec<u32>,
+    ) {
+        match plan {
+            DirectRunPlan::Finish { mapping_id } => mapping_ids.push(*mapping_id),
+            DirectRunPlan::Conditional {
+                condition_id,
+                true_plan,
+                false_plan,
+            } => {
+                condition_ids.push(*condition_id);
+                collect_run_plan_ids(true_plan, condition_ids, mapping_ids);
+                collect_run_plan_ids(false_plan, condition_ids, mapping_ids);
+            }
+        }
     }
 
     fn tool_installed(tool: &str) -> bool {
@@ -1589,6 +1640,31 @@ mod tests {
     }
 
     #[test]
+    fn direct_compile_supports_nested_conditional_tree() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let result = compile_direct_workflow(DirectCompilationInput {
+            workflow_id: "conditional-nested".to_string(),
+            version: 1,
+            execution_graph: fixture("conditional_nested"),
+            output_dir: temp.path().to_path_buf(),
+        })
+        .expect("direct nested conditional compile should succeed");
+
+        let wasm = fs::read(&result.wasm_path).expect("wasm");
+        Validator::new()
+            .validate_all(&wasm)
+            .expect("direct nested conditional artifact should validate");
+        assert!(result.support_report.supported);
+        assert_eq!(result.support_report.unsupported, vec![]);
+
+        let manifest: DirectWorkflowManifest =
+            serde_json::from_slice(&fs::read(&result.manifest_path).expect("manifest"))
+                .expect("manifest json");
+        assert_eq!(manifest.graph.conditions.len(), 2);
+        assert_eq!(manifest.graph.mappings.len(), 3);
+    }
+
+    #[test]
     fn direct_core_run_lowers_finish_mapping_through_stdlib() {
         let graph = fixture("simple");
         let manifest = build_direct_workflow_manifest(&graph).expect("manifest");
@@ -1739,9 +1815,9 @@ mod tests {
                                 Operator::Call { function_index } => run_calls.push(function_index),
                                 Operator::I32Const { value }
                                     if matches!(
-                                        core_config.run_plan,
+                                        &core_config.run_plan,
                                         DirectRunPlan::Finish { mapping_id }
-                                            if value == mapping_id as i32
+                                            if value == *mapping_id as i32
                                     ) =>
                                 {
                                     saw_mapping_id = true;
@@ -1800,13 +1876,25 @@ mod tests {
         let manifest = build_direct_workflow_manifest(&graph).expect("manifest");
         let manifest_json = manifest.to_canonical_json().expect("manifest json");
         let core_config = DirectCoreConfig::new(&manifest, &manifest_json).expect("core config");
-        let DirectRunPlan::ConditionalFinish {
+        let DirectRunPlan::Conditional {
             condition_id,
-            true_mapping_id,
-            false_mapping_id,
-        } = core_config.run_plan
+            true_plan,
+            false_plan,
+        } = &core_config.run_plan
         else {
             panic!("expected conditional run plan");
+        };
+        let DirectRunPlan::Finish {
+            mapping_id: true_mapping_id,
+        } = true_plan.as_ref()
+        else {
+            panic!("expected true branch finish plan");
+        };
+        let DirectRunPlan::Finish {
+            mapping_id: false_mapping_id,
+        } = false_plan.as_ref()
+        else {
+            panic!("expected false branch finish plan");
         };
 
         let (resolve, world) = build_direct_component_resolve().expect("resolve");
@@ -1851,13 +1939,13 @@ mod tests {
                             match operator.expect("operator") {
                                 Operator::Call { function_index } => run_calls.push(function_index),
                                 Operator::I32Const { value } => {
-                                    if value == condition_id as i32 {
+                                    if value == *condition_id as i32 {
                                         saw_condition_id = true;
                                     }
-                                    if value == true_mapping_id as i32 {
+                                    if value == *true_mapping_id as i32 {
                                         saw_true_mapping_id = true;
                                     }
-                                    if value == false_mapping_id as i32 {
+                                    if value == *false_mapping_id as i32 {
                                         saw_false_mapping_id = true;
                                     }
                                 }
@@ -1902,6 +1990,109 @@ mod tests {
             "condition result bool should be loaded from retptr payload"
         );
         assert!(saw_branch, "run body should branch on condition result");
+    }
+
+    #[test]
+    fn direct_core_run_lowers_nested_conditional_tree_through_stdlib() {
+        let graph = fixture("conditional_nested");
+        let manifest = build_direct_workflow_manifest(&graph).expect("manifest");
+        let manifest_json = manifest.to_canonical_json().expect("manifest json");
+        let core_config = DirectCoreConfig::new(&manifest, &manifest_json).expect("core config");
+
+        let mut condition_ids = Vec::new();
+        let mut mapping_ids = Vec::new();
+        collect_run_plan_ids(&core_config.run_plan, &mut condition_ids, &mut mapping_ids);
+        assert_eq!(condition_ids.len(), 2);
+        assert_eq!(mapping_ids.len(), 3);
+
+        let (resolve, world) = build_direct_component_resolve().expect("resolve");
+        let core = emit_direct_core_module(&resolve, world, &core_config).expect("core module");
+        Validator::new()
+            .validate_all(&core)
+            .expect("nested conditional core module validates");
+
+        let mut next_function_index = 0;
+        let mut eval_condition_index = None;
+        let mut apply_mapping_index = None;
+        let mut seen_condition_ids = Vec::new();
+        let mut seen_mapping_ids = Vec::new();
+        let mut branch_count = 0;
+        let mut run_calls = Vec::new();
+        let mut code_body_index = 0;
+
+        for payload in Parser::new(0).parse_all(&core) {
+            match payload.expect("core wasm payload") {
+                Payload::ImportSection(reader) => {
+                    for import in reader.into_imports() {
+                        let import = import.expect("core import");
+                        if matches!(import.ty, TypeRef::Func(_)) {
+                            match (import.module, import.name) {
+                                ("cm32p2|runtara:workflow-stdlib/json@0.1", "eval-condition") => {
+                                    eval_condition_index = Some(next_function_index)
+                                }
+                                ("cm32p2|runtara:workflow-stdlib/json@0.1", "apply-mapping") => {
+                                    apply_mapping_index = Some(next_function_index)
+                                }
+                                _ => {}
+                            }
+                            next_function_index += 1;
+                        }
+                    }
+                }
+                Payload::CodeSectionEntry(body) => {
+                    if code_body_index == 0 {
+                        for operator in body.get_operators_reader().expect("operators") {
+                            match operator.expect("operator") {
+                                Operator::Call { function_index } => run_calls.push(function_index),
+                                Operator::I32Const { value } => {
+                                    if condition_ids.contains(&(value as u32)) {
+                                        seen_condition_ids.push(value as u32);
+                                    }
+                                    if mapping_ids.contains(&(value as u32)) {
+                                        seen_mapping_ids.push(value as u32);
+                                    }
+                                }
+                                Operator::If { .. } => branch_count += 1,
+                                _ => {}
+                            }
+                        }
+                    }
+                    code_body_index += 1;
+                }
+                _ => {}
+            }
+        }
+
+        let eval_condition_index = eval_condition_index.expect("eval-condition import");
+        let apply_mapping_index = apply_mapping_index.expect("apply-mapping import");
+        assert_eq!(
+            run_calls
+                .iter()
+                .filter(|&&index| index == eval_condition_index)
+                .count(),
+            2,
+            "nested conditional run should evaluate both condition sites"
+        );
+        assert_eq!(
+            run_calls
+                .iter()
+                .filter(|&&index| index == apply_mapping_index)
+                .count(),
+            3,
+            "nested conditional run should contain one apply-mapping call per Finish leaf"
+        );
+        condition_ids.sort_unstable();
+        mapping_ids.sort_unstable();
+        seen_condition_ids.sort_unstable();
+        seen_condition_ids.dedup();
+        seen_mapping_ids.sort_unstable();
+        seen_mapping_ids.dedup();
+        assert_eq!(seen_condition_ids, condition_ids);
+        assert_eq!(seen_mapping_ids, mapping_ids);
+        assert!(
+            branch_count >= 2,
+            "nested conditional run should emit Wasm branches"
+        );
     }
 
     #[test]

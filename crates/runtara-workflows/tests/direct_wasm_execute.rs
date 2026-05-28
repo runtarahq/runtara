@@ -20,6 +20,7 @@ use serde_json::Value;
 
 const SIMPLE_PASSTHROUGH: &str = include_str!("fixtures/simple_passthrough.json");
 const CONDITIONAL_WORKFLOW: &str = include_str!("fixtures/conditional_workflow.json");
+const CONDITIONAL_NESTED: &str = include_str!("fixtures/conditional_nested.json");
 
 #[derive(Debug)]
 struct Completed {
@@ -394,4 +395,41 @@ fn direct_wasm_execute_conditional_finish_branches_report_completion() {
         br#"{"flag":false}"#,
     );
     assert_eq!(false_output, serde_json::json!({ "result": "no" }));
+}
+
+#[test]
+fn direct_wasm_execute_nested_conditional_branches_report_completion() {
+    let Some(components_dir) = direct_e2e_components_dir() else {
+        return;
+    };
+
+    let true_true_output = run_direct_workflow(
+        &components_dir,
+        "direct-wasm-execute-nested-true-true",
+        CONDITIONAL_NESTED,
+        br#"{"flag":true,"kind":"a"}"#,
+    );
+    assert_eq!(
+        true_true_output,
+        serde_json::json!({ "result": "flag-kind-a" })
+    );
+
+    let true_false_output = run_direct_workflow(
+        &components_dir,
+        "direct-wasm-execute-nested-true-false",
+        CONDITIONAL_NESTED,
+        br#"{"flag":true,"kind":"b"}"#,
+    );
+    assert_eq!(
+        true_false_output,
+        serde_json::json!({ "result": "flag-kind-other" })
+    );
+
+    let false_output = run_direct_workflow(
+        &components_dir,
+        "direct-wasm-execute-nested-false",
+        CONDITIONAL_NESTED,
+        br#"{"flag":false,"kind":"a"}"#,
+    );
+    assert_eq!(false_output, serde_json::json!({ "result": "flag-false" }));
 }
