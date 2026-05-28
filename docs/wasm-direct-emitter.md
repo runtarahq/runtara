@@ -94,6 +94,10 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   `Finish` steps. It calls `stdlib.eval-condition`, branches on the returned
   bool, applies the selected `Finish` mapping, and completes through the runtime
   component. Other routing shapes remain rejected by the support gate.
+- `tests/direct_wasm_condition_parity.rs` now compares direct conditional
+  branch selection and selected `Finish` output against the current
+  generated-code condition semantics for representative fixtures, including
+  boolean equality and `LENGTH`-based numeric comparison.
 
 ## Final Goal
 
@@ -989,8 +993,10 @@ Current status:
   `Conditional -> true/false Finish`, with support gating kept narrow.
 - Gated execution coverage now runs the composed conditional artifact for both
   true and false inputs and verifies the selected Finish output.
-- Remaining work: add direct-vs-Rust parity coverage for conditional branch
-  behavior, then broaden graph lowering to multi-step pure JSON/control
+- Direct conditional branch parity fixtures now compare direct stdlib
+  evaluation and branch output against current generated-code condition
+  semantics for both simple equality and `LENGTH` comparisons.
+- Remaining work: broaden graph lowering to multi-step pure JSON/control
   workflows.
 
 Implementation steps:
