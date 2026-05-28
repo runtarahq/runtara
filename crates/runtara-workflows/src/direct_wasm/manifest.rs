@@ -75,6 +75,9 @@ pub struct DirectGraphManifest {
     /// Split definitions addressable by generated direct Wasm.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub splits: Vec<DirectSplitManifest>,
+    /// While definitions addressable by generated direct Wasm.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub whiles: Vec<DirectWhileManifest>,
     /// Filter definitions addressable by generated direct Wasm.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub filters: Vec<DirectFilterManifest>,
@@ -183,6 +186,27 @@ pub struct DirectSplitManifest {
     pub input_schema: serde_json::Value,
     /// Canonical JSON serialization of the per-iteration output schema.
     pub output_schema: serde_json::Value,
+}
+
+/// Deterministic While definition referenced by direct-emitted Wasm.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DirectWhileManifest {
+    /// Manifest-wide While identifier.
+    pub id: u32,
+    /// Step that owns this While config.
+    pub step_id: String,
+    /// Human-readable step name.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Step type that owns this While config.
+    pub step_type: String,
+    /// Config role within the step.
+    pub purpose: String,
+    /// Canonical JSON serialization of the DSL While config.
+    pub value: serde_json::Value,
+    /// Canonical JSON serialization of the While condition expression.
+    pub condition: serde_json::Value,
 }
 
 /// Deterministic Filter definition referenced by direct-emitted Wasm.
@@ -432,6 +456,7 @@ struct DirectManifestBuildState {
     next_mapping_id: u32,
     next_condition_id: u32,
     next_split_id: u32,
+    next_while_id: u32,
     next_filter_id: u32,
     next_switch_id: u32,
     next_group_by_id: u32,
@@ -457,6 +482,12 @@ impl DirectManifestBuildState {
     fn allocate_split_id(&mut self) -> u32 {
         let id = self.next_split_id;
         self.next_split_id += 1;
+        id
+    }
+
+    fn allocate_while_id(&mut self) -> u32 {
+        let id = self.next_while_id;
+        self.next_while_id += 1;
         id
     }
 
@@ -529,6 +560,9 @@ fn graph_manifest(
         .splits
         .sort_by(|left, right| left.id.cmp(&right.id));
     collections
+        .whiles
+        .sort_by(|left, right| left.id.cmp(&right.id));
+    collections
         .filters
         .sort_by(|left, right| left.id.cmp(&right.id));
     collections
@@ -570,6 +604,7 @@ fn graph_manifest(
         mappings: collections.mappings,
         conditions: collections.conditions,
         splits: collections.splits,
+        whiles: collections.whiles,
         filters: collections.filters,
         switches: collections.switches,
         group_bys: collections.group_bys,
@@ -586,6 +621,7 @@ struct DirectGraphManifestCollections {
     mappings: Vec<DirectMappingManifest>,
     conditions: Vec<DirectConditionManifest>,
     splits: Vec<DirectSplitManifest>,
+    whiles: Vec<DirectWhileManifest>,
     filters: Vec<DirectFilterManifest>,
     switches: Vec<DirectSwitchManifest>,
     group_bys: Vec<DirectGroupByManifest>,
@@ -673,6 +709,21 @@ fn step_manifest(
             });
         }
         Step::While(step) => {
+            let value = step
+                .config
+                .as_ref()
+                .map(canonical_json)
+                .transpose()?
+                .unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new()));
+            collections.whiles.push(DirectWhileManifest {
+                id: state.allocate_while_id(),
+                step_id: step.id.clone(),
+                name: step.name.clone(),
+                step_type: "While".to_string(),
+                purpose: "while.config".to_string(),
+                value,
+                condition: canonical_json(&step.condition)?,
+            });
             nested_graphs.push(DirectNestedGraphManifest {
                 role: "while.subgraph".to_string(),
                 graph: Box::new(graph_manifest(
@@ -1005,6 +1056,7 @@ mod tests {
             "edge_condition" => include_str!("../../tests/fixtures/edge_condition_priority.json"),
             "transform" => include_str!("../../tests/fixtures/transform_workflow.json"),
             "split" => include_str!("../../tests/fixtures/split_workflow.json"),
+            "while_simple" => include_str!("../../tests/fixtures/while_simple.json"),
             "wait" => include_str!("../../tests/fixtures/wait_for_signal_with_callback.json"),
             other => panic!("unknown fixture {other}"),
         };
@@ -1082,6 +1134,32 @@ mod tests {
         assert_eq!(split_step.nested_graphs.len(), 1);
         assert_eq!(split_step.nested_graphs[0].role, "split.subgraph");
         assert_eq!(split_step.nested_graphs[0].graph.entry_point, "transform");
+    }
+
+    #[test]
+    fn manifest_assigns_while_id_condition_and_nested_graph() {
+        let manifest = build_direct_workflow_manifest(&fixture("while_simple")).expect("manifest");
+
+        assert_eq!(manifest.graph.whiles.len(), 1);
+        let while_step = &manifest.graph.whiles[0];
+        assert_eq!(while_step.id, 0);
+        assert_eq!(while_step.step_id, "loop");
+        assert_eq!(while_step.name.as_deref(), Some("Counter Loop"));
+        assert_eq!(while_step.step_type, "While");
+        assert_eq!(while_step.purpose, "while.config");
+        assert_eq!(while_step.value["maxIterations"], 10);
+        assert_eq!(while_step.condition["type"], "operation");
+        assert_eq!(while_step.condition["op"], "LT");
+
+        let step = manifest
+            .graph
+            .steps
+            .iter()
+            .find(|step| step.id == "loop")
+            .expect("while step");
+        assert_eq!(step.nested_graphs.len(), 1);
+        assert_eq!(step.nested_graphs[0].role, "while.subgraph");
+        assert_eq!(step.nested_graphs[0].graph.entry_point, "increment");
     }
 
     #[test]

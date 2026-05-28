@@ -27,7 +27,7 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   variables, manifest-wide mapping IDs, manifest-wide condition IDs,
   manifest-wide Split IDs, manifest-wide Filter IDs, manifest-wide Switch IDs,
   manifest-wide GroupBy IDs, manifest-wide Log IDs, manifest-wide Error IDs,
-  and a feature summary.
+  manifest-wide While IDs, and a feature summary.
 - `direct_wasm::support` produces deterministic unsupported-feature reports.
   The current production-shaped direct path supports a single entry `Finish` or
   `Error` step, pure `Conditional` true/false decision trees ending in
@@ -1735,6 +1735,7 @@ Implementation steps:
      matching the generated-code split behavior rather than item aggregation;
    - Split retry/timeout/breakpoint semantics: pending.
 3. Implement `While`:
+   - config/condition manifest records and nested graph link: done;
    - max iterations;
    - condition evaluation before each iteration;
    - `_previousOutputs`;
