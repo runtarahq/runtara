@@ -230,9 +230,10 @@ export function TableBlock({
     () => columns.map((column, idx) => inferColumnLayout(column, rows, idx)),
     [columns, rows]
   );
-  const hasFlexibleFillerColumn = columnLayouts.every(
-    (layout) => !layout.isFlex
-  );
+  // Every column carries a concrete width, so a trailing filler column always
+  // absorbs leftover space (keeping columns at their natural size instead of
+  // stretching them) and collapses to zero when the table needs to scroll.
+  const hasFlexibleFillerColumn = true;
   const tableClassName = cn('table-fixed');
   const diagnostics = data.diagnostics ?? EMPTY_DIAGNOSTICS;
   const writebackMutate = writeback.mutate;
@@ -373,8 +374,7 @@ export function TableBlock({
               const sortDirection = getColumnSortDirection(column.key, sort);
               const isSortable = !isNonSortableColumn(column);
               const layout = columnLayouts[idx];
-              const effectiveAlign =
-                column.align ?? layout?.inferredAlign ?? undefined;
+              const effectiveAlign = column.align ?? undefined;
               return (
                 <TableHead
                   key={column.key}
@@ -666,8 +666,7 @@ function TableBodyRow({
           column.workflowAction != null &&
           isWorkflowActionDisabled(column.workflowAction, rowObject);
         const isEditing = editingField === column.key;
-        const effectiveAlign =
-          column.align ?? layout?.inferredAlign ?? undefined;
+        const effectiveAlign = column.align ?? undefined;
 
         return (
           <TableCell
@@ -918,10 +917,23 @@ const FORMAT_WIDTHS: Record<string, string> = {
 
 type ColumnLayout = {
   style?: CSSProperties;
-  inferredAlign?: TableColumn['align'];
-  isFlex: boolean;
 };
 
+// Width bounds for inferred text columns, expressed in `ch`. The lower bound
+// keeps short columns from collapsing; the upper bound keeps a single long
+// column (descriptions, AI rationales) from monopolizing the table — the rest
+// of the value is reachable via the hover tooltip on the truncated cell.
+const MIN_TEXT_CH = 9;
+const MAX_TEXT_CH = 30;
+
+// Every column resolves to a concrete width. Critically, no column is left
+// auto/flex: with `table-layout: fixed` + the table primitive's
+// `min-w-max`, an auto column with `white-space: nowrap` content expands to
+// its full intrinsic width, and several such columns blow the table up to
+// thousands of px wide (the "only one column visible, rest scrolled off"
+// regression). Bounded widths + the trailing filler col (which has no
+// content, so it contributes 0 to max-content) keep the table predictable:
+// it fills the container when there's slack and scrolls when there isn't.
 function inferColumnLayout(
   column: TableColumn,
   rows: NonNullable<TableData['rows']>,
@@ -929,68 +941,43 @@ function inferColumnLayout(
 ): ColumnLayout {
   // Explicit author config wins.
   if (hasPositiveMaxChars(column.maxChars)) {
-    return { style: getColumnWidthStyle(column), isFlex: false };
+    return { style: getColumnWidthStyle(column) };
   }
 
   if (isActionColumn(column)) {
-    return { style: { width: '160px' }, isFlex: false };
+    return { style: { width: '160px' } };
   }
 
   if (column.type === 'chart') {
-    return { style: { width: '160px' }, isFlex: false };
+    return { style: { width: '160px' } };
   }
 
   const formatName = (column.format ?? '').split(':', 1)[0];
   const formatWidth = FORMAT_WIDTHS[formatName];
   if (formatWidth) {
-    return { style: { width: formatWidth }, isFlex: false };
+    return { style: { width: formatWidth } };
   }
 
   const sample = sampleColumnValues(rows, column, columnIndex, SAMPLE_LIMIT);
   const maxLen = sample.reduce((acc, value) => Math.max(acc, value.length), 0);
-  const sampledCount = sample.length;
 
-  // 100% empty column: shrink to header.
-  if (sampledCount > 0 && maxLen === 0) {
-    return { style: { width: '1%' }, isFlex: false };
-  }
+  const labelLen = Array.from(
+    column.label ?? humanizeFieldName(column.key)
+  ).length;
+  // Header glyphs render uppercase + tracking-wide + semibold next to a sort
+  // caret, so budget ~1.1× per glyph plus padding/icon allowance — otherwise
+  // a header like "DTI" truncates to "D..." in a column sized for its data.
+  const headerChars = Math.ceil(labelLen * 1.1) + 8;
+  // Data side: longest sampled value plus slack for the ellipsis. An empty
+  // column (maxLen 0) sizes purely to its header rather than collapsing.
+  const dataChars = maxLen > 0 ? maxLen + 3 : 0;
 
-  // Short codes / IDs / ISO codes: bound to content width.
-  if (sampledCount > 0 && maxLen > 0 && maxLen <= 12) {
-    const labelLen = Array.from(
-      column.label ?? humanizeFieldName(column.key)
-    ).length;
-    // Header width budget: cell padding (~5ch px-5) + sort icon and gap
-    // (~2.5ch, kept in flow even when not active) + uppercase
-    // tracking-wide text (~1.1× per glyph). Without this the header
-    // truncates to "D." for short labels like "DTI".
-    const headerChars = Math.ceil(labelLen * 1.1) + 8;
-    const dataChars = maxLen + 3;
-    const chars = Math.max(dataChars, headerChars, 10);
-    const cappedChars = Math.min(chars, 28);
-    return {
-      style: { width: `${cappedChars}ch` },
-      inferredAlign: inferAlignFromSample(sample),
-      isFlex: false,
-    };
-  }
-
-  // Medium / long text: leave as a flex column so it claims remaining space.
-  return { inferredAlign: inferAlignFromSample(sample), isFlex: true };
-}
-
-function inferAlignFromSample(sample: string[]): TableColumn['align'] {
-  if (sample.length === 0) return undefined;
-  const nonEmpty = sample.filter((value) => value.length > 0);
-  if (nonEmpty.length === 0) return undefined;
-  const numericCount = nonEmpty.reduce(
-    (acc, value) => (NUMERIC_VALUE_PATTERN.test(value) ? acc + 1 : acc),
-    0
+  const widthChars = Math.min(
+    MAX_TEXT_CH,
+    Math.max(headerChars, dataChars, MIN_TEXT_CH)
   );
-  return numericCount / nonEmpty.length >= 0.9 ? 'right' : undefined;
+  return { style: { width: `${widthChars}ch` } };
 }
-
-const NUMERIC_VALUE_PATTERN = /^-?\d+(\.\d+)?$/;
 
 function sampleColumnValues(
   rows: NonNullable<TableData['rows']>,
