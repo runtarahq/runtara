@@ -313,11 +313,17 @@ build_agent_components() {
 ${TARGET_DIR}/wasm32-wasip2/release/runtara_agent_*.wasm" >&2
             exit 1
         fi
+        if ! find "${TARGET_DIR}/wasm32-wasip2/release" -maxdepth 1 \
+                -name 'runtara_workflow_*.wasm' 2>/dev/null | grep -q .; then
+            echo "Error: --skip-build but no built workflow shared components found at \
+${TARGET_DIR}/wasm32-wasip2/release/runtara_workflow_*.wasm" >&2
+            exit 1
+        fi
         info "Skipping agent component build (--skip-build)"
         return
     fi
 
-    step "Building agent WASM components (23 crates)"
+    step "Building agent and direct workflow WASM components"
     PATH="$(dirname "$CARGO_COMPONENT_BINARY"):${PATH}" \
         "$SCRIPT_DIR/build-agent-components.sh"
 }
@@ -370,7 +376,9 @@ assemble_bundle() {
     # pair. At server boot, RUNTARA_AGENT_COMPONENTS_DIR points at this
     # directory; the ComponentDispatcherService loads each pair and exposes
     # the agents to the validator and workflow runtime.
-    info "Copying agent WASM components"
+    # The same directory also carries the direct workflow stdlib/runtime
+    # components used by static direct composition.
+    info "Copying agent and direct workflow WASM components"
     # `wasm32-wasip2/release/` is cargo-component's finalized component output.
     # Same as for workflow-logic: do NOT read from wasm32-wasip1/, which is the
     # intermediate rustc pass cargo-component leaves behind — that file is the
@@ -393,6 +401,24 @@ assemble_bundle() {
         exit 1
     fi
     info "  Agents: ${wasm_count} .wasm + ${meta_count} .meta.json"
+
+    local workflow_component_count=0
+    local workflow_component_meta_count=0
+    for f in "$agent_src"/runtara_workflow_*.wasm; do
+        [ -f "$f" ] || continue
+        cp "$f" "$bundle/agents/"
+        workflow_component_count=$((workflow_component_count + 1))
+    done
+    for f in "$agent_src"/runtara_workflow_*.meta.json; do
+        [ -f "$f" ] || continue
+        cp "$f" "$bundle/agents/"
+        workflow_component_meta_count=$((workflow_component_meta_count + 1))
+    done
+    if [ "$workflow_component_count" -ne 2 ] || [ "$workflow_component_meta_count" -ne 2 ]; then
+        echo "Error: expected 2 runtara_workflow_*.{wasm,meta.json} shared components in ${agent_src}, found ${workflow_component_count} wasm and ${workflow_component_meta_count} meta files" >&2
+        exit 1
+    fi
+    info "  Direct workflow shared components: ${workflow_component_count} .wasm + ${workflow_component_meta_count} .meta.json"
 
     # ── Rust toolchain (pruned) ──
     info "Copying pruned Rust toolchain"
@@ -582,6 +608,7 @@ COMPILESRCEOF
   "cargo_component_version": "${CARGO_COMPONENT_VERSION}",
   "agent_component_count": ${wasm_count},
   "agent_wit_count": ${agent_wit_count},
+  "workflow_shared_component_count": ${workflow_component_count},
   "host_target": "${HOST_TARGET}",
   "os": "${OS}",
   "arch": "${ARCH}",

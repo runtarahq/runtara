@@ -469,10 +469,10 @@ $([ -n "$valkey_pass" ] && echo "VALKEY_PASSWORD=${valkey_pass}" || echo "# VALK
 ${auth_lines}
 
 WASMTIME_PATH=${RUNTARA_DIR}/bin/wasmtime
-# Pre-built agent components (one .wasm + .meta.json per agent) staged into
-# the bundle by scripts/build-bundle.sh. The server loads each pair into the
-# runtime AgentCatalog at boot, so the validator and workflow runtime see
-# the same agent set the dispatcher can route to.
+# Pre-built agent components plus direct workflow stdlib/runtime components
+# staged into the bundle by scripts/build-bundle.sh. The server loads each
+# agent pair into the runtime AgentCatalog at boot, and direct workflow
+# composition uses the shared workflow components from the same directory.
 RUNTARA_AGENT_COMPONENTS_DIR=${RUNTARA_DIR}/agents
 # Source mirror for the workflow compile pipeline. cargo-component reads
 # the bundled stdlib/sdk/agent-wit crates from here when materializing the

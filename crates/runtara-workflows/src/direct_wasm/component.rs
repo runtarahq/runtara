@@ -7,6 +7,39 @@ use runtara_workflow_wit::{RUNTIME_PACKAGE, STDLIB_PACKAGE, WORKFLOW_WIT_VERSION
 /// Package name used by direct-emitted workflow logic components.
 pub const DIRECT_WORKFLOW_LOGIC_PACKAGE: &str = "runtara:workflow-logic@0.1.0";
 
+/// One prebuilt shared component needed by direct workflow composition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DirectSharedComponentRequirement {
+    /// Package name used by `wac -d`, matching `[package.metadata.component]`.
+    pub package: &'static str,
+    /// Versioned WIT package name imported by direct workflow logic.
+    pub package_with_version: &'static str,
+    /// Filename emitted by `cargo component build` into the bundle directory.
+    pub bundle_wasm_filename: &'static str,
+    /// Metadata filename staged beside the bundle `.wasm`.
+    pub bundle_meta_filename: &'static str,
+    /// Stable filename used if copied into a direct component CAS.
+    pub cas_wasm_filename: &'static str,
+}
+
+/// Shared components every direct workflow logic component imports.
+pub const DIRECT_SHARED_COMPONENT_REQUIREMENTS: &[DirectSharedComponentRequirement] = &[
+    DirectSharedComponentRequirement {
+        package: "runtara:workflow-stdlib",
+        package_with_version: STDLIB_PACKAGE,
+        bundle_wasm_filename: "runtara_workflow_stdlib.wasm",
+        bundle_meta_filename: "runtara_workflow_stdlib.meta.json",
+        cas_wasm_filename: "runtara-workflow-stdlib.wasm",
+    },
+    DirectSharedComponentRequirement {
+        package: "runtara:workflow-runtime",
+        package_with_version: RUNTIME_PACKAGE,
+        bundle_wasm_filename: "runtara_workflow_runtime.wasm",
+        bundle_meta_filename: "runtara_workflow_runtime.meta.json",
+        cas_wasm_filename: "runtara-workflow-runtime.wasm",
+    },
+];
+
 /// Direct component composition scaffolding emitted beside direct artifacts.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DirectComponentArtifacts {
@@ -18,6 +51,8 @@ pub struct DirectComponentArtifacts {
     pub stdlib_package: String,
     /// Runtime component package to bind during static composition.
     pub runtime_package: String,
+    /// Shared components required for static composition.
+    pub shared_components: Vec<DirectSharedComponentRequirement>,
 }
 
 /// Emit the direct workflow component scaffolding.
@@ -32,6 +67,7 @@ pub fn emit_direct_component_artifacts(agents: &[String]) -> DirectComponentArti
         wac_source: emit_wac(agents),
         stdlib_package: STDLIB_PACKAGE.to_string(),
         runtime_package: RUNTIME_PACKAGE.to_string(),
+        shared_components: DIRECT_SHARED_COMPONENT_REQUIREMENTS.to_vec(),
     }
 }
 
@@ -139,5 +175,34 @@ mod tests {
         assert!(artifacts.wac_source.contains("...agent-crypto,"));
         assert!(artifacts.wac_source.contains("...agent-object-model,"));
         assert!(artifacts.wac_source.contains("export wf...;"));
+    }
+
+    #[test]
+    fn direct_shared_component_requirements_match_bundle_outputs() {
+        let artifacts = emit_direct_component_artifacts(&[]);
+
+        assert_eq!(
+            artifacts.shared_components,
+            DIRECT_SHARED_COMPONENT_REQUIREMENTS
+        );
+        assert_eq!(
+            artifacts.shared_components,
+            vec![
+                DirectSharedComponentRequirement {
+                    package: "runtara:workflow-stdlib",
+                    package_with_version: "runtara:workflow-stdlib@0.1.0",
+                    bundle_wasm_filename: "runtara_workflow_stdlib.wasm",
+                    bundle_meta_filename: "runtara_workflow_stdlib.meta.json",
+                    cas_wasm_filename: "runtara-workflow-stdlib.wasm",
+                },
+                DirectSharedComponentRequirement {
+                    package: "runtara:workflow-runtime",
+                    package_with_version: "runtara:workflow-runtime@0.1.0",
+                    bundle_wasm_filename: "runtara_workflow_runtime.wasm",
+                    bundle_meta_filename: "runtara_workflow_runtime.meta.json",
+                    cas_wasm_filename: "runtara-workflow-runtime.wasm",
+                },
+            ]
+        );
     }
 }

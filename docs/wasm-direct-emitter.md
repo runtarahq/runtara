@@ -55,6 +55,10 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   from environment variables and exports the first runtime lifecycle surface:
   input loading, completion/failure, custom events, heartbeat, cancellation
   polling, and durable sleep.
+- `scripts/build-agent-components.sh` now builds and stages the direct workflow
+  stdlib/runtime components beside agent components with sibling metadata, and
+  the bundle installer treats `RUNTARA_AGENT_COMPONENTS_DIR` as the shared
+  component directory for agents plus direct workflow components.
 - `direct_wasm::component` emits component-facing sidecars for static
   composition with separate stdlib and runtime components plus any required
   agents.
@@ -815,6 +819,11 @@ Current status:
 - The generated components export `runtara:workflow-stdlib/json@0.1.0` and
   `runtara:workflow-runtime/runtime@0.1.0`, so both shared components are ready
   for the first direct workflow composition smoke test.
+- Component build scripts now stage:
+  - `runtara_workflow_stdlib.wasm`;
+  - `runtara_workflow_stdlib.meta.json`;
+  - `runtara_workflow_runtime.wasm`;
+  - `runtara_workflow_runtime.meta.json`.
 
 Implementation steps:
 
