@@ -86,6 +86,13 @@ pub mod compile;
 #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
 pub mod components_compile;
 
+/// Proof-of-concept direct WebAssembly emitter for workflow DSL graphs.
+#[cfg(all(
+    feature = "compiler",
+    not(all(target_family = "wasm", not(target_os = "wasi")))
+))]
+pub mod direct_wasm_poc;
+
 /// Dependency analysis for child workflows.
 pub mod dependency_analysis;
 

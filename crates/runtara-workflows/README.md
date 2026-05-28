@@ -21,6 +21,21 @@ runtara-compile \
 
 Other useful flags: `--validate` (no compilation), `--analyze` (report only), `--emit-source <path>` (dump generated Rust), `--debug`, `--verbose`. Override the target with `RUNTARA_COMPILE_TARGET=...`. Build artifacts live under `$DATA_DIR` (default `.data`).
 
+## Direct Wasm PoC
+
+The `runtara-direct-wasm-poc` binary experiments with emitting a core Wasm module directly from the typed DSL, without generating a Rust crate or invoking `cargo component build`. This is not the production workflow ABI. It currently lowers a small control-flow subset (`Finish`, `Log`, and `Conditional` over `data.flag`) into `run_bool(flag: i32) -> finish_code`, and writes unsupported DSL features plus finish mappings into a `runtara.direct_wasm_poc` custom section.
+
+```bash
+cargo run -p runtara-workflows --bin runtara-direct-wasm-poc -- \
+  --workflow crates/runtara-workflows/tests/fixtures/conditional_workflow.json \
+  --output /tmp/runtara-direct-poc.wasm \
+  --compare-rust-codegen
+```
+
+Use this to compare direct Wasm emission cost and size against the current Rust/component artifact codegen before designing a production direct-emission ABI for JSON mapping, agent dispatch, durability, and component-model exports.
+
+Add `--full-rust-compile` when you also want to invoke the existing `cargo component build` plus `wac compose` pipeline; that requires the same local tools and agent components as production compilation.
+
 ## Inside Runtara
 
 - Primary consumer: `runtara-server` — `src/compiler/` and the workflows API (`api/services/compilation.rs`, `api/services/workflows.rs`) drive compilation on workflow create/update.

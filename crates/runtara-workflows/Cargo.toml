@@ -10,7 +10,7 @@ categories = ["development-tools"]
 
 [features]
 default = ["compiler", "native-agents"]
-compiler = []
+compiler = ["dep:wasm-encoder"]
 native-agents = ["runtara-agents/native"]
 wasm-js = ["runtara-agents/wasm-js"]
 
@@ -25,13 +25,20 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 proc-macro2 = "1.0"
 quote = "1.0"
 minijinja = "2.5"
+wasm-encoder = { version = "0.246", optional = true }
 
 [[bin]]
 name = "runtara-compile"
 path = "src/bin/compile.rs"
 required-features = ["compiler"]
 
+[[bin]]
+name = "runtara-direct-wasm-poc"
+path = "src/bin/direct_wasm_poc.rs"
+required-features = ["compiler"]
+
 [dev-dependencies]
 tempfile = "3"
 syn = { version = "2.0", features = ["full", "parsing"] }
 base64 = { workspace = true }
+wasmparser = "0.246"
