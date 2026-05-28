@@ -192,17 +192,15 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   imports (`runtara:agent-<id>/capabilities@0.3.0`) and validates core module
   metadata with those imports present.
 - The first Agent execution slice is implemented for Agent normal-flow steps.
-  Non-durable Agent support is intentionally limited to explicit
-  `maxRetries = 0`, because generated Rust still retries non-durable Agent
-  calls by default and the direct path has not yet lowered that non-durable
-  retry loop. The direct core applies the Agent input mapping through stdlib,
-  calls the statically imported per-agent `capabilities.invoke`, stores the
-  success output through `stdlib.agent-output`, rebuilds the source, and
-  continues to the next direct run-plan node. The WIT canonical ABI lowers
-  this import indirectly as `[pointer, pointer]`, so the direct core now writes
-  the argument area for capability id, input bytes, and
-  `option<connection-info>`, and reads the Agent-specific result payload
-  offsets for successful output bytes.
+  Non-durable Agent support now includes the generated Rust retry defaults and
+  retry overrides without checkpoint I/O. The direct core applies the Agent
+  input mapping through stdlib, calls the statically imported per-agent
+  `capabilities.invoke`, stores the success output through
+  `stdlib.agent-output`, rebuilds the source, and continues to the next direct
+  run-plan node. The WIT canonical ABI lowers this import indirectly as
+  `[pointer, pointer]`, so the direct core now writes the argument area for
+  capability id, input bytes, and `option<connection-info>`, and reads the
+  Agent-specific result payload offsets for successful output bytes.
 - Agent failure handling now converts WIT `error-info` into the same JSON
   envelope used by component codegen, wraps it in the current generated Agent
   step failure string, emits Agent `step_debug_end` failure payloads when
@@ -214,12 +212,11 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   validation JSON used by generated Rust, emits Agent failure debug payloads
   when `track_events` is enabled, calls `runtime.fail`, and returns failed
   `wasi:cli/run`.
-- Non-durable Agent connection ids are now supported within the explicit
-  `maxRetries = 0` subset. The direct stdlib injects the generated
-  Rust-compatible `connection_id` and `_connection` fields into Agent JSON
-  input, and the direct core writes the canonical ABI `some(connection-info)`
-  record with the connection id, empty integration id, `{}` parameters, and no
-  subtype/rate-limit config.
+- Non-durable Agent connection ids are now supported. The direct stdlib
+  injects the generated Rust-compatible `connection_id` and `_connection`
+  fields into Agent JSON input, and the direct core writes the canonical ABI
+  `some(connection-info)` record with the connection id, empty integration id,
+  `{}` parameters, and no subtype/rate-limit config.
 - Agent `onError` routing is now supported for default handlers and
   priority-ordered conditional handlers with at most one default fallback. The
   direct stdlib exposes `error-steps` to insert generated-code-compatible
@@ -268,6 +265,13 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   payload skips both `capabilities.invoke` and `runtime.checkpoint`, while the
   fresh branch still invokes the Agent and checkpoints only after success.
   Full host-level crash/resume differential tests remain pending.
+- Non-durable Agent retry-loop lowering is now implemented. The direct core
+  uses the same default retry counts and base delays as generated Rust, calls
+  `stdlib.agent-retry-error-info` and `stdlib.agent-retry-delay-ms` for retry
+  classification and backoff calculation, and sleeps through
+  `runtime.blocking-sleep`. The emitted non-durable path does not call
+  checkpoint lookup/write, durable sleep, retry sleep-key construction, or
+  retry-attempt recording, matching `#[resilient(durable = false)]`.
 - Durable Delay normal flow is now public in the direct emitter. The manifest
   records `Delay` configs, the shared stdlib resolves `durationMs` through the
   same mapping evaluator and emits the generated Rust-compatible
@@ -717,6 +721,7 @@ stdlib/runtime owns:
 - retry category handling;
 - rate-limit budget accounting;
 - durable sleep;
+- blocking sleep for non-durable waits;
 - cancellation checks;
 - resume from checkpoint;
 - failure classification.
@@ -742,6 +747,7 @@ record checkpoint-result {
   custom-signal: option<custom-signal-info>,
 }
 
+blocking-sleep: func(ms: u64) -> result<_, string>;
 get-checkpoint: func(checkpoint-id: string) -> result<option<list<u8>>, string>;
 checkpoint: func(checkpoint-id: string, state: list<u8>) -> result<checkpoint-result, string>;
 handle-checkpoint-signal: func(signal-type: string) -> result<bool, string>;
@@ -1459,10 +1465,11 @@ Current status:
   imports, and the workflow-logic component resolver now includes matching
   per-agent WIT imports in component metadata.
 - Non-durable Agent normal-flow lowering now compiles and validates as a
-  direct component for explicit `maxRetries = 0`, including steps with a static
-  `connectionId`. Non-durable Agent default retry behavior remains gated until
-  the direct path lowers the generated Rust retry loop without checkpoint I/O.
-  Durable Agent retry support is enabled for the subset described below.
+  direct component, including generated Rust retry defaults/overrides and
+  steps with a static `connectionId`. Non-durable retry waits use the runtime
+  `blocking-sleep` ABI and do not perform checkpoint I/O or retry-attempt
+  recording. Durable Agent retry support is enabled for the subset described
+  below.
 - The shared stdlib WIT now includes `agent-output`, implemented by
   `runtara-workflow-stdlib::direct_json`, to store Agent success outputs using
   the same `steps.<id>` envelope shape as generated Rust code.
@@ -1525,6 +1532,9 @@ Current status:
 - A structural core Wasm test now covers the durable Agent cached-checkpoint
   replay branch. It proves the cached branch does not invoke the Agent or save
   another checkpoint, and that fresh execution still saves only after invoke.
+- A structural core Wasm test now covers non-durable Agent default retry
+  lowering. It proves the direct retry loop uses `runtime.blocking-sleep` and
+  omits checkpoint, durable sleep, retry sleep-key, and retry-attempt calls.
 
 Implementation steps:
 
@@ -1562,8 +1572,9 @@ Implementation steps:
    - pause/cancel/shutdown acknowledgement after checkpoint save: internal
      lowering in place through `runtime.handle-checkpoint-signal`, public
      support enabled for the durable Agent subset;
-   - non-durable retry loop parity: pending; public non-durable Agent support
-     requires explicit `maxRetries = 0`;
+   - non-durable retry loop parity: done through
+     `stdlib.agent-retry-error-info`, `stdlib.agent-retry-delay-ms`, and
+     `runtime.blocking-sleep`;
    - cached-checkpoint replay branch test: done at the emitted core Wasm level;
    - timeout behavior: pending.
 5. Extend `onError` routing beyond Agent when additional failing step types are

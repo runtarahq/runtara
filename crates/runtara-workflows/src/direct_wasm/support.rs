@@ -316,20 +316,8 @@ fn supports_direct_control_step_inner(
     }
 }
 
-fn supports_agent_step_baseline(graph: &ExecutionGraph, step: &AgentStep) -> bool {
-    step.timeout.is_none()
-        && step.compensation.is_none()
-        && !step.breakpoint.unwrap_or(false)
-        && supports_agent_retry_baseline(graph, step)
-}
-
-fn supports_agent_retry_baseline(graph: &ExecutionGraph, step: &AgentStep) -> bool {
-    agent_step_is_durable(graph, step) || step.max_retries == Some(0)
-}
-
-fn agent_step_is_durable(graph: &ExecutionGraph, step: &AgentStep) -> bool {
-    let graph_durable = graph.durable.unwrap_or(true);
-    graph_durable && step.durable.unwrap_or(true)
+fn supports_agent_step_baseline(_graph: &ExecutionGraph, step: &AgentStep) -> bool {
+    step.timeout.is_none() && step.compensation.is_none() && !step.breakpoint.unwrap_or(false)
 }
 
 fn supports_delay_step_baseline(graph: &ExecutionGraph, step: &DelayStep) -> bool {
@@ -782,7 +770,7 @@ fn collect_step_support(
 }
 
 fn collect_agent_step_unsupported(
-    graph: &ExecutionGraph,
+    _graph: &ExecutionGraph,
     step: &AgentStep,
     unsupported: &mut Vec<UnsupportedWorkflowFeature>,
 ) {
@@ -795,12 +783,6 @@ fn collect_agent_step_unsupported(
         });
     };
 
-    if !supports_agent_retry_baseline(graph, step) {
-        push(
-            "agent-retry",
-            "Non-durable Agent direct lowering currently requires maxRetries = 0 because generated Rust retries non-durable Agent calls by default",
-        );
-    }
     if step.timeout.is_some() {
         push(
             "agent-timeout",
@@ -1454,7 +1436,7 @@ mod tests {
     }
 
     #[test]
-    fn non_durable_agent_default_retry_is_rejected_until_retry_loop_is_lowered() {
+    fn non_durable_agent_default_retry_is_supported() {
         let graph = serde_json::from_value::<ExecutionGraph>(serde_json::json!({
             "durable": false,
             "steps": {
@@ -1481,12 +1463,7 @@ mod tests {
 
         let report = analyze_direct_wasm_support(&graph);
 
-        assert!(!report.supported);
-        assert!(report.unsupported.iter().any(|feature| {
-            feature.step_id.as_deref() == Some("agent")
-                && feature.step_type.as_deref() == Some("Agent")
-                && feature.feature == "agent-retry"
-        }));
+        assert!(report.supported, "{:?}", report.unsupported);
     }
 
     #[test]

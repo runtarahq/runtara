@@ -952,11 +952,7 @@ fn step_run_plan_inner(
         "Agent" => {
             let agent = agent_config(graph, step_id)?;
             let durable_checkpoint = agent.durable;
-            let max_retries = if agent.durable {
-                agent_effective_max_retries(agent)
-            } else {
-                0
-            };
+            let max_retries = agent_effective_max_retries(agent);
             let retry_delay_ms = agent_effective_retry_delay_ms(agent);
             let rate_limit_budget_ms = graph.rate_limit_budget_ms;
             let next_plan = normal_flow_plan(graph, step_id, stack, include_on_error)?;
@@ -1660,6 +1656,7 @@ struct DirectCoreImportIndices {
     runtime_handle_checkpoint_signal: Option<u32>,
     runtime_record_retry_attempt: Option<u32>,
     runtime_durable_sleep: Option<u32>,
+    runtime_blocking_sleep: Option<u32>,
     runtime_durable_sleep_checkpoint: Option<u32>,
     stdlib_init_manifest: Option<u32>,
     stdlib_build_source: Option<u32>,
@@ -1720,6 +1717,10 @@ impl DirectCoreImportIndices {
             runtime_durable_sleep: require_import(
                 self.runtime_durable_sleep,
                 "runtime.durable-sleep",
+            )?,
+            runtime_blocking_sleep: require_import(
+                self.runtime_blocking_sleep,
+                "runtime.blocking-sleep",
             )?,
             runtime_durable_sleep_checkpoint: require_import(
                 self.runtime_durable_sleep_checkpoint,
@@ -1813,6 +1814,7 @@ struct DirectCoreFunctionIndices {
     runtime_handle_checkpoint_signal: u32,
     runtime_record_retry_attempt: u32,
     runtime_durable_sleep: u32,
+    runtime_blocking_sleep: u32,
     runtime_durable_sleep_checkpoint: u32,
     stdlib_init_manifest: u32,
     stdlib_build_source: u32,
@@ -1897,6 +1899,8 @@ fn import_core_function(
         import_indices.runtime_record_retry_attempt = Some(function_index);
     } else if is_runtime_import(resolve, interface, function, "durable-sleep") {
         import_indices.runtime_durable_sleep = Some(function_index);
+    } else if is_runtime_import(resolve, interface, function, "blocking-sleep") {
+        import_indices.runtime_blocking_sleep = Some(function_index);
     } else if is_runtime_import(resolve, interface, function, "durable-sleep-checkpoint") {
         import_indices.runtime_durable_sleep_checkpoint = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "init-manifest") {
@@ -3130,7 +3134,7 @@ fn emit_agent_plan(
     let capability_id = static_data
         .agent_capability_id(agent_id)
         .expect("direct Agent run plans have static capability ids");
-    if durable_checkpoint && max_retries > 0 {
+    if max_retries > 0 {
         body.instruction(&Instruction::I32Const(1));
         body.instruction(&Instruction::LocalSet(DIRECT_AGENT_RETRY_ATTEMPT_LOCAL));
         body.instruction(&Instruction::Block(BlockType::Empty));
@@ -3167,19 +3171,22 @@ fn emit_agent_plan(
             body,
             indices,
             static_data,
+            durable_checkpoint,
             route_ptr_local,
             route_len_local,
             DIRECT_AGENT_RETRY_ERROR_PTR_LOCAL,
             DIRECT_AGENT_RETRY_ERROR_LEN_LOCAL,
         );
-        emit_agent_record_retry_attempt(
-            body,
-            indices,
-            route_ptr_local,
-            route_len_local,
-            DIRECT_AGENT_RETRY_ERROR_PTR_LOCAL,
-            DIRECT_AGENT_RETRY_ERROR_LEN_LOCAL,
-        );
+        if durable_checkpoint {
+            emit_agent_record_retry_attempt(
+                body,
+                indices,
+                route_ptr_local,
+                route_len_local,
+                DIRECT_AGENT_RETRY_ERROR_PTR_LOCAL,
+                DIRECT_AGENT_RETRY_ERROR_LEN_LOCAL,
+            );
+        }
         body.instruction(&Instruction::Br(2));
         body.instruction(&Instruction::End);
         emit_agent_invoke_error_body_from_info(
@@ -3894,10 +3901,12 @@ fn emit_agent_retry_delay(
     body.instruction(&Instruction::LocalSet(DIRECT_AGENT_RETRY_SLEEP_MS_LOCAL));
 }
 
+#[allow(clippy::too_many_arguments)]
 fn emit_agent_retry_sleep(
     body: &mut WasmFunction,
     indices: &DirectCoreFunctionIndices,
     static_data: &DirectCoreStaticData,
+    durable_checkpoint: bool,
     cache_key_ptr_local: u32,
     cache_key_len_local: u32,
     sleep_key_ptr_local: u32,
@@ -3905,25 +3914,37 @@ fn emit_agent_retry_sleep(
 ) {
     body.instruction(&Instruction::LocalGet(DIRECT_AGENT_RETRY_SLEEP_TAG_LOCAL));
     body.instruction(&Instruction::If(BlockType::Empty));
-    body.instruction(&Instruction::LocalGet(cache_key_ptr_local));
-    body.instruction(&Instruction::LocalGet(cache_key_len_local));
-    body.instruction(&Instruction::LocalGet(DIRECT_AGENT_RETRY_ATTEMPT_LOCAL));
-    push_retptr_arg(body);
-    body.instruction(&Instruction::Call(indices.stdlib_agent_retry_sleep_key));
-    return_if_retptr_error(body);
-    load_retptr_list(body, sleep_key_ptr_local, sleep_key_len_local);
+    if durable_checkpoint {
+        body.instruction(&Instruction::LocalGet(cache_key_ptr_local));
+        body.instruction(&Instruction::LocalGet(cache_key_len_local));
+        body.instruction(&Instruction::LocalGet(DIRECT_AGENT_RETRY_ATTEMPT_LOCAL));
+        push_retptr_arg(body);
+        body.instruction(&Instruction::Call(indices.stdlib_agent_retry_sleep_key));
+        return_if_retptr_error(body);
+        load_retptr_list(body, sleep_key_ptr_local, sleep_key_len_local);
 
-    body.instruction(&Instruction::LocalGet(sleep_key_ptr_local));
-    body.instruction(&Instruction::LocalGet(sleep_key_len_local));
-    push_segment_args(body, &static_data.agent_rate_limit_wait);
+        body.instruction(&Instruction::LocalGet(sleep_key_ptr_local));
+        body.instruction(&Instruction::LocalGet(sleep_key_len_local));
+        push_segment_args(body, &static_data.agent_rate_limit_wait);
+    }
     body.instruction(&Instruction::LocalGet(DIRECT_AGENT_RETRY_SLEEP_MS_LOCAL));
-    push_retptr_arg(body);
-    body.instruction(&Instruction::Call(indices.runtime_durable_sleep_checkpoint));
-    return_if_retptr_error(body);
+    if durable_checkpoint {
+        push_retptr_arg(body);
+        body.instruction(&Instruction::Call(indices.runtime_durable_sleep_checkpoint));
+        return_if_retptr_error(body);
+    } else {
+        push_retptr_arg(body);
+        body.instruction(&Instruction::Call(indices.runtime_blocking_sleep));
+        return_if_retptr_error(body);
+    }
     body.instruction(&Instruction::Else);
     body.instruction(&Instruction::LocalGet(DIRECT_AGENT_RETRY_SLEEP_MS_LOCAL));
     push_retptr_arg(body);
-    body.instruction(&Instruction::Call(indices.runtime_durable_sleep));
+    body.instruction(&Instruction::Call(if durable_checkpoint {
+        indices.runtime_durable_sleep
+    } else {
+        indices.runtime_blocking_sleep
+    }));
     return_if_retptr_error(body);
     body.instruction(&Instruction::End);
 }
@@ -5861,9 +5882,9 @@ mod tests {
     }
 
     #[test]
-    fn direct_compile_rejects_non_durable_agent_default_retry() {
+    fn direct_compile_supports_non_durable_agent_default_retry() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let err = compile_direct_workflow(DirectCompilationInput {
+        let result = compile_direct_workflow(DirectCompilationInput {
             workflow_id: "agent-non-durable-default-retry".to_string(),
             version: 1,
             execution_graph: non_durable_agent_default_retry_graph(),
@@ -5871,15 +5892,22 @@ mod tests {
             track_events: false,
             agent_catalog: None,
         })
-        .expect_err("non-durable Agent default retry should remain gated");
+        .expect("non-durable Agent default retry compile should succeed");
 
-        let DirectCompileError::Unsupported { report } = err else {
-            panic!("expected unsupported error");
-        };
-        assert!(!report.supported);
-        assert!(report.unsupported.iter().any(|feature| {
-            feature.step_id.as_deref() == Some("agent") && feature.feature == "agent-retry"
-        }));
+        let wasm = fs::read(&result.wasm_path).expect("wasm");
+        Validator::new()
+            .validate_all(&wasm)
+            .expect("direct non-durable Agent default retry artifact should validate");
+        assert!(result.support_report.supported);
+        assert_eq!(result.support_report.unsupported, vec![]);
+
+        let manifest: DirectWorkflowManifest =
+            serde_json::from_slice(&fs::read(&result.manifest_path).expect("manifest"))
+                .expect("manifest json");
+        assert_eq!(manifest.graph.agents.len(), 1);
+        assert!(!manifest.graph.agents[0].durable);
+        assert_eq!(manifest.graph.agents[0].max_retries, None);
+        assert_eq!(manifest.graph.agents[0].retry_delay, None);
     }
 
     #[test]
@@ -6759,6 +6787,331 @@ mod tests {
         assert!(
             saw_validate_before_invoke,
             "Agent input validation should run before capabilities.invoke"
+        );
+    }
+
+    #[test]
+    fn direct_core_lowers_non_durable_agent_retry_loop() {
+        let graph = non_durable_agent_default_retry_graph();
+        let manifest = build_direct_workflow_manifest(&graph).expect("manifest");
+        let manifest_json = manifest.to_canonical_json().expect("manifest json");
+        let core_config =
+            DirectCoreConfig::new(&manifest, &manifest_json, false).expect("core config");
+
+        let DirectRunPlan::Agent {
+            durable_checkpoint,
+            max_retries,
+            retry_delay_ms,
+            rate_limit_budget_ms,
+            ..
+        } = &core_config.run_plan
+        else {
+            panic!("expected Agent run plan");
+        };
+        assert!(!*durable_checkpoint);
+        assert_eq!(*max_retries, 3);
+        assert_eq!(*retry_delay_ms, 1_000);
+        assert_eq!(*rate_limit_budget_ms, 60_000);
+        assert!(!manifest.graph.agents[0].durable);
+
+        let (resolve, world) =
+            build_direct_component_resolve_with_agents(&manifest.feature_summary.agent_ids)
+                .expect("agent resolve");
+        let core = emit_direct_core_module(&resolve, world, &core_config).expect("core module");
+        Validator::new()
+            .validate_all(&core)
+            .expect("non-durable Agent retry core module validates");
+
+        let mut next_function_index = 0;
+        let mut get_checkpoint_index = None;
+        let mut checkpoint_index = None;
+        let mut durable_sleep_index = None;
+        let mut durable_sleep_checkpoint_index = None;
+        let mut blocking_sleep_index = None;
+        let mut agent_retry_sleep_key_index = None;
+        let mut agent_retry_delay_index = None;
+        let mut agent_retry_error_info_index = None;
+        let mut agent_error_from_info_index = None;
+        let mut record_retry_attempt_index = None;
+        let mut agent_invoke_index = None;
+        let mut saw_blocking_sleep_import = false;
+        let mut saw_agent_retry_delay_import = false;
+        let mut saw_agent_retry_error_info_import = false;
+        let mut saw_agent_error_from_info_import = false;
+        let mut saw_retry_loop = false;
+        let mut saw_retry_continue_branch = false;
+        let mut saw_retryable_load = false;
+        let mut saw_retry_info_retryable_load = false;
+        let mut saw_retry_after_tag_load = false;
+        let mut saw_retry_after_value_load = false;
+        let mut saw_rate_limit_wait_accumulator = false;
+        let mut saw_rate_limit_base_delay_const = false;
+        let mut saw_rate_limit_budget_const = false;
+        let mut saw_rate_limit_budget_compare = false;
+        let mut saw_retry_bound = false;
+        let mut saw_invoke = false;
+        let mut saw_retry_info_after_invoke = false;
+        let mut saw_retry_delay_after_retry_info = false;
+        let mut saw_blocking_sleep_after_retry_delay = false;
+        let mut saw_error_from_info_after_retry_info = false;
+        let mut saw_get_checkpoint_call = false;
+        let mut saw_checkpoint_call = false;
+        let mut saw_durable_sleep_call = false;
+        let mut saw_durable_sleep_checkpoint_call = false;
+        let mut saw_retry_sleep_key_call = false;
+        let mut saw_record_retry_attempt_call = false;
+        let mut code_body_index = 0;
+
+        for payload in Parser::new(0).parse_all(&core) {
+            match payload.expect("core wasm payload") {
+                Payload::ImportSection(reader) => {
+                    for import in reader.into_imports() {
+                        let import = import.expect("core import");
+                        if matches!(import.ty, TypeRef::Func(_)) {
+                            match (import.module, import.name) {
+                                (module, "get-checkpoint")
+                                    if module.contains("runtara:workflow-runtime/runtime") =>
+                                {
+                                    get_checkpoint_index = Some(next_function_index);
+                                }
+                                (module, "checkpoint")
+                                    if module.contains("runtara:workflow-runtime/runtime") =>
+                                {
+                                    checkpoint_index = Some(next_function_index);
+                                }
+                                (module, "durable-sleep")
+                                    if module.contains("runtara:workflow-runtime/runtime") =>
+                                {
+                                    durable_sleep_index = Some(next_function_index);
+                                }
+                                (module, "durable-sleep-checkpoint")
+                                    if module.contains("runtara:workflow-runtime/runtime") =>
+                                {
+                                    durable_sleep_checkpoint_index = Some(next_function_index);
+                                }
+                                (module, "blocking-sleep")
+                                    if module.contains("runtara:workflow-runtime/runtime") =>
+                                {
+                                    saw_blocking_sleep_import = true;
+                                    blocking_sleep_index = Some(next_function_index);
+                                }
+                                (module, "agent-retry-sleep-key")
+                                    if module.contains("runtara:workflow-stdlib/json") =>
+                                {
+                                    agent_retry_sleep_key_index = Some(next_function_index);
+                                }
+                                (module, "agent-retry-delay-ms")
+                                    if module.contains("runtara:workflow-stdlib/json") =>
+                                {
+                                    saw_agent_retry_delay_import = true;
+                                    agent_retry_delay_index = Some(next_function_index);
+                                }
+                                (module, "agent-retry-error-info")
+                                    if module.contains("runtara:workflow-stdlib/json") =>
+                                {
+                                    saw_agent_retry_error_info_import = true;
+                                    agent_retry_error_info_index = Some(next_function_index);
+                                }
+                                (module, "agent-error-from-info")
+                                    if module.contains("runtara:workflow-stdlib/json") =>
+                                {
+                                    saw_agent_error_from_info_import = true;
+                                    agent_error_from_info_index = Some(next_function_index);
+                                }
+                                (module, "record-retry-attempt")
+                                    if module.contains("runtara:workflow-runtime/runtime") =>
+                                {
+                                    record_retry_attempt_index = Some(next_function_index);
+                                }
+                                (module, "invoke")
+                                    if module.contains("runtara:agent-utils/capabilities") =>
+                                {
+                                    agent_invoke_index = Some(next_function_index);
+                                }
+                                _ => {}
+                            }
+                            next_function_index += 1;
+                        }
+                    }
+                }
+                Payload::CodeSectionEntry(body) => {
+                    if code_body_index == 0 {
+                        let mut saw_invoke_call = false;
+                        let mut saw_retry_info_call = false;
+                        let mut saw_retry_delay_call = false;
+                        for operator in body.get_operators_reader().expect("operators") {
+                            match operator.expect("operator") {
+                                Operator::Call { function_index }
+                                    if Some(function_index) == get_checkpoint_index =>
+                                {
+                                    saw_get_checkpoint_call = true;
+                                }
+                                Operator::Call { function_index }
+                                    if Some(function_index) == checkpoint_index =>
+                                {
+                                    saw_checkpoint_call = true;
+                                }
+                                Operator::Call { function_index }
+                                    if Some(function_index) == durable_sleep_index =>
+                                {
+                                    saw_durable_sleep_call = true;
+                                }
+                                Operator::Call { function_index }
+                                    if Some(function_index) == durable_sleep_checkpoint_index =>
+                                {
+                                    saw_durable_sleep_checkpoint_call = true;
+                                }
+                                Operator::Call { function_index }
+                                    if Some(function_index) == agent_retry_sleep_key_index =>
+                                {
+                                    saw_retry_sleep_key_call = true;
+                                }
+                                Operator::Call { function_index }
+                                    if Some(function_index) == record_retry_attempt_index =>
+                                {
+                                    saw_record_retry_attempt_call = true;
+                                }
+                                Operator::Call { function_index }
+                                    if Some(function_index) == agent_invoke_index =>
+                                {
+                                    saw_invoke = true;
+                                    saw_invoke_call = true;
+                                }
+                                Operator::Call { function_index }
+                                    if Some(function_index) == agent_retry_error_info_index =>
+                                {
+                                    saw_retry_info_after_invoke = saw_invoke_call;
+                                    saw_retry_info_call = true;
+                                }
+                                Operator::Call { function_index }
+                                    if Some(function_index) == agent_retry_delay_index =>
+                                {
+                                    saw_retry_delay_after_retry_info = saw_retry_info_call;
+                                    saw_retry_delay_call = true;
+                                }
+                                Operator::Call { function_index }
+                                    if Some(function_index) == blocking_sleep_index =>
+                                {
+                                    saw_blocking_sleep_after_retry_delay = saw_retry_delay_call;
+                                }
+                                Operator::Call { function_index }
+                                    if Some(function_index) == agent_error_from_info_index =>
+                                {
+                                    saw_error_from_info_after_retry_info = saw_retry_info_call;
+                                }
+                                Operator::Loop { .. } => saw_retry_loop = true,
+                                Operator::Br { relative_depth: 2 } => {
+                                    saw_retry_continue_branch = true;
+                                }
+                                Operator::I32Load8U { memarg }
+                                    if memarg.offset
+                                        == DIRECT_AGENT_RESULT_ERR_RETRYABLE_OFFSET =>
+                                {
+                                    saw_retryable_load = true;
+                                }
+                                Operator::I32Load8U { memarg }
+                                    if memarg.offset
+                                        == DIRECT_AGENT_RETRY_INFO_RETRYABLE_OFFSET =>
+                                {
+                                    saw_retry_info_retryable_load = true;
+                                }
+                                Operator::I32Load8U { memarg }
+                                    if memarg.offset
+                                        == DIRECT_AGENT_RESULT_ERR_RETRY_AFTER_TAG_OFFSET =>
+                                {
+                                    saw_retry_after_tag_load = true;
+                                }
+                                Operator::I64Load { memarg }
+                                    if memarg.offset
+                                        == DIRECT_AGENT_RESULT_ERR_RETRY_AFTER_VALUE_OFFSET =>
+                                {
+                                    saw_retry_after_value_load = true;
+                                }
+                                Operator::I64Add => saw_rate_limit_wait_accumulator = true,
+                                Operator::I64Const { value: 1_000 } => {
+                                    saw_rate_limit_base_delay_const = true;
+                                }
+                                Operator::I64Const { value: 60_000 } => {
+                                    saw_rate_limit_budget_const = true;
+                                }
+                                Operator::I64LeU => saw_rate_limit_budget_compare = true,
+                                Operator::I32Const { value: 3 } => {
+                                    saw_retry_bound = true;
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                    code_body_index += 1;
+                }
+                _ => {}
+            }
+        }
+
+        assert!(
+            saw_blocking_sleep_import,
+            "core should import runtime.blocking-sleep"
+        );
+        assert!(
+            saw_agent_retry_delay_import,
+            "core should import stdlib.agent-retry-delay-ms"
+        );
+        assert!(
+            saw_agent_retry_error_info_import,
+            "core should import stdlib.agent-retry-error-info"
+        );
+        assert!(
+            saw_agent_error_from_info_import,
+            "core should import stdlib.agent-error-from-info"
+        );
+        assert!(saw_invoke, "retry loop should invoke the Agent capability");
+        assert!(
+            saw_retry_loop && saw_retry_continue_branch,
+            "non-durable retry Agent should lower a retry loop"
+        );
+        assert!(
+            saw_retryable_load && saw_retry_info_retryable_load,
+            "retry decision should inspect retryable Agent error metadata"
+        );
+        assert!(
+            saw_retry_after_tag_load && saw_retry_after_value_load,
+            "retry path should inspect typed retryAfterMs hints"
+        );
+        assert!(
+            saw_rate_limit_wait_accumulator,
+            "rate-limited retry path should accumulate wait time"
+        );
+        assert!(
+            saw_rate_limit_base_delay_const
+                && saw_rate_limit_budget_const
+                && saw_rate_limit_budget_compare,
+            "retry path should apply generated retry delay and budget defaults"
+        );
+        assert!(saw_retry_bound, "retry loop should compare maxRetries=3");
+        assert!(
+            saw_retry_info_after_invoke,
+            "retry error payload should be built after failed invoke"
+        );
+        assert!(
+            saw_retry_delay_after_retry_info,
+            "retry delay should be computed from preserved retry payload"
+        );
+        assert!(
+            saw_blocking_sleep_after_retry_delay,
+            "non-durable retries should use runtime.blocking-sleep after delay calculation"
+        );
+        assert!(
+            saw_error_from_info_after_retry_info,
+            "non-retried errors should format the preserved retry payload"
+        );
+        assert!(
+            !saw_get_checkpoint_call
+                && !saw_checkpoint_call
+                && !saw_durable_sleep_call
+                && !saw_durable_sleep_checkpoint_call
+                && !saw_retry_sleep_key_call
+                && !saw_record_retry_attempt_call,
+            "non-durable retry lowering must not call checkpoint, durable sleep, sleep-key, or retry-attempt APIs"
         );
     }
 

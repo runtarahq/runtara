@@ -167,6 +167,11 @@ pub fn durable_sleep(ms: u64) -> Result<(), String> {
     durable_sleep_checkpoint("__direct_workflow_runtime_durable_sleep", &[], ms)
 }
 
+pub fn blocking_sleep(ms: u64) -> Result<(), String> {
+    std::thread::sleep(Duration::from_millis(ms));
+    Ok(())
+}
+
 pub fn get_checkpoint(checkpoint_id: &str) -> Result<Option<Vec<u8>>, String> {
     with_sdk(|sdk| sdk.get_checkpoint(checkpoint_id).map_err(sdk_error))
 }
@@ -278,6 +283,10 @@ mod component {
             super::durable_sleep(ms)
         }
 
+        fn blocking_sleep(ms: u64) -> Result<(), String> {
+            super::blocking_sleep(ms)
+        }
+
         fn get_checkpoint(checkpoint_id: String) -> Result<Option<Vec<u8>>, String> {
             super::get_checkpoint(&checkpoint_id)
         }
@@ -315,8 +324,8 @@ mod tests {
     use runtara_sdk::{CheckpointResult, CustomSignal, Signal, SignalType};
 
     use super::{
-        CheckpointSignalAction, checkpoint_signal_action, runtime_checkpoint_result, sdk_error,
-        signal_is_cancel, signal_type_name,
+        CheckpointSignalAction, blocking_sleep, checkpoint_signal_action,
+        runtime_checkpoint_result, sdk_error, signal_is_cancel, signal_type_name,
     };
 
     #[test]
@@ -324,6 +333,11 @@ mod tests {
         let error = sdk_error(std::io::Error::other("network unavailable"));
 
         assert_eq!(error, "network unavailable");
+    }
+
+    #[test]
+    fn blocking_sleep_returns_ok_without_sdk() {
+        blocking_sleep(0).expect("zero-duration blocking sleep should not need SDK state");
     }
 
     #[test]

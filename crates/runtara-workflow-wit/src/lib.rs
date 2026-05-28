@@ -106,6 +106,7 @@ mod tests {
             "heartbeat",
             "is-cancelled",
             "durable-sleep",
+            "blocking-sleep",
             "get-checkpoint",
             "checkpoint",
             "handle-checkpoint-signal",
