@@ -11,6 +11,7 @@
 use serde_json::Value;
 use std::collections::HashMap;
 
+pub mod connection_types;
 pub(crate) mod http_api_key;
 pub(crate) mod http_bearer;
 pub(crate) mod sftp;
@@ -51,24 +52,15 @@ pub trait HttpConnectionExtractor: Send + Sync {
 static HTTP_EXTRACTORS: &[&dyn HttpConnectionExtractor] = &[
     &HttpBearerExtractor,
     &HttpApiKeyExtractor,
-    #[cfg(feature = "integrations")]
-    &crate::integrations::connection_types::ShopifyExtractor,
-    #[cfg(feature = "integrations")]
-    &crate::integrations::connection_types::ShopifyClientCredentialsExtractor,
-    #[cfg(feature = "integrations")]
-    &crate::integrations::connection_types::OpenAiExtractor,
-    #[cfg(feature = "integrations")]
-    &crate::integrations::connection_types::MicrosoftEntraClientCredentialsExtractor,
-    #[cfg(feature = "integrations")]
-    &crate::integrations::connection_types::MailgunExtractor,
-    #[cfg(feature = "integrations")]
-    &crate::integrations::connection_types::HubSpotExtractor,
-    #[cfg(feature = "integrations")]
-    &crate::integrations::connection_types::HubSpotAccessTokenExtractor,
-    #[cfg(feature = "integrations")]
-    &crate::integrations::connection_types::StripeExtractor,
-    #[cfg(feature = "integrations")]
-    &crate::integrations::connection_types::McpExtractor,
+    &connection_types::ShopifyExtractor,
+    &connection_types::ShopifyClientCredentialsExtractor,
+    &connection_types::OpenAiExtractor,
+    &connection_types::MicrosoftEntraClientCredentialsExtractor,
+    &connection_types::MailgunExtractor,
+    &connection_types::HubSpotExtractor,
+    &connection_types::HubSpotAccessTokenExtractor,
+    &connection_types::StripeExtractor,
+    &connection_types::McpExtractor,
 ];
 
 /// Returns all integration_ids that have a registered `HttpConnectionExtractor`.

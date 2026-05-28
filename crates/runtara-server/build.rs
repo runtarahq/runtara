@@ -15,7 +15,7 @@ fn main() {
 
     // Sibling crates (relative to this crate)
     let stdlib_src = crate_dir.join("../runtara-workflow-stdlib/src");
-    let agents_integrations = crate_dir.join("../runtara-agents/src/agents/integrations");
+    let agents_src = crate_dir.join("../runtara-agents/src/agents");
     let ai_src = crate_dir.join("../runtara-ai/src");
     let http_src = crate_dir.join("../runtara-http/src");
 
@@ -23,8 +23,8 @@ fn main() {
     if stdlib_src.exists() {
         println!("cargo:rerun-if-changed={}", stdlib_src.display());
     }
-    if agents_integrations.exists() {
-        println!("cargo:rerun-if-changed={}", agents_integrations.display());
+    if agents_src.exists() {
+        println!("cargo:rerun-if-changed={}", agents_src.display());
     }
     if ai_src.exists() {
         println!("cargo:rerun-if-changed={}", ai_src.display());
@@ -381,12 +381,6 @@ fn git_output(workspace_root: &Path, args: &[&str]) -> Option<String> {
 /// Generate DSL and Agent specs from runtara-dsl
 fn generate_specs(out_dir: &Path) {
     use runtara_agents as _;
-    use runtara_agents::integrations::ai_tools as _;
-    use runtara_agents::integrations::bedrock as _;
-    use runtara_agents::integrations::object_model as _;
-    use runtara_agents::integrations::openai as _;
-    use runtara_agents::integrations::shopify as _;
-    use runtara_agents::integrations::stripe as _;
     use runtara_dsl::spec::{agent_openapi, dsl_schema};
 
     println!("cargo:warning=");

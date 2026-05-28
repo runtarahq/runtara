@@ -26,9 +26,6 @@ pub use server::start;
 // Link runtara_agents so the static metadata registry is available at runtime.
 extern crate runtara_agents;
 
-// Keep integration agents reachable for metadata and execution APIs.
-pub use runtara_agents::integrations;
-
 // Re-export spec_generator from runtara-dsl
 pub use runtara_dsl::spec as spec_generator;
 

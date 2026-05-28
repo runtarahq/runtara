@@ -3,7 +3,7 @@
 //! Helpers for resolving the tenant's default S3-compatible storage connection.
 //! Used by webhook channels (Mailgun, Slack) to persist incoming attachments.
 
-use runtara_agents::integrations::s3_client::S3Client;
+use runtara_agents::s3_client::S3Client;
 use runtara_connections::ConnectionsFacade;
 
 #[derive(Debug)]

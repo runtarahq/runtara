@@ -9,9 +9,8 @@ keywords = ["durable", "workflow", "compiler", "dsl"]
 categories = ["development-tools"]
 
 [features]
-default = ["compiler", "integrations", "native-agents"]
+default = ["compiler", "native-agents"]
 compiler = []
-integrations = ["runtara-agents/integrations"]
 native-agents = ["runtara-agents/native"]
 wasm-js = ["runtara-agents/wasm-js"]
 

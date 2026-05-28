@@ -29,9 +29,6 @@ native = [
     "runtara-http/native",
 ]
 
-# Platform integrations - Shopify, OpenAI, Bedrock, Stripe, HubSpot, Slack, Mailgun, S3
-integrations = []
-
 # WASI target (wasm32-wasip2) - HTTP via wasi-http, no SFTP
 wasi = ["runtara-http/wasi"]
 

@@ -37,16 +37,16 @@ pub mod xlsx;
 #[path = "agents/xml.rs"]
 pub mod xml;
 
-// Platform integration agents
-#[cfg(feature = "integrations")]
-#[path = "agents/integrations/mod.rs"]
-pub mod integrations;
-
 // Shared types
 pub mod types;
 
 // Shared connection management
 pub mod connections;
+
+// Standalone S3-compatible client used by the server's file-storage service
+// (default file storage, attachments). Not a workflow agent — the S3 *agent*
+// capabilities now live in the `runtara-agent-s3-storage` WASM component.
+pub mod s3_client;
 
 // Re-export shared infrastructure
 pub mod registry;

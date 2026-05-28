@@ -28,7 +28,7 @@ runtara-core = { path = "../runtara-core", version = "7.2" }
 
 # DSL types for agent metadata (list_agents, get_capability)
 runtara-dsl = { path = "../runtara-dsl", version = "7.2" }
-runtara-agents = { path = "../runtara-agents", version = "7.2", default-features = false, features = ["integrations"] }
+runtara-agents = { path = "../runtara-agents", version = "7.2", default-features = false }
 
 # Configuration
 dotenvy = "0.15"

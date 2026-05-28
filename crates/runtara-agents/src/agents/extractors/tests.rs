@@ -414,14 +414,12 @@ fn test_extractor_with_wrong_type_token() {
 // MCP Extractor Tests
 // ============================================================================
 
-#[cfg(feature = "integrations")]
 #[test]
 fn test_mcp_extractor_registered() {
     let ids = get_http_extractor_ids();
     assert!(ids.contains(&"mcp"), "should contain mcp, got: {:?}", ids);
 }
 
-#[cfg(feature = "integrations")]
 #[test]
 fn test_extract_http_config_mcp_minimal() {
     let params = json!({
@@ -435,7 +433,6 @@ fn test_extract_http_config_mcp_minimal() {
     );
 }
 
-#[cfg(feature = "integrations")]
 #[test]
 fn test_extract_http_config_mcp_with_extra_headers() {
     let params = json!({
@@ -446,7 +443,6 @@ fn test_extract_http_config_mcp_with_extra_headers() {
     assert_eq!(config.headers.get("X-Custom"), Some(&"yes".to_string()));
 }
 
-#[cfg(feature = "integrations")]
 #[test]
 fn test_extract_http_config_mcp_rejects_non_http_url() {
     let params = json!({
@@ -457,7 +453,6 @@ fn test_extract_http_config_mcp_rejects_non_http_url() {
     assert!(err.contains("http://"), "{err}");
 }
 
-#[cfg(feature = "integrations")]
 #[test]
 fn test_extract_http_config_mcp_requires_url() {
     let params = json!({});
