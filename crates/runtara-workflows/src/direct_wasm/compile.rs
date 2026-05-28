@@ -653,6 +653,21 @@ struct DirectErrorRoutePlan {
     default_plan: Option<Box<DirectRunPlan>>,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct DirectFailureTarget {
+    split_id: u32,
+    branch_depth: u32,
+}
+
+impl DirectFailureTarget {
+    fn nested(self, extra_depth: u32) -> Self {
+        Self {
+            split_id: self.split_id,
+            branch_depth: self.branch_depth + extra_depth,
+        }
+    }
+}
+
 impl DirectCoreConfig {
     #[cfg(test)]
     fn new(
@@ -2448,6 +2463,7 @@ fn direct_run_function(
         ROUTE_LEN_LOCAL,
         &config.static_data.workflow_log_kind,
         &config.static_data.workflow_error_kind,
+        None,
     );
 
     body.instruction(&Instruction::LocalGet(OUTPUT_PTR_LOCAL));
@@ -2479,6 +2495,7 @@ fn emit_run_plan_mapping(
     route_len_local: u32,
     workflow_log_kind: &DirectDataSegment,
     workflow_error_kind: &DirectDataSegment,
+    failure_target: Option<DirectFailureTarget>,
 ) {
     match run_plan {
         DirectRunPlan::Finish {
@@ -2546,6 +2563,7 @@ fn emit_run_plan_mapping(
                 route_len_local,
                 workflow_log_kind,
                 workflow_error_kind,
+                failure_target,
             );
         }
         DirectRunPlan::SwitchValue {
@@ -2575,6 +2593,7 @@ fn emit_run_plan_mapping(
                 route_len_local,
                 workflow_log_kind,
                 workflow_error_kind,
+                failure_target,
             );
         }
         DirectRunPlan::SwitchRoute {
@@ -2605,6 +2624,7 @@ fn emit_run_plan_mapping(
                 route_len_local,
                 workflow_log_kind,
                 workflow_error_kind,
+                failure_target,
             );
         }
         DirectRunPlan::EdgeRoute {
@@ -2631,6 +2651,7 @@ fn emit_run_plan_mapping(
                 route_len_local,
                 workflow_log_kind,
                 workflow_error_kind,
+                failure_target,
             );
         }
         DirectRunPlan::GroupBy {
@@ -2660,6 +2681,7 @@ fn emit_run_plan_mapping(
                 route_len_local,
                 workflow_log_kind,
                 workflow_error_kind,
+                failure_target,
             );
         }
         DirectRunPlan::Split {
@@ -2692,6 +2714,7 @@ fn emit_run_plan_mapping(
                 route_len_local,
                 workflow_log_kind,
                 workflow_error_kind,
+                failure_target,
             );
         }
         DirectRunPlan::Delay {
@@ -2722,6 +2745,7 @@ fn emit_run_plan_mapping(
                 route_len_local,
                 workflow_log_kind,
                 workflow_error_kind,
+                failure_target,
             );
         }
         DirectRunPlan::Log { log_id, next_plan } => {
@@ -2745,6 +2769,7 @@ fn emit_run_plan_mapping(
                 route_len_local,
                 workflow_log_kind,
                 workflow_error_kind,
+                failure_target,
             );
         }
         DirectRunPlan::Agent {
@@ -2787,6 +2812,7 @@ fn emit_run_plan_mapping(
                 route_len_local,
                 workflow_log_kind,
                 workflow_error_kind,
+                failure_target,
             );
         }
         DirectRunPlan::Error { step_id, error_id } => {
@@ -2867,6 +2893,7 @@ fn emit_run_plan_mapping(
                 route_len_local,
                 workflow_log_kind,
                 workflow_error_kind,
+                failure_target.map(|target| target.nested(1)),
             );
             body.instruction(&Instruction::Else);
             emit_run_plan_mapping(
@@ -2888,6 +2915,7 @@ fn emit_run_plan_mapping(
                 route_len_local,
                 workflow_log_kind,
                 workflow_error_kind,
+                failure_target.map(|target| target.nested(1)),
             );
             body.instruction(&Instruction::End);
         }
@@ -2962,6 +2990,7 @@ fn emit_edge_route_dispatch(
     route_len_local: u32,
     workflow_log_kind: &DirectDataSegment,
     workflow_error_kind: &DirectDataSegment,
+    failure_target: Option<DirectFailureTarget>,
 ) {
     let Some((branch, remaining)) = branches.split_first() else {
         emit_run_plan_mapping(
@@ -2983,6 +3012,7 @@ fn emit_edge_route_dispatch(
             route_len_local,
             workflow_log_kind,
             workflow_error_kind,
+            failure_target,
         );
         return;
     };
@@ -3020,6 +3050,7 @@ fn emit_edge_route_dispatch(
         route_len_local,
         workflow_log_kind,
         workflow_error_kind,
+        failure_target.map(|target| target.nested(1)),
     );
     body.instruction(&Instruction::Else);
     emit_edge_route_dispatch(
@@ -3042,6 +3073,7 @@ fn emit_edge_route_dispatch(
         route_len_local,
         workflow_log_kind,
         workflow_error_kind,
+        failure_target.map(|target| target.nested(1)),
     );
     body.instruction(&Instruction::End);
 }
@@ -3069,6 +3101,7 @@ fn emit_step_context_plan(
     route_len_local: u32,
     workflow_log_kind: &DirectDataSegment,
     workflow_error_kind: &DirectDataSegment,
+    failure_target: Option<DirectFailureTarget>,
 ) {
     emit_step_debug_event(
         body,
@@ -3133,6 +3166,7 @@ fn emit_step_context_plan(
         route_len_local,
         workflow_log_kind,
         workflow_error_kind,
+        failure_target,
     );
 }
 
@@ -3160,6 +3194,7 @@ fn emit_split_plan(
     route_len_local: u32,
     workflow_log_kind: &DirectDataSegment,
     workflow_error_kind: &DirectDataSegment,
+    failure_target: Option<DirectFailureTarget>,
 ) {
     emit_step_debug_event(
         body,
@@ -3230,7 +3265,10 @@ fn emit_split_plan(
         emit_split_append_retptr_error_and_continue(
             body,
             indices,
-            split_id,
+            DirectFailureTarget {
+                split_id,
+                branch_depth: 0,
+            },
             route_ptr_local,
             route_len_local,
         );
@@ -3293,6 +3331,14 @@ fn emit_split_plan(
         route_len_local,
         workflow_log_kind,
         workflow_error_kind,
+        if dont_stop_on_failed {
+            Some(DirectFailureTarget {
+                split_id,
+                branch_depth: 0,
+            })
+        } else {
+            failure_target
+        },
     );
 
     body.instruction(&Instruction::I32Const(split_id as i32));
@@ -3305,7 +3351,10 @@ fn emit_split_plan(
         emit_split_append_retptr_error_and_continue(
             body,
             indices,
-            split_id,
+            DirectFailureTarget {
+                split_id,
+                branch_depth: 0,
+            },
             route_ptr_local,
             route_len_local,
         );
@@ -3389,20 +3438,38 @@ fn emit_split_plan(
         route_len_local,
         workflow_log_kind,
         workflow_error_kind,
+        failure_target,
     );
 }
 
 fn emit_split_append_retptr_error_and_continue(
     body: &mut WasmFunction,
     indices: &DirectCoreFunctionIndices,
-    split_id: u32,
+    target: DirectFailureTarget,
     error_ptr_local: u32,
     error_len_local: u32,
 ) {
     load_retptr_tag(body);
     body.instruction(&Instruction::If(BlockType::Empty));
     load_retptr_list(body, error_ptr_local, error_len_local);
-    body.instruction(&Instruction::I32Const(split_id as i32));
+    emit_split_append_error_payload_and_continue(
+        body,
+        indices,
+        target.nested(1),
+        error_ptr_local,
+        error_len_local,
+    );
+    body.instruction(&Instruction::End);
+}
+
+fn emit_split_append_error_payload_and_continue(
+    body: &mut WasmFunction,
+    indices: &DirectCoreFunctionIndices,
+    target: DirectFailureTarget,
+    error_ptr_local: u32,
+    error_len_local: u32,
+) {
+    body.instruction(&Instruction::I32Const(target.split_id as i32));
     body.instruction(&Instruction::LocalGet(DIRECT_SPLIT_RESULTS_PTR_LOCAL));
     body.instruction(&Instruction::LocalGet(DIRECT_SPLIT_RESULTS_LEN_LOCAL));
     body.instruction(&Instruction::LocalGet(error_ptr_local));
@@ -3420,8 +3487,7 @@ fn emit_split_append_retptr_error_and_continue(
     body.instruction(&Instruction::I32Const(1));
     body.instruction(&Instruction::I32Add);
     body.instruction(&Instruction::LocalSet(DIRECT_SPLIT_INDEX_LOCAL));
-    body.instruction(&Instruction::Br(1));
-    body.instruction(&Instruction::End);
+    body.instruction(&Instruction::Br(target.branch_depth));
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3447,6 +3513,7 @@ fn emit_delay_plan(
     route_len_local: u32,
     workflow_log_kind: &DirectDataSegment,
     workflow_error_kind: &DirectDataSegment,
+    failure_target: Option<DirectFailureTarget>,
 ) {
     emit_step_debug_event(
         body,
@@ -3540,6 +3607,7 @@ fn emit_delay_plan(
         route_len_local,
         workflow_log_kind,
         workflow_error_kind,
+        failure_target,
     );
 }
 
@@ -3564,6 +3632,7 @@ fn emit_log_plan(
     route_len_local: u32,
     workflow_log_kind: &DirectDataSegment,
     workflow_error_kind: &DirectDataSegment,
+    failure_target: Option<DirectFailureTarget>,
 ) {
     body.instruction(&Instruction::I32Const(log_id as i32));
     body.instruction(&Instruction::LocalGet(source_ptr_local));
@@ -3619,6 +3688,7 @@ fn emit_log_plan(
         route_len_local,
         workflow_log_kind,
         workflow_error_kind,
+        failure_target,
     );
 }
 
@@ -3651,6 +3721,7 @@ fn emit_agent_plan(
     route_len_local: u32,
     workflow_log_kind: &DirectDataSegment,
     workflow_error_kind: &DirectDataSegment,
+    failure_target: Option<DirectFailureTarget>,
 ) {
     emit_step_debug_event(
         body,
@@ -3696,6 +3767,7 @@ fn emit_agent_plan(
         data_len_local,
         workflow_log_kind,
         workflow_error_kind,
+        failure_target,
     );
 
     emit_agent_connection_input(
@@ -3813,6 +3885,7 @@ fn emit_agent_plan(
             data_len_local,
             workflow_log_kind,
             workflow_error_kind,
+            failure_target.map(|target| target.nested(3)),
         );
         body.instruction(&Instruction::End);
         load_agent_retptr_list(body, output_ptr_local, output_len_local);
@@ -3850,6 +3923,7 @@ fn emit_agent_plan(
             data_len_local,
             workflow_log_kind,
             workflow_error_kind,
+            failure_target,
         );
         load_agent_retptr_list(body, output_ptr_local, output_len_local);
     }
@@ -3920,6 +3994,7 @@ fn emit_agent_plan(
         route_len_local,
         workflow_log_kind,
         workflow_error_kind,
+        failure_target,
     );
 }
 
@@ -4016,6 +4091,7 @@ fn emit_switch_route_plan(
     route_len_local: u32,
     workflow_log_kind: &DirectDataSegment,
     workflow_error_kind: &DirectDataSegment,
+    failure_target: Option<DirectFailureTarget>,
 ) {
     emit_step_debug_event(
         body,
@@ -4089,6 +4165,7 @@ fn emit_switch_route_plan(
         route_len_local,
         workflow_log_kind,
         workflow_error_kind,
+        failure_target,
     );
 }
 
@@ -4113,6 +4190,7 @@ fn emit_switch_route_dispatch(
     route_len_local: u32,
     workflow_log_kind: &DirectDataSegment,
     workflow_error_kind: &DirectDataSegment,
+    failure_target: Option<DirectFailureTarget>,
 ) {
     let Some((branch, remaining)) = branches.split_first() else {
         emit_run_plan_mapping(
@@ -4134,6 +4212,7 @@ fn emit_switch_route_dispatch(
             route_len_local,
             workflow_log_kind,
             workflow_error_kind,
+            failure_target,
         );
         return;
     };
@@ -4159,6 +4238,7 @@ fn emit_switch_route_dispatch(
         route_len_local,
         workflow_log_kind,
         workflow_error_kind,
+        failure_target.map(|target| target.nested(1)),
     );
     body.instruction(&Instruction::Else);
     emit_switch_route_dispatch(
@@ -4181,6 +4261,7 @@ fn emit_switch_route_dispatch(
         route_len_local,
         workflow_log_kind,
         workflow_error_kind,
+        failure_target.map(|target| target.nested(1)),
     );
     body.instruction(&Instruction::End);
 }
@@ -4276,6 +4357,7 @@ fn emit_agent_input_validation(
     data_len_local: u32,
     workflow_log_kind: &DirectDataSegment,
     workflow_error_kind: &DirectDataSegment,
+    failure_target: Option<DirectFailureTarget>,
 ) {
     body.instruction(&Instruction::I32Const(agent_id as i32));
     body.instruction(&Instruction::LocalGet(input_ptr_local));
@@ -4326,6 +4408,7 @@ fn emit_agent_input_validation(
         data_len_local,
         workflow_log_kind,
         workflow_error_kind,
+        failure_target.map(|target| target.nested(1)),
     );
     body.instruction(&Instruction::End);
 }
@@ -4667,6 +4750,7 @@ fn emit_agent_invoke_error_branch(
     data_len_local: u32,
     workflow_log_kind: &DirectDataSegment,
     workflow_error_kind: &DirectDataSegment,
+    failure_target: Option<DirectFailureTarget>,
 ) {
     load_retptr_tag(body);
     body.instruction(&Instruction::If(BlockType::Empty));
@@ -4691,6 +4775,7 @@ fn emit_agent_invoke_error_branch(
         data_len_local,
         workflow_log_kind,
         workflow_error_kind,
+        failure_target.map(|target| target.nested(1)),
     );
     body.instruction(&Instruction::End);
 }
@@ -4717,6 +4802,7 @@ fn emit_agent_invoke_error_body(
     data_len_local: u32,
     workflow_log_kind: &DirectDataSegment,
     workflow_error_kind: &DirectDataSegment,
+    failure_target: Option<DirectFailureTarget>,
 ) {
     emit_agent_error(body, indices, agent_id, output_ptr_local, output_len_local);
     emit_agent_debug_error(
@@ -4752,6 +4838,7 @@ fn emit_agent_invoke_error_body(
         data_len_local,
         workflow_log_kind,
         workflow_error_kind,
+        failure_target,
     );
 }
 
@@ -4779,6 +4866,7 @@ fn emit_agent_invoke_error_body_from_info(
     data_len_local: u32,
     workflow_log_kind: &DirectDataSegment,
     workflow_error_kind: &DirectDataSegment,
+    failure_target: Option<DirectFailureTarget>,
 ) {
     emit_agent_error_from_info(
         body,
@@ -4822,6 +4910,7 @@ fn emit_agent_invoke_error_body_from_info(
         data_len_local,
         workflow_log_kind,
         workflow_error_kind,
+        failure_target,
     );
 }
 
@@ -4848,6 +4937,7 @@ fn emit_agent_error_route_or_fail(
     data_len_local: u32,
     workflow_log_kind: &DirectDataSegment,
     workflow_error_kind: &DirectDataSegment,
+    failure_target: Option<DirectFailureTarget>,
 ) {
     if let Some(error_plan) = error_plan {
         emit_error_steps(
@@ -4893,7 +4983,17 @@ fn emit_agent_error_route_or_fail(
         );
     }
 
-    emit_runtime_fail_return(body, indices, error_ptr_local, error_len_local);
+    if let Some(failure_target) = failure_target {
+        emit_split_append_error_payload_and_continue(
+            body,
+            indices,
+            failure_target,
+            error_ptr_local,
+            error_len_local,
+        );
+    } else {
+        emit_runtime_fail_return(body, indices, error_ptr_local, error_len_local);
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -5112,6 +5212,7 @@ fn emit_terminal_run_plan_mapping(
         route_len_local,
         workflow_log_kind,
         workflow_error_kind,
+        None,
     );
 
     body.instruction(&Instruction::LocalGet(output_ptr_local));
@@ -9539,8 +9640,11 @@ mod tests {
             .expect("Split dontStop core module validates");
 
         let mut next_function_index = 0;
+        let mut agent_failure_index = None;
         let mut split_append_error_index = None;
         let mut saw_split_append_error_call = false;
+        let mut saw_agent_failure_call = false;
+        let mut saw_split_append_error_after_agent_failure = false;
         let mut saw_continue_after_split_append_error = false;
         let mut code_body_index = 0;
 
@@ -9554,6 +9658,11 @@ mod tests {
                         {
                             split_append_error_index = Some(next_function_index);
                         }
+                        if import.module.contains("runtara:workflow-stdlib/json")
+                            && matches!(import.name, "agent-error" | "agent-error-from-info")
+                        {
+                            agent_failure_index = Some(next_function_index);
+                        }
                         if matches!(import.ty, TypeRef::Func(_)) {
                             next_function_index += 1;
                         }
@@ -9565,8 +9674,16 @@ mod tests {
                         {
                             match operator.expect("operator") {
                                 Operator::Call { function_index }
+                                    if Some(function_index) == agent_failure_index =>
+                                {
+                                    saw_agent_failure_call = true;
+                                }
+                                Operator::Call { function_index }
                                     if Some(function_index) == split_append_error_index =>
                                 {
+                                    if saw_agent_failure_call {
+                                        saw_split_append_error_after_agent_failure = true;
+                                    }
                                     saw_split_append_error_call = true;
                                 }
                                 Operator::Br { relative_depth: 1 }
@@ -9587,6 +9704,10 @@ mod tests {
         assert!(
             saw_split_append_error_call,
             "Split dontStop run should append validation failures"
+        );
+        assert!(
+            saw_split_append_error_after_agent_failure,
+            "Split dontStop run should append nested Agent failures"
         );
         assert!(
             saw_continue_after_split_append_error,
