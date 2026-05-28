@@ -64,6 +64,22 @@ const AGENT_WIT_VERSION: &str = "0.3.0";
 const DIRECT_RUN_RETPTR_OFFSET: i32 = 0;
 const DIRECT_AGENT_ARGS_OFFSET: i32 = 128;
 const DIRECT_STATIC_DATA_OFFSET: i32 = 256;
+const DIRECT_AGENT_RESULT_OK_PTR_OFFSET: u64 = 8;
+const DIRECT_AGENT_RESULT_OK_LEN_OFFSET: u64 = 12;
+const DIRECT_AGENT_RESULT_ERR_CODE_PTR_OFFSET: u64 = 8;
+const DIRECT_AGENT_RESULT_ERR_CODE_LEN_OFFSET: u64 = 12;
+const DIRECT_AGENT_RESULT_ERR_MESSAGE_PTR_OFFSET: u64 = 16;
+const DIRECT_AGENT_RESULT_ERR_MESSAGE_LEN_OFFSET: u64 = 20;
+const DIRECT_AGENT_RESULT_ERR_CATEGORY_PTR_OFFSET: u64 = 24;
+const DIRECT_AGENT_RESULT_ERR_CATEGORY_LEN_OFFSET: u64 = 28;
+const DIRECT_AGENT_RESULT_ERR_SEVERITY_PTR_OFFSET: u64 = 32;
+const DIRECT_AGENT_RESULT_ERR_SEVERITY_LEN_OFFSET: u64 = 36;
+const DIRECT_AGENT_RESULT_ERR_RETRYABLE_OFFSET: u64 = 40;
+const DIRECT_AGENT_RESULT_ERR_RETRY_AFTER_TAG_OFFSET: u64 = 48;
+const DIRECT_AGENT_RESULT_ERR_RETRY_AFTER_VALUE_OFFSET: u64 = 56;
+const DIRECT_AGENT_RESULT_ERR_ATTRIBUTES_TAG_OFFSET: u64 = 64;
+const DIRECT_AGENT_RESULT_ERR_ATTRIBUTES_PTR_OFFSET: u64 = 68;
+const DIRECT_AGENT_RESULT_ERR_ATTRIBUTES_LEN_OFFSET: u64 = 72;
 const DIRECT_EMPTY_STEPS_CONTEXT: &[u8] = b"{}";
 const DIRECT_WORKFLOW_LOG_KIND: &[u8] = b"workflow_log";
 const DIRECT_WORKFLOW_ERROR_KIND: &[u8] = b"workflow_error";
@@ -1375,6 +1391,8 @@ struct DirectCoreImportIndices {
     stdlib_value_switch: Option<u32>,
     stdlib_group_by: Option<u32>,
     stdlib_agent_output: Option<u32>,
+    stdlib_agent_error: Option<u32>,
+    stdlib_agent_debug_error: Option<u32>,
     stdlib_step_debug_start: Option<u32>,
     stdlib_step_debug_end: Option<u32>,
     agent_invokes: BTreeMap<String, DirectAgentInvokeImport>,
@@ -1415,6 +1433,11 @@ impl DirectCoreImportIndices {
             stdlib_value_switch: require_import(self.stdlib_value_switch, "stdlib.value-switch")?,
             stdlib_group_by: require_import(self.stdlib_group_by, "stdlib.group-by")?,
             stdlib_agent_output: require_import(self.stdlib_agent_output, "stdlib.agent-output")?,
+            stdlib_agent_error: require_import(self.stdlib_agent_error, "stdlib.agent-error")?,
+            stdlib_agent_debug_error: require_import(
+                self.stdlib_agent_debug_error,
+                "stdlib.agent-debug-error",
+            )?,
             stdlib_step_debug_start: require_import(
                 self.stdlib_step_debug_start,
                 "stdlib.step-debug-start",
@@ -1447,6 +1470,8 @@ struct DirectCoreFunctionIndices {
     stdlib_value_switch: u32,
     stdlib_group_by: u32,
     stdlib_agent_output: u32,
+    stdlib_agent_error: u32,
+    stdlib_agent_debug_error: u32,
     stdlib_step_debug_start: u32,
     stdlib_step_debug_end: u32,
     agent_invokes: BTreeMap<String, DirectAgentInvokeImport>,
@@ -1521,6 +1546,10 @@ fn import_core_function(
         import_indices.stdlib_group_by = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "agent-output") {
         import_indices.stdlib_agent_output = Some(function_index);
+    } else if is_stdlib_import(resolve, interface, function, "agent-error") {
+        import_indices.stdlib_agent_error = Some(function_index);
+    } else if is_stdlib_import(resolve, interface, function, "agent-debug-error") {
+        import_indices.stdlib_agent_debug_error = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "step-debug-start") {
         import_indices.stdlib_step_debug_start = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "step-debug-end") {
@@ -2499,8 +2528,18 @@ fn emit_agent_plan(
         output_ptr_local,
         output_len_local,
     );
-    return_if_retptr_error(body);
-    load_retptr_list(body, output_ptr_local, output_len_local);
+    emit_agent_invoke_error_branch(
+        body,
+        indices,
+        static_data,
+        track_events,
+        agent_id,
+        output_ptr_local,
+        output_len_local,
+        route_ptr_local,
+        route_len_local,
+    );
+    load_agent_retptr_list(body, output_ptr_local, output_len_local);
 
     body.instruction(&Instruction::I32Const(agent_id as i32));
     body.instruction(&Instruction::LocalGet(source_ptr_local));
@@ -2923,6 +2962,102 @@ fn emit_agent_invoke(
     body.instruction(&Instruction::Call(invoke.function_index));
 }
 
+#[allow(clippy::too_many_arguments)]
+fn emit_agent_invoke_error_branch(
+    body: &mut WasmFunction,
+    indices: &DirectCoreFunctionIndices,
+    static_data: &DirectCoreStaticData,
+    track_events: bool,
+    agent_id: u32,
+    output_ptr_local: u32,
+    output_len_local: u32,
+    debug_ptr_local: u32,
+    debug_len_local: u32,
+) {
+    load_retptr_tag(body);
+    body.instruction(&Instruction::If(BlockType::Empty));
+    emit_agent_error(body, indices, agent_id, output_ptr_local, output_len_local);
+    emit_agent_debug_error(
+        body,
+        indices,
+        static_data,
+        track_events,
+        agent_id,
+        output_ptr_local,
+        output_len_local,
+        debug_ptr_local,
+        debug_len_local,
+    );
+
+    body.instruction(&Instruction::LocalGet(output_ptr_local));
+    body.instruction(&Instruction::LocalGet(output_len_local));
+    push_retptr_arg(body);
+    body.instruction(&Instruction::Call(indices.runtime_fail));
+    body.instruction(&Instruction::I32Const(1));
+    body.instruction(&Instruction::Return);
+    body.instruction(&Instruction::End);
+}
+
+fn emit_agent_error(
+    body: &mut WasmFunction,
+    indices: &DirectCoreFunctionIndices,
+    agent_id: u32,
+    output_ptr_local: u32,
+    output_len_local: u32,
+) {
+    body.instruction(&Instruction::I32Const(agent_id as i32));
+    push_retptr_i32_load(body, DIRECT_AGENT_RESULT_ERR_CODE_PTR_OFFSET);
+    push_retptr_i32_load(body, DIRECT_AGENT_RESULT_ERR_CODE_LEN_OFFSET);
+    push_retptr_i32_load(body, DIRECT_AGENT_RESULT_ERR_MESSAGE_PTR_OFFSET);
+    push_retptr_i32_load(body, DIRECT_AGENT_RESULT_ERR_MESSAGE_LEN_OFFSET);
+    push_retptr_i32_load(body, DIRECT_AGENT_RESULT_ERR_CATEGORY_PTR_OFFSET);
+    push_retptr_i32_load(body, DIRECT_AGENT_RESULT_ERR_CATEGORY_LEN_OFFSET);
+    push_retptr_i32_load(body, DIRECT_AGENT_RESULT_ERR_SEVERITY_PTR_OFFSET);
+    push_retptr_i32_load(body, DIRECT_AGENT_RESULT_ERR_SEVERITY_LEN_OFFSET);
+    push_retptr_u8_load(body, DIRECT_AGENT_RESULT_ERR_RETRYABLE_OFFSET);
+    push_retptr_u8_load(body, DIRECT_AGENT_RESULT_ERR_RETRY_AFTER_TAG_OFFSET);
+    push_retptr_i64_load(body, DIRECT_AGENT_RESULT_ERR_RETRY_AFTER_VALUE_OFFSET);
+    push_retptr_u8_load(body, DIRECT_AGENT_RESULT_ERR_ATTRIBUTES_TAG_OFFSET);
+    push_retptr_i32_load(body, DIRECT_AGENT_RESULT_ERR_ATTRIBUTES_PTR_OFFSET);
+    push_retptr_i32_load(body, DIRECT_AGENT_RESULT_ERR_ATTRIBUTES_LEN_OFFSET);
+    push_retptr_arg(body);
+    body.instruction(&Instruction::Call(indices.stdlib_agent_error));
+    return_if_retptr_error(body);
+    load_retptr_list(body, output_ptr_local, output_len_local);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_agent_debug_error(
+    body: &mut WasmFunction,
+    indices: &DirectCoreFunctionIndices,
+    static_data: &DirectCoreStaticData,
+    track_events: bool,
+    agent_id: u32,
+    error_ptr_local: u32,
+    error_len_local: u32,
+    debug_ptr_local: u32,
+    debug_len_local: u32,
+) {
+    if !track_events {
+        return;
+    }
+
+    body.instruction(&Instruction::I32Const(agent_id as i32));
+    body.instruction(&Instruction::LocalGet(error_ptr_local));
+    body.instruction(&Instruction::LocalGet(error_len_local));
+    push_retptr_arg(body);
+    body.instruction(&Instruction::Call(indices.stdlib_agent_debug_error));
+    return_if_retptr_error(body);
+    load_retptr_list(body, debug_ptr_local, debug_len_local);
+
+    push_segment_args(body, &static_data.step_debug_end_kind);
+    body.instruction(&Instruction::LocalGet(debug_ptr_local));
+    body.instruction(&Instruction::LocalGet(debug_len_local));
+    push_retptr_arg(body);
+    body.instruction(&Instruction::Call(indices.runtime_custom_event));
+    return_if_retptr_error(body);
+}
+
 fn store_i32_at(function: &mut WasmFunction, offset: i32, value: i32) {
     function.instruction(&Instruction::I32Const(offset));
     function.instruction(&Instruction::I32Const(value));
@@ -2984,6 +3119,40 @@ fn load_retptr_list(function: &mut WasmFunction, ptr_local: u32, len_local: u32)
         memory_index: 0,
     }));
     function.instruction(&Instruction::LocalSet(len_local));
+}
+
+fn load_agent_retptr_list(function: &mut WasmFunction, ptr_local: u32, len_local: u32) {
+    push_retptr_i32_load(function, DIRECT_AGENT_RESULT_OK_PTR_OFFSET);
+    function.instruction(&Instruction::LocalSet(ptr_local));
+    push_retptr_i32_load(function, DIRECT_AGENT_RESULT_OK_LEN_OFFSET);
+    function.instruction(&Instruction::LocalSet(len_local));
+}
+
+fn push_retptr_i32_load(function: &mut WasmFunction, offset: u64) {
+    function.instruction(&Instruction::I32Const(DIRECT_RUN_RETPTR_OFFSET));
+    function.instruction(&Instruction::I32Load(MemArg {
+        offset,
+        align: 2,
+        memory_index: 0,
+    }));
+}
+
+fn push_retptr_u8_load(function: &mut WasmFunction, offset: u64) {
+    function.instruction(&Instruction::I32Const(DIRECT_RUN_RETPTR_OFFSET));
+    function.instruction(&Instruction::I32Load8U(MemArg {
+        offset,
+        align: 0,
+        memory_index: 0,
+    }));
+}
+
+fn push_retptr_i64_load(function: &mut WasmFunction, offset: u64) {
+    function.instruction(&Instruction::I32Const(DIRECT_RUN_RETPTR_OFFSET));
+    function.instruction(&Instruction::I64Load(MemArg {
+        offset,
+        align: 3,
+        memory_index: 0,
+    }));
 }
 
 fn zero_return_function(results: &[WasmType]) -> WasmFunction {
@@ -4288,15 +4457,60 @@ mod tests {
         );
         let mut saw_agent_invoke = false;
         let mut saw_agent_output = false;
+        let mut saw_agent_error = false;
+        let mut saw_agent_debug_error = false;
+        let mut saw_runtime_fail = false;
+        let mut saw_agent_ok_ptr_load = false;
+        let mut saw_agent_ok_len_load = false;
+        let mut saw_agent_retry_after_value_load = false;
+        let mut code_body_index = 0;
         for payload in Parser::new(0).parse_all(&core) {
-            if let Payload::ImportSection(reader) = payload.expect("core wasm payload") {
-                for import in reader.into_imports() {
-                    let import = import.expect("core import");
-                    saw_agent_invoke |=
-                        import.module == actual_module && import.name == actual_name;
-                    saw_agent_output |= import.module.contains("runtara:workflow-stdlib/json")
-                        && import.name == "agent-output";
+            match payload.expect("core wasm payload") {
+                Payload::ImportSection(reader) => {
+                    for import in reader.into_imports() {
+                        let import = import.expect("core import");
+                        saw_agent_invoke |=
+                            import.module == actual_module && import.name == actual_name;
+                        saw_agent_output |= import.module.contains("runtara:workflow-stdlib/json")
+                            && import.name == "agent-output";
+                        saw_agent_error |= import.module.contains("runtara:workflow-stdlib/json")
+                            && import.name == "agent-error";
+                        saw_agent_debug_error |=
+                            import.module.contains("runtara:workflow-stdlib/json")
+                                && import.name == "agent-debug-error";
+                        saw_runtime_fail |=
+                            import.module.contains("runtara:workflow-runtime/runtime")
+                                && import.name == "fail";
+                    }
                 }
+                Payload::CodeSectionEntry(body) => {
+                    if code_body_index == 0 {
+                        for operator in body.get_operators_reader().expect("operators").into_iter()
+                        {
+                            match operator.expect("operator") {
+                                Operator::I32Load { memarg }
+                                    if memarg.offset == DIRECT_AGENT_RESULT_OK_PTR_OFFSET =>
+                                {
+                                    saw_agent_ok_ptr_load = true;
+                                }
+                                Operator::I32Load { memarg }
+                                    if memarg.offset == DIRECT_AGENT_RESULT_OK_LEN_OFFSET =>
+                                {
+                                    saw_agent_ok_len_load = true;
+                                }
+                                Operator::I64Load { memarg }
+                                    if memarg.offset
+                                        == DIRECT_AGENT_RESULT_ERR_RETRY_AFTER_VALUE_OFFSET =>
+                                {
+                                    saw_agent_retry_after_value_load = true;
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                    code_body_index += 1;
+                }
+                _ => {}
             }
         }
 
@@ -4305,6 +4519,24 @@ mod tests {
             "core should import Agent capabilities.invoke"
         );
         assert!(saw_agent_output, "core should import stdlib.agent-output");
+        assert!(saw_agent_error, "core should import stdlib.agent-error");
+        assert!(
+            saw_agent_debug_error,
+            "core should import stdlib.agent-debug-error"
+        );
+        assert!(saw_runtime_fail, "core should import runtime.fail");
+        assert!(
+            saw_agent_ok_ptr_load,
+            "Agent success should load list pointer from result payload offset 8"
+        );
+        assert!(
+            saw_agent_ok_len_load,
+            "Agent success should load list length from result payload offset 12"
+        );
+        assert!(
+            saw_agent_retry_after_value_load,
+            "Agent error path should pass retry-after-ms from error-info"
+        );
     }
 
     #[test]

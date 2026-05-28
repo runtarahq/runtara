@@ -909,6 +909,195 @@ pub mod exports {
                 }
                 #[doc(hidden)]
                 #[allow(non_snake_case)]
+                pub unsafe fn _export_agent_error_cabi<T: Guest>(
+                    arg0: i32,
+                    arg1: *mut u8,
+                    arg2: usize,
+                    arg3: *mut u8,
+                    arg4: usize,
+                    arg5: *mut u8,
+                    arg6: usize,
+                    arg7: *mut u8,
+                    arg8: usize,
+                    arg9: i32,
+                    arg10: i32,
+                    arg11: i64,
+                    arg12: i32,
+                    arg13: *mut u8,
+                    arg14: usize,
+                ) -> *mut u8 {
+                    #[cfg(target_arch = "wasm32")] _rt::run_ctors_once();
+                    let len0 = arg2;
+                    let bytes0 = _rt::Vec::from_raw_parts(arg1.cast(), len0, len0);
+                    let len1 = arg4;
+                    let bytes1 = _rt::Vec::from_raw_parts(arg3.cast(), len1, len1);
+                    let len2 = arg6;
+                    let bytes2 = _rt::Vec::from_raw_parts(arg5.cast(), len2, len2);
+                    let len3 = arg8;
+                    let bytes3 = _rt::Vec::from_raw_parts(arg7.cast(), len3, len3);
+                    let result5 = T::agent_error(
+                        arg0 as u32,
+                        _rt::string_lift(bytes0),
+                        _rt::string_lift(bytes1),
+                        _rt::string_lift(bytes2),
+                        _rt::string_lift(bytes3),
+                        _rt::bool_lift(arg9 as u8),
+                        match arg10 {
+                            0 => None,
+                            1 => {
+                                let e = arg11 as u64;
+                                Some(e)
+                            }
+                            _ => _rt::invalid_enum_discriminant(),
+                        },
+                        match arg12 {
+                            0 => None,
+                            1 => {
+                                let e = {
+                                    let len4 = arg14;
+                                    let bytes4 = _rt::Vec::from_raw_parts(
+                                        arg13.cast(),
+                                        len4,
+                                        len4,
+                                    );
+                                    _rt::string_lift(bytes4)
+                                };
+                                Some(e)
+                            }
+                            _ => _rt::invalid_enum_discriminant(),
+                        },
+                    );
+                    let ptr6 = (&raw mut _RET_AREA.0).cast::<u8>();
+                    match result5 {
+                        Ok(e) => {
+                            *ptr6.add(0).cast::<u8>() = (0i32) as u8;
+                            let vec7 = (e).into_boxed_slice();
+                            let ptr7 = vec7.as_ptr().cast::<u8>();
+                            let len7 = vec7.len();
+                            ::core::mem::forget(vec7);
+                            *ptr6
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>() = len7;
+                            *ptr6
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>() = ptr7.cast_mut();
+                        }
+                        Err(e) => {
+                            *ptr6.add(0).cast::<u8>() = (1i32) as u8;
+                            let vec8 = (e.into_bytes()).into_boxed_slice();
+                            let ptr8 = vec8.as_ptr().cast::<u8>();
+                            let len8 = vec8.len();
+                            ::core::mem::forget(vec8);
+                            *ptr6
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>() = len8;
+                            *ptr6
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>() = ptr8.cast_mut();
+                        }
+                    };
+                    ptr6
+                }
+                #[doc(hidden)]
+                #[allow(non_snake_case)]
+                pub unsafe fn __post_return_agent_error<T: Guest>(arg0: *mut u8) {
+                    let l0 = i32::from(*arg0.add(0).cast::<u8>());
+                    match l0 {
+                        0 => {
+                            let l1 = *arg0
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>();
+                            let l2 = *arg0
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>();
+                            let base3 = l1;
+                            let len3 = l2;
+                            _rt::cabi_dealloc(base3, len3 * 1, 1);
+                        }
+                        _ => {
+                            let l4 = *arg0
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>();
+                            let l5 = *arg0
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>();
+                            _rt::cabi_dealloc(l4, l5, 1);
+                        }
+                    }
+                }
+                #[doc(hidden)]
+                #[allow(non_snake_case)]
+                pub unsafe fn _export_agent_debug_error_cabi<T: Guest>(
+                    arg0: i32,
+                    arg1: *mut u8,
+                    arg2: usize,
+                ) -> *mut u8 {
+                    #[cfg(target_arch = "wasm32")] _rt::run_ctors_once();
+                    let len0 = arg2;
+                    let result1 = T::agent_debug_error(
+                        arg0 as u32,
+                        _rt::Vec::from_raw_parts(arg1.cast(), len0, len0),
+                    );
+                    let ptr2 = (&raw mut _RET_AREA.0).cast::<u8>();
+                    match result1 {
+                        Ok(e) => {
+                            *ptr2.add(0).cast::<u8>() = (0i32) as u8;
+                            let vec3 = (e).into_boxed_slice();
+                            let ptr3 = vec3.as_ptr().cast::<u8>();
+                            let len3 = vec3.len();
+                            ::core::mem::forget(vec3);
+                            *ptr2
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>() = len3;
+                            *ptr2
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>() = ptr3.cast_mut();
+                        }
+                        Err(e) => {
+                            *ptr2.add(0).cast::<u8>() = (1i32) as u8;
+                            let vec4 = (e.into_bytes()).into_boxed_slice();
+                            let ptr4 = vec4.as_ptr().cast::<u8>();
+                            let len4 = vec4.len();
+                            ::core::mem::forget(vec4);
+                            *ptr2
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>() = len4;
+                            *ptr2
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>() = ptr4.cast_mut();
+                        }
+                    };
+                    ptr2
+                }
+                #[doc(hidden)]
+                #[allow(non_snake_case)]
+                pub unsafe fn __post_return_agent_debug_error<T: Guest>(arg0: *mut u8) {
+                    let l0 = i32::from(*arg0.add(0).cast::<u8>());
+                    match l0 {
+                        0 => {
+                            let l1 = *arg0
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>();
+                            let l2 = *arg0
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>();
+                            let base3 = l1;
+                            let len3 = l2;
+                            _rt::cabi_dealloc(base3, len3 * 1, 1);
+                        }
+                        _ => {
+                            let l4 = *arg0
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>();
+                            let l5 = *arg0
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>();
+                            _rt::cabi_dealloc(l4, l5, 1);
+                        }
+                    }
+                }
+                #[doc(hidden)]
+                #[allow(non_snake_case)]
                 pub unsafe fn _export_step_debug_start_cabi<T: Guest>(
                     arg0: *mut u8,
                     arg1: usize,
@@ -1107,6 +1296,20 @@ pub mod exports {
                         source: _rt::Vec<u8>,
                         output: _rt::Vec<u8>,
                     ) -> Result<_rt::Vec<u8>, _rt::String>;
+                    fn agent_error(
+                        agent_id: u32,
+                        code: _rt::String,
+                        message: _rt::String,
+                        category: _rt::String,
+                        severity: _rt::String,
+                        retryable: bool,
+                        retry_after_ms: Option<u64>,
+                        attributes: Option<_rt::String>,
+                    ) -> Result<_rt::Vec<u8>, _rt::String>;
+                    fn agent_debug_error(
+                        agent_id: u32,
+                        error: _rt::Vec<u8>,
+                    ) -> Result<_rt::Vec<u8>, _rt::String>;
                     fn step_debug_start(
                         step_id: _rt::String,
                         source: _rt::Vec<u8>,
@@ -1237,6 +1440,29 @@ pub mod exports {
                         unsafe extern "C" fn _post_return_agent_output(arg0 : * mut u8,)
                         { unsafe { $($path_to_types)*:: __post_return_agent_output::<$ty
                         > (arg0) } } #[unsafe (export_name =
+                        "runtara:workflow-stdlib/json@0.1.0#agent-error")] unsafe extern
+                        "C" fn export_agent_error(arg0 : i32, arg1 : * mut u8, arg2 :
+                        usize, arg3 : * mut u8, arg4 : usize, arg5 : * mut u8, arg6 :
+                        usize, arg7 : * mut u8, arg8 : usize, arg9 : i32, arg10 : i32,
+                        arg11 : i64, arg12 : i32, arg13 : * mut u8, arg14 : usize,) -> *
+                        mut u8 { unsafe { $($path_to_types)*::
+                        _export_agent_error_cabi::<$ty > (arg0, arg1, arg2, arg3, arg4,
+                        arg5, arg6, arg7, arg8, arg9, arg10, arg11, arg12, arg13, arg14)
+                        } } #[unsafe (export_name =
+                        "cabi_post_runtara:workflow-stdlib/json@0.1.0#agent-error")]
+                        unsafe extern "C" fn _post_return_agent_error(arg0 : * mut u8,) {
+                        unsafe { $($path_to_types)*:: __post_return_agent_error::<$ty >
+                        (arg0) } } #[unsafe (export_name =
+                        "runtara:workflow-stdlib/json@0.1.0#agent-debug-error")] unsafe
+                        extern "C" fn export_agent_debug_error(arg0 : i32, arg1 : * mut
+                        u8, arg2 : usize,) -> * mut u8 { unsafe { $($path_to_types)*::
+                        _export_agent_debug_error_cabi::<$ty > (arg0, arg1, arg2) } }
+                        #[unsafe (export_name =
+                        "cabi_post_runtara:workflow-stdlib/json@0.1.0#agent-debug-error")]
+                        unsafe extern "C" fn _post_return_agent_debug_error(arg0 : * mut
+                        u8,) { unsafe { $($path_to_types)*::
+                        __post_return_agent_debug_error::<$ty > (arg0) } } #[unsafe
+                        (export_name =
                         "runtara:workflow-stdlib/json@0.1.0#step-debug-start")] unsafe
                         extern "C" fn export_step_debug_start(arg0 : * mut u8, arg1 :
                         usize, arg2 : * mut u8, arg3 : usize,) -> * mut u8 { unsafe {
@@ -1298,6 +1524,24 @@ mod _rt {
             String::from_utf8_unchecked(bytes)
         }
     }
+    pub unsafe fn bool_lift(val: u8) -> bool {
+        if cfg!(debug_assertions) {
+            match val {
+                0 => false,
+                1 => true,
+                _ => panic!("invalid bool discriminant"),
+            }
+        } else {
+            val != 0
+        }
+    }
+    pub unsafe fn invalid_enum_discriminant<T>() -> T {
+        if cfg!(debug_assertions) {
+            panic!("invalid enum discriminant")
+        } else {
+            unsafe { core::hint::unreachable_unchecked() }
+        }
+    }
     extern crate alloc as alloc_crate;
     pub use alloc_crate::alloc;
 }
@@ -1335,10 +1579,10 @@ pub(crate) use __export_workflow_stdlib_impl as export;
 #[unsafe(link_section = "component-type:wit-bindgen:0.41.0:runtara:workflow-stdlib@0.1.0:workflow-stdlib:encoded world")]
 #[doc(hidden)]
 #[allow(clippy::octal_escapes)]
-pub static __WIT_BINDGEN_COMPONENT_TYPE: [u8; 783] = *b"\
-\0asm\x0d\0\x01\0\0\x19\x16wit-component-encoding\x04\0\x07\x89\x05\x01A\x02\x01\
-A\x02\x01B\x20\x01p}\x01j\0\x01s\x01@\x01\x08manifest\0\0\x01\x04\0\x0dinit-mani\
-fest\x01\x02\x01j\x01\0\x01s\x01@\x03\x04data\0\x09variables\0\x05steps\0\0\x03\x04\
+pub static __WIT_BINDGEN_COMPONENT_TYPE: [u8; 938] = *b"\
+\0asm\x0d\0\x01\0\0\x19\x16wit-component-encoding\x04\0\x07\xa4\x06\x01A\x02\x01\
+A\x02\x01B&\x01p}\x01j\0\x01s\x01@\x01\x08manifest\0\0\x01\x04\0\x0dinit-manifes\
+t\x01\x02\x01j\x01\0\x01s\x01@\x03\x04data\0\x09variables\0\x05steps\0\0\x03\x04\
 \0\x0cbuild-source\x01\x04\x01@\x02\x0amapping-idy\x06source\0\0\x03\x04\0\x0dap\
 ply-mapping\x01\x05\x01j\x01\x7f\x01s\x01@\x02\x0ccondition-idy\x06source\0\0\x06\
 \x04\0\x0eeval-condition\x01\x07\x01j\x01s\x01s\x01@\x02\x09switch-idy\x06source\
@@ -1348,11 +1592,14 @@ filter\x01\x0b\x01@\x02\x06log-idy\x06source\0\0\x03\x04\0\x09log-event\x01\x0c\
 \0\x03log\x01\x0c\x01@\x02\x08error-idy\x06source\0\0\x03\x04\0\x0berror-event\x01\
 \x0d\x04\0\x05error\x01\x0d\x01@\x02\x08group-idy\x06source\0\0\x03\x04\0\x08gro\
 up-by\x01\x0e\x01@\x03\x08agent-idy\x06source\0\x06output\0\0\x03\x04\0\x0cagent\
--output\x01\x0f\x01@\x02\x07step-ids\x06source\0\0\x03\x04\0\x10step-debug-start\
-\x01\x10\x04\0\x0estep-debug-end\x01\x10\x04\0\"runtara:workflow-stdlib/json@0.1\
-.0\x05\0\x04\0-runtara:workflow-stdlib/workflow-stdlib@0.1.0\x04\0\x0b\x15\x01\0\
-\x0fworkflow-stdlib\x03\0\0\0G\x09producers\x01\x0cprocessed-by\x02\x0dwit-compo\
-nent\x070.227.1\x10wit-bindgen-rust\x060.41.0";
+-output\x01\x0f\x01kw\x01ks\x01@\x08\x08agent-idy\x04codes\x07messages\x08catego\
+rys\x08severitys\x09retryable\x7f\x0eretry-after-ms\x10\x0aattributes\x11\0\x03\x04\
+\0\x0bagent-error\x01\x12\x01@\x02\x08agent-idy\x05error\0\0\x03\x04\0\x11agent-\
+debug-error\x01\x13\x01@\x02\x07step-ids\x06source\0\0\x03\x04\0\x10step-debug-s\
+tart\x01\x14\x04\0\x0estep-debug-end\x01\x14\x04\0\"runtara:workflow-stdlib/json\
+@0.1.0\x05\0\x04\0-runtara:workflow-stdlib/workflow-stdlib@0.1.0\x04\0\x0b\x15\x01\
+\0\x0fworkflow-stdlib\x03\0\0\0G\x09producers\x01\x0cprocessed-by\x02\x0dwit-com\
+ponent\x070.227.1\x10wit-bindgen-rust\x060.41.0";
 #[inline(never)]
 #[doc(hidden)]
 pub fn __link_custom_section_describing_imports() {

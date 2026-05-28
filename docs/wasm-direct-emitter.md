@@ -198,9 +198,15 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   success output through `stdlib.agent-output`, rebuilds the source, and
   continues to the next direct run-plan node. The WIT canonical ABI lowers
   this import indirectly as `[pointer, pointer]`, so the direct core now writes
-  the argument area for capability id, input bytes, and a `none` connection.
-  Durable Agent calls, connection envelopes, retry/timeout policy,
-  compensation, on-error routing, and Agent error envelopes remain rejected.
+  the argument area for capability id, input bytes, and a `none` connection,
+  and reads the Agent-specific result payload offsets for successful output
+  bytes.
+- Agent failure handling now converts WIT `error-info` into the same JSON
+  envelope used by component codegen, wraps it in the current generated Agent
+  step failure string, emits Agent `step_debug_end` failure payloads when
+  `track_events` is enabled, calls `runtime.fail`, and returns failed
+  `wasi:cli/run`. Durable Agent calls, connection envelopes, retry/timeout
+  policy, compensation, and on-error routing remain rejected.
 
 ## Final Goal
 
@@ -1311,6 +1317,12 @@ Current status:
 - Agent `step_debug_start` uses the Agent input mapping, and
   `step_debug_end` reads the stored Agent step output after source rebuild.
   This covers success debug payloads for the first Agent subset.
+- The shared stdlib WIT now also includes `agent-error` and
+  `agent-debug-error`. `agent-error` converts WIT `error-info` into the raw
+  JSON envelope used by component codegen, then wraps it as
+  `Step <id> failed: Agent <agent>::<capability>: <json>`, matching current
+  Agent failure formatting. `agent-debug-error` emits the generated
+  `{"_error": true, "error": ...}` debug-end output shape.
 
 Implementation steps:
 
@@ -1322,9 +1334,12 @@ Implementation steps:
    - input mapping: done through `stdlib.apply-mapping`;
    - static `capabilities.invoke`: done for `connection = none`;
    - success output envelope: done through `stdlib.agent-output`;
+   - success ABI result layout: done for the current indirect
+     `[pointer, pointer]` invoke lowering;
+   - `error-info` to current Agent failure string/debug payload: done;
    - agent input validation: pending parity with generated Rust validation;
    - connection resolution/envelope: pending;
-   - `error-info` to JSON error envelope: pending.
+   - durable retry/timeout behavior: pending.
 5. Implement `onError` routing for agent failures.
 6. Preserve current retry policy shape by delegating durable retry behavior to
    stdlib/runtime. Non-durable calls can be supported first if needed.

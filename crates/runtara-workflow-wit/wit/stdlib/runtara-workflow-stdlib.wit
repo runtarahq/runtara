@@ -72,6 +72,22 @@ interface json {
         output: list<u8>,
     ) -> result<list<u8>, string>;
 
+    agent-error: func(
+        agent-id: u32,
+        code: string,
+        message: string,
+        category: string,
+        severity: string,
+        retryable: bool,
+        retry-after-ms: option<u64>,
+        attributes: option<string>,
+    ) -> result<list<u8>, string>;
+
+    agent-debug-error: func(
+        agent-id: u32,
+        error: list<u8>,
+    ) -> result<list<u8>, string>;
+
     step-debug-start: func(
         step-id: string,
         source: list<u8>,

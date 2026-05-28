@@ -183,6 +183,75 @@ impl DirectJsonManifest {
             .map_err(|err| format!("failed to serialize Agent steps context: {err}"))
     }
 
+    /// Convert a WIT `error-info` into the current Agent failure string shape.
+    #[allow(clippy::too_many_arguments)]
+    pub fn agent_error(
+        &self,
+        agent_id: u32,
+        code: &str,
+        message: &str,
+        category: &str,
+        severity: &str,
+        retryable: bool,
+        retry_after_ms: Option<u64>,
+        attributes: Option<&str>,
+    ) -> Result<Vec<u8>, String> {
+        let agent = self
+            .agents
+            .get(&agent_id)
+            .ok_or_else(|| format!("unknown direct Agent id {agent_id}"))?;
+        let raw = agent_error_info_envelope(
+            code,
+            message,
+            category,
+            severity,
+            retryable,
+            retry_after_ms,
+            attributes,
+        );
+        Ok(format!(
+            "Step {} failed: Agent {}::{}: {}",
+            agent.step_id, agent.agent_id, agent.capability_id, raw
+        )
+        .into_bytes())
+    }
+
+    /// Build generated-code-compatible Agent `step_debug_end` payload for failures.
+    pub fn agent_debug_error(&self, agent_id: u32, error: &[u8]) -> Result<Vec<u8>, String> {
+        let agent = self
+            .agents
+            .get(&agent_id)
+            .ok_or_else(|| format!("unknown direct Agent id {agent_id}"))?;
+        let step = self
+            .steps
+            .get(&agent.step_id)
+            .ok_or_else(|| format!("unknown direct Agent step '{}'", agent.step_id))?;
+        let timestamp = timestamp_ms();
+        let duration_ms = self
+            .debug_start_ms
+            .borrow_mut()
+            .remove(&agent.step_id)
+            .map(|start| timestamp.saturating_sub(start).max(0))
+            .unwrap_or(0);
+        let error = String::from_utf8_lossy(error).to_string();
+
+        let mut payload = debug_event_base(step, timestamp);
+        payload.insert(
+            "outputs".to_string(),
+            serde_json::json!({
+                "_error": true,
+                "error": error,
+            }),
+        );
+        payload.insert(
+            "duration_ms".to_string(),
+            Value::Number(serde_json::Number::from(duration_ms)),
+        );
+
+        serde_json::to_vec(&Value::Object(payload))
+            .map_err(|err| format!("failed to serialize Agent step-debug-end payload: {err}"))
+    }
+
     /// Build the payload for a manifest Log step's runtime custom event.
     pub fn log_event(&self, log_id: u32, source: &[u8]) -> Result<Vec<u8>, String> {
         let source: Value = serde_json::from_slice(source)
@@ -720,6 +789,8 @@ fn collect_graph_manifest(
                 DirectJsonAgent {
                     step_id: agent.step_id.clone(),
                     name: agent.name.clone(),
+                    agent_id: agent.agent_id.clone(),
+                    capability_id: agent.capability_id.clone(),
                     input_mapping_id: agent.input_mapping_id,
                 },
             )
@@ -1034,6 +1105,36 @@ fn apply_error(config: &Value, source: &Value) -> Result<DirectErrorResult, Stri
         severity,
         context,
     })
+}
+
+fn agent_error_info_envelope(
+    code: &str,
+    message: &str,
+    category: &str,
+    severity: &str,
+    retryable: bool,
+    retry_after_ms: Option<u64>,
+    attributes: Option<&str>,
+) -> String {
+    let mut object = Map::new();
+    object.insert("code".to_string(), Value::String(code.to_string()));
+    object.insert("message".to_string(), Value::String(message.to_string()));
+    object.insert("category".to_string(), Value::String(category.to_string()));
+    object.insert("severity".to_string(), Value::String(severity.to_string()));
+    object.insert("retryable".to_string(), Value::Bool(retryable));
+    if let Some(retry_after_ms) = retry_after_ms {
+        object.insert(
+            "retry_after_ms".to_string(),
+            Value::Number(serde_json::Number::from(retry_after_ms)),
+        );
+    }
+    if let Some(attributes) = attributes
+        && let Ok(parsed) = serde_json::from_str::<Value>(attributes)
+    {
+        object.insert("attributes".to_string(), parsed);
+    }
+
+    Value::Object(object).to_string()
 }
 
 fn timestamp_ms() -> i64 {
@@ -1685,6 +1786,8 @@ struct AgentWire {
     step_id: String,
     #[serde(default)]
     name: Option<String>,
+    agent_id: String,
+    capability_id: String,
     input_mapping_id: u32,
 }
 
@@ -1748,6 +1851,8 @@ struct DirectJsonError {
 struct DirectJsonAgent {
     step_id: String,
     name: Option<String>,
+    agent_id: String,
+    capability_id: String,
     input_mapping_id: u32,
 }
 
@@ -2490,6 +2595,60 @@ mod tests {
         assert_eq!(end["outputs"]["stepId"], json!("agent"));
         assert_eq!(end["outputs"]["stepType"], json!("Agent"));
         assert_eq!(end["outputs"]["outputs"], json!({ "value": "out" }));
+    }
+
+    #[test]
+    fn agent_error_formats_error_info_like_component_dispatch() {
+        let manifest = DirectJsonManifest::parse(&agent_manifest(json!({}))).expect("manifest");
+
+        let error = manifest
+            .agent_error(
+                0,
+                "CAPABILITY_ERROR",
+                "bad request",
+                "permanent",
+                "error",
+                false,
+                Some(1500),
+                Some(r#"{"field":"value"}"#),
+            )
+            .expect("Agent error");
+        let error = String::from_utf8(error).expect("utf8 error");
+
+        assert!(error.starts_with("Step agent failed: Agent utils::normalize: "));
+        let raw = error
+            .strip_prefix("Step agent failed: Agent utils::normalize: ")
+            .expect("raw envelope");
+        let raw: Value = serde_json::from_str(raw).expect("raw json");
+        assert_eq!(raw["code"], json!("CAPABILITY_ERROR"));
+        assert_eq!(raw["message"], json!("bad request"));
+        assert_eq!(raw["category"], json!("permanent"));
+        assert_eq!(raw["severity"], json!("error"));
+        assert_eq!(raw["retryable"], json!(false));
+        assert_eq!(raw["retry_after_ms"], json!(1500));
+        assert_eq!(raw["attributes"], json!({ "field": "value" }));
+    }
+
+    #[test]
+    fn agent_debug_error_payload_matches_generated_shape() {
+        let manifest = DirectJsonManifest::parse(&agent_manifest(json!({}))).expect("manifest");
+        let source = build_source(b"{}", b"{}", b"{}").expect("source");
+        manifest
+            .step_debug_start("agent", &source)
+            .expect("debug start");
+
+        let payload = manifest
+            .agent_debug_error(0, b"Step agent failed")
+            .expect("debug error");
+        let payload: Value = serde_json::from_slice(&payload).expect("payload json");
+
+        assert_eq!(payload["step_id"], json!("agent"));
+        assert_eq!(payload["step_type"], json!("Agent"));
+        assert_eq!(
+            payload["outputs"],
+            json!({ "_error": true, "error": "Step agent failed" })
+        );
+        assert!(payload["duration_ms"].as_i64().is_some());
     }
 
     #[test]
