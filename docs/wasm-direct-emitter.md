@@ -24,7 +24,8 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   references, durability, and routing features.
 - `direct_wasm::manifest` builds a deterministic versioned manifest with a
   checksum, sorted steps, sorted edges, nested graph manifests, schemas,
-  variables, manifest-wide mapping IDs, and a feature summary.
+  variables, manifest-wide mapping IDs, manifest-wide condition IDs,
+  manifest-wide GroupBy IDs, and a feature summary.
 - `direct_wasm::support` produces deterministic unsupported-feature reports.
   The current production-shaped direct path supports a single entry `Finish`
   step and pure `Conditional` true/false decision trees ending in `Finish`
@@ -91,6 +92,10 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   including logical operators, comparisons, equality, string/array operators,
   `LENGTH`, emptiness checks, truthy value expressions, and server-side-only
   operators falling back to `false`.
+- `direct_wasm::manifest` now assigns manifest-wide GroupBy IDs for
+  `GroupBy.config`, and `runtara-workflow-stdlib::direct_json` implements the
+  shared `group-by` helper for simple keys, nested keys, null keys, non-array
+  inputs, and expected key initialization.
 - The direct core emitter now supports pure conditional decision trees:
   each `Conditional` has exactly two labeled `true`/`false` edges to another
   supported direct-control step, and all leaves are `Finish` steps. It calls
@@ -101,6 +106,9 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   branch selection and selected `Finish` output against the current
   generated-code condition semantics for representative fixtures, including
   boolean equality, `LENGTH`-based numeric comparison, and nested conditionals.
+- `tests/direct_wasm_group_by_parity.rs` now compares the direct GroupBy stdlib
+  helper against current generated-code GroupBy semantics for simple groups,
+  nested key paths, and `expectedKeys`.
 
 ## Final Goal
 
@@ -990,6 +998,9 @@ Current status:
   behavior that direct stdlib must preserve.
 - Conditional condition IDs are now in the manifest and the direct stdlib
   component can evaluate those conditions through the checked WIT surface.
+- GroupBy config IDs are now in the manifest and the direct stdlib component
+  can evaluate GroupBy configs through the checked WIT surface; parity fixtures
+  cover simple, nested-key, expected-key, null-key, and non-array behavior.
 - The first direct Wasm branching path is implemented for
   `Conditional -> true/false Finish`, and the run-plan lowering now recurses
   through nested pure `Conditional` trees until each branch reaches a `Finish`
@@ -1000,8 +1011,9 @@ Current status:
   evaluation and branch output against current generated-code condition
   semantics for simple equality, `LENGTH` comparisons, and nested branch paths.
 - Remaining work: broaden graph lowering to multi-step pure JSON/control
-  workflows with non-branch sequential steps, switch routing, filter/grouping,
-  log/error behavior, and edge-condition priority handling.
+  workflows by wiring step output into the direct `steps` source context, then
+  lowering non-branch sequential GroupBy/Filter/Switch value steps, switch
+  routing, log/error behavior, and edge-condition priority handling.
 
 Implementation steps:
 
@@ -1048,9 +1060,13 @@ Current progress:
 - `Conditional` lowering now supports pure true/false decision trees that end
   in `Finish` leaves. It evaluates each condition through `stdlib.eval-condition`
   and emits nested Wasm `if` control flow in the workflow-specific module.
-- Remaining parity work in this phase starts with normal sequential edges and
-  then broadens to `Switch`, `Filter`, `GroupBy`, `Log`, `Error`, edge
-  conditions, and debug event behavior.
+- The shared direct stdlib now implements deterministic GroupBy semantics behind
+  `group-by`, with manifest IDs and parity tests in place. The direct core still
+  needs the generic step-output source-context update before it can lower
+  `GroupBy -> Finish` normal edges end to end.
+- Remaining parity work in this phase starts with that step-output source
+  context and normal sequential edges, then broadens to `Switch`, `Filter`,
+  `Log`, `Error`, edge conditions, and debug event behavior.
 
 Implementation steps:
 

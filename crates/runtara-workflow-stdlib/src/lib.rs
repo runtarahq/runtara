@@ -188,8 +188,14 @@ mod component {
             Err("direct stdlib filter is not implemented yet".to_string())
         }
 
-        fn group_by(_group_id: u32, _source: Vec<u8>) -> Result<Vec<u8>, String> {
-            Err("direct stdlib group-by is not implemented yet".to_string())
+        fn group_by(group_id: u32, source: Vec<u8>) -> Result<Vec<u8>, String> {
+            MANIFEST.with(|slot| {
+                let slot = slot.borrow();
+                let manifest = slot
+                    .as_ref()
+                    .ok_or_else(|| "direct stdlib manifest was not initialized".to_string())?;
+                manifest.group_by(group_id, &source)
+            })
         }
     }
 

@@ -69,6 +69,9 @@ pub struct DirectGraphManifest {
     /// Condition definitions addressable by generated direct Wasm.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub conditions: Vec<DirectConditionManifest>,
+    /// GroupBy definitions addressable by generated direct Wasm.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub group_bys: Vec<DirectGroupByManifest>,
     /// Execution-plan edges in deterministic routing order.
     pub edges: Vec<DirectEdgeManifest>,
 }
@@ -130,6 +133,22 @@ pub struct DirectConditionManifest {
     /// Condition role, for example `conditional.condition`.
     pub purpose: String,
     /// Canonical JSON serialization of the DSL condition expression.
+    pub value: serde_json::Value,
+}
+
+/// Deterministic GroupBy definition referenced by direct-emitted Wasm.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DirectGroupByManifest {
+    /// Manifest-wide GroupBy identifier.
+    pub id: u32,
+    /// Step that owns this GroupBy config.
+    pub step_id: String,
+    /// Step type that owns this GroupBy config.
+    pub step_type: String,
+    /// Config role within the step.
+    pub purpose: String,
+    /// Canonical JSON serialization of the DSL GroupBy config.
     pub value: serde_json::Value,
 }
 
@@ -197,6 +216,7 @@ pub fn build_direct_workflow_manifest(
 struct DirectManifestBuildState {
     next_mapping_id: u32,
     next_condition_id: u32,
+    next_group_by_id: u32,
 }
 
 impl DirectManifestBuildState {
@@ -209,6 +229,12 @@ impl DirectManifestBuildState {
     fn allocate_condition_id(&mut self) -> u32 {
         let id = self.next_condition_id;
         self.next_condition_id += 1;
+        id
+    }
+
+    fn allocate_group_by_id(&mut self) -> u32 {
+        let id = self.next_group_by_id;
+        self.next_group_by_id += 1;
         id
     }
 }
@@ -224,13 +250,24 @@ fn graph_manifest(
 
     let mut mappings = Vec::new();
     let mut conditions = Vec::new();
+    let mut group_bys = Vec::new();
     let steps = step_values
         .into_iter()
-        .map(|step| step_manifest(step, durable, state, &mut mappings, &mut conditions))
+        .map(|step| {
+            step_manifest(
+                step,
+                durable,
+                state,
+                &mut mappings,
+                &mut conditions,
+                &mut group_bys,
+            )
+        })
         .collect::<Result<Vec<_>, _>>()?;
 
     mappings.sort_by(|left, right| left.id.cmp(&right.id));
     conditions.sort_by(|left, right| left.id.cmp(&right.id));
+    group_bys.sort_by(|left, right| left.id.cmp(&right.id));
 
     let mut edges = graph
         .execution_plan
@@ -250,6 +287,7 @@ fn graph_manifest(
         steps,
         mappings,
         conditions,
+        group_bys,
         edges,
     })
 }
@@ -260,6 +298,7 @@ fn step_manifest(
     state: &mut DirectManifestBuildState,
     mappings: &mut Vec<DirectMappingManifest>,
     conditions: &mut Vec<DirectConditionManifest>,
+    group_bys: &mut Vec<DirectGroupByManifest>,
 ) -> Result<DirectStepManifest, DirectManifestError> {
     let mut nested_graphs = Vec::new();
     match step {
@@ -297,6 +336,15 @@ fn step_manifest(
             nested_graphs.push(DirectNestedGraphManifest {
                 role: "while.subgraph".to_string(),
                 graph: Box::new(graph_manifest(&step.subgraph, inherited_durable, state)?),
+            });
+        }
+        Step::GroupBy(step) => {
+            group_bys.push(DirectGroupByManifest {
+                id: state.allocate_group_by_id(),
+                step_id: step.id.clone(),
+                step_type: "GroupBy".to_string(),
+                purpose: "groupBy.config".to_string(),
+                value: canonical_json(&step.config)?,
             });
         }
         Step::WaitForSignal(step) => {
@@ -460,6 +508,7 @@ mod tests {
         let json = match name {
             "simple" => include_str!("../../tests/fixtures/simple_passthrough.json"),
             "conditional" => include_str!("../../tests/fixtures/conditional_workflow.json"),
+            "group_by" => include_str!("../../tests/fixtures/group_by_simple.json"),
             "wait" => include_str!("../../tests/fixtures/wait_for_signal_with_callback.json"),
             other => panic!("unknown fixture {other}"),
         };
@@ -508,6 +557,21 @@ mod tests {
         assert_eq!(condition.purpose, "conditional.condition");
         assert_eq!(condition.value["type"], "operation");
         assert_eq!(condition.value["op"], "EQ");
+    }
+
+    #[test]
+    fn manifest_assigns_group_by_id() {
+        let manifest = build_direct_workflow_manifest(&fixture("group_by")).expect("manifest");
+
+        assert_eq!(manifest.graph.group_bys.len(), 1);
+        let group_by = &manifest.graph.group_bys[0];
+        assert_eq!(group_by.id, 0);
+        assert_eq!(group_by.step_id, "group");
+        assert_eq!(group_by.step_type, "GroupBy");
+        assert_eq!(group_by.purpose, "groupBy.config");
+        assert_eq!(group_by.value["key"], "status");
+        assert_eq!(group_by.value["value"]["valueType"], "reference");
+        assert_eq!(group_by.value["value"]["value"], "data.items");
     }
 
     #[test]

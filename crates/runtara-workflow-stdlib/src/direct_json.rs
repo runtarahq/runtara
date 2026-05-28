@@ -20,6 +20,7 @@ use crate::template::render_template;
 pub struct DirectJsonManifest {
     mappings: BTreeMap<u32, DirectJsonMapping>,
     conditions: BTreeMap<u32, Value>,
+    group_bys: BTreeMap<u32, DirectJsonGroupBy>,
 }
 
 impl DirectJsonManifest {
@@ -29,10 +30,17 @@ impl DirectJsonManifest {
             .map_err(|err| format!("failed to parse direct manifest: {err}"))?;
         let mut mappings = BTreeMap::new();
         let mut conditions = BTreeMap::new();
-        collect_graph_manifest(&manifest.graph, &mut mappings, &mut conditions)?;
+        let mut group_bys = BTreeMap::new();
+        collect_graph_manifest(
+            &manifest.graph,
+            &mut mappings,
+            &mut conditions,
+            &mut group_bys,
+        )?;
         Ok(Self {
             mappings,
             conditions,
+            group_bys,
         })
     }
 
@@ -61,6 +69,19 @@ impl DirectJsonManifest {
             .get(&condition_id)
             .ok_or_else(|| format!("unknown direct condition id {condition_id}"))?;
         eval_condition_expression(condition, &source)
+    }
+
+    /// Execute a manifest GroupBy config against a source JSON envelope.
+    pub fn group_by(&self, group_id: u32, source: &[u8]) -> Result<Vec<u8>, String> {
+        let source: Value = serde_json::from_slice(source)
+            .map_err(|err| format!("failed to parse group-by source: {err}"))?;
+        let group_by = self
+            .group_bys
+            .get(&group_id)
+            .ok_or_else(|| format!("unknown direct GroupBy id {group_id}"))?;
+        let output = apply_group_by(&group_by.value, &source)?;
+        serde_json::to_vec(&output)
+            .map_err(|err| format!("failed to serialize group-by output: {err}"))
     }
 }
 
@@ -101,6 +122,7 @@ fn collect_graph_manifest(
     graph: &GraphWire,
     mappings: &mut BTreeMap<u32, DirectJsonMapping>,
     conditions: &mut BTreeMap<u32, Value>,
+    group_bys: &mut BTreeMap<u32, DirectJsonGroupBy>,
 ) -> Result<(), String> {
     for mapping in &graph.mappings {
         if mappings
@@ -124,12 +146,70 @@ fn collect_graph_manifest(
             return Err(format!("duplicate direct condition id {}", condition.id));
         }
     }
+    for group_by in &graph.group_bys {
+        if group_bys
+            .insert(
+                group_by.id,
+                DirectJsonGroupBy {
+                    value: group_by.value.clone(),
+                },
+            )
+            .is_some()
+        {
+            return Err(format!("duplicate direct GroupBy id {}", group_by.id));
+        }
+    }
     for step in &graph.steps {
         for nested in &step.nested_graphs {
-            collect_graph_manifest(&nested.graph, mappings, conditions)?;
+            collect_graph_manifest(&nested.graph, mappings, conditions, group_bys)?;
         }
     }
     Ok(())
+}
+
+fn apply_group_by(config: &Value, source: &Value) -> Result<Value, String> {
+    let input = config
+        .get("value")
+        .ok_or_else(|| "GroupBy config missing value".to_string())
+        .and_then(|value| apply_mapping_value(value, source))?;
+    let items = input.as_array().cloned().unwrap_or_default();
+    let key = config
+        .get("key")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "GroupBy config missing key".to_string())?;
+    let pointer = path_to_json_pointer(key);
+
+    let mut groups = BTreeMap::<String, Vec<Value>>::new();
+    let mut counts = BTreeMap::<String, usize>::new();
+    if let Some(expected_keys) = config.get("expectedKeys").and_then(Value::as_array) {
+        for key in expected_keys.iter().filter_map(Value::as_str) {
+            groups.entry(key.to_string()).or_default();
+            counts.entry(key.to_string()).or_insert(0);
+        }
+    }
+
+    for item in items {
+        let key = item.pointer(&pointer).cloned().unwrap_or(Value::Null);
+        let key = group_key_string(&key);
+        groups.entry(key.clone()).or_default().push(item);
+        *counts.entry(key).or_insert(0) += 1;
+    }
+
+    Ok(serde_json::json!({
+        "groups": groups,
+        "counts": counts,
+        "total_groups": groups.len(),
+    }))
+}
+
+fn group_key_string(value: &Value) -> String {
+    match value {
+        Value::String(value) => value.clone(),
+        Value::Number(value) => value.to_string(),
+        Value::Bool(value) => value.to_string(),
+        Value::Null => "_null".to_string(),
+        other => serde_json::to_string(other).unwrap_or_else(|_| "_invalid".to_string()),
+    }
 }
 
 fn eval_condition_expression(expr: &Value, source: &Value) -> Result<bool, String> {
@@ -554,6 +634,8 @@ struct GraphWire {
     #[serde(default)]
     conditions: Vec<ConditionWire>,
     #[serde(default)]
+    group_bys: Vec<GroupByWire>,
+    #[serde(default)]
     steps: Vec<StepWire>,
 }
 
@@ -585,9 +667,21 @@ struct ConditionWire {
     value: Value,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GroupByWire {
+    id: u32,
+    value: Value,
+}
+
 #[derive(Debug, Clone)]
 struct DirectJsonMapping {
     purpose: String,
+    value: Value,
+}
+
+#[derive(Debug, Clone)]
+struct DirectJsonGroupBy {
     value: Value,
 }
 
@@ -621,6 +715,22 @@ mod tests {
                     "ownerType": "Conditional",
                     "purpose": "conditional.condition",
                     "value": condition_value
+                }],
+                "steps": []
+            }
+        }))
+        .expect("manifest json")
+    }
+
+    fn group_by_manifest(config: Value) -> Vec<u8> {
+        serde_json::to_vec(&json!({
+            "graph": {
+                "groupBys": [{
+                    "id": 0,
+                    "stepId": "group",
+                    "stepType": "GroupBy",
+                    "purpose": "groupBy.config",
+                    "value": config
                 }],
                 "steps": []
             }
@@ -782,5 +892,74 @@ mod tests {
         let source = build_source(br#"{"present":"yes"}"#, b"{}", b"{}").expect("source");
 
         assert!(manifest.eval_condition(0, &source).expect("condition"));
+    }
+
+    #[test]
+    fn group_by_groups_items_by_simple_key() {
+        let manifest = DirectJsonManifest::parse(&group_by_manifest(json!({
+            "value": { "valueType": "reference", "value": "data.items" },
+            "key": "status"
+        })))
+        .expect("manifest");
+        let source = build_source(
+            br#"{"items":[{"id":1,"status":"active"},{"id":2,"status":"inactive"},{"id":3,"status":"active"}]}"#,
+            b"{}",
+            b"{}",
+        )
+        .expect("source");
+
+        let output = manifest.group_by(0, &source).expect("group output");
+        let output: Value = serde_json::from_slice(&output).expect("output json");
+
+        assert_eq!(output["counts"], json!({ "active": 2, "inactive": 1 }));
+        assert_eq!(output["total_groups"], json!(2));
+        assert_eq!(output["groups"]["active"][0]["id"], json!(1));
+        assert_eq!(output["groups"]["active"][1]["id"], json!(3));
+    }
+
+    #[test]
+    fn group_by_handles_nested_keys_null_and_expected_keys() {
+        let manifest = DirectJsonManifest::parse(&group_by_manifest(json!({
+            "value": { "valueType": "reference", "value": "data.users" },
+            "key": "profile.role",
+            "expectedKeys": ["admin", "viewer", "missing"]
+        })))
+        .expect("manifest");
+        let source = build_source(
+            br#"{"users":[{"id":1,"profile":{"role":"admin"}},{"id":2,"profile":{"role":"viewer"}},{"id":3,"profile":{}}]}"#,
+            b"{}",
+            b"{}",
+        )
+        .expect("source");
+
+        let output = manifest.group_by(0, &source).expect("group output");
+        let output: Value = serde_json::from_slice(&output).expect("output json");
+
+        assert_eq!(
+            output["counts"],
+            json!({ "_null": 1, "admin": 1, "missing": 0, "viewer": 1 })
+        );
+        assert_eq!(output["groups"]["missing"], json!([]));
+        assert_eq!(output["groups"]["_null"][0]["id"], json!(3));
+        assert_eq!(output["total_groups"], json!(4));
+    }
+
+    #[test]
+    fn group_by_treats_non_array_input_as_empty_array() {
+        let manifest = DirectJsonManifest::parse(&group_by_manifest(json!({
+            "value": { "valueType": "reference", "value": "data.items" },
+            "key": "status",
+            "expectedKeys": ["active"]
+        })))
+        .expect("manifest");
+        let source =
+            build_source(br#"{"items":{"status":"active"}}"#, b"{}", b"{}").expect("source");
+
+        let output = manifest.group_by(0, &source).expect("group output");
+        let output: Value = serde_json::from_slice(&output).expect("output json");
+
+        assert_eq!(output["counts"], json!({ "active": 0 }));
+        assert_eq!(output["groups"], json!({ "active": [] }));
+        assert_eq!(output["total_groups"], json!(1));
     }
 }
