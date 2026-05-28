@@ -265,11 +265,14 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   timeout, compensation, or breakpoints. Timeout remains gated because the
   generated Rust Agent path does not currently enforce `AgentStep.timeout`;
   crash/resume differential coverage remains a Phase 8 hardening checkpoint.
-- The direct core now has structural replay coverage for durable Agent cached
-  checkpoints: the emitted Wasm branch that receives an existing checkpoint
-  payload skips both `capabilities.invoke` and `runtime.checkpoint`, while the
-  fresh branch still invokes the Agent and checkpoints only after success.
-  Full host-level crash/resume differential tests remain pending.
+- The direct core now has structural and gated host-level replay coverage for
+  durable Agent cached checkpoints: the emitted Wasm branch that receives an
+  existing checkpoint payload skips both `capabilities.invoke` and
+  `runtime.checkpoint`, while the fresh branch still invokes the Agent and
+  checkpoints only after success. The direct execution smoke server can preload
+  SDK checkpoint responses and verifies cached Agent output flows through
+  `Finish` without a fresh Agent invocation. Full host-level crash/resume
+  differential tests remain pending.
 - Non-durable Agent retry-loop lowering is now implemented. The direct core
   uses the same default retry counts and base delays as generated Rust, calls
   `stdlib.agent-retry-error-info` and `stdlib.agent-retry-delay-ms` for retry
@@ -1537,9 +1540,11 @@ Current status:
   signals continue. The public support gate accepts this durable Agent subset;
   timeout, compensation, and breakpoints remain rejected, and crash/resume
   differential tests remain pending.
-- A structural core Wasm test now covers the durable Agent cached-checkpoint
-  replay branch. It proves the cached branch does not invoke the Agent or save
-  another checkpoint, and that fresh execution still saves only after invoke.
+- Structural core Wasm coverage and a gated direct execution smoke now cover
+  the durable Agent cached-checkpoint replay branch. They prove the cached
+  branch does not invoke the Agent or save another checkpoint, that cached raw
+  Agent output still feeds the generated-compatible `steps` context, and that
+  fresh execution still saves only after invoke.
 - A structural core Wasm test now covers non-durable Agent default retry
   lowering. It proves the direct retry loop uses `runtime.blocking-sleep` and
   omits checkpoint, durable sleep, retry sleep-key, and retry-attempt calls.
@@ -1583,7 +1588,8 @@ Implementation steps:
    - non-durable retry loop parity: done through
      `stdlib.agent-retry-error-info`, `stdlib.agent-retry-delay-ms`, and
      `runtime.blocking-sleep`;
-   - cached-checkpoint replay branch test: done at the emitted core Wasm level;
+   - cached-checkpoint replay branch test: done at the emitted core Wasm level
+     and in a gated direct execution smoke with preloaded SDK checkpoint state;
    - timeout behavior: pending.
 5. Extend `onError` routing beyond Agent when additional failing step types are
    lowered.
@@ -1660,8 +1666,8 @@ Implementation steps:
    - Delay breakpoints: pending and gated;
    - host-level crash/resume differential tests: pending.
 6. Add crash/resume tests:
-   - resume after checkpoint: structural core replay test done; host-level
-     differential test pending;
+   - resume after checkpoint: structural core replay test and gated host-level
+     cached Agent replay smoke done; full differential test pending;
    - retry transient failure;
    - no retry permanent failure;
    - rate-limit budget exhaustion;

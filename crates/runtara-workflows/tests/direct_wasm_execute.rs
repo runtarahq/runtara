@@ -3,11 +3,12 @@
 //! Gated by `RUNTARA_RUN_DIRECT_WASM_E2E=1` because it needs prebuilt shared
 //! workflow components, `wac`, and `wasmtime`.
 
+use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::{Arc, mpsc};
+use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::Duration;
 
@@ -29,6 +30,36 @@ const DELAY_DYNAMIC: &str = include_str!("fixtures/delay_dynamic.json");
 const LOG_ALL_LEVELS: &str = include_str!("fixtures/log_all_levels.json");
 const ERROR_DIRECT_SIMPLE: &str = include_str!("fixtures/error_direct_simple.json");
 const EDGE_CONDITION_PRIORITY: &str = include_str!("fixtures/edge_condition_priority.json");
+const AGENT_CACHED_REPLAY: &str = r#"{
+  "durable": true,
+  "steps": {
+    "agent": {
+      "stepType": "Agent",
+      "id": "agent",
+      "name": "Return Cached Value",
+      "agentId": "utils",
+      "capabilityId": "return-input",
+      "maxRetries": 0,
+      "inputMapping": {
+        "value": { "valueType": "reference", "value": "data.value" }
+      }
+    },
+    "finish": {
+      "stepType": "Finish",
+      "id": "finish",
+      "inputMapping": {
+        "result": { "valueType": "reference", "value": "steps.agent.outputs.value" }
+      }
+    }
+  },
+  "entryPoint": "agent",
+  "executionPlan": [
+    { "fromStep": "agent", "toStep": "finish" }
+  ],
+  "variables": {},
+  "inputSchema": {},
+  "outputSchema": {}
+}"#;
 
 #[derive(Debug)]
 struct Completed {
@@ -54,10 +85,17 @@ struct SleepRequest {
 }
 
 #[derive(Debug)]
+struct CheckpointRequest {
+    checkpoint_id: String,
+    state: Vec<u8>,
+}
+
+#[derive(Debug)]
 struct DirectRunOutput {
     output_json: Value,
     events: Vec<RuntimeEvent>,
     sleeps: Vec<SleepRequest>,
+    checkpoints: Vec<CheckpointRequest>,
 }
 
 #[derive(Debug)]
@@ -72,6 +110,7 @@ struct CapturedRun {
     error_json: Option<Value>,
     events: Vec<RuntimeEvent>,
     sleeps: Vec<SleepRequest>,
+    checkpoints: Vec<CheckpointRequest>,
     status_success: bool,
     stderr: String,
 }
@@ -82,6 +121,12 @@ enum CapturedMessage {
     Failed(Failed),
     Event(RuntimeEvent),
     Sleep(SleepRequest),
+    Checkpoint(CheckpointRequest),
+}
+
+#[derive(Debug, Default)]
+struct ServerState {
+    checkpoints: Mutex<HashMap<String, Vec<u8>>>,
 }
 
 fn e2e_enabled() -> bool {
@@ -153,6 +198,7 @@ fn wasmtime_installed() -> bool {
 fn handle_request(
     stream: &mut std::net::TcpStream,
     sink: &mpsc::Sender<CapturedMessage>,
+    server_state: &ServerState,
     workflow_input: &[u8],
 ) -> std::io::Result<bool> {
     stream.set_read_timeout(Some(Duration::from_secs(10)))?;
@@ -206,7 +252,7 @@ fn handle_request(
         buf
     };
 
-    let (status, response_json) = route(&method, &path, &body, sink, workflow_input);
+    let (status, response_json) = route(&method, &path, &body, sink, server_state, workflow_input);
     let response_bytes = response_json.to_string();
     let response = format!(
         "HTTP/1.1 {status} OK\r\nContent-Type: application/json\r\nContent-Length: {len}\r\nConnection: keep-alive\r\n\r\n{body}",
@@ -252,6 +298,7 @@ fn route(
     path: &str,
     body: &[u8],
     sink: &mpsc::Sender<CapturedMessage>,
+    server_state: &ServerState,
     workflow_input: &[u8],
 ) -> (u16, Value) {
     let path = path.split('?').next().unwrap_or(path);
@@ -279,6 +326,7 @@ fn route(
                 capture_event(body, sink);
                 return (200, serde_json::json!({"success": true}));
             }
+            ("POST", "checkpoint") => return checkpoint_response(body, sink, server_state),
             ("POST", "sleep") => {
                 capture_sleep(body, sink);
                 return (200, serde_json::json!({"success": true}));
@@ -292,6 +340,69 @@ fn route(
     }
 
     (200, serde_json::json!({"success": true}))
+}
+
+fn checkpoint_response(
+    body: &[u8],
+    sink: &mpsc::Sender<CapturedMessage>,
+    server_state: &ServerState,
+) -> (u16, Value) {
+    let Ok(parsed) = serde_json::from_slice::<Value>(body) else {
+        return (
+            400,
+            serde_json::json!({
+                "found": false,
+                "state": null,
+                "signal": null,
+                "custom_signal": null,
+            }),
+        );
+    };
+
+    let checkpoint_id = parsed
+        .get("checkpoint_id")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let state = parsed
+        .get("state")
+        .and_then(Value::as_str)
+        .and_then(|b64| base64::engine::general_purpose::STANDARD.decode(b64).ok())
+        .unwrap_or_default();
+    let _ = sink.send(CapturedMessage::Checkpoint(CheckpointRequest {
+        checkpoint_id: checkpoint_id.clone(),
+        state: state.clone(),
+    }));
+
+    let mut checkpoints = server_state
+        .checkpoints
+        .lock()
+        .expect("checkpoint state lock");
+    if let Some(existing) = checkpoints.get(&checkpoint_id) {
+        return (
+            200,
+            serde_json::json!({
+                "found": true,
+                "state": base64::engine::general_purpose::STANDARD.encode(existing),
+                "signal": null,
+                "custom_signal": null,
+            }),
+        );
+    }
+
+    if !state.is_empty() {
+        checkpoints.insert(checkpoint_id, state);
+    }
+
+    (
+        200,
+        serde_json::json!({
+            "found": false,
+            "state": null,
+            "signal": null,
+            "custom_signal": null,
+        }),
+    )
 }
 
 fn capture_completed(body: &[u8], sink: &mpsc::Sender<CapturedMessage>) {
@@ -353,6 +464,7 @@ fn capture_sleep(body: &[u8], sink: &mpsc::Sender<CapturedMessage>) {
 fn serve(
     listener: TcpListener,
     sink: mpsc::Sender<CapturedMessage>,
+    server_state: Arc<ServerState>,
     stop: mpsc::Receiver<()>,
     workflow_input: Arc<Vec<u8>>,
 ) {
@@ -366,10 +478,11 @@ fn serve(
         match listener.accept() {
             Ok((mut stream, _)) => {
                 let sink = sink.clone();
+                let server_state = server_state.clone();
                 let workflow_input = workflow_input.clone();
                 thread::spawn(move || {
                     while let Ok(true) =
-                        handle_request(&mut stream, &sink, workflow_input.as_slice())
+                        handle_request(&mut stream, &sink, &server_state, workflow_input.as_slice())
                     {
                         // Keep serving the same connection while the SDK reuses it.
                     }
@@ -458,6 +571,7 @@ fn run_direct_workflow_with_events_and_tracking(
         output_json,
         events: captured.events,
         sleeps: captured.sleeps,
+        checkpoints: captured.checkpoints,
     }
 }
 
@@ -501,6 +615,24 @@ fn run_direct_workflow_capture(
     workflow_input: &[u8],
     track_events: bool,
 ) -> CapturedRun {
+    run_direct_workflow_capture_with_preloaded_checkpoints(
+        components_dir,
+        workflow_id,
+        graph_json,
+        workflow_input,
+        track_events,
+        Vec::new(),
+    )
+}
+
+fn run_direct_workflow_capture_with_preloaded_checkpoints(
+    components_dir: &Path,
+    workflow_id: &str,
+    graph_json: &str,
+    workflow_input: &[u8],
+    track_events: bool,
+    preloaded_checkpoints: Vec<(String, Vec<u8>)>,
+) -> CapturedRun {
     let temp = tempfile::tempdir().expect("tempdir");
     let graph: ExecutionGraph = serde_json::from_str(graph_json).expect("fixture parses");
     let compiled = compile_direct_workflow_composed(
@@ -522,7 +654,11 @@ fn run_direct_workflow_capture(
     let (capture_tx, capture_rx) = mpsc::channel::<CapturedMessage>();
     let (stop_tx, stop_rx) = mpsc::channel::<()>();
     let workflow_input = Arc::new(workflow_input.to_vec());
-    let server_handle = thread::spawn(move || serve(listener, capture_tx, stop_rx, workflow_input));
+    let server_state = Arc::new(ServerState {
+        checkpoints: Mutex::new(preloaded_checkpoints.into_iter().collect()),
+    });
+    let server_handle =
+        thread::spawn(move || serve(listener, capture_tx, server_state, stop_rx, workflow_input));
 
     let output = Command::new(wasmtime_binary())
         .arg("run")
@@ -554,12 +690,14 @@ fn run_direct_workflow_capture(
     let mut error_json = None;
     let mut events = Vec::new();
     let mut sleeps = Vec::new();
+    let mut checkpoints = Vec::new();
     for message in capture_rx.try_iter() {
         match message {
             CapturedMessage::Completed(completed) => output_json = Some(completed.output_json),
             CapturedMessage::Failed(failed) => error_json = Some(failed.error_json),
             CapturedMessage::Event(event) => events.push(event),
             CapturedMessage::Sleep(sleep) => sleeps.push(sleep),
+            CapturedMessage::Checkpoint(checkpoint) => checkpoints.push(checkpoint),
         }
     }
     CapturedRun {
@@ -567,6 +705,7 @@ fn run_direct_workflow_capture(
         error_json,
         events,
         sleeps,
+        checkpoints,
         status_success: output.status.success(),
         stderr: stderr.into_owned(),
     }
@@ -775,6 +914,7 @@ fn direct_wasm_execute_durable_delay_reports_sleep_and_completion() {
     assert_eq!(sleep.checkpoint_id, "delay");
     assert_eq!(sleep.duration_ms, 0);
     assert!(sleep.state.is_empty());
+    assert!(result.checkpoints.is_empty());
 }
 
 #[test]
@@ -795,6 +935,51 @@ fn direct_wasm_execute_non_durable_delay_reports_completion_without_sleep() {
     assert!(
         result.sleeps.is_empty(),
         "non-durable Delay should not call runtime durable sleep"
+    );
+    assert!(result.checkpoints.is_empty());
+}
+
+#[test]
+fn direct_wasm_execute_durable_agent_uses_cached_checkpoint() {
+    let Some(components_dir) = direct_e2e_components_dir() else {
+        return;
+    };
+    let workflow_id = "direct-wasm-execute-agent-cached-replay";
+    let checkpoint_id = format!("{workflow_id}::agent::utils::return-input::agent");
+
+    let captured = run_direct_workflow_capture_with_preloaded_checkpoints(
+        &components_dir,
+        workflow_id,
+        AGENT_CACHED_REPLAY,
+        br#"{"value":"fresh-agent"}"#,
+        false,
+        vec![(
+            checkpoint_id.clone(),
+            br#"{"value":"cached-agent"}"#.to_vec(),
+        )],
+    );
+
+    assert!(
+        captured.status_success,
+        "wasmtime exited non-zero:\n--- stderr ---\n{}",
+        captured.stderr
+    );
+    assert_eq!(
+        captured
+            .output_json
+            .expect("direct workflow should complete from cached Agent output"),
+        serde_json::json!({ "result": "cached-agent" })
+    );
+    assert_eq!(captured.checkpoints.len(), 1);
+    let checkpoint = &captured.checkpoints[0];
+    assert_eq!(checkpoint.checkpoint_id, checkpoint_id);
+    assert!(
+        checkpoint.state.is_empty(),
+        "cached Agent replay should only perform the read-only checkpoint lookup"
+    );
+    assert!(
+        captured.sleeps.is_empty(),
+        "cached Agent replay should not use durable sleep"
     );
 }
 
