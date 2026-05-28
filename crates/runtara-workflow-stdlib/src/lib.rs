@@ -134,7 +134,7 @@ pub use agent_input_validation::{
 mod component {
     use std::cell::RefCell;
 
-    use super::bindings::exports::runtara::workflow_stdlib::json::Guest;
+    use super::bindings::exports::runtara::workflow_stdlib::json::{AgentRetryError, Guest};
     use super::direct_json::{self, DirectJsonManifest};
 
     struct Component;
@@ -338,6 +338,31 @@ mod component {
             )
         }
 
+        fn agent_retry_error_info(
+            code: String,
+            message: String,
+            category: String,
+            severity: String,
+            retryable: bool,
+            retry_after_ms: Option<u64>,
+            attributes: Option<String>,
+        ) -> Result<AgentRetryError, String> {
+            let retry = direct_json::DirectJsonManifest::agent_retry_error_info(
+                &code,
+                &message,
+                &category,
+                &severity,
+                retryable,
+                retry_after_ms,
+                attributes.as_deref(),
+            )?;
+            Ok(AgentRetryError {
+                payload: retry.payload,
+                retryable: retry.retryable,
+                rate_limited: retry.rate_limited,
+            })
+        }
+
         fn agent_error(
             agent_id: u32,
             code: String,
@@ -363,6 +388,16 @@ mod component {
                     retry_after_ms,
                     attributes.as_deref(),
                 )
+            })
+        }
+
+        fn agent_error_from_info(agent_id: u32, error_info: Vec<u8>) -> Result<Vec<u8>, String> {
+            MANIFEST.with(|slot| {
+                let slot = slot.borrow();
+                let manifest = slot
+                    .as_ref()
+                    .ok_or_else(|| "direct stdlib manifest was not initialized".to_string())?;
+                manifest.agent_error_from_info(agent_id, &error_info)
             })
         }
 

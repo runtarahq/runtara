@@ -12,6 +12,24 @@ pub mod exports {
                 #[doc(hidden)]
                 static __FORCE_SECTION_REF: fn() = super::super::super::super::__link_custom_section_describing_imports;
                 use super::super::super::super::_rt;
+                #[derive(Clone)]
+                pub struct AgentRetryError {
+                    pub payload: _rt::Vec<u8>,
+                    pub retryable: bool,
+                    pub rate_limited: bool,
+                }
+                impl ::core::fmt::Debug for AgentRetryError {
+                    fn fmt(
+                        &self,
+                        f: &mut ::core::fmt::Formatter<'_>,
+                    ) -> ::core::fmt::Result {
+                        f.debug_struct("AgentRetryError")
+                            .field("payload", &self.payload)
+                            .field("retryable", &self.retryable)
+                            .field("rate-limited", &self.rate_limited)
+                            .finish()
+                    }
+                }
                 #[doc(hidden)]
                 #[allow(non_snake_case)]
                 pub unsafe fn _export_init_manifest_cabi<T: Guest>(
@@ -1394,6 +1412,141 @@ pub mod exports {
                 }
                 #[doc(hidden)]
                 #[allow(non_snake_case)]
+                pub unsafe fn _export_agent_retry_error_info_cabi<T: Guest>(
+                    arg0: *mut u8,
+                    arg1: usize,
+                    arg2: *mut u8,
+                    arg3: usize,
+                    arg4: *mut u8,
+                    arg5: usize,
+                    arg6: *mut u8,
+                    arg7: usize,
+                    arg8: i32,
+                    arg9: i32,
+                    arg10: i64,
+                    arg11: i32,
+                    arg12: *mut u8,
+                    arg13: usize,
+                ) -> *mut u8 {
+                    #[cfg(target_arch = "wasm32")] _rt::run_ctors_once();
+                    let len0 = arg1;
+                    let bytes0 = _rt::Vec::from_raw_parts(arg0.cast(), len0, len0);
+                    let len1 = arg3;
+                    let bytes1 = _rt::Vec::from_raw_parts(arg2.cast(), len1, len1);
+                    let len2 = arg5;
+                    let bytes2 = _rt::Vec::from_raw_parts(arg4.cast(), len2, len2);
+                    let len3 = arg7;
+                    let bytes3 = _rt::Vec::from_raw_parts(arg6.cast(), len3, len3);
+                    let result5 = T::agent_retry_error_info(
+                        _rt::string_lift(bytes0),
+                        _rt::string_lift(bytes1),
+                        _rt::string_lift(bytes2),
+                        _rt::string_lift(bytes3),
+                        _rt::bool_lift(arg8 as u8),
+                        match arg9 {
+                            0 => None,
+                            1 => {
+                                let e = arg10 as u64;
+                                Some(e)
+                            }
+                            _ => _rt::invalid_enum_discriminant(),
+                        },
+                        match arg11 {
+                            0 => None,
+                            1 => {
+                                let e = {
+                                    let len4 = arg13;
+                                    let bytes4 = _rt::Vec::from_raw_parts(
+                                        arg12.cast(),
+                                        len4,
+                                        len4,
+                                    );
+                                    _rt::string_lift(bytes4)
+                                };
+                                Some(e)
+                            }
+                            _ => _rt::invalid_enum_discriminant(),
+                        },
+                    );
+                    let ptr6 = (&raw mut _RET_AREA.0).cast::<u8>();
+                    match result5 {
+                        Ok(e) => {
+                            *ptr6.add(0).cast::<u8>() = (0i32) as u8;
+                            let AgentRetryError {
+                                payload: payload7,
+                                retryable: retryable7,
+                                rate_limited: rate_limited7,
+                            } = e;
+                            let vec8 = (payload7).into_boxed_slice();
+                            let ptr8 = vec8.as_ptr().cast::<u8>();
+                            let len8 = vec8.len();
+                            ::core::mem::forget(vec8);
+                            *ptr6
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>() = len8;
+                            *ptr6
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>() = ptr8.cast_mut();
+                            *ptr6
+                                .add(3 * ::core::mem::size_of::<*const u8>())
+                                .cast::<u8>() = (match retryable7 {
+                                true => 1,
+                                false => 0,
+                            }) as u8;
+                            *ptr6
+                                .add(1 + 3 * ::core::mem::size_of::<*const u8>())
+                                .cast::<u8>() = (match rate_limited7 {
+                                true => 1,
+                                false => 0,
+                            }) as u8;
+                        }
+                        Err(e) => {
+                            *ptr6.add(0).cast::<u8>() = (1i32) as u8;
+                            let vec9 = (e.into_bytes()).into_boxed_slice();
+                            let ptr9 = vec9.as_ptr().cast::<u8>();
+                            let len9 = vec9.len();
+                            ::core::mem::forget(vec9);
+                            *ptr6
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>() = len9;
+                            *ptr6
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>() = ptr9.cast_mut();
+                        }
+                    };
+                    ptr6
+                }
+                #[doc(hidden)]
+                #[allow(non_snake_case)]
+                pub unsafe fn __post_return_agent_retry_error_info<T: Guest>(
+                    arg0: *mut u8,
+                ) {
+                    let l0 = i32::from(*arg0.add(0).cast::<u8>());
+                    match l0 {
+                        0 => {
+                            let l1 = *arg0
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>();
+                            let l2 = *arg0
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>();
+                            let base3 = l1;
+                            let len3 = l2;
+                            _rt::cabi_dealloc(base3, len3 * 1, 1);
+                        }
+                        _ => {
+                            let l4 = *arg0
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>();
+                            let l5 = *arg0
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>();
+                            _rt::cabi_dealloc(l4, l5, 1);
+                        }
+                    }
+                }
+                #[doc(hidden)]
+                #[allow(non_snake_case)]
                 pub unsafe fn _export_agent_error_cabi<T: Guest>(
                     arg0: i32,
                     arg1: *mut u8,
@@ -1486,6 +1639,79 @@ pub mod exports {
                 #[doc(hidden)]
                 #[allow(non_snake_case)]
                 pub unsafe fn __post_return_agent_error<T: Guest>(arg0: *mut u8) {
+                    let l0 = i32::from(*arg0.add(0).cast::<u8>());
+                    match l0 {
+                        0 => {
+                            let l1 = *arg0
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>();
+                            let l2 = *arg0
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>();
+                            let base3 = l1;
+                            let len3 = l2;
+                            _rt::cabi_dealloc(base3, len3 * 1, 1);
+                        }
+                        _ => {
+                            let l4 = *arg0
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>();
+                            let l5 = *arg0
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>();
+                            _rt::cabi_dealloc(l4, l5, 1);
+                        }
+                    }
+                }
+                #[doc(hidden)]
+                #[allow(non_snake_case)]
+                pub unsafe fn _export_agent_error_from_info_cabi<T: Guest>(
+                    arg0: i32,
+                    arg1: *mut u8,
+                    arg2: usize,
+                ) -> *mut u8 {
+                    #[cfg(target_arch = "wasm32")] _rt::run_ctors_once();
+                    let len0 = arg2;
+                    let result1 = T::agent_error_from_info(
+                        arg0 as u32,
+                        _rt::Vec::from_raw_parts(arg1.cast(), len0, len0),
+                    );
+                    let ptr2 = (&raw mut _RET_AREA.0).cast::<u8>();
+                    match result1 {
+                        Ok(e) => {
+                            *ptr2.add(0).cast::<u8>() = (0i32) as u8;
+                            let vec3 = (e).into_boxed_slice();
+                            let ptr3 = vec3.as_ptr().cast::<u8>();
+                            let len3 = vec3.len();
+                            ::core::mem::forget(vec3);
+                            *ptr2
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>() = len3;
+                            *ptr2
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>() = ptr3.cast_mut();
+                        }
+                        Err(e) => {
+                            *ptr2.add(0).cast::<u8>() = (1i32) as u8;
+                            let vec4 = (e.into_bytes()).into_boxed_slice();
+                            let ptr4 = vec4.as_ptr().cast::<u8>();
+                            let len4 = vec4.len();
+                            ::core::mem::forget(vec4);
+                            *ptr2
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>() = len4;
+                            *ptr2
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>() = ptr4.cast_mut();
+                        }
+                    };
+                    ptr2
+                }
+                #[doc(hidden)]
+                #[allow(non_snake_case)]
+                pub unsafe fn __post_return_agent_error_from_info<T: Guest>(
+                    arg0: *mut u8,
+                ) {
                     let l0 = i32::from(*arg0.add(0).cast::<u8>());
                     match l0 {
                         0 => {
@@ -1811,6 +2037,15 @@ pub mod exports {
                         retry_after_ms: Option<u64>,
                         attributes: Option<_rt::String>,
                     ) -> Result<_rt::Vec<u8>, _rt::String>;
+                    fn agent_retry_error_info(
+                        code: _rt::String,
+                        message: _rt::String,
+                        category: _rt::String,
+                        severity: _rt::String,
+                        retryable: bool,
+                        retry_after_ms: Option<u64>,
+                        attributes: Option<_rt::String>,
+                    ) -> Result<AgentRetryError, _rt::String>;
                     fn agent_error(
                         agent_id: u32,
                         code: _rt::String,
@@ -1820,6 +2055,10 @@ pub mod exports {
                         retryable: bool,
                         retry_after_ms: Option<u64>,
                         attributes: Option<_rt::String>,
+                    ) -> Result<_rt::Vec<u8>, _rt::String>;
+                    fn agent_error_from_info(
+                        agent_id: u32,
+                        error_info: _rt::Vec<u8>,
                     ) -> Result<_rt::Vec<u8>, _rt::String>;
                     fn agent_debug_error(
                         agent_id: u32,
@@ -2017,6 +2256,20 @@ pub mod exports {
                         unsafe extern "C" fn _post_return_agent_error_info(arg0 : * mut
                         u8,) { unsafe { $($path_to_types)*::
                         __post_return_agent_error_info::<$ty > (arg0) } } #[unsafe
+                        (export_name =
+                        "runtara:workflow-stdlib/json@0.1.0#agent-retry-error-info")]
+                        unsafe extern "C" fn export_agent_retry_error_info(arg0 : * mut
+                        u8, arg1 : usize, arg2 : * mut u8, arg3 : usize, arg4 : * mut u8,
+                        arg5 : usize, arg6 : * mut u8, arg7 : usize, arg8 : i32, arg9 :
+                        i32, arg10 : i64, arg11 : i32, arg12 : * mut u8, arg13 : usize,)
+                        -> * mut u8 { unsafe { $($path_to_types)*::
+                        _export_agent_retry_error_info_cabi::<$ty > (arg0, arg1, arg2,
+                        arg3, arg4, arg5, arg6, arg7, arg8, arg9, arg10, arg11, arg12,
+                        arg13) } } #[unsafe (export_name =
+                        "cabi_post_runtara:workflow-stdlib/json@0.1.0#agent-retry-error-info")]
+                        unsafe extern "C" fn _post_return_agent_retry_error_info(arg0 : *
+                        mut u8,) { unsafe { $($path_to_types)*::
+                        __post_return_agent_retry_error_info::<$ty > (arg0) } } #[unsafe
                         (export_name = "runtara:workflow-stdlib/json@0.1.0#agent-error")]
                         unsafe extern "C" fn export_agent_error(arg0 : i32, arg1 : * mut
                         u8, arg2 : usize, arg3 : * mut u8, arg4 : usize, arg5 : * mut u8,
@@ -2030,6 +2283,16 @@ pub mod exports {
                         unsafe extern "C" fn _post_return_agent_error(arg0 : * mut u8,) {
                         unsafe { $($path_to_types)*:: __post_return_agent_error::<$ty >
                         (arg0) } } #[unsafe (export_name =
+                        "runtara:workflow-stdlib/json@0.1.0#agent-error-from-info")]
+                        unsafe extern "C" fn export_agent_error_from_info(arg0 : i32,
+                        arg1 : * mut u8, arg2 : usize,) -> * mut u8 { unsafe {
+                        $($path_to_types)*:: _export_agent_error_from_info_cabi::<$ty >
+                        (arg0, arg1, arg2) } } #[unsafe (export_name =
+                        "cabi_post_runtara:workflow-stdlib/json@0.1.0#agent-error-from-info")]
+                        unsafe extern "C" fn _post_return_agent_error_from_info(arg0 : *
+                        mut u8,) { unsafe { $($path_to_types)*::
+                        __post_return_agent_error_from_info::<$ty > (arg0) } } #[unsafe
+                        (export_name =
                         "runtara:workflow-stdlib/json@0.1.0#agent-debug-error")] unsafe
                         extern "C" fn export_agent_debug_error(arg0 : i32, arg1 : * mut
                         u8, arg2 : usize,) -> * mut u8 { unsafe { $($path_to_types)*::
@@ -2068,10 +2331,10 @@ pub mod exports {
                 struct _RetArea(
                     [::core::mem::MaybeUninit<
                         u8,
-                    >; 3 * ::core::mem::size_of::<*const u8>()],
+                    >; 4 * ::core::mem::size_of::<*const u8>()],
                 );
                 static mut _RET_AREA: _RetArea = _RetArea(
-                    [::core::mem::MaybeUninit::uninit(); 3
+                    [::core::mem::MaybeUninit::uninit(); 4
                         * ::core::mem::size_of::<*const u8>()],
                 );
             }
@@ -2081,11 +2344,11 @@ pub mod exports {
 #[rustfmt::skip]
 mod _rt {
     #![allow(dead_code, clippy::all)]
+    pub use alloc_crate::vec::Vec;
     #[cfg(target_arch = "wasm32")]
     pub fn run_ctors_once() {
         wit_bindgen_rt::run_ctors_once();
     }
-    pub use alloc_crate::vec::Vec;
     pub unsafe fn cabi_dealloc(ptr: *mut u8, size: usize, align: usize) {
         if size == 0 {
             return;
@@ -2156,33 +2419,38 @@ pub(crate) use __export_workflow_stdlib_impl as export;
 #[unsafe(link_section = "component-type:wit-bindgen:0.41.0:runtara:workflow-stdlib@0.1.0:workflow-stdlib:encoded world")]
 #[doc(hidden)]
 #[allow(clippy::octal_escapes)]
-pub static __WIT_BINDGEN_COMPONENT_TYPE: [u8; 1261] = *b"\
-\0asm\x0d\0\x01\0\0\x19\x16wit-component-encoding\x04\0\x07\xe7\x08\x01A\x02\x01\
-A\x02\x01B1\x01p}\x01j\0\x01s\x01@\x01\x08manifest\0\0\x01\x04\0\x0dinit-manifes\
-t\x01\x02\x01j\x01\0\x01s\x01@\x03\x04data\0\x09variables\0\x05steps\0\0\x03\x04\
-\0\x0cbuild-source\x01\x04\x01@\x02\x0amapping-idy\x06source\0\0\x03\x04\0\x0dap\
-ply-mapping\x01\x05\x01j\x01\x7f\x01s\x01@\x02\x0ccondition-idy\x06source\0\0\x06\
-\x04\0\x0eeval-condition\x01\x07\x01j\x01s\x01s\x01@\x02\x09switch-idy\x06source\
-\0\0\x08\x04\0\x0eprocess-switch\x01\x09\x01@\x02\x09switch-idy\x06source\0\0\x03\
-\x04\0\x0cvalue-switch\x01\x0a\x01@\x02\x09filter-idy\x06source\0\0\x03\x04\0\x06\
-filter\x01\x0b\x01@\x02\x06log-idy\x06source\0\0\x03\x04\0\x09log-event\x01\x0c\x04\
-\0\x03log\x01\x0c\x01@\x02\x08error-idy\x06source\0\0\x03\x04\0\x0berror-event\x01\
-\x0d\x04\0\x05error\x01\x0d\x01@\x03\x07step-ids\x05error\0\x05steps\0\0\x03\x04\
-\0\x0berror-steps\x01\x0e\x01@\x02\x08group-idy\x06source\0\0\x03\x04\0\x08group\
--by\x01\x0f\x01@\x03\x08agent-idy\x06source\0\x06output\0\0\x03\x04\0\x0cagent-o\
-utput\x01\x10\x01@\x02\x08agent-idy\x05input\0\0\x03\x04\0\x14agent-validate-inp\
-ut\x01\x11\x04\0\x16agent-connection-input\x01\x11\x01@\x02\x08agent-idy\x06sour\
-ce\0\0\x03\x04\0\x0fagent-cache-key\x01\x12\x01@\x02\x0dcheckpoint-ids\x0eattemp\
-t-numbery\0\x03\x04\0\x15agent-retry-sleep-key\x01\x13\x01kw\x01ks\x01@\x07\x04c\
-odes\x07messages\x08categorys\x08severitys\x09retryable\x7f\x0eretry-after-ms\x14\
-\x0aattributes\x15\0\x03\x04\0\x10agent-error-info\x01\x16\x01@\x08\x08agent-idy\
-\x04codes\x07messages\x08categorys\x08severitys\x09retryable\x7f\x0eretry-after-\
-ms\x14\x0aattributes\x15\0\x03\x04\0\x0bagent-error\x01\x17\x01@\x02\x08agent-id\
-y\x05error\0\0\x03\x04\0\x11agent-debug-error\x01\x18\x01@\x02\x07step-ids\x06so\
-urce\0\0\x03\x04\0\x10step-debug-start\x01\x19\x04\0\x0estep-debug-end\x01\x19\x04\
-\0\"runtara:workflow-stdlib/json@0.1.0\x05\0\x04\0-runtara:workflow-stdlib/workf\
-low-stdlib@0.1.0\x04\0\x0b\x15\x01\0\x0fworkflow-stdlib\x03\0\0\0G\x09producers\x01\
-\x0cprocessed-by\x02\x0dwit-component\x070.227.1\x10wit-bindgen-rust\x060.41.0";
+pub static __WIT_BINDGEN_COMPONENT_TYPE: [u8; 1486] = *b"\
+\0asm\x0d\0\x01\0\0\x19\x16wit-component-encoding\x04\0\x07\xc8\x0a\x01A\x02\x01\
+A\x02\x01B8\x01p}\x01r\x03\x07payload\0\x09retryable\x7f\x0crate-limited\x7f\x04\
+\0\x11agent-retry-error\x03\0\x01\x01j\0\x01s\x01@\x01\x08manifest\0\0\x03\x04\0\
+\x0dinit-manifest\x01\x04\x01j\x01\0\x01s\x01@\x03\x04data\0\x09variables\0\x05s\
+teps\0\0\x05\x04\0\x0cbuild-source\x01\x06\x01@\x02\x0amapping-idy\x06source\0\0\
+\x05\x04\0\x0dapply-mapping\x01\x07\x01j\x01\x7f\x01s\x01@\x02\x0ccondition-idy\x06\
+source\0\0\x08\x04\0\x0eeval-condition\x01\x09\x01j\x01s\x01s\x01@\x02\x09switch\
+-idy\x06source\0\0\x0a\x04\0\x0eprocess-switch\x01\x0b\x01@\x02\x09switch-idy\x06\
+source\0\0\x05\x04\0\x0cvalue-switch\x01\x0c\x01@\x02\x09filter-idy\x06source\0\0\
+\x05\x04\0\x06filter\x01\x0d\x01@\x02\x06log-idy\x06source\0\0\x05\x04\0\x09log-\
+event\x01\x0e\x04\0\x03log\x01\x0e\x01@\x02\x08error-idy\x06source\0\0\x05\x04\0\
+\x0berror-event\x01\x0f\x04\0\x05error\x01\x0f\x01@\x03\x07step-ids\x05error\0\x05\
+steps\0\0\x05\x04\0\x0berror-steps\x01\x10\x01@\x02\x08group-idy\x06source\0\0\x05\
+\x04\0\x08group-by\x01\x11\x01@\x03\x08agent-idy\x06source\0\x06output\0\0\x05\x04\
+\0\x0cagent-output\x01\x12\x01@\x02\x08agent-idy\x05input\0\0\x05\x04\0\x14agent\
+-validate-input\x01\x13\x04\0\x16agent-connection-input\x01\x13\x01@\x02\x08agen\
+t-idy\x06source\0\0\x05\x04\0\x0fagent-cache-key\x01\x14\x01@\x02\x0dcheckpoint-\
+ids\x0eattempt-numbery\0\x05\x04\0\x15agent-retry-sleep-key\x01\x15\x01kw\x01ks\x01\
+@\x07\x04codes\x07messages\x08categorys\x08severitys\x09retryable\x7f\x0eretry-a\
+fter-ms\x16\x0aattributes\x17\0\x05\x04\0\x10agent-error-info\x01\x18\x01j\x01\x02\
+\x01s\x01@\x07\x04codes\x07messages\x08categorys\x08severitys\x09retryable\x7f\x0e\
+retry-after-ms\x16\x0aattributes\x17\0\x19\x04\0\x16agent-retry-error-info\x01\x1a\
+\x01@\x08\x08agent-idy\x04codes\x07messages\x08categorys\x08severitys\x09retryab\
+le\x7f\x0eretry-after-ms\x16\x0aattributes\x17\0\x05\x04\0\x0bagent-error\x01\x1b\
+\x01@\x02\x08agent-idy\x0aerror-info\0\0\x05\x04\0\x15agent-error-from-info\x01\x1c\
+\x01@\x02\x08agent-idy\x05error\0\0\x05\x04\0\x11agent-debug-error\x01\x1d\x01@\x02\
+\x07step-ids\x06source\0\0\x05\x04\0\x10step-debug-start\x01\x1e\x04\0\x0estep-d\
+ebug-end\x01\x1e\x04\0\"runtara:workflow-stdlib/json@0.1.0\x05\0\x04\0-runtara:w\
+orkflow-stdlib/workflow-stdlib@0.1.0\x04\0\x0b\x15\x01\0\x0fworkflow-stdlib\x03\0\
+\0\0G\x09producers\x01\x0cprocessed-by\x02\x0dwit-component\x070.227.1\x10wit-bi\
+ndgen-rust\x060.41.0";
 #[inline(never)]
 #[doc(hidden)]
 pub fn __link_custom_section_describing_imports() {

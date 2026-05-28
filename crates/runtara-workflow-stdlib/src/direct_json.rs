@@ -36,6 +36,14 @@ pub struct DirectJsonManifest {
     debug_start_ms: RefCell<BTreeMap<String, i64>>,
 }
 
+/// Raw Agent retry payload plus generated-Rust-compatible retry classification.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DirectJsonAgentRetryError {
+    pub payload: Vec<u8>,
+    pub retryable: bool,
+    pub rate_limited: bool,
+}
+
 impl DirectJsonManifest {
     /// Parse direct manifest JSON emitted by `runtara-workflows`.
     pub fn parse(bytes: &[u8]) -> Result<Self, String> {
@@ -290,7 +298,7 @@ impl DirectJsonManifest {
         retry_after_ms: Option<u64>,
         attributes: Option<&str>,
     ) -> Result<Vec<u8>, String> {
-        Ok(agent_error_info_envelope(
+        Ok(Self::agent_retry_error_info(
             code,
             message,
             category,
@@ -298,8 +306,35 @@ impl DirectJsonManifest {
             retryable,
             retry_after_ms,
             attributes,
-        )
-        .into_bytes())
+        )?
+        .payload)
+    }
+
+    /// Convert a WIT `error-info` into retry payload and retry classification.
+    #[allow(clippy::too_many_arguments)]
+    pub fn agent_retry_error_info(
+        code: &str,
+        message: &str,
+        category: &str,
+        severity: &str,
+        retryable: bool,
+        retry_after_ms: Option<u64>,
+        attributes: Option<&str>,
+    ) -> Result<DirectJsonAgentRetryError, String> {
+        Ok(DirectJsonAgentRetryError {
+            payload: agent_error_info_envelope(
+                code,
+                message,
+                category,
+                severity,
+                retryable,
+                retry_after_ms,
+                attributes,
+            )
+            .into_bytes(),
+            retryable: retryable && category != "permanent",
+            rate_limited: agent_error_code_is_rate_limited(code),
+        })
     }
 
     /// Convert a WIT `error-info` into the current Agent failure string shape.
@@ -329,6 +364,25 @@ impl DirectJsonManifest {
             attributes,
         )?)
         .map_err(|error| format!("Agent error-info JSON was not UTF-8: {error}"))?;
+        Ok(format!(
+            "Step {} failed: Agent {}::{}: {}",
+            agent.step_id, agent.agent_id, agent.capability_id, raw
+        )
+        .into_bytes())
+    }
+
+    /// Convert a raw Agent error-info payload into the current failure string shape.
+    pub fn agent_error_from_info(
+        &self,
+        agent_id: u32,
+        error_info: &[u8],
+    ) -> Result<Vec<u8>, String> {
+        let agent = self
+            .agents
+            .get(&agent_id)
+            .ok_or_else(|| format!("unknown direct Agent id {agent_id}"))?;
+        let raw = String::from_utf8(error_info.to_vec())
+            .map_err(|error| format!("Agent error-info JSON was not UTF-8: {error}"))?;
         Ok(format!(
             "Step {} failed: Agent {}::{}: {}",
             agent.step_id, agent.agent_id, agent.capability_id, raw
@@ -1322,6 +1376,10 @@ fn agent_error_info_envelope(
     }
 
     Value::Object(object).to_string()
+}
+
+fn agent_error_code_is_rate_limited(code: &str) -> bool {
+    code.contains("RATE_LIMITED")
 }
 
 fn timestamp_ms() -> i64 {
@@ -3039,6 +3097,55 @@ mod tests {
         assert_eq!(raw["retryable"], json!(false));
         assert_eq!(raw["retryAfterMs"], json!(1500));
         assert_eq!(raw["attributes"], json!({ "field": "value" }));
+    }
+
+    #[test]
+    fn agent_retry_error_info_classifies_rate_limited_codes() {
+        let retry = DirectJsonManifest::agent_retry_error_info(
+            "HTTP_RATE_LIMITED",
+            "try later",
+            "transient",
+            "error",
+            true,
+            None,
+            None,
+        )
+        .expect("Agent retry error-info");
+        let raw: Value = serde_json::from_slice(&retry.payload).expect("raw json");
+
+        assert!(retry.retryable);
+        assert!(retry.rate_limited);
+        assert_eq!(raw["code"], json!("HTTP_RATE_LIMITED"));
+        assert_eq!(raw.get("retryAfterMs"), None);
+
+        let permanent = DirectJsonManifest::agent_retry_error_info(
+            "CAPABILITY_RATE_LIMITED",
+            "bad config",
+            "permanent",
+            "error",
+            true,
+            Some(1500),
+            None,
+        )
+        .expect("Agent retry error-info");
+        assert!(!permanent.retryable);
+        assert!(permanent.rate_limited);
+    }
+
+    #[test]
+    fn agent_error_from_info_formats_preserved_retry_payload() {
+        let manifest = DirectJsonManifest::parse(&agent_manifest(json!({}))).expect("manifest");
+        let payload = br#"{"code":"HTTP_RATE_LIMITED","message":"try later"}"#;
+
+        let error = manifest
+            .agent_error_from_info(0, payload)
+            .expect("Agent error");
+        let error = String::from_utf8(error).expect("utf8 error");
+
+        assert_eq!(
+            error,
+            "Step agent failed: Agent utils::normalize: {\"code\":\"HTTP_RATE_LIMITED\",\"message\":\"try later\"}"
+        );
     }
 
     #[test]

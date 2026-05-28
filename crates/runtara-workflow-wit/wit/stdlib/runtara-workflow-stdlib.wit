@@ -8,6 +8,12 @@
 package runtara:workflow-stdlib@0.1.0;
 
 interface json {
+    record agent-retry-error {
+        payload: list<u8>,
+        retryable: bool,
+        rate-limited: bool,
+    }
+
     init-manifest: func(manifest: list<u8>) -> result<_, string>;
 
     build-source: func(
@@ -108,6 +114,16 @@ interface json {
         attributes: option<string>,
     ) -> result<list<u8>, string>;
 
+    agent-retry-error-info: func(
+        code: string,
+        message: string,
+        category: string,
+        severity: string,
+        retryable: bool,
+        retry-after-ms: option<u64>,
+        attributes: option<string>,
+    ) -> result<agent-retry-error, string>;
+
     agent-error: func(
         agent-id: u32,
         code: string,
@@ -117,6 +133,11 @@ interface json {
         retryable: bool,
         retry-after-ms: option<u64>,
         attributes: option<string>,
+    ) -> result<list<u8>, string>;
+
+    agent-error-from-info: func(
+        agent-id: u32,
+        error-info: list<u8>,
     ) -> result<list<u8>, string>;
 
     agent-debug-error: func(

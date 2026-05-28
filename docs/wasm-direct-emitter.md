@@ -245,9 +245,11 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   `runtime.record-retry-attempt` with the raw Agent error JSON payload, lowers
   typed `retryAfterMs` hints to checkpointed `runtime.durable-sleep-checkpoint`
   calls gated by graph `rateLimitBudgetMs`, and checkpoints successful output.
-  Public support remains gated until generic exponential backoff, complete
-  rate-limit classification/budget semantics, timeout, pause/cancel/shutdown
-  acknowledgement, and crash/resume parity are covered.
+  It also classifies generated-Rust-compatible rate-limit error codes and
+  charges rate-limited errors without `retryAfterMs` against the budget using
+  the effective base retry delay. Public support remains gated until generic
+  exponential backoff sleep, timeout, pause/cancel/shutdown acknowledgement,
+  and crash/resume parity are covered.
 
 ## Final Goal
 
@@ -744,6 +746,24 @@ agent-error-info: func(
   retryable: bool,
   retry-after-ms: option<u64>,
   attributes: option<string>,
+) -> result<list<u8>, string>;
+record agent-retry-error {
+  payload: list<u8>,
+  retryable: bool,
+  rate-limited: bool,
+}
+agent-retry-error-info: func(
+  code: string,
+  message: string,
+  category: string,
+  severity: string,
+  retryable: bool,
+  retry-after-ms: option<u64>,
+  attributes: option<string>,
+) -> result<agent-retry-error, string>;
+agent-error-from-info: func(
+  agent-id: u32,
+  error-info: list<u8>,
 ) -> result<list<u8>, string>;
 ```
 
@@ -1442,10 +1462,14 @@ Current status:
   Rust-compatible `rate_limit_wait` state before retry-attempt recording. The
   direct graph manifest now carries `rateLimitBudgetMs`; typed `retryAfterMs`
   retries accumulate raw wait time and continue only while the cumulative total
-  stays within that budget. Support remains gated because generic backoff,
-  complete rate-limit classification for errors without `retryAfterMs`, timeout,
-  pause/cancel/shutdown acknowledgement, and crash/resume parity are still
-  pending.
+  stays within that budget. The shared stdlib now also exposes
+  `agent-retry-error-info`, which preserves the raw retry payload while
+  classifying `RATE_LIMITED`/`HTTP_RATE_LIMITED` codes and permanent
+  categories. The direct retry decision uses that classification so
+  rate-limited errors without `retryAfterMs` consume the effective base retry
+  delay from the same `rateLimitBudgetMs` budget. Support remains gated because
+  generic backoff sleeping, timeout, pause/cancel/shutdown acknowledgement, and
+  crash/resume parity are still pending.
 
 Implementation steps:
 
@@ -1476,8 +1500,10 @@ Implementation steps:
      still gated from public support;
    - `rateLimitBudgetMs` propagation and typed `retryAfterMs` cumulative budget:
      internal lowering in place, still gated from public support;
-   - generic exponential backoff, rate-limit classification without
-     `retryAfterMs`, and timeout behavior: pending.
+   - rate-limit classification and base-delay budget accounting without
+     `retryAfterMs`: internal lowering in place, still gated from public
+     support;
+   - generic exponential backoff sleep and timeout behavior: pending.
 5. Extend `onError` routing beyond the first non-durable Agent subset when
    additional failing step types are lowered.
 6. Preserve current retry policy shape with direct control flow plus
@@ -1519,14 +1545,18 @@ Implementation steps:
    - retry sleep scope: done for Agent typed `retryAfterMs`;
    - graph `rateLimitBudgetMs` propagation: done for Agent typed
      `retryAfterMs`;
-   - full rate-limit classification scope: pending.
+   - rate-limit classification and base-delay budget scope: done for Agent
+     typed WIT errors;
+   - generic backoff sleep scope: pending.
 4. Migrate durable `Agent`:
    - no-retry checkpoint lookup/write: internal lowering done;
    - retry loop and retry-attempt recording: internal lowering done;
    - retry error-message payloads: internal lowering done;
    - typed `retryAfterMs` durable sleep: internal lowering done;
    - typed `retryAfterMs` cumulative budget: internal lowering done;
-   - generic backoff and full rate-limit classification parity: pending;
+   - rate-limit classification and no-`retryAfterMs` budget accounting:
+     internal lowering done;
+   - generic backoff sleep parity: pending;
    - pause/cancel/shutdown acknowledgement parity: pending;
    - crash/resume differential tests: pending.
 5. Migrate `Delay`.
