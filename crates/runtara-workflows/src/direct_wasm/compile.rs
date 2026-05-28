@@ -58,6 +58,8 @@ world command {
     export run;
 }
 "#;
+const AGENT_TYPES_WIT: &str = include_str!("../../../runtara-agent-wit/wit/runtara-agent.wit");
+const AGENT_WIT_VERSION: &str = "0.3.0";
 
 const DIRECT_RUN_RETPTR_OFFSET: i32 = 0;
 const DIRECT_STATIC_DATA_OFFSET: i32 = 64;
@@ -377,7 +379,8 @@ fn emit_direct_component(
     manifest_json: &[u8],
     track_events: bool,
 ) -> Result<Vec<u8>, DirectCompileError> {
-    let (resolve, world) = build_direct_component_resolve()?;
+    let (resolve, world) =
+        build_direct_component_resolve_with_agents(&manifest.feature_summary.agent_ids)?;
     let core_config = DirectCoreConfig::new(manifest, manifest_json, track_events)?;
     let mut core_module = emit_direct_core_module(&resolve, world, &core_config)?;
     embed_component_metadata(&mut core_module, &resolve, world, StringEncoding::UTF8)
@@ -391,7 +394,14 @@ fn emit_direct_component(
         .map_err(component_error)
 }
 
+#[cfg(test)]
 fn build_direct_component_resolve() -> Result<(Resolve, WorldId), DirectCompileError> {
+    build_direct_component_resolve_with_agents(&[])
+}
+
+fn build_direct_component_resolve_with_agents(
+    agents: &[String],
+) -> Result<(Resolve, WorldId), DirectCompileError> {
     let mut resolve = Resolve::default();
     resolve
         .push_str("runtara-workflow-stdlib.wit", STDLIB_WIT)
@@ -402,16 +412,34 @@ fn build_direct_component_resolve() -> Result<(Resolve, WorldId), DirectCompileE
     resolve
         .push_str("wasi-cli-run.wit", WASI_CLI_RUN_WIT)
         .map_err(component_error)?;
+    if !agents.is_empty() {
+        resolve
+            .push_str("runtara-agent-types.wit", AGENT_TYPES_WIT)
+            .map_err(component_error)?;
+        for agent in agents {
+            resolve
+                .push_str(
+                    format!("runtara-agent-{agent}.wit"),
+                    &agent_wit_package(agent),
+                )
+                .map_err(component_error)?;
+        }
+    }
 
-    let workflow_wit = format!(
+    let mut workflow_wit = format!(
         "package runtara:workflow@{WORKFLOW_WIT_VERSION};\n\
          \n\
          world workflow {{\n\
              import runtara:workflow-stdlib/json@{WORKFLOW_WIT_VERSION};\n\
-             import runtara:workflow-runtime/runtime@{WORKFLOW_WIT_VERSION};\n\
-             export wasi:cli/run@0.2.3;\n\
-         }}\n"
+             import runtara:workflow-runtime/runtime@{WORKFLOW_WIT_VERSION};\n"
     );
+    for agent in agents {
+        workflow_wit.push_str(&format!(
+            "    import runtara:agent-{agent}/capabilities@{AGENT_WIT_VERSION};\n",
+        ));
+    }
+    workflow_wit.push_str("    export wasi:cli/run@0.2.3;\n");
+    workflow_wit.push_str("}\n");
     let package = resolve
         .push_str("runtara-workflow.wit", &workflow_wit)
         .map_err(component_error)?;
@@ -420,6 +448,25 @@ fn build_direct_component_resolve() -> Result<(Resolve, WorldId), DirectCompileE
         .map_err(component_error)?;
 
     Ok((resolve, world))
+}
+
+fn agent_wit_package(agent: &str) -> String {
+    format!(
+        "package runtara:agent-{agent}@{AGENT_WIT_VERSION};\n\
+         \n\
+         interface capabilities {{\n\
+             use runtara:agent/types@{AGENT_WIT_VERSION}.{{connection-info, error-info}};\n\
+             invoke: func(\n\
+                 capability-id: string,\n\
+                 input: list<u8>,\n\
+                 connection: option<connection-info>,\n\
+             ) -> result<list<u8>, error-info>;\n\
+         }}\n\
+         \n\
+         world agent {{\n\
+             export capabilities;\n\
+         }}\n"
+    )
 }
 
 #[derive(Debug, Clone)]
@@ -3742,6 +3789,64 @@ mod tests {
         assert!(
             saw_run_retptr_tag_load,
             "run body should return runtime.complete result tag"
+        );
+    }
+
+    #[test]
+    fn direct_core_metadata_can_import_agent_capabilities() {
+        let graph = fixture("simple");
+        let manifest = build_direct_workflow_manifest(&graph).expect("manifest");
+        let manifest_json = manifest.to_canonical_json().expect("manifest json");
+        let core_config =
+            DirectCoreConfig::new(&manifest, &manifest_json, false).expect("core config");
+
+        let agents = vec!["crypto".to_string(), "object-model".to_string()];
+        let (resolve, world) =
+            build_direct_component_resolve_with_agents(&agents).expect("agent resolve");
+        let (interface_key, function) = imported_wit_function(
+            &resolve,
+            world,
+            "runtara:agent-crypto/capabilities",
+            "invoke",
+        );
+        let (actual_module, actual_name) = resolve.wasm_import_name(
+            ManglingAndAbi::Standard32,
+            WasmImport::Func {
+                interface: Some(interface_key),
+                func: function,
+            },
+        );
+        assert!(actual_module.contains("runtara:agent-crypto/capabilities"));
+        assert_eq!(actual_name, "invoke");
+
+        let core = emit_direct_core_module(&resolve, world, &core_config).expect("core module");
+        Validator::new()
+            .validate_all(&core)
+            .expect("agent-importing core module validates");
+
+        let mut saw_crypto_invoke = false;
+        let mut saw_object_model_invoke = false;
+        for payload in Parser::new(0).parse_all(&core) {
+            if let Payload::ImportSection(reader) = payload.expect("core wasm payload") {
+                for import in reader.into_imports() {
+                    let import = import.expect("core import");
+                    saw_crypto_invoke |= import.name == "invoke"
+                        && import.module.contains("runtara:agent-crypto/capabilities");
+                    saw_object_model_invoke |= import.name == "invoke"
+                        && import
+                            .module
+                            .contains("runtara:agent-object-model/capabilities");
+                }
+            }
+        }
+
+        assert!(
+            saw_crypto_invoke,
+            "core metadata should import crypto capabilities.invoke"
+        );
+        assert!(
+            saw_object_model_invoke,
+            "core metadata should import object-model capabilities.invoke"
         );
     }
 

@@ -188,6 +188,11 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   include deterministic `agents` entries plus `agent.inputMapping` mapping
   entries, so the next Agent-lowering slice can refer to stable manifest IDs
   without changing the manifest schema at the same time.
+- The workflow-logic component resolver can now include concrete per-agent WIT
+  imports (`runtara:agent-<id>/capabilities@0.3.0`) and validates core module
+  metadata with those imports present. Agent execution remains behind the
+  support gate until invoke lowering, connection handling, and error envelopes
+  are implemented.
 
 ## Final Goal
 
@@ -1286,9 +1291,10 @@ Current status:
 - Agent input mappings are serialized into the existing manifest-wide
   `mappings` table with purpose `agent.inputMapping`.
 - Component sidecars already collect used agent ids and emit per-agent WIT/WAC
-  imports, but the workflow-logic component metadata and direct core run-plan
-  still keep `Agent` behind the support gate until the invocation ABI is
-  lowered and tested.
+  imports, and the workflow-logic component resolver now includes matching
+  per-agent WIT imports in component metadata. The direct core run-plan still
+  keeps `Agent` behind the support gate until the invocation ABI is lowered and
+  tested.
 
 Implementation steps:
 
