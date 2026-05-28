@@ -92,6 +92,7 @@ const DIRECT_AGENT_RESULT_ERR_RETRY_AFTER_VALUE_OFFSET: u64 = 56;
 const DIRECT_AGENT_RESULT_ERR_ATTRIBUTES_TAG_OFFSET: u64 = 64;
 const DIRECT_AGENT_RESULT_ERR_ATTRIBUTES_PTR_OFFSET: u64 = 68;
 const DIRECT_AGENT_RESULT_ERR_ATTRIBUTES_LEN_OFFSET: u64 = 72;
+const DIRECT_AGENT_RETRY_ATTEMPT_LOCAL: u32 = 10;
 const DIRECT_EMPTY_STEPS_CONTEXT: &[u8] = b"{}";
 const DIRECT_WORKFLOW_LOG_KIND: &[u8] = b"workflow_log";
 const DIRECT_WORKFLOW_ERROR_KIND: &[u8] = b"workflow_error";
@@ -563,6 +564,7 @@ enum DirectRunPlan {
         agent_component_id: String,
         input_mapping_id: u32,
         durable_checkpoint: bool,
+        max_retries: u32,
         next_plan: Box<DirectRunPlan>,
         error_plan: Option<DirectErrorRoutePlan>,
     },
@@ -901,12 +903,12 @@ fn step_run_plan_inner(
         }
         "Agent" => {
             let agent = agent_config(graph, step_id)?;
-            let durable_checkpoint = agent.durable && agent.max_retries == Some(0);
-            if agent.durable && !durable_checkpoint {
-                return Err(DirectCompileError::Component(format!(
-                    "direct durable Agent step '{step_id}' requires retry/checkpoint lowering before core emission"
-                )));
-            }
+            let durable_checkpoint = agent.durable;
+            let max_retries = if agent.durable {
+                agent_effective_max_retries(agent)
+            } else {
+                0
+            };
             let next_plan = normal_flow_plan(graph, step_id, stack, include_on_error)?;
             let error_plan = if include_on_error {
                 on_error_plan(graph, step_id, stack)?
@@ -920,6 +922,7 @@ fn step_run_plan_inner(
                 agent_component_id: canonicalize_direct_agent_id(&agent.agent_id),
                 input_mapping_id: agent.input_mapping_id,
                 durable_checkpoint,
+                max_retries,
                 next_plan: Box::new(next_plan),
                 error_plan,
             })
@@ -1327,6 +1330,12 @@ fn agent_config<'a>(
         })
 }
 
+fn agent_effective_max_retries(agent: &DirectAgentManifest) -> u32 {
+    agent
+        .max_retries
+        .unwrap_or(if agent.rate_limited { 5 } else { 3 })
+}
+
 fn finish_mapping_id(
     graph: &DirectGraphManifest,
     step_id: &str,
@@ -1566,6 +1575,7 @@ struct DirectCoreImportIndices {
     runtime_custom_event: Option<u32>,
     runtime_get_checkpoint: Option<u32>,
     runtime_checkpoint: Option<u32>,
+    runtime_record_retry_attempt: Option<u32>,
     stdlib_init_manifest: Option<u32>,
     stdlib_build_source: Option<u32>,
     stdlib_apply_mapping: Option<u32>,
@@ -1605,6 +1615,10 @@ impl DirectCoreImportIndices {
                 "runtime.get-checkpoint",
             )?,
             runtime_checkpoint: require_import(self.runtime_checkpoint, "runtime.checkpoint")?,
+            runtime_record_retry_attempt: require_import(
+                self.runtime_record_retry_attempt,
+                "runtime.record-retry-attempt",
+            )?,
             stdlib_init_manifest: require_import(
                 self.stdlib_init_manifest,
                 "stdlib.init-manifest",
@@ -1669,6 +1683,7 @@ struct DirectCoreFunctionIndices {
     runtime_custom_event: u32,
     runtime_get_checkpoint: u32,
     runtime_checkpoint: u32,
+    runtime_record_retry_attempt: u32,
     stdlib_init_manifest: u32,
     stdlib_build_source: u32,
     stdlib_apply_mapping: u32,
@@ -1740,6 +1755,8 @@ fn import_core_function(
         import_indices.runtime_get_checkpoint = Some(function_index);
     } else if is_runtime_import(resolve, interface, function, "checkpoint") {
         import_indices.runtime_checkpoint = Some(function_index);
+    } else if is_runtime_import(resolve, interface, function, "record-retry-attempt") {
+        import_indices.runtime_record_retry_attempt = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "init-manifest") {
         import_indices.stdlib_init_manifest = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "build-source") {
@@ -1951,7 +1968,7 @@ fn direct_run_function(
     const ROUTE_PTR_LOCAL: u32 = 8;
     const ROUTE_LEN_LOCAL: u32 = 9;
 
-    let mut body = WasmFunction::new([(10, ValType::I32)]);
+    let mut body = WasmFunction::new([(11, ValType::I32)]);
 
     push_segment_args(&mut body, &config.static_data.manifest);
     push_retptr_arg(&mut body);
@@ -2242,6 +2259,7 @@ fn emit_run_plan_mapping(
             agent_component_id,
             input_mapping_id,
             durable_checkpoint,
+            max_retries,
             next_plan,
             error_plan,
         } => {
@@ -2256,6 +2274,7 @@ fn emit_run_plan_mapping(
                 agent_component_id,
                 *input_mapping_id,
                 *durable_checkpoint,
+                *max_retries,
                 next_plan,
                 error_plan.as_ref(),
                 data_ptr_local,
@@ -2710,6 +2729,7 @@ fn emit_agent_plan(
     agent_component_id: &str,
     input_mapping_id: u32,
     durable_checkpoint: bool,
+    max_retries: u32,
     next_plan: &DirectRunPlan,
     error_plan: Option<&DirectErrorRoutePlan>,
     data_ptr_local: u32,
@@ -2808,38 +2828,88 @@ fn emit_agent_plan(
     let capability_id = static_data
         .agent_capability_id(agent_id)
         .expect("direct Agent run plans have static capability ids");
-    emit_agent_invoke(
-        body,
-        invoke,
-        capability_id,
-        static_data,
-        agent_id,
-        output_ptr_local,
-        output_len_local,
-    );
-    emit_agent_invoke_error_branch(
-        body,
-        indices,
-        static_data,
-        track_events,
-        agent_id,
-        step_id,
-        output_ptr_local,
-        output_len_local,
-        source_ptr_local,
-        source_len_local,
-        steps_ptr_local,
-        steps_len_local,
-        error_plan,
-        route_ptr_local,
-        route_len_local,
-        variables,
-        data_ptr_local,
-        data_len_local,
-        workflow_log_kind,
-        workflow_error_kind,
-    );
-    load_agent_retptr_list(body, output_ptr_local, output_len_local);
+    if durable_checkpoint && max_retries > 0 {
+        body.instruction(&Instruction::I32Const(1));
+        body.instruction(&Instruction::LocalSet(DIRECT_AGENT_RETRY_ATTEMPT_LOCAL));
+        body.instruction(&Instruction::Block(BlockType::Empty));
+        body.instruction(&Instruction::Loop(BlockType::Empty));
+        emit_agent_invoke(
+            body,
+            invoke,
+            capability_id,
+            static_data,
+            agent_id,
+            output_ptr_local,
+            output_len_local,
+        );
+        load_retptr_tag(body);
+        body.instruction(&Instruction::If(BlockType::Empty));
+        emit_agent_retry_condition(body, max_retries);
+        body.instruction(&Instruction::If(BlockType::Empty));
+        emit_agent_record_retry_attempt(body, indices, route_ptr_local, route_len_local);
+        body.instruction(&Instruction::Br(2));
+        body.instruction(&Instruction::End);
+        emit_agent_invoke_error_body(
+            body,
+            indices,
+            static_data,
+            track_events,
+            agent_id,
+            step_id,
+            output_ptr_local,
+            output_len_local,
+            source_ptr_local,
+            source_len_local,
+            steps_ptr_local,
+            steps_len_local,
+            error_plan,
+            route_ptr_local,
+            route_len_local,
+            variables,
+            data_ptr_local,
+            data_len_local,
+            workflow_log_kind,
+            workflow_error_kind,
+        );
+        body.instruction(&Instruction::End);
+        load_agent_retptr_list(body, output_ptr_local, output_len_local);
+        body.instruction(&Instruction::Br(1));
+        body.instruction(&Instruction::End);
+        body.instruction(&Instruction::End);
+    } else {
+        emit_agent_invoke(
+            body,
+            invoke,
+            capability_id,
+            static_data,
+            agent_id,
+            output_ptr_local,
+            output_len_local,
+        );
+        emit_agent_invoke_error_branch(
+            body,
+            indices,
+            static_data,
+            track_events,
+            agent_id,
+            step_id,
+            output_ptr_local,
+            output_len_local,
+            source_ptr_local,
+            source_len_local,
+            steps_ptr_local,
+            steps_len_local,
+            error_plan,
+            route_ptr_local,
+            route_len_local,
+            variables,
+            data_ptr_local,
+            data_len_local,
+            workflow_log_kind,
+            workflow_error_kind,
+        );
+        load_agent_retptr_list(body, output_ptr_local, output_len_local);
+    }
 
     if durable_checkpoint {
         emit_agent_checkpoint_save(
@@ -3390,6 +3460,35 @@ fn emit_agent_checkpoint_save(
     body.instruction(&Instruction::Call(indices.runtime_checkpoint));
 }
 
+fn emit_agent_retry_condition(body: &mut WasmFunction, max_retries: u32) {
+    push_retptr_u8_load(body, DIRECT_AGENT_RESULT_ERR_RETRYABLE_OFFSET);
+    body.instruction(&Instruction::LocalGet(DIRECT_AGENT_RETRY_ATTEMPT_LOCAL));
+    body.instruction(&Instruction::I32Const(max_retries as i32));
+    body.instruction(&Instruction::I32LeU);
+    body.instruction(&Instruction::I32And);
+}
+
+fn emit_agent_record_retry_attempt(
+    body: &mut WasmFunction,
+    indices: &DirectCoreFunctionIndices,
+    cache_key_ptr_local: u32,
+    cache_key_len_local: u32,
+) {
+    body.instruction(&Instruction::LocalGet(DIRECT_AGENT_RETRY_ATTEMPT_LOCAL));
+    body.instruction(&Instruction::I32Const(1));
+    body.instruction(&Instruction::I32Add);
+    body.instruction(&Instruction::LocalSet(DIRECT_AGENT_RETRY_ATTEMPT_LOCAL));
+    body.instruction(&Instruction::LocalGet(cache_key_ptr_local));
+    body.instruction(&Instruction::LocalGet(cache_key_len_local));
+    body.instruction(&Instruction::LocalGet(DIRECT_AGENT_RETRY_ATTEMPT_LOCAL));
+    body.instruction(&Instruction::I32Const(0));
+    body.instruction(&Instruction::I32Const(0));
+    body.instruction(&Instruction::I32Const(0));
+    push_retptr_arg(body);
+    body.instruction(&Instruction::Call(indices.runtime_record_retry_attempt));
+    return_if_retptr_error(body);
+}
+
 fn emit_agent_invoke(
     body: &mut WasmFunction,
     invoke: &DirectAgentInvokeImport,
@@ -3491,6 +3590,54 @@ fn emit_agent_invoke_error_branch(
 ) {
     load_retptr_tag(body);
     body.instruction(&Instruction::If(BlockType::Empty));
+    emit_agent_invoke_error_body(
+        body,
+        indices,
+        static_data,
+        track_events,
+        agent_id,
+        step_id,
+        output_ptr_local,
+        output_len_local,
+        source_ptr_local,
+        source_len_local,
+        steps_ptr_local,
+        steps_len_local,
+        error_plan,
+        route_ptr_local,
+        route_len_local,
+        variables,
+        data_ptr_local,
+        data_len_local,
+        workflow_log_kind,
+        workflow_error_kind,
+    );
+    body.instruction(&Instruction::End);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_agent_invoke_error_body(
+    body: &mut WasmFunction,
+    indices: &DirectCoreFunctionIndices,
+    static_data: &DirectCoreStaticData,
+    track_events: bool,
+    agent_id: u32,
+    step_id: &str,
+    output_ptr_local: u32,
+    output_len_local: u32,
+    source_ptr_local: u32,
+    source_len_local: u32,
+    steps_ptr_local: u32,
+    steps_len_local: u32,
+    error_plan: Option<&DirectErrorRoutePlan>,
+    route_ptr_local: u32,
+    route_len_local: u32,
+    variables: &DirectDataSegment,
+    data_ptr_local: u32,
+    data_len_local: u32,
+    workflow_log_kind: &DirectDataSegment,
+    workflow_error_kind: &DirectDataSegment,
+) {
     emit_agent_error(body, indices, agent_id, output_ptr_local, output_len_local);
     emit_agent_debug_error(
         body,
@@ -3526,7 +3673,6 @@ fn emit_agent_invoke_error_branch(
         workflow_log_kind,
         workflow_error_kind,
     );
-    body.instruction(&Instruction::End);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -4249,6 +4395,17 @@ mod tests {
         graph
     }
 
+    fn durable_agent_retry_graph() -> ExecutionGraph {
+        let mut graph = non_durable_agent_graph();
+        graph.durable = Some(true);
+        let Some(runtara_dsl::Step::Agent(agent)) = graph.steps.get_mut("agent") else {
+            panic!("expected Agent step");
+        };
+        agent.max_retries = Some(2);
+        agent.durable = Some(true);
+        graph
+    }
+
     fn non_durable_agent_on_error_finish_graph() -> ExecutionGraph {
         serde_json::from_value(serde_json::json!({
             "durable": false,
@@ -4456,6 +4613,45 @@ mod tests {
             );
             None
         }
+    }
+
+    fn direct_agent_manifest_with_retry_defaults(
+        rate_limited: bool,
+        max_retries: Option<u32>,
+    ) -> DirectAgentManifest {
+        DirectAgentManifest {
+            id: 0,
+            step_id: "agent".to_string(),
+            name: None,
+            step_type: "Agent".to_string(),
+            purpose: "agent.config".to_string(),
+            agent_id: "utils".to_string(),
+            capability_id: "normalize".to_string(),
+            connection_id: None,
+            durable: true,
+            rate_limited,
+            input_mapping_id: 0,
+            required_inputs: vec![],
+            max_retries,
+            retry_delay: None,
+            timeout: None,
+        }
+    }
+
+    #[test]
+    fn direct_agent_effective_max_retries_matches_generated_defaults() {
+        assert_eq!(
+            agent_effective_max_retries(&direct_agent_manifest_with_retry_defaults(false, None)),
+            3
+        );
+        assert_eq!(
+            agent_effective_max_retries(&direct_agent_manifest_with_retry_defaults(true, None)),
+            5
+        );
+        assert_eq!(
+            agent_effective_max_retries(&direct_agent_manifest_with_retry_defaults(true, Some(2))),
+            2
+        );
     }
 
     fn imported_wit_function<'a>(
@@ -5684,7 +5880,9 @@ mod tests {
             DirectCoreConfig::new(&manifest, &manifest_json, false).expect("core config");
 
         let DirectRunPlan::Agent {
-            durable_checkpoint, ..
+            durable_checkpoint,
+            max_retries,
+            ..
         } = &core_config.run_plan
         else {
             panic!("expected Agent run plan");
@@ -5693,6 +5891,7 @@ mod tests {
             *durable_checkpoint,
             "maxRetries=0 durable Agent should use checkpoint lowering"
         );
+        assert_eq!(*max_retries, 0);
         assert!(manifest.graph.agents[0].durable);
 
         let (resolve, world) =
@@ -5840,6 +6039,164 @@ mod tests {
         assert!(
             saw_checkpoint_after_invoke,
             "successful capability output should be checkpointed after invoke"
+        );
+    }
+
+    #[test]
+    fn direct_core_lowers_durable_agent_retry_loop() {
+        let graph = durable_agent_retry_graph();
+        let manifest = build_direct_workflow_manifest(&graph).expect("manifest");
+        let manifest_json = manifest.to_canonical_json().expect("manifest json");
+        let core_config =
+            DirectCoreConfig::new(&manifest, &manifest_json, false).expect("core config");
+
+        let DirectRunPlan::Agent {
+            durable_checkpoint,
+            max_retries,
+            ..
+        } = &core_config.run_plan
+        else {
+            panic!("expected Agent run plan");
+        };
+        assert!(*durable_checkpoint);
+        assert_eq!(*max_retries, 2);
+        assert!(manifest.graph.agents[0].durable);
+
+        let (resolve, world) =
+            build_direct_component_resolve_with_agents(&manifest.feature_summary.agent_ids)
+                .expect("agent resolve");
+        let core = emit_direct_core_module(&resolve, world, &core_config).expect("core module");
+        Validator::new()
+            .validate_all(&core)
+            .expect("durable Agent retry core module validates");
+
+        let mut next_function_index = 0;
+        let mut get_checkpoint_index = None;
+        let mut checkpoint_index = None;
+        let mut record_retry_attempt_index = None;
+        let mut agent_invoke_index = None;
+        let mut saw_record_retry_attempt_import = false;
+        let mut saw_retry_loop = false;
+        let mut saw_retry_continue_branch = false;
+        let mut saw_retryable_load = false;
+        let mut saw_retry_bound = false;
+        let mut saw_lookup_before_invoke = false;
+        let mut saw_record_after_invoke = false;
+        let mut saw_checkpoint_after_invoke = false;
+        let mut code_body_index = 0;
+
+        for payload in Parser::new(0).parse_all(&core) {
+            match payload.expect("core wasm payload") {
+                Payload::ImportSection(reader) => {
+                    for import in reader.into_imports() {
+                        let import = import.expect("core import");
+                        if matches!(import.ty, TypeRef::Func(_)) {
+                            match (import.module, import.name) {
+                                (module, "get-checkpoint")
+                                    if module.contains("runtara:workflow-runtime/runtime") =>
+                                {
+                                    get_checkpoint_index = Some(next_function_index);
+                                }
+                                (module, "checkpoint")
+                                    if module.contains("runtara:workflow-runtime/runtime") =>
+                                {
+                                    checkpoint_index = Some(next_function_index);
+                                }
+                                (module, "record-retry-attempt")
+                                    if module.contains("runtara:workflow-runtime/runtime") =>
+                                {
+                                    saw_record_retry_attempt_import = true;
+                                    record_retry_attempt_index = Some(next_function_index);
+                                }
+                                (module, "invoke")
+                                    if module.contains("runtara:agent-utils/capabilities") =>
+                                {
+                                    agent_invoke_index = Some(next_function_index);
+                                }
+                                _ => {}
+                            }
+                            next_function_index += 1;
+                        }
+                    }
+                }
+                Payload::CodeSectionEntry(body) => {
+                    if code_body_index == 0 {
+                        let mut saw_lookup_call = false;
+                        let mut saw_invoke_call = false;
+                        for operator in body.get_operators_reader().expect("operators") {
+                            match operator.expect("operator") {
+                                Operator::Call { function_index }
+                                    if Some(function_index) == get_checkpoint_index =>
+                                {
+                                    saw_lookup_call = true;
+                                }
+                                Operator::Call { function_index }
+                                    if Some(function_index) == agent_invoke_index =>
+                                {
+                                    saw_lookup_before_invoke = saw_lookup_call;
+                                    saw_invoke_call = true;
+                                }
+                                Operator::Call { function_index }
+                                    if Some(function_index) == record_retry_attempt_index =>
+                                {
+                                    saw_record_after_invoke = saw_invoke_call;
+                                }
+                                Operator::Call { function_index }
+                                    if Some(function_index) == checkpoint_index =>
+                                {
+                                    saw_checkpoint_after_invoke = saw_invoke_call;
+                                }
+                                Operator::Loop { .. } => saw_retry_loop = true,
+                                Operator::Br { relative_depth: 2 } => {
+                                    saw_retry_continue_branch = true;
+                                }
+                                Operator::I32Load8U { memarg }
+                                    if memarg.offset
+                                        == DIRECT_AGENT_RESULT_ERR_RETRYABLE_OFFSET =>
+                                {
+                                    saw_retryable_load = true;
+                                }
+                                Operator::I32Const { value: 2 } => {
+                                    saw_retry_bound = true;
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                    code_body_index += 1;
+                }
+                _ => {}
+            }
+        }
+
+        assert!(
+            saw_record_retry_attempt_import,
+            "core should import runtime.record-retry-attempt"
+        );
+        assert!(saw_retry_loop, "durable retry Agent should lower a loop");
+        assert!(
+            saw_retry_continue_branch,
+            "retry path should branch back to the loop"
+        );
+        assert!(
+            saw_retryable_load,
+            "retry decision should inspect Agent error-info.retryable"
+        );
+        assert!(
+            saw_retry_bound,
+            "retry loop should compare against maxRetries"
+        );
+        assert!(
+            saw_lookup_before_invoke,
+            "checkpoint lookup should run before capability invoke"
+        );
+        assert!(
+            saw_record_after_invoke,
+            "retry attempt recording should run after failed invoke"
+        );
+        assert!(
+            saw_checkpoint_after_invoke,
+            "successful retry output should be checkpointed after invoke"
         );
     }
 

@@ -227,16 +227,25 @@ Current implementation progress on `codex/wasm-direct-emitter`:
 - The first Phase 8 runtime lifecycle ABI slice is in place. The
   `runtara:workflow-runtime` WIT and runtime component now expose checkpoint
   lookup/write, retry-attempt recording, checkpointed durable sleep, and a
-  signal-aware checkpoint result wire shape. Durable Agent and Delay lowering
-  still remain gated until the direct emitter starts using this ABI and
+  signal-aware checkpoint result wire shape. Direct Agent lowering now uses the
+  checkpoint and retry-attempt pieces internally; public durable Agent and Delay
+  support remain gated until the rest of the lifecycle semantics and
   differential crash/resume tests exist.
 - The shared stdlib now exposes `agent-cache-key`, which centralizes the
   generated Rust-compatible durable Agent key shape using `_workflow_id`,
   `_cache_key_prefix`, and `_loop_indices`. The direct core has an internal
   no-retry durable Agent checkpoint path that computes this key, reads an
   existing checkpoint before `capabilities.invoke`, and writes a checkpoint
-  after successful output. Public support remains gated until retry and
-  signal/ack behavior are lowered and tested.
+  after successful output. Public support remains gated until the remaining
+  lifecycle behavior is lowered and tested.
+- The direct core now also has an internal durable Agent retry loop. It uses
+  the generated Rust retry defaults (`maxRetries` override, otherwise 3 or 5
+  for rate-limited capabilities), retries only typed WIT Agent errors with
+  `error-info.retryable = true`, records retry attempts through
+  `runtime.record-retry-attempt`, and checkpoints successful output. Public
+  support remains gated until retry error-message payloads, backoff/sleep,
+  timeout, pause/cancel/shutdown acknowledgement, and crash/resume parity are
+  covered.
 
 ## Final Goal
 
@@ -669,11 +678,12 @@ workflow stdlib component.
 
 ## Durability and Checkpoints
 
-Durability should not be compiled as raw Wasm logic. The direct emitter should
-generate stable ids and control-flow boundaries, while stdlib/runtime owns:
+Durability should not duplicate SDK persistence logic in raw Wasm. The direct
+emitter should generate stable ids and control-flow boundaries, while
+stdlib/runtime owns:
 
 - checkpoint lookup/write;
-- retry loops;
+- retry attempt storage;
 - retry category handling;
 - rate-limit budget accounting;
 - durable sleep;
@@ -1397,7 +1407,14 @@ Current status:
   as generated Rust. Direct core has an internal `maxRetries = 0` durable Agent
   checkpoint lowering that uses `runtime.get-checkpoint` and
   `runtime.checkpoint`, but the support gate still rejects durable Agent
-  workflows until retry and signal/ack semantics are complete.
+  workflows until the remaining durability semantics are complete.
+- Durable Agent retry-loop lowering is now implemented internally for typed WIT
+  Agent errors. The direct manifest records the Agent catalog `rateLimited`
+  flag, the run plan derives the same default retry counts as generated Rust,
+  and the core loop calls `runtime.record-retry-attempt` before retrying.
+  Support remains gated because retry error-message payloads, backoff/sleep,
+  timeout, pause/cancel/shutdown acknowledgement, and crash/resume parity are
+  still pending.
 
 Implementation steps:
 
@@ -1420,11 +1437,15 @@ Implementation steps:
      failures with conditional priority/default handlers;
    - durable no-retry checkpoint lookup/write: internal lowering in place for
      `maxRetries = 0`, still gated from public support;
-   - durable retry/timeout behavior: pending.
+   - durable retry loop and retry-attempt recording: internal lowering in
+     place, still gated from public support;
+   - retry error-message payloads, durable backoff/sleep, and timeout
+     behavior: pending.
 5. Extend `onError` routing beyond the first non-durable Agent subset when
    additional failing step types are lowered.
-6. Preserve current retry policy shape by delegating durable retry behavior to
-   stdlib/runtime. Non-durable calls can be supported first if needed.
+6. Preserve current retry policy shape with direct control flow plus
+   stdlib/runtime-owned checkpoint, retry-attempt, and sleep behavior.
+   Non-durable calls can be supported first if needed.
 
 Checkpoint 7:
 
@@ -1461,7 +1482,8 @@ Implementation steps:
    - retry/rate-limit scope.
 4. Migrate durable `Agent`:
    - no-retry checkpoint lookup/write: internal lowering done;
-   - retry loop and retry-attempt recording: pending;
+   - retry loop and retry-attempt recording: internal lowering done;
+   - retry error-message payloads: pending;
    - rate-limit durable sleep: pending;
    - pause/cancel/shutdown acknowledgement parity: pending;
    - crash/resume differential tests: pending.

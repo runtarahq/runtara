@@ -271,6 +271,8 @@ pub struct DirectAgentManifest {
     pub connection_id: Option<String>,
     /// Effective Agent durability after graph-level inheritance is applied.
     pub durable: bool,
+    /// Whether the referenced capability is marked rate-limited in the Agent catalog.
+    pub rate_limited: bool,
     /// Manifest-wide mapping id for Agent inputs.
     pub input_mapping_id: u32,
     /// Required capability inputs validated after runtime references resolve.
@@ -626,6 +628,7 @@ fn step_manifest(
             });
         }
         Step::Agent(step) => {
+            let agent_id = canonicalize_direct_agent_id(&step.agent_id);
             let input_mapping = step
                 .input_mapping
                 .as_ref()
@@ -646,14 +649,19 @@ fn step_manifest(
                 name: step.name.clone(),
                 step_type: "Agent".to_string(),
                 purpose: "agent.config".to_string(),
-                agent_id: canonicalize_direct_agent_id(&step.agent_id),
+                agent_id: agent_id.clone(),
                 capability_id: step.capability_id.clone(),
                 connection_id: step.connection_id.clone(),
                 durable: inherited_durable && step.durable.unwrap_or(true),
+                rate_limited: agent_capability_rate_limited(
+                    agent_catalog,
+                    &agent_id,
+                    &step.capability_id,
+                ),
                 input_mapping_id,
                 required_inputs: required_agent_inputs(
                     agent_catalog,
-                    &canonicalize_direct_agent_id(&step.agent_id),
+                    &agent_id,
                     &step.capability_id,
                 ),
                 max_retries: step.max_retries,
@@ -751,6 +759,17 @@ fn canonical_json<T: serde::Serialize>(
 
 fn canonicalize_direct_agent_id(agent_id: &str) -> String {
     agent_id.to_lowercase().replace('_', "-")
+}
+
+fn agent_capability_rate_limited(
+    agent_catalog: Option<&AgentCatalog>,
+    agent_id: &str,
+    capability_id: &str,
+) -> bool {
+    agent_catalog
+        .and_then(|catalog| catalog.capability(agent_id, capability_id))
+        .map(|capability| capability.rate_limited)
+        .unwrap_or(false)
 }
 
 fn required_agent_inputs(
@@ -1017,6 +1036,7 @@ mod tests {
         assert_eq!(agent.agent_id, "transform");
         assert_eq!(agent.capability_id, "map-fields");
         assert_eq!(agent.connection_id, None);
+        assert!(!agent.rate_limited);
         assert_eq!(agent.input_mapping_id, 1);
 
         assert_eq!(manifest.graph.mappings.len(), 2);
