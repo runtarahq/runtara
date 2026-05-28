@@ -10,7 +10,12 @@ categories = ["development-tools"]
 
 [features]
 default = ["compiler", "native-agents"]
-compiler = ["dep:runtara-workflow-wit", "dep:wasm-encoder"]
+compiler = [
+    "dep:runtara-workflow-wit",
+    "dep:wasm-encoder",
+    "dep:wit-component",
+    "dep:wit-parser",
+]
 native-agents = ["runtara-agents/native"]
 wasm-js = ["runtara-agents/wasm-js"]
 
@@ -26,7 +31,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 proc-macro2 = "1.0"
 quote = "1.0"
 minijinja = "2.5"
-wasm-encoder = { version = "0.246", optional = true }
+wasm-encoder = { version = "0.247", optional = true }
+wit-component = { version = "0.247", optional = true }
+wit-parser = { version = "0.247", optional = true }
 
 [[bin]]
 name = "runtara-compile"
@@ -42,4 +49,4 @@ required-features = ["compiler"]
 tempfile = "3"
 syn = { version = "2.0", features = ["full", "parsing"] }
 base64 = { workspace = true }
-wasmparser = "0.246"
+wasmparser = "0.247"

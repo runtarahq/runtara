@@ -29,11 +29,12 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   The current production-shaped direct path intentionally supports only
   finish-only graphs.
 - `direct_wasm::compile::compile_direct_workflow` is an opt-in entry point that
-  emits a valid component-format metadata envelope for finish-only graphs,
-  writes `workflow.wasm`, `manifest.json`, `support-report.json`,
-  `wit/world.wit`, and `workflow.wac`, and does not generate a Rust crate. This
-  is a temporary non-executable component envelope for migration tests, not the
-  final component-model runtime artifact.
+  emits a valid component-format artifact for finish-only graphs, imports the
+  workflow stdlib/runtime interfaces, exports `wasi:cli/run@0.2.3`, writes
+  `workflow.wasm`, `manifest.json`, `support-report.json`, `wit/world.wit`,
+  and `workflow.wac`, and does not generate a Rust crate. The exported run entry
+  currently returns success without runtime `Finish` completion, so this is not
+  the final component-model runtime artifact.
 - `runtara-workflow-wit` now defines the first checked-in workflow WIT
   contracts: `runtara:workflow-stdlib/json@0.1.0` for shared JSON semantics and
   `runtara:workflow-runtime/runtime@0.1.0` for SDK/runtime lifecycle calls.
@@ -815,19 +816,20 @@ Goal: emit a real component-model workflow, not core-Wasm PoC output.
 
 Current status:
 
-- Component-format artifact emission has started, but component-model execution
-  has not.
-- A temporary finish-only component metadata envelope exists in
-  `direct_wasm::compile` to prove the direct compile entry, sidecars,
-  support-gating, artifact validation, and "no generated Rust crate" behavior
-  before executable component ABI emission lands.
+- Component-format artifact emission has started. The opt-in direct path now
+  emits a valid component with a canonical `wasi:cli/run@0.2.3` export and
+  stdlib/runtime component imports.
+- The current finish-only direct component proves the direct compile entry,
+  sidecars, support-gating, artifact validation, canonical run export, and
+  "no generated Rust crate" behavior before runtime-complete `Finish` emission
+  lands.
 - `direct_wasm::component` emits `wit/world.wit` and `workflow.wac` sidecars
   that import `runtara:workflow-stdlib/json@0.1.0`,
-  `runtara:workflow-runtime/runtime@0.1.0`, include `wasi:cli/command@0.2.3`,
+  `runtara:workflow-runtime/runtime@0.1.0`, export `wasi:cli/run@0.2.3`,
   and statically compose stdlib, runtime, workflow logic, and required agents.
-- This temporary non-executable envelope must be replaced by a real component
-  exporting `wasi:cli/run` before direct mode can execute under the environment
-  runner.
+- The current run entry is only a dispatcher stub. It must call runtime
+  completion/failure paths before direct mode can execute real workflow
+  semantics under the environment runner.
 
 Implementation steps:
 
@@ -874,11 +876,11 @@ Current status:
 - Unsupported reports exist and name exact step ids, step types, feature keys,
   and actionable reasons.
 - Finish-only graphs can be compiled through the opt-in direct entry point into
-  a component-format artifact envelope and sidecar files without generating
+  a component-format artifact and sidecar files without generating
   `Cargo.toml`, `src/lib.rs`, or any per-workflow Rust crate.
-- Remaining work: replace the temporary component envelope with an executable
-  component dispatcher and add the first runtime-complete `Finish`
-  implementation through stdlib or runtime imports.
+- Remaining work: replace the current success-only run dispatcher with the
+  first runtime-complete `Finish` implementation through stdlib/runtime
+  imports.
 
 Implementation steps:
 

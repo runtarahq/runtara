@@ -22,9 +22,9 @@ pub struct DirectComponentArtifacts {
 
 /// Emit the direct workflow component scaffolding.
 ///
-/// The current finish-only direct compiler writes a component-format metadata
-/// envelope as `workflow.wasm`. These artifacts define the WIT/WAC contract the
-/// executable component dispatcher will implement without changing the output
+/// The current finish-only direct compiler writes a component-format artifact
+/// as `workflow.wasm`. These artifacts define the WIT/WAC contract the runtime
+/// completion dispatcher will continue to implement without changing the output
 /// directory contract.
 pub fn emit_direct_component_artifacts(agents: &[String]) -> DirectComponentArtifacts {
     DirectComponentArtifacts {
@@ -49,7 +49,7 @@ fn emit_world_wit(agents: &[String]) -> String {
             "    import runtara:agent-{agent}/capabilities@0.3.0;\n"
         ));
     }
-    out.push_str("    include wasi:cli/command@0.2.3;\n");
+    out.push_str("    export wasi:cli/run@0.2.3;\n");
     out.push_str("}\n");
     out
 }
@@ -85,7 +85,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn direct_world_imports_stdlib_runtime_and_wasi_run() {
+    fn direct_world_imports_stdlib_runtime_and_exports_wasi_run() {
         let artifacts = emit_direct_component_artifacts(&[]);
 
         assert!(
@@ -103,11 +103,7 @@ mod tests {
                 .world_wit
                 .contains("import runtara:workflow-runtime/runtime@0.1.0;")
         );
-        assert!(
-            artifacts
-                .world_wit
-                .contains("include wasi:cli/command@0.2.3;")
-        );
+        assert!(artifacts.world_wit.contains("export wasi:cli/run@0.2.3;"));
     }
 
     #[test]
