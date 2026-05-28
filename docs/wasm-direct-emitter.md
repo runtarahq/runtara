@@ -32,12 +32,12 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   shared stdlib.
 - `direct_wasm::compile::compile_direct_workflow` is an opt-in entry point that
   emits a valid component-format artifact for single-entry `Finish` graphs,
-  imports the workflow stdlib/runtime interfaces, exports `wasi:cli/run@0.2.3`, writes
-  `workflow.wasm`, `manifest.json`, `support-report.json`, `wit/world.wit`,
-  and `workflow.wac`, and does not generate a Rust crate. The exported run entry
-  now initializes the stdlib with the manifest, loads runtime input, builds the
-  mapping source, applies the entry `Finish` mapping by manifest mapping ID, and
-  calls `runtara:workflow-runtime/runtime.complete`.
+  imports the workflow stdlib/runtime interfaces, exports `wasi:cli/run@0.2.3`,
+  writes `workflow-logic.wasm`, `manifest.json`, `support-report.json`,
+  `wit/world.wit`, and `workflow.wac`, and does not generate a Rust crate. The
+  exported run entry now initializes the stdlib with the manifest, loads runtime
+  input, builds the mapping source, applies the entry `Finish` mapping by
+  manifest mapping ID, and calls `runtara:workflow-runtime/runtime.complete`.
 - `runtara-workflow-wit` now defines the first checked-in workflow WIT
   contracts: `runtara:workflow-stdlib/json@0.1.0` for shared JSON semantics and
   `runtara:workflow-runtime/runtime@0.1.0` for SDK/runtime lifecycle calls.
@@ -63,9 +63,14 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   composition with separate stdlib and runtime components plus any required
   agents.
 - `direct_wasm::compile::compose_direct_workflow` now performs the first
-  direct static composition smoke path: it maps the direct workflow-logic
-  component plus prebuilt stdlib/runtime components into `wac compose` and
-  writes `workflow-composed.wasm`.
+  direct static composition path: it maps the direct `workflow-logic.wasm`
+  component plus prebuilt stdlib/runtime components into `wac compose`, writes
+  the runtime-facing `workflow.wasm`, and promotes the primary direct compile
+  result metadata to the composed artifact.
+- `direct_wasm::compile::compile_direct_workflow_composed` now provides the
+  first finish-only direct compile entry that returns the final static
+  `workflow.wasm` artifact shape while retaining `workflow-logic.wasm` for
+  debugging and manifest validation.
 
 ## Final Goal
 
@@ -945,9 +950,13 @@ Current status:
 - The first direct composition helper and test can compose a finish-only direct
   workflow component with the prebuilt shared stdlib/runtime components through
   `wac compose`.
-- Remaining work: promote the composed artifact into the direct compile result,
-  add Finish parity fixtures against the Rust-generated path, and broaden graph
-  lowering beyond the single-entry Finish shape.
+- The composed artifact is now represented in the direct compile result:
+  logic-only compilation keeps `wasm_path == workflow_logic_wasm_path`, while
+  composition updates `wasm_path` to the final `workflow.wasm` and records
+  composed size/checksum metadata.
+- Remaining work: add Finish parity fixtures against the Rust-generated path,
+  run the composed artifact under the current environment runner shape, and
+  broaden graph lowering beyond the single-entry Finish shape.
 
 Implementation steps:
 

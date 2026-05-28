@@ -16,7 +16,8 @@ pub mod support;
 pub use compile::{
     DIRECT_WORKFLOW_ABI_SECTION, DIRECT_WORKFLOW_ABI_VERSION, DIRECT_WORKFLOW_MANIFEST_SECTION,
     DIRECT_WORKFLOW_SUPPORT_SECTION, DirectCompilationInput, DirectCompilationResult,
-    DirectCompileError, compile_direct_workflow, compose_direct_workflow,
+    DirectCompileError, compile_direct_workflow, compile_direct_workflow_composed,
+    compose_direct_workflow,
 };
 #[cfg(feature = "compiler")]
 pub use component::{

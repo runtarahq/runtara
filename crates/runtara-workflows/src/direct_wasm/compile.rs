@@ -79,8 +79,14 @@ pub struct DirectCompilationInput {
 /// Result of opt-in direct workflow compilation.
 #[derive(Debug, Clone)]
 pub struct DirectCompilationResult {
-    /// Path to the emitted `workflow.wasm` artifact.
+    /// Path to the primary emitted Wasm artifact.
+    ///
+    /// Before static composition this is the directly emitted
+    /// `workflow-logic.wasm`; after [`compose_direct_workflow`] it is the final
+    /// runnable `workflow.wasm`.
     pub wasm_path: PathBuf,
+    /// Path to the directly emitted workflow-logic component.
+    pub workflow_logic_wasm_path: PathBuf,
     /// Path to the emitted manifest sidecar.
     pub manifest_path: PathBuf,
     /// Path to the emitted support-report sidecar.
@@ -91,10 +97,20 @@ pub struct DirectCompilationResult {
     pub wac_path: PathBuf,
     /// Path to the per-workflow direct build directory.
     pub build_dir: PathBuf,
-    /// Size of the emitted Wasm artifact in bytes.
+    /// Size of the primary emitted Wasm artifact in bytes.
     pub wasm_size: usize,
-    /// SHA-256 checksum of the emitted Wasm artifact.
+    /// SHA-256 checksum of the primary emitted Wasm artifact.
     pub wasm_checksum: String,
+    /// Size of the workflow-logic component in bytes.
+    pub workflow_logic_wasm_size: usize,
+    /// SHA-256 checksum of the workflow-logic component.
+    pub workflow_logic_wasm_checksum: String,
+    /// Path to the final statically composed `workflow.wasm`, when composed.
+    pub composed_wasm_path: Option<PathBuf>,
+    /// Size of the final statically composed artifact in bytes.
+    pub composed_wasm_size: Option<usize>,
+    /// SHA-256 checksum of the final statically composed artifact.
+    pub composed_wasm_checksum: Option<String>,
     /// SHA-256 checksum embedded in the manifest.
     pub manifest_checksum: String,
     /// Deterministic support report produced before emission.
@@ -172,11 +188,11 @@ impl From<std::io::Error> for DirectCompileError {
 /// emission. This explicit step performs the static composition that will
 /// eventually produce the runnable `workflow.wasm` artifact for direct mode.
 pub fn compose_direct_workflow(
-    result: &DirectCompilationResult,
+    result: &mut DirectCompilationResult,
     components_dir: impl AsRef<Path>,
 ) -> Result<PathBuf, DirectCompileError> {
     let components_dir = components_dir.as_ref();
-    let composed_path = result.build_dir.join("workflow-composed.wasm");
+    let composed_path = result.build_dir.join("workflow.wasm");
 
     let mut cmd = Command::new("wac");
     cmd.arg("compose")
@@ -184,7 +200,7 @@ pub fn compose_direct_workflow(
         .arg("-d")
         .arg(format!(
             "runtara:workflow-logic={}",
-            result.wasm_path.display()
+            result.workflow_logic_wasm_path.display()
         ));
 
     for component in &result.component_artifacts.shared_components {
@@ -226,7 +242,29 @@ pub fn compose_direct_workflow(
         )));
     }
 
+    let composed_wasm = fs::read(&composed_path)?;
+    let composed_wasm_size = composed_wasm.len();
+    let composed_wasm_checksum = sha256_hex(&composed_wasm);
+
+    result.wasm_path = composed_path.clone();
+    result.wasm_size = composed_wasm_size;
+    result.wasm_checksum = composed_wasm_checksum.clone();
+    result.composed_wasm_path = Some(composed_path.clone());
+    result.composed_wasm_size = Some(composed_wasm_size);
+    result.composed_wasm_checksum = Some(composed_wasm_checksum);
+
     Ok(composed_path)
+}
+
+/// Compile and statically compose a direct workflow into the final
+/// `workflow.wasm` artifact shape used by the runtime.
+pub fn compile_direct_workflow_composed(
+    input: DirectCompilationInput,
+    components_dir: impl AsRef<Path>,
+) -> Result<DirectCompilationResult, DirectCompileError> {
+    let mut result = compile_direct_workflow(input)?;
+    compose_direct_workflow(&mut result, components_dir)?;
+    Ok(result)
 }
 
 /// Compile a finish-only workflow through the direct path.
@@ -261,7 +299,7 @@ pub fn compile_direct_workflow(
     fs::create_dir_all(&build_dir)?;
     fs::create_dir_all(build_dir.join("wit"))?;
 
-    let wasm_path = build_dir.join("workflow.wasm");
+    let wasm_path = build_dir.join("workflow-logic.wasm");
     let manifest_path = build_dir.join("manifest.json");
     let support_report_path = build_dir.join("support-report.json");
     let world_wit_path = build_dir.join("wit/world.wit");
@@ -275,6 +313,7 @@ pub fn compile_direct_workflow(
 
     Ok(DirectCompilationResult {
         wasm_path,
+        workflow_logic_wasm_path: build_dir.join("workflow-logic.wasm"),
         manifest_path,
         support_report_path,
         world_wit_path,
@@ -282,6 +321,11 @@ pub fn compile_direct_workflow(
         build_dir,
         wasm_size: wasm.len(),
         wasm_checksum: sha256_hex(&wasm),
+        workflow_logic_wasm_size: wasm.len(),
+        workflow_logic_wasm_checksum: sha256_hex(&wasm),
+        composed_wasm_path: None,
+        composed_wasm_size: None,
+        composed_wasm_checksum: None,
         manifest_checksum: manifest.checksum().to_string(),
         support_report,
         component_artifacts,
@@ -1202,7 +1246,15 @@ mod tests {
             .validate_all(&wasm)
             .expect("direct artifact should validate as a Wasm component");
 
+        assert_eq!(result.wasm_path, result.workflow_logic_wasm_path);
         assert_eq!(result.wasm_size, wasm.len());
+        assert_eq!(result.workflow_logic_wasm_size, wasm.len());
+        assert_eq!(result.wasm_checksum, result.workflow_logic_wasm_checksum);
+        assert!(result.wasm_path.ends_with("workflow-logic.wasm"));
+        assert!(!result.build_dir.join("workflow.wasm").exists());
+        assert!(result.composed_wasm_path.is_none());
+        assert!(result.composed_wasm_size.is_none());
+        assert!(result.composed_wasm_checksum.is_none());
         assert_eq!(result.manifest_checksum.len(), 64);
         assert!(result.manifest_path.exists());
         assert!(result.support_report_path.exists());
@@ -1549,7 +1601,7 @@ mod tests {
         };
 
         let temp = tempfile::tempdir().expect("tempdir");
-        let result = compile_direct_workflow(DirectCompilationInput {
+        let mut result = compile_direct_workflow(DirectCompilationInput {
             workflow_id: "simple".to_string(),
             version: 1,
             execution_graph: fixture("simple"),
@@ -1557,10 +1609,68 @@ mod tests {
         })
         .expect("direct compile should succeed");
 
-        let composed = compose_direct_workflow(&result, &components_dir)
+        let composed = compose_direct_workflow(&mut result, &components_dir)
             .expect("direct workflow composition should succeed");
         let wasm = fs::read(&composed).expect("composed wasm");
         assert!(!wasm.is_empty());
+        assert_eq!(composed, result.build_dir.join("workflow.wasm"));
+        assert_eq!(result.wasm_path, composed);
+        assert_eq!(
+            result.composed_wasm_path.as_deref(),
+            Some(composed.as_path())
+        );
+        assert_eq!(result.wasm_size, wasm.len());
+        assert_eq!(result.composed_wasm_size, Some(wasm.len()));
+        assert_eq!(
+            result.composed_wasm_checksum.as_deref(),
+            Some(result.wasm_checksum.as_str())
+        );
+        assert_eq!(
+            result.workflow_logic_wasm_path,
+            result.build_dir.join("workflow-logic.wasm")
+        );
+        assert!(result.workflow_logic_wasm_path.exists());
+        Validator::new()
+            .validate_all(&wasm)
+            .expect("composed direct workflow should validate");
+    }
+
+    #[test]
+    fn direct_compile_composed_returns_final_workflow_wasm_when_available() {
+        if !tool_installed("wac") {
+            eprintln!("SKIP: wac not installed. `cargo install wac-cli --locked` first.");
+            return;
+        }
+        let Some(components_dir) = shared_components_dir() else {
+            return;
+        };
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let result = compile_direct_workflow_composed(
+            DirectCompilationInput {
+                workflow_id: "simple".to_string(),
+                version: 1,
+                execution_graph: fixture("simple"),
+                output_dir: temp.path().to_path_buf(),
+            },
+            &components_dir,
+        )
+        .expect("direct composed compile should succeed");
+
+        assert_eq!(result.wasm_path, result.build_dir.join("workflow.wasm"));
+        assert_eq!(
+            result.workflow_logic_wasm_path,
+            result.build_dir.join("workflow-logic.wasm")
+        );
+        assert_eq!(
+            result.composed_wasm_path.as_deref(),
+            Some(result.wasm_path.as_path())
+        );
+        assert!(result.wasm_path.exists());
+        assert!(result.workflow_logic_wasm_path.exists());
+
+        let wasm = fs::read(&result.wasm_path).expect("composed wasm");
+        assert_eq!(result.wasm_size, wasm.len());
         Validator::new()
             .validate_all(&wasm)
             .expect("composed direct workflow should validate");
