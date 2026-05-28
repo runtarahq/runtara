@@ -20,6 +20,7 @@ use crate::template::render_template;
 pub struct DirectJsonManifest {
     mappings: BTreeMap<u32, DirectJsonMapping>,
     conditions: BTreeMap<u32, Value>,
+    filters: BTreeMap<u32, DirectJsonFilter>,
     group_bys: BTreeMap<u32, DirectJsonGroupBy>,
 }
 
@@ -30,16 +31,19 @@ impl DirectJsonManifest {
             .map_err(|err| format!("failed to parse direct manifest: {err}"))?;
         let mut mappings = BTreeMap::new();
         let mut conditions = BTreeMap::new();
+        let mut filters = BTreeMap::new();
         let mut group_bys = BTreeMap::new();
         collect_graph_manifest(
             &manifest.graph,
             &mut mappings,
             &mut conditions,
+            &mut filters,
             &mut group_bys,
         )?;
         Ok(Self {
             mappings,
             conditions,
+            filters,
             group_bys,
         })
     }
@@ -71,6 +75,26 @@ impl DirectJsonManifest {
         eval_condition_expression(condition, &source)
     }
 
+    /// Execute a manifest Filter config and return an updated steps context.
+    pub fn filter(&self, filter_id: u32, source: &[u8]) -> Result<Vec<u8>, String> {
+        let source: Value = serde_json::from_slice(source)
+            .map_err(|err| format!("failed to parse filter source: {err}"))?;
+        let filter = self
+            .filters
+            .get(&filter_id)
+            .ok_or_else(|| format!("unknown direct Filter id {filter_id}"))?;
+        let output = apply_filter(&filter.value, &source)?;
+        let steps = insert_step_output(
+            &source,
+            &filter.step_id,
+            filter.name.as_deref(),
+            "Filter",
+            output,
+        );
+        serde_json::to_vec(&Value::Object(steps))
+            .map_err(|err| format!("failed to serialize filter steps context: {err}"))
+    }
+
     /// Execute a manifest GroupBy config and return an updated steps context.
     pub fn group_by(&self, group_id: u32, source: &[u8]) -> Result<Vec<u8>, String> {
         let source: Value = serde_json::from_slice(source)
@@ -80,22 +104,15 @@ impl DirectJsonManifest {
             .get(&group_id)
             .ok_or_else(|| format!("unknown direct GroupBy id {group_id}"))?;
         let output = apply_group_by(&group_by.value, &source)?;
-        let mut steps = source
-            .get("steps")
-            .and_then(Value::as_object)
-            .cloned()
-            .unwrap_or_default();
-        steps.insert(
-            group_by.step_id.clone(),
-            serde_json::json!({
-                "stepId": group_by.step_id,
-                "stepName": group_by.name.as_deref().unwrap_or("Unnamed"),
-                "stepType": group_by.step_type,
-                "outputs": output,
-            }),
+        let steps = insert_step_output(
+            &source,
+            &group_by.step_id,
+            group_by.name.as_deref(),
+            "GroupBy",
+            output,
         );
         serde_json::to_vec(&Value::Object(steps))
-            .map_err(|err| format!("failed to serialize group-by output: {err}"))
+            .map_err(|err| format!("failed to serialize group-by steps context: {err}"))
     }
 }
 
@@ -136,6 +153,7 @@ fn collect_graph_manifest(
     graph: &GraphWire,
     mappings: &mut BTreeMap<u32, DirectJsonMapping>,
     conditions: &mut BTreeMap<u32, Value>,
+    filters: &mut BTreeMap<u32, DirectJsonFilter>,
     group_bys: &mut BTreeMap<u32, DirectJsonGroupBy>,
 ) -> Result<(), String> {
     for mapping in &graph.mappings {
@@ -160,6 +178,21 @@ fn collect_graph_manifest(
             return Err(format!("duplicate direct condition id {}", condition.id));
         }
     }
+    for filter in &graph.filters {
+        if filters
+            .insert(
+                filter.id,
+                DirectJsonFilter {
+                    step_id: filter.step_id.clone(),
+                    name: filter.name.clone(),
+                    value: filter.value.clone(),
+                },
+            )
+            .is_some()
+        {
+            return Err(format!("duplicate direct Filter id {}", filter.id));
+        }
+    }
     for group_by in &graph.group_bys {
         if group_bys
             .insert(
@@ -167,7 +200,6 @@ fn collect_graph_manifest(
                 DirectJsonGroupBy {
                     step_id: group_by.step_id.clone(),
                     name: group_by.name.clone(),
-                    step_type: group_by.step_type.clone(),
                     value: group_by.value.clone(),
                 },
             )
@@ -178,10 +210,41 @@ fn collect_graph_manifest(
     }
     for step in &graph.steps {
         for nested in &step.nested_graphs {
-            collect_graph_manifest(&nested.graph, mappings, conditions, group_bys)?;
+            collect_graph_manifest(&nested.graph, mappings, conditions, filters, group_bys)?;
         }
     }
     Ok(())
+}
+
+fn apply_filter(config: &Value, source: &Value) -> Result<Value, String> {
+    let input = config
+        .get("value")
+        .ok_or_else(|| "Filter config missing value".to_string())
+        .and_then(|value| apply_mapping_value(value, source))?;
+    let items = input.as_array().cloned().unwrap_or_default();
+    let condition = config
+        .get("condition")
+        .ok_or_else(|| "Filter config missing condition".to_string())?;
+    let mut source = source.clone();
+    if !source.is_object() {
+        return Err("filter source must be a JSON object".to_string());
+    }
+
+    let mut filtered = Vec::new();
+    for item in items {
+        source
+            .as_object_mut()
+            .expect("filter source was checked as object")
+            .insert("item".to_string(), item.clone());
+        if eval_condition_expression(condition, &source)? {
+            filtered.push(item);
+        }
+    }
+
+    Ok(serde_json::json!({
+        "items": filtered,
+        "count": filtered.len(),
+    }))
 }
 
 fn apply_group_by(config: &Value, source: &Value) -> Result<Value, String> {
@@ -217,6 +280,30 @@ fn apply_group_by(config: &Value, source: &Value) -> Result<Value, String> {
         "counts": counts,
         "total_groups": groups.len(),
     }))
+}
+
+fn insert_step_output(
+    source: &Value,
+    step_id: &str,
+    step_name: Option<&str>,
+    step_type: &str,
+    output: Value,
+) -> Map<String, Value> {
+    let mut steps = source
+        .get("steps")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    steps.insert(
+        step_id.to_string(),
+        serde_json::json!({
+            "stepId": step_id,
+            "stepName": step_name.unwrap_or("Unnamed"),
+            "stepType": step_type,
+            "outputs": output,
+        }),
+    );
+    steps
 }
 
 fn group_key_string(value: &Value) -> String {
@@ -651,6 +738,8 @@ struct GraphWire {
     #[serde(default)]
     conditions: Vec<ConditionWire>,
     #[serde(default)]
+    filters: Vec<FilterWire>,
+    #[serde(default)]
     group_bys: Vec<GroupByWire>,
     #[serde(default)]
     steps: Vec<StepWire>,
@@ -686,12 +775,21 @@ struct ConditionWire {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct FilterWire {
+    id: u32,
+    step_id: String,
+    #[serde(default)]
+    name: Option<String>,
+    value: Value,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct GroupByWire {
     id: u32,
     step_id: String,
     #[serde(default)]
     name: Option<String>,
-    step_type: String,
     value: Value,
 }
 
@@ -702,10 +800,16 @@ struct DirectJsonMapping {
 }
 
 #[derive(Debug, Clone)]
+struct DirectJsonFilter {
+    step_id: String,
+    name: Option<String>,
+    value: Value,
+}
+
+#[derive(Debug, Clone)]
 struct DirectJsonGroupBy {
     step_id: String,
     name: Option<String>,
-    step_type: String,
     value: Value,
 }
 
@@ -739,6 +843,23 @@ mod tests {
                     "ownerType": "Conditional",
                     "purpose": "conditional.condition",
                     "value": condition_value
+                }],
+                "steps": []
+            }
+        }))
+        .expect("manifest json")
+    }
+
+    fn filter_manifest(config: Value) -> Vec<u8> {
+        serde_json::to_vec(&json!({
+            "graph": {
+                "filters": [{
+                    "id": 0,
+                    "stepId": "filter",
+                    "name": "Filter Active Items",
+                    "stepType": "Filter",
+                    "purpose": "filter.config",
+                    "value": config
                 }],
                 "steps": []
             }
@@ -917,6 +1038,121 @@ mod tests {
         let source = build_source(br#"{"present":"yes"}"#, b"{}", b"{}").expect("source");
 
         assert!(manifest.eval_condition(0, &source).expect("condition"));
+    }
+
+    #[test]
+    fn filter_keeps_items_matching_condition() {
+        let manifest = DirectJsonManifest::parse(&filter_manifest(json!({
+            "value": { "valueType": "reference", "value": "data.items" },
+            "condition": {
+                "type": "operation",
+                "op": "EQ",
+                "arguments": [
+                    { "valueType": "reference", "value": "item.status" },
+                    { "valueType": "immediate", "value": "active" }
+                ]
+            }
+        })))
+        .expect("manifest");
+        let source = build_source(
+            br#"{"items":[{"id":1,"status":"active"},{"id":2,"status":"failed"},{"id":3,"status":"active"}]}"#,
+            b"{}",
+            b"{}",
+        )
+        .expect("source");
+
+        let steps = manifest.filter(0, &source).expect("steps context");
+        let steps: Value = serde_json::from_slice(&steps).expect("steps json");
+        let output = &steps["filter"]["outputs"];
+
+        assert_eq!(output["count"], json!(2));
+        assert_eq!(output["items"][0]["id"], json!(1));
+        assert_eq!(output["items"][1]["id"], json!(3));
+        assert_eq!(steps["filter"]["stepName"], json!("Filter Active Items"));
+        assert_eq!(steps["filter"]["stepType"], json!("Filter"));
+    }
+
+    #[test]
+    fn filter_supports_nested_boolean_conditions() {
+        let manifest = DirectJsonManifest::parse(&filter_manifest(json!({
+            "value": { "valueType": "reference", "value": "data.users" },
+            "condition": {
+                "type": "operation",
+                "op": "OR",
+                "arguments": [
+                    {
+                        "type": "operation",
+                        "op": "AND",
+                        "arguments": [
+                            {
+                                "type": "operation",
+                                "op": "EQ",
+                                "arguments": [
+                                    { "valueType": "reference", "value": "item.status" },
+                                    { "valueType": "immediate", "value": "active" }
+                                ]
+                            },
+                            {
+                                "type": "operation",
+                                "op": "GT",
+                                "arguments": [
+                                    { "valueType": "reference", "value": "item.age" },
+                                    { "valueType": "immediate", "value": 18 }
+                                ]
+                            }
+                        ]
+                    },
+                    {
+                        "type": "operation",
+                        "op": "EQ",
+                        "arguments": [
+                            { "valueType": "reference", "value": "item.role" },
+                            { "valueType": "immediate", "value": "admin" }
+                        ]
+                    }
+                ]
+            }
+        })))
+        .expect("manifest");
+        let source = build_source(
+            br#"{"users":[{"id":1,"status":"active","age":19,"role":"user"},{"id":2,"status":"active","age":17,"role":"user"},{"id":3,"status":"disabled","age":15,"role":"admin"}]}"#,
+            b"{}",
+            b"{}",
+        )
+        .expect("source");
+
+        let steps = manifest.filter(0, &source).expect("steps context");
+        let steps: Value = serde_json::from_slice(&steps).expect("steps json");
+        let output = &steps["filter"]["outputs"];
+
+        assert_eq!(output["count"], json!(2));
+        assert_eq!(output["items"][0]["id"], json!(1));
+        assert_eq!(output["items"][1]["id"], json!(3));
+    }
+
+    #[test]
+    fn filter_treats_non_array_input_as_empty_array() {
+        let manifest = DirectJsonManifest::parse(&filter_manifest(json!({
+            "value": { "valueType": "reference", "value": "data.items" },
+            "condition": {
+                "type": "operation",
+                "op": "EQ",
+                "arguments": [
+                    { "valueType": "reference", "value": "item.status" },
+                    { "valueType": "immediate", "value": "active" }
+                ]
+            }
+        })))
+        .expect("manifest");
+        let source =
+            build_source(br#"{"items":{"status":"active"}}"#, b"{}", b"{}").expect("source");
+
+        let steps = manifest.filter(0, &source).expect("steps context");
+        let steps: Value = serde_json::from_slice(&steps).expect("steps json");
+        let output = &steps["filter"]["outputs"];
+
+        assert_eq!(output["count"], json!(0));
+        assert_eq!(output["items"], json!([]));
     }
 
     #[test]

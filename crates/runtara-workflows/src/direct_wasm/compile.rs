@@ -424,6 +424,10 @@ enum DirectRunPlan {
     Finish {
         mapping_id: u32,
     },
+    Filter {
+        filter_id: u32,
+        next_plan: Box<DirectRunPlan>,
+    },
     GroupBy {
         group_id: u32,
         next_plan: Box<DirectRunPlan>,
@@ -521,7 +525,7 @@ fn direct_run_plan(manifest: &DirectWorkflowManifest) -> Result<DirectRunPlan, D
         })?;
 
     match entry.step_type.as_str() {
-        "Finish" | "GroupBy" | "Conditional" => step_run_plan(
+        "Finish" | "Filter" | "GroupBy" | "Conditional" => step_run_plan(
             &manifest.graph,
             &manifest.graph.entry_point,
             &mut Vec::new(),
@@ -553,6 +557,19 @@ fn step_run_plan(
         "Finish" => Ok(DirectRunPlan::Finish {
             mapping_id: finish_mapping_id(graph, step_id)?,
         }),
+        "Filter" => {
+            let filter_id = filter_id(graph, step_id)?;
+            let next_step = normal_target(graph, step_id)?.to_string();
+
+            stack.push(step_id.to_string());
+            let next_plan = step_run_plan(graph, &next_step, stack)?;
+            stack.pop();
+
+            Ok(DirectRunPlan::Filter {
+                filter_id,
+                next_plan: Box::new(next_plan),
+            })
+        }
         "GroupBy" => {
             let group_id = group_by_id(graph, step_id)?;
             let next_step = normal_target(graph, step_id)?.to_string();
@@ -632,6 +649,27 @@ fn branch_target<'a>(
             DirectCompileError::Component(format!(
                 "missing '{label}' branch for Conditional step '{from_step}'"
             ))
+        })
+}
+
+fn filter_id(graph: &DirectGraphManifest, step_id: &str) -> Result<u32, DirectCompileError> {
+    if !graph
+        .steps
+        .iter()
+        .any(|step| step.id == step_id && step.step_type == "Filter")
+    {
+        return Err(DirectCompileError::Component(format!(
+            "direct step '{step_id}' is not a Filter step"
+        )));
+    }
+
+    graph
+        .filters
+        .iter()
+        .find(|filter| filter.step_id == step_id && filter.purpose == "filter.config")
+        .map(|filter| filter.id)
+        .ok_or_else(|| {
+            DirectCompileError::Component(format!("missing Filter config for step '{step_id}'"))
         })
 }
 
@@ -881,6 +919,7 @@ struct DirectCoreImportIndices {
     stdlib_build_source: Option<u32>,
     stdlib_apply_mapping: Option<u32>,
     stdlib_eval_condition: Option<u32>,
+    stdlib_filter: Option<u32>,
     stdlib_group_by: Option<u32>,
 }
 
@@ -902,6 +941,7 @@ impl DirectCoreImportIndices {
                 self.stdlib_eval_condition,
                 "stdlib.eval-condition",
             )?,
+            stdlib_filter: require_import(self.stdlib_filter, "stdlib.filter")?,
             stdlib_group_by: require_import(self.stdlib_group_by, "stdlib.group-by")?,
         })
     }
@@ -915,6 +955,7 @@ struct DirectCoreFunctionIndices {
     stdlib_build_source: u32,
     stdlib_apply_mapping: u32,
     stdlib_eval_condition: u32,
+    stdlib_filter: u32,
     stdlib_group_by: u32,
 }
 
@@ -959,6 +1000,8 @@ fn import_core_function(
         import_indices.stdlib_apply_mapping = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "eval-condition") {
         import_indices.stdlib_eval_condition = Some(function_index);
+    } else if is_stdlib_import(resolve, interface, function, "filter") {
+        import_indices.stdlib_filter = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "group-by") {
         import_indices.stdlib_group_by = Some(function_index);
     }
@@ -1198,34 +1241,37 @@ fn emit_run_plan_mapping(
                 output_len_local,
             );
         }
-        DirectRunPlan::GroupBy {
-            group_id,
+        DirectRunPlan::Filter {
+            filter_id,
             next_plan,
         } => {
-            body.instruction(&Instruction::I32Const(*group_id as i32));
-            body.instruction(&Instruction::LocalGet(source_ptr_local));
-            body.instruction(&Instruction::LocalGet(source_len_local));
-            push_retptr_arg(body);
-            body.instruction(&Instruction::Call(indices.stdlib_group_by));
-            return_if_retptr_error(body);
-            load_retptr_list(body, steps_ptr_local, steps_len_local);
-
-            emit_build_source(
+            emit_step_context_plan(
                 body,
                 indices,
                 variables,
+                indices.stdlib_filter,
+                *filter_id,
+                next_plan,
                 data_ptr_local,
                 data_len_local,
                 steps_ptr_local,
                 steps_len_local,
                 source_ptr_local,
                 source_len_local,
+                output_ptr_local,
+                output_len_local,
             );
-
-            emit_run_plan_mapping(
+        }
+        DirectRunPlan::GroupBy {
+            group_id,
+            next_plan,
+        } => {
+            emit_step_context_plan(
                 body,
                 indices,
                 variables,
+                indices.stdlib_group_by,
+                *group_id,
                 next_plan,
                 data_ptr_local,
                 data_len_local,
@@ -1288,6 +1334,59 @@ fn emit_run_plan_mapping(
             body.instruction(&Instruction::End);
         }
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_step_context_plan(
+    body: &mut WasmFunction,
+    indices: &DirectCoreFunctionIndices,
+    variables: &DirectDataSegment,
+    step_function_index: u32,
+    step_config_id: u32,
+    next_plan: &DirectRunPlan,
+    data_ptr_local: u32,
+    data_len_local: u32,
+    steps_ptr_local: u32,
+    steps_len_local: u32,
+    source_ptr_local: u32,
+    source_len_local: u32,
+    output_ptr_local: u32,
+    output_len_local: u32,
+) {
+    body.instruction(&Instruction::I32Const(step_config_id as i32));
+    body.instruction(&Instruction::LocalGet(source_ptr_local));
+    body.instruction(&Instruction::LocalGet(source_len_local));
+    push_retptr_arg(body);
+    body.instruction(&Instruction::Call(step_function_index));
+    return_if_retptr_error(body);
+    load_retptr_list(body, steps_ptr_local, steps_len_local);
+
+    emit_build_source(
+        body,
+        indices,
+        variables,
+        data_ptr_local,
+        data_len_local,
+        steps_ptr_local,
+        steps_len_local,
+        source_ptr_local,
+        source_len_local,
+    );
+
+    emit_run_plan_mapping(
+        body,
+        indices,
+        variables,
+        next_plan,
+        data_ptr_local,
+        data_len_local,
+        steps_ptr_local,
+        steps_len_local,
+        source_ptr_local,
+        source_len_local,
+        output_ptr_local,
+        output_len_local,
+    );
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1535,6 +1634,7 @@ mod tests {
             "conditional_nested" => {
                 include_str!("../../tests/fixtures/conditional_nested.json")
             }
+            "filter" => include_str!("../../tests/fixtures/filter_simple.json"),
             "group_by" => include_str!("../../tests/fixtures/group_by_simple.json"),
             "transform" => include_str!("../../tests/fixtures/transform_workflow.json"),
             other => panic!("unknown fixture {other}"),
@@ -1549,6 +1649,9 @@ mod tests {
     ) {
         match plan {
             DirectRunPlan::Finish { mapping_id } => mapping_ids.push(*mapping_id),
+            DirectRunPlan::Filter { next_plan, .. } => {
+                collect_run_plan_ids(next_plan, condition_ids, mapping_ids);
+            }
             DirectRunPlan::GroupBy { next_plan, .. } => {
                 collect_run_plan_ids(next_plan, condition_ids, mapping_ids);
             }
@@ -1848,6 +1951,31 @@ mod tests {
     }
 
     #[test]
+    fn direct_compile_supports_filter_finish_graph() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let result = compile_direct_workflow(DirectCompilationInput {
+            workflow_id: "filter".to_string(),
+            version: 1,
+            execution_graph: fixture("filter"),
+            output_dir: temp.path().to_path_buf(),
+        })
+        .expect("direct Filter compile should succeed");
+
+        let wasm = fs::read(&result.wasm_path).expect("wasm");
+        Validator::new()
+            .validate_all(&wasm)
+            .expect("direct Filter artifact should validate");
+        assert!(result.support_report.supported);
+        assert_eq!(result.support_report.unsupported, vec![]);
+
+        let manifest: DirectWorkflowManifest =
+            serde_json::from_slice(&fs::read(&result.manifest_path).expect("manifest"))
+                .expect("manifest json");
+        assert_eq!(manifest.graph.filters.len(), 1);
+        assert_eq!(manifest.graph.mappings.len(), 1);
+    }
+
+    #[test]
     fn direct_core_run_lowers_finish_mapping_through_stdlib() {
         let graph = fixture("simple");
         let manifest = build_direct_workflow_manifest(&graph).expect("manifest");
@@ -1903,6 +2031,18 @@ mod tests {
                 "runtara:workflow-stdlib/json",
                 "cm32p2|runtara:workflow-stdlib/json@0.1",
                 "eval-condition",
+                vec![
+                    WasmType::I32,
+                    WasmType::Pointer,
+                    WasmType::Length,
+                    WasmType::Pointer,
+                ],
+            ),
+            (
+                "stdlib.filter",
+                "runtara:workflow-stdlib/json",
+                "cm32p2|runtara:workflow-stdlib/json@0.1",
+                "filter",
                 vec![
                     WasmType::I32,
                     WasmType::Pointer,
@@ -2395,6 +2535,117 @@ mod tests {
             "GroupBy run should apply the terminal Finish mapping once"
         );
         assert!(saw_group_id, "GroupBy id should be passed to stdlib");
+        assert!(
+            saw_mapping_id,
+            "Finish mapping id should be passed to stdlib"
+        );
+    }
+
+    #[test]
+    fn direct_core_run_lowers_filter_finish_through_stdlib() {
+        let graph = fixture("filter");
+        let manifest = build_direct_workflow_manifest(&graph).expect("manifest");
+        let manifest_json = manifest.to_canonical_json().expect("manifest json");
+        let core_config = DirectCoreConfig::new(&manifest, &manifest_json).expect("core config");
+        let DirectRunPlan::Filter {
+            filter_id,
+            next_plan,
+        } = &core_config.run_plan
+        else {
+            panic!("expected Filter run plan");
+        };
+        let DirectRunPlan::Finish { mapping_id } = next_plan.as_ref() else {
+            panic!("expected Filter to flow into Finish");
+        };
+
+        let (resolve, world) = build_direct_component_resolve().expect("resolve");
+        let core = emit_direct_core_module(&resolve, world, &core_config).expect("core module");
+        Validator::new()
+            .validate_all(&core)
+            .expect("Filter core module validates");
+
+        let mut next_function_index = 0;
+        let mut build_source_index = None;
+        let mut filter_index = None;
+        let mut apply_mapping_index = None;
+        let mut saw_filter_id = false;
+        let mut saw_mapping_id = false;
+        let mut run_calls = Vec::new();
+        let mut code_body_index = 0;
+
+        for payload in Parser::new(0).parse_all(&core) {
+            match payload.expect("core wasm payload") {
+                Payload::ImportSection(reader) => {
+                    for import in reader.into_imports() {
+                        let import = import.expect("core import");
+                        if matches!(import.ty, TypeRef::Func(_)) {
+                            match (import.module, import.name) {
+                                ("cm32p2|runtara:workflow-stdlib/json@0.1", "build-source") => {
+                                    build_source_index = Some(next_function_index)
+                                }
+                                ("cm32p2|runtara:workflow-stdlib/json@0.1", "filter") => {
+                                    filter_index = Some(next_function_index)
+                                }
+                                ("cm32p2|runtara:workflow-stdlib/json@0.1", "apply-mapping") => {
+                                    apply_mapping_index = Some(next_function_index)
+                                }
+                                _ => {}
+                            }
+                            next_function_index += 1;
+                        }
+                    }
+                }
+                Payload::CodeSectionEntry(body) => {
+                    if code_body_index == 0 {
+                        for operator in body.get_operators_reader().expect("operators") {
+                            match operator.expect("operator") {
+                                Operator::Call { function_index } => run_calls.push(function_index),
+                                Operator::I32Const { value } => {
+                                    if value == *filter_id as i32 {
+                                        saw_filter_id = true;
+                                    }
+                                    if value == *mapping_id as i32 {
+                                        saw_mapping_id = true;
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                    code_body_index += 1;
+                }
+                _ => {}
+            }
+        }
+
+        let build_source_index = build_source_index.expect("build-source import");
+        let filter_index = filter_index.expect("filter import");
+        let apply_mapping_index = apply_mapping_index.expect("apply-mapping import");
+        assert_eq!(
+            run_calls
+                .iter()
+                .filter(|&&index| index == build_source_index)
+                .count(),
+            2,
+            "Filter run should rebuild source after updating steps context"
+        );
+        assert_eq!(
+            run_calls
+                .iter()
+                .filter(|&&index| index == filter_index)
+                .count(),
+            1,
+            "Filter run should call the stdlib Filter helper once"
+        );
+        assert_eq!(
+            run_calls
+                .iter()
+                .filter(|&&index| index == apply_mapping_index)
+                .count(),
+            1,
+            "Filter run should apply the terminal Finish mapping once"
+        );
+        assert!(saw_filter_id, "Filter id should be passed to stdlib");
         assert!(
             saw_mapping_id,
             "Finish mapping id should be passed to stdlib"

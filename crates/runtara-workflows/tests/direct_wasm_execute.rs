@@ -21,6 +21,7 @@ use serde_json::Value;
 const SIMPLE_PASSTHROUGH: &str = include_str!("fixtures/simple_passthrough.json");
 const CONDITIONAL_WORKFLOW: &str = include_str!("fixtures/conditional_workflow.json");
 const CONDITIONAL_NESTED: &str = include_str!("fixtures/conditional_nested.json");
+const FILTER_SIMPLE: &str = include_str!("fixtures/filter_simple.json");
 const GROUP_BY_SIMPLE: &str = include_str!("fixtures/group_by_simple.json");
 
 #[derive(Debug)]
@@ -465,6 +466,31 @@ fn direct_wasm_execute_group_by_finish_reports_completion() {
                 "inactive": 1
             },
             "total_groups": 2
+        })
+    );
+}
+
+#[test]
+fn direct_wasm_execute_filter_finish_reports_completion() {
+    let Some(components_dir) = direct_e2e_components_dir() else {
+        return;
+    };
+
+    let output = run_direct_workflow(
+        &components_dir,
+        "direct-wasm-execute-filter",
+        FILTER_SIMPLE,
+        br#"{"items":[{"id":1,"status":"active"},{"id":2,"status":"failed"},{"id":3,"status":"active"}]}"#,
+    );
+
+    assert_eq!(
+        output,
+        serde_json::json!({
+            "filtered": [
+                { "id": 1, "status": "active" },
+                { "id": 3, "status": "active" }
+            ],
+            "count": 2
         })
     );
 }

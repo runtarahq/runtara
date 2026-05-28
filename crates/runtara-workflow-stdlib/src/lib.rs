@@ -184,8 +184,14 @@ mod component {
             Err("direct stdlib process-switch is not implemented yet".to_string())
         }
 
-        fn filter(_filter_id: u32, _source: Vec<u8>) -> Result<Vec<u8>, String> {
-            Err("direct stdlib filter is not implemented yet".to_string())
+        fn filter(filter_id: u32, source: Vec<u8>) -> Result<Vec<u8>, String> {
+            MANIFEST.with(|slot| {
+                let slot = slot.borrow();
+                let manifest = slot
+                    .as_ref()
+                    .ok_or_else(|| "direct stdlib manifest was not initialized".to_string())?;
+                manifest.filter(filter_id, &source)
+            })
         }
 
         fn group_by(group_id: u32, source: Vec<u8>) -> Result<Vec<u8>, String> {

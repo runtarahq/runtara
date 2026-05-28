@@ -79,7 +79,7 @@ fn collect_graph_support(
                     .map(step_type_name)
                     .map(str::to_string),
                 feature: "execution-plan-routing".to_string(),
-                reason: "direct emitter currently lowers only a single entry Finish step, pure Conditional true/false trees, and normal GroupBy edges ending in Finish leaves".to_string(),
+                reason: "direct emitter currently lowers only a single entry Finish step, pure Conditional true/false trees, and normal Filter/GroupBy edges ending in Finish leaves".to_string(),
             });
         }
     }
@@ -216,32 +216,45 @@ fn supports_direct_control_step(
 
             true_supported && false_supported
         }
+        Step::Filter(_) => {
+            supports_single_normal_edge_step(graph, step_id, reachable, used_edges, stack)
+        }
         Step::GroupBy(_) => {
-            let mut normal_edge = None;
-            for (index, edge) in graph.execution_plan.iter().enumerate() {
-                if edge.from_step != step_id {
-                    continue;
-                }
-                if edge.label.is_none() && edge.condition.is_none() && normal_edge.is_none() {
-                    normal_edge = Some((index, edge));
-                } else {
-                    return false;
-                }
-            }
-
-            let Some((edge_index, edge)) = normal_edge else {
-                return false;
-            };
-            used_edges.insert(edge_index);
-            stack.push(step_id.to_string());
-            let supported =
-                supports_direct_control_step(graph, &edge.to_step, reachable, used_edges, stack);
-            stack.pop();
-
-            supported
+            supports_single_normal_edge_step(graph, step_id, reachable, used_edges, stack)
         }
         _ => false,
     }
+}
+
+fn supports_single_normal_edge_step(
+    graph: &ExecutionGraph,
+    step_id: &str,
+    reachable: &mut BTreeSet<String>,
+    used_edges: &mut BTreeSet<usize>,
+    stack: &mut Vec<String>,
+) -> bool {
+    let mut normal_edge = None;
+    for (index, edge) in graph.execution_plan.iter().enumerate() {
+        if edge.from_step != step_id {
+            continue;
+        }
+        if edge.label.is_none() && edge.condition.is_none() && normal_edge.is_none() {
+            normal_edge = Some((index, edge));
+        } else {
+            return false;
+        }
+    }
+
+    let Some((edge_index, edge)) = normal_edge else {
+        return false;
+    };
+    used_edges.insert(edge_index);
+    stack.push(step_id.to_string());
+    let supported =
+        supports_direct_control_step(graph, &edge.to_step, reachable, used_edges, stack);
+    stack.pop();
+
+    supported
 }
 
 fn collect_step_support(
@@ -273,6 +286,16 @@ fn collect_step_support(
             "Conditional steps require stdlib condition evaluation and branch lowering",
             unsupported,
         ),
+        Step::Filter(step) if direct_control => {
+            if step.breakpoint.unwrap_or(false) {
+                unsupported.push(UnsupportedWorkflowFeature {
+                    step_id: Some(step.id.clone()),
+                    step_type: Some("Filter".to_string()),
+                    feature: "filter-breakpoint".to_string(),
+                    reason: "Filter breakpoints require direct debug event emission".to_string(),
+                });
+            }
+        }
         Step::GroupBy(step) if direct_control => {
             if step.breakpoint.unwrap_or(false) {
                 unsupported.push(UnsupportedWorkflowFeature {
@@ -426,6 +449,7 @@ mod tests {
             "conditional_nested" => {
                 include_str!("../../tests/fixtures/conditional_nested.json")
             }
+            "filter" => include_str!("../../tests/fixtures/filter_simple.json"),
             "group_by" => include_str!("../../tests/fixtures/group_by_simple.json"),
             "transform" => include_str!("../../tests/fixtures/transform_workflow.json"),
             "wait" => include_str!("../../tests/fixtures/wait_for_signal_with_callback.json"),
@@ -565,6 +589,30 @@ mod tests {
 
         assert!(report.supported, "{:?}", report.unsupported);
         assert!(report.unsupported.is_empty());
+    }
+
+    #[test]
+    fn filter_finish_normal_edge_is_supported() {
+        let report = analyze_direct_wasm_support(&fixture("filter"));
+
+        assert!(report.supported, "{:?}", report.unsupported);
+        assert!(report.unsupported.is_empty());
+    }
+
+    #[test]
+    fn filter_breakpoints_are_rejected_until_debug_events_are_lowered() {
+        let mut graph = fixture("filter");
+        let Some(Step::Filter(filter)) = graph.steps.get_mut("filter") else {
+            panic!("expected Filter fixture step");
+        };
+        filter.breakpoint = Some(true);
+
+        let report = analyze_direct_wasm_support(&graph);
+
+        assert!(!report.supported);
+        assert!(report.unsupported.iter().any(|feature| {
+            feature.step_id.as_deref() == Some("filter") && feature.feature == "filter-breakpoint"
+        }));
     }
 
     #[test]

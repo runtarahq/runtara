@@ -69,6 +69,9 @@ pub struct DirectGraphManifest {
     /// Condition definitions addressable by generated direct Wasm.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub conditions: Vec<DirectConditionManifest>,
+    /// Filter definitions addressable by generated direct Wasm.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub filters: Vec<DirectFilterManifest>,
     /// GroupBy definitions addressable by generated direct Wasm.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub group_bys: Vec<DirectGroupByManifest>,
@@ -133,6 +136,25 @@ pub struct DirectConditionManifest {
     /// Condition role, for example `conditional.condition`.
     pub purpose: String,
     /// Canonical JSON serialization of the DSL condition expression.
+    pub value: serde_json::Value,
+}
+
+/// Deterministic Filter definition referenced by direct-emitted Wasm.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DirectFilterManifest {
+    /// Manifest-wide Filter identifier.
+    pub id: u32,
+    /// Step that owns this Filter config.
+    pub step_id: String,
+    /// Human-readable step name.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Step type that owns this Filter config.
+    pub step_type: String,
+    /// Config role within the step.
+    pub purpose: String,
+    /// Canonical JSON serialization of the DSL Filter config.
     pub value: serde_json::Value,
 }
 
@@ -219,6 +241,7 @@ pub fn build_direct_workflow_manifest(
 struct DirectManifestBuildState {
     next_mapping_id: u32,
     next_condition_id: u32,
+    next_filter_id: u32,
     next_group_by_id: u32,
 }
 
@@ -232,6 +255,12 @@ impl DirectManifestBuildState {
     fn allocate_condition_id(&mut self) -> u32 {
         let id = self.next_condition_id;
         self.next_condition_id += 1;
+        id
+    }
+
+    fn allocate_filter_id(&mut self) -> u32 {
+        let id = self.next_filter_id;
+        self.next_filter_id += 1;
         id
     }
 
@@ -253,6 +282,7 @@ fn graph_manifest(
 
     let mut mappings = Vec::new();
     let mut conditions = Vec::new();
+    let mut filters = Vec::new();
     let mut group_bys = Vec::new();
     let steps = step_values
         .into_iter()
@@ -263,6 +293,7 @@ fn graph_manifest(
                 state,
                 &mut mappings,
                 &mut conditions,
+                &mut filters,
                 &mut group_bys,
             )
         })
@@ -270,6 +301,7 @@ fn graph_manifest(
 
     mappings.sort_by(|left, right| left.id.cmp(&right.id));
     conditions.sort_by(|left, right| left.id.cmp(&right.id));
+    filters.sort_by(|left, right| left.id.cmp(&right.id));
     group_bys.sort_by(|left, right| left.id.cmp(&right.id));
 
     let mut edges = graph
@@ -290,6 +322,7 @@ fn graph_manifest(
         steps,
         mappings,
         conditions,
+        filters,
         group_bys,
         edges,
     })
@@ -301,6 +334,7 @@ fn step_manifest(
     state: &mut DirectManifestBuildState,
     mappings: &mut Vec<DirectMappingManifest>,
     conditions: &mut Vec<DirectConditionManifest>,
+    filters: &mut Vec<DirectFilterManifest>,
     group_bys: &mut Vec<DirectGroupByManifest>,
 ) -> Result<DirectStepManifest, DirectManifestError> {
     let mut nested_graphs = Vec::new();
@@ -339,6 +373,16 @@ fn step_manifest(
             nested_graphs.push(DirectNestedGraphManifest {
                 role: "while.subgraph".to_string(),
                 graph: Box::new(graph_manifest(&step.subgraph, inherited_durable, state)?),
+            });
+        }
+        Step::Filter(step) => {
+            filters.push(DirectFilterManifest {
+                id: state.allocate_filter_id(),
+                step_id: step.id.clone(),
+                name: step.name.clone(),
+                step_type: "Filter".to_string(),
+                purpose: "filter.config".to_string(),
+                value: canonical_json(&step.config)?,
             });
         }
         Step::GroupBy(step) => {
@@ -512,6 +556,7 @@ mod tests {
         let json = match name {
             "simple" => include_str!("../../tests/fixtures/simple_passthrough.json"),
             "conditional" => include_str!("../../tests/fixtures/conditional_workflow.json"),
+            "filter" => include_str!("../../tests/fixtures/filter_simple.json"),
             "group_by" => include_str!("../../tests/fixtures/group_by_simple.json"),
             "wait" => include_str!("../../tests/fixtures/wait_for_signal_with_callback.json"),
             other => panic!("unknown fixture {other}"),
@@ -561,6 +606,22 @@ mod tests {
         assert_eq!(condition.purpose, "conditional.condition");
         assert_eq!(condition.value["type"], "operation");
         assert_eq!(condition.value["op"], "EQ");
+    }
+
+    #[test]
+    fn manifest_assigns_filter_id() {
+        let manifest = build_direct_workflow_manifest(&fixture("filter")).expect("manifest");
+
+        assert_eq!(manifest.graph.filters.len(), 1);
+        let filter = &manifest.graph.filters[0];
+        assert_eq!(filter.id, 0);
+        assert_eq!(filter.step_id, "filter");
+        assert_eq!(filter.name.as_deref(), Some("Filter Active Items"));
+        assert_eq!(filter.step_type, "Filter");
+        assert_eq!(filter.purpose, "filter.config");
+        assert_eq!(filter.value["condition"]["op"], "EQ");
+        assert_eq!(filter.value["value"]["valueType"], "reference");
+        assert_eq!(filter.value["value"]["value"], "data.items");
     }
 
     #[test]
