@@ -45,6 +45,7 @@ mod tests {
             "apply-mapping",
             "eval-condition",
             "process-switch",
+            "value-switch",
             "filter",
             "group-by",
         ] {

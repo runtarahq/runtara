@@ -1,0 +1,79 @@
+{
+  "name": "Simple Value Switch Workflow",
+  "description": "A workflow that selects an output object from a non-routing Switch step",
+  "steps": {
+    "switch": {
+      "stepType": "Switch",
+      "id": "switch",
+      "name": "Classify Status",
+      "config": {
+        "value": {
+          "valueType": "reference",
+          "value": "data.status"
+        },
+        "cases": [
+          {
+            "matchType": "EQ",
+            "match": "active",
+            "output": {
+              "bucket": {
+                "valueType": "immediate",
+                "value": "ready"
+              },
+              "echo": {
+                "valueType": "reference",
+                "value": "data.status"
+              }
+            }
+          },
+          {
+            "matchType": "EQ",
+            "match": ["queued", "retry"],
+            "output": {
+              "bucket": "pending"
+            }
+          }
+        ],
+        "default": {
+          "bucket": "other"
+        }
+      }
+    },
+    "finish": {
+      "stepType": "Finish",
+      "id": "finish",
+      "inputMapping": {
+        "bucket": {
+          "valueType": "reference",
+          "value": "steps.switch.outputs.bucket"
+        },
+        "echo": {
+          "valueType": "reference",
+          "value": "steps.switch.outputs.echo",
+          "default": "n/a"
+        }
+      }
+    }
+  },
+  "entryPoint": "switch",
+  "executionPlan": [
+    {
+      "fromStep": "switch",
+      "toStep": "finish"
+    }
+  ],
+  "variables": {},
+  "inputSchema": {
+    "status": {
+      "type": "string"
+    }
+  },
+  "outputSchema": {
+    "bucket": {
+      "type": "string"
+    },
+    "echo": {
+      "type": "string"
+    }
+  }
+}

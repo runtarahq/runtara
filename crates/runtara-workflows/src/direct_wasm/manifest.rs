@@ -72,6 +72,9 @@ pub struct DirectGraphManifest {
     /// Filter definitions addressable by generated direct Wasm.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub filters: Vec<DirectFilterManifest>,
+    /// Switch definitions addressable by generated direct Wasm.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub switches: Vec<DirectSwitchManifest>,
     /// GroupBy definitions addressable by generated direct Wasm.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub group_bys: Vec<DirectGroupByManifest>,
@@ -155,6 +158,25 @@ pub struct DirectFilterManifest {
     /// Config role within the step.
     pub purpose: String,
     /// Canonical JSON serialization of the DSL Filter config.
+    pub value: serde_json::Value,
+}
+
+/// Deterministic Switch definition referenced by direct-emitted Wasm.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DirectSwitchManifest {
+    /// Manifest-wide Switch identifier.
+    pub id: u32,
+    /// Step that owns this Switch config.
+    pub step_id: String,
+    /// Human-readable step name.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Step type that owns this Switch config.
+    pub step_type: String,
+    /// Config role within the step.
+    pub purpose: String,
+    /// Canonical JSON serialization of the DSL Switch config.
     pub value: serde_json::Value,
 }
 
@@ -242,6 +264,7 @@ struct DirectManifestBuildState {
     next_mapping_id: u32,
     next_condition_id: u32,
     next_filter_id: u32,
+    next_switch_id: u32,
     next_group_by_id: u32,
 }
 
@@ -264,6 +287,12 @@ impl DirectManifestBuildState {
         id
     }
 
+    fn allocate_switch_id(&mut self) -> u32 {
+        let id = self.next_switch_id;
+        self.next_switch_id += 1;
+        id
+    }
+
     fn allocate_group_by_id(&mut self) -> u32 {
         let id = self.next_group_by_id;
         self.next_group_by_id += 1;
@@ -280,29 +309,27 @@ fn graph_manifest(
     let mut step_values = graph.steps.values().collect::<Vec<_>>();
     step_values.sort_by(|left, right| step_id(left).cmp(step_id(right)));
 
-    let mut mappings = Vec::new();
-    let mut conditions = Vec::new();
-    let mut filters = Vec::new();
-    let mut group_bys = Vec::new();
+    let mut collections = DirectGraphManifestCollections::default();
     let steps = step_values
         .into_iter()
-        .map(|step| {
-            step_manifest(
-                step,
-                durable,
-                state,
-                &mut mappings,
-                &mut conditions,
-                &mut filters,
-                &mut group_bys,
-            )
-        })
+        .map(|step| step_manifest(step, durable, state, &mut collections))
         .collect::<Result<Vec<_>, _>>()?;
 
-    mappings.sort_by(|left, right| left.id.cmp(&right.id));
-    conditions.sort_by(|left, right| left.id.cmp(&right.id));
-    filters.sort_by(|left, right| left.id.cmp(&right.id));
-    group_bys.sort_by(|left, right| left.id.cmp(&right.id));
+    collections
+        .mappings
+        .sort_by(|left, right| left.id.cmp(&right.id));
+    collections
+        .conditions
+        .sort_by(|left, right| left.id.cmp(&right.id));
+    collections
+        .filters
+        .sort_by(|left, right| left.id.cmp(&right.id));
+    collections
+        .switches
+        .sort_by(|left, right| left.id.cmp(&right.id));
+    collections
+        .group_bys
+        .sort_by(|left, right| left.id.cmp(&right.id));
 
     let mut edges = graph
         .execution_plan
@@ -320,22 +347,29 @@ fn graph_manifest(
         input_schema: canonical_json(&graph.input_schema)?,
         output_schema: canonical_json(&graph.output_schema)?,
         steps,
-        mappings,
-        conditions,
-        filters,
-        group_bys,
+        mappings: collections.mappings,
+        conditions: collections.conditions,
+        filters: collections.filters,
+        switches: collections.switches,
+        group_bys: collections.group_bys,
         edges,
     })
+}
+
+#[derive(Default)]
+struct DirectGraphManifestCollections {
+    mappings: Vec<DirectMappingManifest>,
+    conditions: Vec<DirectConditionManifest>,
+    filters: Vec<DirectFilterManifest>,
+    switches: Vec<DirectSwitchManifest>,
+    group_bys: Vec<DirectGroupByManifest>,
 }
 
 fn step_manifest(
     step: &Step,
     inherited_durable: bool,
     state: &mut DirectManifestBuildState,
-    mappings: &mut Vec<DirectMappingManifest>,
-    conditions: &mut Vec<DirectConditionManifest>,
-    filters: &mut Vec<DirectFilterManifest>,
-    group_bys: &mut Vec<DirectGroupByManifest>,
+    collections: &mut DirectGraphManifestCollections,
 ) -> Result<DirectStepManifest, DirectManifestError> {
     let mut nested_graphs = Vec::new();
     match step {
@@ -346,7 +380,7 @@ fn step_manifest(
                 .map(canonical_json)
                 .transpose()?
                 .unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new()));
-            mappings.push(DirectMappingManifest {
+            collections.mappings.push(DirectMappingManifest {
                 id: state.allocate_mapping_id(),
                 step_id: step.id.clone(),
                 step_type: "Finish".to_string(),
@@ -355,7 +389,7 @@ fn step_manifest(
             });
         }
         Step::Conditional(step) => {
-            conditions.push(DirectConditionManifest {
+            collections.conditions.push(DirectConditionManifest {
                 id: state.allocate_condition_id(),
                 owner_id: step.id.clone(),
                 owner_type: "Conditional".to_string(),
@@ -369,6 +403,22 @@ fn step_manifest(
                 graph: Box::new(graph_manifest(&step.subgraph, inherited_durable, state)?),
             });
         }
+        Step::Switch(step) => {
+            let value = step
+                .config
+                .as_ref()
+                .map(canonical_json)
+                .transpose()?
+                .unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new()));
+            collections.switches.push(DirectSwitchManifest {
+                id: state.allocate_switch_id(),
+                step_id: step.id.clone(),
+                name: step.name.clone(),
+                step_type: "Switch".to_string(),
+                purpose: "switch.config".to_string(),
+                value,
+            });
+        }
         Step::While(step) => {
             nested_graphs.push(DirectNestedGraphManifest {
                 role: "while.subgraph".to_string(),
@@ -376,7 +426,7 @@ fn step_manifest(
             });
         }
         Step::Filter(step) => {
-            filters.push(DirectFilterManifest {
+            collections.filters.push(DirectFilterManifest {
                 id: state.allocate_filter_id(),
                 step_id: step.id.clone(),
                 name: step.name.clone(),
@@ -386,7 +436,7 @@ fn step_manifest(
             });
         }
         Step::GroupBy(step) => {
-            group_bys.push(DirectGroupByManifest {
+            collections.group_bys.push(DirectGroupByManifest {
                 id: state.allocate_group_by_id(),
                 step_id: step.id.clone(),
                 name: step.name.clone(),
@@ -557,6 +607,7 @@ mod tests {
             "simple" => include_str!("../../tests/fixtures/simple_passthrough.json"),
             "conditional" => include_str!("../../tests/fixtures/conditional_workflow.json"),
             "filter" => include_str!("../../tests/fixtures/filter_simple.json"),
+            "switch_value" => include_str!("../../tests/fixtures/switch_value_simple.json"),
             "group_by" => include_str!("../../tests/fixtures/group_by_simple.json"),
             "wait" => include_str!("../../tests/fixtures/wait_for_signal_with_callback.json"),
             other => panic!("unknown fixture {other}"),
@@ -622,6 +673,22 @@ mod tests {
         assert_eq!(filter.value["condition"]["op"], "EQ");
         assert_eq!(filter.value["value"]["valueType"], "reference");
         assert_eq!(filter.value["value"]["value"], "data.items");
+    }
+
+    #[test]
+    fn manifest_assigns_switch_id() {
+        let manifest = build_direct_workflow_manifest(&fixture("switch_value")).expect("manifest");
+
+        assert_eq!(manifest.graph.switches.len(), 1);
+        let switch = &manifest.graph.switches[0];
+        assert_eq!(switch.id, 0);
+        assert_eq!(switch.step_id, "switch");
+        assert_eq!(switch.name.as_deref(), Some("Classify Status"));
+        assert_eq!(switch.step_type, "Switch");
+        assert_eq!(switch.purpose, "switch.config");
+        assert_eq!(switch.value["value"]["valueType"], "reference");
+        assert_eq!(switch.value["value"]["value"], "data.status");
+        assert_eq!(switch.value["cases"][0]["matchType"], "EQ");
     }
 
     #[test]

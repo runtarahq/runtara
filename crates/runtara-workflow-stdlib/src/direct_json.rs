@@ -13,6 +13,7 @@ use serde::Deserialize;
 use serde_json::{Map, Value};
 
 use crate::conditions::{is_truthy, to_number, values_equal};
+use crate::switch_helpers::process_switch_output;
 use crate::template::render_template;
 
 /// Parsed direct-workflow manifest data needed by JSON stdlib calls.
@@ -21,6 +22,7 @@ pub struct DirectJsonManifest {
     mappings: BTreeMap<u32, DirectJsonMapping>,
     conditions: BTreeMap<u32, Value>,
     filters: BTreeMap<u32, DirectJsonFilter>,
+    switches: BTreeMap<u32, DirectJsonSwitch>,
     group_bys: BTreeMap<u32, DirectJsonGroupBy>,
 }
 
@@ -32,18 +34,21 @@ impl DirectJsonManifest {
         let mut mappings = BTreeMap::new();
         let mut conditions = BTreeMap::new();
         let mut filters = BTreeMap::new();
+        let mut switches = BTreeMap::new();
         let mut group_bys = BTreeMap::new();
         collect_graph_manifest(
             &manifest.graph,
             &mut mappings,
             &mut conditions,
             &mut filters,
+            &mut switches,
             &mut group_bys,
         )?;
         Ok(Self {
             mappings,
             conditions,
             filters,
+            switches,
             group_bys,
         })
     }
@@ -93,6 +98,26 @@ impl DirectJsonManifest {
         );
         serde_json::to_vec(&Value::Object(steps))
             .map_err(|err| format!("failed to serialize filter steps context: {err}"))
+    }
+
+    /// Execute a manifest value Switch config and return an updated steps context.
+    pub fn value_switch(&self, switch_id: u32, source: &[u8]) -> Result<Vec<u8>, String> {
+        let source: Value = serde_json::from_slice(source)
+            .map_err(|err| format!("failed to parse value-switch source: {err}"))?;
+        let switch = self
+            .switches
+            .get(&switch_id)
+            .ok_or_else(|| format!("unknown direct Switch id {switch_id}"))?;
+        let output = apply_value_switch(&switch.value, &source)?;
+        let steps = insert_step_output(
+            &source,
+            &switch.step_id,
+            switch.name.as_deref(),
+            "Switch",
+            output,
+        );
+        serde_json::to_vec(&Value::Object(steps))
+            .map_err(|err| format!("failed to serialize value-switch steps context: {err}"))
     }
 
     /// Execute a manifest GroupBy config and return an updated steps context.
@@ -154,6 +179,7 @@ fn collect_graph_manifest(
     mappings: &mut BTreeMap<u32, DirectJsonMapping>,
     conditions: &mut BTreeMap<u32, Value>,
     filters: &mut BTreeMap<u32, DirectJsonFilter>,
+    switches: &mut BTreeMap<u32, DirectJsonSwitch>,
     group_bys: &mut BTreeMap<u32, DirectJsonGroupBy>,
 ) -> Result<(), String> {
     for mapping in &graph.mappings {
@@ -193,6 +219,21 @@ fn collect_graph_manifest(
             return Err(format!("duplicate direct Filter id {}", filter.id));
         }
     }
+    for switch in &graph.switches {
+        if switches
+            .insert(
+                switch.id,
+                DirectJsonSwitch {
+                    step_id: switch.step_id.clone(),
+                    name: switch.name.clone(),
+                    value: switch.value.clone(),
+                },
+            )
+            .is_some()
+        {
+            return Err(format!("duplicate direct Switch id {}", switch.id));
+        }
+    }
     for group_by in &graph.group_bys {
         if group_bys
             .insert(
@@ -210,7 +251,14 @@ fn collect_graph_manifest(
     }
     for step in &graph.steps {
         for nested in &step.nested_graphs {
-            collect_graph_manifest(&nested.graph, mappings, conditions, filters, group_bys)?;
+            collect_graph_manifest(
+                &nested.graph,
+                mappings,
+                conditions,
+                filters,
+                switches,
+                group_bys,
+            )?;
         }
     }
     Ok(())
@@ -245,6 +293,134 @@ fn apply_filter(config: &Value, source: &Value) -> Result<Value, String> {
         "items": filtered,
         "count": filtered.len(),
     }))
+}
+
+fn apply_value_switch(config: &Value, source: &Value) -> Result<Value, String> {
+    let Some(switch_value) = config.get("value") else {
+        let default = config
+            .get("default")
+            .cloned()
+            .unwrap_or_else(|| Value::Object(Map::new()));
+        return Ok(process_switch_output(&default, source));
+    };
+
+    if let Some(cases) = config.get("cases").and_then(Value::as_array) {
+        for case in cases {
+            let condition = switch_case_condition(switch_value, case)?;
+            if eval_condition_expression(&condition, source)? {
+                let output = case
+                    .get("output")
+                    .ok_or_else(|| "Switch case missing output".to_string())?;
+                return Ok(process_switch_output(output, source));
+            }
+        }
+    }
+
+    let default = config
+        .get("default")
+        .cloned()
+        .unwrap_or_else(|| Value::Object(Map::new()));
+    Ok(process_switch_output(&default, source))
+}
+
+fn switch_case_condition(switch_value: &Value, case: &Value) -> Result<Value, String> {
+    let match_type = case
+        .get("matchType")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "Switch case missing matchType".to_string())?;
+    let match_value = case.get("match").cloned().unwrap_or(Value::Null);
+    let right = serde_json::json!({
+        "valueType": "immediate",
+        "value": match_value,
+    });
+
+    match match_type {
+        "EQ" if case.get("match").is_some_and(Value::is_array) => {
+            Ok(binary_condition("IN", switch_value.clone(), right))
+        }
+        "EQ" | "NE" | "GT" | "GTE" | "LT" | "LTE" | "STARTS_WITH" | "ENDS_WITH" | "CONTAINS"
+        | "IN" | "NOT_IN" => Ok(binary_condition(match_type, switch_value.clone(), right)),
+        "IS_DEFINED" | "IS_EMPTY" | "IS_NOT_EMPTY" => {
+            Ok(unary_condition(match_type, switch_value.clone()))
+        }
+        "BETWEEN" => Ok(build_between_condition(switch_value, &match_value)),
+        "RANGE" => Ok(build_range_condition(switch_value, &match_value)),
+        other => Err(format!("unsupported Switch matchType '{other}'")),
+    }
+}
+
+fn binary_condition(op: &str, left: Value, right: Value) -> Value {
+    serde_json::json!({
+        "type": "operation",
+        "op": op,
+        "arguments": [left, right],
+    })
+}
+
+fn unary_condition(op: &str, value: Value) -> Value {
+    serde_json::json!({
+        "type": "operation",
+        "op": op,
+        "arguments": [value],
+    })
+}
+
+fn value_condition(value: bool) -> Value {
+    serde_json::json!({
+        "type": "value",
+        "valueType": "immediate",
+        "value": value,
+    })
+}
+
+fn build_between_condition(switch_value: &Value, match_value: &Value) -> Value {
+    let Some(bounds) = match_value.as_array().filter(|bounds| bounds.len() >= 2) else {
+        return value_condition(false);
+    };
+
+    serde_json::json!({
+        "type": "operation",
+        "op": "AND",
+        "arguments": [
+            binary_condition(
+                "GTE",
+                switch_value.clone(),
+                serde_json::json!({ "valueType": "immediate", "value": bounds[0].clone() }),
+            ),
+            binary_condition(
+                "LTE",
+                switch_value.clone(),
+                serde_json::json!({ "valueType": "immediate", "value": bounds[1].clone() }),
+            ),
+        ],
+    })
+}
+
+fn build_range_condition(switch_value: &Value, match_value: &Value) -> Value {
+    let Some(bounds) = match_value.as_object() else {
+        return value_condition(true);
+    };
+
+    let mut conditions = Vec::new();
+    for (key, op) in [("gte", "GTE"), ("gt", "GT"), ("lte", "LTE"), ("lt", "LT")] {
+        if let Some(value) = bounds.get(key) {
+            conditions.push(binary_condition(
+                op,
+                switch_value.clone(),
+                serde_json::json!({ "valueType": "immediate", "value": value.clone() }),
+            ));
+        }
+    }
+
+    match conditions.len() {
+        0 => value_condition(true),
+        1 => conditions.remove(0),
+        _ => serde_json::json!({
+            "type": "operation",
+            "op": "AND",
+            "arguments": conditions,
+        }),
+    }
 }
 
 fn apply_group_by(config: &Value, source: &Value) -> Result<Value, String> {
@@ -740,6 +916,8 @@ struct GraphWire {
     #[serde(default)]
     filters: Vec<FilterWire>,
     #[serde(default)]
+    switches: Vec<SwitchWire>,
+    #[serde(default)]
     group_bys: Vec<GroupByWire>,
     #[serde(default)]
     steps: Vec<StepWire>,
@@ -785,6 +963,16 @@ struct FilterWire {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct SwitchWire {
+    id: u32,
+    step_id: String,
+    #[serde(default)]
+    name: Option<String>,
+    value: Value,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct GroupByWire {
     id: u32,
     step_id: String,
@@ -801,6 +989,13 @@ struct DirectJsonMapping {
 
 #[derive(Debug, Clone)]
 struct DirectJsonFilter {
+    step_id: String,
+    name: Option<String>,
+    value: Value,
+}
+
+#[derive(Debug, Clone)]
+struct DirectJsonSwitch {
     step_id: String,
     name: Option<String>,
     value: Value,
@@ -859,6 +1054,23 @@ mod tests {
                     "name": "Filter Active Items",
                     "stepType": "Filter",
                     "purpose": "filter.config",
+                    "value": config
+                }],
+                "steps": []
+            }
+        }))
+        .expect("manifest json")
+    }
+
+    fn switch_manifest(config: Value) -> Vec<u8> {
+        serde_json::to_vec(&json!({
+            "graph": {
+                "switches": [{
+                    "id": 0,
+                    "stepId": "switch",
+                    "name": "Classify Status",
+                    "stepType": "Switch",
+                    "purpose": "switch.config",
                     "value": config
                 }],
                 "steps": []
@@ -1153,6 +1365,103 @@ mod tests {
 
         assert_eq!(output["count"], json!(0));
         assert_eq!(output["items"], json!([]));
+    }
+
+    #[test]
+    fn value_switch_selects_first_matching_case() {
+        let manifest = DirectJsonManifest::parse(&switch_manifest(json!({
+            "value": { "valueType": "reference", "value": "data.status" },
+            "cases": [
+                {
+                    "matchType": "EQ",
+                    "match": "active",
+                    "output": {
+                        "bucket": { "valueType": "immediate", "value": "ready" },
+                        "echo": { "valueType": "reference", "value": "data.status" }
+                    }
+                },
+                {
+                    "matchType": "EQ",
+                    "match": ["active", "retry"],
+                    "output": { "bucket": "array-match" }
+                }
+            ],
+            "default": { "bucket": "other" }
+        })))
+        .expect("manifest");
+        let source = build_source(br#"{"status":"active"}"#, b"{}", b"{}").expect("source");
+
+        let steps = manifest.value_switch(0, &source).expect("steps context");
+        let steps: Value = serde_json::from_slice(&steps).expect("steps json");
+        let output = &steps["switch"]["outputs"];
+
+        assert_eq!(output, &json!({ "bucket": "ready", "echo": "active" }));
+        assert_eq!(steps["switch"]["stepName"], json!("Classify Status"));
+        assert_eq!(steps["switch"]["stepType"], json!("Switch"));
+    }
+
+    #[test]
+    fn value_switch_supports_array_match_and_default() {
+        let manifest = DirectJsonManifest::parse(&switch_manifest(json!({
+            "value": { "valueType": "reference", "value": "data.status" },
+            "cases": [
+                {
+                    "matchType": "EQ",
+                    "match": ["queued", "retry"],
+                    "output": { "bucket": "pending" }
+                }
+            ],
+            "default": { "bucket": "other" }
+        })))
+        .expect("manifest");
+        let queued = build_source(br#"{"status":"queued"}"#, b"{}", b"{}").expect("source");
+        let unknown = build_source(br#"{"status":"done"}"#, b"{}", b"{}").expect("source");
+
+        let queued_steps = manifest.value_switch(0, &queued).expect("queued steps");
+        let queued_steps: Value = serde_json::from_slice(&queued_steps).expect("queued json");
+        assert_eq!(
+            queued_steps["switch"]["outputs"],
+            json!({ "bucket": "pending" })
+        );
+
+        let unknown_steps = manifest.value_switch(0, &unknown).expect("unknown steps");
+        let unknown_steps: Value = serde_json::from_slice(&unknown_steps).expect("unknown json");
+        assert_eq!(
+            unknown_steps["switch"]["outputs"],
+            json!({ "bucket": "other" })
+        );
+    }
+
+    #[test]
+    fn value_switch_supports_between_and_range_cases() {
+        let manifest = DirectJsonManifest::parse(&switch_manifest(json!({
+            "value": { "valueType": "reference", "value": "data.score" },
+            "cases": [
+                {
+                    "matchType": "BETWEEN",
+                    "match": [80, 100],
+                    "output": { "grade": "high" }
+                },
+                {
+                    "matchType": "RANGE",
+                    "match": { "gte": 50, "lt": 80 },
+                    "output": { "grade": "mid" }
+                }
+            ],
+            "default": { "grade": "low" }
+        })))
+        .expect("manifest");
+
+        for (input, expected) in [
+            (br#"{"score":90}"#.as_slice(), json!({ "grade": "high" })),
+            (br#"{"score":65}"#.as_slice(), json!({ "grade": "mid" })),
+            (br#"{"score":20}"#.as_slice(), json!({ "grade": "low" })),
+        ] {
+            let source = build_source(input, b"{}", b"{}").expect("source");
+            let steps = manifest.value_switch(0, &source).expect("steps context");
+            let steps: Value = serde_json::from_slice(&steps).expect("steps json");
+            assert_eq!(steps["switch"]["outputs"], expected);
+        }
     }
 
     #[test]

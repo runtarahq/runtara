@@ -184,6 +184,16 @@ mod component {
             Err("direct stdlib process-switch is not implemented yet".to_string())
         }
 
+        fn value_switch(switch_id: u32, source: Vec<u8>) -> Result<Vec<u8>, String> {
+            MANIFEST.with(|slot| {
+                let slot = slot.borrow();
+                let manifest = slot
+                    .as_ref()
+                    .ok_or_else(|| "direct stdlib manifest was not initialized".to_string())?;
+                manifest.value_switch(switch_id, &source)
+            })
+        }
+
         fn filter(filter_id: u32, source: Vec<u8>) -> Result<Vec<u8>, String> {
             MANIFEST.with(|slot| {
                 let slot = slot.borrow();

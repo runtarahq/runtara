@@ -31,6 +31,11 @@ interface json {
         source: list<u8>,
     ) -> result<string, string>;
 
+    value-switch: func(
+        switch-id: u32,
+        source: list<u8>,
+    ) -> result<list<u8>, string>;
+
     filter: func(
         filter-id: u32,
         source: list<u8>,

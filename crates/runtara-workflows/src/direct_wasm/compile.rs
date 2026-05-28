@@ -428,6 +428,10 @@ enum DirectRunPlan {
         filter_id: u32,
         next_plan: Box<DirectRunPlan>,
     },
+    SwitchValue {
+        switch_id: u32,
+        next_plan: Box<DirectRunPlan>,
+    },
     GroupBy {
         group_id: u32,
         next_plan: Box<DirectRunPlan>,
@@ -525,7 +529,7 @@ fn direct_run_plan(manifest: &DirectWorkflowManifest) -> Result<DirectRunPlan, D
         })?;
 
     match entry.step_type.as_str() {
-        "Finish" | "Filter" | "GroupBy" | "Conditional" => step_run_plan(
+        "Finish" | "Filter" | "Switch" | "GroupBy" | "Conditional" => step_run_plan(
             &manifest.graph,
             &manifest.graph.entry_point,
             &mut Vec::new(),
@@ -567,6 +571,19 @@ fn step_run_plan(
 
             Ok(DirectRunPlan::Filter {
                 filter_id,
+                next_plan: Box::new(next_plan),
+            })
+        }
+        "Switch" => {
+            let switch_id = switch_id(graph, step_id)?;
+            let next_step = normal_target(graph, step_id)?.to_string();
+
+            stack.push(step_id.to_string());
+            let next_plan = step_run_plan(graph, &next_step, stack)?;
+            stack.pop();
+
+            Ok(DirectRunPlan::SwitchValue {
+                switch_id,
                 next_plan: Box::new(next_plan),
             })
         }
@@ -670,6 +687,27 @@ fn filter_id(graph: &DirectGraphManifest, step_id: &str) -> Result<u32, DirectCo
         .map(|filter| filter.id)
         .ok_or_else(|| {
             DirectCompileError::Component(format!("missing Filter config for step '{step_id}'"))
+        })
+}
+
+fn switch_id(graph: &DirectGraphManifest, step_id: &str) -> Result<u32, DirectCompileError> {
+    if !graph
+        .steps
+        .iter()
+        .any(|step| step.id == step_id && step.step_type == "Switch")
+    {
+        return Err(DirectCompileError::Component(format!(
+            "direct step '{step_id}' is not a Switch step"
+        )));
+    }
+
+    graph
+        .switches
+        .iter()
+        .find(|switch| switch.step_id == step_id && switch.purpose == "switch.config")
+        .map(|switch| switch.id)
+        .ok_or_else(|| {
+            DirectCompileError::Component(format!("missing Switch config for step '{step_id}'"))
         })
 }
 
@@ -920,6 +958,7 @@ struct DirectCoreImportIndices {
     stdlib_apply_mapping: Option<u32>,
     stdlib_eval_condition: Option<u32>,
     stdlib_filter: Option<u32>,
+    stdlib_value_switch: Option<u32>,
     stdlib_group_by: Option<u32>,
 }
 
@@ -942,6 +981,7 @@ impl DirectCoreImportIndices {
                 "stdlib.eval-condition",
             )?,
             stdlib_filter: require_import(self.stdlib_filter, "stdlib.filter")?,
+            stdlib_value_switch: require_import(self.stdlib_value_switch, "stdlib.value-switch")?,
             stdlib_group_by: require_import(self.stdlib_group_by, "stdlib.group-by")?,
         })
     }
@@ -956,6 +996,7 @@ struct DirectCoreFunctionIndices {
     stdlib_apply_mapping: u32,
     stdlib_eval_condition: u32,
     stdlib_filter: u32,
+    stdlib_value_switch: u32,
     stdlib_group_by: u32,
 }
 
@@ -1002,6 +1043,8 @@ fn import_core_function(
         import_indices.stdlib_eval_condition = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "filter") {
         import_indices.stdlib_filter = Some(function_index);
+    } else if is_stdlib_import(resolve, interface, function, "value-switch") {
+        import_indices.stdlib_value_switch = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "group-by") {
         import_indices.stdlib_group_by = Some(function_index);
     }
@@ -1251,6 +1294,27 @@ fn emit_run_plan_mapping(
                 variables,
                 indices.stdlib_filter,
                 *filter_id,
+                next_plan,
+                data_ptr_local,
+                data_len_local,
+                steps_ptr_local,
+                steps_len_local,
+                source_ptr_local,
+                source_len_local,
+                output_ptr_local,
+                output_len_local,
+            );
+        }
+        DirectRunPlan::SwitchValue {
+            switch_id,
+            next_plan,
+        } => {
+            emit_step_context_plan(
+                body,
+                indices,
+                variables,
+                indices.stdlib_value_switch,
+                *switch_id,
                 next_plan,
                 data_ptr_local,
                 data_len_local,
@@ -1635,6 +1699,7 @@ mod tests {
                 include_str!("../../tests/fixtures/conditional_nested.json")
             }
             "filter" => include_str!("../../tests/fixtures/filter_simple.json"),
+            "switch_value" => include_str!("../../tests/fixtures/switch_value_simple.json"),
             "group_by" => include_str!("../../tests/fixtures/group_by_simple.json"),
             "transform" => include_str!("../../tests/fixtures/transform_workflow.json"),
             other => panic!("unknown fixture {other}"),
@@ -1650,6 +1715,9 @@ mod tests {
         match plan {
             DirectRunPlan::Finish { mapping_id } => mapping_ids.push(*mapping_id),
             DirectRunPlan::Filter { next_plan, .. } => {
+                collect_run_plan_ids(next_plan, condition_ids, mapping_ids);
+            }
+            DirectRunPlan::SwitchValue { next_plan, .. } => {
                 collect_run_plan_ids(next_plan, condition_ids, mapping_ids);
             }
             DirectRunPlan::GroupBy { next_plan, .. } => {
@@ -1976,6 +2044,31 @@ mod tests {
     }
 
     #[test]
+    fn direct_compile_supports_value_switch_finish_graph() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let result = compile_direct_workflow(DirectCompilationInput {
+            workflow_id: "switch-value".to_string(),
+            version: 1,
+            execution_graph: fixture("switch_value"),
+            output_dir: temp.path().to_path_buf(),
+        })
+        .expect("direct value Switch compile should succeed");
+
+        let wasm = fs::read(&result.wasm_path).expect("wasm");
+        Validator::new()
+            .validate_all(&wasm)
+            .expect("direct value Switch artifact should validate");
+        assert!(result.support_report.supported);
+        assert_eq!(result.support_report.unsupported, vec![]);
+
+        let manifest: DirectWorkflowManifest =
+            serde_json::from_slice(&fs::read(&result.manifest_path).expect("manifest"))
+                .expect("manifest json");
+        assert_eq!(manifest.graph.switches.len(), 1);
+        assert_eq!(manifest.graph.mappings.len(), 1);
+    }
+
+    #[test]
     fn direct_core_run_lowers_finish_mapping_through_stdlib() {
         let graph = fixture("simple");
         let manifest = build_direct_workflow_manifest(&graph).expect("manifest");
@@ -2043,6 +2136,18 @@ mod tests {
                 "runtara:workflow-stdlib/json",
                 "cm32p2|runtara:workflow-stdlib/json@0.1",
                 "filter",
+                vec![
+                    WasmType::I32,
+                    WasmType::Pointer,
+                    WasmType::Length,
+                    WasmType::Pointer,
+                ],
+            ),
+            (
+                "stdlib.value-switch",
+                "runtara:workflow-stdlib/json",
+                "cm32p2|runtara:workflow-stdlib/json@0.1",
+                "value-switch",
                 vec![
                     WasmType::I32,
                     WasmType::Pointer,
@@ -2646,6 +2751,117 @@ mod tests {
             "Filter run should apply the terminal Finish mapping once"
         );
         assert!(saw_filter_id, "Filter id should be passed to stdlib");
+        assert!(
+            saw_mapping_id,
+            "Finish mapping id should be passed to stdlib"
+        );
+    }
+
+    #[test]
+    fn direct_core_run_lowers_value_switch_finish_through_stdlib() {
+        let graph = fixture("switch_value");
+        let manifest = build_direct_workflow_manifest(&graph).expect("manifest");
+        let manifest_json = manifest.to_canonical_json().expect("manifest json");
+        let core_config = DirectCoreConfig::new(&manifest, &manifest_json).expect("core config");
+        let DirectRunPlan::SwitchValue {
+            switch_id,
+            next_plan,
+        } = &core_config.run_plan
+        else {
+            panic!("expected value Switch run plan");
+        };
+        let DirectRunPlan::Finish { mapping_id } = next_plan.as_ref() else {
+            panic!("expected value Switch to flow into Finish");
+        };
+
+        let (resolve, world) = build_direct_component_resolve().expect("resolve");
+        let core = emit_direct_core_module(&resolve, world, &core_config).expect("core module");
+        Validator::new()
+            .validate_all(&core)
+            .expect("value Switch core module validates");
+
+        let mut next_function_index = 0;
+        let mut build_source_index = None;
+        let mut value_switch_index = None;
+        let mut apply_mapping_index = None;
+        let mut saw_switch_id = false;
+        let mut saw_mapping_id = false;
+        let mut run_calls = Vec::new();
+        let mut code_body_index = 0;
+
+        for payload in Parser::new(0).parse_all(&core) {
+            match payload.expect("core wasm payload") {
+                Payload::ImportSection(reader) => {
+                    for import in reader.into_imports() {
+                        let import = import.expect("core import");
+                        if matches!(import.ty, TypeRef::Func(_)) {
+                            match (import.module, import.name) {
+                                ("cm32p2|runtara:workflow-stdlib/json@0.1", "build-source") => {
+                                    build_source_index = Some(next_function_index)
+                                }
+                                ("cm32p2|runtara:workflow-stdlib/json@0.1", "value-switch") => {
+                                    value_switch_index = Some(next_function_index)
+                                }
+                                ("cm32p2|runtara:workflow-stdlib/json@0.1", "apply-mapping") => {
+                                    apply_mapping_index = Some(next_function_index)
+                                }
+                                _ => {}
+                            }
+                            next_function_index += 1;
+                        }
+                    }
+                }
+                Payload::CodeSectionEntry(body) => {
+                    if code_body_index == 0 {
+                        for operator in body.get_operators_reader().expect("operators") {
+                            match operator.expect("operator") {
+                                Operator::Call { function_index } => run_calls.push(function_index),
+                                Operator::I32Const { value } => {
+                                    if value == *switch_id as i32 {
+                                        saw_switch_id = true;
+                                    }
+                                    if value == *mapping_id as i32 {
+                                        saw_mapping_id = true;
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                    code_body_index += 1;
+                }
+                _ => {}
+            }
+        }
+
+        let build_source_index = build_source_index.expect("build-source import");
+        let value_switch_index = value_switch_index.expect("value-switch import");
+        let apply_mapping_index = apply_mapping_index.expect("apply-mapping import");
+        assert_eq!(
+            run_calls
+                .iter()
+                .filter(|&&index| index == build_source_index)
+                .count(),
+            2,
+            "value Switch run should rebuild source after updating steps context"
+        );
+        assert_eq!(
+            run_calls
+                .iter()
+                .filter(|&&index| index == value_switch_index)
+                .count(),
+            1,
+            "value Switch run should call the stdlib value-switch helper once"
+        );
+        assert_eq!(
+            run_calls
+                .iter()
+                .filter(|&&index| index == apply_mapping_index)
+                .count(),
+            1,
+            "value Switch run should apply the terminal Finish mapping once"
+        );
+        assert!(saw_switch_id, "Switch id should be passed to stdlib");
         assert!(
             saw_mapping_id,
             "Finish mapping id should be passed to stdlib"

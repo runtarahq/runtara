@@ -22,6 +22,7 @@ const SIMPLE_PASSTHROUGH: &str = include_str!("fixtures/simple_passthrough.json"
 const CONDITIONAL_WORKFLOW: &str = include_str!("fixtures/conditional_workflow.json");
 const CONDITIONAL_NESTED: &str = include_str!("fixtures/conditional_nested.json");
 const FILTER_SIMPLE: &str = include_str!("fixtures/filter_simple.json");
+const SWITCH_VALUE_SIMPLE: &str = include_str!("fixtures/switch_value_simple.json");
 const GROUP_BY_SIMPLE: &str = include_str!("fixtures/group_by_simple.json");
 
 #[derive(Debug)]
@@ -491,6 +492,28 @@ fn direct_wasm_execute_filter_finish_reports_completion() {
                 { "id": 3, "status": "active" }
             ],
             "count": 2
+        })
+    );
+}
+
+#[test]
+fn direct_wasm_execute_value_switch_finish_reports_completion() {
+    let Some(components_dir) = direct_e2e_components_dir() else {
+        return;
+    };
+
+    let output = run_direct_workflow(
+        &components_dir,
+        "direct-wasm-execute-value-switch",
+        SWITCH_VALUE_SIMPLE,
+        br#"{"status":"active"}"#,
+    );
+
+    assert_eq!(
+        output,
+        serde_json::json!({
+            "bucket": "ready",
+            "echo": "active"
         })
     );
 }

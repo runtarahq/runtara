@@ -79,7 +79,7 @@ fn collect_graph_support(
                     .map(step_type_name)
                     .map(str::to_string),
                 feature: "execution-plan-routing".to_string(),
-                reason: "direct emitter currently lowers only a single entry Finish step, pure Conditional true/false trees, and normal Filter/GroupBy edges ending in Finish leaves".to_string(),
+                reason: "direct emitter currently lowers only a single entry Finish step, pure Conditional true/false trees, and normal Filter/Switch/GroupBy edges ending in Finish leaves".to_string(),
             });
         }
     }
@@ -219,6 +219,14 @@ fn supports_direct_control_step(
         Step::Filter(_) => {
             supports_single_normal_edge_step(graph, step_id, reachable, used_edges, stack)
         }
+        Step::Switch(step)
+            if step
+                .config
+                .as_ref()
+                .is_none_or(|config| !config.is_routing()) =>
+        {
+            supports_single_normal_edge_step(graph, step_id, reachable, used_edges, stack)
+        }
         Step::GroupBy(_) => {
             supports_single_normal_edge_step(graph, step_id, reachable, used_edges, stack)
         }
@@ -296,6 +304,22 @@ fn collect_step_support(
                 });
             }
         }
+        Step::Switch(step)
+            if direct_control
+                && step
+                    .config
+                    .as_ref()
+                    .is_none_or(|config| !config.is_routing()) =>
+        {
+            if step.breakpoint.unwrap_or(false) {
+                unsupported.push(UnsupportedWorkflowFeature {
+                    step_id: Some(step.id.clone()),
+                    step_type: Some("Switch".to_string()),
+                    feature: "switch-breakpoint".to_string(),
+                    reason: "Switch breakpoints require direct debug event emission".to_string(),
+                });
+            }
+        }
         Step::GroupBy(step) if direct_control => {
             if step.breakpoint.unwrap_or(false) {
                 unsupported.push(UnsupportedWorkflowFeature {
@@ -315,10 +339,23 @@ fn collect_step_support(
             );
             collect_graph_support(&split.subgraph, unsupported);
         }
+        Step::Switch(step)
+            if step
+                .config
+                .as_ref()
+                .is_some_and(|config| config.is_routing()) =>
+        {
+            unsupported.push(UnsupportedWorkflowFeature {
+                step_id: Some(step.id.clone()),
+                step_type: Some("Switch".to_string()),
+                feature: "switch-routing".to_string(),
+                reason: "Routing Switch steps require direct route dispatch lowering".to_string(),
+            });
+        }
         Step::Switch(_) => unsupported_step(
             step,
             "switch",
-            "Switch steps require stdlib switch routing",
+            "Switch steps require value-switch stdlib lowering",
             unsupported,
         ),
         Step::EmbedWorkflow(_) => unsupported_step(
@@ -450,6 +487,7 @@ mod tests {
                 include_str!("../../tests/fixtures/conditional_nested.json")
             }
             "filter" => include_str!("../../tests/fixtures/filter_simple.json"),
+            "switch_value" => include_str!("../../tests/fixtures/switch_value_simple.json"),
             "group_by" => include_str!("../../tests/fixtures/group_by_simple.json"),
             "transform" => include_str!("../../tests/fixtures/transform_workflow.json"),
             "wait" => include_str!("../../tests/fixtures/wait_for_signal_with_callback.json"),
@@ -597,6 +635,69 @@ mod tests {
 
         assert!(report.supported, "{:?}", report.unsupported);
         assert!(report.unsupported.is_empty());
+    }
+
+    #[test]
+    fn value_switch_finish_normal_edge_is_supported() {
+        let report = analyze_direct_wasm_support(&fixture("switch_value"));
+
+        assert!(report.supported, "{:?}", report.unsupported);
+        assert!(report.unsupported.is_empty());
+    }
+
+    #[test]
+    fn value_switch_breakpoints_are_rejected_until_debug_events_are_lowered() {
+        let mut graph = fixture("switch_value");
+        let Some(Step::Switch(switch)) = graph.steps.get_mut("switch") else {
+            panic!("expected Switch fixture step");
+        };
+        switch.breakpoint = Some(true);
+
+        let report = analyze_direct_wasm_support(&graph);
+
+        assert!(!report.supported);
+        assert!(report.unsupported.iter().any(|feature| {
+            feature.step_id.as_deref() == Some("switch") && feature.feature == "switch-breakpoint"
+        }));
+    }
+
+    #[test]
+    fn routing_switch_is_rejected_until_route_dispatch_is_lowered() {
+        let graph = serde_json::from_value::<ExecutionGraph>(serde_json::json!({
+            "steps": {
+                "switch": {
+                    "stepType": "Switch",
+                    "id": "switch",
+                    "config": {
+                        "value": { "valueType": "reference", "value": "data.status" },
+                        "cases": [{
+                            "matchType": "EQ",
+                            "match": "active",
+                            "output": { "bucket": "active" },
+                            "route": "active"
+                        }],
+                        "default": { "bucket": "other" }
+                    }
+                },
+                "finish": { "stepType": "Finish", "id": "finish" }
+            },
+            "entryPoint": "switch",
+            "executionPlan": [
+                { "fromStep": "switch", "toStep": "finish", "label": "active" },
+                { "fromStep": "switch", "toStep": "finish", "label": "default" }
+            ],
+            "variables": {},
+            "inputSchema": {},
+            "outputSchema": {}
+        }))
+        .expect("graph parses");
+
+        let report = analyze_direct_wasm_support(&graph);
+
+        assert!(!report.supported);
+        assert!(report.unsupported.iter().any(|feature| {
+            feature.step_id.as_deref() == Some("switch") && feature.feature == "switch-routing"
+        }));
     }
 
     #[test]
