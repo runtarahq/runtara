@@ -17,6 +17,7 @@ use wasm_encoder::{
     Module, TypeSection, ValType,
 };
 
+use super::component::{DirectComponentArtifacts, emit_direct_component_artifacts};
 use super::manifest::{
     DIRECT_WORKFLOW_MANIFEST_VERSION, DirectManifestError, DirectWorkflowManifest,
     build_direct_workflow_manifest,
@@ -61,6 +62,10 @@ pub struct DirectCompilationResult {
     pub manifest_path: PathBuf,
     /// Path to the emitted support-report sidecar.
     pub support_report_path: PathBuf,
+    /// Path to the generated component world WIT.
+    pub world_wit_path: PathBuf,
+    /// Path to the generated static composition script.
+    pub wac_path: PathBuf,
     /// Path to the per-workflow direct build directory.
     pub build_dir: PathBuf,
     /// Size of the emitted Wasm artifact in bytes.
@@ -71,6 +76,8 @@ pub struct DirectCompilationResult {
     pub manifest_checksum: String,
     /// Deterministic support report produced before emission.
     pub support_report: DirectWorkflowSupportReport,
+    /// Component-facing scaffolding emitted beside the direct artifact.
+    pub component_artifacts: DirectComponentArtifacts,
 }
 
 /// Errors returned by the opt-in direct compiler.
@@ -152,6 +159,7 @@ pub fn compile_direct_workflow(
     let manifest_json = manifest.to_canonical_json()?;
     let support_json = serde_json::to_vec(&support_report)?;
     let wasm = emit_finish_only_artifact(&manifest, &manifest_json, &support_json)?;
+    let component_artifacts = emit_direct_component_artifacts(&manifest.feature_summary.agent_ids);
 
     let build_dir = input.output_dir.join(format!(
         "{}-v{}-direct",
@@ -159,24 +167,32 @@ pub fn compile_direct_workflow(
         input.version
     ));
     fs::create_dir_all(&build_dir)?;
+    fs::create_dir_all(build_dir.join("wit"))?;
 
     let wasm_path = build_dir.join("workflow.wasm");
     let manifest_path = build_dir.join("manifest.json");
     let support_report_path = build_dir.join("support-report.json");
+    let world_wit_path = build_dir.join("wit/world.wit");
+    let wac_path = build_dir.join("workflow.wac");
 
     fs::write(&wasm_path, &wasm)?;
     fs::write(&manifest_path, &manifest_json)?;
     fs::write(&support_report_path, &support_json)?;
+    fs::write(&world_wit_path, &component_artifacts.world_wit)?;
+    fs::write(&wac_path, &component_artifacts.wac_source)?;
 
     Ok(DirectCompilationResult {
         wasm_path,
         manifest_path,
         support_report_path,
+        world_wit_path,
+        wac_path,
         build_dir,
         wasm_size: wasm.len(),
         wasm_checksum: sha256_hex(&wasm),
         manifest_checksum: manifest.checksum().to_string(),
         support_report,
+        component_artifacts,
     })
 }
 
@@ -335,6 +351,8 @@ mod tests {
         assert_eq!(result.manifest_checksum.len(), 64);
         assert!(result.manifest_path.exists());
         assert!(result.support_report_path.exists());
+        assert!(result.world_wit_path.exists());
+        assert!(result.wac_path.exists());
         assert!(!result.build_dir.join("Cargo.toml").exists());
         assert!(!result.build_dir.join("src/lib.rs").exists());
     }
@@ -389,6 +407,31 @@ mod tests {
         assert!(saw_export, "direct ABI version export should exist");
         assert!(saw_manifest, "manifest custom section should exist");
         assert!(saw_support, "support-report custom section should exist");
+    }
+
+    #[test]
+    fn direct_compile_writes_component_scaffold_sidecars() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let result = compile_direct_workflow(DirectCompilationInput {
+            workflow_id: "simple".to_string(),
+            version: 1,
+            execution_graph: fixture("simple"),
+            output_dir: temp.path().to_path_buf(),
+        })
+        .expect("direct compile should succeed");
+
+        let world_wit = fs::read_to_string(&result.world_wit_path).expect("world wit");
+        let wac = fs::read_to_string(&result.wac_path).expect("wac");
+
+        assert_eq!(world_wit, result.component_artifacts.world_wit);
+        assert_eq!(wac, result.component_artifacts.wac_source);
+        assert!(world_wit.contains("import runtara:workflow-stdlib/json@0.1.0;"));
+        assert!(world_wit.contains("import runtara:workflow-runtime/runtime@0.1.0;"));
+        assert!(world_wit.contains("include wasi:cli/command@0.2.3;"));
+        assert!(wac.contains("new runtara:workflow-stdlib"));
+        assert!(wac.contains("new runtara:workflow-runtime"));
+        assert!(wac.contains("new runtara:workflow-logic"));
+        assert!(wac.contains("export wf...;"));
     }
 
     #[test]

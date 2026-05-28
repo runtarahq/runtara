@@ -7,6 +7,8 @@
 
 #[cfg(feature = "compiler")]
 pub mod compile;
+#[cfg(feature = "compiler")]
+pub mod component;
 pub mod manifest;
 pub mod support;
 
@@ -15,6 +17,10 @@ pub use compile::{
     DIRECT_WORKFLOW_ABI_SECTION, DIRECT_WORKFLOW_ABI_VERSION, DIRECT_WORKFLOW_MANIFEST_SECTION,
     DIRECT_WORKFLOW_SUPPORT_SECTION, DirectCompilationInput, DirectCompilationResult,
     DirectCompileError, compile_direct_workflow,
+};
+#[cfg(feature = "compiler")]
+pub use component::{
+    DIRECT_WORKFLOW_LOGIC_PACKAGE, DirectComponentArtifacts, emit_direct_component_artifacts,
 };
 pub use manifest::{
     DIRECT_WORKFLOW_MANIFEST_VERSION, DirectEdgeManifest, DirectGraphManifest, DirectManifestError,
