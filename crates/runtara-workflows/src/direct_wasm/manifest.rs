@@ -66,6 +66,9 @@ pub struct DirectGraphManifest {
     /// Mapping definitions addressable by generated direct Wasm.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mappings: Vec<DirectMappingManifest>,
+    /// Condition definitions addressable by generated direct Wasm.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub conditions: Vec<DirectConditionManifest>,
     /// Execution-plan edges in deterministic routing order.
     pub edges: Vec<DirectEdgeManifest>,
 }
@@ -111,6 +114,22 @@ pub struct DirectMappingManifest {
     /// Mapping role within the step, for example `finish.inputMapping`.
     pub purpose: String,
     /// Canonical JSON serialization of the DSL mapping.
+    pub value: serde_json::Value,
+}
+
+/// Deterministic condition definition referenced by direct-emitted Wasm.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DirectConditionManifest {
+    /// Manifest-wide condition identifier.
+    pub id: u32,
+    /// Step or edge source that owns this condition.
+    pub owner_id: String,
+    /// Owner type, for example `Conditional` or `Edge`.
+    pub owner_type: String,
+    /// Condition role, for example `conditional.condition`.
+    pub purpose: String,
+    /// Canonical JSON serialization of the DSL condition expression.
     pub value: serde_json::Value,
 }
 
@@ -177,12 +196,19 @@ pub fn build_direct_workflow_manifest(
 #[derive(Debug, Default)]
 struct DirectManifestBuildState {
     next_mapping_id: u32,
+    next_condition_id: u32,
 }
 
 impl DirectManifestBuildState {
     fn allocate_mapping_id(&mut self) -> u32 {
         let id = self.next_mapping_id;
         self.next_mapping_id += 1;
+        id
+    }
+
+    fn allocate_condition_id(&mut self) -> u32 {
+        let id = self.next_condition_id;
+        self.next_condition_id += 1;
         id
     }
 }
@@ -197,12 +223,14 @@ fn graph_manifest(
     step_values.sort_by(|left, right| step_id(left).cmp(step_id(right)));
 
     let mut mappings = Vec::new();
+    let mut conditions = Vec::new();
     let steps = step_values
         .into_iter()
-        .map(|step| step_manifest(step, durable, state, &mut mappings))
+        .map(|step| step_manifest(step, durable, state, &mut mappings, &mut conditions))
         .collect::<Result<Vec<_>, _>>()?;
 
     mappings.sort_by(|left, right| left.id.cmp(&right.id));
+    conditions.sort_by(|left, right| left.id.cmp(&right.id));
 
     let mut edges = graph
         .execution_plan
@@ -221,6 +249,7 @@ fn graph_manifest(
         output_schema: canonical_json(&graph.output_schema)?,
         steps,
         mappings,
+        conditions,
         edges,
     })
 }
@@ -230,6 +259,7 @@ fn step_manifest(
     inherited_durable: bool,
     state: &mut DirectManifestBuildState,
     mappings: &mut Vec<DirectMappingManifest>,
+    conditions: &mut Vec<DirectConditionManifest>,
 ) -> Result<DirectStepManifest, DirectManifestError> {
     let mut nested_graphs = Vec::new();
     match step {
@@ -246,6 +276,15 @@ fn step_manifest(
                 step_type: "Finish".to_string(),
                 purpose: "finish.inputMapping".to_string(),
                 value,
+            });
+        }
+        Step::Conditional(step) => {
+            conditions.push(DirectConditionManifest {
+                id: state.allocate_condition_id(),
+                owner_id: step.id.clone(),
+                owner_type: "Conditional".to_string(),
+                purpose: "conditional.condition".to_string(),
+                value: canonical_json(&step.condition)?,
             });
         }
         Step::Split(step) => {
@@ -420,6 +459,7 @@ mod tests {
     fn fixture(name: &str) -> ExecutionGraph {
         let json = match name {
             "simple" => include_str!("../../tests/fixtures/simple_passthrough.json"),
+            "conditional" => include_str!("../../tests/fixtures/conditional_workflow.json"),
             "wait" => include_str!("../../tests/fixtures/wait_for_signal_with_callback.json"),
             other => panic!("unknown fixture {other}"),
         };
@@ -454,6 +494,20 @@ mod tests {
         assert_eq!(mapping.purpose, "finish.inputMapping");
         assert_eq!(mapping.value["result"]["valueType"], "reference");
         assert_eq!(mapping.value["result"]["value"], "data.input");
+    }
+
+    #[test]
+    fn manifest_assigns_conditional_condition_id() {
+        let manifest = build_direct_workflow_manifest(&fixture("conditional")).expect("manifest");
+
+        assert_eq!(manifest.graph.conditions.len(), 1);
+        let condition = &manifest.graph.conditions[0];
+        assert_eq!(condition.id, 0);
+        assert_eq!(condition.owner_id, "check");
+        assert_eq!(condition.owner_type, "Conditional");
+        assert_eq!(condition.purpose, "conditional.condition");
+        assert_eq!(condition.value["type"], "operation");
+        assert_eq!(condition.value["op"], "EQ");
     }
 
     #[test]

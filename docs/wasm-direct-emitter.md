@@ -81,6 +81,12 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   fixture shapes: data passthrough, dotted `outputs.*` unwrap, templates,
   composites, variables, step references, type hints, and defaults for missing
   or `null` references.
+- `direct_wasm::manifest` now assigns manifest-wide condition IDs for
+  `Conditional.condition` expressions, and `runtara-workflow-stdlib::direct_json`
+  implements `eval-condition` for the current generated-code condition contract,
+  including logical operators, comparisons, equality, string/array operators,
+  `LENGTH`, emptiness checks, truthy value expressions, and server-side-only
+  operators falling back to `false`.
 
 ## Final Goal
 
@@ -970,7 +976,10 @@ Current status:
 - Finish mapping parity fixtures now compare direct stdlib output against the
   current Rust-generated mapping contract and cover the default-on-null
   behavior that direct stdlib must preserve.
-- Remaining work: broaden graph lowering beyond the single-entry Finish shape.
+- Conditional condition IDs are now in the manifest and the direct stdlib
+  component can evaluate those conditions through the checked WIT surface.
+- Remaining work: lower direct Wasm branching for `Conditional` edges and then
+  broaden graph lowering beyond the single-entry Finish shape.
 
 Implementation steps:
 

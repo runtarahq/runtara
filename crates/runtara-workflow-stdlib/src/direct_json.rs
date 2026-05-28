@@ -12,12 +12,14 @@ use std::collections::BTreeMap;
 use serde::Deserialize;
 use serde_json::{Map, Value};
 
+use crate::conditions::{is_truthy, to_number, values_equal};
 use crate::template::render_template;
 
 /// Parsed direct-workflow manifest data needed by JSON stdlib calls.
 #[derive(Debug, Clone)]
 pub struct DirectJsonManifest {
     mappings: BTreeMap<u32, DirectJsonMapping>,
+    conditions: BTreeMap<u32, Value>,
 }
 
 impl DirectJsonManifest {
@@ -26,8 +28,12 @@ impl DirectJsonManifest {
         let manifest: ManifestWire = serde_json::from_slice(bytes)
             .map_err(|err| format!("failed to parse direct manifest: {err}"))?;
         let mut mappings = BTreeMap::new();
-        collect_graph_mappings(&manifest.graph, &mut mappings)?;
-        Ok(Self { mappings })
+        let mut conditions = BTreeMap::new();
+        collect_graph_manifest(&manifest.graph, &mut mappings, &mut conditions)?;
+        Ok(Self {
+            mappings,
+            conditions,
+        })
     }
 
     /// Apply a manifest mapping to a source JSON envelope.
@@ -44,6 +50,17 @@ impl DirectJsonManifest {
         }
         serde_json::to_vec(&output)
             .map_err(|err| format!("failed to serialize mapping output: {err}"))
+    }
+
+    /// Evaluate a manifest condition against a source JSON envelope.
+    pub fn eval_condition(&self, condition_id: u32, source: &[u8]) -> Result<bool, String> {
+        let source: Value = serde_json::from_slice(source)
+            .map_err(|err| format!("failed to parse condition source: {err}"))?;
+        let condition = self
+            .conditions
+            .get(&condition_id)
+            .ok_or_else(|| format!("unknown direct condition id {condition_id}"))?;
+        eval_condition_expression(condition, &source)
     }
 }
 
@@ -80,9 +97,10 @@ pub fn build_source(data: &[u8], variables: &[u8], steps: &[u8]) -> Result<Vec<u
         .map_err(|err| format!("failed to serialize source: {err}"))
 }
 
-fn collect_graph_mappings(
+fn collect_graph_manifest(
     graph: &GraphWire,
     mappings: &mut BTreeMap<u32, DirectJsonMapping>,
+    conditions: &mut BTreeMap<u32, Value>,
 ) -> Result<(), String> {
     for mapping in &graph.mappings {
         if mappings
@@ -98,12 +116,228 @@ fn collect_graph_mappings(
             return Err(format!("duplicate direct mapping id {}", mapping.id));
         }
     }
+    for condition in &graph.conditions {
+        if conditions
+            .insert(condition.id, condition.value.clone())
+            .is_some()
+        {
+            return Err(format!("duplicate direct condition id {}", condition.id));
+        }
+    }
     for step in &graph.steps {
         for nested in &step.nested_graphs {
-            collect_graph_mappings(&nested.graph, mappings)?;
+            collect_graph_manifest(&nested.graph, mappings, conditions)?;
         }
     }
     Ok(())
+}
+
+fn eval_condition_expression(expr: &Value, source: &Value) -> Result<bool, String> {
+    if is_condition_operation(expr) {
+        eval_condition_operation(expr, source)
+    } else {
+        eval_condition_value(expr, source).map(|value| is_truthy(&value))
+    }
+}
+
+fn is_condition_operation(expr: &Value) -> bool {
+    expr.get("op").is_some()
+        || expr
+            .get("type")
+            .and_then(Value::as_str)
+            .is_some_and(|value| value == "operation")
+}
+
+fn eval_condition_operation(expr: &Value, source: &Value) -> Result<bool, String> {
+    let op = expr
+        .get("op")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "condition operation missing op".to_string())?;
+    let args = expr
+        .get("arguments")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "condition operation missing arguments".to_string())?;
+
+    match op {
+        "AND" => args.iter().try_fold(true, |acc, arg| {
+            if !acc {
+                Ok(false)
+            } else {
+                eval_condition_argument_as_bool(arg, source)
+            }
+        }),
+        "OR" => args.iter().try_fold(false, |acc, arg| {
+            if acc {
+                Ok(true)
+            } else {
+                eval_condition_argument_as_bool(arg, source)
+            }
+        }),
+        "NOT" => args
+            .first()
+            .map(|arg| eval_condition_argument_as_bool(arg, source).map(|value| !value))
+            .unwrap_or(Ok(true)),
+        "GT" | "GTE" | "LT" | "LTE" => eval_comparison(op, args, source),
+        "EQ" | "NE" => eval_equality(op, args, source),
+        "STARTS_WITH" | "ENDS_WITH" => eval_string_match(op, args, source),
+        "CONTAINS" | "IN" | "NOT_IN" => eval_array_match(op, args, source),
+        "LENGTH" => eval_length_as_value(args, source).map(|value| {
+            value
+                .as_i64()
+                .or_else(|| value.as_u64().map(|value| value as i64))
+                .unwrap_or(0)
+                > 0
+        }),
+        "IS_DEFINED" => args
+            .first()
+            .map(|arg| eval_condition_argument_as_value(arg, source).map(|value| !value.is_null()))
+            .unwrap_or(Ok(false)),
+        "IS_EMPTY" => args
+            .first()
+            .map(|arg| {
+                eval_condition_argument_as_value(arg, source).map(|value| match value {
+                    Value::Array(value) => value.is_empty(),
+                    Value::String(value) => value.is_empty(),
+                    Value::Object(value) => value.is_empty(),
+                    Value::Null => true,
+                    _ => false,
+                })
+            })
+            .unwrap_or(Ok(true)),
+        "IS_NOT_EMPTY" => args
+            .first()
+            .map(|arg| {
+                eval_condition_argument_as_value(arg, source).map(|value| match value {
+                    Value::Array(value) => !value.is_empty(),
+                    Value::String(value) => !value.is_empty(),
+                    Value::Object(value) => !value.is_empty(),
+                    Value::Null => false,
+                    _ => true,
+                })
+            })
+            .unwrap_or(Ok(false)),
+        "SIMILARITY_GTE" | "MATCH" | "COSINE_DISTANCE_LTE" | "L2_DISTANCE_LTE" => Ok(false),
+        other => Err(format!("unsupported condition operator '{other}'")),
+    }
+}
+
+fn eval_condition_argument_as_bool(arg: &Value, source: &Value) -> Result<bool, String> {
+    if is_condition_operation(arg) {
+        eval_condition_expression(arg, source)
+    } else {
+        eval_condition_value(arg, source).map(|value| is_truthy(&value))
+    }
+}
+
+fn eval_condition_argument_as_value(arg: &Value, source: &Value) -> Result<Value, String> {
+    if is_condition_operation(arg) {
+        if arg.get("op").and_then(Value::as_str) == Some("LENGTH") {
+            let args = arg
+                .get("arguments")
+                .and_then(Value::as_array)
+                .ok_or_else(|| "LENGTH condition missing arguments".to_string())?;
+            eval_length_as_value(args, source)
+        } else {
+            eval_condition_expression(arg, source).map(Value::Bool)
+        }
+    } else {
+        eval_condition_value(arg, source)
+    }
+}
+
+fn eval_condition_value(value: &Value, source: &Value) -> Result<Value, String> {
+    if value.get("type").and_then(Value::as_str) == Some("value") {
+        if value.get("valueType").is_some() {
+            return apply_mapping_value(value, source);
+        }
+        if let Some(inner) = value.get("value") {
+            return apply_mapping_value(inner, source);
+        }
+    }
+    apply_mapping_value(value, source)
+}
+
+fn eval_comparison(op: &str, args: &[Value], source: &Value) -> Result<bool, String> {
+    if args.len() < 2 {
+        return Ok(false);
+    }
+    let left = eval_condition_argument_as_value(&args[0], source)?;
+    let right = eval_condition_argument_as_value(&args[1], source)?;
+    let Some(left) = to_number(&left) else {
+        return Ok(false);
+    };
+    let Some(right) = to_number(&right) else {
+        return Ok(false);
+    };
+    Ok(match op {
+        "GT" => left > right,
+        "GTE" => left >= right,
+        "LT" => left < right,
+        "LTE" => left <= right,
+        _ => false,
+    })
+}
+
+fn eval_equality(op: &str, args: &[Value], source: &Value) -> Result<bool, String> {
+    if args.len() < 2 {
+        return Ok(false);
+    }
+    let left = eval_condition_argument_as_value(&args[0], source)?;
+    let right = eval_condition_argument_as_value(&args[1], source)?;
+    let equal = values_equal(&left, &right);
+    Ok(if op == "NE" { !equal } else { equal })
+}
+
+fn eval_string_match(op: &str, args: &[Value], source: &Value) -> Result<bool, String> {
+    if args.len() < 2 {
+        return Ok(false);
+    }
+    let left = eval_condition_argument_as_value(&args[0], source)?;
+    let right = eval_condition_argument_as_value(&args[1], source)?;
+    let Some(left) = left.as_str() else {
+        return Ok(false);
+    };
+    let Some(right) = right.as_str() else {
+        return Ok(false);
+    };
+    Ok(if op == "STARTS_WITH" {
+        left.starts_with(right)
+    } else {
+        left.ends_with(right)
+    })
+}
+
+fn eval_array_match(op: &str, args: &[Value], source: &Value) -> Result<bool, String> {
+    if args.len() < 2 {
+        return Ok(false);
+    }
+    let left = eval_condition_argument_as_value(&args[0], source)?;
+    let right = eval_condition_argument_as_value(&args[1], source)?;
+    let matched = match op {
+        "CONTAINS" => left
+            .as_array()
+            .is_some_and(|items| items.iter().any(|item| values_equal(item, &right))),
+        "IN" | "NOT_IN" => right
+            .as_array()
+            .is_some_and(|items| items.iter().any(|item| values_equal(&left, item))),
+        _ => false,
+    };
+    Ok(if op == "NOT_IN" { !matched } else { matched })
+}
+
+fn eval_length_as_value(args: &[Value], source: &Value) -> Result<Value, String> {
+    let Some(arg) = args.first() else {
+        return Ok(Value::Number(0.into()));
+    };
+    let value = eval_condition_argument_as_value(arg, source)?;
+    let len = match &value {
+        Value::String(value) => value.len() as i64,
+        Value::Array(value) => value.len() as i64,
+        Value::Object(value) => value.len() as i64,
+        Value::Null => 0,
+        _ => 1,
+    };
+    Ok(Value::Number(len.into()))
 }
 
 fn apply_input_mapping(mapping: &Value, source: &Value) -> Result<Value, String> {
@@ -318,6 +552,8 @@ struct GraphWire {
     #[serde(default)]
     mappings: Vec<MappingWire>,
     #[serde(default)]
+    conditions: Vec<ConditionWire>,
+    #[serde(default)]
     steps: Vec<StepWire>,
 }
 
@@ -342,6 +578,13 @@ struct MappingWire {
     value: Value,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ConditionWire {
+    id: u32,
+    value: Value,
+}
+
 #[derive(Debug, Clone)]
 struct DirectJsonMapping {
     purpose: String,
@@ -362,6 +605,22 @@ mod tests {
                     "stepType": "Finish",
                     "purpose": "finish.inputMapping",
                     "value": mapping_value
+                }],
+                "steps": []
+            }
+        }))
+        .expect("manifest json")
+    }
+
+    fn condition_manifest(condition_value: Value) -> Vec<u8> {
+        serde_json::to_vec(&json!({
+            "graph": {
+                "conditions": [{
+                    "id": 0,
+                    "ownerId": "check",
+                    "ownerType": "Conditional",
+                    "purpose": "conditional.condition",
+                    "value": condition_value
                 }],
                 "steps": []
             }
@@ -470,5 +729,58 @@ mod tests {
                 }
             })
         );
+    }
+
+    #[test]
+    fn eval_condition_handles_equality_against_source() {
+        let manifest = DirectJsonManifest::parse(&condition_manifest(json!({
+            "type": "operation",
+            "op": "EQ",
+            "arguments": [
+                { "valueType": "reference", "value": "data.flag" },
+                { "valueType": "immediate", "value": true }
+            ]
+        })))
+        .expect("manifest");
+        let source = build_source(br#"{"flag":true}"#, b"{}", b"{}").expect("source");
+
+        assert!(manifest.eval_condition(0, &source).expect("condition"));
+    }
+
+    #[test]
+    fn eval_condition_handles_length_comparison() {
+        let manifest = DirectJsonManifest::parse(&condition_manifest(json!({
+            "type": "operation",
+            "op": "GT",
+            "arguments": [
+                {
+                    "type": "operation",
+                    "op": "LENGTH",
+                    "arguments": [
+                        { "valueType": "reference", "value": "data.description" }
+                    ]
+                },
+                { "valueType": "immediate", "value": 3 }
+            ]
+        })))
+        .expect("manifest");
+        let short = build_source(br#"{"description":"hey"}"#, b"{}", b"{}").expect("source");
+        let long = build_source(br#"{"description":"hello"}"#, b"{}", b"{}").expect("source");
+
+        assert!(!manifest.eval_condition(0, &short).expect("short"));
+        assert!(manifest.eval_condition(0, &long).expect("long"));
+    }
+
+    #[test]
+    fn eval_condition_handles_truthy_value_expression() {
+        let manifest = DirectJsonManifest::parse(&condition_manifest(json!({
+            "type": "value",
+            "valueType": "reference",
+            "value": "data.present"
+        })))
+        .expect("manifest");
+        let source = build_source(br#"{"present":"yes"}"#, b"{}", b"{}").expect("source");
+
+        assert!(manifest.eval_condition(0, &source).expect("condition"));
     }
 }

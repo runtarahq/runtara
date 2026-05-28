@@ -170,8 +170,14 @@ mod component {
             })
         }
 
-        fn eval_condition(_condition_id: u32, _source: Vec<u8>) -> Result<bool, String> {
-            Err("direct stdlib eval-condition is not implemented yet".to_string())
+        fn eval_condition(condition_id: u32, source: Vec<u8>) -> Result<bool, String> {
+            MANIFEST.with(|slot| {
+                let slot = slot.borrow();
+                let manifest = slot
+                    .as_ref()
+                    .ok_or_else(|| "direct stdlib manifest was not initialized".to_string())?;
+                manifest.eval_condition(condition_id, &source)
+            })
         }
 
         fn process_switch(_switch_id: u32, _source: Vec<u8>) -> Result<String, String> {

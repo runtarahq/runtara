@@ -25,9 +25,9 @@ pub use component::{
     DirectSharedComponentRequirement, emit_direct_component_artifacts,
 };
 pub use manifest::{
-    DIRECT_WORKFLOW_MANIFEST_VERSION, DirectEdgeManifest, DirectGraphManifest, DirectManifestError,
-    DirectNestedGraphManifest, DirectStepManifest, DirectWorkflowManifest,
-    build_direct_workflow_manifest,
+    DIRECT_WORKFLOW_MANIFEST_VERSION, DirectConditionManifest, DirectEdgeManifest,
+    DirectGraphManifest, DirectManifestError, DirectNestedGraphManifest, DirectStepManifest,
+    DirectWorkflowManifest, build_direct_workflow_manifest,
 };
 pub use support::{
     DirectWorkflowSupportReport, UnsupportedWorkflowFeature, analyze_direct_wasm_support,
