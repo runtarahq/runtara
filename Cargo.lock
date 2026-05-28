@@ -4720,6 +4720,7 @@ dependencies = [
  "runtara-sdk",
  "serde",
  "serde_json",
+ "wit-bindgen-rt 0.44.0",
 ]
 
 [[package]]

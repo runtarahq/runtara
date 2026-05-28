@@ -23,7 +23,12 @@
 //! `wac compose` time. The stdlib is now ~thin runtime: condition
 //! evaluators, SDK protocol wrapper, template rendering, validators.
 
+#[cfg(all(target_arch = "wasm32", feature = "direct-component"))]
+#[allow(warnings)]
+mod bindings;
+
 // Runtime module (wraps runtara-sdk)
+#[cfg(feature = "sdk-runtime")]
 pub mod runtime;
 
 // Condition helpers for generated conditional steps
@@ -32,7 +37,7 @@ pub mod conditions;
 // Switch step helpers for generated switch steps
 pub mod switch_helpers;
 
-// Connection management (fetches connections from external service)
+// Connection envelope types for generated workflow code.
 pub mod connections;
 
 // Instance output handling (for Environment communication)
@@ -49,12 +54,14 @@ pub use serde_json;
 // Note: tokio and futures are no longer re-exported — generated workflows are synchronous.
 
 // Re-export runtara-sdk for direct use
+#[cfg(feature = "sdk-runtime")]
 pub use runtara_sdk;
 
 // Re-export runtara-ai as `ai` for AI Agent step codegen.
 // Generated workflow code references `runtara_workflow_stdlib::ai::completion`,
 // `::message`, `::types`, `::provider`, and `OneOrMany`. Keep this until the
 // AI Agent codegen is migrated to dispatch through the `ai-tools` WIT agent.
+#[cfg(feature = "sdk-runtime")]
 pub use runtara_ai as ai;
 
 // Template rendering for MappingValue::Template
@@ -72,11 +79,13 @@ pub mod agent_input_validation;
 // Prelude for convenient imports
 pub mod prelude {
     // Runtime types
+    #[cfg(feature = "sdk-runtime")]
     pub use crate::runtime::{Error, Result};
 
     // SDK types for durability
     #[cfg(feature = "native")]
     pub use crate::runtime::HttpSdkConfig;
+    #[cfg(feature = "sdk-runtime")]
     pub use crate::runtime::{RuntaraSdk, register_sdk, resilient, sdk};
 
     // Condition helpers for generated conditional steps
@@ -108,6 +117,7 @@ pub mod prelude {
 }
 
 // Direct access to commonly used modules
+#[cfg(feature = "sdk-runtime")]
 pub use runtime::{Error, Result};
 
 // Re-export child input validation for generated code
@@ -119,3 +129,63 @@ pub use child_input_validation::{
 pub use agent_input_validation::{
     AgentInputValidationError, RequiredAgentInput, validate_agent_inputs,
 };
+
+#[cfg(all(target_arch = "wasm32", feature = "direct-component"))]
+mod component {
+    use std::cell::RefCell;
+
+    use super::bindings::exports::runtara::workflow_stdlib::json::Guest;
+    use super::direct_json::{self, DirectJsonManifest};
+
+    struct Component;
+
+    thread_local! {
+        static MANIFEST: RefCell<Option<DirectJsonManifest>> = const { RefCell::new(None) };
+    }
+
+    impl Guest for Component {
+        fn init_manifest(manifest: Vec<u8>) -> Result<(), String> {
+            let manifest = DirectJsonManifest::parse(&manifest)?;
+            MANIFEST.with(|slot| {
+                *slot.borrow_mut() = Some(manifest);
+            });
+            Ok(())
+        }
+
+        fn build_source(
+            data: Vec<u8>,
+            variables: Vec<u8>,
+            steps: Vec<u8>,
+        ) -> Result<Vec<u8>, String> {
+            direct_json::build_source(&data, &variables, &steps)
+        }
+
+        fn apply_mapping(mapping_id: u32, source: Vec<u8>) -> Result<Vec<u8>, String> {
+            MANIFEST.with(|slot| {
+                let slot = slot.borrow();
+                let manifest = slot
+                    .as_ref()
+                    .ok_or_else(|| "direct stdlib manifest was not initialized".to_string())?;
+                manifest.apply_mapping(mapping_id, &source)
+            })
+        }
+
+        fn eval_condition(_condition_id: u32, _source: Vec<u8>) -> Result<bool, String> {
+            Err("direct stdlib eval-condition is not implemented yet".to_string())
+        }
+
+        fn process_switch(_switch_id: u32, _source: Vec<u8>) -> Result<String, String> {
+            Err("direct stdlib process-switch is not implemented yet".to_string())
+        }
+
+        fn filter(_filter_id: u32, _source: Vec<u8>) -> Result<Vec<u8>, String> {
+            Err("direct stdlib filter is not implemented yet".to_string())
+        }
+
+        fn group_by(_group_id: u32, _source: Vec<u8>) -> Result<Vec<u8>, String> {
+            Err("direct stdlib group-by is not implemented yet".to_string())
+        }
+    }
+
+    super::bindings::export!(Component with_types_in super::bindings);
+}

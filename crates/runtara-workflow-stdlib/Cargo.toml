@@ -11,15 +11,18 @@ categories = ["development-tools"]
 [lib]
 name = "runtara_workflow_stdlib"
 path = "src/lib.rs"
-crate-type = ["rlib"]
+crate-type = ["cdylib", "rlib"]
 
 [features]
 default = ["native"]
+sdk-runtime = ["dep:runtara-ai", "dep:runtara-http", "dep:runtara-sdk"]
+direct-component = ["dep:wit-bindgen-rt"]
 
 # Native platform — uses the native SDK backend (blocking ureq HTTP).
 # Also forwards tracing to runtara-sdk and runtara-ai so native consumers
 # (runtara-server) see the full structured logs.
 native = [
+    "sdk-runtime",
     "runtara-sdk/native",
     "runtara-sdk/tracing",
     "runtara-http/native",
@@ -27,23 +30,25 @@ native = [
 ]
 
 # WASI target (wasm32-wasip1/wasip2) — wasi-http transport.
-wasi = ["runtara-sdk/wasi", "runtara-http/wasi"]
+wasi = ["sdk-runtime", "runtara-sdk/wasi", "runtara-http/wasi"]
 
 # Browser/Node.js target — JS HTTP interop.
-wasm-js = ["runtara-sdk/wasm-js", "runtara-http/wasm-js"]
+wasm-js = ["sdk-runtime", "runtara-sdk/wasm-js", "runtara-http/wasm-js"]
 
 [dependencies]
+wit-bindgen-rt = { version = "0.44", features = ["bitflags"], optional = true }
+
 # Core dependency: the SDK protocol wrapper. Agent dispatch happens via
 # per-agent WIT bindings injected by `wac compose`, not by linking the
 # `runtara-agents` crate into the workflow.
-runtara-sdk = { path = "../runtara-sdk", version = "7.2", default-features = false, features = ["http"] }
+runtara-sdk = { path = "../runtara-sdk", version = "7.2", default-features = false, features = ["http"], optional = true }
 
 # AI/LLM helpers consumed directly by codegen for AI Agent steps
 # (CompletionModel, ToolDefinition, Message, provider dispatch). Re-exported
 # below as `ai` so generated code can write `runtara_workflow_stdlib::ai::*`.
 # TODO: migrate AI Agent codegen to dispatch through the `ai-tools` WIT agent
 # and drop this dep again (would shrink workflow.wasm).
-runtara-ai = { path = "../runtara-ai", version = "7.2", default-features = false }
+runtara-ai = { path = "../runtara-ai", version = "7.2", default-features = false, optional = true }
 
 # Re-exported for workflows
 serde = { workspace = true }
@@ -52,7 +57,14 @@ serde_json = { workspace = true }
 # HTTP client for connection fetching. Backend is selected via this crate's
 # `native` / `wasi` / `wasm-js` features, which forward to runtara-http.
 # default-features = false keeps the consumer in charge of the backend.
-runtara-http = { workspace = true, default-features = false }
+runtara-http = { workspace = true, default-features = false, optional = true }
 
 # Template rendering for MappingValue::Template
 minijinja = "2.5"
+
+[package.metadata.component]
+package = "runtara:workflow-stdlib"
+
+[package.metadata.component.target]
+path = "../runtara-workflow-wit/wit/stdlib"
+world = "workflow-stdlib"
