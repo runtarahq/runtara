@@ -16,7 +16,7 @@ use std::time::Duration;
 use tracing_subscriber::fmt::format::FmtSpan;
 use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 
-/// Production-default `EnvFilter` directives used when `RUST_LOG` isn't set.
+/// Production-default `EnvFilter` directives.
 ///
 /// Two things matter here. First, our own crates run at INFO so workflow
 /// lifecycle events (`workflow.execute`, `step.*`) are visible. Second,
@@ -27,13 +27,109 @@ use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitEx
 /// carry no signal. Mute the wasmtime/cranelift targets below WARN so the
 /// per-function span fires never reach the formatter.
 ///
-/// Override-friendly: anyone needing the compile traces back can set
-/// `RUST_LOG=wasmtime=trace` and it takes precedence.
+/// Broad `RUST_LOG=debug` style settings still get these mutes appended. Anyone
+/// needing the compile traces back can set an explicit target override such as
+/// `RUST_LOG=debug,wasmtime=trace`.
 pub(super) const DEFAULT_LOG_FILTER: &str = "info,sqlx=warn,wasmtime=warn,\
-     wasmtime_cranelift=warn,cranelift_codegen=warn,cranelift_wasm=warn";
+     wasmtime_cache=warn,wasmtime_cranelift=warn,wasmtime_environ=warn,\
+     wasmtime_jit=warn,wasmtime_runtime=warn,wasmtime_wasi=warn,\
+     wasmtime_wasi_http=warn,cranelift_codegen=warn,cranelift_control=warn,\
+     cranelift_frontend=warn,cranelift_native=warn,cranelift_wasm=warn,\
+     regalloc2=warn";
+
+const NOISY_LOG_TARGETS: &[&str] = &[
+    "sqlx",
+    "wasmtime",
+    "wasmtime_cache",
+    "wasmtime_cranelift",
+    "wasmtime_environ",
+    "wasmtime_jit",
+    "wasmtime_runtime",
+    "wasmtime_wasi",
+    "wasmtime_wasi_http",
+    "cranelift_codegen",
+    "cranelift_control",
+    "cranelift_frontend",
+    "cranelift_native",
+    "cranelift_wasm",
+    "regalloc2",
+];
 
 fn default_env_filter() -> EnvFilter {
-    EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(DEFAULT_LOG_FILTER))
+    let filter = std::env::var("RUST_LOG")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .map(|value| effective_log_filter(Some(&value)))
+        .unwrap_or_else(|| effective_log_filter(None));
+
+    EnvFilter::try_new(filter).unwrap_or_else(|_| EnvFilter::new(DEFAULT_LOG_FILTER))
+}
+
+fn effective_log_filter(rust_log: Option<&str>) -> String {
+    match rust_log.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(value) => append_noisy_target_mutes(value),
+        None => DEFAULT_LOG_FILTER.to_string(),
+    }
+}
+
+fn append_noisy_target_mutes(rust_log: &str) -> String {
+    let mut filter = rust_log.trim().to_string();
+    if !has_broad_directive_at_warn_or_more_verbose(rust_log) {
+        return filter;
+    }
+    for target in NOISY_LOG_TARGETS {
+        if filter_mentions_target(rust_log, target) {
+            continue;
+        }
+        if !filter.is_empty() {
+            filter.push(',');
+        }
+        filter.push_str(target);
+        filter.push_str("=warn");
+    }
+    filter
+}
+
+fn filter_mentions_target(filter: &str, target: &str) -> bool {
+    filter
+        .split(',')
+        .filter_map(directive_target)
+        .any(|directive| directive == target)
+}
+
+fn directive_target(directive: &str) -> Option<&str> {
+    let directive = directive.trim();
+    if directive.is_empty() {
+        return None;
+    }
+
+    let before_level = directive
+        .split_once('=')
+        .map_or(directive, |(target, _)| target);
+    let target = before_level
+        .split_once("[{")
+        .map_or(before_level, |(target, _)| target)
+        .trim();
+
+    if target.is_empty()
+        || matches!(
+            target.to_ascii_lowercase().as_str(),
+            "off" | "error" | "warn" | "info" | "debug" | "trace"
+        )
+    {
+        None
+    } else {
+        Some(target)
+    }
+}
+
+fn has_broad_directive_at_warn_or_more_verbose(filter: &str) -> bool {
+    filter.split(',').any(|directive| {
+        matches!(
+            directive.trim().to_ascii_lowercase().as_str(),
+            "warn" | "info" | "debug" | "trace"
+        )
+    })
 }
 
 /// Global metrics instruments
@@ -367,6 +463,18 @@ mod tests {
         }
     }
 
+    fn capture_events(filter: EnvFilter, emit: impl FnOnce()) -> Vec<(String, tracing::Level)> {
+        let captured = Arc::new(Mutex::new(Vec::<(String, tracing::Level)>::new()));
+        let layer = CaptureLayer {
+            events: captured.clone(),
+        };
+        let subscriber = tracing_subscriber::registry().with(filter).with(layer);
+
+        tracing::subscriber::with_default(subscriber, emit);
+
+        captured.lock().unwrap().clone()
+    }
+
     /// Asserts that the production-default `EnvFilter` mutes wasmtime/cranelift
     /// noise below WARN while letting our own targets through at INFO.
     ///
@@ -378,21 +486,17 @@ mod tests {
     /// flood.
     #[test]
     fn default_filter_mutes_wasmtime_below_warn() {
-        let captured = Arc::new(Mutex::new(Vec::<(String, tracing::Level)>::new()));
-        let layer = CaptureLayer {
-            events: captured.clone(),
-        };
-        let subscriber = tracing_subscriber::registry()
-            .with(EnvFilter::new(DEFAULT_LOG_FILTER))
-            .with(layer);
-
-        tracing::subscriber::with_default(subscriber, || {
+        let events = capture_events(EnvFilter::new(DEFAULT_LOG_FILTER), || {
             // Wasmtime / cranelift at TRACE/DEBUG/INFO — must be muted.
             tracing::trace!(target: "wasmtime", "compile in 0ns");
             tracing::debug!(target: "wasmtime", "translate to CLIF");
             tracing::info!(target: "wasmtime_cranelift", "function 473");
+            tracing::info!(target: "wasmtime_jit", "compiled");
+            tracing::info!(target: "wasmtime_wasi", "stdio");
             tracing::info!(target: "cranelift_codegen", "regalloc");
+            tracing::info!(target: "cranelift_frontend", "lowering");
             tracing::info!(target: "cranelift_wasm", "translating");
+            tracing::debug!(target: "regalloc2", "allocation");
             // At WARN — must pass.
             tracing::warn!(target: "wasmtime", "real wasmtime warning");
             // sqlx at INFO — must be muted (query spam).
@@ -404,7 +508,6 @@ mod tests {
             tracing::info!(target: "runtara_workflows", "compiled workflow");
         });
 
-        let events = captured.lock().unwrap();
         let targets: Vec<_> = events.iter().map(|(t, l)| (t.as_str(), *l)).collect();
 
         // Things that MUST NOT be in the captured set
@@ -413,8 +516,12 @@ mod tests {
             ("wasmtime", tracing::Level::DEBUG),
             ("wasmtime", tracing::Level::INFO),
             ("wasmtime_cranelift", tracing::Level::INFO),
+            ("wasmtime_jit", tracing::Level::INFO),
+            ("wasmtime_wasi", tracing::Level::INFO),
             ("cranelift_codegen", tracing::Level::INFO),
+            ("cranelift_frontend", tracing::Level::INFO),
             ("cranelift_wasm", tracing::Level::INFO),
+            ("regalloc2", tracing::Level::DEBUG),
             ("sqlx", tracing::Level::INFO),
         ] {
             assert!(
@@ -444,31 +551,46 @@ mod tests {
         }
     }
 
-    /// Sanity-check that explicit RUST_LOG still overrides the fallback —
-    /// support requires being able to escalate wasmtime to trace for one-off
-    /// debugging without code changes.
     #[test]
-    fn rust_log_overrides_default_filter() {
-        // Build a filter manually with the same shape `try_from_default_env`
-        // would produce if RUST_LOG=wasmtime=trace were set. We can't safely
-        // mutate env vars in unit tests (parallel test runner), so construct
-        // the filter directly.
-        let filter = EnvFilter::new("wasmtime=trace");
-        let captured = Arc::new(Mutex::new(Vec::new()));
-        let layer = CaptureLayer {
-            events: captured.clone(),
-        };
-        let subscriber = tracing_subscriber::registry().with(filter).with(layer);
-        tracing::subscriber::with_default(subscriber, || {
-            tracing::trace!(target: "wasmtime", "should pass under wasmtime=trace");
+    fn broad_rust_log_still_mutes_wasmtime_below_warn() {
+        let filter = EnvFilter::new(effective_log_filter(Some("debug")));
+        let events = capture_events(filter, || {
+            tracing::debug!(target: "runtara_server", "app debug should pass");
+            tracing::debug!(target: "wasmtime", "wasmtime debug should be muted");
+            tracing::debug!(target: "cranelift_codegen", "cranelift debug should be muted");
+            tracing::warn!(target: "wasmtime", "wasmtime warn should pass");
         });
-        assert!(
-            captured
-                .lock()
-                .unwrap()
-                .iter()
-                .any(|(t, _)| t == "wasmtime"),
-            "RUST_LOG=wasmtime=trace must allow wasmtime trace events through"
+
+        let targets: Vec<_> = events.iter().map(|(t, l)| (t.as_str(), *l)).collect();
+        assert!(targets.contains(&("runtara_server", tracing::Level::DEBUG)));
+        assert!(!targets.contains(&("wasmtime", tracing::Level::DEBUG)));
+        assert!(!targets.contains(&("cranelift_codegen", tracing::Level::DEBUG)));
+        assert!(targets.contains(&("wasmtime", tracing::Level::WARN)));
+    }
+
+    #[test]
+    fn targeted_rust_log_is_not_broadened() {
+        assert_eq!(
+            effective_log_filter(Some("runtara_server=debug")),
+            "runtara_server=debug"
         );
+        assert_eq!(effective_log_filter(Some("error")), "error");
+        assert_eq!(effective_log_filter(Some("off")), "off");
+    }
+
+    /// Sanity-check that explicit target overrides still work — support
+    /// requires being able to escalate wasmtime to trace for one-off debugging
+    /// without code changes.
+    #[test]
+    fn explicit_rust_log_target_override_allows_wasmtime_trace() {
+        let filter = EnvFilter::new(effective_log_filter(Some("debug,wasmtime=trace")));
+        let events = capture_events(filter, || {
+            tracing::trace!(target: "wasmtime", "should pass under wasmtime=trace");
+            tracing::debug!(target: "wasmtime_cranelift", "still muted without explicit override");
+        });
+        let targets: Vec<_> = events.iter().map(|(t, l)| (t.as_str(), *l)).collect();
+
+        assert!(targets.contains(&("wasmtime", tracing::Level::TRACE)));
+        assert!(!targets.contains(&("wasmtime_cranelift", tracing::Level::DEBUG)));
     }
 }

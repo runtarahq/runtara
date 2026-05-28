@@ -24,6 +24,28 @@ use crate::runner::{
     RunnerHandle,
 };
 
+/// Logging filter for the host-side `wasmtime` CLI process.
+///
+/// The guest gets its own `RUST_LOG` via `--env` below. This value is for the
+/// CLI itself; without overriding inherited host env, `RUST_LOG=debug` or
+/// `WASMTIME_LOG=debug` on the environment process makes Wasmtime/Cranelift
+/// emit one compile/timing line per wasm function.
+const WASMTIME_PROCESS_LOG_FILTER: &str = "warn";
+
+fn configure_wasmtime_process_logging(cmd: &mut Command) {
+    let filter = wasmtime_process_log_filter(std::env::var("RUNTARA_WASMTIME_LOG").ok().as_deref());
+    cmd.env("RUST_LOG", &filter);
+    cmd.env("WASMTIME_LOG", filter);
+}
+
+fn wasmtime_process_log_filter(override_filter: Option<&str>) -> String {
+    override_filter
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(WASMTIME_PROCESS_LOG_FILTER)
+        .to_string()
+}
+
 /// WebAssembly runner configuration.
 #[derive(Debug, Clone)]
 pub struct WasmRunnerConfig {
@@ -186,6 +208,7 @@ impl WasmRunner {
     /// Build the wasmtime command with all flags.
     fn build_command(&self, wasm_path: &Path, env: &HashMap<String, String>) -> Command {
         let mut cmd = Command::new(&self.config.wasmtime_path);
+        configure_wasmtime_process_logging(&mut cmd);
 
         cmd.arg("run");
 
@@ -434,6 +457,7 @@ impl WasmRunner {
         };
 
         let mut cmd = Command::new(&self.config.wasmtime_path);
+        configure_wasmtime_process_logging(&mut cmd);
 
         cmd.arg("run");
 
@@ -667,5 +691,25 @@ impl Runner for WasmRunner {
 
     async fn get_pid(&self, handle: &RunnerHandle) -> Option<u32> {
         handle.spawned_pid
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wasmtime_process_log_filter_defaults_to_warn() {
+        assert_eq!(wasmtime_process_log_filter(None), "warn");
+        assert_eq!(wasmtime_process_log_filter(Some("   ")), "warn");
+    }
+
+    #[test]
+    fn wasmtime_process_log_filter_accepts_explicit_override() {
+        assert_eq!(wasmtime_process_log_filter(Some("debug")), "debug");
+        assert_eq!(
+            wasmtime_process_log_filter(Some("wasmtime=trace,cranelift_codegen=trace")),
+            "wasmtime=trace,cranelift_codegen=trace"
+        );
     }
 }
