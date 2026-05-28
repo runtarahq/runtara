@@ -262,6 +262,18 @@ impl DirectJsonManifest {
         serde_json::to_vec(&input).map_err(|err| format!("failed to serialize Agent input: {err}"))
     }
 
+    /// Build the generated-code-compatible durable cache key for an Agent step.
+    pub fn agent_cache_key(&self, agent_id: u32, source: &[u8]) -> Result<Vec<u8>, String> {
+        let source: Value = serde_json::from_slice(source)
+            .map_err(|err| format!("failed to parse Agent cache-key source: {err}"))?;
+        let agent = self
+            .agents
+            .get(&agent_id)
+            .ok_or_else(|| format!("unknown direct Agent id {agent_id}"))?;
+
+        Ok(agent_cache_key(agent, &source).into_bytes())
+    }
+
     /// Convert a WIT `error-info` into the current Agent failure string shape.
     #[allow(clippy::too_many_arguments)]
     pub fn agent_error(
@@ -747,6 +759,37 @@ pub fn error_steps(step_id: &str, error: &[u8], steps: &[u8]) -> Result<Vec<u8>,
 
     serde_json::to_vec(&Value::Object(steps))
         .map_err(|err| format!("failed to serialize error steps context: {err}"))
+}
+
+fn agent_cache_key(agent: &DirectJsonAgent, source: &Value) -> String {
+    let variables = source.get("variables").and_then(Value::as_object);
+    let prefix = variables
+        .and_then(|vars| vars.get("_cache_key_prefix"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let indices_suffix = variables
+        .and_then(|vars| vars.get("_loop_indices"))
+        .and_then(Value::as_array)
+        .filter(|indices| !indices.is_empty())
+        .map(|indices| {
+            let indices = indices.iter().map(Value::to_string).collect::<Vec<_>>();
+            format!("::[{}]", indices.join(","))
+        })
+        .unwrap_or_default();
+    let base = format!(
+        "agent::{}::{}::{}",
+        agent.agent_id, agent.capability_id, agent.step_id
+    );
+
+    if prefix.is_empty() {
+        let workflow_id = variables
+            .and_then(|vars| vars.get("_workflow_id"))
+            .and_then(Value::as_str)
+            .unwrap_or("root");
+        format!("{workflow_id}::{base}{indices_suffix}")
+    } else {
+        format!("{prefix}::{base}{indices_suffix}")
+    }
 }
 
 #[derive(Default)]
@@ -2793,6 +2836,55 @@ mod tests {
             })
         );
         assert_eq!(input["value"], json!("present"));
+    }
+
+    #[test]
+    fn agent_cache_key_matches_generated_default_root_shape() {
+        let manifest = DirectJsonManifest::parse(&agent_manifest(json!({}))).expect("manifest");
+        let source = build_source(br#"{"value":"in"}"#, b"{}", b"{}").expect("source");
+
+        let key = manifest.agent_cache_key(0, &source).expect("cache key");
+
+        assert_eq!(
+            String::from_utf8(key).expect("utf8"),
+            "root::agent::utils::normalize::agent"
+        );
+    }
+
+    #[test]
+    fn agent_cache_key_uses_workflow_id_and_loop_indices() {
+        let manifest = DirectJsonManifest::parse(&agent_manifest(json!({}))).expect("manifest");
+        let source = build_source(
+            br#"{"value":"in"}"#,
+            br#"{"_workflow_id":"wf-42","_loop_indices":[0,2,"x"]}"#,
+            b"{}",
+        )
+        .expect("source");
+
+        let key = manifest.agent_cache_key(0, &source).expect("cache key");
+
+        assert_eq!(
+            String::from_utf8(key).expect("utf8"),
+            "wf-42::agent::utils::normalize::agent::[0,2,\"x\"]"
+        );
+    }
+
+    #[test]
+    fn agent_cache_key_prefers_parent_cache_prefix() {
+        let manifest = DirectJsonManifest::parse(&agent_manifest(json!({}))).expect("manifest");
+        let source = build_source(
+            br#"{"value":"in"}"#,
+            br#"{"_workflow_id":"wf-42","_cache_key_prefix":"parent::child","_loop_indices":[1]}"#,
+            b"{}",
+        )
+        .expect("source");
+
+        let key = manifest.agent_cache_key(0, &source).expect("cache key");
+
+        assert_eq!(
+            String::from_utf8(key).expect("utf8"),
+            "parent::child::agent::utils::normalize::agent::[1]"
+        );
     }
 
     #[test]

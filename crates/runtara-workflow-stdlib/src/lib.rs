@@ -298,6 +298,16 @@ mod component {
             })
         }
 
+        fn agent_cache_key(agent_id: u32, source: Vec<u8>) -> Result<Vec<u8>, String> {
+            MANIFEST.with(|slot| {
+                let slot = slot.borrow();
+                let manifest = slot
+                    .as_ref()
+                    .ok_or_else(|| "direct stdlib manifest was not initialized".to_string())?;
+                manifest.agent_cache_key(agent_id, &source)
+            })
+        }
+
         fn agent_error(
             agent_id: u32,
             code: String,

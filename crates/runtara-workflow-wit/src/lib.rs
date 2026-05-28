@@ -51,7 +51,16 @@ mod tests {
             "log",
             "error-event",
             "error",
+            "error-steps",
             "group-by",
+            "agent-output",
+            "agent-validate-input",
+            "agent-connection-input",
+            "agent-cache-key",
+            "agent-error",
+            "agent-debug-error",
+            "step-debug-start",
+            "step-debug-end",
         ] {
             assert!(
                 interface.functions.contains_key(function),

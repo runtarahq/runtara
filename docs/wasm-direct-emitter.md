@@ -230,6 +230,13 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   signal-aware checkpoint result wire shape. Durable Agent and Delay lowering
   still remain gated until the direct emitter starts using this ABI and
   differential crash/resume tests exist.
+- The shared stdlib now exposes `agent-cache-key`, which centralizes the
+  generated Rust-compatible durable Agent key shape using `_workflow_id`,
+  `_cache_key_prefix`, and `_loop_indices`. The direct core has an internal
+  no-retry durable Agent checkpoint path that computes this key, reads an
+  existing checkpoint before `capabilities.invoke`, and writes a checkpoint
+  after successful output. Public support remains gated until retry and
+  signal/ack behavior are lowered and tested.
 
 ## Final Goal
 
@@ -1385,6 +1392,12 @@ Current status:
   `onError` edges with condition priority/default routing. Handler branches are
   emitted as terminal direct run plans; an unmatched conditional handler
   propagates through `runtime.fail`.
+- `agent-cache-key` now builds the durable Agent idempotency key in stdlib
+  using the same workflow id, parent cache prefix, and loop-index suffix rules
+  as generated Rust. Direct core has an internal `maxRetries = 0` durable Agent
+  checkpoint lowering that uses `runtime.get-checkpoint` and
+  `runtime.checkpoint`, but the support gate still rejects durable Agent
+  workflows until retry and signal/ack semantics are complete.
 
 Implementation steps:
 
@@ -1405,6 +1418,8 @@ Implementation steps:
      static `connectionId`;
    - `onError` routing: done for non-durable Agent validation/capability
      failures with conditional priority/default handlers;
+   - durable no-retry checkpoint lookup/write: internal lowering in place for
+     `maxRetries = 0`, still gated from public support;
    - durable retry/timeout behavior: pending.
 5. Extend `onError` routing beyond the first non-durable Agent subset when
    additional failing step types are lowered.
@@ -1439,12 +1454,17 @@ Implementation steps:
    - stable resume-from-checkpoint lowering: pending per step family.
 2. Implement stdlib/runtime functions using the existing SDK behavior.
 3. Generate stable cache keys matching current behavior:
-   - workflow id;
-   - step id;
-   - loop indices;
-   - child cache prefixes;
+   - workflow id: done for Agent cache keys;
+   - step id: done for Agent cache keys;
+   - loop indices: done for Agent cache keys;
+   - child cache prefixes: done for Agent cache keys;
    - retry/rate-limit scope.
-4. Migrate durable `Agent`.
+4. Migrate durable `Agent`:
+   - no-retry checkpoint lookup/write: internal lowering done;
+   - retry loop and retry-attempt recording: pending;
+   - rate-limit durable sleep: pending;
+   - pause/cancel/shutdown acknowledgement parity: pending;
+   - crash/resume differential tests: pending.
 5. Migrate `Delay`.
 6. Add crash/resume tests:
    - resume after checkpoint;

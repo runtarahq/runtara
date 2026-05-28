@@ -62,6 +62,9 @@ const AGENT_TYPES_WIT: &str = include_str!("../../../runtara-agent-wit/wit/runta
 const AGENT_WIT_VERSION: &str = "0.3.0";
 
 const DIRECT_RUN_RETPTR_OFFSET: i32 = 0;
+const DIRECT_RESULT_OPTION_TAG_OFFSET: u64 = 4;
+const DIRECT_RESULT_OPTION_LIST_PTR_OFFSET: u64 = 8;
+const DIRECT_RESULT_OPTION_LIST_LEN_OFFSET: u64 = 12;
 const DIRECT_AGENT_ARGS_OFFSET: i32 = 128;
 const DIRECT_AGENT_ARG_CONNECTION_TAG_OFFSET: i32 = DIRECT_AGENT_ARGS_OFFSET + 16;
 const DIRECT_AGENT_ARG_CONNECTION_ID_PTR_OFFSET: i32 = DIRECT_AGENT_ARGS_OFFSET + 20;
@@ -559,6 +562,7 @@ enum DirectRunPlan {
         agent_id: u32,
         agent_component_id: String,
         input_mapping_id: u32,
+        durable_checkpoint: bool,
         next_plan: Box<DirectRunPlan>,
         error_plan: Option<DirectErrorRoutePlan>,
     },
@@ -897,6 +901,12 @@ fn step_run_plan_inner(
         }
         "Agent" => {
             let agent = agent_config(graph, step_id)?;
+            let durable_checkpoint = agent.durable && agent.max_retries == Some(0);
+            if agent.durable && !durable_checkpoint {
+                return Err(DirectCompileError::Component(format!(
+                    "direct durable Agent step '{step_id}' requires retry/checkpoint lowering before core emission"
+                )));
+            }
             let next_plan = normal_flow_plan(graph, step_id, stack, include_on_error)?;
             let error_plan = if include_on_error {
                 on_error_plan(graph, step_id, stack)?
@@ -909,6 +919,7 @@ fn step_run_plan_inner(
                 agent_id: agent.id,
                 agent_component_id: canonicalize_direct_agent_id(&agent.agent_id),
                 input_mapping_id: agent.input_mapping_id,
+                durable_checkpoint,
                 next_plan: Box::new(next_plan),
                 error_plan,
             })
@@ -1553,6 +1564,8 @@ struct DirectCoreImportIndices {
     runtime_complete: Option<u32>,
     runtime_fail: Option<u32>,
     runtime_custom_event: Option<u32>,
+    runtime_get_checkpoint: Option<u32>,
+    runtime_checkpoint: Option<u32>,
     stdlib_init_manifest: Option<u32>,
     stdlib_build_source: Option<u32>,
     stdlib_apply_mapping: Option<u32>,
@@ -1569,6 +1582,7 @@ struct DirectCoreImportIndices {
     stdlib_agent_output: Option<u32>,
     stdlib_agent_validate_input: Option<u32>,
     stdlib_agent_connection_input: Option<u32>,
+    stdlib_agent_cache_key: Option<u32>,
     stdlib_agent_error: Option<u32>,
     stdlib_agent_debug_error: Option<u32>,
     stdlib_step_debug_start: Option<u32>,
@@ -1586,6 +1600,11 @@ impl DirectCoreImportIndices {
                 self.runtime_custom_event,
                 "runtime.custom-event",
             )?,
+            runtime_get_checkpoint: require_import(
+                self.runtime_get_checkpoint,
+                "runtime.get-checkpoint",
+            )?,
+            runtime_checkpoint: require_import(self.runtime_checkpoint, "runtime.checkpoint")?,
             stdlib_init_manifest: require_import(
                 self.stdlib_init_manifest,
                 "stdlib.init-manifest",
@@ -1620,6 +1639,10 @@ impl DirectCoreImportIndices {
                 self.stdlib_agent_connection_input,
                 "stdlib.agent-connection-input",
             )?,
+            stdlib_agent_cache_key: require_import(
+                self.stdlib_agent_cache_key,
+                "stdlib.agent-cache-key",
+            )?,
             stdlib_agent_error: require_import(self.stdlib_agent_error, "stdlib.agent-error")?,
             stdlib_agent_debug_error: require_import(
                 self.stdlib_agent_debug_error,
@@ -1644,6 +1667,8 @@ struct DirectCoreFunctionIndices {
     runtime_complete: u32,
     runtime_fail: u32,
     runtime_custom_event: u32,
+    runtime_get_checkpoint: u32,
+    runtime_checkpoint: u32,
     stdlib_init_manifest: u32,
     stdlib_build_source: u32,
     stdlib_apply_mapping: u32,
@@ -1660,6 +1685,7 @@ struct DirectCoreFunctionIndices {
     stdlib_agent_output: u32,
     stdlib_agent_validate_input: u32,
     stdlib_agent_connection_input: u32,
+    stdlib_agent_cache_key: u32,
     stdlib_agent_error: u32,
     stdlib_agent_debug_error: u32,
     stdlib_step_debug_start: u32,
@@ -1710,6 +1736,10 @@ fn import_core_function(
         import_indices.runtime_fail = Some(function_index);
     } else if is_runtime_import(resolve, interface, function, "custom-event") {
         import_indices.runtime_custom_event = Some(function_index);
+    } else if is_runtime_import(resolve, interface, function, "get-checkpoint") {
+        import_indices.runtime_get_checkpoint = Some(function_index);
+    } else if is_runtime_import(resolve, interface, function, "checkpoint") {
+        import_indices.runtime_checkpoint = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "init-manifest") {
         import_indices.stdlib_init_manifest = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "build-source") {
@@ -1742,6 +1772,8 @@ fn import_core_function(
         import_indices.stdlib_agent_validate_input = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "agent-connection-input") {
         import_indices.stdlib_agent_connection_input = Some(function_index);
+    } else if is_stdlib_import(resolve, interface, function, "agent-cache-key") {
+        import_indices.stdlib_agent_cache_key = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "agent-error") {
         import_indices.stdlib_agent_error = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "agent-debug-error") {
@@ -2209,6 +2241,7 @@ fn emit_run_plan_mapping(
             agent_id,
             agent_component_id,
             input_mapping_id,
+            durable_checkpoint,
             next_plan,
             error_plan,
         } => {
@@ -2222,6 +2255,7 @@ fn emit_run_plan_mapping(
                 *agent_id,
                 agent_component_id,
                 *input_mapping_id,
+                *durable_checkpoint,
                 next_plan,
                 error_plan.as_ref(),
                 data_ptr_local,
@@ -2675,6 +2709,7 @@ fn emit_agent_plan(
     agent_id: u32,
     agent_component_id: &str,
     input_mapping_id: u32,
+    durable_checkpoint: bool,
     next_plan: &DirectRunPlan,
     error_plan: Option<&DirectErrorRoutePlan>,
     data_ptr_local: u32,
@@ -2745,6 +2780,27 @@ fn emit_agent_plan(
         output_len_local,
     );
 
+    if durable_checkpoint {
+        emit_agent_cache_key(
+            body,
+            indices,
+            agent_id,
+            source_ptr_local,
+            source_len_local,
+            route_ptr_local,
+            route_len_local,
+        );
+        emit_agent_checkpoint_lookup(
+            body,
+            indices,
+            route_ptr_local,
+            route_len_local,
+            output_ptr_local,
+            output_len_local,
+        );
+        body.instruction(&Instruction::Else);
+    }
+
     let invoke = indices
         .agent_invokes
         .get(agent_component_id)
@@ -2784,6 +2840,18 @@ fn emit_agent_plan(
         workflow_error_kind,
     );
     load_agent_retptr_list(body, output_ptr_local, output_len_local);
+
+    if durable_checkpoint {
+        emit_agent_checkpoint_save(
+            body,
+            indices,
+            route_ptr_local,
+            route_len_local,
+            output_ptr_local,
+            output_len_local,
+        );
+        body.instruction(&Instruction::End);
+    }
 
     body.instruction(&Instruction::I32Const(agent_id as i32));
     body.instruction(&Instruction::LocalGet(source_ptr_local));
@@ -3268,6 +3336,58 @@ fn emit_agent_connection_input(
     body.instruction(&Instruction::Call(indices.stdlib_agent_connection_input));
     return_if_retptr_error(body);
     load_retptr_list(body, input_ptr_local, input_len_local);
+}
+
+fn emit_agent_cache_key(
+    body: &mut WasmFunction,
+    indices: &DirectCoreFunctionIndices,
+    agent_id: u32,
+    source_ptr_local: u32,
+    source_len_local: u32,
+    cache_key_ptr_local: u32,
+    cache_key_len_local: u32,
+) {
+    body.instruction(&Instruction::I32Const(agent_id as i32));
+    body.instruction(&Instruction::LocalGet(source_ptr_local));
+    body.instruction(&Instruction::LocalGet(source_len_local));
+    push_retptr_arg(body);
+    body.instruction(&Instruction::Call(indices.stdlib_agent_cache_key));
+    return_if_retptr_error(body);
+    load_retptr_list(body, cache_key_ptr_local, cache_key_len_local);
+}
+
+fn emit_agent_checkpoint_lookup(
+    body: &mut WasmFunction,
+    indices: &DirectCoreFunctionIndices,
+    cache_key_ptr_local: u32,
+    cache_key_len_local: u32,
+    output_ptr_local: u32,
+    output_len_local: u32,
+) {
+    body.instruction(&Instruction::LocalGet(cache_key_ptr_local));
+    body.instruction(&Instruction::LocalGet(cache_key_len_local));
+    push_retptr_arg(body);
+    body.instruction(&Instruction::Call(indices.runtime_get_checkpoint));
+
+    emit_get_checkpoint_has_value(body);
+    body.instruction(&Instruction::If(BlockType::Empty));
+    load_retptr_option_list(body, output_ptr_local, output_len_local);
+}
+
+fn emit_agent_checkpoint_save(
+    body: &mut WasmFunction,
+    indices: &DirectCoreFunctionIndices,
+    cache_key_ptr_local: u32,
+    cache_key_len_local: u32,
+    output_ptr_local: u32,
+    output_len_local: u32,
+) {
+    body.instruction(&Instruction::LocalGet(cache_key_ptr_local));
+    body.instruction(&Instruction::LocalGet(cache_key_len_local));
+    body.instruction(&Instruction::LocalGet(output_ptr_local));
+    body.instruction(&Instruction::LocalGet(output_len_local));
+    push_retptr_arg(body);
+    body.instruction(&Instruction::Call(indices.runtime_checkpoint));
 }
 
 fn emit_agent_invoke(
@@ -3843,6 +3963,23 @@ fn load_retptr_list(function: &mut WasmFunction, ptr_local: u32, len_local: u32)
     function.instruction(&Instruction::LocalSet(len_local));
 }
 
+fn emit_get_checkpoint_has_value(function: &mut WasmFunction) {
+    load_retptr_tag(function);
+    function.instruction(&Instruction::I32Eqz);
+    function.instruction(&Instruction::If(BlockType::Result(ValType::I32)));
+    push_retptr_u8_load(function, DIRECT_RESULT_OPTION_TAG_OFFSET);
+    function.instruction(&Instruction::Else);
+    function.instruction(&Instruction::I32Const(0));
+    function.instruction(&Instruction::End);
+}
+
+fn load_retptr_option_list(function: &mut WasmFunction, ptr_local: u32, len_local: u32) {
+    push_retptr_i32_load(function, DIRECT_RESULT_OPTION_LIST_PTR_OFFSET);
+    function.instruction(&Instruction::LocalSet(ptr_local));
+    push_retptr_i32_load(function, DIRECT_RESULT_OPTION_LIST_LEN_OFFSET);
+    function.instruction(&Instruction::LocalSet(len_local));
+}
+
 fn load_agent_retptr_list(function: &mut WasmFunction, ptr_local: u32, len_local: u32) {
     push_retptr_i32_load(function, DIRECT_AGENT_RESULT_OK_PTR_OFFSET);
     function.instruction(&Instruction::LocalSet(ptr_local));
@@ -4098,6 +4235,17 @@ mod tests {
             panic!("expected Agent step");
         };
         agent.connection_id = Some("shopify-main".to_string());
+        graph
+    }
+
+    fn durable_agent_no_retry_graph() -> ExecutionGraph {
+        let mut graph = non_durable_agent_graph();
+        graph.durable = Some(true);
+        let Some(runtara_dsl::Step::Agent(agent)) = graph.steps.get_mut("agent") else {
+            panic!("expected Agent step");
+        };
+        agent.max_retries = Some(0);
+        agent.durable = Some(true);
         graph
     }
 
@@ -5524,6 +5672,174 @@ mod tests {
         assert!(
             saw_validate_before_invoke,
             "Agent input validation should run before capabilities.invoke"
+        );
+    }
+
+    #[test]
+    fn direct_core_lowers_durable_agent_no_retry_checkpoint_path() {
+        let graph = durable_agent_no_retry_graph();
+        let manifest = build_direct_workflow_manifest(&graph).expect("manifest");
+        let manifest_json = manifest.to_canonical_json().expect("manifest json");
+        let core_config =
+            DirectCoreConfig::new(&manifest, &manifest_json, false).expect("core config");
+
+        let DirectRunPlan::Agent {
+            durable_checkpoint, ..
+        } = &core_config.run_plan
+        else {
+            panic!("expected Agent run plan");
+        };
+        assert!(
+            *durable_checkpoint,
+            "maxRetries=0 durable Agent should use checkpoint lowering"
+        );
+        assert!(manifest.graph.agents[0].durable);
+
+        let (resolve, world) =
+            build_direct_component_resolve_with_agents(&manifest.feature_summary.agent_ids)
+                .expect("agent resolve");
+        let core = emit_direct_core_module(&resolve, world, &core_config).expect("core module");
+        Validator::new()
+            .validate_all(&core)
+            .expect("durable Agent core module validates");
+
+        let mut next_function_index = 0;
+        let mut agent_cache_key_index = None;
+        let mut get_checkpoint_index = None;
+        let mut checkpoint_index = None;
+        let mut agent_invoke_index = None;
+        let mut saw_cache_key_import = false;
+        let mut saw_get_checkpoint_import = false;
+        let mut saw_checkpoint_import = false;
+        let mut saw_get_checkpoint_option_tag_load = false;
+        let mut saw_cached_payload_ptr_load = false;
+        let mut saw_cached_payload_len_load = false;
+        let mut saw_cache_key_before_lookup = false;
+        let mut saw_lookup_before_invoke = false;
+        let mut saw_checkpoint_after_invoke = false;
+        let mut code_body_index = 0;
+
+        for payload in Parser::new(0).parse_all(&core) {
+            match payload.expect("core wasm payload") {
+                Payload::ImportSection(reader) => {
+                    for import in reader.into_imports() {
+                        let import = import.expect("core import");
+                        if matches!(import.ty, TypeRef::Func(_)) {
+                            match (import.module, import.name) {
+                                (module, "agent-cache-key")
+                                    if module.contains("runtara:workflow-stdlib/json") =>
+                                {
+                                    saw_cache_key_import = true;
+                                    agent_cache_key_index = Some(next_function_index);
+                                }
+                                (module, "get-checkpoint")
+                                    if module.contains("runtara:workflow-runtime/runtime") =>
+                                {
+                                    saw_get_checkpoint_import = true;
+                                    get_checkpoint_index = Some(next_function_index);
+                                }
+                                (module, "checkpoint")
+                                    if module.contains("runtara:workflow-runtime/runtime") =>
+                                {
+                                    saw_checkpoint_import = true;
+                                    checkpoint_index = Some(next_function_index);
+                                }
+                                (module, "invoke")
+                                    if module.contains("runtara:agent-utils/capabilities") =>
+                                {
+                                    agent_invoke_index = Some(next_function_index);
+                                }
+                                _ => {}
+                            }
+                            next_function_index += 1;
+                        }
+                    }
+                }
+                Payload::CodeSectionEntry(body) => {
+                    if code_body_index == 0 {
+                        let mut saw_cache_key_call = false;
+                        let mut saw_lookup_call = false;
+                        let mut saw_invoke_call = false;
+                        for operator in body.get_operators_reader().expect("operators") {
+                            match operator.expect("operator") {
+                                Operator::Call { function_index }
+                                    if Some(function_index) == agent_cache_key_index =>
+                                {
+                                    saw_cache_key_call = true;
+                                }
+                                Operator::Call { function_index }
+                                    if Some(function_index) == get_checkpoint_index =>
+                                {
+                                    saw_cache_key_before_lookup = saw_cache_key_call;
+                                    saw_lookup_call = true;
+                                }
+                                Operator::Call { function_index }
+                                    if Some(function_index) == agent_invoke_index =>
+                                {
+                                    saw_lookup_before_invoke = saw_lookup_call;
+                                    saw_invoke_call = true;
+                                }
+                                Operator::Call { function_index }
+                                    if Some(function_index) == checkpoint_index =>
+                                {
+                                    saw_checkpoint_after_invoke = saw_invoke_call;
+                                }
+                                Operator::I32Load8U { memarg }
+                                    if memarg.offset == DIRECT_RESULT_OPTION_TAG_OFFSET =>
+                                {
+                                    saw_get_checkpoint_option_tag_load = true;
+                                }
+                                Operator::I32Load { memarg }
+                                    if memarg.offset == DIRECT_RESULT_OPTION_LIST_PTR_OFFSET =>
+                                {
+                                    saw_cached_payload_ptr_load = true;
+                                }
+                                Operator::I32Load { memarg }
+                                    if memarg.offset == DIRECT_RESULT_OPTION_LIST_LEN_OFFSET =>
+                                {
+                                    saw_cached_payload_len_load = true;
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                    code_body_index += 1;
+                }
+                _ => {}
+            }
+        }
+
+        assert!(
+            saw_cache_key_import,
+            "core should import stdlib.agent-cache-key"
+        );
+        assert!(
+            saw_get_checkpoint_import,
+            "core should import runtime.get-checkpoint"
+        );
+        assert!(
+            saw_checkpoint_import,
+            "core should import runtime.checkpoint"
+        );
+        assert!(
+            saw_get_checkpoint_option_tag_load,
+            "core should inspect get-checkpoint option tag"
+        );
+        assert!(
+            saw_cached_payload_ptr_load && saw_cached_payload_len_load,
+            "core should load cached checkpoint payload bytes"
+        );
+        assert!(
+            saw_cache_key_before_lookup,
+            "Agent cache key should be computed before checkpoint lookup"
+        );
+        assert!(
+            saw_lookup_before_invoke,
+            "checkpoint lookup should run before capability invoke"
+        );
+        assert!(
+            saw_checkpoint_after_invoke,
+            "successful capability output should be checkpointed after invoke"
         );
     }
 

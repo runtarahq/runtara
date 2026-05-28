@@ -88,6 +88,11 @@ interface json {
         input: list<u8>,
     ) -> result<list<u8>, string>;
 
+    agent-cache-key: func(
+        agent-id: u32,
+        source: list<u8>,
+    ) -> result<list<u8>, string>;
+
     agent-error: func(
         agent-id: u32,
         code: string,

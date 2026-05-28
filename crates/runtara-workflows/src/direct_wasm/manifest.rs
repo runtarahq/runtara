@@ -269,6 +269,8 @@ pub struct DirectAgentManifest {
     /// Optional workflow connection id.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub connection_id: Option<String>,
+    /// Effective Agent durability after graph-level inheritance is applied.
+    pub durable: bool,
     /// Manifest-wide mapping id for Agent inputs.
     pub input_mapping_id: u32,
     /// Required capability inputs validated after runtime references resolve.
@@ -647,6 +649,7 @@ fn step_manifest(
                 agent_id: canonicalize_direct_agent_id(&step.agent_id),
                 capability_id: step.capability_id.clone(),
                 connection_id: step.connection_id.clone(),
+                durable: inherited_durable && step.durable.unwrap_or(true),
                 input_mapping_id,
                 required_inputs: required_agent_inputs(
                     agent_catalog,
