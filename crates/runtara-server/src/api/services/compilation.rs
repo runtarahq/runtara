@@ -710,6 +710,11 @@ impl CompilationService {
                         out.insert(id.clone());
                     }
                 }
+                // Recurse into subgraphs so agent steps nested inside loops /
+                // splits are covered too (EmbedWorkflow children are walked
+                // separately by the caller via `child_workflows`).
+                runtara_dsl::Step::Split(s) => Self::collect_connection_ids(&s.subgraph, out),
+                runtara_dsl::Step::While(w) => Self::collect_connection_ids(&w.subgraph, out),
                 _ => {}
             }
         }

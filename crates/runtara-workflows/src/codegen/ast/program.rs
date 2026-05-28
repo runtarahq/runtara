@@ -1732,6 +1732,17 @@ pub fn emit_graph_as_function(
     ctx.step_to_child_ref = parent_ctx.step_to_child_ref.clone();
     // Inherit emitted child functions for deduplication across nested workflows
     ctx.emitted_child_functions = parent_ctx.emitted_child_functions.clone();
+    // Inherit the pre-resolved connection_id -> integration_id map so agent
+    // steps inside subgraphs / embedded child workflows get the same
+    // `_connection.integration_id` injection as top-level steps. Without this,
+    // `EmitContext::new` leaves the map empty and `emit_connection_fetch`
+    // falls back to "", which breaks component agents that dispatch on it
+    // (e.g. ai-tools::text-completion) when used inside an EmbedWorkflow/While/Split.
+    ctx.connection_integration_ids = parent_ctx.connection_integration_ids.clone();
+    // Inherit the agent catalog too — `EmitContext::new` installs an empty one,
+    // which would make embedded agent steps silently skip rate-limit wrapping
+    // and required-input validation (both consult ctx.catalog).
+    ctx.set_catalog(parent_ctx.catalog.clone());
     // Use this graph's rate_limit_budget_ms, or inherit from parent
     ctx.rate_limit_budget_ms = graph.rate_limit_budget_ms;
     // Durability is a top-level workflow concern: children and subgraphs always
@@ -2828,6 +2839,69 @@ mod tests {
         assert!(
             code.contains("child_fn"),
             "Should create function with given name"
+        );
+    }
+
+    #[test]
+    fn test_emit_graph_as_function_inherits_connection_integration_ids() {
+        // Regression: agent steps inside an embedded child / subgraph must get
+        // the same `_connection.integration_id` injection as top-level steps.
+        // `emit_graph_as_function` builds a fresh EmitContext, so it has to copy
+        // `connection_integration_ids` from the parent — otherwise the map is
+        // empty and component agents that dispatch on integration_id (ai-tools)
+        // break only when nested.
+        let mut steps = HashMap::new();
+        steps.insert(
+            "fetch".to_string(),
+            Step::Agent(AgentStep {
+                id: "fetch".to_string(),
+                name: None,
+                agent_id: "ai-tools".to_string(),
+                capability_id: "text-completion".to_string(),
+                connection_id: Some("conn-1".to_string()),
+                input_mapping: None,
+                max_retries: None,
+                retry_delay: None,
+                timeout: None,
+                compensation: None,
+                breakpoint: None,
+                durable: None,
+            }),
+        );
+        steps.insert(
+            "done".to_string(),
+            Step::Finish(FinishStep {
+                id: "done".to_string(),
+                name: None,
+                input_mapping: None,
+                breakpoint: None,
+            }),
+        );
+        let graph = ExecutionGraph {
+            entry_point: "fetch".to_string(),
+            steps,
+            ..Default::default()
+        };
+
+        let mut parent_ctx = EmitContext::with_child_workflows(
+            false,
+            HashMap::new(),
+            HashMap::new(),
+            None,
+            Some("t".to_string()),
+        );
+        parent_ctx
+            .connection_integration_ids
+            .insert("conn-1".to_string(), "openai_api_key".to_string());
+
+        let fn_name = Ident::new("child_fn", Span::call_site());
+        let code = emit_graph_as_function(&fn_name, &graph, &parent_ctx)
+            .unwrap()
+            .to_string();
+
+        assert!(
+            code.contains("openai_api_key"),
+            "nested agent step must carry the resolved integration_id, got:\n{code}"
         );
     }
 
