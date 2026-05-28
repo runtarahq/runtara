@@ -144,6 +144,9 @@ pub struct DirectGroupByManifest {
     pub id: u32,
     /// Step that owns this GroupBy config.
     pub step_id: String,
+    /// Human-readable step name.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     /// Step type that owns this GroupBy config.
     pub step_type: String,
     /// Config role within the step.
@@ -342,6 +345,7 @@ fn step_manifest(
             group_bys.push(DirectGroupByManifest {
                 id: state.allocate_group_by_id(),
                 step_id: step.id.clone(),
+                name: step.name.clone(),
                 step_type: "GroupBy".to_string(),
                 purpose: "groupBy.config".to_string(),
                 value: canonical_json(&step.config)?,
@@ -567,6 +571,7 @@ mod tests {
         let group_by = &manifest.graph.group_bys[0];
         assert_eq!(group_by.id, 0);
         assert_eq!(group_by.step_id, "group");
+        assert_eq!(group_by.name.as_deref(), Some("Group by Status"));
         assert_eq!(group_by.step_type, "GroupBy");
         assert_eq!(group_by.purpose, "groupBy.config");
         assert_eq!(group_by.value["key"], "status");

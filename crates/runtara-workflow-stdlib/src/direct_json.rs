@@ -71,7 +71,7 @@ impl DirectJsonManifest {
         eval_condition_expression(condition, &source)
     }
 
-    /// Execute a manifest GroupBy config against a source JSON envelope.
+    /// Execute a manifest GroupBy config and return an updated steps context.
     pub fn group_by(&self, group_id: u32, source: &[u8]) -> Result<Vec<u8>, String> {
         let source: Value = serde_json::from_slice(source)
             .map_err(|err| format!("failed to parse group-by source: {err}"))?;
@@ -80,7 +80,21 @@ impl DirectJsonManifest {
             .get(&group_id)
             .ok_or_else(|| format!("unknown direct GroupBy id {group_id}"))?;
         let output = apply_group_by(&group_by.value, &source)?;
-        serde_json::to_vec(&output)
+        let mut steps = source
+            .get("steps")
+            .and_then(Value::as_object)
+            .cloned()
+            .unwrap_or_default();
+        steps.insert(
+            group_by.step_id.clone(),
+            serde_json::json!({
+                "stepId": group_by.step_id,
+                "stepName": group_by.name.as_deref().unwrap_or("Unnamed"),
+                "stepType": group_by.step_type,
+                "outputs": output,
+            }),
+        );
+        serde_json::to_vec(&Value::Object(steps))
             .map_err(|err| format!("failed to serialize group-by output: {err}"))
     }
 }
@@ -151,6 +165,9 @@ fn collect_graph_manifest(
             .insert(
                 group_by.id,
                 DirectJsonGroupBy {
+                    step_id: group_by.step_id.clone(),
+                    name: group_by.name.clone(),
+                    step_type: group_by.step_type.clone(),
                     value: group_by.value.clone(),
                 },
             )
@@ -671,6 +688,10 @@ struct ConditionWire {
 #[serde(rename_all = "camelCase")]
 struct GroupByWire {
     id: u32,
+    step_id: String,
+    #[serde(default)]
+    name: Option<String>,
+    step_type: String,
     value: Value,
 }
 
@@ -682,6 +703,9 @@ struct DirectJsonMapping {
 
 #[derive(Debug, Clone)]
 struct DirectJsonGroupBy {
+    step_id: String,
+    name: Option<String>,
+    step_type: String,
     value: Value,
 }
 
@@ -728,6 +752,7 @@ mod tests {
                 "groupBys": [{
                     "id": 0,
                     "stepId": "group",
+                    "name": "Group by Status",
                     "stepType": "GroupBy",
                     "purpose": "groupBy.config",
                     "value": config
@@ -908,13 +933,16 @@ mod tests {
         )
         .expect("source");
 
-        let output = manifest.group_by(0, &source).expect("group output");
-        let output: Value = serde_json::from_slice(&output).expect("output json");
+        let steps = manifest.group_by(0, &source).expect("steps context");
+        let steps: Value = serde_json::from_slice(&steps).expect("steps json");
+        let output = &steps["group"]["outputs"];
 
         assert_eq!(output["counts"], json!({ "active": 2, "inactive": 1 }));
         assert_eq!(output["total_groups"], json!(2));
         assert_eq!(output["groups"]["active"][0]["id"], json!(1));
         assert_eq!(output["groups"]["active"][1]["id"], json!(3));
+        assert_eq!(steps["group"]["stepName"], json!("Group by Status"));
+        assert_eq!(steps["group"]["stepType"], json!("GroupBy"));
     }
 
     #[test]
@@ -932,8 +960,9 @@ mod tests {
         )
         .expect("source");
 
-        let output = manifest.group_by(0, &source).expect("group output");
-        let output: Value = serde_json::from_slice(&output).expect("output json");
+        let steps = manifest.group_by(0, &source).expect("steps context");
+        let steps: Value = serde_json::from_slice(&steps).expect("steps json");
+        let output = &steps["group"]["outputs"];
 
         assert_eq!(
             output["counts"],
@@ -955,8 +984,9 @@ mod tests {
         let source =
             build_source(br#"{"items":{"status":"active"}}"#, b"{}", b"{}").expect("source");
 
-        let output = manifest.group_by(0, &source).expect("group output");
-        let output: Value = serde_json::from_slice(&output).expect("output json");
+        let steps = manifest.group_by(0, &source).expect("steps context");
+        let steps: Value = serde_json::from_slice(&steps).expect("steps json");
+        let output = &steps["group"]["outputs"];
 
         assert_eq!(output["counts"], json!({ "active": 0 }));
         assert_eq!(output["groups"], json!({ "active": [] }));

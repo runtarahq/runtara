@@ -99,8 +99,9 @@ fn direct_group_by_output(graph_json: &str, data: &Value) -> Value {
     let output = direct_manifest
         .group_by(group_id, &source)
         .expect("group output");
+    let steps: Value = serde_json::from_slice(&output).expect("steps json");
 
-    serde_json::from_slice(&output).expect("output json")
+    steps[&manifest.graph.entry_point]["outputs"].clone()
 }
 
 fn current_group_by_output(graph_json: &str, data: &Value) -> Value {

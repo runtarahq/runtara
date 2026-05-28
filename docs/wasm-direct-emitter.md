@@ -77,10 +77,11 @@ Current implementation progress on `codex/wasm-direct-emitter`:
 - `tests/direct_wasm_execute.rs` now provides gated direct execution smoke
   tests. With `RUNTARA_RUN_DIRECT_WASM_E2E=1`, it compiles and statically
   composes the simple `Finish` fixture plus flat and nested `Conditional`
-  fixtures, runs each final `workflow.wasm` under
+  fixtures plus the simple `GroupBy -> Finish` fixture, runs each final
+  `workflow.wasm` under
   `wasmtime run --wasi http --wasi inherit-network`, and asserts the fake SDK
-  receives the expected mapped completion payloads for the Finish path and all
-  conditional branches.
+  receives the expected mapped completion payloads for the Finish path,
+  conditional branches, and GroupBy output.
 - `tests/direct_wasm_finish_parity.rs` now compares direct `Finish` mapping
   output against the current Rust-generated mapping contract for representative
   fixture shapes: data passthrough, dotted `outputs.*` unwrap, templates,
@@ -95,13 +96,17 @@ Current implementation progress on `codex/wasm-direct-emitter`:
 - `direct_wasm::manifest` now assigns manifest-wide GroupBy IDs for
   `GroupBy.config`, and `runtara-workflow-stdlib::direct_json` implements the
   shared `group-by` helper for simple keys, nested keys, null keys, non-array
-  inputs, and expected key initialization.
+  inputs, expected key initialization, and step-context insertion.
 - The direct core emitter now supports pure conditional decision trees:
   each `Conditional` has exactly two labeled `true`/`false` edges to another
   supported direct-control step, and all leaves are `Finish` steps. It calls
   `stdlib.eval-condition`, branches on the returned bool, applies the selected
   `Finish` mapping, and completes through the runtime component. Other routing
   shapes remain rejected by the support gate.
+- The direct core emitter now also supports the first normal-edge JSON step:
+  `GroupBy -> Finish`. It calls `stdlib.group-by`, uses the returned `steps`
+  context to rebuild the mapping source, then applies the terminal `Finish`
+  mapping against `steps.<group>.outputs.*`.
 - `tests/direct_wasm_condition_parity.rs` now compares direct conditional
   branch selection and selected `Finish` output against the current
   generated-code condition semantics for representative fixtures, including
@@ -1000,7 +1005,9 @@ Current status:
   component can evaluate those conditions through the checked WIT surface.
 - GroupBy config IDs are now in the manifest and the direct stdlib component
   can evaluate GroupBy configs through the checked WIT surface; parity fixtures
-  cover simple, nested-key, expected-key, null-key, and non-array behavior.
+  cover simple, nested-key, expected-key, null-key, and non-array behavior. The
+  direct core now consumes the helper's updated `steps` context for
+  `GroupBy -> Finish` normal-edge workflows.
 - The first direct Wasm branching path is implemented for
   `Conditional -> true/false Finish`, and the run-plan lowering now recurses
   through nested pure `Conditional` trees until each branch reaches a `Finish`
@@ -1011,9 +1018,9 @@ Current status:
   evaluation and branch output against current generated-code condition
   semantics for simple equality, `LENGTH` comparisons, and nested branch paths.
 - Remaining work: broaden graph lowering to multi-step pure JSON/control
-  workflows by wiring step output into the direct `steps` source context, then
-  lowering non-branch sequential GroupBy/Filter/Switch value steps, switch
-  routing, log/error behavior, and edge-condition priority handling.
+  workflows by generalizing the `steps` source-context update beyond GroupBy,
+  then lowering Filter/Switch value steps, switch routing, log/error behavior,
+  and edge-condition priority handling.
 
 Implementation steps:
 
@@ -1060,12 +1067,11 @@ Current progress:
 - `Conditional` lowering now supports pure true/false decision trees that end
   in `Finish` leaves. It evaluates each condition through `stdlib.eval-condition`
   and emits nested Wasm `if` control flow in the workflow-specific module.
-- The shared direct stdlib now implements deterministic GroupBy semantics behind
-  `group-by`, with manifest IDs and parity tests in place. The direct core still
-  needs the generic step-output source-context update before it can lower
-  `GroupBy -> Finish` normal edges end to end.
-- Remaining parity work in this phase starts with that step-output source
-  context and normal sequential edges, then broadens to `Switch`, `Filter`,
+- `GroupBy -> Finish` normal-edge lowering now runs end to end. The shared
+  direct stdlib returns an updated `steps` context from `group-by`, and the
+  direct core rebuilds the source before applying the final `Finish` mapping.
+- Remaining parity work in this phase starts by reusing that source-context
+  pattern for `Filter` and value `Switch`, then broadens to switch routing,
   `Log`, `Error`, edge conditions, and debug event behavior.
 
 Implementation steps:

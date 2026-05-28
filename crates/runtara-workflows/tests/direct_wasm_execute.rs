@@ -21,6 +21,7 @@ use serde_json::Value;
 const SIMPLE_PASSTHROUGH: &str = include_str!("fixtures/simple_passthrough.json");
 const CONDITIONAL_WORKFLOW: &str = include_str!("fixtures/conditional_workflow.json");
 const CONDITIONAL_NESTED: &str = include_str!("fixtures/conditional_nested.json");
+const GROUP_BY_SIMPLE: &str = include_str!("fixtures/group_by_simple.json");
 
 #[derive(Debug)]
 struct Completed {
@@ -432,4 +433,38 @@ fn direct_wasm_execute_nested_conditional_branches_report_completion() {
         br#"{"flag":false,"kind":"a"}"#,
     );
     assert_eq!(false_output, serde_json::json!({ "result": "flag-false" }));
+}
+
+#[test]
+fn direct_wasm_execute_group_by_finish_reports_completion() {
+    let Some(components_dir) = direct_e2e_components_dir() else {
+        return;
+    };
+
+    let output = run_direct_workflow(
+        &components_dir,
+        "direct-wasm-execute-group-by",
+        GROUP_BY_SIMPLE,
+        br#"{"items":[{"id":1,"status":"active"},{"id":2,"status":"inactive"},{"id":3,"status":"active"}]}"#,
+    );
+
+    assert_eq!(
+        output,
+        serde_json::json!({
+            "groups": {
+                "active": [
+                    { "id": 1, "status": "active" },
+                    { "id": 3, "status": "active" }
+                ],
+                "inactive": [
+                    { "id": 2, "status": "inactive" }
+                ]
+            },
+            "counts": {
+                "active": 2,
+                "inactive": 1
+            },
+            "total_groups": 2
+        })
+    );
 }
