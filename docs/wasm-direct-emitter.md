@@ -64,6 +64,11 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   nested Agent, explicit Error-step, mapping/source, and control-stdlib
   failure collection, result accumulation, and result step envelopes, including
   the generated-code-compatible `dontStopOnFailed` accumulator/result shape.
+  It also contains the first While stdlib helper surface for max-iteration
+  resolution, loop state initialization/advance, loop-context injection for
+  condition evaluation, generated-code-compatible iteration variables including
+  `_loop_indices`, `_index`, `_previousOutputs`, `_loop`, and `_scope_id`, and
+  final While step-output envelopes.
 - `runtara-workflow-stdlib` now has a `direct-component` feature and
   component metadata for `runtara:workflow-stdlib`. That feature builds a
   `wasm32-wasip2` stdlib component without pulling in SDK/runtime, HTTP, AI,
@@ -1736,9 +1741,15 @@ Implementation steps:
    - Split retry/timeout/breakpoint semantics: pending.
 3. Implement `While`:
    - config/condition manifest records and nested graph link: done;
-   - max iterations;
-   - condition evaluation before each iteration;
-   - `_previousOutputs`;
+   - max iterations: stdlib helper and WIT export done, direct lowering
+     pending;
+   - loop state initialization/advance and final output envelope: stdlib
+     helpers and WIT exports done, direct lowering pending;
+   - condition evaluation before each iteration: stdlib source-injection and
+     condition-evaluation helpers done, direct lowering pending;
+   - `_previousOutputs`, `_loop_indices`, `_index`, `_loop`, and `_scope_id`
+     iteration variable shape: stdlib helper and WIT export done, direct
+     lowering pending;
    - heartbeat/cancellation checks;
    - onError routing.
 4. Defer parallel split until runtime support and test coverage are explicit.

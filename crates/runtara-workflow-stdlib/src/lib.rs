@@ -318,6 +318,88 @@ mod component {
             })
         }
 
+        fn while_max_iterations(while_id: u32) -> Result<u32, String> {
+            MANIFEST.with(|slot| {
+                let slot = slot.borrow();
+                let manifest = slot
+                    .as_ref()
+                    .ok_or_else(|| "direct stdlib manifest was not initialized".to_string())?;
+                manifest.while_max_iterations(while_id)
+            })
+        }
+
+        fn while_initial_state(while_id: u32) -> Result<Vec<u8>, String> {
+            MANIFEST.with(|slot| {
+                let slot = slot.borrow();
+                let manifest = slot
+                    .as_ref()
+                    .ok_or_else(|| "direct stdlib manifest was not initialized".to_string())?;
+                manifest.while_initial_state(while_id)
+            })
+        }
+
+        fn while_condition_source(
+            while_id: u32,
+            source: Vec<u8>,
+            state: Vec<u8>,
+        ) -> Result<Vec<u8>, String> {
+            MANIFEST.with(|slot| {
+                let slot = slot.borrow();
+                let manifest = slot
+                    .as_ref()
+                    .ok_or_else(|| "direct stdlib manifest was not initialized".to_string())?;
+                manifest.while_condition_source(while_id, &source, &state)
+            })
+        }
+
+        fn while_condition(while_id: u32, source: Vec<u8>) -> Result<bool, String> {
+            MANIFEST.with(|slot| {
+                let slot = slot.borrow();
+                let manifest = slot
+                    .as_ref()
+                    .ok_or_else(|| "direct stdlib manifest was not initialized".to_string())?;
+                manifest.while_condition(while_id, &source)
+            })
+        }
+
+        fn while_iteration_variables(
+            while_id: u32,
+            variables: Vec<u8>,
+            state: Vec<u8>,
+        ) -> Result<Vec<u8>, String> {
+            MANIFEST.with(|slot| {
+                let slot = slot.borrow();
+                let manifest = slot
+                    .as_ref()
+                    .ok_or_else(|| "direct stdlib manifest was not initialized".to_string())?;
+                manifest.while_iteration_variables(while_id, &variables, &state)
+            })
+        }
+
+        fn while_advance_state(
+            while_id: u32,
+            state: Vec<u8>,
+            output: Vec<u8>,
+        ) -> Result<Vec<u8>, String> {
+            MANIFEST.with(|slot| {
+                let slot = slot.borrow();
+                let manifest = slot
+                    .as_ref()
+                    .ok_or_else(|| "direct stdlib manifest was not initialized".to_string())?;
+                manifest.while_advance_state(while_id, &state, &output)
+            })
+        }
+
+        fn while_output(while_id: u32, source: Vec<u8>, state: Vec<u8>) -> Result<Vec<u8>, String> {
+            MANIFEST.with(|slot| {
+                let slot = slot.borrow();
+                let manifest = slot
+                    .as_ref()
+                    .ok_or_else(|| "direct stdlib manifest was not initialized".to_string())?;
+                manifest.while_output(while_id, &source, &state)
+            })
+        }
+
         fn filter(filter_id: u32, source: Vec<u8>) -> Result<Vec<u8>, String> {
             MANIFEST.with(|slot| {
                 let slot = slot.borrow();

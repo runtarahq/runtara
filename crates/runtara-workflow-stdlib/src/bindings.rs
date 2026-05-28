@@ -1110,6 +1110,486 @@ pub mod exports {
                 }
                 #[doc(hidden)]
                 #[allow(non_snake_case)]
+                pub unsafe fn _export_while_max_iterations_cabi<T: Guest>(
+                    arg0: i32,
+                ) -> *mut u8 {
+                    #[cfg(target_arch = "wasm32")] _rt::run_ctors_once();
+                    let result0 = T::while_max_iterations(arg0 as u32);
+                    let ptr1 = (&raw mut _RET_AREA.0).cast::<u8>();
+                    match result0 {
+                        Ok(e) => {
+                            *ptr1.add(0).cast::<u8>() = (0i32) as u8;
+                            *ptr1
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<i32>() = _rt::as_i32(e);
+                        }
+                        Err(e) => {
+                            *ptr1.add(0).cast::<u8>() = (1i32) as u8;
+                            let vec2 = (e.into_bytes()).into_boxed_slice();
+                            let ptr2 = vec2.as_ptr().cast::<u8>();
+                            let len2 = vec2.len();
+                            ::core::mem::forget(vec2);
+                            *ptr1
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>() = len2;
+                            *ptr1
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>() = ptr2.cast_mut();
+                        }
+                    };
+                    ptr1
+                }
+                #[doc(hidden)]
+                #[allow(non_snake_case)]
+                pub unsafe fn __post_return_while_max_iterations<T: Guest>(
+                    arg0: *mut u8,
+                ) {
+                    let l0 = i32::from(*arg0.add(0).cast::<u8>());
+                    match l0 {
+                        0 => {}
+                        _ => {
+                            let l1 = *arg0
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>();
+                            let l2 = *arg0
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>();
+                            _rt::cabi_dealloc(l1, l2, 1);
+                        }
+                    }
+                }
+                #[doc(hidden)]
+                #[allow(non_snake_case)]
+                pub unsafe fn _export_while_initial_state_cabi<T: Guest>(
+                    arg0: i32,
+                ) -> *mut u8 {
+                    #[cfg(target_arch = "wasm32")] _rt::run_ctors_once();
+                    let result0 = T::while_initial_state(arg0 as u32);
+                    let ptr1 = (&raw mut _RET_AREA.0).cast::<u8>();
+                    match result0 {
+                        Ok(e) => {
+                            *ptr1.add(0).cast::<u8>() = (0i32) as u8;
+                            let vec2 = (e).into_boxed_slice();
+                            let ptr2 = vec2.as_ptr().cast::<u8>();
+                            let len2 = vec2.len();
+                            ::core::mem::forget(vec2);
+                            *ptr1
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>() = len2;
+                            *ptr1
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>() = ptr2.cast_mut();
+                        }
+                        Err(e) => {
+                            *ptr1.add(0).cast::<u8>() = (1i32) as u8;
+                            let vec3 = (e.into_bytes()).into_boxed_slice();
+                            let ptr3 = vec3.as_ptr().cast::<u8>();
+                            let len3 = vec3.len();
+                            ::core::mem::forget(vec3);
+                            *ptr1
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>() = len3;
+                            *ptr1
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>() = ptr3.cast_mut();
+                        }
+                    };
+                    ptr1
+                }
+                #[doc(hidden)]
+                #[allow(non_snake_case)]
+                pub unsafe fn __post_return_while_initial_state<T: Guest>(
+                    arg0: *mut u8,
+                ) {
+                    let l0 = i32::from(*arg0.add(0).cast::<u8>());
+                    match l0 {
+                        0 => {
+                            let l1 = *arg0
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>();
+                            let l2 = *arg0
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>();
+                            let base3 = l1;
+                            let len3 = l2;
+                            _rt::cabi_dealloc(base3, len3 * 1, 1);
+                        }
+                        _ => {
+                            let l4 = *arg0
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>();
+                            let l5 = *arg0
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>();
+                            _rt::cabi_dealloc(l4, l5, 1);
+                        }
+                    }
+                }
+                #[doc(hidden)]
+                #[allow(non_snake_case)]
+                pub unsafe fn _export_while_condition_source_cabi<T: Guest>(
+                    arg0: i32,
+                    arg1: *mut u8,
+                    arg2: usize,
+                    arg3: *mut u8,
+                    arg4: usize,
+                ) -> *mut u8 {
+                    #[cfg(target_arch = "wasm32")] _rt::run_ctors_once();
+                    let len0 = arg2;
+                    let len1 = arg4;
+                    let result2 = T::while_condition_source(
+                        arg0 as u32,
+                        _rt::Vec::from_raw_parts(arg1.cast(), len0, len0),
+                        _rt::Vec::from_raw_parts(arg3.cast(), len1, len1),
+                    );
+                    let ptr3 = (&raw mut _RET_AREA.0).cast::<u8>();
+                    match result2 {
+                        Ok(e) => {
+                            *ptr3.add(0).cast::<u8>() = (0i32) as u8;
+                            let vec4 = (e).into_boxed_slice();
+                            let ptr4 = vec4.as_ptr().cast::<u8>();
+                            let len4 = vec4.len();
+                            ::core::mem::forget(vec4);
+                            *ptr3
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>() = len4;
+                            *ptr3
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>() = ptr4.cast_mut();
+                        }
+                        Err(e) => {
+                            *ptr3.add(0).cast::<u8>() = (1i32) as u8;
+                            let vec5 = (e.into_bytes()).into_boxed_slice();
+                            let ptr5 = vec5.as_ptr().cast::<u8>();
+                            let len5 = vec5.len();
+                            ::core::mem::forget(vec5);
+                            *ptr3
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>() = len5;
+                            *ptr3
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>() = ptr5.cast_mut();
+                        }
+                    };
+                    ptr3
+                }
+                #[doc(hidden)]
+                #[allow(non_snake_case)]
+                pub unsafe fn __post_return_while_condition_source<T: Guest>(
+                    arg0: *mut u8,
+                ) {
+                    let l0 = i32::from(*arg0.add(0).cast::<u8>());
+                    match l0 {
+                        0 => {
+                            let l1 = *arg0
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>();
+                            let l2 = *arg0
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>();
+                            let base3 = l1;
+                            let len3 = l2;
+                            _rt::cabi_dealloc(base3, len3 * 1, 1);
+                        }
+                        _ => {
+                            let l4 = *arg0
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>();
+                            let l5 = *arg0
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>();
+                            _rt::cabi_dealloc(l4, l5, 1);
+                        }
+                    }
+                }
+                #[doc(hidden)]
+                #[allow(non_snake_case)]
+                pub unsafe fn _export_while_condition_cabi<T: Guest>(
+                    arg0: i32,
+                    arg1: *mut u8,
+                    arg2: usize,
+                ) -> *mut u8 {
+                    #[cfg(target_arch = "wasm32")] _rt::run_ctors_once();
+                    let len0 = arg2;
+                    let result1 = T::while_condition(
+                        arg0 as u32,
+                        _rt::Vec::from_raw_parts(arg1.cast(), len0, len0),
+                    );
+                    let ptr2 = (&raw mut _RET_AREA.0).cast::<u8>();
+                    match result1 {
+                        Ok(e) => {
+                            *ptr2.add(0).cast::<u8>() = (0i32) as u8;
+                            *ptr2
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<u8>() = (match e {
+                                true => 1,
+                                false => 0,
+                            }) as u8;
+                        }
+                        Err(e) => {
+                            *ptr2.add(0).cast::<u8>() = (1i32) as u8;
+                            let vec3 = (e.into_bytes()).into_boxed_slice();
+                            let ptr3 = vec3.as_ptr().cast::<u8>();
+                            let len3 = vec3.len();
+                            ::core::mem::forget(vec3);
+                            *ptr2
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>() = len3;
+                            *ptr2
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>() = ptr3.cast_mut();
+                        }
+                    };
+                    ptr2
+                }
+                #[doc(hidden)]
+                #[allow(non_snake_case)]
+                pub unsafe fn __post_return_while_condition<T: Guest>(arg0: *mut u8) {
+                    let l0 = i32::from(*arg0.add(0).cast::<u8>());
+                    match l0 {
+                        0 => {}
+                        _ => {
+                            let l1 = *arg0
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>();
+                            let l2 = *arg0
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>();
+                            _rt::cabi_dealloc(l1, l2, 1);
+                        }
+                    }
+                }
+                #[doc(hidden)]
+                #[allow(non_snake_case)]
+                pub unsafe fn _export_while_iteration_variables_cabi<T: Guest>(
+                    arg0: i32,
+                    arg1: *mut u8,
+                    arg2: usize,
+                    arg3: *mut u8,
+                    arg4: usize,
+                ) -> *mut u8 {
+                    #[cfg(target_arch = "wasm32")] _rt::run_ctors_once();
+                    let len0 = arg2;
+                    let len1 = arg4;
+                    let result2 = T::while_iteration_variables(
+                        arg0 as u32,
+                        _rt::Vec::from_raw_parts(arg1.cast(), len0, len0),
+                        _rt::Vec::from_raw_parts(arg3.cast(), len1, len1),
+                    );
+                    let ptr3 = (&raw mut _RET_AREA.0).cast::<u8>();
+                    match result2 {
+                        Ok(e) => {
+                            *ptr3.add(0).cast::<u8>() = (0i32) as u8;
+                            let vec4 = (e).into_boxed_slice();
+                            let ptr4 = vec4.as_ptr().cast::<u8>();
+                            let len4 = vec4.len();
+                            ::core::mem::forget(vec4);
+                            *ptr3
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>() = len4;
+                            *ptr3
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>() = ptr4.cast_mut();
+                        }
+                        Err(e) => {
+                            *ptr3.add(0).cast::<u8>() = (1i32) as u8;
+                            let vec5 = (e.into_bytes()).into_boxed_slice();
+                            let ptr5 = vec5.as_ptr().cast::<u8>();
+                            let len5 = vec5.len();
+                            ::core::mem::forget(vec5);
+                            *ptr3
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>() = len5;
+                            *ptr3
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>() = ptr5.cast_mut();
+                        }
+                    };
+                    ptr3
+                }
+                #[doc(hidden)]
+                #[allow(non_snake_case)]
+                pub unsafe fn __post_return_while_iteration_variables<T: Guest>(
+                    arg0: *mut u8,
+                ) {
+                    let l0 = i32::from(*arg0.add(0).cast::<u8>());
+                    match l0 {
+                        0 => {
+                            let l1 = *arg0
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>();
+                            let l2 = *arg0
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>();
+                            let base3 = l1;
+                            let len3 = l2;
+                            _rt::cabi_dealloc(base3, len3 * 1, 1);
+                        }
+                        _ => {
+                            let l4 = *arg0
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>();
+                            let l5 = *arg0
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>();
+                            _rt::cabi_dealloc(l4, l5, 1);
+                        }
+                    }
+                }
+                #[doc(hidden)]
+                #[allow(non_snake_case)]
+                pub unsafe fn _export_while_advance_state_cabi<T: Guest>(
+                    arg0: i32,
+                    arg1: *mut u8,
+                    arg2: usize,
+                    arg3: *mut u8,
+                    arg4: usize,
+                ) -> *mut u8 {
+                    #[cfg(target_arch = "wasm32")] _rt::run_ctors_once();
+                    let len0 = arg2;
+                    let len1 = arg4;
+                    let result2 = T::while_advance_state(
+                        arg0 as u32,
+                        _rt::Vec::from_raw_parts(arg1.cast(), len0, len0),
+                        _rt::Vec::from_raw_parts(arg3.cast(), len1, len1),
+                    );
+                    let ptr3 = (&raw mut _RET_AREA.0).cast::<u8>();
+                    match result2 {
+                        Ok(e) => {
+                            *ptr3.add(0).cast::<u8>() = (0i32) as u8;
+                            let vec4 = (e).into_boxed_slice();
+                            let ptr4 = vec4.as_ptr().cast::<u8>();
+                            let len4 = vec4.len();
+                            ::core::mem::forget(vec4);
+                            *ptr3
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>() = len4;
+                            *ptr3
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>() = ptr4.cast_mut();
+                        }
+                        Err(e) => {
+                            *ptr3.add(0).cast::<u8>() = (1i32) as u8;
+                            let vec5 = (e.into_bytes()).into_boxed_slice();
+                            let ptr5 = vec5.as_ptr().cast::<u8>();
+                            let len5 = vec5.len();
+                            ::core::mem::forget(vec5);
+                            *ptr3
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>() = len5;
+                            *ptr3
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>() = ptr5.cast_mut();
+                        }
+                    };
+                    ptr3
+                }
+                #[doc(hidden)]
+                #[allow(non_snake_case)]
+                pub unsafe fn __post_return_while_advance_state<T: Guest>(
+                    arg0: *mut u8,
+                ) {
+                    let l0 = i32::from(*arg0.add(0).cast::<u8>());
+                    match l0 {
+                        0 => {
+                            let l1 = *arg0
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>();
+                            let l2 = *arg0
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>();
+                            let base3 = l1;
+                            let len3 = l2;
+                            _rt::cabi_dealloc(base3, len3 * 1, 1);
+                        }
+                        _ => {
+                            let l4 = *arg0
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>();
+                            let l5 = *arg0
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>();
+                            _rt::cabi_dealloc(l4, l5, 1);
+                        }
+                    }
+                }
+                #[doc(hidden)]
+                #[allow(non_snake_case)]
+                pub unsafe fn _export_while_output_cabi<T: Guest>(
+                    arg0: i32,
+                    arg1: *mut u8,
+                    arg2: usize,
+                    arg3: *mut u8,
+                    arg4: usize,
+                ) -> *mut u8 {
+                    #[cfg(target_arch = "wasm32")] _rt::run_ctors_once();
+                    let len0 = arg2;
+                    let len1 = arg4;
+                    let result2 = T::while_output(
+                        arg0 as u32,
+                        _rt::Vec::from_raw_parts(arg1.cast(), len0, len0),
+                        _rt::Vec::from_raw_parts(arg3.cast(), len1, len1),
+                    );
+                    let ptr3 = (&raw mut _RET_AREA.0).cast::<u8>();
+                    match result2 {
+                        Ok(e) => {
+                            *ptr3.add(0).cast::<u8>() = (0i32) as u8;
+                            let vec4 = (e).into_boxed_slice();
+                            let ptr4 = vec4.as_ptr().cast::<u8>();
+                            let len4 = vec4.len();
+                            ::core::mem::forget(vec4);
+                            *ptr3
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>() = len4;
+                            *ptr3
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>() = ptr4.cast_mut();
+                        }
+                        Err(e) => {
+                            *ptr3.add(0).cast::<u8>() = (1i32) as u8;
+                            let vec5 = (e.into_bytes()).into_boxed_slice();
+                            let ptr5 = vec5.as_ptr().cast::<u8>();
+                            let len5 = vec5.len();
+                            ::core::mem::forget(vec5);
+                            *ptr3
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>() = len5;
+                            *ptr3
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>() = ptr5.cast_mut();
+                        }
+                    };
+                    ptr3
+                }
+                #[doc(hidden)]
+                #[allow(non_snake_case)]
+                pub unsafe fn __post_return_while_output<T: Guest>(arg0: *mut u8) {
+                    let l0 = i32::from(*arg0.add(0).cast::<u8>());
+                    match l0 {
+                        0 => {
+                            let l1 = *arg0
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>();
+                            let l2 = *arg0
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>();
+                            let base3 = l1;
+                            let len3 = l2;
+                            _rt::cabi_dealloc(base3, len3 * 1, 1);
+                        }
+                        _ => {
+                            let l4 = *arg0
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>();
+                            let l5 = *arg0
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>();
+                            _rt::cabi_dealloc(l4, l5, 1);
+                        }
+                    }
+                }
+                #[doc(hidden)]
+                #[allow(non_snake_case)]
                 pub unsafe fn _export_filter_cabi<T: Guest>(
                     arg0: i32,
                     arg1: *mut u8,
@@ -2893,6 +3373,34 @@ pub mod exports {
                         source: _rt::Vec<u8>,
                         results: _rt::Vec<u8>,
                     ) -> Result<_rt::Vec<u8>, _rt::String>;
+                    fn while_max_iterations(while_id: u32) -> Result<u32, _rt::String>;
+                    fn while_initial_state(
+                        while_id: u32,
+                    ) -> Result<_rt::Vec<u8>, _rt::String>;
+                    fn while_condition_source(
+                        while_id: u32,
+                        source: _rt::Vec<u8>,
+                        state: _rt::Vec<u8>,
+                    ) -> Result<_rt::Vec<u8>, _rt::String>;
+                    fn while_condition(
+                        while_id: u32,
+                        source: _rt::Vec<u8>,
+                    ) -> Result<bool, _rt::String>;
+                    fn while_iteration_variables(
+                        while_id: u32,
+                        variables: _rt::Vec<u8>,
+                        state: _rt::Vec<u8>,
+                    ) -> Result<_rt::Vec<u8>, _rt::String>;
+                    fn while_advance_state(
+                        while_id: u32,
+                        state: _rt::Vec<u8>,
+                        output: _rt::Vec<u8>,
+                    ) -> Result<_rt::Vec<u8>, _rt::String>;
+                    fn while_output(
+                        while_id: u32,
+                        source: _rt::Vec<u8>,
+                        state: _rt::Vec<u8>,
+                    ) -> Result<_rt::Vec<u8>, _rt::String>;
                     fn filter(
                         filter_id: u32,
                         source: _rt::Vec<u8>,
@@ -3163,6 +3671,78 @@ pub mod exports {
                         "cabi_post_runtara:workflow-stdlib/json@0.1.0#split-output")]
                         unsafe extern "C" fn _post_return_split_output(arg0 : * mut u8,)
                         { unsafe { $($path_to_types)*:: __post_return_split_output::<$ty
+                        > (arg0) } } #[unsafe (export_name =
+                        "runtara:workflow-stdlib/json@0.1.0#while-max-iterations")]
+                        unsafe extern "C" fn export_while_max_iterations(arg0 : i32,) ->
+                        * mut u8 { unsafe { $($path_to_types)*::
+                        _export_while_max_iterations_cabi::<$ty > (arg0) } } #[unsafe
+                        (export_name =
+                        "cabi_post_runtara:workflow-stdlib/json@0.1.0#while-max-iterations")]
+                        unsafe extern "C" fn _post_return_while_max_iterations(arg0 : *
+                        mut u8,) { unsafe { $($path_to_types)*::
+                        __post_return_while_max_iterations::<$ty > (arg0) } } #[unsafe
+                        (export_name =
+                        "runtara:workflow-stdlib/json@0.1.0#while-initial-state")] unsafe
+                        extern "C" fn export_while_initial_state(arg0 : i32,) -> * mut u8
+                        { unsafe { $($path_to_types)*::
+                        _export_while_initial_state_cabi::<$ty > (arg0) } } #[unsafe
+                        (export_name =
+                        "cabi_post_runtara:workflow-stdlib/json@0.1.0#while-initial-state")]
+                        unsafe extern "C" fn _post_return_while_initial_state(arg0 : *
+                        mut u8,) { unsafe { $($path_to_types)*::
+                        __post_return_while_initial_state::<$ty > (arg0) } } #[unsafe
+                        (export_name =
+                        "runtara:workflow-stdlib/json@0.1.0#while-condition-source")]
+                        unsafe extern "C" fn export_while_condition_source(arg0 : i32,
+                        arg1 : * mut u8, arg2 : usize, arg3 : * mut u8, arg4 : usize,) ->
+                        * mut u8 { unsafe { $($path_to_types)*::
+                        _export_while_condition_source_cabi::<$ty > (arg0, arg1, arg2,
+                        arg3, arg4) } } #[unsafe (export_name =
+                        "cabi_post_runtara:workflow-stdlib/json@0.1.0#while-condition-source")]
+                        unsafe extern "C" fn _post_return_while_condition_source(arg0 : *
+                        mut u8,) { unsafe { $($path_to_types)*::
+                        __post_return_while_condition_source::<$ty > (arg0) } } #[unsafe
+                        (export_name =
+                        "runtara:workflow-stdlib/json@0.1.0#while-condition")] unsafe
+                        extern "C" fn export_while_condition(arg0 : i32, arg1 : * mut u8,
+                        arg2 : usize,) -> * mut u8 { unsafe { $($path_to_types)*::
+                        _export_while_condition_cabi::<$ty > (arg0, arg1, arg2) } }
+                        #[unsafe (export_name =
+                        "cabi_post_runtara:workflow-stdlib/json@0.1.0#while-condition")]
+                        unsafe extern "C" fn _post_return_while_condition(arg0 : * mut
+                        u8,) { unsafe { $($path_to_types)*::
+                        __post_return_while_condition::<$ty > (arg0) } } #[unsafe
+                        (export_name =
+                        "runtara:workflow-stdlib/json@0.1.0#while-iteration-variables")]
+                        unsafe extern "C" fn export_while_iteration_variables(arg0 : i32,
+                        arg1 : * mut u8, arg2 : usize, arg3 : * mut u8, arg4 : usize,) ->
+                        * mut u8 { unsafe { $($path_to_types)*::
+                        _export_while_iteration_variables_cabi::<$ty > (arg0, arg1, arg2,
+                        arg3, arg4) } } #[unsafe (export_name =
+                        "cabi_post_runtara:workflow-stdlib/json@0.1.0#while-iteration-variables")]
+                        unsafe extern "C" fn _post_return_while_iteration_variables(arg0
+                        : * mut u8,) { unsafe { $($path_to_types)*::
+                        __post_return_while_iteration_variables::<$ty > (arg0) } }
+                        #[unsafe (export_name =
+                        "runtara:workflow-stdlib/json@0.1.0#while-advance-state")] unsafe
+                        extern "C" fn export_while_advance_state(arg0 : i32, arg1 : * mut
+                        u8, arg2 : usize, arg3 : * mut u8, arg4 : usize,) -> * mut u8 {
+                        unsafe { $($path_to_types)*::
+                        _export_while_advance_state_cabi::<$ty > (arg0, arg1, arg2, arg3,
+                        arg4) } } #[unsafe (export_name =
+                        "cabi_post_runtara:workflow-stdlib/json@0.1.0#while-advance-state")]
+                        unsafe extern "C" fn _post_return_while_advance_state(arg0 : *
+                        mut u8,) { unsafe { $($path_to_types)*::
+                        __post_return_while_advance_state::<$ty > (arg0) } } #[unsafe
+                        (export_name =
+                        "runtara:workflow-stdlib/json@0.1.0#while-output")] unsafe extern
+                        "C" fn export_while_output(arg0 : i32, arg1 : * mut u8, arg2 :
+                        usize, arg3 : * mut u8, arg4 : usize,) -> * mut u8 { unsafe {
+                        $($path_to_types)*:: _export_while_output_cabi::<$ty > (arg0,
+                        arg1, arg2, arg3, arg4) } } #[unsafe (export_name =
+                        "cabi_post_runtara:workflow-stdlib/json@0.1.0#while-output")]
+                        unsafe extern "C" fn _post_return_while_output(arg0 : * mut u8,)
+                        { unsafe { $($path_to_types)*:: __post_return_while_output::<$ty
                         > (arg0) } } #[unsafe (export_name =
                         "runtara:workflow-stdlib/json@0.1.0#filter")] unsafe extern "C"
                         fn export_filter(arg0 : i32, arg1 : * mut u8, arg2 : usize,) -> *
@@ -3559,9 +4139,9 @@ pub(crate) use __export_workflow_stdlib_impl as export;
 #[unsafe(link_section = "component-type:wit-bindgen:0.41.0:runtara:workflow-stdlib@0.1.0:workflow-stdlib:encoded world")]
 #[doc(hidden)]
 #[allow(clippy::octal_escapes)]
-pub static __WIT_BINDGEN_COMPONENT_TYPE: [u8; 2206] = *b"\
-\0asm\x0d\0\x01\0\0\x19\x16wit-component-encoding\x04\0\x07\x98\x10\x01A\x02\x01\
-A\x02\x01BT\x01p}\x01r\x03\x07payload\0\x09retryable\x7f\x0crate-limited\x7f\x04\
+pub static __WIT_BINDGEN_COMPONENT_TYPE: [u8; 2519] = *b"\
+\0asm\x0d\0\x01\0\0\x19\x16wit-component-encoding\x04\0\x07\xd1\x12\x01A\x02\x01\
+A\x02\x01Ba\x01p}\x01r\x03\x07payload\0\x09retryable\x7f\x0crate-limited\x7f\x04\
 \0\x11agent-retry-error\x03\0\x01\x01j\0\x01s\x01@\x01\x08manifest\0\0\x03\x04\0\
 \x0dinit-manifest\x01\x04\x01j\x01\0\x01s\x01@\x03\x04data\0\x09variables\0\x05s\
 teps\0\0\x05\x04\0\x0cbuild-source\x01\x06\x01@\x02\x0amapping-idy\x06source\0\0\
@@ -3579,32 +4159,38 @@ split-idy\x06output\0\x05indexy\0\x03\x04\0\x15split-validate-output\x01\x13\x01
 t-idy\x07results\0\x06output\0\0\x05\x04\0\x13split-append-output\x01\x15\x01@\x04\
 \x08split-idy\x07results\0\x05errors\x05indexy\0\x05\x04\0\x12split-append-error\
 \x01\x16\x01@\x03\x08split-idy\x06source\0\x07results\0\0\x05\x04\0\x0csplit-out\
-put\x01\x17\x01@\x02\x09filter-idy\x06source\0\0\x05\x04\0\x06filter\x01\x18\x01\
-@\x02\x06log-idy\x06source\0\0\x05\x04\0\x09log-event\x01\x19\x04\0\x03log\x01\x19\
-\x01@\x02\x08error-idy\x06source\0\0\x05\x04\0\x0berror-event\x01\x1a\x04\0\x05e\
-rror\x01\x1a\x01@\x03\x07step-ids\x05error\0\x05steps\0\0\x05\x04\0\x0berror-ste\
-ps\x01\x1b\x01@\x02\x08group-idy\x06source\0\0\x05\x04\0\x08group-by\x01\x1c\x01\
-j\x01w\x01s\x01@\x02\x08delay-idy\x06source\0\0\x1d\x04\0\x11delay-duration-ms\x01\
-\x1e\x01@\x03\x08delay-idy\x06source\0\x0bduration-msw\0\x05\x04\0\x05delay\x01\x1f\
-\x01@\x03\x08agent-idy\x06source\0\x06output\0\0\x05\x04\0\x0cagent-output\x01\x20\
-\x01@\x02\x08agent-idy\x05input\0\0\x05\x04\0\x14agent-validate-input\x01!\x04\0\
-\x16agent-connection-input\x01!\x01@\x02\x08agent-idy\x06source\0\0\x05\x04\0\x0f\
-agent-cache-key\x01\"\x01@\x02\x0dcheckpoint-ids\x0eattempt-numbery\0\x05\x04\0\x15\
-agent-retry-sleep-key\x01#\x01kw\x01@\x05\x0eattempt-numbery\x0etotal-attemptsy\x0d\
-base-delay-msw\x0cmax-delay-msw\x0eretry-after-ms$\0\x1d\x04\0\x14agent-retry-de\
-lay-ms\x01%\x01ks\x01@\x07\x04codes\x07messages\x08categorys\x08severitys\x09ret\
-ryable\x7f\x0eretry-after-ms$\x0aattributes&\0\x05\x04\0\x10agent-error-info\x01\
-'\x01j\x01\x02\x01s\x01@\x07\x04codes\x07messages\x08categorys\x08severitys\x09r\
-etryable\x7f\x0eretry-after-ms$\x0aattributes&\0(\x04\0\x16agent-retry-error-inf\
-o\x01)\x01@\x08\x08agent-idy\x04codes\x07messages\x08categorys\x08severitys\x09r\
-etryable\x7f\x0eretry-after-ms$\x0aattributes&\0\x05\x04\0\x0bagent-error\x01*\x01\
-@\x02\x08agent-idy\x0aerror-info\0\0\x05\x04\0\x15agent-error-from-info\x01+\x01\
-@\x02\x08agent-idy\x05error\0\0\x05\x04\0\x11agent-debug-error\x01,\x01@\x02\x07\
-step-ids\x06source\0\0\x05\x04\0\x10step-debug-start\x01-\x04\0\x0estep-debug-en\
-d\x01-\x04\0\"runtara:workflow-stdlib/json@0.1.0\x05\0\x04\0-runtara:workflow-st\
-dlib/workflow-stdlib@0.1.0\x04\0\x0b\x15\x01\0\x0fworkflow-stdlib\x03\0\0\0G\x09\
-producers\x01\x0cprocessed-by\x02\x0dwit-component\x070.227.1\x10wit-bindgen-rus\
-t\x060.41.0";
+put\x01\x17\x01@\x01\x08while-idy\0\x0e\x04\0\x14while-max-iterations\x01\x18\x01\
+@\x01\x08while-idy\0\x05\x04\0\x13while-initial-state\x01\x19\x01@\x03\x08while-\
+idy\x06source\0\x05state\0\0\x05\x04\0\x16while-condition-source\x01\x1a\x01@\x02\
+\x08while-idy\x06source\0\0\x08\x04\0\x0fwhile-condition\x01\x1b\x01@\x03\x08whi\
+le-idy\x09variables\0\x05state\0\0\x05\x04\0\x19while-iteration-variables\x01\x1c\
+\x01@\x03\x08while-idy\x05state\0\x06output\0\0\x05\x04\0\x13while-advance-state\
+\x01\x1d\x04\0\x0cwhile-output\x01\x1a\x01@\x02\x09filter-idy\x06source\0\0\x05\x04\
+\0\x06filter\x01\x1e\x01@\x02\x06log-idy\x06source\0\0\x05\x04\0\x09log-event\x01\
+\x1f\x04\0\x03log\x01\x1f\x01@\x02\x08error-idy\x06source\0\0\x05\x04\0\x0berror\
+-event\x01\x20\x04\0\x05error\x01\x20\x01@\x03\x07step-ids\x05error\0\x05steps\0\
+\0\x05\x04\0\x0berror-steps\x01!\x01@\x02\x08group-idy\x06source\0\0\x05\x04\0\x08\
+group-by\x01\"\x01j\x01w\x01s\x01@\x02\x08delay-idy\x06source\0\0#\x04\0\x11dela\
+y-duration-ms\x01$\x01@\x03\x08delay-idy\x06source\0\x0bduration-msw\0\x05\x04\0\
+\x05delay\x01%\x01@\x03\x08agent-idy\x06source\0\x06output\0\0\x05\x04\0\x0cagen\
+t-output\x01&\x01@\x02\x08agent-idy\x05input\0\0\x05\x04\0\x14agent-validate-inp\
+ut\x01'\x04\0\x16agent-connection-input\x01'\x01@\x02\x08agent-idy\x06source\0\0\
+\x05\x04\0\x0fagent-cache-key\x01(\x01@\x02\x0dcheckpoint-ids\x0eattempt-numbery\
+\0\x05\x04\0\x15agent-retry-sleep-key\x01)\x01kw\x01@\x05\x0eattempt-numbery\x0e\
+total-attemptsy\x0dbase-delay-msw\x0cmax-delay-msw\x0eretry-after-ms*\0#\x04\0\x14\
+agent-retry-delay-ms\x01+\x01ks\x01@\x07\x04codes\x07messages\x08categorys\x08se\
+veritys\x09retryable\x7f\x0eretry-after-ms*\x0aattributes,\0\x05\x04\0\x10agent-\
+error-info\x01-\x01j\x01\x02\x01s\x01@\x07\x04codes\x07messages\x08categorys\x08\
+severitys\x09retryable\x7f\x0eretry-after-ms*\x0aattributes,\0.\x04\0\x16agent-r\
+etry-error-info\x01/\x01@\x08\x08agent-idy\x04codes\x07messages\x08categorys\x08\
+severitys\x09retryable\x7f\x0eretry-after-ms*\x0aattributes,\0\x05\x04\0\x0bagen\
+t-error\x010\x01@\x02\x08agent-idy\x0aerror-info\0\0\x05\x04\0\x15agent-error-fr\
+om-info\x011\x01@\x02\x08agent-idy\x05error\0\0\x05\x04\0\x11agent-debug-error\x01\
+2\x01@\x02\x07step-ids\x06source\0\0\x05\x04\0\x10step-debug-start\x013\x04\0\x0e\
+step-debug-end\x013\x04\0\"runtara:workflow-stdlib/json@0.1.0\x05\0\x04\0-runtar\
+a:workflow-stdlib/workflow-stdlib@0.1.0\x04\0\x0b\x15\x01\0\x0fworkflow-stdlib\x03\
+\0\0\0G\x09producers\x01\x0cprocessed-by\x02\x0dwit-component\x070.227.1\x10wit-\
+bindgen-rust\x060.41.0";
 #[inline(never)]
 #[doc(hidden)]
 pub fn __link_custom_section_describing_imports() {

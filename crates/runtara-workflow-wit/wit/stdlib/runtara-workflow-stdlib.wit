@@ -100,6 +100,43 @@ interface json {
         results: list<u8>,
     ) -> result<list<u8>, string>;
 
+    while-max-iterations: func(
+        while-id: u32,
+    ) -> result<u32, string>;
+
+    while-initial-state: func(
+        while-id: u32,
+    ) -> result<list<u8>, string>;
+
+    while-condition-source: func(
+        while-id: u32,
+        source: list<u8>,
+        state: list<u8>,
+    ) -> result<list<u8>, string>;
+
+    while-condition: func(
+        while-id: u32,
+        source: list<u8>,
+    ) -> result<bool, string>;
+
+    while-iteration-variables: func(
+        while-id: u32,
+        variables: list<u8>,
+        state: list<u8>,
+    ) -> result<list<u8>, string>;
+
+    while-advance-state: func(
+        while-id: u32,
+        state: list<u8>,
+        output: list<u8>,
+    ) -> result<list<u8>, string>;
+
+    while-output: func(
+        while-id: u32,
+        source: list<u8>,
+        state: list<u8>,
+    ) -> result<list<u8>, string>;
+
     filter: func(
         filter-id: u32,
         source: list<u8>,

@@ -28,6 +28,7 @@ pub struct DirectJsonManifest {
     mappings: BTreeMap<u32, DirectJsonMapping>,
     conditions: BTreeMap<u32, DirectJsonCondition>,
     splits: BTreeMap<u32, DirectJsonSplit>,
+    whiles: BTreeMap<u32, DirectJsonWhile>,
     filters: BTreeMap<u32, DirectJsonFilter>,
     switches: BTreeMap<u32, DirectJsonSwitch>,
     group_bys: BTreeMap<u32, DirectJsonGroupBy>,
@@ -58,6 +59,7 @@ impl DirectJsonManifest {
             mappings: collections.mappings,
             conditions: collections.conditions,
             splits: collections.splits,
+            whiles: collections.whiles,
             filters: collections.filters,
             switches: collections.switches,
             group_bys: collections.group_bys,
@@ -341,6 +343,137 @@ impl DirectJsonManifest {
         };
         serde_json::to_vec(&Value::Object(steps))
             .map_err(|err| format!("failed to serialize Split steps context: {err}"))
+    }
+
+    /// Return the configured While maximum iterations, or the generated-code default.
+    pub fn while_max_iterations(&self, while_id: u32) -> Result<u32, String> {
+        let while_step = self
+            .whiles
+            .get(&while_id)
+            .ok_or_else(|| format!("unknown direct While id {while_id}"))?;
+        while_max_iterations(while_step)
+    }
+
+    /// Build the initial generated-code-compatible While state.
+    pub fn while_initial_state(&self, while_id: u32) -> Result<Vec<u8>, String> {
+        self.whiles
+            .get(&while_id)
+            .ok_or_else(|| format!("unknown direct While id {while_id}"))?;
+        serde_json::to_vec(&serde_json::json!({
+            "index": 0,
+            "outputs": Value::Null,
+        }))
+        .map_err(|err| format!("failed to serialize While initial state: {err}"))
+    }
+
+    /// Inject the current generated-code-compatible `loop` context into a source envelope.
+    pub fn while_condition_source(
+        &self,
+        while_id: u32,
+        source: &[u8],
+        state: &[u8],
+    ) -> Result<Vec<u8>, String> {
+        let while_step = self
+            .whiles
+            .get(&while_id)
+            .ok_or_else(|| format!("unknown direct While id {while_id}"))?;
+        let mut source: Value = serde_json::from_slice(source)
+            .map_err(|err| format!("failed to parse While condition source: {err}"))?;
+        let state = parse_while_state(while_step, state)?;
+        let source = source.as_object_mut().ok_or_else(|| {
+            format!(
+                "While step '{}' condition source must be a JSON object",
+                while_step.step_id
+            )
+        })?;
+        source.insert("loop".to_string(), while_loop_context(&state));
+        serde_json::to_vec(&Value::Object(source.clone()))
+            .map_err(|err| format!("failed to serialize While condition source: {err}"))
+    }
+
+    /// Evaluate a While condition against a source envelope that already has loop context.
+    pub fn while_condition(&self, while_id: u32, source: &[u8]) -> Result<bool, String> {
+        let source: Value = serde_json::from_slice(source)
+            .map_err(|err| format!("failed to parse While condition source: {err}"))?;
+        let while_step = self
+            .whiles
+            .get(&while_id)
+            .ok_or_else(|| format!("unknown direct While id {while_id}"))?;
+        eval_condition_expression(&while_step.condition, &source)
+    }
+
+    /// Build generated-code-compatible variables for one While iteration.
+    pub fn while_iteration_variables(
+        &self,
+        while_id: u32,
+        variables: &[u8],
+        state: &[u8],
+    ) -> Result<Vec<u8>, String> {
+        let while_step = self
+            .whiles
+            .get(&while_id)
+            .ok_or_else(|| format!("unknown direct While id {while_id}"))?;
+        let variables: Value = serde_json::from_slice(variables)
+            .map_err(|err| format!("failed to parse While variables: {err}"))?;
+        let state = parse_while_state(while_step, state)?;
+        let variables = while_iteration_variables(while_step, variables, &state);
+        serde_json::to_vec(&Value::Object(variables))
+            .map_err(|err| format!("failed to serialize While iteration variables: {err}"))
+    }
+
+    /// Advance a While state after one successful subgraph iteration output.
+    pub fn while_advance_state(
+        &self,
+        while_id: u32,
+        state: &[u8],
+        output: &[u8],
+    ) -> Result<Vec<u8>, String> {
+        let while_step = self
+            .whiles
+            .get(&while_id)
+            .ok_or_else(|| format!("unknown direct While id {while_id}"))?;
+        let mut state = parse_while_state(while_step, state)?;
+        let output: Value = serde_json::from_slice(output)
+            .map_err(|err| format!("failed to parse While iteration output: {err}"))?;
+        state.index = state.index.checked_add(1).ok_or_else(|| {
+            format!(
+                "While step '{}' iteration index overflowed u32",
+                while_step.step_id
+            )
+        })?;
+        state.outputs = output;
+        serde_json::to_vec(&state.to_value())
+            .map_err(|err| format!("failed to serialize While state: {err}"))
+    }
+
+    /// Store final While loop outputs in the generated-code-compatible steps context.
+    pub fn while_output(
+        &self,
+        while_id: u32,
+        source: &[u8],
+        state: &[u8],
+    ) -> Result<Vec<u8>, String> {
+        let source: Value = serde_json::from_slice(source)
+            .map_err(|err| format!("failed to parse While source: {err}"))?;
+        let while_step = self
+            .whiles
+            .get(&while_id)
+            .ok_or_else(|| format!("unknown direct While id {while_id}"))?;
+        let state = parse_while_state(while_step, state)?;
+        let output = serde_json::json!({
+            "iterations": state.index,
+            "outputs": state.outputs,
+        });
+        let steps = insert_step_output(
+            &source,
+            &while_step.step_id,
+            while_step.name.as_deref(),
+            "While",
+            output,
+            None,
+        );
+        serde_json::to_vec(&Value::Object(steps))
+            .map_err(|err| format!("failed to serialize While steps context: {err}"))
     }
 
     /// Execute a manifest Filter config and return an updated steps context.
@@ -1205,6 +1338,7 @@ struct DirectJsonManifestCollections {
     mappings: BTreeMap<u32, DirectJsonMapping>,
     conditions: BTreeMap<u32, DirectJsonCondition>,
     splits: BTreeMap<u32, DirectJsonSplit>,
+    whiles: BTreeMap<u32, DirectJsonWhile>,
     filters: BTreeMap<u32, DirectJsonFilter>,
     switches: BTreeMap<u32, DirectJsonSwitch>,
     group_bys: BTreeMap<u32, DirectJsonGroupBy>,
@@ -1276,6 +1410,23 @@ fn collect_graph_manifest(
             .is_some()
         {
             return Err(format!("duplicate direct Split id {}", split.id));
+        }
+    }
+    for while_step in &graph.whiles {
+        if collections
+            .whiles
+            .insert(
+                while_step.id,
+                DirectJsonWhile {
+                    step_id: while_step.step_id.clone(),
+                    name: while_step.name.clone(),
+                    value: while_step.value.clone(),
+                    condition: while_step.condition.clone(),
+                },
+            )
+            .is_some()
+        {
+            return Err(format!("duplicate direct While id {}", while_step.id));
         }
     }
     for filter in &graph.filters {
@@ -1582,6 +1733,105 @@ fn split_dont_stop_result(
         },
         "outputs": success
     }))
+}
+
+#[derive(Debug, Clone)]
+struct DirectJsonWhileState {
+    index: u32,
+    outputs: Value,
+}
+
+impl DirectJsonWhileState {
+    fn to_value(&self) -> Value {
+        serde_json::json!({
+            "index": self.index,
+            "outputs": self.outputs,
+        })
+    }
+}
+
+fn while_max_iterations(while_step: &DirectJsonWhile) -> Result<u32, String> {
+    let Some(max_iterations) = while_step.value.get("maxIterations") else {
+        return Ok(10);
+    };
+    let max_iterations = max_iterations.as_u64().ok_or_else(|| {
+        format!(
+            "While step '{}' maxIterations must be an unsigned integer",
+            while_step.step_id
+        )
+    })?;
+    u32::try_from(max_iterations).map_err(|_| {
+        format!(
+            "While step '{}' maxIterations exceeds u32 range",
+            while_step.step_id
+        )
+    })
+}
+
+fn parse_while_state(
+    while_step: &DirectJsonWhile,
+    state: &[u8],
+) -> Result<DirectJsonWhileState, String> {
+    let state: Value = serde_json::from_slice(state)
+        .map_err(|err| format!("failed to parse While state: {err}"))?;
+    let state = state.as_object().ok_or_else(|| {
+        format!(
+            "While step '{}' internal state must be a JSON object",
+            while_step.step_id
+        )
+    })?;
+    let index = state.get("index").and_then(Value::as_u64).ok_or_else(|| {
+        format!(
+            "While step '{}' internal state missing numeric index",
+            while_step.step_id
+        )
+    })?;
+    let index = u32::try_from(index).map_err(|_| {
+        format!(
+            "While step '{}' internal state index exceeds u32 range",
+            while_step.step_id
+        )
+    })?;
+    let outputs = state.get("outputs").cloned().unwrap_or(Value::Null);
+
+    Ok(DirectJsonWhileState { index, outputs })
+}
+
+fn while_loop_context(state: &DirectJsonWhileState) -> Value {
+    serde_json::json!({
+        "index": state.index,
+        "outputs": state.outputs,
+    })
+}
+
+fn while_iteration_variables(
+    while_step: &DirectJsonWhile,
+    variables: Value,
+    state: &DirectJsonWhileState,
+) -> Map<String, Value> {
+    let mut variables = variables.as_object().cloned().unwrap_or_default();
+    let parent_indices = variables
+        .get("_loop_indices")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let mut loop_indices = parent_indices;
+    loop_indices.push(serde_json::json!(state.index));
+    variables.insert("_loop_indices".to_string(), Value::Array(loop_indices));
+    variables.insert("_index".to_string(), serde_json::json!(state.index));
+    if !state.outputs.is_null() {
+        variables.insert("_previousOutputs".to_string(), state.outputs.clone());
+    }
+    variables.insert("_loop".to_string(), while_loop_context(state));
+
+    let scope_id = variables
+        .get("_scope_id")
+        .and_then(Value::as_str)
+        .map(|parent| format!("{}_{}_{}", parent, while_step.step_id, state.index))
+        .unwrap_or_else(|| format!("sc_{}_{}", while_step.step_id, state.index));
+    variables.insert("_scope_id".to_string(), Value::String(scope_id));
+
+    variables
 }
 
 fn validate_split_schema(value: &Value, schema: &Value, ctx: &str) -> Result<(), String> {
@@ -2554,6 +2804,8 @@ struct GraphWire {
     #[serde(default)]
     splits: Vec<SplitWire>,
     #[serde(default)]
+    whiles: Vec<WhileWire>,
+    #[serde(default)]
     filters: Vec<FilterWire>,
     #[serde(default)]
     switches: Vec<SwitchWire>,
@@ -2620,6 +2872,17 @@ struct SplitWire {
     input_schema: Value,
     #[serde(default)]
     output_schema: Value,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WhileWire {
+    id: u32,
+    step_id: String,
+    #[serde(default)]
+    name: Option<String>,
+    value: Value,
+    condition: Value,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2719,6 +2982,14 @@ struct DirectJsonSplit {
     value: Value,
     input_schema: Value,
     output_schema: Value,
+}
+
+#[derive(Debug, Clone)]
+struct DirectJsonWhile {
+    step_id: String,
+    name: Option<String>,
+    value: Value,
+    condition: Value,
 }
 
 #[derive(Debug, Clone)]
@@ -2874,6 +3145,33 @@ mod tests {
                         "id": "split",
                         "stepType": "Split",
                         "name": "Process Items"
+                    }
+                }]
+            }
+        }))
+        .expect("manifest json")
+    }
+
+    fn while_manifest(config: Value, condition: Value) -> Vec<u8> {
+        serde_json::to_vec(&json!({
+            "graph": {
+                "whiles": [{
+                    "id": 0,
+                    "stepId": "loop",
+                    "name": "Counter Loop",
+                    "stepType": "While",
+                    "purpose": "while.config",
+                    "value": config,
+                    "condition": condition
+                }],
+                "steps": [{
+                    "id": "loop",
+                    "stepType": "While",
+                    "name": "Counter Loop",
+                    "body": {
+                        "id": "loop",
+                        "stepType": "While",
+                        "name": "Counter Loop"
                     }
                 }]
             }
@@ -3558,6 +3856,142 @@ mod tests {
         assert_eq!(steps["split"]["stepName"], json!("Process Items"));
         assert_eq!(steps["split"]["stepType"], json!("Split"));
         assert_eq!(steps["split"]["outputs"], json!([{ "ok": true }]));
+    }
+
+    #[test]
+    fn while_default_max_iterations_is_generated_code_default() {
+        let manifest = DirectJsonManifest::parse(&while_manifest(
+            json!({}),
+            json!({ "valueType": "immediate", "value": false }),
+        ))
+        .expect("manifest");
+
+        assert_eq!(
+            manifest.while_max_iterations(0).expect("max iterations"),
+            10
+        );
+    }
+
+    #[test]
+    fn while_helpers_match_generated_state_condition_and_output_shape() {
+        let manifest = DirectJsonManifest::parse(&while_manifest(
+            json!({ "maxIterations": 3 }),
+            json!({
+                "type": "operation",
+                "op": "LT",
+                "arguments": [
+                    { "valueType": "reference", "value": "loop.index" },
+                    { "valueType": "immediate", "value": 2 }
+                ]
+            }),
+        ))
+        .expect("manifest");
+        let source = build_source(
+            br#"{"input":"hello"}"#,
+            br#"{"_workflow_id":"wf-1","_scope_id":"parent","_loop_indices":[4],"keep":true}"#,
+            br#"{"prev":{"outputs":1}}"#,
+        )
+        .expect("source");
+
+        assert_eq!(manifest.while_max_iterations(0).expect("max iterations"), 3);
+        let state = manifest.while_initial_state(0).expect("initial state");
+        let state_value: Value = serde_json::from_slice(&state).expect("state json");
+        assert_eq!(state_value, json!({ "index": 0, "outputs": null }));
+
+        let condition_source = manifest
+            .while_condition_source(0, &source, &state)
+            .expect("condition source");
+        let condition_source: Value =
+            serde_json::from_slice(&condition_source).expect("condition source json");
+        assert_eq!(
+            condition_source["loop"],
+            json!({ "index": 0, "outputs": null })
+        );
+        assert!(
+            manifest
+                .while_condition(
+                    0,
+                    &serde_json::to_vec(&condition_source).expect("condition source bytes")
+                )
+                .expect("condition")
+        );
+
+        let iteration_variables = manifest
+            .while_iteration_variables(
+                0,
+                br#"{"_workflow_id":"wf-1","_scope_id":"parent","_loop_indices":[4],"keep":true}"#,
+                &state,
+            )
+            .expect("iteration variables");
+        let iteration_variables: Value =
+            serde_json::from_slice(&iteration_variables).expect("variables json");
+        assert_eq!(iteration_variables["_workflow_id"], json!("wf-1"));
+        assert_eq!(iteration_variables["keep"], json!(true));
+        assert_eq!(iteration_variables["_loop_indices"], json!([4, 0]));
+        assert_eq!(iteration_variables["_index"], json!(0));
+        assert_eq!(
+            iteration_variables["_loop"],
+            json!({ "index": 0, "outputs": null })
+        );
+        assert!(iteration_variables.get("_previousOutputs").is_none());
+        assert_eq!(iteration_variables["_scope_id"], json!("parent_loop_0"));
+
+        let state = manifest
+            .while_advance_state(0, &state, br#"{"counter":1}"#)
+            .expect("advanced state");
+        let iteration_variables = manifest
+            .while_iteration_variables(
+                0,
+                br#"{"_workflow_id":"wf-1","_scope_id":"parent","_loop_indices":[4]}"#,
+                &state,
+            )
+            .expect("iteration variables");
+        let iteration_variables: Value =
+            serde_json::from_slice(&iteration_variables).expect("variables json");
+        assert_eq!(iteration_variables["_loop_indices"], json!([4, 1]));
+        assert_eq!(iteration_variables["_index"], json!(1));
+        assert_eq!(
+            iteration_variables["_previousOutputs"],
+            json!({ "counter": 1 })
+        );
+        assert_eq!(
+            iteration_variables["_loop"],
+            json!({ "index": 1, "outputs": { "counter": 1 } })
+        );
+
+        let condition_source = manifest
+            .while_condition_source(0, &source, &state)
+            .expect("condition source");
+        assert!(
+            manifest
+                .while_condition(0, &condition_source)
+                .expect("second condition")
+        );
+        let state = manifest
+            .while_advance_state(0, &state, br#"{"counter":2}"#)
+            .expect("second advanced state");
+        let condition_source = manifest
+            .while_condition_source(0, &source, &state)
+            .expect("condition source");
+        assert!(
+            !manifest
+                .while_condition(0, &condition_source)
+                .expect("final condition")
+        );
+
+        let steps = manifest
+            .while_output(0, &source, &state)
+            .expect("While steps context");
+        let steps: Value = serde_json::from_slice(&steps).expect("steps json");
+
+        assert_eq!(steps["prev"]["outputs"], json!(1));
+        assert_eq!(steps["loop"]["stepId"], json!("loop"));
+        assert_eq!(steps["loop"]["stepName"], json!("Counter Loop"));
+        assert_eq!(steps["loop"]["stepType"], json!("While"));
+        assert_eq!(
+            steps["loop"]["outputs"],
+            json!({ "iterations": 2, "outputs": { "counter": 2 } })
+        );
     }
 
     #[test]
