@@ -165,28 +165,15 @@ impl Config {
 
         let dev_mode: bool = parse_bool_or("RUNTARA_DEV_MODE", cfg!(debug_assertions))?;
 
-        // The entitlement allowlist needs every agent id that any workflow can
-        // legally reference. Two sources contribute:
-        //
-        //   1. The statically-linked `runtara_agents::registry` — historical
-        //      snake_case ids (`ai_tools`, `s3_storage`, …). Kept so legacy
-        //      workflow JSON authored against the static registry keeps
-        //      validating.
-        //   2. The kebab-case ids discovered from `RUNTARA_AGENT_COMPONENTS_DIR`
-        //      — these are the canonical ids the components-mode pipeline and
-        //      the API discovery surface use (`ai-tools`, `s3-storage`,
-        //      `mcp`, …). Without them, workflows referencing the modern
-        //      kebab ids get `AGENT_NOT_ENABLED` even though the component
-        //      is loaded.
-        //
-        // The union covers both forms so write-time validation never blocks a
-        // workflow whose agent is actually deployable.
-        let mut registered_agents: BTreeSet<String> =
-            runtara_agents::registry::get_all_agent_modules()
-                .iter()
-                .map(|m| m.id.to_string())
-                .collect();
-        registered_agents.extend(discover_component_agent_ids());
+        // The entitlement allowlist tracks exactly the agents that are
+        // deployable — i.e. the WASM components present at
+        // `RUNTARA_AGENT_COMPONENTS_DIR`. The runtime only dispatches
+        // components, so an agent that isn't there can't run and must not be
+        // "registered". (The static `runtara_agents::registry` is no longer a
+        // source here: most of it duplicates components that supersede it, and
+        // serving those ids would let a workflow validate against an agent the
+        // runtime can't actually execute.)
+        let registered_agents: BTreeSet<String> = discover_component_agent_ids();
 
         let entitlement_snapshot: EntitlementSnapshot = EntitlementSnapshot::parse_entitlements(
             &tenant_id,

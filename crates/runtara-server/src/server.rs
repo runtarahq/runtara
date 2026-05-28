@@ -812,25 +812,46 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
             match ComponentDispatcherService::from_dir(dir, env).await {
                 Ok(dispatcher) => {
                     let loaded: Vec<&str> = dispatcher.agent_ids().collect();
-                    println!(
-                        "✓ Component dispatcher loaded {} agent(s) from {}: {}",
-                        loaded.len(),
-                        dir.display(),
-                        loaded.join(", ")
-                    );
+                    if loaded.is_empty() {
+                        // The runtime dispatches ONLY WASM components, so zero
+                        // agents means the server can't run any workflow. Make
+                        // it impossible to miss rather than silently serving an
+                        // empty agent surface (a `cargo clean` wiping the
+                        // build-output components dir is the usual cause).
+                        eprintln!(
+                            "❌ Component dispatcher loaded 0 agents from {}.\n\
+                             The directory exists but contains no runtara_agent_*.wasm \
+                             components — the server has NO runnable agents.\n\
+                             Rebuild them (scripts/build-agent-components.sh) or point \
+                             RUNTARA_AGENT_COMPONENTS_DIR at a populated bundle.",
+                            dir.display()
+                        );
+                    } else {
+                        println!(
+                            "✓ Component dispatcher loaded {} agent(s) from {}: {}",
+                            loaded.len(),
+                            dir.display(),
+                            loaded.join(", ")
+                        );
+                    }
                     Some(Arc::new(dispatcher))
                 }
                 Err(e) => {
-                    println!(
-                        "⚠ Failed to load WASM agent components from {}: {}",
+                    eprintln!(
+                        "❌ Failed to load WASM agent components from {}: {}\n\
+                         The server has NO runnable agents until this is resolved.",
                         dir.display(),
                         e
                     );
-                    println!("  Continuing with legacy dispatcher only.");
                     None
                 }
             }
         } else {
+            eprintln!(
+                "❌ RUNTARA_AGENT_COMPONENTS_DIR is not set — no agent components \
+                 will be loaded and the server has NO runnable agents.\n\
+                 Set it to a directory of runtara_agent_*.wasm components."
+            );
             None
         }
     };

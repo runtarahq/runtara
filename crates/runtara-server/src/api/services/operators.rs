@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use runtara_component_host::ComponentDispatcherService;
 
-use crate::api::dto::operators::{AgentInfo, AgentSummary, CapabilityInfo, get_agents};
+use crate::api::dto::operators::{AgentInfo, AgentSummary, CapabilityInfo};
 
 #[derive(Debug)]
 pub enum ServiceError {
@@ -47,101 +47,64 @@ impl AgentsService {
     }
 
     /// Build the canonical AgentInfo for a given id. Returns
-    /// `(AgentInfo, component_backed)`. The component-backed path is a
-    /// straight clone of the parsed sidecar JSON; the legacy path uses the
-    /// static registry built into the server binary.
+    /// `(AgentInfo, component_backed)` — the bool is always `true`; it's kept
+    /// for call-site compatibility with the DTO mapping.
     ///
-    /// Resolution order — when the component dispatcher is loaded, an exact
-    /// match wins; otherwise a snake-to-kebab fold (`ai_tools` →
-    /// `ai-tools`) is retried so old workflow JSON still resolves to the
-    /// canonical component agent. Only when no component matches do we fall
-    /// back to the static registry — and even then we hide the static entry
-    /// if a kebab-equivalent component exists, so callers never see a legacy
-    /// duplicate of a deployed component.
+    /// The component dispatcher is the *only* source of agents at runtime:
+    /// everything executes as a WASM component, so an agent that isn't loaded
+    /// by the dispatcher isn't runnable and must not be discoverable. An exact
+    /// id match wins; a snake→kebab fold (`ai_tools` → `ai-tools`) is retried
+    /// so legacy workflow JSON still resolves to the canonical component.
     fn agent_by_id(&self, name: &str) -> Option<(AgentInfo, bool)> {
-        if let Some(d) = self.component_dispatcher.as_deref() {
-            let exact = d.agent_info_of(name);
-            let kebab_fold = name.replace('_', "-");
-            let folded = if kebab_fold != name {
+        let d = self.component_dispatcher.as_deref()?;
+        let kebab_fold = name.replace('_', "-");
+        let info = d.agent_info_of(name).or_else(|| {
+            if kebab_fold != name {
                 d.agent_info_of(&kebab_fold)
             } else {
                 None
-            };
-            if let Some(info) = exact.or(folded) {
-                let mut info = info.clone();
-                // The http agent's integration list is dynamic (any registered
-                // HttpConnectionExtractor counts). Preserve that augmentation
-                // even when http is component-backed.
-                if info.id == "http" {
-                    info.integration_ids = http_integration_ids();
-                }
-                return Some((info, true));
             }
-            // No component matches — fall through to static, but suppress
-            // names whose kebab form IS deployed as a component (the static
-            // shadow exists only for binary-internal use, not the API).
-            if d.agent_info_of(&kebab_fold).is_some() {
-                return None;
-            }
+        })?;
+        let mut info = info.clone();
+        // The http agent's integration list is dynamic (any registered
+        // HttpConnectionExtractor counts).
+        if info.id == "http" {
+            info.integration_ids = http_integration_ids();
         }
-        get_agents()
-            .into_iter()
-            .find(|a| a.id.eq_ignore_ascii_case(name))
-            .map(|a| (a, false))
+        Some((info, true))
     }
 
-    /// Get all agents (summary view). When the component dispatcher is
-    /// loaded, the kebab-cased component agents are the canonical surface and
-    /// any static-registered snake_case shadows (e.g. `ai_tools` next to
-    /// `ai-tools`) are dropped so discovery doesn't list every agent twice.
-    /// Static-only agents (no kebab equivalent in the dispatcher) still pass
-    /// through. With no dispatcher loaded — CLI / minimal deployments — the
-    /// static registry is returned as-is.
+    /// Get all agents (summary view). Sourced purely from the component
+    /// dispatcher — the runtime only dispatches WASM components, so the agent
+    /// surface is exactly what's loaded. No dispatcher (or an empty one) means
+    /// no agents; that's a misconfiguration the server logs loudly at boot
+    /// rather than papering over with unrunnable static entries.
     pub fn list_agents(&self) -> Vec<AgentSummary> {
-        use std::collections::{BTreeMap, BTreeSet};
+        let Some(d) = self.component_dispatcher.as_deref() else {
+            return Vec::new();
+        };
 
-        // Canonical kebab ids deployed via the component dispatcher.
-        let canonical_kebab: BTreeSet<String> = self
-            .component_dispatcher
-            .as_deref()
-            .map(|d| d.agent_ids().map(String::from).collect())
-            .unwrap_or_default();
-
-        let mut by_id: BTreeMap<String, (AgentInfo, bool)> = BTreeMap::new();
-
-        for agent in get_agents() {
-            // Skip the legacy static entry when the dispatcher already exposes
-            // an equivalent under its kebab id — `ai_tools` is hidden in favor
-            // of `ai-tools`, and so on.
-            if canonical_kebab.contains(&agent.id.replace('_', "-")) {
-                continue;
-            }
-            by_id.insert(agent.id.clone(), (agent, false));
-        }
-
-        if let Some(d) = self.component_dispatcher.as_deref() {
-            for agent_id in d.agent_ids() {
-                if let Some(info) = d.agent_info_of(agent_id) {
-                    let mut info = info.clone();
-                    if info.id == "http" {
-                        info.integration_ids = http_integration_ids();
-                    }
-                    by_id.insert(agent_id.to_string(), (info, true));
+        let mut out: Vec<AgentSummary> = d
+            .agent_ids()
+            .filter_map(|agent_id| d.agent_info_of(agent_id))
+            .map(|info| {
+                let integration_ids = if info.id == "http" {
+                    http_integration_ids()
+                } else {
+                    info.integration_ids.clone()
+                };
+                AgentSummary {
+                    component_backed: true,
+                    id: info.id.clone(),
+                    name: info.name.clone(),
+                    description: info.description.clone(),
+                    supports_connections: info.supports_connections,
+                    integration_ids,
                 }
-            }
-        }
-
-        by_id
-            .into_values()
-            .map(|(agent, component_backed)| AgentSummary {
-                component_backed,
-                id: agent.id,
-                name: agent.name,
-                description: agent.description,
-                supports_connections: agent.supports_connections,
-                integration_ids: agent.integration_ids,
             })
-            .collect()
+            .collect();
+        out.sort_by(|a, b| a.id.cmp(&b.id));
+        out
     }
 
     /// Get a specific agent by name (full info incl. capabilities).
