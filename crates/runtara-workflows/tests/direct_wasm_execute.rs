@@ -25,10 +25,29 @@ const FILTER_SIMPLE: &str = include_str!("fixtures/filter_simple.json");
 const SWITCH_VALUE_SIMPLE: &str = include_str!("fixtures/switch_value_simple.json");
 const SWITCH_ROUTING_SIMPLE: &str = include_str!("fixtures/switch_routing_simple.json");
 const GROUP_BY_SIMPLE: &str = include_str!("fixtures/group_by_simple.json");
+const LOG_ALL_LEVELS: &str = include_str!("fixtures/log_all_levels.json");
 
 #[derive(Debug)]
 struct Completed {
     output_json: Value,
+}
+
+#[derive(Debug)]
+struct RuntimeEvent {
+    subtype: String,
+    payload_json: Value,
+}
+
+#[derive(Debug)]
+struct DirectRunOutput {
+    output_json: Value,
+    events: Vec<RuntimeEvent>,
+}
+
+#[derive(Debug)]
+enum CapturedMessage {
+    Completed(Completed),
+    Event(RuntimeEvent),
 }
 
 fn e2e_enabled() -> bool {
@@ -99,7 +118,7 @@ fn wasmtime_installed() -> bool {
 
 fn handle_request(
     stream: &mut std::net::TcpStream,
-    sink: &mpsc::Sender<Completed>,
+    sink: &mpsc::Sender<CapturedMessage>,
     workflow_input: &[u8],
 ) -> std::io::Result<bool> {
     stream.set_read_timeout(Some(Duration::from_secs(10)))?;
@@ -198,7 +217,7 @@ fn route(
     method: &str,
     path: &str,
     body: &[u8],
-    sink: &mpsc::Sender<Completed>,
+    sink: &mpsc::Sender<CapturedMessage>,
     workflow_input: &[u8],
 ) -> (u16, Value) {
     let path = path.split('?').next().unwrap_or(path);
@@ -222,7 +241,11 @@ fn route(
                 capture_completed(body, sink);
                 return (200, serde_json::json!({"success": true}));
             }
-            ("POST", "failed") | ("POST", "events") => {
+            ("POST", "events") => {
+                capture_event(body, sink);
+                return (200, serde_json::json!({"success": true}));
+            }
+            ("POST", "failed") => {
                 return (200, serde_json::json!({"success": true}));
             }
             _ => {}
@@ -232,19 +255,34 @@ fn route(
     (200, serde_json::json!({"success": true}))
 }
 
-fn capture_completed(body: &[u8], sink: &mpsc::Sender<Completed>) {
+fn capture_completed(body: &[u8], sink: &mpsc::Sender<CapturedMessage>) {
     if let Ok(parsed) = serde_json::from_slice::<Value>(body)
         && let Some(b64) = parsed.get("output").and_then(Value::as_str)
         && let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(b64)
         && let Ok(output_json) = serde_json::from_slice::<Value>(&bytes)
     {
-        let _ = sink.send(Completed { output_json });
+        let _ = sink.send(CapturedMessage::Completed(Completed { output_json }));
+    }
+}
+
+fn capture_event(body: &[u8], sink: &mpsc::Sender<CapturedMessage>) {
+    if let Ok(parsed) = serde_json::from_slice::<Value>(body)
+        && parsed.get("event_type").and_then(Value::as_str) == Some("custom")
+        && let Some(subtype) = parsed.get("subtype").and_then(Value::as_str)
+        && let Some(b64) = parsed.get("payload").and_then(Value::as_str)
+        && let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(b64)
+        && let Ok(payload_json) = serde_json::from_slice::<Value>(&bytes)
+    {
+        let _ = sink.send(CapturedMessage::Event(RuntimeEvent {
+            subtype: subtype.to_string(),
+            payload_json,
+        }));
     }
 }
 
 fn serve(
     listener: TcpListener,
-    sink: mpsc::Sender<Completed>,
+    sink: mpsc::Sender<CapturedMessage>,
     stop: mpsc::Receiver<()>,
     workflow_input: Arc<Vec<u8>>,
 ) {
@@ -302,6 +340,16 @@ fn run_direct_workflow(
     graph_json: &str,
     workflow_input: &[u8],
 ) -> Value {
+    run_direct_workflow_with_events(components_dir, workflow_id, graph_json, workflow_input)
+        .output_json
+}
+
+fn run_direct_workflow_with_events(
+    components_dir: &Path,
+    workflow_id: &str,
+    graph_json: &str,
+    workflow_input: &[u8],
+) -> DirectRunOutput {
     let temp = tempfile::tempdir().expect("tempdir");
     let graph: ExecutionGraph = serde_json::from_str(graph_json).expect("fixture parses");
     let compiled = compile_direct_workflow_composed(
@@ -318,11 +366,10 @@ fn run_direct_workflow(
 
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
     let addr = listener.local_addr().expect("local_addr");
-    let (completion_tx, completion_rx) = mpsc::channel::<Completed>();
+    let (capture_tx, capture_rx) = mpsc::channel::<CapturedMessage>();
     let (stop_tx, stop_rx) = mpsc::channel::<()>();
     let workflow_input = Arc::new(workflow_input.to_vec());
-    let server_handle =
-        thread::spawn(move || serve(listener, completion_tx, stop_rx, workflow_input));
+    let server_handle = thread::spawn(move || serve(listener, capture_tx, stop_rx, workflow_input));
 
     let output = Command::new(wasmtime_binary())
         .arg("run")
@@ -356,10 +403,21 @@ fn run_direct_workflow(
         output.status.code(),
     );
 
-    let completion = completion_rx.try_iter().last().unwrap_or_else(|| {
+    let mut output_json = None;
+    let mut events = Vec::new();
+    for message in capture_rx.try_iter() {
+        match message {
+            CapturedMessage::Completed(completed) => output_json = Some(completed.output_json),
+            CapturedMessage::Event(event) => events.push(event),
+        }
+    }
+    let output_json = output_json.unwrap_or_else(|| {
         panic!("direct workflow exited but never POSTed /completed.\n--- stderr ---\n{stderr}")
     });
-    completion.output_json
+    DirectRunOutput {
+        output_json,
+        events,
+    }
 }
 
 #[test]
@@ -553,6 +611,59 @@ fn direct_wasm_execute_routing_switch_finish_reports_completion() {
             "path": "default",
             "bucket": "other",
             "route": "default"
+        })
+    );
+}
+
+#[test]
+fn direct_wasm_execute_log_finish_emits_events_and_reports_completion() {
+    let Some(components_dir) = direct_e2e_components_dir() else {
+        return;
+    };
+
+    let result = run_direct_workflow_with_events(
+        &components_dir,
+        "direct-wasm-execute-log",
+        LOG_ALL_LEVELS,
+        br#"{"message":"hello"}"#,
+    );
+
+    assert_eq!(result.output_json, serde_json::json!({ "logsEmitted": 4 }));
+    assert_eq!(result.events.len(), 4);
+
+    let debug = &result.events[0];
+    assert_eq!(debug.subtype, "workflow_log");
+    assert_eq!(debug.payload_json["step_id"], "log_debug");
+    assert_eq!(debug.payload_json["level"], "debug");
+    assert_eq!(debug.payload_json["message"], "Debug level message");
+    assert_eq!(
+        debug.payload_json["context"],
+        serde_json::json!({
+            "debugData": { "message": "hello" }
+        })
+    );
+    assert!(
+        debug.payload_json["timestamp_ms"]
+            .as_i64()
+            .is_some_and(|value| value > 0)
+    );
+
+    assert_eq!(result.events[1].payload_json["level"], "info");
+    assert_eq!(
+        result.events[1].payload_json["context"],
+        serde_json::json!({ "infoData": "hello" })
+    );
+    assert_eq!(result.events[2].payload_json["level"], "warn");
+    assert_eq!(
+        result.events[2].payload_json["context"],
+        serde_json::json!({ "warningReason": "potential_issue" })
+    );
+    assert_eq!(result.events[3].payload_json["level"], "error");
+    assert_eq!(
+        result.events[3].payload_json["context"],
+        serde_json::json!({
+            "errorCode": "E001",
+            "errorDescription": "Sample error for testing"
         })
     );
 }

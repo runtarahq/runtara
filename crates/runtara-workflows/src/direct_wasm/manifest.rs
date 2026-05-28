@@ -78,6 +78,9 @@ pub struct DirectGraphManifest {
     /// GroupBy definitions addressable by generated direct Wasm.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub group_bys: Vec<DirectGroupByManifest>,
+    /// Log definitions addressable by generated direct Wasm.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub logs: Vec<DirectLogManifest>,
     /// Execution-plan edges in deterministic routing order.
     pub edges: Vec<DirectEdgeManifest>,
 }
@@ -199,6 +202,25 @@ pub struct DirectGroupByManifest {
     pub value: serde_json::Value,
 }
 
+/// Deterministic Log definition referenced by direct-emitted Wasm.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DirectLogManifest {
+    /// Manifest-wide Log identifier.
+    pub id: u32,
+    /// Step that owns this Log config.
+    pub step_id: String,
+    /// Human-readable step name.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Step type that owns this Log config.
+    pub step_type: String,
+    /// Config role within the step.
+    pub purpose: String,
+    /// Canonical JSON serialization of the DSL Log step.
+    pub value: serde_json::Value,
+}
+
 /// Deterministic manifest for one execution-plan edge.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -266,6 +288,7 @@ struct DirectManifestBuildState {
     next_filter_id: u32,
     next_switch_id: u32,
     next_group_by_id: u32,
+    next_log_id: u32,
 }
 
 impl DirectManifestBuildState {
@@ -296,6 +319,12 @@ impl DirectManifestBuildState {
     fn allocate_group_by_id(&mut self) -> u32 {
         let id = self.next_group_by_id;
         self.next_group_by_id += 1;
+        id
+    }
+
+    fn allocate_log_id(&mut self) -> u32 {
+        let id = self.next_log_id;
+        self.next_log_id += 1;
         id
     }
 }
@@ -330,6 +359,9 @@ fn graph_manifest(
     collections
         .group_bys
         .sort_by(|left, right| left.id.cmp(&right.id));
+    collections
+        .logs
+        .sort_by(|left, right| left.id.cmp(&right.id));
 
     let mut edges = graph
         .execution_plan
@@ -352,6 +384,7 @@ fn graph_manifest(
         filters: collections.filters,
         switches: collections.switches,
         group_bys: collections.group_bys,
+        logs: collections.logs,
         edges,
     })
 }
@@ -363,6 +396,7 @@ struct DirectGraphManifestCollections {
     filters: Vec<DirectFilterManifest>,
     switches: Vec<DirectSwitchManifest>,
     group_bys: Vec<DirectGroupByManifest>,
+    logs: Vec<DirectLogManifest>,
 }
 
 fn step_manifest(
@@ -443,6 +477,16 @@ fn step_manifest(
                 step_type: "GroupBy".to_string(),
                 purpose: "groupBy.config".to_string(),
                 value: canonical_json(&step.config)?,
+            });
+        }
+        Step::Log(step) => {
+            collections.logs.push(DirectLogManifest {
+                id: state.allocate_log_id(),
+                step_id: step.id.clone(),
+                name: step.name.clone(),
+                step_type: "Log".to_string(),
+                purpose: "log.config".to_string(),
+                value: canonical_json(step)?,
             });
         }
         Step::WaitForSignal(step) => {
@@ -609,6 +653,7 @@ mod tests {
             "filter" => include_str!("../../tests/fixtures/filter_simple.json"),
             "switch_value" => include_str!("../../tests/fixtures/switch_value_simple.json"),
             "group_by" => include_str!("../../tests/fixtures/group_by_simple.json"),
+            "log" => include_str!("../../tests/fixtures/log_no_context.json"),
             "wait" => include_str!("../../tests/fixtures/wait_for_signal_with_callback.json"),
             other => panic!("unknown fixture {other}"),
         };
@@ -705,6 +750,20 @@ mod tests {
         assert_eq!(group_by.value["key"], "status");
         assert_eq!(group_by.value["value"]["valueType"], "reference");
         assert_eq!(group_by.value["value"]["value"], "data.items");
+    }
+
+    #[test]
+    fn manifest_assigns_log_ids() {
+        let manifest = build_direct_workflow_manifest(&fixture("log")).expect("manifest");
+
+        assert_eq!(manifest.graph.logs.len(), 2);
+        let log = &manifest.graph.logs[0];
+        assert_eq!(log.id, 0);
+        assert_eq!(log.step_id, "log_default_level");
+        assert_eq!(log.step_type, "Log");
+        assert_eq!(log.purpose, "log.config");
+        assert_eq!(log.value["level"], "info");
+        assert_eq!(log.value["message"], "Log with default level (info)");
     }
 
     #[test]

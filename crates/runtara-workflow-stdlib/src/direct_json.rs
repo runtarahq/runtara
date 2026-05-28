@@ -8,6 +8,7 @@
 //! functions here.
 
 use std::collections::BTreeMap;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Deserialize;
 use serde_json::{Map, Value};
@@ -24,6 +25,7 @@ pub struct DirectJsonManifest {
     filters: BTreeMap<u32, DirectJsonFilter>,
     switches: BTreeMap<u32, DirectJsonSwitch>,
     group_bys: BTreeMap<u32, DirectJsonGroupBy>,
+    logs: BTreeMap<u32, DirectJsonLog>,
 }
 
 impl DirectJsonManifest {
@@ -36,6 +38,7 @@ impl DirectJsonManifest {
         let mut filters = BTreeMap::new();
         let mut switches = BTreeMap::new();
         let mut group_bys = BTreeMap::new();
+        let mut logs = BTreeMap::new();
         collect_graph_manifest(
             &manifest.graph,
             &mut mappings,
@@ -43,6 +46,7 @@ impl DirectJsonManifest {
             &mut filters,
             &mut switches,
             &mut group_bys,
+            &mut logs,
         )?;
         Ok(Self {
             mappings,
@@ -50,6 +54,7 @@ impl DirectJsonManifest {
             filters,
             switches,
             group_bys,
+            logs,
         })
     }
 
@@ -154,6 +159,50 @@ impl DirectJsonManifest {
         serde_json::to_vec(&Value::Object(steps))
             .map_err(|err| format!("failed to serialize group-by steps context: {err}"))
     }
+
+    /// Build the payload for a manifest Log step's runtime custom event.
+    pub fn log_event(&self, log_id: u32, source: &[u8]) -> Result<Vec<u8>, String> {
+        let source: Value = serde_json::from_slice(source)
+            .map_err(|err| format!("failed to parse log-event source: {err}"))?;
+        let log = self
+            .logs
+            .get(&log_id)
+            .ok_or_else(|| format!("unknown direct Log id {log_id}"))?;
+        let details = apply_log(&log.value, &source)?;
+        serde_json::to_vec(&serde_json::json!({
+            "step_id": log.step_id,
+            "step_name": log.name.as_deref().unwrap_or("Unnamed"),
+            "level": details.level,
+            "message": details.message,
+            "context": details.context,
+            "timestamp_ms": timestamp_ms(),
+        }))
+        .map_err(|err| format!("failed to serialize log event payload: {err}"))
+    }
+
+    /// Execute a manifest Log step and return an updated steps context.
+    pub fn log(&self, log_id: u32, source: &[u8]) -> Result<Vec<u8>, String> {
+        let source: Value = serde_json::from_slice(source)
+            .map_err(|err| format!("failed to parse log source: {err}"))?;
+        let log = self
+            .logs
+            .get(&log_id)
+            .ok_or_else(|| format!("unknown direct Log id {log_id}"))?;
+        let details = apply_log(&log.value, &source)?;
+        let steps = insert_step_output(
+            &source,
+            &log.step_id,
+            log.name.as_deref(),
+            "Log",
+            serde_json::json!({
+                "level": details.level,
+                "message": details.message,
+            }),
+            None,
+        );
+        serde_json::to_vec(&Value::Object(steps))
+            .map_err(|err| format!("failed to serialize log steps context: {err}"))
+    }
 }
 
 /// Build the source envelope consumed by direct mapping/condition helpers.
@@ -196,6 +245,7 @@ fn collect_graph_manifest(
     filters: &mut BTreeMap<u32, DirectJsonFilter>,
     switches: &mut BTreeMap<u32, DirectJsonSwitch>,
     group_bys: &mut BTreeMap<u32, DirectJsonGroupBy>,
+    logs: &mut BTreeMap<u32, DirectJsonLog>,
 ) -> Result<(), String> {
     for mapping in &graph.mappings {
         if mappings
@@ -264,6 +314,21 @@ fn collect_graph_manifest(
             return Err(format!("duplicate direct GroupBy id {}", group_by.id));
         }
     }
+    for log in &graph.logs {
+        if logs
+            .insert(
+                log.id,
+                DirectJsonLog {
+                    step_id: log.step_id.clone(),
+                    name: log.name.clone(),
+                    value: log.value.clone(),
+                },
+            )
+            .is_some()
+        {
+            return Err(format!("duplicate direct Log id {}", log.id));
+        }
+    }
     for step in &graph.steps {
         for nested in &step.nested_graphs {
             collect_graph_manifest(
@@ -273,6 +338,7 @@ fn collect_graph_manifest(
                 filters,
                 switches,
                 group_bys,
+                logs,
             )?;
         }
     }
@@ -497,6 +563,46 @@ fn apply_group_by(config: &Value, source: &Value) -> Result<Value, String> {
         "counts": counts,
         "total_groups": groups.len(),
     }))
+}
+
+#[derive(Debug, Clone)]
+struct DirectLogResult {
+    level: String,
+    message: String,
+    context: Value,
+}
+
+fn apply_log(config: &Value, source: &Value) -> Result<DirectLogResult, String> {
+    let level = config
+        .get("level")
+        .and_then(Value::as_str)
+        .unwrap_or("info")
+        .to_string();
+    let message = config
+        .get("message")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "Log step missing message".to_string())?
+        .to_string();
+    let context = config
+        .get("context")
+        .and_then(Value::as_object)
+        .filter(|context| !context.is_empty())
+        .map(|context| apply_input_mapping(&Value::Object(context.clone()), source))
+        .transpose()?
+        .unwrap_or_else(|| Value::Object(Map::new()));
+
+    Ok(DirectLogResult {
+        level,
+        message,
+        context,
+    })
+}
+
+fn timestamp_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as i64)
+        .unwrap_or(0)
 }
 
 fn insert_step_output(
@@ -965,6 +1071,8 @@ struct GraphWire {
     #[serde(default)]
     group_bys: Vec<GroupByWire>,
     #[serde(default)]
+    logs: Vec<LogWire>,
+    #[serde(default)]
     steps: Vec<StepWire>,
 }
 
@@ -1026,6 +1134,16 @@ struct GroupByWire {
     value: Value,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LogWire {
+    id: u32,
+    step_id: String,
+    #[serde(default)]
+    name: Option<String>,
+    value: Value,
+}
+
 #[derive(Debug, Clone)]
 struct DirectJsonMapping {
     purpose: String,
@@ -1048,6 +1166,13 @@ struct DirectJsonSwitch {
 
 #[derive(Debug, Clone)]
 struct DirectJsonGroupBy {
+    step_id: String,
+    name: Option<String>,
+    value: Value,
+}
+
+#[derive(Debug, Clone)]
+struct DirectJsonLog {
     step_id: String,
     name: Option<String>,
     value: Value,
@@ -1133,6 +1258,23 @@ mod tests {
                     "name": "Group by Status",
                     "stepType": "GroupBy",
                     "purpose": "groupBy.config",
+                    "value": config
+                }],
+                "steps": []
+            }
+        }))
+        .expect("manifest json")
+    }
+
+    fn log_manifest(config: Value) -> Vec<u8> {
+        serde_json::to_vec(&json!({
+            "graph": {
+                "logs": [{
+                    "id": 0,
+                    "stepId": "log",
+                    "name": "Log Start",
+                    "stepType": "Log",
+                    "purpose": "log.config",
                     "value": config
                 }],
                 "steps": []
@@ -1646,5 +1788,63 @@ mod tests {
         assert_eq!(output["counts"], json!({ "active": 0 }));
         assert_eq!(output["groups"], json!({ "active": [] }));
         assert_eq!(output["total_groups"], json!(1));
+    }
+
+    #[test]
+    fn log_event_builds_payload_and_records_step_output() {
+        let manifest = DirectJsonManifest::parse(&log_manifest(json!({
+            "id": "log",
+            "stepType": "Log",
+            "name": "Log Start",
+            "level": "warn",
+            "message": "Starting workflow",
+            "context": {
+                "input": { "valueType": "reference", "value": "data.input" },
+                "static": { "valueType": "immediate", "value": 42 }
+            }
+        })))
+        .expect("manifest");
+        let source = build_source(br#"{"input":"hello"}"#, b"{}", b"{}").expect("source");
+
+        let payload = manifest.log_event(0, &source).expect("log payload");
+        let payload: Value = serde_json::from_slice(&payload).expect("payload json");
+        assert_eq!(payload["step_id"], json!("log"));
+        assert_eq!(payload["step_name"], json!("Log Start"));
+        assert_eq!(payload["level"], json!("warn"));
+        assert_eq!(payload["message"], json!("Starting workflow"));
+        assert_eq!(
+            payload["context"],
+            json!({ "input": "hello", "static": 42 })
+        );
+        assert!(
+            payload["timestamp_ms"]
+                .as_i64()
+                .is_some_and(|value| value > 0)
+        );
+
+        let steps = manifest.log(0, &source).expect("steps context");
+        let steps: Value = serde_json::from_slice(&steps).expect("steps json");
+        assert_eq!(steps["log"]["stepName"], json!("Log Start"));
+        assert_eq!(steps["log"]["stepType"], json!("Log"));
+        assert_eq!(
+            steps["log"]["outputs"],
+            json!({ "level": "warn", "message": "Starting workflow" })
+        );
+    }
+
+    #[test]
+    fn log_defaults_to_info_and_empty_context() {
+        let manifest = DirectJsonManifest::parse(&log_manifest(json!({
+            "id": "log",
+            "stepType": "Log",
+            "message": "Default level"
+        })))
+        .expect("manifest");
+        let source = build_source(br#"{"input":"hello"}"#, b"{}", b"{}").expect("source");
+
+        let payload = manifest.log_event(0, &source).expect("log payload");
+        let payload: Value = serde_json::from_slice(&payload).expect("payload json");
+        assert_eq!(payload["level"], json!("info"));
+        assert_eq!(payload["context"], json!({}));
     }
 }

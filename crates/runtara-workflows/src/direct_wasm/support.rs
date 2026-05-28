@@ -79,7 +79,7 @@ fn collect_graph_support(
                     .map(step_type_name)
                     .map(str::to_string),
                 feature: "execution-plan-routing".to_string(),
-                reason: "direct emitter currently lowers only a single entry Finish step, pure Conditional true/false trees, normal Filter/value Switch/GroupBy edges, and routing Switch dispatch trees ending in Finish leaves".to_string(),
+                reason: "direct emitter currently lowers only a single entry Finish step, pure Conditional true/false trees, normal Filter/value Switch/GroupBy/Log edges, and routing Switch dispatch trees ending in Finish leaves".to_string(),
             });
         }
     }
@@ -231,6 +231,9 @@ fn supports_direct_control_step(
             supports_single_normal_edge_step(graph, step_id, reachable, used_edges, stack)
         }
         Step::GroupBy(_) => {
+            supports_single_normal_edge_step(graph, step_id, reachable, used_edges, stack)
+        }
+        Step::Log(_) => {
             supports_single_normal_edge_step(graph, step_id, reachable, used_edges, stack)
         }
         _ => false,
@@ -386,6 +389,16 @@ fn collect_step_support(
                     step_type: Some("GroupBy".to_string()),
                     feature: "group-by-breakpoint".to_string(),
                     reason: "GroupBy breakpoints require direct debug event emission".to_string(),
+                });
+            }
+        }
+        Step::Log(step) if direct_control => {
+            if step.breakpoint.unwrap_or(false) {
+                unsupported.push(UnsupportedWorkflowFeature {
+                    step_id: Some(step.id.clone()),
+                    step_type: Some("Log".to_string()),
+                    feature: "log-breakpoint".to_string(),
+                    reason: "Log breakpoints require direct debug event emission".to_string(),
                 });
             }
         }
@@ -549,6 +562,7 @@ mod tests {
             "switch_value" => include_str!("../../tests/fixtures/switch_value_simple.json"),
             "switch_routing" => include_str!("../../tests/fixtures/switch_routing_simple.json"),
             "group_by" => include_str!("../../tests/fixtures/group_by_simple.json"),
+            "log" => include_str!("../../tests/fixtures/log_no_context.json"),
             "transform" => include_str!("../../tests/fixtures/transform_workflow.json"),
             "wait" => include_str!("../../tests/fixtures/wait_for_signal_with_callback.json"),
             other => panic!("unknown fixture {other}"),
@@ -762,6 +776,30 @@ mod tests {
     }
 
     #[test]
+    fn log_finish_normal_edges_are_supported() {
+        let report = analyze_direct_wasm_support(&fixture("log"));
+
+        assert!(report.supported, "{:?}", report.unsupported);
+        assert!(report.unsupported.is_empty());
+    }
+
+    #[test]
+    fn log_breakpoints_are_rejected_until_debug_events_are_lowered() {
+        let mut graph = fixture("log");
+        let Some(Step::Log(log)) = graph.steps.get_mut("simple_log") else {
+            panic!("expected Log fixture step");
+        };
+        log.breakpoint = Some(true);
+
+        let report = analyze_direct_wasm_support(&graph);
+
+        assert!(!report.supported);
+        assert!(report.unsupported.iter().any(|feature| {
+            feature.step_id.as_deref() == Some("simple_log") && feature.feature == "log-breakpoint"
+        }));
+    }
+
+    #[test]
     fn filter_breakpoints_are_rejected_until_debug_events_are_lowered() {
         let mut graph = fixture("filter");
         let Some(Step::Filter(filter)) = graph.steps.get_mut("filter") else {
@@ -857,12 +895,8 @@ mod tests {
                 .any(|feature| feature.step_id.as_deref() == Some("wait")
                     && feature.feature == "wait-for-signal")
         );
-        assert!(
-            report
-                .unsupported
-                .iter()
-                .any(|feature| feature.step_id.as_deref() == Some("log")
-                    && feature.feature == "log-event")
-        );
+        assert!(!report.unsupported.iter().any(|feature| {
+            feature.step_id.as_deref() == Some("log") && feature.feature == "log-event"
+        }));
     }
 }

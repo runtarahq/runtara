@@ -47,6 +47,8 @@ mod tests {
             "process-switch",
             "value-switch",
             "filter",
+            "log-event",
+            "log",
             "group-by",
         ] {
             assert!(
