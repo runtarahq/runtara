@@ -63,6 +63,9 @@ pub struct DirectGraphManifest {
     pub output_schema: serde_json::Value,
     /// Steps sorted by step id.
     pub steps: Vec<DirectStepManifest>,
+    /// Mapping definitions addressable by generated direct Wasm.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mappings: Vec<DirectMappingManifest>,
     /// Execution-plan edges in deterministic routing order.
     pub edges: Vec<DirectEdgeManifest>,
 }
@@ -93,6 +96,22 @@ pub struct DirectNestedGraphManifest {
     pub role: String,
     /// Nested graph manifest.
     pub graph: Box<DirectGraphManifest>,
+}
+
+/// Deterministic mapping definition referenced by direct-emitted Wasm.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DirectMappingManifest {
+    /// Manifest-wide mapping identifier.
+    pub id: u32,
+    /// Step that owns this mapping.
+    pub step_id: String,
+    /// Step type that owns this mapping.
+    pub step_type: String,
+    /// Mapping role within the step, for example `finish.inputMapping`.
+    pub purpose: String,
+    /// Canonical JSON serialization of the DSL mapping.
+    pub value: serde_json::Value,
 }
 
 /// Deterministic manifest for one execution-plan edge.
@@ -141,11 +160,12 @@ pub fn build_direct_workflow_manifest(
 ) -> Result<DirectWorkflowManifest, DirectManifestError> {
     let feature_summary = analyze_workflow_features(graph);
     let root_durable = graph.durable.unwrap_or(true);
+    let mut state = DirectManifestBuildState::default();
     let mut manifest = DirectWorkflowManifest {
         version: DIRECT_WORKFLOW_MANIFEST_VERSION,
         template_major_version: TEMPLATE_MAJOR_VERSION.to_string(),
         checksum: None,
-        graph: graph_manifest(graph, root_durable)?,
+        graph: graph_manifest(graph, root_durable, &mut state)?,
         feature_summary,
     };
 
@@ -154,17 +174,35 @@ pub fn build_direct_workflow_manifest(
     Ok(manifest)
 }
 
+#[derive(Debug, Default)]
+struct DirectManifestBuildState {
+    next_mapping_id: u32,
+}
+
+impl DirectManifestBuildState {
+    fn allocate_mapping_id(&mut self) -> u32 {
+        let id = self.next_mapping_id;
+        self.next_mapping_id += 1;
+        id
+    }
+}
+
 fn graph_manifest(
     graph: &ExecutionGraph,
     inherited_durable: bool,
+    state: &mut DirectManifestBuildState,
 ) -> Result<DirectGraphManifest, DirectManifestError> {
     let durable = graph.durable.unwrap_or(inherited_durable);
-    let mut steps = graph
-        .steps
-        .values()
-        .map(|step| step_manifest(step, durable))
+    let mut step_values = graph.steps.values().collect::<Vec<_>>();
+    step_values.sort_by(|left, right| step_id(left).cmp(step_id(right)));
+
+    let mut mappings = Vec::new();
+    let steps = step_values
+        .into_iter()
+        .map(|step| step_manifest(step, durable, state, &mut mappings))
         .collect::<Result<Vec<_>, _>>()?;
-    steps.sort_by(|left, right| left.id.cmp(&right.id));
+
+    mappings.sort_by(|left, right| left.id.cmp(&right.id));
 
     let mut edges = graph
         .execution_plan
@@ -182,6 +220,7 @@ fn graph_manifest(
         input_schema: canonical_json(&graph.input_schema)?,
         output_schema: canonical_json(&graph.output_schema)?,
         steps,
+        mappings,
         edges,
     })
 }
@@ -189,26 +228,43 @@ fn graph_manifest(
 fn step_manifest(
     step: &Step,
     inherited_durable: bool,
+    state: &mut DirectManifestBuildState,
+    mappings: &mut Vec<DirectMappingManifest>,
 ) -> Result<DirectStepManifest, DirectManifestError> {
     let mut nested_graphs = Vec::new();
     match step {
+        Step::Finish(step) => {
+            let value = step
+                .input_mapping
+                .as_ref()
+                .map(canonical_json)
+                .transpose()?
+                .unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new()));
+            mappings.push(DirectMappingManifest {
+                id: state.allocate_mapping_id(),
+                step_id: step.id.clone(),
+                step_type: "Finish".to_string(),
+                purpose: "finish.inputMapping".to_string(),
+                value,
+            });
+        }
         Step::Split(step) => {
             nested_graphs.push(DirectNestedGraphManifest {
                 role: "split.subgraph".to_string(),
-                graph: Box::new(graph_manifest(&step.subgraph, inherited_durable)?),
+                graph: Box::new(graph_manifest(&step.subgraph, inherited_durable, state)?),
             });
         }
         Step::While(step) => {
             nested_graphs.push(DirectNestedGraphManifest {
                 role: "while.subgraph".to_string(),
-                graph: Box::new(graph_manifest(&step.subgraph, inherited_durable)?),
+                graph: Box::new(graph_manifest(&step.subgraph, inherited_durable, state)?),
             });
         }
         Step::WaitForSignal(step) => {
             if let Some(on_wait) = &step.on_wait {
                 nested_graphs.push(DirectNestedGraphManifest {
                     role: "waitForSignal.onWait".to_string(),
-                    graph: Box::new(graph_manifest(on_wait, inherited_durable)?),
+                    graph: Box::new(graph_manifest(on_wait, inherited_durable, state)?),
                 });
             }
         }
@@ -384,6 +440,20 @@ mod tests {
         );
         assert_eq!(first.version, DIRECT_WORKFLOW_MANIFEST_VERSION);
         assert_eq!(first.graph.entry_point, "finish");
+    }
+
+    #[test]
+    fn manifest_assigns_finish_mapping_id() {
+        let manifest = build_direct_workflow_manifest(&fixture("simple")).expect("manifest");
+
+        assert_eq!(manifest.graph.mappings.len(), 1);
+        let mapping = &manifest.graph.mappings[0];
+        assert_eq!(mapping.id, 0);
+        assert_eq!(mapping.step_id, "finish");
+        assert_eq!(mapping.step_type, "Finish");
+        assert_eq!(mapping.purpose, "finish.inputMapping");
+        assert_eq!(mapping.value["result"]["valueType"], "reference");
+        assert_eq!(mapping.value["result"]["value"], "data.input");
     }
 
     #[test]

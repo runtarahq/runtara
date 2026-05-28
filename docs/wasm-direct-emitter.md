@@ -24,7 +24,7 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   references, durability, and routing features.
 - `direct_wasm::manifest` builds a deterministic versioned manifest with a
   checksum, sorted steps, sorted edges, nested graph manifests, schemas,
-  variables, and a feature summary.
+  variables, manifest-wide mapping IDs, and a feature summary.
 - `direct_wasm::support` produces deterministic unsupported-feature reports.
   The current production-shaped direct path intentionally supports only
   finish-only graphs.
@@ -831,6 +831,9 @@ Current status:
 - The current run entry still has placeholder `Finish` output semantics. It
   must lower the real Finish mapping/output envelope before direct mode has
   behavior parity under the environment runner.
+- The manifest now assigns deterministic manifest-wide mapping IDs. The next
+  run-lowering step can call `stdlib.apply-mapping(mapping-id, source)` without
+  relying on implicit step ordering.
 
 Implementation steps:
 
