@@ -109,6 +109,9 @@ pub mod schema_fields_validation;
 /// Workflow validation for security and correctness.
 pub mod validation;
 
+/// Workflow feature analysis for direct-emitter planning and gating.
+pub mod workflow_features;
+
 // Re-export main types
 #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
 pub use compile::{
@@ -128,6 +131,9 @@ pub use schema_fields_validation::{
 pub use validation::{
     MissingInputField, ValidationError, ValidationResult, validate_workflow,
     validate_workflow_with_children,
+};
+pub use workflow_features::{
+    ChildWorkflowReference, WorkflowFeature, WorkflowFeatureSummary, analyze_workflow_features,
 };
 
 // Re-export DSL types for convenience
