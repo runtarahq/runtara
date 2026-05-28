@@ -6684,6 +6684,177 @@ mod tests {
     }
 
     #[test]
+    fn direct_core_checkpoint_replay_skips_agent_invoke_and_checkpoint_save() {
+        #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+        enum ReplayOp {
+            CallGetCheckpoint,
+            CallAgentInvoke,
+            CallCheckpoint,
+            If,
+            Else,
+            End,
+            LoadCachedPtr,
+            LoadCachedLen,
+        }
+
+        fn if_else_blocks(ops: &[ReplayOp]) -> Vec<(usize, usize, usize)> {
+            let mut blocks = Vec::new();
+            for (if_index, op) in ops.iter().enumerate() {
+                if *op != ReplayOp::If {
+                    continue;
+                }
+
+                let mut depth = 1u32;
+                let mut else_index = None;
+                for (index, op) in ops.iter().enumerate().skip(if_index + 1) {
+                    match op {
+                        ReplayOp::If => depth += 1,
+                        ReplayOp::Else if depth == 1 => else_index = Some(index),
+                        ReplayOp::End => {
+                            depth -= 1;
+                            if depth == 0 {
+                                if let Some(else_index) = else_index {
+                                    blocks.push((if_index, else_index, index));
+                                }
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            blocks
+        }
+
+        let graph = durable_agent_no_retry_graph();
+        let manifest = build_direct_workflow_manifest(&graph).expect("manifest");
+        let manifest_json = manifest.to_canonical_json().expect("manifest json");
+        let core_config =
+            DirectCoreConfig::new(&manifest, &manifest_json, false).expect("core config");
+        let (resolve, world) =
+            build_direct_component_resolve_with_agents(&manifest.feature_summary.agent_ids)
+                .expect("agent resolve");
+        let core = emit_direct_core_module(&resolve, world, &core_config).expect("core module");
+        Validator::new()
+            .validate_all(&core)
+            .expect("durable Agent replay core module validates");
+
+        let mut next_function_index = 0;
+        let mut get_checkpoint_index = None;
+        let mut checkpoint_index = None;
+        let mut agent_invoke_index = None;
+        let mut code_body_index = 0;
+        let mut ops = Vec::new();
+
+        for payload in Parser::new(0).parse_all(&core) {
+            match payload.expect("core wasm payload") {
+                Payload::ImportSection(reader) => {
+                    for import in reader.into_imports() {
+                        let import = import.expect("core import");
+                        if matches!(import.ty, TypeRef::Func(_)) {
+                            match (import.module, import.name) {
+                                (module, "get-checkpoint")
+                                    if module.contains("runtara:workflow-runtime/runtime") =>
+                                {
+                                    get_checkpoint_index = Some(next_function_index);
+                                }
+                                (module, "checkpoint")
+                                    if module.contains("runtara:workflow-runtime/runtime") =>
+                                {
+                                    checkpoint_index = Some(next_function_index);
+                                }
+                                (module, "invoke")
+                                    if module.contains("runtara:agent-utils/capabilities") =>
+                                {
+                                    agent_invoke_index = Some(next_function_index);
+                                }
+                                _ => {}
+                            }
+                            next_function_index += 1;
+                        }
+                    }
+                }
+                Payload::CodeSectionEntry(body) => {
+                    if code_body_index == 0 {
+                        for operator in body.get_operators_reader().expect("operators") {
+                            match operator.expect("operator") {
+                                Operator::Call { function_index }
+                                    if Some(function_index) == get_checkpoint_index =>
+                                {
+                                    ops.push(ReplayOp::CallGetCheckpoint);
+                                }
+                                Operator::Call { function_index }
+                                    if Some(function_index) == agent_invoke_index =>
+                                {
+                                    ops.push(ReplayOp::CallAgentInvoke);
+                                }
+                                Operator::Call { function_index }
+                                    if Some(function_index) == checkpoint_index =>
+                                {
+                                    ops.push(ReplayOp::CallCheckpoint);
+                                }
+                                Operator::If { .. } => ops.push(ReplayOp::If),
+                                Operator::Else => ops.push(ReplayOp::Else),
+                                Operator::End => ops.push(ReplayOp::End),
+                                Operator::I32Load { memarg }
+                                    if memarg.offset == DIRECT_RESULT_OPTION_LIST_PTR_OFFSET =>
+                                {
+                                    ops.push(ReplayOp::LoadCachedPtr);
+                                }
+                                Operator::I32Load { memarg }
+                                    if memarg.offset == DIRECT_RESULT_OPTION_LIST_LEN_OFFSET =>
+                                {
+                                    ops.push(ReplayOp::LoadCachedLen);
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                    code_body_index += 1;
+                }
+                _ => {}
+            }
+        }
+
+        let lookup_index = ops
+            .iter()
+            .position(|op| *op == ReplayOp::CallGetCheckpoint)
+            .expect("checkpoint lookup call");
+        let (if_index, else_index, end_index) = if_else_blocks(&ops)
+            .into_iter()
+            .find(|(if_index, else_index, _)| {
+                *if_index > lookup_index
+                    && ops[*if_index + 1..*else_index].contains(&ReplayOp::LoadCachedPtr)
+                    && ops[*if_index + 1..*else_index].contains(&ReplayOp::LoadCachedLen)
+            })
+            .expect("checkpoint replay branch");
+
+        let cached_branch = &ops[if_index + 1..else_index];
+        assert!(
+            !cached_branch.contains(&ReplayOp::CallAgentInvoke),
+            "cached checkpoint replay branch must not invoke the Agent"
+        );
+        assert!(
+            !cached_branch.contains(&ReplayOp::CallCheckpoint),
+            "cached checkpoint replay branch must not write another checkpoint"
+        );
+
+        let fresh_branch = &ops[else_index + 1..end_index];
+        let invoke_index = fresh_branch
+            .iter()
+            .position(|op| *op == ReplayOp::CallAgentInvoke)
+            .expect("fresh branch invokes Agent");
+        let checkpoint_index = fresh_branch
+            .iter()
+            .position(|op| *op == ReplayOp::CallCheckpoint)
+            .expect("fresh branch checkpoints Agent output");
+        assert!(
+            invoke_index < checkpoint_index,
+            "fresh execution branch should checkpoint only after Agent invoke"
+        );
+    }
+
+    #[test]
     fn direct_core_lowers_durable_agent_retry_loop() {
         let graph = durable_agent_retry_graph();
         let manifest = build_direct_workflow_manifest(&graph).expect("manifest");

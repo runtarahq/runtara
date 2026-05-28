@@ -263,6 +263,11 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   timeout, compensation, or breakpoints. Timeout remains gated because the
   generated Rust Agent path does not currently enforce `AgentStep.timeout`;
   crash/resume differential coverage remains a Phase 8 hardening checkpoint.
+- The direct core now has structural replay coverage for durable Agent cached
+  checkpoints: the emitted Wasm branch that receives an existing checkpoint
+  payload skips both `capabilities.invoke` and `runtime.checkpoint`, while the
+  fresh branch still invokes the Agent and checkpoints only after success.
+  Full host-level crash/resume differential tests remain pending.
 
 ## Final Goal
 
@@ -1500,6 +1505,9 @@ Current status:
   signals continue. The public support gate accepts this durable Agent subset;
   timeout, compensation, and breakpoints remain rejected, and crash/resume
   differential tests remain pending.
+- A structural core Wasm test now covers the durable Agent cached-checkpoint
+  replay branch. It proves the cached branch does not invoke the Agent or save
+  another checkpoint, and that fresh execution still saves only after invoke.
 
 Implementation steps:
 
@@ -1539,6 +1547,7 @@ Implementation steps:
      support enabled for the durable Agent subset;
    - non-durable retry loop parity: pending; public non-durable Agent support
      requires explicit `maxRetries = 0`;
+   - cached-checkpoint replay branch test: done at the emitted core Wasm level;
    - timeout behavior: pending.
 5. Extend `onError` routing beyond Agent when additional failing step types are
    lowered.
@@ -1602,7 +1611,8 @@ Implementation steps:
    - crash/resume differential tests: pending.
 5. Migrate `Delay`.
 6. Add crash/resume tests:
-   - resume after checkpoint;
+   - resume after checkpoint: structural core replay test done; host-level
+     differential test pending;
    - retry transient failure;
    - no retry permanent failure;
    - rate-limit budget exhaustion;
