@@ -1853,6 +1853,8 @@ struct DirectCoreImportIndices {
     stdlib_split_item_count: Option<u32>,
     stdlib_split_item: Option<u32>,
     stdlib_split_iteration_variables: Option<u32>,
+    stdlib_split_validate_input: Option<u32>,
+    stdlib_split_validate_output: Option<u32>,
     stdlib_split_append_output: Option<u32>,
     stdlib_split_output: Option<u32>,
     stdlib_delay_duration_ms: Option<u32>,
@@ -1944,6 +1946,14 @@ impl DirectCoreImportIndices {
                 self.stdlib_split_iteration_variables,
                 "stdlib.split-iteration-variables",
             )?,
+            stdlib_split_validate_input: require_import(
+                self.stdlib_split_validate_input,
+                "stdlib.split-validate-input",
+            )?,
+            stdlib_split_validate_output: require_import(
+                self.stdlib_split_validate_output,
+                "stdlib.split-validate-output",
+            )?,
             stdlib_split_append_output: require_import(
                 self.stdlib_split_append_output,
                 "stdlib.split-append-output",
@@ -2030,6 +2040,8 @@ struct DirectCoreFunctionIndices {
     stdlib_split_item_count: u32,
     stdlib_split_item: u32,
     stdlib_split_iteration_variables: u32,
+    stdlib_split_validate_input: u32,
+    stdlib_split_validate_output: u32,
     stdlib_split_append_output: u32,
     stdlib_split_output: u32,
     stdlib_delay_duration_ms: u32,
@@ -2138,6 +2150,10 @@ fn import_core_function(
         import_indices.stdlib_split_item = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "split-iteration-variables") {
         import_indices.stdlib_split_iteration_variables = Some(function_index);
+    } else if is_stdlib_import(resolve, interface, function, "split-validate-input") {
+        import_indices.stdlib_split_validate_input = Some(function_index);
+    } else if is_stdlib_import(resolve, interface, function, "split-validate-output") {
+        import_indices.stdlib_split_validate_output = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "split-append-output") {
         import_indices.stdlib_split_append_output = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "split-output") {
@@ -3153,6 +3169,14 @@ fn emit_split_plan(
     );
 
     body.instruction(&Instruction::I32Const(split_id as i32));
+    body.instruction(&Instruction::LocalGet(DIRECT_SPLIT_ITEM_PTR_LOCAL));
+    body.instruction(&Instruction::LocalGet(DIRECT_SPLIT_ITEM_LEN_LOCAL));
+    body.instruction(&Instruction::LocalGet(DIRECT_SPLIT_INDEX_LOCAL));
+    push_retptr_arg(body);
+    body.instruction(&Instruction::Call(indices.stdlib_split_validate_input));
+    return_if_retptr_error(body);
+
+    body.instruction(&Instruction::I32Const(split_id as i32));
     body.instruction(&Instruction::LocalGet(DIRECT_SPLIT_PARENT_SOURCE_PTR_LOCAL));
     body.instruction(&Instruction::LocalGet(DIRECT_SPLIT_PARENT_SOURCE_LEN_LOCAL));
     body.instruction(&Instruction::LocalGet(DIRECT_SPLIT_ITEM_PTR_LOCAL));
@@ -3208,6 +3232,14 @@ fn emit_split_plan(
         workflow_log_kind,
         workflow_error_kind,
     );
+
+    body.instruction(&Instruction::I32Const(split_id as i32));
+    body.instruction(&Instruction::LocalGet(output_ptr_local));
+    body.instruction(&Instruction::LocalGet(output_len_local));
+    body.instruction(&Instruction::LocalGet(DIRECT_SPLIT_INDEX_LOCAL));
+    push_retptr_arg(body);
+    body.instruction(&Instruction::Call(indices.stdlib_split_validate_output));
+    return_if_retptr_error(body);
 
     body.instruction(&Instruction::I32Const(split_id as i32));
     body.instruction(&Instruction::LocalGet(DIRECT_SPLIT_RESULTS_PTR_LOCAL));
@@ -5417,6 +5449,7 @@ mod tests {
             "error" => include_str!("../../tests/fixtures/error_direct_simple.json"),
             "edge_condition" => include_str!("../../tests/fixtures/edge_condition_priority.json"),
             "split" => include_str!("../../tests/fixtures/split_workflow.json"),
+            "split_with_schemas" => include_str!("../../tests/fixtures/split_with_schemas.json"),
             "transform" => include_str!("../../tests/fixtures/transform_workflow.json"),
             other => panic!("unknown fixture {other}"),
         };
@@ -6169,6 +6202,39 @@ mod tests {
             .expect("split nested graph");
         assert_eq!(nested.graph.agents.len(), 1);
         assert_eq!(nested.graph.mappings.len(), 2);
+    }
+
+    #[test]
+    fn direct_compile_supports_split_schema_validation_graph() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let result = compile_direct_workflow(DirectCompilationInput {
+            workflow_id: "split-with-schemas".to_string(),
+            version: 1,
+            execution_graph: fixture("split_with_schemas"),
+            output_dir: temp.path().to_path_buf(),
+            track_events: false,
+            agent_catalog: None,
+        })
+        .expect("direct Split schema compile should succeed");
+
+        let wasm = fs::read(&result.wasm_path).expect("wasm");
+        Validator::new()
+            .validate_all(&wasm)
+            .expect("direct Split schema artifact should validate");
+        assert!(result.support_report.supported);
+        assert_eq!(result.support_report.unsupported, vec![]);
+
+        let manifest: DirectWorkflowManifest =
+            serde_json::from_slice(&fs::read(&result.manifest_path).expect("manifest"))
+                .expect("manifest json");
+        assert_eq!(
+            manifest.graph.splits[0].input_schema["value"]["required"],
+            true
+        );
+        assert_eq!(
+            manifest.graph.splits[0].output_schema["processed"]["required"],
+            true
+        );
     }
 
     #[test]
@@ -9218,12 +9284,16 @@ mod tests {
         let mut split_item_count_index = None;
         let mut split_item_index = None;
         let mut split_iteration_variables_index = None;
+        let mut split_validate_input_index = None;
+        let mut split_validate_output_index = None;
         let mut split_append_output_index = None;
         let mut split_output_index = None;
         let mut saw_loop = false;
         let mut saw_split_item_count_call = false;
         let mut saw_split_item_call = false;
         let mut saw_split_iteration_variables_call = false;
+        let mut saw_split_validate_input_call = false;
+        let mut saw_split_validate_output_call = false;
         let mut saw_split_append_output_call = false;
         let mut saw_split_output_call = false;
         let mut code_body_index = 0;
@@ -9241,6 +9311,12 @@ mod tests {
                                 "split-item" => split_item_index = Some(next_function_index),
                                 "split-iteration-variables" => {
                                     split_iteration_variables_index = Some(next_function_index)
+                                }
+                                "split-validate-input" => {
+                                    split_validate_input_index = Some(next_function_index)
+                                }
+                                "split-validate-output" => {
+                                    split_validate_output_index = Some(next_function_index)
                                 }
                                 "split-append-output" => {
                                     split_append_output_index = Some(next_function_index)
@@ -9270,6 +9346,12 @@ mod tests {
                                     if Some(function_index) == split_iteration_variables_index {
                                         saw_split_iteration_variables_call = true;
                                     }
+                                    if Some(function_index) == split_validate_input_index {
+                                        saw_split_validate_input_call = true;
+                                    }
+                                    if Some(function_index) == split_validate_output_index {
+                                        saw_split_validate_output_call = true;
+                                    }
                                     if Some(function_index) == split_append_output_index {
                                         saw_split_append_output_call = true;
                                     }
@@ -9296,6 +9378,14 @@ mod tests {
         assert!(
             saw_split_iteration_variables_call,
             "Split run should call split-iteration-variables"
+        );
+        assert!(
+            saw_split_validate_input_call,
+            "Split run should call split-validate-input"
+        );
+        assert!(
+            saw_split_validate_output_call,
+            "Split run should call split-validate-output"
         );
         assert!(
             saw_split_append_output_call,

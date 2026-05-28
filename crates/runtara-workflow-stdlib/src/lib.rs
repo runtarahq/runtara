@@ -245,6 +245,26 @@ mod component {
             })
         }
 
+        fn split_validate_input(split_id: u32, item: Vec<u8>, index: u32) -> Result<(), String> {
+            MANIFEST.with(|slot| {
+                let slot = slot.borrow();
+                let manifest = slot
+                    .as_ref()
+                    .ok_or_else(|| "direct stdlib manifest was not initialized".to_string())?;
+                manifest.split_validate_input(split_id, &item, index)
+            })
+        }
+
+        fn split_validate_output(split_id: u32, output: Vec<u8>, index: u32) -> Result<(), String> {
+            MANIFEST.with(|slot| {
+                let slot = slot.borrow();
+                let manifest = slot
+                    .as_ref()
+                    .ok_or_else(|| "direct stdlib manifest was not initialized".to_string())?;
+                manifest.split_validate_output(split_id, &output, index)
+            })
+        }
+
         fn split_append_output(
             split_id: u32,
             results: Vec<u8>,

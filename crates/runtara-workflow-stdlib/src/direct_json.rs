@@ -183,6 +183,46 @@ impl DirectJsonManifest {
             .map_err(|err| format!("failed to serialize Split iteration variables: {err}"))
     }
 
+    /// Validate one Split iteration input item against the Split input schema.
+    pub fn split_validate_input(
+        &self,
+        split_id: u32,
+        item: &[u8],
+        index: u32,
+    ) -> Result<(), String> {
+        let item: Value = serde_json::from_slice(item)
+            .map_err(|err| format!("failed to parse Split item: {err}"))?;
+        let split = self
+            .splits
+            .get(&split_id)
+            .ok_or_else(|| format!("unknown direct Split id {split_id}"))?;
+        validate_split_schema(
+            &item,
+            &split.input_schema,
+            &format!("Split '{}' iteration {index}: input", split.step_id),
+        )
+    }
+
+    /// Validate one Split iteration output against the Split output schema.
+    pub fn split_validate_output(
+        &self,
+        split_id: u32,
+        output: &[u8],
+        index: u32,
+    ) -> Result<(), String> {
+        let output: Value = serde_json::from_slice(output)
+            .map_err(|err| format!("failed to parse Split iteration output: {err}"))?;
+        let split = self
+            .splits
+            .get(&split_id)
+            .ok_or_else(|| format!("unknown direct Split id {split_id}"))?;
+        validate_split_schema(
+            &output,
+            &split.output_schema,
+            &format!("Split '{}' iteration {index}: output", split.step_id),
+        )
+    }
+
     /// Append one Split iteration output to a JSON result array.
     pub fn split_append_output(
         &self,
@@ -1162,6 +1202,8 @@ fn collect_graph_manifest(
                     step_id: split.step_id.clone(),
                     name: split.name.clone(),
                     value: split.value.clone(),
+                    input_schema: split.input_schema.clone(),
+                    output_schema: split.output_schema.clone(),
                 },
             )
             .is_some()
@@ -1380,6 +1422,76 @@ fn split_iteration_variables(
     variables.insert("_scope_id".to_string(), Value::String(scope_id));
 
     Ok(variables)
+}
+
+fn validate_split_schema(value: &Value, schema: &Value, ctx: &str) -> Result<(), String> {
+    let schema_obj = match schema.as_object() {
+        Some(schema_obj) if !schema_obj.is_empty() => schema_obj,
+        _ => return Ok(()),
+    };
+    let value_obj = value
+        .as_object()
+        .ok_or_else(|| format!("{ctx}: expected object, got {}", json_type_name(value)))?;
+
+    let mut missing = Vec::new();
+    let mut wrong_type = Vec::new();
+    for (field_name, field_schema) in schema_obj {
+        let required = field_schema
+            .get("required")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let field_type = field_schema
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        match value_obj.get(field_name) {
+            None if required => missing.push(field_name.clone()),
+            None => {}
+            Some(actual_value) if !field_type.is_empty() && !actual_value.is_null() => {
+                if !split_schema_type_matches(field_type, actual_value) {
+                    wrong_type.push(format!(
+                        "'{}' (expected {}, got {})",
+                        field_name,
+                        field_type,
+                        json_type_name(actual_value)
+                    ));
+                }
+            }
+            Some(_) => {}
+        }
+    }
+
+    if missing.is_empty() && wrong_type.is_empty() {
+        return Ok(());
+    }
+
+    let mut parts = Vec::new();
+    if !missing.is_empty() {
+        let mut got = value_obj.keys().cloned().collect::<Vec<_>>();
+        got.sort();
+        parts.push(format!(
+            "required field(s) [{}] missing (got fields: [{}])",
+            missing.join(", "),
+            got.join(", ")
+        ));
+    }
+    if !wrong_type.is_empty() {
+        parts.push(format!("type mismatches: {}", wrong_type.join(", ")));
+    }
+
+    Err(format!("{ctx}: {}", parts.join("; ")))
+}
+
+fn split_schema_type_matches(field_type: &str, value: &Value) -> bool {
+    match field_type {
+        "string" => value.is_string(),
+        "integer" => value.is_i64() || value.is_u64(),
+        "number" => value.is_number(),
+        "boolean" => value.is_boolean(),
+        "array" => value.is_array(),
+        "object" => value.is_object(),
+        _ => true,
+    }
 }
 
 fn split_bool_config(config: &Value, key: &str) -> bool {
@@ -2344,6 +2456,10 @@ struct SplitWire {
     #[serde(default)]
     name: Option<String>,
     value: Value,
+    #[serde(default)]
+    input_schema: Value,
+    #[serde(default)]
+    output_schema: Value,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2441,6 +2557,8 @@ struct DirectJsonSplit {
     step_id: String,
     name: Option<String>,
     value: Value,
+    input_schema: Value,
+    output_schema: Value,
 }
 
 #[derive(Debug, Clone)]
@@ -2567,6 +2685,14 @@ mod tests {
     }
 
     fn split_manifest(config: Value) -> Vec<u8> {
+        split_manifest_with_schemas(config, json!({}), json!({}))
+    }
+
+    fn split_manifest_with_schemas(
+        config: Value,
+        input_schema: Value,
+        output_schema: Value,
+    ) -> Vec<u8> {
         serde_json::to_vec(&json!({
             "graph": {
                 "splits": [{
@@ -2577,8 +2703,8 @@ mod tests {
                     "purpose": "split.config",
                     "durable": true,
                     "value": config,
-                    "inputSchema": {},
-                    "outputSchema": {}
+                    "inputSchema": input_schema,
+                    "outputSchema": output_schema
                 }],
                 "steps": [{
                     "id": "split",
@@ -3077,6 +3203,77 @@ mod tests {
         assert_eq!(variables["_index"], json!(3));
         assert_eq!(variables["_item"], json!({ "id": 7 }));
         assert_eq!(variables["_scope_id"], json!("parent_split_3"));
+    }
+
+    #[test]
+    fn split_schema_validation_accepts_matching_input_and_output() {
+        let manifest = DirectJsonManifest::parse(&split_manifest_with_schemas(
+            json!({
+                "value": { "valueType": "reference", "value": "data.items" }
+            }),
+            json!({
+                "value": { "type": "string", "required": true },
+                "count": { "type": "integer", "required": false }
+            }),
+            json!({
+                "processed": { "type": "object", "required": true }
+            }),
+        ))
+        .expect("manifest");
+
+        manifest
+            .split_validate_input(0, br#"{"value":"ok","count":2}"#, 1)
+            .expect("input schema");
+        manifest
+            .split_validate_output(0, br#"{"processed":{"ok":true}}"#, 1)
+            .expect("output schema");
+    }
+
+    #[test]
+    fn split_schema_validation_reports_missing_and_wrong_type_fields() {
+        let manifest = DirectJsonManifest::parse(&split_manifest_with_schemas(
+            json!({
+                "value": { "valueType": "reference", "value": "data.items" }
+            }),
+            json!({
+                "value": { "type": "string", "required": true },
+                "count": { "type": "integer", "required": true }
+            }),
+            json!({}),
+        ))
+        .expect("manifest");
+
+        let err = manifest
+            .split_validate_input(0, br#"{"value":7}"#, 2)
+            .expect_err("schema should fail");
+
+        assert_eq!(
+            err,
+            "Split 'split' iteration 2: input: required field(s) [count] missing (got fields: [value]); type mismatches: 'value' (expected string, got number)"
+        );
+    }
+
+    #[test]
+    fn split_schema_validation_rejects_non_object_value() {
+        let manifest = DirectJsonManifest::parse(&split_manifest_with_schemas(
+            json!({
+                "value": { "valueType": "reference", "value": "data.items" }
+            }),
+            json!({
+                "value": { "type": "string", "required": true }
+            }),
+            json!({}),
+        ))
+        .expect("manifest");
+
+        let err = manifest
+            .split_validate_input(0, br#""not-object""#, 0)
+            .expect_err("schema should fail");
+
+        assert_eq!(
+            err,
+            "Split 'split' iteration 0: input: expected object, got string"
+        );
     }
 
     #[test]

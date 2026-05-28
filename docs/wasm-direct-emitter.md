@@ -58,7 +58,8 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   lookup, source-envelope construction, mapping application, template rendering,
   type hints, Finish `outputs` unwrapping, and Split helpers for item
   normalization, indexed item access, per-iteration variable construction,
-  result accumulation, and result step envelopes.
+  per-iteration input/output schema validation, result accumulation, and result
+  step envelopes.
 - `runtara-workflow-stdlib` now has a `direct-component` feature and
   component metadata for `runtara:workflow-stdlib`. That feature builds a
   `wasm32-wasip2` stdlib component without pulling in SDK/runtime, HTTP, AI,
@@ -1711,15 +1712,15 @@ Implementation steps:
      variables, and result envelopes;
    - direct loop lowering: schema-free sequential Split done, including nested
      direct run-plan emission, per-item source construction, output
-     accumulation, duplicate nested step-id manifest parsing, and structural
-     core-Wasm lowering tests.
+     accumulation, duplicate nested step-id manifest parsing, schema validation
+     calls, and structural core-Wasm lowering tests.
 2. Preserve split behavior:
    - null and non-array handling: done in stdlib;
    - item variable injection: done in stdlib;
    - `_loop_indices`: done in stdlib;
-   - output collection shape: done for fail-fast schema-free sequential Split;
+   - output collection shape: done for fail-fast sequential Split;
+   - input/output schema validation: done;
    - `dontStopOnFailed`: pending;
-   - input/output schema validation: pending;
    - Split retry/timeout/breakpoint semantics: pending.
 3. Implement `While`:
    - max iterations;

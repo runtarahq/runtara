@@ -338,8 +338,6 @@ fn supports_delay_step_baseline(_graph: &ExecutionGraph, step: &DelayStep) -> bo
 fn supports_split_step_baseline(step: &SplitStep) -> bool {
     let config = step.config.as_ref();
     !step.breakpoint.unwrap_or(false)
-        && step.input_schema.is_empty()
-        && step.output_schema.is_empty()
         && config.is_none_or(|config| {
             !config.dont_stop_on_failed.unwrap_or(false)
                 && config
@@ -862,12 +860,6 @@ fn collect_split_step_unsupported(
             "Split breakpoints require a direct runtime checkpoint/pause ABI",
         );
     }
-    if !step.input_schema.is_empty() || !step.output_schema.is_empty() {
-        push(
-            "split-schema-validation",
-            "Split input/output schemas require direct per-iteration schema validation",
-        );
-    }
     if let Some(config) = step.config.as_ref() {
         if config.dont_stop_on_failed.unwrap_or(false) {
             push(
@@ -1386,14 +1378,11 @@ mod tests {
     }
 
     #[test]
-    fn split_schema_validation_remains_rejected_until_lowered() {
+    fn split_schema_validation_is_supported() {
         let report = analyze_direct_wasm_support(&fixture("split_with_schemas"));
 
-        assert!(!report.supported);
-        assert!(report.unsupported.iter().any(|feature| {
-            feature.step_id.as_deref() == Some("split")
-                && feature.feature == "split-schema-validation"
-        }));
+        assert!(report.supported, "{:?}", report.unsupported);
+        assert!(report.unsupported.is_empty());
     }
 
     #[test]
