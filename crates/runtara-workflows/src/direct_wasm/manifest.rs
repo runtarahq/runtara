@@ -72,6 +72,9 @@ pub struct DirectGraphManifest {
     /// Condition definitions addressable by generated direct Wasm.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub conditions: Vec<DirectConditionManifest>,
+    /// Split definitions addressable by generated direct Wasm.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub splits: Vec<DirectSplitManifest>,
     /// Filter definitions addressable by generated direct Wasm.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub filters: Vec<DirectFilterManifest>,
@@ -155,6 +158,31 @@ pub struct DirectConditionManifest {
     pub purpose: String,
     /// Canonical JSON serialization of the DSL condition expression.
     pub value: serde_json::Value,
+}
+
+/// Deterministic Split definition referenced by direct-emitted Wasm.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DirectSplitManifest {
+    /// Manifest-wide Split identifier.
+    pub id: u32,
+    /// Step that owns this Split config.
+    pub step_id: String,
+    /// Human-readable step name.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Step type that owns this Split config.
+    pub step_type: String,
+    /// Config role within the step.
+    pub purpose: String,
+    /// Effective Split durability after graph-level inheritance is applied.
+    pub durable: bool,
+    /// Canonical JSON serialization of the DSL Split config.
+    pub value: serde_json::Value,
+    /// Canonical JSON serialization of the per-iteration input schema.
+    pub input_schema: serde_json::Value,
+    /// Canonical JSON serialization of the per-iteration output schema.
+    pub output_schema: serde_json::Value,
 }
 
 /// Deterministic Filter definition referenced by direct-emitted Wasm.
@@ -403,6 +431,7 @@ pub fn build_direct_workflow_manifest_with_agent_catalog(
 struct DirectManifestBuildState {
     next_mapping_id: u32,
     next_condition_id: u32,
+    next_split_id: u32,
     next_filter_id: u32,
     next_switch_id: u32,
     next_group_by_id: u32,
@@ -422,6 +451,12 @@ impl DirectManifestBuildState {
     fn allocate_condition_id(&mut self) -> u32 {
         let id = self.next_condition_id;
         self.next_condition_id += 1;
+        id
+    }
+
+    fn allocate_split_id(&mut self) -> u32 {
+        let id = self.next_split_id;
+        self.next_split_id += 1;
         id
     }
 
@@ -491,6 +526,9 @@ fn graph_manifest(
         .conditions
         .sort_by(|left, right| left.id.cmp(&right.id));
     collections
+        .splits
+        .sort_by(|left, right| left.id.cmp(&right.id));
+    collections
         .filters
         .sort_by(|left, right| left.id.cmp(&right.id));
     collections
@@ -531,6 +569,7 @@ fn graph_manifest(
         steps,
         mappings: collections.mappings,
         conditions: collections.conditions,
+        splits: collections.splits,
         filters: collections.filters,
         switches: collections.switches,
         group_bys: collections.group_bys,
@@ -546,6 +585,7 @@ fn graph_manifest(
 struct DirectGraphManifestCollections {
     mappings: Vec<DirectMappingManifest>,
     conditions: Vec<DirectConditionManifest>,
+    splits: Vec<DirectSplitManifest>,
     filters: Vec<DirectFilterManifest>,
     switches: Vec<DirectSwitchManifest>,
     group_bys: Vec<DirectGroupByManifest>,
@@ -589,6 +629,23 @@ fn step_manifest(
             });
         }
         Step::Split(step) => {
+            let value = step
+                .config
+                .as_ref()
+                .map(canonical_json)
+                .transpose()?
+                .unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new()));
+            collections.splits.push(DirectSplitManifest {
+                id: state.allocate_split_id(),
+                step_id: step.id.clone(),
+                name: step.name.clone(),
+                step_type: "Split".to_string(),
+                purpose: "split.config".to_string(),
+                durable: inherited_durable && step.durable.unwrap_or(true),
+                value,
+                input_schema: canonical_json(&step.input_schema)?,
+                output_schema: canonical_json(&step.output_schema)?,
+            });
             nested_graphs.push(DirectNestedGraphManifest {
                 role: "split.subgraph".to_string(),
                 graph: Box::new(graph_manifest(
@@ -947,6 +1004,7 @@ mod tests {
             "error" => include_str!("../../tests/fixtures/error_direct_simple.json"),
             "edge_condition" => include_str!("../../tests/fixtures/edge_condition_priority.json"),
             "transform" => include_str!("../../tests/fixtures/transform_workflow.json"),
+            "split" => include_str!("../../tests/fixtures/split_workflow.json"),
             "wait" => include_str!("../../tests/fixtures/wait_for_signal_with_callback.json"),
             other => panic!("unknown fixture {other}"),
         };
@@ -996,6 +1054,34 @@ mod tests {
         assert_eq!(condition.purpose, "conditional.condition");
         assert_eq!(condition.value["type"], "operation");
         assert_eq!(condition.value["op"], "EQ");
+    }
+
+    #[test]
+    fn manifest_assigns_split_id_and_nested_graph() {
+        let manifest = build_direct_workflow_manifest(&fixture("split")).expect("manifest");
+
+        assert_eq!(manifest.graph.splits.len(), 1);
+        let split = &manifest.graph.splits[0];
+        assert_eq!(split.id, 0);
+        assert_eq!(split.step_id, "split");
+        assert_eq!(split.step_type, "Split");
+        assert_eq!(split.purpose, "split.config");
+        assert!(split.durable);
+        assert_eq!(split.value["value"]["valueType"], "reference");
+        assert_eq!(split.value["value"]["value"], "data.items");
+        assert_eq!(split.value["sequential"], true);
+        assert_eq!(split.input_schema, serde_json::json!({}));
+        assert_eq!(split.output_schema, serde_json::json!({}));
+
+        let split_step = manifest
+            .graph
+            .steps
+            .iter()
+            .find(|step| step.id == "split")
+            .expect("split step");
+        assert_eq!(split_step.nested_graphs.len(), 1);
+        assert_eq!(split_step.nested_graphs[0].role, "split.subgraph");
+        assert_eq!(split_step.nested_graphs[0].graph.entry_point, "transform");
     }
 
     #[test]

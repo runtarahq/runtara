@@ -25,8 +25,9 @@ Current implementation progress on `codex/wasm-direct-emitter`:
 - `direct_wasm::manifest` builds a deterministic versioned manifest with a
   checksum, sorted steps, sorted edges, nested graph manifests, schemas,
   variables, manifest-wide mapping IDs, manifest-wide condition IDs,
-  manifest-wide Filter IDs, manifest-wide Switch IDs, manifest-wide GroupBy
-  IDs, manifest-wide Log IDs, manifest-wide Error IDs, and a feature summary.
+  manifest-wide Split IDs, manifest-wide Filter IDs, manifest-wide Switch IDs,
+  manifest-wide GroupBy IDs, manifest-wide Log IDs, manifest-wide Error IDs,
+  and a feature summary.
 - `direct_wasm::support` produces deterministic unsupported-feature reports.
   The current production-shaped direct path supports a single entry `Finish` or
   `Error` step, pure `Conditional` true/false decision trees ending in
@@ -1700,6 +1701,10 @@ Goal: support loop and collection control flow.
 Implementation steps:
 
 1. Implement sequential `Split` first.
+   - config manifest records with input/output schemas and nested graph link:
+     done;
+   - stdlib split-input/source helpers: pending;
+   - direct loop lowering: pending.
 2. Preserve split behavior:
    - null and non-array handling;
    - item variable injection;
