@@ -119,48 +119,11 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_sharepoint_agent_is_registered() {
-        let agents = get_agents();
-        let sharepoint = agents
-            .iter()
-            .find(|a| a.id == "sharepoint")
-            .expect("sharepoint agent should be registered");
-
-        assert!(
-            sharepoint
-                .integration_ids
-                .contains(&"microsoft_entra_client_credentials".to_string()),
-            "sharepoint agent should reuse the microsoft_entra_client_credentials connection, got: {:?}",
-            sharepoint.integration_ids
-        );
-
-        // Spot-check a few capabilities — we don't pin the full list to avoid
-        // brittleness, but we do verify the read/write/copy pillars are wired.
-        let cap_names: Vec<&str> = sharepoint
-            .capabilities
-            .iter()
-            .map(|c| c.name.as_str())
-            .collect();
-        for required in [
-            "sharepoint_list_drives",
-            "sharepoint_list_children",
-            "sharepoint_download_file",
-            "sharepoint_upload_file",
-            "sharepoint_upload_file_large",
-            "sharepoint_create_folder",
-            "sharepoint_delete_item",
-            "sharepoint_move_item",
-            "sharepoint_copy_item",
-            "sharepoint_get_copy_status",
-            "sharepoint_search",
-            "sharepoint_search_global",
-        ] {
-            assert!(
-                cap_names.contains(&required),
-                "sharepoint missing capability {required}; got: {:?}",
-                cap_names
-            );
-        }
-    }
+    // NOTE: the standalone native `sharepoint` agent was deleted in
+    // "agents: delete legacy native integration agents" — SharePoint now runs
+    // as a WASM component, and its connection is surfaced through the `http`
+    // agent's integration_ids (asserted in
+    // `test_http_agent_includes_all_extractors` above). The former
+    // `test_sharepoint_agent_is_registered`, which asserted a native agent in
+    // `get_agents()`, was removed as stale.
 }

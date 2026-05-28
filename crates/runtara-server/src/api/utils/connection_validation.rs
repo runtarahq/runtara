@@ -333,6 +333,13 @@ mod tests {
         assert!(issues.is_empty());
     }
 
+    // NOTE: these exercise the candidate-suggestion mechanism with `sftp`, a
+    // surviving native agent that still carries static `integration_ids`
+    // (["sftp"], supports_connections=true). They previously used `shopify`,
+    // which was deleted in "agents: delete legacy native integration agents" —
+    // shopify now runs as a WASM component and is not in the static agent
+    // registry the validator reads. Suggestions for component agents are a
+    // known gap tracked separately; the mechanism itself is unchanged.
     #[test]
     fn test_candidate_suggestions_on_missing_connection() {
         let workflow: Workflow = serde_json::from_value(json!({
@@ -341,8 +348,8 @@ mod tests {
                     "step1": {
                         "stepType": "Agent",
                         "id": "step1",
-                        "agentId": "shopify",
-                        "capabilityId": "get-products",
+                        "agentId": "sftp",
+                        "capabilityId": "sftp_list_files",
                         "connectionId": "wrong-id"
                     }
                 },
@@ -353,18 +360,18 @@ mod tests {
         }))
         .unwrap();
 
-        // Tenant has a shopify connection (matching integration_id) and an
-        // openai one (which should NOT be suggested for a shopify step).
+        // Tenant has an sftp connection (matching integration_id) and a
+        // postgres one (which should NOT be suggested for an sftp step).
         let tenant = vec![
             ConnectionRef {
-                id: "conn-shop".to_string(),
-                integration_id: Some("shopify_access_token".to_string()),
-                title: "My Shopify Store".to_string(),
+                id: "conn-sftp".to_string(),
+                integration_id: Some("sftp".to_string()),
+                title: "My SFTP Server".to_string(),
             },
             ConnectionRef {
-                id: "conn-openai".to_string(),
-                integration_id: Some("openai_api_key".to_string()),
-                title: "OpenAI Prod".to_string(),
+                id: "conn-db".to_string(),
+                integration_id: Some("postgres".to_string()),
+                title: "Object Model DB".to_string(),
             },
         ];
 
@@ -373,15 +380,15 @@ mod tests {
         let msg = &issues[0].message;
         assert!(msg.contains("'wrong-id'"), "{msg}");
         assert!(
-            msg.contains("My Shopify Store"),
-            "should suggest the shopify connection: {msg}"
+            msg.contains("My SFTP Server"),
+            "should suggest the sftp connection: {msg}"
         );
         assert!(
-            msg.contains("conn-shop"),
+            msg.contains("conn-sftp"),
             "should include the candidate id: {msg}"
         );
         assert!(
-            !msg.contains("OpenAI Prod"),
+            !msg.contains("Object Model DB"),
             "should not suggest unrelated connections: {msg}"
         );
     }
@@ -394,8 +401,8 @@ mod tests {
                     "step1": {
                         "stepType": "Agent",
                         "id": "step1",
-                        "agentId": "shopify",
-                        "capabilityId": "get-products",
+                        "agentId": "sftp",
+                        "capabilityId": "sftp_list_files",
                         "connectionId": "wrong-id"
                     }
                 },
@@ -409,16 +416,16 @@ mod tests {
         // Tenant has only an unrelated connection — the validator should fall
         // back to listing the agent's accepted integrationIds.
         let tenant = vec![ConnectionRef {
-            id: "conn-openai".to_string(),
-            integration_id: Some("openai_api_key".to_string()),
-            title: "OpenAI Prod".to_string(),
+            id: "conn-db".to_string(),
+            integration_id: Some("postgres".to_string()),
+            title: "Object Model DB".to_string(),
         }];
 
         let issues = validate_connections_with_candidates(&workflow, &tenant);
         assert_eq!(issues.len(), 1);
         let msg = &issues[0].message;
         assert!(
-            msg.contains("shopify_access_token") || msg.contains("shopify_client_credentials"),
+            msg.contains("sftp"),
             "should hint at accepted integration ids: {msg}"
         );
         assert!(msg.contains("none configured"), "{msg}");

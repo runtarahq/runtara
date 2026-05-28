@@ -4473,7 +4473,58 @@ mod tests {
     /// component dispatcher; tests use this shim so they don't have to stand
     /// up wasmtime.
     pub(super) fn test_catalog() -> runtara_dsl::agent_meta::AgentCatalog {
-        runtara_dsl::agent_meta::AgentCatalog::from_agents(runtara_agents::registry::get_agents())
+        // In production the validator's catalog is sourced from the component
+        // dispatcher (see `server.rs`), which includes `object_model` and the
+        // other agents that now run as WASM components. The static
+        // `runtara_agents::registry` no longer carries those integration
+        // agents (they were deleted in "agents: delete legacy native
+        // integration agents"), so we re-add a minimal `object_model` entry
+        // to mirror the runtime catalog the validator actually sees.
+        let mut agents = runtara_agents::registry::get_agents();
+        if !agents.iter().any(|agent| agent.id == "object_model") {
+            agents.push(object_model_catalog_agent());
+        }
+        runtara_dsl::agent_meta::AgentCatalog::from_agents(agents)
+    }
+
+    /// Minimal `object_model` agent mirroring the component dispatcher's
+    /// catalog entry: connection-backed (`postgres`) with the capabilities the
+    /// validation tests exercise.
+    fn object_model_catalog_agent() -> runtara_dsl::agent_meta::AgentInfo {
+        serde_json::from_value(serde_json::json!({
+            "id": "object_model",
+            "name": "Object Model",
+            "description": "Object Model CRUD capabilities (test mirror of the component agent).",
+            "hasSideEffects": true,
+            "supportsConnections": true,
+            "integrationIds": ["postgres"],
+            "capabilities": [
+                object_model_catalog_capability("query-instances", "Query Instances", false),
+                object_model_catalog_capability(
+                    "bulk-update-instances",
+                    "Bulk Update Instances",
+                    true,
+                ),
+            ],
+        }))
+        .expect("object_model AgentInfo fixture should deserialize")
+    }
+
+    fn object_model_catalog_capability(
+        id: &str,
+        name: &str,
+        has_side_effects: bool,
+    ) -> serde_json::Value {
+        serde_json::json!({
+            "id": id,
+            "name": name,
+            "inputType": "Value",
+            "inputs": [],
+            "output": { "type": "object" },
+            "hasSideEffects": has_side_effects,
+            "isIdempotent": !has_side_effects,
+            "rateLimited": false,
+        })
     }
 
     fn create_agent_step(id: &str, agent_id: &str, mapping: Option<InputMapping>) -> Step {
