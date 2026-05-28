@@ -2,6 +2,7 @@ import {
   memo,
   useCallback,
   useMemo,
+  useRef,
   useState,
   type CSSProperties,
 } from 'react';
@@ -29,7 +30,7 @@ import {
   Line,
   LineChart,
   ResponsiveContainer,
-  Tooltip,
+  Tooltip as RechartsTooltip,
 } from 'recharts';
 import { Button } from '@/shared/components/ui/button';
 import { Checkbox } from '@/shared/components/ui/checkbox';
@@ -49,6 +50,12 @@ import {
   TableRow,
 } from '@/shared/components/ui/table';
 import { Badge } from '@/shared/components/ui/badge';
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from '@/shared/components/ui/tooltip';
 import { cn } from '@/lib/utils';
 import {
   ReportBlockDefinition,
@@ -219,15 +226,14 @@ export function TableBlock({
       : undefined;
   const lastPageOffset =
     totalPages && totalPages > 0 ? (totalPages - 1) * page.size : undefined;
-  const hasSizedColumns = columns.some((column) =>
-    hasPositiveMaxChars(column.maxChars)
+  const columnLayouts = useMemo(
+    () => columns.map((column, idx) => inferColumnLayout(column, rows, idx)),
+    [columns, rows]
   );
-  const hasFlexibleFillerColumn =
-    hasSizedColumns &&
-    columns.every(
-      (column) => isActionColumn(column) || hasPositiveMaxChars(column.maxChars)
-    );
-  const tableClassName = cn(hasSizedColumns && 'table-fixed');
+  const hasFlexibleFillerColumn = columnLayouts.every(
+    (layout) => !layout.isFlex
+  );
+  const tableClassName = cn('table-fixed');
   const diagnostics = data.diagnostics ?? EMPTY_DIAGNOSTICS;
   const writebackMutate = writeback.mutate;
   const writebackPending = writeback.isPending;
@@ -322,7 +328,8 @@ export function TableBlock({
   }
 
   return (
-    <div className="overflow-hidden rounded-lg border bg-background">
+    <TooltipProvider delayDuration={150} skipDelayDuration={0}>
+      <div className="overflow-x-auto rounded-lg border bg-background">
       {tableActions.length > 0 && (
         <TableActionsToolbar
           blockId={block.id}
@@ -332,24 +339,22 @@ export function TableBlock({
         />
       )}
       <Table className={tableClassName || undefined}>
-        {hasSizedColumns && (
-          <colgroup>
+        <colgroup>
+          {selectable && (
+            <col
+              className="report-print-hidden"
+              style={{ width: '2.5rem' }}
+            />
+          )}
+          {columns.map((column, idx) => (
+            <col key={column.key} style={columnLayouts[idx]?.style} />
+          ))}
+          {hasFlexibleFillerColumn && <col aria-hidden="true" />}
+        </colgroup>
+        <TableHeader className="sticky top-0 z-10 bg-background shadow-[inset_0_-1px_0_0_hsl(var(--border))]">
+          <TableRow className="group/header border-b-0 bg-muted/30 hover:bg-muted/30">
             {selectable && (
-              <col
-                className="report-print-hidden"
-                style={{ width: '2.5rem' }}
-              />
-            )}
-            {columns.map((column) => (
-              <col key={column.key} style={getColumnWidthStyle(column)} />
-            ))}
-            {hasFlexibleFillerColumn && <col aria-hidden="true" />}
-          </colgroup>
-        )}
-        <TableHeader>
-          <TableRow className="group/header bg-muted/30 hover:bg-muted/30">
-            {selectable && (
-              <TableHead className="report-print-hidden h-10 w-10">
+              <TableHead className="report-print-hidden h-9 w-10">
                 <Checkbox
                   aria-label="Select all rows"
                   checked={
@@ -364,18 +369,21 @@ export function TableBlock({
                 />
               </TableHead>
             )}
-            {columns.map((column) => {
+            {columns.map((column, idx) => {
               const sortDirection = getColumnSortDirection(column.key, sort);
               const isSortable = !isNonSortableColumn(column);
+              const layout = columnLayouts[idx];
+              const effectiveAlign =
+                column.align ?? layout?.inferredAlign ?? undefined;
               return (
                 <TableHead
                   key={column.key}
                   aria-sort={getAriaSort(sortDirection)}
-                  style={getColumnWidthStyle(column)}
+                  style={layout?.style}
                   className={cn(
-                    'h-10 whitespace-nowrap',
+                    'h-9 whitespace-nowrap',
                     isActionColumn(column) && 'report-print-hidden',
-                    column.align === 'right' && 'text-right'
+                    effectiveAlign === 'right' && 'text-right'
                   )}
                 >
                   {isSortable ? (
@@ -383,13 +391,13 @@ export function TableBlock({
                       type="button"
                       className={cn(
                         'group/h flex w-full items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-muted-foreground transition-colors hover:text-foreground',
-                        column.align === 'right' && 'justify-end'
+                        effectiveAlign === 'right' && 'justify-end'
                       )}
                       onClick={() =>
                         onSortChange(nextSortForColumn(column.key, sort))
                       }
                     >
-                      <span>
+                      <span className="truncate">
                         {column.label ?? humanizeFieldName(column.key)}
                       </span>
                       <SortIcon direction={sortDirection} />
@@ -397,8 +405,8 @@ export function TableBlock({
                   ) : (
                     <span
                       className={cn(
-                        'block text-xs font-semibold uppercase tracking-wide text-muted-foreground',
-                        column.align === 'right' ? 'text-right' : 'text-left'
+                        'block truncate text-xs font-semibold uppercase tracking-wide text-muted-foreground',
+                        effectiveAlign === 'right' ? 'text-right' : 'text-left'
                       )}
                     >
                       {column.label ?? humanizeFieldName(column.key)}
@@ -408,7 +416,7 @@ export function TableBlock({
               );
             })}
             {hasFlexibleFillerColumn && (
-              <TableHead aria-hidden="true" className="h-10 p-0" />
+              <TableHead aria-hidden="true" className="h-9 p-0" />
             )}
           </TableRow>
         </TableHeader>
@@ -437,6 +445,7 @@ export function TableBlock({
                   rowKey={rowKey}
                   rowObject={rowObject}
                   columns={columns}
+                  columnLayouts={columnLayouts}
                   hasFlexibleFillerColumn={hasFlexibleFillerColumn}
                   selectable={selectable}
                   selected={selectedRowKeys.has(rowKey)}
@@ -546,7 +555,8 @@ export function TableBlock({
           ))}
         </div>
       )}
-    </div>
+      </div>
+    </TooltipProvider>
   );
 }
 
@@ -557,6 +567,7 @@ type TableBodyRowProps = {
   rowKey: string;
   rowObject: Record<string, unknown>;
   columns: TableColumn[];
+  columnLayouts: ColumnLayout[];
   hasFlexibleFillerColumn: boolean;
   selectable: boolean;
   selected: boolean;
@@ -602,6 +613,7 @@ function TableBodyRow({
   rowKey,
   rowObject,
   columns,
+  columnLayouts,
   hasFlexibleFillerColumn,
   selectable,
   selected,
@@ -629,7 +641,7 @@ function TableBodyRow({
       onClick={() => onRowClick?.(rowObject)}
     >
       {selectable && (
-        <TableCell className="report-print-hidden w-10 py-3 align-top">
+        <TableCell className="report-print-hidden w-10 py-2 align-middle">
           <Checkbox
             aria-label="Select row"
             checked={selected}
@@ -639,6 +651,7 @@ function TableBodyRow({
         </TableCell>
       )}
       {columns.map((column, columnIndex) => {
+        const layout = columnLayouts[columnIndex];
         const value = getCellValue(row, column, columnIndex);
         const displayValue = getCellDisplayValue(rowObject, column, value);
         const writebackContext = getWritebackContext(column, rowObject);
@@ -653,14 +666,16 @@ function TableBodyRow({
           column.workflowAction != null &&
           isWorkflowActionDisabled(column.workflowAction, rowObject);
         const isEditing = editingField === column.key;
+        const effectiveAlign =
+          column.align ?? layout?.inferredAlign ?? undefined;
 
         return (
           <TableCell
             key={column.key}
-            style={getColumnWidthStyle(column)}
+            style={layout?.style}
             className={cn(
-              'group/cell relative py-3 align-top',
-              column.align === 'right' && 'text-right tabular-nums',
+              'group/cell relative py-2 align-middle',
+              effectiveAlign === 'right' && 'text-right tabular-nums',
               isActionColumn(column) && 'report-print-hidden',
               writebackContext && !isEditing && 'pr-8'
             )}
@@ -777,6 +792,7 @@ function areTableBodyRowPropsEqual(
     previous.row === next.row &&
     previous.rowObject === next.rowObject &&
     previous.columns === next.columns &&
+    previous.columnLayouts === next.columnLayouts &&
     previous.hasFlexibleFillerColumn === next.hasFlexibleFillerColumn &&
     previous.selectable === next.selectable &&
     previous.selected === next.selected &&
@@ -881,6 +897,128 @@ function getColumnWidthStyle(column: TableColumn): CSSProperties | undefined {
   const widthChars = Math.max(contentChars, headerChars, 6);
   const width = `calc(${widthChars}ch + 1rem)`;
   return { width, maxWidth: width };
+}
+
+const SAMPLE_LIMIT = 100;
+
+const FORMAT_WIDTHS: Record<string, string> = {
+  pill: '160px',
+  date: '120px',
+  datetime: '180px',
+  bytes: '120px',
+  percent: '100px',
+  currency: '140px',
+  currency_compact: '120px',
+  number: '120px',
+  number_compact: '100px',
+  decimal: '120px',
+  bar_indicator: '140px',
+  avatar_label: '220px',
+};
+
+type ColumnLayout = {
+  style?: CSSProperties;
+  inferredAlign?: TableColumn['align'];
+  isFlex: boolean;
+};
+
+function inferColumnLayout(
+  column: TableColumn,
+  rows: NonNullable<TableData['rows']>,
+  columnIndex: number
+): ColumnLayout {
+  // Explicit author config wins.
+  if (hasPositiveMaxChars(column.maxChars)) {
+    return { style: getColumnWidthStyle(column), isFlex: false };
+  }
+
+  if (isActionColumn(column)) {
+    return { style: { width: '160px' }, isFlex: false };
+  }
+
+  if (column.type === 'chart') {
+    return { style: { width: '160px' }, isFlex: false };
+  }
+
+  const formatName = (column.format ?? '').split(':', 1)[0];
+  const formatWidth = FORMAT_WIDTHS[formatName];
+  if (formatWidth) {
+    return { style: { width: formatWidth }, isFlex: false };
+  }
+
+  const sample = sampleColumnValues(rows, column, columnIndex, SAMPLE_LIMIT);
+  const maxLen = sample.reduce((acc, value) => Math.max(acc, value.length), 0);
+  const sampledCount = sample.length;
+
+  // 100% empty column: shrink to header.
+  if (sampledCount > 0 && maxLen === 0) {
+    return { style: { width: '1%' }, isFlex: false };
+  }
+
+  // Short codes / IDs / ISO codes: bound to content width.
+  if (sampledCount > 0 && maxLen > 0 && maxLen <= 12) {
+    const labelLen = Array.from(
+      column.label ?? humanizeFieldName(column.key)
+    ).length;
+    // Header width budget: cell padding (~5ch px-5) + sort icon and gap
+    // (~2.5ch, kept in flow even when not active) + uppercase
+    // tracking-wide text (~1.1× per glyph). Without this the header
+    // truncates to "D." for short labels like "DTI".
+    const headerChars = Math.ceil(labelLen * 1.1) + 8;
+    const dataChars = maxLen + 3;
+    const chars = Math.max(dataChars, headerChars, 10);
+    const cappedChars = Math.min(chars, 28);
+    return {
+      style: { width: `${cappedChars}ch` },
+      inferredAlign: inferAlignFromSample(sample),
+      isFlex: false,
+    };
+  }
+
+  // Medium / long text: leave as a flex column so it claims remaining space.
+  return { inferredAlign: inferAlignFromSample(sample), isFlex: true };
+}
+
+function inferAlignFromSample(sample: string[]): TableColumn['align'] {
+  if (sample.length === 0) return undefined;
+  const nonEmpty = sample.filter((value) => value.length > 0);
+  if (nonEmpty.length === 0) return undefined;
+  const numericCount = nonEmpty.reduce(
+    (acc, value) => (NUMERIC_VALUE_PATTERN.test(value) ? acc + 1 : acc),
+    0
+  );
+  return numericCount / nonEmpty.length >= 0.9 ? 'right' : undefined;
+}
+
+const NUMERIC_VALUE_PATTERN = /^-?\d+(\.\d+)?$/;
+
+function sampleColumnValues(
+  rows: NonNullable<TableData['rows']>,
+  column: TableColumn,
+  columnIndex: number,
+  limit: number
+): string[] {
+  const result: string[] = [];
+  const count = Math.min(rows.length, limit);
+  for (let i = 0; i < count; i += 1) {
+    const value = getCellValue(rows[i], column, columnIndex);
+    if (value === null || value === undefined) {
+      result.push('');
+      continue;
+    }
+    if (typeof value === 'string') {
+      result.push(value);
+    } else if (typeof value === 'number' || typeof value === 'boolean') {
+      result.push(String(value));
+    } else {
+      try {
+        result.push(JSON.stringify(value));
+      } catch {
+        result.push(String(value));
+      }
+    }
+  }
+  return result;
 }
 
 function defaultAlign(format?: string | null): TableColumn['align'] {
@@ -1077,7 +1215,7 @@ function InteractionButtonsCell({
   );
 
   if (visibleButtons.length === 0) {
-    return <span className="text-muted-foreground">-</span>;
+    return <EmptyCellPlaceholder />;
   }
 
   return (
@@ -1231,12 +1369,69 @@ function TruncatedCellText({
 }) {
   const display = truncateCellText(text, maxChars);
   return (
-    <span
+    <OverflowText
+      text={display.text}
+      fullText={display.title ?? display.text}
       className={className}
-      title={display.title}
-      aria-label={display.title}
+    />
+  );
+}
+
+function OverflowText({
+  text,
+  fullText,
+  className,
+}: {
+  text: string;
+  fullText: string;
+  className?: string;
+}) {
+  const spanRef = useRef<HTMLSpanElement>(null);
+  const [overflowing, setOverflowing] = useState(false);
+
+  const measure = useCallback(() => {
+    const el = spanRef.current;
+    if (!el) return;
+    setOverflowing(el.scrollWidth - el.clientWidth > 1);
+  }, []);
+
+  if (!text || text.length === 0) {
+    return <EmptyCellPlaceholder className={className} />;
+  }
+
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <span
+          ref={spanRef}
+          className={cn('block min-w-0 truncate', className)}
+          aria-label={overflowing ? fullText : undefined}
+          onPointerEnter={measure}
+          onFocus={measure}
+        >
+          {text}
+        </span>
+      </TooltipTrigger>
+      {overflowing && (
+        <TooltipContent
+          side="top"
+          align="start"
+          className="max-w-md whitespace-pre-line break-words text-xs"
+        >
+          {fullText}
+        </TooltipContent>
+      )}
+    </Tooltip>
+  );
+}
+
+function EmptyCellPlaceholder({ className }: { className?: string }) {
+  return (
+    <span
+      aria-label="No value"
+      className={cn('text-muted-foreground/60', className)}
     >
-      {display.text}
+      —
     </span>
   );
 }
@@ -1280,11 +1475,10 @@ function AvatarLabelCell({
   const displayText = truncateCellText(display, column.maxChars);
   const initials = initialsFromValue(display);
   const colorClass = colorClassForKey(raw);
+  const fullText =
+    typeof tooltipValue === 'string' ? tooltipValue : displayText.title ?? raw;
   return (
-    <div
-      className="flex items-center gap-2"
-      title={typeof tooltipValue === 'string' ? tooltipValue : raw}
-    >
+    <div className="flex min-w-0 items-center gap-2">
       <span
         className={cn(
           'flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-[10px] font-semibold uppercase tracking-wide text-white',
@@ -1294,13 +1488,7 @@ function AvatarLabelCell({
       >
         {initials}
       </span>
-      <span
-        className="truncate"
-        title={displayText.title}
-        aria-label={displayText.title}
-      >
-        {displayText.text}
-      </span>
+      <OverflowText text={displayText.text} fullText={fullText} />
     </div>
   );
 }
@@ -1353,8 +1541,8 @@ function BarIndicatorCell({
   const total = levels.length;
   const filled = idx >= 0 ? idx + 1 : 0;
   return (
-    <div className="flex items-center gap-2">
-      <div className="flex items-end gap-0.5" aria-hidden>
+    <div className="flex min-w-0 items-center gap-2">
+      <div className="flex shrink-0 items-end gap-0.5" aria-hidden>
         {Array.from({ length: Math.max(total, 1) }).map((_, i) => {
           const isFilled = i < filled;
           const heights = ['h-1.5', 'h-2', 'h-2.5', 'h-3'];
@@ -1398,8 +1586,8 @@ function PrimaryWithSecondaryCell({
   const link = typeof linkRaw === 'string' && linkRaw ? linkRaw : undefined;
   const primary = formatCellValue(value, column.format ?? undefined);
   return (
-    <div className="flex flex-col">
-      <div className="flex items-center gap-1.5">
+    <div className="flex min-w-0 flex-col">
+      <div className="flex min-w-0 items-center gap-1.5">
         <TruncatedCellText
           text={primary}
           maxChars={column.maxChars}
@@ -1411,7 +1599,7 @@ function PrimaryWithSecondaryCell({
             target="_blank"
             rel="noreferrer noopener"
             onClick={(event) => event.stopPropagation()}
-            className="text-muted-foreground hover:text-foreground"
+            className="shrink-0 text-muted-foreground hover:text-foreground"
             aria-label="Open link"
           >
             <ExternalLink className="h-3.5 w-3.5" />
@@ -1419,7 +1607,11 @@ function PrimaryWithSecondaryCell({
         )}
       </div>
       {secondary && (
-        <span className="text-xs text-muted-foreground">{secondary}</span>
+        <OverflowText
+          text={secondary}
+          fullText={secondary}
+          className="text-xs text-muted-foreground"
+        />
       )}
     </div>
   );
@@ -1446,7 +1638,7 @@ function InlineTableChart({
   const series = getInlineChartSeries(column, columns);
 
   if (!chart || rows.length === 0 || series.length === 0) {
-    return <span className="text-muted-foreground">-</span>;
+    return <EmptyCellPlaceholder />;
   }
 
   const chartRows = rows.map((row) =>
@@ -1462,7 +1654,7 @@ function InlineTableChart({
       <ResponsiveContainer width="100%" height="100%">
         {chart.kind === 'bar' ? (
           <BarChart data={chartRows}>
-            <Tooltip
+            <RechartsTooltip
               cursor={false}
               contentStyle={{ fontSize: 12 }}
               labelStyle={{ fontSize: 12 }}
@@ -1475,7 +1667,7 @@ function InlineTableChart({
           </BarChart>
         ) : chart.kind === 'area' ? (
           <AreaChart data={chartRows}>
-            <Tooltip
+            <RechartsTooltip
               cursor={false}
               contentStyle={{ fontSize: 12 }}
               labelStyle={{ fontSize: 12 }}
@@ -1492,7 +1684,7 @@ function InlineTableChart({
           </AreaChart>
         ) : (
           <LineChart data={chartRows}>
-            <Tooltip
+            <RechartsTooltip
               cursor={false}
               contentStyle={{ fontSize: 12 }}
               labelStyle={{ fontSize: 12 }}
