@@ -335,7 +335,7 @@ fn validate_agents(
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, ToSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum Tier {
-    Default,
+    Default, // "RUNTARA_PRICING_TIER: default" is incorrect way, it shouldn't be configured at all
     Starter,
     Premium,
     Enterprise,
