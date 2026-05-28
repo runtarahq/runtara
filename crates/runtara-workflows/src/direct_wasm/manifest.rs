@@ -1,0 +1,438 @@
+// Copyright (C) 2025 SyncMyOrders Sp. z o.o.
+// SPDX-License-Identifier: AGPL-3.0-or-later
+//! Versioned manifest emitted by the production direct WebAssembly compiler.
+
+use std::cmp::Ordering;
+use std::collections::BTreeMap;
+use std::fmt;
+
+use runtara_dsl::{ExecutionGraph, ExecutionPlanEdge, Step};
+use sha2::{Digest, Sha256};
+
+use crate::compile::TEMPLATE_MAJOR_VERSION;
+use crate::workflow_features::{WorkflowFeatureSummary, analyze_workflow_features};
+
+/// Current direct workflow manifest schema version.
+pub const DIRECT_WORKFLOW_MANIFEST_VERSION: u32 = 1;
+
+/// Versioned, deterministic manifest for a workflow graph.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DirectWorkflowManifest {
+    /// Manifest schema version.
+    pub version: u32,
+    /// Generated workflow template major version used for cache invalidation.
+    pub template_major_version: String,
+    /// SHA-256 over the manifest with this field omitted.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub checksum: Option<String>,
+    /// Root graph manifest.
+    pub graph: DirectGraphManifest,
+    /// Feature summary used by direct-emitter gating and cache metadata.
+    pub feature_summary: WorkflowFeatureSummary,
+}
+
+impl DirectWorkflowManifest {
+    /// Return the computed manifest checksum.
+    pub fn checksum(&self) -> &str {
+        self.checksum.as_deref().unwrap_or_default()
+    }
+
+    /// Serialize this manifest to stable JSON bytes.
+    pub fn to_canonical_json(&self) -> Result<Vec<u8>, DirectManifestError> {
+        serde_json::to_vec(self).map_err(DirectManifestError::Serialize)
+    }
+}
+
+/// Deterministic manifest for one execution graph.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DirectGraphManifest {
+    /// Human-readable graph name.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Graph entry point step id.
+    pub entry_point: String,
+    /// Effective graph durability. `None` in the DSL inherits from the parent.
+    pub durable: bool,
+    /// Graph-level constant variables as canonical JSON.
+    pub variables: serde_json::Value,
+    /// Graph input schema as canonical JSON.
+    pub input_schema: serde_json::Value,
+    /// Graph output schema as canonical JSON.
+    pub output_schema: serde_json::Value,
+    /// Steps sorted by step id.
+    pub steps: Vec<DirectStepManifest>,
+    /// Execution-plan edges in deterministic routing order.
+    pub edges: Vec<DirectEdgeManifest>,
+}
+
+/// Deterministic manifest for one DSL step.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DirectStepManifest {
+    /// DSL step id.
+    pub id: String,
+    /// DSL step type.
+    pub step_type: String,
+    /// Human-readable step name.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Canonical JSON serialization of the step.
+    pub body: serde_json::Value,
+    /// Nested graphs owned by this step.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub nested_graphs: Vec<DirectNestedGraphManifest>,
+}
+
+/// Nested graph attached to a step.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DirectNestedGraphManifest {
+    /// Role of the nested graph, for example `split.subgraph`.
+    pub role: String,
+    /// Nested graph manifest.
+    pub graph: Box<DirectGraphManifest>,
+}
+
+/// Deterministic manifest for one execution-plan edge.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DirectEdgeManifest {
+    /// Original position in `ExecutionGraph.executionPlan`.
+    pub ordinal: usize,
+    /// Source step id.
+    pub from_step: String,
+    /// Target step id.
+    pub to_step: String,
+    /// Optional edge label.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    /// Optional edge condition as canonical JSON.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub condition: Option<serde_json::Value>,
+    /// Optional edge priority.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub priority: Option<i32>,
+}
+
+/// Errors returned while building or serializing a direct workflow manifest.
+#[derive(Debug)]
+pub enum DirectManifestError {
+    /// A DSL value failed to serialize into the manifest.
+    Serialize(serde_json::Error),
+}
+
+impl fmt::Display for DirectManifestError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            DirectManifestError::Serialize(err) => {
+                write!(f, "failed to serialize direct workflow manifest: {err}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for DirectManifestError {}
+
+/// Build a deterministic direct workflow manifest from a parsed DSL graph.
+pub fn build_direct_workflow_manifest(
+    graph: &ExecutionGraph,
+) -> Result<DirectWorkflowManifest, DirectManifestError> {
+    let feature_summary = analyze_workflow_features(graph);
+    let root_durable = graph.durable.unwrap_or(true);
+    let mut manifest = DirectWorkflowManifest {
+        version: DIRECT_WORKFLOW_MANIFEST_VERSION,
+        template_major_version: TEMPLATE_MAJOR_VERSION.to_string(),
+        checksum: None,
+        graph: graph_manifest(graph, root_durable)?,
+        feature_summary,
+    };
+
+    let canonical = serde_json::to_vec(&manifest).map_err(DirectManifestError::Serialize)?;
+    manifest.checksum = Some(sha256_hex(&canonical));
+    Ok(manifest)
+}
+
+fn graph_manifest(
+    graph: &ExecutionGraph,
+    inherited_durable: bool,
+) -> Result<DirectGraphManifest, DirectManifestError> {
+    let durable = graph.durable.unwrap_or(inherited_durable);
+    let mut steps = graph
+        .steps
+        .values()
+        .map(|step| step_manifest(step, durable))
+        .collect::<Result<Vec<_>, _>>()?;
+    steps.sort_by(|left, right| left.id.cmp(&right.id));
+
+    let mut edges = graph
+        .execution_plan
+        .iter()
+        .enumerate()
+        .map(|(ordinal, edge)| edge_manifest(ordinal, edge))
+        .collect::<Result<Vec<_>, _>>()?;
+    edges.sort_by(compare_edges);
+
+    Ok(DirectGraphManifest {
+        name: graph.name.clone(),
+        entry_point: graph.entry_point.clone(),
+        durable,
+        variables: canonical_json(&graph.variables)?,
+        input_schema: canonical_json(&graph.input_schema)?,
+        output_schema: canonical_json(&graph.output_schema)?,
+        steps,
+        edges,
+    })
+}
+
+fn step_manifest(
+    step: &Step,
+    inherited_durable: bool,
+) -> Result<DirectStepManifest, DirectManifestError> {
+    let mut nested_graphs = Vec::new();
+    match step {
+        Step::Split(step) => {
+            nested_graphs.push(DirectNestedGraphManifest {
+                role: "split.subgraph".to_string(),
+                graph: Box::new(graph_manifest(&step.subgraph, inherited_durable)?),
+            });
+        }
+        Step::While(step) => {
+            nested_graphs.push(DirectNestedGraphManifest {
+                role: "while.subgraph".to_string(),
+                graph: Box::new(graph_manifest(&step.subgraph, inherited_durable)?),
+            });
+        }
+        Step::WaitForSignal(step) => {
+            if let Some(on_wait) = &step.on_wait {
+                nested_graphs.push(DirectNestedGraphManifest {
+                    role: "waitForSignal.onWait".to_string(),
+                    graph: Box::new(graph_manifest(on_wait, inherited_durable)?),
+                });
+            }
+        }
+        _ => {}
+    }
+
+    Ok(DirectStepManifest {
+        id: step_id(step).to_string(),
+        step_type: step_type_name(step).to_string(),
+        name: step_name(step).map(ToOwned::to_owned),
+        body: canonical_json(step)?,
+        nested_graphs,
+    })
+}
+
+fn edge_manifest(
+    ordinal: usize,
+    edge: &ExecutionPlanEdge,
+) -> Result<DirectEdgeManifest, DirectManifestError> {
+    Ok(DirectEdgeManifest {
+        ordinal,
+        from_step: edge.from_step.clone(),
+        to_step: edge.to_step.clone(),
+        label: edge.label.clone(),
+        condition: edge.condition.as_ref().map(canonical_json).transpose()?,
+        priority: edge.priority,
+    })
+}
+
+fn compare_edges(left: &DirectEdgeManifest, right: &DirectEdgeManifest) -> Ordering {
+    (
+        &left.from_step,
+        left.label.as_deref().unwrap_or_default(),
+        edge_route_rank(left),
+        left.ordinal,
+        &left.to_step,
+    )
+        .cmp(&(
+            &right.from_step,
+            right.label.as_deref().unwrap_or_default(),
+            edge_route_rank(right),
+            right.ordinal,
+            &right.to_step,
+        ))
+}
+
+fn edge_route_rank(edge: &DirectEdgeManifest) -> i64 {
+    if edge.condition.is_some() {
+        -(i64::from(edge.priority.unwrap_or(0)))
+    } else {
+        i64::MAX
+    }
+}
+
+fn canonical_json<T: serde::Serialize>(
+    value: &T,
+) -> Result<serde_json::Value, DirectManifestError> {
+    let value = serde_json::to_value(value).map_err(DirectManifestError::Serialize)?;
+    Ok(sort_json(value))
+}
+
+fn sort_json(value: serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::Array(values) => {
+            serde_json::Value::Array(values.into_iter().map(sort_json).collect())
+        }
+        serde_json::Value::Object(values) => {
+            let sorted = values
+                .into_iter()
+                .map(|(key, value)| (key, sort_json(value)))
+                .collect::<BTreeMap<_, _>>();
+            serde_json::Value::Object(sorted.into_iter().collect())
+        }
+        other => other,
+    }
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let digest = Sha256::digest(bytes);
+    let mut out = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        out.push(HEX[(byte >> 4) as usize] as char);
+        out.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    out
+}
+
+fn step_id(step: &Step) -> &str {
+    match step {
+        Step::Finish(step) => &step.id,
+        Step::Agent(step) => &step.id,
+        Step::Conditional(step) => &step.id,
+        Step::Split(step) => &step.id,
+        Step::Switch(step) => &step.id,
+        Step::EmbedWorkflow(step) => &step.id,
+        Step::While(step) => &step.id,
+        Step::Log(step) => &step.id,
+        Step::Error(step) => &step.id,
+        Step::Filter(step) => &step.id,
+        Step::GroupBy(step) => &step.id,
+        Step::Delay(step) => &step.id,
+        Step::WaitForSignal(step) => &step.id,
+        Step::AiAgent(step) => &step.id,
+    }
+}
+
+fn step_name(step: &Step) -> Option<&str> {
+    match step {
+        Step::Finish(step) => step.name.as_deref(),
+        Step::Agent(step) => step.name.as_deref(),
+        Step::Conditional(step) => step.name.as_deref(),
+        Step::Split(step) => step.name.as_deref(),
+        Step::Switch(step) => step.name.as_deref(),
+        Step::EmbedWorkflow(step) => step.name.as_deref(),
+        Step::While(step) => step.name.as_deref(),
+        Step::Log(step) => step.name.as_deref(),
+        Step::Error(step) => step.name.as_deref(),
+        Step::Filter(step) => step.name.as_deref(),
+        Step::GroupBy(step) => step.name.as_deref(),
+        Step::Delay(step) => step.name.as_deref(),
+        Step::WaitForSignal(step) => step.name.as_deref(),
+        Step::AiAgent(step) => step.name.as_deref(),
+    }
+}
+
+fn step_type_name(step: &Step) -> &'static str {
+    match step {
+        Step::Finish(_) => "Finish",
+        Step::Agent(_) => "Agent",
+        Step::Conditional(_) => "Conditional",
+        Step::Split(_) => "Split",
+        Step::Switch(_) => "Switch",
+        Step::EmbedWorkflow(_) => "EmbedWorkflow",
+        Step::While(_) => "While",
+        Step::Log(_) => "Log",
+        Step::Error(_) => "Error",
+        Step::Filter(_) => "Filter",
+        Step::GroupBy(_) => "GroupBy",
+        Step::Delay(_) => "Delay",
+        Step::WaitForSignal(_) => "WaitForSignal",
+        Step::AiAgent(_) => "AiAgent",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+    use std::path::PathBuf;
+
+    use super::*;
+
+    fn fixture(name: &str) -> ExecutionGraph {
+        let json = match name {
+            "simple" => include_str!("../../tests/fixtures/simple_passthrough.json"),
+            "wait" => include_str!("../../tests/fixtures/wait_for_signal_with_callback.json"),
+            other => panic!("unknown fixture {other}"),
+        };
+        serde_json::from_str(json).expect("fixture should parse")
+    }
+
+    #[test]
+    fn manifest_checksum_is_deterministic() {
+        let graph = fixture("simple");
+
+        let first = build_direct_workflow_manifest(&graph).expect("manifest");
+        let second = build_direct_workflow_manifest(&graph).expect("manifest");
+
+        assert_eq!(first.checksum(), second.checksum());
+        assert_eq!(
+            first.to_canonical_json().expect("json"),
+            second.to_canonical_json().expect("json")
+        );
+        assert_eq!(first.version, DIRECT_WORKFLOW_MANIFEST_VERSION);
+        assert_eq!(first.graph.entry_point, "finish");
+    }
+
+    #[test]
+    fn manifest_captures_nested_wait_graph() {
+        let manifest = build_direct_workflow_manifest(&fixture("wait")).expect("manifest");
+
+        let wait = manifest
+            .graph
+            .steps
+            .iter()
+            .find(|step| step.id == "wait")
+            .expect("wait step");
+        assert_eq!(wait.nested_graphs.len(), 1);
+        assert_eq!(wait.nested_graphs[0].role, "waitForSignal.onWait");
+        assert_eq!(wait.nested_graphs[0].graph.entry_point, "log");
+        assert!(
+            wait.nested_graphs[0]
+                .graph
+                .steps
+                .iter()
+                .any(|step| step.step_type == "Log")
+        );
+    }
+
+    #[test]
+    fn manifest_builds_deterministically_for_parseable_fixtures() {
+        let fixture_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+        let mut parseable = 0usize;
+
+        for entry in fs::read_dir(fixture_dir).expect("fixture dir") {
+            let path = entry.expect("fixture entry").path();
+            if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+                continue;
+            }
+
+            let json = fs::read_to_string(&path).expect("fixture file");
+            let Ok(graph) = serde_json::from_str::<ExecutionGraph>(&json) else {
+                continue;
+            };
+            parseable += 1;
+
+            let first = build_direct_workflow_manifest(&graph).expect("manifest");
+            let second = build_direct_workflow_manifest(&graph).expect("manifest");
+            assert_eq!(first.checksum(), second.checksum(), "{path:?}");
+        }
+
+        assert!(
+            parseable >= 40,
+            "expected broad fixture coverage, got {parseable}"
+        );
+    }
+}

@@ -96,6 +96,10 @@ pub mod direct_wasm_poc;
 /// Dependency analysis for child workflows.
 pub mod dependency_analysis;
 
+/// Production direct WebAssembly compiler scaffolding.
+#[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
+pub mod direct_wasm;
+
 /// Workflow start input validation.
 pub mod input_validation;
 
