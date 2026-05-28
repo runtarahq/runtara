@@ -54,6 +54,7 @@ pub fn compile_workflow_components(input: CompilationInput) -> io::Result<Native
         track_events,
         child_workflows,
         connection_service_url,
+        connection_integration_ids,
         agent_catalog,
         progress_callback,
     } = input;
@@ -77,6 +78,7 @@ pub fn compile_workflow_components(input: CompilationInput) -> io::Result<Native
         &child_workflows,
         connection_service_url.as_deref(),
         &tenant_id,
+        connection_integration_ids,
         catalog,
     )?;
 
@@ -211,6 +213,7 @@ fn run_codegen(
     child_workflows: &[ChildWorkflowInput],
     connection_service_url: Option<&str>,
     tenant_id: &str,
+    connection_integration_ids: HashMap<String, String>,
     catalog: std::sync::Arc<runtara_dsl::agent_meta::AgentCatalog>,
 ) -> io::Result<CodegenArtifacts> {
     let child_graphs: HashMap<String, ExecutionGraph> = child_workflows
@@ -238,6 +241,7 @@ fn run_codegen(
         Some(tenant_id.to_string()),
     );
     ctx.set_catalog(catalog);
+    ctx.connection_integration_ids = connection_integration_ids;
     ctx.rate_limit_budget_ms = graph.rate_limit_budget_ms;
     ctx.durable = graph.durable.unwrap_or(true);
 

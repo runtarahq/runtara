@@ -48,6 +48,14 @@ pub struct EmitContext {
     /// Tenant ID for connection service requests
     pub tenant_id: Option<String>,
 
+    /// Pre-resolved `connection_id -> integration_id` map for every agent step
+    /// in the graph. Component-backed agents that dispatch on `integration_id`
+    /// (like `ai-tools`) can't fetch it from inside the WASM module; the
+    /// compile pipeline looks it up via the connections repository before
+    /// codegen and lets `emit_connection_fetch` bake the value straight into
+    /// the synthetic `_connection` literal.
+    pub connection_integration_ids: HashMap<String, String>,
+
     /// Maximum cumulative durable-sleep time for rate-limited retries (ms).
     /// Propagated from `ExecutionGraph.rate_limit_budget_ms`.
     pub rate_limit_budget_ms: u64,
@@ -93,6 +101,7 @@ impl EmitContext {
             emitted_child_functions: HashMap::new(),
             connection_service_url: None,
             tenant_id: None,
+            connection_integration_ids: HashMap::new(),
             rate_limit_budget_ms: 60_000,
             durable: true,
             catalog,
@@ -121,6 +130,7 @@ impl EmitContext {
             emitted_child_functions: HashMap::new(),
             connection_service_url,
             tenant_id,
+            connection_integration_ids: HashMap::new(),
             rate_limit_budget_ms: 60_000,
             durable: true,
             catalog: std::sync::Arc::new(runtara_dsl::agent_meta::AgentCatalog::new()),

@@ -105,6 +105,7 @@ pub async fn compile_with_child_workflows(
         track_events,
         child_workflows,
         connection_service_url,
+        connection_integration_ids: std::collections::HashMap::new(),
         // TODO(phase-c): inject the runtime catalog from app state once the
         // compiler module accepts it via its config. None = falls back to
         // the statically-linked agent registry.

@@ -121,6 +121,7 @@ fn compile_actual_large_embedded_workflow() {
             track_events: input.track_events,
             child_workflows,
             connection_service_url: input.connection_service_url,
+            connection_integration_ids: std::collections::HashMap::new(),
             agent_catalog: None,
             progress_callback: None,
         };

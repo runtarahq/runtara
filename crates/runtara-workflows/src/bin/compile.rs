@@ -494,6 +494,7 @@ fn main() -> ExitCode {
         track_events: args.track_events,
         child_workflows: vec![],
         connection_service_url: None,
+        connection_integration_ids: std::collections::HashMap::new(),
         agent_catalog: None,
         progress_callback: None,
     };

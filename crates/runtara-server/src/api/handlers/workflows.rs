@@ -658,11 +658,12 @@ pub async fn clone_workflow_handler(
     ),
     tag = "workflow-controller"
 )]
-#[instrument(skip(pool, runtime_client), fields(workflow_id = %workflow_id, version = %version))]
+#[instrument(skip(pool, runtime_client, connections), fields(workflow_id = %workflow_id, version = %version))]
 pub async fn compile_workflow_handler(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
     State(pool): State<PgPool>,
     State(runtime_client): State<Option<Arc<crate::runtime_client::RuntimeClient>>>,
+    State(connections): State<Arc<ConnectionsFacade>>,
     Path((workflow_id, version)): Path<(String, String)>,
     Query(query): Query<CompileWorkflowQuery>,
 ) -> (StatusCode, Json<Value>) {
@@ -891,7 +892,8 @@ pub async fn compile_workflow_handler(
         repository,
         connection_service_url,
         runtime_client,
-    );
+    )
+    .with_connections_facade(connections);
 
     match compilation_service
         .compile_workflow(&tenant_id, &workflow_id, version_num, force_recompile)

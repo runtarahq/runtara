@@ -146,6 +146,7 @@ fn components_e2e_compiles_trivial_workflow() {
         track_events: false,
         child_workflows: vec![],
         connection_service_url: None,
+        connection_integration_ids: std::collections::HashMap::new(),
         agent_catalog: None,
         progress_callback: None,
     };

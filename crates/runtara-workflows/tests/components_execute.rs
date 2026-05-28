@@ -407,6 +407,7 @@ fn components_execute_crypto_hash_produces_expected_digest() {
         track_events: false,
         child_workflows: vec![],
         connection_service_url: None,
+        connection_integration_ids: std::collections::HashMap::new(),
         agent_catalog: None,
         progress_callback: None,
     };

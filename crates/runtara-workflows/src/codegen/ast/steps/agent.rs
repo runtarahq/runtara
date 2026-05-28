@@ -568,7 +568,7 @@ fn emit_durable_rate_limited_call(
 fn emit_connection_fetch(
     _step_id: &str,
     connection_id: Option<&str>,
-    _ctx: &EmitContext,
+    ctx: &EmitContext,
     inputs_var: &proc_macro2::Ident,
     _with_rate_limit_handling: bool,
     _agent_id: &str,
@@ -584,6 +584,19 @@ fn emit_connection_fetch(
         proc_macro2::Span::call_site(),
     );
 
+    // Pre-resolved integration_id (from the connections repository) baked into
+    // the synthetic `_connection` so component-backed agents that dispatch on
+    // it — e.g. `ai-tools::text-completion`, which routes between OpenAI and
+    // Bedrock by the connection's integration_id — see a populated value
+    // instead of an empty string. Falls back to "" when the compile pipeline
+    // didn't resolve the connection (tests, CLI compile, missing rows);
+    // agents that don't read integration_id are unaffected.
+    let integration_id = ctx
+        .connection_integration_ids
+        .get(conn_id)
+        .map(String::as_str)
+        .unwrap_or("");
+
     // Inject both connection_id and _connection with connection_id populated.
     // Agents use _connection.connection_id to set X-Runtara-Connection-Id header,
     // and the proxy resolves credentials server-side.
@@ -594,7 +607,7 @@ fn emit_connection_fetch(
                 map.insert("connection_id".to_string(), serde_json::Value::String(#conn_id.to_string()));
                 map.insert("_connection".to_string(), serde_json::json!({
                     "connection_id": #conn_id,
-                    "integration_id": "",
+                    "integration_id": #integration_id,
                     "parameters": {}
                 }));
             }

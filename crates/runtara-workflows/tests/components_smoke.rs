@@ -683,6 +683,7 @@ fn components_smoke_all_shapes() {
             track_events: false,
             child_workflows,
             connection_service_url: None,
+            connection_integration_ids: std::collections::HashMap::new(),
             agent_catalog: None,
             progress_callback: None,
         };
