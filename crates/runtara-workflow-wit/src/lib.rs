@@ -49,6 +49,8 @@ mod tests {
             "filter",
             "log-event",
             "log",
+            "error-event",
+            "error",
             "group-by",
         ] {
             assert!(

@@ -81,6 +81,9 @@ pub struct DirectGraphManifest {
     /// Log definitions addressable by generated direct Wasm.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub logs: Vec<DirectLogManifest>,
+    /// Error definitions addressable by generated direct Wasm.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub errors: Vec<DirectErrorManifest>,
     /// Execution-plan edges in deterministic routing order.
     pub edges: Vec<DirectEdgeManifest>,
 }
@@ -221,6 +224,25 @@ pub struct DirectLogManifest {
     pub value: serde_json::Value,
 }
 
+/// Deterministic Error definition referenced by direct-emitted Wasm.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DirectErrorManifest {
+    /// Manifest-wide Error identifier.
+    pub id: u32,
+    /// Step that owns this Error config.
+    pub step_id: String,
+    /// Human-readable step name.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Step type that owns this Error config.
+    pub step_type: String,
+    /// Config role within the step.
+    pub purpose: String,
+    /// Canonical JSON serialization of the DSL Error step.
+    pub value: serde_json::Value,
+}
+
 /// Deterministic manifest for one execution-plan edge.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -289,6 +311,7 @@ struct DirectManifestBuildState {
     next_switch_id: u32,
     next_group_by_id: u32,
     next_log_id: u32,
+    next_error_id: u32,
 }
 
 impl DirectManifestBuildState {
@@ -327,6 +350,12 @@ impl DirectManifestBuildState {
         self.next_log_id += 1;
         id
     }
+
+    fn allocate_error_id(&mut self) -> u32 {
+        let id = self.next_error_id;
+        self.next_error_id += 1;
+        id
+    }
 }
 
 fn graph_manifest(
@@ -362,6 +391,9 @@ fn graph_manifest(
     collections
         .logs
         .sort_by(|left, right| left.id.cmp(&right.id));
+    collections
+        .errors
+        .sort_by(|left, right| left.id.cmp(&right.id));
 
     let mut edges = graph
         .execution_plan
@@ -385,6 +417,7 @@ fn graph_manifest(
         switches: collections.switches,
         group_bys: collections.group_bys,
         logs: collections.logs,
+        errors: collections.errors,
         edges,
     })
 }
@@ -397,6 +430,7 @@ struct DirectGraphManifestCollections {
     switches: Vec<DirectSwitchManifest>,
     group_bys: Vec<DirectGroupByManifest>,
     logs: Vec<DirectLogManifest>,
+    errors: Vec<DirectErrorManifest>,
 }
 
 fn step_manifest(
@@ -486,6 +520,16 @@ fn step_manifest(
                 name: step.name.clone(),
                 step_type: "Log".to_string(),
                 purpose: "log.config".to_string(),
+                value: canonical_json(step)?,
+            });
+        }
+        Step::Error(step) => {
+            collections.errors.push(DirectErrorManifest {
+                id: state.allocate_error_id(),
+                step_id: step.id.clone(),
+                name: step.name.clone(),
+                step_type: "Error".to_string(),
+                purpose: "error.config".to_string(),
                 value: canonical_json(step)?,
             });
         }
@@ -654,6 +698,7 @@ mod tests {
             "switch_value" => include_str!("../../tests/fixtures/switch_value_simple.json"),
             "group_by" => include_str!("../../tests/fixtures/group_by_simple.json"),
             "log" => include_str!("../../tests/fixtures/log_no_context.json"),
+            "error" => include_str!("../../tests/fixtures/error_direct_simple.json"),
             "wait" => include_str!("../../tests/fixtures/wait_for_signal_with_callback.json"),
             other => panic!("unknown fixture {other}"),
         };
@@ -764,6 +809,21 @@ mod tests {
         assert_eq!(log.purpose, "log.config");
         assert_eq!(log.value["level"], "info");
         assert_eq!(log.value["message"], "Log with default level (info)");
+    }
+
+    #[test]
+    fn manifest_assigns_error_ids() {
+        let manifest = build_direct_workflow_manifest(&fixture("error")).expect("manifest");
+
+        assert_eq!(manifest.graph.errors.len(), 1);
+        let error = &manifest.graph.errors[0];
+        assert_eq!(error.id, 0);
+        assert_eq!(error.step_id, "fail");
+        assert_eq!(error.step_type, "Error");
+        assert_eq!(error.purpose, "error.config");
+        assert_eq!(error.value["category"], "permanent");
+        assert_eq!(error.value["code"], "DIRECT_FAILURE");
+        assert_eq!(error.value["severity"], "critical");
     }
 
     #[test]

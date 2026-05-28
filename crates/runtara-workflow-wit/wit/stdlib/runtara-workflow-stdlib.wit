@@ -51,6 +51,16 @@ interface json {
         source: list<u8>,
     ) -> result<list<u8>, string>;
 
+    error-event: func(
+        error-id: u32,
+        source: list<u8>,
+    ) -> result<list<u8>, string>;
+
+    error: func(
+        error-id: u32,
+        source: list<u8>,
+    ) -> result<list<u8>, string>;
+
     group-by: func(
         group-id: u32,
         source: list<u8>,

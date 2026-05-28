@@ -230,6 +230,26 @@ mod component {
             })
         }
 
+        fn error_event(error_id: u32, source: Vec<u8>) -> Result<Vec<u8>, String> {
+            MANIFEST.with(|slot| {
+                let slot = slot.borrow();
+                let manifest = slot
+                    .as_ref()
+                    .ok_or_else(|| "direct stdlib manifest was not initialized".to_string())?;
+                manifest.error_event(error_id, &source)
+            })
+        }
+
+        fn error(error_id: u32, source: Vec<u8>) -> Result<Vec<u8>, String> {
+            MANIFEST.with(|slot| {
+                let slot = slot.borrow();
+                let manifest = slot
+                    .as_ref()
+                    .ok_or_else(|| "direct stdlib manifest was not initialized".to_string())?;
+                manifest.error(error_id, &source)
+            })
+        }
+
         fn group_by(group_id: u32, source: Vec<u8>) -> Result<Vec<u8>, String> {
             MANIFEST.with(|slot| {
                 let slot = slot.borrow();

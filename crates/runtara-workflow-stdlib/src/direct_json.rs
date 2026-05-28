@@ -26,6 +26,7 @@ pub struct DirectJsonManifest {
     switches: BTreeMap<u32, DirectJsonSwitch>,
     group_bys: BTreeMap<u32, DirectJsonGroupBy>,
     logs: BTreeMap<u32, DirectJsonLog>,
+    errors: BTreeMap<u32, DirectJsonError>,
 }
 
 impl DirectJsonManifest {
@@ -33,28 +34,16 @@ impl DirectJsonManifest {
     pub fn parse(bytes: &[u8]) -> Result<Self, String> {
         let manifest: ManifestWire = serde_json::from_slice(bytes)
             .map_err(|err| format!("failed to parse direct manifest: {err}"))?;
-        let mut mappings = BTreeMap::new();
-        let mut conditions = BTreeMap::new();
-        let mut filters = BTreeMap::new();
-        let mut switches = BTreeMap::new();
-        let mut group_bys = BTreeMap::new();
-        let mut logs = BTreeMap::new();
-        collect_graph_manifest(
-            &manifest.graph,
-            &mut mappings,
-            &mut conditions,
-            &mut filters,
-            &mut switches,
-            &mut group_bys,
-            &mut logs,
-        )?;
+        let mut collections = DirectJsonManifestCollections::default();
+        collect_graph_manifest(&manifest.graph, &mut collections)?;
         Ok(Self {
-            mappings,
-            conditions,
-            filters,
-            switches,
-            group_bys,
-            logs,
+            mappings: collections.mappings,
+            conditions: collections.conditions,
+            filters: collections.filters,
+            switches: collections.switches,
+            group_bys: collections.group_bys,
+            logs: collections.logs,
+            errors: collections.errors,
         })
     }
 
@@ -203,6 +192,49 @@ impl DirectJsonManifest {
         serde_json::to_vec(&Value::Object(steps))
             .map_err(|err| format!("failed to serialize log steps context: {err}"))
     }
+
+    /// Build the payload for a manifest Error step's runtime custom event.
+    pub fn error_event(&self, error_id: u32, source: &[u8]) -> Result<Vec<u8>, String> {
+        let source: Value = serde_json::from_slice(source)
+            .map_err(|err| format!("failed to parse error-event source: {err}"))?;
+        let error = self
+            .errors
+            .get(&error_id)
+            .ok_or_else(|| format!("unknown direct Error id {error_id}"))?;
+        let details = apply_error(&error.value, &source)?;
+        serde_json::to_vec(&serde_json::json!({
+            "step_id": error.step_id,
+            "step_name": error.name.as_deref().unwrap_or("Unnamed"),
+            "category": details.category,
+            "code": details.code,
+            "message": details.message,
+            "severity": details.severity,
+            "context": details.context,
+            "timestamp_ms": timestamp_ms(),
+        }))
+        .map_err(|err| format!("failed to serialize error event payload: {err}"))
+    }
+
+    /// Build the structured failure payload for a manifest Error step.
+    pub fn error(&self, error_id: u32, source: &[u8]) -> Result<Vec<u8>, String> {
+        let source: Value = serde_json::from_slice(source)
+            .map_err(|err| format!("failed to parse error source: {err}"))?;
+        let error = self
+            .errors
+            .get(&error_id)
+            .ok_or_else(|| format!("unknown direct Error id {error_id}"))?;
+        let details = apply_error(&error.value, &source)?;
+        serde_json::to_vec(&serde_json::json!({
+            "stepId": error.step_id,
+            "stepName": error.name.as_deref().unwrap_or("Unnamed"),
+            "category": details.category,
+            "code": details.code,
+            "message": details.message,
+            "severity": details.severity,
+            "context": details.context,
+        }))
+        .map_err(|err| format!("failed to serialize error failure payload: {err}"))
+    }
 }
 
 /// Build the source envelope consumed by direct mapping/condition helpers.
@@ -238,17 +270,24 @@ pub fn build_source(data: &[u8], variables: &[u8], steps: &[u8]) -> Result<Vec<u
         .map_err(|err| format!("failed to serialize source: {err}"))
 }
 
+#[derive(Default)]
+struct DirectJsonManifestCollections {
+    mappings: BTreeMap<u32, DirectJsonMapping>,
+    conditions: BTreeMap<u32, Value>,
+    filters: BTreeMap<u32, DirectJsonFilter>,
+    switches: BTreeMap<u32, DirectJsonSwitch>,
+    group_bys: BTreeMap<u32, DirectJsonGroupBy>,
+    logs: BTreeMap<u32, DirectJsonLog>,
+    errors: BTreeMap<u32, DirectJsonError>,
+}
+
 fn collect_graph_manifest(
     graph: &GraphWire,
-    mappings: &mut BTreeMap<u32, DirectJsonMapping>,
-    conditions: &mut BTreeMap<u32, Value>,
-    filters: &mut BTreeMap<u32, DirectJsonFilter>,
-    switches: &mut BTreeMap<u32, DirectJsonSwitch>,
-    group_bys: &mut BTreeMap<u32, DirectJsonGroupBy>,
-    logs: &mut BTreeMap<u32, DirectJsonLog>,
+    collections: &mut DirectJsonManifestCollections,
 ) -> Result<(), String> {
     for mapping in &graph.mappings {
-        if mappings
+        if collections
+            .mappings
             .insert(
                 mapping.id,
                 DirectJsonMapping {
@@ -262,7 +301,8 @@ fn collect_graph_manifest(
         }
     }
     for condition in &graph.conditions {
-        if conditions
+        if collections
+            .conditions
             .insert(condition.id, condition.value.clone())
             .is_some()
         {
@@ -270,7 +310,8 @@ fn collect_graph_manifest(
         }
     }
     for filter in &graph.filters {
-        if filters
+        if collections
+            .filters
             .insert(
                 filter.id,
                 DirectJsonFilter {
@@ -285,7 +326,8 @@ fn collect_graph_manifest(
         }
     }
     for switch in &graph.switches {
-        if switches
+        if collections
+            .switches
             .insert(
                 switch.id,
                 DirectJsonSwitch {
@@ -300,7 +342,8 @@ fn collect_graph_manifest(
         }
     }
     for group_by in &graph.group_bys {
-        if group_bys
+        if collections
+            .group_bys
             .insert(
                 group_by.id,
                 DirectJsonGroupBy {
@@ -315,7 +358,8 @@ fn collect_graph_manifest(
         }
     }
     for log in &graph.logs {
-        if logs
+        if collections
+            .logs
             .insert(
                 log.id,
                 DirectJsonLog {
@@ -329,17 +373,25 @@ fn collect_graph_manifest(
             return Err(format!("duplicate direct Log id {}", log.id));
         }
     }
+    for error in &graph.errors {
+        if collections
+            .errors
+            .insert(
+                error.id,
+                DirectJsonError {
+                    step_id: error.step_id.clone(),
+                    name: error.name.clone(),
+                    value: error.value.clone(),
+                },
+            )
+            .is_some()
+        {
+            return Err(format!("duplicate direct Error id {}", error.id));
+        }
+    }
     for step in &graph.steps {
         for nested in &step.nested_graphs {
-            collect_graph_manifest(
-                &nested.graph,
-                mappings,
-                conditions,
-                filters,
-                switches,
-                group_bys,
-                logs,
-            )?;
+            collect_graph_manifest(&nested.graph, collections)?;
         }
     }
     Ok(())
@@ -594,6 +646,53 @@ fn apply_log(config: &Value, source: &Value) -> Result<DirectLogResult, String> 
     Ok(DirectLogResult {
         level,
         message,
+        context,
+    })
+}
+
+#[derive(Debug, Clone)]
+struct DirectErrorResult {
+    category: String,
+    code: String,
+    message: String,
+    severity: String,
+    context: Value,
+}
+
+fn apply_error(config: &Value, source: &Value) -> Result<DirectErrorResult, String> {
+    let category = config
+        .get("category")
+        .and_then(Value::as_str)
+        .unwrap_or("permanent")
+        .to_string();
+    let code = config
+        .get("code")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "Error step missing code".to_string())?
+        .to_string();
+    let message = config
+        .get("message")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "Error step missing message".to_string())?
+        .to_string();
+    let severity = config
+        .get("severity")
+        .and_then(Value::as_str)
+        .unwrap_or("error")
+        .to_string();
+    let context = config
+        .get("context")
+        .and_then(Value::as_object)
+        .filter(|context| !context.is_empty())
+        .map(|context| apply_input_mapping(&Value::Object(context.clone()), source))
+        .transpose()?
+        .unwrap_or_else(|| Value::Object(Map::new()));
+
+    Ok(DirectErrorResult {
+        category,
+        code,
+        message,
+        severity,
         context,
     })
 }
@@ -1073,6 +1172,8 @@ struct GraphWire {
     #[serde(default)]
     logs: Vec<LogWire>,
     #[serde(default)]
+    errors: Vec<ErrorWire>,
+    #[serde(default)]
     steps: Vec<StepWire>,
 }
 
@@ -1144,6 +1245,16 @@ struct LogWire {
     value: Value,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ErrorWire {
+    id: u32,
+    step_id: String,
+    #[serde(default)]
+    name: Option<String>,
+    value: Value,
+}
+
 #[derive(Debug, Clone)]
 struct DirectJsonMapping {
     purpose: String,
@@ -1173,6 +1284,13 @@ struct DirectJsonGroupBy {
 
 #[derive(Debug, Clone)]
 struct DirectJsonLog {
+    step_id: String,
+    name: Option<String>,
+    value: Value,
+}
+
+#[derive(Debug, Clone)]
+struct DirectJsonError {
     step_id: String,
     name: Option<String>,
     value: Value,
@@ -1275,6 +1393,23 @@ mod tests {
                     "name": "Log Start",
                     "stepType": "Log",
                     "purpose": "log.config",
+                    "value": config
+                }],
+                "steps": []
+            }
+        }))
+        .expect("manifest json")
+    }
+
+    fn error_manifest(config: Value) -> Vec<u8> {
+        serde_json::to_vec(&json!({
+            "graph": {
+                "errors": [{
+                    "id": 0,
+                    "stepId": "fail",
+                    "name": "Fail Fast",
+                    "stepType": "Error",
+                    "purpose": "error.config",
                     "value": config
                 }],
                 "steps": []
@@ -1846,5 +1981,81 @@ mod tests {
         let payload: Value = serde_json::from_slice(&payload).expect("payload json");
         assert_eq!(payload["level"], json!("info"));
         assert_eq!(payload["context"], json!({}));
+    }
+
+    #[test]
+    fn error_event_builds_payload_and_failure_message() {
+        let manifest = DirectJsonManifest::parse(&error_manifest(json!({
+            "id": "fail",
+            "stepType": "Error",
+            "name": "Fail Fast",
+            "category": "transient",
+            "code": "TEMPORARY_FAILURE",
+            "message": "Try again later",
+            "severity": "warning",
+            "context": {
+                "input": { "valueType": "reference", "value": "data.input" },
+                "static": { "valueType": "immediate", "value": 42 }
+            }
+        })))
+        .expect("manifest");
+        let source = build_source(br#"{"input":"hello"}"#, b"{}", b"{}").expect("source");
+
+        let payload = manifest.error_event(0, &source).expect("error payload");
+        let payload: Value = serde_json::from_slice(&payload).expect("payload json");
+        assert_eq!(payload["step_id"], json!("fail"));
+        assert_eq!(payload["step_name"], json!("Fail Fast"));
+        assert_eq!(payload["category"], json!("transient"));
+        assert_eq!(payload["code"], json!("TEMPORARY_FAILURE"));
+        assert_eq!(payload["message"], json!("Try again later"));
+        assert_eq!(payload["severity"], json!("warning"));
+        assert_eq!(
+            payload["context"],
+            json!({ "input": "hello", "static": 42 })
+        );
+        assert!(
+            payload["timestamp_ms"]
+                .as_i64()
+                .is_some_and(|value| value > 0)
+        );
+
+        let failure = manifest.error(0, &source).expect("failure payload");
+        let failure: Value = serde_json::from_slice(&failure).expect("failure json");
+        assert_eq!(
+            failure,
+            json!({
+                "stepId": "fail",
+                "stepName": "Fail Fast",
+                "category": "transient",
+                "code": "TEMPORARY_FAILURE",
+                "message": "Try again later",
+                "severity": "warning",
+                "context": { "input": "hello", "static": 42 }
+            })
+        );
+    }
+
+    #[test]
+    fn error_defaults_to_permanent_error_and_empty_context() {
+        let manifest = DirectJsonManifest::parse(&error_manifest(json!({
+            "id": "fail",
+            "stepType": "Error",
+            "code": "DEFAULT_FAILURE",
+            "message": "Default failure"
+        })))
+        .expect("manifest");
+        let source = build_source(br#"{"input":"hello"}"#, b"{}", b"{}").expect("source");
+
+        let payload = manifest.error_event(0, &source).expect("error payload");
+        let payload: Value = serde_json::from_slice(&payload).expect("payload json");
+        assert_eq!(payload["category"], json!("permanent"));
+        assert_eq!(payload["severity"], json!("error"));
+        assert_eq!(payload["context"], json!({}));
+
+        let failure = manifest.error(0, &source).expect("failure payload");
+        let failure: Value = serde_json::from_slice(&failure).expect("failure json");
+        assert_eq!(failure["category"], json!("permanent"));
+        assert_eq!(failure["severity"], json!("error"));
+        assert_eq!(failure["context"], json!({}));
     }
 }

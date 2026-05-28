@@ -26,14 +26,16 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   checksum, sorted steps, sorted edges, nested graph manifests, schemas,
   variables, manifest-wide mapping IDs, manifest-wide condition IDs,
   manifest-wide Filter IDs, manifest-wide Switch IDs, manifest-wide GroupBy
-  IDs, manifest-wide Log IDs, and a feature summary.
+  IDs, manifest-wide Log IDs, manifest-wide Error IDs, and a feature summary.
 - `direct_wasm::support` produces deterministic unsupported-feature reports.
-  The current production-shaped direct path supports a single entry `Finish`
-  step, pure `Conditional` true/false decision trees ending in `Finish` leaves,
-  normal-edge `Filter`/value `Switch`/`GroupBy`/`Log` chains ending in `Finish`
-  leaves, and routing `Switch` dispatch trees with one static edge per route
-  plus a `default` edge. Breakpoints and dynamic edge conditions remain outside
-  the supported direct-control subset. `Finish.inputMapping` forms remain
+  The current production-shaped direct path supports a single entry `Finish` or
+  `Error` step, pure `Conditional` true/false decision trees ending in
+  `Finish`/`Error` leaves,
+  normal-edge `Filter`/value `Switch`/`GroupBy`/`Log` chains ending in
+  `Finish`/`Error` leaves, and routing `Switch` dispatch trees with one static
+  edge per route plus a `default` edge whose leaves can be `Finish` or `Error`.
+  Breakpoints and dynamic edge conditions remain outside the supported
+  direct-control subset. `Finish.inputMapping` forms remain
   broadly supported because mapping semantics are delegated to the shared
   stdlib.
 - `direct_wasm::compile::compile_direct_workflow` is an opt-in entry point that
@@ -43,8 +45,9 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   writes `workflow-logic.wasm`, `manifest.json`, `support-report.json`,
   `wit/world.wit`, and `workflow.wac`, and does not generate a Rust crate. The
   exported run entry now initializes the stdlib with the manifest, loads runtime
-  input, builds the mapping source, applies the entry `Finish` mapping by
-  manifest mapping ID, and calls `runtara:workflow-runtime/runtime.complete`.
+  input, builds the mapping source, dispatches the supported direct run plan,
+  and calls `runtara:workflow-runtime/runtime.complete` or
+  `runtara:workflow-runtime/runtime.fail` as the selected terminal requires.
 - `runtara-workflow-wit` now defines the first checked-in workflow WIT
   contracts: `runtara:workflow-stdlib/json@0.1.0` for shared JSON semantics and
   `runtara:workflow-runtime/runtime@0.1.0` for SDK/runtime lifecycle calls.
@@ -82,12 +85,14 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   tests. With `RUNTARA_RUN_DIRECT_WASM_E2E=1`, it compiles and statically
   composes the simple `Finish` fixture plus flat and nested `Conditional`
   fixtures plus simple `Filter -> Finish`, value `Switch -> Finish`, routing
-  `Switch`, `GroupBy -> Finish`, and `Log -> Finish` fixtures, runs each final
+  `Switch`, `GroupBy -> Finish`, `Log -> Finish`, and terminal `Error`
+  fixtures, runs each final
   `workflow.wasm` under
   `wasmtime run --wasi http --wasi inherit-network`, and asserts the fake SDK
   receives the expected mapped completion payloads for the Finish path,
   conditional branches, Filter output, value Switch output, routing Switch route
-  leaves, GroupBy output, and Log custom events.
+  leaves, GroupBy output, Log custom events, and Error custom-event/failure
+  payloads.
 - `tests/direct_wasm_finish_parity.rs` now compares direct `Finish` mapping
   output against the current Rust-generated mapping contract for representative
   fixture shapes: data passthrough, dotted `outputs.*` unwrap, templates,
@@ -118,12 +123,18 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   and `log` helpers for generated-code-compatible `workflow_log` payloads,
   context mapping, default level handling, timestamp insertion, and Log
   step-context insertion.
+- `direct_wasm::manifest` now assigns manifest-wide Error IDs for `Error`
+  steps, and `runtara-workflow-stdlib::direct_json` implements the shared
+  `error-event` and `error` helpers for generated-code-compatible
+  `workflow_error` payloads, context mapping, default category/severity
+  handling, timestamp insertion, and structured workflow-failure payloads.
 - The direct core emitter now supports pure conditional decision trees:
   each `Conditional` has exactly two labeled `true`/`false` edges to another
-  supported direct-control step, and all leaves are `Finish` steps. It calls
-  `stdlib.eval-condition`, branches on the returned bool, applies the selected
-  `Finish` mapping, and completes through the runtime component. Other routing
-  shapes remain rejected by the support gate.
+  supported direct-control step, and leaves may be `Finish` or `Error` steps.
+  It calls `stdlib.eval-condition`, branches on the returned bool, applies the
+  selected `Finish` mapping or emits the selected Error payload, and completes
+  or fails through the runtime component. Other routing shapes remain rejected
+  by the support gate.
 - The direct core emitter now also supports the first JSON transformation and
   dispatch steps: `Filter -> Finish`, value `Switch -> Finish`,
   `GroupBy -> Finish`, `Log -> Finish`, and routing `Switch` trees with static
@@ -131,7 +142,9 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   context to rebuild the mapping source, emits Log payloads through
   `runtime.custom-event`, then applies the selected terminal `Finish` mapping
   against `steps.<step>.outputs.*` and, for routing Switches,
-  `steps.<switch>.route`.
+  `steps.<switch>.route`. Terminal `Error` paths emit `workflow_error` through
+  `runtime.custom-event`, call `runtime.fail`, and return a failed
+  `wasi:cli/run` result instead of completing.
 - `tests/direct_wasm_condition_parity.rs` now compares direct conditional
   branch selection and selected `Finish` output against the current
   generated-code condition semantics for representative fixtures, including
@@ -150,6 +163,9 @@ Current implementation progress on `codex/wasm-direct-emitter`:
 - `tests/direct_wasm_log_parity.rs` now compares the direct Log stdlib helpers
   against current generated-code Log event payload and step-output semantics for
   all log levels and representative context mappings.
+- `tests/direct_wasm_error_parity.rs` now compares the direct Error stdlib
+  helpers against current generated-code Error event payload and workflow
+  failure semantics for explicit and default category/severity cases.
 
 ## Final Goal
 
@@ -300,6 +316,16 @@ interface json {
 
   log: func(
     log-id: u32,
+    source: list<u8>
+  ) -> result<list<u8>, string>;
+
+  error-event: func(
+    error-id: u32,
+    source: list<u8>
+  ) -> result<list<u8>, string>;
+
+  error: func(
+    error-id: u32,
     source: list<u8>
   ) -> result<list<u8>, string>;
 
@@ -870,7 +896,7 @@ Current status:
   `direct-component` implementation for the JSON stdlib surface. Implemented
   functions are `init-manifest`, `build-source`, `apply-mapping`,
   `eval-condition`, `process-switch`, `value-switch`, `filter`, `log-event`,
-  `log`, and `group-by`.
+  `log`, `error-event`, `error`, and `group-by`.
 - `runtara-workflow-runtime` includes generated WIT bindings and implements
   the runtime lifecycle surface against `runtara-sdk`.
 - Remaining work: add host-side bindings smoke tests that instantiate and call
@@ -1074,6 +1100,11 @@ Current status:
   through the checked `log-event` and `log` WIT surfaces. The direct core emits
   those payloads through `runtime.custom-event`, rebuilds the source from the
   updated `steps` context, and continues along the normal edge.
+- Error IDs are now in the manifest and the direct stdlib component can build
+  generated-code-compatible `workflow_error` event payloads and structured
+  failure payloads through the checked `error-event` and `error` WIT surfaces.
+  The direct core emits the custom event, calls `runtime.fail`, and returns a
+  failed `wasi:cli/run` result without posting completion.
 - The first direct Wasm branching path is implemented for
   `Conditional -> true/false Finish`, and the run-plan lowering now recurses
   through nested pure `Conditional` trees until each branch reaches a `Finish`
@@ -1084,7 +1115,8 @@ Current status:
   evaluation and branch output against current generated-code condition
   semantics for simple equality, `LENGTH` comparisons, and nested branch paths.
 - Remaining work: broaden graph lowering across more pure JSON/control
-  workflows by lowering Error behavior and edge-condition priority handling.
+  workflows by lowering edge-condition priority handling and debug event
+  behavior.
 
 Implementation steps:
 
@@ -1129,16 +1161,21 @@ Current progress:
 - `Finish` is implemented for direct execution through the shared mapping
   stdlib and runtime completion surface.
 - `Conditional` lowering now supports pure true/false decision trees that end
-  in `Finish` leaves. It evaluates each condition through `stdlib.eval-condition`
-  and emits nested Wasm `if` control flow in the workflow-specific module.
+  in `Finish` or `Error` leaves. It evaluates each condition through
+  `stdlib.eval-condition` and emits nested Wasm `if` control flow in the
+  workflow-specific module.
 - `Filter -> Finish`, value `Switch -> Finish`, routing `Switch` trees,
   `GroupBy -> Finish`, and `Log -> Finish` lowering now run end to end. The
   shared direct stdlib returns an updated `steps` context from the step helper,
   and the direct core rebuilds the source before applying the selected final
   `Finish` mapping. Log lowering also emits `workflow_log` through the runtime
   custom-event surface before continuing.
-- Remaining parity work in this phase starts with `Error`, edge conditions, and
-  debug event behavior.
+- Terminal `Error` lowering now runs end to end for supported direct-control
+  paths. The direct core emits `workflow_error` through the runtime custom-event
+  surface, sends the structured failure payload through `runtime.fail`, and
+  returns a failed `wasi:cli/run` result.
+- Remaining parity work in this phase starts with edge conditions and debug
+  event behavior.
 
 Implementation steps:
 

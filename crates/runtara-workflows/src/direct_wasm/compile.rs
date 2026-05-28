@@ -62,6 +62,7 @@ const DIRECT_RUN_RETPTR_OFFSET: i32 = 0;
 const DIRECT_STATIC_DATA_OFFSET: i32 = 64;
 const DIRECT_EMPTY_STEPS_CONTEXT: &[u8] = b"{}";
 const DIRECT_WORKFLOW_LOG_KIND: &[u8] = b"workflow_log";
+const DIRECT_WORKFLOW_ERROR_KIND: &[u8] = b"workflow_error";
 const WASM_PAGE_SIZE: i32 = 65_536;
 
 /// Input for the opt-in direct compiler.
@@ -446,6 +447,9 @@ enum DirectRunPlan {
         log_id: u32,
         next_plan: Box<DirectRunPlan>,
     },
+    Error {
+        error_id: u32,
+    },
     Conditional {
         condition_id: u32,
         true_plan: Box<DirectRunPlan>,
@@ -482,6 +486,7 @@ struct DirectCoreStaticData {
     variables: DirectDataSegment,
     steps: DirectDataSegment,
     workflow_log_kind: DirectDataSegment,
+    workflow_error_kind: DirectDataSegment,
     heap_base: i32,
     memory_min_pages: u64,
 }
@@ -508,12 +513,19 @@ impl DirectCoreStaticData {
             16,
         );
 
+        let workflow_error_kind = DirectDataSegment::new(offset, DIRECT_WORKFLOW_ERROR_KIND);
+        offset = align_i32(
+            checked_offset_add(offset, DIRECT_WORKFLOW_ERROR_KIND.len())?,
+            16,
+        );
+
         let memory_min_pages = wasm_pages_for_bytes(offset)?;
         Ok(Self {
             manifest,
             variables,
             steps,
             workflow_log_kind,
+            workflow_error_kind,
             heap_base: offset,
             memory_min_pages,
         })
@@ -553,11 +565,13 @@ fn direct_run_plan(manifest: &DirectWorkflowManifest) -> Result<DirectRunPlan, D
         })?;
 
     match entry.step_type.as_str() {
-        "Finish" | "Filter" | "Switch" | "GroupBy" | "Log" | "Conditional" => step_run_plan(
-            &manifest.graph,
-            &manifest.graph.entry_point,
-            &mut Vec::new(),
-        ),
+        "Finish" | "Filter" | "Switch" | "GroupBy" | "Log" | "Error" | "Conditional" => {
+            step_run_plan(
+                &manifest.graph,
+                &manifest.graph.entry_point,
+                &mut Vec::new(),
+            )
+        }
         other => Err(DirectCompileError::Component(format!(
             "direct run plan does not support entry step type '{other}'"
         ))),
@@ -661,6 +675,9 @@ fn step_run_plan(
                 next_plan: Box::new(next_plan),
             })
         }
+        "Error" => Ok(DirectRunPlan::Error {
+            error_id: error_id(graph, step_id)?,
+        }),
         "Conditional" => {
             let condition_id = graph
                 .conditions
@@ -853,6 +870,27 @@ fn log_id(graph: &DirectGraphManifest, step_id: &str) -> Result<u32, DirectCompi
         .map(|log| log.id)
         .ok_or_else(|| {
             DirectCompileError::Component(format!("missing Log config for step '{step_id}'"))
+        })
+}
+
+fn error_id(graph: &DirectGraphManifest, step_id: &str) -> Result<u32, DirectCompileError> {
+    if !graph
+        .steps
+        .iter()
+        .any(|step| step.id == step_id && step.step_type == "Error")
+    {
+        return Err(DirectCompileError::Component(format!(
+            "direct step '{step_id}' is not an Error step"
+        )));
+    }
+
+    graph
+        .errors
+        .iter()
+        .find(|error| error.step_id == step_id && error.purpose == "error.config")
+        .map(|error| error.id)
+        .ok_or_else(|| {
+            DirectCompileError::Component(format!("missing Error config for step '{step_id}'"))
         })
 }
 
@@ -1052,6 +1090,7 @@ fn emit_direct_core_module(
         &config.static_data.variables,
         &config.static_data.steps,
         &config.static_data.workflow_log_kind,
+        &config.static_data.workflow_error_kind,
     ] {
         data.active(
             0,
@@ -1078,6 +1117,7 @@ fn emit_direct_core_module(
 struct DirectCoreImportIndices {
     runtime_load_input: Option<u32>,
     runtime_complete: Option<u32>,
+    runtime_fail: Option<u32>,
     runtime_custom_event: Option<u32>,
     stdlib_init_manifest: Option<u32>,
     stdlib_build_source: Option<u32>,
@@ -1087,6 +1127,8 @@ struct DirectCoreImportIndices {
     stdlib_filter: Option<u32>,
     stdlib_log_event: Option<u32>,
     stdlib_log: Option<u32>,
+    stdlib_error_event: Option<u32>,
+    stdlib_error: Option<u32>,
     stdlib_value_switch: Option<u32>,
     stdlib_group_by: Option<u32>,
 }
@@ -1096,6 +1138,7 @@ impl DirectCoreImportIndices {
         Ok(DirectCoreFunctionIndices {
             runtime_load_input: require_import(self.runtime_load_input, "runtime.load-input")?,
             runtime_complete: require_import(self.runtime_complete, "runtime.complete")?,
+            runtime_fail: require_import(self.runtime_fail, "runtime.fail")?,
             runtime_custom_event: require_import(
                 self.runtime_custom_event,
                 "runtime.custom-event",
@@ -1120,6 +1163,8 @@ impl DirectCoreImportIndices {
             stdlib_filter: require_import(self.stdlib_filter, "stdlib.filter")?,
             stdlib_log_event: require_import(self.stdlib_log_event, "stdlib.log-event")?,
             stdlib_log: require_import(self.stdlib_log, "stdlib.log")?,
+            stdlib_error_event: require_import(self.stdlib_error_event, "stdlib.error-event")?,
+            stdlib_error: require_import(self.stdlib_error, "stdlib.error")?,
             stdlib_value_switch: require_import(self.stdlib_value_switch, "stdlib.value-switch")?,
             stdlib_group_by: require_import(self.stdlib_group_by, "stdlib.group-by")?,
         })
@@ -1130,6 +1175,7 @@ impl DirectCoreImportIndices {
 struct DirectCoreFunctionIndices {
     runtime_load_input: u32,
     runtime_complete: u32,
+    runtime_fail: u32,
     runtime_custom_event: u32,
     stdlib_init_manifest: u32,
     stdlib_build_source: u32,
@@ -1139,6 +1185,8 @@ struct DirectCoreFunctionIndices {
     stdlib_filter: u32,
     stdlib_log_event: u32,
     stdlib_log: u32,
+    stdlib_error_event: u32,
+    stdlib_error: u32,
     stdlib_value_switch: u32,
     stdlib_group_by: u32,
 }
@@ -1176,6 +1224,8 @@ fn import_core_function(
         import_indices.runtime_load_input = Some(function_index);
     } else if is_runtime_import(resolve, interface, function, "complete") {
         import_indices.runtime_complete = Some(function_index);
+    } else if is_runtime_import(resolve, interface, function, "fail") {
+        import_indices.runtime_fail = Some(function_index);
     } else if is_runtime_import(resolve, interface, function, "custom-event") {
         import_indices.runtime_custom_event = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "init-manifest") {
@@ -1194,6 +1244,10 @@ fn import_core_function(
         import_indices.stdlib_log_event = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "log") {
         import_indices.stdlib_log = Some(function_index);
+    } else if is_stdlib_import(resolve, interface, function, "error-event") {
+        import_indices.stdlib_error_event = Some(function_index);
+    } else if is_stdlib_import(resolve, interface, function, "error") {
+        import_indices.stdlib_error = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "value-switch") {
         import_indices.stdlib_value_switch = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "group-by") {
@@ -1402,6 +1456,7 @@ fn direct_run_function(
         ROUTE_PTR_LOCAL,
         ROUTE_LEN_LOCAL,
         &config.static_data.workflow_log_kind,
+        &config.static_data.workflow_error_kind,
     );
 
     body.instruction(&Instruction::LocalGet(OUTPUT_PTR_LOCAL));
@@ -1430,6 +1485,7 @@ fn emit_run_plan_mapping(
     route_ptr_local: u32,
     route_len_local: u32,
     workflow_log_kind: &DirectDataSegment,
+    workflow_error_kind: &DirectDataSegment,
 ) {
     match run_plan {
         DirectRunPlan::Finish { mapping_id } => {
@@ -1465,6 +1521,7 @@ fn emit_run_plan_mapping(
                 route_ptr_local,
                 route_len_local,
                 workflow_log_kind,
+                workflow_error_kind,
             );
         }
         DirectRunPlan::SwitchValue {
@@ -1489,6 +1546,7 @@ fn emit_run_plan_mapping(
                 route_ptr_local,
                 route_len_local,
                 workflow_log_kind,
+                workflow_error_kind,
             );
         }
         DirectRunPlan::SwitchRoute {
@@ -1514,6 +1572,7 @@ fn emit_run_plan_mapping(
                 route_ptr_local,
                 route_len_local,
                 workflow_log_kind,
+                workflow_error_kind,
             );
         }
         DirectRunPlan::GroupBy {
@@ -1538,6 +1597,7 @@ fn emit_run_plan_mapping(
                 route_ptr_local,
                 route_len_local,
                 workflow_log_kind,
+                workflow_error_kind,
             );
         }
         DirectRunPlan::Log { log_id, next_plan } => {
@@ -1558,6 +1618,19 @@ fn emit_run_plan_mapping(
                 route_ptr_local,
                 route_len_local,
                 workflow_log_kind,
+                workflow_error_kind,
+            );
+        }
+        DirectRunPlan::Error { error_id } => {
+            emit_error_plan(
+                body,
+                indices,
+                *error_id,
+                source_ptr_local,
+                source_len_local,
+                output_ptr_local,
+                output_len_local,
+                workflow_error_kind,
             );
         }
         DirectRunPlan::Conditional {
@@ -1595,6 +1668,7 @@ fn emit_run_plan_mapping(
                 route_ptr_local,
                 route_len_local,
                 workflow_log_kind,
+                workflow_error_kind,
             );
             body.instruction(&Instruction::Else);
             emit_run_plan_mapping(
@@ -1613,6 +1687,7 @@ fn emit_run_plan_mapping(
                 route_ptr_local,
                 route_len_local,
                 workflow_log_kind,
+                workflow_error_kind,
             );
             body.instruction(&Instruction::End);
         }
@@ -1638,6 +1713,7 @@ fn emit_step_context_plan(
     route_ptr_local: u32,
     route_len_local: u32,
     workflow_log_kind: &DirectDataSegment,
+    workflow_error_kind: &DirectDataSegment,
 ) {
     body.instruction(&Instruction::I32Const(step_config_id as i32));
     body.instruction(&Instruction::LocalGet(source_ptr_local));
@@ -1675,6 +1751,7 @@ fn emit_step_context_plan(
         route_ptr_local,
         route_len_local,
         workflow_log_kind,
+        workflow_error_kind,
     );
 }
 
@@ -1696,6 +1773,7 @@ fn emit_log_plan(
     route_ptr_local: u32,
     route_len_local: u32,
     workflow_log_kind: &DirectDataSegment,
+    workflow_error_kind: &DirectDataSegment,
 ) {
     body.instruction(&Instruction::I32Const(log_id as i32));
     body.instruction(&Instruction::LocalGet(source_ptr_local));
@@ -1748,7 +1826,50 @@ fn emit_log_plan(
         route_ptr_local,
         route_len_local,
         workflow_log_kind,
+        workflow_error_kind,
     );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_error_plan(
+    body: &mut WasmFunction,
+    indices: &DirectCoreFunctionIndices,
+    error_id: u32,
+    source_ptr_local: u32,
+    source_len_local: u32,
+    output_ptr_local: u32,
+    output_len_local: u32,
+    workflow_error_kind: &DirectDataSegment,
+) {
+    body.instruction(&Instruction::I32Const(error_id as i32));
+    body.instruction(&Instruction::LocalGet(source_ptr_local));
+    body.instruction(&Instruction::LocalGet(source_len_local));
+    push_retptr_arg(body);
+    body.instruction(&Instruction::Call(indices.stdlib_error_event));
+    return_if_retptr_error(body);
+    load_retptr_list(body, output_ptr_local, output_len_local);
+
+    push_segment_args(body, workflow_error_kind);
+    body.instruction(&Instruction::LocalGet(output_ptr_local));
+    body.instruction(&Instruction::LocalGet(output_len_local));
+    push_retptr_arg(body);
+    body.instruction(&Instruction::Call(indices.runtime_custom_event));
+    return_if_retptr_error(body);
+
+    body.instruction(&Instruction::I32Const(error_id as i32));
+    body.instruction(&Instruction::LocalGet(source_ptr_local));
+    body.instruction(&Instruction::LocalGet(source_len_local));
+    push_retptr_arg(body);
+    body.instruction(&Instruction::Call(indices.stdlib_error));
+    return_if_retptr_error(body);
+    load_retptr_list(body, output_ptr_local, output_len_local);
+
+    body.instruction(&Instruction::LocalGet(output_ptr_local));
+    body.instruction(&Instruction::LocalGet(output_len_local));
+    push_retptr_arg(body);
+    body.instruction(&Instruction::Call(indices.runtime_fail));
+    body.instruction(&Instruction::I32Const(1));
+    body.instruction(&Instruction::Return);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1770,6 +1891,7 @@ fn emit_switch_route_plan(
     route_ptr_local: u32,
     route_len_local: u32,
     workflow_log_kind: &DirectDataSegment,
+    workflow_error_kind: &DirectDataSegment,
 ) {
     body.instruction(&Instruction::I32Const(switch_id as i32));
     body.instruction(&Instruction::LocalGet(source_ptr_local));
@@ -1816,6 +1938,7 @@ fn emit_switch_route_plan(
         route_ptr_local,
         route_len_local,
         workflow_log_kind,
+        workflow_error_kind,
     );
 }
 
@@ -1837,6 +1960,7 @@ fn emit_switch_route_dispatch(
     route_ptr_local: u32,
     route_len_local: u32,
     workflow_log_kind: &DirectDataSegment,
+    workflow_error_kind: &DirectDataSegment,
 ) {
     let Some((branch, remaining)) = branches.split_first() else {
         emit_run_plan_mapping(
@@ -1855,6 +1979,7 @@ fn emit_switch_route_dispatch(
             route_ptr_local,
             route_len_local,
             workflow_log_kind,
+            workflow_error_kind,
         );
         return;
     };
@@ -1877,6 +2002,7 @@ fn emit_switch_route_dispatch(
         route_ptr_local,
         route_len_local,
         workflow_log_kind,
+        workflow_error_kind,
     );
     body.instruction(&Instruction::Else);
     emit_switch_route_dispatch(
@@ -1896,6 +2022,7 @@ fn emit_switch_route_dispatch(
         route_ptr_local,
         route_len_local,
         workflow_log_kind,
+        workflow_error_kind,
     );
     body.instruction(&Instruction::End);
 }
@@ -2178,6 +2305,7 @@ mod tests {
             "switch_routing" => include_str!("../../tests/fixtures/switch_routing_simple.json"),
             "group_by" => include_str!("../../tests/fixtures/group_by_simple.json"),
             "log" => include_str!("../../tests/fixtures/log_no_context.json"),
+            "error" => include_str!("../../tests/fixtures/error_direct_simple.json"),
             "transform" => include_str!("../../tests/fixtures/transform_workflow.json"),
             other => panic!("unknown fixture {other}"),
         };
@@ -2213,6 +2341,7 @@ mod tests {
             DirectRunPlan::Log { next_plan, .. } => {
                 collect_run_plan_ids(next_plan, condition_ids, mapping_ids);
             }
+            DirectRunPlan::Error { .. } => {}
             DirectRunPlan::Conditional {
                 condition_id,
                 true_plan,
@@ -2609,6 +2738,31 @@ mod tests {
     }
 
     #[test]
+    fn direct_compile_supports_error_entry_graph() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let result = compile_direct_workflow(DirectCompilationInput {
+            workflow_id: "error".to_string(),
+            version: 1,
+            execution_graph: fixture("error"),
+            output_dir: temp.path().to_path_buf(),
+        })
+        .expect("direct Error compile should succeed");
+
+        let wasm = fs::read(&result.wasm_path).expect("wasm");
+        Validator::new()
+            .validate_all(&wasm)
+            .expect("direct Error artifact should validate");
+        assert!(result.support_report.supported);
+        assert_eq!(result.support_report.unsupported, vec![]);
+
+        let manifest: DirectWorkflowManifest =
+            serde_json::from_slice(&fs::read(&result.manifest_path).expect("manifest"))
+                .expect("manifest json");
+        assert_eq!(manifest.graph.errors.len(), 1);
+        assert_eq!(manifest.graph.mappings.len(), 0);
+    }
+
+    #[test]
     fn direct_core_run_lowers_finish_mapping_through_stdlib() {
         let graph = fixture("simple");
         let manifest = build_direct_workflow_manifest(&graph).expect("manifest");
@@ -2751,6 +2905,13 @@ mod tests {
                 vec![WasmType::Pointer, WasmType::Length, WasmType::Pointer],
             ),
             (
+                "runtime.fail",
+                "runtara:workflow-runtime/runtime",
+                "cm32p2|runtara:workflow-runtime/runtime@0.1",
+                "fail",
+                vec![WasmType::Pointer, WasmType::Length, WasmType::Pointer],
+            ),
+            (
                 "runtime.custom-event",
                 "runtara:workflow-runtime/runtime",
                 "cm32p2|runtara:workflow-runtime/runtime@0.1",
@@ -2758,6 +2919,30 @@ mod tests {
                 vec![
                     WasmType::Pointer,
                     WasmType::Length,
+                    WasmType::Pointer,
+                    WasmType::Length,
+                    WasmType::Pointer,
+                ],
+            ),
+            (
+                "stdlib.error-event",
+                "runtara:workflow-stdlib/json",
+                "cm32p2|runtara:workflow-stdlib/json@0.1",
+                "error-event",
+                vec![
+                    WasmType::I32,
+                    WasmType::Pointer,
+                    WasmType::Length,
+                    WasmType::Pointer,
+                ],
+            ),
+            (
+                "stdlib.error",
+                "runtara:workflow-stdlib/json",
+                "cm32p2|runtara:workflow-stdlib/json@0.1",
+                "error",
+                vec![
+                    WasmType::I32,
                     WasmType::Pointer,
                     WasmType::Length,
                     WasmType::Pointer,
@@ -2799,7 +2984,10 @@ mod tests {
         let mut process_switch_index = None;
         let mut log_event_index = None;
         let mut log_index = None;
+        let mut error_event_index = None;
+        let mut error_index = None;
         let mut complete_index = None;
+        let mut fail_index = None;
         let mut custom_event_index = None;
         let mut saw_manifest_data = false;
         let mut saw_variables_data = false;
@@ -2840,8 +3028,17 @@ mod tests {
                                 ("cm32p2|runtara:workflow-stdlib/json@0.1", "log") => {
                                     log_index = Some(next_function_index)
                                 }
+                                ("cm32p2|runtara:workflow-stdlib/json@0.1", "error-event") => {
+                                    error_event_index = Some(next_function_index)
+                                }
+                                ("cm32p2|runtara:workflow-stdlib/json@0.1", "error") => {
+                                    error_index = Some(next_function_index)
+                                }
                                 ("cm32p2|runtara:workflow-runtime/runtime@0.1", "complete") => {
                                     complete_index = Some(next_function_index)
+                                }
+                                ("cm32p2|runtara:workflow-runtime/runtime@0.1", "fail") => {
+                                    fail_index = Some(next_function_index)
                                 }
                                 ("cm32p2|runtara:workflow-runtime/runtime@0.1", "custom-event") => {
                                     custom_event_index = Some(next_function_index)
@@ -2914,8 +3111,20 @@ mod tests {
             "log import should exist for Log lowering"
         );
         assert!(
+            error_event_index.is_some(),
+            "error-event import should exist for Error lowering"
+        );
+        assert!(
+            error_index.is_some(),
+            "error import should exist for Error lowering"
+        );
+        assert!(
+            fail_index.is_some(),
+            "fail import should exist for Error lowering"
+        );
+        assert!(
             custom_event_index.is_some(),
-            "custom-event import should exist for Log lowering"
+            "custom-event import should exist for Log/Error lowering"
         );
         assert_eq!(
             run_calls, expected_call_order,
@@ -3804,6 +4013,169 @@ mod tests {
         assert!(
             saw_workflow_log_kind,
             "workflow_log custom-event kind should be static data"
+        );
+    }
+
+    #[test]
+    fn direct_core_run_lowers_error_through_stdlib_and_runtime() {
+        let graph = fixture("error");
+        let manifest = build_direct_workflow_manifest(&graph).expect("manifest");
+        let manifest_json = manifest.to_canonical_json().expect("manifest json");
+        let core_config = DirectCoreConfig::new(&manifest, &manifest_json).expect("core config");
+        let DirectRunPlan::Error { error_id } = &core_config.run_plan else {
+            panic!("expected Error run plan");
+        };
+
+        let (resolve, world) = build_direct_component_resolve().expect("resolve");
+        let core = emit_direct_core_module(&resolve, world, &core_config).expect("core module");
+        Validator::new()
+            .validate_all(&core)
+            .expect("Error core module validates");
+
+        let mut next_function_index = 0;
+        let mut build_source_index = None;
+        let mut error_event_index = None;
+        let mut error_index = None;
+        let mut custom_event_index = None;
+        let mut fail_index = None;
+        let mut complete_index = None;
+        let mut saw_error_id = false;
+        let mut saw_workflow_error_kind = false;
+        let mut saw_failed_run_return = false;
+        let mut run_calls = Vec::new();
+        let mut code_body_index = 0;
+
+        for payload in Parser::new(0).parse_all(&core) {
+            match payload.expect("core wasm payload") {
+                Payload::ImportSection(reader) => {
+                    for import in reader.into_imports() {
+                        let import = import.expect("core import");
+                        if matches!(import.ty, TypeRef::Func(_)) {
+                            match (import.module, import.name) {
+                                ("cm32p2|runtara:workflow-stdlib/json@0.1", "build-source") => {
+                                    build_source_index = Some(next_function_index)
+                                }
+                                ("cm32p2|runtara:workflow-stdlib/json@0.1", "error-event") => {
+                                    error_event_index = Some(next_function_index)
+                                }
+                                ("cm32p2|runtara:workflow-stdlib/json@0.1", "error") => {
+                                    error_index = Some(next_function_index)
+                                }
+                                ("cm32p2|runtara:workflow-runtime/runtime@0.1", "custom-event") => {
+                                    custom_event_index = Some(next_function_index)
+                                }
+                                ("cm32p2|runtara:workflow-runtime/runtime@0.1", "fail") => {
+                                    fail_index = Some(next_function_index)
+                                }
+                                ("cm32p2|runtara:workflow-runtime/runtime@0.1", "complete") => {
+                                    complete_index = Some(next_function_index)
+                                }
+                                _ => {}
+                            }
+                            next_function_index += 1;
+                        }
+                    }
+                }
+                Payload::CodeSectionEntry(body) => {
+                    if code_body_index == 0 {
+                        let mut previous_was_failure_const = false;
+                        for operator in body.get_operators_reader().expect("operators") {
+                            match operator.expect("operator") {
+                                Operator::Call { function_index } => {
+                                    run_calls.push(function_index);
+                                    previous_was_failure_const = false;
+                                }
+                                Operator::I32Const { value } => {
+                                    if value == *error_id as i32 {
+                                        saw_error_id = true;
+                                    }
+                                    previous_was_failure_const = value == 1;
+                                }
+                                Operator::Return if previous_was_failure_const => {
+                                    saw_failed_run_return = true;
+                                    previous_was_failure_const = false;
+                                }
+                                _ => previous_was_failure_const = false,
+                            }
+                        }
+                    }
+                    code_body_index += 1;
+                }
+                Payload::DataSection(reader) => {
+                    for data in reader {
+                        let data = data.expect("data segment");
+                        saw_workflow_error_kind |= data.data == DIRECT_WORKFLOW_ERROR_KIND;
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        let build_source_index = build_source_index.expect("build-source import");
+        let error_event_index = error_event_index.expect("error-event import");
+        let error_index = error_index.expect("error import");
+        let custom_event_index = custom_event_index.expect("custom-event import");
+        let fail_index = fail_index.expect("fail import");
+        let complete_index = complete_index.expect("complete import");
+        assert_eq!(
+            run_calls
+                .iter()
+                .filter(|&&index| index == build_source_index)
+                .count(),
+            1,
+            "Error run should build the source once"
+        );
+        assert_eq!(
+            run_calls
+                .iter()
+                .filter(|&&index| index == error_event_index)
+                .count(),
+            1,
+            "Error run should build one event payload"
+        );
+        assert_eq!(
+            run_calls
+                .iter()
+                .filter(|&&index| index == custom_event_index)
+                .count(),
+            1,
+            "Error run should emit one custom event"
+        );
+        assert_eq!(
+            run_calls
+                .iter()
+                .filter(|&&index| index == error_index)
+                .count(),
+            1,
+            "Error run should build one failure payload"
+        );
+        assert_eq!(
+            run_calls
+                .iter()
+                .filter(|&&index| index == fail_index)
+                .count(),
+            1,
+            "Error run should call runtime.fail once"
+        );
+        assert!(
+            run_calls
+                .iter()
+                .position(|&index| index == fail_index)
+                .expect("runtime.fail call")
+                < run_calls
+                    .iter()
+                    .position(|&index| index == complete_index)
+                    .expect("runtime.complete call"),
+            "runtime.fail should be emitted before the unreachable completion tail"
+        );
+        assert!(saw_error_id, "Error id should be passed to stdlib");
+        assert!(
+            saw_workflow_error_kind,
+            "workflow_error custom-event kind should be static data"
+        );
+        assert!(
+            saw_failed_run_return,
+            "Error lowering should return a failed wasi:cli/run result after runtime.fail"
         );
     }
 

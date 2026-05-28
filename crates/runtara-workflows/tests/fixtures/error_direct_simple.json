@@ -1,0 +1,26 @@
+{
+  "name": "Direct Error Simple",
+  "description": "Direct-emitter fixture for terminal Error lowering",
+  "steps": {
+    "fail": {
+      "stepType": "Error",
+      "id": "fail",
+      "name": "Fail Fast",
+      "category": "permanent",
+      "code": "DIRECT_FAILURE",
+      "message": "Direct workflow failure",
+      "severity": "critical",
+      "context": {
+        "requestId": { "valueType": "reference", "value": "data.requestId" },
+        "reason": { "valueType": "immediate", "value": "fixture" }
+      }
+    }
+  },
+  "entryPoint": "fail",
+  "executionPlan": [],
+  "variables": {},
+  "inputSchema": {
+    "requestId": { "type": "string", "required": true }
+  },
+  "outputSchema": {}
+}

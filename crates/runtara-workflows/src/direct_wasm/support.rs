@@ -79,7 +79,7 @@ fn collect_graph_support(
                     .map(step_type_name)
                     .map(str::to_string),
                 feature: "execution-plan-routing".to_string(),
-                reason: "direct emitter currently lowers only a single entry Finish step, pure Conditional true/false trees, normal Filter/value Switch/GroupBy/Log edges, and routing Switch dispatch trees ending in Finish leaves".to_string(),
+                reason: "direct emitter currently lowers only a single entry Finish or Error step, pure Conditional true/false trees, normal Filter/value Switch/GroupBy/Log edges, and routing Switch dispatch trees ending in Finish/Error leaves".to_string(),
             });
         }
     }
@@ -168,7 +168,7 @@ fn supports_direct_control_step(
     reachable.insert(step_id.to_string());
 
     match step {
-        Step::Finish(_) => graph
+        Step::Finish(_) | Step::Error(_) => graph
             .execution_plan
             .iter()
             .all(|edge| edge.from_step != step_id),
@@ -402,6 +402,16 @@ fn collect_step_support(
                 });
             }
         }
+        Step::Error(step) if direct_control => {
+            if step.breakpoint.unwrap_or(false) {
+                unsupported.push(UnsupportedWorkflowFeature {
+                    step_id: Some(step.id.clone()),
+                    step_type: Some("Error".to_string()),
+                    feature: "error-breakpoint".to_string(),
+                    reason: "Error breakpoints require direct debug event emission".to_string(),
+                });
+            }
+        }
         Step::Split(split) => {
             unsupported_step(
                 step,
@@ -563,6 +573,7 @@ mod tests {
             "switch_routing" => include_str!("../../tests/fixtures/switch_routing_simple.json"),
             "group_by" => include_str!("../../tests/fixtures/group_by_simple.json"),
             "log" => include_str!("../../tests/fixtures/log_no_context.json"),
+            "error" => include_str!("../../tests/fixtures/error_direct_simple.json"),
             "transform" => include_str!("../../tests/fixtures/transform_workflow.json"),
             "wait" => include_str!("../../tests/fixtures/wait_for_signal_with_callback.json"),
             other => panic!("unknown fixture {other}"),
@@ -796,6 +807,71 @@ mod tests {
         assert!(!report.supported);
         assert!(report.unsupported.iter().any(|feature| {
             feature.step_id.as_deref() == Some("simple_log") && feature.feature == "log-breakpoint"
+        }));
+    }
+
+    #[test]
+    fn error_entry_is_supported_as_terminal_failure() {
+        let report = analyze_direct_wasm_support(&fixture("error"));
+
+        assert!(report.supported, "{:?}", report.unsupported);
+        assert!(report.unsupported.is_empty());
+    }
+
+    #[test]
+    fn conditional_error_leaf_is_supported() {
+        let graph = serde_json::from_value::<ExecutionGraph>(serde_json::json!({
+            "steps": {
+                "check": {
+                    "stepType": "Conditional",
+                    "id": "check",
+                    "condition": {
+                        "type": "operation",
+                        "op": "EQ",
+                        "arguments": [
+                            { "valueType": "reference", "value": "data.ok" },
+                            { "valueType": "immediate", "value": true }
+                        ]
+                    }
+                },
+                "finish": { "stepType": "Finish", "id": "finish" },
+                "fail": {
+                    "stepType": "Error",
+                    "id": "fail",
+                    "code": "NOT_OK",
+                    "message": "Not ok"
+                }
+            },
+            "entryPoint": "check",
+            "executionPlan": [
+                { "fromStep": "check", "toStep": "finish", "label": "true" },
+                { "fromStep": "check", "toStep": "fail", "label": "false" }
+            ],
+            "variables": {},
+            "inputSchema": {},
+            "outputSchema": {}
+        }))
+        .expect("graph parses");
+
+        let report = analyze_direct_wasm_support(&graph);
+
+        assert!(report.supported, "{:?}", report.unsupported);
+        assert!(report.unsupported.is_empty());
+    }
+
+    #[test]
+    fn error_breakpoints_are_rejected_until_debug_events_are_lowered() {
+        let mut graph = fixture("error");
+        let Some(Step::Error(error)) = graph.steps.get_mut("fail") else {
+            panic!("expected Error fixture step");
+        };
+        error.breakpoint = Some(true);
+
+        let report = analyze_direct_wasm_support(&graph);
+
+        assert!(!report.supported);
+        assert!(report.unsupported.iter().any(|feature| {
+            feature.step_id.as_deref() == Some("fail") && feature.feature == "error-breakpoint"
         }));
     }
 

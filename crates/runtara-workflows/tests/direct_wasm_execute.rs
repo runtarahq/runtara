@@ -26,10 +26,16 @@ const SWITCH_VALUE_SIMPLE: &str = include_str!("fixtures/switch_value_simple.jso
 const SWITCH_ROUTING_SIMPLE: &str = include_str!("fixtures/switch_routing_simple.json");
 const GROUP_BY_SIMPLE: &str = include_str!("fixtures/group_by_simple.json");
 const LOG_ALL_LEVELS: &str = include_str!("fixtures/log_all_levels.json");
+const ERROR_DIRECT_SIMPLE: &str = include_str!("fixtures/error_direct_simple.json");
 
 #[derive(Debug)]
 struct Completed {
     output_json: Value,
+}
+
+#[derive(Debug)]
+struct Failed {
+    error_json: Value,
 }
 
 #[derive(Debug)]
@@ -45,8 +51,24 @@ struct DirectRunOutput {
 }
 
 #[derive(Debug)]
+struct DirectFailureOutput {
+    error_json: Value,
+    events: Vec<RuntimeEvent>,
+}
+
+#[derive(Debug)]
+struct CapturedRun {
+    output_json: Option<Value>,
+    error_json: Option<Value>,
+    events: Vec<RuntimeEvent>,
+    status_success: bool,
+    stderr: String,
+}
+
+#[derive(Debug)]
 enum CapturedMessage {
     Completed(Completed),
+    Failed(Failed),
     Event(RuntimeEvent),
 }
 
@@ -246,6 +268,7 @@ fn route(
                 return (200, serde_json::json!({"success": true}));
             }
             ("POST", "failed") => {
+                capture_failed(body, sink);
                 return (200, serde_json::json!({"success": true}));
             }
             _ => {}
@@ -262,6 +285,16 @@ fn capture_completed(body: &[u8], sink: &mpsc::Sender<CapturedMessage>) {
         && let Ok(output_json) = serde_json::from_slice::<Value>(&bytes)
     {
         let _ = sink.send(CapturedMessage::Completed(Completed { output_json }));
+    }
+}
+
+fn capture_failed(body: &[u8], sink: &mpsc::Sender<CapturedMessage>) {
+    if let Ok(parsed) = serde_json::from_slice::<Value>(body)
+        && let Some(error) = parsed.get("error").and_then(Value::as_str)
+    {
+        let error_json =
+            serde_json::from_str::<Value>(error).unwrap_or_else(|_| Value::String(error.into()));
+        let _ = sink.send(CapturedMessage::Failed(Failed { error_json }));
     }
 }
 
@@ -350,6 +383,59 @@ fn run_direct_workflow_with_events(
     graph_json: &str,
     workflow_input: &[u8],
 ) -> DirectRunOutput {
+    let captured =
+        run_direct_workflow_capture(components_dir, workflow_id, graph_json, workflow_input);
+    assert!(
+        captured.status_success,
+        "wasmtime exited non-zero:\n--- stderr ---\n{}",
+        captured.stderr
+    );
+    let output_json = captured.output_json.unwrap_or_else(|| {
+        panic!(
+            "direct workflow exited but never POSTed /completed.\n--- stderr ---\n{}",
+            captured.stderr
+        )
+    });
+    DirectRunOutput {
+        output_json,
+        events: captured.events,
+    }
+}
+
+fn run_direct_workflow_expect_failure(
+    components_dir: &Path,
+    workflow_id: &str,
+    graph_json: &str,
+    workflow_input: &[u8],
+) -> DirectFailureOutput {
+    let captured =
+        run_direct_workflow_capture(components_dir, workflow_id, graph_json, workflow_input);
+    assert!(
+        !captured.status_success,
+        "direct Error workflow should return a failed wasi:cli/run result"
+    );
+    assert!(
+        captured.output_json.is_none(),
+        "direct Error workflow should not POST /completed"
+    );
+    let error_json = captured.error_json.unwrap_or_else(|| {
+        panic!(
+            "direct workflow exited but never POSTed /failed.\n--- stderr ---\n{}",
+            captured.stderr
+        )
+    });
+    DirectFailureOutput {
+        error_json,
+        events: captured.events,
+    }
+}
+
+fn run_direct_workflow_capture(
+    components_dir: &Path,
+    workflow_id: &str,
+    graph_json: &str,
+    workflow_input: &[u8],
+) -> CapturedRun {
     let temp = tempfile::tempdir().expect("tempdir");
     let graph: ExecutionGraph = serde_json::from_str(graph_json).expect("fixture parses");
     let compiled = compile_direct_workflow_composed(
@@ -397,26 +483,22 @@ fn run_direct_workflow_with_events(
     let _ = stop_tx.send(());
     let _ = server_handle.join();
 
-    assert!(
-        output.status.success(),
-        "wasmtime exited non-zero ({:?}):\n--- stderr ---\n{stderr}",
-        output.status.code(),
-    );
-
     let mut output_json = None;
+    let mut error_json = None;
     let mut events = Vec::new();
     for message in capture_rx.try_iter() {
         match message {
             CapturedMessage::Completed(completed) => output_json = Some(completed.output_json),
+            CapturedMessage::Failed(failed) => error_json = Some(failed.error_json),
             CapturedMessage::Event(event) => events.push(event),
         }
     }
-    let output_json = output_json.unwrap_or_else(|| {
-        panic!("direct workflow exited but never POSTed /completed.\n--- stderr ---\n{stderr}")
-    });
-    DirectRunOutput {
+    CapturedRun {
         output_json,
+        error_json,
         events,
+        status_success: output.status.success(),
+        stderr: stderr.into_owned(),
     }
 }
 
@@ -665,5 +747,56 @@ fn direct_wasm_execute_log_finish_emits_events_and_reports_completion() {
             "errorCode": "E001",
             "errorDescription": "Sample error for testing"
         })
+    );
+}
+
+#[test]
+fn direct_wasm_execute_error_entry_emits_event_and_reports_failure() {
+    let Some(components_dir) = direct_e2e_components_dir() else {
+        return;
+    };
+
+    let result = run_direct_workflow_expect_failure(
+        &components_dir,
+        "direct-wasm-execute-error",
+        ERROR_DIRECT_SIMPLE,
+        br#"{"requestId":"req-123"}"#,
+    );
+
+    assert_eq!(
+        result.error_json,
+        serde_json::json!({
+            "stepId": "fail",
+            "stepName": "Fail Fast",
+            "category": "permanent",
+            "code": "DIRECT_FAILURE",
+            "message": "Direct workflow failure",
+            "severity": "critical",
+            "context": {
+                "requestId": "req-123",
+                "reason": "fixture"
+            }
+        })
+    );
+    assert_eq!(result.events.len(), 1);
+    let event = &result.events[0];
+    assert_eq!(event.subtype, "workflow_error");
+    assert_eq!(event.payload_json["step_id"], "fail");
+    assert_eq!(event.payload_json["step_name"], "Fail Fast");
+    assert_eq!(event.payload_json["category"], "permanent");
+    assert_eq!(event.payload_json["code"], "DIRECT_FAILURE");
+    assert_eq!(event.payload_json["message"], "Direct workflow failure");
+    assert_eq!(event.payload_json["severity"], "critical");
+    assert_eq!(
+        event.payload_json["context"],
+        serde_json::json!({
+            "requestId": "req-123",
+            "reason": "fixture"
+        })
+    );
+    assert!(
+        event.payload_json["timestamp_ms"]
+            .as_i64()
+            .is_some_and(|value| value > 0)
     );
 }
