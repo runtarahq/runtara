@@ -240,11 +240,13 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   pending.
 - The shared stdlib now exposes `agent-cache-key`, which centralizes the
   generated Rust-compatible durable Agent key shape using `_workflow_id`,
-  `_cache_key_prefix`, and `_loop_indices`. The direct core has an internal
-  no-retry durable Agent checkpoint path that computes this key, reads an
-  existing checkpoint before `capabilities.invoke`, and writes a checkpoint
-  after successful output. Public support is enabled for the durable Agent
-  subset without Agent timeout, compensation, or breakpoints.
+  `_cache_key_prefix`, and `_loop_indices`. The direct core injects the
+  compile workflow id into runtime variables before source construction, so
+  root Agent cache keys use the same workflow-id namespace as generated Rust.
+  It has an internal no-retry durable Agent checkpoint path that computes this
+  key, reads an existing checkpoint before `capabilities.invoke`, and writes a
+  checkpoint after successful output. Public support is enabled for the durable
+  Agent subset without Agent timeout, compensation, or breakpoints.
 - The direct core now also has an internal durable Agent retry loop. It uses
   the generated Rust retry defaults (`maxRetries` override, otherwise 3 or 5
   for rate-limited capabilities), retries only typed WIT Agent errors with
@@ -1499,10 +1501,13 @@ Current status:
   `runtime.fail`.
 - `agent-cache-key` now builds the durable Agent idempotency key in stdlib
   using the same workflow id, parent cache prefix, and loop-index suffix rules
-  as generated Rust. Direct core has an internal `maxRetries = 0` durable Agent
-  checkpoint lowering that uses `runtime.get-checkpoint` and
-  `runtime.checkpoint`, and the support gate now accepts durable Agent
-  workflows that do not use timeout, compensation, or breakpoints.
+  as generated Rust. Direct core injects the compile workflow id into runtime
+  variables before building the source, so root direct Agent cache keys no
+  longer fall back to the shared `root::` namespace. Direct core has an
+  internal `maxRetries = 0` durable Agent checkpoint lowering that uses
+  `runtime.get-checkpoint` and `runtime.checkpoint`, and the support gate now
+  accepts durable Agent workflows that do not use timeout, compensation, or
+  breakpoints.
 - Durable Agent retry-loop lowering is now implemented internally for typed WIT
   Agent errors. The direct manifest records the Agent catalog `rateLimited`
   flag, the run plan derives the same default retry counts as generated Rust,
@@ -1618,7 +1623,7 @@ Implementation steps:
    - stable resume-from-checkpoint lowering: pending per step family.
 2. Implement stdlib/runtime functions using the existing SDK behavior.
 3. Generate stable cache keys matching current behavior:
-   - workflow id: done for Agent cache keys;
+   - workflow id: done for Agent cache keys and injected by direct core;
    - step id: done for Agent cache keys;
    - loop indices: done for Agent cache keys;
    - child cache prefixes: done for Agent cache keys;

@@ -362,7 +362,13 @@ pub fn compile_direct_workflow(
 
     let manifest_json = manifest.to_canonical_json()?;
     let support_json = serde_json::to_vec(&support_report)?;
-    let wasm = emit_direct_artifact(&manifest, &manifest_json, &support_json, input.track_events)?;
+    let wasm = emit_direct_artifact(
+        &manifest,
+        &manifest_json,
+        &support_json,
+        input.track_events,
+        &input.workflow_id,
+    )?;
     let component_artifacts = emit_direct_component_artifacts(&manifest.feature_summary.agent_ids);
 
     let build_dir = input.output_dir.join(format!(
@@ -411,6 +417,7 @@ fn emit_direct_artifact(
     manifest_json: &[u8],
     support_json: &[u8],
     track_events: bool,
+    workflow_id: &str,
 ) -> Result<Vec<u8>, DirectCompileError> {
     let abi_json = serde_json::to_vec(&serde_json::json!({
         "abiVersion": DIRECT_WORKFLOW_ABI_VERSION,
@@ -424,7 +431,7 @@ fn emit_direct_artifact(
         "note": "direct compiler component with canonical run export, stdlib mapping/condition calls, and runtime.complete call"
     }))?;
 
-    let mut component = emit_direct_component(manifest, manifest_json, track_events)?;
+    let mut component = emit_direct_component(manifest, manifest_json, track_events, workflow_id)?;
     append_component_custom_section(&mut component, DIRECT_WORKFLOW_ABI_SECTION, &abi_json);
     append_component_custom_section(
         &mut component,
@@ -444,10 +451,12 @@ fn emit_direct_component(
     manifest: &DirectWorkflowManifest,
     manifest_json: &[u8],
     track_events: bool,
+    workflow_id: &str,
 ) -> Result<Vec<u8>, DirectCompileError> {
     let (resolve, world) =
         build_direct_component_resolve_with_agents(&manifest.feature_summary.agent_ids)?;
-    let core_config = DirectCoreConfig::new(manifest, manifest_json, track_events)?;
+    let core_config =
+        DirectCoreConfig::new_with_workflow_id(manifest, manifest_json, track_events, workflow_id)?;
     let mut core_module = emit_direct_core_module(&resolve, world, &core_config)?;
     embed_component_metadata(&mut core_module, &resolve, world, StringEncoding::UTF8)
         .map_err(component_error)?;
@@ -626,12 +635,31 @@ struct DirectErrorRoutePlan {
 }
 
 impl DirectCoreConfig {
+    #[cfg(test)]
     fn new(
         manifest: &DirectWorkflowManifest,
         manifest_json: &[u8],
         track_events: bool,
     ) -> Result<Self, DirectCompileError> {
-        let variables_json = serde_json::to_vec(&manifest.graph.variables)?;
+        Self::new_inner(manifest, manifest_json, track_events, None)
+    }
+
+    fn new_with_workflow_id(
+        manifest: &DirectWorkflowManifest,
+        manifest_json: &[u8],
+        track_events: bool,
+        workflow_id: &str,
+    ) -> Result<Self, DirectCompileError> {
+        Self::new_inner(manifest, manifest_json, track_events, Some(workflow_id))
+    }
+
+    fn new_inner(
+        manifest: &DirectWorkflowManifest,
+        manifest_json: &[u8],
+        track_events: bool,
+        workflow_id: Option<&str>,
+    ) -> Result<Self, DirectCompileError> {
+        let variables_json = direct_core_variables_json(&manifest.graph.variables, workflow_id)?;
         Ok(Self {
             run_plan: direct_run_plan(manifest)?,
             static_data: DirectCoreStaticData::new(
@@ -643,6 +671,36 @@ impl DirectCoreConfig {
             track_events,
         })
     }
+}
+
+fn direct_core_variables_json(
+    variables: &serde_json::Value,
+    workflow_id: Option<&str>,
+) -> Result<Vec<u8>, DirectCompileError> {
+    let Some(workflow_id) = workflow_id else {
+        return serde_json::to_vec(variables).map_err(DirectCompileError::Serialize);
+    };
+
+    let mut variables = variables.clone();
+    match &mut variables {
+        serde_json::Value::Object(map) => {
+            map.insert(
+                "_workflow_id".to_string(),
+                serde_json::Value::String(workflow_id.to_string()),
+            );
+        }
+        _ => {
+            let mut map = serde_json::Map::new();
+            map.insert(
+                "_workflow_id".to_string(),
+                serde_json::Value::String(workflow_id.to_string()),
+            );
+            map.insert("_variables".to_string(), variables);
+            variables = serde_json::Value::Object(map);
+        }
+    }
+
+    serde_json::to_vec(&variables).map_err(DirectCompileError::Serialize)
 }
 
 #[derive(Debug, Clone)]
@@ -5346,6 +5404,48 @@ mod tests {
             )),
             750
         );
+    }
+
+    #[test]
+    fn direct_core_variables_include_compile_workflow_id() {
+        let graph = durable_agent_no_retry_graph();
+        let manifest = build_direct_workflow_manifest(&graph).expect("manifest");
+        let manifest_json = manifest.to_canonical_json().expect("manifest json");
+        let core_config = DirectCoreConfig::new_with_workflow_id(
+            &manifest,
+            &manifest_json,
+            false,
+            "wf-cache-key",
+        )
+        .expect("core config");
+
+        let variables: serde_json::Value =
+            serde_json::from_slice(&core_config.static_data.variables.data).expect("variables");
+
+        assert_eq!(variables["_workflow_id"], "wf-cache-key");
+    }
+
+    #[test]
+    fn direct_core_variables_override_user_workflow_id_variable() {
+        let mut graph = durable_agent_no_retry_graph();
+        graph.variables.insert(
+            "_workflow_id".to_string(),
+            runtara_dsl::Variable {
+                var_type: runtara_dsl::VariableType::String,
+                value: serde_json::json!("user-provided"),
+                description: None,
+            },
+        );
+        let manifest = build_direct_workflow_manifest(&graph).expect("manifest");
+        let manifest_json = manifest.to_canonical_json().expect("manifest json");
+        let core_config =
+            DirectCoreConfig::new_with_workflow_id(&manifest, &manifest_json, false, "compiled-id")
+                .expect("core config");
+
+        let variables: serde_json::Value =
+            serde_json::from_slice(&core_config.static_data.variables.data).expect("variables");
+
+        assert_eq!(variables["_workflow_id"], "compiled-id");
     }
 
     fn imported_wit_function<'a>(
