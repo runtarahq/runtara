@@ -21,8 +21,9 @@ pub use compile::{
 };
 #[cfg(feature = "compiler")]
 pub use component::{
-    DIRECT_SHARED_COMPONENT_REQUIREMENTS, DIRECT_WORKFLOW_LOGIC_PACKAGE, DirectComponentArtifacts,
-    DirectSharedComponentRequirement, emit_direct_component_artifacts,
+    DIRECT_SHARED_COMPONENT_REQUIREMENTS, DIRECT_WORKFLOW_LOGIC_PACKAGE,
+    DirectAgentComponentRequirement, DirectComponentArtifacts, DirectSharedComponentRequirement,
+    emit_direct_component_artifacts,
 };
 pub use manifest::{
     DIRECT_WORKFLOW_MANIFEST_VERSION, DirectConditionManifest, DirectEdgeManifest,

@@ -98,9 +98,10 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   agents.
 - `direct_wasm::compile::compose_direct_workflow` now performs the first
   direct static composition path: it maps the direct `workflow-logic.wasm`
-  component plus prebuilt stdlib/runtime components into `wac compose`, writes
-  the runtime-facing `workflow.wasm`, and promotes the primary direct compile
-  result metadata to the composed artifact.
+  component plus prebuilt stdlib/runtime/agent components into `wac compose`,
+  writes the runtime-facing `workflow.wasm`, promotes the primary direct
+  compile result metadata to the composed artifact, and reports missing agent
+  components with the exact agent id and expected bundle path.
 - `direct_wasm::compile::compile_direct_workflow_composed` now provides the
   first direct compile entry that returns the final static
   `workflow.wasm` artifact shape while retaining `workflow-logic.wasm` for
@@ -1622,6 +1623,9 @@ Implementation steps:
      execution;
    - cached-checkpoint replay branch test: done at the emitted core Wasm level
      and in a gated direct execution smoke with preloaded SDK checkpoint state;
+   - static agent composition inputs: done; direct composition now binds every
+     required `runtara:agent-<id>` package from the shared component directory
+     and fails before `wac` with the exact missing agent path;
    - timeout behavior: pending.
 5. Extend `onError` routing beyond Agent when additional failing step types are
    lowered.

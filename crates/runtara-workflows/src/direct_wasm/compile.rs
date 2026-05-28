@@ -29,7 +29,9 @@ use wit_parser::{
     WorldId, WorldItem, WorldKey,
 };
 
-use super::component::{DirectComponentArtifacts, emit_direct_component_artifacts};
+use super::component::{
+    DIRECT_AGENT_WIT_VERSION, DirectComponentArtifacts, emit_direct_component_artifacts,
+};
 use super::manifest::{
     DIRECT_WORKFLOW_MANIFEST_VERSION, DirectAgentManifest, DirectDelayManifest, DirectEdgeManifest,
     DirectGraphManifest, DirectManifestError, DirectWorkflowManifest,
@@ -60,7 +62,7 @@ world command {
 }
 "#;
 const AGENT_TYPES_WIT: &str = include_str!("../../../runtara-agent-wit/wit/runtara-agent.wit");
-const AGENT_WIT_VERSION: &str = "0.3.0";
+const AGENT_WIT_VERSION: &str = DIRECT_AGENT_WIT_VERSION;
 
 const DIRECT_RUN_RETPTR_OFFSET: i32 = 0;
 const DIRECT_RET_BOOL_OK_OFFSET: u64 = 4;
@@ -296,6 +298,21 @@ pub fn compose_direct_workflow(
                 format!(
                     "direct shared component `{}` missing at {}",
                     component.package,
+                    wasm.display()
+                ),
+            )));
+        }
+        cmd.arg("-d")
+            .arg(format!("{}={}", component.package, wasm.display()));
+    }
+    for component in &result.component_artifacts.agent_components {
+        let wasm = components_dir.join(&component.bundle_wasm_filename);
+        if !wasm.exists() {
+            return Err(DirectCompileError::Io(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!(
+                    "direct agent component `{}` missing at {}",
+                    component.agent_id,
                     wasm.display()
                 ),
             )));
@@ -11836,6 +11853,36 @@ mod tests {
         Validator::new()
             .validate_all(&wasm)
             .expect("composed direct workflow should validate");
+    }
+
+    #[test]
+    fn direct_compile_composition_reports_missing_agent_component() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let mut result = compile_direct_workflow(DirectCompilationInput {
+            workflow_id: "agent".to_string(),
+            version: 1,
+            execution_graph: non_durable_agent_graph(),
+            output_dir: temp.path().join("out"),
+            track_events: false,
+            agent_catalog: None,
+        })
+        .expect("direct agent compile should succeed");
+        for component in &result.component_artifacts.shared_components {
+            fs::write(
+                temp.path().join(component.bundle_wasm_filename),
+                b"placeholder",
+            )
+            .expect("dummy shared component");
+        }
+
+        let err = compose_direct_workflow(&mut result, temp.path())
+            .expect_err("missing agent component should fail before wac");
+        let DirectCompileError::Io(err) = err else {
+            panic!("expected missing agent component IO error");
+        };
+        let message = err.to_string();
+        assert!(message.contains("direct agent component `utils` missing"));
+        assert!(message.contains("runtara_agent_utils.wasm"));
     }
 
     #[test]

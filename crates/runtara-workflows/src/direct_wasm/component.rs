@@ -6,6 +6,8 @@ use runtara_workflow_wit::{RUNTIME_PACKAGE, STDLIB_PACKAGE, WORKFLOW_WIT_VERSION
 
 /// Package name used by direct-emitted workflow logic components.
 pub const DIRECT_WORKFLOW_LOGIC_PACKAGE: &str = "runtara:workflow-logic@0.1.0";
+/// Version used by generated per-agent component imports.
+pub const DIRECT_AGENT_WIT_VERSION: &str = "0.3.0";
 
 /// One prebuilt shared component needed by direct workflow composition.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -20,6 +22,23 @@ pub struct DirectSharedComponentRequirement {
     pub bundle_meta_filename: &'static str,
     /// Stable filename used if copied into a direct component CAS.
     pub cas_wasm_filename: &'static str,
+}
+
+/// One prebuilt agent component needed by direct workflow composition.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DirectAgentComponentRequirement {
+    /// Canonical DSL/component agent id.
+    pub agent_id: String,
+    /// Package name used by `wac -d`.
+    pub package: String,
+    /// Versioned WIT package name imported by direct workflow logic.
+    pub package_with_version: String,
+    /// Filename emitted by `cargo component build` into the bundle directory.
+    pub bundle_wasm_filename: String,
+    /// Metadata filename staged beside the bundle `.wasm`.
+    pub bundle_meta_filename: String,
+    /// Stable filename used if copied into a direct component CAS.
+    pub cas_wasm_filename: String,
 }
 
 /// Shared components every direct workflow logic component imports.
@@ -53,6 +72,8 @@ pub struct DirectComponentArtifacts {
     pub runtime_package: String,
     /// Shared components required for static composition.
     pub shared_components: Vec<DirectSharedComponentRequirement>,
+    /// Agent components required for static composition.
+    pub agent_components: Vec<DirectAgentComponentRequirement>,
 }
 
 /// Emit the direct workflow component scaffolding.
@@ -68,6 +89,20 @@ pub fn emit_direct_component_artifacts(agents: &[String]) -> DirectComponentArti
         stdlib_package: STDLIB_PACKAGE.to_string(),
         runtime_package: RUNTIME_PACKAGE.to_string(),
         shared_components: DIRECT_SHARED_COMPONENT_REQUIREMENTS.to_vec(),
+        agent_components: agents.iter().map(|agent| agent_component(agent)).collect(),
+    }
+}
+
+fn agent_component(agent: &str) -> DirectAgentComponentRequirement {
+    let snake = agent.replace('-', "_");
+    let package = format!("runtara:agent-{agent}");
+    DirectAgentComponentRequirement {
+        agent_id: agent.to_string(),
+        package: package.clone(),
+        package_with_version: format!("{package}@{DIRECT_AGENT_WIT_VERSION}"),
+        bundle_wasm_filename: format!("runtara_agent_{snake}.wasm"),
+        bundle_meta_filename: format!("runtara_agent_{snake}.meta.json"),
+        cas_wasm_filename: format!("{}.wasm", package.replace(':', "-")),
     }
 }
 
@@ -82,7 +117,7 @@ fn emit_world_wit(agents: &[String]) -> String {
     );
     for agent in agents {
         out.push_str(&format!(
-            "    import runtara:agent-{agent}/capabilities@0.3.0;\n"
+            "    import runtara:agent-{agent}/capabilities@{DIRECT_AGENT_WIT_VERSION};\n"
         ));
     }
     out.push_str("    export wasi:cli/run@0.2.3;\n");
@@ -175,6 +210,27 @@ mod tests {
         assert!(artifacts.wac_source.contains("...agent-crypto,"));
         assert!(artifacts.wac_source.contains("...agent-object-model,"));
         assert!(artifacts.wac_source.contains("export wf...;"));
+        assert_eq!(
+            artifacts.agent_components,
+            vec![
+                DirectAgentComponentRequirement {
+                    agent_id: "crypto".to_string(),
+                    package: "runtara:agent-crypto".to_string(),
+                    package_with_version: "runtara:agent-crypto@0.3.0".to_string(),
+                    bundle_wasm_filename: "runtara_agent_crypto.wasm".to_string(),
+                    bundle_meta_filename: "runtara_agent_crypto.meta.json".to_string(),
+                    cas_wasm_filename: "runtara-agent-crypto.wasm".to_string(),
+                },
+                DirectAgentComponentRequirement {
+                    agent_id: "object-model".to_string(),
+                    package: "runtara:agent-object-model".to_string(),
+                    package_with_version: "runtara:agent-object-model@0.3.0".to_string(),
+                    bundle_wasm_filename: "runtara_agent_object_model.wasm".to_string(),
+                    bundle_meta_filename: "runtara_agent_object_model.meta.json".to_string(),
+                    cas_wasm_filename: "runtara-agent-object-model.wasm".to_string(),
+                },
+            ]
+        );
     }
 
     #[test]
@@ -185,6 +241,7 @@ mod tests {
             artifacts.shared_components,
             DIRECT_SHARED_COMPONENT_REQUIREMENTS
         );
+        assert!(artifacts.agent_components.is_empty());
         assert_eq!(
             artifacts.shared_components,
             vec![

@@ -49,7 +49,7 @@ const AGENT_CACHED_REPLAY: &str = r#"{
       "stepType": "Finish",
       "id": "finish",
       "inputMapping": {
-        "result": { "valueType": "reference", "value": "steps.agent.outputs.value" }
+        "result": { "valueType": "reference", "value": "steps.agent.outputs" }
       }
     }
   },
@@ -1013,7 +1013,7 @@ fn direct_wasm_execute_durable_agent_invokes_and_saves_checkpoint() {
     );
     let save = &result.checkpoints[1];
     assert_eq!(save.checkpoint_id, checkpoint_id);
-    assert_eq!(save.state, br#"{"value":"fresh-agent"}"#);
+    assert_eq!(save.state, br#""fresh-agent""#);
     assert!(
         result.sleeps.is_empty(),
         "successful durable Agent should not use durable sleep without retries"
@@ -1062,10 +1062,7 @@ fn direct_wasm_execute_durable_agent_uses_cached_checkpoint() {
         AGENT_CACHED_REPLAY,
         br#"{"value":"fresh-agent"}"#,
         false,
-        vec![(
-            checkpoint_id.clone(),
-            br#"{"value":"cached-agent"}"#.to_vec(),
-        )],
+        vec![(checkpoint_id.clone(), br#""cached-agent""#.to_vec())],
     );
 
     assert!(
