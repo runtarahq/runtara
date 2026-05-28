@@ -16,6 +16,7 @@ import {
   CapabilityInfo,
   ListStepTypesResponse,
 } from '@/generated/RuntaraRuntimeApi';
+import { RuntimeREST } from '@/shared/queries';
 
 export interface RustWorkflowValidationResult {
   success: boolean;
@@ -49,6 +50,10 @@ let initPromise: Promise<unknown> | null = null;
  * `<agent>.meta.json` from `$RUNTARA_AGENT_COMPONENTS_DIR` at boot) —
  * so the validator + the runtime see the same agent set.
  *
+ * Goes through `RuntimeREST` so the shared org_id-prefix interceptor in
+ * `shared/queries/index.ts` rewrites the URL on multi-tenant deployments
+ * — a raw `fetch` here would bypass it and 404 against the gateway.
+ *
  * Idempotent: skips the fetch if `agentCatalogLoaded()` already returns
  * true (e.g. another caller initialized it).
  */
@@ -56,12 +61,10 @@ async function loadAgentCatalogIntoWasm(): Promise<void> {
   if (agentCatalogLoaded()) {
     return;
   }
-  let response: Response;
+  let body: { agents?: unknown };
   try {
-    response = await fetch('/api/runtime/agents', {
-      credentials: 'include',
-      headers: { accept: 'application/json' },
-    });
+    const response = await RuntimeREST.api.listAgentsHandler();
+    body = response.data ?? { agents: [] };
   } catch (error) {
     throw new Error(
       `Failed to fetch /api/runtime/agents for validator init: ${
@@ -69,12 +72,6 @@ async function loadAgentCatalogIntoWasm(): Promise<void> {
       }`
     );
   }
-  if (!response.ok) {
-    throw new Error(
-      `/api/runtime/agents returned HTTP ${response.status} ${response.statusText}`
-    );
-  }
-  const body = (await response.json()) as { agents?: unknown };
   const agentsArray = Array.isArray(body?.agents) ? body.agents : [];
   const initResultRaw = initAgentCatalog(JSON.stringify(agentsArray));
   let parsed: { success?: boolean; agentCount?: number; error?: string };

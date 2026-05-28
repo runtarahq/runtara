@@ -1,6 +1,14 @@
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
-import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+import {
+  afterAll,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from 'vitest';
 import {
   getStaticAgentWithRust,
   getStaticAgentsWithRust,
@@ -19,6 +27,17 @@ const wasmBytes = readFileSync(
   )
 );
 const originalFetch = globalThis.fetch.bind(globalThis);
+const { listAgentsHandlerMock } = vi.hoisted(() => ({
+  listAgentsHandlerMock: vi.fn(),
+}));
+
+vi.mock('@/shared/queries', () => ({
+  RuntimeREST: {
+    api: {
+      listAgentsHandler: listAgentsHandlerMock,
+    },
+  },
+}));
 
 /**
  * Sample catalog returned by the stubbed `/api/runtime/agents`. Shape
@@ -67,10 +86,10 @@ function stubWasmFetch() {
         });
       }
 
-      if (target.endsWith('/api/runtime/agents')) {
-        return new Response(JSON.stringify(TEST_AGENT_CATALOG), {
-          headers: { 'Content-Type': 'application/json' },
-        });
+      if (target.includes('/api/runtime/agents')) {
+        throw new Error(
+          'GET /api/runtime/agents must go through RuntimeREST so the shared tenant URL interceptor can run'
+        );
       }
 
       return originalFetch(input, init);
@@ -81,6 +100,11 @@ function stubWasmFetch() {
 describe('rust workflow validation WASM', () => {
   beforeAll(() => {
     stubWasmFetch();
+  });
+
+  beforeEach(() => {
+    listAgentsHandlerMock.mockClear();
+    listAgentsHandlerMock.mockResolvedValue({ data: TEST_AGENT_CATALOG });
   });
 
   afterAll(() => {
@@ -116,6 +140,7 @@ describe('rust workflow validation WASM', () => {
     expect(result.valid).toBe(false);
     expect(result.status).toBe('invalid');
     expect(result.errors.length).toBeGreaterThan(0);
+    expect(listAgentsHandlerMock).toHaveBeenCalledTimes(1);
   });
 
   it('reports Rust graph parse failures as invalid, not unavailable', async () => {
