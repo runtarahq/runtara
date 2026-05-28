@@ -419,7 +419,8 @@ fn collect_step_support(
                     step_id: Some(step.id.clone()),
                     step_type: Some("Finish".to_string()),
                     feature: "finish-breakpoint".to_string(),
-                    reason: "Finish breakpoints require direct debug event emission".to_string(),
+                    reason: "Finish breakpoints require a direct runtime checkpoint/pause ABI"
+                        .to_string(),
                 });
             }
         }
@@ -442,7 +443,8 @@ fn collect_step_support(
                     step_id: Some(step.id.clone()),
                     step_type: Some("Filter".to_string()),
                     feature: "filter-breakpoint".to_string(),
-                    reason: "Filter breakpoints require direct debug event emission".to_string(),
+                    reason: "Filter breakpoints require a direct runtime checkpoint/pause ABI"
+                        .to_string(),
                 });
             }
         }
@@ -452,7 +454,8 @@ fn collect_step_support(
                     step_id: Some(step.id.clone()),
                     step_type: Some("Switch".to_string()),
                     feature: "switch-breakpoint".to_string(),
-                    reason: "Switch breakpoints require direct debug event emission".to_string(),
+                    reason: "Switch breakpoints require a direct runtime checkpoint/pause ABI"
+                        .to_string(),
                 });
             }
         }
@@ -462,7 +465,8 @@ fn collect_step_support(
                     step_id: Some(step.id.clone()),
                     step_type: Some("GroupBy".to_string()),
                     feature: "group-by-breakpoint".to_string(),
-                    reason: "GroupBy breakpoints require direct debug event emission".to_string(),
+                    reason: "GroupBy breakpoints require a direct runtime checkpoint/pause ABI"
+                        .to_string(),
                 });
             }
         }
@@ -472,7 +476,8 @@ fn collect_step_support(
                     step_id: Some(step.id.clone()),
                     step_type: Some("Log".to_string()),
                     feature: "log-breakpoint".to_string(),
-                    reason: "Log breakpoints require direct debug event emission".to_string(),
+                    reason: "Log breakpoints require a direct runtime checkpoint/pause ABI"
+                        .to_string(),
                 });
             }
         }
@@ -482,7 +487,8 @@ fn collect_step_support(
                     step_id: Some(step.id.clone()),
                     step_type: Some("Error".to_string()),
                     feature: "error-breakpoint".to_string(),
-                    reason: "Error breakpoints require direct debug event emission".to_string(),
+                    reason: "Error breakpoints require a direct runtime checkpoint/pause ABI"
+                        .to_string(),
                 });
             }
         }
@@ -732,9 +738,19 @@ mod tests {
         let report = analyze_direct_wasm_support(&graph);
 
         assert!(!report.supported);
-        assert!(report.unsupported.iter().any(|feature| {
-            feature.step_id.as_deref() == Some("finish") && feature.feature == "finish-breakpoint"
-        }));
+        let feature = report
+            .unsupported
+            .iter()
+            .find(|feature| {
+                feature.step_id.as_deref() == Some("finish")
+                    && feature.feature == "finish-breakpoint"
+            })
+            .expect("finish breakpoint rejection");
+        assert!(
+            feature.reason.contains("checkpoint/pause ABI"),
+            "{:?}",
+            feature
+        );
     }
 
     #[test]
@@ -981,6 +997,37 @@ mod tests {
         assert!(!report.supported);
         assert!(report.unsupported.iter().any(|feature| {
             feature.step_id.as_deref() == Some("classify") && feature.feature == "edge-condition"
+        }));
+    }
+
+    #[test]
+    fn parallel_normal_fanout_is_rejected_until_parallel_semantics_are_lowered() {
+        let graph = serde_json::from_value::<ExecutionGraph>(serde_json::json!({
+            "steps": {
+                "log": {
+                    "stepType": "Log",
+                    "id": "log",
+                    "message": "fanout"
+                },
+                "finish_a": { "stepType": "Finish", "id": "finish_a" },
+                "finish_b": { "stepType": "Finish", "id": "finish_b" }
+            },
+            "entryPoint": "log",
+            "executionPlan": [
+                { "fromStep": "log", "toStep": "finish_a" },
+                { "fromStep": "log", "toStep": "finish_b" }
+            ],
+            "variables": {},
+            "inputSchema": {},
+            "outputSchema": {}
+        }))
+        .expect("graph parses");
+
+        let report = analyze_direct_wasm_support(&graph);
+
+        assert!(!report.supported);
+        assert!(report.unsupported.iter().any(|feature| {
+            feature.step_id.as_deref() == Some("log") && feature.feature == "execution-plan-routing"
         }));
     }
 

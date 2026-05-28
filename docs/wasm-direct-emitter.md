@@ -179,6 +179,15 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   `Log` remains intentionally limited to its existing `workflow_log` events,
   matching the generated Rust path. Breakpoint pauses remain rejected until the
   runtime/checkpoint ABI can represent durable pause/resume behavior.
+- Phase 6 routing scope is now explicit: direct mode supports deterministic
+  single-successor normal flow, condition-priority routes with an explicit
+  default, and routing Switches with a complete static route/default edge set.
+  Parallel fan-out and no-default routing remain rejected until explicit
+  direct parallel aggregation and failure semantics are designed.
+- Agent preparation has started in the manifest layer. Direct manifests now
+  include deterministic `agents` entries plus `agent.inputMapping` mapping
+  entries, so the next Agent-lowering slice can refer to stable manifest IDs
+  without changing the manifest schema at the same time.
 
 ## Final Goal
 
@@ -1209,10 +1218,13 @@ Current progress:
   `runtime.custom-event` before/after each supported step helper or terminal
   action. Log steps continue to emit only `workflow_log`, matching the current
   generated Rust behavior.
-- Remaining parity work in this phase is now the deliberate production decision
-  for unsupported parallel/no-default routing shapes. Breakpoint support moves
-  to Phase 8 because it requires a durable checkpoint/pause ABI, not only debug
-  event payloads.
+- The deliberate production decision for unsupported routing shapes is now
+  closed for this phase: parallel fan-out and no-default routing remain outside
+  direct Phase 6. They require explicit parallel result aggregation, error
+  propagation, or missing-default behavior and should be addressed with loops,
+  agents, or runtime lifecycle work instead of being inferred here. Breakpoint
+  support moves to Phase 8 because it requires a durable checkpoint/pause ABI,
+  not only debug event payloads.
 
 Implementation steps:
 
@@ -1245,6 +1257,9 @@ Implementation steps:
 8. Keep breakpoints rejected until Phase 8:
    - breakpoint behavior depends on persisted checkpoint/pause state;
    - direct runtime WIT does not yet expose a checkpoint API.
+9. Keep parallel fan-out/no-default routes rejected until their owning phases:
+   - fan-out requires explicit aggregation and error propagation;
+   - no-default behavior must be specified per step/routing family.
 
 Checkpoint 6:
 
@@ -1262,6 +1277,18 @@ Rollback:
 
 Goal: support workflows that invoke agents through existing per-agent WIT
 interfaces.
+
+Current status:
+
+- `DirectWorkflowManifest` now serializes Agent-specific manifest entries with
+  stable ids, agent id, capability id, optional connection id, retry/timeout
+  knobs, and a stable `input_mapping_id`.
+- Agent input mappings are serialized into the existing manifest-wide
+  `mappings` table with purpose `agent.inputMapping`.
+- Component sidecars already collect used agent ids and emit per-agent WIT/WAC
+  imports, but the workflow-logic component metadata and direct core run-plan
+  still keep `Agent` behind the support gate until the invocation ABI is
+  lowered and tested.
 
 Implementation steps:
 

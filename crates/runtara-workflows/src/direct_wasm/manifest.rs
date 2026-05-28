@@ -84,6 +84,9 @@ pub struct DirectGraphManifest {
     /// Error definitions addressable by generated direct Wasm.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub errors: Vec<DirectErrorManifest>,
+    /// Agent definitions addressable by generated direct Wasm.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub agents: Vec<DirectAgentManifest>,
     /// Execution-plan edges in deterministic routing order.
     pub edges: Vec<DirectEdgeManifest>,
 }
@@ -243,6 +246,41 @@ pub struct DirectErrorManifest {
     pub value: serde_json::Value,
 }
 
+/// Deterministic Agent definition referenced by direct-emitted Wasm.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DirectAgentManifest {
+    /// Manifest-wide Agent identifier.
+    pub id: u32,
+    /// Step that owns this Agent config.
+    pub step_id: String,
+    /// Human-readable step name.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Step type that owns this Agent config.
+    pub step_type: String,
+    /// Config role within the step.
+    pub purpose: String,
+    /// Agent component id.
+    pub agent_id: String,
+    /// Capability id passed to the agent component.
+    pub capability_id: String,
+    /// Optional workflow connection id.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub connection_id: Option<String>,
+    /// Manifest-wide mapping id for Agent inputs.
+    pub input_mapping_id: u32,
+    /// Maximum retry attempts configured on the Agent step.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_retries: Option<u32>,
+    /// Base retry delay configured on the Agent step.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retry_delay: Option<u64>,
+    /// Step timeout configured on the Agent step.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timeout: Option<u64>,
+}
+
 /// Deterministic manifest for one execution-plan edge.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -315,6 +353,7 @@ struct DirectManifestBuildState {
     next_group_by_id: u32,
     next_log_id: u32,
     next_error_id: u32,
+    next_agent_id: u32,
 }
 
 impl DirectManifestBuildState {
@@ -359,6 +398,12 @@ impl DirectManifestBuildState {
         self.next_error_id += 1;
         id
     }
+
+    fn allocate_agent_id(&mut self) -> u32 {
+        let id = self.next_agent_id;
+        self.next_agent_id += 1;
+        id
+    }
 }
 
 fn graph_manifest(
@@ -397,6 +442,9 @@ fn graph_manifest(
     collections
         .errors
         .sort_by(|left, right| left.id.cmp(&right.id));
+    collections
+        .agents
+        .sort_by(|left, right| left.id.cmp(&right.id));
 
     let mut edges = graph
         .execution_plan
@@ -421,6 +469,7 @@ fn graph_manifest(
         group_bys: collections.group_bys,
         logs: collections.logs,
         errors: collections.errors,
+        agents: collections.agents,
         edges,
     })
 }
@@ -434,6 +483,7 @@ struct DirectGraphManifestCollections {
     group_bys: Vec<DirectGroupByManifest>,
     logs: Vec<DirectLogManifest>,
     errors: Vec<DirectErrorManifest>,
+    agents: Vec<DirectAgentManifest>,
 }
 
 fn step_manifest(
@@ -534,6 +584,36 @@ fn step_manifest(
                 step_type: "Error".to_string(),
                 purpose: "error.config".to_string(),
                 value: canonical_json(step)?,
+            });
+        }
+        Step::Agent(step) => {
+            let input_mapping = step
+                .input_mapping
+                .as_ref()
+                .map(canonical_json)
+                .transpose()?
+                .unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new()));
+            let input_mapping_id = state.allocate_mapping_id();
+            collections.mappings.push(DirectMappingManifest {
+                id: input_mapping_id,
+                step_id: step.id.clone(),
+                step_type: "Agent".to_string(),
+                purpose: "agent.inputMapping".to_string(),
+                value: input_mapping,
+            });
+            collections.agents.push(DirectAgentManifest {
+                id: state.allocate_agent_id(),
+                step_id: step.id.clone(),
+                name: step.name.clone(),
+                step_type: "Agent".to_string(),
+                purpose: "agent.config".to_string(),
+                agent_id: step.agent_id.clone(),
+                capability_id: step.capability_id.clone(),
+                connection_id: step.connection_id.clone(),
+                input_mapping_id,
+                max_retries: step.max_retries,
+                retry_delay: step.retry_delay,
+                timeout: step.timeout,
             });
         }
         Step::WaitForSignal(step) => {
@@ -720,6 +800,7 @@ mod tests {
             "log" => include_str!("../../tests/fixtures/log_no_context.json"),
             "error" => include_str!("../../tests/fixtures/error_direct_simple.json"),
             "edge_condition" => include_str!("../../tests/fixtures/edge_condition_priority.json"),
+            "transform" => include_str!("../../tests/fixtures/transform_workflow.json"),
             "wait" => include_str!("../../tests/fixtures/wait_for_signal_with_callback.json"),
             other => panic!("unknown fixture {other}"),
         };
@@ -845,6 +926,39 @@ mod tests {
         assert_eq!(error.value["category"], "permanent");
         assert_eq!(error.value["code"], "DIRECT_FAILURE");
         assert_eq!(error.value["severity"], "critical");
+    }
+
+    #[test]
+    fn manifest_assigns_agent_ids_and_input_mapping() {
+        let manifest = build_direct_workflow_manifest(&fixture("transform")).expect("manifest");
+
+        assert_eq!(manifest.graph.agents.len(), 1);
+        let agent = &manifest.graph.agents[0];
+        assert_eq!(agent.id, 0);
+        assert_eq!(agent.step_id, "transform");
+        assert_eq!(agent.step_type, "Agent");
+        assert_eq!(agent.purpose, "agent.config");
+        assert_eq!(agent.agent_id, "transform");
+        assert_eq!(agent.capability_id, "map-fields");
+        assert_eq!(agent.connection_id, None);
+        assert_eq!(agent.input_mapping_id, 1);
+
+        assert_eq!(manifest.graph.mappings.len(), 2);
+        let mapping = manifest
+            .graph
+            .mappings
+            .iter()
+            .find(|mapping| mapping.id == agent.input_mapping_id)
+            .expect("agent input mapping");
+        assert_eq!(mapping.step_id, "transform");
+        assert_eq!(mapping.step_type, "Agent");
+        assert_eq!(mapping.purpose, "agent.inputMapping");
+        assert_eq!(mapping.value["source"]["valueType"], "reference");
+        assert_eq!(mapping.value["source"]["value"], "data");
+        assert_eq!(
+            mapping.value["mapping"]["value"]["output_field"],
+            "$.input_field"
+        );
     }
 
     #[test]
