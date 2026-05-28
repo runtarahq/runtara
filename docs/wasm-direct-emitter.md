@@ -16,6 +16,24 @@ That PoC emits a valid core Wasm module for a tiny control-flow subset. It is
 not the production ABI and should be treated only as context for measurement
 and learning.
 
+Current implementation progress on `codex/wasm-direct-emitter`:
+
+- `direct_wasm_poc` baseline and comparison CLI exist for measurement only.
+- `workflow_features` analyzes parsed `ExecutionGraph` values recursively and
+  reports step features, nested graphs, agent ids, connections, child workflow
+  references, durability, and routing features.
+- `direct_wasm::manifest` builds a deterministic versioned manifest with a
+  checksum, sorted steps, sorted edges, nested graph manifests, schemas,
+  variables, and a feature summary.
+- `direct_wasm::support` produces deterministic unsupported-feature reports.
+  The current production-shaped direct path intentionally supports only
+  finish-only graphs.
+- `direct_wasm::compile::compile_direct_workflow` is an opt-in entry point that
+  emits a valid core-Wasm metadata envelope for finish-only graphs, writes
+  `workflow.wasm`, `manifest.json`, and `support-report.json`, and does not
+  generate a Rust crate. This is a temporary artifact envelope for migration
+  tests, not the final component-model runtime artifact.
+
 ## Final Goal
 
 The final production result is:
@@ -601,13 +619,13 @@ goal.
 
 ## Open Questions
 
-- Should stdlib expose pure JSON functions only, or also runtime SDK calls?
-- Should runtime lifecycle be a stdlib component, host imports, or both?
-- Should manifests be JSON, CBOR, or static Wasm data tables?
+- Should stdlib expose pure JSON functions only, or also runtime SDK calls? - we probably want to have a separate component for STDLIB and a separate one for SDK
+- Should runtime lifecycle be a stdlib component, host imports, or both? - clarification needed, ask me.
+- Should manifests be JSON, CBOR, or static Wasm data tables? - like now, JSON
 - Should direct-emitted workflows use a state-machine interpreter model or
-  generated structured control flow?
+  generated structured control flow? - generated control flow as now
 - Should child workflows be inlined into the workflow-logic component or
-  statically composed as separate workflow components?
+  statically composed as separate workflow components? - separate components. this means we need to store separate the whole assembled bundle and "naked" workflow. No inlining, unless it substantially complicates the process
 
 ## Step-by-Step Production Migration Plan
 
@@ -777,6 +795,16 @@ Rollback:
 
 Goal: emit a real component-model workflow, not core-Wasm PoC output.
 
+Current status:
+
+- Not started for component-model execution.
+- A temporary finish-only core-Wasm metadata envelope exists in
+  `direct_wasm::compile` to prove the direct compile entry, sidecars,
+  support-gating, and "no generated Rust crate" behavior before component ABI
+  emission lands.
+- This temporary envelope must be replaced by a real component exporting
+  `wasi:cli/run` before direct mode can execute under the environment runner.
+
 Implementation steps:
 
 1. Add a `direct_component` emitter module separate from the current
@@ -814,6 +842,19 @@ Rollback:
 
 Goal: lower complete workflow graph metadata into a manifest and generate a
 step dispatcher skeleton.
+
+Current status:
+
+- `DirectWorkflowManifest` exists and is covered by deterministic checksum
+  tests across parseable workflow fixtures.
+- Unsupported reports exist and name exact step ids, step types, feature keys,
+  and actionable reasons.
+- Finish-only graphs can be compiled through the opt-in direct entry point into
+  an artifact envelope and sidecar files without generating `Cargo.toml`,
+  `src/lib.rs`, or any per-workflow Rust crate.
+- Remaining work: replace the temporary envelope with a component dispatcher
+  and add the first runtime-complete `Finish` implementation through stdlib or
+  runtime imports.
 
 Implementation steps:
 

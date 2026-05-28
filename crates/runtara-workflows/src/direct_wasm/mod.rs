@@ -5,9 +5,17 @@
 //! This module is separate from `direct_wasm_poc`: the PoC proves core Wasm can
 //! be emitted, while this module owns the production migration surface.
 
+#[cfg(feature = "compiler")]
+pub mod compile;
 pub mod manifest;
 pub mod support;
 
+#[cfg(feature = "compiler")]
+pub use compile::{
+    DIRECT_WORKFLOW_ABI_SECTION, DIRECT_WORKFLOW_ABI_VERSION, DIRECT_WORKFLOW_MANIFEST_SECTION,
+    DIRECT_WORKFLOW_SUPPORT_SECTION, DirectCompilationInput, DirectCompilationResult,
+    DirectCompileError, compile_direct_workflow,
+};
 pub use manifest::{
     DIRECT_WORKFLOW_MANIFEST_VERSION, DirectEdgeManifest, DirectGraphManifest, DirectManifestError,
     DirectNestedGraphManifest, DirectStepManifest, DirectWorkflowManifest,
