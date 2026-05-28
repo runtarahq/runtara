@@ -1,0 +1,30 @@
+// Canonical WIT contract for the workflow runtime/SDK component.
+//
+// The runtime component owns lifecycle and persistence-facing behavior:
+// loading persisted input, completing/failing instances, event emission,
+// cancellation, heartbeat, and durable sleep.
+
+package runtara:workflow-runtime@0.1.0;
+
+interface runtime {
+    load-input: func() -> result<list<u8>, string>;
+
+    complete: func(output: list<u8>) -> result<_, string>;
+
+    fail: func(error: list<u8>) -> result<_, string>;
+
+    custom-event: func(
+        kind: string,
+        payload: list<u8>,
+    ) -> result<_, string>;
+
+    heartbeat: func() -> result<_, string>;
+
+    is-cancelled: func() -> result<bool, string>;
+
+    durable-sleep: func(ms: u64) -> result<_, string>;
+}
+
+world workflow-runtime {
+    export runtime;
+}

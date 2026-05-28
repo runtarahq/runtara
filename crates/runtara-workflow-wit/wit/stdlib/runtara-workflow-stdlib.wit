@@ -1,0 +1,47 @@
+// Canonical WIT contract for the shared workflow stdlib component.
+//
+// The stdlib owns reusable JSON-heavy workflow semantics. Direct-emitted
+// workflow logic should call these functions instead of embedding serde,
+// mapping, condition, filter, group-by, or switch implementations in every
+// workflow artifact.
+
+package runtara:workflow-stdlib@0.1.0;
+
+interface json {
+    init-manifest: func(manifest: list<u8>) -> result<_, string>;
+
+    build-source: func(
+        data: list<u8>,
+        variables: list<u8>,
+        steps: list<u8>,
+    ) -> result<list<u8>, string>;
+
+    apply-mapping: func(
+        mapping-id: u32,
+        source: list<u8>,
+    ) -> result<list<u8>, string>;
+
+    eval-condition: func(
+        condition-id: u32,
+        source: list<u8>,
+    ) -> result<bool, string>;
+
+    process-switch: func(
+        switch-id: u32,
+        source: list<u8>,
+    ) -> result<string, string>;
+
+    filter: func(
+        filter-id: u32,
+        source: list<u8>,
+    ) -> result<list<u8>, string>;
+
+    group-by: func(
+        group-id: u32,
+        source: list<u8>,
+    ) -> result<list<u8>, string>;
+}
+
+world workflow-stdlib {
+    export json;
+}

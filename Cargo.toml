@@ -29,6 +29,7 @@ members = [
     "crates/runtara-report-dsl",
     # WASM Component Model migration — see docs/wasm-components-migration-plan.md
     "crates/runtara-agent-wit",
+    "crates/runtara-workflow-wit",
     "crates/runtara-component-host",
     "crates/agents/runtara-agent-crypto",
     "crates/agents/runtara-agent-xml",
