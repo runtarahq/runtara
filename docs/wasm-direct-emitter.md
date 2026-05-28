@@ -76,7 +76,9 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   envelope before continuing normal flow. It also calls runtime cancellation,
   heartbeat, and signal-check helpers around each iteration body. Public While
   support is enabled for normal-flow loops without breakpoint/timeout and
-  without nested Split/While loop steps.
+  without nested Split/While loop steps. Gated execution coverage now includes
+  an agentless While loop that verifies loop index variables, previous-output
+  threading, final iteration counts, and absence of checkpoint/sleep traffic.
 - `runtara-workflow-stdlib` now has a `direct-component` feature and
   component metadata for `runtara:workflow-stdlib`. That feature builds a
   `wasm32-wasip2` stdlib component without pulling in SDK/runtime, HTTP, AI,
@@ -109,16 +111,16 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   fixtures plus simple `Filter -> Finish`, value `Switch -> Finish`, routing
   `Switch`, `GroupBy -> Finish`, durable/non-durable `Delay -> Finish`,
   durable/non-durable `Agent -> Finish`, cached durable Agent replay,
-  `Log -> Finish`, terminal `Error`, and normal-edge condition-priority
-  fixtures, runs each final
+  `Log -> Finish`, terminal `Error`, normal-edge condition-priority, and
+  agentless `While -> Finish` fixtures, runs each final
   `workflow.wasm` under
   `wasmtime run --wasi http --wasi inherit-network`, and asserts the fake SDK
   receives the expected mapped completion payloads for the Finish path,
   conditional branches, Filter output, value Switch output, routing Switch route
   leaves, GroupBy output, Delay output plus durable sleep traffic, Agent output
   plus durable checkpoint traffic, cached Agent checkpoint replay, Log custom
-  events, Error custom-event/failure payloads, and condition-priority/default
-  routing.
+  events, Error custom-event/failure payloads, condition-priority/default
+  routing, and While loop output/side-effect behavior.
 - `tests/direct_wasm_finish_parity.rs` now compares direct `Finish` mapping
   output against the current Rust-generated mapping contract for representative
   fixture shapes: data passthrough, dotted `outputs.*` unwrap, templates,
@@ -1762,6 +1764,9 @@ Implementation steps:
      direct-core lowering done;
    - public support gate: enabled for normal-flow While loops without
      breakpoint/timeout and without nested Split/While loop steps;
+   - gated composed-artifact execution smoke: done for an agentless While loop
+     that exercises loop index variables, `_previousOutputs`, final output
+     shape, heartbeat/signal polling, and no checkpoint/sleep traffic;
    - While timeout, breakpoint, nested loop-local reentrancy, and onError
      routing: pending.
 4. Defer parallel split until runtime support and test coverage are explicit.

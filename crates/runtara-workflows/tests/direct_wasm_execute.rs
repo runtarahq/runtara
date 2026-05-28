@@ -30,6 +30,7 @@ const DELAY_DYNAMIC: &str = include_str!("fixtures/delay_dynamic.json");
 const LOG_ALL_LEVELS: &str = include_str!("fixtures/log_all_levels.json");
 const ERROR_DIRECT_SIMPLE: &str = include_str!("fixtures/error_direct_simple.json");
 const EDGE_CONDITION_PRIORITY: &str = include_str!("fixtures/edge_condition_priority.json");
+const WHILE_DIRECT_INDEX_ONLY: &str = include_str!("fixtures/while_direct_index_only.json");
 const AGENT_CACHED_REPLAY: &str = r#"{
   "durable": true,
   "steps": {
@@ -892,6 +893,51 @@ fn direct_wasm_execute_group_by_finish_reports_completion() {
             },
             "total_groups": 2
         })
+    );
+}
+
+#[test]
+fn direct_wasm_execute_while_loop_reports_completion() {
+    let Some(components_dir) = direct_e2e_components_dir() else {
+        return;
+    };
+
+    let result = run_direct_workflow_with_events(
+        &components_dir,
+        "direct-wasm-execute-while-loop",
+        WHILE_DIRECT_INDEX_ONLY,
+        br#"{"count":3}"#,
+    );
+
+    assert_eq!(
+        result.output_json,
+        serde_json::json!({
+            "iterations": 3,
+            "last": {
+                "iteration": 2,
+                "loopIndex": 2,
+                "indices": [2],
+                "previous": {
+                    "iteration": 1,
+                    "loopIndex": 1,
+                    "indices": [1],
+                    "previous": {
+                        "iteration": 0,
+                        "loopIndex": 0,
+                        "indices": [0],
+                        "previous": null
+                    }
+                }
+            }
+        })
+    );
+    assert!(
+        result.sleeps.is_empty(),
+        "normal While execution should not use durable sleep"
+    );
+    assert!(
+        result.checkpoints.is_empty(),
+        "normal While execution should not use durable checkpoints"
     );
 }
 
