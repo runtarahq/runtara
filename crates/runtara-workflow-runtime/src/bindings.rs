@@ -12,6 +12,60 @@ pub mod exports {
                 #[doc(hidden)]
                 static __FORCE_SECTION_REF: fn() = super::super::super::super::__link_custom_section_describing_imports;
                 use super::super::super::super::_rt;
+                #[derive(Clone)]
+                pub struct SignalInfo {
+                    pub signal_type: _rt::String,
+                    pub payload: _rt::Vec<u8>,
+                    pub checkpoint_id: Option<_rt::String>,
+                }
+                impl ::core::fmt::Debug for SignalInfo {
+                    fn fmt(
+                        &self,
+                        f: &mut ::core::fmt::Formatter<'_>,
+                    ) -> ::core::fmt::Result {
+                        f.debug_struct("SignalInfo")
+                            .field("signal-type", &self.signal_type)
+                            .field("payload", &self.payload)
+                            .field("checkpoint-id", &self.checkpoint_id)
+                            .finish()
+                    }
+                }
+                #[derive(Clone)]
+                pub struct CustomSignalInfo {
+                    pub checkpoint_id: _rt::String,
+                    pub payload: _rt::Vec<u8>,
+                }
+                impl ::core::fmt::Debug for CustomSignalInfo {
+                    fn fmt(
+                        &self,
+                        f: &mut ::core::fmt::Formatter<'_>,
+                    ) -> ::core::fmt::Result {
+                        f.debug_struct("CustomSignalInfo")
+                            .field("checkpoint-id", &self.checkpoint_id)
+                            .field("payload", &self.payload)
+                            .finish()
+                    }
+                }
+                #[derive(Clone)]
+                pub struct CheckpointResult {
+                    pub found: bool,
+                    pub state: _rt::Vec<u8>,
+                    pub pending_signal: Option<SignalInfo>,
+                    pub custom_signal: Option<CustomSignalInfo>,
+                }
+                impl ::core::fmt::Debug for CheckpointResult {
+                    fn fmt(
+                        &self,
+                        f: &mut ::core::fmt::Formatter<'_>,
+                    ) -> ::core::fmt::Result {
+                        f.debug_struct("CheckpointResult")
+                            .field("found", &self.found)
+                            .field("state", &self.state)
+                            .field("pending-signal", &self.pending_signal)
+                            .field("custom-signal", &self.custom_signal)
+                            .finish()
+                    }
+                }
                 #[doc(hidden)]
                 #[allow(non_snake_case)]
                 pub unsafe fn _export_load_input_cabi<T: Guest>() -> *mut u8 {
@@ -364,6 +418,476 @@ pub mod exports {
                         }
                     }
                 }
+                #[doc(hidden)]
+                #[allow(non_snake_case)]
+                pub unsafe fn _export_get_checkpoint_cabi<T: Guest>(
+                    arg0: *mut u8,
+                    arg1: usize,
+                ) -> *mut u8 {
+                    #[cfg(target_arch = "wasm32")] _rt::run_ctors_once();
+                    let len0 = arg1;
+                    let bytes0 = _rt::Vec::from_raw_parts(arg0.cast(), len0, len0);
+                    let result1 = T::get_checkpoint(_rt::string_lift(bytes0));
+                    let ptr2 = (&raw mut _RET_AREA.0).cast::<u8>();
+                    match result1 {
+                        Ok(e) => {
+                            *ptr2.add(0).cast::<u8>() = (0i32) as u8;
+                            match e {
+                                Some(e) => {
+                                    *ptr2
+                                        .add(::core::mem::size_of::<*const u8>())
+                                        .cast::<u8>() = (1i32) as u8;
+                                    let vec3 = (e).into_boxed_slice();
+                                    let ptr3 = vec3.as_ptr().cast::<u8>();
+                                    let len3 = vec3.len();
+                                    ::core::mem::forget(vec3);
+                                    *ptr2
+                                        .add(3 * ::core::mem::size_of::<*const u8>())
+                                        .cast::<usize>() = len3;
+                                    *ptr2
+                                        .add(2 * ::core::mem::size_of::<*const u8>())
+                                        .cast::<*mut u8>() = ptr3.cast_mut();
+                                }
+                                None => {
+                                    *ptr2
+                                        .add(::core::mem::size_of::<*const u8>())
+                                        .cast::<u8>() = (0i32) as u8;
+                                }
+                            };
+                        }
+                        Err(e) => {
+                            *ptr2.add(0).cast::<u8>() = (1i32) as u8;
+                            let vec4 = (e.into_bytes()).into_boxed_slice();
+                            let ptr4 = vec4.as_ptr().cast::<u8>();
+                            let len4 = vec4.len();
+                            ::core::mem::forget(vec4);
+                            *ptr2
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>() = len4;
+                            *ptr2
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>() = ptr4.cast_mut();
+                        }
+                    };
+                    ptr2
+                }
+                #[doc(hidden)]
+                #[allow(non_snake_case)]
+                pub unsafe fn __post_return_get_checkpoint<T: Guest>(arg0: *mut u8) {
+                    let l0 = i32::from(*arg0.add(0).cast::<u8>());
+                    match l0 {
+                        0 => {
+                            let l1 = i32::from(
+                                *arg0.add(::core::mem::size_of::<*const u8>()).cast::<u8>(),
+                            );
+                            match l1 {
+                                0 => {}
+                                _ => {
+                                    let l2 = *arg0
+                                        .add(2 * ::core::mem::size_of::<*const u8>())
+                                        .cast::<*mut u8>();
+                                    let l3 = *arg0
+                                        .add(3 * ::core::mem::size_of::<*const u8>())
+                                        .cast::<usize>();
+                                    let base4 = l2;
+                                    let len4 = l3;
+                                    _rt::cabi_dealloc(base4, len4 * 1, 1);
+                                }
+                            }
+                        }
+                        _ => {
+                            let l5 = *arg0
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>();
+                            let l6 = *arg0
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>();
+                            _rt::cabi_dealloc(l5, l6, 1);
+                        }
+                    }
+                }
+                #[doc(hidden)]
+                #[allow(non_snake_case)]
+                pub unsafe fn _export_checkpoint_cabi<T: Guest>(
+                    arg0: *mut u8,
+                    arg1: usize,
+                    arg2: *mut u8,
+                    arg3: usize,
+                ) -> *mut u8 {
+                    #[cfg(target_arch = "wasm32")] _rt::run_ctors_once();
+                    let len0 = arg1;
+                    let bytes0 = _rt::Vec::from_raw_parts(arg0.cast(), len0, len0);
+                    let len1 = arg3;
+                    let result2 = T::checkpoint(
+                        _rt::string_lift(bytes0),
+                        _rt::Vec::from_raw_parts(arg2.cast(), len1, len1),
+                    );
+                    let ptr3 = (&raw mut _RET_AREA.0).cast::<u8>();
+                    match result2 {
+                        Ok(e) => {
+                            *ptr3.add(0).cast::<u8>() = (0i32) as u8;
+                            let CheckpointResult {
+                                found: found4,
+                                state: state4,
+                                pending_signal: pending_signal4,
+                                custom_signal: custom_signal4,
+                            } = e;
+                            *ptr3
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<u8>() = (match found4 {
+                                true => 1,
+                                false => 0,
+                            }) as u8;
+                            let vec5 = (state4).into_boxed_slice();
+                            let ptr5 = vec5.as_ptr().cast::<u8>();
+                            let len5 = vec5.len();
+                            ::core::mem::forget(vec5);
+                            *ptr3
+                                .add(3 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>() = len5;
+                            *ptr3
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>() = ptr5.cast_mut();
+                            match pending_signal4 {
+                                Some(e) => {
+                                    *ptr3
+                                        .add(4 * ::core::mem::size_of::<*const u8>())
+                                        .cast::<u8>() = (1i32) as u8;
+                                    let SignalInfo {
+                                        signal_type: signal_type6,
+                                        payload: payload6,
+                                        checkpoint_id: checkpoint_id6,
+                                    } = e;
+                                    let vec7 = (signal_type6.into_bytes()).into_boxed_slice();
+                                    let ptr7 = vec7.as_ptr().cast::<u8>();
+                                    let len7 = vec7.len();
+                                    ::core::mem::forget(vec7);
+                                    *ptr3
+                                        .add(6 * ::core::mem::size_of::<*const u8>())
+                                        .cast::<usize>() = len7;
+                                    *ptr3
+                                        .add(5 * ::core::mem::size_of::<*const u8>())
+                                        .cast::<*mut u8>() = ptr7.cast_mut();
+                                    let vec8 = (payload6).into_boxed_slice();
+                                    let ptr8 = vec8.as_ptr().cast::<u8>();
+                                    let len8 = vec8.len();
+                                    ::core::mem::forget(vec8);
+                                    *ptr3
+                                        .add(8 * ::core::mem::size_of::<*const u8>())
+                                        .cast::<usize>() = len8;
+                                    *ptr3
+                                        .add(7 * ::core::mem::size_of::<*const u8>())
+                                        .cast::<*mut u8>() = ptr8.cast_mut();
+                                    match checkpoint_id6 {
+                                        Some(e) => {
+                                            *ptr3
+                                                .add(9 * ::core::mem::size_of::<*const u8>())
+                                                .cast::<u8>() = (1i32) as u8;
+                                            let vec9 = (e.into_bytes()).into_boxed_slice();
+                                            let ptr9 = vec9.as_ptr().cast::<u8>();
+                                            let len9 = vec9.len();
+                                            ::core::mem::forget(vec9);
+                                            *ptr3
+                                                .add(11 * ::core::mem::size_of::<*const u8>())
+                                                .cast::<usize>() = len9;
+                                            *ptr3
+                                                .add(10 * ::core::mem::size_of::<*const u8>())
+                                                .cast::<*mut u8>() = ptr9.cast_mut();
+                                        }
+                                        None => {
+                                            *ptr3
+                                                .add(9 * ::core::mem::size_of::<*const u8>())
+                                                .cast::<u8>() = (0i32) as u8;
+                                        }
+                                    };
+                                }
+                                None => {
+                                    *ptr3
+                                        .add(4 * ::core::mem::size_of::<*const u8>())
+                                        .cast::<u8>() = (0i32) as u8;
+                                }
+                            };
+                            match custom_signal4 {
+                                Some(e) => {
+                                    *ptr3
+                                        .add(12 * ::core::mem::size_of::<*const u8>())
+                                        .cast::<u8>() = (1i32) as u8;
+                                    let CustomSignalInfo {
+                                        checkpoint_id: checkpoint_id10,
+                                        payload: payload10,
+                                    } = e;
+                                    let vec11 = (checkpoint_id10.into_bytes())
+                                        .into_boxed_slice();
+                                    let ptr11 = vec11.as_ptr().cast::<u8>();
+                                    let len11 = vec11.len();
+                                    ::core::mem::forget(vec11);
+                                    *ptr3
+                                        .add(14 * ::core::mem::size_of::<*const u8>())
+                                        .cast::<usize>() = len11;
+                                    *ptr3
+                                        .add(13 * ::core::mem::size_of::<*const u8>())
+                                        .cast::<*mut u8>() = ptr11.cast_mut();
+                                    let vec12 = (payload10).into_boxed_slice();
+                                    let ptr12 = vec12.as_ptr().cast::<u8>();
+                                    let len12 = vec12.len();
+                                    ::core::mem::forget(vec12);
+                                    *ptr3
+                                        .add(16 * ::core::mem::size_of::<*const u8>())
+                                        .cast::<usize>() = len12;
+                                    *ptr3
+                                        .add(15 * ::core::mem::size_of::<*const u8>())
+                                        .cast::<*mut u8>() = ptr12.cast_mut();
+                                }
+                                None => {
+                                    *ptr3
+                                        .add(12 * ::core::mem::size_of::<*const u8>())
+                                        .cast::<u8>() = (0i32) as u8;
+                                }
+                            };
+                        }
+                        Err(e) => {
+                            *ptr3.add(0).cast::<u8>() = (1i32) as u8;
+                            let vec13 = (e.into_bytes()).into_boxed_slice();
+                            let ptr13 = vec13.as_ptr().cast::<u8>();
+                            let len13 = vec13.len();
+                            ::core::mem::forget(vec13);
+                            *ptr3
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>() = len13;
+                            *ptr3
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>() = ptr13.cast_mut();
+                        }
+                    };
+                    ptr3
+                }
+                #[doc(hidden)]
+                #[allow(non_snake_case)]
+                pub unsafe fn __post_return_checkpoint<T: Guest>(arg0: *mut u8) {
+                    let l0 = i32::from(*arg0.add(0).cast::<u8>());
+                    match l0 {
+                        0 => {
+                            let l1 = *arg0
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>();
+                            let l2 = *arg0
+                                .add(3 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>();
+                            let base3 = l1;
+                            let len3 = l2;
+                            _rt::cabi_dealloc(base3, len3 * 1, 1);
+                            let l4 = i32::from(
+                                *arg0
+                                    .add(4 * ::core::mem::size_of::<*const u8>())
+                                    .cast::<u8>(),
+                            );
+                            match l4 {
+                                0 => {}
+                                _ => {
+                                    let l5 = *arg0
+                                        .add(5 * ::core::mem::size_of::<*const u8>())
+                                        .cast::<*mut u8>();
+                                    let l6 = *arg0
+                                        .add(6 * ::core::mem::size_of::<*const u8>())
+                                        .cast::<usize>();
+                                    _rt::cabi_dealloc(l5, l6, 1);
+                                    let l7 = *arg0
+                                        .add(7 * ::core::mem::size_of::<*const u8>())
+                                        .cast::<*mut u8>();
+                                    let l8 = *arg0
+                                        .add(8 * ::core::mem::size_of::<*const u8>())
+                                        .cast::<usize>();
+                                    let base9 = l7;
+                                    let len9 = l8;
+                                    _rt::cabi_dealloc(base9, len9 * 1, 1);
+                                    let l10 = i32::from(
+                                        *arg0
+                                            .add(9 * ::core::mem::size_of::<*const u8>())
+                                            .cast::<u8>(),
+                                    );
+                                    match l10 {
+                                        0 => {}
+                                        _ => {
+                                            let l11 = *arg0
+                                                .add(10 * ::core::mem::size_of::<*const u8>())
+                                                .cast::<*mut u8>();
+                                            let l12 = *arg0
+                                                .add(11 * ::core::mem::size_of::<*const u8>())
+                                                .cast::<usize>();
+                                            _rt::cabi_dealloc(l11, l12, 1);
+                                        }
+                                    }
+                                }
+                            }
+                            let l13 = i32::from(
+                                *arg0
+                                    .add(12 * ::core::mem::size_of::<*const u8>())
+                                    .cast::<u8>(),
+                            );
+                            match l13 {
+                                0 => {}
+                                _ => {
+                                    let l14 = *arg0
+                                        .add(13 * ::core::mem::size_of::<*const u8>())
+                                        .cast::<*mut u8>();
+                                    let l15 = *arg0
+                                        .add(14 * ::core::mem::size_of::<*const u8>())
+                                        .cast::<usize>();
+                                    _rt::cabi_dealloc(l14, l15, 1);
+                                    let l16 = *arg0
+                                        .add(15 * ::core::mem::size_of::<*const u8>())
+                                        .cast::<*mut u8>();
+                                    let l17 = *arg0
+                                        .add(16 * ::core::mem::size_of::<*const u8>())
+                                        .cast::<usize>();
+                                    let base18 = l16;
+                                    let len18 = l17;
+                                    _rt::cabi_dealloc(base18, len18 * 1, 1);
+                                }
+                            }
+                        }
+                        _ => {
+                            let l19 = *arg0
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>();
+                            let l20 = *arg0
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>();
+                            _rt::cabi_dealloc(l19, l20, 1);
+                        }
+                    }
+                }
+                #[doc(hidden)]
+                #[allow(non_snake_case)]
+                pub unsafe fn _export_record_retry_attempt_cabi<T: Guest>(
+                    arg0: *mut u8,
+                    arg1: usize,
+                    arg2: i32,
+                    arg3: i32,
+                    arg4: *mut u8,
+                    arg5: usize,
+                ) -> *mut u8 {
+                    #[cfg(target_arch = "wasm32")] _rt::run_ctors_once();
+                    let len0 = arg1;
+                    let bytes0 = _rt::Vec::from_raw_parts(arg0.cast(), len0, len0);
+                    let result2 = T::record_retry_attempt(
+                        _rt::string_lift(bytes0),
+                        arg2 as u32,
+                        match arg3 {
+                            0 => None,
+                            1 => {
+                                let e = {
+                                    let len1 = arg5;
+                                    let bytes1 = _rt::Vec::from_raw_parts(
+                                        arg4.cast(),
+                                        len1,
+                                        len1,
+                                    );
+                                    _rt::string_lift(bytes1)
+                                };
+                                Some(e)
+                            }
+                            _ => _rt::invalid_enum_discriminant(),
+                        },
+                    );
+                    let ptr3 = (&raw mut _RET_AREA.0).cast::<u8>();
+                    match result2 {
+                        Ok(_) => {
+                            *ptr3.add(0).cast::<u8>() = (0i32) as u8;
+                        }
+                        Err(e) => {
+                            *ptr3.add(0).cast::<u8>() = (1i32) as u8;
+                            let vec4 = (e.into_bytes()).into_boxed_slice();
+                            let ptr4 = vec4.as_ptr().cast::<u8>();
+                            let len4 = vec4.len();
+                            ::core::mem::forget(vec4);
+                            *ptr3
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>() = len4;
+                            *ptr3
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>() = ptr4.cast_mut();
+                        }
+                    };
+                    ptr3
+                }
+                #[doc(hidden)]
+                #[allow(non_snake_case)]
+                pub unsafe fn __post_return_record_retry_attempt<T: Guest>(
+                    arg0: *mut u8,
+                ) {
+                    let l0 = i32::from(*arg0.add(0).cast::<u8>());
+                    match l0 {
+                        0 => {}
+                        _ => {
+                            let l1 = *arg0
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>();
+                            let l2 = *arg0
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>();
+                            _rt::cabi_dealloc(l1, l2, 1);
+                        }
+                    }
+                }
+                #[doc(hidden)]
+                #[allow(non_snake_case)]
+                pub unsafe fn _export_durable_sleep_checkpoint_cabi<T: Guest>(
+                    arg0: *mut u8,
+                    arg1: usize,
+                    arg2: *mut u8,
+                    arg3: usize,
+                    arg4: i64,
+                ) -> *mut u8 {
+                    #[cfg(target_arch = "wasm32")] _rt::run_ctors_once();
+                    let len0 = arg1;
+                    let bytes0 = _rt::Vec::from_raw_parts(arg0.cast(), len0, len0);
+                    let len1 = arg3;
+                    let result2 = T::durable_sleep_checkpoint(
+                        _rt::string_lift(bytes0),
+                        _rt::Vec::from_raw_parts(arg2.cast(), len1, len1),
+                        arg4 as u64,
+                    );
+                    let ptr3 = (&raw mut _RET_AREA.0).cast::<u8>();
+                    match result2 {
+                        Ok(_) => {
+                            *ptr3.add(0).cast::<u8>() = (0i32) as u8;
+                        }
+                        Err(e) => {
+                            *ptr3.add(0).cast::<u8>() = (1i32) as u8;
+                            let vec4 = (e.into_bytes()).into_boxed_slice();
+                            let ptr4 = vec4.as_ptr().cast::<u8>();
+                            let len4 = vec4.len();
+                            ::core::mem::forget(vec4);
+                            *ptr3
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>() = len4;
+                            *ptr3
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>() = ptr4.cast_mut();
+                        }
+                    };
+                    ptr3
+                }
+                #[doc(hidden)]
+                #[allow(non_snake_case)]
+                pub unsafe fn __post_return_durable_sleep_checkpoint<T: Guest>(
+                    arg0: *mut u8,
+                ) {
+                    let l0 = i32::from(*arg0.add(0).cast::<u8>());
+                    match l0 {
+                        0 => {}
+                        _ => {
+                            let l1 = *arg0
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>();
+                            let l2 = *arg0
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>();
+                            _rt::cabi_dealloc(l1, l2, 1);
+                        }
+                    }
+                }
                 pub trait Guest {
                     fn load_input() -> Result<_rt::Vec<u8>, _rt::String>;
                     fn complete(output: _rt::Vec<u8>) -> Result<(), _rt::String>;
@@ -375,6 +899,23 @@ pub mod exports {
                     fn heartbeat() -> Result<(), _rt::String>;
                     fn is_cancelled() -> Result<bool, _rt::String>;
                     fn durable_sleep(ms: u64) -> Result<(), _rt::String>;
+                    fn get_checkpoint(
+                        checkpoint_id: _rt::String,
+                    ) -> Result<Option<_rt::Vec<u8>>, _rt::String>;
+                    fn checkpoint(
+                        checkpoint_id: _rt::String,
+                        state: _rt::Vec<u8>,
+                    ) -> Result<CheckpointResult, _rt::String>;
+                    fn record_retry_attempt(
+                        checkpoint_id: _rt::String,
+                        attempt_number: u32,
+                        error_message: Option<_rt::String>,
+                    ) -> Result<(), _rt::String>;
+                    fn durable_sleep_checkpoint(
+                        checkpoint_id: _rt::String,
+                        state: _rt::Vec<u8>,
+                        ms: u64,
+                    ) -> Result<(), _rt::String>;
                 }
                 #[doc(hidden)]
                 macro_rules! __export_runtara_workflow_runtime_runtime_0_1_0_cabi {
@@ -436,7 +977,47 @@ pub mod exports {
                         "cabi_post_runtara:workflow-runtime/runtime@0.1.0#durable-sleep")]
                         unsafe extern "C" fn _post_return_durable_sleep(arg0 : * mut u8,)
                         { unsafe { $($path_to_types)*:: __post_return_durable_sleep::<$ty
-                        > (arg0) } } };
+                        > (arg0) } } #[unsafe (export_name =
+                        "runtara:workflow-runtime/runtime@0.1.0#get-checkpoint")] unsafe
+                        extern "C" fn export_get_checkpoint(arg0 : * mut u8, arg1 :
+                        usize,) -> * mut u8 { unsafe { $($path_to_types)*::
+                        _export_get_checkpoint_cabi::<$ty > (arg0, arg1) } } #[unsafe
+                        (export_name =
+                        "cabi_post_runtara:workflow-runtime/runtime@0.1.0#get-checkpoint")]
+                        unsafe extern "C" fn _post_return_get_checkpoint(arg0 : * mut
+                        u8,) { unsafe { $($path_to_types)*::
+                        __post_return_get_checkpoint::<$ty > (arg0) } } #[unsafe
+                        (export_name =
+                        "runtara:workflow-runtime/runtime@0.1.0#checkpoint")] unsafe
+                        extern "C" fn export_checkpoint(arg0 : * mut u8, arg1 : usize,
+                        arg2 : * mut u8, arg3 : usize,) -> * mut u8 { unsafe {
+                        $($path_to_types)*:: _export_checkpoint_cabi::<$ty > (arg0, arg1,
+                        arg2, arg3) } } #[unsafe (export_name =
+                        "cabi_post_runtara:workflow-runtime/runtime@0.1.0#checkpoint")]
+                        unsafe extern "C" fn _post_return_checkpoint(arg0 : * mut u8,) {
+                        unsafe { $($path_to_types)*:: __post_return_checkpoint::<$ty >
+                        (arg0) } } #[unsafe (export_name =
+                        "runtara:workflow-runtime/runtime@0.1.0#record-retry-attempt")]
+                        unsafe extern "C" fn export_record_retry_attempt(arg0 : * mut u8,
+                        arg1 : usize, arg2 : i32, arg3 : i32, arg4 : * mut u8, arg5 :
+                        usize,) -> * mut u8 { unsafe { $($path_to_types)*::
+                        _export_record_retry_attempt_cabi::<$ty > (arg0, arg1, arg2,
+                        arg3, arg4, arg5) } } #[unsafe (export_name =
+                        "cabi_post_runtara:workflow-runtime/runtime@0.1.0#record-retry-attempt")]
+                        unsafe extern "C" fn _post_return_record_retry_attempt(arg0 : *
+                        mut u8,) { unsafe { $($path_to_types)*::
+                        __post_return_record_retry_attempt::<$ty > (arg0) } } #[unsafe
+                        (export_name =
+                        "runtara:workflow-runtime/runtime@0.1.0#durable-sleep-checkpoint")]
+                        unsafe extern "C" fn export_durable_sleep_checkpoint(arg0 : * mut
+                        u8, arg1 : usize, arg2 : * mut u8, arg3 : usize, arg4 : i64,) ->
+                        * mut u8 { unsafe { $($path_to_types)*::
+                        _export_durable_sleep_checkpoint_cabi::<$ty > (arg0, arg1, arg2,
+                        arg3, arg4) } } #[unsafe (export_name =
+                        "cabi_post_runtara:workflow-runtime/runtime@0.1.0#durable-sleep-checkpoint")]
+                        unsafe extern "C" fn _post_return_durable_sleep_checkpoint(arg0 :
+                        * mut u8,) { unsafe { $($path_to_types)*::
+                        __post_return_durable_sleep_checkpoint::<$ty > (arg0) } } };
                     };
                 }
                 #[doc(hidden)]
@@ -446,10 +1027,10 @@ pub mod exports {
                 struct _RetArea(
                     [::core::mem::MaybeUninit<
                         u8,
-                    >; 3 * ::core::mem::size_of::<*const u8>()],
+                    >; 17 * ::core::mem::size_of::<*const u8>()],
                 );
                 static mut _RET_AREA: _RetArea = _RetArea(
-                    [::core::mem::MaybeUninit::uninit(); 3
+                    [::core::mem::MaybeUninit::uninit(); 17
                         * ::core::mem::size_of::<*const u8>()],
                 );
             }
@@ -459,6 +1040,8 @@ pub mod exports {
 #[rustfmt::skip]
 mod _rt {
     #![allow(dead_code, clippy::all)]
+    pub use alloc_crate::string::String;
+    pub use alloc_crate::vec::Vec;
     #[cfg(target_arch = "wasm32")]
     pub fn run_ctors_once() {
         wit_bindgen_rt::run_ctors_once();
@@ -470,8 +1053,6 @@ mod _rt {
         let layout = alloc::Layout::from_size_align_unchecked(size, align);
         alloc::dealloc(ptr, layout);
     }
-    pub use alloc_crate::vec::Vec;
-    pub use alloc_crate::string::String;
     pub unsafe fn string_lift(bytes: Vec<u8>) -> String {
         if cfg!(debug_assertions) {
             String::from_utf8(bytes).unwrap()
@@ -479,8 +1060,15 @@ mod _rt {
             String::from_utf8_unchecked(bytes)
         }
     }
-    pub use alloc_crate::alloc;
+    pub unsafe fn invalid_enum_discriminant<T>() -> T {
+        if cfg!(debug_assertions) {
+            panic!("invalid enum discriminant")
+        } else {
+            unsafe { core::hint::unreachable_unchecked() }
+        }
+    }
     extern crate alloc as alloc_crate;
+    pub use alloc_crate::alloc;
 }
 /// Generates `#[unsafe(no_mangle)]` functions to export the specified type as
 /// the root implementation of all generated traits.
@@ -517,17 +1105,25 @@ pub(crate) use __export_workflow_runtime_impl as export;
 #[unsafe(link_section = "component-type:wit-bindgen:0.41.0:runtara:workflow-runtime@0.1.0:workflow-runtime:encoded world")]
 #[doc(hidden)]
 #[allow(clippy::octal_escapes)]
-pub static __WIT_BINDGEN_COMPONENT_TYPE: [u8; 431] = *b"\
-\0asm\x0d\0\x01\0\0\x19\x16wit-component-encoding\x04\0\x07\xa8\x02\x01A\x02\x01\
-A\x02\x01B\x12\x01p}\x01j\x01\0\x01s\x01@\0\0\x01\x04\0\x0aload-input\x01\x02\x01\
-j\0\x01s\x01@\x01\x06output\0\0\x03\x04\0\x08complete\x01\x04\x01@\x01\x05error\0\
-\0\x03\x04\0\x04fail\x01\x05\x01@\x02\x04kinds\x07payload\0\0\x03\x04\0\x0ccusto\
-m-event\x01\x06\x01@\0\0\x03\x04\0\x09heartbeat\x01\x07\x01j\x01\x7f\x01s\x01@\0\
-\0\x08\x04\0\x0cis-cancelled\x01\x09\x01@\x01\x02msw\0\x03\x04\0\x0ddurable-slee\
-p\x01\x0a\x04\0&runtara:workflow-runtime/runtime@0.1.0\x05\0\x04\0/runtara:workf\
-low-runtime/workflow-runtime@0.1.0\x04\0\x0b\x16\x01\0\x10workflow-runtime\x03\0\
-\0\0G\x09producers\x01\x0cprocessed-by\x02\x0dwit-component\x070.227.1\x10wit-bi\
-ndgen-rust\x060.41.0";
+pub static __WIT_BINDGEN_COMPONENT_TYPE: [u8; 851] = *b"\
+\0asm\x0d\0\x01\0\0\x19\x16wit-component-encoding\x04\0\x07\xcc\x05\x01A\x02\x01\
+A\x02\x01B&\x01p}\x01ks\x01r\x03\x0bsignal-types\x07payload\0\x0dcheckpoint-id\x01\
+\x04\0\x0bsignal-info\x03\0\x02\x01r\x02\x0dcheckpoint-ids\x07payload\0\x04\0\x12\
+custom-signal-info\x03\0\x04\x01k\x03\x01k\x05\x01r\x04\x05found\x7f\x05state\0\x0e\
+pending-signal\x06\x0dcustom-signal\x07\x04\0\x11checkpoint-result\x03\0\x08\x01\
+j\x01\0\x01s\x01@\0\0\x0a\x04\0\x0aload-input\x01\x0b\x01j\0\x01s\x01@\x01\x06ou\
+tput\0\0\x0c\x04\0\x08complete\x01\x0d\x01@\x01\x05error\0\0\x0c\x04\0\x04fail\x01\
+\x0e\x01@\x02\x04kinds\x07payload\0\0\x0c\x04\0\x0ccustom-event\x01\x0f\x01@\0\0\
+\x0c\x04\0\x09heartbeat\x01\x10\x01j\x01\x7f\x01s\x01@\0\0\x11\x04\0\x0cis-cance\
+lled\x01\x12\x01@\x01\x02msw\0\x0c\x04\0\x0ddurable-sleep\x01\x13\x01k\0\x01j\x01\
+\x14\x01s\x01@\x01\x0dcheckpoint-ids\0\x15\x04\0\x0eget-checkpoint\x01\x16\x01j\x01\
+\x09\x01s\x01@\x02\x0dcheckpoint-ids\x05state\0\0\x17\x04\0\x0acheckpoint\x01\x18\
+\x01@\x03\x0dcheckpoint-ids\x0eattempt-numbery\x0derror-message\x01\0\x0c\x04\0\x14\
+record-retry-attempt\x01\x19\x01@\x03\x0dcheckpoint-ids\x05state\0\x02msw\0\x0c\x04\
+\0\x18durable-sleep-checkpoint\x01\x1a\x04\0&runtara:workflow-runtime/runtime@0.\
+1.0\x05\0\x04\0/runtara:workflow-runtime/workflow-runtime@0.1.0\x04\0\x0b\x16\x01\
+\0\x10workflow-runtime\x03\0\0\0G\x09producers\x01\x0cprocessed-by\x02\x0dwit-co\
+mponent\x070.227.1\x10wit-bindgen-rust\x060.41.0";
 #[inline(never)]
 #[doc(hidden)]
 pub fn __link_custom_section_describing_imports() {

@@ -224,6 +224,12 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   capability failures through the handler branch before falling back to
   `runtime.fail` when no condition matches. Durable Agent calls, retry/timeout
   policy, and compensation remain rejected.
+- The first Phase 8 runtime lifecycle ABI slice is in place. The
+  `runtara:workflow-runtime` WIT and runtime component now expose checkpoint
+  lookup/write, retry-attempt recording, checkpointed durable sleep, and a
+  signal-aware checkpoint result wire shape. Durable Agent and Delay lowering
+  still remain gated until the direct emitter starts using this ABI and
+  differential crash/resume tests exist.
 
 ## Final Goal
 
@@ -668,19 +674,45 @@ generate stable ids and control-flow boundaries, while stdlib/runtime owns:
 - resume from checkpoint;
 - failure classification.
 
-Candidate runtime ABI additions:
+Current direct runtime ABI additions:
 
 ```wit
-interface checkpoint {
-  run-once: func(key: string, input: list<u8>) -> result<list<u8>, string>;
-  begin-step: func(key: string, metadata: list<u8>) -> result<option<list<u8>>, string>;
-  finish-step: func(key: string, output: list<u8>) -> result<_, string>;
-  fail-step: func(key: string, error: list<u8>) -> result<_, string>;
+record signal-info {
+  signal-type: string,
+  payload: list<u8>,
+  checkpoint-id: option<string>,
 }
+
+record custom-signal-info {
+  checkpoint-id: string,
+  payload: list<u8>,
+}
+
+record checkpoint-result {
+  found: bool,
+  state: list<u8>,
+  pending-signal: option<signal-info>,
+  custom-signal: option<custom-signal-info>,
+}
+
+get-checkpoint: func(checkpoint-id: string) -> result<option<list<u8>>, string>;
+checkpoint: func(checkpoint-id: string, state: list<u8>) -> result<checkpoint-result, string>;
+record-retry-attempt: func(
+  checkpoint-id: string,
+  attempt-number: u32,
+  error-message: option<string>,
+) -> result<_, string>;
+durable-sleep-checkpoint: func(
+  checkpoint-id: string,
+  state: list<u8>,
+  ms: u64,
+) -> result<_, string>;
 ```
 
-The exact API needs a focused spike because `#[resilient]` currently hides a
-lot of behavior behind Rust macros and global SDK state.
+This is intentionally still a low-level runtime ABI, not a dynamic-linking
+scheme. The direct emitter should compile workflow-specific control flow into
+the core module and call these statically composed runtime exports at durable
+boundaries.
 
 ## Error Routing
 
@@ -1398,14 +1430,13 @@ without changing workflow semantics.
 Implementation steps:
 
 1. Specify checkpoint/runtime WIT:
-   - begin step;
-   - finish step;
-   - fail step;
-   - retry decision;
-   - durable sleep;
-   - heartbeat;
-   - cancellation check;
-   - resume from checkpoint.
+   - checkpoint lookup/write: done;
+   - signal-aware checkpoint result: done;
+   - retry-attempt recording: done;
+   - checkpointed durable sleep: done;
+   - heartbeat: already exposed;
+   - cancellation check: already exposed;
+   - stable resume-from-checkpoint lowering: pending per step family.
 2. Implement stdlib/runtime functions using the existing SDK behavior.
 3. Generate stable cache keys matching current behavior:
    - workflow id;

@@ -90,10 +90,20 @@ mod tests {
             "heartbeat",
             "is-cancelled",
             "durable-sleep",
+            "get-checkpoint",
+            "checkpoint",
+            "record-retry-attempt",
+            "durable-sleep-checkpoint",
         ] {
             assert!(
                 interface.functions.contains_key(function),
                 "missing runtime function {function}"
+            );
+        }
+        for type_name in ["signal-info", "custom-signal-info", "checkpoint-result"] {
+            assert!(
+                interface.types.contains_key(type_name),
+                "missing runtime type {type_name}"
             );
         }
 

@@ -10,7 +10,9 @@
 use std::sync::{MutexGuard, PoisonError};
 use std::time::Duration;
 
-use runtara_sdk::{RuntaraSdk, Signal, SignalType, register_sdk, sdk, try_sdk};
+use runtara_sdk::{
+    CheckpointResult, CustomSignal, RuntaraSdk, Signal, SignalType, register_sdk, sdk, try_sdk,
+};
 
 #[cfg(target_arch = "wasm32")]
 #[allow(warnings)]
@@ -50,6 +52,60 @@ fn with_sdk_mut<T>(op: impl FnOnce(&mut RuntaraSdk) -> Result<T, String>) -> Res
 
 fn signal_is_cancel(signal: Option<Signal>) -> bool {
     signal.is_some_and(|signal| signal.signal_type == SignalType::Cancel)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeSignalInfo {
+    pub signal_type: String,
+    pub payload: Vec<u8>,
+    pub checkpoint_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeCustomSignalInfo {
+    pub checkpoint_id: String,
+    pub payload: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeCheckpointResult {
+    pub found: bool,
+    pub state: Vec<u8>,
+    pub pending_signal: Option<RuntimeSignalInfo>,
+    pub custom_signal: Option<RuntimeCustomSignalInfo>,
+}
+
+fn signal_type_name(signal_type: SignalType) -> &'static str {
+    match signal_type {
+        SignalType::Cancel => "cancel",
+        SignalType::Pause => "pause",
+        SignalType::Resume => "resume",
+        SignalType::Shutdown => "shutdown",
+    }
+}
+
+fn runtime_signal(signal: Signal) -> RuntimeSignalInfo {
+    RuntimeSignalInfo {
+        signal_type: signal_type_name(signal.signal_type).to_string(),
+        payload: signal.payload,
+        checkpoint_id: signal.checkpoint_id,
+    }
+}
+
+fn runtime_custom_signal(signal: CustomSignal) -> RuntimeCustomSignalInfo {
+    RuntimeCustomSignalInfo {
+        checkpoint_id: signal.checkpoint_id,
+        payload: signal.payload,
+    }
+}
+
+fn runtime_checkpoint_result(result: CheckpointResult) -> RuntimeCheckpointResult {
+    RuntimeCheckpointResult {
+        found: result.found,
+        state: result.state,
+        pending_signal: result.pending_signal.map(runtime_signal),
+        custom_signal: result.custom_signal.map(runtime_custom_signal),
+    }
 }
 
 pub fn load_input() -> Result<Vec<u8>, String> {
@@ -92,21 +148,70 @@ pub fn is_cancelled() -> Result<bool, String> {
 }
 
 pub fn durable_sleep(ms: u64) -> Result<(), String> {
+    durable_sleep_checkpoint("__direct_workflow_runtime_durable_sleep", &[], ms)
+}
+
+pub fn get_checkpoint(checkpoint_id: &str) -> Result<Option<Vec<u8>>, String> {
+    with_sdk(|sdk| sdk.get_checkpoint(checkpoint_id).map_err(sdk_error))
+}
+
+pub fn checkpoint(checkpoint_id: &str, state: &[u8]) -> Result<RuntimeCheckpointResult, String> {
     with_sdk(|sdk| {
-        sdk.sleep(
-            Duration::from_millis(ms),
-            "__direct_workflow_runtime_durable_sleep",
-            &[],
-        )
-        .map_err(sdk_error)
+        sdk.checkpoint(checkpoint_id, state)
+            .map(runtime_checkpoint_result)
+            .map_err(sdk_error)
+    })
+}
+
+pub fn record_retry_attempt(
+    checkpoint_id: &str,
+    attempt_number: u32,
+    error_message: Option<&str>,
+) -> Result<(), String> {
+    with_sdk(|sdk| {
+        sdk.record_retry_attempt(checkpoint_id, attempt_number, error_message)
+            .map_err(sdk_error)
+    })
+}
+
+pub fn durable_sleep_checkpoint(checkpoint_id: &str, state: &[u8], ms: u64) -> Result<(), String> {
+    with_sdk(|sdk| {
+        sdk.sleep(Duration::from_millis(ms), checkpoint_id, state)
+            .map_err(sdk_error)
     })
 }
 
 #[cfg(target_arch = "wasm32")]
 mod component {
-    use super::bindings::exports::runtara::workflow_runtime::runtime::Guest;
+    use super::bindings::exports::runtara::workflow_runtime::runtime::{
+        CheckpointResult, CustomSignalInfo, Guest, SignalInfo,
+    };
 
     struct Component;
+
+    fn signal_info(signal: super::RuntimeSignalInfo) -> SignalInfo {
+        SignalInfo {
+            signal_type: signal.signal_type,
+            payload: signal.payload,
+            checkpoint_id: signal.checkpoint_id,
+        }
+    }
+
+    fn custom_signal_info(signal: super::RuntimeCustomSignalInfo) -> CustomSignalInfo {
+        CustomSignalInfo {
+            checkpoint_id: signal.checkpoint_id,
+            payload: signal.payload,
+        }
+    }
+
+    fn checkpoint_result(result: super::RuntimeCheckpointResult) -> CheckpointResult {
+        CheckpointResult {
+            found: result.found,
+            state: result.state,
+            pending_signal: result.pending_signal.map(signal_info),
+            custom_signal: result.custom_signal.map(custom_signal_info),
+        }
+    }
 
     impl Guest for Component {
         fn load_input() -> Result<Vec<u8>, String> {
@@ -136,6 +241,30 @@ mod component {
         fn durable_sleep(ms: u64) -> Result<(), String> {
             super::durable_sleep(ms)
         }
+
+        fn get_checkpoint(checkpoint_id: String) -> Result<Option<Vec<u8>>, String> {
+            super::get_checkpoint(&checkpoint_id)
+        }
+
+        fn checkpoint(checkpoint_id: String, state: Vec<u8>) -> Result<CheckpointResult, String> {
+            super::checkpoint(&checkpoint_id, &state).map(checkpoint_result)
+        }
+
+        fn record_retry_attempt(
+            checkpoint_id: String,
+            attempt_number: u32,
+            error_message: Option<String>,
+        ) -> Result<(), String> {
+            super::record_retry_attempt(&checkpoint_id, attempt_number, error_message.as_deref())
+        }
+
+        fn durable_sleep_checkpoint(
+            checkpoint_id: String,
+            state: Vec<u8>,
+            ms: u64,
+        ) -> Result<(), String> {
+            super::durable_sleep_checkpoint(&checkpoint_id, &state, ms)
+        }
     }
 
     super::bindings::export!(Component with_types_in super::bindings);
@@ -143,9 +272,9 @@ mod component {
 
 #[cfg(test)]
 mod tests {
-    use runtara_sdk::{Signal, SignalType};
+    use runtara_sdk::{CheckpointResult, CustomSignal, Signal, SignalType};
 
-    use super::{sdk_error, signal_is_cancel};
+    use super::{runtime_checkpoint_result, sdk_error, signal_is_cancel, signal_type_name};
 
     #[test]
     fn sdk_errors_are_exposed_as_strings() {
@@ -170,5 +299,42 @@ mod tests {
         assert!(!signal_is_cancel(None));
         assert!(!signal_is_cancel(Some(pause)));
         assert!(signal_is_cancel(Some(cancel)));
+    }
+
+    #[test]
+    fn signal_type_names_match_runtime_abi() {
+        assert_eq!(signal_type_name(SignalType::Cancel), "cancel");
+        assert_eq!(signal_type_name(SignalType::Pause), "pause");
+        assert_eq!(signal_type_name(SignalType::Resume), "resume");
+        assert_eq!(signal_type_name(SignalType::Shutdown), "shutdown");
+    }
+
+    #[test]
+    fn checkpoint_result_converts_to_runtime_wire_shape() {
+        let result = CheckpointResult {
+            found: true,
+            state: br#"{"ok":true}"#.to_vec(),
+            pending_signal: Some(Signal {
+                signal_type: SignalType::Pause,
+                payload: b"pause-now".to_vec(),
+                checkpoint_id: Some("step-a".to_string()),
+            }),
+            custom_signal: Some(CustomSignal {
+                checkpoint_id: "wait-a".to_string(),
+                payload: br#"{"resume":true}"#.to_vec(),
+            }),
+        };
+
+        let wire = runtime_checkpoint_result(result);
+
+        assert!(wire.found);
+        assert_eq!(wire.state, br#"{"ok":true}"#);
+        let signal = wire.pending_signal.expect("pending signal");
+        assert_eq!(signal.signal_type, "pause");
+        assert_eq!(signal.payload, b"pause-now");
+        assert_eq!(signal.checkpoint_id.as_deref(), Some("step-a"));
+        let custom = wire.custom_signal.expect("custom signal");
+        assert_eq!(custom.checkpoint_id, "wait-a");
+        assert_eq!(custom.payload, br#"{"resume":true}"#);
     }
 }
