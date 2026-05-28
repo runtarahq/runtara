@@ -63,6 +63,15 @@ const AGENT_WIT_VERSION: &str = "0.3.0";
 
 const DIRECT_RUN_RETPTR_OFFSET: i32 = 0;
 const DIRECT_AGENT_ARGS_OFFSET: i32 = 128;
+const DIRECT_AGENT_ARG_CONNECTION_TAG_OFFSET: i32 = DIRECT_AGENT_ARGS_OFFSET + 16;
+const DIRECT_AGENT_ARG_CONNECTION_ID_PTR_OFFSET: i32 = DIRECT_AGENT_ARGS_OFFSET + 20;
+const DIRECT_AGENT_ARG_CONNECTION_ID_LEN_OFFSET: i32 = DIRECT_AGENT_ARGS_OFFSET + 24;
+const DIRECT_AGENT_ARG_CONNECTION_INTEGRATION_PTR_OFFSET: i32 = DIRECT_AGENT_ARGS_OFFSET + 28;
+const DIRECT_AGENT_ARG_CONNECTION_INTEGRATION_LEN_OFFSET: i32 = DIRECT_AGENT_ARGS_OFFSET + 32;
+const DIRECT_AGENT_ARG_CONNECTION_SUBTYPE_TAG_OFFSET: i32 = DIRECT_AGENT_ARGS_OFFSET + 36;
+const DIRECT_AGENT_ARG_CONNECTION_PARAMETERS_PTR_OFFSET: i32 = DIRECT_AGENT_ARGS_OFFSET + 48;
+const DIRECT_AGENT_ARG_CONNECTION_PARAMETERS_LEN_OFFSET: i32 = DIRECT_AGENT_ARGS_OFFSET + 52;
+const DIRECT_AGENT_ARG_CONNECTION_RATE_LIMIT_TAG_OFFSET: i32 = DIRECT_AGENT_ARGS_OFFSET + 56;
 const DIRECT_STATIC_DATA_OFFSET: i32 = 256;
 const DIRECT_AGENT_RESULT_OK_PTR_OFFSET: u64 = 8;
 const DIRECT_AGENT_RESULT_OK_LEN_OFFSET: u64 = 12;
@@ -85,6 +94,8 @@ const DIRECT_WORKFLOW_LOG_KIND: &[u8] = b"workflow_log";
 const DIRECT_WORKFLOW_ERROR_KIND: &[u8] = b"workflow_error";
 const DIRECT_STEP_DEBUG_START_KIND: &[u8] = b"step_debug_start";
 const DIRECT_STEP_DEBUG_END_KIND: &[u8] = b"step_debug_end";
+const DIRECT_AGENT_EMPTY_INTEGRATION_ID: &[u8] = b"";
+const DIRECT_AGENT_EMPTY_PARAMETERS: &[u8] = b"{}";
 const WASM_PAGE_SIZE: i32 = 65_536;
 
 /// Input for the opt-in direct compiler.
@@ -603,8 +614,11 @@ struct DirectCoreStaticData {
     workflow_error_kind: DirectDataSegment,
     step_debug_start_kind: DirectDataSegment,
     step_debug_end_kind: DirectDataSegment,
+    agent_empty_integration_id: DirectDataSegment,
+    agent_empty_parameters: DirectDataSegment,
     step_ids: BTreeMap<String, DirectDataSegment>,
     agent_capability_ids: BTreeMap<u32, DirectDataSegment>,
+    agent_connection_ids: BTreeMap<u32, DirectDataSegment>,
     heap_base: i32,
     memory_min_pages: u64,
 }
@@ -650,6 +664,19 @@ impl DirectCoreStaticData {
             16,
         );
 
+        let agent_empty_integration_id =
+            DirectDataSegment::new(offset, DIRECT_AGENT_EMPTY_INTEGRATION_ID);
+        offset = align_i32(
+            checked_offset_add(offset, DIRECT_AGENT_EMPTY_INTEGRATION_ID.len())?,
+            16,
+        );
+
+        let agent_empty_parameters = DirectDataSegment::new(offset, DIRECT_AGENT_EMPTY_PARAMETERS);
+        offset = align_i32(
+            checked_offset_add(offset, DIRECT_AGENT_EMPTY_PARAMETERS.len())?,
+            16,
+        );
+
         let mut step_ids = BTreeMap::new();
         for step in &graph.steps {
             let segment = DirectDataSegment::new(offset, step.id.as_bytes());
@@ -664,6 +691,15 @@ impl DirectCoreStaticData {
             agent_capability_ids.insert(agent.id, segment);
         }
 
+        let mut agent_connection_ids = BTreeMap::new();
+        for agent in &graph.agents {
+            if let Some(connection_id) = agent.connection_id.as_deref() {
+                let segment = DirectDataSegment::new(offset, connection_id.as_bytes());
+                offset = align_i32(checked_offset_add(offset, connection_id.len())?, 16);
+                agent_connection_ids.insert(agent.id, segment);
+            }
+        }
+
         let memory_min_pages = wasm_pages_for_bytes(offset)?;
         Ok(Self {
             manifest,
@@ -673,8 +709,11 @@ impl DirectCoreStaticData {
             workflow_error_kind,
             step_debug_start_kind,
             step_debug_end_kind,
+            agent_empty_integration_id,
+            agent_empty_parameters,
             step_ids,
             agent_capability_ids,
+            agent_connection_ids,
             heap_base: offset,
             memory_min_pages,
         })
@@ -692,6 +731,10 @@ impl DirectCoreStaticData {
                 "missing direct static Agent capability id {agent_id}"
             ))
         })
+    }
+
+    fn agent_connection_id(&self, agent_id: u32) -> Option<&DirectDataSegment> {
+        self.agent_connection_ids.get(&agent_id)
     }
 }
 
@@ -1362,9 +1405,12 @@ fn emit_direct_core_module(
         &config.static_data.workflow_error_kind,
         &config.static_data.step_debug_start_kind,
         &config.static_data.step_debug_end_kind,
+        &config.static_data.agent_empty_integration_id,
+        &config.static_data.agent_empty_parameters,
     ];
     segments.extend(config.static_data.step_ids.values());
     segments.extend(config.static_data.agent_capability_ids.values());
+    segments.extend(config.static_data.agent_connection_ids.values());
     for segment in segments {
         data.active(
             0,
@@ -1407,6 +1453,7 @@ struct DirectCoreImportIndices {
     stdlib_group_by: Option<u32>,
     stdlib_agent_output: Option<u32>,
     stdlib_agent_validate_input: Option<u32>,
+    stdlib_agent_connection_input: Option<u32>,
     stdlib_agent_error: Option<u32>,
     stdlib_agent_debug_error: Option<u32>,
     stdlib_step_debug_start: Option<u32>,
@@ -1453,6 +1500,10 @@ impl DirectCoreImportIndices {
                 self.stdlib_agent_validate_input,
                 "stdlib.agent-validate-input",
             )?,
+            stdlib_agent_connection_input: require_import(
+                self.stdlib_agent_connection_input,
+                "stdlib.agent-connection-input",
+            )?,
             stdlib_agent_error: require_import(self.stdlib_agent_error, "stdlib.agent-error")?,
             stdlib_agent_debug_error: require_import(
                 self.stdlib_agent_debug_error,
@@ -1491,6 +1542,7 @@ struct DirectCoreFunctionIndices {
     stdlib_group_by: u32,
     stdlib_agent_output: u32,
     stdlib_agent_validate_input: u32,
+    stdlib_agent_connection_input: u32,
     stdlib_agent_error: u32,
     stdlib_agent_debug_error: u32,
     stdlib_step_debug_start: u32,
@@ -1569,6 +1621,8 @@ fn import_core_function(
         import_indices.stdlib_agent_output = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "agent-validate-input") {
         import_indices.stdlib_agent_validate_input = Some(function_index);
+    } else if is_stdlib_import(resolve, interface, function, "agent-connection-input") {
+        import_indices.stdlib_agent_connection_input = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "agent-error") {
         import_indices.stdlib_agent_error = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "agent-debug-error") {
@@ -2549,6 +2603,15 @@ fn emit_agent_plan(
         route_len_local,
     );
 
+    emit_agent_connection_input(
+        body,
+        indices,
+        static_data,
+        agent_id,
+        output_ptr_local,
+        output_len_local,
+    );
+
     let invoke = indices
         .agent_invokes
         .get(agent_component_id)
@@ -2560,6 +2623,8 @@ fn emit_agent_plan(
         body,
         invoke,
         capability_id,
+        static_data,
+        agent_id,
         output_ptr_local,
         output_len_local,
     );
@@ -3008,10 +3073,33 @@ fn emit_agent_input_validation(
     body.instruction(&Instruction::End);
 }
 
+fn emit_agent_connection_input(
+    body: &mut WasmFunction,
+    indices: &DirectCoreFunctionIndices,
+    static_data: &DirectCoreStaticData,
+    agent_id: u32,
+    input_ptr_local: u32,
+    input_len_local: u32,
+) {
+    if static_data.agent_connection_id(agent_id).is_none() {
+        return;
+    }
+
+    body.instruction(&Instruction::I32Const(agent_id as i32));
+    body.instruction(&Instruction::LocalGet(input_ptr_local));
+    body.instruction(&Instruction::LocalGet(input_len_local));
+    push_retptr_arg(body);
+    body.instruction(&Instruction::Call(indices.stdlib_agent_connection_input));
+    return_if_retptr_error(body);
+    load_retptr_list(body, input_ptr_local, input_len_local);
+}
+
 fn emit_agent_invoke(
     body: &mut WasmFunction,
     invoke: &DirectAgentInvokeImport,
     capability_id: &DirectDataSegment,
+    static_data: &DirectCoreStaticData,
+    agent_id: u32,
     input_ptr_local: u32,
     input_len_local: u32,
 ) {
@@ -3020,7 +3108,7 @@ fn emit_agent_invoke(
         store_i32_at(body, DIRECT_AGENT_ARGS_OFFSET + 4, capability_id.len_i32());
         store_local_i32_at(body, DIRECT_AGENT_ARGS_OFFSET + 8, input_ptr_local);
         store_local_i32_at(body, DIRECT_AGENT_ARGS_OFFSET + 12, input_len_local);
-        store_i32_at(body, DIRECT_AGENT_ARGS_OFFSET + 16, 0);
+        emit_agent_connection_args(body, static_data, agent_id);
         body.instruction(&Instruction::I32Const(DIRECT_AGENT_ARGS_OFFSET));
         push_retptr_arg(body);
         body.instruction(&Instruction::Call(invoke.function_index));
@@ -3039,6 +3127,47 @@ fn emit_agent_invoke(
     }
     push_retptr_arg(body);
     body.instruction(&Instruction::Call(invoke.function_index));
+}
+
+fn emit_agent_connection_args(
+    body: &mut WasmFunction,
+    static_data: &DirectCoreStaticData,
+    agent_id: u32,
+) {
+    let Some(connection_id) = static_data.agent_connection_id(agent_id) else {
+        store_i32_at(body, DIRECT_AGENT_ARG_CONNECTION_TAG_OFFSET, 0);
+        return;
+    };
+
+    store_i32_at(body, DIRECT_AGENT_ARG_CONNECTION_TAG_OFFSET, 1);
+    store_i32_at(
+        body,
+        DIRECT_AGENT_ARG_CONNECTION_ID_PTR_OFFSET,
+        connection_id.offset,
+    );
+    store_i32_at(
+        body,
+        DIRECT_AGENT_ARG_CONNECTION_ID_LEN_OFFSET,
+        connection_id.len_i32(),
+    );
+    store_i32_at(
+        body,
+        DIRECT_AGENT_ARG_CONNECTION_INTEGRATION_PTR_OFFSET,
+        static_data.agent_empty_integration_id.offset,
+    );
+    store_i32_at(body, DIRECT_AGENT_ARG_CONNECTION_INTEGRATION_LEN_OFFSET, 0);
+    store_i32_at(body, DIRECT_AGENT_ARG_CONNECTION_SUBTYPE_TAG_OFFSET, 0);
+    store_i32_at(
+        body,
+        DIRECT_AGENT_ARG_CONNECTION_PARAMETERS_PTR_OFFSET,
+        static_data.agent_empty_parameters.offset,
+    );
+    store_i32_at(
+        body,
+        DIRECT_AGENT_ARG_CONNECTION_PARAMETERS_LEN_OFFSET,
+        static_data.agent_empty_parameters.len_i32(),
+    );
+    store_i32_at(body, DIRECT_AGENT_ARG_CONNECTION_RATE_LIMIT_TAG_OFFSET, 0);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3447,6 +3576,15 @@ mod tests {
             "outputSchema": {}
         }))
         .expect("agent graph parses")
+    }
+
+    fn non_durable_agent_connection_graph() -> ExecutionGraph {
+        let mut graph = non_durable_agent_graph();
+        let Some(runtara_dsl::Step::Agent(agent)) = graph.steps.get_mut("agent") else {
+            panic!("expected Agent step");
+        };
+        agent.connection_id = Some("shopify-main".to_string());
+        graph
     }
 
     fn collect_run_plan_ids(
@@ -3995,6 +4133,35 @@ mod tests {
         assert_eq!(manifest.graph.agents[0].agent_id, "utils");
         assert_eq!(manifest.graph.agents[0].capability_id, "normalize");
         assert_eq!(manifest.graph.mappings.len(), 2);
+    }
+
+    #[test]
+    fn direct_compile_supports_non_durable_agent_connection_finish_graph() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let result = compile_direct_workflow(DirectCompilationInput {
+            workflow_id: "agent-connection".to_string(),
+            version: 1,
+            execution_graph: non_durable_agent_connection_graph(),
+            output_dir: temp.path().to_path_buf(),
+            track_events: false,
+            agent_catalog: None,
+        })
+        .expect("direct Agent connection compile should succeed");
+
+        let wasm = fs::read(&result.wasm_path).expect("wasm");
+        Validator::new()
+            .validate_all(&wasm)
+            .expect("direct Agent connection artifact should validate");
+        assert!(result.support_report.supported);
+        assert_eq!(result.support_report.unsupported, vec![]);
+
+        let manifest: DirectWorkflowManifest =
+            serde_json::from_slice(&fs::read(&result.manifest_path).expect("manifest"))
+                .expect("manifest json");
+        assert_eq!(
+            manifest.graph.agents[0].connection_id.as_deref(),
+            Some("shopify-main")
+        );
     }
 
     #[test]
@@ -4665,6 +4832,116 @@ mod tests {
         assert!(
             saw_validate_before_invoke,
             "Agent input validation should run before capabilities.invoke"
+        );
+    }
+
+    #[test]
+    fn direct_core_lowers_non_durable_agent_connection_call() {
+        let graph = non_durable_agent_connection_graph();
+        let manifest = build_direct_workflow_manifest(&graph).expect("manifest");
+        let manifest_json = manifest.to_canonical_json().expect("manifest json");
+        let core_config =
+            DirectCoreConfig::new(&manifest, &manifest_json, false).expect("core config");
+
+        let (resolve, world) =
+            build_direct_component_resolve_with_agents(&manifest.feature_summary.agent_ids)
+                .expect("agent resolve");
+        let (interface_key, function) = imported_wit_function(
+            &resolve,
+            world,
+            "runtara:agent-utils/capabilities",
+            "invoke",
+        );
+        let (actual_module, actual_name) = resolve.wasm_import_name(
+            ManglingAndAbi::Standard32,
+            WasmImport::Func {
+                interface: Some(interface_key),
+                func: function,
+            },
+        );
+        let core = emit_direct_core_module(&resolve, world, &core_config).expect("core module");
+        Validator::new()
+            .validate_all(&core)
+            .expect("Agent connection core module validates");
+
+        let mut agent_invoke_index = None;
+        let mut agent_connection_input_index = None;
+        let mut saw_connection_input_before_invoke = false;
+        let mut saw_connection_some_tag_store = false;
+        let mut pending_connection_tag_value = false;
+        let mut previous_i32_const = None;
+        let mut code_body_index = 0;
+        let mut next_function_index = 0;
+
+        for payload in Parser::new(0).parse_all(&core) {
+            match payload.expect("core wasm payload") {
+                Payload::ImportSection(reader) => {
+                    for import in reader.into_imports() {
+                        let import = import.expect("core import");
+                        if import.module == actual_module && import.name == actual_name {
+                            agent_invoke_index = Some(next_function_index);
+                        }
+                        if import.module.contains("runtara:workflow-stdlib/json")
+                            && import.name == "agent-connection-input"
+                        {
+                            agent_connection_input_index = Some(next_function_index);
+                        }
+                        if matches!(import.ty, TypeRef::Func(_)) {
+                            next_function_index += 1;
+                        }
+                    }
+                }
+                Payload::CodeSectionEntry(body) => {
+                    if code_body_index == 0 {
+                        let mut saw_connection_input_call = false;
+                        for operator in body.get_operators_reader().expect("operators").into_iter()
+                        {
+                            match operator.expect("operator") {
+                                Operator::Call { function_index }
+                                    if Some(function_index) == agent_connection_input_index =>
+                                {
+                                    saw_connection_input_call = true;
+                                }
+                                Operator::Call { function_index }
+                                    if Some(function_index) == agent_invoke_index =>
+                                {
+                                    saw_connection_input_before_invoke = saw_connection_input_call;
+                                }
+                                Operator::I32Const { value } => {
+                                    pending_connection_tag_value = previous_i32_const
+                                        == Some(DIRECT_AGENT_ARG_CONNECTION_TAG_OFFSET)
+                                        && value == 1;
+                                    previous_i32_const = Some(value);
+                                }
+                                Operator::I32Store { .. } if pending_connection_tag_value => {
+                                    saw_connection_some_tag_store = true;
+                                    pending_connection_tag_value = false;
+                                    previous_i32_const = None;
+                                }
+                                _ => {
+                                    pending_connection_tag_value = false;
+                                    previous_i32_const = None;
+                                }
+                            }
+                        }
+                    }
+                    code_body_index += 1;
+                }
+                _ => {}
+            }
+        }
+
+        assert!(
+            agent_connection_input_index.is_some(),
+            "core should import stdlib.agent-connection-input"
+        );
+        assert!(
+            saw_connection_input_before_invoke,
+            "Agent connection input injection should run before capabilities.invoke"
+        );
+        assert!(
+            saw_connection_some_tag_store,
+            "Agent connection lowering should store option<connection-info> discriminant 1"
         );
     }
 

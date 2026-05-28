@@ -77,6 +77,11 @@ interface json {
         input: list<u8>,
     ) -> result<list<u8>, string>;
 
+    agent-connection-input: func(
+        agent-id: u32,
+        input: list<u8>,
+    ) -> result<list<u8>, string>;
+
     agent-error: func(
         agent-id: u32,
         code: string,

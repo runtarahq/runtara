@@ -239,7 +239,6 @@ fn supports_direct_control_step(
 
 fn supports_agent_step_baseline(graph: &ExecutionGraph, step: &AgentStep) -> bool {
     !agent_step_is_durable(graph, step)
-        && step.connection_id.is_none()
         && step.max_retries.is_none()
         && step.retry_delay.is_none()
         && step.timeout.is_none()
@@ -619,12 +618,6 @@ fn collect_agent_step_unsupported(
         push(
             "agent-durable",
             "Agent direct lowering currently supports only non-durable capability calls",
-        );
-    }
-    if step.connection_id.is_some() {
-        push(
-            "agent-connection",
-            "Agent direct lowering needs connection-info canonical ABI lowering",
         );
     }
     if step.max_retries.is_some() || step.retry_delay.is_some() {
@@ -1215,7 +1208,7 @@ mod tests {
     }
 
     #[test]
-    fn agent_connection_is_rejected_until_connection_abi_is_lowered() {
+    fn non_durable_agent_connection_normal_flow_is_supported() {
         let mut graph = fixture("transform");
         graph.durable = Some(false);
         let Some(Step::Agent(agent)) = graph.steps.get_mut("transform") else {
@@ -1225,12 +1218,7 @@ mod tests {
 
         let report = analyze_direct_wasm_support(&graph);
 
-        assert!(!report.supported);
-        assert!(report.unsupported.iter().any(|feature| {
-            feature.step_id.as_deref() == Some("transform")
-                && feature.step_type.as_deref() == Some("Agent")
-                && feature.feature == "agent-connection"
-        }));
+        assert!(report.supported, "{:?}", report.unsupported);
     }
 
     #[test]

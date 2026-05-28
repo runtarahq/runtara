@@ -192,15 +192,15 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   imports (`runtara:agent-<id>/capabilities@0.3.0`) and validates core module
   metadata with those imports present.
 - The first Agent execution slice is implemented for non-durable normal-flow
-  Agent steps with no connection, retry override, timeout, compensation, or
+  Agent steps with no retry override, timeout, compensation, or
   breakpoint. The direct core applies the Agent input mapping through stdlib,
   calls the statically imported per-agent `capabilities.invoke`, stores the
   success output through `stdlib.agent-output`, rebuilds the source, and
   continues to the next direct run-plan node. The WIT canonical ABI lowers
   this import indirectly as `[pointer, pointer]`, so the direct core now writes
-  the argument area for capability id, input bytes, and a `none` connection,
-  and reads the Agent-specific result payload offsets for successful output
-  bytes.
+  the argument area for capability id, input bytes, and
+  `option<connection-info>`, and reads the Agent-specific result payload
+  offsets for successful output bytes.
 - Agent failure handling now converts WIT `error-info` into the same JSON
   envelope used by component codegen, wraps it in the current generated Agent
   step failure string, emits Agent `step_debug_end` failure payloads when
@@ -211,8 +211,13 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   Agent inputs before `capabilities.invoke`, emits the same structured
   validation JSON used by generated Rust, emits Agent failure debug payloads
   when `track_events` is enabled, calls `runtime.fail`, and returns failed
-  `wasi:cli/run`. Durable Agent calls, connection envelopes, retry/timeout
-  policy, compensation, and on-error routing remain rejected.
+  `wasi:cli/run`.
+- Non-durable Agent connection ids are now supported. The direct stdlib injects
+  the generated Rust-compatible `connection_id` and `_connection` fields into
+  Agent JSON input, and the direct core writes the canonical ABI
+  `some(connection-info)` record with the connection id, empty integration id,
+  `{}` parameters, and no subtype/rate-limit config. Durable Agent calls,
+  retry/timeout policy, compensation, and on-error routing remain rejected.
 
 ## Final Goal
 
@@ -1313,10 +1318,11 @@ Current status:
 - Component sidecars already collect used agent ids and emit per-agent WIT/WAC
   imports, and the workflow-logic component resolver now includes matching
   per-agent WIT imports in component metadata.
-- Non-durable, no-connection Agent normal-flow lowering now compiles and
-  validates as a direct component. The support gate allows only this first
-  subset and emits exact rejection reasons for durable Agent calls, connection
-  use, retry overrides, timeouts, compensation, and breakpoints.
+- Non-durable Agent normal-flow lowering now compiles and validates as a
+  direct component, including steps with a static `connectionId`. The support
+  gate allows only this first subset and emits exact rejection reasons for
+  durable Agent calls, retry overrides, timeouts, compensation, and
+  breakpoints.
 - The shared stdlib WIT now includes `agent-output`, implemented by
   `runtara-workflow-stdlib::direct_json`, to store Agent success outputs using
   the same `steps.<id>` envelope shape as generated Rust code.
@@ -1333,6 +1339,9 @@ Current status:
   compile-time Agent catalog, and `agent-validate-input` validates resolved
   inputs before dispatch. Missing/null fields return the generated Rust
   validation JSON shape and reuse the Agent debug-end failure path.
+- `agent-connection-input` injects the same JSON connection fields as generated
+  Rust, and direct core writes the current `option<connection-info>` ABI layout
+  for static connection ids.
 
 Implementation steps:
 
@@ -1342,13 +1351,15 @@ Implementation steps:
 4. Implement `Agent` lowering:
    - source construction: done for the first non-durable subset;
    - input mapping: done through `stdlib.apply-mapping`;
-   - static `capabilities.invoke`: done for `connection = none`;
+   - static `capabilities.invoke`: done for `connection = none` and static
+     `connectionId`;
    - success output envelope: done through `stdlib.agent-output`;
    - success ABI result layout: done for the current indirect
      `[pointer, pointer]` invoke lowering;
    - `error-info` to current Agent failure string/debug payload: done;
    - agent input validation: done for required-field missing/null checks;
-   - connection resolution/envelope: pending;
+   - connection JSON injection and WIT `connection-info` envelope: done for
+     static `connectionId`;
    - durable retry/timeout behavior: pending.
 5. Implement `onError` routing for agent failures.
 6. Preserve current retry policy shape by delegating durable retry behavior to

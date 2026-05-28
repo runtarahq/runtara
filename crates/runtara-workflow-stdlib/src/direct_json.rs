@@ -231,6 +231,37 @@ impl DirectJsonManifest {
         }
     }
 
+    /// Inject generated-code-compatible connection fields into Agent JSON input.
+    pub fn agent_connection_input(&self, agent_id: u32, input: &[u8]) -> Result<Vec<u8>, String> {
+        let mut input: Value = serde_json::from_slice(input)
+            .map_err(|err| format!("failed to parse Agent input for connection: {err}"))?;
+        let agent = self
+            .agents
+            .get(&agent_id)
+            .ok_or_else(|| format!("unknown direct Agent id {agent_id}"))?;
+        let Some(connection_id) = agent.connection_id.as_deref() else {
+            return serde_json::to_vec(&input)
+                .map_err(|err| format!("failed to serialize Agent input: {err}"));
+        };
+
+        if let Value::Object(ref mut map) = input {
+            map.insert(
+                "connection_id".to_string(),
+                Value::String(connection_id.to_string()),
+            );
+            map.insert(
+                "_connection".to_string(),
+                serde_json::json!({
+                    "connection_id": connection_id,
+                    "integration_id": "",
+                    "parameters": {}
+                }),
+            );
+        }
+
+        serde_json::to_vec(&input).map_err(|err| format!("failed to serialize Agent input: {err}"))
+    }
+
     /// Convert a WIT `error-info` into the current Agent failure string shape.
     #[allow(clippy::too_many_arguments)]
     pub fn agent_error(
@@ -839,6 +870,7 @@ fn collect_graph_manifest(
                     name: agent.name.clone(),
                     agent_id: agent.agent_id.clone(),
                     capability_id: agent.capability_id.clone(),
+                    connection_id: agent.connection_id.clone(),
                     input_mapping_id: agent.input_mapping_id,
                     required_inputs: agent.required_inputs.clone(),
                 },
@@ -1837,6 +1869,8 @@ struct AgentWire {
     name: Option<String>,
     agent_id: String,
     capability_id: String,
+    #[serde(default)]
+    connection_id: Option<String>,
     input_mapping_id: u32,
     #[serde(default)]
     required_inputs: Vec<DirectJsonRequiredAgentInput>,
@@ -1904,6 +1938,7 @@ struct DirectJsonAgent {
     name: Option<String>,
     agent_id: String,
     capability_id: String,
+    connection_id: Option<String>,
     input_mapping_id: u32,
     required_inputs: Vec<DirectJsonRequiredAgentInput>,
 }
@@ -2047,6 +2082,14 @@ mod tests {
         input_mapping: Value,
         required_inputs: Value,
     ) -> Vec<u8> {
+        agent_manifest_with_required_inputs_and_connection(input_mapping, required_inputs, None)
+    }
+
+    fn agent_manifest_with_required_inputs_and_connection(
+        input_mapping: Value,
+        required_inputs: Value,
+        connection_id: Option<&str>,
+    ) -> Vec<u8> {
         serde_json::to_vec(&json!({
             "graph": {
                 "mappings": [{
@@ -2065,7 +2108,8 @@ mod tests {
                     "agentId": "utils",
                     "capabilityId": "normalize",
                     "inputMappingId": 0,
-                    "requiredInputs": required_inputs
+                    "requiredInputs": required_inputs,
+                    "connectionId": connection_id
                 }],
                 "steps": [{
                     "id": "agent",
@@ -2688,6 +2732,33 @@ mod tests {
             validation["missingInputs"][1]["code"],
             json!("STEP_REQUIRED_INPUT_MISSING")
         );
+    }
+
+    #[test]
+    fn agent_connection_input_matches_generated_injection_shape() {
+        let manifest =
+            DirectJsonManifest::parse(&agent_manifest_with_required_inputs_and_connection(
+                json!({}),
+                json!([]),
+                Some("shopify-main"),
+            ))
+            .expect("manifest");
+
+        let input = manifest
+            .agent_connection_input(0, br#"{"value":"present"}"#)
+            .expect("connection input");
+        let input: Value = serde_json::from_slice(&input).expect("input json");
+
+        assert_eq!(input["connection_id"], json!("shopify-main"));
+        assert_eq!(
+            input["_connection"],
+            json!({
+                "connection_id": "shopify-main",
+                "integration_id": "",
+                "parameters": {}
+            })
+        );
+        assert_eq!(input["value"], json!("present"));
     }
 
     #[test]
