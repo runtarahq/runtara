@@ -50,6 +50,11 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   `wasm32-wasip2` stdlib component without pulling in SDK/runtime, HTTP, AI,
   or native agent dependencies; default/native builds keep the existing Rust
   crate API and runtime exports.
+- `runtara-workflow-runtime` now builds the separate
+  `runtara:workflow-runtime` component. It lazily initializes the existing SDK
+  from environment variables and exports the first runtime lifecycle surface:
+  input loading, completion/failure, custom events, heartbeat, cancellation
+  polling, and durable sleep.
 - `direct_wasm::component` emits component-facing sidecars for static
   composition with separate stdlib and runtime components plus any required
   agents.
@@ -758,8 +763,10 @@ Current status:
   functions are `init-manifest`, `build-source`, and `apply-mapping`; condition,
   switch, filter, and group-by return explicit unimplemented errors until their
   stdlib parity work lands.
-- Remaining work: implement/build the runtime component and add host-side
-  bindings smoke tests that instantiate and call the stdlib component.
+- `runtara-workflow-runtime` includes generated WIT bindings and implements
+  the runtime lifecycle surface against `runtara-sdk`.
+- Remaining work: add host-side bindings smoke tests that instantiate and call
+  the stdlib/runtime components.
 
 Implementation steps:
 
@@ -800,11 +807,14 @@ Current status:
 
 - `runtara-workflow-stdlib` can be built as a static component with:
   `cargo component build --target wasm32-wasip2 -p runtara-workflow-stdlib --no-default-features --features direct-component`.
+- `runtara-workflow-runtime` can be built as a static component with:
+  `cargo component build --target wasm32-wasip2 -p runtara-workflow-runtime --no-default-features --features wasi`.
 - The `direct-component` feature keeps the stdlib component byte surface focused
   on shared JSON semantics while default/native/wasi/wasm-js builds continue to
   expose the existing Rust SDK runtime API.
-- The generated component exports `runtara:workflow-stdlib/json@0.1.0` and is
-  ready for the first direct workflow composition smoke test.
+- The generated components export `runtara:workflow-stdlib/json@0.1.0` and
+  `runtara:workflow-runtime/runtime@0.1.0`, so both shared components are ready
+  for the first direct workflow composition smoke test.
 
 Implementation steps:
 
@@ -916,9 +926,12 @@ Current status:
 - The WIT component wrapper around the direct JSON stdlib helpers now builds as
   a standalone `workflow_stdlib.wasm` component under the `direct-component`
   feature.
-- Remaining work: implement/compose the runtime component, add Finish parity
-  fixtures against the Rust-generated path, and broaden graph lowering beyond
-  the single-entry Finish shape.
+- The runtime WIT component wrapper now builds as a standalone
+  `workflow_runtime.wasm` component under the `wasi` feature and delegates SDK
+  lifecycle calls to `runtara-sdk`.
+- Remaining work: compose the direct workflow with both shared components, add
+  Finish parity fixtures against the Rust-generated path, and broaden graph
+  lowering beyond the single-entry Finish shape.
 
 Implementation steps:
 
