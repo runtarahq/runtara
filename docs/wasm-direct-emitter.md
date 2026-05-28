@@ -33,8 +33,9 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   workflow stdlib/runtime interfaces, exports `wasi:cli/run@0.2.3`, writes
   `workflow.wasm`, `manifest.json`, `support-report.json`, `wit/world.wit`,
   and `workflow.wac`, and does not generate a Rust crate. The exported run entry
-  currently returns success without runtime `Finish` completion, so this is not
-  the final component-model runtime artifact.
+  now calls `runtara:workflow-runtime/runtime.complete` with a static empty JSON
+  payload. Finish output lowering from the workflow manifest is still pending,
+  so this is not the final component-model runtime artifact.
 - `runtara-workflow-wit` now defines the first checked-in workflow WIT
   contracts: `runtara:workflow-stdlib/json@0.1.0` for shared JSON semantics and
   `runtara:workflow-runtime/runtime@0.1.0` for SDK/runtime lifecycle calls.
@@ -821,15 +822,15 @@ Current status:
   stdlib/runtime component imports.
 - The current finish-only direct component proves the direct compile entry,
   sidecars, support-gating, artifact validation, canonical run export, and
-  "no generated Rust crate" behavior before runtime-complete `Finish` emission
-  lands.
+  "no generated Rust crate" behavior. The `run` dispatcher calls
+  `runtime.complete` with a static empty JSON payload.
 - `direct_wasm::component` emits `wit/world.wit` and `workflow.wac` sidecars
   that import `runtara:workflow-stdlib/json@0.1.0`,
   `runtara:workflow-runtime/runtime@0.1.0`, export `wasi:cli/run@0.2.3`,
   and statically compose stdlib, runtime, workflow logic, and required agents.
-- The current run entry is only a dispatcher stub. It must call runtime
-  completion/failure paths before direct mode can execute real workflow
-  semantics under the environment runner.
+- The current run entry still has placeholder `Finish` output semantics. It
+  must lower the real Finish mapping/output envelope before direct mode has
+  behavior parity under the environment runner.
 
 Implementation steps:
 
@@ -878,9 +879,10 @@ Current status:
 - Finish-only graphs can be compiled through the opt-in direct entry point into
   a component-format artifact and sidecar files without generating
   `Cargo.toml`, `src/lib.rs`, or any per-workflow Rust crate.
-- Remaining work: replace the current success-only run dispatcher with the
-  first runtime-complete `Finish` implementation through stdlib/runtime
-  imports.
+- The current run dispatcher calls `runtime.complete` and propagates the
+  `result<_, string>` tag back through `wasi:cli/run`.
+- Remaining work: replace the static empty JSON output with real Finish output
+  lowering through manifest data and stdlib/runtime imports.
 
 Implementation steps:
 

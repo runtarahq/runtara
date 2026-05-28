@@ -3,8 +3,8 @@
 //! Opt-in direct workflow compilation entry point.
 //!
 //! This is the first production-shaped entry point, not the PoC ABI. It emits
-//! a deterministic artifact envelope for finish-only graphs and writes the
-//! manifest/support sidecars that later component-model work will consume.
+//! a deterministic component artifact for finish-only graphs and writes the
+//! manifest/support sidecars that later graph-lowering work will consume.
 
 use std::borrow::Cow;
 use std::fmt;
@@ -15,9 +15,10 @@ use runtara_dsl::ExecutionGraph;
 use runtara_workflow_wit::{RUNTIME_WIT, STDLIB_WIT, WORKFLOW_WIT_VERSION};
 use sha2::{Digest, Sha256};
 use wasm_encoder::{
-    CodeSection, CustomSection, Encode, EntityType, ExportKind, ExportSection,
-    Function as WasmFunction, FunctionSection, Ieee32, Ieee64, ImportSection, Instruction,
-    MemorySection, MemoryType, Module, Section, TypeSection, ValType,
+    CodeSection, ConstExpr, CustomSection, DataSection, Encode, EntityType, ExportKind,
+    ExportSection, Function as WasmFunction, FunctionSection, GlobalSection, GlobalType, Ieee32,
+    Ieee64, ImportSection, Instruction, MemArg, MemorySection, MemoryType, Module, Section,
+    TypeSection, ValType,
 };
 use wit_component::{ComponentEncoder, StringEncoding, embed_component_metadata};
 use wit_parser::abi::WasmType;
@@ -55,6 +56,11 @@ world command {
     export run;
 }
 "#;
+
+const DIRECT_RUNTIME_RETPTR_OFFSET: i32 = 0;
+const DIRECT_STATIC_OUTPUT_OFFSET: i32 = 16;
+const DIRECT_STATIC_OUTPUT: &[u8] = b"{}";
+const DIRECT_HEAP_BASE: i32 = 4096;
 
 /// Input for the opt-in direct compiler.
 #[derive(Debug, Clone)]
@@ -164,8 +170,9 @@ impl From<std::io::Error> for DirectCompileError {
 /// This does not replace [`crate::compile_workflow`]. It is intentionally
 /// opt-in and currently supports only graphs accepted by
 /// [`analyze_direct_wasm_support`]. The emitted component-format artifact is a
-/// stable metadata envelope for the direct pipeline; executable component-model
-/// runtime dispatch will replace this envelope in the next phases.
+/// stable direct pipeline artifact with a canonical `wasi:cli/run` export and
+/// a first runtime completion call. Full `Finish` output lowering will replace
+/// the current static output payload in the next phases.
 pub fn compile_direct_workflow(
     input: DirectCompilationInput,
 ) -> Result<DirectCompilationResult, DirectCompileError> {
@@ -227,10 +234,11 @@ fn emit_finish_only_artifact(
         "artifactKind": "finish-only-run-component",
         "componentRunExport": "wasi:cli/run@0.2.3",
         "entryPointExecutable": true,
-        "runtimeExecutable": false,
+        "runtimeExecutable": true,
+        "finishOutputMode": "static-empty-json",
         "manifestVersion": DIRECT_WORKFLOW_MANIFEST_VERSION,
         "stepCount": manifest.feature_summary.total_steps,
-        "note": "direct compiler component with canonical run export; runtime Finish completion comes next"
+        "note": "direct compiler component with canonical run export and runtime.complete call; Finish output lowering comes next"
     }))?;
 
     let mut component = emit_finish_only_component()?;
@@ -251,7 +259,7 @@ fn emit_finish_only_artifact(
 
 fn emit_finish_only_component() -> Result<Vec<u8>, DirectCompileError> {
     let (resolve, world) = build_direct_component_resolve()?;
-    let mut core_module = emit_direct_core_module(&resolve, world);
+    let mut core_module = emit_direct_core_module(&resolve, world)?;
     embed_component_metadata(&mut core_module, &resolve, world, StringEncoding::UTF8)
         .map_err(component_error)?;
 
@@ -294,7 +302,10 @@ fn build_direct_component_resolve() -> Result<(Resolve, WorldId), DirectCompileE
     Ok((resolve, world))
 }
 
-fn emit_direct_core_module(resolve: &Resolve, world: WorldId) -> Vec<u8> {
+fn emit_direct_core_module(
+    resolve: &Resolve,
+    world: WorldId,
+) -> Result<Vec<u8>, DirectCompileError> {
     let mangling = ManglingAndAbi::Standard32;
     let world = &resolve.worlds[world];
 
@@ -302,6 +313,7 @@ fn emit_direct_core_module(resolve: &Resolve, world: WorldId) -> Vec<u8> {
     let mut type_count = 0;
     let mut imports = ImportSection::new();
     let mut imported_function_count = 0;
+    let mut import_indices = DirectCoreImportIndices::default();
     let mut functions = FunctionSection::new();
     let mut exports = ExportSection::new();
     let mut code = CodeSection::new();
@@ -315,9 +327,11 @@ fn emit_direct_core_module(resolve: &Resolve, world: WorldId) -> Vec<u8> {
                     mangling,
                     None,
                     function,
+                    imported_function_count,
                     &mut types,
                     &mut type_count,
                     &mut imports,
+                    &mut import_indices,
                 );
                 imported_function_count += 1;
             }
@@ -328,9 +342,11 @@ fn emit_direct_core_module(resolve: &Resolve, world: WorldId) -> Vec<u8> {
                         mangling,
                         Some(name),
                         function,
+                        imported_function_count,
                         &mut types,
                         &mut type_count,
                         &mut imports,
+                        &mut import_indices,
                     );
                     imported_function_count += 1;
                 }
@@ -338,6 +354,10 @@ fn emit_direct_core_module(resolve: &Resolve, world: WorldId) -> Vec<u8> {
             WorldItem::Type { .. } => {}
         }
     }
+
+    let runtime_complete_index = import_indices.runtime_complete.ok_or_else(|| {
+        DirectCompileError::Component("missing runtime.complete import in direct world".to_string())
+    })?;
 
     for (name, export) in &world.exports {
         match export {
@@ -354,6 +374,7 @@ fn emit_direct_core_module(resolve: &Resolve, world: WorldId) -> Vec<u8> {
                     &mut code,
                     imported_function_count,
                     &mut next_defined_function,
+                    runtime_complete_index,
                 );
             }
             WorldItem::Interface { id, .. } => {
@@ -370,6 +391,7 @@ fn emit_direct_core_module(resolve: &Resolve, world: WorldId) -> Vec<u8> {
                         &mut code,
                         imported_function_count,
                         &mut next_defined_function,
+                        runtime_complete_index,
                     );
                 }
             }
@@ -379,7 +401,7 @@ fn emit_direct_core_module(resolve: &Resolve, world: WorldId) -> Vec<u8> {
 
     let mut memories = MemorySection::new();
     memories.memory(MemoryType {
-        minimum: 0,
+        minimum: 1,
         maximum: None,
         memory64: false,
         shared: false,
@@ -387,6 +409,16 @@ fn emit_direct_core_module(resolve: &Resolve, world: WorldId) -> Vec<u8> {
     });
     let memory_name = resolve.wasm_export_name(mangling, WasmExport::Memory);
     exports.export(&memory_name, ExportKind::Memory, 0);
+
+    let mut globals = GlobalSection::new();
+    globals.global(
+        GlobalType {
+            val_type: ValType::I32,
+            mutable: true,
+            shared: false,
+        },
+        &ConstExpr::i32_const(DIRECT_HEAP_BASE),
+    );
 
     export_realloc(
         resolve,
@@ -411,6 +443,13 @@ fn emit_direct_core_module(resolve: &Resolve, world: WorldId) -> Vec<u8> {
         &mut next_defined_function,
     );
 
+    let mut data = DataSection::new();
+    data.active(
+        0,
+        &ConstExpr::i32_const(DIRECT_STATIC_OUTPUT_OFFSET),
+        DIRECT_STATIC_OUTPUT.iter().copied(),
+    );
+
     let mut module = Module::new();
     module.section(&types);
     if !imports.is_empty() {
@@ -418,19 +457,29 @@ fn emit_direct_core_module(resolve: &Resolve, world: WorldId) -> Vec<u8> {
     }
     module.section(&functions);
     module.section(&memories);
+    module.section(&globals);
     module.section(&exports);
     module.section(&code);
-    module.finish()
+    module.section(&data);
+    Ok(module.finish())
 }
 
+#[derive(Debug, Default)]
+struct DirectCoreImportIndices {
+    runtime_complete: Option<u32>,
+}
+
+#[allow(clippy::too_many_arguments)]
 fn import_core_function(
     resolve: &Resolve,
     mangling: ManglingAndAbi,
     interface: Option<&WorldKey>,
     function: &WitFunction,
+    function_index: u32,
     types: &mut TypeSection,
     type_count: &mut u32,
     imports: &mut ImportSection,
+    import_indices: &mut DirectCoreImportIndices,
 ) {
     let signature = resolve.wasm_signature(mangling.import_variant(), function);
     let type_index = push_core_type(types, type_count, &signature.params, &signature.results);
@@ -442,6 +491,10 @@ fn import_core_function(
         },
     );
     imports.import(&module, &name, EntityType::Function(type_index));
+
+    if is_runtime_complete_import(resolve, interface, function) {
+        import_indices.runtime_complete = Some(function_index);
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -457,6 +510,7 @@ fn export_core_function(
     code: &mut CodeSection,
     imported_function_count: u32,
     next_defined_function: &mut u32,
+    runtime_complete_index: u32,
 ) {
     let signature = resolve.wasm_signature(mangling.export_variant(), function);
     let type_index = push_core_type(types, type_count, &signature.params, &signature.results);
@@ -474,11 +528,11 @@ fn export_core_function(
     );
     exports.export(&export_name, ExportKind::Func, function_index);
 
-    let mut body = WasmFunction::new([]);
-    for result in &signature.results {
-        push_zero_value(&mut body, result);
-    }
-    body.instruction(&Instruction::End);
+    let body = if is_wasi_cli_run_export(resolve, interface, function) {
+        runtime_complete_run_function(runtime_complete_index)
+    } else {
+        zero_return_function(&signature.results)
+    };
     code.function(&body);
 
     let post_return_type = push_core_type(types, type_count, &signature.results, &[]);
@@ -526,8 +580,14 @@ fn export_realloc(
     let realloc_name = resolve.wasm_export_name(mangling, WasmExport::Realloc);
     exports.export(&realloc_name, ExportKind::Func, function_index);
 
-    let mut body = WasmFunction::new([]);
-    body.instruction(&Instruction::I32Const(0));
+    let mut body = WasmFunction::new([(1, ValType::I32)]);
+    body.instruction(&Instruction::GlobalGet(0));
+    body.instruction(&Instruction::LocalSet(4));
+    body.instruction(&Instruction::GlobalGet(0));
+    body.instruction(&Instruction::LocalGet(3));
+    body.instruction(&Instruction::I32Add);
+    body.instruction(&Instruction::GlobalSet(0));
+    body.instruction(&Instruction::LocalGet(4));
     body.instruction(&Instruction::End);
     code.function(&body);
 }
@@ -555,6 +615,31 @@ fn export_initialize(
     let mut body = WasmFunction::new([]);
     body.instruction(&Instruction::End);
     code.function(&body);
+}
+
+fn runtime_complete_run_function(runtime_complete_index: u32) -> WasmFunction {
+    let mut body = WasmFunction::new([]);
+    body.instruction(&Instruction::I32Const(DIRECT_STATIC_OUTPUT_OFFSET));
+    body.instruction(&Instruction::I32Const(DIRECT_STATIC_OUTPUT.len() as i32));
+    body.instruction(&Instruction::I32Const(DIRECT_RUNTIME_RETPTR_OFFSET));
+    body.instruction(&Instruction::Call(runtime_complete_index));
+    body.instruction(&Instruction::I32Const(DIRECT_RUNTIME_RETPTR_OFFSET));
+    body.instruction(&Instruction::I32Load8U(MemArg {
+        offset: 0,
+        align: 0,
+        memory_index: 0,
+    }));
+    body.instruction(&Instruction::End);
+    body
+}
+
+fn zero_return_function(results: &[WasmType]) -> WasmFunction {
+    let mut body = WasmFunction::new([]);
+    for result in results {
+        push_zero_value(&mut body, result);
+    }
+    body.instruction(&Instruction::End);
+    body
 }
 
 fn push_core_type(
@@ -596,6 +681,28 @@ fn push_zero_value(function: &mut WasmFunction, ty: &WasmType) {
             function.instruction(&Instruction::F64Const(Ieee64::new(0)));
         }
     };
+}
+
+fn is_runtime_complete_import(
+    resolve: &Resolve,
+    interface: Option<&WorldKey>,
+    function: &WitFunction,
+) -> bool {
+    function.name == "complete"
+        && interface
+            .map(|key| resolve.name_world_key(key))
+            .is_some_and(|name| name.starts_with("runtara:workflow-runtime/runtime"))
+}
+
+fn is_wasi_cli_run_export(
+    resolve: &Resolve,
+    interface: Option<&WorldKey>,
+    function: &WitFunction,
+) -> bool {
+    function.name == "run"
+        && interface
+            .map(|key| resolve.name_world_key(key))
+            .is_some_and(|name| name.starts_with("wasi:cli/run"))
 }
 
 fn append_component_custom_section(bytes: &mut Vec<u8>, name: &str, data: &[u8]) {
@@ -662,7 +769,9 @@ mod tests {
     use std::fs;
 
     use super::*;
-    use wasmparser::{ComponentExternalKind, Encoding, Parser, Payload, Validator};
+    use wasmparser::{
+        ComponentExternalKind, Encoding, Operator, Parser, Payload, TypeRef, Validator,
+    };
 
     fn fixture(name: &str) -> ExecutionGraph {
         let json = match name {
@@ -734,7 +843,8 @@ mod tests {
                     assert_eq!(abi["artifactKind"], "finish-only-run-component");
                     assert_eq!(abi["componentRunExport"], "wasi:cli/run@0.2.3");
                     assert_eq!(abi["entryPointExecutable"].as_bool(), Some(true));
-                    assert_eq!(abi["runtimeExecutable"].as_bool(), Some(false));
+                    assert_eq!(abi["runtimeExecutable"].as_bool(), Some(true));
+                    assert_eq!(abi["finishOutputMode"], "static-empty-json");
                     assert_eq!(
                         abi["manifestVersion"].as_u64(),
                         Some(u64::from(DIRECT_WORKFLOW_MANIFEST_VERSION))
@@ -815,6 +925,118 @@ mod tests {
         assert!(saw_stdlib_import, "stdlib interface import should exist");
         assert!(saw_runtime_import, "runtime interface import should exist");
         assert!(saw_run_export, "wasi:cli/run export should exist");
+    }
+
+    #[test]
+    fn direct_core_run_calls_runtime_complete() {
+        let (resolve, world) = build_direct_component_resolve().expect("resolve");
+        let world_ref = &resolve.worlds[world];
+        let (runtime_key, complete_function) = world_ref
+            .imports
+            .iter()
+            .find_map(|(key, item)| match item {
+                WorldItem::Interface { id, .. }
+                    if resolve
+                        .name_world_key(key)
+                        .starts_with("runtara:workflow-runtime/runtime") =>
+                {
+                    Some((key, &resolve.interfaces[*id].functions["complete"]))
+                }
+                _ => None,
+            })
+            .expect("runtime.complete import");
+        let complete_signature = resolve.wasm_signature(
+            ManglingAndAbi::Standard32.import_variant(),
+            complete_function,
+        );
+        assert_eq!(
+            complete_signature.params,
+            vec![WasmType::Pointer, WasmType::Length, WasmType::Pointer]
+        );
+        assert!(complete_signature.retptr);
+        assert!(complete_signature.results.is_empty());
+
+        let (module, name) = resolve.wasm_import_name(
+            ManglingAndAbi::Standard32,
+            WasmImport::Func {
+                interface: Some(runtime_key),
+                func: complete_function,
+            },
+        );
+        assert_eq!(module, "cm32p2|runtara:workflow-runtime/runtime@0.1");
+        assert_eq!(name, "complete");
+
+        let core = emit_direct_core_module(&resolve, world).expect("core module");
+        Validator::new()
+            .validate_all(&core)
+            .expect("core module validates");
+
+        let mut next_function_index = 0;
+        let mut runtime_complete_index = None;
+        let mut saw_static_output = false;
+        let mut saw_run_complete_call = false;
+        let mut saw_run_retptr_tag_load = false;
+        let mut code_body_index = 0;
+
+        for payload in Parser::new(0).parse_all(&core) {
+            match payload.expect("core wasm payload") {
+                Payload::ImportSection(reader) => {
+                    for import in reader.into_imports() {
+                        let import = import.expect("core import");
+                        if matches!(import.ty, TypeRef::Func(_)) {
+                            if import.module == module && import.name == name {
+                                runtime_complete_index = Some(next_function_index);
+                            }
+                            next_function_index += 1;
+                        }
+                    }
+                }
+                Payload::CodeSectionEntry(body) => {
+                    if code_body_index == 0 {
+                        let complete_index =
+                            runtime_complete_index.expect("runtime.complete import index");
+                        for operator in body.get_operators_reader().expect("operators").into_iter()
+                        {
+                            match operator.expect("operator") {
+                                Operator::Call { function_index }
+                                    if function_index == complete_index =>
+                                {
+                                    saw_run_complete_call = true;
+                                }
+                                Operator::I32Load8U { memarg }
+                                    if memarg.offset == 0 && memarg.memory == 0 =>
+                                {
+                                    saw_run_retptr_tag_load = true;
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                    code_body_index += 1;
+                }
+                Payload::DataSection(reader) => {
+                    for data in reader {
+                        let data = data.expect("data segment");
+                        saw_static_output |= data.data == DIRECT_STATIC_OUTPUT;
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        assert!(
+            runtime_complete_index.is_some(),
+            "runtime.complete import should be present"
+        );
+        assert!(saw_static_output, "static finish output should be present");
+        assert!(
+            saw_run_complete_call,
+            "run body should call runtime.complete"
+        );
+        assert!(
+            saw_run_retptr_tag_load,
+            "run body should return runtime.complete result tag"
+        );
     }
 
     #[test]
