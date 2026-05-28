@@ -32,7 +32,7 @@ use wit_parser::{
 use super::component::{DirectComponentArtifacts, emit_direct_component_artifacts};
 use super::manifest::{
     DIRECT_WORKFLOW_MANIFEST_VERSION, DirectAgentManifest, DirectEdgeManifest, DirectGraphManifest,
-    DirectManifestError, DirectWorkflowManifest, build_direct_workflow_manifest,
+    DirectManifestError, DirectWorkflowManifest, build_direct_workflow_manifest_with_agent_catalog,
 };
 use super::support::{
     DirectWorkflowSupportReport, UnsupportedWorkflowFeature, analyze_direct_wasm_support,
@@ -100,6 +100,11 @@ pub struct DirectCompilationInput {
     pub output_dir: PathBuf,
     /// Whether to emit generated-code-compatible step debug events.
     pub track_events: bool,
+    /// Runtime agent metadata catalog used to serialize capability validation.
+    ///
+    /// `None` falls back to the statically linked registry, matching the Rust
+    /// codegen compiler's transition behavior.
+    pub agent_catalog: Option<std::sync::Arc<runtara_dsl::agent_meta::AgentCatalog>>,
 }
 
 /// Result of opt-in direct workflow compilation.
@@ -303,7 +308,17 @@ pub fn compile_direct_workflow_composed(
 pub fn compile_direct_workflow(
     input: DirectCompilationInput,
 ) -> Result<DirectCompilationResult, DirectCompileError> {
-    let manifest = build_direct_workflow_manifest(&input.execution_graph)?;
+    let fallback_agent_catalog;
+    let agent_catalog = if let Some(agent_catalog) = input.agent_catalog.as_deref() {
+        Some(agent_catalog)
+    } else {
+        fallback_agent_catalog = runtara_dsl::agent_meta::AgentCatalog::from_agents(
+            runtara_agents::registry::get_agents(),
+        );
+        Some(&fallback_agent_catalog)
+    };
+    let manifest =
+        build_direct_workflow_manifest_with_agent_catalog(&input.execution_graph, agent_catalog)?;
     let support_report = analyze_direct_wasm_support(&input.execution_graph);
     if !support_report.supported {
         return Err(DirectCompileError::Unsupported {
@@ -1391,6 +1406,7 @@ struct DirectCoreImportIndices {
     stdlib_value_switch: Option<u32>,
     stdlib_group_by: Option<u32>,
     stdlib_agent_output: Option<u32>,
+    stdlib_agent_validate_input: Option<u32>,
     stdlib_agent_error: Option<u32>,
     stdlib_agent_debug_error: Option<u32>,
     stdlib_step_debug_start: Option<u32>,
@@ -1433,6 +1449,10 @@ impl DirectCoreImportIndices {
             stdlib_value_switch: require_import(self.stdlib_value_switch, "stdlib.value-switch")?,
             stdlib_group_by: require_import(self.stdlib_group_by, "stdlib.group-by")?,
             stdlib_agent_output: require_import(self.stdlib_agent_output, "stdlib.agent-output")?,
+            stdlib_agent_validate_input: require_import(
+                self.stdlib_agent_validate_input,
+                "stdlib.agent-validate-input",
+            )?,
             stdlib_agent_error: require_import(self.stdlib_agent_error, "stdlib.agent-error")?,
             stdlib_agent_debug_error: require_import(
                 self.stdlib_agent_debug_error,
@@ -1470,6 +1490,7 @@ struct DirectCoreFunctionIndices {
     stdlib_value_switch: u32,
     stdlib_group_by: u32,
     stdlib_agent_output: u32,
+    stdlib_agent_validate_input: u32,
     stdlib_agent_error: u32,
     stdlib_agent_debug_error: u32,
     stdlib_step_debug_start: u32,
@@ -1546,6 +1567,8 @@ fn import_core_function(
         import_indices.stdlib_group_by = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "agent-output") {
         import_indices.stdlib_agent_output = Some(function_index);
+    } else if is_stdlib_import(resolve, interface, function, "agent-validate-input") {
+        import_indices.stdlib_agent_validate_input = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "agent-error") {
         import_indices.stdlib_agent_error = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "agent-debug-error") {
@@ -2514,6 +2537,18 @@ fn emit_agent_plan(
         output_len_local,
     );
 
+    emit_agent_input_validation(
+        body,
+        indices,
+        static_data,
+        track_events,
+        agent_id,
+        output_ptr_local,
+        output_len_local,
+        route_ptr_local,
+        route_len_local,
+    );
+
     let invoke = indices
         .agent_invokes
         .get(agent_component_id)
@@ -2929,6 +2964,50 @@ fn emit_apply_mapping(
     load_retptr_list(body, output_ptr_local, output_len_local);
 }
 
+#[allow(clippy::too_many_arguments)]
+fn emit_agent_input_validation(
+    body: &mut WasmFunction,
+    indices: &DirectCoreFunctionIndices,
+    static_data: &DirectCoreStaticData,
+    track_events: bool,
+    agent_id: u32,
+    input_ptr_local: u32,
+    input_len_local: u32,
+    error_ptr_local: u32,
+    error_len_local: u32,
+) {
+    body.instruction(&Instruction::I32Const(agent_id as i32));
+    body.instruction(&Instruction::LocalGet(input_ptr_local));
+    body.instruction(&Instruction::LocalGet(input_len_local));
+    push_retptr_arg(body);
+    body.instruction(&Instruction::Call(indices.stdlib_agent_validate_input));
+    return_if_retptr_error(body);
+    load_retptr_list(body, error_ptr_local, error_len_local);
+
+    body.instruction(&Instruction::LocalGet(error_len_local));
+    body.instruction(&Instruction::I32Const(0));
+    body.instruction(&Instruction::I32Ne);
+    body.instruction(&Instruction::If(BlockType::Empty));
+    emit_agent_debug_error(
+        body,
+        indices,
+        static_data,
+        track_events,
+        agent_id,
+        error_ptr_local,
+        error_len_local,
+        input_ptr_local,
+        input_len_local,
+    );
+    body.instruction(&Instruction::LocalGet(error_ptr_local));
+    body.instruction(&Instruction::LocalGet(error_len_local));
+    push_retptr_arg(body);
+    body.instruction(&Instruction::Call(indices.runtime_fail));
+    body.instruction(&Instruction::I32Const(1));
+    body.instruction(&Instruction::Return);
+    body.instruction(&Instruction::End);
+}
+
 fn emit_agent_invoke(
     body: &mut WasmFunction,
     invoke: &DirectAgentInvokeImport,
@@ -3311,6 +3390,7 @@ mod tests {
     use std::fs;
     use std::process::Stdio;
 
+    use super::super::manifest::build_direct_workflow_manifest;
     use super::*;
     use wasmparser::{
         ComponentExternalKind, Encoding, Operator, Parser, Payload, TypeRef, Validator,
@@ -3494,6 +3574,7 @@ mod tests {
             execution_graph: fixture("simple"),
             output_dir: temp.path().to_path_buf(),
             track_events: false,
+            agent_catalog: None,
         })
         .expect("direct compile should succeed");
 
@@ -3529,6 +3610,7 @@ mod tests {
             execution_graph: fixture("simple"),
             output_dir: temp.path().to_path_buf(),
             track_events: false,
+            agent_catalog: None,
         })
         .expect("direct compile should succeed");
 
@@ -3602,6 +3684,7 @@ mod tests {
             execution_graph: fixture("simple"),
             output_dir: temp.path().to_path_buf(),
             track_events: false,
+            agent_catalog: None,
         })
         .expect("direct compile should succeed");
 
@@ -3650,6 +3733,7 @@ mod tests {
             execution_graph: fixture("conditional"),
             output_dir: temp.path().to_path_buf(),
             track_events: false,
+            agent_catalog: None,
         })
         .expect("direct conditional compile should succeed");
 
@@ -3676,6 +3760,7 @@ mod tests {
             execution_graph: fixture("conditional_nested"),
             output_dir: temp.path().to_path_buf(),
             track_events: false,
+            agent_catalog: None,
         })
         .expect("direct nested conditional compile should succeed");
 
@@ -3702,6 +3787,7 @@ mod tests {
             execution_graph: fixture("group_by"),
             output_dir: temp.path().to_path_buf(),
             track_events: false,
+            agent_catalog: None,
         })
         .expect("direct GroupBy compile should succeed");
 
@@ -3728,6 +3814,7 @@ mod tests {
             execution_graph: fixture("filter"),
             output_dir: temp.path().to_path_buf(),
             track_events: false,
+            agent_catalog: None,
         })
         .expect("direct Filter compile should succeed");
 
@@ -3754,6 +3841,7 @@ mod tests {
             execution_graph: fixture("switch_value"),
             output_dir: temp.path().to_path_buf(),
             track_events: false,
+            agent_catalog: None,
         })
         .expect("direct value Switch compile should succeed");
 
@@ -3780,6 +3868,7 @@ mod tests {
             execution_graph: fixture("switch_routing"),
             output_dir: temp.path().to_path_buf(),
             track_events: false,
+            agent_catalog: None,
         })
         .expect("direct routing Switch compile should succeed");
 
@@ -3806,6 +3895,7 @@ mod tests {
             execution_graph: fixture("log"),
             output_dir: temp.path().to_path_buf(),
             track_events: false,
+            agent_catalog: None,
         })
         .expect("direct Log compile should succeed");
 
@@ -3832,6 +3922,7 @@ mod tests {
             execution_graph: fixture("error"),
             output_dir: temp.path().to_path_buf(),
             track_events: false,
+            agent_catalog: None,
         })
         .expect("direct Error compile should succeed");
 
@@ -3858,6 +3949,7 @@ mod tests {
             execution_graph: fixture("edge_condition"),
             output_dir: temp.path().to_path_buf(),
             track_events: false,
+            agent_catalog: None,
         })
         .expect("direct edge-condition compile should succeed");
 
@@ -3885,6 +3977,7 @@ mod tests {
             execution_graph: non_durable_agent_graph(),
             output_dir: temp.path().to_path_buf(),
             track_events: false,
+            agent_catalog: None,
         })
         .expect("direct Agent compile should succeed");
 
@@ -3917,6 +4010,7 @@ mod tests {
             execution_graph: graph,
             output_dir: temp.path().to_path_buf(),
             track_events: false,
+            agent_catalog: None,
         })
         .expect("direct next edge-condition compile should succeed");
 
@@ -4457,22 +4551,35 @@ mod tests {
         );
         let mut saw_agent_invoke = false;
         let mut saw_agent_output = false;
+        let mut saw_agent_validate_input = false;
         let mut saw_agent_error = false;
         let mut saw_agent_debug_error = false;
         let mut saw_runtime_fail = false;
         let mut saw_agent_ok_ptr_load = false;
         let mut saw_agent_ok_len_load = false;
         let mut saw_agent_retry_after_value_load = false;
+        let mut agent_invoke_index = None;
+        let mut agent_validate_input_index = None;
+        let mut saw_validate_before_invoke = false;
         let mut code_body_index = 0;
+        let mut next_function_index = 0;
         for payload in Parser::new(0).parse_all(&core) {
             match payload.expect("core wasm payload") {
                 Payload::ImportSection(reader) => {
                     for import in reader.into_imports() {
                         let import = import.expect("core import");
-                        saw_agent_invoke |=
-                            import.module == actual_module && import.name == actual_name;
+                        if import.module == actual_module && import.name == actual_name {
+                            saw_agent_invoke = true;
+                            agent_invoke_index = Some(next_function_index);
+                        }
                         saw_agent_output |= import.module.contains("runtara:workflow-stdlib/json")
                             && import.name == "agent-output";
+                        if import.module.contains("runtara:workflow-stdlib/json")
+                            && import.name == "agent-validate-input"
+                        {
+                            saw_agent_validate_input = true;
+                            agent_validate_input_index = Some(next_function_index);
+                        }
                         saw_agent_error |= import.module.contains("runtara:workflow-stdlib/json")
                             && import.name == "agent-error";
                         saw_agent_debug_error |=
@@ -4481,13 +4588,27 @@ mod tests {
                         saw_runtime_fail |=
                             import.module.contains("runtara:workflow-runtime/runtime")
                                 && import.name == "fail";
+                        if matches!(import.ty, TypeRef::Func(_)) {
+                            next_function_index += 1;
+                        }
                     }
                 }
                 Payload::CodeSectionEntry(body) => {
                     if code_body_index == 0 {
+                        let mut saw_validate_call = false;
                         for operator in body.get_operators_reader().expect("operators").into_iter()
                         {
                             match operator.expect("operator") {
+                                Operator::Call { function_index }
+                                    if Some(function_index) == agent_validate_input_index =>
+                                {
+                                    saw_validate_call = true;
+                                }
+                                Operator::Call { function_index }
+                                    if Some(function_index) == agent_invoke_index =>
+                                {
+                                    saw_validate_before_invoke = saw_validate_call;
+                                }
                                 Operator::I32Load { memarg }
                                     if memarg.offset == DIRECT_AGENT_RESULT_OK_PTR_OFFSET =>
                                 {
@@ -4519,6 +4640,10 @@ mod tests {
             "core should import Agent capabilities.invoke"
         );
         assert!(saw_agent_output, "core should import stdlib.agent-output");
+        assert!(
+            saw_agent_validate_input,
+            "core should import stdlib.agent-validate-input"
+        );
         assert!(saw_agent_error, "core should import stdlib.agent-error");
         assert!(
             saw_agent_debug_error,
@@ -4536,6 +4661,10 @@ mod tests {
         assert!(
             saw_agent_retry_after_value_load,
             "Agent error path should pass retry-after-ms from error-info"
+        );
+        assert!(
+            saw_validate_before_invoke,
+            "Agent input validation should run before capabilities.invoke"
         );
     }
 
@@ -5852,6 +5981,7 @@ mod tests {
             execution_graph: fixture("simple"),
             output_dir: temp.path().to_path_buf(),
             track_events: false,
+            agent_catalog: None,
         })
         .expect("direct compile should succeed");
 
@@ -5886,6 +6016,7 @@ mod tests {
             execution_graph: fixture("simple"),
             output_dir: temp.path().to_path_buf(),
             track_events: false,
+            agent_catalog: None,
         })
         .expect("direct compile should succeed");
 
@@ -5933,6 +6064,7 @@ mod tests {
                 execution_graph: fixture("simple"),
                 output_dir: temp.path().to_path_buf(),
                 track_events: false,
+                agent_catalog: None,
             },
             &components_dir,
         )
@@ -5966,6 +6098,7 @@ mod tests {
             execution_graph: fixture("transform"),
             output_dir: temp.path().to_path_buf(),
             track_events: false,
+            agent_catalog: None,
         })
         .expect_err("agent workflow is not supported yet");
 

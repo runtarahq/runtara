@@ -205,6 +205,12 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   envelope used by component codegen, wraps it in the current generated Agent
   step failure string, emits Agent `step_debug_end` failure payloads when
   `track_events` is enabled, calls `runtime.fail`, and returns failed
+  `wasi:cli/run`.
+- Agent input validation now serializes required capability fields from the
+  Agent catalog into the direct manifest. The direct core validates resolved
+  Agent inputs before `capabilities.invoke`, emits the same structured
+  validation JSON used by generated Rust, emits Agent failure debug payloads
+  when `track_events` is enabled, calls `runtime.fail`, and returns failed
   `wasi:cli/run`. Durable Agent calls, connection envelopes, retry/timeout
   policy, compensation, and on-error routing remain rejected.
 
@@ -1323,6 +1329,10 @@ Current status:
   `Step <id> failed: Agent <agent>::<capability>: <json>`, matching current
   Agent failure formatting. `agent-debug-error` emits the generated
   `{"_error": true, "error": ...}` debug-end output shape.
+- The direct manifest now records required Agent capability inputs from the
+  compile-time Agent catalog, and `agent-validate-input` validates resolved
+  inputs before dispatch. Missing/null fields return the generated Rust
+  validation JSON shape and reuse the Agent debug-end failure path.
 
 Implementation steps:
 
@@ -1337,7 +1347,7 @@ Implementation steps:
    - success ABI result layout: done for the current indirect
      `[pointer, pointer]` invoke lowering;
    - `error-info` to current Agent failure string/debug payload: done;
-   - agent input validation: pending parity with generated Rust validation;
+   - agent input validation: done for required-field missing/null checks;
    - connection resolution/envelope: pending;
    - durable retry/timeout behavior: pending.
 5. Implement `onError` routing for agent failures.

@@ -72,6 +72,11 @@ interface json {
         output: list<u8>,
     ) -> result<list<u8>, string>;
 
+    agent-validate-input: func(
+        agent-id: u32,
+        input: list<u8>,
+    ) -> result<list<u8>, string>;
+
     agent-error: func(
         agent-id: u32,
         code: string,

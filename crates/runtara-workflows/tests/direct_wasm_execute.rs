@@ -473,6 +473,7 @@ fn run_direct_workflow_capture(
             execution_graph: graph,
             output_dir: temp.path().to_path_buf(),
             track_events,
+            agent_catalog: None,
         },
         components_dir,
     )

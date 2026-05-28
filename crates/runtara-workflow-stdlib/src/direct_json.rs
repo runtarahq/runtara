@@ -14,6 +14,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::Deserialize;
 use serde_json::{Map, Value};
 
+use crate::agent_input_validation::{
+    AgentInputMissingReason, AgentInputValidationError, MissingAgentInput,
+};
 use crate::conditions::{is_truthy, to_number, values_equal};
 use crate::switch_helpers::process_switch_output;
 use crate::template::render_template;
@@ -181,6 +184,51 @@ impl DirectJsonManifest {
         );
         serde_json::to_vec(&Value::Object(steps))
             .map_err(|err| format!("failed to serialize Agent steps context: {err}"))
+    }
+
+    /// Validate resolved Agent inputs and return a generated-code-compatible
+    /// validation error string when required fields are missing/null.
+    pub fn agent_validate_input(&self, agent_id: u32, input: &[u8]) -> Result<Vec<u8>, String> {
+        let input: Value = serde_json::from_slice(input)
+            .map_err(|err| format!("failed to parse Agent input: {err}"))?;
+        let agent = self
+            .agents
+            .get(&agent_id)
+            .ok_or_else(|| format!("unknown direct Agent id {agent_id}"))?;
+        let input_obj = input.as_object();
+        let mut missing_inputs = Vec::new();
+
+        for field in &agent.required_inputs {
+            let value = input_obj.and_then(|obj| obj.get(field.name.as_str()));
+            let reason = match value {
+                None => Some(AgentInputMissingReason::NotProvided),
+                Some(Value::Null) => Some(AgentInputMissingReason::WasNull),
+                Some(_) => None,
+            };
+
+            if let Some(reason) = reason {
+                missing_inputs.push(MissingAgentInput {
+                    name: field.name.clone(),
+                    field_type: field.field_type.clone(),
+                    description: field.description.clone(),
+                    reason,
+                });
+            }
+        }
+
+        if missing_inputs.is_empty() {
+            Ok(Vec::new())
+        } else {
+            Ok(AgentInputValidationError {
+                step_id: agent.step_id.clone(),
+                step_name: agent.name.clone(),
+                agent_id: agent.agent_id.clone(),
+                capability_id: agent.capability_id.clone(),
+                missing_inputs,
+            }
+            .to_json_string()
+            .into_bytes())
+        }
     }
 
     /// Convert a WIT `error-info` into the current Agent failure string shape.
@@ -792,6 +840,7 @@ fn collect_graph_manifest(
                     agent_id: agent.agent_id.clone(),
                     capability_id: agent.capability_id.clone(),
                     input_mapping_id: agent.input_mapping_id,
+                    required_inputs: agent.required_inputs.clone(),
                 },
             )
             .is_some()
@@ -1789,6 +1838,8 @@ struct AgentWire {
     agent_id: String,
     capability_id: String,
     input_mapping_id: u32,
+    #[serde(default)]
+    required_inputs: Vec<DirectJsonRequiredAgentInput>,
 }
 
 #[derive(Debug, Clone)]
@@ -1854,6 +1905,16 @@ struct DirectJsonAgent {
     agent_id: String,
     capability_id: String,
     input_mapping_id: u32,
+    required_inputs: Vec<DirectJsonRequiredAgentInput>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DirectJsonRequiredAgentInput {
+    name: String,
+    field_type: String,
+    #[serde(default)]
+    description: Option<String>,
 }
 
 #[cfg(test)]
@@ -1979,6 +2040,13 @@ mod tests {
     }
 
     fn agent_manifest(input_mapping: Value) -> Vec<u8> {
+        agent_manifest_with_required_inputs(input_mapping, json!([]))
+    }
+
+    fn agent_manifest_with_required_inputs(
+        input_mapping: Value,
+        required_inputs: Value,
+    ) -> Vec<u8> {
         serde_json::to_vec(&json!({
             "graph": {
                 "mappings": [{
@@ -1996,7 +2064,8 @@ mod tests {
                     "purpose": "agent.config",
                     "agentId": "utils",
                     "capabilityId": "normalize",
-                    "inputMappingId": 0
+                    "inputMappingId": 0,
+                    "requiredInputs": required_inputs
                 }],
                 "steps": [{
                     "id": "agent",
@@ -2562,6 +2631,62 @@ mod tests {
         assert_eq!(
             steps["agent"]["outputs"],
             json!({ "value": "out", "ok": true })
+        );
+    }
+
+    #[test]
+    fn agent_validate_input_accepts_present_required_fields() {
+        let manifest = DirectJsonManifest::parse(&agent_manifest_with_required_inputs(
+            json!({}),
+            json!([{
+                "name": "value",
+                "fieldType": "string",
+                "description": "Value to normalize"
+            }]),
+        ))
+        .expect("manifest");
+
+        let validation = manifest
+            .agent_validate_input(0, br#"{"value":"present"}"#)
+            .expect("validation");
+
+        assert!(validation.is_empty());
+    }
+
+    #[test]
+    fn agent_validate_input_returns_generated_json_error() {
+        let manifest = DirectJsonManifest::parse(&agent_manifest_with_required_inputs(
+            json!({}),
+            json!([
+                {
+                    "name": "value",
+                    "fieldType": "string",
+                    "description": "Value to normalize"
+                },
+                {
+                    "name": "other",
+                    "fieldType": "number"
+                }
+            ]),
+        ))
+        .expect("manifest");
+
+        let validation = manifest
+            .agent_validate_input(0, br#"{"value":null}"#)
+            .expect("validation");
+        let validation: Value = serde_json::from_slice(&validation).expect("validation json");
+
+        assert_eq!(validation["code"], json!("STEP_REQUIRED_INPUT_NULL"));
+        assert_eq!(validation["stepId"], json!("agent"));
+        assert_eq!(validation["stepName"], json!("Normalize Data"));
+        assert_eq!(validation["stepType"], json!("Agent"));
+        assert_eq!(validation["agentId"], json!("utils"));
+        assert_eq!(validation["capabilityId"], json!("normalize"));
+        assert_eq!(validation["missingInputs"][0]["field"], json!("value"));
+        assert_eq!(validation["missingInputs"][0]["reason"], json!("was null"));
+        assert_eq!(
+            validation["missingInputs"][1]["code"],
+            json!("STEP_REQUIRED_INPUT_MISSING")
         );
     }
 

@@ -6,6 +6,7 @@ use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::fmt;
 
+use runtara_dsl::agent_meta::AgentCatalog;
 use runtara_dsl::{ExecutionGraph, ExecutionPlanEdge, Step};
 use sha2::{Digest, Sha256};
 
@@ -270,6 +271,9 @@ pub struct DirectAgentManifest {
     pub connection_id: Option<String>,
     /// Manifest-wide mapping id for Agent inputs.
     pub input_mapping_id: u32,
+    /// Required capability inputs validated after runtime references resolve.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub required_inputs: Vec<DirectAgentRequiredInputManifest>,
     /// Maximum retry attempts configured on the Agent step.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_retries: Option<u32>,
@@ -279,6 +283,19 @@ pub struct DirectAgentManifest {
     /// Step timeout configured on the Agent step.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timeout: Option<u64>,
+}
+
+/// Required Agent capability input metadata used by direct runtime validation.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DirectAgentRequiredInputManifest {
+    /// Field name.
+    pub name: String,
+    /// Field type for diagnostics.
+    pub field_type: String,
+    /// Optional field description.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
 }
 
 /// Deterministic manifest for one execution-plan edge.
@@ -328,6 +345,14 @@ impl std::error::Error for DirectManifestError {}
 pub fn build_direct_workflow_manifest(
     graph: &ExecutionGraph,
 ) -> Result<DirectWorkflowManifest, DirectManifestError> {
+    build_direct_workflow_manifest_with_agent_catalog(graph, None)
+}
+
+/// Build a deterministic direct workflow manifest using an optional Agent catalog.
+pub fn build_direct_workflow_manifest_with_agent_catalog(
+    graph: &ExecutionGraph,
+    agent_catalog: Option<&AgentCatalog>,
+) -> Result<DirectWorkflowManifest, DirectManifestError> {
     let feature_summary = analyze_workflow_features(graph);
     let root_durable = graph.durable.unwrap_or(true);
     let mut state = DirectManifestBuildState::default();
@@ -335,7 +360,7 @@ pub fn build_direct_workflow_manifest(
         version: DIRECT_WORKFLOW_MANIFEST_VERSION,
         template_major_version: TEMPLATE_MAJOR_VERSION.to_string(),
         checksum: None,
-        graph: graph_manifest(graph, root_durable, &mut state)?,
+        graph: graph_manifest(graph, root_durable, &mut state, agent_catalog)?,
         feature_summary,
     };
 
@@ -410,6 +435,7 @@ fn graph_manifest(
     graph: &ExecutionGraph,
     inherited_durable: bool,
     state: &mut DirectManifestBuildState,
+    agent_catalog: Option<&AgentCatalog>,
 ) -> Result<DirectGraphManifest, DirectManifestError> {
     let durable = graph.durable.unwrap_or(inherited_durable);
     let mut step_values = graph.steps.values().collect::<Vec<_>>();
@@ -418,7 +444,7 @@ fn graph_manifest(
     let mut collections = DirectGraphManifestCollections::default();
     let steps = step_values
         .into_iter()
-        .map(|step| step_manifest(step, durable, state, &mut collections))
+        .map(|step| step_manifest(step, durable, state, &mut collections, agent_catalog))
         .collect::<Result<Vec<_>, _>>()?;
 
     collections
@@ -491,6 +517,7 @@ fn step_manifest(
     inherited_durable: bool,
     state: &mut DirectManifestBuildState,
     collections: &mut DirectGraphManifestCollections,
+    agent_catalog: Option<&AgentCatalog>,
 ) -> Result<DirectStepManifest, DirectManifestError> {
     let mut nested_graphs = Vec::new();
     match step {
@@ -521,7 +548,12 @@ fn step_manifest(
         Step::Split(step) => {
             nested_graphs.push(DirectNestedGraphManifest {
                 role: "split.subgraph".to_string(),
-                graph: Box::new(graph_manifest(&step.subgraph, inherited_durable, state)?),
+                graph: Box::new(graph_manifest(
+                    &step.subgraph,
+                    inherited_durable,
+                    state,
+                    agent_catalog,
+                )?),
             });
         }
         Step::Switch(step) => {
@@ -543,7 +575,12 @@ fn step_manifest(
         Step::While(step) => {
             nested_graphs.push(DirectNestedGraphManifest {
                 role: "while.subgraph".to_string(),
-                graph: Box::new(graph_manifest(&step.subgraph, inherited_durable, state)?),
+                graph: Box::new(graph_manifest(
+                    &step.subgraph,
+                    inherited_durable,
+                    state,
+                    agent_catalog,
+                )?),
             });
         }
         Step::Filter(step) => {
@@ -611,6 +648,11 @@ fn step_manifest(
                 capability_id: step.capability_id.clone(),
                 connection_id: step.connection_id.clone(),
                 input_mapping_id,
+                required_inputs: required_agent_inputs(
+                    agent_catalog,
+                    &canonicalize_direct_agent_id(&step.agent_id),
+                    &step.capability_id,
+                ),
                 max_retries: step.max_retries,
                 retry_delay: step.retry_delay,
                 timeout: step.timeout,
@@ -620,7 +662,12 @@ fn step_manifest(
             if let Some(on_wait) = &step.on_wait {
                 nested_graphs.push(DirectNestedGraphManifest {
                     role: "waitForSignal.onWait".to_string(),
-                    graph: Box::new(graph_manifest(on_wait, inherited_durable, state)?),
+                    graph: Box::new(graph_manifest(
+                        on_wait,
+                        inherited_durable,
+                        state,
+                        agent_catalog,
+                    )?),
                 });
             }
         }
@@ -701,6 +748,28 @@ fn canonical_json<T: serde::Serialize>(
 
 fn canonicalize_direct_agent_id(agent_id: &str) -> String {
     agent_id.to_lowercase().replace('_', "-")
+}
+
+fn required_agent_inputs(
+    agent_catalog: Option<&AgentCatalog>,
+    agent_id: &str,
+    capability_id: &str,
+) -> Vec<DirectAgentRequiredInputManifest> {
+    agent_catalog
+        .and_then(|catalog| catalog.capability(agent_id, capability_id))
+        .map(|capability| {
+            capability
+                .inputs
+                .iter()
+                .filter(|field| field.required && field.name != "_connection")
+                .map(|field| DirectAgentRequiredInputManifest {
+                    name: field.name.clone(),
+                    field_type: field.type_name.clone(),
+                    description: field.description.clone(),
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn sort_json(value: serde_json::Value) -> serde_json::Value {
@@ -962,6 +1031,29 @@ mod tests {
         assert_eq!(
             mapping.value["mapping"]["value"]["output_field"],
             "$.input_field"
+        );
+    }
+
+    #[test]
+    fn manifest_serializes_agent_required_inputs_from_catalog() {
+        let catalog = AgentCatalog::from_agents(runtara_agents::registry::get_agents());
+        let manifest = build_direct_workflow_manifest_with_agent_catalog(
+            &fixture("transform"),
+            Some(&catalog),
+        )
+        .expect("manifest");
+
+        let required_inputs = &manifest.graph.agents[0].required_inputs;
+        assert!(
+            required_inputs
+                .iter()
+                .any(|input| input.name == "source_data")
+        );
+        assert!(required_inputs.iter().any(|input| input.name == "mappings"));
+        assert!(
+            required_inputs
+                .iter()
+                .all(|input| !input.field_type.is_empty())
         );
     }
 
