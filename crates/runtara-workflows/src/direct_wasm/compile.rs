@@ -6952,6 +6952,33 @@ mod tests {
     }
 
     #[test]
+    fn direct_compile_supports_simple_while_graph() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let result = compile_direct_workflow(DirectCompilationInput {
+            workflow_id: "while".to_string(),
+            version: 1,
+            execution_graph: fixture("while_simple"),
+            output_dir: temp.path().to_path_buf(),
+            track_events: false,
+            agent_catalog: None,
+        })
+        .expect("direct While compile should succeed");
+
+        let wasm = fs::read(&result.wasm_path).expect("wasm");
+        Validator::new()
+            .validate_all(&wasm)
+            .expect("direct While artifact should validate");
+        assert!(result.support_report.supported);
+        assert_eq!(result.support_report.unsupported, vec![]);
+
+        let manifest: DirectWorkflowManifest =
+            serde_json::from_slice(&fs::read(&result.manifest_path).expect("manifest"))
+                .expect("manifest json");
+        assert_eq!(manifest.graph.whiles.len(), 1);
+        assert_eq!(manifest.graph.whiles[0].step_id, "loop");
+    }
+
+    #[test]
     fn direct_compile_supports_split_schema_validation_graph() {
         let temp = tempfile::tempdir().expect("tempdir");
         let result = compile_direct_workflow(DirectCompilationInput {

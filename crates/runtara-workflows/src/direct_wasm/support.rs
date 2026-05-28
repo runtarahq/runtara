@@ -4,7 +4,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use runtara_dsl::{AgentStep, DelayStep, ExecutionGraph, SplitStep, Step};
+use runtara_dsl::{AgentStep, DelayStep, ExecutionGraph, SplitStep, Step, WhileStep};
 
 use crate::workflow_features::{WorkflowFeatureSummary, analyze_workflow_features};
 
@@ -292,6 +292,17 @@ fn supports_direct_control_step_inner(
                     include_on_error,
                 )
         }
+        Step::While(step) if supports_while_step_baseline(step) => {
+            supports_direct_control_graph(&step.subgraph)
+                && supports_normal_flow_step(
+                    graph,
+                    step_id,
+                    reachable,
+                    used_edges,
+                    stack,
+                    include_on_error,
+                )
+        }
         Step::Delay(step) if supports_delay_step_baseline(graph, step) => {
             supports_normal_flow_step(
                 graph,
@@ -345,6 +356,20 @@ fn supports_split_step_baseline(step: &SplitStep) -> bool {
                 && config.retry_delay.is_none()
                 && config.timeout.is_none()
         })
+}
+
+fn supports_while_step_baseline(step: &WhileStep) -> bool {
+    let config = step.config.as_ref();
+    !step.breakpoint.unwrap_or(false)
+        && config.is_none_or(|config| config.timeout.is_none())
+        && !graph_contains_loop_step(&step.subgraph)
+}
+
+fn graph_contains_loop_step(graph: &ExecutionGraph) -> bool {
+    graph
+        .steps
+        .values()
+        .any(|step| matches!(step, Step::Split(_) | Step::While(_)))
 }
 
 fn supports_normal_flow_step(
@@ -705,6 +730,9 @@ fn collect_step_support(
             }
             collect_graph_support(&split.subgraph, unsupported);
         }
+        Step::While(while_step) if supports_while_step_baseline(while_step) => {
+            collect_graph_support(&while_step.subgraph, unsupported);
+        }
         Step::Switch(step)
             if step
                 .config
@@ -731,12 +759,7 @@ fn collect_step_support(
             unsupported,
         ),
         Step::While(while_step) => {
-            unsupported_step(
-                step,
-                "while",
-                "While steps require loop lowering and stdlib condition evaluation",
-                unsupported,
-            );
+            collect_while_step_unsupported(while_step, unsupported);
             collect_graph_support(&while_step.subgraph, unsupported);
         }
         Step::Log(_) => unsupported_step(
@@ -876,6 +899,44 @@ fn collect_split_step_unsupported(
                 "Split timeout requires direct timeout enforcement",
             );
         }
+    }
+}
+
+fn collect_while_step_unsupported(
+    step: &WhileStep,
+    unsupported: &mut Vec<UnsupportedWorkflowFeature>,
+) {
+    let mut push = |feature: &str, reason: &str| {
+        unsupported.push(UnsupportedWorkflowFeature {
+            step_id: Some(step.id.clone()),
+            step_type: Some("While".to_string()),
+            feature: feature.to_string(),
+            reason: reason.to_string(),
+        });
+    };
+
+    if step.breakpoint.unwrap_or(false) {
+        push(
+            "while-breakpoint",
+            "While breakpoints require a direct runtime checkpoint/pause ABI",
+        );
+    }
+    if step
+        .config
+        .as_ref()
+        .and_then(|config| config.timeout)
+        .is_some()
+    {
+        push(
+            "while-timeout",
+            "While timeout requires direct timeout enforcement",
+        );
+    }
+    if graph_contains_loop_step(&step.subgraph) {
+        push(
+            "while-nested-loop",
+            "While subgraphs containing Split or While need reentrant direct loop locals",
+        );
     }
 }
 
@@ -1426,17 +1487,37 @@ mod tests {
     }
 
     #[test]
-    fn while_remains_gated_until_lifecycle_lowering_is_complete() {
+    fn while_normal_flow_is_supported() {
         let report = analyze_direct_wasm_support(&fixture("while_simple"));
 
+        assert!(report.supported, "{:?}", report.unsupported);
+        assert!(report.unsupported.is_empty());
+    }
+
+    #[test]
+    fn while_breakpoint_timeout_and_nested_loops_are_rejected() {
+        let mut graph = fixture("while_simple");
+        let nested_loop_graph = fixture("split");
+        let Some(Step::While(while_step)) = graph.steps.get_mut("loop") else {
+            panic!("expected While fixture step");
+        };
+        while_step.breakpoint = Some(true);
+        let config = while_step.config.as_mut().expect("while fixture config");
+        config.timeout = Some(1_000);
+        *while_step.subgraph = nested_loop_graph;
+
+        let report = analyze_direct_wasm_support(&graph);
+
         assert!(!report.supported);
-        assert!(
-            report.unsupported.iter().any(|unsupported| {
-                unsupported.step_id.as_deref() == Some("loop") && unsupported.feature == "while"
-            }),
-            "{:?}",
-            report.unsupported
-        );
+        for feature in ["while-breakpoint", "while-timeout", "while-nested-loop"] {
+            assert!(
+                report.unsupported.iter().any(|unsupported| {
+                    unsupported.step_id.as_deref() == Some("loop") && unsupported.feature == feature
+                }),
+                "{feature}: {:?}",
+                report.unsupported
+            );
+        }
     }
 
     #[test]
