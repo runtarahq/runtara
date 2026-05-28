@@ -71,6 +71,11 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   first finish-only direct compile entry that returns the final static
   `workflow.wasm` artifact shape while retaining `workflow-logic.wasm` for
   debugging and manifest validation.
+- `tests/direct_wasm_execute.rs` now provides a gated direct execution smoke
+  test. With `RUNTARA_RUN_DIRECT_WASM_E2E=1`, it compiles and statically
+  composes the simple `Finish` fixture, runs the final `workflow.wasm` under
+  `wasmtime run --wasi http --wasi inherit-network`, and asserts the fake SDK
+  receives the expected mapped completion payload.
 
 ## Final Goal
 
@@ -954,9 +959,11 @@ Current status:
   logic-only compilation keeps `wasm_path == workflow_logic_wasm_path`, while
   composition updates `wasm_path` to the final `workflow.wasm` and records
   composed size/checksum metadata.
-- Remaining work: add Finish parity fixtures against the Rust-generated path,
-  run the composed artifact under the current environment runner shape, and
-  broaden graph lowering beyond the single-entry Finish shape.
+- A gated direct execution test now runs the composed finish-only artifact
+  through the current environment runner shape and verifies the SDK completion
+  payload.
+- Remaining work: add Finish parity fixtures against the Rust-generated path
+  and broaden graph lowering beyond the single-entry Finish shape.
 
 Implementation steps:
 
