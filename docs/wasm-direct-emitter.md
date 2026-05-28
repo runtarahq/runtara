@@ -242,10 +242,11 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   the generated Rust retry defaults (`maxRetries` override, otherwise 3 or 5
   for rate-limited capabilities), retries only typed WIT Agent errors with
   `error-info.retryable = true`, records retry attempts through
-  `runtime.record-retry-attempt` with the raw Agent error JSON payload, and
-  checkpoints successful output. Public support remains gated until
-  backoff/sleep, timeout, pause/cancel/shutdown acknowledgement, and
-  crash/resume parity are covered.
+  `runtime.record-retry-attempt` with the raw Agent error JSON payload, lowers
+  typed `retryAfterMs` hints to checkpointed `runtime.durable-sleep-checkpoint`
+  calls, and checkpoints successful output. Public support remains gated until
+  generic exponential backoff, full rate-limit budget semantics, timeout,
+  pause/cancel/shutdown acknowledgement, and crash/resume parity are covered.
 
 ## Final Goal
 
@@ -726,6 +727,25 @@ durable-sleep-checkpoint: func(
 ) -> result<_, string>;
 ```
 
+Current direct stdlib Agent durability helpers:
+
+```wit
+agent-cache-key: func(agent-id: u32, source: list<u8>) -> result<list<u8>, string>;
+agent-retry-sleep-key: func(
+  checkpoint-id: string,
+  attempt-number: u32,
+) -> result<list<u8>, string>;
+agent-error-info: func(
+  code: string,
+  message: string,
+  category: string,
+  severity: string,
+  retryable: bool,
+  retry-after-ms: option<u64>,
+  attributes: option<string>,
+) -> result<list<u8>, string>;
+```
+
 This is intentionally still a low-level runtime ABI, not a dynamic-linking
 scheme. The direct emitter should compile workflow-specific control flow into
 the core module and call these statically composed runtime exports at durable
@@ -1013,8 +1033,9 @@ Current status:
   `direct-component` implementation for the JSON stdlib surface. Implemented
   functions are `init-manifest`, `build-source`, `apply-mapping`,
   `eval-condition`, `process-switch`, `value-switch`, `filter`, `log-event`,
-  `log`, `error-event`, `error`, `group-by`, `step-debug-start`, and
-  `step-debug-end`.
+  `log`, `error-event`, `error`, `error-steps`, `group-by`, Agent output,
+  validation, connection, cache-key, retry-sleep-key, and error helpers,
+  `step-debug-start`, and `step-debug-end`.
 - `runtara-workflow-runtime` includes generated WIT bindings and implements
   the runtime lifecycle surface against `runtara-sdk`.
 - Remaining work: add host-side bindings smoke tests that instantiate and call
@@ -1414,10 +1435,13 @@ Current status:
   and the core loop calls `runtime.record-retry-attempt` before retrying. The
   shared stdlib now exposes `agent-error-info`, so retry attempts receive the
   same raw Agent error JSON payload that generated durable Rust records,
-  including the camelCase `retryAfterMs` rate-limit hint.
-  Support remains gated because backoff/sleep, timeout,
-  pause/cancel/shutdown acknowledgement, and crash/resume parity are still
-  pending.
+  including the camelCase `retryAfterMs` rate-limit hint. The shared stdlib
+  also exposes `agent-retry-sleep-key`, and the core lowers typed
+  `retryAfterMs` hints to `runtime.durable-sleep-checkpoint` with the generated
+  Rust-compatible `rate_limit_wait` state before retry-attempt recording.
+  Support remains gated because generic backoff, full rate-limit budget
+  semantics, timeout, pause/cancel/shutdown acknowledgement, and crash/resume
+  parity are still pending.
 
 Implementation steps:
 
@@ -1443,7 +1467,11 @@ Implementation steps:
    - durable retry loop and retry-attempt recording: internal lowering in
      place, still gated from public support;
    - retry error-message payloads: done through `stdlib.agent-error-info`;
-   - durable backoff/sleep and timeout behavior: pending.
+   - typed `retryAfterMs` durable sleep: internal lowering in place through
+     `stdlib.agent-retry-sleep-key` and `runtime.durable-sleep-checkpoint`,
+     still gated from public support;
+   - generic exponential backoff, full rate-limit budget semantics, and timeout
+     behavior: pending.
 5. Extend `onError` routing beyond the first non-durable Agent subset when
    additional failing step types are lowered.
 6. Preserve current retry policy shape with direct control flow plus
@@ -1482,12 +1510,14 @@ Implementation steps:
    - step id: done for Agent cache keys;
    - loop indices: done for Agent cache keys;
    - child cache prefixes: done for Agent cache keys;
-   - retry/rate-limit scope.
+   - retry sleep scope: done for Agent typed `retryAfterMs`;
+   - full rate-limit budget scope: pending.
 4. Migrate durable `Agent`:
    - no-retry checkpoint lookup/write: internal lowering done;
    - retry loop and retry-attempt recording: internal lowering done;
    - retry error-message payloads: internal lowering done;
-   - rate-limit durable sleep: pending;
+   - typed `retryAfterMs` durable sleep: internal lowering done;
+   - generic backoff and full rate-limit budget parity: pending;
    - pause/cancel/shutdown acknowledgement parity: pending;
    - crash/resume differential tests: pending.
 5. Migrate `Delay`.

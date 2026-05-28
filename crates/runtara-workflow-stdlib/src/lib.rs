@@ -308,6 +308,16 @@ mod component {
             })
         }
 
+        fn agent_retry_sleep_key(
+            checkpoint_id: String,
+            attempt_number: u32,
+        ) -> Result<Vec<u8>, String> {
+            Ok(direct_json::DirectJsonManifest::agent_retry_sleep_key(
+                &checkpoint_id,
+                attempt_number,
+            ))
+        }
+
         fn agent_error_info(
             code: String,
             message: String,

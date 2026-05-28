@@ -57,6 +57,7 @@ mod tests {
             "agent-validate-input",
             "agent-connection-input",
             "agent-cache-key",
+            "agent-retry-sleep-key",
             "agent-error-info",
             "agent-error",
             "agent-debug-error",

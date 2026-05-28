@@ -274,6 +274,11 @@ impl DirectJsonManifest {
         Ok(agent_cache_key(agent, &source).into_bytes())
     }
 
+    /// Build the generated-code-compatible durable sleep key for an Agent retry.
+    pub fn agent_retry_sleep_key(checkpoint_id: &str, attempt_number: u32) -> Vec<u8> {
+        format!("{checkpoint_id}::retry_sleep::{attempt_number}").into_bytes()
+    }
+
     /// Convert a WIT `error-info` into the raw JSON envelope used for retries.
     #[allow(clippy::too_many_arguments)]
     pub fn agent_error_info(
@@ -2908,6 +2913,19 @@ mod tests {
         assert_eq!(
             String::from_utf8(key).expect("utf8"),
             "parent::child::agent::utils::normalize::agent::[1]"
+        );
+    }
+
+    #[test]
+    fn agent_retry_sleep_key_matches_generated_retry_shape() {
+        let key = DirectJsonManifest::agent_retry_sleep_key(
+            "wf-42::agent::utils::normalize::agent::[1]",
+            2,
+        );
+
+        assert_eq!(
+            String::from_utf8(key).expect("utf8"),
+            "wf-42::agent::utils::normalize::agent::[1]::retry_sleep::2"
         );
     }
 

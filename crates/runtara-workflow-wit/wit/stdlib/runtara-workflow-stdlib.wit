@@ -93,6 +93,11 @@ interface json {
         source: list<u8>,
     ) -> result<list<u8>, string>;
 
+    agent-retry-sleep-key: func(
+        checkpoint-id: string,
+        attempt-number: u32,
+    ) -> result<list<u8>, string>;
+
     agent-error-info: func(
         code: string,
         message: string,

@@ -95,6 +95,8 @@ const DIRECT_AGENT_RESULT_ERR_ATTRIBUTES_LEN_OFFSET: u64 = 72;
 const DIRECT_AGENT_RETRY_ATTEMPT_LOCAL: u32 = 10;
 const DIRECT_AGENT_RETRY_ERROR_PTR_LOCAL: u32 = 11;
 const DIRECT_AGENT_RETRY_ERROR_LEN_LOCAL: u32 = 12;
+const DIRECT_AGENT_RETRY_SLEEP_TAG_LOCAL: u32 = 13;
+const DIRECT_AGENT_RETRY_SLEEP_MS_LOCAL: u32 = 14;
 const DIRECT_EMPTY_STEPS_CONTEXT: &[u8] = b"{}";
 const DIRECT_WORKFLOW_LOG_KIND: &[u8] = b"workflow_log";
 const DIRECT_WORKFLOW_ERROR_KIND: &[u8] = b"workflow_error";
@@ -102,6 +104,7 @@ const DIRECT_STEP_DEBUG_START_KIND: &[u8] = b"step_debug_start";
 const DIRECT_STEP_DEBUG_END_KIND: &[u8] = b"step_debug_end";
 const DIRECT_AGENT_EMPTY_INTEGRATION_ID: &[u8] = b"";
 const DIRECT_AGENT_EMPTY_PARAMETERS: &[u8] = b"{}";
+const DIRECT_AGENT_RATE_LIMIT_WAIT: &[u8] = b"rate_limit_wait";
 const WASM_PAGE_SIZE: i32 = 65_536;
 
 /// Input for the opt-in direct compiler.
@@ -631,6 +634,7 @@ struct DirectCoreStaticData {
     step_debug_end_kind: DirectDataSegment,
     agent_empty_integration_id: DirectDataSegment,
     agent_empty_parameters: DirectDataSegment,
+    agent_rate_limit_wait: DirectDataSegment,
     step_ids: BTreeMap<String, DirectDataSegment>,
     agent_capability_ids: BTreeMap<u32, DirectDataSegment>,
     agent_connection_ids: BTreeMap<u32, DirectDataSegment>,
@@ -692,6 +696,12 @@ impl DirectCoreStaticData {
             16,
         );
 
+        let agent_rate_limit_wait = DirectDataSegment::new(offset, DIRECT_AGENT_RATE_LIMIT_WAIT);
+        offset = align_i32(
+            checked_offset_add(offset, DIRECT_AGENT_RATE_LIMIT_WAIT.len())?,
+            16,
+        );
+
         let mut step_ids = BTreeMap::new();
         for step in &graph.steps {
             let segment = DirectDataSegment::new(offset, step.id.as_bytes());
@@ -726,6 +736,7 @@ impl DirectCoreStaticData {
             step_debug_end_kind,
             agent_empty_integration_id,
             agent_empty_parameters,
+            agent_rate_limit_wait,
             step_ids,
             agent_capability_ids,
             agent_connection_ids,
@@ -1543,6 +1554,7 @@ fn emit_direct_core_module(
         &config.static_data.step_debug_end_kind,
         &config.static_data.agent_empty_integration_id,
         &config.static_data.agent_empty_parameters,
+        &config.static_data.agent_rate_limit_wait,
     ];
     segments.extend(config.static_data.step_ids.values());
     segments.extend(config.static_data.agent_capability_ids.values());
@@ -1578,6 +1590,7 @@ struct DirectCoreImportIndices {
     runtime_get_checkpoint: Option<u32>,
     runtime_checkpoint: Option<u32>,
     runtime_record_retry_attempt: Option<u32>,
+    runtime_durable_sleep_checkpoint: Option<u32>,
     stdlib_init_manifest: Option<u32>,
     stdlib_build_source: Option<u32>,
     stdlib_apply_mapping: Option<u32>,
@@ -1595,6 +1608,7 @@ struct DirectCoreImportIndices {
     stdlib_agent_validate_input: Option<u32>,
     stdlib_agent_connection_input: Option<u32>,
     stdlib_agent_cache_key: Option<u32>,
+    stdlib_agent_retry_sleep_key: Option<u32>,
     stdlib_agent_error_info: Option<u32>,
     stdlib_agent_error: Option<u32>,
     stdlib_agent_debug_error: Option<u32>,
@@ -1621,6 +1635,10 @@ impl DirectCoreImportIndices {
             runtime_record_retry_attempt: require_import(
                 self.runtime_record_retry_attempt,
                 "runtime.record-retry-attempt",
+            )?,
+            runtime_durable_sleep_checkpoint: require_import(
+                self.runtime_durable_sleep_checkpoint,
+                "runtime.durable-sleep-checkpoint",
             )?,
             stdlib_init_manifest: require_import(
                 self.stdlib_init_manifest,
@@ -1660,6 +1678,10 @@ impl DirectCoreImportIndices {
                 self.stdlib_agent_cache_key,
                 "stdlib.agent-cache-key",
             )?,
+            stdlib_agent_retry_sleep_key: require_import(
+                self.stdlib_agent_retry_sleep_key,
+                "stdlib.agent-retry-sleep-key",
+            )?,
             stdlib_agent_error_info: require_import(
                 self.stdlib_agent_error_info,
                 "stdlib.agent-error-info",
@@ -1691,6 +1713,7 @@ struct DirectCoreFunctionIndices {
     runtime_get_checkpoint: u32,
     runtime_checkpoint: u32,
     runtime_record_retry_attempt: u32,
+    runtime_durable_sleep_checkpoint: u32,
     stdlib_init_manifest: u32,
     stdlib_build_source: u32,
     stdlib_apply_mapping: u32,
@@ -1708,6 +1731,7 @@ struct DirectCoreFunctionIndices {
     stdlib_agent_validate_input: u32,
     stdlib_agent_connection_input: u32,
     stdlib_agent_cache_key: u32,
+    stdlib_agent_retry_sleep_key: u32,
     stdlib_agent_error_info: u32,
     stdlib_agent_error: u32,
     stdlib_agent_debug_error: u32,
@@ -1765,6 +1789,8 @@ fn import_core_function(
         import_indices.runtime_checkpoint = Some(function_index);
     } else if is_runtime_import(resolve, interface, function, "record-retry-attempt") {
         import_indices.runtime_record_retry_attempt = Some(function_index);
+    } else if is_runtime_import(resolve, interface, function, "durable-sleep-checkpoint") {
+        import_indices.runtime_durable_sleep_checkpoint = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "init-manifest") {
         import_indices.stdlib_init_manifest = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "build-source") {
@@ -1799,6 +1825,8 @@ fn import_core_function(
         import_indices.stdlib_agent_connection_input = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "agent-cache-key") {
         import_indices.stdlib_agent_cache_key = Some(function_index);
+    } else if is_stdlib_import(resolve, interface, function, "agent-retry-sleep-key") {
+        import_indices.stdlib_agent_retry_sleep_key = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "agent-error-info") {
         import_indices.stdlib_agent_error_info = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "agent-error") {
@@ -1978,7 +2006,7 @@ fn direct_run_function(
     const ROUTE_PTR_LOCAL: u32 = 8;
     const ROUTE_LEN_LOCAL: u32 = 9;
 
-    let mut body = WasmFunction::new([(13, ValType::I32)]);
+    let mut body = WasmFunction::new([(14, ValType::I32), (1, ValType::I64)]);
 
     push_segment_args(&mut body, &config.static_data.manifest);
     push_retptr_arg(&mut body);
@@ -2856,9 +2884,20 @@ fn emit_agent_plan(
         body.instruction(&Instruction::If(BlockType::Empty));
         emit_agent_retry_condition(body, max_retries);
         body.instruction(&Instruction::If(BlockType::Empty));
+        emit_agent_advance_retry_attempt(body);
+        emit_agent_capture_retry_sleep(body);
         emit_agent_error_info(
             body,
             indices,
+            DIRECT_AGENT_RETRY_ERROR_PTR_LOCAL,
+            DIRECT_AGENT_RETRY_ERROR_LEN_LOCAL,
+        );
+        emit_agent_retry_sleep_if_requested(
+            body,
+            indices,
+            static_data,
+            route_ptr_local,
+            route_len_local,
             DIRECT_AGENT_RETRY_ERROR_PTR_LOCAL,
             DIRECT_AGENT_RETRY_ERROR_LEN_LOCAL,
         );
@@ -3491,6 +3530,52 @@ fn emit_agent_retry_condition(body: &mut WasmFunction, max_retries: u32) {
     body.instruction(&Instruction::I32And);
 }
 
+fn emit_agent_advance_retry_attempt(body: &mut WasmFunction) {
+    body.instruction(&Instruction::LocalGet(DIRECT_AGENT_RETRY_ATTEMPT_LOCAL));
+    body.instruction(&Instruction::I32Const(1));
+    body.instruction(&Instruction::I32Add);
+    body.instruction(&Instruction::LocalSet(DIRECT_AGENT_RETRY_ATTEMPT_LOCAL));
+}
+
+fn emit_agent_capture_retry_sleep(body: &mut WasmFunction) {
+    push_retptr_u8_load(body, DIRECT_AGENT_RESULT_ERR_RETRY_AFTER_TAG_OFFSET);
+    body.instruction(&Instruction::LocalSet(DIRECT_AGENT_RETRY_SLEEP_TAG_LOCAL));
+    body.instruction(&Instruction::LocalGet(DIRECT_AGENT_RETRY_SLEEP_TAG_LOCAL));
+    body.instruction(&Instruction::If(BlockType::Empty));
+    push_retptr_i64_load(body, DIRECT_AGENT_RESULT_ERR_RETRY_AFTER_VALUE_OFFSET);
+    body.instruction(&Instruction::LocalSet(DIRECT_AGENT_RETRY_SLEEP_MS_LOCAL));
+    body.instruction(&Instruction::End);
+}
+
+fn emit_agent_retry_sleep_if_requested(
+    body: &mut WasmFunction,
+    indices: &DirectCoreFunctionIndices,
+    static_data: &DirectCoreStaticData,
+    cache_key_ptr_local: u32,
+    cache_key_len_local: u32,
+    sleep_key_ptr_local: u32,
+    sleep_key_len_local: u32,
+) {
+    body.instruction(&Instruction::LocalGet(DIRECT_AGENT_RETRY_SLEEP_TAG_LOCAL));
+    body.instruction(&Instruction::If(BlockType::Empty));
+    body.instruction(&Instruction::LocalGet(cache_key_ptr_local));
+    body.instruction(&Instruction::LocalGet(cache_key_len_local));
+    body.instruction(&Instruction::LocalGet(DIRECT_AGENT_RETRY_ATTEMPT_LOCAL));
+    push_retptr_arg(body);
+    body.instruction(&Instruction::Call(indices.stdlib_agent_retry_sleep_key));
+    return_if_retptr_error(body);
+    load_retptr_list(body, sleep_key_ptr_local, sleep_key_len_local);
+
+    body.instruction(&Instruction::LocalGet(sleep_key_ptr_local));
+    body.instruction(&Instruction::LocalGet(sleep_key_len_local));
+    push_segment_args(body, &static_data.agent_rate_limit_wait);
+    body.instruction(&Instruction::LocalGet(DIRECT_AGENT_RETRY_SLEEP_MS_LOCAL));
+    push_retptr_arg(body);
+    body.instruction(&Instruction::Call(indices.runtime_durable_sleep_checkpoint));
+    return_if_retptr_error(body);
+    body.instruction(&Instruction::End);
+}
+
 fn emit_agent_record_retry_attempt(
     body: &mut WasmFunction,
     indices: &DirectCoreFunctionIndices,
@@ -3499,10 +3584,6 @@ fn emit_agent_record_retry_attempt(
     error_ptr_local: u32,
     error_len_local: u32,
 ) {
-    body.instruction(&Instruction::LocalGet(DIRECT_AGENT_RETRY_ATTEMPT_LOCAL));
-    body.instruction(&Instruction::I32Const(1));
-    body.instruction(&Instruction::I32Add);
-    body.instruction(&Instruction::LocalSet(DIRECT_AGENT_RETRY_ATTEMPT_LOCAL));
     body.instruction(&Instruction::LocalGet(cache_key_ptr_local));
     body.instruction(&Instruction::LocalGet(cache_key_len_local));
     body.instruction(&Instruction::LocalGet(DIRECT_AGENT_RETRY_ATTEMPT_LOCAL));
@@ -4658,15 +4739,17 @@ mod tests {
         if missing.is_empty() {
             let stdlib_wasm = dir.join("runtara_workflow_stdlib.wasm");
             let stdlib_bytes = fs::read(&stdlib_wasm).ok()?;
-            if !stdlib_bytes
-                .windows(b"agent-error-info".len())
-                .any(|window| window == b"agent-error-info")
-            {
-                eprintln!(
-                    "SKIP: direct shared workflow stdlib component is stale: {:?}",
-                    stdlib_wasm
-                );
-                return None;
+            for marker in [b"agent-error-info".as_slice(), b"agent-retry-sleep-key"] {
+                if !stdlib_bytes
+                    .windows(marker.len())
+                    .any(|window| window == marker)
+                {
+                    eprintln!(
+                        "SKIP: direct shared workflow stdlib component is stale: {:?}",
+                        stdlib_wasm
+                    );
+                    return None;
+                }
             }
             Some(dir)
         } else {
@@ -6136,20 +6219,29 @@ mod tests {
         let mut next_function_index = 0;
         let mut get_checkpoint_index = None;
         let mut checkpoint_index = None;
+        let mut durable_sleep_checkpoint_index = None;
+        let mut agent_retry_sleep_key_index = None;
         let mut agent_error_info_index = None;
         let mut record_retry_attempt_index = None;
         let mut agent_invoke_index = None;
+        let mut saw_durable_sleep_checkpoint_import = false;
+        let mut saw_agent_retry_sleep_key_import = false;
         let mut saw_agent_error_info_import = false;
         let mut saw_record_retry_attempt_import = false;
         let mut saw_retry_loop = false;
         let mut saw_retry_continue_branch = false;
         let mut saw_retryable_load = false;
+        let mut saw_retry_after_tag_load = false;
+        let mut saw_retry_after_value_load = false;
         let mut saw_retry_bound = false;
         let mut saw_lookup_before_invoke = false;
         let mut saw_error_info_after_invoke = false;
-        let mut saw_record_after_error_info = false;
+        let mut saw_sleep_key_after_error_info = false;
+        let mut saw_durable_sleep_after_sleep_key = false;
+        let mut saw_record_after_durable_sleep = false;
         let mut saw_record_after_invoke = false;
         let mut saw_checkpoint_after_invoke = false;
+        let mut saw_rate_limit_wait_state = false;
         let mut code_body_index = 0;
 
         for payload in Parser::new(0).parse_all(&core) {
@@ -6168,6 +6260,18 @@ mod tests {
                                     if module.contains("runtara:workflow-runtime/runtime") =>
                                 {
                                     checkpoint_index = Some(next_function_index);
+                                }
+                                (module, "durable-sleep-checkpoint")
+                                    if module.contains("runtara:workflow-runtime/runtime") =>
+                                {
+                                    saw_durable_sleep_checkpoint_import = true;
+                                    durable_sleep_checkpoint_index = Some(next_function_index);
+                                }
+                                (module, "agent-retry-sleep-key")
+                                    if module.contains("runtara:workflow-stdlib/json") =>
+                                {
+                                    saw_agent_retry_sleep_key_import = true;
+                                    agent_retry_sleep_key_index = Some(next_function_index);
                                 }
                                 (module, "agent-error-info")
                                     if module.contains("runtara:workflow-stdlib/json") =>
@@ -6197,6 +6301,8 @@ mod tests {
                         let mut saw_lookup_call = false;
                         let mut saw_invoke_call = false;
                         let mut saw_error_info_call = false;
+                        let mut saw_sleep_key_call = false;
+                        let mut saw_durable_sleep_call = false;
                         for operator in body.get_operators_reader().expect("operators") {
                             match operator.expect("operator") {
                                 Operator::Call { function_index }
@@ -6217,10 +6323,22 @@ mod tests {
                                     saw_error_info_call = true;
                                 }
                                 Operator::Call { function_index }
+                                    if Some(function_index) == agent_retry_sleep_key_index =>
+                                {
+                                    saw_sleep_key_after_error_info = saw_error_info_call;
+                                    saw_sleep_key_call = true;
+                                }
+                                Operator::Call { function_index }
+                                    if Some(function_index) == durable_sleep_checkpoint_index =>
+                                {
+                                    saw_durable_sleep_after_sleep_key = saw_sleep_key_call;
+                                    saw_durable_sleep_call = true;
+                                }
+                                Operator::Call { function_index }
                                     if Some(function_index) == record_retry_attempt_index =>
                                 {
                                     saw_record_after_invoke = saw_invoke_call;
-                                    saw_record_after_error_info = saw_error_info_call;
+                                    saw_record_after_durable_sleep = saw_durable_sleep_call;
                                 }
                                 Operator::Call { function_index }
                                     if Some(function_index) == checkpoint_index =>
@@ -6237,6 +6355,18 @@ mod tests {
                                 {
                                     saw_retryable_load = true;
                                 }
+                                Operator::I32Load8U { memarg }
+                                    if memarg.offset
+                                        == DIRECT_AGENT_RESULT_ERR_RETRY_AFTER_TAG_OFFSET =>
+                                {
+                                    saw_retry_after_tag_load = true;
+                                }
+                                Operator::I64Load { memarg }
+                                    if memarg.offset
+                                        == DIRECT_AGENT_RESULT_ERR_RETRY_AFTER_VALUE_OFFSET =>
+                                {
+                                    saw_retry_after_value_load = true;
+                                }
                                 Operator::I32Const { value: 2 } => {
                                     saw_retry_bound = true;
                                 }
@@ -6246,6 +6376,12 @@ mod tests {
                     }
                     code_body_index += 1;
                 }
+                Payload::DataSection(reader) => {
+                    for data in reader {
+                        let data = data.expect("data segment");
+                        saw_rate_limit_wait_state |= data.data == DIRECT_AGENT_RATE_LIMIT_WAIT;
+                    }
+                }
                 _ => {}
             }
         }
@@ -6253,6 +6389,14 @@ mod tests {
         assert!(
             saw_record_retry_attempt_import,
             "core should import runtime.record-retry-attempt"
+        );
+        assert!(
+            saw_durable_sleep_checkpoint_import,
+            "core should import runtime.durable-sleep-checkpoint"
+        );
+        assert!(
+            saw_agent_retry_sleep_key_import,
+            "core should import stdlib.agent-retry-sleep-key"
         );
         assert!(
             saw_agent_error_info_import,
@@ -6266,6 +6410,10 @@ mod tests {
         assert!(
             saw_retryable_load,
             "retry decision should inspect Agent error-info.retryable"
+        );
+        assert!(
+            saw_retry_after_tag_load && saw_retry_after_value_load,
+            "retry path should inspect typed retryAfterMs hints"
         );
         assert!(
             saw_retry_bound,
@@ -6284,8 +6432,20 @@ mod tests {
             "retry error payload should be built after failed invoke"
         );
         assert!(
-            saw_record_after_error_info,
-            "retry attempt recording should receive the stdlib-built error payload"
+            saw_sleep_key_after_error_info,
+            "retry sleep key should be built after preserving the error payload"
+        );
+        assert!(
+            saw_durable_sleep_after_sleep_key,
+            "typed retryAfterMs should lower to runtime.durable-sleep-checkpoint"
+        );
+        assert!(
+            saw_record_after_durable_sleep,
+            "retry attempt recording should run after the typed durable sleep"
+        );
+        assert!(
+            saw_rate_limit_wait_state,
+            "retry sleep should use the generated rate-limit wait state"
         );
         assert!(
             saw_checkpoint_after_invoke,

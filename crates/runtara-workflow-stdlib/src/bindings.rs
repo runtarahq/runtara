@@ -1204,6 +1204,80 @@ pub mod exports {
                 }
                 #[doc(hidden)]
                 #[allow(non_snake_case)]
+                pub unsafe fn _export_agent_retry_sleep_key_cabi<T: Guest>(
+                    arg0: *mut u8,
+                    arg1: usize,
+                    arg2: i32,
+                ) -> *mut u8 {
+                    #[cfg(target_arch = "wasm32")] _rt::run_ctors_once();
+                    let len0 = arg1;
+                    let bytes0 = _rt::Vec::from_raw_parts(arg0.cast(), len0, len0);
+                    let result1 = T::agent_retry_sleep_key(
+                        _rt::string_lift(bytes0),
+                        arg2 as u32,
+                    );
+                    let ptr2 = (&raw mut _RET_AREA.0).cast::<u8>();
+                    match result1 {
+                        Ok(e) => {
+                            *ptr2.add(0).cast::<u8>() = (0i32) as u8;
+                            let vec3 = (e).into_boxed_slice();
+                            let ptr3 = vec3.as_ptr().cast::<u8>();
+                            let len3 = vec3.len();
+                            ::core::mem::forget(vec3);
+                            *ptr2
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>() = len3;
+                            *ptr2
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>() = ptr3.cast_mut();
+                        }
+                        Err(e) => {
+                            *ptr2.add(0).cast::<u8>() = (1i32) as u8;
+                            let vec4 = (e.into_bytes()).into_boxed_slice();
+                            let ptr4 = vec4.as_ptr().cast::<u8>();
+                            let len4 = vec4.len();
+                            ::core::mem::forget(vec4);
+                            *ptr2
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>() = len4;
+                            *ptr2
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>() = ptr4.cast_mut();
+                        }
+                    };
+                    ptr2
+                }
+                #[doc(hidden)]
+                #[allow(non_snake_case)]
+                pub unsafe fn __post_return_agent_retry_sleep_key<T: Guest>(
+                    arg0: *mut u8,
+                ) {
+                    let l0 = i32::from(*arg0.add(0).cast::<u8>());
+                    match l0 {
+                        0 => {
+                            let l1 = *arg0
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>();
+                            let l2 = *arg0
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>();
+                            let base3 = l1;
+                            let len3 = l2;
+                            _rt::cabi_dealloc(base3, len3 * 1, 1);
+                        }
+                        _ => {
+                            let l4 = *arg0
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>();
+                            let l5 = *arg0
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>();
+                            _rt::cabi_dealloc(l4, l5, 1);
+                        }
+                    }
+                }
+                #[doc(hidden)]
+                #[allow(non_snake_case)]
                 pub unsafe fn _export_agent_error_info_cabi<T: Guest>(
                     arg0: *mut u8,
                     arg1: usize,
@@ -1724,6 +1798,10 @@ pub mod exports {
                         agent_id: u32,
                         source: _rt::Vec<u8>,
                     ) -> Result<_rt::Vec<u8>, _rt::String>;
+                    fn agent_retry_sleep_key(
+                        checkpoint_id: _rt::String,
+                        attempt_number: u32,
+                    ) -> Result<_rt::Vec<u8>, _rt::String>;
                     fn agent_error_info(
                         code: _rt::String,
                         message: _rt::String,
@@ -1916,6 +1994,16 @@ pub mod exports {
                         u8,) { unsafe { $($path_to_types)*::
                         __post_return_agent_cache_key::<$ty > (arg0) } } #[unsafe
                         (export_name =
+                        "runtara:workflow-stdlib/json@0.1.0#agent-retry-sleep-key")]
+                        unsafe extern "C" fn export_agent_retry_sleep_key(arg0 : * mut
+                        u8, arg1 : usize, arg2 : i32,) -> * mut u8 { unsafe {
+                        $($path_to_types)*:: _export_agent_retry_sleep_key_cabi::<$ty >
+                        (arg0, arg1, arg2) } } #[unsafe (export_name =
+                        "cabi_post_runtara:workflow-stdlib/json@0.1.0#agent-retry-sleep-key")]
+                        unsafe extern "C" fn _post_return_agent_retry_sleep_key(arg0 : *
+                        mut u8,) { unsafe { $($path_to_types)*::
+                        __post_return_agent_retry_sleep_key::<$ty > (arg0) } } #[unsafe
+                        (export_name =
                         "runtara:workflow-stdlib/json@0.1.0#agent-error-info")] unsafe
                         extern "C" fn export_agent_error_info(arg0 : * mut u8, arg1 :
                         usize, arg2 : * mut u8, arg3 : usize, arg4 : * mut u8, arg5 :
@@ -2068,9 +2156,9 @@ pub(crate) use __export_workflow_stdlib_impl as export;
 #[unsafe(link_section = "component-type:wit-bindgen:0.41.0:runtara:workflow-stdlib@0.1.0:workflow-stdlib:encoded world")]
 #[doc(hidden)]
 #[allow(clippy::octal_escapes)]
-pub static __WIT_BINDGEN_COMPONENT_TYPE: [u8; 1199] = *b"\
-\0asm\x0d\0\x01\0\0\x19\x16wit-component-encoding\x04\0\x07\xa9\x08\x01A\x02\x01\
-A\x02\x01B/\x01p}\x01j\0\x01s\x01@\x01\x08manifest\0\0\x01\x04\0\x0dinit-manifes\
+pub static __WIT_BINDGEN_COMPONENT_TYPE: [u8; 1261] = *b"\
+\0asm\x0d\0\x01\0\0\x19\x16wit-component-encoding\x04\0\x07\xe7\x08\x01A\x02\x01\
+A\x02\x01B1\x01p}\x01j\0\x01s\x01@\x01\x08manifest\0\0\x01\x04\0\x0dinit-manifes\
 t\x01\x02\x01j\x01\0\x01s\x01@\x03\x04data\0\x09variables\0\x05steps\0\0\x03\x04\
 \0\x0cbuild-source\x01\x04\x01@\x02\x0amapping-idy\x06source\0\0\x03\x04\0\x0dap\
 ply-mapping\x01\x05\x01j\x01\x7f\x01s\x01@\x02\x0ccondition-idy\x06source\0\0\x06\
@@ -2084,16 +2172,17 @@ filter\x01\x0b\x01@\x02\x06log-idy\x06source\0\0\x03\x04\0\x09log-event\x01\x0c\
 -by\x01\x0f\x01@\x03\x08agent-idy\x06source\0\x06output\0\0\x03\x04\0\x0cagent-o\
 utput\x01\x10\x01@\x02\x08agent-idy\x05input\0\0\x03\x04\0\x14agent-validate-inp\
 ut\x01\x11\x04\0\x16agent-connection-input\x01\x11\x01@\x02\x08agent-idy\x06sour\
-ce\0\0\x03\x04\0\x0fagent-cache-key\x01\x12\x01kw\x01ks\x01@\x07\x04codes\x07mes\
-sages\x08categorys\x08severitys\x09retryable\x7f\x0eretry-after-ms\x13\x0aattrib\
-utes\x14\0\x03\x04\0\x10agent-error-info\x01\x15\x01@\x08\x08agent-idy\x04codes\x07\
-messages\x08categorys\x08severitys\x09retryable\x7f\x0eretry-after-ms\x13\x0aatt\
-ributes\x14\0\x03\x04\0\x0bagent-error\x01\x16\x01@\x02\x08agent-idy\x05error\0\0\
-\x03\x04\0\x11agent-debug-error\x01\x17\x01@\x02\x07step-ids\x06source\0\0\x03\x04\
-\0\x10step-debug-start\x01\x18\x04\0\x0estep-debug-end\x01\x18\x04\0\"runtara:wo\
-rkflow-stdlib/json@0.1.0\x05\0\x04\0-runtara:workflow-stdlib/workflow-stdlib@0.1\
-.0\x04\0\x0b\x15\x01\0\x0fworkflow-stdlib\x03\0\0\0G\x09producers\x01\x0cprocess\
-ed-by\x02\x0dwit-component\x070.227.1\x10wit-bindgen-rust\x060.41.0";
+ce\0\0\x03\x04\0\x0fagent-cache-key\x01\x12\x01@\x02\x0dcheckpoint-ids\x0eattemp\
+t-numbery\0\x03\x04\0\x15agent-retry-sleep-key\x01\x13\x01kw\x01ks\x01@\x07\x04c\
+odes\x07messages\x08categorys\x08severitys\x09retryable\x7f\x0eretry-after-ms\x14\
+\x0aattributes\x15\0\x03\x04\0\x10agent-error-info\x01\x16\x01@\x08\x08agent-idy\
+\x04codes\x07messages\x08categorys\x08severitys\x09retryable\x7f\x0eretry-after-\
+ms\x14\x0aattributes\x15\0\x03\x04\0\x0bagent-error\x01\x17\x01@\x02\x08agent-id\
+y\x05error\0\0\x03\x04\0\x11agent-debug-error\x01\x18\x01@\x02\x07step-ids\x06so\
+urce\0\0\x03\x04\0\x10step-debug-start\x01\x19\x04\0\x0estep-debug-end\x01\x19\x04\
+\0\"runtara:workflow-stdlib/json@0.1.0\x05\0\x04\0-runtara:workflow-stdlib/workf\
+low-stdlib@0.1.0\x04\0\x0b\x15\x01\0\x0fworkflow-stdlib\x03\0\0\0G\x09producers\x01\
+\x0cprocessed-by\x02\x0dwit-component\x070.227.1\x10wit-bindgen-rust\x060.41.0";
 #[inline(never)]
 #[doc(hidden)]
 pub fn __link_custom_section_describing_imports() {
