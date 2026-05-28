@@ -217,13 +217,13 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   Agent JSON input, and the direct core writes the canonical ABI
   `some(connection-info)` record with the connection id, empty integration id,
   `{}` parameters, and no subtype/rate-limit config.
-- Non-durable Agent `onError` routing is now supported for default handlers and
+- Agent `onError` routing is now supported for default handlers and
   priority-ordered conditional handlers with at most one default fallback. The
   direct stdlib exposes `error-steps` to insert generated-code-compatible
   `steps.__error`/`steps.error` context, and direct core routes validation and
   capability failures through the handler branch before falling back to
-  `runtime.fail` when no condition matches. Durable Agent calls, retry/timeout
-  policy, and compensation remain rejected.
+  `runtime.fail` when no condition matches. Agent timeout, compensation, and
+  breakpoints remain rejected.
 - The first Phase 8 runtime lifecycle ABI slice is in place. The
   `runtara:workflow-runtime` WIT and runtime component now expose checkpoint
   lookup/write, retry-attempt recording, checkpointed durable sleep, and a
@@ -231,16 +231,17 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   `handle-checkpoint-signal`, which acknowledges checkpoint-returned
   `cancel`/`pause`/`shutdown` signals and suspends or cancels without reporting
   workflow completion. Direct Agent lowering now uses these checkpoint,
-  retry-attempt, and lifecycle-signal pieces internally; public durable Agent
-  and Delay support remain gated until the rest of the lifecycle semantics and
-  differential crash/resume tests exist.
+  retry-attempt, and lifecycle-signal pieces internally. Durable Agent public
+  support is enabled for workflows without Agent timeout, compensation, or
+  breakpoints; Delay support and crash/resume differential tests remain
+  pending.
 - The shared stdlib now exposes `agent-cache-key`, which centralizes the
   generated Rust-compatible durable Agent key shape using `_workflow_id`,
   `_cache_key_prefix`, and `_loop_indices`. The direct core has an internal
   no-retry durable Agent checkpoint path that computes this key, reads an
   existing checkpoint before `capabilities.invoke`, and writes a checkpoint
-  after successful output. Public support remains gated until the remaining
-  lifecycle behavior is lowered and tested.
+  after successful output. Public support is enabled for the durable Agent
+  subset without Agent timeout, compensation, or breakpoints.
 - The direct core now also has an internal durable Agent retry loop. It uses
   the generated Rust retry defaults (`maxRetries` override, otherwise 3 or 5
   for rate-limited capabilities), retries only typed WIT Agent errors with
@@ -255,8 +256,10 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   recording retry attempts. Successful durable Agent checkpoint saves now route
   pending `cancel`/`pause`/`shutdown` signals through the runtime lifecycle
   handler and return before `runtime.complete` when the instance is stopped.
-  Public support remains gated until timeout and crash/resume parity are
-  covered.
+  Public support is now enabled for durable Agent workflows that do not use
+  timeout, compensation, or breakpoints. Timeout remains gated because the
+  generated Rust Agent path does not currently enforce `AgentStep.timeout`;
+  crash/resume differential coverage remains a Phase 8 hardening checkpoint.
 
 ## Final Goal
 
@@ -1455,16 +1458,16 @@ Current status:
   Rust, and direct core writes the current `option<connection-info>` ABI layout
   for static connection ids.
 - `error-steps` now builds the generated-code-compatible `onError` source
-  context for Agent failures, and direct core lowers non-durable Agent
-  `onError` edges with condition priority/default routing. Handler branches are
-  emitted as terminal direct run plans; an unmatched conditional handler
-  propagates through `runtime.fail`.
+  context for Agent failures, and direct core lowers Agent `onError` edges with
+  condition priority/default routing. Handler branches are emitted as terminal
+  direct run plans; an unmatched conditional handler propagates through
+  `runtime.fail`.
 - `agent-cache-key` now builds the durable Agent idempotency key in stdlib
   using the same workflow id, parent cache prefix, and loop-index suffix rules
   as generated Rust. Direct core has an internal `maxRetries = 0` durable Agent
   checkpoint lowering that uses `runtime.get-checkpoint` and
-  `runtime.checkpoint`, but the support gate still rejects durable Agent
-  workflows until the remaining durability semantics are complete.
+  `runtime.checkpoint`, and the support gate now accepts durable Agent
+  workflows that do not use timeout, compensation, or breakpoints.
 - Durable Agent retry-loop lowering is now implemented internally for typed WIT
   Agent errors. The direct manifest records the Agent catalog `rateLimited`
   flag, the run plan derives the same default retry counts as generated Rust,
@@ -1491,8 +1494,9 @@ Current status:
   runtime checkpoint result's pending-signal option and call
   `runtime.handle-checkpoint-signal`; handled `cancel`, `pause`, and
   `shutdown` signals stop before `runtime.complete`, while `resume`/unknown
-  signals continue. Support remains gated because timeout and crash/resume
-  parity are still pending.
+  signals continue. The public support gate accepts this durable Agent subset;
+  timeout, compensation, and breakpoints remain rejected, and crash/resume
+  differential tests remain pending.
 
 Implementation steps:
 
@@ -1500,7 +1504,7 @@ Implementation steps:
 2. Emit per-agent imports in workflow WIT/component metadata.
 3. Extend `wac` generation to instantiate/spread required agents and stdlib.
 4. Implement `Agent` lowering:
-   - source construction: done for the first non-durable subset;
+   - source construction: done for the Agent subset;
    - input mapping: done through `stdlib.apply-mapping`;
    - static `capabilities.invoke`: done for `connection = none` and static
      `connectionId`;
@@ -1511,33 +1515,32 @@ Implementation steps:
    - agent input validation: done for required-field missing/null checks;
    - connection JSON injection and WIT `connection-info` envelope: done for
      static `connectionId`;
-   - `onError` routing: done for non-durable Agent validation/capability
-     failures with conditional priority/default handlers;
+   - `onError` routing: done for Agent validation/capability failures with
+     conditional priority/default handlers;
    - durable no-retry checkpoint lookup/write: internal lowering in place for
-     `maxRetries = 0`, still gated from public support;
+     `maxRetries = 0`, public support enabled for the durable Agent subset;
    - durable retry loop and retry-attempt recording: internal lowering in
-     place, still gated from public support;
+     place, public support enabled for the durable Agent subset;
    - retry error-message payloads: done through `stdlib.agent-error-info`;
-   - typed `retryAfterMs` durable sleep: internal lowering in place through
-     `stdlib.agent-retry-sleep-key` and `runtime.durable-sleep-checkpoint`,
-     still gated from public support;
+   - typed `retryAfterMs` durable sleep: done through
+     `stdlib.agent-retry-sleep-key` and `runtime.durable-sleep-checkpoint`;
    - `rateLimitBudgetMs` propagation and typed `retryAfterMs` cumulative budget:
-     internal lowering in place, still gated from public support;
+     done for the durable Agent subset;
    - rate-limit classification and base-delay budget accounting without
-     `retryAfterMs`: internal lowering in place, still gated from public
-     support;
+     `retryAfterMs`: done for the durable Agent subset;
    - generic exponential backoff sleep: internal lowering in place through
-     `stdlib.agent-retry-delay-ms` and `runtime.durable-sleep`, still gated
-     from public support;
+     `stdlib.agent-retry-delay-ms` and `runtime.durable-sleep`, public support
+     enabled for the durable Agent subset;
    - pause/cancel/shutdown acknowledgement after checkpoint save: internal
-     lowering in place through `runtime.handle-checkpoint-signal`, still gated
-     from public support;
+     lowering in place through `runtime.handle-checkpoint-signal`, public
+     support enabled for the durable Agent subset;
    - timeout behavior: pending.
-5. Extend `onError` routing beyond the first non-durable Agent subset when
-   additional failing step types are lowered.
+5. Extend `onError` routing beyond Agent when additional failing step types are
+   lowered.
 6. Preserve current retry policy shape with direct control flow plus
    stdlib/runtime-owned checkpoint, retry-attempt, and sleep behavior.
-   Non-durable calls can be supported first if needed.
+   This now covers the public durable Agent subset; crash/resume tests still
+   need to prove persisted-state parity.
 
 Checkpoint 7:
 
@@ -1548,7 +1551,8 @@ Checkpoint 7:
 
 Rollback:
 
-- Direct mode rejects agent workflows unless `direct-agent` support is enabled.
+- Direct mode can re-gate durable Agent workflows while keeping the
+  non-durable Agent subset available.
 
 ### Phase 8: Runtime Lifecycle and Durability ABI
 
@@ -1608,8 +1612,7 @@ Checkpoint 8:
 
 Rollback:
 
-- Direct mode remains limited to non-durable workflows until this checkpoint
-  passes.
+- Direct mode can re-gate durable Agent workflows until this checkpoint passes.
 
 ### Phase 9: Split and While
 

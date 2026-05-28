@@ -4790,6 +4790,15 @@ mod tests {
         graph
     }
 
+    fn agent_timeout_graph() -> ExecutionGraph {
+        let mut graph = fixture("transform");
+        let Some(runtara_dsl::Step::Agent(agent)) = graph.steps.get_mut("transform") else {
+            panic!("expected Agent step");
+        };
+        agent.timeout = Some(1_000);
+        graph
+    }
+
     fn non_durable_agent_on_error_finish_graph() -> ExecutionGraph {
         serde_json::from_value(serde_json::json!({
             "durable": false,
@@ -4891,6 +4900,16 @@ mod tests {
             "outputSchema": {}
         }))
         .expect("agent conditional onError graph parses")
+    }
+
+    fn durable_agent_conditional_on_error_graph() -> ExecutionGraph {
+        let mut graph = non_durable_agent_conditional_on_error_graph();
+        graph.durable = Some(true);
+        let Some(runtara_dsl::Step::Agent(agent)) = graph.steps.get_mut("agent") else {
+            panic!("expected Agent step");
+        };
+        agent.durable = Some(true);
+        graph
     }
 
     fn collect_run_plan_ids(
@@ -5540,6 +5559,67 @@ mod tests {
     }
 
     #[test]
+    fn direct_compile_supports_durable_agent_finish_graph() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let result = compile_direct_workflow(DirectCompilationInput {
+            workflow_id: "durable-agent".to_string(),
+            version: 1,
+            execution_graph: fixture("transform"),
+            output_dir: temp.path().to_path_buf(),
+            track_events: false,
+            agent_catalog: None,
+        })
+        .expect("direct durable Agent compile should succeed");
+
+        let wasm = fs::read(&result.wasm_path).expect("wasm");
+        Validator::new()
+            .validate_all(&wasm)
+            .expect("direct durable Agent artifact should validate");
+        assert!(result.support_report.supported);
+        assert_eq!(result.support_report.unsupported, vec![]);
+
+        let manifest: DirectWorkflowManifest =
+            serde_json::from_slice(&fs::read(&result.manifest_path).expect("manifest"))
+                .expect("manifest json");
+        assert_eq!(manifest.graph.agents.len(), 1);
+        assert_eq!(manifest.graph.agents[0].agent_id, "transform");
+        assert_eq!(manifest.graph.agents[0].capability_id, "map-fields");
+        assert!(manifest.graph.agents[0].durable);
+        assert_eq!(manifest.graph.agents[0].max_retries, None);
+        assert_eq!(manifest.graph.agents[0].retry_delay, None);
+    }
+
+    #[test]
+    fn direct_compile_supports_durable_agent_retry_overrides() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let result = compile_direct_workflow(DirectCompilationInput {
+            workflow_id: "durable-agent-retry".to_string(),
+            version: 1,
+            execution_graph: durable_agent_retry_graph(),
+            output_dir: temp.path().to_path_buf(),
+            track_events: false,
+            agent_catalog: None,
+        })
+        .expect("direct durable Agent retry compile should succeed");
+
+        let wasm = fs::read(&result.wasm_path).expect("wasm");
+        Validator::new()
+            .validate_all(&wasm)
+            .expect("direct durable Agent retry artifact should validate");
+        assert!(result.support_report.supported);
+        assert_eq!(result.support_report.unsupported, vec![]);
+
+        let manifest: DirectWorkflowManifest =
+            serde_json::from_slice(&fs::read(&result.manifest_path).expect("manifest"))
+                .expect("manifest json");
+        assert_eq!(manifest.graph.rate_limit_budget_ms, 2_500);
+        assert_eq!(manifest.graph.agents.len(), 1);
+        assert!(manifest.graph.agents[0].durable);
+        assert_eq!(manifest.graph.agents[0].max_retries, Some(2));
+        assert_eq!(manifest.graph.agents[0].retry_delay, Some(750));
+    }
+
+    #[test]
     fn direct_compile_supports_non_durable_agent_connection_finish_graph() {
         let temp = tempfile::tempdir().expect("tempdir");
         let result = compile_direct_workflow(DirectCompilationInput {
@@ -5631,6 +5711,35 @@ mod tests {
             .find(|edge| edge.label.as_deref() == Some("onError") && edge.condition_id.is_some())
             .expect("conditioned onError edge");
         assert_eq!(on_error_condition.priority, Some(10));
+    }
+
+    #[test]
+    fn direct_compile_supports_durable_agent_conditional_on_error_graph() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let result = compile_direct_workflow(DirectCompilationInput {
+            workflow_id: "durable-agent-conditional-on-error".to_string(),
+            version: 1,
+            execution_graph: durable_agent_conditional_on_error_graph(),
+            output_dir: temp.path().to_path_buf(),
+            track_events: false,
+            agent_catalog: None,
+        })
+        .expect("direct durable Agent conditional onError compile should succeed");
+
+        let wasm = fs::read(&result.wasm_path).expect("wasm");
+        Validator::new()
+            .validate_all(&wasm)
+            .expect("direct durable Agent conditional onError artifact should validate");
+        assert!(result.support_report.supported);
+        assert_eq!(result.support_report.unsupported, vec![]);
+
+        let manifest: DirectWorkflowManifest =
+            serde_json::from_slice(&fs::read(&result.manifest_path).expect("manifest"))
+                .expect("manifest json");
+        assert!(manifest.graph.agents[0].durable);
+        assert!(manifest.graph.edges.iter().any(|edge| {
+            edge.label.as_deref() == Some("onError") && edge.condition_id.is_some()
+        }));
     }
 
     #[test]
@@ -8594,14 +8703,14 @@ mod tests {
     fn direct_compile_rejects_unsupported_graphs_before_writing_artifacts() {
         let temp = tempfile::tempdir().expect("tempdir");
         let err = compile_direct_workflow(DirectCompilationInput {
-            workflow_id: "transform".to_string(),
+            workflow_id: "agent-timeout".to_string(),
             version: 1,
-            execution_graph: fixture("transform"),
+            execution_graph: agent_timeout_graph(),
             output_dir: temp.path().to_path_buf(),
             track_events: false,
             agent_catalog: None,
         })
-        .expect_err("agent workflow is not supported yet");
+        .expect_err("Agent timeout workflow is not supported yet");
 
         let DirectCompileError::Unsupported { report } = err else {
             panic!("expected unsupported error");
@@ -8612,7 +8721,7 @@ mod tests {
                 .unsupported
                 .iter()
                 .any(|feature| feature.step_id.as_deref() == Some("transform")
-                    && feature.feature == "agent-durable")
+                    && feature.feature == "agent-timeout")
         );
         assert!(
             fs::read_dir(temp.path())

@@ -111,7 +111,7 @@ fn collect_graph_support(
         };
         if edge.condition.is_some() && !condition_route_supported {
             let reason = if edge.label.as_deref() == Some("onError") {
-                "direct emitter supports onError edge conditions only for non-durable Agent sources with at most one default fallback"
+                "direct emitter supports onError edge conditions only for Agent sources with at most one default fallback"
             } else {
                 "direct emitter supports edge-condition routing only for normal/next edges with exactly one default fallback"
             };
@@ -137,7 +137,7 @@ fn collect_graph_support(
                     .map(step_type_name)
                     .map(str::to_string),
                 feature: "error-handler-edge".to_string(),
-                reason: "direct onError routing currently supports non-durable Agent sources with at most one default handler".to_string(),
+                reason: "direct onError routing currently supports Agent sources with at most one default handler".to_string(),
             });
         }
     }
@@ -306,18 +306,8 @@ fn supports_direct_control_step_inner(
     }
 }
 
-fn supports_agent_step_baseline(graph: &ExecutionGraph, step: &AgentStep) -> bool {
-    !agent_step_is_durable(graph, step)
-        && step.max_retries.is_none()
-        && step.retry_delay.is_none()
-        && step.timeout.is_none()
-        && step.compensation.is_none()
-        && !step.breakpoint.unwrap_or(false)
-}
-
-fn agent_step_is_durable(graph: &ExecutionGraph, step: &AgentStep) -> bool {
-    let graph_durable = graph.durable.unwrap_or(true);
-    graph_durable && step.durable.unwrap_or(true)
+fn supports_agent_step_baseline(_graph: &ExecutionGraph, step: &AgentStep) -> bool {
+    step.timeout.is_none() && step.compensation.is_none() && !step.breakpoint.unwrap_or(false)
 }
 
 fn supports_normal_flow_step(
@@ -766,7 +756,7 @@ fn collect_step_support(
 }
 
 fn collect_agent_step_unsupported(
-    graph: &ExecutionGraph,
+    _graph: &ExecutionGraph,
     step: &AgentStep,
     unsupported: &mut Vec<UnsupportedWorkflowFeature>,
 ) {
@@ -779,18 +769,6 @@ fn collect_agent_step_unsupported(
         });
     };
 
-    if agent_step_is_durable(graph, step) {
-        push(
-            "agent-durable",
-            "Agent direct lowering currently supports only non-durable capability calls",
-        );
-    }
-    if step.max_retries.is_some() || step.retry_delay.is_some() {
-        push(
-            "agent-retry",
-            "Agent direct lowering needs retry policy and durable retry semantics",
-        );
-    }
     if step.timeout.is_some() {
         push(
             "agent-timeout",
@@ -866,6 +844,7 @@ fn step_type_name(step: &Step) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use runtara_dsl::CompensationConfig;
 
     fn fixture(name: &str) -> ExecutionGraph {
         let json = match name {
@@ -1469,13 +1448,59 @@ mod tests {
     }
 
     #[test]
-    fn agent_rejection_names_exact_step_and_reason() {
+    fn durable_agent_normal_flow_is_supported() {
         let report = analyze_direct_wasm_support(&fixture("transform"));
 
+        assert!(report.supported, "{:?}", report.unsupported);
+    }
+
+    #[test]
+    fn durable_agent_retry_overrides_are_supported() {
+        let mut graph = fixture("transform");
+        let Some(Step::Agent(agent)) = graph.steps.get_mut("transform") else {
+            panic!("expected Agent fixture step");
+        };
+        agent.max_retries = Some(2);
+        agent.retry_delay = Some(750);
+
+        let report = analyze_direct_wasm_support(&graph);
+
+        assert!(report.supported, "{:?}", report.unsupported);
+    }
+
+    #[test]
+    fn agent_timeout_compensation_and_breakpoint_remain_rejected() {
+        let mut graph = fixture("transform");
+        let Some(Step::Agent(agent)) = graph.steps.get_mut("transform") else {
+            panic!("expected Agent fixture step");
+        };
+        agent.timeout = Some(1_000);
+        agent.compensation = Some(CompensationConfig {
+            compensation_step: "finish".to_string(),
+            compensation_data: None,
+            trigger: None,
+            order: None,
+        });
+        agent.breakpoint = Some(true);
+
+        let report = analyze_direct_wasm_support(&graph);
+
         assert!(!report.supported);
-        assert_eq!(report.unsupported[0].step_id.as_deref(), Some("transform"));
-        assert_eq!(report.unsupported[0].step_type.as_deref(), Some("Agent"));
-        assert_eq!(report.unsupported[0].feature, "agent-durable");
+        assert!(report.unsupported.iter().any(|feature| {
+            feature.step_id.as_deref() == Some("transform")
+                && feature.step_type.as_deref() == Some("Agent")
+                && feature.feature == "agent-timeout"
+        }));
+        assert!(report.unsupported.iter().any(|feature| {
+            feature.step_id.as_deref() == Some("transform")
+                && feature.step_type.as_deref() == Some("Agent")
+                && feature.feature == "agent-compensation"
+        }));
+        assert!(report.unsupported.iter().any(|feature| {
+            feature.step_id.as_deref() == Some("transform")
+                && feature.step_type.as_deref() == Some("Agent")
+                && feature.feature == "agent-breakpoint"
+        }));
     }
 
     #[test]
