@@ -30,8 +30,8 @@ use wit_parser::{
 
 use super::component::{DirectComponentArtifacts, emit_direct_component_artifacts};
 use super::manifest::{
-    DIRECT_WORKFLOW_MANIFEST_VERSION, DirectManifestError, DirectWorkflowManifest,
-    build_direct_workflow_manifest,
+    DIRECT_WORKFLOW_MANIFEST_VERSION, DirectGraphManifest, DirectManifestError,
+    DirectWorkflowManifest, build_direct_workflow_manifest,
 };
 use super::support::{
     DirectWorkflowSupportReport, UnsupportedWorkflowFeature, analyze_direct_wasm_support,
@@ -267,14 +267,13 @@ pub fn compile_direct_workflow_composed(
     Ok(result)
 }
 
-/// Compile a finish-only workflow through the direct path.
+/// Compile a currently supported workflow through the direct path.
 ///
 /// This does not replace [`crate::compile_workflow`]. It is intentionally
 /// opt-in and currently supports only graphs accepted by
 /// [`analyze_direct_wasm_support`]. The emitted component-format artifact is a
-/// stable direct pipeline artifact with a canonical `wasi:cli/run` export and
-/// a first runtime completion call. Full `Finish` output lowering will replace
-/// the current static output payload in the next phases.
+/// stable direct pipeline artifact with a canonical `wasi:cli/run` export,
+/// stdlib JSON calls, and runtime completion calls.
 pub fn compile_direct_workflow(
     input: DirectCompilationInput,
 ) -> Result<DirectCompilationResult, DirectCompileError> {
@@ -288,7 +287,7 @@ pub fn compile_direct_workflow(
 
     let manifest_json = manifest.to_canonical_json()?;
     let support_json = serde_json::to_vec(&support_report)?;
-    let wasm = emit_finish_only_artifact(&manifest, &manifest_json, &support_json)?;
+    let wasm = emit_direct_artifact(&manifest, &manifest_json, &support_json)?;
     let component_artifacts = emit_direct_component_artifacts(&manifest.feature_summary.agent_ids);
 
     let build_dir = input.output_dir.join(format!(
@@ -332,24 +331,24 @@ pub fn compile_direct_workflow(
     })
 }
 
-fn emit_finish_only_artifact(
+fn emit_direct_artifact(
     manifest: &DirectWorkflowManifest,
     manifest_json: &[u8],
     support_json: &[u8],
 ) -> Result<Vec<u8>, DirectCompileError> {
     let abi_json = serde_json::to_vec(&serde_json::json!({
         "abiVersion": DIRECT_WORKFLOW_ABI_VERSION,
-        "artifactKind": "finish-only-run-component",
+        "artifactKind": "direct-run-component",
         "componentRunExport": "wasi:cli/run@0.2.3",
         "entryPointExecutable": true,
         "runtimeExecutable": true,
-        "finishOutputMode": "stdlib-apply-mapping",
+        "outputMode": "stdlib-apply-mapping",
         "manifestVersion": DIRECT_WORKFLOW_MANIFEST_VERSION,
         "stepCount": manifest.feature_summary.total_steps,
-        "note": "direct compiler component with canonical run export, stdlib Finish mapping, and runtime.complete call"
+        "note": "direct compiler component with canonical run export, stdlib mapping/condition calls, and runtime.complete call"
     }))?;
 
-    let mut component = emit_finish_only_component(manifest, manifest_json)?;
+    let mut component = emit_direct_component(manifest, manifest_json)?;
     append_component_custom_section(&mut component, DIRECT_WORKFLOW_ABI_SECTION, &abi_json);
     append_component_custom_section(
         &mut component,
@@ -365,7 +364,7 @@ fn emit_finish_only_artifact(
     Ok(component)
 }
 
-fn emit_finish_only_component(
+fn emit_direct_component(
     manifest: &DirectWorkflowManifest,
     manifest_json: &[u8],
 ) -> Result<Vec<u8>, DirectCompileError> {
@@ -416,8 +415,20 @@ fn build_direct_component_resolve() -> Result<(Resolve, WorldId), DirectCompileE
 
 #[derive(Debug, Clone)]
 struct DirectCoreConfig {
-    finish_mapping_id: u32,
+    run_plan: DirectRunPlan,
     static_data: DirectCoreStaticData,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum DirectRunPlan {
+    Finish {
+        mapping_id: u32,
+    },
+    ConditionalFinish {
+        condition_id: u32,
+        true_mapping_id: u32,
+        false_mapping_id: u32,
+    },
 }
 
 impl DirectCoreConfig {
@@ -427,7 +438,7 @@ impl DirectCoreConfig {
     ) -> Result<Self, DirectCompileError> {
         let variables_json = serde_json::to_vec(&manifest.graph.variables)?;
         Ok(Self {
-            finish_mapping_id: entry_finish_mapping_id(manifest)?,
+            run_plan: direct_run_plan(manifest)?,
             static_data: DirectCoreStaticData::new(
                 manifest_json,
                 &variables_json,
@@ -492,20 +503,96 @@ impl DirectDataSegment {
     }
 }
 
-fn entry_finish_mapping_id(manifest: &DirectWorkflowManifest) -> Result<u32, DirectCompileError> {
-    manifest
+fn direct_run_plan(manifest: &DirectWorkflowManifest) -> Result<DirectRunPlan, DirectCompileError> {
+    let entry = manifest
         .graph
+        .steps
+        .iter()
+        .find(|step| step.id == manifest.graph.entry_point)
+        .ok_or_else(|| {
+            DirectCompileError::Component(format!(
+                "missing direct entry step '{}'",
+                manifest.graph.entry_point
+            ))
+        })?;
+
+    match entry.step_type.as_str() {
+        "Finish" => Ok(DirectRunPlan::Finish {
+            mapping_id: finish_mapping_id(&manifest.graph, &manifest.graph.entry_point)?,
+        }),
+        "Conditional" => conditional_finish_run_plan(&manifest.graph),
+        other => Err(DirectCompileError::Component(format!(
+            "direct run plan does not support entry step type '{other}'"
+        ))),
+    }
+}
+
+fn conditional_finish_run_plan(
+    graph: &DirectGraphManifest,
+) -> Result<DirectRunPlan, DirectCompileError> {
+    let condition_id = graph
+        .conditions
+        .iter()
+        .find(|condition| {
+            condition.owner_id == graph.entry_point && condition.purpose == "conditional.condition"
+        })
+        .map(|condition| condition.id)
+        .ok_or_else(|| {
+            DirectCompileError::Component(format!(
+                "missing Conditional condition for entry point '{}'",
+                graph.entry_point
+            ))
+        })?;
+
+    let true_step = branch_target(graph, "true")?;
+    let false_step = branch_target(graph, "false")?;
+
+    Ok(DirectRunPlan::ConditionalFinish {
+        condition_id,
+        true_mapping_id: finish_mapping_id(graph, true_step)?,
+        false_mapping_id: finish_mapping_id(graph, false_step)?,
+    })
+}
+
+fn branch_target<'a>(
+    graph: &'a DirectGraphManifest,
+    label: &str,
+) -> Result<&'a str, DirectCompileError> {
+    graph
+        .edges
+        .iter()
+        .find(|edge| edge.from_step == graph.entry_point && edge.label.as_deref() == Some(label))
+        .map(|edge| edge.to_step.as_str())
+        .ok_or_else(|| {
+            DirectCompileError::Component(format!(
+                "missing '{label}' branch for Conditional entry point '{}'",
+                graph.entry_point
+            ))
+        })
+}
+
+fn finish_mapping_id(
+    graph: &DirectGraphManifest,
+    step_id: &str,
+) -> Result<u32, DirectCompileError> {
+    if !graph
+        .steps
+        .iter()
+        .any(|step| step.id == step_id && step.step_type == "Finish")
+    {
+        return Err(DirectCompileError::Component(format!(
+            "direct branch target '{step_id}' is not a Finish step"
+        )));
+    }
+
+    graph
         .mappings
         .iter()
-        .find(|mapping| {
-            mapping.step_id == manifest.graph.entry_point
-                && mapping.purpose == "finish.inputMapping"
-        })
+        .find(|mapping| mapping.step_id == step_id && mapping.purpose == "finish.inputMapping")
         .map(|mapping| mapping.id)
         .ok_or_else(|| {
             DirectCompileError::Component(format!(
-                "missing Finish input mapping for entry point '{}'",
-                manifest.graph.entry_point
+                "missing Finish input mapping for step '{step_id}'"
             ))
         })
 }
@@ -708,6 +795,7 @@ struct DirectCoreImportIndices {
     stdlib_init_manifest: Option<u32>,
     stdlib_build_source: Option<u32>,
     stdlib_apply_mapping: Option<u32>,
+    stdlib_eval_condition: Option<u32>,
 }
 
 impl DirectCoreImportIndices {
@@ -724,6 +812,10 @@ impl DirectCoreImportIndices {
                 self.stdlib_apply_mapping,
                 "stdlib.apply-mapping",
             )?,
+            stdlib_eval_condition: require_import(
+                self.stdlib_eval_condition,
+                "stdlib.eval-condition",
+            )?,
         })
     }
 }
@@ -735,6 +827,7 @@ struct DirectCoreFunctionIndices {
     stdlib_init_manifest: u32,
     stdlib_build_source: u32,
     stdlib_apply_mapping: u32,
+    stdlib_eval_condition: u32,
 }
 
 fn require_import(value: Option<u32>, name: &str) -> Result<u32, DirectCompileError> {
@@ -776,6 +869,8 @@ fn import_core_function(
         import_indices.stdlib_build_source = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "apply-mapping") {
         import_indices.stdlib_apply_mapping = Some(function_index);
+    } else if is_stdlib_import(resolve, interface, function, "eval-condition") {
+        import_indices.stdlib_eval_condition = Some(function_index);
     }
 }
 
@@ -812,7 +907,7 @@ fn export_core_function(
     exports.export(&export_name, ExportKind::Func, function_index);
 
     let body = if is_wasi_cli_run_export(resolve, interface, function) {
-        finish_mapping_run_function(import_indices, config)
+        direct_run_function(import_indices, config)
     } else {
         zero_return_function(&signature.results)
     };
@@ -920,7 +1015,7 @@ fn export_initialize(
     code.function(&body);
 }
 
-fn finish_mapping_run_function(
+fn direct_run_function(
     indices: &DirectCoreFunctionIndices,
     config: &DirectCoreConfig,
 ) -> WasmFunction {
@@ -952,13 +1047,15 @@ fn finish_mapping_run_function(
     return_if_retptr_error(&mut body);
     load_retptr_list(&mut body, SOURCE_PTR_LOCAL, SOURCE_LEN_LOCAL);
 
-    body.instruction(&Instruction::I32Const(config.finish_mapping_id as i32));
-    body.instruction(&Instruction::LocalGet(SOURCE_PTR_LOCAL));
-    body.instruction(&Instruction::LocalGet(SOURCE_LEN_LOCAL));
-    push_retptr_arg(&mut body);
-    body.instruction(&Instruction::Call(indices.stdlib_apply_mapping));
-    return_if_retptr_error(&mut body);
-    load_retptr_list(&mut body, OUTPUT_PTR_LOCAL, OUTPUT_LEN_LOCAL);
+    emit_run_plan_mapping(
+        &mut body,
+        indices,
+        &config.run_plan,
+        SOURCE_PTR_LOCAL,
+        SOURCE_LEN_LOCAL,
+        OUTPUT_PTR_LOCAL,
+        OUTPUT_LEN_LOCAL,
+    );
 
     body.instruction(&Instruction::LocalGet(OUTPUT_PTR_LOCAL));
     body.instruction(&Instruction::LocalGet(OUTPUT_LEN_LOCAL));
@@ -967,6 +1064,88 @@ fn finish_mapping_run_function(
     load_retptr_tag(&mut body);
     body.instruction(&Instruction::End);
     body
+}
+
+fn emit_run_plan_mapping(
+    body: &mut WasmFunction,
+    indices: &DirectCoreFunctionIndices,
+    run_plan: &DirectRunPlan,
+    source_ptr_local: u32,
+    source_len_local: u32,
+    output_ptr_local: u32,
+    output_len_local: u32,
+) {
+    match run_plan {
+        DirectRunPlan::Finish { mapping_id } => {
+            emit_apply_mapping(
+                body,
+                indices,
+                *mapping_id,
+                source_ptr_local,
+                source_len_local,
+                output_ptr_local,
+                output_len_local,
+            );
+        }
+        DirectRunPlan::ConditionalFinish {
+            condition_id,
+            true_mapping_id,
+            false_mapping_id,
+        } => {
+            body.instruction(&Instruction::I32Const(*condition_id as i32));
+            body.instruction(&Instruction::LocalGet(source_ptr_local));
+            body.instruction(&Instruction::LocalGet(source_len_local));
+            push_retptr_arg(body);
+            body.instruction(&Instruction::Call(indices.stdlib_eval_condition));
+            return_if_retptr_error(body);
+
+            body.instruction(&Instruction::I32Const(DIRECT_RUN_RETPTR_OFFSET));
+            body.instruction(&Instruction::I32Load8U(MemArg {
+                offset: 4,
+                align: 0,
+                memory_index: 0,
+            }));
+            body.instruction(&Instruction::If(BlockType::Empty));
+            emit_apply_mapping(
+                body,
+                indices,
+                *true_mapping_id,
+                source_ptr_local,
+                source_len_local,
+                output_ptr_local,
+                output_len_local,
+            );
+            body.instruction(&Instruction::Else);
+            emit_apply_mapping(
+                body,
+                indices,
+                *false_mapping_id,
+                source_ptr_local,
+                source_len_local,
+                output_ptr_local,
+                output_len_local,
+            );
+            body.instruction(&Instruction::End);
+        }
+    }
+}
+
+fn emit_apply_mapping(
+    body: &mut WasmFunction,
+    indices: &DirectCoreFunctionIndices,
+    mapping_id: u32,
+    source_ptr_local: u32,
+    source_len_local: u32,
+    output_ptr_local: u32,
+    output_len_local: u32,
+) {
+    body.instruction(&Instruction::I32Const(mapping_id as i32));
+    body.instruction(&Instruction::LocalGet(source_ptr_local));
+    body.instruction(&Instruction::LocalGet(source_len_local));
+    push_retptr_arg(body);
+    body.instruction(&Instruction::Call(indices.stdlib_apply_mapping));
+    return_if_retptr_error(body);
+    load_retptr_list(body, output_ptr_local, output_len_local);
 }
 
 fn push_segment_args(function: &mut WasmFunction, segment: &DirectDataSegment) {
@@ -1170,6 +1349,7 @@ mod tests {
         let json = match name {
             "simple" => include_str!("../../tests/fixtures/simple_passthrough.json"),
             "conditional" => include_str!("../../tests/fixtures/conditional_workflow.json"),
+            "transform" => include_str!("../../tests/fixtures/transform_workflow.json"),
             other => panic!("unknown fixture {other}"),
         };
         serde_json::from_str(json).expect("fixture should parse")
@@ -1296,11 +1476,11 @@ mod tests {
                         abi["abiVersion"].as_u64(),
                         Some(u64::from(DIRECT_WORKFLOW_ABI_VERSION))
                     );
-                    assert_eq!(abi["artifactKind"], "finish-only-run-component");
+                    assert_eq!(abi["artifactKind"], "direct-run-component");
                     assert_eq!(abi["componentRunExport"], "wasi:cli/run@0.2.3");
                     assert_eq!(abi["entryPointExecutable"].as_bool(), Some(true));
                     assert_eq!(abi["runtimeExecutable"].as_bool(), Some(true));
-                    assert_eq!(abi["finishOutputMode"], "stdlib-apply-mapping");
+                    assert_eq!(abi["outputMode"], "stdlib-apply-mapping");
                     assert_eq!(
                         abi["manifestVersion"].as_u64(),
                         Some(u64::from(DIRECT_WORKFLOW_MANIFEST_VERSION))
@@ -1384,6 +1564,31 @@ mod tests {
     }
 
     #[test]
+    fn direct_compile_supports_conditional_finish_graph() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let result = compile_direct_workflow(DirectCompilationInput {
+            workflow_id: "conditional".to_string(),
+            version: 1,
+            execution_graph: fixture("conditional"),
+            output_dir: temp.path().to_path_buf(),
+        })
+        .expect("direct conditional compile should succeed");
+
+        let wasm = fs::read(&result.wasm_path).expect("wasm");
+        Validator::new()
+            .validate_all(&wasm)
+            .expect("direct conditional artifact should validate");
+        assert!(result.support_report.supported);
+        assert_eq!(result.support_report.unsupported, vec![]);
+
+        let manifest: DirectWorkflowManifest =
+            serde_json::from_slice(&fs::read(&result.manifest_path).expect("manifest"))
+                .expect("manifest json");
+        assert_eq!(manifest.graph.conditions.len(), 1);
+        assert_eq!(manifest.graph.mappings.len(), 2);
+    }
+
+    #[test]
     fn direct_core_run_lowers_finish_mapping_through_stdlib() {
         let graph = fixture("simple");
         let manifest = build_direct_workflow_manifest(&graph).expect("manifest");
@@ -1435,6 +1640,18 @@ mod tests {
                 ],
             ),
             (
+                "stdlib.eval-condition",
+                "runtara:workflow-stdlib/json",
+                "cm32p2|runtara:workflow-stdlib/json@0.1",
+                "eval-condition",
+                vec![
+                    WasmType::I32,
+                    WasmType::Pointer,
+                    WasmType::Length,
+                    WasmType::Pointer,
+                ],
+            ),
+            (
                 "runtime.complete",
                 "runtara:workflow-runtime/runtime",
                 "cm32p2|runtara:workflow-runtime/runtime@0.1",
@@ -1473,6 +1690,7 @@ mod tests {
         let mut load_input_index = None;
         let mut build_source_index = None;
         let mut apply_mapping_index = None;
+        let mut eval_condition_index = None;
         let mut complete_index = None;
         let mut saw_manifest_data = false;
         let mut saw_variables_data = false;
@@ -1501,6 +1719,9 @@ mod tests {
                                 ("cm32p2|runtara:workflow-stdlib/json@0.1", "apply-mapping") => {
                                     apply_mapping_index = Some(next_function_index)
                                 }
+                                ("cm32p2|runtara:workflow-stdlib/json@0.1", "eval-condition") => {
+                                    eval_condition_index = Some(next_function_index)
+                                }
                                 ("cm32p2|runtara:workflow-runtime/runtime@0.1", "complete") => {
                                     complete_index = Some(next_function_index)
                                 }
@@ -1517,7 +1738,11 @@ mod tests {
                             match operator.expect("operator") {
                                 Operator::Call { function_index } => run_calls.push(function_index),
                                 Operator::I32Const { value }
-                                    if value == core_config.finish_mapping_id as i32 =>
+                                    if matches!(
+                                        core_config.run_plan,
+                                        DirectRunPlan::Finish { mapping_id }
+                                            if value == mapping_id as i32
+                                    ) =>
                                 {
                                     saw_mapping_id = true;
                                 }
@@ -1551,6 +1776,10 @@ mod tests {
             apply_mapping_index.expect("apply-mapping import"),
             complete_index.expect("complete import"),
         ];
+        assert!(
+            eval_condition_index.is_some(),
+            "eval-condition import should exist for conditional lowering"
+        );
         assert_eq!(
             run_calls, expected_call_order,
             "run body should lower Finish through stdlib/runtime calls in order"
@@ -1563,6 +1792,116 @@ mod tests {
             saw_run_retptr_tag_load,
             "run body should return runtime.complete result tag"
         );
+    }
+
+    #[test]
+    fn direct_core_run_lowers_conditional_finish_branches_through_stdlib() {
+        let graph = fixture("conditional");
+        let manifest = build_direct_workflow_manifest(&graph).expect("manifest");
+        let manifest_json = manifest.to_canonical_json().expect("manifest json");
+        let core_config = DirectCoreConfig::new(&manifest, &manifest_json).expect("core config");
+        let DirectRunPlan::ConditionalFinish {
+            condition_id,
+            true_mapping_id,
+            false_mapping_id,
+        } = core_config.run_plan
+        else {
+            panic!("expected conditional run plan");
+        };
+
+        let (resolve, world) = build_direct_component_resolve().expect("resolve");
+        let core = emit_direct_core_module(&resolve, world, &core_config).expect("core module");
+        Validator::new()
+            .validate_all(&core)
+            .expect("conditional core module validates");
+
+        let mut next_function_index = 0;
+        let mut eval_condition_index = None;
+        let mut apply_mapping_index = None;
+        let mut saw_condition_id = false;
+        let mut saw_true_mapping_id = false;
+        let mut saw_false_mapping_id = false;
+        let mut saw_condition_bool_load = false;
+        let mut saw_branch = false;
+        let mut run_calls = Vec::new();
+        let mut code_body_index = 0;
+
+        for payload in Parser::new(0).parse_all(&core) {
+            match payload.expect("core wasm payload") {
+                Payload::ImportSection(reader) => {
+                    for import in reader.into_imports() {
+                        let import = import.expect("core import");
+                        if matches!(import.ty, TypeRef::Func(_)) {
+                            match (import.module, import.name) {
+                                ("cm32p2|runtara:workflow-stdlib/json@0.1", "eval-condition") => {
+                                    eval_condition_index = Some(next_function_index)
+                                }
+                                ("cm32p2|runtara:workflow-stdlib/json@0.1", "apply-mapping") => {
+                                    apply_mapping_index = Some(next_function_index)
+                                }
+                                _ => {}
+                            }
+                            next_function_index += 1;
+                        }
+                    }
+                }
+                Payload::CodeSectionEntry(body) => {
+                    if code_body_index == 0 {
+                        for operator in body.get_operators_reader().expect("operators") {
+                            match operator.expect("operator") {
+                                Operator::Call { function_index } => run_calls.push(function_index),
+                                Operator::I32Const { value } => {
+                                    if value == condition_id as i32 {
+                                        saw_condition_id = true;
+                                    }
+                                    if value == true_mapping_id as i32 {
+                                        saw_true_mapping_id = true;
+                                    }
+                                    if value == false_mapping_id as i32 {
+                                        saw_false_mapping_id = true;
+                                    }
+                                }
+                                Operator::I32Load8U { memarg }
+                                    if memarg.offset == 4 && memarg.memory == 0 =>
+                                {
+                                    saw_condition_bool_load = true;
+                                }
+                                Operator::If { .. } => saw_branch = true,
+                                _ => {}
+                            }
+                        }
+                    }
+                    code_body_index += 1;
+                }
+                _ => {}
+            }
+        }
+
+        let eval_condition_index = eval_condition_index.expect("eval-condition import");
+        let apply_mapping_index = apply_mapping_index.expect("apply-mapping import");
+        assert!(run_calls.contains(&eval_condition_index));
+        assert_eq!(
+            run_calls
+                .iter()
+                .filter(|&&index| index == apply_mapping_index)
+                .count(),
+            2,
+            "conditional run should contain one apply-mapping call per branch"
+        );
+        assert!(saw_condition_id, "condition id should be passed to stdlib");
+        assert!(
+            saw_true_mapping_id,
+            "true branch mapping id should be present"
+        );
+        assert!(
+            saw_false_mapping_id,
+            "false branch mapping id should be present"
+        );
+        assert!(
+            saw_condition_bool_load,
+            "condition result bool should be loaded from retptr payload"
+        );
+        assert!(saw_branch, "run body should branch on condition result");
     }
 
     #[test]
@@ -1680,12 +2019,12 @@ mod tests {
     fn direct_compile_rejects_unsupported_graphs_before_writing_artifacts() {
         let temp = tempfile::tempdir().expect("tempdir");
         let err = compile_direct_workflow(DirectCompilationInput {
-            workflow_id: "conditional".to_string(),
+            workflow_id: "transform".to_string(),
             version: 1,
-            execution_graph: fixture("conditional"),
+            execution_graph: fixture("transform"),
             output_dir: temp.path().to_path_buf(),
         })
-        .expect_err("conditional is not supported yet");
+        .expect_err("agent workflow is not supported yet");
 
         let DirectCompileError::Unsupported { report } = err else {
             panic!("expected unsupported error");
@@ -1695,8 +2034,8 @@ mod tests {
             report
                 .unsupported
                 .iter()
-                .any(|feature| feature.step_id.as_deref() == Some("check")
-                    && feature.feature == "conditional")
+                .any(|feature| feature.step_id.as_deref() == Some("transform")
+                    && feature.feature == "agent-call")
         );
         assert!(
             fs::read_dir(temp.path())

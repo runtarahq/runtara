@@ -87,6 +87,11 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   including logical operators, comparisons, equality, string/array operators,
   `LENGTH`, emptiness checks, truthy value expressions, and server-side-only
   operators falling back to `false`.
+- The direct core emitter now supports the first conditional graph shape:
+  an entry `Conditional` with exactly two labeled `true`/`false` edges to
+  `Finish` steps. It calls `stdlib.eval-condition`, branches on the returned
+  bool, applies the selected `Finish` mapping, and completes through the runtime
+  component. Other routing shapes remain rejected by the support gate.
 
 ## Final Goal
 
@@ -978,8 +983,11 @@ Current status:
   behavior that direct stdlib must preserve.
 - Conditional condition IDs are now in the manifest and the direct stdlib
   component can evaluate those conditions through the checked WIT surface.
-- Remaining work: lower direct Wasm branching for `Conditional` edges and then
-  broaden graph lowering beyond the single-entry Finish shape.
+- The first direct Wasm branching path is implemented for
+  `Conditional -> true/false Finish`, with support gating kept narrow.
+- Remaining work: add execution/parity coverage for composed conditional
+  artifacts, then broaden graph lowering to multi-step pure JSON/control
+  workflows.
 
 Implementation steps:
 

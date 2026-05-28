@@ -66,17 +66,20 @@ fn collect_graph_support(
     graph: &ExecutionGraph,
     unsupported: &mut Vec<UnsupportedWorkflowFeature>,
 ) {
-    for edge in &graph.execution_plan {
-        unsupported.push(UnsupportedWorkflowFeature {
-            step_id: Some(edge.from_step.clone()),
-            step_type: graph
-                .steps
-                .get(&edge.from_step)
-                .map(step_type_name)
-                .map(str::to_string),
-            feature: "execution-plan-routing".to_string(),
-            reason: "direct emitter currently lowers only a single entry Finish step".to_string(),
-        });
+    let conditional_finish = supports_conditional_finish_graph(graph);
+    if !conditional_finish {
+        for edge in &graph.execution_plan {
+            unsupported.push(UnsupportedWorkflowFeature {
+                step_id: Some(edge.from_step.clone()),
+                step_type: graph
+                    .steps
+                    .get(&edge.from_step)
+                    .map(step_type_name)
+                    .map(str::to_string),
+                feature: "execution-plan-routing".to_string(),
+                reason: "direct emitter currently lowers only a single entry Finish step or a Conditional with true/false Finish branches".to_string(),
+            });
+        }
     }
 
     let finish_steps = graph
@@ -87,7 +90,7 @@ fn collect_graph_support(
             _ => None,
         })
         .collect::<Vec<_>>();
-    if finish_steps.len() > 1 {
+    if finish_steps.len() > 1 && !conditional_finish {
         for step in finish_steps {
             unsupported.push(UnsupportedWorkflowFeature {
                 step_id: Some(step.id.clone()),
@@ -126,11 +129,42 @@ fn collect_graph_support(
     }
 
     for step in graph.steps.values() {
-        collect_step_support(step, unsupported);
+        collect_step_support(step, conditional_finish, unsupported);
     }
 }
 
-fn collect_step_support(step: &Step, unsupported: &mut Vec<UnsupportedWorkflowFeature>) {
+fn supports_conditional_finish_graph(graph: &ExecutionGraph) -> bool {
+    let Some(Step::Conditional(_)) = graph.steps.get(&graph.entry_point) else {
+        return false;
+    };
+    if graph.steps.len() != 3 || graph.execution_plan.len() != 2 {
+        return false;
+    }
+
+    let mut saw_true = false;
+    let mut saw_false = false;
+    for edge in &graph.execution_plan {
+        if edge.from_step != graph.entry_point || edge.condition.is_some() {
+            return false;
+        }
+        let Some(Step::Finish(_)) = graph.steps.get(&edge.to_step) else {
+            return false;
+        };
+        match edge.label.as_deref() {
+            Some("true") if !saw_true => saw_true = true,
+            Some("false") if !saw_false => saw_false = true,
+            _ => return false,
+        }
+    }
+
+    saw_true && saw_false
+}
+
+fn collect_step_support(
+    step: &Step,
+    conditional_finish: bool,
+    unsupported: &mut Vec<UnsupportedWorkflowFeature>,
+) {
     match step {
         Step::Finish(step) => {
             if step.breakpoint.unwrap_or(false) {
@@ -148,6 +182,7 @@ fn collect_step_support(step: &Step, unsupported: &mut Vec<UnsupportedWorkflowFe
             "Agent steps require static composition with agent imports and stdlib mapping",
             unsupported,
         ),
+        Step::Conditional(_) if conditional_finish => {}
         Step::Conditional(_) => unsupported_step(
             step,
             "conditional",
@@ -411,8 +446,42 @@ mod tests {
     }
 
     #[test]
-    fn conditional_rejection_names_exact_step() {
+    fn conditional_finish_branches_are_supported() {
         let report = analyze_direct_wasm_support(&fixture("conditional"));
+
+        assert!(report.supported, "{:?}", report.unsupported);
+        assert!(report.unsupported.is_empty());
+    }
+
+    #[test]
+    fn unsupported_conditional_shape_still_names_exact_step() {
+        let graph = serde_json::from_value::<ExecutionGraph>(serde_json::json!({
+            "steps": {
+                "check": {
+                    "stepType": "Conditional",
+                    "id": "check",
+                    "condition": {
+                        "type": "operation",
+                        "op": "EQ",
+                        "arguments": [
+                            { "valueType": "reference", "value": "data.flag" },
+                            { "valueType": "immediate", "value": true }
+                        ]
+                    }
+                },
+                "finish": { "stepType": "Finish", "id": "finish" }
+            },
+            "entryPoint": "check",
+            "executionPlan": [
+                { "fromStep": "check", "toStep": "finish", "label": "true" }
+            ],
+            "variables": {},
+            "inputSchema": {},
+            "outputSchema": {}
+        }))
+        .expect("graph parses");
+
+        let report = analyze_direct_wasm_support(&graph);
 
         assert!(!report.supported);
         assert!(
