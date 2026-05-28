@@ -4,7 +4,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use runtara_dsl::{ExecutionGraph, Step};
+use runtara_dsl::{AgentStep, ExecutionGraph, Step};
 
 use crate::workflow_features::{WorkflowFeatureSummary, analyze_workflow_features};
 
@@ -132,7 +132,7 @@ fn collect_graph_support(
     }
 
     for step in graph.steps.values() {
-        collect_step_support(step, direct_control, unsupported);
+        collect_step_support(graph, step, direct_control, unsupported);
     }
 }
 
@@ -229,8 +229,27 @@ fn supports_direct_control_step(
         Step::Switch(_) => supports_normal_flow_step(graph, step_id, reachable, used_edges, stack),
         Step::GroupBy(_) => supports_normal_flow_step(graph, step_id, reachable, used_edges, stack),
         Step::Log(_) => supports_normal_flow_step(graph, step_id, reachable, used_edges, stack),
+        Step::Agent(step) => {
+            supports_agent_step_baseline(graph, step)
+                && supports_normal_flow_step(graph, step_id, reachable, used_edges, stack)
+        }
         _ => false,
     }
+}
+
+fn supports_agent_step_baseline(graph: &ExecutionGraph, step: &AgentStep) -> bool {
+    !agent_step_is_durable(graph, step)
+        && step.connection_id.is_none()
+        && step.max_retries.is_none()
+        && step.retry_delay.is_none()
+        && step.timeout.is_none()
+        && step.compensation.is_none()
+        && !step.breakpoint.unwrap_or(false)
+}
+
+fn agent_step_is_durable(graph: &ExecutionGraph, step: &AgentStep) -> bool {
+    let graph_durable = graph.durable.unwrap_or(true);
+    graph_durable && step.durable.unwrap_or(true)
 }
 
 fn supports_normal_flow_step(
@@ -408,6 +427,7 @@ fn supports_routing_switch_step(
 }
 
 fn collect_step_support(
+    graph: &ExecutionGraph,
     step: &Step,
     direct_control: bool,
     unsupported: &mut Vec<UnsupportedWorkflowFeature>,
@@ -424,12 +444,8 @@ fn collect_step_support(
                 });
             }
         }
-        Step::Agent(_) => unsupported_step(
-            step,
-            "agent-call",
-            "Agent steps require static composition with agent imports and stdlib mapping",
-            unsupported,
-        ),
+        Step::Agent(step) if supports_agent_step_baseline(graph, step) => {}
+        Step::Agent(step) => collect_agent_step_unsupported(graph, step, unsupported),
         Step::Conditional(_) if direct_control => {}
         Step::Conditional(_) => unsupported_step(
             step,
@@ -582,6 +598,58 @@ fn collect_step_support(
             "AiAgent steps require LLM/tool-loop runtime support",
             unsupported,
         ),
+    }
+}
+
+fn collect_agent_step_unsupported(
+    graph: &ExecutionGraph,
+    step: &AgentStep,
+    unsupported: &mut Vec<UnsupportedWorkflowFeature>,
+) {
+    let mut push = |feature: &str, reason: &str| {
+        unsupported.push(UnsupportedWorkflowFeature {
+            step_id: Some(step.id.clone()),
+            step_type: Some("Agent".to_string()),
+            feature: feature.to_string(),
+            reason: reason.to_string(),
+        });
+    };
+
+    if agent_step_is_durable(graph, step) {
+        push(
+            "agent-durable",
+            "Agent direct lowering currently supports only non-durable capability calls",
+        );
+    }
+    if step.connection_id.is_some() {
+        push(
+            "agent-connection",
+            "Agent direct lowering needs connection-info canonical ABI lowering",
+        );
+    }
+    if step.max_retries.is_some() || step.retry_delay.is_some() {
+        push(
+            "agent-retry",
+            "Agent direct lowering needs retry policy and durable retry semantics",
+        );
+    }
+    if step.timeout.is_some() {
+        push(
+            "agent-timeout",
+            "Agent direct lowering needs timeout enforcement",
+        );
+    }
+    if step.compensation.is_some() {
+        push(
+            "agent-compensation",
+            "Agent direct lowering needs compensation/saga propagation",
+        );
+    }
+    if step.breakpoint.unwrap_or(false) {
+        push(
+            "agent-breakpoint",
+            "Agent breakpoints require a direct runtime checkpoint/pause ABI",
+        );
     }
 }
 
@@ -1106,13 +1174,63 @@ mod tests {
     }
 
     #[test]
-    fn agent_rejection_names_exact_step() {
+    fn non_durable_agent_normal_flow_is_supported() {
+        let graph = serde_json::from_value::<ExecutionGraph>(serde_json::json!({
+            "durable": false,
+            "steps": {
+                "agent": {
+                    "stepType": "Agent",
+                    "id": "agent",
+                    "agentId": "utils",
+                    "capabilityId": "normalize",
+                    "inputMapping": {
+                        "value": { "valueType": "reference", "value": "data.value" }
+                    }
+                },
+                "finish": { "stepType": "Finish", "id": "finish" }
+            },
+            "entryPoint": "agent",
+            "executionPlan": [
+                { "fromStep": "agent", "toStep": "finish" }
+            ],
+            "variables": {},
+            "inputSchema": {},
+            "outputSchema": {}
+        }))
+        .expect("graph parses");
+
+        let report = analyze_direct_wasm_support(&graph);
+
+        assert!(report.supported, "{:?}", report.unsupported);
+    }
+
+    #[test]
+    fn agent_rejection_names_exact_step_and_reason() {
         let report = analyze_direct_wasm_support(&fixture("transform"));
 
         assert!(!report.supported);
         assert_eq!(report.unsupported[0].step_id.as_deref(), Some("transform"));
         assert_eq!(report.unsupported[0].step_type.as_deref(), Some("Agent"));
-        assert_eq!(report.unsupported[0].feature, "agent-call");
+        assert_eq!(report.unsupported[0].feature, "agent-durable");
+    }
+
+    #[test]
+    fn agent_connection_is_rejected_until_connection_abi_is_lowered() {
+        let mut graph = fixture("transform");
+        graph.durable = Some(false);
+        let Some(Step::Agent(agent)) = graph.steps.get_mut("transform") else {
+            panic!("expected Agent fixture step");
+        };
+        agent.connection_id = Some("shopify-main".to_string());
+
+        let report = analyze_direct_wasm_support(&graph);
+
+        assert!(!report.supported);
+        assert!(report.unsupported.iter().any(|feature| {
+            feature.step_id.as_deref() == Some("transform")
+                && feature.step_type.as_deref() == Some("Agent")
+                && feature.feature == "agent-connection"
+        }));
     }
 
     #[test]

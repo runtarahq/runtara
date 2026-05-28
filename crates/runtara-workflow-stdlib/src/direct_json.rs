@@ -29,6 +29,7 @@ pub struct DirectJsonManifest {
     group_bys: BTreeMap<u32, DirectJsonGroupBy>,
     logs: BTreeMap<u32, DirectJsonLog>,
     errors: BTreeMap<u32, DirectJsonError>,
+    agents: BTreeMap<u32, DirectJsonAgent>,
     debug_start_ms: RefCell<BTreeMap<String, i64>>,
 }
 
@@ -48,6 +49,7 @@ impl DirectJsonManifest {
             group_bys: collections.group_bys,
             logs: collections.logs,
             errors: collections.errors,
+            agents: collections.agents,
             debug_start_ms: RefCell::new(BTreeMap::new()),
         })
     }
@@ -152,6 +154,33 @@ impl DirectJsonManifest {
         );
         serde_json::to_vec(&Value::Object(steps))
             .map_err(|err| format!("failed to serialize group-by steps context: {err}"))
+    }
+
+    /// Store an Agent capability output in the generated-code-compatible steps context.
+    pub fn agent_output(
+        &self,
+        agent_id: u32,
+        source: &[u8],
+        output: &[u8],
+    ) -> Result<Vec<u8>, String> {
+        let source: Value = serde_json::from_slice(source)
+            .map_err(|err| format!("failed to parse agent-output source: {err}"))?;
+        let output: Value = serde_json::from_slice(output)
+            .map_err(|err| format!("failed to parse Agent output: {err}"))?;
+        let agent = self
+            .agents
+            .get(&agent_id)
+            .ok_or_else(|| format!("unknown direct Agent id {agent_id}"))?;
+        let steps = insert_step_output(
+            &source,
+            &agent.step_id,
+            agent.name.as_deref(),
+            "Agent",
+            output,
+            None,
+        );
+        serde_json::to_vec(&Value::Object(steps))
+            .map_err(|err| format!("failed to serialize Agent steps context: {err}"))
     }
 
     /// Build the payload for a manifest Log step's runtime custom event.
@@ -346,6 +375,23 @@ impl DirectJsonManifest {
                     .and_then(|value| apply_mapping_value(value, source))?;
                 Ok((input, None))
             }
+            "Agent" => {
+                let agent = self
+                    .agent_by_step(step.id.as_str())
+                    .ok_or_else(|| format!("missing direct Agent config for '{}'", step.id))?;
+                let mapping = self.mappings.get(&agent.input_mapping_id).ok_or_else(|| {
+                    format!(
+                        "missing direct Agent input mapping {} for '{}'",
+                        agent.input_mapping_id, step.id
+                    )
+                })?;
+                let inputs = apply_input_mapping(&mapping.value, source)?;
+                Ok((
+                    inputs,
+                    (!mapping.value.as_object().is_some_and(Map::is_empty))
+                        .then(|| mapping.value.clone()),
+                ))
+            }
             "Error" => Ok((Value::Null, None)),
             "Log" => {
                 let log = self
@@ -419,6 +465,10 @@ impl DirectJsonManifest {
                     None,
                 ))
             }
+            "Agent" => source
+                .pointer(&format!("/steps/{}", escape_json_pointer_token(&step.id)))
+                .cloned()
+                .ok_or_else(|| format!("missing direct Agent output for '{}'", step.id)),
             "Error" => {
                 let error = self
                     .error_by_step(step.id.as_str())
@@ -478,6 +528,10 @@ impl DirectJsonManifest {
     fn error_by_step(&self, step_id: &str) -> Option<&DirectJsonError> {
         self.errors.values().find(|error| error.step_id == step_id)
     }
+
+    fn agent_by_step(&self, step_id: &str) -> Option<&DirectJsonAgent> {
+        self.agents.values().find(|agent| agent.step_id == step_id)
+    }
 }
 
 /// Build the source envelope consumed by direct mapping/condition helpers.
@@ -523,6 +577,7 @@ struct DirectJsonManifestCollections {
     group_bys: BTreeMap<u32, DirectJsonGroupBy>,
     logs: BTreeMap<u32, DirectJsonLog>,
     errors: BTreeMap<u32, DirectJsonError>,
+    agents: BTreeMap<u32, DirectJsonAgent>,
 }
 
 fn collect_graph_manifest(
@@ -655,6 +710,22 @@ fn collect_graph_manifest(
             .is_some()
         {
             return Err(format!("duplicate direct Error id {}", error.id));
+        }
+    }
+    for agent in &graph.agents {
+        if collections
+            .agents
+            .insert(
+                agent.id,
+                DirectJsonAgent {
+                    step_id: agent.step_id.clone(),
+                    name: agent.name.clone(),
+                    input_mapping_id: agent.input_mapping_id,
+                },
+            )
+            .is_some()
+        {
+            return Err(format!("duplicate direct Agent id {}", agent.id));
         }
     }
     for step in &graph.steps {
@@ -1034,6 +1105,10 @@ fn step_output_envelope(step: &DirectJsonStep, output: Value, route: Option<&str
         envelope.insert("route".to_string(), Value::String(route.to_string()));
     }
     envelope
+}
+
+fn escape_json_pointer_token(value: &str) -> String {
+    value.replace('~', "~0").replace('/', "~1")
 }
 
 fn default_step_name(step_type: &str) -> &str {
@@ -1511,6 +1586,8 @@ struct GraphWire {
     #[serde(default)]
     errors: Vec<ErrorWire>,
     #[serde(default)]
+    agents: Vec<AgentWire>,
+    #[serde(default)]
     steps: Vec<StepWire>,
 }
 
@@ -1601,6 +1678,16 @@ struct ErrorWire {
     value: Value,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AgentWire {
+    id: u32,
+    step_id: String,
+    #[serde(default)]
+    name: Option<String>,
+    input_mapping_id: u32,
+}
+
 #[derive(Debug, Clone)]
 struct DirectJsonMapping {
     step_id: String,
@@ -1655,6 +1742,13 @@ struct DirectJsonError {
     step_id: String,
     name: Option<String>,
     value: Value,
+}
+
+#[derive(Debug, Clone)]
+struct DirectJsonAgent {
+    step_id: String,
+    name: Option<String>,
+    input_mapping_id: u32,
 }
 
 #[cfg(test)]
@@ -1774,6 +1868,41 @@ mod tests {
                     "value": config
                 }],
                 "steps": []
+            }
+        }))
+        .expect("manifest json")
+    }
+
+    fn agent_manifest(input_mapping: Value) -> Vec<u8> {
+        serde_json::to_vec(&json!({
+            "graph": {
+                "mappings": [{
+                    "id": 0,
+                    "stepId": "agent",
+                    "stepType": "Agent",
+                    "purpose": "agent.inputMapping",
+                    "value": input_mapping
+                }],
+                "agents": [{
+                    "id": 0,
+                    "stepId": "agent",
+                    "name": "Normalize Data",
+                    "stepType": "Agent",
+                    "purpose": "agent.config",
+                    "agentId": "utils",
+                    "capabilityId": "normalize",
+                    "inputMappingId": 0
+                }],
+                "steps": [{
+                    "id": "agent",
+                    "stepType": "Agent",
+                    "name": "Normalize Data",
+                    "body": {
+                        "id": "agent",
+                        "stepType": "Agent",
+                        "name": "Normalize Data"
+                    }
+                }]
             }
         }))
         .expect("manifest json")
@@ -2307,6 +2436,60 @@ mod tests {
         assert_eq!(output["counts"], json!({ "active": 0 }));
         assert_eq!(output["groups"], json!({ "active": [] }));
         assert_eq!(output["total_groups"], json!(1));
+    }
+
+    #[test]
+    fn agent_output_stores_generated_code_compatible_step_envelope() {
+        let manifest = DirectJsonManifest::parse(&agent_manifest(json!({
+            "value": { "valueType": "reference", "value": "data.value" }
+        })))
+        .expect("manifest");
+        let source = build_source(br#"{"value":"in"}"#, b"{}", b"{}").expect("source");
+
+        let steps = manifest
+            .agent_output(0, &source, br#"{"value":"out","ok":true}"#)
+            .expect("Agent steps context");
+        let steps: Value = serde_json::from_slice(&steps).expect("steps json");
+
+        assert_eq!(steps["agent"]["stepId"], json!("agent"));
+        assert_eq!(steps["agent"]["stepName"], json!("Normalize Data"));
+        assert_eq!(steps["agent"]["stepType"], json!("Agent"));
+        assert_eq!(
+            steps["agent"]["outputs"],
+            json!({ "value": "out", "ok": true })
+        );
+    }
+
+    #[test]
+    fn agent_debug_payloads_use_mapping_and_stored_output() {
+        let manifest = DirectJsonManifest::parse(&agent_manifest(json!({
+            "value": { "valueType": "reference", "value": "data.value" }
+        })))
+        .expect("manifest");
+        let source = build_source(br#"{"value":"in"}"#, b"{}", b"{}").expect("source");
+
+        let start = manifest
+            .step_debug_start("agent", &source)
+            .expect("debug start");
+        let start: Value = serde_json::from_slice(&start).expect("start json");
+        assert_eq!(start["inputs"], json!({ "value": "in" }));
+        assert_eq!(
+            start["input_mapping"],
+            json!({ "value": { "valueType": "reference", "value": "data.value" } })
+        );
+
+        let steps = manifest
+            .agent_output(0, &source, br#"{"value":"out"}"#)
+            .expect("Agent steps context");
+        let source = build_source(br#"{"value":"in"}"#, b"{}", &steps).expect("source");
+
+        let end = manifest
+            .step_debug_end("agent", &source)
+            .expect("debug end");
+        let end: Value = serde_json::from_slice(&end).expect("end json");
+        assert_eq!(end["outputs"]["stepId"], json!("agent"));
+        assert_eq!(end["outputs"]["stepType"], json!("Agent"));
+        assert_eq!(end["outputs"]["outputs"], json!({ "value": "out" }));
     }
 
     #[test]

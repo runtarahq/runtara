@@ -31,8 +31,8 @@ use wit_parser::{
 
 use super::component::{DirectComponentArtifacts, emit_direct_component_artifacts};
 use super::manifest::{
-    DIRECT_WORKFLOW_MANIFEST_VERSION, DirectEdgeManifest, DirectGraphManifest, DirectManifestError,
-    DirectWorkflowManifest, build_direct_workflow_manifest,
+    DIRECT_WORKFLOW_MANIFEST_VERSION, DirectAgentManifest, DirectEdgeManifest, DirectGraphManifest,
+    DirectManifestError, DirectWorkflowManifest, build_direct_workflow_manifest,
 };
 use super::support::{
     DirectWorkflowSupportReport, UnsupportedWorkflowFeature, analyze_direct_wasm_support,
@@ -62,7 +62,8 @@ const AGENT_TYPES_WIT: &str = include_str!("../../../runtara-agent-wit/wit/runta
 const AGENT_WIT_VERSION: &str = "0.3.0";
 
 const DIRECT_RUN_RETPTR_OFFSET: i32 = 0;
-const DIRECT_STATIC_DATA_OFFSET: i32 = 64;
+const DIRECT_AGENT_ARGS_OFFSET: i32 = 128;
+const DIRECT_STATIC_DATA_OFFSET: i32 = 256;
 const DIRECT_EMPTY_STEPS_CONTEXT: &[u8] = b"{}";
 const DIRECT_WORKFLOW_LOG_KIND: &[u8] = b"workflow_log";
 const DIRECT_WORKFLOW_ERROR_KIND: &[u8] = b"workflow_error";
@@ -511,6 +512,13 @@ enum DirectRunPlan {
         log_id: u32,
         next_plan: Box<DirectRunPlan>,
     },
+    Agent {
+        step_id: String,
+        agent_id: u32,
+        agent_component_id: String,
+        input_mapping_id: u32,
+        next_plan: Box<DirectRunPlan>,
+    },
     Error {
         step_id: String,
         error_id: u32,
@@ -565,6 +573,7 @@ struct DirectCoreStaticData {
     step_debug_start_kind: DirectDataSegment,
     step_debug_end_kind: DirectDataSegment,
     step_ids: BTreeMap<String, DirectDataSegment>,
+    agent_capability_ids: BTreeMap<u32, DirectDataSegment>,
     heap_base: i32,
     memory_min_pages: u64,
 }
@@ -617,6 +626,13 @@ impl DirectCoreStaticData {
             step_ids.insert(step.id.clone(), segment);
         }
 
+        let mut agent_capability_ids = BTreeMap::new();
+        for agent in &graph.agents {
+            let segment = DirectDataSegment::new(offset, agent.capability_id.as_bytes());
+            offset = align_i32(checked_offset_add(offset, agent.capability_id.len())?, 16);
+            agent_capability_ids.insert(agent.id, segment);
+        }
+
         let memory_min_pages = wasm_pages_for_bytes(offset)?;
         Ok(Self {
             manifest,
@@ -627,6 +643,7 @@ impl DirectCoreStaticData {
             step_debug_start_kind,
             step_debug_end_kind,
             step_ids,
+            agent_capability_ids,
             heap_base: offset,
             memory_min_pages,
         })
@@ -635,6 +652,14 @@ impl DirectCoreStaticData {
     fn step_id(&self, step_id: &str) -> Result<&DirectDataSegment, DirectCompileError> {
         self.step_ids.get(step_id).ok_or_else(|| {
             DirectCompileError::Component(format!("missing direct static step id '{step_id}'"))
+        })
+    }
+
+    fn agent_capability_id(&self, agent_id: u32) -> Result<&DirectDataSegment, DirectCompileError> {
+        self.agent_capability_ids.get(&agent_id).ok_or_else(|| {
+            DirectCompileError::Component(format!(
+                "missing direct static Agent capability id {agent_id}"
+            ))
         })
     }
 }
@@ -672,7 +697,7 @@ fn direct_run_plan(manifest: &DirectWorkflowManifest) -> Result<DirectRunPlan, D
         })?;
 
     match entry.step_type.as_str() {
-        "Finish" | "Filter" | "Switch" | "GroupBy" | "Log" | "Error" | "Conditional" => {
+        "Finish" | "Filter" | "Switch" | "GroupBy" | "Log" | "Agent" | "Error" | "Conditional" => {
             step_run_plan(
                 &manifest.graph,
                 &manifest.graph.entry_point,
@@ -768,6 +793,18 @@ fn step_run_plan(
 
             Ok(DirectRunPlan::Log {
                 log_id,
+                next_plan: Box::new(next_plan),
+            })
+        }
+        "Agent" => {
+            let agent = agent_config(graph, step_id)?;
+            let next_plan = normal_flow_plan(graph, step_id, stack)?;
+
+            Ok(DirectRunPlan::Agent {
+                step_id: step_id.to_string(),
+                agent_id: agent.id,
+                agent_component_id: canonicalize_direct_agent_id(&agent.agent_id),
+                input_mapping_id: agent.input_mapping_id,
                 next_plan: Box::new(next_plan),
             })
         }
@@ -1068,6 +1105,29 @@ fn error_id(graph: &DirectGraphManifest, step_id: &str) -> Result<u32, DirectCom
         })
 }
 
+fn agent_config<'a>(
+    graph: &'a DirectGraphManifest,
+    step_id: &str,
+) -> Result<&'a DirectAgentManifest, DirectCompileError> {
+    if !graph
+        .steps
+        .iter()
+        .any(|step| step.id == step_id && step.step_type == "Agent")
+    {
+        return Err(DirectCompileError::Component(format!(
+            "direct step '{step_id}' is not an Agent step"
+        )));
+    }
+
+    graph
+        .agents
+        .iter()
+        .find(|agent| agent.step_id == step_id && agent.purpose == "agent.config")
+        .ok_or_else(|| {
+            DirectCompileError::Component(format!("missing Agent config for step '{step_id}'"))
+        })
+}
+
 fn finish_mapping_id(
     graph: &DirectGraphManifest,
     step_id: &str,
@@ -1092,6 +1152,10 @@ fn finish_mapping_id(
                 "missing Finish input mapping for step '{step_id}'"
             ))
         })
+}
+
+fn canonicalize_direct_agent_id(agent_id: &str) -> String {
+    agent_id.to_lowercase().replace('_', "-")
 }
 
 fn checked_offset_add(offset: i32, len: usize) -> Result<i32, DirectCompileError> {
@@ -1269,6 +1333,7 @@ fn emit_direct_core_module(
         &config.static_data.step_debug_end_kind,
     ];
     segments.extend(config.static_data.step_ids.values());
+    segments.extend(config.static_data.agent_capability_ids.values());
     for segment in segments {
         data.active(
             0,
@@ -1309,8 +1374,10 @@ struct DirectCoreImportIndices {
     stdlib_error: Option<u32>,
     stdlib_value_switch: Option<u32>,
     stdlib_group_by: Option<u32>,
+    stdlib_agent_output: Option<u32>,
     stdlib_step_debug_start: Option<u32>,
     stdlib_step_debug_end: Option<u32>,
+    agent_invokes: BTreeMap<String, DirectAgentInvokeImport>,
 }
 
 impl DirectCoreImportIndices {
@@ -1347,6 +1414,7 @@ impl DirectCoreImportIndices {
             stdlib_error: require_import(self.stdlib_error, "stdlib.error")?,
             stdlib_value_switch: require_import(self.stdlib_value_switch, "stdlib.value-switch")?,
             stdlib_group_by: require_import(self.stdlib_group_by, "stdlib.group-by")?,
+            stdlib_agent_output: require_import(self.stdlib_agent_output, "stdlib.agent-output")?,
             stdlib_step_debug_start: require_import(
                 self.stdlib_step_debug_start,
                 "stdlib.step-debug-start",
@@ -1355,11 +1423,12 @@ impl DirectCoreImportIndices {
                 self.stdlib_step_debug_end,
                 "stdlib.step-debug-end",
             )?,
+            agent_invokes: self.agent_invokes,
         })
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct DirectCoreFunctionIndices {
     runtime_load_input: u32,
     runtime_complete: u32,
@@ -1377,8 +1446,16 @@ struct DirectCoreFunctionIndices {
     stdlib_error: u32,
     stdlib_value_switch: u32,
     stdlib_group_by: u32,
+    stdlib_agent_output: u32,
     stdlib_step_debug_start: u32,
     stdlib_step_debug_end: u32,
+    agent_invokes: BTreeMap<String, DirectAgentInvokeImport>,
+}
+
+#[derive(Debug, Clone)]
+struct DirectAgentInvokeImport {
+    function_index: u32,
+    params: Vec<WasmType>,
 }
 
 fn require_import(value: Option<u32>, name: &str) -> Result<u32, DirectCompileError> {
@@ -1442,10 +1519,22 @@ fn import_core_function(
         import_indices.stdlib_value_switch = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "group-by") {
         import_indices.stdlib_group_by = Some(function_index);
+    } else if is_stdlib_import(resolve, interface, function, "agent-output") {
+        import_indices.stdlib_agent_output = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "step-debug-start") {
         import_indices.stdlib_step_debug_start = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "step-debug-end") {
         import_indices.stdlib_step_debug_end = Some(function_index);
+    } else if function.name == "invoke"
+        && let Some(agent_id) = agent_id_for_import(resolve, interface)
+    {
+        import_indices.agent_invokes.insert(
+            agent_id,
+            DirectAgentInvokeImport {
+                function_index,
+                params: signature.params.clone(),
+            },
+        );
     }
 }
 
@@ -1890,6 +1979,38 @@ fn emit_run_plan_mapping(
                 workflow_error_kind,
             );
         }
+        DirectRunPlan::Agent {
+            step_id,
+            agent_id,
+            agent_component_id,
+            input_mapping_id,
+            next_plan,
+        } => {
+            emit_agent_plan(
+                body,
+                indices,
+                static_data,
+                track_events,
+                variables,
+                step_id,
+                *agent_id,
+                agent_component_id,
+                *input_mapping_id,
+                next_plan,
+                data_ptr_local,
+                data_len_local,
+                steps_ptr_local,
+                steps_len_local,
+                source_ptr_local,
+                source_len_local,
+                output_ptr_local,
+                output_len_local,
+                route_ptr_local,
+                route_len_local,
+                workflow_log_kind,
+                workflow_error_kind,
+            );
+        }
         DirectRunPlan::Error { step_id, error_id } => {
             emit_error_plan(
                 body,
@@ -2317,6 +2438,128 @@ fn emit_log_plan(
 }
 
 #[allow(clippy::too_many_arguments)]
+fn emit_agent_plan(
+    body: &mut WasmFunction,
+    indices: &DirectCoreFunctionIndices,
+    static_data: &DirectCoreStaticData,
+    track_events: bool,
+    variables: &DirectDataSegment,
+    step_id: &str,
+    agent_id: u32,
+    agent_component_id: &str,
+    input_mapping_id: u32,
+    next_plan: &DirectRunPlan,
+    data_ptr_local: u32,
+    data_len_local: u32,
+    steps_ptr_local: u32,
+    steps_len_local: u32,
+    source_ptr_local: u32,
+    source_len_local: u32,
+    output_ptr_local: u32,
+    output_len_local: u32,
+    route_ptr_local: u32,
+    route_len_local: u32,
+    workflow_log_kind: &DirectDataSegment,
+    workflow_error_kind: &DirectDataSegment,
+) {
+    emit_step_debug_event(
+        body,
+        indices,
+        static_data,
+        track_events,
+        true,
+        step_id,
+        source_ptr_local,
+        source_len_local,
+        output_ptr_local,
+        output_len_local,
+    );
+
+    emit_apply_mapping(
+        body,
+        indices,
+        input_mapping_id,
+        source_ptr_local,
+        source_len_local,
+        output_ptr_local,
+        output_len_local,
+    );
+
+    let invoke = indices
+        .agent_invokes
+        .get(agent_component_id)
+        .expect("direct Agent run plans have matching component imports");
+    let capability_id = static_data
+        .agent_capability_id(agent_id)
+        .expect("direct Agent run plans have static capability ids");
+    emit_agent_invoke(
+        body,
+        invoke,
+        capability_id,
+        output_ptr_local,
+        output_len_local,
+    );
+    return_if_retptr_error(body);
+    load_retptr_list(body, output_ptr_local, output_len_local);
+
+    body.instruction(&Instruction::I32Const(agent_id as i32));
+    body.instruction(&Instruction::LocalGet(source_ptr_local));
+    body.instruction(&Instruction::LocalGet(source_len_local));
+    body.instruction(&Instruction::LocalGet(output_ptr_local));
+    body.instruction(&Instruction::LocalGet(output_len_local));
+    push_retptr_arg(body);
+    body.instruction(&Instruction::Call(indices.stdlib_agent_output));
+    return_if_retptr_error(body);
+    load_retptr_list(body, steps_ptr_local, steps_len_local);
+
+    emit_build_source(
+        body,
+        indices,
+        variables,
+        data_ptr_local,
+        data_len_local,
+        steps_ptr_local,
+        steps_len_local,
+        source_ptr_local,
+        source_len_local,
+    );
+
+    emit_step_debug_event(
+        body,
+        indices,
+        static_data,
+        track_events,
+        false,
+        step_id,
+        source_ptr_local,
+        source_len_local,
+        output_ptr_local,
+        output_len_local,
+    );
+
+    emit_run_plan_mapping(
+        body,
+        indices,
+        static_data,
+        track_events,
+        variables,
+        next_plan,
+        data_ptr_local,
+        data_len_local,
+        steps_ptr_local,
+        steps_len_local,
+        source_ptr_local,
+        source_len_local,
+        output_ptr_local,
+        output_len_local,
+        route_ptr_local,
+        route_len_local,
+        workflow_log_kind,
+        workflow_error_kind,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
 fn emit_error_plan(
     body: &mut WasmFunction,
     indices: &DirectCoreFunctionIndices,
@@ -2647,6 +2890,59 @@ fn emit_apply_mapping(
     load_retptr_list(body, output_ptr_local, output_len_local);
 }
 
+fn emit_agent_invoke(
+    body: &mut WasmFunction,
+    invoke: &DirectAgentInvokeImport,
+    capability_id: &DirectDataSegment,
+    input_ptr_local: u32,
+    input_len_local: u32,
+) {
+    if invoke.params == [WasmType::Pointer, WasmType::Pointer] {
+        store_i32_at(body, DIRECT_AGENT_ARGS_OFFSET, capability_id.offset);
+        store_i32_at(body, DIRECT_AGENT_ARGS_OFFSET + 4, capability_id.len_i32());
+        store_local_i32_at(body, DIRECT_AGENT_ARGS_OFFSET + 8, input_ptr_local);
+        store_local_i32_at(body, DIRECT_AGENT_ARGS_OFFSET + 12, input_len_local);
+        store_i32_at(body, DIRECT_AGENT_ARGS_OFFSET + 16, 0);
+        body.instruction(&Instruction::I32Const(DIRECT_AGENT_ARGS_OFFSET));
+        push_retptr_arg(body);
+        body.instruction(&Instruction::Call(invoke.function_index));
+        return;
+    }
+
+    push_segment_args(body, capability_id);
+    body.instruction(&Instruction::LocalGet(input_ptr_local));
+    body.instruction(&Instruction::LocalGet(input_len_local));
+    for param_type in invoke
+        .params
+        .get(4..invoke.params.len().saturating_sub(1))
+        .unwrap_or(&[])
+    {
+        push_zero_value(body, param_type);
+    }
+    push_retptr_arg(body);
+    body.instruction(&Instruction::Call(invoke.function_index));
+}
+
+fn store_i32_at(function: &mut WasmFunction, offset: i32, value: i32) {
+    function.instruction(&Instruction::I32Const(offset));
+    function.instruction(&Instruction::I32Const(value));
+    function.instruction(&Instruction::I32Store(MemArg {
+        offset: 0,
+        align: 2,
+        memory_index: 0,
+    }));
+}
+
+fn store_local_i32_at(function: &mut WasmFunction, offset: i32, local: u32) {
+    function.instruction(&Instruction::I32Const(offset));
+    function.instruction(&Instruction::LocalGet(local));
+    function.instruction(&Instruction::I32Store(MemArg {
+        offset: 0,
+        align: 2,
+        memory_index: 0,
+    }));
+}
+
 fn push_segment_args(function: &mut WasmFunction, segment: &DirectDataSegment) {
     function.instruction(&Instruction::I32Const(segment.offset));
     function.instruction(&Instruction::I32Const(segment.len_i32()));
@@ -2764,6 +3060,13 @@ fn is_stdlib_import(
             .is_some_and(|name| name.starts_with("runtara:workflow-stdlib/json"))
 }
 
+fn agent_id_for_import(resolve: &Resolve, interface: Option<&WorldKey>) -> Option<String> {
+    let name = interface.map(|key| resolve.name_world_key(key))?;
+    name.strip_prefix("runtara:agent-")?
+        .split_once('/')
+        .map(|(agent_id, _)| agent_id.to_string())
+}
+
 fn is_wasi_cli_run_export(
     resolve: &Resolve,
     interface: Option<&WorldKey>,
@@ -2864,6 +3167,39 @@ mod tests {
         serde_json::from_str(json).expect("fixture should parse")
     }
 
+    fn non_durable_agent_graph() -> ExecutionGraph {
+        serde_json::from_value(serde_json::json!({
+            "durable": false,
+            "steps": {
+                "agent": {
+                    "stepType": "Agent",
+                    "id": "agent",
+                    "name": "Normalize Data",
+                    "agentId": "utils",
+                    "capabilityId": "normalize",
+                    "inputMapping": {
+                        "value": { "valueType": "reference", "value": "data.value" }
+                    }
+                },
+                "finish": {
+                    "stepType": "Finish",
+                    "id": "finish",
+                    "inputMapping": {
+                        "result": { "valueType": "reference", "value": "steps.agent.outputs.value" }
+                    }
+                }
+            },
+            "entryPoint": "agent",
+            "executionPlan": [
+                { "fromStep": "agent", "toStep": "finish" }
+            ],
+            "variables": {},
+            "inputSchema": {},
+            "outputSchema": {}
+        }))
+        .expect("agent graph parses")
+    }
+
     fn collect_run_plan_ids(
         plan: &DirectRunPlan,
         condition_ids: &mut Vec<u32>,
@@ -2901,6 +3237,14 @@ mod tests {
                 collect_run_plan_ids(next_plan, condition_ids, mapping_ids);
             }
             DirectRunPlan::Log { next_plan, .. } => {
+                collect_run_plan_ids(next_plan, condition_ids, mapping_ids);
+            }
+            DirectRunPlan::Agent {
+                input_mapping_id,
+                next_plan,
+                ..
+            } => {
+                mapping_ids.push(*input_mapping_id);
                 collect_run_plan_ids(next_plan, condition_ids, mapping_ids);
             }
             DirectRunPlan::Error { .. } => {}
@@ -3364,6 +3708,34 @@ mod tests {
     }
 
     #[test]
+    fn direct_compile_supports_non_durable_agent_finish_graph() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let result = compile_direct_workflow(DirectCompilationInput {
+            workflow_id: "agent".to_string(),
+            version: 1,
+            execution_graph: non_durable_agent_graph(),
+            output_dir: temp.path().to_path_buf(),
+            track_events: false,
+        })
+        .expect("direct Agent compile should succeed");
+
+        let wasm = fs::read(&result.wasm_path).expect("wasm");
+        Validator::new()
+            .validate_all(&wasm)
+            .expect("direct Agent artifact should validate");
+        assert!(result.support_report.supported);
+        assert_eq!(result.support_report.unsupported, vec![]);
+
+        let manifest: DirectWorkflowManifest =
+            serde_json::from_slice(&fs::read(&result.manifest_path).expect("manifest"))
+                .expect("manifest json");
+        assert_eq!(manifest.graph.agents.len(), 1);
+        assert_eq!(manifest.graph.agents[0].agent_id, "utils");
+        assert_eq!(manifest.graph.agents[0].capability_id, "normalize");
+        assert_eq!(manifest.graph.mappings.len(), 2);
+    }
+
+    #[test]
     fn direct_compile_supports_next_label_edge_condition_graph() {
         let temp = tempfile::tempdir().expect("tempdir");
         let mut graph = fixture("edge_condition");
@@ -3518,6 +3890,20 @@ mod tests {
                 "group-by",
                 vec![
                     WasmType::I32,
+                    WasmType::Pointer,
+                    WasmType::Length,
+                    WasmType::Pointer,
+                ],
+            ),
+            (
+                "stdlib.agent-output",
+                "runtara:workflow-stdlib/json",
+                "cm32p2|runtara:workflow-stdlib/json@0.1",
+                "agent-output",
+                vec![
+                    WasmType::I32,
+                    WasmType::Pointer,
+                    WasmType::Length,
                     WasmType::Pointer,
                     WasmType::Length,
                     WasmType::Pointer,
@@ -3848,6 +4234,77 @@ mod tests {
             saw_object_model_invoke,
             "core metadata should import object-model capabilities.invoke"
         );
+    }
+
+    #[test]
+    fn direct_core_lowers_non_durable_agent_call() {
+        let graph = non_durable_agent_graph();
+        let manifest = build_direct_workflow_manifest(&graph).expect("manifest");
+        let manifest_json = manifest.to_canonical_json().expect("manifest json");
+        let core_config =
+            DirectCoreConfig::new(&manifest, &manifest_json, false).expect("core config");
+
+        let DirectRunPlan::Agent {
+            agent_id,
+            agent_component_id,
+            input_mapping_id,
+            next_plan,
+            ..
+        } = &core_config.run_plan
+        else {
+            panic!("expected Agent run plan");
+        };
+        assert_eq!(*agent_id, 0);
+        assert_eq!(agent_component_id, "utils");
+        assert_eq!(*input_mapping_id, 0);
+        assert!(matches!(next_plan.as_ref(), DirectRunPlan::Finish { .. }));
+
+        let (resolve, world) =
+            build_direct_component_resolve_with_agents(&manifest.feature_summary.agent_ids)
+                .expect("agent resolve");
+        let (interface_key, function) = imported_wit_function(
+            &resolve,
+            world,
+            "runtara:agent-utils/capabilities",
+            "invoke",
+        );
+        let signature =
+            resolve.wasm_signature(ManglingAndAbi::Standard32.import_variant(), function);
+        assert_eq!(signature.params, vec![WasmType::Pointer, WasmType::Pointer]);
+        assert!(signature.results.is_empty());
+        assert_eq!(signature.params.last(), Some(&WasmType::Pointer));
+
+        let core = emit_direct_core_module(&resolve, world, &core_config).expect("core module");
+        Validator::new()
+            .validate_all(&core)
+            .expect("Agent core module validates");
+
+        let (actual_module, actual_name) = resolve.wasm_import_name(
+            ManglingAndAbi::Standard32,
+            WasmImport::Func {
+                interface: Some(interface_key),
+                func: function,
+            },
+        );
+        let mut saw_agent_invoke = false;
+        let mut saw_agent_output = false;
+        for payload in Parser::new(0).parse_all(&core) {
+            if let Payload::ImportSection(reader) = payload.expect("core wasm payload") {
+                for import in reader.into_imports() {
+                    let import = import.expect("core import");
+                    saw_agent_invoke |=
+                        import.module == actual_module && import.name == actual_name;
+                    saw_agent_output |= import.module.contains("runtara:workflow-stdlib/json")
+                        && import.name == "agent-output";
+                }
+            }
+        }
+
+        assert!(
+            saw_agent_invoke,
+            "core should import Agent capabilities.invoke"
+        );
+        assert!(saw_agent_output, "core should import stdlib.agent-output");
     }
 
     #[test]
@@ -5289,7 +5746,7 @@ mod tests {
                 .unsupported
                 .iter()
                 .any(|feature| feature.step_id.as_deref() == Some("transform")
-                    && feature.feature == "agent-call")
+                    && feature.feature == "agent-durable")
         );
         assert!(
             fs::read_dir(temp.path())

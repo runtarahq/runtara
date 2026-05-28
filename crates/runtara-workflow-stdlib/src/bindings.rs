@@ -834,6 +834,81 @@ pub mod exports {
                 }
                 #[doc(hidden)]
                 #[allow(non_snake_case)]
+                pub unsafe fn _export_agent_output_cabi<T: Guest>(
+                    arg0: i32,
+                    arg1: *mut u8,
+                    arg2: usize,
+                    arg3: *mut u8,
+                    arg4: usize,
+                ) -> *mut u8 {
+                    #[cfg(target_arch = "wasm32")] _rt::run_ctors_once();
+                    let len0 = arg2;
+                    let len1 = arg4;
+                    let result2 = T::agent_output(
+                        arg0 as u32,
+                        _rt::Vec::from_raw_parts(arg1.cast(), len0, len0),
+                        _rt::Vec::from_raw_parts(arg3.cast(), len1, len1),
+                    );
+                    let ptr3 = (&raw mut _RET_AREA.0).cast::<u8>();
+                    match result2 {
+                        Ok(e) => {
+                            *ptr3.add(0).cast::<u8>() = (0i32) as u8;
+                            let vec4 = (e).into_boxed_slice();
+                            let ptr4 = vec4.as_ptr().cast::<u8>();
+                            let len4 = vec4.len();
+                            ::core::mem::forget(vec4);
+                            *ptr3
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>() = len4;
+                            *ptr3
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>() = ptr4.cast_mut();
+                        }
+                        Err(e) => {
+                            *ptr3.add(0).cast::<u8>() = (1i32) as u8;
+                            let vec5 = (e.into_bytes()).into_boxed_slice();
+                            let ptr5 = vec5.as_ptr().cast::<u8>();
+                            let len5 = vec5.len();
+                            ::core::mem::forget(vec5);
+                            *ptr3
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>() = len5;
+                            *ptr3
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>() = ptr5.cast_mut();
+                        }
+                    };
+                    ptr3
+                }
+                #[doc(hidden)]
+                #[allow(non_snake_case)]
+                pub unsafe fn __post_return_agent_output<T: Guest>(arg0: *mut u8) {
+                    let l0 = i32::from(*arg0.add(0).cast::<u8>());
+                    match l0 {
+                        0 => {
+                            let l1 = *arg0
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>();
+                            let l2 = *arg0
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>();
+                            let base3 = l1;
+                            let len3 = l2;
+                            _rt::cabi_dealloc(base3, len3 * 1, 1);
+                        }
+                        _ => {
+                            let l4 = *arg0
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>();
+                            let l5 = *arg0
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>();
+                            _rt::cabi_dealloc(l4, l5, 1);
+                        }
+                    }
+                }
+                #[doc(hidden)]
+                #[allow(non_snake_case)]
                 pub unsafe fn _export_step_debug_start_cabi<T: Guest>(
                     arg0: *mut u8,
                     arg1: usize,
@@ -1027,6 +1102,11 @@ pub mod exports {
                         group_id: u32,
                         source: _rt::Vec<u8>,
                     ) -> Result<_rt::Vec<u8>, _rt::String>;
+                    fn agent_output(
+                        agent_id: u32,
+                        source: _rt::Vec<u8>,
+                        output: _rt::Vec<u8>,
+                    ) -> Result<_rt::Vec<u8>, _rt::String>;
                     fn step_debug_start(
                         step_id: _rt::String,
                         source: _rt::Vec<u8>,
@@ -1148,6 +1228,15 @@ pub mod exports {
                         extern "C" fn _post_return_group_by(arg0 : * mut u8,) { unsafe {
                         $($path_to_types)*:: __post_return_group_by::<$ty > (arg0) } }
                         #[unsafe (export_name =
+                        "runtara:workflow-stdlib/json@0.1.0#agent-output")] unsafe extern
+                        "C" fn export_agent_output(arg0 : i32, arg1 : * mut u8, arg2 :
+                        usize, arg3 : * mut u8, arg4 : usize,) -> * mut u8 { unsafe {
+                        $($path_to_types)*:: _export_agent_output_cabi::<$ty > (arg0,
+                        arg1, arg2, arg3, arg4) } } #[unsafe (export_name =
+                        "cabi_post_runtara:workflow-stdlib/json@0.1.0#agent-output")]
+                        unsafe extern "C" fn _post_return_agent_output(arg0 : * mut u8,)
+                        { unsafe { $($path_to_types)*:: __post_return_agent_output::<$ty
+                        > (arg0) } } #[unsafe (export_name =
                         "runtara:workflow-stdlib/json@0.1.0#step-debug-start")] unsafe
                         extern "C" fn export_step_debug_start(arg0 : * mut u8, arg1 :
                         usize, arg2 : * mut u8, arg3 : usize,) -> * mut u8 { unsafe {
@@ -1246,9 +1335,9 @@ pub(crate) use __export_workflow_stdlib_impl as export;
 #[unsafe(link_section = "component-type:wit-bindgen:0.41.0:runtara:workflow-stdlib@0.1.0:workflow-stdlib:encoded world")]
 #[doc(hidden)]
 #[allow(clippy::octal_escapes)]
-pub static __WIT_BINDGEN_COMPONENT_TYPE: [u8; 735] = *b"\
-\0asm\x0d\0\x01\0\0\x19\x16wit-component-encoding\x04\0\x07\xd9\x04\x01A\x02\x01\
-A\x02\x01B\x1e\x01p}\x01j\0\x01s\x01@\x01\x08manifest\0\0\x01\x04\0\x0dinit-mani\
+pub static __WIT_BINDGEN_COMPONENT_TYPE: [u8; 783] = *b"\
+\0asm\x0d\0\x01\0\0\x19\x16wit-component-encoding\x04\0\x07\x89\x05\x01A\x02\x01\
+A\x02\x01B\x20\x01p}\x01j\0\x01s\x01@\x01\x08manifest\0\0\x01\x04\0\x0dinit-mani\
 fest\x01\x02\x01j\x01\0\x01s\x01@\x03\x04data\0\x09variables\0\x05steps\0\0\x03\x04\
 \0\x0cbuild-source\x01\x04\x01@\x02\x0amapping-idy\x06source\0\0\x03\x04\0\x0dap\
 ply-mapping\x01\x05\x01j\x01\x7f\x01s\x01@\x02\x0ccondition-idy\x06source\0\0\x06\
@@ -1258,11 +1347,12 @@ ply-mapping\x01\x05\x01j\x01\x7f\x01s\x01@\x02\x0ccondition-idy\x06source\0\0\x0
 filter\x01\x0b\x01@\x02\x06log-idy\x06source\0\0\x03\x04\0\x09log-event\x01\x0c\x04\
 \0\x03log\x01\x0c\x01@\x02\x08error-idy\x06source\0\0\x03\x04\0\x0berror-event\x01\
 \x0d\x04\0\x05error\x01\x0d\x01@\x02\x08group-idy\x06source\0\0\x03\x04\0\x08gro\
-up-by\x01\x0e\x01@\x02\x07step-ids\x06source\0\0\x03\x04\0\x10step-debug-start\x01\
-\x0f\x04\0\x0estep-debug-end\x01\x0f\x04\0\"runtara:workflow-stdlib/json@0.1.0\x05\
-\0\x04\0-runtara:workflow-stdlib/workflow-stdlib@0.1.0\x04\0\x0b\x15\x01\0\x0fwo\
-rkflow-stdlib\x03\0\0\0G\x09producers\x01\x0cprocessed-by\x02\x0dwit-component\x07\
-0.227.1\x10wit-bindgen-rust\x060.41.0";
+up-by\x01\x0e\x01@\x03\x08agent-idy\x06source\0\x06output\0\0\x03\x04\0\x0cagent\
+-output\x01\x0f\x01@\x02\x07step-ids\x06source\0\0\x03\x04\0\x10step-debug-start\
+\x01\x10\x04\0\x0estep-debug-end\x01\x10\x04\0\"runtara:workflow-stdlib/json@0.1\
+.0\x05\0\x04\0-runtara:workflow-stdlib/workflow-stdlib@0.1.0\x04\0\x0b\x15\x01\0\
+\x0fworkflow-stdlib\x03\0\0\0G\x09producers\x01\x0cprocessed-by\x02\x0dwit-compo\
+nent\x070.227.1\x10wit-bindgen-rust\x060.41.0";
 #[inline(never)]
 #[doc(hidden)]
 pub fn __link_custom_section_describing_imports() {

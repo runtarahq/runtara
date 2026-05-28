@@ -66,6 +66,12 @@ interface json {
         source: list<u8>,
     ) -> result<list<u8>, string>;
 
+    agent-output: func(
+        agent-id: u32,
+        source: list<u8>,
+        output: list<u8>,
+    ) -> result<list<u8>, string>;
+
     step-debug-start: func(
         step-id: string,
         source: list<u8>,

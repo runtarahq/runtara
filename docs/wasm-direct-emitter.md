@@ -184,15 +184,23 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   default, and routing Switches with a complete static route/default edge set.
   Parallel fan-out and no-default routing remain rejected until explicit
   direct parallel aggregation and failure semantics are designed.
-- Agent preparation has started in the manifest layer. Direct manifests now
+- Agent manifest preparation is in place. Direct manifests now
   include deterministic `agents` entries plus `agent.inputMapping` mapping
   entries, so the next Agent-lowering slice can refer to stable manifest IDs
   without changing the manifest schema at the same time.
 - The workflow-logic component resolver can now include concrete per-agent WIT
   imports (`runtara:agent-<id>/capabilities@0.3.0`) and validates core module
-  metadata with those imports present. Agent execution remains behind the
-  support gate until invoke lowering, connection handling, and error envelopes
-  are implemented.
+  metadata with those imports present.
+- The first Agent execution slice is implemented for non-durable normal-flow
+  Agent steps with no connection, retry override, timeout, compensation, or
+  breakpoint. The direct core applies the Agent input mapping through stdlib,
+  calls the statically imported per-agent `capabilities.invoke`, stores the
+  success output through `stdlib.agent-output`, rebuilds the source, and
+  continues to the next direct run-plan node. The WIT canonical ABI lowers
+  this import indirectly as `[pointer, pointer]`, so the direct core now writes
+  the argument area for capability id, input bytes, and a `none` connection.
+  Durable Agent calls, connection envelopes, retry/timeout policy,
+  compensation, on-error routing, and Agent error envelopes remain rejected.
 
 ## Final Goal
 
@@ -1292,9 +1300,17 @@ Current status:
   `mappings` table with purpose `agent.inputMapping`.
 - Component sidecars already collect used agent ids and emit per-agent WIT/WAC
   imports, and the workflow-logic component resolver now includes matching
-  per-agent WIT imports in component metadata. The direct core run-plan still
-  keeps `Agent` behind the support gate until the invocation ABI is lowered and
-  tested.
+  per-agent WIT imports in component metadata.
+- Non-durable, no-connection Agent normal-flow lowering now compiles and
+  validates as a direct component. The support gate allows only this first
+  subset and emits exact rejection reasons for durable Agent calls, connection
+  use, retry overrides, timeouts, compensation, and breakpoints.
+- The shared stdlib WIT now includes `agent-output`, implemented by
+  `runtara-workflow-stdlib::direct_json`, to store Agent success outputs using
+  the same `steps.<id>` envelope shape as generated Rust code.
+- Agent `step_debug_start` uses the Agent input mapping, and
+  `step_debug_end` reads the stored Agent step output after source rebuild.
+  This covers success debug payloads for the first Agent subset.
 
 Implementation steps:
 
@@ -1302,13 +1318,13 @@ Implementation steps:
 2. Emit per-agent imports in workflow WIT/component metadata.
 3. Extend `wac` generation to instantiate/spread required agents and stdlib.
 4. Implement `Agent` lowering:
-   - source construction;
-   - input mapping;
-   - agent input validation;
-   - connection resolution/envelope;
-   - `capabilities.invoke`;
-   - success output envelope;
-   - `error-info` to JSON error envelope.
+   - source construction: done for the first non-durable subset;
+   - input mapping: done through `stdlib.apply-mapping`;
+   - static `capabilities.invoke`: done for `connection = none`;
+   - success output envelope: done through `stdlib.agent-output`;
+   - agent input validation: pending parity with generated Rust validation;
+   - connection resolution/envelope: pending;
+   - `error-info` to JSON error envelope: pending.
 5. Implement `onError` routing for agent failures.
 6. Preserve current retry policy shape by delegating durable retry behavior to
    stdlib/runtime. Non-durable calls can be supported first if needed.

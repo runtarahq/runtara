@@ -607,7 +607,7 @@ fn step_manifest(
                 name: step.name.clone(),
                 step_type: "Agent".to_string(),
                 purpose: "agent.config".to_string(),
-                agent_id: step.agent_id.clone(),
+                agent_id: canonicalize_direct_agent_id(&step.agent_id),
                 capability_id: step.capability_id.clone(),
                 connection_id: step.connection_id.clone(),
                 input_mapping_id,
@@ -697,6 +697,10 @@ fn canonical_json<T: serde::Serialize>(
 ) -> Result<serde_json::Value, DirectManifestError> {
     let value = serde_json::to_value(value).map_err(DirectManifestError::Serialize)?;
     Ok(sort_json(value))
+}
+
+fn canonicalize_direct_agent_id(agent_id: &str) -> String {
+    agent_id.to_lowercase().replace('_', "-")
 }
 
 fn sort_json(value: serde_json::Value) -> serde_json::Value {
