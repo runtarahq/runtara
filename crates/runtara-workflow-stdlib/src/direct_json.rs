@@ -7,6 +7,7 @@
 //! a parsed [`DirectJsonManifest`] after `init-manifest` and delegate the WIT
 //! functions here.
 
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -20,13 +21,15 @@ use crate::template::render_template;
 /// Parsed direct-workflow manifest data needed by JSON stdlib calls.
 #[derive(Debug, Clone)]
 pub struct DirectJsonManifest {
+    steps: BTreeMap<String, DirectJsonStep>,
     mappings: BTreeMap<u32, DirectJsonMapping>,
-    conditions: BTreeMap<u32, Value>,
+    conditions: BTreeMap<u32, DirectJsonCondition>,
     filters: BTreeMap<u32, DirectJsonFilter>,
     switches: BTreeMap<u32, DirectJsonSwitch>,
     group_bys: BTreeMap<u32, DirectJsonGroupBy>,
     logs: BTreeMap<u32, DirectJsonLog>,
     errors: BTreeMap<u32, DirectJsonError>,
+    debug_start_ms: RefCell<BTreeMap<String, i64>>,
 }
 
 impl DirectJsonManifest {
@@ -37,6 +40,7 @@ impl DirectJsonManifest {
         let mut collections = DirectJsonManifestCollections::default();
         collect_graph_manifest(&manifest.graph, &mut collections)?;
         Ok(Self {
+            steps: collections.steps,
             mappings: collections.mappings,
             conditions: collections.conditions,
             filters: collections.filters,
@@ -44,6 +48,7 @@ impl DirectJsonManifest {
             group_bys: collections.group_bys,
             logs: collections.logs,
             errors: collections.errors,
+            debug_start_ms: RefCell::new(BTreeMap::new()),
         })
     }
 
@@ -71,7 +76,7 @@ impl DirectJsonManifest {
             .conditions
             .get(&condition_id)
             .ok_or_else(|| format!("unknown direct condition id {condition_id}"))?;
-        eval_condition_expression(condition, &source)
+        eval_condition_expression(&condition.value, &source)
     }
 
     /// Execute a manifest routing Switch config and return the selected route.
@@ -235,6 +240,244 @@ impl DirectJsonManifest {
         }))
         .map_err(|err| format!("failed to serialize error failure payload: {err}"))
     }
+
+    /// Build a generated-code-compatible `step_debug_start` payload.
+    pub fn step_debug_start(&self, step_id: &str, source: &[u8]) -> Result<Vec<u8>, String> {
+        let source: Value = serde_json::from_slice(source)
+            .map_err(|err| format!("failed to parse step-debug-start source: {err}"))?;
+        let step = self
+            .steps
+            .get(step_id)
+            .ok_or_else(|| format!("unknown direct debug step '{step_id}'"))?;
+        let timestamp = timestamp_ms();
+        self.debug_start_ms
+            .borrow_mut()
+            .insert(step_id.to_string(), timestamp);
+
+        let mut payload = debug_event_base(step, timestamp);
+        let (inputs, input_mapping) = self.debug_start_data(step, &source)?;
+        payload.insert("inputs".to_string(), inputs);
+        if let Some(input_mapping) = input_mapping {
+            payload.insert("input_mapping".to_string(), input_mapping);
+        }
+
+        serde_json::to_vec(&Value::Object(payload))
+            .map_err(|err| format!("failed to serialize step-debug-start payload: {err}"))
+    }
+
+    /// Build a generated-code-compatible `step_debug_end` payload.
+    pub fn step_debug_end(&self, step_id: &str, source: &[u8]) -> Result<Vec<u8>, String> {
+        let source: Value = serde_json::from_slice(source)
+            .map_err(|err| format!("failed to parse step-debug-end source: {err}"))?;
+        let step = self
+            .steps
+            .get(step_id)
+            .ok_or_else(|| format!("unknown direct debug step '{step_id}'"))?;
+        let timestamp = timestamp_ms();
+        let duration_ms = self
+            .debug_start_ms
+            .borrow_mut()
+            .remove(step_id)
+            .map(|start| timestamp.saturating_sub(start).max(0))
+            .unwrap_or(0);
+
+        let mut payload = debug_event_base(step, timestamp);
+        payload.insert("outputs".to_string(), self.debug_end_output(step, &source)?);
+        payload.insert(
+            "duration_ms".to_string(),
+            Value::Number(serde_json::Number::from(duration_ms)),
+        );
+
+        serde_json::to_vec(&Value::Object(payload))
+            .map_err(|err| format!("failed to serialize step-debug-end payload: {err}"))
+    }
+
+    fn debug_start_data(
+        &self,
+        step: &DirectJsonStep,
+        source: &Value,
+    ) -> Result<(Value, Option<Value>), String> {
+        match step.step_type.as_str() {
+            "Finish" => {
+                let mapping = self.finish_mapping(step.id.as_str());
+                Ok((
+                    serde_json::json!({ "finishing": true }),
+                    mapping.and_then(|mapping| {
+                        (!mapping.value.as_object().is_some_and(Map::is_empty))
+                            .then(|| mapping.value.clone())
+                    }),
+                ))
+            }
+            "Conditional" => {
+                let condition = self.conditional_condition(step.id.as_str());
+                Ok((
+                    serde_json::json!({ "condition": "evaluating" }),
+                    condition.cloned(),
+                ))
+            }
+            "Filter" => {
+                let filter = self
+                    .filter_by_step(step.id.as_str())
+                    .ok_or_else(|| format!("missing direct Filter config for '{}'", step.id))?;
+                let input = filter
+                    .value
+                    .get("value")
+                    .ok_or_else(|| "Filter config missing value".to_string())
+                    .and_then(|value| apply_mapping_value(value, source))?;
+                Ok((input, filter.value.get("condition").cloned()))
+            }
+            "Switch" => {
+                let switch = self
+                    .switch_by_step(step.id.as_str())
+                    .ok_or_else(|| format!("missing direct Switch config for '{}'", step.id))?;
+                Ok((
+                    switch_debug_inputs(&switch.value, source)?,
+                    Some(switch.value.clone()),
+                ))
+            }
+            "GroupBy" => {
+                let group_by = self
+                    .group_by_by_step(step.id.as_str())
+                    .ok_or_else(|| format!("missing direct GroupBy config for '{}'", step.id))?;
+                let input = group_by
+                    .value
+                    .get("value")
+                    .ok_or_else(|| "GroupBy config missing value".to_string())
+                    .and_then(|value| apply_mapping_value(value, source))?;
+                Ok((input, None))
+            }
+            "Error" => Ok((Value::Null, None)),
+            "Log" => {
+                let log = self
+                    .log_by_step(step.id.as_str())
+                    .ok_or_else(|| format!("missing direct Log config for '{}'", step.id))?;
+                let details = apply_log(&log.value, source)?;
+                Ok((details.context, None))
+            }
+            other => Err(format!(
+                "direct step-debug-start does not support step type '{other}'"
+            )),
+        }
+    }
+
+    fn debug_end_output(&self, step: &DirectJsonStep, source: &Value) -> Result<Value, String> {
+        match step.step_type.as_str() {
+            "Finish" => {
+                let mapping = self
+                    .finish_mapping(step.id.as_str())
+                    .ok_or_else(|| format!("missing direct Finish mapping for '{}'", step.id))?;
+                let mut output = apply_input_mapping(&mapping.value, source)?;
+                output = output.get("outputs").cloned().unwrap_or(output);
+                Ok(step_output_envelope(step, output, None))
+            }
+            "Conditional" => {
+                let condition = self
+                    .conditional_condition(step.id.as_str())
+                    .ok_or_else(|| {
+                        format!("missing direct Conditional condition for '{}'", step.id)
+                    })?;
+                let result = eval_condition_expression(condition, source)?;
+                Ok(step_output_envelope(
+                    step,
+                    serde_json::json!({ "result": result }),
+                    None,
+                ))
+            }
+            "Filter" => {
+                let filter = self
+                    .filter_by_step(step.id.as_str())
+                    .ok_or_else(|| format!("missing direct Filter config for '{}'", step.id))?;
+                let output = apply_filter(&filter.value, source)?;
+                Ok(step_output_envelope(step, output, None))
+            }
+            "Switch" => {
+                let switch = self
+                    .switch_by_step(step.id.as_str())
+                    .ok_or_else(|| format!("missing direct Switch config for '{}'", step.id))?;
+                let result = apply_switch(&switch.value, source)?;
+                let route = switch_is_routing(&switch.value).then_some(result.route.as_str());
+                Ok(step_output_envelope(step, result.output, route))
+            }
+            "GroupBy" => {
+                let group_by = self
+                    .group_by_by_step(step.id.as_str())
+                    .ok_or_else(|| format!("missing direct GroupBy config for '{}'", step.id))?;
+                let output = apply_group_by(&group_by.value, source)?;
+                Ok(step_output_envelope(step, output, None))
+            }
+            "Log" => {
+                let log = self
+                    .log_by_step(step.id.as_str())
+                    .ok_or_else(|| format!("missing direct Log config for '{}'", step.id))?;
+                let details = apply_log(&log.value, source)?;
+                Ok(step_output_envelope(
+                    step,
+                    serde_json::json!({
+                        "level": details.level,
+                        "message": details.message,
+                    }),
+                    None,
+                ))
+            }
+            "Error" => {
+                let error = self
+                    .error_by_step(step.id.as_str())
+                    .ok_or_else(|| format!("missing direct Error config for '{}'", step.id))?;
+                let details = apply_error(&error.value, source)?;
+                Ok(serde_json::json!({
+                    "_error": true,
+                    "category": details.category,
+                    "code": details.code,
+                    "message": details.message,
+                    "severity": details.severity,
+                }))
+            }
+            other => Err(format!(
+                "direct step-debug-end does not support step type '{other}'"
+            )),
+        }
+    }
+
+    fn finish_mapping(&self, step_id: &str) -> Option<&DirectJsonMapping> {
+        self.mappings
+            .values()
+            .find(|mapping| mapping.step_id == step_id && mapping.purpose == "finish.inputMapping")
+    }
+
+    fn conditional_condition(&self, step_id: &str) -> Option<&Value> {
+        self.conditions
+            .values()
+            .find(|condition| {
+                condition.owner_id == step_id && condition.purpose == "conditional.condition"
+            })
+            .map(|condition| &condition.value)
+    }
+
+    fn filter_by_step(&self, step_id: &str) -> Option<&DirectJsonFilter> {
+        self.filters
+            .values()
+            .find(|filter| filter.step_id == step_id)
+    }
+
+    fn switch_by_step(&self, step_id: &str) -> Option<&DirectJsonSwitch> {
+        self.switches
+            .values()
+            .find(|switch| switch.step_id == step_id)
+    }
+
+    fn group_by_by_step(&self, step_id: &str) -> Option<&DirectJsonGroupBy> {
+        self.group_bys
+            .values()
+            .find(|group_by| group_by.step_id == step_id)
+    }
+
+    fn log_by_step(&self, step_id: &str) -> Option<&DirectJsonLog> {
+        self.logs.values().find(|log| log.step_id == step_id)
+    }
+
+    fn error_by_step(&self, step_id: &str) -> Option<&DirectJsonError> {
+        self.errors.values().find(|error| error.step_id == step_id)
+    }
 }
 
 /// Build the source envelope consumed by direct mapping/condition helpers.
@@ -272,8 +515,9 @@ pub fn build_source(data: &[u8], variables: &[u8], steps: &[u8]) -> Result<Vec<u
 
 #[derive(Default)]
 struct DirectJsonManifestCollections {
+    steps: BTreeMap<String, DirectJsonStep>,
     mappings: BTreeMap<u32, DirectJsonMapping>,
-    conditions: BTreeMap<u32, Value>,
+    conditions: BTreeMap<u32, DirectJsonCondition>,
     filters: BTreeMap<u32, DirectJsonFilter>,
     switches: BTreeMap<u32, DirectJsonSwitch>,
     group_bys: BTreeMap<u32, DirectJsonGroupBy>,
@@ -285,12 +529,29 @@ fn collect_graph_manifest(
     graph: &GraphWire,
     collections: &mut DirectJsonManifestCollections,
 ) -> Result<(), String> {
+    for step in &graph.steps {
+        if collections
+            .steps
+            .insert(
+                step.id.clone(),
+                DirectJsonStep {
+                    id: step.id.clone(),
+                    step_type: step.step_type.clone(),
+                    name: step.name.clone(),
+                },
+            )
+            .is_some()
+        {
+            return Err(format!("duplicate direct step id {}", step.id));
+        }
+    }
     for mapping in &graph.mappings {
         if collections
             .mappings
             .insert(
                 mapping.id,
                 DirectJsonMapping {
+                    step_id: mapping.step_id.clone(),
                     purpose: mapping.purpose.clone(),
                     value: mapping.value.clone(),
                 },
@@ -303,7 +564,14 @@ fn collect_graph_manifest(
     for condition in &graph.conditions {
         if collections
             .conditions
-            .insert(condition.id, condition.value.clone())
+            .insert(
+                condition.id,
+                DirectJsonCondition {
+                    owner_id: condition.owner_id.clone(),
+                    purpose: condition.purpose.clone(),
+                    value: condition.value.clone(),
+                },
+            )
             .is_some()
         {
             return Err(format!("duplicate direct condition id {}", condition.id));
@@ -704,6 +972,78 @@ fn timestamp_ms() -> i64 {
         .unwrap_or(0)
 }
 
+fn debug_event_base(step: &DirectJsonStep, timestamp_ms: i64) -> Map<String, Value> {
+    let mut payload = Map::new();
+    payload.insert("step_id".to_string(), Value::String(step.id.clone()));
+    payload.insert(
+        "step_name".to_string(),
+        step.name
+            .as_ref()
+            .map(|name| Value::String(name.clone()))
+            .unwrap_or(Value::Null),
+    );
+    payload.insert(
+        "step_type".to_string(),
+        Value::String(step.step_type.clone()),
+    );
+    payload.insert("scope_id".to_string(), Value::Null);
+    payload.insert("parent_scope_id".to_string(), Value::Null);
+    payload.insert("loop_indices".to_string(), Value::Array(Vec::new()));
+    payload.insert(
+        "timestamp_ms".to_string(),
+        Value::Number(serde_json::Number::from(timestamp_ms)),
+    );
+    payload
+}
+
+fn switch_debug_inputs(config: &Value, source: &Value) -> Result<Value, String> {
+    let value = config
+        .get("value")
+        .map(|value| apply_mapping_value(value, source))
+        .transpose()?
+        .unwrap_or(Value::Null);
+    let mut inputs = Map::new();
+    inputs.insert("value".to_string(), value);
+    inputs.insert(
+        "cases".to_string(),
+        config
+            .get("cases")
+            .cloned()
+            .unwrap_or_else(|| Value::Array(Vec::new())),
+    );
+    inputs.insert(
+        "default".to_string(),
+        config
+            .get("default")
+            .cloned()
+            .unwrap_or_else(|| Value::Object(Map::new())),
+    );
+    Ok(Value::Object(inputs))
+}
+
+fn step_output_envelope(step: &DirectJsonStep, output: Value, route: Option<&str>) -> Value {
+    let mut envelope = serde_json::json!({
+        "stepId": step.id,
+        "stepName": step.name.as_deref().unwrap_or_else(|| default_step_name(&step.step_type)),
+        "stepType": step.step_type,
+        "outputs": output,
+    });
+    if let Some(route) = route
+        && let Some(envelope) = envelope.as_object_mut()
+    {
+        envelope.insert("route".to_string(), Value::String(route.to_string()));
+    }
+    envelope
+}
+
+fn default_step_name(step_type: &str) -> &str {
+    if step_type == "Finish" {
+        "Finish"
+    } else {
+        "Unnamed"
+    }
+}
+
 fn insert_step_output(
     source: &Value,
     step_id: &str,
@@ -717,18 +1057,15 @@ fn insert_step_output(
         .and_then(Value::as_object)
         .cloned()
         .unwrap_or_default();
-    let mut envelope = serde_json::json!({
-        "stepId": step_id,
-        "stepName": step_name.unwrap_or("Unnamed"),
-        "stepType": step_type,
-        "outputs": output,
-    });
-    if let Some(route) = route
-        && let Some(envelope) = envelope.as_object_mut()
-    {
-        envelope.insert("route".to_string(), Value::String(route.to_string()));
-    }
-    steps.insert(step_id.to_string(), envelope);
+    let step = DirectJsonStep {
+        id: step_id.to_string(),
+        step_type: step_type.to_string(),
+        name: step_name.map(str::to_string),
+    };
+    steps.insert(
+        step_id.to_string(),
+        step_output_envelope(&step, output, route),
+    );
     steps
 }
 
@@ -1180,6 +1517,11 @@ struct GraphWire {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct StepWire {
+    id: String,
+    #[serde(rename = "stepType")]
+    step_type: String,
+    #[serde(default)]
+    name: Option<String>,
     #[serde(default)]
     nested_graphs: Vec<NestedGraphWire>,
 }
@@ -1194,6 +1536,8 @@ struct NestedGraphWire {
 #[serde(rename_all = "camelCase")]
 struct MappingWire {
     id: u32,
+    #[serde(rename = "stepId")]
+    step_id: String,
     purpose: String,
     value: Value,
 }
@@ -1202,6 +1546,8 @@ struct MappingWire {
 #[serde(rename_all = "camelCase")]
 struct ConditionWire {
     id: u32,
+    owner_id: String,
+    purpose: String,
     value: Value,
 }
 
@@ -1257,8 +1603,23 @@ struct ErrorWire {
 
 #[derive(Debug, Clone)]
 struct DirectJsonMapping {
+    step_id: String,
     purpose: String,
     value: Value,
+}
+
+#[derive(Debug, Clone)]
+struct DirectJsonCondition {
+    owner_id: String,
+    purpose: String,
+    value: Value,
+}
+
+#[derive(Debug, Clone)]
+struct DirectJsonStep {
+    id: String,
+    step_type: String,
+    name: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -1416,6 +1777,29 @@ mod tests {
             }
         }))
         .expect("manifest json")
+    }
+
+    fn debug_manifest(
+        step_type: &str,
+        step_id: &str,
+        name: Option<&str>,
+        collections: Value,
+    ) -> Vec<u8> {
+        let mut graph = collections.as_object().cloned().unwrap_or_default();
+        graph.insert(
+            "steps".to_string(),
+            json!([{
+                "id": step_id,
+                "stepType": step_type,
+                "name": name,
+                "body": {
+                    "id": step_id,
+                    "stepType": step_type,
+                    "name": name
+                }
+            }]),
+        );
+        serde_json::to_vec(&json!({ "graph": graph })).expect("manifest json")
     }
 
     #[test]
@@ -2057,5 +2441,174 @@ mod tests {
         assert_eq!(failure["category"], json!("permanent"));
         assert_eq!(failure["severity"], json!("error"));
         assert_eq!(failure["context"], json!({}));
+    }
+
+    #[test]
+    fn step_debug_finish_payloads_match_generated_shape() {
+        let manifest = DirectJsonManifest::parse(&debug_manifest(
+            "Finish",
+            "finish",
+            Some("Done"),
+            json!({
+                "mappings": [{
+                    "id": 0,
+                    "stepId": "finish",
+                    "stepType": "Finish",
+                    "purpose": "finish.inputMapping",
+                    "value": {
+                        "outputs": {
+                            "valueType": "reference",
+                            "value": "data.value"
+                        }
+                    }
+                }]
+            }),
+        ))
+        .expect("manifest");
+        let source = build_source(br#"{"value":"ok"}"#, b"{}", b"{}").expect("source");
+
+        let start = manifest
+            .step_debug_start("finish", &source)
+            .expect("debug start");
+        let start: Value = serde_json::from_slice(&start).expect("start json");
+        assert_eq!(start["step_id"], json!("finish"));
+        assert_eq!(start["step_name"], json!("Done"));
+        assert_eq!(start["step_type"], json!("Finish"));
+        assert_eq!(start["scope_id"], Value::Null);
+        assert_eq!(start["parent_scope_id"], Value::Null);
+        assert_eq!(start["loop_indices"], json!([]));
+        assert_eq!(start["inputs"], json!({ "finishing": true }));
+        assert_eq!(
+            start["input_mapping"],
+            json!({
+                "outputs": {
+                    "valueType": "reference",
+                    "value": "data.value"
+                }
+            })
+        );
+        assert!(
+            start["timestamp_ms"]
+                .as_i64()
+                .is_some_and(|value| value > 0)
+        );
+
+        let end = manifest
+            .step_debug_end("finish", &source)
+            .expect("debug end");
+        let end: Value = serde_json::from_slice(&end).expect("end json");
+        assert_eq!(end["step_id"], json!("finish"));
+        assert_eq!(
+            end["outputs"],
+            json!({
+                "stepId": "finish",
+                "stepName": "Done",
+                "stepType": "Finish",
+                "outputs": "ok"
+            })
+        );
+        assert!(end["duration_ms"].as_i64().is_some_and(|value| value >= 0));
+    }
+
+    #[test]
+    fn step_debug_conditional_payloads_include_result() {
+        let manifest = DirectJsonManifest::parse(&debug_manifest(
+            "Conditional",
+            "check",
+            None,
+            json!({
+                "conditions": [{
+                    "id": 0,
+                    "ownerId": "check",
+                    "ownerType": "Conditional",
+                    "purpose": "conditional.condition",
+                    "value": {
+                        "type": "operation",
+                        "op": "EQ",
+                        "arguments": [
+                            { "valueType": "reference", "value": "data.status" },
+                            { "valueType": "immediate", "value": "active" }
+                        ]
+                    }
+                }]
+            }),
+        ))
+        .expect("manifest");
+        let source = build_source(br#"{"status":"active"}"#, b"{}", b"{}").expect("source");
+
+        let start = manifest
+            .step_debug_start("check", &source)
+            .expect("debug start");
+        let start: Value = serde_json::from_slice(&start).expect("start json");
+        assert_eq!(start["inputs"], json!({ "condition": "evaluating" }));
+        assert_eq!(start["input_mapping"]["op"], json!("EQ"));
+
+        let end = manifest
+            .step_debug_end("check", &source)
+            .expect("debug end");
+        let end: Value = serde_json::from_slice(&end).expect("end json");
+        assert_eq!(
+            end["outputs"],
+            json!({
+                "stepId": "check",
+                "stepName": "Unnamed",
+                "stepType": "Conditional",
+                "outputs": { "result": true }
+            })
+        );
+    }
+
+    #[test]
+    fn step_debug_switch_payloads_include_inputs_and_route() {
+        let config = json!({
+            "value": { "valueType": "reference", "value": "data.status" },
+            "cases": [{
+                "matchType": "EQ",
+                "match": "active",
+                "route": "active",
+                "output": { "selected": { "valueType": "immediate", "value": "yes" } }
+            }],
+            "default": { "selected": { "valueType": "immediate", "value": "no" } }
+        });
+        let manifest = DirectJsonManifest::parse(&debug_manifest(
+            "Switch",
+            "switch",
+            Some("Classify"),
+            json!({
+                "switches": [{
+                    "id": 0,
+                    "stepId": "switch",
+                    "name": "Classify",
+                    "stepType": "Switch",
+                    "purpose": "switch.config",
+                    "value": config
+                }]
+            }),
+        ))
+        .expect("manifest");
+        let source = build_source(br#"{"status":"active"}"#, b"{}", b"{}").expect("source");
+
+        let start = manifest
+            .step_debug_start("switch", &source)
+            .expect("debug start");
+        let start: Value = serde_json::from_slice(&start).expect("start json");
+        assert_eq!(start["inputs"]["value"], json!("active"));
+        assert_eq!(start["inputs"]["cases"][0]["route"], json!("active"));
+        assert_eq!(start["input_mapping"]["cases"][0]["match"], json!("active"));
+
+        let end = manifest
+            .step_debug_end("switch", &source)
+            .expect("debug end");
+        let end: Value = serde_json::from_slice(&end).expect("end json");
+        assert_eq!(
+            end["outputs"],
+            json!({
+                "stepId": "switch",
+                "stepName": "Classify",
+                "stepType": "Switch",
+                "outputs": { "selected": "yes" },
+                "route": "active"
+            })
+        );
     }
 }

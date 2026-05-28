@@ -384,8 +384,29 @@ fn run_direct_workflow_with_events(
     graph_json: &str,
     workflow_input: &[u8],
 ) -> DirectRunOutput {
-    let captured =
-        run_direct_workflow_capture(components_dir, workflow_id, graph_json, workflow_input);
+    run_direct_workflow_with_events_and_tracking(
+        components_dir,
+        workflow_id,
+        graph_json,
+        workflow_input,
+        false,
+    )
+}
+
+fn run_direct_workflow_with_events_and_tracking(
+    components_dir: &Path,
+    workflow_id: &str,
+    graph_json: &str,
+    workflow_input: &[u8],
+    track_events: bool,
+) -> DirectRunOutput {
+    let captured = run_direct_workflow_capture(
+        components_dir,
+        workflow_id,
+        graph_json,
+        workflow_input,
+        track_events,
+    );
     assert!(
         captured.status_success,
         "wasmtime exited non-zero:\n--- stderr ---\n{}",
@@ -409,8 +430,13 @@ fn run_direct_workflow_expect_failure(
     graph_json: &str,
     workflow_input: &[u8],
 ) -> DirectFailureOutput {
-    let captured =
-        run_direct_workflow_capture(components_dir, workflow_id, graph_json, workflow_input);
+    let captured = run_direct_workflow_capture(
+        components_dir,
+        workflow_id,
+        graph_json,
+        workflow_input,
+        false,
+    );
     assert!(
         !captured.status_success,
         "direct Error workflow should return a failed wasi:cli/run result"
@@ -436,6 +462,7 @@ fn run_direct_workflow_capture(
     workflow_id: &str,
     graph_json: &str,
     workflow_input: &[u8],
+    track_events: bool,
 ) -> CapturedRun {
     let temp = tempfile::tempdir().expect("tempdir");
     let graph: ExecutionGraph = serde_json::from_str(graph_json).expect("fixture parses");
@@ -445,6 +472,7 @@ fn run_direct_workflow_capture(
             version: 1,
             execution_graph: graph,
             output_dir: temp.path().to_path_buf(),
+            track_events,
         },
         components_dir,
     )
@@ -517,6 +545,74 @@ fn direct_wasm_execute_finish_passthrough_reports_completion() {
     );
 
     assert_eq!(output, serde_json::json!({ "result": "direct-finish" }));
+}
+
+#[test]
+fn direct_wasm_execute_finish_passthrough_track_events_emits_step_debug_events() {
+    let Some(components_dir) = direct_e2e_components_dir() else {
+        return;
+    };
+
+    let result = run_direct_workflow_with_events_and_tracking(
+        &components_dir,
+        "direct-wasm-execute-finish-track-events",
+        SIMPLE_PASSTHROUGH,
+        br#"{"input":"direct-finish"}"#,
+        true,
+    );
+
+    assert_eq!(
+        result.output_json,
+        serde_json::json!({ "result": "direct-finish" })
+    );
+    assert_eq!(result.events.len(), 2);
+
+    let start = &result.events[0];
+    assert_eq!(start.subtype, "step_debug_start");
+    assert_eq!(start.payload_json["step_id"], "finish");
+    assert_eq!(start.payload_json["step_name"], Value::Null);
+    assert_eq!(start.payload_json["step_type"], "Finish");
+    assert_eq!(start.payload_json["scope_id"], Value::Null);
+    assert_eq!(start.payload_json["parent_scope_id"], Value::Null);
+    assert_eq!(start.payload_json["loop_indices"], serde_json::json!([]));
+    assert_eq!(
+        start.payload_json["inputs"],
+        serde_json::json!({ "finishing": true })
+    );
+    assert_eq!(
+        start.payload_json["input_mapping"],
+        serde_json::json!({
+            "result": {
+                "valueType": "reference",
+                "value": "data.input"
+            }
+        })
+    );
+    assert!(
+        start.payload_json["timestamp_ms"]
+            .as_i64()
+            .is_some_and(|value| value > 0)
+    );
+
+    let end = &result.events[1];
+    assert_eq!(end.subtype, "step_debug_end");
+    assert_eq!(end.payload_json["step_id"], "finish");
+    assert_eq!(
+        end.payload_json["outputs"],
+        serde_json::json!({
+            "stepId": "finish",
+            "stepName": "Finish",
+            "stepType": "Finish",
+            "outputs": {
+                "result": "direct-finish"
+            }
+        })
+    );
+    assert!(
+        end.payload_json["duration_ms"]
+            .as_i64()
+            .is_some_and(|value| value >= 0)
+    );
 }
 
 #[test]

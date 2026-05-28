@@ -7,6 +7,7 @@
 //! manifest/support sidecars that later graph-lowering work will consume.
 
 use std::borrow::Cow;
+use std::collections::BTreeMap;
 use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -63,6 +64,8 @@ const DIRECT_STATIC_DATA_OFFSET: i32 = 64;
 const DIRECT_EMPTY_STEPS_CONTEXT: &[u8] = b"{}";
 const DIRECT_WORKFLOW_LOG_KIND: &[u8] = b"workflow_log";
 const DIRECT_WORKFLOW_ERROR_KIND: &[u8] = b"workflow_error";
+const DIRECT_STEP_DEBUG_START_KIND: &[u8] = b"step_debug_start";
+const DIRECT_STEP_DEBUG_END_KIND: &[u8] = b"step_debug_end";
 const WASM_PAGE_SIZE: i32 = 65_536;
 
 /// Input for the opt-in direct compiler.
@@ -76,6 +79,8 @@ pub struct DirectCompilationInput {
     pub execution_graph: ExecutionGraph,
     /// Directory where the direct artifact directory should be created.
     pub output_dir: PathBuf,
+    /// Whether to emit generated-code-compatible step debug events.
+    pub track_events: bool,
 }
 
 /// Result of opt-in direct workflow compilation.
@@ -289,7 +294,7 @@ pub fn compile_direct_workflow(
 
     let manifest_json = manifest.to_canonical_json()?;
     let support_json = serde_json::to_vec(&support_report)?;
-    let wasm = emit_direct_artifact(&manifest, &manifest_json, &support_json)?;
+    let wasm = emit_direct_artifact(&manifest, &manifest_json, &support_json, input.track_events)?;
     let component_artifacts = emit_direct_component_artifacts(&manifest.feature_summary.agent_ids);
 
     let build_dir = input.output_dir.join(format!(
@@ -337,6 +342,7 @@ fn emit_direct_artifact(
     manifest: &DirectWorkflowManifest,
     manifest_json: &[u8],
     support_json: &[u8],
+    track_events: bool,
 ) -> Result<Vec<u8>, DirectCompileError> {
     let abi_json = serde_json::to_vec(&serde_json::json!({
         "abiVersion": DIRECT_WORKFLOW_ABI_VERSION,
@@ -350,7 +356,7 @@ fn emit_direct_artifact(
         "note": "direct compiler component with canonical run export, stdlib mapping/condition calls, and runtime.complete call"
     }))?;
 
-    let mut component = emit_direct_component(manifest, manifest_json)?;
+    let mut component = emit_direct_component(manifest, manifest_json, track_events)?;
     append_component_custom_section(&mut component, DIRECT_WORKFLOW_ABI_SECTION, &abi_json);
     append_component_custom_section(
         &mut component,
@@ -369,9 +375,10 @@ fn emit_direct_artifact(
 fn emit_direct_component(
     manifest: &DirectWorkflowManifest,
     manifest_json: &[u8],
+    track_events: bool,
 ) -> Result<Vec<u8>, DirectCompileError> {
     let (resolve, world) = build_direct_component_resolve()?;
-    let core_config = DirectCoreConfig::new(manifest, manifest_json)?;
+    let core_config = DirectCoreConfig::new(manifest, manifest_json, track_events)?;
     let mut core_module = emit_direct_core_module(&resolve, world, &core_config)?;
     embed_component_metadata(&mut core_module, &resolve, world, StringEncoding::UTF8)
         .map_err(component_error)?;
@@ -419,22 +426,27 @@ fn build_direct_component_resolve() -> Result<(Resolve, WorldId), DirectCompileE
 struct DirectCoreConfig {
     run_plan: DirectRunPlan,
     static_data: DirectCoreStaticData,
+    track_events: bool,
 }
 
 #[derive(Debug, Clone)]
 enum DirectRunPlan {
     Finish {
+        step_id: String,
         mapping_id: u32,
     },
     Filter {
+        step_id: String,
         filter_id: u32,
         next_plan: Box<DirectRunPlan>,
     },
     SwitchValue {
+        step_id: String,
         switch_id: u32,
         next_plan: Box<DirectRunPlan>,
     },
     SwitchRoute {
+        step_id: String,
         switch_id: u32,
         branches: Vec<DirectSwitchRoutePlan>,
         default_plan: Box<DirectRunPlan>,
@@ -444,6 +456,7 @@ enum DirectRunPlan {
         default_plan: Box<DirectRunPlan>,
     },
     GroupBy {
+        step_id: String,
         group_id: u32,
         next_plan: Box<DirectRunPlan>,
     },
@@ -452,9 +465,11 @@ enum DirectRunPlan {
         next_plan: Box<DirectRunPlan>,
     },
     Error {
+        step_id: String,
         error_id: u32,
     },
     Conditional {
+        step_id: String,
         condition_id: u32,
         true_plan: Box<DirectRunPlan>,
         false_plan: Box<DirectRunPlan>,
@@ -477,15 +492,18 @@ impl DirectCoreConfig {
     fn new(
         manifest: &DirectWorkflowManifest,
         manifest_json: &[u8],
+        track_events: bool,
     ) -> Result<Self, DirectCompileError> {
         let variables_json = serde_json::to_vec(&manifest.graph.variables)?;
         Ok(Self {
             run_plan: direct_run_plan(manifest)?,
             static_data: DirectCoreStaticData::new(
+                &manifest.graph,
                 manifest_json,
                 &variables_json,
                 DIRECT_EMPTY_STEPS_CONTEXT,
             )?,
+            track_events,
         })
     }
 }
@@ -497,12 +515,16 @@ struct DirectCoreStaticData {
     steps: DirectDataSegment,
     workflow_log_kind: DirectDataSegment,
     workflow_error_kind: DirectDataSegment,
+    step_debug_start_kind: DirectDataSegment,
+    step_debug_end_kind: DirectDataSegment,
+    step_ids: BTreeMap<String, DirectDataSegment>,
     heap_base: i32,
     memory_min_pages: u64,
 }
 
 impl DirectCoreStaticData {
     fn new(
+        graph: &DirectGraphManifest,
         manifest_json: &[u8],
         variables_json: &[u8],
         steps_json: &[u8],
@@ -529,6 +551,25 @@ impl DirectCoreStaticData {
             16,
         );
 
+        let step_debug_start_kind = DirectDataSegment::new(offset, DIRECT_STEP_DEBUG_START_KIND);
+        offset = align_i32(
+            checked_offset_add(offset, DIRECT_STEP_DEBUG_START_KIND.len())?,
+            16,
+        );
+
+        let step_debug_end_kind = DirectDataSegment::new(offset, DIRECT_STEP_DEBUG_END_KIND);
+        offset = align_i32(
+            checked_offset_add(offset, DIRECT_STEP_DEBUG_END_KIND.len())?,
+            16,
+        );
+
+        let mut step_ids = BTreeMap::new();
+        for step in &graph.steps {
+            let segment = DirectDataSegment::new(offset, step.id.as_bytes());
+            offset = align_i32(checked_offset_add(offset, step.id.len())?, 16);
+            step_ids.insert(step.id.clone(), segment);
+        }
+
         let memory_min_pages = wasm_pages_for_bytes(offset)?;
         Ok(Self {
             manifest,
@@ -536,8 +577,17 @@ impl DirectCoreStaticData {
             steps,
             workflow_log_kind,
             workflow_error_kind,
+            step_debug_start_kind,
+            step_debug_end_kind,
+            step_ids,
             heap_base: offset,
             memory_min_pages,
+        })
+    }
+
+    fn step_id(&self, step_id: &str) -> Result<&DirectDataSegment, DirectCompileError> {
+        self.step_ids.get(step_id).ok_or_else(|| {
+            DirectCompileError::Component(format!("missing direct static step id '{step_id}'"))
         })
     }
 }
@@ -607,6 +657,7 @@ fn step_run_plan(
 
     match step.step_type.as_str() {
         "Finish" => Ok(DirectRunPlan::Finish {
+            step_id: step_id.to_string(),
             mapping_id: finish_mapping_id(graph, step_id)?,
         }),
         "Filter" => {
@@ -614,6 +665,7 @@ fn step_run_plan(
             let next_plan = normal_flow_plan(graph, step_id, stack)?;
 
             Ok(DirectRunPlan::Filter {
+                step_id: step_id.to_string(),
                 filter_id,
                 next_plan: Box::new(next_plan),
             })
@@ -638,6 +690,7 @@ fn step_run_plan(
                 stack.pop();
 
                 Ok(DirectRunPlan::SwitchRoute {
+                    step_id: step_id.to_string(),
                     switch_id,
                     branches,
                     default_plan: Box::new(default_plan),
@@ -646,6 +699,7 @@ fn step_run_plan(
                 let next_plan = normal_flow_plan(graph, step_id, stack)?;
 
                 Ok(DirectRunPlan::SwitchValue {
+                    step_id: step_id.to_string(),
                     switch_id,
                     next_plan: Box::new(next_plan),
                 })
@@ -656,6 +710,7 @@ fn step_run_plan(
             let next_plan = normal_flow_plan(graph, step_id, stack)?;
 
             Ok(DirectRunPlan::GroupBy {
+                step_id: step_id.to_string(),
                 group_id,
                 next_plan: Box::new(next_plan),
             })
@@ -670,6 +725,7 @@ fn step_run_plan(
             })
         }
         "Error" => Ok(DirectRunPlan::Error {
+            step_id: step_id.to_string(),
             error_id: error_id(graph, step_id)?,
         }),
         "Conditional" => {
@@ -695,6 +751,7 @@ fn step_run_plan(
             stack.pop();
 
             Ok(DirectRunPlan::Conditional {
+                step_id: step_id.to_string(),
                 condition_id,
                 true_plan: Box::new(true_plan),
                 false_plan: Box::new(false_plan),
@@ -1155,13 +1212,17 @@ fn emit_direct_core_module(
     );
 
     let mut data = DataSection::new();
-    for segment in [
+    let mut segments = vec![
         &config.static_data.manifest,
         &config.static_data.variables,
         &config.static_data.steps,
         &config.static_data.workflow_log_kind,
         &config.static_data.workflow_error_kind,
-    ] {
+        &config.static_data.step_debug_start_kind,
+        &config.static_data.step_debug_end_kind,
+    ];
+    segments.extend(config.static_data.step_ids.values());
+    for segment in segments {
         data.active(
             0,
             &ConstExpr::i32_const(segment.offset),
@@ -1201,6 +1262,8 @@ struct DirectCoreImportIndices {
     stdlib_error: Option<u32>,
     stdlib_value_switch: Option<u32>,
     stdlib_group_by: Option<u32>,
+    stdlib_step_debug_start: Option<u32>,
+    stdlib_step_debug_end: Option<u32>,
 }
 
 impl DirectCoreImportIndices {
@@ -1237,6 +1300,14 @@ impl DirectCoreImportIndices {
             stdlib_error: require_import(self.stdlib_error, "stdlib.error")?,
             stdlib_value_switch: require_import(self.stdlib_value_switch, "stdlib.value-switch")?,
             stdlib_group_by: require_import(self.stdlib_group_by, "stdlib.group-by")?,
+            stdlib_step_debug_start: require_import(
+                self.stdlib_step_debug_start,
+                "stdlib.step-debug-start",
+            )?,
+            stdlib_step_debug_end: require_import(
+                self.stdlib_step_debug_end,
+                "stdlib.step-debug-end",
+            )?,
         })
     }
 }
@@ -1259,6 +1330,8 @@ struct DirectCoreFunctionIndices {
     stdlib_error: u32,
     stdlib_value_switch: u32,
     stdlib_group_by: u32,
+    stdlib_step_debug_start: u32,
+    stdlib_step_debug_end: u32,
 }
 
 fn require_import(value: Option<u32>, name: &str) -> Result<u32, DirectCompileError> {
@@ -1322,6 +1395,10 @@ fn import_core_function(
         import_indices.stdlib_value_switch = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "group-by") {
         import_indices.stdlib_group_by = Some(function_index);
+    } else if is_stdlib_import(resolve, interface, function, "step-debug-start") {
+        import_indices.stdlib_step_debug_start = Some(function_index);
+    } else if is_stdlib_import(resolve, interface, function, "step-debug-end") {
+        import_indices.stdlib_step_debug_end = Some(function_index);
     }
 }
 
@@ -1513,6 +1590,8 @@ fn direct_run_function(
     emit_run_plan_mapping(
         &mut body,
         indices,
+        &config.static_data,
+        config.track_events,
         &config.static_data.variables,
         &config.run_plan,
         DATA_PTR_LOCAL,
@@ -1542,6 +1621,8 @@ fn direct_run_function(
 fn emit_run_plan_mapping(
     body: &mut WasmFunction,
     indices: &DirectCoreFunctionIndices,
+    static_data: &DirectCoreStaticData,
+    track_events: bool,
     variables: &DirectDataSegment,
     run_plan: &DirectRunPlan,
     data_ptr_local: u32,
@@ -1558,7 +1639,22 @@ fn emit_run_plan_mapping(
     workflow_error_kind: &DirectDataSegment,
 ) {
     match run_plan {
-        DirectRunPlan::Finish { mapping_id } => {
+        DirectRunPlan::Finish {
+            step_id,
+            mapping_id,
+        } => {
+            emit_step_debug_event(
+                body,
+                indices,
+                static_data,
+                track_events,
+                true,
+                step_id,
+                source_ptr_local,
+                source_len_local,
+                route_ptr_local,
+                route_len_local,
+            );
             emit_apply_mapping(
                 body,
                 indices,
@@ -1568,15 +1664,31 @@ fn emit_run_plan_mapping(
                 output_ptr_local,
                 output_len_local,
             );
+            emit_step_debug_event(
+                body,
+                indices,
+                static_data,
+                track_events,
+                false,
+                step_id,
+                source_ptr_local,
+                source_len_local,
+                route_ptr_local,
+                route_len_local,
+            );
         }
         DirectRunPlan::Filter {
+            step_id,
             filter_id,
             next_plan,
         } => {
             emit_step_context_plan(
                 body,
                 indices,
+                static_data,
+                track_events,
                 variables,
+                step_id,
                 indices.stdlib_filter,
                 *filter_id,
                 next_plan,
@@ -1595,13 +1707,17 @@ fn emit_run_plan_mapping(
             );
         }
         DirectRunPlan::SwitchValue {
+            step_id,
             switch_id,
             next_plan,
         } => {
             emit_step_context_plan(
                 body,
                 indices,
+                static_data,
+                track_events,
                 variables,
+                step_id,
                 indices.stdlib_value_switch,
                 *switch_id,
                 next_plan,
@@ -1620,6 +1736,7 @@ fn emit_run_plan_mapping(
             );
         }
         DirectRunPlan::SwitchRoute {
+            step_id,
             switch_id,
             branches,
             default_plan,
@@ -1627,7 +1744,10 @@ fn emit_run_plan_mapping(
             emit_switch_route_plan(
                 body,
                 indices,
+                static_data,
+                track_events,
                 variables,
+                step_id,
                 *switch_id,
                 branches,
                 default_plan,
@@ -1652,6 +1772,8 @@ fn emit_run_plan_mapping(
             emit_edge_route_dispatch(
                 body,
                 indices,
+                static_data,
+                track_events,
                 variables,
                 branches,
                 default_plan,
@@ -1670,13 +1792,17 @@ fn emit_run_plan_mapping(
             );
         }
         DirectRunPlan::GroupBy {
+            step_id,
             group_id,
             next_plan,
         } => {
             emit_step_context_plan(
                 body,
                 indices,
+                static_data,
+                track_events,
                 variables,
+                step_id,
                 indices.stdlib_group_by,
                 *group_id,
                 next_plan,
@@ -1698,6 +1824,8 @@ fn emit_run_plan_mapping(
             emit_log_plan(
                 body,
                 indices,
+                static_data,
+                track_events,
                 variables,
                 *log_id,
                 next_plan,
@@ -1715,10 +1843,13 @@ fn emit_run_plan_mapping(
                 workflow_error_kind,
             );
         }
-        DirectRunPlan::Error { error_id } => {
+        DirectRunPlan::Error { step_id, error_id } => {
             emit_error_plan(
                 body,
                 indices,
+                static_data,
+                track_events,
+                step_id,
                 *error_id,
                 source_ptr_local,
                 source_len_local,
@@ -1728,16 +1859,41 @@ fn emit_run_plan_mapping(
             );
         }
         DirectRunPlan::Conditional {
+            step_id,
             condition_id,
             true_plan,
             false_plan,
         } => {
+            emit_step_debug_event(
+                body,
+                indices,
+                static_data,
+                track_events,
+                true,
+                step_id,
+                source_ptr_local,
+                source_len_local,
+                output_ptr_local,
+                output_len_local,
+            );
             body.instruction(&Instruction::I32Const(*condition_id as i32));
             body.instruction(&Instruction::LocalGet(source_ptr_local));
             body.instruction(&Instruction::LocalGet(source_len_local));
             push_retptr_arg(body);
             body.instruction(&Instruction::Call(indices.stdlib_eval_condition));
             return_if_retptr_error(body);
+            emit_step_debug_event(
+                body,
+                indices,
+                static_data,
+                track_events,
+                false,
+                step_id,
+                source_ptr_local,
+                source_len_local,
+                output_ptr_local,
+                output_len_local,
+            );
 
             body.instruction(&Instruction::I32Const(DIRECT_RUN_RETPTR_OFFSET));
             body.instruction(&Instruction::I32Load8U(MemArg {
@@ -1749,6 +1905,8 @@ fn emit_run_plan_mapping(
             emit_run_plan_mapping(
                 body,
                 indices,
+                static_data,
+                track_events,
                 variables,
                 true_plan,
                 data_ptr_local,
@@ -1768,6 +1926,8 @@ fn emit_run_plan_mapping(
             emit_run_plan_mapping(
                 body,
                 indices,
+                static_data,
+                track_events,
                 variables,
                 false_plan,
                 data_ptr_local,
@@ -1789,9 +1949,58 @@ fn emit_run_plan_mapping(
 }
 
 #[allow(clippy::too_many_arguments)]
+fn emit_step_debug_event(
+    body: &mut WasmFunction,
+    indices: &DirectCoreFunctionIndices,
+    static_data: &DirectCoreStaticData,
+    track_events: bool,
+    start: bool,
+    step_id: &str,
+    source_ptr_local: u32,
+    source_len_local: u32,
+    output_ptr_local: u32,
+    output_len_local: u32,
+) {
+    if !track_events {
+        return;
+    }
+
+    let step_id = static_data
+        .step_id(step_id)
+        .expect("run plan step ids are present in static data");
+    push_segment_args(body, step_id);
+    body.instruction(&Instruction::LocalGet(source_ptr_local));
+    body.instruction(&Instruction::LocalGet(source_len_local));
+    push_retptr_arg(body);
+    body.instruction(&Instruction::Call(if start {
+        indices.stdlib_step_debug_start
+    } else {
+        indices.stdlib_step_debug_end
+    }));
+    return_if_retptr_error(body);
+    load_retptr_list(body, output_ptr_local, output_len_local);
+
+    push_segment_args(
+        body,
+        if start {
+            &static_data.step_debug_start_kind
+        } else {
+            &static_data.step_debug_end_kind
+        },
+    );
+    body.instruction(&Instruction::LocalGet(output_ptr_local));
+    body.instruction(&Instruction::LocalGet(output_len_local));
+    push_retptr_arg(body);
+    body.instruction(&Instruction::Call(indices.runtime_custom_event));
+    return_if_retptr_error(body);
+}
+
+#[allow(clippy::too_many_arguments)]
 fn emit_edge_route_dispatch(
     body: &mut WasmFunction,
     indices: &DirectCoreFunctionIndices,
+    static_data: &DirectCoreStaticData,
+    track_events: bool,
     variables: &DirectDataSegment,
     branches: &[DirectEdgeConditionPlan],
     default_plan: &DirectRunPlan,
@@ -1812,6 +2021,8 @@ fn emit_edge_route_dispatch(
         emit_run_plan_mapping(
             body,
             indices,
+            static_data,
+            track_events,
             variables,
             default_plan,
             data_ptr_local,
@@ -1847,6 +2058,8 @@ fn emit_edge_route_dispatch(
     emit_run_plan_mapping(
         body,
         indices,
+        static_data,
+        track_events,
         variables,
         &branch.plan,
         data_ptr_local,
@@ -1866,6 +2079,8 @@ fn emit_edge_route_dispatch(
     emit_edge_route_dispatch(
         body,
         indices,
+        static_data,
+        track_events,
         variables,
         remaining,
         default_plan,
@@ -1889,7 +2104,10 @@ fn emit_edge_route_dispatch(
 fn emit_step_context_plan(
     body: &mut WasmFunction,
     indices: &DirectCoreFunctionIndices,
+    static_data: &DirectCoreStaticData,
+    track_events: bool,
     variables: &DirectDataSegment,
+    step_id: &str,
     step_function_index: u32,
     step_config_id: u32,
     next_plan: &DirectRunPlan,
@@ -1906,6 +2124,18 @@ fn emit_step_context_plan(
     workflow_log_kind: &DirectDataSegment,
     workflow_error_kind: &DirectDataSegment,
 ) {
+    emit_step_debug_event(
+        body,
+        indices,
+        static_data,
+        track_events,
+        true,
+        step_id,
+        source_ptr_local,
+        source_len_local,
+        output_ptr_local,
+        output_len_local,
+    );
     body.instruction(&Instruction::I32Const(step_config_id as i32));
     body.instruction(&Instruction::LocalGet(source_ptr_local));
     body.instruction(&Instruction::LocalGet(source_len_local));
@@ -1913,6 +2143,18 @@ fn emit_step_context_plan(
     body.instruction(&Instruction::Call(step_function_index));
     return_if_retptr_error(body);
     load_retptr_list(body, steps_ptr_local, steps_len_local);
+    emit_step_debug_event(
+        body,
+        indices,
+        static_data,
+        track_events,
+        false,
+        step_id,
+        source_ptr_local,
+        source_len_local,
+        output_ptr_local,
+        output_len_local,
+    );
 
     emit_build_source(
         body,
@@ -1929,6 +2171,8 @@ fn emit_step_context_plan(
     emit_run_plan_mapping(
         body,
         indices,
+        static_data,
+        track_events,
         variables,
         next_plan,
         data_ptr_local,
@@ -1950,6 +2194,8 @@ fn emit_step_context_plan(
 fn emit_log_plan(
     body: &mut WasmFunction,
     indices: &DirectCoreFunctionIndices,
+    static_data: &DirectCoreStaticData,
+    track_events: bool,
     variables: &DirectDataSegment,
     log_id: u32,
     next_plan: &DirectRunPlan,
@@ -2004,6 +2250,8 @@ fn emit_log_plan(
     emit_run_plan_mapping(
         body,
         indices,
+        static_data,
+        track_events,
         variables,
         next_plan,
         data_ptr_local,
@@ -2025,6 +2273,9 @@ fn emit_log_plan(
 fn emit_error_plan(
     body: &mut WasmFunction,
     indices: &DirectCoreFunctionIndices,
+    static_data: &DirectCoreStaticData,
+    track_events: bool,
+    step_id: &str,
     error_id: u32,
     source_ptr_local: u32,
     source_len_local: u32,
@@ -2032,6 +2283,18 @@ fn emit_error_plan(
     output_len_local: u32,
     workflow_error_kind: &DirectDataSegment,
 ) {
+    emit_step_debug_event(
+        body,
+        indices,
+        static_data,
+        track_events,
+        true,
+        step_id,
+        source_ptr_local,
+        source_len_local,
+        output_ptr_local,
+        output_len_local,
+    );
     body.instruction(&Instruction::I32Const(error_id as i32));
     body.instruction(&Instruction::LocalGet(source_ptr_local));
     body.instruction(&Instruction::LocalGet(source_len_local));
@@ -2046,6 +2309,19 @@ fn emit_error_plan(
     push_retptr_arg(body);
     body.instruction(&Instruction::Call(indices.runtime_custom_event));
     return_if_retptr_error(body);
+
+    emit_step_debug_event(
+        body,
+        indices,
+        static_data,
+        track_events,
+        false,
+        step_id,
+        source_ptr_local,
+        source_len_local,
+        output_ptr_local,
+        output_len_local,
+    );
 
     body.instruction(&Instruction::I32Const(error_id as i32));
     body.instruction(&Instruction::LocalGet(source_ptr_local));
@@ -2067,7 +2343,10 @@ fn emit_error_plan(
 fn emit_switch_route_plan(
     body: &mut WasmFunction,
     indices: &DirectCoreFunctionIndices,
+    static_data: &DirectCoreStaticData,
+    track_events: bool,
     variables: &DirectDataSegment,
+    step_id: &str,
     switch_id: u32,
     branches: &[DirectSwitchRoutePlan],
     default_plan: &DirectRunPlan,
@@ -2084,6 +2363,18 @@ fn emit_switch_route_plan(
     workflow_log_kind: &DirectDataSegment,
     workflow_error_kind: &DirectDataSegment,
 ) {
+    emit_step_debug_event(
+        body,
+        indices,
+        static_data,
+        track_events,
+        true,
+        step_id,
+        source_ptr_local,
+        source_len_local,
+        output_ptr_local,
+        output_len_local,
+    );
     body.instruction(&Instruction::I32Const(switch_id as i32));
     body.instruction(&Instruction::LocalGet(source_ptr_local));
     body.instruction(&Instruction::LocalGet(source_len_local));
@@ -2099,6 +2390,18 @@ fn emit_switch_route_plan(
     body.instruction(&Instruction::Call(indices.stdlib_value_switch));
     return_if_retptr_error(body);
     load_retptr_list(body, steps_ptr_local, steps_len_local);
+    emit_step_debug_event(
+        body,
+        indices,
+        static_data,
+        track_events,
+        false,
+        step_id,
+        source_ptr_local,
+        source_len_local,
+        output_ptr_local,
+        output_len_local,
+    );
 
     emit_build_source(
         body,
@@ -2115,6 +2418,8 @@ fn emit_switch_route_plan(
     emit_switch_route_dispatch(
         body,
         indices,
+        static_data,
+        track_events,
         variables,
         branches,
         default_plan,
@@ -2137,6 +2442,8 @@ fn emit_switch_route_plan(
 fn emit_switch_route_dispatch(
     body: &mut WasmFunction,
     indices: &DirectCoreFunctionIndices,
+    static_data: &DirectCoreStaticData,
+    track_events: bool,
     variables: &DirectDataSegment,
     branches: &[DirectSwitchRoutePlan],
     default_plan: &DirectRunPlan,
@@ -2157,6 +2464,8 @@ fn emit_switch_route_dispatch(
         emit_run_plan_mapping(
             body,
             indices,
+            static_data,
+            track_events,
             variables,
             default_plan,
             data_ptr_local,
@@ -2180,6 +2489,8 @@ fn emit_switch_route_dispatch(
     emit_run_plan_mapping(
         body,
         indices,
+        static_data,
+        track_events,
         variables,
         &branch.plan,
         data_ptr_local,
@@ -2199,6 +2510,8 @@ fn emit_switch_route_dispatch(
     emit_switch_route_dispatch(
         body,
         indices,
+        static_data,
+        track_events,
         variables,
         remaining,
         default_plan,
@@ -2510,7 +2823,7 @@ mod tests {
         mapping_ids: &mut Vec<u32>,
     ) {
         match plan {
-            DirectRunPlan::Finish { mapping_id } => mapping_ids.push(*mapping_id),
+            DirectRunPlan::Finish { mapping_id, .. } => mapping_ids.push(*mapping_id),
             DirectRunPlan::Filter { next_plan, .. } => {
                 collect_run_plan_ids(next_plan, condition_ids, mapping_ids);
             }
@@ -2548,6 +2861,7 @@ mod tests {
                 condition_id,
                 true_plan,
                 false_plan,
+                ..
             } => {
                 condition_ids.push(*condition_id);
                 collect_run_plan_ids(true_plan, condition_ids, mapping_ids);
@@ -2619,6 +2933,7 @@ mod tests {
             version: 7,
             execution_graph: fixture("simple"),
             output_dir: temp.path().to_path_buf(),
+            track_events: false,
         })
         .expect("direct compile should succeed");
 
@@ -2653,6 +2968,7 @@ mod tests {
             version: 1,
             execution_graph: fixture("simple"),
             output_dir: temp.path().to_path_buf(),
+            track_events: false,
         })
         .expect("direct compile should succeed");
 
@@ -2725,6 +3041,7 @@ mod tests {
             version: 1,
             execution_graph: fixture("simple"),
             output_dir: temp.path().to_path_buf(),
+            track_events: false,
         })
         .expect("direct compile should succeed");
 
@@ -2772,6 +3089,7 @@ mod tests {
             version: 1,
             execution_graph: fixture("conditional"),
             output_dir: temp.path().to_path_buf(),
+            track_events: false,
         })
         .expect("direct conditional compile should succeed");
 
@@ -2797,6 +3115,7 @@ mod tests {
             version: 1,
             execution_graph: fixture("conditional_nested"),
             output_dir: temp.path().to_path_buf(),
+            track_events: false,
         })
         .expect("direct nested conditional compile should succeed");
 
@@ -2822,6 +3141,7 @@ mod tests {
             version: 1,
             execution_graph: fixture("group_by"),
             output_dir: temp.path().to_path_buf(),
+            track_events: false,
         })
         .expect("direct GroupBy compile should succeed");
 
@@ -2847,6 +3167,7 @@ mod tests {
             version: 1,
             execution_graph: fixture("filter"),
             output_dir: temp.path().to_path_buf(),
+            track_events: false,
         })
         .expect("direct Filter compile should succeed");
 
@@ -2872,6 +3193,7 @@ mod tests {
             version: 1,
             execution_graph: fixture("switch_value"),
             output_dir: temp.path().to_path_buf(),
+            track_events: false,
         })
         .expect("direct value Switch compile should succeed");
 
@@ -2897,6 +3219,7 @@ mod tests {
             version: 1,
             execution_graph: fixture("switch_routing"),
             output_dir: temp.path().to_path_buf(),
+            track_events: false,
         })
         .expect("direct routing Switch compile should succeed");
 
@@ -2922,6 +3245,7 @@ mod tests {
             version: 1,
             execution_graph: fixture("log"),
             output_dir: temp.path().to_path_buf(),
+            track_events: false,
         })
         .expect("direct Log compile should succeed");
 
@@ -2947,6 +3271,7 @@ mod tests {
             version: 1,
             execution_graph: fixture("error"),
             output_dir: temp.path().to_path_buf(),
+            track_events: false,
         })
         .expect("direct Error compile should succeed");
 
@@ -2972,6 +3297,7 @@ mod tests {
             version: 1,
             execution_graph: fixture("edge_condition"),
             output_dir: temp.path().to_path_buf(),
+            track_events: false,
         })
         .expect("direct edge-condition compile should succeed");
 
@@ -3002,6 +3328,7 @@ mod tests {
             version: 1,
             execution_graph: graph,
             output_dir: temp.path().to_path_buf(),
+            track_events: false,
         })
         .expect("direct next edge-condition compile should succeed");
 
@@ -3018,7 +3345,8 @@ mod tests {
         let graph = fixture("simple");
         let manifest = build_direct_workflow_manifest(&graph).expect("manifest");
         let manifest_json = manifest.to_canonical_json().expect("manifest json");
-        let core_config = DirectCoreConfig::new(&manifest, &manifest_json).expect("core config");
+        let core_config =
+            DirectCoreConfig::new(&manifest, &manifest_json, false).expect("core config");
         let variables_json = serde_json::to_vec(&manifest.graph.variables).expect("variables json");
 
         let (resolve, world) = build_direct_component_resolve().expect("resolve");
@@ -3143,6 +3471,32 @@ mod tests {
                 "group-by",
                 vec![
                     WasmType::I32,
+                    WasmType::Pointer,
+                    WasmType::Length,
+                    WasmType::Pointer,
+                ],
+            ),
+            (
+                "stdlib.step-debug-start",
+                "runtara:workflow-stdlib/json",
+                "cm32p2|runtara:workflow-stdlib/json@0.1",
+                "step-debug-start",
+                vec![
+                    WasmType::Pointer,
+                    WasmType::Length,
+                    WasmType::Pointer,
+                    WasmType::Length,
+                    WasmType::Pointer,
+                ],
+            ),
+            (
+                "stdlib.step-debug-end",
+                "runtara:workflow-stdlib/json",
+                "cm32p2|runtara:workflow-stdlib/json@0.1",
+                "step-debug-end",
+                vec![
+                    WasmType::Pointer,
+                    WasmType::Length,
                     WasmType::Pointer,
                     WasmType::Length,
                     WasmType::Pointer,
@@ -3309,7 +3663,7 @@ mod tests {
                                 Operator::I32Const { value }
                                     if matches!(
                                         &core_config.run_plan,
-                                        DirectRunPlan::Finish { mapping_id }
+                                        DirectRunPlan::Finish { mapping_id, .. }
                                             if value == *mapping_id as i32
                                     ) =>
                                 {
@@ -3392,27 +3746,148 @@ mod tests {
     }
 
     #[test]
+    fn direct_core_run_emits_step_debug_events_when_tracking_enabled() {
+        let graph = fixture("simple");
+        let manifest = build_direct_workflow_manifest(&graph).expect("manifest");
+        let manifest_json = manifest.to_canonical_json().expect("manifest json");
+        let core_config =
+            DirectCoreConfig::new(&manifest, &manifest_json, true).expect("core config");
+
+        let (resolve, world) = build_direct_component_resolve().expect("resolve");
+        let core = emit_direct_core_module(&resolve, world, &core_config).expect("core module");
+        Validator::new()
+            .validate_all(&core)
+            .expect("tracked core module validates");
+
+        let mut next_function_index = 0;
+        let mut init_manifest_index = None;
+        let mut load_input_index = None;
+        let mut build_source_index = None;
+        let mut apply_mapping_index = None;
+        let mut complete_index = None;
+        let mut custom_event_index = None;
+        let mut step_debug_start_index = None;
+        let mut step_debug_end_index = None;
+        let mut saw_step_debug_start_kind = false;
+        let mut saw_step_debug_end_kind = false;
+        let mut saw_finish_step_id = false;
+        let mut run_calls = Vec::new();
+        let mut code_body_index = 0;
+
+        for payload in Parser::new(0).parse_all(&core) {
+            match payload.expect("core wasm payload") {
+                Payload::ImportSection(reader) => {
+                    for import in reader.into_imports() {
+                        let import = import.expect("core import");
+                        if matches!(import.ty, TypeRef::Func(_)) {
+                            match (import.module, import.name) {
+                                ("cm32p2|runtara:workflow-stdlib/json@0.1", "init-manifest") => {
+                                    init_manifest_index = Some(next_function_index)
+                                }
+                                ("cm32p2|runtara:workflow-runtime/runtime@0.1", "load-input") => {
+                                    load_input_index = Some(next_function_index)
+                                }
+                                ("cm32p2|runtara:workflow-stdlib/json@0.1", "build-source") => {
+                                    build_source_index = Some(next_function_index)
+                                }
+                                ("cm32p2|runtara:workflow-stdlib/json@0.1", "apply-mapping") => {
+                                    apply_mapping_index = Some(next_function_index)
+                                }
+                                ("cm32p2|runtara:workflow-runtime/runtime@0.1", "complete") => {
+                                    complete_index = Some(next_function_index)
+                                }
+                                ("cm32p2|runtara:workflow-runtime/runtime@0.1", "custom-event") => {
+                                    custom_event_index = Some(next_function_index)
+                                }
+                                ("cm32p2|runtara:workflow-stdlib/json@0.1", "step-debug-start") => {
+                                    step_debug_start_index = Some(next_function_index)
+                                }
+                                ("cm32p2|runtara:workflow-stdlib/json@0.1", "step-debug-end") => {
+                                    step_debug_end_index = Some(next_function_index)
+                                }
+                                _ => {}
+                            }
+                            next_function_index += 1;
+                        }
+                    }
+                }
+                Payload::CodeSectionEntry(body) => {
+                    if code_body_index == 0 {
+                        for operator in body.get_operators_reader().expect("operators") {
+                            if let Operator::Call { function_index } = operator.expect("operator") {
+                                run_calls.push(function_index);
+                            }
+                        }
+                    }
+                    code_body_index += 1;
+                }
+                Payload::DataSection(reader) => {
+                    for data in reader {
+                        let data = data.expect("data segment");
+                        saw_step_debug_start_kind |= data.data == DIRECT_STEP_DEBUG_START_KIND;
+                        saw_step_debug_end_kind |= data.data == DIRECT_STEP_DEBUG_END_KIND;
+                        saw_finish_step_id |= data.data == b"finish";
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        let expected_call_order = [
+            init_manifest_index.expect("init-manifest import"),
+            load_input_index.expect("load-input import"),
+            build_source_index.expect("build-source import"),
+            step_debug_start_index.expect("step-debug-start import"),
+            custom_event_index.expect("custom-event import"),
+            apply_mapping_index.expect("apply-mapping import"),
+            step_debug_end_index.expect("step-debug-end import"),
+            custom_event_index.expect("custom-event import"),
+            complete_index.expect("complete import"),
+        ];
+        assert_eq!(
+            run_calls, expected_call_order,
+            "tracked Finish run should emit start/end debug custom events around mapping"
+        );
+        assert!(
+            saw_step_debug_start_kind,
+            "step_debug_start custom-event kind should be static data"
+        );
+        assert!(
+            saw_step_debug_end_kind,
+            "step_debug_end custom-event kind should be static data"
+        );
+        assert!(
+            saw_finish_step_id,
+            "tracked debug events should pass the Finish step id as static data"
+        );
+    }
+
+    #[test]
     fn direct_core_run_lowers_conditional_finish_branches_through_stdlib() {
         let graph = fixture("conditional");
         let manifest = build_direct_workflow_manifest(&graph).expect("manifest");
         let manifest_json = manifest.to_canonical_json().expect("manifest json");
-        let core_config = DirectCoreConfig::new(&manifest, &manifest_json).expect("core config");
+        let core_config =
+            DirectCoreConfig::new(&manifest, &manifest_json, false).expect("core config");
         let DirectRunPlan::Conditional {
             condition_id,
             true_plan,
             false_plan,
+            ..
         } = &core_config.run_plan
         else {
             panic!("expected conditional run plan");
         };
         let DirectRunPlan::Finish {
             mapping_id: true_mapping_id,
+            ..
         } = true_plan.as_ref()
         else {
             panic!("expected true branch finish plan");
         };
         let DirectRunPlan::Finish {
             mapping_id: false_mapping_id,
+            ..
         } = false_plan.as_ref()
         else {
             panic!("expected false branch finish plan");
@@ -3518,7 +3993,8 @@ mod tests {
         let graph = fixture("conditional_nested");
         let manifest = build_direct_workflow_manifest(&graph).expect("manifest");
         let manifest_json = manifest.to_canonical_json().expect("manifest json");
-        let core_config = DirectCoreConfig::new(&manifest, &manifest_json).expect("core config");
+        let core_config =
+            DirectCoreConfig::new(&manifest, &manifest_json, false).expect("core config");
 
         let mut condition_ids = Vec::new();
         let mut mapping_ids = Vec::new();
@@ -3621,15 +4097,17 @@ mod tests {
         let graph = fixture("group_by");
         let manifest = build_direct_workflow_manifest(&graph).expect("manifest");
         let manifest_json = manifest.to_canonical_json().expect("manifest json");
-        let core_config = DirectCoreConfig::new(&manifest, &manifest_json).expect("core config");
+        let core_config =
+            DirectCoreConfig::new(&manifest, &manifest_json, false).expect("core config");
         let DirectRunPlan::GroupBy {
             group_id,
             next_plan,
+            ..
         } = &core_config.run_plan
         else {
             panic!("expected GroupBy run plan");
         };
-        let DirectRunPlan::Finish { mapping_id } = next_plan.as_ref() else {
+        let DirectRunPlan::Finish { mapping_id, .. } = next_plan.as_ref() else {
             panic!("expected GroupBy to flow into Finish");
         };
 
@@ -3732,15 +4210,17 @@ mod tests {
         let graph = fixture("filter");
         let manifest = build_direct_workflow_manifest(&graph).expect("manifest");
         let manifest_json = manifest.to_canonical_json().expect("manifest json");
-        let core_config = DirectCoreConfig::new(&manifest, &manifest_json).expect("core config");
+        let core_config =
+            DirectCoreConfig::new(&manifest, &manifest_json, false).expect("core config");
         let DirectRunPlan::Filter {
             filter_id,
             next_plan,
+            ..
         } = &core_config.run_plan
         else {
             panic!("expected Filter run plan");
         };
-        let DirectRunPlan::Finish { mapping_id } = next_plan.as_ref() else {
+        let DirectRunPlan::Finish { mapping_id, .. } = next_plan.as_ref() else {
             panic!("expected Filter to flow into Finish");
         };
 
@@ -3843,15 +4323,17 @@ mod tests {
         let graph = fixture("switch_value");
         let manifest = build_direct_workflow_manifest(&graph).expect("manifest");
         let manifest_json = manifest.to_canonical_json().expect("manifest json");
-        let core_config = DirectCoreConfig::new(&manifest, &manifest_json).expect("core config");
+        let core_config =
+            DirectCoreConfig::new(&manifest, &manifest_json, false).expect("core config");
         let DirectRunPlan::SwitchValue {
             switch_id,
             next_plan,
+            ..
         } = &core_config.run_plan
         else {
             panic!("expected value Switch run plan");
         };
-        let DirectRunPlan::Finish { mapping_id } = next_plan.as_ref() else {
+        let DirectRunPlan::Finish { mapping_id, .. } = next_plan.as_ref() else {
             panic!("expected value Switch to flow into Finish");
         };
 
@@ -3954,11 +4436,13 @@ mod tests {
         let graph = fixture("switch_routing");
         let manifest = build_direct_workflow_manifest(&graph).expect("manifest");
         let manifest_json = manifest.to_canonical_json().expect("manifest json");
-        let core_config = DirectCoreConfig::new(&manifest, &manifest_json).expect("core config");
+        let core_config =
+            DirectCoreConfig::new(&manifest, &manifest_json, false).expect("core config");
         let DirectRunPlan::SwitchRoute {
             switch_id,
             branches,
             default_plan,
+            ..
         } = &core_config.run_plan
         else {
             panic!("expected routing Switch run plan");
@@ -3972,6 +4456,7 @@ mod tests {
         );
         let DirectRunPlan::Finish {
             mapping_id: default_mapping_id,
+            ..
         } = default_plan.as_ref()
         else {
             panic!("expected routing Switch default branch to Finish");
@@ -3979,7 +4464,7 @@ mod tests {
         let mut mapping_ids = branches
             .iter()
             .map(|branch| match branch.plan.as_ref() {
-                DirectRunPlan::Finish { mapping_id } => *mapping_id,
+                DirectRunPlan::Finish { mapping_id, .. } => *mapping_id,
                 other => panic!("expected routing Switch branch to Finish, got {other:?}"),
             })
             .collect::<Vec<_>>();
@@ -4109,7 +4594,8 @@ mod tests {
         let graph = fixture("log");
         let manifest = build_direct_workflow_manifest(&graph).expect("manifest");
         let manifest_json = manifest.to_canonical_json().expect("manifest json");
-        let core_config = DirectCoreConfig::new(&manifest, &manifest_json).expect("core config");
+        let core_config =
+            DirectCoreConfig::new(&manifest, &manifest_json, false).expect("core config");
         let DirectRunPlan::Log {
             log_id: first_log_id,
             next_plan,
@@ -4124,7 +4610,7 @@ mod tests {
         else {
             panic!("expected second Log run plan");
         };
-        let DirectRunPlan::Finish { mapping_id } = next_plan.as_ref() else {
+        let DirectRunPlan::Finish { mapping_id, .. } = next_plan.as_ref() else {
             panic!("expected Log chain to flow into Finish");
         };
 
@@ -4272,8 +4758,9 @@ mod tests {
         let graph = fixture("error");
         let manifest = build_direct_workflow_manifest(&graph).expect("manifest");
         let manifest_json = manifest.to_canonical_json().expect("manifest json");
-        let core_config = DirectCoreConfig::new(&manifest, &manifest_json).expect("core config");
-        let DirectRunPlan::Error { error_id } = &core_config.run_plan else {
+        let core_config =
+            DirectCoreConfig::new(&manifest, &manifest_json, false).expect("core config");
+        let DirectRunPlan::Error { error_id, .. } = &core_config.run_plan else {
             panic!("expected Error run plan");
         };
 
@@ -4435,7 +4922,8 @@ mod tests {
         let graph = fixture("edge_condition");
         let manifest = build_direct_workflow_manifest(&graph).expect("manifest");
         let manifest_json = manifest.to_canonical_json().expect("manifest json");
-        let core_config = DirectCoreConfig::new(&manifest, &manifest_json).expect("core config");
+        let core_config =
+            DirectCoreConfig::new(&manifest, &manifest_json, false).expect("core config");
         let DirectRunPlan::Log { next_plan, .. } = &core_config.run_plan else {
             panic!("expected Log entry run plan");
         };
@@ -4457,12 +4945,13 @@ mod tests {
         let mut mapping_ids = branches
             .iter()
             .map(|branch| match branch.plan.as_ref() {
-                DirectRunPlan::Finish { mapping_id } => *mapping_id,
+                DirectRunPlan::Finish { mapping_id, .. } => *mapping_id,
                 other => panic!("expected conditioned edge branch to Finish, got {other:?}"),
             })
             .collect::<Vec<_>>();
         let DirectRunPlan::Finish {
             mapping_id: default_mapping_id,
+            ..
         } = default_plan.as_ref()
         else {
             panic!("expected edge-condition default branch to Finish");
@@ -4568,6 +5057,7 @@ mod tests {
             version: 1,
             execution_graph: fixture("simple"),
             output_dir: temp.path().to_path_buf(),
+            track_events: false,
         })
         .expect("direct compile should succeed");
 
@@ -4601,6 +5091,7 @@ mod tests {
             version: 1,
             execution_graph: fixture("simple"),
             output_dir: temp.path().to_path_buf(),
+            track_events: false,
         })
         .expect("direct compile should succeed");
 
@@ -4647,6 +5138,7 @@ mod tests {
                 version: 1,
                 execution_graph: fixture("simple"),
                 output_dir: temp.path().to_path_buf(),
+                track_events: false,
             },
             &components_dir,
         )
@@ -4679,6 +5171,7 @@ mod tests {
             version: 1,
             execution_graph: fixture("transform"),
             output_dir: temp.path().to_path_buf(),
+            track_events: false,
         })
         .expect_err("agent workflow is not supported yet");
 

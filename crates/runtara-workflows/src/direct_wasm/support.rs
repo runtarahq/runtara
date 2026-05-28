@@ -712,7 +712,7 @@ mod tests {
     }
 
     #[test]
-    fn finish_breakpoints_are_rejected_until_debug_events_are_lowered() {
+    fn finish_breakpoints_are_rejected_until_checkpoint_abi_is_lowered() {
         let graph = serde_json::from_value::<ExecutionGraph>(serde_json::json!({
             "steps": {
                 "finish": {
@@ -806,7 +806,7 @@ mod tests {
     }
 
     #[test]
-    fn value_switch_breakpoints_are_rejected_until_debug_events_are_lowered() {
+    fn value_switch_breakpoints_are_rejected_until_checkpoint_abi_is_lowered() {
         let mut graph = fixture("switch_value");
         let Some(Step::Switch(switch)) = graph.steps.get_mut("switch") else {
             panic!("expected Switch fixture step");
@@ -830,7 +830,7 @@ mod tests {
     }
 
     #[test]
-    fn routing_switch_breakpoints_are_rejected_until_debug_events_are_lowered() {
+    fn routing_switch_breakpoints_are_rejected_until_checkpoint_abi_is_lowered() {
         let mut graph = fixture("switch_routing");
         let Some(Step::Switch(switch)) = graph.steps.get_mut("switch") else {
             panic!("expected Switch fixture step");
@@ -870,7 +870,7 @@ mod tests {
     }
 
     #[test]
-    fn log_breakpoints_are_rejected_until_debug_events_are_lowered() {
+    fn log_breakpoints_are_rejected_until_checkpoint_abi_is_lowered() {
         let mut graph = fixture("log");
         let Some(Step::Log(log)) = graph.steps.get_mut("simple_log") else {
             panic!("expected Log fixture step");
@@ -935,7 +935,7 @@ mod tests {
     }
 
     #[test]
-    fn error_breakpoints_are_rejected_until_debug_events_are_lowered() {
+    fn error_breakpoints_are_rejected_until_checkpoint_abi_is_lowered() {
         let mut graph = fixture("error");
         let Some(Step::Error(error)) = graph.steps.get_mut("fail") else {
             panic!("expected Error fixture step");
@@ -985,7 +985,7 @@ mod tests {
     }
 
     #[test]
-    fn filter_breakpoints_are_rejected_until_debug_events_are_lowered() {
+    fn filter_breakpoints_are_rejected_until_checkpoint_abi_is_lowered() {
         let mut graph = fixture("filter");
         let Some(Step::Filter(filter)) = graph.steps.get_mut("filter") else {
             panic!("expected Filter fixture step");
@@ -1001,7 +1001,7 @@ mod tests {
     }
 
     #[test]
-    fn group_by_breakpoints_are_rejected_until_debug_events_are_lowered() {
+    fn group_by_breakpoints_are_rejected_until_checkpoint_abi_is_lowered() {
         let mut graph = fixture("group_by");
         let Some(Step::GroupBy(group_by)) = graph.steps.get_mut("group") else {
             panic!("expected GroupBy fixture step");

@@ -172,6 +172,13 @@ Current implementation progress on `codex/wasm-direct-emitter`:
 - `tests/direct_wasm_error_parity.rs` now compares the direct Error stdlib
   helpers against current generated-code Error event payload and workflow
   failure semantics for explicit and default category/severity cases.
+- `track_events` is now wired through the direct compiler. The direct WIT,
+  stdlib component, and core emitter support generated-code-compatible
+  `step_debug_start`/`step_debug_end` custom events for `Finish`,
+  `Conditional`, `Filter`, `Switch`, `GroupBy`, and terminal `Error` steps.
+  `Log` remains intentionally limited to its existing `workflow_log` events,
+  matching the generated Rust path. Breakpoint pauses remain rejected until the
+  runtime/checkpoint ABI can represent durable pause/resume behavior.
 
 ## Final Goal
 
@@ -337,6 +344,16 @@ interface json {
 
   group-by: func(
     group-id: u32,
+    source: list<u8>
+  ) -> result<list<u8>, string>;
+
+  step-debug-start: func(
+    step-id: string,
+    source: list<u8>
+  ) -> result<list<u8>, string>;
+
+  step-debug-end: func(
+    step-id: string,
     source: list<u8>
   ) -> result<list<u8>, string>;
 }
@@ -902,7 +919,8 @@ Current status:
   `direct-component` implementation for the JSON stdlib surface. Implemented
   functions are `init-manifest`, `build-source`, `apply-mapping`,
   `eval-condition`, `process-switch`, `value-switch`, `filter`, `log-event`,
-  `log`, `error-event`, `error`, and `group-by`.
+  `log`, `error-event`, `error`, `group-by`, `step-debug-start`, and
+  `step-debug-end`.
 - `runtara-workflow-runtime` includes generated WIT bindings and implements
   the runtime lifecycle surface against `runtara-sdk`.
 - Remaining work: add host-side bindings smoke tests that instantiate and call
@@ -1184,9 +1202,17 @@ Current progress:
   direct-control subset. The direct core evaluates conditioned edges through
   `stdlib.eval-condition` in descending priority order and falls back to the
   explicit default edge when no condition matches.
-- Remaining parity work in this phase starts with debug event behavior and a
-  deliberate production decision for unsupported parallel/no-default routing
-  shapes.
+- Compile-time `track_events` now emits generated-code-compatible
+  `step_debug_start` and `step_debug_end` events for supported non-Log pure
+  JSON/control steps. The stdlib constructs the JSON payloads from the manifest
+  and current source envelope; the direct core emits them through
+  `runtime.custom-event` before/after each supported step helper or terminal
+  action. Log steps continue to emit only `workflow_log`, matching the current
+  generated Rust behavior.
+- Remaining parity work in this phase is now the deliberate production decision
+  for unsupported parallel/no-default routing shapes. Breakpoint support moves
+  to Phase 8 because it requires a durable checkpoint/pause ABI, not only debug
+  event payloads.
 
 Implementation steps:
 
@@ -1212,6 +1238,13 @@ Implementation steps:
    - priority order;
    - default fallback;
    - `__error` source injection for error edges where applicable.
+7. Implement compile-time `track_events` for supported pure-control steps:
+   - lower `step_debug_start`;
+   - lower `step_debug_end`;
+   - verify event payload parity for representative fixtures.
+8. Keep breakpoints rejected until Phase 8:
+   - breakpoint behavior depends on persisted checkpoint/pause state;
+   - direct runtime WIT does not yet expose a checkpoint API.
 
 Checkpoint 6:
 

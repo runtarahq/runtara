@@ -65,6 +65,16 @@ interface json {
         group-id: u32,
         source: list<u8>,
     ) -> result<list<u8>, string>;
+
+    step-debug-start: func(
+        step-id: string,
+        source: list<u8>,
+    ) -> result<list<u8>, string>;
+
+    step-debug-end: func(
+        step-id: string,
+        source: list<u8>,
+    ) -> result<list<u8>, string>;
 }
 
 world workflow-stdlib {

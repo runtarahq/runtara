@@ -259,6 +259,26 @@ mod component {
                 manifest.group_by(group_id, &source)
             })
         }
+
+        fn step_debug_start(step_id: String, source: Vec<u8>) -> Result<Vec<u8>, String> {
+            MANIFEST.with(|slot| {
+                let slot = slot.borrow();
+                let manifest = slot
+                    .as_ref()
+                    .ok_or_else(|| "direct stdlib manifest was not initialized".to_string())?;
+                manifest.step_debug_start(&step_id, &source)
+            })
+        }
+
+        fn step_debug_end(step_id: String, source: Vec<u8>) -> Result<Vec<u8>, String> {
+            MANIFEST.with(|slot| {
+                let slot = slot.borrow();
+                let manifest = slot
+                    .as_ref()
+                    .ok_or_else(|| "direct stdlib manifest was not initialized".to_string())?;
+                manifest.step_debug_end(&step_id, &source)
+            })
+        }
     }
 
     super::bindings::export!(Component with_types_in super::bindings);
