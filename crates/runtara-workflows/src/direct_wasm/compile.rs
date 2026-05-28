@@ -30,7 +30,7 @@ use wit_parser::{
 
 use super::component::{DirectComponentArtifacts, emit_direct_component_artifacts};
 use super::manifest::{
-    DIRECT_WORKFLOW_MANIFEST_VERSION, DirectGraphManifest, DirectManifestError,
+    DIRECT_WORKFLOW_MANIFEST_VERSION, DirectEdgeManifest, DirectGraphManifest, DirectManifestError,
     DirectWorkflowManifest, build_direct_workflow_manifest,
 };
 use super::support::{
@@ -439,6 +439,10 @@ enum DirectRunPlan {
         branches: Vec<DirectSwitchRoutePlan>,
         default_plan: Box<DirectRunPlan>,
     },
+    EdgeRoute {
+        branches: Vec<DirectEdgeConditionPlan>,
+        default_plan: Box<DirectRunPlan>,
+    },
     GroupBy {
         group_id: u32,
         next_plan: Box<DirectRunPlan>,
@@ -460,6 +464,12 @@ enum DirectRunPlan {
 #[derive(Debug, Clone)]
 struct DirectSwitchRoutePlan {
     label: String,
+    plan: Box<DirectRunPlan>,
+}
+
+#[derive(Debug, Clone)]
+struct DirectEdgeConditionPlan {
+    condition_id: u32,
     plan: Box<DirectRunPlan>,
 }
 
@@ -601,11 +611,7 @@ fn step_run_plan(
         }),
         "Filter" => {
             let filter_id = filter_id(graph, step_id)?;
-            let next_step = normal_target(graph, step_id)?.to_string();
-
-            stack.push(step_id.to_string());
-            let next_plan = step_run_plan(graph, &next_step, stack)?;
-            stack.pop();
+            let next_plan = normal_flow_plan(graph, step_id, stack)?;
 
             Ok(DirectRunPlan::Filter {
                 filter_id,
@@ -637,11 +643,7 @@ fn step_run_plan(
                     default_plan: Box::new(default_plan),
                 })
             } else {
-                let next_step = normal_target(graph, step_id)?.to_string();
-
-                stack.push(step_id.to_string());
-                let next_plan = step_run_plan(graph, &next_step, stack)?;
-                stack.pop();
+                let next_plan = normal_flow_plan(graph, step_id, stack)?;
 
                 Ok(DirectRunPlan::SwitchValue {
                     switch_id,
@@ -651,11 +653,7 @@ fn step_run_plan(
         }
         "GroupBy" => {
             let group_id = group_by_id(graph, step_id)?;
-            let next_step = normal_target(graph, step_id)?.to_string();
-
-            stack.push(step_id.to_string());
-            let next_plan = step_run_plan(graph, &next_step, stack)?;
-            stack.pop();
+            let next_plan = normal_flow_plan(graph, step_id, stack)?;
 
             Ok(DirectRunPlan::GroupBy {
                 group_id,
@@ -664,11 +662,7 @@ fn step_run_plan(
         }
         "Log" => {
             let log_id = log_id(graph, step_id)?;
-            let next_step = normal_target(graph, step_id)?.to_string();
-
-            stack.push(step_id.to_string());
-            let next_plan = step_run_plan(graph, &next_step, stack)?;
-            stack.pop();
+            let next_plan = normal_flow_plan(graph, step_id, stack)?;
 
             Ok(DirectRunPlan::Log {
                 log_id,
@@ -712,22 +706,98 @@ fn step_run_plan(
     }
 }
 
-fn normal_target<'a>(
+fn normal_flow_plan(
+    graph: &DirectGraphManifest,
+    from_step: &str,
+    stack: &mut Vec<String>,
+) -> Result<DirectRunPlan, DirectCompileError> {
+    let edges = normal_flow_edges(graph, from_step);
+    if edges.is_empty() {
+        return Err(DirectCompileError::Component(format!(
+            "missing normal branch for direct step '{from_step}'"
+        )));
+    }
+
+    let mut conditional_edges = edges
+        .iter()
+        .filter(|edge| edge.condition_id.is_some())
+        .copied()
+        .collect::<Vec<_>>();
+    let default_edges = edges
+        .iter()
+        .filter(|edge| edge.condition_id.is_none())
+        .copied()
+        .collect::<Vec<_>>();
+
+    if conditional_edges.is_empty() {
+        let [edge] = default_edges.as_slice() else {
+            return Err(DirectCompileError::Component(format!(
+                "direct step '{from_step}' has unsupported parallel normal branches"
+            )));
+        };
+        stack.push(from_step.to_string());
+        let next_plan = step_run_plan(graph, &edge.to_step, stack)?;
+        stack.pop();
+        return Ok(next_plan);
+    }
+
+    let [default_edge] = default_edges.as_slice() else {
+        return Err(DirectCompileError::Component(format!(
+            "direct step '{from_step}' conditional edge routing requires exactly one default branch"
+        )));
+    };
+
+    conditional_edges.sort_by(|left, right| {
+        (
+            -i64::from(left.priority.unwrap_or(0)),
+            left.ordinal,
+            left.to_step.as_str(),
+        )
+            .cmp(&(
+                -i64::from(right.priority.unwrap_or(0)),
+                right.ordinal,
+                right.to_step.as_str(),
+            ))
+    });
+
+    stack.push(from_step.to_string());
+    let branches = conditional_edges
+        .into_iter()
+        .map(|edge| {
+            let condition_id = edge.condition_id.ok_or_else(|| {
+                DirectCompileError::Component(format!(
+                    "missing edge condition id for direct step '{from_step}'"
+                ))
+            })?;
+            let plan = step_run_plan(graph, &edge.to_step, stack)?;
+            Ok(DirectEdgeConditionPlan {
+                condition_id,
+                plan: Box::new(plan),
+            })
+        })
+        .collect::<Result<Vec<_>, DirectCompileError>>()?;
+    let default_plan = step_run_plan(graph, &default_edge.to_step, stack)?;
+    stack.pop();
+
+    Ok(DirectRunPlan::EdgeRoute {
+        branches,
+        default_plan: Box::new(default_plan),
+    })
+}
+
+fn normal_flow_edges<'a>(
     graph: &'a DirectGraphManifest,
     from_step: &str,
-) -> Result<&'a str, DirectCompileError> {
+) -> Vec<&'a DirectEdgeManifest> {
     graph
         .edges
         .iter()
-        .find(|edge| {
-            edge.from_step == from_step && edge.label.is_none() && edge.condition.is_none()
-        })
-        .map(|edge| edge.to_step.as_str())
-        .ok_or_else(|| {
-            DirectCompileError::Component(format!(
-                "missing normal branch for direct step '{from_step}'"
-            ))
-        })
+        .filter(|edge| edge.from_step == from_step && is_normal_label(edge.label.as_deref()))
+        .collect()
+}
+
+fn is_normal_label(label: Option<&str>) -> bool {
+    label.is_none_or(|label| label.is_empty() || label == "next")
 }
 
 fn branch_target<'a>(
@@ -1575,6 +1645,30 @@ fn emit_run_plan_mapping(
                 workflow_error_kind,
             );
         }
+        DirectRunPlan::EdgeRoute {
+            branches,
+            default_plan,
+        } => {
+            emit_edge_route_dispatch(
+                body,
+                indices,
+                variables,
+                branches,
+                default_plan,
+                data_ptr_local,
+                data_len_local,
+                steps_ptr_local,
+                steps_len_local,
+                source_ptr_local,
+                source_len_local,
+                output_ptr_local,
+                output_len_local,
+                route_ptr_local,
+                route_len_local,
+                workflow_log_kind,
+                workflow_error_kind,
+            );
+        }
         DirectRunPlan::GroupBy {
             group_id,
             next_plan,
@@ -1692,6 +1786,103 @@ fn emit_run_plan_mapping(
             body.instruction(&Instruction::End);
         }
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_edge_route_dispatch(
+    body: &mut WasmFunction,
+    indices: &DirectCoreFunctionIndices,
+    variables: &DirectDataSegment,
+    branches: &[DirectEdgeConditionPlan],
+    default_plan: &DirectRunPlan,
+    data_ptr_local: u32,
+    data_len_local: u32,
+    steps_ptr_local: u32,
+    steps_len_local: u32,
+    source_ptr_local: u32,
+    source_len_local: u32,
+    output_ptr_local: u32,
+    output_len_local: u32,
+    route_ptr_local: u32,
+    route_len_local: u32,
+    workflow_log_kind: &DirectDataSegment,
+    workflow_error_kind: &DirectDataSegment,
+) {
+    let Some((branch, remaining)) = branches.split_first() else {
+        emit_run_plan_mapping(
+            body,
+            indices,
+            variables,
+            default_plan,
+            data_ptr_local,
+            data_len_local,
+            steps_ptr_local,
+            steps_len_local,
+            source_ptr_local,
+            source_len_local,
+            output_ptr_local,
+            output_len_local,
+            route_ptr_local,
+            route_len_local,
+            workflow_log_kind,
+            workflow_error_kind,
+        );
+        return;
+    };
+
+    body.instruction(&Instruction::I32Const(branch.condition_id as i32));
+    body.instruction(&Instruction::LocalGet(source_ptr_local));
+    body.instruction(&Instruction::LocalGet(source_len_local));
+    push_retptr_arg(body);
+    body.instruction(&Instruction::Call(indices.stdlib_eval_condition));
+    return_if_retptr_error(body);
+
+    body.instruction(&Instruction::I32Const(DIRECT_RUN_RETPTR_OFFSET));
+    body.instruction(&Instruction::I32Load8U(MemArg {
+        offset: 4,
+        align: 0,
+        memory_index: 0,
+    }));
+    body.instruction(&Instruction::If(BlockType::Empty));
+    emit_run_plan_mapping(
+        body,
+        indices,
+        variables,
+        &branch.plan,
+        data_ptr_local,
+        data_len_local,
+        steps_ptr_local,
+        steps_len_local,
+        source_ptr_local,
+        source_len_local,
+        output_ptr_local,
+        output_len_local,
+        route_ptr_local,
+        route_len_local,
+        workflow_log_kind,
+        workflow_error_kind,
+    );
+    body.instruction(&Instruction::Else);
+    emit_edge_route_dispatch(
+        body,
+        indices,
+        variables,
+        remaining,
+        default_plan,
+        data_ptr_local,
+        data_len_local,
+        steps_ptr_local,
+        steps_len_local,
+        source_ptr_local,
+        source_len_local,
+        output_ptr_local,
+        output_len_local,
+        route_ptr_local,
+        route_len_local,
+        workflow_log_kind,
+        workflow_error_kind,
+    );
+    body.instruction(&Instruction::End);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2306,6 +2497,7 @@ mod tests {
             "group_by" => include_str!("../../tests/fixtures/group_by_simple.json"),
             "log" => include_str!("../../tests/fixtures/log_no_context.json"),
             "error" => include_str!("../../tests/fixtures/error_direct_simple.json"),
+            "edge_condition" => include_str!("../../tests/fixtures/edge_condition_priority.json"),
             "transform" => include_str!("../../tests/fixtures/transform_workflow.json"),
             other => panic!("unknown fixture {other}"),
         };
@@ -2331,6 +2523,16 @@ mod tests {
                 ..
             } => {
                 for branch in branches {
+                    collect_run_plan_ids(&branch.plan, condition_ids, mapping_ids);
+                }
+                collect_run_plan_ids(default_plan, condition_ids, mapping_ids);
+            }
+            DirectRunPlan::EdgeRoute {
+                branches,
+                default_plan,
+            } => {
+                for branch in branches {
+                    condition_ids.push(branch.condition_id);
                     collect_run_plan_ids(&branch.plan, condition_ids, mapping_ids);
                 }
                 collect_run_plan_ids(default_plan, condition_ids, mapping_ids);
@@ -2760,6 +2962,55 @@ mod tests {
                 .expect("manifest json");
         assert_eq!(manifest.graph.errors.len(), 1);
         assert_eq!(manifest.graph.mappings.len(), 0);
+    }
+
+    #[test]
+    fn direct_compile_supports_edge_condition_graph() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let result = compile_direct_workflow(DirectCompilationInput {
+            workflow_id: "edge-condition".to_string(),
+            version: 1,
+            execution_graph: fixture("edge_condition"),
+            output_dir: temp.path().to_path_buf(),
+        })
+        .expect("direct edge-condition compile should succeed");
+
+        let wasm = fs::read(&result.wasm_path).expect("wasm");
+        Validator::new()
+            .validate_all(&wasm)
+            .expect("direct edge-condition artifact should validate");
+        assert!(result.support_report.supported);
+        assert_eq!(result.support_report.unsupported, vec![]);
+
+        let manifest: DirectWorkflowManifest =
+            serde_json::from_slice(&fs::read(&result.manifest_path).expect("manifest"))
+                .expect("manifest json");
+        assert_eq!(manifest.graph.logs.len(), 1);
+        assert_eq!(manifest.graph.conditions.len(), 2);
+        assert_eq!(manifest.graph.mappings.len(), 3);
+    }
+
+    #[test]
+    fn direct_compile_supports_next_label_edge_condition_graph() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let mut graph = fixture("edge_condition");
+        for edge in &mut graph.execution_plan {
+            edge.label = Some("next".to_string());
+        }
+        let result = compile_direct_workflow(DirectCompilationInput {
+            workflow_id: "next-edge-condition".to_string(),
+            version: 1,
+            execution_graph: graph,
+            output_dir: temp.path().to_path_buf(),
+        })
+        .expect("direct next edge-condition compile should succeed");
+
+        let wasm = fs::read(&result.wasm_path).expect("wasm");
+        Validator::new()
+            .validate_all(&wasm)
+            .expect("direct next edge-condition artifact should validate");
+        assert!(result.support_report.supported);
+        assert_eq!(result.support_report.unsupported, vec![]);
     }
 
     #[test]
@@ -4177,6 +4428,136 @@ mod tests {
             saw_failed_run_return,
             "Error lowering should return a failed wasi:cli/run result after runtime.fail"
         );
+    }
+
+    #[test]
+    fn direct_core_run_lowers_edge_conditions_through_stdlib() {
+        let graph = fixture("edge_condition");
+        let manifest = build_direct_workflow_manifest(&graph).expect("manifest");
+        let manifest_json = manifest.to_canonical_json().expect("manifest json");
+        let core_config = DirectCoreConfig::new(&manifest, &manifest_json).expect("core config");
+        let DirectRunPlan::Log { next_plan, .. } = &core_config.run_plan else {
+            panic!("expected Log entry run plan");
+        };
+        let DirectRunPlan::EdgeRoute {
+            branches,
+            default_plan,
+        } = next_plan.as_ref()
+        else {
+            panic!("expected edge-condition route plan");
+        };
+        assert_eq!(
+            branches
+                .iter()
+                .map(|branch| branch.condition_id)
+                .collect::<Vec<_>>(),
+            vec![1, 0],
+            "conditioned edges should be checked by descending priority"
+        );
+        let mut mapping_ids = branches
+            .iter()
+            .map(|branch| match branch.plan.as_ref() {
+                DirectRunPlan::Finish { mapping_id } => *mapping_id,
+                other => panic!("expected conditioned edge branch to Finish, got {other:?}"),
+            })
+            .collect::<Vec<_>>();
+        let DirectRunPlan::Finish {
+            mapping_id: default_mapping_id,
+        } = default_plan.as_ref()
+        else {
+            panic!("expected edge-condition default branch to Finish");
+        };
+        mapping_ids.push(*default_mapping_id);
+
+        let (resolve, world) = build_direct_component_resolve().expect("resolve");
+        let core = emit_direct_core_module(&resolve, world, &core_config).expect("core module");
+        Validator::new()
+            .validate_all(&core)
+            .expect("edge-condition core module validates");
+
+        let mut next_function_index = 0;
+        let mut build_source_index = None;
+        let mut eval_condition_index = None;
+        let mut apply_mapping_index = None;
+        let mut seen_mapping_ids = Vec::new();
+        let mut run_calls = Vec::new();
+        let mut code_body_index = 0;
+
+        for payload in Parser::new(0).parse_all(&core) {
+            match payload.expect("core wasm payload") {
+                Payload::ImportSection(reader) => {
+                    for import in reader.into_imports() {
+                        let import = import.expect("core import");
+                        if matches!(import.ty, TypeRef::Func(_)) {
+                            match (import.module, import.name) {
+                                ("cm32p2|runtara:workflow-stdlib/json@0.1", "build-source") => {
+                                    build_source_index = Some(next_function_index)
+                                }
+                                ("cm32p2|runtara:workflow-stdlib/json@0.1", "eval-condition") => {
+                                    eval_condition_index = Some(next_function_index)
+                                }
+                                ("cm32p2|runtara:workflow-stdlib/json@0.1", "apply-mapping") => {
+                                    apply_mapping_index = Some(next_function_index)
+                                }
+                                _ => {}
+                            }
+                            next_function_index += 1;
+                        }
+                    }
+                }
+                Payload::CodeSectionEntry(body) => {
+                    if code_body_index == 0 {
+                        for operator in body.get_operators_reader().expect("operators") {
+                            match operator.expect("operator") {
+                                Operator::Call { function_index } => {
+                                    run_calls.push(function_index);
+                                }
+                                Operator::I32Const { value } => {
+                                    if mapping_ids.contains(&(value as u32)) {
+                                        seen_mapping_ids.push(value as u32);
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                    code_body_index += 1;
+                }
+                _ => {}
+            }
+        }
+
+        let build_source_index = build_source_index.expect("build-source import");
+        let eval_condition_index = eval_condition_index.expect("eval-condition import");
+        let apply_mapping_index = apply_mapping_index.expect("apply-mapping import");
+        assert_eq!(
+            run_calls
+                .iter()
+                .filter(|&&index| index == build_source_index)
+                .count(),
+            2,
+            "edge-condition Log chain should build initial source and rebuild after Log"
+        );
+        assert_eq!(
+            run_calls
+                .iter()
+                .filter(|&&index| index == eval_condition_index)
+                .count(),
+            2,
+            "edge-condition dispatch should evaluate both conditioned edges"
+        );
+        assert_eq!(
+            run_calls
+                .iter()
+                .filter(|&&index| index == apply_mapping_index)
+                .count(),
+            3,
+            "edge-condition dispatch should emit one Finish mapping per possible leaf"
+        );
+        mapping_ids.sort_unstable();
+        seen_mapping_ids.sort_unstable();
+        seen_mapping_ids.dedup();
+        assert_eq!(seen_mapping_ids, mapping_ids);
     }
 
     #[test]

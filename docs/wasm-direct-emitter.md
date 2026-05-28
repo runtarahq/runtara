@@ -34,10 +34,11 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   normal-edge `Filter`/value `Switch`/`GroupBy`/`Log` chains ending in
   `Finish`/`Error` leaves, and routing `Switch` dispatch trees with one static
   edge per route plus a `default` edge whose leaves can be `Finish` or `Error`.
-  Breakpoints and dynamic edge conditions remain outside the supported
-  direct-control subset. `Finish.inputMapping` forms remain
-  broadly supported because mapping semantics are delegated to the shared
-  stdlib.
+  Supported normal/`next` edges can now either be a single unconditioned edge or
+  a priority-ordered conditional edge set with exactly one unconditioned default
+  fallback. Breakpoints remain outside the supported direct-control subset.
+  `Finish.inputMapping` forms remain broadly supported because mapping semantics
+  are delegated to the shared stdlib.
 - `direct_wasm::compile::compile_direct_workflow` is an opt-in entry point that
   emits a valid component-format artifact for the currently supported direct
   graph shapes,
@@ -85,25 +86,26 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   tests. With `RUNTARA_RUN_DIRECT_WASM_E2E=1`, it compiles and statically
   composes the simple `Finish` fixture plus flat and nested `Conditional`
   fixtures plus simple `Filter -> Finish`, value `Switch -> Finish`, routing
-  `Switch`, `GroupBy -> Finish`, `Log -> Finish`, and terminal `Error`
-  fixtures, runs each final
+  `Switch`, `GroupBy -> Finish`, `Log -> Finish`, terminal `Error`, and
+  normal-edge condition-priority fixtures, runs each final
   `workflow.wasm` under
   `wasmtime run --wasi http --wasi inherit-network`, and asserts the fake SDK
   receives the expected mapped completion payloads for the Finish path,
   conditional branches, Filter output, value Switch output, routing Switch route
-  leaves, GroupBy output, Log custom events, and Error custom-event/failure
-  payloads.
+  leaves, GroupBy output, Log custom events, Error custom-event/failure payloads,
+  and condition-priority/default routing.
 - `tests/direct_wasm_finish_parity.rs` now compares direct `Finish` mapping
   output against the current Rust-generated mapping contract for representative
   fixture shapes: data passthrough, dotted `outputs.*` unwrap, templates,
   composites, variables, step references, type hints, and defaults for missing
   or `null` references.
 - `direct_wasm::manifest` now assigns manifest-wide condition IDs for
-  `Conditional.condition` expressions, and `runtara-workflow-stdlib::direct_json`
-  implements `eval-condition` for the current generated-code condition contract,
-  including logical operators, comparisons, equality, string/array operators,
-  `LENGTH`, emptiness checks, truthy value expressions, and server-side-only
-  operators falling back to `false`.
+  `Conditional.condition` expressions and normal-edge conditions, and
+  `runtara-workflow-stdlib::direct_json` implements `eval-condition` for the
+  current generated-code condition contract, including logical operators,
+  comparisons, equality, string/array operators, `LENGTH`, emptiness checks,
+  truthy value expressions, and server-side-only operators falling back to
+  `false`.
 - `direct_wasm::manifest` now assigns manifest-wide Filter IDs for
   `Filter.config`, and `runtara-workflow-stdlib::direct_json` implements the
   shared `filter` helper for array filtering, non-array inputs, condition
@@ -145,6 +147,10 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   `steps.<switch>.route`. Terminal `Error` paths emit `workflow_error` through
   `runtime.custom-event`, call `runtime.fail`, and return a failed
   `wasi:cli/run` result instead of completing.
+- The direct core emitter now lowers supported normal/`next` edge conditions
+  directly into Wasm control flow. Conditional edges are evaluated through
+  `stdlib.eval-condition` in descending priority order, and the direct emitter
+  follows the explicit default edge when no condition matches.
 - `tests/direct_wasm_condition_parity.rs` now compares direct conditional
   branch selection and selected `Finish` output against the current
   generated-code condition semantics for representative fixtures, including
@@ -627,7 +633,7 @@ Stdlib owns:
 
 - error envelope construction;
 - error category extraction;
-- edge condition evaluation against `__error`;
+- edge condition evaluation against the workflow source or `__error`;
 - error payload truncation for events.
 
 Parity target: current behavior in `program::emit_execute_workflow`, especially
@@ -1115,8 +1121,8 @@ Current status:
   evaluation and branch output against current generated-code condition
   semantics for simple equality, `LENGTH` comparisons, and nested branch paths.
 - Remaining work: broaden graph lowering across more pure JSON/control
-  workflows by lowering edge-condition priority handling and debug event
-  behavior.
+  workflows by finishing debug event behavior and deciding which currently
+  rejected fan-out/no-default routing shapes should stay unsupported.
 
 Implementation steps:
 
@@ -1174,8 +1180,13 @@ Current progress:
   paths. The direct core emits `workflow_error` through the runtime custom-event
   surface, sends the structured failure payload through `runtime.fail`, and
   returns a failed `wasi:cli/run` result.
-- Remaining parity work in this phase starts with edge conditions and debug
-  event behavior.
+- Normal/`next` edge-condition lowering now runs end to end for the supported
+  direct-control subset. The direct core evaluates conditioned edges through
+  `stdlib.eval-condition` in descending priority order and falls back to the
+  explicit default edge when no condition matches.
+- Remaining parity work in this phase starts with debug event behavior and a
+  deliberate production decision for unsupported parallel/no-default routing
+  shapes.
 
 Implementation steps:
 

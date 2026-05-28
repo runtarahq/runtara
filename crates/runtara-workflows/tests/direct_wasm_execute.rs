@@ -27,6 +27,7 @@ const SWITCH_ROUTING_SIMPLE: &str = include_str!("fixtures/switch_routing_simple
 const GROUP_BY_SIMPLE: &str = include_str!("fixtures/group_by_simple.json");
 const LOG_ALL_LEVELS: &str = include_str!("fixtures/log_all_levels.json");
 const ERROR_DIRECT_SIMPLE: &str = include_str!("fixtures/error_direct_simple.json");
+const EDGE_CONDITION_PRIORITY: &str = include_str!("fixtures/edge_condition_priority.json");
 
 #[derive(Debug)]
 struct Completed {
@@ -798,5 +799,45 @@ fn direct_wasm_execute_error_entry_emits_event_and_reports_failure() {
         event.payload_json["timestamp_ms"]
             .as_i64()
             .is_some_and(|value| value > 0)
+    );
+}
+
+#[test]
+fn direct_wasm_execute_edge_condition_priority_and_default_reports_completion() {
+    let Some(components_dir) = direct_e2e_components_dir() else {
+        return;
+    };
+
+    let vip_output = run_direct_workflow(
+        &components_dir,
+        "direct-wasm-execute-edge-condition-vip",
+        EDGE_CONDITION_PRIORITY,
+        br#"{"status":"active","tier":"vip"}"#,
+    );
+    assert_eq!(
+        vip_output,
+        serde_json::json!({ "path": "vip", "status": "active" })
+    );
+
+    let active_output = run_direct_workflow(
+        &components_dir,
+        "direct-wasm-execute-edge-condition-active",
+        EDGE_CONDITION_PRIORITY,
+        br#"{"status":"active","tier":"basic"}"#,
+    );
+    assert_eq!(
+        active_output,
+        serde_json::json!({ "path": "active", "status": "active" })
+    );
+
+    let default_output = run_direct_workflow(
+        &components_dir,
+        "direct-wasm-execute-edge-condition-default",
+        EDGE_CONDITION_PRIORITY,
+        br#"{"status":"inactive","tier":"basic"}"#,
+    );
+    assert_eq!(
+        default_output,
+        serde_json::json!({ "path": "default", "status": "inactive" })
     );
 }

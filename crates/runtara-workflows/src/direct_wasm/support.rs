@@ -104,7 +104,8 @@ fn collect_graph_support(
     }
 
     for edge in &graph.execution_plan {
-        if edge.condition.is_some() {
+        if edge.condition.is_some() && !edge_condition_route_shape_supported(graph, &edge.from_step)
+        {
             unsupported.push(UnsupportedWorkflowFeature {
                 step_id: Some(edge.from_step.clone()),
                 step_type: graph
@@ -113,7 +114,7 @@ fn collect_graph_support(
                     .map(step_type_name)
                     .map(str::to_string),
                 feature: "edge-condition".to_string(),
-                reason: "edge-condition routing requires stdlib condition evaluation".to_string(),
+                reason: "direct emitter supports edge-condition routing only for normal/next edges with exactly one default fallback".to_string(),
             });
         }
         if edge.label.as_deref() == Some("onError") {
@@ -216,9 +217,7 @@ fn supports_direct_control_step(
 
             true_supported && false_supported
         }
-        Step::Filter(_) => {
-            supports_single_normal_edge_step(graph, step_id, reachable, used_edges, stack)
-        }
+        Step::Filter(_) => supports_normal_flow_step(graph, step_id, reachable, used_edges, stack),
         Step::Switch(step)
             if step
                 .config
@@ -227,48 +226,123 @@ fn supports_direct_control_step(
         {
             supports_routing_switch_step(graph, step_id, step, reachable, used_edges, stack)
         }
-        Step::Switch(_) => {
-            supports_single_normal_edge_step(graph, step_id, reachable, used_edges, stack)
-        }
-        Step::GroupBy(_) => {
-            supports_single_normal_edge_step(graph, step_id, reachable, used_edges, stack)
-        }
-        Step::Log(_) => {
-            supports_single_normal_edge_step(graph, step_id, reachable, used_edges, stack)
-        }
+        Step::Switch(_) => supports_normal_flow_step(graph, step_id, reachable, used_edges, stack),
+        Step::GroupBy(_) => supports_normal_flow_step(graph, step_id, reachable, used_edges, stack),
+        Step::Log(_) => supports_normal_flow_step(graph, step_id, reachable, used_edges, stack),
         _ => false,
     }
 }
 
-fn supports_single_normal_edge_step(
+fn supports_normal_flow_step(
     graph: &ExecutionGraph,
     step_id: &str,
     reachable: &mut BTreeSet<String>,
     used_edges: &mut BTreeSet<usize>,
     stack: &mut Vec<String>,
 ) -> bool {
-    let mut normal_edge = None;
-    for (index, edge) in graph.execution_plan.iter().enumerate() {
-        if edge.from_step != step_id {
-            continue;
-        }
-        if edge.label.is_none() && edge.condition.is_none() && normal_edge.is_none() {
-            normal_edge = Some((index, edge));
-        } else {
-            return false;
-        }
-    }
-
-    let Some((edge_index, edge)) = normal_edge else {
+    let edges = normal_flow_edges(graph, step_id);
+    if edges.is_empty() {
         return false;
     };
-    used_edges.insert(edge_index);
+
+    let conditional_edges = edges
+        .iter()
+        .filter(|(_, edge)| edge.condition.is_some())
+        .copied()
+        .collect::<Vec<_>>();
+    let default_edges = edges
+        .iter()
+        .filter(|(_, edge)| edge.condition.is_none())
+        .copied()
+        .collect::<Vec<_>>();
+
+    if conditional_edges.is_empty() {
+        let [(edge_index, edge)] = default_edges.as_slice() else {
+            return false;
+        };
+        used_edges.insert(*edge_index);
+        stack.push(step_id.to_string());
+        let supported =
+            supports_direct_control_step(graph, &edge.to_step, reachable, used_edges, stack);
+        stack.pop();
+        return supported;
+    }
+
+    let [(default_index, default_edge)] = default_edges.as_slice() else {
+        return false;
+    };
+
     stack.push(step_id.to_string());
-    let supported =
-        supports_direct_control_step(graph, &edge.to_step, reachable, used_edges, stack);
+    let mut supported = true;
+    for (edge_index, edge) in conditional_edges {
+        used_edges.insert(edge_index);
+        if !supports_direct_control_step(graph, &edge.to_step, reachable, used_edges, stack) {
+            supported = false;
+        }
+    }
+    used_edges.insert(*default_index);
+    if !supports_direct_control_step(graph, &default_edge.to_step, reachable, used_edges, stack) {
+        supported = false;
+    }
     stack.pop();
 
     supported
+}
+
+fn normal_flow_edges<'a>(
+    graph: &'a ExecutionGraph,
+    step_id: &str,
+) -> Vec<(usize, &'a runtara_dsl::ExecutionPlanEdge)> {
+    graph
+        .execution_plan
+        .iter()
+        .enumerate()
+        .filter(|(_, edge)| edge.from_step == step_id && is_normal_label(edge.label.as_deref()))
+        .collect()
+}
+
+fn is_normal_label(label: Option<&str>) -> bool {
+    label.is_none_or(|label| label.is_empty() || label == "next")
+}
+
+fn edge_condition_route_shape_supported(graph: &ExecutionGraph, step_id: &str) -> bool {
+    let Some(step) = graph.steps.get(step_id) else {
+        return false;
+    };
+    match step {
+        Step::Filter(_) | Step::GroupBy(_) | Step::Log(_) => {}
+        Step::Switch(step)
+            if !step
+                .config
+                .as_ref()
+                .is_some_and(|config| config.is_routing()) => {}
+        _ => return false,
+    }
+
+    let outgoing_condition_edges = graph
+        .execution_plan
+        .iter()
+        .filter(|edge| edge.from_step == step_id && edge.condition.is_some())
+        .collect::<Vec<_>>();
+    if outgoing_condition_edges.is_empty()
+        || outgoing_condition_edges
+            .iter()
+            .any(|edge| !is_normal_label(edge.label.as_deref()))
+    {
+        return false;
+    }
+
+    let edges = normal_flow_edges(graph, step_id);
+    let conditional_count = edges
+        .iter()
+        .filter(|(_, edge)| edge.condition.is_some())
+        .count();
+    let default_count = edges
+        .iter()
+        .filter(|(_, edge)| edge.condition.is_none())
+        .count();
+
+    conditional_count > 0 && default_count == 1
 }
 
 fn supports_routing_switch_step(
@@ -574,6 +648,7 @@ mod tests {
             "group_by" => include_str!("../../tests/fixtures/group_by_simple.json"),
             "log" => include_str!("../../tests/fixtures/log_no_context.json"),
             "error" => include_str!("../../tests/fixtures/error_direct_simple.json"),
+            "edge_condition" => include_str!("../../tests/fixtures/edge_condition_priority.json"),
             "transform" => include_str!("../../tests/fixtures/transform_workflow.json"),
             "wait" => include_str!("../../tests/fixtures/wait_for_signal_with_callback.json"),
             other => panic!("unknown fixture {other}"),
@@ -872,6 +947,40 @@ mod tests {
         assert!(!report.supported);
         assert!(report.unsupported.iter().any(|feature| {
             feature.step_id.as_deref() == Some("fail") && feature.feature == "error-breakpoint"
+        }));
+    }
+
+    #[test]
+    fn normal_edge_condition_priority_with_default_is_supported() {
+        let report = analyze_direct_wasm_support(&fixture("edge_condition"));
+
+        assert!(report.supported, "{:?}", report.unsupported);
+        assert!(report.unsupported.is_empty());
+    }
+
+    #[test]
+    fn next_label_edge_condition_priority_with_default_is_supported() {
+        let mut graph = fixture("edge_condition");
+        for edge in &mut graph.execution_plan {
+            edge.label = Some("next".to_string());
+        }
+
+        let report = analyze_direct_wasm_support(&graph);
+
+        assert!(report.supported, "{:?}", report.unsupported);
+        assert!(report.unsupported.is_empty());
+    }
+
+    #[test]
+    fn normal_edge_condition_without_default_is_rejected() {
+        let mut graph = fixture("edge_condition");
+        graph.execution_plan.retain(|edge| edge.condition.is_some());
+
+        let report = analyze_direct_wasm_support(&graph);
+
+        assert!(!report.supported);
+        assert!(report.unsupported.iter().any(|feature| {
+            feature.step_id.as_deref() == Some("classify") && feature.feature == "edge-condition"
         }));
     }
 

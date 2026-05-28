@@ -259,6 +259,9 @@ pub struct DirectEdgeManifest {
     /// Optional edge condition as canonical JSON.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub condition: Option<serde_json::Value>,
+    /// Manifest-wide condition identifier for this edge condition.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub condition_id: Option<u32>,
     /// Optional edge priority.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub priority: Option<i32>,
@@ -399,7 +402,7 @@ fn graph_manifest(
         .execution_plan
         .iter()
         .enumerate()
-        .map(|(ordinal, edge)| edge_manifest(ordinal, edge))
+        .map(|(ordinal, edge)| edge_manifest(ordinal, edge, state, &mut collections))
         .collect::<Result<Vec<_>, _>>()?;
     edges.sort_by(compare_edges);
 
@@ -556,13 +559,30 @@ fn step_manifest(
 fn edge_manifest(
     ordinal: usize,
     edge: &ExecutionPlanEdge,
+    state: &mut DirectManifestBuildState,
+    collections: &mut DirectGraphManifestCollections,
 ) -> Result<DirectEdgeManifest, DirectManifestError> {
+    let condition_id = if let Some(condition) = edge.condition.as_ref() {
+        let id = state.allocate_condition_id();
+        collections.conditions.push(DirectConditionManifest {
+            id,
+            owner_id: edge.from_step.clone(),
+            owner_type: "Edge".to_string(),
+            purpose: "edge.condition".to_string(),
+            value: canonical_json(condition)?,
+        });
+        Some(id)
+    } else {
+        None
+    };
+
     Ok(DirectEdgeManifest {
         ordinal,
         from_step: edge.from_step.clone(),
         to_step: edge.to_step.clone(),
         label: edge.label.clone(),
         condition: edge.condition.as_ref().map(canonical_json).transpose()?,
+        condition_id,
         priority: edge.priority,
     })
 }
@@ -699,6 +719,7 @@ mod tests {
             "group_by" => include_str!("../../tests/fixtures/group_by_simple.json"),
             "log" => include_str!("../../tests/fixtures/log_no_context.json"),
             "error" => include_str!("../../tests/fixtures/error_direct_simple.json"),
+            "edge_condition" => include_str!("../../tests/fixtures/edge_condition_priority.json"),
             "wait" => include_str!("../../tests/fixtures/wait_for_signal_with_callback.json"),
             other => panic!("unknown fixture {other}"),
         };
@@ -824,6 +845,43 @@ mod tests {
         assert_eq!(error.value["category"], "permanent");
         assert_eq!(error.value["code"], "DIRECT_FAILURE");
         assert_eq!(error.value["severity"], "critical");
+    }
+
+    #[test]
+    fn manifest_assigns_edge_condition_ids() {
+        let manifest =
+            build_direct_workflow_manifest(&fixture("edge_condition")).expect("manifest");
+
+        assert_eq!(manifest.graph.conditions.len(), 2);
+        assert_eq!(
+            manifest
+                .graph
+                .conditions
+                .iter()
+                .map(|condition| condition.owner_type.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Edge", "Edge"]
+        );
+        assert_eq!(
+            manifest
+                .graph
+                .conditions
+                .iter()
+                .map(|condition| condition.purpose.as_str())
+                .collect::<Vec<_>>(),
+            vec!["edge.condition", "edge.condition"]
+        );
+        let conditioned_edges = manifest
+            .graph
+            .edges
+            .iter()
+            .filter(|edge| edge.condition_id.is_some())
+            .collect::<Vec<_>>();
+        assert_eq!(conditioned_edges.len(), 2);
+        assert_eq!(conditioned_edges[0].condition_id, Some(1));
+        assert_eq!(conditioned_edges[0].priority, Some(10));
+        assert_eq!(conditioned_edges[1].condition_id, Some(0));
+        assert_eq!(conditioned_edges[1].priority, Some(5));
     }
 
     #[test]
