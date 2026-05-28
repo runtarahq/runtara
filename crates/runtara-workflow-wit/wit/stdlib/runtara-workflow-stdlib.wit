@@ -93,6 +93,16 @@ interface json {
         source: list<u8>,
     ) -> result<list<u8>, string>;
 
+    agent-error-info: func(
+        code: string,
+        message: string,
+        category: string,
+        severity: string,
+        retryable: bool,
+        retry-after-ms: option<u64>,
+        attributes: option<string>,
+    ) -> result<list<u8>, string>;
+
     agent-error: func(
         agent-id: u32,
         code: string,

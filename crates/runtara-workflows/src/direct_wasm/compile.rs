@@ -93,6 +93,8 @@ const DIRECT_AGENT_RESULT_ERR_ATTRIBUTES_TAG_OFFSET: u64 = 64;
 const DIRECT_AGENT_RESULT_ERR_ATTRIBUTES_PTR_OFFSET: u64 = 68;
 const DIRECT_AGENT_RESULT_ERR_ATTRIBUTES_LEN_OFFSET: u64 = 72;
 const DIRECT_AGENT_RETRY_ATTEMPT_LOCAL: u32 = 10;
+const DIRECT_AGENT_RETRY_ERROR_PTR_LOCAL: u32 = 11;
+const DIRECT_AGENT_RETRY_ERROR_LEN_LOCAL: u32 = 12;
 const DIRECT_EMPTY_STEPS_CONTEXT: &[u8] = b"{}";
 const DIRECT_WORKFLOW_LOG_KIND: &[u8] = b"workflow_log";
 const DIRECT_WORKFLOW_ERROR_KIND: &[u8] = b"workflow_error";
@@ -1593,6 +1595,7 @@ struct DirectCoreImportIndices {
     stdlib_agent_validate_input: Option<u32>,
     stdlib_agent_connection_input: Option<u32>,
     stdlib_agent_cache_key: Option<u32>,
+    stdlib_agent_error_info: Option<u32>,
     stdlib_agent_error: Option<u32>,
     stdlib_agent_debug_error: Option<u32>,
     stdlib_step_debug_start: Option<u32>,
@@ -1657,6 +1660,10 @@ impl DirectCoreImportIndices {
                 self.stdlib_agent_cache_key,
                 "stdlib.agent-cache-key",
             )?,
+            stdlib_agent_error_info: require_import(
+                self.stdlib_agent_error_info,
+                "stdlib.agent-error-info",
+            )?,
             stdlib_agent_error: require_import(self.stdlib_agent_error, "stdlib.agent-error")?,
             stdlib_agent_debug_error: require_import(
                 self.stdlib_agent_debug_error,
@@ -1701,6 +1708,7 @@ struct DirectCoreFunctionIndices {
     stdlib_agent_validate_input: u32,
     stdlib_agent_connection_input: u32,
     stdlib_agent_cache_key: u32,
+    stdlib_agent_error_info: u32,
     stdlib_agent_error: u32,
     stdlib_agent_debug_error: u32,
     stdlib_step_debug_start: u32,
@@ -1791,6 +1799,8 @@ fn import_core_function(
         import_indices.stdlib_agent_connection_input = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "agent-cache-key") {
         import_indices.stdlib_agent_cache_key = Some(function_index);
+    } else if is_stdlib_import(resolve, interface, function, "agent-error-info") {
+        import_indices.stdlib_agent_error_info = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "agent-error") {
         import_indices.stdlib_agent_error = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "agent-debug-error") {
@@ -1968,7 +1978,7 @@ fn direct_run_function(
     const ROUTE_PTR_LOCAL: u32 = 8;
     const ROUTE_LEN_LOCAL: u32 = 9;
 
-    let mut body = WasmFunction::new([(11, ValType::I32)]);
+    let mut body = WasmFunction::new([(13, ValType::I32)]);
 
     push_segment_args(&mut body, &config.static_data.manifest);
     push_retptr_arg(&mut body);
@@ -2846,7 +2856,20 @@ fn emit_agent_plan(
         body.instruction(&Instruction::If(BlockType::Empty));
         emit_agent_retry_condition(body, max_retries);
         body.instruction(&Instruction::If(BlockType::Empty));
-        emit_agent_record_retry_attempt(body, indices, route_ptr_local, route_len_local);
+        emit_agent_error_info(
+            body,
+            indices,
+            DIRECT_AGENT_RETRY_ERROR_PTR_LOCAL,
+            DIRECT_AGENT_RETRY_ERROR_LEN_LOCAL,
+        );
+        emit_agent_record_retry_attempt(
+            body,
+            indices,
+            route_ptr_local,
+            route_len_local,
+            DIRECT_AGENT_RETRY_ERROR_PTR_LOCAL,
+            DIRECT_AGENT_RETRY_ERROR_LEN_LOCAL,
+        );
         body.instruction(&Instruction::Br(2));
         body.instruction(&Instruction::End);
         emit_agent_invoke_error_body(
@@ -3473,6 +3496,8 @@ fn emit_agent_record_retry_attempt(
     indices: &DirectCoreFunctionIndices,
     cache_key_ptr_local: u32,
     cache_key_len_local: u32,
+    error_ptr_local: u32,
+    error_len_local: u32,
 ) {
     body.instruction(&Instruction::LocalGet(DIRECT_AGENT_RETRY_ATTEMPT_LOCAL));
     body.instruction(&Instruction::I32Const(1));
@@ -3481,9 +3506,9 @@ fn emit_agent_record_retry_attempt(
     body.instruction(&Instruction::LocalGet(cache_key_ptr_local));
     body.instruction(&Instruction::LocalGet(cache_key_len_local));
     body.instruction(&Instruction::LocalGet(DIRECT_AGENT_RETRY_ATTEMPT_LOCAL));
-    body.instruction(&Instruction::I32Const(0));
-    body.instruction(&Instruction::I32Const(0));
-    body.instruction(&Instruction::I32Const(0));
+    body.instruction(&Instruction::I32Const(1));
+    body.instruction(&Instruction::LocalGet(error_ptr_local));
+    body.instruction(&Instruction::LocalGet(error_len_local));
     push_retptr_arg(body);
     body.instruction(&Instruction::Call(indices.runtime_record_retry_attempt));
     return_if_retptr_error(body);
@@ -3984,6 +4009,32 @@ fn emit_runtime_fail_return(
     body.instruction(&Instruction::Call(indices.runtime_fail));
     body.instruction(&Instruction::I32Const(1));
     body.instruction(&Instruction::Return);
+}
+
+fn emit_agent_error_info(
+    body: &mut WasmFunction,
+    indices: &DirectCoreFunctionIndices,
+    output_ptr_local: u32,
+    output_len_local: u32,
+) {
+    push_retptr_i32_load(body, DIRECT_AGENT_RESULT_ERR_CODE_PTR_OFFSET);
+    push_retptr_i32_load(body, DIRECT_AGENT_RESULT_ERR_CODE_LEN_OFFSET);
+    push_retptr_i32_load(body, DIRECT_AGENT_RESULT_ERR_MESSAGE_PTR_OFFSET);
+    push_retptr_i32_load(body, DIRECT_AGENT_RESULT_ERR_MESSAGE_LEN_OFFSET);
+    push_retptr_i32_load(body, DIRECT_AGENT_RESULT_ERR_CATEGORY_PTR_OFFSET);
+    push_retptr_i32_load(body, DIRECT_AGENT_RESULT_ERR_CATEGORY_LEN_OFFSET);
+    push_retptr_i32_load(body, DIRECT_AGENT_RESULT_ERR_SEVERITY_PTR_OFFSET);
+    push_retptr_i32_load(body, DIRECT_AGENT_RESULT_ERR_SEVERITY_LEN_OFFSET);
+    push_retptr_u8_load(body, DIRECT_AGENT_RESULT_ERR_RETRYABLE_OFFSET);
+    push_retptr_u8_load(body, DIRECT_AGENT_RESULT_ERR_RETRY_AFTER_TAG_OFFSET);
+    push_retptr_i64_load(body, DIRECT_AGENT_RESULT_ERR_RETRY_AFTER_VALUE_OFFSET);
+    push_retptr_u8_load(body, DIRECT_AGENT_RESULT_ERR_ATTRIBUTES_TAG_OFFSET);
+    push_retptr_i32_load(body, DIRECT_AGENT_RESULT_ERR_ATTRIBUTES_PTR_OFFSET);
+    push_retptr_i32_load(body, DIRECT_AGENT_RESULT_ERR_ATTRIBUTES_LEN_OFFSET);
+    push_retptr_arg(body);
+    body.instruction(&Instruction::Call(indices.stdlib_agent_error_info));
+    return_if_retptr_error(body);
+    load_retptr_list(body, output_ptr_local, output_len_local);
 }
 
 fn emit_agent_error(
@@ -4605,6 +4656,18 @@ mod tests {
             })
             .collect();
         if missing.is_empty() {
+            let stdlib_wasm = dir.join("runtara_workflow_stdlib.wasm");
+            let stdlib_bytes = fs::read(&stdlib_wasm).ok()?;
+            if !stdlib_bytes
+                .windows(b"agent-error-info".len())
+                .any(|window| window == b"agent-error-info")
+            {
+                eprintln!(
+                    "SKIP: direct shared workflow stdlib component is stale: {:?}",
+                    stdlib_wasm
+                );
+                return None;
+            }
             Some(dir)
         } else {
             eprintln!(
@@ -6073,14 +6136,18 @@ mod tests {
         let mut next_function_index = 0;
         let mut get_checkpoint_index = None;
         let mut checkpoint_index = None;
+        let mut agent_error_info_index = None;
         let mut record_retry_attempt_index = None;
         let mut agent_invoke_index = None;
+        let mut saw_agent_error_info_import = false;
         let mut saw_record_retry_attempt_import = false;
         let mut saw_retry_loop = false;
         let mut saw_retry_continue_branch = false;
         let mut saw_retryable_load = false;
         let mut saw_retry_bound = false;
         let mut saw_lookup_before_invoke = false;
+        let mut saw_error_info_after_invoke = false;
+        let mut saw_record_after_error_info = false;
         let mut saw_record_after_invoke = false;
         let mut saw_checkpoint_after_invoke = false;
         let mut code_body_index = 0;
@@ -6101,6 +6168,12 @@ mod tests {
                                     if module.contains("runtara:workflow-runtime/runtime") =>
                                 {
                                     checkpoint_index = Some(next_function_index);
+                                }
+                                (module, "agent-error-info")
+                                    if module.contains("runtara:workflow-stdlib/json") =>
+                                {
+                                    saw_agent_error_info_import = true;
+                                    agent_error_info_index = Some(next_function_index);
                                 }
                                 (module, "record-retry-attempt")
                                     if module.contains("runtara:workflow-runtime/runtime") =>
@@ -6123,6 +6196,7 @@ mod tests {
                     if code_body_index == 0 {
                         let mut saw_lookup_call = false;
                         let mut saw_invoke_call = false;
+                        let mut saw_error_info_call = false;
                         for operator in body.get_operators_reader().expect("operators") {
                             match operator.expect("operator") {
                                 Operator::Call { function_index }
@@ -6137,9 +6211,16 @@ mod tests {
                                     saw_invoke_call = true;
                                 }
                                 Operator::Call { function_index }
+                                    if Some(function_index) == agent_error_info_index =>
+                                {
+                                    saw_error_info_after_invoke = saw_invoke_call;
+                                    saw_error_info_call = true;
+                                }
+                                Operator::Call { function_index }
                                     if Some(function_index) == record_retry_attempt_index =>
                                 {
                                     saw_record_after_invoke = saw_invoke_call;
+                                    saw_record_after_error_info = saw_error_info_call;
                                 }
                                 Operator::Call { function_index }
                                     if Some(function_index) == checkpoint_index =>
@@ -6173,6 +6254,10 @@ mod tests {
             saw_record_retry_attempt_import,
             "core should import runtime.record-retry-attempt"
         );
+        assert!(
+            saw_agent_error_info_import,
+            "core should import stdlib.agent-error-info"
+        );
         assert!(saw_retry_loop, "durable retry Agent should lower a loop");
         assert!(
             saw_retry_continue_branch,
@@ -6193,6 +6278,14 @@ mod tests {
         assert!(
             saw_record_after_invoke,
             "retry attempt recording should run after failed invoke"
+        );
+        assert!(
+            saw_error_info_after_invoke,
+            "retry error payload should be built after failed invoke"
+        );
+        assert!(
+            saw_record_after_error_info,
+            "retry attempt recording should receive the stdlib-built error payload"
         );
         assert!(
             saw_checkpoint_after_invoke,

@@ -242,10 +242,10 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   the generated Rust retry defaults (`maxRetries` override, otherwise 3 or 5
   for rate-limited capabilities), retries only typed WIT Agent errors with
   `error-info.retryable = true`, records retry attempts through
-  `runtime.record-retry-attempt`, and checkpoints successful output. Public
-  support remains gated until retry error-message payloads, backoff/sleep,
-  timeout, pause/cancel/shutdown acknowledgement, and crash/resume parity are
-  covered.
+  `runtime.record-retry-attempt` with the raw Agent error JSON payload, and
+  checkpoints successful output. Public support remains gated until
+  backoff/sleep, timeout, pause/cancel/shutdown acknowledgement, and
+  crash/resume parity are covered.
 
 ## Final Goal
 
@@ -1411,10 +1411,13 @@ Current status:
 - Durable Agent retry-loop lowering is now implemented internally for typed WIT
   Agent errors. The direct manifest records the Agent catalog `rateLimited`
   flag, the run plan derives the same default retry counts as generated Rust,
-  and the core loop calls `runtime.record-retry-attempt` before retrying.
-  Support remains gated because retry error-message payloads, backoff/sleep,
-  timeout, pause/cancel/shutdown acknowledgement, and crash/resume parity are
-  still pending.
+  and the core loop calls `runtime.record-retry-attempt` before retrying. The
+  shared stdlib now exposes `agent-error-info`, so retry attempts receive the
+  same raw Agent error JSON payload that generated durable Rust records,
+  including the camelCase `retryAfterMs` rate-limit hint.
+  Support remains gated because backoff/sleep, timeout,
+  pause/cancel/shutdown acknowledgement, and crash/resume parity are still
+  pending.
 
 Implementation steps:
 
@@ -1439,8 +1442,8 @@ Implementation steps:
      `maxRetries = 0`, still gated from public support;
    - durable retry loop and retry-attempt recording: internal lowering in
      place, still gated from public support;
-   - retry error-message payloads, durable backoff/sleep, and timeout
-     behavior: pending.
+   - retry error-message payloads: done through `stdlib.agent-error-info`;
+   - durable backoff/sleep and timeout behavior: pending.
 5. Extend `onError` routing beyond the first non-durable Agent subset when
    additional failing step types are lowered.
 6. Preserve current retry policy shape with direct control flow plus
@@ -1483,7 +1486,7 @@ Implementation steps:
 4. Migrate durable `Agent`:
    - no-retry checkpoint lookup/write: internal lowering done;
    - retry loop and retry-attempt recording: internal lowering done;
-   - retry error-message payloads: pending;
+   - retry error-message payloads: internal lowering done;
    - rate-limit durable sleep: pending;
    - pause/cancel/shutdown acknowledgement parity: pending;
    - crash/resume differential tests: pending.

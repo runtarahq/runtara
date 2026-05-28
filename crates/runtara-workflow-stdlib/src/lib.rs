@@ -308,6 +308,26 @@ mod component {
             })
         }
 
+        fn agent_error_info(
+            code: String,
+            message: String,
+            category: String,
+            severity: String,
+            retryable: bool,
+            retry_after_ms: Option<u64>,
+            attributes: Option<String>,
+        ) -> Result<Vec<u8>, String> {
+            direct_json::DirectJsonManifest::agent_error_info(
+                &code,
+                &message,
+                &category,
+                &severity,
+                retryable,
+                retry_after_ms,
+                attributes.as_deref(),
+            )
+        }
+
         fn agent_error(
             agent_id: u32,
             code: String,

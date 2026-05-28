@@ -274,6 +274,29 @@ impl DirectJsonManifest {
         Ok(agent_cache_key(agent, &source).into_bytes())
     }
 
+    /// Convert a WIT `error-info` into the raw JSON envelope used for retries.
+    #[allow(clippy::too_many_arguments)]
+    pub fn agent_error_info(
+        code: &str,
+        message: &str,
+        category: &str,
+        severity: &str,
+        retryable: bool,
+        retry_after_ms: Option<u64>,
+        attributes: Option<&str>,
+    ) -> Result<Vec<u8>, String> {
+        Ok(agent_error_info_envelope(
+            code,
+            message,
+            category,
+            severity,
+            retryable,
+            retry_after_ms,
+            attributes,
+        )
+        .into_bytes())
+    }
+
     /// Convert a WIT `error-info` into the current Agent failure string shape.
     #[allow(clippy::too_many_arguments)]
     pub fn agent_error(
@@ -291,7 +314,7 @@ impl DirectJsonManifest {
             .agents
             .get(&agent_id)
             .ok_or_else(|| format!("unknown direct Agent id {agent_id}"))?;
-        let raw = agent_error_info_envelope(
+        let raw = String::from_utf8(Self::agent_error_info(
             code,
             message,
             category,
@@ -299,7 +322,8 @@ impl DirectJsonManifest {
             retryable,
             retry_after_ms,
             attributes,
-        );
+        )?)
+        .map_err(|error| format!("Agent error-info JSON was not UTF-8: {error}"))?;
         Ok(format!(
             "Step {} failed: Agent {}::{}: {}",
             agent.step_id, agent.agent_id, agent.capability_id, raw
@@ -1282,7 +1306,7 @@ fn agent_error_info_envelope(
     object.insert("retryable".to_string(), Value::Bool(retryable));
     if let Some(retry_after_ms) = retry_after_ms {
         object.insert(
-            "retry_after_ms".to_string(),
+            "retryAfterMs".to_string(),
             Value::Number(serde_json::Number::from(retry_after_ms)),
         );
     }
@@ -2952,6 +2976,25 @@ mod tests {
     fn agent_error_formats_error_info_like_component_dispatch() {
         let manifest = DirectJsonManifest::parse(&agent_manifest(json!({}))).expect("manifest");
 
+        let raw = DirectJsonManifest::agent_error_info(
+            "CAPABILITY_ERROR",
+            "bad request",
+            "permanent",
+            "error",
+            false,
+            Some(1500),
+            Some(r#"{"field":"value"}"#),
+        )
+        .expect("Agent error-info");
+        let raw: Value = serde_json::from_slice(&raw).expect("raw json");
+        assert_eq!(raw["code"], json!("CAPABILITY_ERROR"));
+        assert_eq!(raw["message"], json!("bad request"));
+        assert_eq!(raw["category"], json!("permanent"));
+        assert_eq!(raw["severity"], json!("error"));
+        assert_eq!(raw["retryable"], json!(false));
+        assert_eq!(raw["retryAfterMs"], json!(1500));
+        assert_eq!(raw["attributes"], json!({ "field": "value" }));
+
         let error = manifest
             .agent_error(
                 0,
@@ -2976,7 +3019,7 @@ mod tests {
         assert_eq!(raw["category"], json!("permanent"));
         assert_eq!(raw["severity"], json!("error"));
         assert_eq!(raw["retryable"], json!(false));
-        assert_eq!(raw["retry_after_ms"], json!(1500));
+        assert_eq!(raw["retryAfterMs"], json!(1500));
         assert_eq!(raw["attributes"], json!({ "field": "value" }));
     }
 
