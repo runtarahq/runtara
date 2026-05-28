@@ -165,10 +165,28 @@ impl Config {
 
         let dev_mode: bool = parse_bool_or("RUNTARA_DEV_MODE", cfg!(debug_assertions))?;
 
-        let registered_agents: BTreeSet<String> = runtara_agents::registry::get_all_agent_modules()
-            .iter()
-            .map(|m| m.id.to_string())
-            .collect();
+        // The entitlement allowlist needs every agent id that any workflow can
+        // legally reference. Two sources contribute:
+        //
+        //   1. The statically-linked `runtara_agents::registry` — historical
+        //      snake_case ids (`ai_tools`, `s3_storage`, …). Kept so legacy
+        //      workflow JSON authored against the static registry keeps
+        //      validating.
+        //   2. The kebab-case ids discovered from `RUNTARA_AGENT_COMPONENTS_DIR`
+        //      — these are the canonical ids the components-mode pipeline and
+        //      the API discovery surface use (`ai-tools`, `s3-storage`,
+        //      `mcp`, …). Without them, workflows referencing the modern
+        //      kebab ids get `AGENT_NOT_ENABLED` even though the component
+        //      is loaded.
+        //
+        // The union covers both forms so write-time validation never blocks a
+        // workflow whose agent is actually deployable.
+        let mut registered_agents: BTreeSet<String> =
+            runtara_agents::registry::get_all_agent_modules()
+                .iter()
+                .map(|m| m.id.to_string())
+                .collect();
+        registered_agents.extend(discover_component_agent_ids());
 
         let entitlement_snapshot: EntitlementSnapshot = EntitlementSnapshot::parse_entitlements(
             &tenant_id,
@@ -238,6 +256,40 @@ fn parse_bool_or(name: &'static str, default: bool) -> Result<bool, ConfigError>
         )),
         Err(_) => Ok(default),
     }
+}
+
+/// Discover the kebab-cased agent ids deployed at
+/// `$RUNTARA_AGENT_COMPONENTS_DIR`, derived from `runtara_agent_*.wasm`
+/// filenames. Returns an empty set when the env var is unset or the directory
+/// is unreadable — the static registry alone is enough for CLI / fallback
+/// paths. Doesn't parse the `.meta.json` files (the `ComponentDispatcherService`
+/// already does that at boot for full metadata); the filename stem is all the
+/// entitlement allowlist needs, and parsing has to wait until after env-var
+/// parsing has finished anyway.
+fn discover_component_agent_ids() -> BTreeSet<String> {
+    let Ok(dir) = std::env::var("RUNTARA_AGENT_COMPONENTS_DIR") else {
+        return BTreeSet::new();
+    };
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return BTreeSet::new();
+    };
+    let mut ids = BTreeSet::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|s| s.to_str()) != Some("wasm") {
+            continue;
+        }
+        let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        let Some(stem_id) = stem.strip_prefix("runtara_agent_") else {
+            continue;
+        };
+        // Matches `ComponentDispatcherService::from_dir` — cargo-component
+        // emits snake_case wasm filenames, the canonical id is kebab.
+        ids.insert(stem_id.replace('_', "-"));
+    }
+    ids
 }
 
 fn parse_bool(s: &str) -> Option<bool> {
