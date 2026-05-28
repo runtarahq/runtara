@@ -12,10 +12,7 @@ use std::path::PathBuf;
 
 use runtara_dsl::ExecutionGraph;
 use sha2::{Digest, Sha256};
-use wasm_encoder::{
-    CodeSection, CustomSection, ExportKind, ExportSection, Function, FunctionSection, Instruction,
-    Module, TypeSection, ValType,
-};
+use wasm_encoder::{Component, CustomSection};
 
 use super::component::{DirectComponentArtifacts, emit_direct_component_artifacts};
 use super::manifest::{
@@ -34,11 +31,6 @@ pub const DIRECT_WORKFLOW_MANIFEST_SECTION: &str = "runtara.direct_workflow.mani
 pub const DIRECT_WORKFLOW_SUPPORT_SECTION: &str = "runtara.direct_workflow.support";
 /// Custom section containing direct artifact ABI metadata JSON.
 pub const DIRECT_WORKFLOW_ABI_SECTION: &str = "runtara.direct_workflow.abi";
-
-const TYPE_I32_RESULT: u32 = 0;
-const FUNC_ABI_VERSION: u32 = 0;
-const FUNC_MANIFEST_VERSION: u32 = 1;
-const FUNC_STEP_COUNT: u32 = 2;
 
 /// Input for the opt-in direct compiler.
 #[derive(Debug, Clone)]
@@ -142,9 +134,9 @@ impl From<std::io::Error> for DirectCompileError {
 ///
 /// This does not replace [`crate::compile_workflow`]. It is intentionally
 /// opt-in and currently supports only graphs accepted by
-/// [`analyze_direct_wasm_support`]. The emitted core Wasm artifact is a stable
-/// metadata envelope for the direct pipeline; component-model runtime execution
-/// will replace this envelope in the next phases.
+/// [`analyze_direct_wasm_support`]. The emitted component-format artifact is a
+/// stable metadata envelope for the direct pipeline; executable component-model
+/// runtime dispatch will replace this envelope in the next phases.
 pub fn compile_direct_workflow(
     input: DirectCompilationInput,
 ) -> Result<DirectCompilationResult, DirectCompileError> {
@@ -203,70 +195,28 @@ fn emit_finish_only_artifact(
 ) -> Result<Vec<u8>, DirectCompileError> {
     let abi_json = serde_json::to_vec(&serde_json::json!({
         "abiVersion": DIRECT_WORKFLOW_ABI_VERSION,
-        "artifactKind": "finish-only-core-envelope",
+        "artifactKind": "finish-only-component-envelope",
         "runtimeExecutable": false,
-        "note": "temporary direct compiler artifact envelope; component-model execution comes next"
+        "manifestVersion": DIRECT_WORKFLOW_MANIFEST_VERSION,
+        "stepCount": manifest.feature_summary.total_steps,
+        "note": "temporary direct compiler component envelope; component-model execution comes next"
     }))?;
 
-    let mut module = Module::new();
-
-    let mut types = TypeSection::new();
-    types.ty().function([], [ValType::I32]);
-
-    let mut functions = FunctionSection::new();
-    functions.function(TYPE_I32_RESULT);
-    functions.function(TYPE_I32_RESULT);
-    functions.function(TYPE_I32_RESULT);
-
-    let mut exports = ExportSection::new();
-    exports.export(
-        "__runtara_direct_abi_version",
-        ExportKind::Func,
-        FUNC_ABI_VERSION,
-    );
-    exports.export(
-        "__runtara_direct_manifest_version",
-        ExportKind::Func,
-        FUNC_MANIFEST_VERSION,
-    );
-    exports.export(
-        "__runtara_direct_step_count",
-        ExportKind::Func,
-        FUNC_STEP_COUNT,
-    );
-
-    let mut code = CodeSection::new();
-    code.function(&const_i32_function(DIRECT_WORKFLOW_ABI_VERSION as i32));
-    code.function(&const_i32_function(DIRECT_WORKFLOW_MANIFEST_VERSION as i32));
-    code.function(&const_i32_function(
-        manifest.feature_summary.total_steps as i32,
-    ));
-
-    module.section(&types);
-    module.section(&functions);
-    module.section(&exports);
-    module.section(&code);
-    module.section(&CustomSection {
+    let mut component = Component::new();
+    component.section(&CustomSection {
         name: DIRECT_WORKFLOW_ABI_SECTION.into(),
         data: abi_json.into(),
     });
-    module.section(&CustomSection {
+    component.section(&CustomSection {
         name: DIRECT_WORKFLOW_MANIFEST_SECTION.into(),
         data: manifest_json.into(),
     });
-    module.section(&CustomSection {
+    component.section(&CustomSection {
         name: DIRECT_WORKFLOW_SUPPORT_SECTION.into(),
         data: support_json.into(),
     });
 
-    Ok(module.finish())
-}
-
-fn const_i32_function(value: i32) -> Function {
-    let mut function = Function::new([]);
-    function.instruction(&Instruction::I32Const(value));
-    function.instruction(&Instruction::End);
-    function
+    Ok(component.finish())
 }
 
 fn sanitize_path_segment(value: &str) -> String {
@@ -320,7 +270,7 @@ mod tests {
     use std::fs;
 
     use super::*;
-    use wasmparser::{ExternalKind, Parser, Payload, Validator};
+    use wasmparser::{Encoding, Parser, Payload, Validator};
 
     fn fixture(name: &str) -> ExecutionGraph {
         let json = match name {
@@ -345,7 +295,7 @@ mod tests {
         let wasm = fs::read(&result.wasm_path).expect("wasm");
         Validator::new()
             .validate_all(&wasm)
-            .expect("direct artifact should validate as core Wasm");
+            .expect("direct artifact should validate as a Wasm component");
 
         assert_eq!(result.wasm_size, wasm.len());
         assert_eq!(result.manifest_checksum.len(), 64);
@@ -369,20 +319,33 @@ mod tests {
         .expect("direct compile should succeed");
 
         let wasm = fs::read(&result.wasm_path).expect("wasm");
+        let mut saw_component_header = false;
+        let mut saw_abi = false;
         let mut saw_manifest = false;
         let mut saw_support = false;
-        let mut saw_export = false;
 
         for payload in Parser::new(0).parse_all(&wasm) {
             match payload.expect("wasm payload") {
-                Payload::ExportSection(reader) => {
-                    for export in reader {
-                        let export = export.expect("export");
-                        if export.name == "__runtara_direct_abi_version" {
-                            assert_eq!(export.kind, ExternalKind::Func);
-                            saw_export = true;
-                        }
-                    }
+                Payload::Version { encoding, .. } => {
+                    assert_eq!(encoding, Encoding::Component);
+                    saw_component_header = true;
+                }
+                Payload::CustomSection(section)
+                    if section.name() == DIRECT_WORKFLOW_ABI_SECTION =>
+                {
+                    let abi: serde_json::Value =
+                        serde_json::from_slice(section.data()).expect("abi json");
+                    assert_eq!(
+                        abi["abiVersion"].as_u64(),
+                        Some(u64::from(DIRECT_WORKFLOW_ABI_VERSION))
+                    );
+                    assert_eq!(abi["artifactKind"], "finish-only-component-envelope");
+                    assert_eq!(abi["runtimeExecutable"].as_bool(), Some(false));
+                    assert_eq!(
+                        abi["manifestVersion"].as_u64(),
+                        Some(u64::from(DIRECT_WORKFLOW_MANIFEST_VERSION))
+                    );
+                    saw_abi = true;
                 }
                 Payload::CustomSection(section)
                     if section.name() == DIRECT_WORKFLOW_MANIFEST_SECTION =>
@@ -404,7 +367,11 @@ mod tests {
             }
         }
 
-        assert!(saw_export, "direct ABI version export should exist");
+        assert!(
+            saw_component_header,
+            "direct artifact should be a component"
+        );
+        assert!(saw_abi, "direct ABI custom section should exist");
         assert!(saw_manifest, "manifest custom section should exist");
         assert!(saw_support, "support-report custom section should exist");
     }

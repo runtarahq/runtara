@@ -22,10 +22,10 @@ pub struct DirectComponentArtifacts {
 
 /// Emit the direct workflow component scaffolding.
 ///
-/// The current finish-only direct compiler still writes a core-Wasm metadata
-/// envelope as `workflow.wasm`. These artifacts are emitted now so the next
-/// step can replace that envelope with a component implementing this world
-/// without changing the output directory contract.
+/// The current finish-only direct compiler writes a component-format metadata
+/// envelope as `workflow.wasm`. These artifacts define the WIT/WAC contract the
+/// executable component dispatcher will implement without changing the output
+/// directory contract.
 pub fn emit_direct_component_artifacts(agents: &[String]) -> DirectComponentArtifacts {
     DirectComponentArtifacts {
         world_wit: emit_world_wit(agents),
