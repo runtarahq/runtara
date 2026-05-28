@@ -86,14 +86,16 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   tests. With `RUNTARA_RUN_DIRECT_WASM_E2E=1`, it compiles and statically
   composes the simple `Finish` fixture plus flat and nested `Conditional`
   fixtures plus simple `Filter -> Finish`, value `Switch -> Finish`, routing
-  `Switch`, `GroupBy -> Finish`, `Log -> Finish`, terminal `Error`, and
-  normal-edge condition-priority fixtures, runs each final
+  `Switch`, `GroupBy -> Finish`, durable/non-durable `Delay -> Finish`,
+  `Log -> Finish`, terminal `Error`, and normal-edge condition-priority
+  fixtures, runs each final
   `workflow.wasm` under
   `wasmtime run --wasi http --wasi inherit-network`, and asserts the fake SDK
   receives the expected mapped completion payloads for the Finish path,
   conditional branches, Filter output, value Switch output, routing Switch route
-  leaves, GroupBy output, Log custom events, Error custom-event/failure payloads,
-  and condition-priority/default routing.
+  leaves, GroupBy output, Delay output plus durable sleep traffic, Log custom
+  events, Error custom-event/failure payloads, and condition-priority/default
+  routing.
 - `tests/direct_wasm_finish_parity.rs` now compares direct `Finish` mapping
   output against the current Rust-generated mapping contract for representative
   fixture shapes: data passthrough, dotted `outputs.*` unwrap, templates,

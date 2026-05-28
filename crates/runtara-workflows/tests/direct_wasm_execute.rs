@@ -25,6 +25,7 @@ const FILTER_SIMPLE: &str = include_str!("fixtures/filter_simple.json");
 const SWITCH_VALUE_SIMPLE: &str = include_str!("fixtures/switch_value_simple.json");
 const SWITCH_ROUTING_SIMPLE: &str = include_str!("fixtures/switch_routing_simple.json");
 const GROUP_BY_SIMPLE: &str = include_str!("fixtures/group_by_simple.json");
+const DELAY_DYNAMIC: &str = include_str!("fixtures/delay_dynamic.json");
 const LOG_ALL_LEVELS: &str = include_str!("fixtures/log_all_levels.json");
 const ERROR_DIRECT_SIMPLE: &str = include_str!("fixtures/error_direct_simple.json");
 const EDGE_CONDITION_PRIORITY: &str = include_str!("fixtures/edge_condition_priority.json");
@@ -46,9 +47,17 @@ struct RuntimeEvent {
 }
 
 #[derive(Debug)]
+struct SleepRequest {
+    checkpoint_id: String,
+    duration_ms: u64,
+    state: Vec<u8>,
+}
+
+#[derive(Debug)]
 struct DirectRunOutput {
     output_json: Value,
     events: Vec<RuntimeEvent>,
+    sleeps: Vec<SleepRequest>,
 }
 
 #[derive(Debug)]
@@ -62,6 +71,7 @@ struct CapturedRun {
     output_json: Option<Value>,
     error_json: Option<Value>,
     events: Vec<RuntimeEvent>,
+    sleeps: Vec<SleepRequest>,
     status_success: bool,
     stderr: String,
 }
@@ -71,6 +81,7 @@ enum CapturedMessage {
     Completed(Completed),
     Failed(Failed),
     Event(RuntimeEvent),
+    Sleep(SleepRequest),
 }
 
 fn e2e_enabled() -> bool {
@@ -268,6 +279,10 @@ fn route(
                 capture_event(body, sink);
                 return (200, serde_json::json!({"success": true}));
             }
+            ("POST", "sleep") => {
+                capture_sleep(body, sink);
+                return (200, serde_json::json!({"success": true}));
+            }
             ("POST", "failed") => {
                 capture_failed(body, sink);
                 return (200, serde_json::json!({"success": true}));
@@ -310,6 +325,27 @@ fn capture_event(body: &[u8], sink: &mpsc::Sender<CapturedMessage>) {
         let _ = sink.send(CapturedMessage::Event(RuntimeEvent {
             subtype: subtype.to_string(),
             payload_json,
+        }));
+    }
+}
+
+fn capture_sleep(body: &[u8], sink: &mpsc::Sender<CapturedMessage>) {
+    if let Ok(parsed) = serde_json::from_slice::<Value>(body)
+        && let Some(checkpoint_id) = parsed.get("checkpoint_id").and_then(Value::as_str)
+    {
+        let duration_ms = parsed
+            .get("duration_ms")
+            .and_then(Value::as_u64)
+            .unwrap_or_default();
+        let state = parsed
+            .get("state")
+            .and_then(Value::as_str)
+            .and_then(|b64| base64::engine::general_purpose::STANDARD.decode(b64).ok())
+            .unwrap_or_default();
+        let _ = sink.send(CapturedMessage::Sleep(SleepRequest {
+            checkpoint_id: checkpoint_id.to_string(),
+            duration_ms,
+            state,
         }));
     }
 }
@@ -421,6 +457,7 @@ fn run_direct_workflow_with_events_and_tracking(
     DirectRunOutput {
         output_json,
         events: captured.events,
+        sleeps: captured.sleeps,
     }
 }
 
@@ -516,20 +553,29 @@ fn run_direct_workflow_capture(
     let mut output_json = None;
     let mut error_json = None;
     let mut events = Vec::new();
+    let mut sleeps = Vec::new();
     for message in capture_rx.try_iter() {
         match message {
             CapturedMessage::Completed(completed) => output_json = Some(completed.output_json),
             CapturedMessage::Failed(failed) => error_json = Some(failed.error_json),
             CapturedMessage::Event(event) => events.push(event),
+            CapturedMessage::Sleep(sleep) => sleeps.push(sleep),
         }
     }
     CapturedRun {
         output_json,
         error_json,
         events,
+        sleeps,
         status_success: output.status.success(),
         stderr: stderr.into_owned(),
     }
+}
+
+fn non_durable_graph_json(graph_json: &str) -> String {
+    let mut graph: Value = serde_json::from_str(graph_json).expect("fixture parses as json");
+    graph["durable"] = Value::Bool(false);
+    serde_json::to_string(&graph).expect("graph serializes")
 }
 
 #[test]
@@ -707,6 +753,48 @@ fn direct_wasm_execute_group_by_finish_reports_completion() {
             },
             "total_groups": 2
         })
+    );
+}
+
+#[test]
+fn direct_wasm_execute_durable_delay_reports_sleep_and_completion() {
+    let Some(components_dir) = direct_e2e_components_dir() else {
+        return;
+    };
+
+    let result = run_direct_workflow_with_events(
+        &components_dir,
+        "direct-wasm-execute-delay-durable",
+        DELAY_DYNAMIC,
+        br#"{"waitTime":0}"#,
+    );
+
+    assert_eq!(result.output_json, serde_json::json!({ "waited": 0 }));
+    assert_eq!(result.sleeps.len(), 1);
+    let sleep = &result.sleeps[0];
+    assert_eq!(sleep.checkpoint_id, "delay");
+    assert_eq!(sleep.duration_ms, 0);
+    assert!(sleep.state.is_empty());
+}
+
+#[test]
+fn direct_wasm_execute_non_durable_delay_reports_completion_without_sleep() {
+    let Some(components_dir) = direct_e2e_components_dir() else {
+        return;
+    };
+    let graph_json = non_durable_graph_json(DELAY_DYNAMIC);
+
+    let result = run_direct_workflow_with_events(
+        &components_dir,
+        "direct-wasm-execute-delay-non-durable",
+        &graph_json,
+        br#"{"waitTime":0}"#,
+    );
+
+    assert_eq!(result.output_json, serde_json::json!({ "waited": 0 }));
+    assert!(
+        result.sleeps.is_empty(),
+        "non-durable Delay should not call runtime durable sleep"
     );
 }
 
