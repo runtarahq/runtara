@@ -56,9 +56,9 @@ Current implementation progress on `codex/wasm-direct-emitter`:
 - `runtara-workflow-stdlib::direct_json` now contains the pure Rust
   implementation behind the direct JSON stdlib contract: manifest mapping
   lookup, source-envelope construction, mapping application, template rendering,
-  type hints, Finish `outputs` unwrapping, and the first Split helpers for
-  item normalization, per-iteration variable construction, and result step
-  envelopes.
+  type hints, Finish `outputs` unwrapping, and Split helpers for item
+  normalization, indexed item access, per-iteration variable construction,
+  result accumulation, and result step envelopes.
 - `runtara-workflow-stdlib` now has a `direct-component` feature and
   component metadata for `runtara:workflow-stdlib`. That feature builds a
   `wasm32-wasip2` stdlib component without pulling in SDK/runtime, HTTP, AI,
@@ -1708,15 +1708,19 @@ Implementation steps:
    - stdlib split-input/source helpers: pure Rust helpers and WIT exports done
      for null, single-value, batching, indexed item access, result
      accumulation, `_loop_indices`, `_item`, `_index`, `_scope_id`, extra
-     variables, and result envelopes; direct lowering pending;
-   - direct loop lowering: pending.
+     variables, and result envelopes;
+   - direct loop lowering: schema-free sequential Split done, including nested
+     direct run-plan emission, per-item source construction, output
+     accumulation, duplicate nested step-id manifest parsing, and structural
+     core-Wasm lowering tests.
 2. Preserve split behavior:
-   - null and non-array handling;
-   - item variable injection;
-   - `_loop_indices`;
-   - `dontStopOnFailed`;
-   - input/output schema validation;
-   - output collection shape.
+   - null and non-array handling: done in stdlib;
+   - item variable injection: done in stdlib;
+   - `_loop_indices`: done in stdlib;
+   - output collection shape: done for fail-fast schema-free sequential Split;
+   - `dontStopOnFailed`: pending;
+   - input/output schema validation: pending;
+   - Split retry/timeout/breakpoint semantics: pending.
 3. Implement `While`:
    - max iterations;
    - condition evaluation before each iteration;

@@ -64,6 +64,7 @@ const AGENT_WIT_VERSION: &str = "0.3.0";
 
 const DIRECT_RUN_RETPTR_OFFSET: i32 = 0;
 const DIRECT_RET_BOOL_OK_OFFSET: u64 = 4;
+const DIRECT_RET_U32_OK_OFFSET: u64 = 4;
 const DIRECT_RET_U64_OK_OFFSET: u64 = 8;
 const DIRECT_RESULT_OPTION_TAG_OFFSET: u64 = 4;
 const DIRECT_RESULT_OPTION_LIST_PTR_OFFSET: u64 = 8;
@@ -111,7 +112,18 @@ const DIRECT_AGENT_RATE_LIMITED_LOCAL: u32 = 15;
 const DIRECT_AGENT_RETRY_SLEEP_MS_LOCAL: u32 = 16;
 const DIRECT_AGENT_RATE_LIMIT_WAIT_TOTAL_LOCAL: u32 = 17;
 const DIRECT_DELAY_DURATION_MS_LOCAL: u32 = DIRECT_AGENT_RETRY_SLEEP_MS_LOCAL;
+const DIRECT_SPLIT_COUNT_LOCAL: u32 = 18;
+const DIRECT_SPLIT_INDEX_LOCAL: u32 = 19;
+const DIRECT_SPLIT_ITEM_PTR_LOCAL: u32 = 20;
+const DIRECT_SPLIT_ITEM_LEN_LOCAL: u32 = 21;
+const DIRECT_SPLIT_RESULTS_PTR_LOCAL: u32 = 22;
+const DIRECT_SPLIT_RESULTS_LEN_LOCAL: u32 = 23;
+const DIRECT_SPLIT_PARENT_SOURCE_PTR_LOCAL: u32 = 24;
+const DIRECT_SPLIT_PARENT_SOURCE_LEN_LOCAL: u32 = 25;
+const DIRECT_SPLIT_VARIABLES_PTR_LOCAL: u32 = 26;
+const DIRECT_SPLIT_VARIABLES_LEN_LOCAL: u32 = 27;
 const DIRECT_EMPTY_STEPS_CONTEXT: &[u8] = b"{}";
+const DIRECT_EMPTY_SPLIT_RESULTS: &[u8] = b"[]";
 const DIRECT_WORKFLOW_LOG_KIND: &[u8] = b"workflow_log";
 const DIRECT_WORKFLOW_ERROR_KIND: &[u8] = b"workflow_error";
 const DIRECT_STEP_DEBUG_START_KIND: &[u8] = b"step_debug_start";
@@ -582,6 +594,12 @@ enum DirectRunPlan {
         group_id: u32,
         next_plan: Box<DirectRunPlan>,
     },
+    Split {
+        step_id: String,
+        split_id: u32,
+        nested_plan: Box<DirectRunPlan>,
+        next_plan: Box<DirectRunPlan>,
+    },
     Delay {
         step_id: String,
         delay_id: u32,
@@ -708,6 +726,7 @@ struct DirectCoreStaticData {
     manifest: DirectDataSegment,
     variables: DirectDataSegment,
     steps: DirectDataSegment,
+    split_empty_results: DirectDataSegment,
     workflow_log_kind: DirectDataSegment,
     workflow_error_kind: DirectDataSegment,
     step_debug_start_kind: DirectDataSegment,
@@ -738,6 +757,12 @@ impl DirectCoreStaticData {
 
         let steps = DirectDataSegment::new(offset, steps_json);
         offset = align_i32(checked_offset_add(offset, steps_json.len())?, 16);
+
+        let split_empty_results = DirectDataSegment::new(offset, DIRECT_EMPTY_SPLIT_RESULTS);
+        offset = align_i32(
+            checked_offset_add(offset, DIRECT_EMPTY_SPLIT_RESULTS.len())?,
+            16,
+        );
 
         let workflow_log_kind = DirectDataSegment::new(offset, DIRECT_WORKFLOW_LOG_KIND);
         offset = align_i32(
@@ -783,33 +808,23 @@ impl DirectCoreStaticData {
         );
 
         let mut step_ids = BTreeMap::new();
-        for step in &graph.steps {
-            let segment = DirectDataSegment::new(offset, step.id.as_bytes());
-            offset = align_i32(checked_offset_add(offset, step.id.len())?, 16);
-            step_ids.insert(step.id.clone(), segment);
-        }
+        collect_static_step_ids(graph, &mut offset, &mut step_ids)?;
 
         let mut agent_capability_ids = BTreeMap::new();
-        for agent in &graph.agents {
-            let segment = DirectDataSegment::new(offset, agent.capability_id.as_bytes());
-            offset = align_i32(checked_offset_add(offset, agent.capability_id.len())?, 16);
-            agent_capability_ids.insert(agent.id, segment);
-        }
-
         let mut agent_connection_ids = BTreeMap::new();
-        for agent in &graph.agents {
-            if let Some(connection_id) = agent.connection_id.as_deref() {
-                let segment = DirectDataSegment::new(offset, connection_id.as_bytes());
-                offset = align_i32(checked_offset_add(offset, connection_id.len())?, 16);
-                agent_connection_ids.insert(agent.id, segment);
-            }
-        }
+        collect_static_agent_data(
+            graph,
+            &mut offset,
+            &mut agent_capability_ids,
+            &mut agent_connection_ids,
+        )?;
 
         let memory_min_pages = wasm_pages_for_bytes(offset)?;
         Ok(Self {
             manifest,
             variables,
             steps,
+            split_empty_results,
             workflow_log_kind,
             workflow_error_kind,
             step_debug_start_kind,
@@ -844,6 +859,54 @@ impl DirectCoreStaticData {
     }
 }
 
+fn collect_static_step_ids(
+    graph: &DirectGraphManifest,
+    offset: &mut i32,
+    step_ids: &mut BTreeMap<String, DirectDataSegment>,
+) -> Result<(), DirectCompileError> {
+    for step in &graph.steps {
+        if !step_ids.contains_key(&step.id) {
+            let segment = DirectDataSegment::new(*offset, step.id.as_bytes());
+            *offset = align_i32(checked_offset_add(*offset, step.id.len())?, 16);
+            step_ids.insert(step.id.clone(), segment);
+        }
+        for nested in &step.nested_graphs {
+            collect_static_step_ids(&nested.graph, offset, step_ids)?;
+        }
+    }
+    Ok(())
+}
+
+fn collect_static_agent_data(
+    graph: &DirectGraphManifest,
+    offset: &mut i32,
+    agent_capability_ids: &mut BTreeMap<u32, DirectDataSegment>,
+    agent_connection_ids: &mut BTreeMap<u32, DirectDataSegment>,
+) -> Result<(), DirectCompileError> {
+    for agent in &graph.agents {
+        let segment = DirectDataSegment::new(*offset, agent.capability_id.as_bytes());
+        *offset = align_i32(checked_offset_add(*offset, agent.capability_id.len())?, 16);
+        agent_capability_ids.insert(agent.id, segment);
+
+        if let Some(connection_id) = agent.connection_id.as_deref() {
+            let segment = DirectDataSegment::new(*offset, connection_id.as_bytes());
+            *offset = align_i32(checked_offset_add(*offset, connection_id.len())?, 16);
+            agent_connection_ids.insert(agent.id, segment);
+        }
+    }
+    for step in &graph.steps {
+        for nested in &step.nested_graphs {
+            collect_static_agent_data(
+                &nested.graph,
+                offset,
+                agent_capability_ids,
+                agent_connection_ids,
+            )?;
+        }
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone)]
 struct DirectDataSegment {
     offset: i32,
@@ -863,6 +926,12 @@ impl DirectDataSegment {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+enum DirectVariables<'a> {
+    Segment(&'a DirectDataSegment),
+    Locals { ptr_local: u32, len_local: u32 },
+}
+
 fn direct_run_plan(manifest: &DirectWorkflowManifest) -> Result<DirectRunPlan, DirectCompileError> {
     let entry = manifest
         .graph
@@ -877,8 +946,8 @@ fn direct_run_plan(manifest: &DirectWorkflowManifest) -> Result<DirectRunPlan, D
         })?;
 
     match entry.step_type.as_str() {
-        "Finish" | "Filter" | "Switch" | "GroupBy" | "Delay" | "Log" | "Agent" | "Error"
-        | "Conditional" => step_run_plan(
+        "Finish" | "Filter" | "Switch" | "GroupBy" | "Split" | "Delay" | "Log" | "Agent"
+        | "Error" | "Conditional" => step_run_plan(
             &manifest.graph,
             &manifest.graph.entry_point,
             &mut Vec::new(),
@@ -981,6 +1050,20 @@ fn step_run_plan_inner(
             Ok(DirectRunPlan::GroupBy {
                 step_id: step_id.to_string(),
                 group_id,
+                next_plan: Box::new(next_plan),
+            })
+        }
+        "Split" => {
+            let split_id = split_id(graph, step_id)?;
+            let nested_graph = split_subgraph(graph, step_id)?;
+            let nested_plan =
+                step_run_plan(nested_graph, &nested_graph.entry_point, &mut Vec::new())?;
+            let next_plan = normal_flow_plan(graph, step_id, stack, include_on_error)?;
+
+            Ok(DirectRunPlan::Split {
+                step_id: step_id.to_string(),
+                split_id,
+                nested_plan: Box::new(nested_plan),
                 next_plan: Box::new(next_plan),
             })
         }
@@ -1368,6 +1451,46 @@ fn group_by_id(graph: &DirectGraphManifest, step_id: &str) -> Result<u32, Direct
         })
 }
 
+fn split_id(graph: &DirectGraphManifest, step_id: &str) -> Result<u32, DirectCompileError> {
+    if !graph
+        .steps
+        .iter()
+        .any(|step| step.id == step_id && step.step_type == "Split")
+    {
+        return Err(DirectCompileError::Component(format!(
+            "direct step '{step_id}' is not a Split step"
+        )));
+    }
+
+    graph
+        .splits
+        .iter()
+        .find(|split| split.step_id == step_id && split.purpose == "split.config")
+        .map(|split| split.id)
+        .ok_or_else(|| {
+            DirectCompileError::Component(format!("missing Split config for step '{step_id}'"))
+        })
+}
+
+fn split_subgraph<'a>(
+    graph: &'a DirectGraphManifest,
+    step_id: &str,
+) -> Result<&'a DirectGraphManifest, DirectCompileError> {
+    graph
+        .steps
+        .iter()
+        .find(|step| step.id == step_id && step.step_type == "Split")
+        .and_then(|step| {
+            step.nested_graphs
+                .iter()
+                .find(|nested| nested.role == "split.subgraph")
+        })
+        .map(|nested| nested.graph.as_ref())
+        .ok_or_else(|| {
+            DirectCompileError::Component(format!("missing Split subgraph for step '{step_id}'"))
+        })
+}
+
 fn delay_config<'a>(
     graph: &'a DirectGraphManifest,
     step_id: &str,
@@ -1667,6 +1790,7 @@ fn emit_direct_core_module(
         &config.static_data.manifest,
         &config.static_data.variables,
         &config.static_data.steps,
+        &config.static_data.split_empty_results,
         &config.static_data.workflow_log_kind,
         &config.static_data.workflow_error_kind,
         &config.static_data.step_debug_start_kind,
@@ -1726,6 +1850,11 @@ struct DirectCoreImportIndices {
     stdlib_error_steps: Option<u32>,
     stdlib_value_switch: Option<u32>,
     stdlib_group_by: Option<u32>,
+    stdlib_split_item_count: Option<u32>,
+    stdlib_split_item: Option<u32>,
+    stdlib_split_iteration_variables: Option<u32>,
+    stdlib_split_append_output: Option<u32>,
+    stdlib_split_output: Option<u32>,
     stdlib_delay_duration_ms: Option<u32>,
     stdlib_delay: Option<u32>,
     stdlib_agent_output: Option<u32>,
@@ -1806,6 +1935,20 @@ impl DirectCoreImportIndices {
             stdlib_error_steps: require_import(self.stdlib_error_steps, "stdlib.error-steps")?,
             stdlib_value_switch: require_import(self.stdlib_value_switch, "stdlib.value-switch")?,
             stdlib_group_by: require_import(self.stdlib_group_by, "stdlib.group-by")?,
+            stdlib_split_item_count: require_import(
+                self.stdlib_split_item_count,
+                "stdlib.split-item-count",
+            )?,
+            stdlib_split_item: require_import(self.stdlib_split_item, "stdlib.split-item")?,
+            stdlib_split_iteration_variables: require_import(
+                self.stdlib_split_iteration_variables,
+                "stdlib.split-iteration-variables",
+            )?,
+            stdlib_split_append_output: require_import(
+                self.stdlib_split_append_output,
+                "stdlib.split-append-output",
+            )?,
+            stdlib_split_output: require_import(self.stdlib_split_output, "stdlib.split-output")?,
             stdlib_delay_duration_ms: require_import(
                 self.stdlib_delay_duration_ms,
                 "stdlib.delay-duration-ms",
@@ -1884,6 +2027,11 @@ struct DirectCoreFunctionIndices {
     stdlib_error_steps: u32,
     stdlib_value_switch: u32,
     stdlib_group_by: u32,
+    stdlib_split_item_count: u32,
+    stdlib_split_item: u32,
+    stdlib_split_iteration_variables: u32,
+    stdlib_split_append_output: u32,
+    stdlib_split_output: u32,
     stdlib_delay_duration_ms: u32,
     stdlib_delay: u32,
     stdlib_agent_output: u32,
@@ -1984,6 +2132,16 @@ fn import_core_function(
         import_indices.stdlib_value_switch = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "group-by") {
         import_indices.stdlib_group_by = Some(function_index);
+    } else if is_stdlib_import(resolve, interface, function, "split-item-count") {
+        import_indices.stdlib_split_item_count = Some(function_index);
+    } else if is_stdlib_import(resolve, interface, function, "split-item") {
+        import_indices.stdlib_split_item = Some(function_index);
+    } else if is_stdlib_import(resolve, interface, function, "split-iteration-variables") {
+        import_indices.stdlib_split_iteration_variables = Some(function_index);
+    } else if is_stdlib_import(resolve, interface, function, "split-append-output") {
+        import_indices.stdlib_split_append_output = Some(function_index);
+    } else if is_stdlib_import(resolve, interface, function, "split-output") {
+        import_indices.stdlib_split_output = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "delay-duration-ms") {
         import_indices.stdlib_delay_duration_ms = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "delay") {
@@ -2183,7 +2341,7 @@ fn direct_run_function(
     const ROUTE_PTR_LOCAL: u32 = 8;
     const ROUTE_LEN_LOCAL: u32 = 9;
 
-    let mut body = WasmFunction::new([(16, ValType::I32), (2, ValType::I64)]);
+    let mut body = WasmFunction::new([(16, ValType::I32), (2, ValType::I64), (10, ValType::I32)]);
 
     push_segment_args(&mut body, &config.static_data.manifest);
     push_retptr_arg(&mut body);
@@ -2203,7 +2361,7 @@ fn direct_run_function(
     emit_build_source(
         &mut body,
         indices,
-        &config.static_data.variables,
+        DirectVariables::Segment(&config.static_data.variables),
         DATA_PTR_LOCAL,
         DATA_LEN_LOCAL,
         STEPS_PTR_LOCAL,
@@ -2217,7 +2375,7 @@ fn direct_run_function(
         indices,
         &config.static_data,
         config.track_events,
-        &config.static_data.variables,
+        DirectVariables::Segment(&config.static_data.variables),
         &config.run_plan,
         DATA_PTR_LOCAL,
         DATA_LEN_LOCAL,
@@ -2248,7 +2406,7 @@ fn emit_run_plan_mapping(
     indices: &DirectCoreFunctionIndices,
     static_data: &DirectCoreStaticData,
     track_events: bool,
-    variables: &DirectDataSegment,
+    variables: DirectVariables<'_>,
     run_plan: &DirectRunPlan,
     data_ptr_local: u32,
     data_len_local: u32,
@@ -2430,6 +2588,36 @@ fn emit_run_plan_mapping(
                 step_id,
                 indices.stdlib_group_by,
                 *group_id,
+                next_plan,
+                data_ptr_local,
+                data_len_local,
+                steps_ptr_local,
+                steps_len_local,
+                source_ptr_local,
+                source_len_local,
+                output_ptr_local,
+                output_len_local,
+                route_ptr_local,
+                route_len_local,
+                workflow_log_kind,
+                workflow_error_kind,
+            );
+        }
+        DirectRunPlan::Split {
+            step_id,
+            split_id,
+            nested_plan,
+            next_plan,
+        } => {
+            emit_split_plan(
+                body,
+                indices,
+                static_data,
+                track_events,
+                variables,
+                step_id,
+                *split_id,
+                nested_plan,
                 next_plan,
                 data_ptr_local,
                 data_len_local,
@@ -2698,7 +2886,7 @@ fn emit_edge_route_dispatch(
     indices: &DirectCoreFunctionIndices,
     static_data: &DirectCoreStaticData,
     track_events: bool,
-    variables: &DirectDataSegment,
+    variables: DirectVariables<'_>,
     branches: &[DirectEdgeConditionPlan],
     default_plan: &DirectRunPlan,
     data_ptr_local: u32,
@@ -2803,7 +2991,7 @@ fn emit_step_context_plan(
     indices: &DirectCoreFunctionIndices,
     static_data: &DirectCoreStaticData,
     track_events: bool,
-    variables: &DirectDataSegment,
+    variables: DirectVariables<'_>,
     step_id: &str,
     step_function_index: u32,
     step_config_id: u32,
@@ -2888,12 +3076,225 @@ fn emit_step_context_plan(
 }
 
 #[allow(clippy::too_many_arguments)]
+fn emit_split_plan(
+    body: &mut WasmFunction,
+    indices: &DirectCoreFunctionIndices,
+    static_data: &DirectCoreStaticData,
+    track_events: bool,
+    variables: DirectVariables<'_>,
+    step_id: &str,
+    split_id: u32,
+    nested_plan: &DirectRunPlan,
+    next_plan: &DirectRunPlan,
+    data_ptr_local: u32,
+    data_len_local: u32,
+    steps_ptr_local: u32,
+    steps_len_local: u32,
+    source_ptr_local: u32,
+    source_len_local: u32,
+    output_ptr_local: u32,
+    output_len_local: u32,
+    route_ptr_local: u32,
+    route_len_local: u32,
+    workflow_log_kind: &DirectDataSegment,
+    workflow_error_kind: &DirectDataSegment,
+) {
+    emit_step_debug_event(
+        body,
+        indices,
+        static_data,
+        track_events,
+        true,
+        step_id,
+        source_ptr_local,
+        source_len_local,
+        output_ptr_local,
+        output_len_local,
+    );
+
+    body.instruction(&Instruction::LocalGet(source_ptr_local));
+    body.instruction(&Instruction::LocalSet(DIRECT_SPLIT_PARENT_SOURCE_PTR_LOCAL));
+    body.instruction(&Instruction::LocalGet(source_len_local));
+    body.instruction(&Instruction::LocalSet(DIRECT_SPLIT_PARENT_SOURCE_LEN_LOCAL));
+
+    body.instruction(&Instruction::I32Const(split_id as i32));
+    body.instruction(&Instruction::LocalGet(DIRECT_SPLIT_PARENT_SOURCE_PTR_LOCAL));
+    body.instruction(&Instruction::LocalGet(DIRECT_SPLIT_PARENT_SOURCE_LEN_LOCAL));
+    push_retptr_arg(body);
+    body.instruction(&Instruction::Call(indices.stdlib_split_item_count));
+    return_if_retptr_error(body);
+    push_retptr_i32_load(body, DIRECT_RET_U32_OK_OFFSET);
+    body.instruction(&Instruction::LocalSet(DIRECT_SPLIT_COUNT_LOCAL));
+
+    push_segment_args(body, &static_data.split_empty_results);
+    body.instruction(&Instruction::LocalSet(DIRECT_SPLIT_RESULTS_LEN_LOCAL));
+    body.instruction(&Instruction::LocalSet(DIRECT_SPLIT_RESULTS_PTR_LOCAL));
+
+    body.instruction(&Instruction::I32Const(0));
+    body.instruction(&Instruction::LocalSet(DIRECT_SPLIT_INDEX_LOCAL));
+    body.instruction(&Instruction::Block(BlockType::Empty));
+    body.instruction(&Instruction::Loop(BlockType::Empty));
+    body.instruction(&Instruction::LocalGet(DIRECT_SPLIT_INDEX_LOCAL));
+    body.instruction(&Instruction::LocalGet(DIRECT_SPLIT_COUNT_LOCAL));
+    body.instruction(&Instruction::I32GeU);
+    body.instruction(&Instruction::BrIf(1));
+
+    body.instruction(&Instruction::I32Const(split_id as i32));
+    body.instruction(&Instruction::LocalGet(DIRECT_SPLIT_PARENT_SOURCE_PTR_LOCAL));
+    body.instruction(&Instruction::LocalGet(DIRECT_SPLIT_PARENT_SOURCE_LEN_LOCAL));
+    body.instruction(&Instruction::LocalGet(DIRECT_SPLIT_INDEX_LOCAL));
+    push_retptr_arg(body);
+    body.instruction(&Instruction::Call(indices.stdlib_split_item));
+    return_if_retptr_error(body);
+    load_retptr_list(
+        body,
+        DIRECT_SPLIT_ITEM_PTR_LOCAL,
+        DIRECT_SPLIT_ITEM_LEN_LOCAL,
+    );
+
+    body.instruction(&Instruction::I32Const(split_id as i32));
+    body.instruction(&Instruction::LocalGet(DIRECT_SPLIT_PARENT_SOURCE_PTR_LOCAL));
+    body.instruction(&Instruction::LocalGet(DIRECT_SPLIT_PARENT_SOURCE_LEN_LOCAL));
+    body.instruction(&Instruction::LocalGet(DIRECT_SPLIT_ITEM_PTR_LOCAL));
+    body.instruction(&Instruction::LocalGet(DIRECT_SPLIT_ITEM_LEN_LOCAL));
+    body.instruction(&Instruction::LocalGet(DIRECT_SPLIT_INDEX_LOCAL));
+    push_retptr_arg(body);
+    body.instruction(&Instruction::Call(indices.stdlib_split_iteration_variables));
+    return_if_retptr_error(body);
+    load_retptr_list(
+        body,
+        DIRECT_SPLIT_VARIABLES_PTR_LOCAL,
+        DIRECT_SPLIT_VARIABLES_LEN_LOCAL,
+    );
+
+    body.instruction(&Instruction::I32Const(static_data.steps.offset));
+    body.instruction(&Instruction::LocalSet(steps_ptr_local));
+    body.instruction(&Instruction::I32Const(static_data.steps.len_i32()));
+    body.instruction(&Instruction::LocalSet(steps_len_local));
+
+    let iteration_variables = DirectVariables::Locals {
+        ptr_local: DIRECT_SPLIT_VARIABLES_PTR_LOCAL,
+        len_local: DIRECT_SPLIT_VARIABLES_LEN_LOCAL,
+    };
+    emit_build_source(
+        body,
+        indices,
+        iteration_variables,
+        DIRECT_SPLIT_ITEM_PTR_LOCAL,
+        DIRECT_SPLIT_ITEM_LEN_LOCAL,
+        steps_ptr_local,
+        steps_len_local,
+        source_ptr_local,
+        source_len_local,
+    );
+
+    emit_run_plan_mapping(
+        body,
+        indices,
+        static_data,
+        track_events,
+        iteration_variables,
+        nested_plan,
+        DIRECT_SPLIT_ITEM_PTR_LOCAL,
+        DIRECT_SPLIT_ITEM_LEN_LOCAL,
+        steps_ptr_local,
+        steps_len_local,
+        source_ptr_local,
+        source_len_local,
+        output_ptr_local,
+        output_len_local,
+        route_ptr_local,
+        route_len_local,
+        workflow_log_kind,
+        workflow_error_kind,
+    );
+
+    body.instruction(&Instruction::I32Const(split_id as i32));
+    body.instruction(&Instruction::LocalGet(DIRECT_SPLIT_RESULTS_PTR_LOCAL));
+    body.instruction(&Instruction::LocalGet(DIRECT_SPLIT_RESULTS_LEN_LOCAL));
+    body.instruction(&Instruction::LocalGet(output_ptr_local));
+    body.instruction(&Instruction::LocalGet(output_len_local));
+    push_retptr_arg(body);
+    body.instruction(&Instruction::Call(indices.stdlib_split_append_output));
+    return_if_retptr_error(body);
+    load_retptr_list(
+        body,
+        DIRECT_SPLIT_RESULTS_PTR_LOCAL,
+        DIRECT_SPLIT_RESULTS_LEN_LOCAL,
+    );
+
+    body.instruction(&Instruction::LocalGet(DIRECT_SPLIT_INDEX_LOCAL));
+    body.instruction(&Instruction::I32Const(1));
+    body.instruction(&Instruction::I32Add);
+    body.instruction(&Instruction::LocalSet(DIRECT_SPLIT_INDEX_LOCAL));
+    body.instruction(&Instruction::Br(0));
+    body.instruction(&Instruction::End);
+    body.instruction(&Instruction::End);
+
+    body.instruction(&Instruction::I32Const(split_id as i32));
+    body.instruction(&Instruction::LocalGet(DIRECT_SPLIT_PARENT_SOURCE_PTR_LOCAL));
+    body.instruction(&Instruction::LocalGet(DIRECT_SPLIT_PARENT_SOURCE_LEN_LOCAL));
+    body.instruction(&Instruction::LocalGet(DIRECT_SPLIT_RESULTS_PTR_LOCAL));
+    body.instruction(&Instruction::LocalGet(DIRECT_SPLIT_RESULTS_LEN_LOCAL));
+    push_retptr_arg(body);
+    body.instruction(&Instruction::Call(indices.stdlib_split_output));
+    return_if_retptr_error(body);
+    load_retptr_list(body, steps_ptr_local, steps_len_local);
+
+    emit_build_source(
+        body,
+        indices,
+        variables,
+        data_ptr_local,
+        data_len_local,
+        steps_ptr_local,
+        steps_len_local,
+        source_ptr_local,
+        source_len_local,
+    );
+
+    emit_step_debug_event(
+        body,
+        indices,
+        static_data,
+        track_events,
+        false,
+        step_id,
+        source_ptr_local,
+        source_len_local,
+        output_ptr_local,
+        output_len_local,
+    );
+
+    emit_run_plan_mapping(
+        body,
+        indices,
+        static_data,
+        track_events,
+        variables,
+        next_plan,
+        data_ptr_local,
+        data_len_local,
+        steps_ptr_local,
+        steps_len_local,
+        source_ptr_local,
+        source_len_local,
+        output_ptr_local,
+        output_len_local,
+        route_ptr_local,
+        route_len_local,
+        workflow_log_kind,
+        workflow_error_kind,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
 fn emit_delay_plan(
     body: &mut WasmFunction,
     indices: &DirectCoreFunctionIndices,
     static_data: &DirectCoreStaticData,
     track_events: bool,
-    variables: &DirectDataSegment,
+    variables: DirectVariables<'_>,
     step_id: &str,
     delay_id: u32,
     durable: bool,
@@ -3012,7 +3413,7 @@ fn emit_log_plan(
     indices: &DirectCoreFunctionIndices,
     static_data: &DirectCoreStaticData,
     track_events: bool,
-    variables: &DirectDataSegment,
+    variables: DirectVariables<'_>,
     log_id: u32,
     next_plan: &DirectRunPlan,
     data_ptr_local: u32,
@@ -3091,7 +3492,7 @@ fn emit_agent_plan(
     indices: &DirectCoreFunctionIndices,
     static_data: &DirectCoreStaticData,
     track_events: bool,
-    variables: &DirectDataSegment,
+    variables: DirectVariables<'_>,
     step_id: &str,
     agent_id: u32,
     agent_component_id: &str,
@@ -3462,7 +3863,7 @@ fn emit_switch_route_plan(
     indices: &DirectCoreFunctionIndices,
     static_data: &DirectCoreStaticData,
     track_events: bool,
-    variables: &DirectDataSegment,
+    variables: DirectVariables<'_>,
     step_id: &str,
     switch_id: u32,
     branches: &[DirectSwitchRoutePlan],
@@ -3561,7 +3962,7 @@ fn emit_switch_route_dispatch(
     indices: &DirectCoreFunctionIndices,
     static_data: &DirectCoreStaticData,
     track_events: bool,
-    variables: &DirectDataSegment,
+    variables: DirectVariables<'_>,
     branches: &[DirectSwitchRoutePlan],
     default_plan: &DirectRunPlan,
     data_ptr_local: u32,
@@ -3680,7 +4081,7 @@ fn emit_route_equals(
 fn emit_build_source(
     body: &mut WasmFunction,
     indices: &DirectCoreFunctionIndices,
-    variables: &DirectDataSegment,
+    variables: DirectVariables<'_>,
     data_ptr_local: u32,
     data_len_local: u32,
     steps_ptr_local: u32,
@@ -3690,7 +4091,7 @@ fn emit_build_source(
 ) {
     body.instruction(&Instruction::LocalGet(data_ptr_local));
     body.instruction(&Instruction::LocalGet(data_len_local));
-    push_segment_args(body, variables);
+    push_variables_args(body, variables);
     body.instruction(&Instruction::LocalGet(steps_ptr_local));
     body.instruction(&Instruction::LocalGet(steps_len_local));
     push_retptr_arg(body);
@@ -3734,7 +4135,7 @@ fn emit_agent_input_validation(
     error_plan: Option<&DirectErrorRoutePlan>,
     route_ptr_local: u32,
     route_len_local: u32,
-    variables: &DirectDataSegment,
+    variables: DirectVariables<'_>,
     data_ptr_local: u32,
     data_len_local: u32,
     workflow_log_kind: &DirectDataSegment,
@@ -4125,7 +4526,7 @@ fn emit_agent_invoke_error_branch(
     error_plan: Option<&DirectErrorRoutePlan>,
     route_ptr_local: u32,
     route_len_local: u32,
-    variables: &DirectDataSegment,
+    variables: DirectVariables<'_>,
     data_ptr_local: u32,
     data_len_local: u32,
     workflow_log_kind: &DirectDataSegment,
@@ -4175,7 +4576,7 @@ fn emit_agent_invoke_error_body(
     error_plan: Option<&DirectErrorRoutePlan>,
     route_ptr_local: u32,
     route_len_local: u32,
-    variables: &DirectDataSegment,
+    variables: DirectVariables<'_>,
     data_ptr_local: u32,
     data_len_local: u32,
     workflow_log_kind: &DirectDataSegment,
@@ -4237,7 +4638,7 @@ fn emit_agent_invoke_error_body_from_info(
     error_plan: Option<&DirectErrorRoutePlan>,
     route_ptr_local: u32,
     route_len_local: u32,
-    variables: &DirectDataSegment,
+    variables: DirectVariables<'_>,
     data_ptr_local: u32,
     data_len_local: u32,
     workflow_log_kind: &DirectDataSegment,
@@ -4294,7 +4695,7 @@ fn emit_agent_error_route_or_fail(
     indices: &DirectCoreFunctionIndices,
     static_data: &DirectCoreStaticData,
     track_events: bool,
-    variables: &DirectDataSegment,
+    variables: DirectVariables<'_>,
     step_id: &str,
     error_ptr_local: u32,
     error_len_local: u32,
@@ -4390,7 +4791,7 @@ fn emit_error_route_dispatch(
     indices: &DirectCoreFunctionIndices,
     static_data: &DirectCoreStaticData,
     track_events: bool,
-    variables: &DirectDataSegment,
+    variables: DirectVariables<'_>,
     error_plan: &DirectErrorRoutePlan,
     data_ptr_local: u32,
     data_len_local: u32,
@@ -4434,7 +4835,7 @@ fn emit_error_route_dispatch_inner(
     indices: &DirectCoreFunctionIndices,
     static_data: &DirectCoreStaticData,
     track_events: bool,
-    variables: &DirectDataSegment,
+    variables: DirectVariables<'_>,
     branches: &[DirectEdgeConditionPlan],
     default_plan: Option<&DirectRunPlan>,
     data_ptr_local: u32,
@@ -4541,7 +4942,7 @@ fn emit_terminal_run_plan_mapping(
     indices: &DirectCoreFunctionIndices,
     static_data: &DirectCoreStaticData,
     track_events: bool,
-    variables: &DirectDataSegment,
+    variables: DirectVariables<'_>,
     run_plan: &DirectRunPlan,
     data_ptr_local: u32,
     data_len_local: u32,
@@ -4733,6 +5134,19 @@ fn store_local_i32_at(function: &mut WasmFunction, offset: i32, local: u32) {
 fn push_segment_args(function: &mut WasmFunction, segment: &DirectDataSegment) {
     function.instruction(&Instruction::I32Const(segment.offset));
     function.instruction(&Instruction::I32Const(segment.len_i32()));
+}
+
+fn push_variables_args(function: &mut WasmFunction, variables: DirectVariables<'_>) {
+    match variables {
+        DirectVariables::Segment(segment) => push_segment_args(function, segment),
+        DirectVariables::Locals {
+            ptr_local,
+            len_local,
+        } => {
+            function.instruction(&Instruction::LocalGet(ptr_local));
+            function.instruction(&Instruction::LocalGet(len_local));
+        }
+    }
 }
 
 fn push_retptr_arg(function: &mut WasmFunction) {
@@ -5002,6 +5416,7 @@ mod tests {
             "log" => include_str!("../../tests/fixtures/log_no_context.json"),
             "error" => include_str!("../../tests/fixtures/error_direct_simple.json"),
             "edge_condition" => include_str!("../../tests/fixtures/edge_condition_priority.json"),
+            "split" => include_str!("../../tests/fixtures/split_workflow.json"),
             "transform" => include_str!("../../tests/fixtures/transform_workflow.json"),
             other => panic!("unknown fixture {other}"),
         };
@@ -5242,6 +5657,14 @@ mod tests {
                 collect_run_plan_ids(default_plan, condition_ids, mapping_ids);
             }
             DirectRunPlan::GroupBy { next_plan, .. } => {
+                collect_run_plan_ids(next_plan, condition_ids, mapping_ids);
+            }
+            DirectRunPlan::Split {
+                nested_plan,
+                next_plan,
+                ..
+            } => {
+                collect_run_plan_ids(nested_plan, condition_ids, mapping_ids);
                 collect_run_plan_ids(next_plan, condition_ids, mapping_ids);
             }
             DirectRunPlan::Delay { next_plan, .. } => {
@@ -5706,6 +6129,46 @@ mod tests {
                 .expect("manifest json");
         assert_eq!(manifest.graph.group_bys.len(), 1);
         assert_eq!(manifest.graph.mappings.len(), 1);
+    }
+
+    #[test]
+    fn direct_compile_supports_sequential_split_graph() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let result = compile_direct_workflow(DirectCompilationInput {
+            workflow_id: "split".to_string(),
+            version: 1,
+            execution_graph: fixture("split"),
+            output_dir: temp.path().to_path_buf(),
+            track_events: false,
+            agent_catalog: None,
+        })
+        .expect("direct Split compile should succeed");
+
+        let wasm = fs::read(&result.wasm_path).expect("wasm");
+        Validator::new()
+            .validate_all(&wasm)
+            .expect("direct Split artifact should validate");
+        assert!(result.support_report.supported);
+        assert_eq!(result.support_report.unsupported, vec![]);
+
+        let manifest: DirectWorkflowManifest =
+            serde_json::from_slice(&fs::read(&result.manifest_path).expect("manifest"))
+                .expect("manifest json");
+        assert_eq!(manifest.graph.splits.len(), 1);
+        assert_eq!(manifest.graph.splits[0].step_id, "split");
+        let split_step = manifest
+            .graph
+            .steps
+            .iter()
+            .find(|step| step.id == "split")
+            .expect("split step");
+        let nested = split_step
+            .nested_graphs
+            .iter()
+            .find(|nested| nested.role == "split.subgraph")
+            .expect("split nested graph");
+        assert_eq!(nested.graph.agents.len(), 1);
+        assert_eq!(nested.graph.mappings.len(), 2);
     }
 
     #[test]
@@ -8720,6 +9183,125 @@ mod tests {
             saw_mapping_id,
             "Finish mapping id should be passed to stdlib"
         );
+    }
+
+    #[test]
+    fn direct_core_run_lowers_split_loop_through_stdlib() {
+        let graph = fixture("split");
+        let manifest = build_direct_workflow_manifest(&graph).expect("manifest");
+        let manifest_json = manifest.to_canonical_json().expect("manifest json");
+        let core_config =
+            DirectCoreConfig::new(&manifest, &manifest_json, false).expect("core config");
+
+        let DirectRunPlan::Split {
+            split_id,
+            nested_plan,
+            next_plan,
+            ..
+        } = &core_config.run_plan
+        else {
+            panic!("expected Split run plan");
+        };
+        assert_eq!(*split_id, 0);
+        assert!(matches!(nested_plan.as_ref(), DirectRunPlan::Agent { .. }));
+        assert!(matches!(next_plan.as_ref(), DirectRunPlan::Finish { .. }));
+
+        let (resolve, world) =
+            build_direct_component_resolve_with_agents(&manifest.feature_summary.agent_ids)
+                .expect("agent resolve");
+        let core = emit_direct_core_module(&resolve, world, &core_config).expect("core module");
+        Validator::new()
+            .validate_all(&core)
+            .expect("Split core module validates");
+
+        let mut next_function_index = 0;
+        let mut split_item_count_index = None;
+        let mut split_item_index = None;
+        let mut split_iteration_variables_index = None;
+        let mut split_append_output_index = None;
+        let mut split_output_index = None;
+        let mut saw_loop = false;
+        let mut saw_split_item_count_call = false;
+        let mut saw_split_item_call = false;
+        let mut saw_split_iteration_variables_call = false;
+        let mut saw_split_append_output_call = false;
+        let mut saw_split_output_call = false;
+        let mut code_body_index = 0;
+
+        for payload in Parser::new(0).parse_all(&core) {
+            match payload.expect("core wasm payload") {
+                Payload::ImportSection(reader) => {
+                    for import in reader.into_imports() {
+                        let import = import.expect("core import");
+                        if import.module.contains("runtara:workflow-stdlib/json") {
+                            match import.name {
+                                "split-item-count" => {
+                                    split_item_count_index = Some(next_function_index)
+                                }
+                                "split-item" => split_item_index = Some(next_function_index),
+                                "split-iteration-variables" => {
+                                    split_iteration_variables_index = Some(next_function_index)
+                                }
+                                "split-append-output" => {
+                                    split_append_output_index = Some(next_function_index)
+                                }
+                                "split-output" => split_output_index = Some(next_function_index),
+                                _ => {}
+                            }
+                        }
+                        if matches!(import.ty, TypeRef::Func(_)) {
+                            next_function_index += 1;
+                        }
+                    }
+                }
+                Payload::CodeSectionEntry(body) => {
+                    if code_body_index == 0 {
+                        for operator in body.get_operators_reader().expect("operators").into_iter()
+                        {
+                            match operator.expect("operator") {
+                                Operator::Loop { .. } => saw_loop = true,
+                                Operator::Call { function_index } => {
+                                    if Some(function_index) == split_item_count_index {
+                                        saw_split_item_count_call = true;
+                                    }
+                                    if Some(function_index) == split_item_index {
+                                        saw_split_item_call = true;
+                                    }
+                                    if Some(function_index) == split_iteration_variables_index {
+                                        saw_split_iteration_variables_call = true;
+                                    }
+                                    if Some(function_index) == split_append_output_index {
+                                        saw_split_append_output_call = true;
+                                    }
+                                    if Some(function_index) == split_output_index {
+                                        saw_split_output_call = true;
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                    code_body_index += 1;
+                }
+                _ => {}
+            }
+        }
+
+        assert!(saw_loop, "Split run should emit a Wasm loop");
+        assert!(
+            saw_split_item_count_call,
+            "Split run should call split-item-count"
+        );
+        assert!(saw_split_item_call, "Split run should call split-item");
+        assert!(
+            saw_split_iteration_variables_call,
+            "Split run should call split-iteration-variables"
+        );
+        assert!(
+            saw_split_append_output_call,
+            "Split run should call split-append-output"
+        );
+        assert!(saw_split_output_call, "Split run should call split-output");
     }
 
     #[test]

@@ -4,7 +4,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use runtara_dsl::{AgentStep, DelayStep, ExecutionGraph, Step};
+use runtara_dsl::{AgentStep, DelayStep, ExecutionGraph, SplitStep, Step};
 
 use crate::workflow_features::{WorkflowFeatureSummary, analyze_workflow_features};
 
@@ -281,6 +281,17 @@ fn supports_direct_control_step_inner(
             stack,
             include_on_error,
         ),
+        Step::Split(step) if supports_split_step_baseline(step) => {
+            supports_direct_control_graph(&step.subgraph)
+                && supports_normal_flow_step(
+                    graph,
+                    step_id,
+                    reachable,
+                    used_edges,
+                    stack,
+                    include_on_error,
+                )
+        }
         Step::Delay(step) if supports_delay_step_baseline(graph, step) => {
             supports_normal_flow_step(
                 graph,
@@ -322,6 +333,21 @@ fn supports_agent_step_baseline(_graph: &ExecutionGraph, step: &AgentStep) -> bo
 
 fn supports_delay_step_baseline(_graph: &ExecutionGraph, step: &DelayStep) -> bool {
     !step.breakpoint.unwrap_or(false)
+}
+
+fn supports_split_step_baseline(step: &SplitStep) -> bool {
+    let config = step.config.as_ref();
+    !step.breakpoint.unwrap_or(false)
+        && step.input_schema.is_empty()
+        && step.output_schema.is_empty()
+        && config.is_none_or(|config| {
+            !config.dont_stop_on_failed.unwrap_or(false)
+                && config
+                    .max_retries
+                    .is_none_or(|max_retries| max_retries == 0)
+                && config.retry_delay.is_none()
+                && config.timeout.is_none()
+        })
 }
 
 fn supports_normal_flow_step(
@@ -677,12 +703,9 @@ fn collect_step_support(
             }
         }
         Step::Split(split) => {
-            unsupported_step(
-                step,
-                "split",
-                "Split steps require loop lowering, per-item source construction, and result collection",
-                unsupported,
-            );
+            if !supports_split_step_baseline(split) {
+                collect_split_step_unsupported(split, unsupported);
+            }
             collect_graph_support(&split.subgraph, unsupported);
         }
         Step::Switch(step)
@@ -820,6 +843,57 @@ fn collect_delay_step_unsupported(
     }
 }
 
+fn collect_split_step_unsupported(
+    step: &SplitStep,
+    unsupported: &mut Vec<UnsupportedWorkflowFeature>,
+) {
+    let mut push = |feature: &str, reason: &str| {
+        unsupported.push(UnsupportedWorkflowFeature {
+            step_id: Some(step.id.clone()),
+            step_type: Some("Split".to_string()),
+            feature: feature.to_string(),
+            reason: reason.to_string(),
+        });
+    };
+
+    if step.breakpoint.unwrap_or(false) {
+        push(
+            "split-breakpoint",
+            "Split breakpoints require a direct runtime checkpoint/pause ABI",
+        );
+    }
+    if !step.input_schema.is_empty() || !step.output_schema.is_empty() {
+        push(
+            "split-schema-validation",
+            "Split input/output schemas require direct per-iteration schema validation",
+        );
+    }
+    if let Some(config) = step.config.as_ref() {
+        if config.dont_stop_on_failed.unwrap_or(false) {
+            push(
+                "split-dont-stop-on-failed",
+                "Split dontStopOnFailed requires direct per-iteration error aggregation",
+            );
+        }
+        if config
+            .max_retries
+            .is_some_and(|max_retries| max_retries > 0)
+            || config.retry_delay.is_some()
+        {
+            push(
+                "split-retry",
+                "Split retries require direct durable retry/checkpoint lowering",
+            );
+        }
+        if config.timeout.is_some() {
+            push(
+                "split-timeout",
+                "Split timeout requires direct timeout enforcement",
+            );
+        }
+    }
+}
+
 fn unsupported_step(
     step: &Step,
     feature: &str,
@@ -893,6 +967,8 @@ mod tests {
             "log" => include_str!("../../tests/fixtures/log_no_context.json"),
             "error" => include_str!("../../tests/fixtures/error_direct_simple.json"),
             "edge_condition" => include_str!("../../tests/fixtures/edge_condition_priority.json"),
+            "split" => include_str!("../../tests/fixtures/split_workflow.json"),
+            "split_with_schemas" => include_str!("../../tests/fixtures/split_with_schemas.json"),
             "transform" => include_str!("../../tests/fixtures/transform_workflow.json"),
             "wait" => include_str!("../../tests/fixtures/wait_for_signal_with_callback.json"),
             other => panic!("unknown fixture {other}"),
@@ -1299,6 +1375,58 @@ mod tests {
         assert!(report.unsupported.iter().any(|feature| {
             feature.step_id.as_deref() == Some("group") && feature.feature == "group-by-breakpoint"
         }));
+    }
+
+    #[test]
+    fn sequential_split_normal_flow_is_supported() {
+        let report = analyze_direct_wasm_support(&fixture("split"));
+
+        assert!(report.supported, "{:?}", report.unsupported);
+        assert!(report.unsupported.is_empty());
+    }
+
+    #[test]
+    fn split_schema_validation_remains_rejected_until_lowered() {
+        let report = analyze_direct_wasm_support(&fixture("split_with_schemas"));
+
+        assert!(!report.supported);
+        assert!(report.unsupported.iter().any(|feature| {
+            feature.step_id.as_deref() == Some("split")
+                && feature.feature == "split-schema-validation"
+        }));
+    }
+
+    #[test]
+    fn split_error_aggregation_retry_timeout_and_breakpoint_are_rejected() {
+        let mut graph = fixture("split");
+        let Some(Step::Split(split)) = graph.steps.get_mut("split") else {
+            panic!("expected Split fixture step");
+        };
+        split.breakpoint = Some(true);
+        let config = split.config.as_mut().expect("split fixture config");
+        config.dont_stop_on_failed = Some(true);
+        config.max_retries = Some(2);
+        config.retry_delay = Some(250);
+        config.timeout = Some(1_000);
+
+        let report = analyze_direct_wasm_support(&graph);
+
+        assert!(!report.supported);
+        for feature in [
+            "split-breakpoint",
+            "split-dont-stop-on-failed",
+            "split-retry",
+            "split-timeout",
+        ] {
+            assert!(
+                report.unsupported.iter().any(|unsupported| {
+                    unsupported.step_id.as_deref() == Some("split")
+                        && unsupported.feature == feature
+                }),
+                "{feature}: {:?}",
+                report.unsupported
+            );
+        }
     }
 
     #[test]

@@ -1112,20 +1112,14 @@ fn collect_graph_manifest(
     collections: &mut DirectJsonManifestCollections,
 ) -> Result<(), String> {
     for step in &graph.steps {
-        if collections
+        collections
             .steps
-            .insert(
-                step.id.clone(),
-                DirectJsonStep {
-                    id: step.id.clone(),
-                    step_type: step.step_type.clone(),
-                    name: step.name.clone(),
-                },
-            )
-            .is_some()
-        {
-            return Err(format!("duplicate direct step id {}", step.id));
-        }
+            .entry(step.id.clone())
+            .or_insert_with(|| DirectJsonStep {
+                id: step.id.clone(),
+                step_type: step.step_type.clone(),
+                name: step.name.clone(),
+            });
     }
     for mapping in &graph.mappings {
         if collections
@@ -2786,6 +2780,36 @@ mod tests {
         assert_eq!(source["workflow"]["inputs"]["data"]["input"], "hello");
         assert_eq!(source["workflow"]["inputs"]["variables"]["tenant"], "t1");
         assert_eq!(source["item"]["id"], 7);
+    }
+
+    #[test]
+    fn parse_allows_duplicate_step_ids_across_nested_graphs() {
+        let manifest = serde_json::to_vec(&json!({
+            "graph": {
+                "steps": [{
+                    "id": "split",
+                    "stepType": "Split",
+                    "body": { "id": "split", "stepType": "Split" },
+                    "nestedGraphs": [{
+                        "role": "split.subgraph",
+                        "graph": {
+                            "steps": [{
+                                "id": "finish",
+                                "stepType": "Finish",
+                                "body": { "id": "finish", "stepType": "Finish" }
+                            }]
+                        }
+                    }]
+                }, {
+                    "id": "finish",
+                    "stepType": "Finish",
+                    "body": { "id": "finish", "stepType": "Finish" }
+                }]
+            }
+        }))
+        .expect("manifest json");
+
+        DirectJsonManifest::parse(&manifest).expect("duplicate nested step ids are graph-scoped");
     }
 
     #[test]
