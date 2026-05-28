@@ -1,3 +1,5 @@
+import { User } from 'oidc-client-ts';
+
 import initRustValidation, {
   agentCatalogLoaded,
   getAgentJson,
@@ -16,7 +18,8 @@ import {
   CapabilityInfo,
   ListStepTypesResponse,
 } from '@/generated/RuntaraRuntimeApi';
-import { RuntimeREST } from '@/shared/queries';
+import { config } from '@/shared/config/runtimeConfig';
+import { getRuntimeBaseUrl } from '@/shared/queries/utils';
 
 export interface RustWorkflowValidationResult {
   success: boolean;
@@ -44,15 +47,51 @@ export interface RustSchemaFieldsValidationResult
 let initPromise: Promise<unknown> | null = null;
 
 /**
+ * Read the current OIDC access token from oidc-client-ts's localStorage user
+ * record. Returns undefined for non-OIDC auth modes (server doesn't need a
+ * Bearer header), when no user is signed in, or when the stored token is
+ * already expired. We can't use `useAuth()` here because this module runs
+ * outside React.
+ */
+function readAccessTokenFromStorage(): string | undefined {
+  const authority = config.oidc.authority;
+  const clientId = config.oidc.clientId;
+  if (!authority || !clientId) {
+    return undefined;
+  }
+  const raw = window.localStorage.getItem(
+    `oidc.user:${authority}:${clientId}`
+  );
+  if (!raw) {
+    return undefined;
+  }
+  try {
+    const user = User.fromStorageString(raw);
+    if (user.expired) {
+      return undefined;
+    }
+    return user.access_token;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
  * One-shot fetch of `GET /api/runtime/agents` whose response is pushed
  * into the WASM via `initAgentCatalog`. The server returns the catalog
  * from its runtime `ComponentDispatcherService` (which loads each
  * `<agent>.meta.json` from `$RUNTARA_AGENT_COMPONENTS_DIR` at boot) —
  * so the validator + the runtime see the same agent set.
  *
- * Goes through `RuntimeREST` so the shared org_id-prefix interceptor in
- * `shared/queries/index.ts` rewrites the URL on multi-tenant deployments
- * — a raw `fetch` here would bypass it and 404 against the gateway.
+ * Uses a raw `fetch` (not `RuntimeREST`) on purpose:
+ *  - URL is built via `getRuntimeBaseUrl()` so the org_id segment is
+ *    inserted for multi-tenant deployments — same logic the axios
+ *    interceptor applies, just expressed directly.
+ *  - We skip the axios pipeline so the shared 401-redirects-to-login
+ *    response interceptor doesn't fire. This is a best-effort background
+ *    load; if it 401s because the user's token is briefly expired during
+ *    silent-renew, we'd otherwise log them out and bounce them off the
+ *    workflow editor.
  *
  * Idempotent: skips the fetch if `agentCatalogLoaded()` already returns
  * true (e.g. another caller initialized it).
@@ -61,17 +100,31 @@ async function loadAgentCatalogIntoWasm(): Promise<void> {
   if (agentCatalogLoaded()) {
     return;
   }
-  let body: { agents?: unknown };
+  const url = `${getRuntimeBaseUrl()}/agents`;
+  const token = readAccessTokenFromStorage();
+  const headers: Record<string, string> = { accept: 'application/json' };
+  if (token) {
+    headers.Authorization = `Bearer ${token}`;
+  }
+  let response: Response;
   try {
-    const response = await RuntimeREST.api.listAgentsHandler();
-    body = response.data ?? { agents: [] };
+    response = await fetch(url, {
+      credentials: 'include',
+      headers,
+    });
   } catch (error) {
     throw new Error(
-      `Failed to fetch /api/runtime/agents for validator init: ${
+      `Failed to fetch ${url} for validator init: ${
         error instanceof Error ? error.message : String(error)
       }`
     );
   }
+  if (!response.ok) {
+    throw new Error(
+      `${url} returned HTTP ${response.status} ${response.statusText}`
+    );
+  }
+  const body = (await response.json()) as { agents?: unknown };
   const agentsArray = Array.isArray(body?.agents) ? body.agents : [];
   const initResultRaw = initAgentCatalog(JSON.stringify(agentsArray));
   let parsed: { success?: boolean; agentCount?: number; error?: string };
