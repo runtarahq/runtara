@@ -141,8 +141,11 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   `direct_wasm::error` owns the shared direct compile error type. `compile.rs`
   now consumes `direct_run_plan` and keeps artifact orchestration/core emission
   responsibilities instead of owning every planning type and helper inline. The
-  next extraction checkpoint is static-data/memory-layout helpers or a stable
-  step-family lowerer behind the same kind of focused module boundary.
+  second decomposition checkpoint is also complete: `direct_wasm::static_data`
+  owns static byte-segment layout, heap/page sizing, static step/Agent segment
+  collection, and compile-time workflow variable serialization. The next
+  extraction checkpoint is a stable step-family lowerer behind the same kind of
+  focused module boundary.
 - `direct_wasm::compile::compose_direct_workflow` now performs the first
   direct static composition path: it maps the direct `workflow-logic.wasm`
   component plus prebuilt stdlib/runtime/agent components into `wac compose`,
@@ -718,6 +721,9 @@ Emitter module boundaries should stay readable as support broadens:
   data model consumed by the core emitter.
 - `error.rs` owns the direct compile error surface shared by planning,
   emission, composition, and artifact-writing code.
+- `static_data.rs` owns direct core static byte-segment layout, heap/page
+  sizing, static step/Agent segment collection, and workflow variable
+  serialization.
 - Step-family lowering should live in focused modules once stable
   (`wait`, `agent`, `split`, `while`, `delay`, and pure control flow).
 - Shared ABI/import/static-data helpers should live behind reusable helper

@@ -14,6 +14,8 @@ mod error;
 pub mod manifest;
 #[cfg(feature = "compiler")]
 mod plan;
+#[cfg(feature = "compiler")]
+mod static_data;
 pub mod support;
 
 #[cfg(feature = "compiler")]

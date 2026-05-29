@@ -35,12 +35,21 @@ use super::component::{
 };
 use super::error::DirectCompileError;
 use super::manifest::{
-    DIRECT_WORKFLOW_MANIFEST_VERSION, DirectGraphManifest, DirectWorkflowManifest,
+    DIRECT_WORKFLOW_MANIFEST_VERSION, DirectWorkflowManifest,
     build_direct_workflow_manifest_with_agent_catalog,
 };
 use super::plan::{
     DirectEdgeConditionPlan, DirectErrorRoutePlan, DirectFailureTarget, DirectRunPlan,
     DirectSwitchRoutePlan, direct_run_plan,
+};
+#[cfg(test)]
+use super::static_data::{
+    DIRECT_AGENT_RATE_LIMIT_WAIT, DIRECT_STEP_DEBUG_END_KIND, DIRECT_STEP_DEBUG_START_KIND,
+    DIRECT_WORKFLOW_ERROR_KIND, DIRECT_WORKFLOW_LOG_KIND,
+};
+use super::static_data::{
+    DIRECT_EMPTY_STEPS_CONTEXT, DirectCoreStaticData, DirectDataSegment, WASM_PAGE_SIZE,
+    direct_core_variables_json,
 };
 use super::support::{DirectWorkflowSupportReport, analyze_direct_wasm_support};
 
@@ -96,7 +105,6 @@ const DIRECT_AGENT_ARG_CONNECTION_SUBTYPE_TAG_OFFSET: i32 = DIRECT_AGENT_ARGS_OF
 const DIRECT_AGENT_ARG_CONNECTION_PARAMETERS_PTR_OFFSET: i32 = DIRECT_AGENT_ARGS_OFFSET + 48;
 const DIRECT_AGENT_ARG_CONNECTION_PARAMETERS_LEN_OFFSET: i32 = DIRECT_AGENT_ARGS_OFFSET + 52;
 const DIRECT_AGENT_ARG_CONNECTION_RATE_LIMIT_TAG_OFFSET: i32 = DIRECT_AGENT_ARGS_OFFSET + 56;
-const DIRECT_STATIC_DATA_OFFSET: i32 = 256;
 const DIRECT_AGENT_RESULT_OK_PTR_OFFSET: u64 = 8;
 const DIRECT_AGENT_RESULT_OK_LEN_OFFSET: u64 = 12;
 const DIRECT_AGENT_RESULT_ERR_CODE_PTR_OFFSET: u64 = 8;
@@ -154,19 +162,6 @@ const DIRECT_WAIT_PARENT_STEPS_PTR_LOCAL: u32 = 31;
 const DIRECT_WAIT_PARENT_STEPS_LEN_LOCAL: u32 = 32;
 const DIRECT_WAIT_SIGNAL_ID_PTR_LOCAL: u32 = 33;
 const DIRECT_WAIT_SIGNAL_ID_LEN_LOCAL: u32 = 34;
-const DIRECT_EMPTY_STEPS_CONTEXT: &[u8] = b"{}";
-const DIRECT_EMPTY_SPLIT_RESULTS: &[u8] = b"[]";
-const DIRECT_WORKFLOW_LOG_KIND: &[u8] = b"workflow_log";
-const DIRECT_WORKFLOW_ERROR_KIND: &[u8] = b"workflow_error";
-const DIRECT_STEP_DEBUG_START_KIND: &[u8] = b"step_debug_start";
-const DIRECT_STEP_DEBUG_END_KIND: &[u8] = b"step_debug_end";
-const DIRECT_BREAKPOINT_HIT_KIND: &[u8] = b"breakpoint_hit";
-const DIRECT_BREAKPOINT_HIT_STATE: &[u8] = b"\"breakpoint_hit\"";
-const DIRECT_EXTERNAL_INPUT_REQUESTED_KIND: &[u8] = b"external_input_requested";
-const DIRECT_AGENT_EMPTY_INTEGRATION_ID: &[u8] = b"";
-const DIRECT_AGENT_EMPTY_PARAMETERS: &[u8] = b"{}";
-const DIRECT_AGENT_RATE_LIMIT_WAIT: &[u8] = b"rate_limit_wait";
-const WASM_PAGE_SIZE: i32 = 65_536;
 
 /// Input for the opt-in direct compiler.
 #[derive(Debug, Clone)]
@@ -995,292 +990,10 @@ impl DirectCoreConfig {
     }
 }
 
-fn direct_core_variables_json(
-    variables: &serde_json::Value,
-    workflow_id: Option<&str>,
-) -> Result<Vec<u8>, DirectCompileError> {
-    let Some(workflow_id) = workflow_id else {
-        return serde_json::to_vec(variables).map_err(DirectCompileError::Serialize);
-    };
-
-    let mut variables = variables.clone();
-    match &mut variables {
-        serde_json::Value::Object(map) => {
-            map.insert(
-                "_workflow_id".to_string(),
-                serde_json::Value::String(workflow_id.to_string()),
-            );
-        }
-        _ => {
-            let mut map = serde_json::Map::new();
-            map.insert(
-                "_workflow_id".to_string(),
-                serde_json::Value::String(workflow_id.to_string()),
-            );
-            map.insert("_variables".to_string(), variables);
-            variables = serde_json::Value::Object(map);
-        }
-    }
-
-    serde_json::to_vec(&variables).map_err(DirectCompileError::Serialize)
-}
-
-#[derive(Debug, Clone)]
-struct DirectCoreStaticData {
-    manifest: DirectDataSegment,
-    variables: DirectDataSegment,
-    steps: DirectDataSegment,
-    split_empty_results: DirectDataSegment,
-    workflow_log_kind: DirectDataSegment,
-    workflow_error_kind: DirectDataSegment,
-    step_debug_start_kind: DirectDataSegment,
-    step_debug_end_kind: DirectDataSegment,
-    breakpoint_hit_kind: DirectDataSegment,
-    breakpoint_hit_state: DirectDataSegment,
-    external_input_requested_kind: DirectDataSegment,
-    agent_empty_integration_id: DirectDataSegment,
-    agent_empty_parameters: DirectDataSegment,
-    agent_rate_limit_wait: DirectDataSegment,
-    step_ids: BTreeMap<String, DirectDataSegment>,
-    agent_capability_ids: BTreeMap<u32, DirectDataSegment>,
-    agent_connection_ids: BTreeMap<u32, DirectDataSegment>,
-    heap_base: i32,
-    memory_min_pages: u64,
-}
-
-impl DirectCoreStaticData {
-    fn new(
-        graph: &DirectGraphManifest,
-        manifest_json: &[u8],
-        variables_json: &[u8],
-        steps_json: &[u8],
-    ) -> Result<Self, DirectCompileError> {
-        let mut offset = DIRECT_STATIC_DATA_OFFSET;
-        let manifest = DirectDataSegment::new(offset, manifest_json);
-        offset = align_i32(checked_offset_add(offset, manifest_json.len())?, 4);
-
-        let variables = DirectDataSegment::new(offset, variables_json);
-        offset = align_i32(checked_offset_add(offset, variables_json.len())?, 4);
-
-        let steps = DirectDataSegment::new(offset, steps_json);
-        offset = align_i32(checked_offset_add(offset, steps_json.len())?, 16);
-
-        let split_empty_results = DirectDataSegment::new(offset, DIRECT_EMPTY_SPLIT_RESULTS);
-        offset = align_i32(
-            checked_offset_add(offset, DIRECT_EMPTY_SPLIT_RESULTS.len())?,
-            16,
-        );
-
-        let workflow_log_kind = DirectDataSegment::new(offset, DIRECT_WORKFLOW_LOG_KIND);
-        offset = align_i32(
-            checked_offset_add(offset, DIRECT_WORKFLOW_LOG_KIND.len())?,
-            16,
-        );
-
-        let workflow_error_kind = DirectDataSegment::new(offset, DIRECT_WORKFLOW_ERROR_KIND);
-        offset = align_i32(
-            checked_offset_add(offset, DIRECT_WORKFLOW_ERROR_KIND.len())?,
-            16,
-        );
-
-        let step_debug_start_kind = DirectDataSegment::new(offset, DIRECT_STEP_DEBUG_START_KIND);
-        offset = align_i32(
-            checked_offset_add(offset, DIRECT_STEP_DEBUG_START_KIND.len())?,
-            16,
-        );
-
-        let step_debug_end_kind = DirectDataSegment::new(offset, DIRECT_STEP_DEBUG_END_KIND);
-        offset = align_i32(
-            checked_offset_add(offset, DIRECT_STEP_DEBUG_END_KIND.len())?,
-            16,
-        );
-
-        let breakpoint_hit_kind = DirectDataSegment::new(offset, DIRECT_BREAKPOINT_HIT_KIND);
-        offset = align_i32(
-            checked_offset_add(offset, DIRECT_BREAKPOINT_HIT_KIND.len())?,
-            16,
-        );
-
-        let breakpoint_hit_state = DirectDataSegment::new(offset, DIRECT_BREAKPOINT_HIT_STATE);
-        offset = align_i32(
-            checked_offset_add(offset, DIRECT_BREAKPOINT_HIT_STATE.len())?,
-            16,
-        );
-
-        let external_input_requested_kind =
-            DirectDataSegment::new(offset, DIRECT_EXTERNAL_INPUT_REQUESTED_KIND);
-        offset = align_i32(
-            checked_offset_add(offset, DIRECT_EXTERNAL_INPUT_REQUESTED_KIND.len())?,
-            16,
-        );
-
-        let agent_empty_integration_id =
-            DirectDataSegment::new(offset, DIRECT_AGENT_EMPTY_INTEGRATION_ID);
-        offset = align_i32(
-            checked_offset_add(offset, DIRECT_AGENT_EMPTY_INTEGRATION_ID.len())?,
-            16,
-        );
-
-        let agent_empty_parameters = DirectDataSegment::new(offset, DIRECT_AGENT_EMPTY_PARAMETERS);
-        offset = align_i32(
-            checked_offset_add(offset, DIRECT_AGENT_EMPTY_PARAMETERS.len())?,
-            16,
-        );
-
-        let agent_rate_limit_wait = DirectDataSegment::new(offset, DIRECT_AGENT_RATE_LIMIT_WAIT);
-        offset = align_i32(
-            checked_offset_add(offset, DIRECT_AGENT_RATE_LIMIT_WAIT.len())?,
-            16,
-        );
-
-        let mut step_ids = BTreeMap::new();
-        collect_static_step_ids(graph, &mut offset, &mut step_ids)?;
-
-        let mut agent_capability_ids = BTreeMap::new();
-        let mut agent_connection_ids = BTreeMap::new();
-        collect_static_agent_data(
-            graph,
-            &mut offset,
-            &mut agent_capability_ids,
-            &mut agent_connection_ids,
-        )?;
-
-        let memory_min_pages = wasm_pages_for_bytes(offset)?;
-        Ok(Self {
-            manifest,
-            variables,
-            steps,
-            split_empty_results,
-            workflow_log_kind,
-            workflow_error_kind,
-            step_debug_start_kind,
-            step_debug_end_kind,
-            breakpoint_hit_kind,
-            breakpoint_hit_state,
-            external_input_requested_kind,
-            agent_empty_integration_id,
-            agent_empty_parameters,
-            agent_rate_limit_wait,
-            step_ids,
-            agent_capability_ids,
-            agent_connection_ids,
-            heap_base: offset,
-            memory_min_pages,
-        })
-    }
-
-    fn step_id(&self, step_id: &str) -> Result<&DirectDataSegment, DirectCompileError> {
-        self.step_ids.get(step_id).ok_or_else(|| {
-            DirectCompileError::Component(format!("missing direct static step id '{step_id}'"))
-        })
-    }
-
-    fn agent_capability_id(&self, agent_id: u32) -> Result<&DirectDataSegment, DirectCompileError> {
-        self.agent_capability_ids.get(&agent_id).ok_or_else(|| {
-            DirectCompileError::Component(format!(
-                "missing direct static Agent capability id {agent_id}"
-            ))
-        })
-    }
-
-    fn agent_connection_id(&self, agent_id: u32) -> Option<&DirectDataSegment> {
-        self.agent_connection_ids.get(&agent_id)
-    }
-}
-
-fn collect_static_step_ids(
-    graph: &DirectGraphManifest,
-    offset: &mut i32,
-    step_ids: &mut BTreeMap<String, DirectDataSegment>,
-) -> Result<(), DirectCompileError> {
-    for step in &graph.steps {
-        if !step_ids.contains_key(&step.id) {
-            let segment = DirectDataSegment::new(*offset, step.id.as_bytes());
-            *offset = align_i32(checked_offset_add(*offset, step.id.len())?, 16);
-            step_ids.insert(step.id.clone(), segment);
-        }
-        for nested in &step.nested_graphs {
-            collect_static_step_ids(&nested.graph, offset, step_ids)?;
-        }
-    }
-    Ok(())
-}
-
-fn collect_static_agent_data(
-    graph: &DirectGraphManifest,
-    offset: &mut i32,
-    agent_capability_ids: &mut BTreeMap<u32, DirectDataSegment>,
-    agent_connection_ids: &mut BTreeMap<u32, DirectDataSegment>,
-) -> Result<(), DirectCompileError> {
-    for agent in &graph.agents {
-        let segment = DirectDataSegment::new(*offset, agent.capability_id.as_bytes());
-        *offset = align_i32(checked_offset_add(*offset, agent.capability_id.len())?, 16);
-        agent_capability_ids.insert(agent.id, segment);
-
-        if let Some(connection_id) = agent.connection_id.as_deref() {
-            let segment = DirectDataSegment::new(*offset, connection_id.as_bytes());
-            *offset = align_i32(checked_offset_add(*offset, connection_id.len())?, 16);
-            agent_connection_ids.insert(agent.id, segment);
-        }
-    }
-    for step in &graph.steps {
-        for nested in &step.nested_graphs {
-            collect_static_agent_data(
-                &nested.graph,
-                offset,
-                agent_capability_ids,
-                agent_connection_ids,
-            )?;
-        }
-    }
-    Ok(())
-}
-
-#[derive(Debug, Clone)]
-struct DirectDataSegment {
-    offset: i32,
-    data: Vec<u8>,
-}
-
-impl DirectDataSegment {
-    fn new(offset: i32, data: &[u8]) -> Self {
-        Self {
-            offset,
-            data: data.to_vec(),
-        }
-    }
-
-    fn len_i32(&self) -> i32 {
-        i32::try_from(self.data.len()).expect("direct data length already checked")
-    }
-}
-
 #[derive(Debug, Clone, Copy)]
 enum DirectVariables<'a> {
     Segment(&'a DirectDataSegment),
     Locals { ptr_local: u32, len_local: u32 },
-}
-
-fn checked_offset_add(offset: i32, len: usize) -> Result<i32, DirectCompileError> {
-    let len = i32::try_from(len).map_err(|_| {
-        DirectCompileError::Component(
-            "direct workflow static data exceeds i32 address space".into(),
-        )
-    })?;
-    offset.checked_add(len).ok_or_else(|| {
-        DirectCompileError::Component("direct workflow static data offset overflow".into())
-    })
-}
-
-fn align_i32(value: i32, align: i32) -> i32 {
-    debug_assert!(align > 0 && (align & (align - 1)) == 0);
-    (value + align - 1) & !(align - 1)
-}
-
-fn wasm_pages_for_bytes(bytes: i32) -> Result<u64, DirectCompileError> {
-    let bytes = u64::try_from(bytes)
-        .map_err(|_| DirectCompileError::Component("negative direct memory size".into()))?;
-    Ok(bytes.div_ceil(WASM_PAGE_SIZE as u64).max(1))
 }
 
 fn emit_direct_core_module(
@@ -1426,26 +1139,7 @@ fn emit_direct_core_module(
     );
 
     let mut data = DataSection::new();
-    let mut segments = vec![
-        &config.static_data.manifest,
-        &config.static_data.variables,
-        &config.static_data.steps,
-        &config.static_data.split_empty_results,
-        &config.static_data.workflow_log_kind,
-        &config.static_data.workflow_error_kind,
-        &config.static_data.step_debug_start_kind,
-        &config.static_data.step_debug_end_kind,
-        &config.static_data.breakpoint_hit_kind,
-        &config.static_data.breakpoint_hit_state,
-        &config.static_data.external_input_requested_kind,
-        &config.static_data.agent_empty_integration_id,
-        &config.static_data.agent_empty_parameters,
-        &config.static_data.agent_rate_limit_wait,
-    ];
-    segments.extend(config.static_data.step_ids.values());
-    segments.extend(config.static_data.agent_capability_ids.values());
-    segments.extend(config.static_data.agent_connection_ids.values());
-    for segment in segments {
+    for segment in config.static_data.data_segments() {
         data.active(
             0,
             &ConstExpr::i32_const(segment.offset),
