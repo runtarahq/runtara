@@ -25,9 +25,19 @@
 //! A sorted set with `score = enqueue_timestamp_ms` and `member =
 //! instance_id` gives us a self-healing release path: every intake runs an
 //! inline `ZREMRANGEBYSCORE` to evict entries older than the configurable
-//! age-out window (default 1h, well past the longest expected real
-//! execution). No background reconciler needed; the count converges within
-//! one intake of every cap-checking call.
+//! age-out window (default 60s). No background reconciler needed; the count
+//! converges within one intake of every cap-checking call.
+//!
+//! **TTL is a coverage/leak trade-off, not a free knob.** The async path
+//! (queue → trigger worker → external runtime) gets no completion signal, so
+//! a finished async execution keeps its slot until the window elapses. A
+//! short window frees those phantom slots quickly (good) but also means any
+//! single execution that runs *longer* than the window has its slot swept
+//! while it's still running — so the cap stops constraining long-runners.
+//! The default 60s assumes most executions are sub-minute; raise
+//! `RUNTARA_CONCURRENT_EXECUTION_TTL_SECS` to bracket your real p99 runtime
+//! if your workflows run longer, or add a completion-based release for the
+//! async path (SYN-433 follow-up) for exact accounting.
 //!
 //! ## Failure mode
 //!
@@ -70,11 +80,14 @@ use crate::entitlement_error::EntitlementDenial;
 /// Redis key prefix for per-tenant in-flight execution sorted sets.
 pub const KEY_PREFIX: &str = "runtara:ent:in_flight";
 
-/// Default age-out window for sorted-set entries (seconds). Executions
-/// older than this are presumed dead (the external runtime has its own
-/// timeout shorter than this) and their slot is released. Overridable via
-/// `RUNTARA_CONCURRENT_EXECUTION_TTL_SECS`.
-pub const DEFAULT_AGE_OUT_TTL_SECS: u64 = 3_600;
+/// Default age-out window for sorted-set entries (seconds). A finished
+/// execution's slot is freed at most this long after it started (the async
+/// path has no completion signal — see the module docs). Set to bracket the
+/// common case of sub-minute executions; raise via
+/// `RUNTARA_CONCURRENT_EXECUTION_TTL_SECS` if your workflows routinely run
+/// longer, otherwise a long-running execution's slot is swept mid-flight and
+/// the cap stops holding it.
+pub const DEFAULT_AGE_OUT_TTL_SECS: u64 = 60;
 
 /// Get the per-tenant key.
 pub fn key_for(tenant_id: &str) -> String {

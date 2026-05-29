@@ -567,6 +567,37 @@ impl ExecutionEngine {
                 ))
             })?;
 
+        // 5.5. Per-tenant maxConcurrentExecutions gate (SYN-433 Finding 1),
+        // sync path. Unlike the async `queue()` path, a synchronous run has a
+        // definite completion point (the `execute_sync` call below returns
+        // when the workflow finishes), so we acquire a slot here and release
+        // it the moment the run returns — accurate accounting, not age-out.
+        // The slot lives in the same per-tenant sorted set as async intakes,
+        // so sync and async executions share one cap. Fails open on Valkey
+        // errors (see the gate's `try_acquire`).
+        let gate_slot = if let Some(gate) = self.concurrent_execution_gate.as_ref() {
+            let snapshot = crate::config::entitlements();
+            let infra_cap = crate::config::raw_max_concurrent_executions();
+            let cap = crate::middleware::entitlement::effective_limit(
+                infra_cap,
+                snapshot.limits.max_concurrent_executions,
+            );
+            // Gate bookkeeping id — independent of the runtime's
+            // auto-generated instance id (which we don't know until the call
+            // returns). Only needs to be unique per in-flight slot.
+            let slot_id = Uuid::new_v4().to_string();
+            use crate::valkey::concurrent_executions::AcquireOutcome;
+            match gate.try_acquire(req.tenant_id, &slot_id, cap).await {
+                AcquireOutcome::Acquired => Some(slot_id),
+                AcquireOutcome::Denied(denial) => {
+                    denial.audit_log(req.tenant_id);
+                    return Err(ExecutionError::EntitlementDenied(denial));
+                }
+            }
+        } else {
+            None
+        };
+
         // 6. Execute via runtime client (no debug for sync executions)
         let execution_result = runtime_client
             .execute_sync(
@@ -579,6 +610,15 @@ impl ExecutionEngine {
                 false,
             )
             .await;
+
+        // Release the concurrency slot as soon as the run returns, on both
+        // success and failure. No `?` between acquire and here, so this is
+        // the single release point for the sync path.
+        if let (Some(gate), Some(slot_id)) =
+            (self.concurrent_execution_gate.as_ref(), gate_slot.as_ref())
+        {
+            gate.release(req.tenant_id, slot_id).await;
+        }
 
         let total_duration = total_start.elapsed().as_secs_f64();
 
