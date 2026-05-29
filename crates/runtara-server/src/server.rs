@@ -161,9 +161,6 @@ use runtime_client::RuntimeClient;
         api::handlers::specs::get_step_type_schema,
         api::handlers::specs::get_dsl_changelog,
         api::handlers::specs::get_dsl_spec_version,
-        api::handlers::specs::get_agents_spec,
-        api::handlers::specs::get_agents_changelog,
-        api::handlers::specs::get_agents_spec_version,
     ),
     components(
         schemas(
@@ -1641,18 +1638,6 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         .route(
             "/api/runtime/specs/dsl/{version}",
             get(api::handlers::specs::get_dsl_spec_version),
-        )
-        .route(
-            "/api/runtime/specs/agents",
-            get(api::handlers::specs::get_agents_spec),
-        )
-        .route(
-            "/api/runtime/specs/agents/changelog",
-            get(api::handlers::specs::get_agents_changelog),
-        )
-        .route(
-            "/api/runtime/specs/agents/{version}",
-            get(api::handlers::specs::get_agents_spec_version),
         )
         // Entitlement-gated sub-routers: each carries its own ENTITLEMENT_REQUIRED
         // layer (see `reports_router` / `api_keys_router` above) so disabling

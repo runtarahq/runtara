@@ -615,7 +615,7 @@ impl ComponentDispatcherService {
 
 ### 6.6 `/api/runtime/agents` metadata source
 
-Today: baked into the server binary at `runtara-server/build.rs:448-464`. Under components: union of every loaded component's `list-capabilities()` output, populated at boot and cached in `OnceLock<Vec<AgentSpec>>`. The same `AgentSpec` / `CapabilitySpec` structs in `runtara-dsl::spec::agent_openapi` are populated from the new source — frontend DTOs unchanged.
+Today: served at runtime from the static `runtara_agents::registry` (`get_agents()`), surfaced via `api::dto::operators::get_agents()` — not generated at build time. (The old build-time `agent_openapi.json` generation and its unused `/api/runtime/specs/agents` endpoint have been removed.) Under components: union of every loaded component's `list-capabilities()` output, populated at boot and cached in `OnceLock<Vec<AgentSpec>>`. The same `AgentSpec` / `CapabilitySpec` structs in `runtara-dsl::spec::agent_openapi` are populated from the new source — frontend DTOs unchanged.
 
 ### 6.7 Workflow runner: stay CLI, then migrate
 

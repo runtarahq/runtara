@@ -380,8 +380,7 @@ fn git_output(workspace_root: &Path, args: &[&str]) -> Option<String> {
 
 /// Generate DSL and Agent specs from runtara-dsl
 fn generate_specs(out_dir: &Path) {
-    use runtara_agents as _;
-    use runtara_dsl::spec::{agent_openapi, dsl_schema};
+    use runtara_dsl::spec::dsl_schema;
 
     println!("cargo:warning=");
     println!("cargo:warning=╔════════════════════════════════════════════════════════════════╗");
@@ -413,39 +412,6 @@ fn generate_specs(out_dir: &Path) {
     println!(
         "cargo:warning=      ✓ DSL changelog: {} bytes",
         dsl_changelog_json.len()
-    );
-
-    // Generate Agent OpenAPI spec
-    println!("cargo:warning=   → Generating Agent OpenAPI spec...");
-    let agents = runtara_agents::registry::get_agents();
-    let agents_json: Vec<serde_json::Value> = agents
-        .iter()
-        .map(|a| serde_json::to_value(a).expect("Failed to serialize agent"))
-        .collect();
-    let agent_spec = agent_openapi::generate_agent_openapi_spec(agents_json);
-    let agent_spec_json =
-        serde_json::to_string_pretty(&agent_spec).expect("Failed to serialize Agent spec");
-    fs::write(specs_dir.join("agent_openapi.json"), &agent_spec_json)
-        .expect("Failed to write Agent spec");
-    println!(
-        "cargo:warning=      ✓ Agent OpenAPI: {} bytes ({} agents)",
-        agent_spec_json.len(),
-        agents.len()
-    );
-
-    // Generate Agent changelog
-    println!("cargo:warning=   → Generating Agent changelog...");
-    let agent_changelog = agent_openapi::get_agent_changelog();
-    let agent_changelog_json = serde_json::to_string_pretty(&agent_changelog)
-        .expect("Failed to serialize Agent changelog");
-    fs::write(
-        specs_dir.join("agent_changelog.json"),
-        &agent_changelog_json,
-    )
-    .expect("Failed to write Agent changelog");
-    println!(
-        "cargo:warning=      ✓ Agent changelog: {} bytes",
-        agent_changelog_json.len()
     );
 
     println!("cargo:warning=   ✓ All specs generated at:");

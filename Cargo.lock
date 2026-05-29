@@ -4650,7 +4650,6 @@ dependencies = [
  "runtara-object-store",
  "runtara-report-dsl",
  "runtara-text-parser",
- "runtara-workflow-stdlib",
  "runtara-workflows",
  "rust-embed",
  "schemars 1.2.1",

@@ -7166,54 +7166,6 @@ export class Api<
       }),
 
     /**
-     * @description Returns the OpenAPI 3.1 specification for all agents, matching the exact format returned by the agent API endpoints.
-     *
-     * @tags Specifications
-     * @name GetAgentsSpec
-     * @summary Get the agent OpenAPI specification
-     * @request GET:/api/runtime/specs/agents
-     */
-    getAgentsSpec: (params: RequestParams = {}) =>
-      this.request<void, void>({
-        path: `/api/runtime/specs/agents`,
-        method: "GET",
-        format: "json",
-        ...params,
-      }),
-
-    /**
-     * No description
-     *
-     * @tags Specifications
-     * @name GetAgentsChangelog
-     * @summary Get the agent changelog
-     * @request GET:/api/runtime/specs/agents/changelog
-     */
-    getAgentsChangelog: (params: RequestParams = {}) =>
-      this.request<void, void>({
-        path: `/api/runtime/specs/agents/changelog`,
-        method: "GET",
-        format: "json",
-        ...params,
-      }),
-
-    /**
-     * @description Currently only the embedded version is available.
-     *
-     * @tags Specifications
-     * @name GetAgentsSpecVersion
-     * @summary Get a specific version of the agent spec
-     * @request GET:/api/runtime/specs/agents/{version}
-     */
-    getAgentsSpecVersion: (version: string, params: RequestParams = {}) =>
-      this.request<void, void>({
-        path: `/api/runtime/specs/agents/${version}`,
-        method: "GET",
-        format: "json",
-        ...params,
-      }),
-
-    /**
      * @description Returns the JSON Schema for the core DSL structure including: - Step types (7 types after GroupBy removal) - Execution graph format - Data mapping DSL
      *
      * @tags Specifications

@@ -11,8 +11,6 @@ use serde_json::{Value, json};
 // Embedded specs generated at compile time by build.rs
 const DSL_SCHEMA: &str = include_str!(concat!(env!("OUT_DIR"), "/specs/dsl_schema.json"));
 const DSL_CHANGELOG: &str = include_str!(concat!(env!("OUT_DIR"), "/specs/dsl_changelog.json"));
-const AGENT_OPENAPI: &str = include_str!(concat!(env!("OUT_DIR"), "/specs/agent_openapi.json"));
-const AGENT_CHANGELOG: &str = include_str!(concat!(env!("OUT_DIR"), "/specs/agent_changelog.json"));
 
 /// Get the current DSL specification
 ///
@@ -57,49 +55,6 @@ pub async fn get_dsl_changelog() -> Result<Json<Value>, (StatusCode, String)> {
     })
 }
 
-/// Get the agent OpenAPI specification
-///
-/// Returns the OpenAPI 3.1 specification for all agents, matching
-/// the exact format returned by the agent API endpoints.
-#[utoipa::path(
-    get,
-    path = "/api/runtime/specs/agents",
-    tag = "Specifications",
-    responses(
-        (status = 200, description = "Agent OpenAPI specification", content_type = "application/json"),
-        (status = 500, description = "Failed to parse embedded spec")
-    )
-)]
-pub async fn get_agents_spec() -> Result<Json<Value>, (StatusCode, String)> {
-    serde_json::from_str(AGENT_OPENAPI).map(Json).map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Failed to parse embedded Agent spec: {}", e),
-        )
-    })
-}
-
-/// Get the agent changelog
-#[utoipa::path(
-    get,
-    path = "/api/runtime/specs/agents/changelog",
-    tag = "Specifications",
-    responses(
-        (status = 200, description = "Agent changelog", content_type = "application/json"),
-        (status = 500, description = "Failed to parse embedded changelog")
-    )
-)]
-pub async fn get_agents_changelog() -> Result<Json<Value>, (StatusCode, String)> {
-    serde_json::from_str(AGENT_CHANGELOG)
-        .map(Json)
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Failed to parse embedded Agent changelog: {}", e),
-            )
-        })
-}
-
 /// Get all available spec versions
 #[utoipa::path(
     get,
@@ -115,11 +70,6 @@ pub async fn get_spec_versions() -> Json<Value> {
             "current": DSL_VERSION,
             "available": [DSL_VERSION],
             "description": "Core DSL specification (step types, execution graph, mapping)"
-        },
-        "agents": {
-            "current": runtara_dsl::spec::agent_openapi::AGENT_VERSION,
-            "available": [runtara_dsl::spec::agent_openapi::AGENT_VERSION],
-            "description": "Agent OpenAPI specification"
         }
     }))
 }
@@ -160,48 +110,6 @@ pub async fn get_dsl_spec_version(
             format!(
                 "DSL spec version {} not found. Available: {}",
                 version, DSL_VERSION
-            ),
-        ))
-    }
-}
-
-/// Get a specific version of the agent spec
-///
-/// Currently only the embedded version is available.
-#[utoipa::path(
-    get,
-    path = "/api/runtime/specs/agents/{version}",
-    tag = "Specifications",
-    params(
-        ("version" = String, Path, description = "Agent spec version (e.g., 1.0.0)")
-    ),
-    responses(
-        (status = 200, description = "Agent OpenAPI spec for specified version", content_type = "application/json"),
-        (status = 400, description = "Invalid version format"),
-        (status = 404, description = "Version not found")
-    )
-)]
-pub async fn get_agents_spec_version(
-    Path(version): Path<String>,
-) -> Result<Json<Value>, (StatusCode, String)> {
-    // Validate version format
-    if !version.chars().all(|c| c.is_ascii_digit() || c == '.') {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "Invalid version format".to_string(),
-        ));
-    }
-
-    // Only the current embedded version is available
-    let current_version = runtara_dsl::spec::agent_openapi::AGENT_VERSION;
-    if version == current_version {
-        get_agents_spec().await
-    } else {
-        Err((
-            StatusCode::NOT_FOUND,
-            format!(
-                "Agent spec version {} not found. Available: {}",
-                version, current_version
             ),
         ))
     }
