@@ -79,6 +79,7 @@ mod tests {
             "wait-timeout-ms",
             "wait-timeout-error",
             "wait-on-wait-variables",
+            "wait-on-wait-error",
             "wait-poll-interval-ms",
             "wait-event",
             "wait-output",

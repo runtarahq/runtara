@@ -719,6 +719,13 @@ impl DirectJsonManifest {
             .map_err(|err| format!("failed to serialize wait-on-wait variables: {err}"))
     }
 
+    /// Wrap a nested `onWait` graph failure exactly like generated Rust code.
+    pub fn wait_on_wait_error(&self, step_id: &str, error: &[u8]) -> Result<Vec<u8>, String> {
+        self.wait_step(step_id)?;
+        let error = String::from_utf8_lossy(error);
+        Ok(format!("WaitForSignal step '{step_id}' on_wait failed: {error}").into_bytes())
+    }
+
     /// Return the configured WaitForSignal poll interval, defaulting to 1000ms.
     pub fn wait_poll_interval_ms(&self, step_id: &str) -> Result<u64, String> {
         let step = self.wait_step(step_id)?;
@@ -4878,6 +4885,27 @@ mod tests {
         assert_eq!(variables["tenant"], json!("t1"));
         assert_eq!(variables["_signal_id"], json!("inst-1/root/wait"));
         assert_eq!(variables["_instance_id"], json!("inst-1"));
+    }
+
+    #[test]
+    fn wait_on_wait_error_wraps_nested_failure_like_generated_code() {
+        let manifest = DirectJsonManifest::parse(&wait_manifest(json!({
+            "id": "wait",
+            "stepType": "WaitForSignal",
+            "name": "Review Input"
+        })))
+        .expect("manifest");
+        let nested = br#"{"stepId":"fail","code":"ON_WAIT_FAILED"}"#;
+
+        let error = manifest
+            .wait_on_wait_error("wait", nested)
+            .expect("on-wait error");
+        let error = String::from_utf8(error).expect("utf8 error");
+
+        assert_eq!(
+            error,
+            "WaitForSignal step 'wait' on_wait failed: {\"stepId\":\"fail\",\"code\":\"ON_WAIT_FAILED\"}"
+        );
     }
 
     #[test]

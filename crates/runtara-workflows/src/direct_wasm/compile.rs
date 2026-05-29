@@ -1117,16 +1117,34 @@ struct DirectErrorRoutePlan {
 }
 
 #[derive(Debug, Clone, Copy)]
-struct DirectFailureTarget {
-    split_id: u32,
-    branch_depth: u32,
+enum DirectFailureTarget {
+    Split {
+        split_id: u32,
+        branch_depth: u32,
+    },
+    WaitOnWait {
+        step_id_offset: i32,
+        step_id_len: i32,
+    },
 }
 
 impl DirectFailureTarget {
     fn nested(self, extra_depth: u32) -> Self {
-        Self {
-            split_id: self.split_id,
-            branch_depth: self.branch_depth + extra_depth,
+        match self {
+            Self::Split {
+                split_id,
+                branch_depth,
+            } => Self::Split {
+                split_id,
+                branch_depth: branch_depth + extra_depth,
+            },
+            Self::WaitOnWait {
+                step_id_offset,
+                step_id_len,
+            } => Self::WaitOnWait {
+                step_id_offset,
+                step_id_len,
+            },
         }
     }
 }
@@ -2493,6 +2511,7 @@ struct DirectCoreImportIndices {
     stdlib_wait_timeout_ms: Option<u32>,
     stdlib_wait_timeout_error: Option<u32>,
     stdlib_wait_on_wait_variables: Option<u32>,
+    stdlib_wait_on_wait_error: Option<u32>,
     stdlib_wait_poll_interval_ms: Option<u32>,
     stdlib_wait_event: Option<u32>,
     stdlib_wait_output: Option<u32>,
@@ -2674,6 +2693,10 @@ impl DirectCoreImportIndices {
                 self.stdlib_wait_on_wait_variables,
                 "stdlib.wait-on-wait-variables",
             )?,
+            stdlib_wait_on_wait_error: require_import(
+                self.stdlib_wait_on_wait_error,
+                "stdlib.wait-on-wait-error",
+            )?,
             stdlib_wait_poll_interval_ms: require_import(
                 self.stdlib_wait_poll_interval_ms,
                 "stdlib.wait-poll-interval-ms",
@@ -2784,6 +2807,7 @@ struct DirectCoreFunctionIndices {
     stdlib_wait_timeout_ms: u32,
     stdlib_wait_timeout_error: u32,
     stdlib_wait_on_wait_variables: u32,
+    stdlib_wait_on_wait_error: u32,
     stdlib_wait_poll_interval_ms: u32,
     stdlib_wait_event: u32,
     stdlib_wait_output: u32,
@@ -2947,6 +2971,8 @@ fn import_core_function(
         import_indices.stdlib_wait_timeout_error = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "wait-on-wait-variables") {
         import_indices.stdlib_wait_on_wait_variables = Some(function_index);
+    } else if is_stdlib_import(resolve, interface, function, "wait-on-wait-error") {
+        import_indices.stdlib_wait_on_wait_error = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "wait-poll-interval-ms") {
         import_indices.stdlib_wait_poll_interval_ms = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "wait-event") {
@@ -4109,7 +4135,7 @@ fn emit_split_plan(
         emit_split_append_retptr_error_and_continue(
             body,
             indices,
-            DirectFailureTarget {
+            DirectFailureTarget::Split {
                 split_id,
                 branch_depth: 0,
             },
@@ -4155,7 +4181,7 @@ fn emit_split_plan(
         source_ptr_local,
         source_len_local,
         if dont_stop_on_failed {
-            Some(DirectFailureTarget {
+            Some(DirectFailureTarget::Split {
                 split_id,
                 branch_depth: 0,
             })
@@ -4184,7 +4210,7 @@ fn emit_split_plan(
         workflow_log_kind,
         workflow_error_kind,
         if dont_stop_on_failed {
-            Some(DirectFailureTarget {
+            Some(DirectFailureTarget::Split {
                 split_id,
                 branch_depth: 0,
             })
@@ -4203,7 +4229,7 @@ fn emit_split_plan(
         emit_split_append_retptr_error_and_continue(
             body,
             indices,
-            DirectFailureTarget {
+            DirectFailureTarget::Split {
                 split_id,
                 branch_depth: 0,
             },
@@ -4591,6 +4617,10 @@ fn emit_split_append_retptr_error_and_continue(
     error_ptr_local: u32,
     error_len_local: u32,
 ) {
+    let DirectFailureTarget::Split { .. } = target else {
+        emit_retptr_error_target_or_return(body, indices, target, error_ptr_local, error_len_local);
+        return;
+    };
     load_retptr_tag(body);
     body.instruction(&Instruction::If(BlockType::Empty));
     load_retptr_list(body, error_ptr_local, error_len_local);
@@ -4611,7 +4641,15 @@ fn emit_split_append_error_payload_and_continue(
     error_ptr_local: u32,
     error_len_local: u32,
 ) {
-    body.instruction(&Instruction::I32Const(target.split_id as i32));
+    let DirectFailureTarget::Split {
+        split_id,
+        branch_depth,
+    } = target
+    else {
+        emit_wait_on_wait_error_and_fail(body, indices, target, error_ptr_local, error_len_local);
+        return;
+    };
+    body.instruction(&Instruction::I32Const(split_id as i32));
     body.instruction(&Instruction::LocalGet(DIRECT_SPLIT_RESULTS_PTR_LOCAL));
     body.instruction(&Instruction::LocalGet(DIRECT_SPLIT_RESULTS_LEN_LOCAL));
     body.instruction(&Instruction::LocalGet(error_ptr_local));
@@ -4629,7 +4667,32 @@ fn emit_split_append_error_payload_and_continue(
     body.instruction(&Instruction::I32Const(1));
     body.instruction(&Instruction::I32Add);
     body.instruction(&Instruction::LocalSet(DIRECT_SPLIT_INDEX_LOCAL));
-    body.instruction(&Instruction::Br(target.branch_depth));
+    body.instruction(&Instruction::Br(branch_depth));
+}
+
+fn emit_wait_on_wait_error_and_fail(
+    body: &mut WasmFunction,
+    indices: &DirectCoreFunctionIndices,
+    target: DirectFailureTarget,
+    error_ptr_local: u32,
+    error_len_local: u32,
+) {
+    let DirectFailureTarget::WaitOnWait {
+        step_id_offset,
+        step_id_len,
+    } = target
+    else {
+        unreachable!("non-onWait target passed to onWait failure emitter");
+    };
+    body.instruction(&Instruction::I32Const(step_id_offset));
+    body.instruction(&Instruction::I32Const(step_id_len));
+    body.instruction(&Instruction::LocalGet(error_ptr_local));
+    body.instruction(&Instruction::LocalGet(error_len_local));
+    push_retptr_arg(body);
+    body.instruction(&Instruction::Call(indices.stdlib_wait_on_wait_error));
+    return_if_retptr_error(body);
+    load_retptr_list(body, error_ptr_local, error_len_local);
+    emit_runtime_fail_return(body, indices, error_ptr_local, error_len_local);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -5056,6 +5119,10 @@ fn emit_wait_on_wait_plan(
         ptr_local: DIRECT_WAIT_ON_WAIT_VARIABLES_PTR_LOCAL,
         len_local: DIRECT_WAIT_ON_WAIT_VARIABLES_LEN_LOCAL,
     };
+    let on_wait_failure_target = DirectFailureTarget::WaitOnWait {
+        step_id_offset: step_id_segment.offset,
+        step_id_len: step_id_segment.len_i32(),
+    };
     emit_build_source(
         body,
         indices,
@@ -5066,7 +5133,7 @@ fn emit_wait_on_wait_plan(
         steps_len_local,
         source_ptr_local,
         source_len_local,
-        failure_target,
+        Some(on_wait_failure_target),
     );
     emit_run_plan_mapping(
         body,
@@ -5087,7 +5154,7 @@ fn emit_wait_on_wait_plan(
         route_len_local,
         workflow_log_kind,
         workflow_error_kind,
-        None,
+        Some(on_wait_failure_target),
     );
 
     body.instruction(&Instruction::LocalGet(DIRECT_WAIT_PARENT_STEPS_PTR_LOCAL));
@@ -7003,7 +7070,7 @@ fn emit_retptr_error_or_return(
     error_len_local: u32,
 ) {
     if let Some(failure_target) = failure_target {
-        emit_split_append_retptr_error_and_continue(
+        emit_retptr_error_target_or_return(
             function,
             indices,
             failure_target,
@@ -7012,6 +7079,37 @@ fn emit_retptr_error_or_return(
         );
     } else {
         return_if_retptr_error(function);
+    }
+}
+
+fn emit_retptr_error_target_or_return(
+    function: &mut WasmFunction,
+    indices: &DirectCoreFunctionIndices,
+    failure_target: DirectFailureTarget,
+    error_ptr_local: u32,
+    error_len_local: u32,
+) {
+    match failure_target {
+        DirectFailureTarget::Split { .. } => emit_split_append_retptr_error_and_continue(
+            function,
+            indices,
+            failure_target,
+            error_ptr_local,
+            error_len_local,
+        ),
+        DirectFailureTarget::WaitOnWait { .. } => {
+            load_retptr_tag(function);
+            function.instruction(&Instruction::If(BlockType::Empty));
+            load_retptr_list(function, error_ptr_local, error_len_local);
+            emit_wait_on_wait_error_and_fail(
+                function,
+                indices,
+                failure_target,
+                error_ptr_local,
+                error_len_local,
+            );
+            function.instruction(&Instruction::End);
+        }
     }
 }
 
@@ -7285,6 +7383,9 @@ mod tests {
             }
             "wait_on_wait" => {
                 include_str!("../../tests/fixtures/wait_for_signal_direct_on_wait.json")
+            }
+            "wait_on_wait_error" => {
+                include_str!("../../tests/fixtures/wait_for_signal_direct_on_wait_error.json")
             }
             "transform" => include_str!("../../tests/fixtures/transform_workflow.json"),
             other => panic!("unknown fixture {other}"),
@@ -12643,6 +12744,106 @@ mod tests {
         assert!(
             log_position < wait_event_position,
             "onWait callback should complete before external input is requested"
+        );
+    }
+
+    #[test]
+    fn direct_core_run_wraps_wait_on_wait_error_before_runtime_fail() {
+        let graph = fixture("wait_on_wait_error");
+        let manifest = build_direct_workflow_manifest(&graph).expect("manifest");
+        let manifest_json = manifest.to_canonical_json().expect("manifest json");
+        let core_config =
+            DirectCoreConfig::new(&manifest, &manifest_json, false).expect("core config");
+        let DirectRunPlan::WaitForSignal {
+            on_wait_plan: Some(on_wait_plan),
+            ..
+        } = &core_config.run_plan
+        else {
+            panic!("expected WaitForSignal run plan with onWait callback");
+        };
+        let DirectRunPlan::Error { step_id, .. } = on_wait_plan.as_ref() else {
+            panic!("expected onWait callback to fail with Error");
+        };
+        assert_eq!(step_id, "fail");
+
+        let (resolve, world) = build_direct_component_resolve().expect("resolve");
+        let core = emit_direct_core_module(&resolve, world, &core_config).expect("core module");
+        Validator::new()
+            .validate_all(&core)
+            .expect("WaitForSignal failing onWait core module validates");
+
+        let mut next_function_index = 0;
+        let mut error_index = None;
+        let mut wait_on_wait_error_index = None;
+        let mut runtime_fail_index = None;
+        let mut run_calls = Vec::new();
+        let mut code_body_index = 0;
+
+        for payload in Parser::new(0).parse_all(&core) {
+            match payload.expect("core wasm payload") {
+                Payload::ImportSection(reader) => {
+                    for import in reader.into_imports() {
+                        let import = import.expect("core import");
+                        if matches!(import.ty, TypeRef::Func(_)) {
+                            match (import.module, import.name) {
+                                ("cm32p2|runtara:workflow-stdlib/json@0.1", "error") => {
+                                    error_index = Some(next_function_index)
+                                }
+                                (
+                                    "cm32p2|runtara:workflow-stdlib/json@0.1",
+                                    "wait-on-wait-error",
+                                ) => wait_on_wait_error_index = Some(next_function_index),
+                                ("cm32p2|runtara:workflow-runtime/runtime@0.1", "fail") => {
+                                    runtime_fail_index = Some(next_function_index)
+                                }
+                                _ => {}
+                            }
+                            next_function_index += 1;
+                        }
+                    }
+                }
+                Payload::CodeSectionEntry(body) => {
+                    if code_body_index == 0 {
+                        for operator in body.get_operators_reader().expect("operators") {
+                            if let Operator::Call { function_index } = operator.expect("operator") {
+                                run_calls.push(function_index);
+                            }
+                        }
+                    }
+                    code_body_index += 1;
+                }
+                _ => {}
+            }
+        }
+
+        let error_index = error_index.expect("error import");
+        let wait_on_wait_error_index = wait_on_wait_error_index.expect("wait-on-wait-error import");
+        let runtime_fail_index = runtime_fail_index.expect("runtime fail import");
+        let error_position = run_calls
+            .iter()
+            .position(|&index| index == error_index)
+            .expect("Error failure payload call");
+        let wait_on_wait_error_position = run_calls
+            .iter()
+            .enumerate()
+            .filter_map(|(position, &index)| {
+                (index == wait_on_wait_error_index && position > error_position).then_some(position)
+            })
+            .next()
+            .expect("onWait failure wrapper call after nested Error payload");
+        let runtime_fail_position = run_calls
+            .iter()
+            .enumerate()
+            .filter_map(|(position, &index)| {
+                (index == runtime_fail_index && position > wait_on_wait_error_position)
+                    .then_some(position)
+            })
+            .next()
+            .expect("runtime fail call after onWait wrapper");
+
+        assert!(
+            wait_on_wait_error_position < runtime_fail_position,
+            "onWait wrapper should feed runtime.fail"
         );
     }
 

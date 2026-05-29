@@ -377,9 +377,7 @@ fn supports_wait_for_signal_step_baseline(step: &WaitForSignalStep) -> bool {
 
 fn supports_wait_for_signal_on_wait_graph_baseline(graph: &ExecutionGraph) -> bool {
     supports_direct_control_graph(graph)
-        && !graph_contains_step(graph, |step| {
-            matches!(step, Step::Error(_) | Step::WaitForSignal(_))
-        })
+        && !graph_contains_step(graph, |step| matches!(step, Step::WaitForSignal(_)))
 }
 
 fn supports_split_step_baseline(step: &SplitStep) -> bool {
@@ -880,12 +878,6 @@ fn collect_wait_for_signal_step_unsupported(
                 "WaitForSignal onWait subgraphs cannot contain nested WaitForSignal steps yet",
             );
         }
-        if graph_contains_step(on_wait, |step| matches!(step, Step::Error(_))) {
-            push(
-                "wait-for-signal-on-wait-error",
-                "WaitForSignal onWait failure wrapping is pending",
-            );
-        }
         if !supports_direct_control_graph(on_wait) {
             push(
                 "wait-for-signal-on-wait-shape",
@@ -1119,6 +1111,9 @@ mod tests {
             }
             "wait_on_wait" => {
                 include_str!("../../tests/fixtures/wait_for_signal_direct_on_wait.json")
+            }
+            "wait_on_wait_error" => {
+                include_str!("../../tests/fixtures/wait_for_signal_direct_on_wait_error.json")
             }
             other => panic!("unknown fixture {other}"),
         };
@@ -1973,7 +1968,7 @@ mod tests {
     }
 
     #[test]
-    fn wait_on_wait_error_remains_rejected_until_wrapped_failure_lowering() {
+    fn wait_on_wait_error_callback_is_supported() {
         let graph = serde_json::from_str::<ExecutionGraph>(
             r#"{
               "steps": {
@@ -2008,11 +2003,7 @@ mod tests {
 
         let report = analyze_direct_wasm_support(&graph);
 
-        assert!(!report.supported);
-        assert!(report.unsupported.iter().any(|feature| {
-            feature.step_id.as_deref() == Some("wait")
-                && feature.feature == "wait-for-signal-on-wait-error"
-        }));
+        assert!(report.supported, "{:?}", report.unsupported);
     }
 
     #[test]

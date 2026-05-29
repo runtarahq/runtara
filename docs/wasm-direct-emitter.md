@@ -108,9 +108,10 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   through stdlib, rebuilds the source envelope, and continues normal flow. It
   also lowers successful direct-control `onWait` callbacks by building the
   generated-compatible callback variables, running the nested callback before
-  `external_input_requested`, restoring the parent step context/source, and
-  then entering the wait loop. Explicit `Error` and nested `WaitForSignal`
-  inside `onWait` remain gated until wrapped nested-failure semantics land.
+  `external_input_requested`, wrapping nested callback failures with the same
+  generated Rust `WaitForSignal step '<id>' on_wait failed: ...` prefix,
+  restoring the parent step context/source, and then entering the wait loop.
+  Nested `WaitForSignal` inside `onWait` remains gated.
 - `scripts/build-agent-components.sh` now builds and stages the direct workflow
   stdlib/runtime components beside agent components with sibling metadata, and
   the bundle installer treats `RUNTARA_AGENT_COMPONENTS_DIR` as the shared
@@ -2003,8 +2004,8 @@ Implementation steps:
    - emit waiting event/action metadata: stdlib helper done through
      `wait-event`, including response schema, action key, correlation, and
      context mapping parity;
-   - execute `on_wait` subgraph: done for the successful direct-control subset
-     that excludes explicit `Error` and nested `WaitForSignal`;
+   - execute `on_wait` subgraph: done for the direct-control subset that
+     excludes nested `WaitForSignal`;
    - poll or suspend: baseline runtime polling loop done; durable suspension
      semantics pending if required;
    - timeout: stdlib timeout mapping helper done through `wait-timeout-ms`,
@@ -2018,8 +2019,8 @@ Implementation steps:
      gated A/B parity for cancel, pause, and shutdown.
 2. Implement `WaitForSignal` lowering:
    - baseline no-`onWait`/no-breakpoint lowering: done, including timeout;
-   - `onWait` nested graph lowering: successful direct-control subset done;
-     wrapped nested failure parity remains pending;
+   - `onWait` nested graph lowering: direct-control subset done, including
+     wrapped explicit failure parity;
    - timeout failure parity: done for immediate timeout with no signal;
    - debug/breakpoint parity: pending.
 3. Add tests for:
@@ -2030,7 +2031,8 @@ Implementation steps:
      pause, and shutdown;
    - successful `on_wait` callback: structural core test and gated A/B test are
      in place;
-   - `on_wait` failure wrapping: pending;
+   - `on_wait` failure wrapping: stdlib, structural core, support, and gated
+     A/B tests are in place;
    - action metadata and response schema.
 
 Checkpoint 11:
@@ -2065,9 +2067,14 @@ Current status:
   `_signal_id` and `_instance_id`, and preserving the parent data/scope while
   the nested callback uses an isolated steps context. Structural coverage proves
   the callback executes before `external_input_requested`, and gated A/B
-  coverage proves callback event parity on the happy path. Explicit
-  `Error`/nested `WaitForSignal` callbacks, debug/breakpoint parity, and durable
-  suspension semantics remain pending.
+  coverage proves callback event parity on the happy path.
+- Direct core lowering now wraps explicit `onWait` callback failures through the
+  stdlib helper `wait-on-wait-error`, matching generated Rust's
+  `WaitForSignal step '<id>' on_wait failed: ...` error string. Support gates no
+  longer reject direct-control `onWait` graphs that end in `Error`, and gated
+  A/B coverage proves failure payload and `workflow_error` event parity. Nested
+  `WaitForSignal` callbacks, debug/breakpoint parity, and durable suspension
+  semantics remain pending.
 
 ### Phase 12: AiAgent
 
