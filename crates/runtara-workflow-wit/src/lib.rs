@@ -120,12 +120,14 @@ mod tests {
         let interface = &resolve.interfaces[interface_id];
         for function in [
             "load-input",
+            "instance-id",
             "complete",
             "fail",
             "custom-event",
             "heartbeat",
             "is-cancelled",
             "check-signals",
+            "poll-custom-signal",
             "durable-sleep",
             "blocking-sleep",
             "get-checkpoint",

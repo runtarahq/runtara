@@ -132,6 +132,10 @@ pub fn load_input() -> Result<Vec<u8>, String> {
     })
 }
 
+pub fn instance_id() -> Result<String, String> {
+    with_sdk(|sdk| Ok(sdk.instance_id().to_string()))
+}
+
 pub fn complete(output: &[u8]) -> Result<(), String> {
     with_sdk(|sdk| sdk.completed(output).map_err(sdk_error))
 }
@@ -186,6 +190,10 @@ pub fn check_signals() -> Result<bool, String> {
         }
         SignalType::Resume => Ok(false),
     }
+}
+
+pub fn poll_custom_signal(checkpoint_id: &str) -> Result<Option<Vec<u8>>, String> {
+    with_sdk_mut(|sdk| sdk.poll_custom_signal(checkpoint_id).map_err(sdk_error))
 }
 
 pub fn durable_sleep(ms: u64) -> Result<(), String> {
@@ -284,6 +292,10 @@ mod component {
             super::load_input()
         }
 
+        fn instance_id() -> Result<String, String> {
+            super::instance_id()
+        }
+
         fn complete(output: Vec<u8>) -> Result<(), String> {
             super::complete(&output)
         }
@@ -306,6 +318,10 @@ mod component {
 
         fn check_signals() -> Result<bool, String> {
             super::check_signals()
+        }
+
+        fn poll_custom_signal(checkpoint_id: String) -> Result<Option<Vec<u8>>, String> {
+            super::poll_custom_signal(&checkpoint_id)
         }
 
         fn durable_sleep(ms: u64) -> Result<(), String> {

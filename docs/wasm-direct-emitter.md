@@ -89,7 +89,8 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   `runtara:workflow-runtime` component. It lazily initializes the existing SDK
   from environment variables and exports the first runtime lifecycle surface:
   input loading, completion/failure, custom events, heartbeat, cancellation
-  polling, and durable sleep.
+  polling, durable sleep, runtime instance id access, and checkpoint-scoped
+  custom signal polling needed by future direct `WaitForSignal` lowering.
 - `scripts/build-agent-components.sh` now builds and stages the direct workflow
   stdlib/runtime components beside agent components with sibling metadata, and
   the bundle installer treats `RUNTARA_AGENT_COMPONENTS_DIR` as the shared
@@ -1777,6 +1778,7 @@ Implementation steps:
    - checkpointed durable sleep: done;
    - heartbeat: already exposed;
    - cancellation check: already exposed;
+   - runtime instance id and custom signal polling for WaitForSignal: done;
    - stable resume-from-checkpoint lowering: pending per step family.
 2. Implement stdlib/runtime functions using the existing SDK behavior.
 3. Generate stable cache keys matching current behavior:
@@ -1972,6 +1974,9 @@ Goal: support long-lived external wait behavior.
 Implementation steps:
 
 1. Specify signal runtime ABI:
+   - expose runtime instance id: done through `runtime.instance-id`;
+   - expose checkpoint-scoped custom signal polling: done through
+     `runtime.poll-custom-signal(checkpointId)`;
    - generate signal id;
    - emit waiting event/action metadata;
    - execute `on_wait` subgraph;
@@ -1996,6 +2001,14 @@ Checkpoint 11:
 Rollback:
 
 - Direct mode rejects wait/signal workflows until enabled.
+
+Current status:
+
+- The first runtime ABI prerequisite is in place. `runtara:workflow-runtime`
+  now exposes `instance-id` and `poll-custom-signal`, matching the SDK calls
+  generated Rust uses to construct deterministic wait keys and retrieve
+  checkpoint-scoped custom signal payloads. Direct core lowering and
+  host-level WaitForSignal A/B execution remain pending.
 
 ### Phase 12: AiAgent
 
