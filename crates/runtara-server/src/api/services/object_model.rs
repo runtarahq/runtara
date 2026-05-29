@@ -748,14 +748,11 @@ impl InstanceService {
 
         let store = get_store(&self.manager, Some(&self.facade), connection_id, tenant_id).await?;
 
-        let limit = store.config().bulk_request_limit;
-        if instance_ids.len() > limit {
-            return Err(ServiceError::ValidationError(format!(
-                "bulk request size {} exceeds limit of {}",
-                instance_ids.len(),
-                limit
-            )));
-        }
+        // Bulk-size cap is enforced at the handler edge via
+        // `check_bulk_size_entitlement` so the overflow surfaces with the
+        // documented `ENTITLEMENT_LIMIT_EXCEEDED` shape (SYN-433 Finding 2).
+        // The store crate retains its own `bulk_request_limit` check as
+        // defense-in-depth for non-handler callers.
 
         let schema = store
             .get_schema_by_id(schema_id)

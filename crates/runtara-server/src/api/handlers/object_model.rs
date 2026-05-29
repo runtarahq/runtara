@@ -16,6 +16,54 @@ use crate::api::repositories::object_model::ObjectStoreManager;
 use crate::api::services::object_model::{InstanceService, SchemaService, ServiceError};
 
 // ============================================================================
+// Bulk size entitlement gate
+// ============================================================================
+
+/// Pre-flight check on a bulk request size against the tenant's
+/// `objectModelBulkRequestLimit` entitlement. Returns the documented
+/// `ENTITLEMENT_LIMIT_EXCEEDED` 403 (same wire contract as `create_workflow`
+/// / `create_object_schema` overflows) when the cap would be exceeded.
+///
+/// SYN-433 Finding 2: the `runtara-object-store` crate has its own
+/// `bulk_request_limit` check, but it returns a generic `Validation` error
+/// that bubbles out as MCP `-32602 InvalidParams` with no `code` / `limit` /
+/// `maximum` structured fields. Pre-checking here at the handler edge gives
+/// callers the stable entitlement error shape; the store-side check remains
+/// as defense-in-depth for any non-handler caller (internal SQL paths, etc).
+///
+/// Only fires when the entitlement explicitly caps the limit. When
+/// `object_model_bulk_request_limit` is `None` (no tenant cap), the handler
+/// passes the request through and the infra cap inside the store crate is
+/// the only thing that can fire — and its current `-32602` shape is an
+/// acceptable fallback in that case because the overflow is infra, not
+/// entitlement.
+fn check_bulk_size_entitlement(requested: usize) -> Result<(), (StatusCode, Json<Value>)> {
+    let snapshot = crate::config::entitlements();
+    match crate::middleware::entitlement::bulk_size_decision(snapshot, requested) {
+        Ok(()) => Ok(()),
+        Err(denial) => {
+            denial.audit_log(snapshot.tenant_id.as_str());
+            Err((StatusCode::FORBIDDEN, Json(denial.json_body())))
+        }
+    }
+}
+
+/// Count the rows a `BulkCreateRequest` will attempt to insert.
+/// Handles both the object form (`instances`) and the columnar form
+/// (`rows`). Returns 0 for a malformed request where neither is present —
+/// downstream validation rejects those with a separate error, so we don't
+/// need to special-case here.
+fn bulk_create_row_count(req: &BulkCreateRequest) -> usize {
+    if let Some(instances) = &req.instances {
+        return instances.len();
+    }
+    if let Some(rows) = &req.rows {
+        return rows.len();
+    }
+    0
+}
+
+// ============================================================================
 // Combined State for Object Model Handlers
 // ============================================================================
 
@@ -562,6 +610,8 @@ pub async fn bulk_delete_instances(
     Query(params): Query<ConnectionQueryParams>,
     Json(request): Json<BulkDeleteRequest>,
 ) -> Result<(StatusCode, Json<BulkDeleteResponse>), (StatusCode, Json<Value>)> {
+    check_bulk_size_entitlement(request.instance_ids.len())?;
+
     let service = InstanceService::new(state.manager.clone(), state.connections.clone());
 
     match service
@@ -639,6 +689,8 @@ pub async fn bulk_create_instances(
     Query(params): Query<ConnectionQueryParams>,
     Json(request): Json<BulkCreateRequest>,
 ) -> Result<(StatusCode, Json<BulkCreateResponse>), (StatusCode, Json<Value>)> {
+    check_bulk_size_entitlement(bulk_create_row_count(&request))?;
+
     let service = InstanceService::new(state.manager.clone(), state.connections.clone());
 
     match service
@@ -728,6 +780,14 @@ pub async fn bulk_update_instances(
     Query(params): Query<ConnectionQueryParams>,
     Json(request): Json<BulkUpdateRequest>,
 ) -> Result<(StatusCode, Json<BulkUpdateResponse>), (StatusCode, Json<Value>)> {
+    // ByIds carries a discrete `updates` list whose size is the entitlement
+    // unit. ByCondition is a single UPDATE statement matched against
+    // arbitrary rows — there is no client-supplied count to gate, and the
+    // store-side `bulk_request_limit` doesn't apply to that path either.
+    if let BulkUpdateRequest::ByIds { updates } = &request {
+        check_bulk_size_entitlement(updates.len())?;
+    }
+
     let service = InstanceService::new(state.manager.clone(), state.connections.clone());
 
     let result = match request {

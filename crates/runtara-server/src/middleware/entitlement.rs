@@ -159,6 +159,35 @@ pub fn limit_decision(
     }
 }
 
+/// Pure decision for the per-request bulk-size cap
+/// (`objectModelBulkRequestLimit`). Different semantics from
+/// [`limit_decision`]: the caller passes the **request size** (how many
+/// items this one call wants to operate on), and the cap is honored
+/// inclusively — `requested == cap` is allowed; `requested > cap` denies.
+///
+/// `None` for the entitlement cap means no tenant-side cap → always Ok;
+/// the store crate's infra-side `bulk_request_limit` then becomes the only
+/// thing that can fire (and surfaces as the legacy validation error,
+/// acceptable for the no-entitlement-cap case).
+///
+/// SYN-433 Finding 2: the wire shape produced when this decision denies is
+/// the documented `ENTITLEMENT_LIMIT_EXCEEDED` body, not the generic
+/// validation error the store crate has historically produced.
+pub fn bulk_size_decision(
+    snapshot: &EntitlementSnapshot,
+    requested: usize,
+) -> Result<(), EntitlementDenial> {
+    if let Some(cap) = snapshot.limits.object_model_bulk_request_limit
+        && requested > cap
+    {
+        return Err(EntitlementDenial::LimitExceeded {
+            limit: "objectModelBulkRequestLimit",
+            maximum: cap as u64,
+        });
+    }
+    Ok(())
+}
+
 /// Pure decision for the API-key auth bypass guard.
 ///
 /// Returns `Ok(())` for non-API-key auth methods (JWT, session, unauthenticated
@@ -627,6 +656,92 @@ mod tests {
         let huge = u64::from(u32::MAX) + 10;
         let denial = limit_decision(huge, Some(u32::MAX), "maxWorkflows").expect_err("must reject");
         assert_eq!(denial.json_body()["maximum"], u64::from(u32::MAX));
+    }
+
+    // ── bulk_size_decision ──────────────────────────────────────────────
+    //
+    // SYN-433 Finding 2: per-request bulk caps must return the documented
+    // ENTITLEMENT_LIMIT_EXCEEDED shape. These tests pin the boundary
+    // semantics: `requested == cap` allowed, `requested > cap` denied,
+    // `None` cap means no entitlement-side gating.
+
+    #[test]
+    fn bulk_size_decision_passes_when_no_cap_set() {
+        // Default snapshot: object_model_bulk_request_limit = None → never gates.
+        let snap = snapshot_with(None, None);
+        assert!(bulk_size_decision(&snap, 0).is_ok());
+        assert!(bulk_size_decision(&snap, 1_000_000).is_ok());
+    }
+
+    #[test]
+    fn bulk_size_decision_allows_exact_cap_inclusive() {
+        // Boundary: `requested == cap` must succeed. Production verified at
+        // both cap=1 (round 1) and cap=2 (round 2b).
+        let snap = snapshot_with(
+            None,
+            Some(r#"{"limits":{"objectModelBulkRequestLimit":2}}"#),
+        );
+        assert!(bulk_size_decision(&snap, 2).is_ok());
+    }
+
+    #[test]
+    fn bulk_size_decision_denies_one_over_cap() {
+        // Boundary: `requested == cap + 1` must deny with the documented shape.
+        let snap = snapshot_with(
+            None,
+            Some(r#"{"limits":{"objectModelBulkRequestLimit":2}}"#),
+        );
+        let denial = bulk_size_decision(&snap, 3).expect_err("3 > cap of 2 must deny");
+        assert_eq!(denial.code(), codes::ENTITLEMENT_LIMIT_EXCEEDED);
+        let body = denial.json_body();
+        assert_eq!(body["limit"], "objectModelBulkRequestLimit");
+        assert_eq!(body["maximum"], 2);
+    }
+
+    #[test]
+    fn bulk_size_decision_at_cap_one_denies_two_rows() {
+        // The exact round-1 production scenario: cap=1, 1 row OK, 2 rows denied.
+        let snap = snapshot_with(
+            None,
+            Some(r#"{"limits":{"objectModelBulkRequestLimit":1}}"#),
+        );
+        assert!(bulk_size_decision(&snap, 0).is_ok());
+        assert!(bulk_size_decision(&snap, 1).is_ok());
+        let denial = bulk_size_decision(&snap, 2).expect_err("2 rows under cap=1 must deny");
+        assert_eq!(denial.code(), codes::ENTITLEMENT_LIMIT_EXCEEDED);
+        assert_eq!(denial.json_body()["maximum"], 1);
+    }
+
+    #[test]
+    fn bulk_size_decision_zero_request_always_passes() {
+        // Empty bulk requests are degenerate but shouldn't be denied —
+        // downstream validation handles "you sent nothing" with its own error.
+        let snap = snapshot_with(
+            None,
+            Some(r#"{"limits":{"objectModelBulkRequestLimit":1}}"#),
+        );
+        assert!(bulk_size_decision(&snap, 0).is_ok());
+    }
+
+    #[tokio::test]
+    async fn bulk_size_decision_denial_renders_as_403_with_stable_code() {
+        // Confirms the denial flows through IntoResponse with the documented
+        // status + body shape — same path the handler-side helper takes.
+        let snap = snapshot_with(
+            None,
+            Some(r#"{"limits":{"objectModelBulkRequestLimit":1}}"#),
+        );
+        let denial = bulk_size_decision(&snap, 5).expect_err("over-cap must deny");
+        let response = denial.into_response();
+
+        assert_eq!(response.status(), axum::http::StatusCode::FORBIDDEN);
+        let bytes = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .expect("body bytes");
+        let body: serde_json::Value = serde_json::from_slice(&bytes).expect("json body");
+        assert_eq!(body["code"], codes::ENTITLEMENT_LIMIT_EXCEEDED);
+        assert_eq!(body["limit"], "objectModelBulkRequestLimit");
+        assert_eq!(body["maximum"], 1);
     }
 
     // ────────────────────────────────────────────────────────────────────
