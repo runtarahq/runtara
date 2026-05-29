@@ -82,6 +82,11 @@ pub enum ExecutionError {
     RuntimeError(String),
     DatabaseError(String),
     NotConnected(String),
+    /// Per-tenant entitlement gate denied the request
+    /// (`maxConcurrentExecutions` or similar). Carries the full
+    /// `EntitlementDenial` so the handler can render the standard
+    /// `ENTITLEMENT_LIMIT_EXCEEDED` body via `denial.json_body()`.
+    EntitlementDenied(crate::entitlement_error::EntitlementDenial),
 }
 
 impl std::fmt::Display for ExecutionError {
@@ -113,6 +118,7 @@ impl std::fmt::Display for ExecutionError {
             ExecutionError::RuntimeError(msg) => write!(f, "Runtime error: {}", msg),
             ExecutionError::DatabaseError(msg) => write!(f, "Database error: {}", msg),
             ExecutionError::NotConnected(msg) => write!(f, "Not connected: {}", msg),
+            ExecutionError::EntitlementDenied(denial) => write!(f, "{}", denial.message()),
         }
     }
 }
@@ -139,6 +145,7 @@ impl ExecutionError {
             ExecutionError::RuntimeError(_) => StatusCode::INTERNAL_SERVER_ERROR,
             ExecutionError::DatabaseError(_) => StatusCode::INTERNAL_SERVER_ERROR,
             ExecutionError::NotConnected(_) => StatusCode::SERVICE_UNAVAILABLE,
+            ExecutionError::EntitlementDenied(_) => StatusCode::FORBIDDEN,
         }
     }
 }
@@ -267,6 +274,12 @@ pub struct ExecutionEngine {
     running_executions: Option<Arc<DashMap<Uuid, CancellationHandle>>>,
     /// Tracks workflows currently starting (prevents single_instance races).
     starting_workflows: Arc<Mutex<HashSet<(String, String)>>>, // (tenant_id, workflow_id)
+    /// Per-tenant `maxConcurrentExecutions` intake gate. `None` when
+    /// Valkey is not configured — in that case the cap is not enforced
+    /// (same posture as the trigger stream itself).
+    /// See `crate::valkey::concurrent_executions` and SYN-433 Finding 1.
+    concurrent_execution_gate:
+        Option<crate::valkey::concurrent_executions::ConcurrentExecutionGate>,
 }
 
 impl ExecutionEngine {
@@ -277,6 +290,9 @@ impl ExecutionEngine {
         runtime_client: Option<Arc<RuntimeClient>>,
         trigger_stream: Option<Arc<TriggerStreamPublisher>>,
         running_executions: Option<Arc<DashMap<Uuid, CancellationHandle>>>,
+        concurrent_execution_gate: Option<
+            crate::valkey::concurrent_executions::ConcurrentExecutionGate,
+        >,
     ) -> Self {
         Self {
             pool,
@@ -285,6 +301,7 @@ impl ExecutionEngine {
             trigger_stream,
             running_executions,
             starting_workflows: Arc::new(Mutex::new(HashSet::new())),
+            concurrent_execution_gate,
         }
     }
 
@@ -422,11 +439,51 @@ impl ExecutionEngine {
             ),
         };
 
+        // 7.5. Per-tenant maxConcurrentExecutions gate (SYN-433 Finding 1).
+        //
+        // Composes `effective_limit(infra, tier)` and asks the Valkey-backed
+        // sorted set whether this enqueue would push the tenant past their
+        // cap. The gate fails *open* on Valkey errors — a new gate that
+        // breaks every enqueue during infra hiccups would be worse than
+        // the gate going silent.
+        //
+        // Skipped entirely when the gate is None (Valkey not configured).
+        if let Some(gate) = self.concurrent_execution_gate.as_ref() {
+            let snapshot = crate::config::entitlements();
+            let infra_cap = crate::config::raw_max_concurrent_executions();
+            let cap = crate::middleware::entitlement::effective_limit(
+                infra_cap,
+                snapshot.limits.max_concurrent_executions,
+            );
+            use crate::valkey::concurrent_executions::AcquireOutcome;
+            match gate
+                .try_acquire(req.tenant_id, &instance_id.to_string(), cap)
+                .await
+            {
+                AcquireOutcome::Acquired => {}
+                AcquireOutcome::Denied(denial) => {
+                    denial.audit_log(req.tenant_id);
+                    return Err(ExecutionError::EntitlementDenied(denial));
+                }
+            }
+        }
+
         // 8. Publish to stream
         trigger_stream
             .publish(req.tenant_id, &event)
             .await
             .map_err(|e| {
+                // Roll back the Valkey-side acquire if the downstream publish
+                // failed — otherwise the tenant's counter drifts upward by
+                // one until age-out.
+                if let Some(gate) = self.concurrent_execution_gate.as_ref() {
+                    let gate = gate.clone();
+                    let tenant_id = req.tenant_id.to_string();
+                    let instance_id = instance_id.to_string();
+                    tokio::spawn(async move {
+                        gate.release(&tenant_id, &instance_id).await;
+                    });
+                }
                 ExecutionError::DatabaseError(format!("Failed to publish to trigger stream: {}", e))
             })?;
 

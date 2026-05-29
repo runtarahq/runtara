@@ -393,6 +393,17 @@ pub fn max_concurrent_executions() -> usize {
     )
 }
 
+/// Returns the **raw infra cap** (just the env-derived value), without
+/// composing against the tenant entitlement. Callers that need the
+/// composed cap should use [`max_concurrent_executions`]; callers that
+/// need to do the composition themselves (e.g. the in-flight gate in
+/// `ExecutionEngine::queue`) read this and call `effective_limit` with the
+/// entitlement value, so the source of each side of the `min` is explicit
+/// at the call site.
+pub fn raw_max_concurrent_executions() -> usize {
+    get().max_concurrent_executions
+}
+
 /// Get checkpoint TTL in hours.
 pub fn checkpoint_ttl_hours() -> u64 {
     get().checkpoint_ttl_hours

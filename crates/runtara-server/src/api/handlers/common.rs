@@ -15,8 +15,15 @@ use crate::workers::execution_engine::ExecutionError;
 /// Standard error response for an `ExecutionError`.
 ///
 /// Status comes from `ExecutionError::http_status()`; body follows the
-/// canonical `{success: false, message: <display>, data: null}` shape.
+/// canonical `{success: false, message: <display>, data: null}` shape
+/// **except** for `EntitlementDenied`, which carries the documented
+/// entitlement body (`{error, code, limit, maximum, message}`) so callers
+/// can switch on the stable `code` field (see
+/// `docs/entitlements.md` § Error Model).
 pub fn execution_error_response(err: &ExecutionError) -> (StatusCode, Json<Value>) {
+    if let ExecutionError::EntitlementDenied(denial) = err {
+        return (err.http_status(), Json(denial.json_body()));
+    }
     (
         err.http_status(),
         Json(json!({
@@ -30,15 +37,24 @@ pub fn execution_error_response(err: &ExecutionError) -> (StatusCode, Json<Value
 /// Like `execution_error_response` but merges extra top-level fields
 /// (e.g. `instanceId`) into the body. Used by instance-scoped handlers
 /// (stop / pause / resume) that echo the target id in error responses.
+///
+/// Same `EntitlementDenied` special-case as
+/// [`execution_error_response`]: the entitlement body is used as the base
+/// (so `code` / `limit` / `maximum` survive) and `extra` fields are still
+/// merged on top.
 pub fn execution_error_response_with(
     err: &ExecutionError,
     extra: Value,
 ) -> (StatusCode, Json<Value>) {
-    let mut body = json!({
-        "success": false,
-        "message": format!("{}", err),
-        "data": Value::Null,
-    });
+    let mut body = if let ExecutionError::EntitlementDenied(denial) = err {
+        denial.json_body()
+    } else {
+        json!({
+            "success": false,
+            "message": format!("{}", err),
+            "data": Value::Null,
+        })
+    };
     if let (Some(extra_obj), Some(body_obj)) = (extra.as_object(), body.as_object_mut()) {
         for (k, v) in extra_obj {
             body_obj.insert(k.clone(), v.clone());
@@ -108,5 +124,50 @@ mod tests {
         assert_eq!(body["success"], false);
         assert_eq!(body["data"], Value::Null);
         assert!(body.get("instanceId").is_none());
+    }
+
+    #[test]
+    fn execution_error_response_surfaces_entitlement_denial_body() {
+        // SYN-433 Finding 1: an EntitlementDenied execution error must
+        // produce the documented body shape (code / limit / maximum) so
+        // callers can switch on `code` — not the generic
+        // `{success, message, data}` envelope.
+        use crate::entitlement_error::{EntitlementDenial, codes};
+
+        let denial = EntitlementDenial::LimitExceeded {
+            limit: "maxConcurrentExecutions",
+            maximum: 2,
+        };
+        let err = ExecutionError::EntitlementDenied(denial);
+        let (status, Json(body)) = execution_error_response(&err);
+
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body["code"], codes::ENTITLEMENT_LIMIT_EXCEEDED);
+        assert_eq!(body["limit"], "maxConcurrentExecutions");
+        assert_eq!(body["maximum"], 2);
+        assert!(
+            body.get("data").is_none(),
+            "entitlement bodies don't carry the generic `data` field"
+        );
+    }
+
+    #[test]
+    fn execution_error_response_with_merges_extra_into_entitlement_body() {
+        // The instance-scoped variant must use the entitlement body as the
+        // base AND still merge extra fields like instanceId on top.
+        use crate::entitlement_error::{EntitlementDenial, codes};
+
+        let denial = EntitlementDenial::LimitExceeded {
+            limit: "maxConcurrentExecutions",
+            maximum: 1,
+        };
+        let err = ExecutionError::EntitlementDenied(denial);
+        let (status, Json(body)) =
+            execution_error_response_with(&err, json!({"instanceId": "abc-123"}));
+
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body["code"], codes::ENTITLEMENT_LIMIT_EXCEEDED);
+        assert_eq!(body["instanceId"], "abc-123");
+        assert_eq!(body["maximum"], 1);
     }
 }

@@ -188,6 +188,38 @@ pub fn bulk_size_decision(
     Ok(())
 }
 
+/// Pure decision for the per-tenant in-flight execution cap
+/// (`maxConcurrentExecutions`). The caller passes the **observed in-flight
+/// count** (executions enqueued and not yet terminal); the decision is
+/// `in_flight >= cap → reject` — the next intake would push the tenant
+/// past `cap` simultaneous runs.
+///
+/// `effective_limit(infra, snapshot.limits.max_concurrent_executions)` is
+/// the composed cap. `None` from the entitlement means no tenant-side cap;
+/// the infra value (currently `num_cpus::get() * 32` by default, settable
+/// via `MAX_CONCURRENT_EXECUTIONS`) is still applied as the upper bound.
+///
+/// SYN-433 Finding 1: before this decision, `maxConcurrentExecutions` was
+/// parsed from env and stored in `Config` but **never consulted** by any
+/// code path — setting it had zero observable effect. The wire shape
+/// produced on denial is the documented `ENTITLEMENT_LIMIT_EXCEEDED` body
+/// (same `code` callers already switch on for `maxWorkflows` /
+/// `maxObjectSchemas` / `maxApiKeys`).
+pub fn concurrent_executions_decision(
+    snapshot: &EntitlementSnapshot,
+    in_flight: u64,
+    infra_cap: usize,
+) -> Result<(), EntitlementDenial> {
+    let cap = effective_limit(infra_cap, snapshot.limits.max_concurrent_executions);
+    if in_flight >= cap as u64 {
+        return Err(EntitlementDenial::LimitExceeded {
+            limit: "maxConcurrentExecutions",
+            maximum: cap as u64,
+        });
+    }
+    Ok(())
+}
+
 /// Pure decision for the API-key auth bypass guard.
 ///
 /// Returns `Ok(())` for non-API-key auth methods (JWT, session, unauthenticated
@@ -721,6 +753,126 @@ mod tests {
             Some(r#"{"limits":{"objectModelBulkRequestLimit":1}}"#),
         );
         assert!(bulk_size_decision(&snap, 0).is_ok());
+    }
+
+    // ── concurrent_executions_decision ─────────────────────────────────
+    //
+    // SYN-433 Finding 1: enforce maxConcurrentExecutions at intake. Before
+    // these tests, the cap was never read by any code path.
+    //
+    // Semantics: `in_flight >= cap → reject` (next intake would breach).
+    // Composition: `effective_limit(infra, tier)` is the stricter of the
+    // two; entitlement `None` falls back to infra alone.
+
+    /// Default-config infra cap used in tests. Production uses
+    /// `num_cpus::get() * 32`, but tests need a deterministic value.
+    const TEST_INFRA_CAP: usize = 8;
+
+    #[test]
+    fn concurrent_executions_decision_passes_when_no_cap_set() {
+        // entitlement = None → infra cap alone applies; in_flight below it OK.
+        let snap = snapshot_with(None, None);
+        assert!(
+            concurrent_executions_decision(&snap, 0, TEST_INFRA_CAP).is_ok(),
+            "empty in-flight under default snapshot must pass"
+        );
+        assert!(
+            concurrent_executions_decision(&snap, (TEST_INFRA_CAP as u64) - 1, TEST_INFRA_CAP)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn concurrent_executions_decision_rejects_at_infra_cap_even_without_tier() {
+        // Pure infra-only cap fires at infra_cap. No tier needed.
+        let snap = snapshot_with(None, None);
+        let denial = concurrent_executions_decision(&snap, TEST_INFRA_CAP as u64, TEST_INFRA_CAP)
+            .expect_err("at infra cap must reject");
+        assert_eq!(denial.code(), codes::ENTITLEMENT_LIMIT_EXCEEDED);
+        assert_eq!(denial.json_body()["limit"], "maxConcurrentExecutions");
+        assert_eq!(denial.json_body()["maximum"], TEST_INFRA_CAP as u64);
+    }
+
+    #[test]
+    fn concurrent_executions_decision_uses_stricter_of_infra_and_tier() {
+        // infra=8, tier=2 → effective cap = 2. At 2 in flight, deny.
+        let snap = snapshot_with(None, Some(r#"{"limits":{"maxConcurrentExecutions":2}}"#));
+        assert!(concurrent_executions_decision(&snap, 1, TEST_INFRA_CAP).is_ok());
+        let denial = concurrent_executions_decision(&snap, 2, TEST_INFRA_CAP)
+            .expect_err("tier cap=2 must fire before infra cap=8");
+        assert_eq!(denial.code(), codes::ENTITLEMENT_LIMIT_EXCEEDED);
+        assert_eq!(
+            denial.json_body()["maximum"],
+            2,
+            "denial body must reflect the stricter (tier) cap, not infra"
+        );
+    }
+
+    #[test]
+    fn concurrent_executions_decision_uses_infra_when_tier_is_higher() {
+        // infra=8, tier=100 → effective cap = 8. Tier wider than infra
+        // doesn't raise the cap (entitlement can only narrow, never widen).
+        let snap = snapshot_with(None, Some(r#"{"limits":{"maxConcurrentExecutions":100}}"#));
+        let denial = concurrent_executions_decision(&snap, TEST_INFRA_CAP as u64, TEST_INFRA_CAP)
+            .expect_err("infra cap=8 must fire even though tier=100");
+        assert_eq!(
+            denial.json_body()["maximum"],
+            TEST_INFRA_CAP as u64,
+            "denial body must reflect the stricter (infra) cap"
+        );
+    }
+
+    #[test]
+    fn concurrent_executions_decision_rejects_at_cap_one() {
+        // Production round-1 scenario: tier=1 means one concurrent execution.
+        // First intake (in_flight=0) OK; second (in_flight=1) denied.
+        let snap = snapshot_with(None, Some(r#"{"limits":{"maxConcurrentExecutions":1}}"#));
+        assert!(concurrent_executions_decision(&snap, 0, TEST_INFRA_CAP).is_ok());
+        let denial = concurrent_executions_decision(&snap, 1, TEST_INFRA_CAP)
+            .expect_err("at cap=1 the 2nd execution must deny");
+        assert_eq!(denial.json_body()["maximum"], 1);
+    }
+
+    #[test]
+    fn concurrent_executions_decision_zero_cap_denies_even_first_intake() {
+        // `maxConcurrentExecutions: 0` composes to an effective cap of 0
+        // and must deny the very first intake (in_flight == 0), the same
+        // way `limit_decision` treats `Some(0)` as "fully disabled". The
+        // Valkey gate mirrors this with its own `cap == 0` short-circuit.
+        let snap = snapshot_with(None, Some(r#"{"limits":{"maxConcurrentExecutions":0}}"#));
+        let denial = concurrent_executions_decision(&snap, 0, TEST_INFRA_CAP)
+            .expect_err("zero cap means no executions allowed");
+        assert_eq!(denial.code(), codes::ENTITLEMENT_LIMIT_EXCEEDED);
+        assert_eq!(denial.json_body()["limit"], "maxConcurrentExecutions");
+        assert_eq!(denial.json_body()["maximum"], 0);
+    }
+
+    #[test]
+    fn concurrent_executions_decision_rejects_when_drifted_over_cap() {
+        // Self-healing reconciler may briefly observe in_flight > cap
+        // (race window or zombie entries that haven't aged out yet). Don't
+        // crash; reject normally with the correct cap in the body.
+        let snap = snapshot_with(None, Some(r#"{"limits":{"maxConcurrentExecutions":2}}"#));
+        let denial = concurrent_executions_decision(&snap, 5, TEST_INFRA_CAP)
+            .expect_err("drift must still deny");
+        assert_eq!(denial.json_body()["maximum"], 2);
+    }
+
+    #[tokio::test]
+    async fn concurrent_executions_decision_denial_renders_as_403_with_stable_code() {
+        // Same IntoResponse path as the other limit denials.
+        let snap = snapshot_with(None, Some(r#"{"limits":{"maxConcurrentExecutions":2}}"#));
+        let denial =
+            concurrent_executions_decision(&snap, 2, TEST_INFRA_CAP).expect_err("at cap must deny");
+        let response = denial.into_response();
+        assert_eq!(response.status(), axum::http::StatusCode::FORBIDDEN);
+        let bytes = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .expect("body bytes");
+        let body: serde_json::Value = serde_json::from_slice(&bytes).expect("json body");
+        assert_eq!(body["code"], codes::ENTITLEMENT_LIMIT_EXCEEDED);
+        assert_eq!(body["limit"], "maxConcurrentExecutions");
+        assert_eq!(body["maximum"], 2);
     }
 
     #[tokio::test]

@@ -140,6 +140,8 @@ pub async fn run(
         runtime_client,
         None, // trigger_stream not needed for the trigger worker
         Some(running_executions.clone()),
+        None, // concurrent-execution gate not needed: the worker consumes,
+              // doesn't enqueue (gate fires on intake at queue() callers).
     ));
 
     // Track the start ID for XAUTOCLAIM pagination
