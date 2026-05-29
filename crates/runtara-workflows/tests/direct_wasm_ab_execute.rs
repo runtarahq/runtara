@@ -1340,6 +1340,143 @@ fn direct_wasm_matches_components_cached_durable_split_checkpoint_replay() {
 }
 
 #[test]
+fn direct_wasm_matches_components_pause_resume_after_durable_split_checkpoint() {
+    let Some(components_dir) = direct_ab_components_dir() else {
+        return;
+    };
+    let _data = setup_data_dir();
+
+    let components_artifact =
+        compile_components_artifact("durable-split-pause-resume", SPLIT_FINISH_WITH_SCHEMAS);
+    let direct_artifact = compile_direct_artifact(
+        &components_dir,
+        "durable-split-pause-resume",
+        SPLIT_FINISH_WITH_SCHEMAS,
+    );
+    assert_eq!(
+        direct_artifact.compiler_mode,
+        WorkflowCompilerMode::DirectWasm
+    );
+
+    let workflow_input = br#"{"items":[{"value":"resume-split"}]}"#;
+    let components_input = components_sdk_input(workflow_input);
+    let components_paused = execute_artifact_with_checkpoint_signal(
+        &components_artifact,
+        "ab-components-durable-split-pause",
+        &components_input,
+        "pause",
+    );
+    let direct_paused = execute_artifact_with_checkpoint_signal(
+        &direct_artifact.path,
+        "ab-direct-durable-split-pause",
+        workflow_input,
+        "pause",
+    );
+
+    assert!(
+        components_paused.status_success,
+        "components artifact did not suspend cleanly:\n{}",
+        components_paused.stderr
+    );
+    assert!(
+        direct_paused.status_success,
+        "direct artifact did not suspend cleanly:\n{}",
+        direct_paused.stderr
+    );
+    assert!(
+        components_paused.output_json.is_none(),
+        "components artifact unexpectedly completed while paused"
+    );
+    assert!(
+        direct_paused.output_json.is_none(),
+        "direct artifact unexpectedly completed while paused"
+    );
+    assert!(
+        components_paused.error_json.is_none(),
+        "components artifact unexpectedly failed while paused: {:?}",
+        components_paused.error_json
+    );
+    assert!(
+        direct_paused.error_json.is_none(),
+        "direct artifact unexpectedly failed while paused: {:?}",
+        direct_paused.error_json
+    );
+
+    let components_checkpoint_traffic = normalized_checkpoints(&components_paused.checkpoints);
+    let direct_checkpoint_traffic = normalized_checkpoints(&direct_paused.checkpoints);
+    assert_eq!(components_checkpoint_traffic, direct_checkpoint_traffic);
+    assert_eq!(components_checkpoint_traffic.len(), 2);
+    assert_eq!(
+        components_checkpoint_traffic[0],
+        (SPLIT_CACHE_KEY.to_string(), Vec::new())
+    );
+    assert_eq!(
+        components_checkpoint_traffic[1].0,
+        SPLIT_CACHE_KEY.to_string()
+    );
+    assert!(
+        !components_checkpoint_traffic[1].1.is_empty(),
+        "paused Split run did not save checkpoint state"
+    );
+    assert_eq!(components_paused.suspended_count, 1);
+    assert_eq!(direct_paused.suspended_count, 1);
+    let expected_pause_ack = vec![SignalAckRequest {
+        signal_type: "pause".to_string(),
+    }];
+    assert_eq!(components_paused.signal_acks, expected_pause_ack);
+    assert_eq!(
+        direct_paused.signal_acks,
+        vec![SignalAckRequest {
+            signal_type: "pause".to_string(),
+        }]
+    );
+
+    let saved_split_result = components_checkpoint_traffic[1].1.clone();
+    let components_resumed = execute_artifact_with_preloaded_checkpoints(
+        &components_artifact,
+        "ab-components-durable-split-resume",
+        &components_input,
+        vec![(SPLIT_CACHE_KEY.to_string(), saved_split_result.clone())],
+    );
+    let direct_resumed = execute_artifact_with_preloaded_checkpoints(
+        &direct_artifact.path,
+        "ab-direct-durable-split-resume",
+        workflow_input,
+        vec![(SPLIT_CACHE_KEY.to_string(), saved_split_result)],
+    );
+
+    assert_success_parity(
+        "durable-split-pause-resume",
+        0,
+        &components_resumed,
+        &direct_resumed,
+    );
+
+    let expected_output = serde_json::json!({
+        "results": [{ "value": "resume-split", "index": 0, "indices": [0] }]
+    });
+    assert_eq!(
+        components_resumed.output_json.as_ref(),
+        Some(&expected_output)
+    );
+    assert_eq!(direct_resumed.output_json.as_ref(), Some(&expected_output));
+
+    let expected_lookup = vec![(SPLIT_CACHE_KEY.to_string(), Vec::new())];
+    assert_eq!(
+        normalized_checkpoints(&components_resumed.checkpoints),
+        expected_lookup
+    );
+    assert_eq!(
+        normalized_checkpoints(&direct_resumed.checkpoints),
+        expected_lookup
+    );
+    assert_eq!(components_resumed.suspended_count, 0);
+    assert_eq!(direct_resumed.suspended_count, 0);
+    assert!(components_resumed.signal_acks.is_empty());
+    assert!(direct_resumed.signal_acks.is_empty());
+}
+
+#[test]
 fn direct_wasm_matches_components_failure_for_error_fixture() {
     let Some(components_dir) = direct_ab_components_dir() else {
         return;
