@@ -29,6 +29,7 @@ fn fixture(name: &str) -> ExecutionGraph {
         "error" => include_str!("../../../tests/fixtures/error_direct_simple.json"),
         "edge_condition" => include_str!("../../../tests/fixtures/edge_condition_priority.json"),
         "split" => include_str!("../../../tests/fixtures/split_workflow.json"),
+        "split_timeout" => include_str!("../../../tests/fixtures/split_timeout.json"),
         "split_with_error" => include_str!("../../../tests/fixtures/split_with_error.json"),
         "split_with_schemas" => include_str!("../../../tests/fixtures/split_with_schemas.json"),
         "split_with_schemas_failing" => {
@@ -1948,6 +1949,39 @@ fn direct_compile_supports_simple_while_graph() {
             .expect("manifest json");
     assert_eq!(manifest.graph.whiles.len(), 1);
     assert_eq!(manifest.graph.whiles[0].step_id, "loop");
+}
+
+#[test]
+fn direct_compile_supports_split_timeout_graph() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let result = compile_direct_workflow(DirectCompilationInput {
+        workflow_id: "split-timeout".to_string(),
+        version: 1,
+        source_checksum: None,
+        execution_graph: fixture("split_timeout"),
+        child_workflows: vec![],
+        output_dir: temp.path().to_path_buf(),
+        track_events: false,
+        agent_catalog: None,
+    })
+    .expect("direct Split timeout compile should succeed");
+
+    let wasm = fs::read(&result.wasm_path).expect("wasm");
+    Validator::new()
+        .validate_all(&wasm)
+        .expect("direct Split timeout artifact should validate");
+    assert!(
+        result.support_report.supported,
+        "{:?}",
+        result.support_report.unsupported
+    );
+    assert_eq!(result.support_report.unsupported, vec![]);
+
+    let manifest: DirectWorkflowManifest =
+        serde_json::from_slice(&fs::read(&result.manifest_path).expect("manifest"))
+            .expect("manifest json");
+    assert_eq!(manifest.graph.splits.len(), 1);
+    assert_eq!(manifest.graph.splits[0].value["timeout"], 10);
 }
 
 #[test]

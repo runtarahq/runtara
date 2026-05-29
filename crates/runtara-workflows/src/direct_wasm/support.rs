@@ -636,9 +636,11 @@ fn supports_embed_workflow_child_graph_baseline(
         })
 }
 
-fn supports_split_step_baseline(step: &SplitStep) -> bool {
-    let config = step.config.as_ref();
-    config.is_none_or(|config| config.timeout.is_none())
+fn supports_split_step_baseline(_step: &SplitStep) -> bool {
+    // Split timeout is now enforced by the direct emitter (and retry/dontStopOnFailed
+    // are supported), so there is no remaining Split-specific baseline restriction.
+    // Kept as an extension point for future Split config gating.
+    true
 }
 
 fn supports_while_step_baseline(_step: &WhileStep) -> bool {
@@ -1191,26 +1193,11 @@ fn collect_delay_step_unsupported(
 }
 
 fn collect_split_step_unsupported(
-    step: &SplitStep,
-    unsupported: &mut Vec<UnsupportedWorkflowFeature>,
+    _step: &SplitStep,
+    _unsupported: &mut Vec<UnsupportedWorkflowFeature>,
 ) {
-    let mut push = |feature: &str, reason: &str| {
-        unsupported.push(UnsupportedWorkflowFeature {
-            step_id: Some(step.id.clone()),
-            step_type: Some("Split".to_string()),
-            feature: feature.to_string(),
-            reason: reason.to_string(),
-        });
-    };
-
-    if let Some(config) = step.config.as_ref()
-        && config.timeout.is_some()
-    {
-        push(
-            "split-timeout",
-            "Split timeout requires direct timeout enforcement",
-        );
-    }
+    // Split timeout is enforced now, so there are no Split-specific unsupported
+    // features to report.
 }
 
 fn collect_while_step_unsupported(
@@ -1295,6 +1282,7 @@ mod tests {
             "error" => include_str!("../../tests/fixtures/error_direct_simple.json"),
             "edge_condition" => include_str!("../../tests/fixtures/edge_condition_priority.json"),
             "split" => include_str!("../../tests/fixtures/split_workflow.json"),
+            "split_timeout" => include_str!("../../tests/fixtures/split_timeout.json"),
             "split_with_error" => include_str!("../../tests/fixtures/split_with_error.json"),
             "split_with_schemas" => include_str!("../../tests/fixtures/split_with_schemas.json"),
             "split_with_schemas_failing" => {
@@ -2167,7 +2155,7 @@ mod tests {
     }
 
     #[test]
-    fn split_retry_is_supported_and_timeout_is_rejected() {
+    fn split_retry_and_timeout_are_supported() {
         let mut graph = fixture("split");
         graph.durable = Some(false);
         let Some(Step::Split(split)) = graph.steps.get_mut("split") else {
@@ -2182,23 +2170,8 @@ mod tests {
 
         let report = analyze_direct_wasm_support(&graph);
 
-        assert!(!report.supported);
-        assert!(
-            !report
-                .unsupported
-                .iter()
-                .any(|unsupported| unsupported.feature == "split-retry"),
-            "{:?}",
-            report.unsupported
-        );
-        assert!(
-            report.unsupported.iter().any(|unsupported| {
-                unsupported.step_id.as_deref() == Some("split")
-                    && unsupported.feature == "split-timeout"
-            }),
-            "{:?}",
-            report.unsupported
-        );
+        assert!(report.supported, "{:?}", report.unsupported);
+        assert!(report.unsupported.is_empty());
     }
 
     #[test]

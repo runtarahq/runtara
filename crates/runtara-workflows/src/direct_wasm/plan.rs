@@ -54,6 +54,7 @@ pub(super) enum DirectRunPlan {
         dont_stop_on_failed: bool,
         nested_plan: Box<DirectRunPlan>,
         next_plan: Box<DirectRunPlan>,
+        timeout_ms: Option<u64>,
     },
     While {
         step_id: String,
@@ -383,6 +384,7 @@ fn step_run_plan_inner(
                 dont_stop_on_failed,
                 nested_plan: Box::new(nested_plan),
                 next_plan: Box::new(next_plan),
+                timeout_ms: split_timeout_ms(graph, step_id)?,
             })
         }
         "While" => {
@@ -927,6 +929,19 @@ fn split_dont_stop_on_failed(
         .get("dontStopOnFailed")
         .and_then(serde_json::Value::as_bool)
         .unwrap_or(false))
+}
+
+/// Resolve a `Split` step's configured timeout in milliseconds, if any. A zero or
+/// absent timeout is treated as "no timeout", matching the degenerate config and
+/// the generated Rust path that does not enforce the field.
+fn split_timeout_ms(
+    graph: &DirectGraphManifest,
+    step_id: &str,
+) -> Result<Option<u64>, DirectCompileError> {
+    Ok(split_config(graph, step_id)?
+        .get("timeout")
+        .and_then(serde_json::Value::as_u64)
+        .filter(|ms| *ms > 0))
 }
 
 fn split_subgraph<'a>(

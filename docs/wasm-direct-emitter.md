@@ -651,11 +651,22 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   retry/backoff control flow, uses blocking sleeps for normal backoff, durable
   sleep checkpoints for `retryAfterMs` rate-limit waits, records retry attempts
   after retry sleeps, and preserves retry locals in the reentrant Split frame so
-  nested bodies cannot corrupt an outer retry attempt. Split timeout remains
-  gated because the generated Rust Split path currently parses the field but
-  does not enforce a deadline. Structural coverage pins retry helper lowering,
-  support coverage removes the previous `split-retry` gate, and gated A/B
-  coverage checks transient Split retry exhaustion and retry-attempt parity.
+  nested bodies cannot corrupt an outer retry attempt. Structural coverage pins
+  retry helper lowering, support coverage removes the previous `split-retry`
+  gate, and gated A/B coverage checks transient Split retry exhaustion and
+  retry-attempt parity.
+- Split `timeout` is now enforced, applying the While-timeout precedent. The
+  deadline is resolved once before the retry/item loop (so it spans all
+  attempts), saved in the Split frame so nested splits cannot clobber it, and
+  checked before each item. On expiry the Split is a *hard* failure: it fails the
+  workflow with the static `SPLIT_TIMEOUT` payload via `runtime.fail`, which is
+  depth-independent and therefore correct under retry, durable replay, and
+  `dontStopOnFailed` aggregation alike — a timeout is deliberately not aggregated
+  or retried. As with While there is no enforcing generated-Rust baseline, so
+  coverage is direct-only: `direct_compile_supports_split_timeout_graph`,
+  `split_retry_and_timeout_are_supported`, and gated execution test
+  `direct_wasm_execute_split_timeout_fails_with_timeout_error`. Fixture:
+  `crates/runtara-workflows/tests/fixtures/split_timeout.json`.
 - While `onError` routing is now supported. Direct mode runs the loop inside a
   capture block whose failures branch to shared step-error locals, restores the
   parent steps context, and routes the captured error through the same
@@ -699,11 +710,6 @@ Current remaining action items:
   behavior or direct mode intentionally becomes the first implementation. The
   current Rust `EmbedWorkflow` codegen appears to parse the field without
   enforcing a deadline.
-- Apply the While-timeout precedent to `Split.timeout`: a loop-based deadline
-  enforced between items. Unlike While, Split timeout must route as a *hard*
-  failure past the retry loop and any `dontStopOnFailed` per-item aggregation to
-  the Split's outer failure target, so the branch-depth math needs care and
-  dedicated retry+timeout and dontStopOnFailed+timeout coverage before enabling.
 - `Agent`/`EmbedWorkflow` timeout is not cleanly enforceable in the synchronous
   direct model (a running `capabilities.invoke` / inline child run cannot be
   preempted mid-call), so leaving it gated is defensible rather than a defect to
@@ -791,9 +797,10 @@ Deep nesting invariants for future work:
 
 Recommended next implementation slices:
 
-1. Decide whether Split and EmbedWorkflow timeout should follow the While
-   timeout precedent (direct mode enforcing the documented deadline that
-   generated Rust parses but ignores) or stay gated.
+1. `EmbedWorkflow`/`Agent` timeout is the last of the family. Unlike While/Split
+   it is not cleanly enforceable synchronously (a child run / `capabilities.invoke`
+   cannot be preempted mid-call), so leave it gated unless an async/cancellable
+   invoke path lands.
 2. Continue Agent hardening after loop durability is stable: timeout,
    compensation policy, retry/failure differential tests, and long-running
    cancellation coverage.
@@ -2352,8 +2359,9 @@ Implementation steps:
    - Split retry/backoff: done for generated-compatible transient and
      rate-limit retry decisions, retry sleeps, retry-attempt recording, and
      final-result checkpoint preservation;
-   - Split timeout durability semantics: pending and gated because generated
-     Rust currently does not enforce `SplitConfig.timeout`.
+   - Split timeout: enforced via a frame-saved deadline checked before each item,
+     failing hard with `SPLIT_TIMEOUT` on expiry (direct-only, since generated
+     Rust does not enforce `SplitConfig.timeout`).
 7. Add crash/resume tests:
    - resume after checkpoint: structural core replay test, gated host-level
      cached Agent replay smoke, durable Agent checkpoint-returned pause/shutdown
@@ -2404,8 +2412,8 @@ Implementation steps:
      and reinserts cached/fresh results into the `steps` context through the
      shared stdlib.
    - public support gate: enabled for sequential Split with final-result
-     checkpoint/replay, durable breakpoint pause/resume, and Split
-     retry/backoff; Split timeout behavior remains gated.
+     checkpoint/replay, durable breakpoint pause/resume, Split retry/backoff,
+     and Split timeout enforcement.
    - strict A/B execution coverage: done for a durable schema-validating
      sequential Split fixture, including fresh and cached checkpoint replay
      plus checkpoint-returned pause and cached resume, and for Split
@@ -2429,7 +2437,8 @@ Implementation steps:
    - durable Split breakpoint semantics: done;
    - Split retry/backoff semantics: done, including reentrant retry-frame
      preservation for deeply nested bodies;
-   - Split timeout semantics: pending and gated.
+   - Split timeout semantics: done via a frame-saved deadline checked before each
+     item and a hard `SPLIT_TIMEOUT` failure on expiry (direct-only).
 3. Implement `While`:
    - config/condition manifest records and nested graph link: done;
    - max iterations: stdlib helper, WIT export, and internal direct-core

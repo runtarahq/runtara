@@ -37,6 +37,7 @@ const ERROR_DIRECT_SIMPLE: &str = include_str!("fixtures/error_direct_simple.jso
 const EDGE_CONDITION_PRIORITY: &str = include_str!("fixtures/edge_condition_priority.json");
 const WHILE_DIRECT_INDEX_ONLY: &str = include_str!("fixtures/while_direct_index_only.json");
 const WHILE_TIMEOUT: &str = include_str!("fixtures/while_timeout.json");
+const SPLIT_TIMEOUT: &str = include_str!("fixtures/split_timeout.json");
 const AGENT_CACHED_REPLAY: &str = r#"{
   "durable": true,
   "steps": {
@@ -1052,6 +1053,33 @@ fn direct_wasm_execute_while_timeout_fails_with_timeout_error() {
         serde_json::json!({
             "code": "WHILE_TIMEOUT",
             "message": "While step exceeded its configured timeout",
+            "category": "timeout",
+            "severity": "error"
+        })
+    );
+}
+
+#[test]
+fn direct_wasm_execute_split_timeout_fails_with_timeout_error() {
+    let Some(components_dir) = direct_e2e_components_dir() else {
+        return;
+    };
+
+    // The 50ms per-item body delay drives the sequential Split past its 10ms
+    // timeout, so the Split fails hard with the static SPLIT_TIMEOUT payload
+    // before processing all items.
+    let result = run_direct_workflow_expect_failure(
+        &components_dir,
+        "direct-wasm-execute-split-timeout",
+        SPLIT_TIMEOUT,
+        br#"{"items":[{"v":1},{"v":2},{"v":3}]}"#,
+    );
+
+    assert_eq!(
+        result.error_json,
+        serde_json::json!({
+            "code": "SPLIT_TIMEOUT",
+            "message": "Split step exceeded its configured timeout",
             "category": "timeout",
             "severity": "error"
         })

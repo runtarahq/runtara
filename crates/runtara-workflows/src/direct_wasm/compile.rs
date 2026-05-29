@@ -243,6 +243,10 @@ const DIRECT_WHILE_PARENT_STEPS_LEN_LOCAL: u32 = 79;
 /// i64 local, saved/restored with the While frame so nested loops do not clobber
 /// an outer loop's deadline.
 const DIRECT_WHILE_DEADLINE_MS_LOCAL: u32 = 80;
+/// Wall-clock deadline (ms since epoch) for an active `Split` step timeout.
+/// i64 local, saved/restored with the Split frame so nested splits do not clobber
+/// an outer split's deadline.
+const DIRECT_SPLIT_DEADLINE_MS_LOCAL: u32 = 81;
 
 /// Input for the opt-in direct compiler.
 #[derive(Debug, Clone)]

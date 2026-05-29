@@ -271,6 +271,7 @@ pub(super) fn emit_run_plan_mapping(
             dont_stop_on_failed,
             nested_plan,
             next_plan,
+            timeout_ms,
         } => {
             emit_split_plan(
                 body,
@@ -287,6 +288,7 @@ pub(super) fn emit_run_plan_mapping(
                 *dont_stop_on_failed,
                 nested_plan,
                 next_plan,
+                *timeout_ms,
                 data_ptr_local,
                 data_len_local,
                 steps_ptr_local,
