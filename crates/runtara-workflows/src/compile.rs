@@ -302,6 +302,7 @@ pub fn compile_workflow_direct(
         version,
         source_checksum: options.source_checksum,
         execution_graph,
+        child_workflows,
         output_dir: options.output_dir,
         track_events,
         agent_catalog,

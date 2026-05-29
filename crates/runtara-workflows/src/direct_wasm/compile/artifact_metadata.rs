@@ -5,6 +5,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use super::super::child_workflows::DirectChildWorkflowDependencyMetadata;
 use super::super::component::{
     DirectAgentComponentRequirement, DirectComponentArtifacts, DirectSharedComponentRequirement,
 };
@@ -45,6 +46,10 @@ pub struct DirectArtifactMetadata {
     pub shared_components: Vec<DirectComponentDependencyMetadata>,
     /// Agent components required for static composition.
     pub agent_components: Vec<DirectComponentDependencyMetadata>,
+    /// Preloaded child workflows that will be statically inlined by the direct
+    /// emitter once `EmbedWorkflow` lowering is enabled.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub child_workflows: Vec<DirectChildWorkflowDependencyMetadata>,
 }
 
 /// File identity captured in direct artifact metadata.
@@ -134,6 +139,7 @@ pub(super) struct InitialArtifactMetadataInput<'a> {
     pub(super) workflow_logic_checksum: &'a str,
     pub(super) workflow_logic_size: usize,
     pub(super) component_artifacts: &'a DirectComponentArtifacts,
+    pub(super) child_workflows: &'a [DirectChildWorkflowDependencyMetadata],
 }
 
 pub(super) fn initial_artifact_metadata(
@@ -168,6 +174,7 @@ pub(super) fn initial_artifact_metadata(
             .iter()
             .map(unresolved_agent_component_metadata)
             .collect(),
+        child_workflows: input.child_workflows.to_vec(),
     }
 }
 

@@ -1969,7 +1969,8 @@ mod tests {
         };
 
         DirectArtifactMetadata {
-            schema_version: 1,
+            schema_version:
+                runtara_workflows::direct_wasm::DIRECT_WORKFLOW_ARTIFACT_METADATA_VERSION,
             artifact_kind: "direct-workflow-component".to_string(),
             workflow_id: "workflow-a".to_string(),
             workflow_version: 7,
@@ -2001,6 +2002,7 @@ mod tests {
                 meta_filename: "runtara_agent_transform.meta.json".to_string(),
                 meta: None,
             }],
+            child_workflows: vec![],
         }
     }
 

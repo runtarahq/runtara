@@ -42,6 +42,8 @@ use wasm_encoder::{CustomSection, Encode, Function as WasmFunction, Instruction,
 use wit_component::{ComponentEncoder, StringEncoding, embed_component_metadata};
 use wit_parser::{Resolve, WorldId};
 
+pub use super::child_workflows::DirectChildWorkflowDependencyMetadata;
+use super::child_workflows::resolve_direct_child_workflow_metadata;
 use abi::push_retptr_arg;
 pub use artifact_metadata::{
     DirectArtifactFileMetadata, DirectArtifactMetadata, DirectComponentDependencyMetadata,
@@ -86,7 +88,7 @@ pub const DIRECT_WORKFLOW_SUPPORT_SECTION: &str = "runtara.direct_workflow.suppo
 /// Custom section containing direct artifact ABI metadata JSON.
 pub const DIRECT_WORKFLOW_ABI_SECTION: &str = "runtara.direct_workflow.abi";
 /// Version for `artifact-metadata.json` emitted beside direct artifacts.
-pub const DIRECT_WORKFLOW_ARTIFACT_METADATA_VERSION: u32 = 1;
+pub const DIRECT_WORKFLOW_ARTIFACT_METADATA_VERSION: u32 = 2;
 /// Sidecar filename containing direct artifact dependency/provenance metadata.
 pub const DIRECT_WORKFLOW_ARTIFACT_METADATA_FILENAME: &str = "artifact-metadata.json";
 
@@ -202,6 +204,11 @@ pub struct DirectCompilationInput {
     pub source_checksum: Option<String>,
     /// Parsed workflow execution graph.
     pub execution_graph: ExecutionGraph,
+    /// Pre-loaded child workflows used by future static `EmbedWorkflow`
+    /// lowering. Direct mode keeps this closure explicit so child graphs can be
+    /// inlined into the emitted workflow-logic component instead of linked
+    /// dynamically at runtime.
+    pub child_workflows: Vec<crate::compile::ChildWorkflowInput>,
     /// Directory where the direct artifact directory should be created.
     pub output_dir: PathBuf,
     /// Whether to emit generated-code-compatible step debug events.
@@ -393,6 +400,8 @@ pub fn compile_direct_workflow(
             report: Box::new(support_report),
         });
     }
+    let child_workflow_metadata =
+        resolve_direct_child_workflow_metadata(&manifest, &input.child_workflows)?;
 
     let manifest_json = manifest.to_canonical_json()?;
     let support_json = serde_json::to_vec(&support_report)?;
@@ -430,6 +439,7 @@ pub fn compile_direct_workflow(
         workflow_logic_checksum: &wasm_checksum,
         workflow_logic_size: wasm.len(),
         component_artifacts: &component_artifacts,
+        child_workflows: &child_workflow_metadata,
     });
 
     fs::write(&wasm_path, &wasm)?;

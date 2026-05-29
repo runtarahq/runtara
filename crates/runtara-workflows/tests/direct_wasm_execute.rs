@@ -665,6 +665,7 @@ fn run_direct_workflow_capture_with_preloaded_checkpoints(
             version: 1,
             source_checksum: None,
             execution_graph: graph,
+            child_workflows: vec![],
             output_dir: temp.path().to_path_buf(),
             track_events,
             agent_catalog: None,

@@ -6,6 +6,8 @@
 //! be emitted, while this module owns the production migration surface.
 
 #[cfg(feature = "compiler")]
+mod child_workflows;
+#[cfg(feature = "compiler")]
 pub mod compile;
 #[cfg(feature = "compiler")]
 pub mod component;
@@ -23,9 +25,9 @@ pub use compile::{
     DIRECT_WORKFLOW_ABI_SECTION, DIRECT_WORKFLOW_ABI_VERSION,
     DIRECT_WORKFLOW_ARTIFACT_METADATA_FILENAME, DIRECT_WORKFLOW_ARTIFACT_METADATA_VERSION,
     DIRECT_WORKFLOW_MANIFEST_SECTION, DIRECT_WORKFLOW_SUPPORT_SECTION, DirectArtifactFileMetadata,
-    DirectArtifactMetadata, DirectCompilationInput, DirectCompilationResult,
-    DirectComponentDependencyMetadata, DirectComponentSidecarMetadata, compile_direct_workflow,
-    compile_direct_workflow_composed, compose_direct_workflow,
+    DirectArtifactMetadata, DirectChildWorkflowDependencyMetadata, DirectCompilationInput,
+    DirectCompilationResult, DirectComponentDependencyMetadata, DirectComponentSidecarMetadata,
+    compile_direct_workflow, compile_direct_workflow_composed, compose_direct_workflow,
 };
 #[cfg(feature = "compiler")]
 pub use component::{

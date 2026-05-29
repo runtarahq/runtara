@@ -187,7 +187,11 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   so step-family lowering now goes through a dedicated dispatcher boundary.
   Direct artifact dependency/provenance sidecar structs, initial metadata
   construction, static component dependency resolution, and sidecar validation
-  moved into `direct_wasm::compile::artifact_metadata`. Direct core module
+  moved into `direct_wasm::compile::artifact_metadata`. Static child-workflow
+  closure metadata moved into `direct_wasm::child_workflows`; direct artifact
+  metadata schema v2 now has a `childWorkflows` section ready for inline
+  `EmbedWorkflow` lowering, including call-site id, requested/resolved version,
+  child direct-manifest checksum, and child feature summary. Direct core module
   assembly, realloc/initialize shims, and direct run-entry assembly moved into
   `direct_wasm::compile::core_module`. Direct core WIT import indexing,
   required-import validation, agent invoke import metadata, and import/export
@@ -203,8 +207,9 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   components with the exact agent id and expected bundle path.
 - Direct compilation now writes `artifact-metadata.json`. Before composition it
   records workflow id/version, optional raw-source checksum, direct ABI version,
-  manifest/support checksums, template major, workflow-logic checksum, and
-  required stdlib/runtime/agent packages. After composition it records the final
+  manifest/support checksums, template major, workflow-logic checksum, static
+  child workflow closure metadata when present, and required
+  stdlib/runtime/agent packages. After composition it records the final
   `workflow.wasm` checksum plus resolved stdlib/runtime/agent component
   checksums and validates any present component `.meta.json` sidecar against
   the actual Wasm bytes before invoking `wac`.
@@ -980,13 +985,15 @@ Required parity:
 
 Implement `EmbedWorkflow` after checkpoint/cache-prefix behavior is shared.
 
-Options:
+Decision:
 
-1. Inline child graphs into the same directly emitted component.
-2. Treat child workflows as separately composed workflow components.
-
-Initial recommendation: inline preloaded child graphs, matching current compile
-behavior, then revisit separately linked child workflows later.
+1. Inline preloaded child graphs into the same directly emitted
+   workflow-logic component.
+2. Keep the final workflow artifact statically composed. Do not introduce
+   runtime dynamic linking for child workflows.
+3. Defer separately composed child workflow components unless there is a later
+   measured build/reuse need that still preserves a single statically composed
+   runtime artifact.
 
 Required parity:
 
@@ -2127,7 +2134,10 @@ Goal: support embedded child workflows with correct isolation and durability.
 Implementation steps:
 
 1. Inline preloaded child graphs into the direct component, matching current
-   compiler behavior.
+   compiler behavior: input plumbing and static child closure metadata are
+   done. `DirectCompilationInput` now carries preloaded children from
+   `compile_workflow_direct`, and `artifact-metadata.json` schema v2 records
+   deterministic child graph metadata once `EmbedWorkflow` lowering is enabled.
 2. Generate separate child graph functions or state-machine regions.
 3. Preserve:
    - child input validation;
@@ -2152,10 +2162,10 @@ Rollback:
 
 Long-term choice:
 
-- Prefer inlining child graphs into the same workflow-logic component unless
-  static composition of child workflow components gives a clear build or reuse
-  benefit.
-- Do not introduce runtime child-workflow dynamic linking.
+- Inline child graphs into the same workflow-logic component for the migration
+  path, matching generated Rust semantics and avoiding another component ABI.
+- Preserve one final statically composed `workflow.wasm`; dynamic child-workflow
+  linking is out of scope.
 
 ### Phase 11: WaitForSignal
 
