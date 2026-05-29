@@ -25,6 +25,7 @@ const CONDITIONAL_WORKFLOW: &str = include_str!("fixtures/conditional_workflow.j
 const FILTER_SIMPLE: &str = include_str!("fixtures/filter_simple.json");
 const SWITCH_VALUE_SIMPLE: &str = include_str!("fixtures/switch_value_simple.json");
 const GROUP_BY_SIMPLE: &str = include_str!("fixtures/group_by_simple.json");
+const EDGE_CONDITION_PRIORITY: &str = include_str!("fixtures/edge_condition_priority.json");
 
 #[derive(Debug)]
 struct Completed {
@@ -567,6 +568,15 @@ fn direct_wasm_matches_components_execution_for_supported_json_fixtures() {
             name: "group-by",
             graph_json: GROUP_BY_SIMPLE,
             inputs: &[br#"{"items":[{"id":1,"status":"active"},{"id":2,"status":"inactive"},{"id":3,"status":"active"}]}"#],
+        },
+        AbCase {
+            name: "edge-condition",
+            graph_json: EDGE_CONDITION_PRIORITY,
+            inputs: &[
+                br#"{"status":"active","tier":"vip"}"#,
+                br#"{"status":"active","tier":"basic"}"#,
+                br#"{"status":"inactive","tier":"basic"}"#,
+            ],
         },
     ];
 

@@ -780,9 +780,11 @@ pub fn build_execution_order(graph: &ExecutionGraph) -> Vec<String> {
             None => continue,
         };
 
-        // Stop at branching steps (Conditional, routing Switch) - branches are
-        // handled by the step emitter itself.
-        if branching::is_branching_step(step) {
+        // Stop at branching steps (Conditional, routing Switch, or a normal
+        // step with conditioned normal-flow edges) - branches are handled by
+        // the step emitter itself.
+        if branching::is_branching_step(step) || has_conditioned_normal_flow_edges(&step_id, graph)
+        {
             continue;
         }
 
@@ -832,6 +834,10 @@ pub fn build_execution_order(graph: &ExecutionGraph) -> Vec<String> {
             continue;
         }
 
+        if has_conditioned_normal_flow_edges(&step_id, graph) {
+            continue;
+        }
+
         for edge in &graph.execution_plan {
             if edge.from_step != step_id
                 || !is_normal_flow_edge(edge)
@@ -877,6 +883,52 @@ pub fn find_next_step_for_label<'a>(
     None
 }
 
+fn sort_conditioned_edges(edges: &mut Vec<&ExecutionPlanEdge>) {
+    edges.sort_by(|a, b| {
+        let a_has_condition = a.condition.is_some();
+        let b_has_condition = b.condition.is_some();
+
+        match (a_has_condition, b_has_condition) {
+            (true, false) => std::cmp::Ordering::Less,
+            (false, true) => std::cmp::Ordering::Greater,
+            _ => {
+                let a_priority = a.priority.unwrap_or(0);
+                let b_priority = b.priority.unwrap_or(0);
+                b_priority.cmp(&a_priority)
+            }
+        }
+    });
+}
+
+/// Find normal-flow edges for a step when at least one edge has a condition.
+///
+/// Returns edges in evaluation order: conditioned edges first by descending
+/// priority, then the unconditioned default edge if present.
+pub fn find_conditioned_normal_flow_edges<'a>(
+    step_id: &str,
+    execution_plan: &'a [ExecutionPlanEdge],
+) -> Vec<&'a ExecutionPlanEdge> {
+    let mut edges: Vec<_> = execution_plan
+        .iter()
+        .filter(|edge| edge.from_step == step_id && is_normal_flow_edge(edge))
+        .collect();
+
+    if !edges.iter().any(|edge| edge.condition.is_some()) {
+        return Vec::new();
+    }
+
+    sort_conditioned_edges(&mut edges);
+    edges
+}
+
+/// Return true when this step's normal-flow successors must be routed through
+/// generated condition code instead of emitted unconditionally.
+pub fn has_conditioned_normal_flow_edges(step_id: &str, graph: &ExecutionGraph) -> bool {
+    graph.execution_plan.iter().any(|edge| {
+        edge.from_step == step_id && is_normal_flow_edge(edge) && edge.condition.is_some()
+    })
+}
+
 /// Find the onError handler step for a given step.
 ///
 /// For backward compatibility, returns the first onError edge found.
@@ -901,23 +953,7 @@ pub fn find_on_error_edges<'a>(
         .filter(|e| e.from_step == step_id && e.label.as_deref() == Some("onError"))
         .collect();
 
-    // Sort by priority: higher priority first, condition-less edges last
-    edges.sort_by(|a, b| {
-        let a_has_condition = a.condition.is_some();
-        let b_has_condition = b.condition.is_some();
-
-        // Edges with conditions come before edges without
-        match (a_has_condition, b_has_condition) {
-            (true, false) => std::cmp::Ordering::Less,
-            (false, true) => std::cmp::Ordering::Greater,
-            _ => {
-                // Both have or both lack conditions: sort by priority (higher first)
-                let a_priority = a.priority.unwrap_or(0);
-                let b_priority = b.priority.unwrap_or(0);
-                b_priority.cmp(&a_priority)
-            }
-        }
-    });
+    sort_conditioned_edges(&mut edges);
 
     edges
 }
@@ -1384,6 +1420,29 @@ mod tests {
                 "merge",
                 "finish"
             ]
+        );
+    }
+
+    #[test]
+    fn test_conditioned_normal_flow_edges_are_sorted_and_own_successors() {
+        let graph: runtara_dsl::ExecutionGraph = serde_json::from_str(include_str!(
+            "../../../../tests/fixtures/edge_condition_priority.json"
+        ))
+        .expect("fixture parses");
+
+        let edges = find_conditioned_normal_flow_edges("classify", &graph.execution_plan);
+        let targets: Vec<_> = edges.iter().map(|edge| edge.to_step.as_str()).collect();
+        assert_eq!(
+            targets,
+            vec!["finish_vip", "finish_active", "finish_default"]
+        );
+        assert!(has_conditioned_normal_flow_edges("classify", &graph));
+
+        let order = build_execution_order(&graph);
+        assert_eq!(
+            order,
+            vec!["classify"],
+            "conditioned normal-flow successors are emitted by the step routing code"
         );
     }
 

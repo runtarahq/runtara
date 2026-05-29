@@ -1479,9 +1479,15 @@ pub(crate) fn emit_step_execution(
 
     // Check if this step has onError edges
     let on_error_edges = steps::find_on_error_edges(sid, &graph.execution_plan);
+    let normal_flow_edges = steps::find_conditioned_normal_flow_edges(sid, &graph.execution_plan);
 
     // Emit the step-specific code
     let step_code = step.emit(ctx, graph)?;
+    let normal_edge_routing = if normal_flow_edges.is_empty() {
+        quote! {}
+    } else {
+        emit_normal_edge_routing(&normal_flow_edges, graph, ctx)?
+    };
 
     // Steps that cannot have onError handling (they don't fail or handle errors differently)
     let can_have_on_error = matches!(
@@ -1529,6 +1535,8 @@ pub(crate) fn emit_step_execution(
                     // cause infinite retry loops when steps fail inside While loops.
                     return Err(__error.to_string());
                 }
+
+                #normal_edge_routing
             }
         })
     } else {
@@ -1536,8 +1544,101 @@ pub(crate) fn emit_step_execution(
             // Step: #sid (#stype)
             #debug_log
             #step_code
+            #normal_edge_routing
         })
     }
+}
+
+/// Emit code for conditioned normal-flow edges.
+///
+/// This mirrors onError routing, but uses the current source envelope after the
+/// successful step has updated `steps_context`. The first matching conditioned
+/// edge wins; an unconditioned edge is the default branch.
+fn emit_normal_edge_routing(
+    edges: &[&runtara_dsl::ExecutionPlanEdge],
+    graph: &ExecutionGraph,
+    ctx: &mut EmitContext,
+) -> Result<TokenStream, CodegenError> {
+    if edges.is_empty() {
+        return Ok(quote! {});
+    }
+
+    let mut conditional_edges: Vec<&runtara_dsl::ExecutionPlanEdge> = Vec::new();
+    let mut default_edge: Option<&runtara_dsl::ExecutionPlanEdge> = None;
+
+    for edge in edges {
+        if edge.condition.is_some() {
+            conditional_edges.push(*edge);
+        } else if default_edge.is_none() {
+            default_edge = Some(*edge);
+        }
+    }
+
+    if conditional_edges.is_empty() {
+        if let Some(edge) = default_edge
+            && graph.steps.contains_key(&edge.to_step)
+        {
+            let branch_code = steps::branching::emit_branch_code(&edge.to_step, graph, ctx, None)?;
+            return Ok(quote! {
+                #branch_code
+            });
+        }
+        return Ok(quote! {});
+    }
+
+    let source_var = ctx.temp_var("normal_edge_source");
+    let build_source = mapping::emit_build_source(ctx);
+    let mut branches: Vec<TokenStream> = Vec::new();
+
+    for (index, edge) in conditional_edges.iter().enumerate() {
+        let condition = edge.condition.as_ref().unwrap();
+        let condition_code = emit_condition_expression(condition, ctx, &source_var);
+        let branch_code = if graph.steps.contains_key(&edge.to_step) {
+            steps::branching::emit_branch_code(&edge.to_step, graph, ctx, None)?
+        } else {
+            quote! {}
+        };
+
+        if index == 0 {
+            branches.push(quote! {
+                if #condition_code {
+                    #branch_code
+                }
+            });
+        } else {
+            branches.push(quote! {
+                else if #condition_code {
+                    #branch_code
+                }
+            });
+        }
+    }
+
+    let default_branch = if let Some(edge) = default_edge {
+        if graph.steps.contains_key(&edge.to_step) {
+            let branch_code = steps::branching::emit_branch_code(&edge.to_step, graph, ctx, None)?;
+            quote! {
+                else {
+                    #branch_code
+                }
+            }
+        } else {
+            quote! {
+                else {}
+            }
+        }
+    } else {
+        quote! {
+            else {}
+        }
+    };
+
+    Ok(quote! {
+        let #source_var = #build_source;
+
+        #(#branches)*
+        #default_branch
+    })
 }
 
 /// Emit code for an error handling branch.

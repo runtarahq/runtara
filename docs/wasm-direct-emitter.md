@@ -167,7 +167,8 @@ Current implementation progress on `codex/wasm-direct-emitter`:
 - `tests/direct_wasm_ab_execute.rs` now provides the first strict direct-vs-Rust
   artifact execution harness. With `RUNTARA_RUN_DIRECT_WASM_E2E=1`, it compiles
   representative `Finish`, `Conditional`, `Filter`, value `Switch`, and
-  `GroupBy` fixtures through both `compile_workflow` and
+  `GroupBy` fixtures plus normal-edge condition-priority/default routing
+  through both `compile_workflow` and
   `compile_workflow_direct`, runs both final `workflow.wasm` artifacts under
   Wasmtime with the same logical workflow input through each runtime's SDK
   input envelope, and diffs the captured `/completed` payloads.
@@ -2008,10 +2009,14 @@ Current status:
   gated direct A/B and direct WASM execution smoke suites against the same
   staged stdlib/runtime/agent components. This gives CI compile/execute
   coverage for the enabled direct subset and a strict output-diff harness for
-  representative agentless fixtures. Expanding the A/B harness to durable,
-  agent, event, failure, and normal-edge-priority fixtures remains pending; the
-  normal-edge priority case currently exposes a Rust/components behavior gap
-  where generated code follows execution-plan order instead of priority order.
+  representative agentless fixtures.
+- Generated Rust/components code now routes conditioned normal-flow edges in
+  descending priority order with the unconditioned edge as the default branch,
+  matching the direct emitter and the validation contract. This fixed the A/B
+  mismatch where Rust previously followed execution-plan order and could pick a
+  lower-priority branch first.
+- Expanding the A/B harness to durable, agent, event, and failure fixtures
+  remains pending.
 
 ### Phase 14: Controlled Production Enablement
 

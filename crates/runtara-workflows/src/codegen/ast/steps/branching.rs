@@ -191,9 +191,13 @@ pub fn collect_branch_steps(
         reachable.insert(current_step_id.clone());
         discovery_order.push(current_step_id.clone());
 
-        // Finish and branching steps terminate this collected branch body. Branching
-        // steps emit their own nested branches, and Finish returns from the workflow.
-        if matches!(step, Step::Finish(_)) || is_branching_step(step) {
+        // Finish and branching steps terminate this collected branch body.
+        // Branching steps emit their own nested branches, and Finish returns
+        // from the workflow.
+        if matches!(step, Step::Finish(_))
+            || is_branching_step(step)
+            || super::has_conditioned_normal_flow_edges(&current_step_id, graph)
+        {
             continue;
         }
 
@@ -238,7 +242,10 @@ pub fn collect_branch_steps(
             None => continue,
         };
 
-        if matches!(step, Step::Finish(_)) || is_branching_step(step) {
+        if matches!(step, Step::Finish(_))
+            || is_branching_step(step)
+            || super::has_conditioned_normal_flow_edges(&step_id, graph)
+        {
             continue;
         }
 
