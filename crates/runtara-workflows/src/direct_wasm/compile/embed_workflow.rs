@@ -53,6 +53,20 @@ pub(super) fn emit_embed_workflow_child_error_and_fail(
     body.instruction(&Instruction::Return);
 }
 
+fn push_embed_workflow_frame(body: &mut WasmFunction, route_ptr_local: u32, route_len_local: u32) {
+    body.instruction(&Instruction::LocalGet(DIRECT_EMBED_PARENT_SOURCE_PTR_LOCAL));
+    body.instruction(&Instruction::LocalGet(DIRECT_EMBED_PARENT_SOURCE_LEN_LOCAL));
+    body.instruction(&Instruction::LocalGet(route_ptr_local));
+    body.instruction(&Instruction::LocalGet(route_len_local));
+}
+
+fn pop_embed_workflow_frame(body: &mut WasmFunction, route_ptr_local: u32, route_len_local: u32) {
+    body.instruction(&Instruction::LocalSet(route_len_local));
+    body.instruction(&Instruction::LocalSet(route_ptr_local));
+    body.instruction(&Instruction::LocalSet(DIRECT_EMBED_PARENT_SOURCE_LEN_LOCAL));
+    body.instruction(&Instruction::LocalSet(DIRECT_EMBED_PARENT_SOURCE_PTR_LOCAL));
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn emit_embed_workflow_plan(
     body: &mut WasmFunction,
@@ -174,6 +188,7 @@ pub(super) fn emit_embed_workflow_plan(
         failure_target,
     );
 
+    push_embed_workflow_frame(body, route_ptr_local, route_len_local);
     emit_run_plan_mapping(
         body,
         indices,
@@ -198,6 +213,7 @@ pub(super) fn emit_embed_workflow_plan(
             step_id_len: step_id_segment.len_i32(),
         }),
     );
+    pop_embed_workflow_frame(body, route_ptr_local, route_len_local);
 
     push_segment_args(body, step_id_segment);
     body.instruction(&Instruction::LocalGet(DIRECT_EMBED_PARENT_SOURCE_PTR_LOCAL));
