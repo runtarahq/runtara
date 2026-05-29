@@ -410,7 +410,7 @@ export function ObjectSchemaFieldsTable({
 
   if (fields.length === 0) {
     return (
-      <div className="flex flex-col items-center justify-center rounded-2xl border border-dashed border-border/50 bg-muted/20 px-6 py-10 text-center">
+      <div className="flex flex-col items-center justify-center rounded-lg border border-dashed border-border/50 bg-muted/20 px-6 py-10 text-center">
         <p className="text-base font-medium text-foreground">No columns yet</p>
         <p className="mt-1 text-sm text-muted-foreground">
           Add at least one column to describe the shape of this schema
@@ -430,7 +430,7 @@ export function ObjectSchemaFieldsTable({
 
   return (
     <div className="space-y-4">
-      <div className="rounded-xl bg-card overflow-hidden">
+      <div className="rounded-lg bg-card overflow-hidden">
         <Table className="table-fixed w-full">
           <colgroup>
             <col className="w-14" />

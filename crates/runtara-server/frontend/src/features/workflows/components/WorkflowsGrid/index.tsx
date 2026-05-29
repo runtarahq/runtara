@@ -6,6 +6,9 @@ import {
   ChevronLast,
   ChevronLeft,
   ChevronRight,
+  Folder,
+  Pencil,
+  Trash2,
 } from 'lucide-react';
 import { WorkflowDto } from '@/generated/RuntaraRuntimeApi';
 import {
@@ -25,6 +28,14 @@ import {
 import { WorkflowCard } from '../WorkflowCard';
 import { Icons } from '@/shared/components/icons.tsx';
 import { Button } from '@/shared/components/ui/button.tsx';
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from '@/shared/components/ui/table';
 import { WorkflowExecuteDialog } from '@/features/workflows/components/WorkflowExecuteDialog';
 import { MoveToFolderDialog } from '../FolderDialogs';
 import { ConfirmationDialog } from '@/shared/components/confirmation-dialog';
@@ -33,6 +44,11 @@ import { useFolders } from '../../hooks/useFolders';
 
 const DEFAULT_PAGE_SIZE = 10;
 
+interface WorkflowFolderItem {
+  name: string;
+  path: string;
+}
+
 interface WorkflowsGridProps {
   searchTerm: string;
   sortBy: 'updated' | 'name';
@@ -40,6 +56,12 @@ interface WorkflowsGridProps {
   folderPath?: string;
   /** Whether to show the move to folder action */
   showMoveAction?: boolean;
+  /** Child folders to render as the first rows of the table */
+  folders?: WorkflowFolderItem[];
+  folderWorkflowCounts?: Record<string, number>;
+  onFolderNavigate?: (path: string) => void;
+  onFolderRename?: (path: string) => void;
+  onFolderDelete?: (path: string) => void;
 }
 
 export function WorkflowsGrid({
@@ -47,6 +69,11 @@ export function WorkflowsGrid({
   sortBy,
   folderPath,
   showMoveAction = false,
+  folders = [],
+  folderWorkflowCounts = {},
+  onFolderNavigate,
+  onFolderRename,
+  onFolderDelete,
 }: WorkflowsGridProps) {
   const navigate = useNavigate();
   const [pendingAction, setPendingAction] = useState<{
@@ -285,22 +312,12 @@ export function WorkflowsGrid({
 
   if (isFetching) {
     return (
-      <div className="space-y-3">
+      <div className="rounded-lg border divide-y">
         {[...Array(8)].map((_, i) => (
-          <div
-            key={i}
-            className="flex items-center gap-4 rounded-xl bg-muted/20 p-4 animate-pulse"
-          >
-            <div className="h-10 w-10 rounded-full bg-muted/70" />
-            <div className="flex-1 space-y-2">
-              <div className="h-4 w-40 rounded bg-muted/70" />
-              <div className="h-3 w-60 rounded bg-muted/70" />
-            </div>
-            <div className="flex gap-2">
-              <div className="h-8 w-20 rounded-full bg-muted/70" />
-              <div className="h-8 w-8 rounded-full bg-muted/70" />
-              <div className="h-8 w-8 rounded-full bg-muted/70" />
-            </div>
+          <div key={i} className="flex items-center gap-4 px-3 py-2.5">
+            <div className="h-4 w-40 rounded bg-muted/60 animate-pulse" />
+            <div className="h-4 w-64 rounded bg-muted/60 animate-pulse" />
+            <div className="ml-auto h-4 w-24 rounded bg-muted/60 animate-pulse" />
           </div>
         ))}
       </div>
@@ -318,7 +335,7 @@ export function WorkflowsGrid({
     const message = err?.response?.data?.message || err?.message;
 
     return (
-      <div className="flex flex-col items-center justify-center rounded-2xl bg-muted/20 px-6 py-10 text-center">
+      <div className="flex flex-col items-center justify-center rounded-lg border bg-muted/20 px-6 py-10 text-center">
         <Icons.warning className="mb-4 h-10 w-10 text-destructive" />
         <p className="text-base font-semibold text-foreground">
           {isNetworkError
@@ -342,9 +359,12 @@ export function WorkflowsGrid({
     );
   }
 
-  if (!filteredWorkflows || filteredWorkflows.length === 0) {
+  const hasFolders = folders.length > 0;
+  const hasWorkflows = filteredWorkflows.length > 0;
+
+  if (!hasFolders && !hasWorkflows) {
     return (
-      <div className="flex flex-col items-center justify-center rounded-2xl bg-muted/20 px-6 py-10 text-center">
+      <div className="flex flex-col items-center justify-center rounded-lg border bg-muted/20 px-6 py-10 text-center">
         <Icons.inbox className="mb-4 h-10 w-10 text-muted-foreground" />
         <p className="text-base font-semibold text-foreground">
           No workflows yet
@@ -353,7 +373,7 @@ export function WorkflowsGrid({
           Create your first workflow to kick off an automation flow.
         </p>
         <Link to="/workflows/create" className="mt-4">
-          <Button className="rounded-full px-5">
+          <Button>
             <Icons.add className="mr-2 h-4 w-4" />
             Create workflow
           </Button>
@@ -368,39 +388,105 @@ export function WorkflowsGrid({
 
   return (
     <>
-      <div className="min-w-0 w-full space-y-2 sm:space-y-3">
-        {filteredWorkflows.map((workflow: WorkflowDto, index: number) => (
-          <WorkflowCard
-            key={workflow.id}
-            workflow={workflow}
-            onUpdate={handleUpdate}
-            onDelete={handleDelete}
-            onSchedule={handleSchedule}
-            onClone={handleClone}
-            onChat={handleChat}
-            onMoveToFolder={handleMoveToFolder}
-            showMoveAction={showMoveAction}
-            pendingActionId={pendingAction?.id}
-            pendingActionType={pendingAction?.type}
-            className="animate-in fade-in-slide-up"
-            style={{ animationDelay: `${index * 100}ms` }}
-          />
-        ))}
-      </div>
-
-      {/* Pagination Controls */}
-      {totalElements > 0 && (
-        <div className="mt-6 px-2 py-4 border-t border-slate-200 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between dark:border-slate-700">
-          <div className="flex flex-wrap items-center gap-3 text-sm text-slate-600 dark:text-slate-400">
+      <div className="rounded-lg border overflow-hidden">
+        <Table className="min-w-0 table-fixed">
+          <TableHeader>
+            <TableRow>
+              <TableHead>Name</TableHead>
+              <TableHead>Description</TableHead>
+              <TableHead className="w-44">Updated</TableHead>
+              <TableHead className="w-48" />
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {folders.map((folder) => {
+              const count = folderWorkflowCounts[folder.path] || 0;
+              return (
+                <TableRow
+                  key={`folder-${folder.path}`}
+                  className="group cursor-pointer"
+                  onClick={() => onFolderNavigate?.(folder.path)}
+                >
+                  <TableCell className="font-medium text-foreground">
+                    <span className="flex items-center gap-2">
+                      <Folder className="h-4 w-4 shrink-0 text-amber-500 dark:text-amber-400" />
+                      <span className="truncate">{folder.name}</span>
+                    </span>
+                  </TableCell>
+                  <TableCell className="text-muted-foreground">
+                    {count} workflow{count !== 1 ? 's' : ''}
+                  </TableCell>
+                  <TableCell className="text-muted-foreground">—</TableCell>
+                  <TableCell
+                    className="text-right"
+                    onClick={(e) => e.stopPropagation()}
+                  >
+                    <div className="flex items-center justify-end gap-1 opacity-0 transition-opacity focus-within:opacity-100 group-hover:opacity-100">
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="h-7 w-7 text-muted-foreground"
+                        title="Rename folder"
+                        onClick={() => onFolderRename?.(folder.path)}
+                      >
+                        <Pencil className="h-4 w-4" />
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="h-7 w-7 text-muted-foreground hover:text-destructive"
+                        title="Delete folder"
+                        onClick={() => onFolderDelete?.(folder.path)}
+                      >
+                        <Trash2 className="h-4 w-4" />
+                      </Button>
+                    </div>
+                  </TableCell>
+                </TableRow>
+              );
+            })}
+            {filteredWorkflows.map((workflow: WorkflowDto, index: number) => (
+              <WorkflowCard
+                key={workflow.id}
+                workflow={workflow}
+                onUpdate={handleUpdate}
+                onDelete={handleDelete}
+                onSchedule={handleSchedule}
+                onClone={handleClone}
+                onChat={handleChat}
+                onMoveToFolder={handleMoveToFolder}
+                showMoveAction={showMoveAction}
+                pendingActionId={pendingAction?.id}
+                pendingActionType={pendingAction?.type}
+                className="animate-in fade-in-slide-up"
+                style={{ animationDelay: `${index * 100}ms` }}
+              />
+            ))}
+            {!hasWorkflows && (
+              <TableRow className="hover:bg-transparent">
+                <TableCell
+                  colSpan={4}
+                  className="py-6 text-center text-sm text-muted-foreground"
+                >
+                  No workflows in this folder yet.
+                </TableCell>
+              </TableRow>
+            )}
+          </TableBody>
+        </Table>
+        {/* Pagination footer (built into the table container) */}
+        {totalElements > 0 && (
+          <div className="px-3 py-2.5 border-t bg-muted/30 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <div className="flex flex-wrap items-center gap-3 text-sm text-muted-foreground">
             <span>
-              Showing {startRow}-{endRow} of {totalElements.toLocaleString()}
+              Rows {startRow}-{endRow} of {totalElements.toLocaleString()}
             </span>
             <div className="flex items-center gap-2">
-              <span className="text-sm text-slate-500 dark:text-slate-400">
+              <span className="text-sm text-muted-foreground">
                 Page size:
               </span>
               <select
-                className="h-8 rounded-md border border-slate-200 bg-white px-2.5 text-sm text-slate-700 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-300"
+                className="h-8 rounded-md border bg-background px-2.5 text-sm text-foreground"
                 value={pageSize}
                 onChange={(e) => {
                   setPageSize(Number(e.target.value));
@@ -416,12 +502,12 @@ export function WorkflowsGrid({
             </div>
           </div>
           <div className="flex items-center gap-3">
-            <span className="text-sm text-slate-600 dark:text-slate-400">
+            <span className="text-sm text-muted-foreground">
               Page {page} of {totalPages.toLocaleString()}
             </span>
             <div className="flex items-center gap-1">
               <button
-                className="p-1.5 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded transition-colors disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-slate-400 dark:hover:text-slate-300 dark:hover:bg-slate-700"
+                className="p-1.5 text-muted-foreground hover:text-foreground hover:bg-muted rounded transition-colors disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-muted-foreground"
                 disabled={isFirstPage}
                 onClick={() => setPage(1)}
                 title="First page"
@@ -429,7 +515,7 @@ export function WorkflowsGrid({
                 <ChevronFirst size={16} />
               </button>
               <button
-                className="p-1.5 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded transition-colors disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-slate-400 dark:hover:text-slate-300 dark:hover:bg-slate-700"
+                className="p-1.5 text-muted-foreground hover:text-foreground hover:bg-muted rounded transition-colors disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-muted-foreground"
                 disabled={isFirstPage}
                 onClick={() => setPage((p) => Math.max(1, p - 1))}
                 title="Previous page"
@@ -437,7 +523,7 @@ export function WorkflowsGrid({
                 <ChevronLeft size={16} />
               </button>
               <button
-                className="p-1.5 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded transition-colors disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-slate-400 dark:hover:text-slate-300 dark:hover:bg-slate-700"
+                className="p-1.5 text-muted-foreground hover:text-foreground hover:bg-muted rounded transition-colors disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-muted-foreground"
                 disabled={isLastPage}
                 onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
                 title="Next page"
@@ -445,7 +531,7 @@ export function WorkflowsGrid({
                 <ChevronRight size={16} />
               </button>
               <button
-                className="p-1.5 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded transition-colors disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-slate-400 dark:hover:text-slate-300 dark:hover:bg-slate-700"
+                className="p-1.5 text-muted-foreground hover:text-foreground hover:bg-muted rounded transition-colors disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-muted-foreground"
                 disabled={isLastPage}
                 onClick={() => setPage(totalPages)}
                 title="Last page"
@@ -454,8 +540,9 @@ export function WorkflowsGrid({
               </button>
             </div>
           </div>
-        </div>
-      )}
+          </div>
+        )}
+      </div>
 
       <WorkflowExecuteDialog
         open={!!executeTarget}

@@ -52,7 +52,7 @@
     --chart-3: 142 71% 45%; /* green */
     --chart-4: 38 92% 50%; /* amber */
     --chart-5: 0 84% 60%; /* soft red */
-    --radius: 0.5rem; /* reduced border radius for cleaner look */
+    --radius: 0.375rem; /* utilitarian: tight corners (controls ~4px, cards ~6px) */
     --sidebar-background: 210 40% 98%; /* very light blue */
     --sidebar-foreground: 214 32% 20%; /* deep blue-gray */
     --sidebar-primary: 217 91% 60%; /* vibrant blue */

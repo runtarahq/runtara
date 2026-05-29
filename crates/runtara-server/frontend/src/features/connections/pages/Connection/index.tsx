@@ -120,7 +120,7 @@ export function Connection() {
   if (!currentConnectionType || !connection.data) {
     return (
       <div className="mx-auto max-w-5xl px-4 py-10 sm:px-6 lg:px-10">
-        <div className="rounded-2xl bg-muted/20 px-6 py-8 text-center text-muted-foreground">
+        <div className="rounded-lg bg-muted/20 px-6 py-8 text-center text-muted-foreground">
           <p>Connection not found or configuration unavailable.</p>
         </div>
       </div>

@@ -21,7 +21,7 @@ export function ObjectModelConnectionSelector() {
 
   if (isLoading) {
     return (
-      <div className="flex h-11 items-center gap-2 rounded-lg border bg-background px-3 text-sm text-muted-foreground">
+      <div className="flex h-9 items-center gap-2 rounded-lg border bg-background px-3 text-sm text-muted-foreground">
         <Loader2 className="h-4 w-4 animate-spin" />
         Loading database connections
       </div>
@@ -30,7 +30,7 @@ export function ObjectModelConnectionSelector() {
 
   if (isError || connections.length === 0) {
     return (
-      <Button asChild variant="outline" className="h-11 rounded-lg">
+      <Button asChild variant="outline" className="h-9 rounded-lg">
         <Link to="/connections/postgres/create">
           <Database className="mr-2 h-4 w-4" />
           Add database connection
@@ -47,7 +47,7 @@ export function ObjectModelConnectionSelector() {
         onValueChange={setSelectedConnectionId}
       >
         <SelectTrigger
-          className="h-11 w-[min(22rem,calc(100vw-2rem))] rounded-lg"
+          className="h-9 w-[min(22rem,calc(100vw-2rem))] rounded-lg"
           aria-label="Database connection"
         >
           <SelectValue placeholder="Database connection" />

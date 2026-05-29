@@ -1,10 +1,17 @@
 import { useState } from 'react';
-import { PlusIcon, Key, Clock, Ban } from 'lucide-react';
+import { PlusIcon, Key, Ban } from 'lucide-react';
 import { Button } from '@/shared/components/ui/button';
 import { Badge } from '@/shared/components/ui/badge';
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from '@/shared/components/ui/table';
 import { usePageTitle } from '@/shared/hooks/usePageTitle';
-import { TilesPage, TileList } from '@/shared/components/tiles-page';
-import { EntityTile } from '@/shared/components/entity-tile';
+import { TilesPage } from '@/shared/components/tiles-page';
 import { Icons } from '@/shared/components/icons';
 import { useApiKeys } from '../../hooks/useApiKeys';
 import { CreateApiKeyDialog } from '../../components/CreateApiKeyDialog';
@@ -38,13 +45,140 @@ export function Settings() {
   const activeKeys = apiKeys?.filter((k) => !k.is_revoked) ?? [];
   const revokedKeys = apiKeys?.filter((k) => k.is_revoked) ?? [];
 
+  const renderBody = () => {
+    if (isFetching) {
+      return (
+        <div className="rounded-lg border divide-y">
+          {[...Array(4)].map((_, i) => (
+            <div key={i} className="flex items-center gap-4 px-3 py-2.5">
+              <div className="h-4 w-40 rounded bg-muted/60 animate-pulse" />
+              <div className="h-4 w-16 rounded bg-muted/60 animate-pulse" />
+              <div className="h-4 w-28 rounded bg-muted/60 animate-pulse" />
+              <div className="ml-auto h-4 w-20 rounded bg-muted/60 animate-pulse" />
+            </div>
+          ))}
+        </div>
+      );
+    }
+
+    if (isError) {
+      return (
+        <div className="rounded-lg border bg-muted/20 px-6 py-10 text-center">
+          <Icons.warning className="mx-auto mb-4 h-10 w-10 text-destructive" />
+          <p className="text-base font-semibold text-foreground">
+            {isNetworkError
+              ? 'Unable to connect to backend'
+              : 'An error occurred'}
+          </p>
+          <p className="mt-1 text-sm text-muted-foreground">
+            {isNetworkError
+              ? 'Please check that the backend service is running and try again.'
+              : 'There was a problem loading API keys. Please try again.'}
+          </p>
+        </div>
+      );
+    }
+
+    if (activeKeys.length === 0 && revokedKeys.length === 0) {
+      return (
+        <div className="rounded-lg border bg-muted/20 px-6 py-10 text-center">
+          <Key className="mx-auto mb-4 h-10 w-10 text-muted-foreground" />
+          <p className="text-base font-semibold text-foreground">
+            No API keys yet
+          </p>
+          <p className="mt-1 text-sm text-muted-foreground">
+            Create an API key to connect MCP clients or external integrations.
+          </p>
+        </div>
+      );
+    }
+
+    return (
+      <div className="rounded-lg border overflow-hidden">
+        <Table>
+          <TableHeader>
+            <TableRow>
+              <TableHead>Name</TableHead>
+              <TableHead>Status</TableHead>
+              <TableHead>Key</TableHead>
+              <TableHead>Created</TableHead>
+              <TableHead>Last used</TableHead>
+              <TableHead>Expires</TableHead>
+              <TableHead className="w-0" />
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {activeKeys.map((key) => (
+              <TableRow key={key.id}>
+                <TableCell className="font-medium text-foreground">
+                  {key.name}
+                </TableCell>
+                <TableCell className="text-muted-foreground">
+                  <Badge variant="success">Active</Badge>
+                </TableCell>
+                <TableCell className="font-mono text-xs text-muted-foreground">
+                  {key.key_prefix}...
+                </TableCell>
+                <TableCell className="text-muted-foreground">
+                  {formatDate(key.created_at)}
+                </TableCell>
+                <TableCell className="text-muted-foreground">
+                  {key.last_used_at ? formatDate(key.last_used_at) : 'Never'}
+                </TableCell>
+                <TableCell className="text-muted-foreground">
+                  {key.expires_at ? formatDate(key.expires_at) : 'No expiration'}
+                </TableCell>
+                <TableCell className="text-right">
+                  <div className="flex items-center justify-end gap-1">
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="h-7 w-7 text-muted-foreground hover:text-destructive"
+                      title="Revoke API key"
+                      onClick={() => setRevokeTarget(key)}
+                    >
+                      <Ban className="h-4 w-4" />
+                    </Button>
+                  </div>
+                </TableCell>
+              </TableRow>
+            ))}
+            {revokedKeys.map((key) => (
+              <TableRow key={key.id} className="opacity-60">
+                <TableCell className="font-medium text-foreground">
+                  {key.name}
+                </TableCell>
+                <TableCell className="text-muted-foreground">
+                  <Badge variant="secondary">Revoked</Badge>
+                </TableCell>
+                <TableCell className="font-mono text-xs text-muted-foreground">
+                  {key.key_prefix}...
+                </TableCell>
+                <TableCell className="text-muted-foreground">
+                  {formatDate(key.created_at)}
+                </TableCell>
+                <TableCell className="text-muted-foreground">
+                  {key.last_used_at ? formatDate(key.last_used_at) : 'Never'}
+                </TableCell>
+                <TableCell className="text-muted-foreground">
+                  {key.expires_at ? formatDate(key.expires_at) : 'No expiration'}
+                </TableCell>
+                <TableCell className="text-right" />
+              </TableRow>
+            ))}
+          </TableBody>
+        </Table>
+      </div>
+    );
+  };
+
   return (
     <TilesPage
       kicker="Settings"
       title="API Keys"
       action={
         <Button
-          className="h-11 w-full rounded-full sm:w-auto sm:px-6"
+          className="w-full sm:w-auto sm:px-4"
           onClick={() => setCreateOpen(true)}
           disabled={isError}
         >
@@ -53,132 +187,7 @@ export function Settings() {
         </Button>
       }
     >
-      {isFetching ? (
-        <TileList>
-          {[...Array(3)].map((_, i) => (
-            <div
-              key={i}
-              className="flex items-center gap-4 rounded-xl bg-muted/20 p-4 animate-pulse"
-            >
-              <div className="h-9 w-9 rounded-full bg-muted/60" />
-              <div className="flex-1 space-y-2">
-                <div className="h-4 w-48 rounded bg-muted/60" />
-                <div className="h-3 w-72 rounded bg-muted/60" />
-              </div>
-              <div className="flex gap-2">
-                <div className="h-8 w-16 rounded-full bg-muted/60" />
-              </div>
-            </div>
-          ))}
-        </TileList>
-      ) : isError ? (
-        <TileList>
-          <div className="flex flex-col items-center justify-center rounded-2xl bg-muted/20 px-6 py-10 text-center">
-            <Icons.warning className="mb-4 h-10 w-10 text-destructive" />
-            <p className="text-base font-semibold text-foreground">
-              {isNetworkError
-                ? 'Unable to connect to backend'
-                : 'An error occurred'}
-            </p>
-            <p className="mt-1 text-sm text-muted-foreground">
-              {isNetworkError
-                ? 'Please check that the backend service is running and try again.'
-                : 'There was a problem loading API keys. Please try again.'}
-            </p>
-          </div>
-        </TileList>
-      ) : activeKeys.length === 0 && revokedKeys.length === 0 ? (
-        <TileList>
-          <div className="flex flex-col items-center justify-center rounded-2xl bg-muted/20 px-6 py-10 text-center">
-            <Key className="mb-4 h-10 w-10 text-muted-foreground/50" />
-            <p className="text-base font-semibold text-foreground">
-              No API keys yet
-            </p>
-            <p className="mt-1 text-sm text-muted-foreground">
-              Create an API key to connect MCP clients or external integrations.
-            </p>
-          </div>
-        </TileList>
-      ) : (
-        <TileList>
-          {activeKeys.map((key) => (
-            <EntityTile
-              key={key.id}
-              title={key.name}
-              badges={
-                <Badge
-                  variant="outline"
-                  className="text-emerald-600 border-emerald-300 dark:text-emerald-400 dark:border-emerald-700"
-                >
-                  Active
-                </Badge>
-              }
-              description={
-                <span className="font-mono text-xs">{key.key_prefix}...</span>
-              }
-              metadata={[
-                <>
-                  <Clock className="h-3 w-3" />
-                  Created {formatDate(key.created_at)}
-                </>,
-                key.last_used_at ? (
-                  <>
-                    <Clock className="h-3 w-3" />
-                    Last used {formatDate(key.last_used_at)}
-                  </>
-                ) : (
-                  'Never used'
-                ),
-                key.expires_at ? (
-                  <>Expires {formatDate(key.expires_at)}</>
-                ) : (
-                  'No expiration'
-                ),
-              ]}
-              actions={
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  className="text-destructive hover:text-destructive hover:bg-destructive/10"
-                  onClick={() => setRevokeTarget(key)}
-                >
-                  <Ban className="mr-1 h-3.5 w-3.5" />
-                  Revoke
-                </Button>
-              }
-            />
-          ))}
-
-          {revokedKeys.length > 0 && (
-            <>
-              <div className="pt-4">
-                <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-                  Revoked
-                </p>
-              </div>
-              {revokedKeys.map((key) => (
-                <EntityTile
-                  key={key.id}
-                  title={key.name}
-                  className="opacity-60"
-                  badges={<Badge variant="secondary">Revoked</Badge>}
-                  description={
-                    <span className="font-mono text-xs">
-                      {key.key_prefix}...
-                    </span>
-                  }
-                  metadata={[
-                    <>
-                      <Clock className="h-3 w-3" />
-                      Created {formatDate(key.created_at)}
-                    </>,
-                  ]}
-                />
-              ))}
-            </>
-          )}
-        </TileList>
-      )}
+      {renderBody()}
 
       <CreateApiKeyDialog
         open={createOpen}

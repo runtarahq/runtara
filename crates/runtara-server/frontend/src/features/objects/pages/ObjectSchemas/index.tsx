@@ -20,17 +20,15 @@ export function ObjectSchemas() {
       title="Object types"
       action={
         <Button
-          className="h-11 w-full rounded-full sm:w-auto sm:px-6"
+          className="w-full sm:w-auto sm:px-4"
           onClick={() => navigate(`/objects/types/create${connectionQuery}`)}
           disabled={isError || !selectedConnectionId}
         >
           Create object type
         </Button>
       }
+      toolbar={<ObjectModelConnectionSelector />}
     >
-      <div className="mb-4 flex justify-end">
-        <ObjectModelConnectionSelector />
-      </div>
       <TileList>
         <ObjectSchemaDtosTable connectionId={selectedConnectionId} />
       </TileList>

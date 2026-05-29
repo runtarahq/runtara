@@ -104,7 +104,7 @@ export function TriggerForm(props: Props) {
       onSubmit={handleSubmit}
       className="space-y-6"
       renderContent={() => (
-        <section className="rounded-2xl bg-card px-4 py-5 shadow-none sm:px-6 sm:py-6">
+        <section className="rounded-lg bg-card px-4 py-5 shadow-none sm:px-6 sm:py-6">
           <div className="space-y-6">
             <div className="space-y-1">
               <p className="text-sm font-semibold text-foreground">{title}</p>

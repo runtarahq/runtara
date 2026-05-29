@@ -427,7 +427,7 @@ export function ReportExplorePage() {
         action={
           <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row">
             <Link to={`/reports/${report.id}`}>
-              <Button variant="outline" className="h-11 rounded-full sm:px-5">
+              <Button variant="outline" className="sm:px-4">
                 <ArrowLeft className="mr-2 h-4 w-4" />
                 Report
               </Button>
@@ -435,7 +435,7 @@ export function ReportExplorePage() {
             <ReportDeleteButton
               reportId={report.id}
               reportName={report.name}
-              className="h-11 rounded-full sm:px-5"
+              className="sm:px-4"
             />
           </div>
         }
@@ -477,7 +477,7 @@ export function ReportExplorePage() {
       action={
         <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row">
           <Link to={`/reports/${report.id}`}>
-            <Button variant="outline" className="h-11 rounded-full sm:px-5">
+            <Button variant="outline" className="sm:px-4">
               <ArrowLeft className="mr-2 h-4 w-4" />
               Report
             </Button>
@@ -485,10 +485,10 @@ export function ReportExplorePage() {
           <ReportDeleteButton
             reportId={report.id}
             reportName={report.name}
-            className="h-11 rounded-full sm:px-5"
+            className="sm:px-4"
           />
           <Button
-            className="h-11 rounded-full sm:px-5"
+            className="sm:px-4"
             disabled={!canSaveBlock || updateReport.isPending}
             onClick={() =>
               handleSaveBlock(canReplaceBlock ? 'replace' : 'append')

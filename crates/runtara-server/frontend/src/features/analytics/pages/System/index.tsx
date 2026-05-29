@@ -1,6 +1,7 @@
 import { usePageTitle } from '@/shared/hooks/usePageTitle';
 import { RefreshCw, Cpu, HardDrive, MemoryStick } from 'lucide-react';
 import { Button } from '@/shared/components/ui/button';
+import { TilesPage } from '@/shared/components/tiles-page';
 import { Card } from '@/shared/components/ui/card';
 import { Progress } from '@/shared/components/ui/progress';
 import { useSystemAnalytics } from '../../hooks/useAnalytics';
@@ -20,36 +21,26 @@ export function System() {
   };
 
   return (
-    <div className="w-full px-4 py-3">
-      <div className="flex w-full flex-col gap-3">
-        <section className="bg-transparent">
-          <div className="flex flex-col gap-2 lg:flex-row lg:items-end lg:justify-between">
-            <div className="space-y-0.5">
-              <p className="text-xs font-semibold uppercase tracking-[0.2em] text-muted-foreground">
-                Analytics
-              </p>
-              <h1 className="text-xl font-semibold leading-tight text-slate-900/90 dark:text-slate-100">
-                System
-              </h1>
-            </div>
-            <div className="flex flex-wrap items-center gap-2">
-              <Button
-                onClick={handleRefresh}
-                variant="ghost"
-                size="sm"
-                className="h-9 px-3 text-xs font-medium text-muted-foreground hover:text-foreground"
-              >
-                <RefreshCw className="h-4 w-4 mr-2" />
-                Refresh
-              </Button>
-            </div>
-          </div>
-        </section>
-
+    <TilesPage
+      kicker="Analytics"
+      title="System"
+      action={
+        <Button
+          onClick={handleRefresh}
+          variant="outline"
+          size="sm"
+          className="text-muted-foreground"
+        >
+          <RefreshCw className="mr-2 h-4 w-4" />
+          Refresh
+        </Button>
+      }
+    >
+      <div className="space-y-4">
         <section>
           <div className="grid gap-4 md:grid-cols-3">
             {/* CPU Info */}
-            <Card className="rounded-xl border border-border/40 bg-card px-4 py-4 sm:px-5 shadow-none">
+            <Card className="rounded-lg border border-border/40 bg-card px-4 py-4 sm:px-5 shadow-none">
               {systemLoading ? (
                 <div className="space-y-3">
                   <div className="flex items-center gap-2">
@@ -69,7 +60,7 @@ export function System() {
                       CPU
                     </span>
                   </div>
-                  <div className="text-2xl font-semibold text-slate-900/90 dark:text-slate-100">
+                  <div className="text-2xl font-semibold text-foreground">
                     {systemAnalytics.data.cpu.logicalCores} Cores
                   </div>
                   <div className="text-sm text-muted-foreground">
@@ -93,7 +84,7 @@ export function System() {
             </Card>
 
             {/* Memory Info */}
-            <Card className="rounded-xl border border-border/40 bg-card px-4 py-4 sm:px-5 shadow-none">
+            <Card className="rounded-lg border border-border/40 bg-card px-4 py-4 sm:px-5 shadow-none">
               {systemLoading ? (
                 <div className="space-y-3">
                   <div className="flex items-center gap-2">
@@ -114,7 +105,7 @@ export function System() {
                       Memory
                     </span>
                   </div>
-                  <div className="text-2xl font-semibold text-slate-900/90 dark:text-slate-100">
+                  <div className="text-2xl font-semibold text-foreground">
                     {formatBytes(
                       systemAnalytics.data.memory.availableForWorkflowsBytes
                     )}{' '}
@@ -151,7 +142,7 @@ export function System() {
             </Card>
 
             {/* Disk Info */}
-            <Card className="rounded-xl border border-border/40 bg-card px-4 py-4 sm:px-5 shadow-none">
+            <Card className="rounded-lg border border-border/40 bg-card px-4 py-4 sm:px-5 shadow-none">
               {systemLoading ? (
                 <div className="space-y-3">
                   <div className="flex items-center gap-2">
@@ -172,7 +163,7 @@ export function System() {
                       Disk
                     </span>
                   </div>
-                  <div className="text-2xl font-semibold text-slate-900/90 dark:text-slate-100">
+                  <div className="text-2xl font-semibold text-foreground">
                     {formatBytes(systemAnalytics.data.disk.availableBytes)}{' '}
                     available
                   </div>
@@ -210,6 +201,6 @@ export function System() {
           </div>
         </section>
       </div>
-    </div>
+    </TilesPage>
   );
 }

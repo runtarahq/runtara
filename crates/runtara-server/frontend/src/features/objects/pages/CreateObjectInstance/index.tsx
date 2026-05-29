@@ -35,7 +35,7 @@ export function CreateObjectInstance() {
   return (
     <div className="w-full px-4 py-6 sm:px-6 lg:px-10">
       <div className="mx-auto flex w-full max-w-5xl flex-col gap-6">
-        <section className="rounded-2xl bg-transparent px-4 py-4 sm:px-5">
+        <section className="rounded-lg bg-transparent px-4 py-4 sm:px-5">
           <div className="space-y-2">
             <p className="text-xs font-semibold uppercase tracking-[0.08em] text-muted-foreground">
               Objects

@@ -67,7 +67,7 @@ export function MetricCard({
 
   if (loading) {
     return (
-      <Card className="h-full rounded-xl border border-border/40 bg-card px-4 py-3 sm:px-5 sm:py-4 shadow-none">
+      <Card className="h-full rounded-lg border border-border/40 bg-card px-4 py-3 sm:px-5 sm:py-4 shadow-none">
         <div className="flex h-full flex-col">
           <div className="min-h-[40px] text-sm font-medium text-muted-foreground leading-snug">
             {title}
@@ -82,7 +82,7 @@ export function MetricCard({
   }
 
   return (
-    <Card className="h-full rounded-xl border border-border/40 bg-card px-4 py-3 sm:px-5 sm:py-4 shadow-none">
+    <Card className="h-full rounded-lg border border-border/40 bg-card px-4 py-3 sm:px-5 sm:py-4 shadow-none">
       <div className="flex h-full flex-col">
         <div className="min-h-[40px] text-sm font-semibold text-muted-foreground leading-snug">
           {title}

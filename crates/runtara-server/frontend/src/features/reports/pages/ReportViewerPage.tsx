@@ -141,7 +141,7 @@ export function ReportViewerPage() {
     return (
       <TilesPage kicker="Reports" title="Loading report">
         <TileList>
-          <div className="h-96 animate-pulse rounded-xl bg-muted/30" />
+          <div className="h-96 animate-pulse rounded-lg bg-muted/30" />
         </TileList>
       </TilesPage>
     );
@@ -151,7 +151,7 @@ export function ReportViewerPage() {
     return (
       <TilesPage kicker="Reports" title="Report unavailable">
         <TileList>
-          <div className="rounded-xl border bg-background p-6 text-sm text-muted-foreground">
+          <div className="rounded-lg border bg-background p-6 text-sm text-muted-foreground">
             {error?.message ?? 'The report could not be loaded.'}
           </div>
         </TileList>
@@ -209,7 +209,7 @@ export function ReportViewerPage() {
               <Button
                 variant="outline"
                 size="sm"
-                className="h-9 w-full rounded-full sm:w-auto sm:px-4"
+                className="w-full sm:w-auto sm:px-4"
               >
                 <Compass className="mr-2 h-4 w-4" />
                 Explore
@@ -218,7 +218,7 @@ export function ReportViewerPage() {
             <Button
               variant="outline"
               size="sm"
-              className="h-9 rounded-full sm:px-4"
+              className="sm:px-4"
               onClick={handlePrint}
               disabled={isRendering}
             >
@@ -228,7 +228,7 @@ export function ReportViewerPage() {
             <Button
               variant="outline"
               size="sm"
-              className="h-9 rounded-full sm:px-4"
+              className="sm:px-4"
               onClick={() => refetch()}
               disabled={isRendering}
             >
@@ -238,12 +238,12 @@ export function ReportViewerPage() {
             <ReportDeleteButton
               reportId={report.id}
               reportName={report.name}
-              className="h-9 rounded-full sm:px-4"
+              className="sm:px-4"
             />
             <Link to={`/reports/${report.id}?edit=1`} className="w-full sm:w-auto">
               <Button
                 size="sm"
-                className="h-9 w-full rounded-full sm:w-auto sm:px-4"
+                className="w-full sm:w-auto sm:px-4"
               >
                 <Edit className="mr-2 h-4 w-4" />
                 Edit

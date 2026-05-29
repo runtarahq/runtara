@@ -83,7 +83,7 @@ export function SQLPreview({
           Generated SQL for your schema (read-only)
         </p>
       </div>
-      <Card className="overflow-hidden rounded-2xl border border-border/40 bg-muted/20">
+      <Card className="overflow-hidden rounded-lg border border-border/40 bg-muted/20">
         <pre className="overflow-x-auto p-4 text-xs font-mono text-foreground/90">
           <code>{generateSQL()}</code>
         </pre>

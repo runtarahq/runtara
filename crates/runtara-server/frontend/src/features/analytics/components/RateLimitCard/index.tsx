@@ -80,7 +80,7 @@ export function RateLimitCard({
 
   return (
     <Card
-      className={`rounded-xl border bg-card p-4 shadow-none transition-all ${
+      className={`rounded-lg border bg-card p-4 shadow-none transition-all ${
         onClick ? 'cursor-pointer hover:border-primary/50' : ''
       } ${selected ? 'border-primary ring-1 ring-primary/20' : 'border-border/40'}`}
       onClick={onClick}
@@ -235,7 +235,7 @@ export function RateLimitCard({
 
 export function RateLimitCardSkeleton() {
   return (
-    <Card className="rounded-xl border border-border/40 bg-card p-4 shadow-none">
+    <Card className="rounded-lg border border-border/40 bg-card p-4 shadow-none">
       <div className="space-y-4">
         <div className="flex items-start justify-between gap-2">
           <div className="flex items-center gap-2">

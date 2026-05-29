@@ -126,14 +126,14 @@ export function InvocationHistoryFilters({ filters, onFiltersChange }: Props) {
       <div className="flex flex-wrap items-center gap-3">
         {/* Workflow filter */}
         <div className="flex items-center gap-2">
-          <span className="text-sm text-slate-500 dark:text-slate-400">
+          <span className="text-sm text-muted-foreground">
             Workflow:
           </span>
           <Select
             value={filters.workflowId || ALL_VALUE}
             onValueChange={handleWorkflowChange}
           >
-            <SelectTrigger className="h-10 min-w-[160px] bg-white border-slate-200 rounded-lg text-sm text-slate-700 dark:bg-slate-800 dark:border-slate-700 dark:text-slate-300">
+            <SelectTrigger className="h-8 min-w-[160px] text-sm">
               <SelectValue placeholder="All workflows" />
             </SelectTrigger>
             <SelectContent>
@@ -152,14 +152,14 @@ export function InvocationHistoryFilters({ filters, onFiltersChange }: Props) {
 
         {/* Status filter */}
         <div className="flex items-center gap-2">
-          <span className="text-sm text-slate-500 dark:text-slate-400">
+          <span className="text-sm text-muted-foreground">
             Status:
           </span>
           <Select
             value={filters.status || ALL_VALUE}
             onValueChange={handleStatusChange}
           >
-            <SelectTrigger className="h-10 min-w-[140px] bg-white border-slate-200 rounded-lg text-sm text-slate-700 dark:bg-slate-800 dark:border-slate-700 dark:text-slate-300">
+            <SelectTrigger className="h-8 min-w-[140px] text-sm">
               <SelectValue placeholder="All statuses" />
             </SelectTrigger>
             <SelectContent>
@@ -175,17 +175,17 @@ export function InvocationHistoryFilters({ filters, onFiltersChange }: Props) {
         {/* Date filters toggle */}
         <button
           onClick={() => setIsOpen(!isOpen)}
-          className="inline-flex items-center gap-2 px-3 py-2 text-sm text-slate-600 bg-white border border-slate-200 rounded-lg hover:bg-slate-50 transition-colors dark:bg-slate-800 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-700"
+          className="inline-flex items-center gap-2 h-8 px-3 text-sm text-foreground border rounded-md hover:bg-muted transition-colors"
         >
           <Filter className="w-4 h-4" />
           <span>Date filters</span>
           {hasDateFilters && (
-            <span className="rounded-full bg-blue-600 px-2 py-0.5 text-xs text-white">
+            <span className="rounded-full bg-primary px-2 py-0.5 text-xs text-primary-foreground">
               Active
             </span>
           )}
           <ChevronDown
-            className={`w-4 h-4 text-slate-400 transition-transform ${isOpen ? 'rotate-180' : ''}`}
+            className={`w-4 h-4 text-muted-foreground transition-transform ${isOpen ? 'rotate-180' : ''}`}
           />
         </button>
 
@@ -198,7 +198,7 @@ export function InvocationHistoryFilters({ filters, onFiltersChange }: Props) {
             variant="ghost"
             size="sm"
             onClick={handleClearFilters}
-            className="gap-1 text-slate-500 hover:text-slate-700 dark:text-slate-400 dark:hover:text-slate-200"
+            className="gap-1 text-muted-foreground hover:text-foreground"
           >
             <X className="h-4 w-4" />
             Clear filters
@@ -209,11 +209,11 @@ export function InvocationHistoryFilters({ filters, onFiltersChange }: Props) {
       {/* Date filters - collapsible */}
       <Collapsible open={isOpen} onOpenChange={setIsOpen}>
         <CollapsibleContent>
-          <div className="grid grid-cols-1 gap-4 rounded-lg border border-slate-200 bg-slate-50/50 p-4 sm:grid-cols-2 lg:grid-cols-4 dark:border-slate-700 dark:bg-slate-800/50">
+          <div className="grid grid-cols-1 gap-4 rounded-lg border bg-muted/30 p-4 sm:grid-cols-2 lg:grid-cols-4">
             <div className="space-y-2">
               <Label
                 htmlFor="created-from"
-                className="text-sm text-slate-600 dark:text-slate-400"
+                className="text-sm text-muted-foreground"
               >
                 Created from
               </Label>
@@ -224,14 +224,14 @@ export function InvocationHistoryFilters({ filters, onFiltersChange }: Props) {
                 onChange={(e) =>
                   handleDateChange('createdFrom', e.target.value)
                 }
-                className="bg-white dark:bg-slate-800"
+                className="bg-background"
               />
             </div>
 
             <div className="space-y-2">
               <Label
                 htmlFor="created-to"
-                className="text-sm text-slate-600 dark:text-slate-400"
+                className="text-sm text-muted-foreground"
               >
                 Created to
               </Label>
@@ -240,14 +240,14 @@ export function InvocationHistoryFilters({ filters, onFiltersChange }: Props) {
                 type="datetime-local"
                 value={toDatetimeLocal(filters.createdTo)}
                 onChange={(e) => handleDateChange('createdTo', e.target.value)}
-                className="bg-white dark:bg-slate-800"
+                className="bg-background"
               />
             </div>
 
             <div className="space-y-2">
               <Label
                 htmlFor="completed-from"
-                className="text-sm text-slate-600 dark:text-slate-400"
+                className="text-sm text-muted-foreground"
               >
                 Completed from
               </Label>
@@ -258,14 +258,14 @@ export function InvocationHistoryFilters({ filters, onFiltersChange }: Props) {
                 onChange={(e) =>
                   handleDateChange('completedFrom', e.target.value)
                 }
-                className="bg-white dark:bg-slate-800"
+                className="bg-background"
               />
             </div>
 
             <div className="space-y-2">
               <Label
                 htmlFor="completed-to"
-                className="text-sm text-slate-600 dark:text-slate-400"
+                className="text-sm text-muted-foreground"
               >
                 Completed to
               </Label>
@@ -276,7 +276,7 @@ export function InvocationHistoryFilters({ filters, onFiltersChange }: Props) {
                 onChange={(e) =>
                   handleDateChange('completedTo', e.target.value)
                 }
-                className="bg-white dark:bg-slate-800"
+                className="bg-background"
               />
             </div>
           </div>

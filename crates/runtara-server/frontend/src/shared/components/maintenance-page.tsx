@@ -33,7 +33,7 @@ export function MaintenancePage() {
         </div>
 
         {/* Card */}
-        <div className="relative rounded-xl border border-gray-200 bg-white shadow-lg shadow-gray-200/50">
+        <div className="relative rounded-lg border bg-card shadow-lg">
           {/* Gradient top accent line */}
           <div className="absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-blue-500 to-transparent" />
 

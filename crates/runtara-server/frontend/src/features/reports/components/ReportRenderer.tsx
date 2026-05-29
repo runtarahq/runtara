@@ -45,7 +45,7 @@ export function ReportRenderer(props: ReportRendererProps) {
 
 function ReportRendererSkeleton() {
   return (
-    <div className="h-32 w-full animate-pulse rounded-xl bg-muted/30" />
+    <div className="h-32 w-full animate-pulse rounded-lg bg-muted/30" />
   );
 }
 
@@ -76,7 +76,7 @@ function ReportRendererInner({
 
   if (!hasStructuredLayout && definition.blocks.length === 0) {
     return (
-      <div className="grid place-items-center gap-2 rounded-xl border border-dashed bg-muted/10 px-6 py-12 text-center">
+      <div className="grid place-items-center gap-2 rounded-lg border border-dashed bg-muted/10 px-6 py-12 text-center">
         <p className="text-sm font-medium text-foreground">
           This report has no content yet
         </p>

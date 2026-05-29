@@ -54,7 +54,7 @@ function HeaderMenu() {
           <img src={Logo} alt="Runtara logo" />
         </div>
         <div className="grid flex-1 text-left leading-tight group-data-[collapsible=icon]:hidden">
-          <span className="truncate text-lg font-semibold text-slate-900/90 dark:text-slate-100">
+          <span className="truncate text-lg font-semibold text-sidebar-foreground">
             Runtara
           </span>
           <span

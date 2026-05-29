@@ -701,7 +701,7 @@ export function ObjectInstanceDtosTable({
         </Alert>
       )}
 
-      <div className="bg-white rounded-xl border border-slate-200/80 shadow-sm overflow-hidden dark:bg-card dark:border-slate-700/50">
+      <div className="rounded-lg border shadow-sm overflow-hidden">
         <DataTable
           columns={columns}
           data={records}

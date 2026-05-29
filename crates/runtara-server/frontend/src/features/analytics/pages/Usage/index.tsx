@@ -4,6 +4,7 @@ import { usePageTitle } from '@/shared/hooks/usePageTitle';
 import { RefreshCw } from 'lucide-react';
 import { Button } from '@/shared/components/ui/button';
 import { Icons } from '@/shared/components/icons';
+import { TilesPage } from '@/shared/components/tiles-page';
 import {
   DateRangeOption,
   DateRangeSelector,
@@ -325,101 +326,52 @@ export function Usage() {
     });
   }, [tenantMetrics, dateRange]);
 
-  if (metricsError && !metricsLoading) {
-    const isNetworkError =
-      error?.message?.includes('fetch') ||
+  const isNetworkError =
+    !!metricsError &&
+    (error?.message?.includes('fetch') ||
       (error as { code?: string })?.code === 'ERR_NETWORK' ||
-      !(error as { response?: unknown })?.response;
-
-    return (
-      <div className="w-full px-4 py-3">
-        <div className="flex w-full flex-col gap-3">
-          <section className="bg-transparent">
-            <div className="flex flex-col gap-2 lg:flex-row lg:items-end lg:justify-between">
-              <div className="space-y-0.5">
-                <p className="text-xs font-semibold uppercase tracking-[0.2em] text-muted-foreground">
-                  Analytics
-                </p>
-                <h1 className="text-xl font-semibold leading-tight text-slate-900/90 dark:text-slate-100">
-                  Usage
-                </h1>
-              </div>
-              <div className="flex flex-wrap items-center gap-2">
-                <DateRangeSelector
-                  value={dateRange}
-                  onChange={handleDateRangeChange}
-                />
-                <Button
-                  onClick={handleRefresh}
-                  variant="ghost"
-                  size="sm"
-                  className="h-9 px-3 text-xs font-medium text-muted-foreground hover:text-foreground"
-                >
-                  <RefreshCw className="h-4 w-4 mr-2" />
-                  Refresh
-                </Button>
-              </div>
-            </div>
-          </section>
-
-          <div>
-            <div className="flex flex-col items-center justify-center rounded-2xl bg-muted/20 px-6 py-10 text-center">
-              <Icons.warning className="mb-4 h-10 w-10 text-destructive" />
-              <p className="text-base font-semibold text-foreground">
-                {isNetworkError
-                  ? 'Unable to connect to backend'
-                  : 'An error occurred'}
-              </p>
-              <p className="mt-1 text-sm text-muted-foreground">
-                {isNetworkError
-                  ? 'Please check your network connection and try again.'
-                  : 'There was a problem loading analytics. Please try again.'}
-              </p>
-              {import.meta.env.DEV && error && (
-                <div className="mt-4 max-w-md rounded-lg bg-destructive/10 p-3 text-left">
-                  <p className="text-xs font-mono text-destructive break-words">
-                    {error.message || 'Unknown error'}
-                  </p>
-                </div>
-              )}
-            </div>
-          </div>
-        </div>
-      </div>
-    );
-  }
+      !(error as { response?: unknown })?.response);
 
   return (
-    <div className="w-full px-4 py-3">
-      <div className="flex w-full flex-col gap-3">
-        <section className="bg-transparent">
-          <div className="flex flex-col gap-2 lg:flex-row lg:items-end lg:justify-between">
-            <div className="space-y-0.5">
-              <p className="text-xs font-semibold uppercase tracking-[0.2em] text-muted-foreground">
-                Analytics
+    <TilesPage
+      kicker="Analytics"
+      title="Usage"
+      action={
+        <Button
+          onClick={handleRefresh}
+          variant="outline"
+          size="sm"
+          className="text-muted-foreground"
+        >
+          <RefreshCw className="mr-2 h-4 w-4" />
+          Refresh
+        </Button>
+      }
+      toolbar={
+        <DateRangeSelector value={dateRange} onChange={handleDateRangeChange} />
+      }
+    >
+      {metricsError && !metricsLoading ? (
+        <div className="flex flex-col items-center justify-center rounded-lg border bg-muted/20 px-6 py-10 text-center">
+          <Icons.warning className="mb-4 h-10 w-10 text-destructive" />
+          <p className="text-base font-semibold text-foreground">
+            {isNetworkError ? 'Unable to connect to backend' : 'An error occurred'}
+          </p>
+          <p className="mt-1 text-sm text-muted-foreground">
+            {isNetworkError
+              ? 'Please check your network connection and try again.'
+              : 'There was a problem loading analytics. Please try again.'}
+          </p>
+          {import.meta.env.DEV && error && (
+            <div className="mt-4 max-w-md rounded-lg bg-destructive/10 p-3 text-left">
+              <p className="text-xs font-mono text-destructive break-words">
+                {error.message || 'Unknown error'}
               </p>
-              <h1 className="text-xl font-semibold leading-tight text-slate-900/90 dark:text-slate-100">
-                Usage
-              </h1>
             </div>
-            <div className="flex flex-wrap items-center gap-2">
-              <DateRangeSelector
-                value={dateRange}
-                onChange={handleDateRangeChange}
-              />
-              <Button
-                onClick={handleRefresh}
-                variant="ghost"
-                size="sm"
-                className="h-9 px-3 text-xs font-medium text-muted-foreground hover:text-foreground"
-              >
-                <RefreshCw className="h-4 w-4 mr-2" />
-                Refresh
-              </Button>
-            </div>
-          </div>
-        </section>
-
+          )}
+        </div>
+      ) : (
+        <div className="space-y-4">
         <section className="grid gap-4 md:grid-cols-2 lg:grid-cols-3 2xl:grid-cols-6">
           <MetricCard
             title="Total Executions"
@@ -468,7 +420,8 @@ export function Usage() {
         <section>
           <ExecutionTrendChart data={chartData} loading={metricsLoading} />
         </section>
-      </div>
-    </div>
+        </div>
+      )}
+    </TilesPage>
   );
 }

@@ -857,7 +857,7 @@ export function SimpleInputMappingEditor({
 
   if (hasNoFields && !allowCustomFields) {
     return (
-      <div className="text-sm text-muted-foreground p-6 rounded-xl bg-muted/20 text-center">
+      <div className="text-sm text-muted-foreground p-6 rounded-lg bg-muted/20 text-center">
         No input fields required for this operation
       </div>
     );
@@ -865,7 +865,7 @@ export function SimpleInputMappingEditor({
 
   return (
     <div className="space-y-4">
-      <div className="rounded-xl bg-card overflow-hidden">
+      <div className="rounded-lg bg-card overflow-hidden">
         <Table className="w-full" style={{ tableLayout: 'fixed' }}>
           <colgroup>
             <col style={{ width: '80px' }} />

@@ -1,10 +1,28 @@
-import { useCallback } from 'react';
+import { useCallback, useState } from 'react';
 import { useNavigate } from 'react-router';
+import { toast } from 'sonner';
+import { Loader2, Edit2, Trash2, Database } from 'lucide-react';
 import { Schema } from '@/generated/RuntaraRuntimeApi';
 import { Button } from '@/shared/components/ui/button';
-import { Loader2, Edit2, Trash2, Database } from 'lucide-react';
+import { Badge } from '@/shared/components/ui/badge';
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from '@/shared/components/ui/table';
+import { ModalDialog } from '@/shared/components/next-dialog';
+import {
+  DialogClose,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/shared/components/ui/dialog';
 import { Icons } from '@/shared/components/icons';
-import { EntityTile } from '@/shared/components/entity-tile';
+import { formatDate } from '@/lib/utils';
 import {
   useObjectSchemaDtos,
   useDeleteObjectSchema,
@@ -18,6 +36,8 @@ export function ObjectSchemaDtosTable({
   connectionId,
 }: ObjectSchemaDtosTableProps) {
   const navigate = useNavigate();
+  const [deleteTarget, setDeleteTarget] = useState<Schema | null>(null);
+
   const {
     data: objectSchemaDtos = [],
     isLoading,
@@ -48,73 +68,33 @@ export function ObjectSchemaDtosTable({
     [connectionQuery, navigate]
   );
 
-  const handleDelete = useCallback(
-    (objectSchemaDto: Schema) => {
-      if (objectSchemaDto.id) {
-        deleteObjectSchemaMutation.mutate(objectSchemaDto.id);
-      }
-    },
-    [deleteObjectSchemaMutation]
-  );
+  const handleDelete = useCallback(() => {
+    if (!deleteTarget?.id) {
+      return;
+    }
+    deleteObjectSchemaMutation.mutate(deleteTarget.id, {
+      onSuccess: () => {
+        toast.info('Object type has been deleted');
+      },
+      onSettled: () => {
+        setDeleteTarget(null);
+      },
+    });
+  }, [deleteObjectSchemaMutation, deleteTarget]);
 
-  const renderCard = (schema: Schema) => {
-    const fieldCount = schema.columns?.length || 0;
-    return (
-      <EntityTile
-        key={schema.id || schema.name}
-        title={schema.name || 'Untitled object type'}
-        metadata={[
-          `${fieldCount} ${fieldCount === 1 ? 'field' : 'fields'}`,
-          schema.id ? `ID: ${schema.id}` : null,
-        ].filter(Boolean)}
-        actions={
-          <>
-            <Button
-              variant="ghost"
-              size="icon"
-              className="p-2 h-auto w-auto text-slate-400 hover:text-blue-600 hover:bg-blue-50 dark:hover:bg-blue-900/30 dark:hover:text-blue-400 rounded-lg transition-colors"
-              title="View instances"
-              onClick={() => handleViewInstances(schema)}
-            >
-              <Database className="w-4 h-4" />
-            </Button>
-            <Button
-              variant="ghost"
-              size="icon"
-              className="p-2 h-auto w-auto text-slate-400 hover:text-slate-600 hover:bg-slate-100 dark:hover:bg-slate-800 dark:hover:text-slate-300 rounded-lg transition-colors"
-              title="Edit object type"
-              onClick={() => handleEdit(schema)}
-            >
-              <Edit2 className="w-4 h-4" />
-            </Button>
-            <Button
-              variant="ghost"
-              size="icon"
-              onClick={() => handleDelete(schema)}
-              className="p-2 h-auto w-auto text-slate-400 hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-900/30 dark:hover:text-red-400 rounded-lg transition-colors"
-              title="Delete object type"
-              disabled={deleteObjectSchemaMutation.isPending}
-            >
-              <Trash2 className="w-4 h-4" />
-            </Button>
-          </>
-        }
-      />
-    );
-  };
+  const deletingId = deleteObjectSchemaMutation.isPending
+    ? deleteTarget?.id
+    : null;
 
   if (isLoading) {
     return (
-      <div className="space-y-3">
-        {[...Array(3)].map((_, i) => (
-          <div
-            key={i}
-            className="rounded-xl bg-muted/20 px-4 py-5 sm:px-5 sm:py-6 animate-pulse"
-          >
-            <div className="flex items-center gap-3">
-              <div className="h-4 w-28 rounded bg-muted/60" />
-            </div>
-            <div className="mt-3 h-5 w-48 rounded bg-muted/60" />
+      <div className="rounded-lg border divide-y">
+        {[...Array(4)].map((_, i) => (
+          <div key={i} className="flex items-center gap-4 px-3 py-2.5">
+            <div className="h-4 w-40 rounded bg-muted/60 animate-pulse" />
+            <div className="h-4 w-16 rounded bg-muted/60 animate-pulse" />
+            <div className="h-4 w-48 rounded bg-muted/60 animate-pulse" />
+            <div className="ml-auto h-4 w-28 rounded bg-muted/60 animate-pulse" />
           </div>
         ))}
       </div>
@@ -123,24 +103,28 @@ export function ObjectSchemaDtosTable({
 
   if (!connectionId) {
     return (
-      <div className="flex flex-col items-center justify-center rounded-2xl bg-muted/20 px-6 py-12 text-center">
-        <Icons.warning className="mb-4 h-12 w-12 text-muted-foreground" />
+      <div className="rounded-lg border bg-muted/20 px-6 py-10 text-center">
+        <Icons.warning className="mx-auto mb-4 h-10 w-10 text-muted-foreground" />
         <p className="text-base font-semibold text-foreground">
           No database connection selected
+        </p>
+        <p className="mt-1 text-sm text-muted-foreground">
+          Select a database connection to view its object types.
         </p>
       </div>
     );
   }
 
   if (isError) {
+    const err = error as Error & { code?: string; response?: unknown };
     const isNetworkError =
-      (error as any)?.message?.includes('fetch') ||
-      (error as any)?.code === 'ERR_NETWORK' ||
-      !(error as any)?.response;
+      err?.message?.includes('fetch') ||
+      err?.code === 'ERR_NETWORK' ||
+      !err?.response;
 
     return (
-      <div className="flex flex-col items-center justify-center rounded-2xl bg-muted/20 px-6 py-12 text-center">
-        <Icons.warning className="mb-4 h-12 w-12 text-destructive" />
+      <div className="rounded-lg border bg-muted/20 px-6 py-10 text-center">
+        <Icons.warning className="mx-auto mb-4 h-10 w-10 text-destructive" />
         <p className="text-base font-semibold text-foreground">
           {isNetworkError
             ? 'Unable to connect to backend'
@@ -152,9 +136,9 @@ export function ObjectSchemaDtosTable({
             : 'There was a problem loading object types. Please try again.'}
         </p>
         {import.meta.env.DEV && error && (
-          <div className="mt-4 max-w-md rounded-lg bg-destructive/10 p-3 text-left">
+          <div className="mt-4 max-w-md mx-auto rounded-lg bg-destructive/10 p-3 text-left">
             <p className="text-xs font-mono text-destructive break-words">
-              {(error as any).message || 'Unknown error'}
+              {err.message || 'Unknown error'}
             </p>
           </div>
         )}
@@ -164,8 +148,8 @@ export function ObjectSchemaDtosTable({
 
   if (!objectSchemaDtos || objectSchemaDtos.length === 0) {
     return (
-      <div className="flex flex-col items-center justify-center rounded-2xl bg-muted/20 px-6 py-12 text-center">
-        <Icons.inbox className="mb-4 h-12 w-12 text-muted-foreground" />
+      <div className="rounded-lg border bg-muted/20 px-6 py-10 text-center">
+        <Icons.inbox className="mx-auto mb-4 h-10 w-10 text-muted-foreground" />
         <p className="text-base font-semibold text-foreground">
           No object types yet
         </p>
@@ -177,14 +161,118 @@ export function ObjectSchemaDtosTable({
   }
 
   return (
-    <div className="space-y-3">
-      {deleteObjectSchemaMutation.isPending && (
-        <div className="flex items-center gap-2 text-xs text-muted-foreground">
-          <Loader2 className="h-4 w-4 animate-spin" />
-          Updating...
+    <>
+      <div className="rounded-lg border overflow-hidden">
+        <Table>
+          <TableHeader>
+            <TableRow>
+              <TableHead>Name</TableHead>
+              <TableHead>Fields</TableHead>
+              <TableHead>Description</TableHead>
+              <TableHead>Updated</TableHead>
+              <TableHead className="w-0" />
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {objectSchemaDtos.map((schema) => {
+              const fieldCount = schema.columns?.length ?? 0;
+              return (
+                <TableRow key={schema.id || schema.name}>
+                  <TableCell className="font-medium text-foreground">
+                    {schema.name || 'Untitled object type'}
+                  </TableCell>
+                  <TableCell className="text-muted-foreground">
+                    <Badge variant="secondary">
+                      {fieldCount} {fieldCount === 1 ? 'field' : 'fields'}
+                    </Badge>
+                  </TableCell>
+                  <TableCell className="text-muted-foreground">
+                    <div className="max-w-[28rem] truncate">
+                      {schema.description || (
+                        <span className="text-muted-foreground/60">—</span>
+                      )}
+                    </div>
+                  </TableCell>
+                  <TableCell className="text-muted-foreground">
+                    {schema.updatedAt ? (
+                      formatDate(schema.updatedAt)
+                    ) : (
+                      <span className="text-muted-foreground/60">—</span>
+                    )}
+                  </TableCell>
+                  <TableCell className="text-right">
+                    <div className="flex items-center justify-end gap-1">
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="h-7 w-7 text-muted-foreground"
+                        title="Manage instances"
+                        onClick={() => handleViewInstances(schema)}
+                      >
+                        <Database className="h-4 w-4" />
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="h-7 w-7 text-muted-foreground"
+                        title="Edit object type"
+                        onClick={() => handleEdit(schema)}
+                      >
+                        <Edit2 className="h-4 w-4" />
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="h-7 w-7 text-muted-foreground hover:text-destructive"
+                        title="Delete object type"
+                        disabled={deletingId === schema.id}
+                        onClick={() => setDeleteTarget(schema)}
+                      >
+                        {deletingId === schema.id ? (
+                          <Loader2 className="h-4 w-4 animate-spin" />
+                        ) : (
+                          <Trash2 className="h-4 w-4" />
+                        )}
+                      </Button>
+                    </div>
+                  </TableCell>
+                </TableRow>
+              );
+            })}
+          </TableBody>
+        </Table>
+      </div>
+
+      <ModalDialog open={!!deleteTarget} onClose={() => setDeleteTarget(null)}>
+        <DialogHeader>
+          <DialogTitle>Delete Object Type</DialogTitle>
+          <DialogDescription>
+            Are you sure you want to delete the object type "
+            {deleteTarget?.name}"?
+          </DialogDescription>
+        </DialogHeader>
+        <div className="py-2">
+          This action cannot be undone and may affect any workflows or records
+          using this object type.
         </div>
-      )}
-      {objectSchemaDtos.map(renderCard)}
-    </div>
+        <DialogFooter className="gap-2 sm:gap-0">
+          <DialogClose asChild>
+            <Button type="button" variant="outline">
+              Cancel
+            </Button>
+          </DialogClose>
+          <Button
+            type="button"
+            variant="destructive"
+            onClick={handleDelete}
+            disabled={deleteObjectSchemaMutation.isPending}
+          >
+            {deleteObjectSchemaMutation.isPending
+              ? 'Deleting...'
+              : 'Delete Object Type'}
+          </Button>
+        </DialogFooter>
+      </ModalDialog>
+    </>
   );
 }

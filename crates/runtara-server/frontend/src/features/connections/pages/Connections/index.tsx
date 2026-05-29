@@ -45,7 +45,7 @@ export function Connections() {
         title="Manage connections"
         action={
           <Button
-            className="h-11 w-full rounded-full sm:w-auto sm:px-6"
+            className="w-full sm:w-auto sm:px-4"
             disabled={
               isFetching ||
               connectionTypes.length === 0 ||

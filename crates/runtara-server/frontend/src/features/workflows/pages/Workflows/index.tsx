@@ -12,7 +12,6 @@ import {
   SelectValue,
 } from '@/shared/components/ui/select';
 import { WorkflowsGrid } from '../../components/WorkflowsGrid';
-import { FolderCard } from '../../components/FolderCard';
 import { FolderBreadcrumb } from '../../components/FolderBreadcrumb';
 import {
   RenameFolderDialog,
@@ -171,7 +170,7 @@ export function Workflows() {
       action={
         <Link to="/workflows/create" className="w-full sm:w-auto">
           <Button
-            className="h-10 w-full sm:w-auto sm:px-4 shadow-sm shadow-blue-600/20 dark:shadow-blue-900/30"
+            className="w-full sm:w-auto sm:px-4"
             disabled={isError}
           >
             <PlusIcon className="mr-2 h-4 w-4" />
@@ -193,18 +192,18 @@ export function Workflows() {
           {/* Search and sort */}
           <div className="flex w-full flex-col gap-4 sm:flex-row sm:items-center">
             <div className="relative w-full sm:flex-[2]">
-              <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+              <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
               <Input
                 value={searchTerm}
                 onChange={(event) => setSearchTerm(event.target.value)}
                 placeholder="Search workflows..."
-                className="h-10 w-full rounded-lg border-slate-200 bg-white pl-10 pr-4 text-sm placeholder:text-slate-400 focus:border-blue-300 focus:ring-2 focus:ring-blue-100 dark:bg-slate-900 dark:border-slate-700 dark:focus:border-blue-600 dark:focus:ring-blue-900/30"
+                className="w-full pl-9 pr-9"
               />
               {searchTerm && (
                 <Button
                   variant="ghost"
                   size="icon"
-                  className="absolute right-1 top-1/2 -translate-y-1/2 h-8 w-8"
+                  className="absolute right-1 top-1/2 -translate-y-1/2 h-6 w-6"
                   onClick={() => setSearchTerm('')}
                 >
                   <X className="h-4 w-4" />
@@ -215,7 +214,7 @@ export function Workflows() {
               value={sortBy}
               onValueChange={(value) => setSortBy(value as 'updated' | 'name')}
             >
-              <SelectTrigger className="h-10 w-full sm:flex-1 rounded-lg border-slate-200 bg-white px-3.5 text-sm text-slate-600 hover:bg-slate-50 dark:bg-slate-900 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800">
+              <SelectTrigger className="w-full sm:flex-1">
                 <SelectValue placeholder="Sort by" />
               </SelectTrigger>
               <SelectContent>
@@ -228,31 +227,17 @@ export function Workflows() {
       }
     >
       <TileList>
-        {/* Folder cards - only show when at root or in a folder with children */}
-        {isAtRoot && childFolders.length > 0 && (
-          <div className="space-y-2 mb-6">
-            {childFolders.map((folder, index) => (
-              <FolderCard
-                key={folder.path}
-                name={folder.name}
-                path={folder.path}
-                workflowCount={folderWorkflowCounts[folder.path] || 0}
-                onOpen={handleFolderNavigate}
-                onRename={(path) => setRenameFolderTarget(path)}
-                onDelete={(path) => setDeleteFolderTarget(path)}
-                className="animate-in fade-in-slide-up"
-                style={{ animationDelay: `${index * 50}ms` }}
-              />
-            ))}
-          </div>
-        )}
-
-        {/* Workflows grid */}
+        {/* Folders + workflows in a single table */}
         <WorkflowsGrid
           searchTerm={debouncedSearchTerm}
           sortBy={sortBy}
           folderPath={currentFolderPath}
           showMoveAction={true}
+          folders={childFolders}
+          folderWorkflowCounts={folderWorkflowCounts}
+          onFolderNavigate={handleFolderNavigate}
+          onFolderRename={setRenameFolderTarget}
+          onFolderDelete={setDeleteFolderTarget}
         />
       </TileList>
 

@@ -50,7 +50,7 @@ export function WorkflowForm(props: WorkflowFormProps) {
 
         <Form {...form}>
           <form onSubmit={form.handleSubmit(onSubmit)}>
-            <div className="mt-6 rounded-2xl bg-card px-4 py-5 shadow-none sm:px-6 sm:py-6">
+            <div className="mt-6 rounded-lg bg-card px-4 py-5 shadow-none sm:px-6 sm:py-6">
               <FormField
                 name="name"
                 render={({ field }) => (

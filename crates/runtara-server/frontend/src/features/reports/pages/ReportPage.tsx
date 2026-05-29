@@ -297,7 +297,7 @@ export function ReportPage() {
     return (
       <TilesPage kicker="Reports" title="Loading report">
         <TileList>
-          <div className="h-96 animate-pulse rounded-xl bg-muted/30" />
+          <div className="h-96 animate-pulse rounded-lg bg-muted/30" />
         </TileList>
       </TilesPage>
     );
@@ -362,7 +362,7 @@ export function ReportPage() {
           <Link to={`/reports/${reportId}`} className="w-full sm:w-auto">
             <Button
               variant="outline"
-              className="h-11 w-full rounded-full sm:px-5"
+              className="w-full sm:px-4"
             >
               <Eye className="mr-2 h-4 w-4" />
               View
@@ -372,7 +372,7 @@ export function ReportPage() {
           <Link to="/reports" className="w-full sm:w-auto">
             <Button
               variant="outline"
-              className="h-11 w-full rounded-full sm:px-5"
+              className="w-full sm:px-4"
             >
               Cancel
             </Button>
@@ -384,7 +384,7 @@ export function ReportPage() {
             <Link to={explorePath} className="w-full sm:w-auto">
               <Button
                 variant="outline"
-                className="h-11 w-full rounded-full sm:px-5"
+                className="w-full sm:px-4"
               >
                 <Compass className="mr-2 h-4 w-4" />
                 Explore
@@ -393,7 +393,7 @@ export function ReportPage() {
           ) : null}
           <Button
             variant="outline"
-            className="h-11 rounded-full sm:px-5"
+            className="sm:px-4"
             disabled={renderQuery.isFetching}
             onClick={handlePrint}
           >
@@ -402,7 +402,7 @@ export function ReportPage() {
           </Button>
           <Button
             variant="outline"
-            className="h-11 rounded-full sm:px-5"
+            className="sm:px-4"
             disabled={renderQuery.isFetching}
             onClick={() => renderQuery.refetch()}
           >
@@ -413,13 +413,13 @@ export function ReportPage() {
             <ReportDeleteButton
               reportId={reportId}
               reportName={existingReport.name}
-              className="h-11 rounded-full sm:px-5"
+              className="sm:px-4"
             />
           ) : null}
           <Link to={`/reports/${reportId}?edit=1`} className="w-full sm:w-auto">
             <Button
               variant="outline"
-              className="h-11 w-full rounded-full sm:px-5"
+              className="w-full sm:px-4"
             >
               <Edit className="mr-2 h-4 w-4" />
               Edit
@@ -431,12 +431,12 @@ export function ReportPage() {
         <ReportDeleteButton
           reportId={reportId}
           reportName={existingReport.name}
-          className="h-11 rounded-full sm:px-5"
+          className="sm:px-4"
         />
       ) : null}
       {editing ? (
         <Button
-          className="h-11 rounded-full sm:px-5"
+          className="sm:px-4"
           disabled={!canSave}
           onClick={handleSave}
         >
@@ -500,7 +500,7 @@ export function ReportPage() {
         ) : (
           <Suspense
             fallback={
-              <div className="h-96 animate-pulse rounded-xl bg-muted/30" />
+              <div className="h-96 animate-pulse rounded-lg bg-muted/30" />
             }
           >
             <ReportBuilderWizardV2

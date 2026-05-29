@@ -301,17 +301,17 @@ export function DataTable<TData, TValue>({
       </div>
       {beforePaginationSlot}
       {shouldRenderPagination && (
-        <div className="px-5 py-4 border-t border-slate-200 bg-slate-50/30 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between dark:border-slate-700 dark:bg-slate-800/30">
-          <div className="flex flex-wrap items-center gap-3 text-sm text-slate-600 dark:text-slate-400">
+        <div className="px-3 py-2.5 border-t bg-muted/30 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <div className="flex flex-wrap items-center gap-3 text-sm text-muted-foreground">
             <span>
               Rows {startRow}-{endRow} of {totalRowCount.toLocaleString()}
             </span>
             <div className="flex items-center gap-2">
-              <span className="text-sm text-slate-500 dark:text-slate-400">
+              <span className="text-sm text-muted-foreground">
                 Page size:
               </span>
               <select
-                className="h-8 rounded-md border border-slate-200 bg-white px-2.5 text-sm text-slate-700 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-300"
+                className="h-8 rounded-md border bg-background px-2.5 text-sm text-foreground"
                 value={pagination.pageSize}
                 onChange={(event) =>
                   pagination.onPageSizeChange?.(Number(event.target.value))
@@ -326,34 +326,34 @@ export function DataTable<TData, TValue>({
             </div>
           </div>
           <div className="flex items-center gap-3">
-            <span className="text-sm text-slate-600 dark:text-slate-400">
+            <span className="text-sm text-muted-foreground">
               Page {table.getState().pagination.pageIndex + 1} of{' '}
               {table.getPageCount().toLocaleString()}
             </span>
             <div className="flex items-center gap-1">
               <button
-                className="p-1.5 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded transition-colors disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-slate-400 dark:hover:text-slate-300 dark:hover:bg-slate-700"
+                className="p-1.5 text-muted-foreground hover:text-foreground hover:bg-muted rounded transition-colors disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-muted-foreground"
                 disabled={!table.getCanPreviousPage()}
                 onClick={() => table.firstPage()}
               >
                 <ChevronFirst size={16} />
               </button>
               <button
-                className="p-1.5 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded transition-colors disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-slate-400 dark:hover:text-slate-300 dark:hover:bg-slate-700"
+                className="p-1.5 text-muted-foreground hover:text-foreground hover:bg-muted rounded transition-colors disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-muted-foreground"
                 disabled={!table.getCanPreviousPage()}
                 onClick={() => table.previousPage()}
               >
                 <ChevronLeft size={16} />
               </button>
               <button
-                className="p-1.5 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded transition-colors disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-slate-400 dark:hover:text-slate-300 dark:hover:bg-slate-700"
+                className="p-1.5 text-muted-foreground hover:text-foreground hover:bg-muted rounded transition-colors disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-muted-foreground"
                 disabled={!table.getCanNextPage()}
                 onClick={() => table.nextPage()}
               >
                 <ChevronRight size={16} />
               </button>
               <button
-                className="p-1.5 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded transition-colors disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-slate-400 dark:hover:text-slate-300 dark:hover:bg-slate-700"
+                className="p-1.5 text-muted-foreground hover:text-foreground hover:bg-muted rounded transition-colors disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-muted-foreground"
                 disabled={!table.getCanNextPage()}
                 onClick={() => table.lastPage()}
               >

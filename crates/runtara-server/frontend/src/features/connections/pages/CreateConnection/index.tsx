@@ -129,7 +129,7 @@ export function CreateConnection() {
   if (!currentConnectionType) {
     return (
       <div className="mx-auto max-w-5xl px-4 py-10 sm:px-6 lg:px-10">
-        <div className="rounded-2xl bg-muted/20 px-6 py-8 text-center text-muted-foreground">
+        <div className="rounded-lg bg-muted/20 px-6 py-8 text-center text-muted-foreground">
           Connection type not found.
         </div>
       </div>

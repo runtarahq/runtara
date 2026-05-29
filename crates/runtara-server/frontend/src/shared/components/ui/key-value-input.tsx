@@ -75,7 +75,7 @@ export function KeyValueInput({
     <div
       id={id}
       className={cn(
-        'flex w-full flex-col gap-2 rounded-2xl border border-border/50 bg-background p-3',
+        'flex w-full flex-col gap-2 rounded-lg border border-border/50 bg-background p-3',
         className
       )}
     >

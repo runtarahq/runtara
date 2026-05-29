@@ -154,7 +154,7 @@ export function ChatBubble({ message }: ChatBubbleProps) {
   if (role === 'user') {
     return (
       <div className="flex justify-end">
-        <div className="max-w-[80%] rounded-2xl rounded-tr-md bg-primary px-4 py-2.5 text-sm text-primary-foreground">
+        <div className="max-w-[80%] rounded-lg rounded-tr-md bg-primary px-4 py-2.5 text-sm text-primary-foreground">
           <p className="whitespace-pre-wrap">{content}</p>
         </div>
       </div>
@@ -184,7 +184,7 @@ export function ChatBubble({ message }: ChatBubbleProps) {
     <div className="flex justify-start">
       <div
         className={cn(
-          'max-w-[80%] rounded-2xl rounded-tl-md border bg-card px-4 py-2.5 text-sm',
+          'max-w-[80%] rounded-lg rounded-tl-md border bg-card px-4 py-2.5 text-sm',
           isStreaming && !content && 'animate-pulse'
         )}
       >

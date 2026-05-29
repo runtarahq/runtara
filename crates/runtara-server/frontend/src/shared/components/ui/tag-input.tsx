@@ -38,7 +38,7 @@ export function TagInput({
   return (
     <div
       className={cn(
-        'flex min-h-11 w-full flex-wrap items-center gap-2 rounded-2xl border border-border/50 bg-background px-3 py-2 text-sm focus-within:ring-2 focus-within:ring-ring focus-within:ring-offset-0',
+        'flex min-h-9 w-full flex-wrap items-center gap-2 rounded-md border border-border/50 bg-background px-3 py-2 text-sm focus-within:ring-2 focus-within:ring-ring focus-within:ring-offset-0',
         className
       )}
     >

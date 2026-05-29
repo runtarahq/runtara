@@ -232,7 +232,7 @@ export function ObjectInstanceDtoForm({
   return (
     <form
       onSubmit={handleSubmit}
-      className="space-y-6 rounded-2xl bg-card px-4 py-5 sm:px-6"
+      className="space-y-6 rounded-lg bg-card px-4 py-5 sm:px-6"
     >
       {objectSchemaDto.columns &&
         getWritableObjectColumns(objectSchemaDto.columns).map((column) => {
@@ -269,7 +269,7 @@ export function ObjectInstanceDtoForm({
                 >
                   <SelectTrigger
                     id={`field-${column.name}`}
-                    className="h-11 rounded-2xl"
+                    className="h-9"
                   >
                     <SelectValue placeholder="-- Select --" />
                   </SelectTrigger>
@@ -284,7 +284,7 @@ export function ObjectInstanceDtoForm({
                   type="datetime-local"
                   value={formValues[column.name] || ''}
                   onChange={(e) => handleChange(column.name, e.target.value)}
-                  className="h-11 rounded-2xl"
+                  className="h-9"
                 />
               ) : dataType === 'integer' || dataType === 'decimal' ? (
                 <Input
@@ -300,7 +300,7 @@ export function ObjectInstanceDtoForm({
                     handleChange(column.name, value);
                   }}
                   placeholder={`Enter ${column.name}`}
-                  className="h-11 rounded-2xl"
+                  className="h-9"
                 />
               ) : dataType === 'json' ? (
                 <textarea
@@ -315,7 +315,7 @@ export function ObjectInstanceDtoForm({
                     }
                   }}
                   placeholder='{"key": "value"}'
-                  className="min-h-[120px] w-full rounded-2xl border border-border/50 bg-background px-3 py-2 text-sm font-mono focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                  className="min-h-[120px] w-full rounded-lg border border-border/50 bg-background px-3 py-2 text-sm font-mono focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                   rows={5}
                 />
               ) : (
@@ -325,7 +325,7 @@ export function ObjectInstanceDtoForm({
                   value={formValues[column.name] || ''}
                   onChange={(e) => handleChange(column.name, e.target.value)}
                   placeholder={`Enter ${column.name}`}
-                  className="h-11 rounded-2xl"
+                  className="h-9"
                 />
               )}
 
@@ -358,7 +358,7 @@ export function ObjectInstanceDtoForm({
           </Button>
           <Button
             type="submit"
-            className="h-11 rounded-full px-6"
+            className="px-4"
             disabled={createRecord.isPending || updateRecord.isPending}
           >
             {isEditing ? 'Update Instance' : 'Create Instance'}
