@@ -166,6 +166,10 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   direct parameters. Simple Agent stdlib input/cache helpers moved into
   `direct_wasm::compile::agent_io`. Agent error payload conversion and onError
   route lowering moved into `direct_wasm::compile::agent_error`.
+  The remaining Agent step state-machine lowering moved into
+  `direct_wasm::compile::agent`, so `compile.rs` dispatches Agent run-plan
+  entries without owning their validation, retry, checkpoint, output, and
+  continuation details inline.
 - `direct_wasm::compile::compose_direct_workflow` now performs the first
   direct static composition path: it maps the direct `workflow-logic.wasm`
   component plus prebuilt stdlib/runtime/agent components into `wac compose`,
@@ -769,6 +773,10 @@ Emitter module boundaries should stay readable as support broadens:
   debug-error emission integration, onError route dispatch, handled-error
   terminal completion, Split nested failure aggregation, and runtime failure
   fallback for unhandled Agent errors.
+- `compile/agent.rs` owns the Agent step state machine, including input mapping,
+  input validation, connection enrichment, durable checkpoint/cache handling,
+  retry/no-retry dispatch, output envelope insertion, debug start/end events,
+  source rebuild, and continuation into the next run plan.
 - `compile/delay.rs` owns Delay step lowering for durable and non-durable
   waits while delegating retptr/result mechanics to `compile/abi.rs`.
 - `compile/log.rs` owns Log step lowering and custom-event emission order while
