@@ -104,9 +104,10 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   stdlib, emits `external_input_requested`, polls `runtime.poll-custom-signal`
   in a runtime signal-aware loop, checks elapsed time through `runtime.now-ms`,
   reports generated-compatible timeout failures through stdlib/runtime,
-  records the received payload through stdlib, rebuilds the source envelope,
-  and continues normal flow. Support gates still reject `onWait` and
-  breakpoint waits until those paths have parity tests.
+  honors cancel/pause/shutdown lifecycle signals, records the received payload
+  through stdlib, rebuilds the source envelope, and continues normal flow.
+  Support gates still reject `onWait` and breakpoint waits until those paths
+  have parity tests.
 - `scripts/build-agent-components.sh` now builds and stages the direct workflow
   stdlib/runtime components beside agent components with sibling metadata, and
   the bundle installer treats `RUNTARA_AGENT_COMPONENTS_DIR` as the shared
@@ -2009,7 +2010,8 @@ Implementation steps:
    - poll interval: stdlib helper done through `wait-poll-interval-ms`;
    - resume with signal payload: stdlib output helper done through
      `wait-output`;
-   - cancellation: runtime signal check is wired in the polling loop.
+   - cancellation: runtime signal check is wired in the polling loop, with
+     gated A/B parity for cancel, pause, and shutdown.
 2. Implement `WaitForSignal` lowering:
    - baseline no-`onWait`/no-breakpoint lowering: done, including timeout;
    - `onWait` nested graph lowering: pending;
@@ -2019,7 +2021,8 @@ Implementation steps:
    - normal signal resume: structural core test and gated A/B test are in
      place;
    - timeout: structural core test and gated A/B failure test are in place;
-   - cancellation;
+   - cancellation: gated A/B lifecycle-signal test is in place for cancel,
+     pause, and shutdown;
    - `on_wait` failure;
    - action metadata and response schema.
 
@@ -2047,8 +2050,9 @@ Current status:
 - Baseline direct core lowering is in place for waits without `onWait` or
   breakpoint. Host-level gated A/B coverage is added for immediate
   custom-signal resume, normal completion, and generated-compatible timeout
-  failure. `onWait`, debug/breakpoint parity, and durable suspension semantics
-  remain pending.
+  failure. Host-level gated A/B lifecycle coverage now proves cancel, pause,
+  and shutdown behavior while waiting. `onWait`, debug/breakpoint parity, and
+  durable suspension semantics remain pending.
 
 ### Phase 12: AiAgent
 

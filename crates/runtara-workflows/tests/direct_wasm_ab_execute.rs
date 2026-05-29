@@ -177,6 +177,7 @@ struct CapturedRun {
 
 struct ServerState {
     checkpoints: Mutex<HashMap<String, Vec<u8>>>,
+    pending_signal: Mutex<Option<String>>,
     pending_checkpoint_signal: Mutex<Option<String>>,
     custom_signal_payload: Mutex<Option<Vec<u8>>>,
 }
@@ -184,11 +185,13 @@ struct ServerState {
 impl ServerState {
     fn new(
         preloaded_checkpoints: Vec<(String, Vec<u8>)>,
+        pending_signal: Option<String>,
         pending_checkpoint_signal: Option<String>,
         custom_signal_payload: Option<Vec<u8>>,
     ) -> Self {
         Self {
             checkpoints: Mutex::new(preloaded_checkpoints.into_iter().collect()),
+            pending_signal: Mutex::new(pending_signal),
             pending_checkpoint_signal: Mutex::new(pending_checkpoint_signal),
             custom_signal_payload: Mutex::new(custom_signal_payload),
         }
@@ -533,10 +536,21 @@ fn route(
                 return (200, serde_json::json!({ "input": input }));
             }
             ("GET", "signals") => {
+                let signal = server_state
+                    .pending_signal
+                    .lock()
+                    .expect("signal state lock")
+                    .take()
+                    .map(|signal_type| {
+                        serde_json::json!({
+                            "signal_type": signal_type,
+                            "payload": null,
+                        })
+                    });
                 return (
                     200,
                     serde_json::json!({
-                        "signal": null,
+                        "signal": signal,
                         "custom_signal": null,
                     }),
                 );
@@ -798,6 +812,7 @@ fn execute_artifact_with_preloaded_checkpoints(
         preloaded_checkpoints,
         None,
         None,
+        None,
     )
 }
 
@@ -812,7 +827,25 @@ fn execute_artifact_with_checkpoint_signal(
         instance_id,
         workflow_input,
         Vec::new(),
+        None,
         Some(signal_type.to_string()),
+        None,
+    )
+}
+
+fn execute_artifact_with_signal(
+    binary_path: &Path,
+    instance_id: &str,
+    workflow_input: &[u8],
+    signal_type: &str,
+) -> CapturedRun {
+    execute_artifact_with_state(
+        binary_path,
+        instance_id,
+        workflow_input,
+        Vec::new(),
+        Some(signal_type.to_string()),
+        None,
         None,
     )
 }
@@ -829,6 +862,7 @@ fn execute_artifact_with_custom_signal(
         workflow_input,
         Vec::new(),
         None,
+        None,
         Some(signal_payload.to_vec()),
     )
 }
@@ -838,6 +872,7 @@ fn execute_artifact_with_state(
     instance_id: &str,
     workflow_input: &[u8],
     preloaded_checkpoints: Vec<(String, Vec<u8>)>,
+    pending_signal: Option<String>,
     pending_checkpoint_signal: Option<String>,
     custom_signal_payload: Option<Vec<u8>>,
 ) -> CapturedRun {
@@ -847,6 +882,7 @@ fn execute_artifact_with_state(
     let (stop_tx, stop_rx) = mpsc::channel::<()>();
     let server_state = Arc::new(ServerState::new(
         preloaded_checkpoints,
+        pending_signal,
         pending_checkpoint_signal,
         custom_signal_payload,
     ));
@@ -1267,6 +1303,111 @@ fn direct_wasm_matches_components_wait_for_signal_timeout() {
     );
 
     assert_failure_parity("wait-signal-timeout", 0, &components, &direct);
+}
+
+#[test]
+fn direct_wasm_matches_components_wait_for_signal_lifecycle_signals() {
+    let Some(components_dir) = direct_ab_components_dir() else {
+        return;
+    };
+    let _data = setup_data_dir();
+
+    let components_artifact =
+        compile_components_artifact("wait-signal-lifecycle", WAIT_FOR_SIGNAL_DIRECT_SIMPLE);
+    let direct_artifact = compile_direct_artifact(
+        &components_dir,
+        "wait-signal-lifecycle",
+        WAIT_FOR_SIGNAL_DIRECT_SIMPLE,
+    );
+    let workflow_input = br#"{"case_id":"case-stop","summary":"Stop while waiting"}"#;
+    let components_input = components_sdk_input(workflow_input);
+
+    for (case_index, signal_type, expected_suspended_count) in [
+        (0usize, "cancel", 0usize),
+        (1, "pause", 1),
+        (2, "shutdown", 1),
+    ] {
+        let components = execute_artifact_with_signal(
+            &components_artifact,
+            &format!("ab-components-wait-signal-{signal_type}"),
+            &components_input,
+            signal_type,
+        );
+        let direct = execute_artifact_with_signal(
+            &direct_artifact.path,
+            &format!("ab-direct-wait-signal-{signal_type}"),
+            workflow_input,
+            signal_type,
+        );
+
+        assert!(
+            components.status_success,
+            "components artifact did not stop cleanly for {signal_type}:\n{}",
+            components.stderr
+        );
+        assert!(
+            direct.status_success,
+            "direct artifact did not stop cleanly for {signal_type}: {direct:?}"
+        );
+        assert!(
+            components.output_json.is_none(),
+            "components artifact unexpectedly completed for {signal_type}"
+        );
+        assert!(
+            direct.output_json.is_none(),
+            "direct artifact unexpectedly completed for {signal_type}"
+        );
+        assert!(
+            components.error_json.is_none(),
+            "components artifact unexpectedly failed for {signal_type}: {:?}",
+            components.error_json
+        );
+        assert!(
+            direct.error_json.is_none(),
+            "direct artifact unexpectedly failed for {signal_type}: {:?}",
+            direct.error_json
+        );
+        assert_eq!(
+            normalized_events(&components.events),
+            normalized_events(&direct.events),
+            "wait lifecycle custom-event payload mismatch for {signal_type}"
+        );
+        assert_eq!(
+            components.sleeps, direct.sleeps,
+            "wait lifecycle sleep mismatch for {signal_type}"
+        );
+        assert_eq!(
+            normalized_checkpoints(&components.checkpoints),
+            normalized_checkpoints(&direct.checkpoints),
+            "wait lifecycle checkpoint mismatch for {signal_type}"
+        );
+        assert_eq!(
+            components.suspended_count, expected_suspended_count,
+            "components suspended count mismatch for {signal_type}"
+        );
+        assert_eq!(
+            direct.suspended_count, expected_suspended_count,
+            "direct suspended count mismatch for {signal_type}"
+        );
+        let expected_ack = vec![SignalAckRequest {
+            signal_type: signal_type.to_string(),
+        }];
+        assert_eq!(
+            components.signal_acks, expected_ack,
+            "components signal acknowledgement mismatch for {signal_type}"
+        );
+        assert_eq!(
+            direct.signal_acks,
+            vec![SignalAckRequest {
+                signal_type: signal_type.to_string(),
+            }],
+            "direct signal acknowledgement mismatch for {signal_type}"
+        );
+        assert_eq!(
+            components.signal_acks, direct.signal_acks,
+            "signal acknowledgement parity mismatch for {signal_type}[{case_index}]"
+        );
+    }
 }
 
 #[test]

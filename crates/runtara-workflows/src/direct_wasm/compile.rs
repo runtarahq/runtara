@@ -73,8 +73,11 @@ const DIRECT_RUN_RETPTR_OFFSET: i32 = 0;
 const DIRECT_RET_BOOL_OK_OFFSET: u64 = 4;
 const DIRECT_RET_U32_OK_OFFSET: u64 = 4;
 const DIRECT_RET_U64_OK_OFFSET: u64 = 8;
+// Canonical ABI aligns option payloads by inner type: option<list<u8>> keeps
+// the option tag at 4, while option<u64> aligns its tag/value to 8-byte slots.
 const DIRECT_RESULT_OPTION_TAG_OFFSET: u64 = 4;
-const DIRECT_RESULT_OPTION_U64_VALUE_OFFSET: u64 = 8;
+const DIRECT_RESULT_OPTION_U64_TAG_OFFSET: u64 = 8;
+const DIRECT_RESULT_OPTION_U64_VALUE_OFFSET: u64 = 16;
 const DIRECT_RESULT_OPTION_LIST_PTR_OFFSET: u64 = 8;
 const DIRECT_RESULT_OPTION_LIST_LEN_OFFSET: u64 = 12;
 const DIRECT_CHECKPOINT_PENDING_SIGNAL_TAG_OFFSET: u64 = 16;
@@ -4758,7 +4761,7 @@ fn emit_wait_for_signal_plan(
         output_ptr_local,
         output_len_local,
     );
-    push_retptr_u8_load(body, DIRECT_RESULT_OPTION_TAG_OFFSET);
+    push_retptr_u8_load(body, DIRECT_RESULT_OPTION_U64_TAG_OFFSET);
     body.instruction(&Instruction::LocalSet(DIRECT_WAIT_TIMEOUT_PRESENT_LOCAL));
     body.instruction(&Instruction::LocalGet(DIRECT_WAIT_TIMEOUT_PRESENT_LOCAL));
     body.instruction(&Instruction::If(BlockType::Empty));
