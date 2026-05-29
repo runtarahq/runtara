@@ -10,6 +10,15 @@ use std::collections::HashMap;
 use runtara_dsl::ExecutionGraph;
 
 /// Context for code emission, tracking variables and providing utilities.
+///
+/// Nested graphs (Split/While subgraphs and EmbedWorkflow children) derive
+/// their own context via [`EmitContext::derive_child`], which **inherits every
+/// configuration field by default** and resets only the per-graph mutable
+/// state (`step_results`, `counter`). When you add a new field here it is
+/// inherited into subgraphs automatically — add it to the reset list in
+/// `derive_child` ONLY if it is per-graph state that must not leak between a
+/// parent graph and its children.
+#[derive(Clone)]
 pub struct EmitContext {
     /// Maps step_id to the Ident of the variable holding its result
     step_results: HashMap<String, Ident>,
@@ -142,6 +151,40 @@ impl EmitContext {
     /// catalog through every constructor argument.
     pub fn set_catalog(&mut self, catalog: std::sync::Arc<runtara_dsl::agent_meta::AgentCatalog>) {
         self.catalog = catalog;
+    }
+
+    /// Derive a child context for a nested graph — a Split/While subgraph or an
+    /// EmbedWorkflow child — for use by `emit_graph_as_function`.
+    ///
+    /// **Inheritance is the default.** Every field is copied from the parent
+    /// (`self`) via struct-update syntax, so a newly added [`EmitContext`]
+    /// field is automatically inherited inside subgraphs without editing this
+    /// method or `emit_graph_as_function`. Only the fields listed explicitly
+    /// below are special-cased:
+    ///
+    /// - `step_results` / `counter` — **per-graph mutable state, RESET.** These
+    ///   are scoped to a single graph (step→variable bindings and the
+    ///   unique-var counter) and must not leak between parent and child.
+    /// - `rate_limit_budget_ms` — **per-graph override:** taken from the child
+    ///   `graph`, not the parent.
+    ///
+    /// `durable` is intentionally inherited from the parent: children and
+    /// subgraphs follow the enclosing workflow's durability and ignore the
+    /// child graph's own `durable` flag.
+    ///
+    /// `emitted_child_functions` is cloned (not shared) so each derived child
+    /// starts from a snapshot of the parent's already-emitted set; this
+    /// preserves the prior hand-copied behavior for cross-nested dedup.
+    pub fn derive_child(&self, graph: &ExecutionGraph) -> Self {
+        Self {
+            // Per-graph mutable state — must not leak across graphs.
+            step_results: HashMap::new(),
+            counter: 0,
+            // Per-graph override: rate-limit budget comes from THIS graph.
+            rate_limit_budget_ms: graph.rate_limit_budget_ms,
+            // Everything else (all configuration) is inherited from the parent.
+            ..self.clone()
+        }
     }
 
     /// Get a child workflow by workflow ID and resolved version.
@@ -296,6 +339,86 @@ mod tests {
         );
         assert!(ctx.connection_service_url.is_some());
         assert!(ctx.tenant_id.is_none());
+    }
+
+    // =============================================================================
+    // derive_child tests — the inherit-by-default contract for nested graphs
+    // =============================================================================
+
+    #[test]
+    fn test_derive_child_inherits_config_and_resets_per_graph_state() {
+        // Parent context with non-default configuration on every field, plus
+        // dirtied per-graph mutable state (a declared step and a bumped counter).
+        let catalog = std::sync::Arc::new(runtara_dsl::agent_meta::AgentCatalog::new());
+        let mut parent = EmitContext::with_catalog(true, catalog.clone());
+        parent.connection_service_url = Some("http://svc".to_string());
+        parent.tenant_id = Some("tenant-x".to_string());
+        parent
+            .child_workflows
+            .insert("wf::1".to_string(), create_simple_graph("c"));
+        parent
+            .step_to_child_ref
+            .insert("s".to_string(), ("wf".to_string(), 1));
+        parent
+            .connection_integration_ids
+            .insert("conn-1".to_string(), "openai".to_string());
+        parent.rate_limit_budget_ms = 99_999;
+        parent.durable = false;
+        parent.get_or_create_child_fn("wf", 1); // populate emitted_child_functions
+        parent.declare_step("parent-step"); // dirty step_results
+        parent.temp_var("tmp"); // bump counter to 1
+
+        // The child graph carries its OWN rate-limit budget.
+        let child_graph = ExecutionGraph {
+            rate_limit_budget_ms: 12_345,
+            ..Default::default()
+        };
+
+        let mut child = parent.derive_child(&child_graph);
+
+        // Configuration — inherited verbatim from the parent.
+        assert!(child.track_events);
+        assert_eq!(child.connection_service_url, Some("http://svc".to_string()));
+        assert_eq!(child.tenant_id, Some("tenant-x".to_string()));
+        assert_eq!(
+            child
+                .connection_integration_ids
+                .get("conn-1")
+                .map(String::as_str),
+            Some("openai")
+        );
+        assert!(child.child_workflows.contains_key("wf::1"));
+        assert!(child.step_to_child_ref.contains_key("s"));
+        assert!(
+            child.emitted_child_functions.contains_key("wf::1"),
+            "emitted_child_functions must be inherited (cloned) for cross-nested dedup"
+        );
+        assert!(!child.durable, "durable must be inherited from the parent");
+        assert!(
+            std::sync::Arc::ptr_eq(&child.catalog, &catalog),
+            "catalog Arc must be shared with the parent, not reset to a fresh empty one"
+        );
+
+        // steps_context_var / inputs_var are inherited and MUST stay the
+        // identifiers the generated function in `emit_graph_as_function`
+        // hardcodes (`inputs` / `steps_context`). This pins the one latent
+        // assumption of the inherit-by-default model: should a future change
+        // ever set these to non-defaults on a parent, this guard trips.
+        assert_eq!(child.steps_context_var.to_string(), "steps_context");
+        assert_eq!(child.inputs_var.to_string(), "inputs");
+
+        // Per-graph override — the rate-limit budget comes from the CHILD graph.
+        assert_eq!(
+            child.rate_limit_budget_ms, 12_345,
+            "must use the child graph's budget (12345), not the parent's (99999)"
+        );
+
+        // Per-graph mutable state — RESET (counter back to 0 → first temp is _1).
+        assert_eq!(
+            child.temp_var("tmp").to_string(),
+            "tmp_1",
+            "counter must reset to 0 in the derived child"
+        );
     }
 
     // =============================================================================

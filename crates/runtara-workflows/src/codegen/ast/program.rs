@@ -1724,31 +1724,13 @@ pub fn emit_graph_as_function(
     graph: &ExecutionGraph,
     parent_ctx: &EmitContext,
 ) -> Result<TokenStream, CodegenError> {
-    // Create a fresh context for this graph, inheriting configuration from parent
-    let mut ctx = EmitContext::new(parent_ctx.track_events);
-    ctx.connection_service_url = parent_ctx.connection_service_url.clone();
-    ctx.tenant_id = parent_ctx.tenant_id.clone();
-    ctx.child_workflows = parent_ctx.child_workflows.clone();
-    ctx.step_to_child_ref = parent_ctx.step_to_child_ref.clone();
-    // Inherit emitted child functions for deduplication across nested workflows
-    ctx.emitted_child_functions = parent_ctx.emitted_child_functions.clone();
-    // Inherit the pre-resolved connection_id -> integration_id map so agent
-    // steps inside subgraphs / embedded child workflows get the same
-    // `_connection.integration_id` injection as top-level steps. Without this,
-    // `EmitContext::new` leaves the map empty and `emit_connection_fetch`
-    // falls back to "", which breaks component agents that dispatch on it
-    // (e.g. ai-tools::text-completion) when used inside an EmbedWorkflow/While/Split.
-    ctx.connection_integration_ids = parent_ctx.connection_integration_ids.clone();
-    // Inherit the agent catalog too — `EmitContext::new` installs an empty one,
-    // which would make embedded agent steps silently skip rate-limit wrapping
-    // and required-input validation (both consult ctx.catalog).
-    ctx.set_catalog(parent_ctx.catalog.clone());
-    // Use this graph's rate_limit_budget_ms, or inherit from parent
-    ctx.rate_limit_budget_ms = graph.rate_limit_budget_ms;
-    // Durability is a top-level workflow concern: children and subgraphs always
-    // inherit from the parent context, ignoring any `durable` flag on this graph.
-    // (The top-level compile_with_children sets ctx.durable from its graph directly.)
-    ctx.durable = parent_ctx.durable;
+    // Derive a child context for this graph. All configuration (connection
+    // service, tenant, child workflows, integration-id map, agent catalog,
+    // durability, …) is inherited from the parent by default; only per-graph
+    // mutable state (step_results, counter) is reset and `rate_limit_budget_ms`
+    // is overridden from this graph. New `EmitContext` fields are inherited
+    // automatically — see `EmitContext::derive_child`.
+    let mut ctx = parent_ctx.derive_child(graph);
 
     // Build execution order
     let step_order = steps::build_execution_order(graph);
