@@ -2024,10 +2024,15 @@ Current status:
   failure/event parity for terminal `Error` workflows, with timestamp fields
   normalized out of the comparison.
 - The strict A/B harness now captures durable sleep/checkpoint requests and
-  includes a durable Delay fixture that diffs both completion output and
-  `/sleep` traffic.
-- Expanding the A/B harness to durable Agent checkpoint/replay fixtures remains
-  pending.
+  includes durable Delay and durable Agent fixtures. Delay diffs completion
+  output plus `/sleep` traffic exactly. Agent diffs completion output,
+  checkpoint ordering, and checkpoint bytes while normalizing the compiler-owned
+  checkpoint id prefix down to the stable
+  `agent::<agentId>::<capabilityId>::<stepId>` key base.
+- Cached durable Agent replay and exact cross-compiler checkpoint id compatibility
+  remain pending. Generated Rust currently wraps Agent checkpoint ids with the
+  resilient function/workflow-instance prefix, while direct artifacts use the
+  direct stdlib key shape.
 
 ### Phase 14: Controlled Production Enablement
 

@@ -29,6 +29,36 @@ const EDGE_CONDITION_PRIORITY: &str = include_str!("fixtures/edge_condition_prio
 const LOG_ALL_LEVELS: &str = include_str!("fixtures/log_all_levels.json");
 const ERROR_DIRECT_SIMPLE: &str = include_str!("fixtures/error_direct_simple.json");
 const DELAY_DYNAMIC: &str = include_str!("fixtures/delay_dynamic.json");
+const AGENT_RETURN_INPUT: &str = r#"{
+  "durable": true,
+  "steps": {
+    "agent": {
+      "stepType": "Agent",
+      "id": "agent",
+      "name": "Return Input",
+      "agentId": "utils",
+      "capabilityId": "return-input",
+      "maxRetries": 0,
+      "inputMapping": {
+        "value": { "valueType": "reference", "value": "data.value" }
+      }
+    },
+    "finish": {
+      "stepType": "Finish",
+      "id": "finish",
+      "inputMapping": {
+        "result": { "valueType": "reference", "value": "steps.agent.outputs" }
+      }
+    }
+  },
+  "entryPoint": "agent",
+  "executionPlan": [
+    { "fromStep": "agent", "toStep": "finish" }
+  ],
+  "variables": {},
+  "inputSchema": {},
+  "outputSchema": {}
+}"#;
 
 #[derive(Debug)]
 struct Completed {
@@ -615,6 +645,35 @@ fn normalized_events(events: &[RuntimeEvent]) -> Vec<(String, Value)> {
         .collect()
 }
 
+fn normalized_checkpoint_id(checkpoint_id: &str) -> String {
+    // Rust-generated components wrap Agent checkpoint ids with the resilient
+    // function and workflow instance prefix; direct artifacts own only the
+    // stable Agent key suffix today. If the step id itself is "agent", direct
+    // keys can surface as "<step>::agent::<agent-id>::<capability>::<step>";
+    // compare from the generated-Rust cache key base onward.
+    let suffix = checkpoint_id
+        .find("agent::")
+        .map(|index| checkpoint_id[index..].to_string())
+        .unwrap_or_else(|| checkpoint_id.to_string());
+    let segments = suffix.split("::").collect::<Vec<_>>();
+    if segments.len() >= 5 && segments[1] == "agent" && segments[0] == segments[4] {
+        return segments[1..].join("::");
+    }
+    suffix
+}
+
+fn normalized_checkpoints(checkpoints: &[CheckpointRequest]) -> Vec<(String, Vec<u8>)> {
+    checkpoints
+        .iter()
+        .map(|checkpoint| {
+            (
+                normalized_checkpoint_id(&checkpoint.checkpoint_id),
+                checkpoint.state.clone(),
+            )
+        })
+        .collect()
+}
+
 fn assert_success_parity(
     case_name: &str,
     input_index: usize,
@@ -659,7 +718,8 @@ fn assert_success_parity(
         "durable sleep request mismatch for {case_name}[{input_index}]"
     );
     assert_eq!(
-        components.checkpoints, direct.checkpoints,
+        normalized_checkpoints(&components.checkpoints),
+        normalized_checkpoints(&direct.checkpoints),
         "checkpoint request mismatch for {case_name}[{input_index}]"
     );
 }
@@ -706,7 +766,8 @@ fn assert_failure_parity(
         "failure durable sleep request mismatch for {case_name}[{input_index}]"
     );
     assert_eq!(
-        components.checkpoints, direct.checkpoints,
+        normalized_checkpoints(&components.checkpoints),
+        normalized_checkpoints(&direct.checkpoints),
         "failure checkpoint request mismatch for {case_name}[{input_index}]"
     );
 }
@@ -762,6 +823,11 @@ fn direct_wasm_matches_components_execution_for_supported_json_fixtures() {
             name: "durable-delay",
             graph_json: DELAY_DYNAMIC,
             inputs: &[br#"{"waitTime":0}"#],
+        },
+        AbCase {
+            name: "durable-agent",
+            graph_json: AGENT_RETURN_INPUT,
+            inputs: &[br#"{"value":"fresh-agent"}"#],
         },
     ];
 
