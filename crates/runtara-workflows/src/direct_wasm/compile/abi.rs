@@ -8,11 +8,12 @@ use wasm_encoder::{
 use wit_parser::abi::WasmType;
 
 use super::split::emit_split_append_retptr_error_and_continue;
+use super::wait::emit_wait_on_wait_error_and_fail;
 use super::{
     DIRECT_AGENT_RESULT_OK_LEN_OFFSET, DIRECT_AGENT_RESULT_OK_PTR_OFFSET,
     DIRECT_RESULT_OPTION_LIST_LEN_OFFSET, DIRECT_RESULT_OPTION_LIST_PTR_OFFSET,
     DIRECT_RESULT_OPTION_TAG_OFFSET, DIRECT_RUN_RETPTR_OFFSET, DirectCoreFunctionIndices,
-    DirectFailureTarget, DirectVariables, emit_wait_on_wait_error_and_fail,
+    DirectFailureTarget, DirectVariables,
 };
 use crate::direct_wasm::static_data::DirectDataSegment;
 

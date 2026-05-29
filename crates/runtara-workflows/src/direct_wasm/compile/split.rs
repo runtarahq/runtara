@@ -11,6 +11,7 @@ use super::abi::{
 use super::checkpoint::{emit_checkpoint_lookup, emit_checkpoint_save};
 use super::debug::emit_step_debug_event;
 use super::mapping::emit_build_source;
+use super::wait::emit_wait_on_wait_error_and_fail;
 use super::{
     DIRECT_RET_U32_OK_OFFSET, DIRECT_SPLIT_COUNT_LOCAL, DIRECT_SPLIT_INDEX_LOCAL,
     DIRECT_SPLIT_ITEM_LEN_LOCAL, DIRECT_SPLIT_ITEM_PTR_LOCAL, DIRECT_SPLIT_PARENT_SOURCE_LEN_LOCAL,
@@ -18,7 +19,6 @@ use super::{
     DIRECT_SPLIT_RESULTS_PTR_LOCAL, DIRECT_SPLIT_VARIABLES_LEN_LOCAL,
     DIRECT_SPLIT_VARIABLES_PTR_LOCAL, DirectCoreFunctionIndices, DirectCoreStaticData,
     DirectDataSegment, DirectFailureTarget, DirectRunPlan, DirectVariables, emit_run_plan_mapping,
-    emit_wait_on_wait_error_and_fail,
 };
 
 #[allow(clippy::too_many_arguments)]

@@ -176,7 +176,10 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   aggregation shared by nested Agent/Error/Wait paths. While loop lowering
   moved into `direct_wasm::compile::while_loop`, covering condition source
   construction, loop control, heartbeat/signal checks, state advancement, and
-  continuation.
+  continuation. WaitForSignal and onWait lowering moved into
+  `direct_wasm::compile::wait`, covering breakpoint pause, signal-id and
+  timeout setup, external-input events, polling/timeout loops, onWait nested
+  execution, and onWait failure conversion shared by ABI/Split paths.
 - `direct_wasm::compile::compose_direct_workflow` now performs the first
   direct static composition path: it maps the direct `workflow-logic.wasm`
   component plus prebuilt stdlib/runtime/agent components into `wac compose`,
@@ -794,6 +797,10 @@ Emitter module boundaries should stay readable as support broadens:
   construction, max-iteration loop control, per-iteration variables,
   heartbeat/check-signals calls, state advancement, final output construction,
   and continuation into the next run plan.
+- `compile/wait.rs` owns WaitForSignal and onWait lowering, including
+  breakpoint pause, signal-id/timeout setup, external-input custom events,
+  polling and timeout checks, onWait variable/source restoration, and onWait
+  failure conversion shared by ABI and Split failure paths.
 - `compile/delay.rs` owns Delay step lowering for durable and non-durable
   waits while delegating retptr/result mechanics to `compile/abi.rs`.
 - `compile/log.rs` owns Log step lowering and custom-event emission order while
