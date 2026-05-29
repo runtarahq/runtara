@@ -212,6 +212,12 @@ interface json {
         source: list<u8>,
     ) -> result<option<u64>, string>;
 
+    wait-timeout-error: func(
+        step-id: string,
+        signal-id: string,
+        timeout-ms: u64,
+    ) -> result<list<u8>, string>;
+
     wait-poll-interval-ms: func(
         step-id: string,
     ) -> result<u64, string>;

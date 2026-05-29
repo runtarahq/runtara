@@ -546,6 +546,20 @@ mod component {
             })
         }
 
+        fn wait_timeout_error(
+            step_id: String,
+            signal_id: String,
+            timeout_ms: u64,
+        ) -> Result<Vec<u8>, String> {
+            MANIFEST.with(|slot| {
+                let slot = slot.borrow();
+                let manifest = slot
+                    .as_ref()
+                    .ok_or_else(|| "direct stdlib manifest was not initialized".to_string())?;
+                manifest.wait_timeout_error(&step_id, &signal_id, timeout_ms)
+            })
+        }
+
         fn wait_poll_interval_ms(step_id: String) -> Result<u64, String> {
             MANIFEST.with(|slot| {
                 let slot = slot.borrow();

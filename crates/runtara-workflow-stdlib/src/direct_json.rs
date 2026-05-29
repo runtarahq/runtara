@@ -677,6 +677,20 @@ impl DirectJsonManifest {
         }
     }
 
+    /// Build the generated-code-compatible timeout failure string.
+    pub fn wait_timeout_error(
+        &self,
+        step_id: &str,
+        signal_id: &str,
+        timeout_ms: u64,
+    ) -> Result<Vec<u8>, String> {
+        self.wait_step(step_id)?;
+        Ok(format!(
+            "WaitForSignal step '{step_id}' timed out after {timeout_ms}ms waiting for signal '{signal_id}'"
+        )
+        .into_bytes())
+    }
+
     /// Return the configured WaitForSignal poll interval, defaulting to 1000ms.
     pub fn wait_poll_interval_ms(&self, step_id: &str) -> Result<u64, String> {
         let step = self.wait_step(step_id)?;
@@ -4791,6 +4805,25 @@ mod tests {
                 .wait_poll_interval_ms("wait")
                 .expect("poll interval"),
             250
+        );
+    }
+
+    #[test]
+    fn wait_timeout_error_matches_generated_failure_message() {
+        let manifest = DirectJsonManifest::parse(&wait_manifest(json!({
+            "id": "wait",
+            "stepType": "WaitForSignal",
+            "name": "Review Input"
+        })))
+        .expect("manifest");
+
+        let error = manifest
+            .wait_timeout_error("wait", "inst-1/root/wait", 500)
+            .expect("timeout error");
+
+        assert_eq!(
+            String::from_utf8(error).expect("utf8 error"),
+            "WaitForSignal step 'wait' timed out after 500ms waiting for signal 'inst-1/root/wait'"
         );
     }
 

@@ -368,7 +368,7 @@ fn supports_delay_step_baseline(_graph: &ExecutionGraph, step: &DelayStep) -> bo
 }
 
 fn supports_wait_for_signal_step_baseline(step: &WaitForSignalStep) -> bool {
-    step.on_wait.is_none() && step.timeout_ms.is_none() && !step.breakpoint.unwrap_or(false)
+    step.on_wait.is_none() && !step.breakpoint.unwrap_or(false)
 }
 
 fn supports_split_step_baseline(step: &SplitStep) -> bool {
@@ -846,13 +846,6 @@ fn collect_wait_for_signal_step_unsupported(
         );
     }
 
-    if step.timeout_ms.is_some() {
-        push(
-            "wait-for-signal-timeout",
-            "WaitForSignal timeout lowering is pending",
-        );
-    }
-
     if let Some(on_wait) = &step.on_wait {
         push(
             "wait-for-signal-on-wait",
@@ -1079,6 +1072,9 @@ mod tests {
             "wait" => include_str!("../../tests/fixtures/wait_for_signal_with_callback.json"),
             "wait_simple" => {
                 include_str!("../../tests/fixtures/wait_for_signal_direct_simple.json")
+            }
+            "wait_timeout" => {
+                include_str!("../../tests/fixtures/wait_for_signal_direct_timeout.json")
             }
             other => panic!("unknown fixture {other}"),
         };
@@ -1945,6 +1941,13 @@ mod tests {
     #[test]
     fn wait_without_timeout_or_on_wait_is_supported() {
         let report = analyze_direct_wasm_support(&fixture("wait_simple"));
+
+        assert!(report.supported, "{:?}", report.unsupported);
+    }
+
+    #[test]
+    fn wait_with_timeout_without_on_wait_is_supported() {
+        let report = analyze_direct_wasm_support(&fixture("wait_timeout"));
 
         assert!(report.supported, "{:?}", report.unsupported);
     }

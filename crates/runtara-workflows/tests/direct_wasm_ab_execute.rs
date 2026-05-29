@@ -33,6 +33,8 @@ const ERROR_DIRECT_SIMPLE: &str = include_str!("fixtures/error_direct_simple.jso
 const DELAY_DYNAMIC: &str = include_str!("fixtures/delay_dynamic.json");
 const WAIT_FOR_SIGNAL_DIRECT_SIMPLE: &str =
     include_str!("fixtures/wait_for_signal_direct_simple.json");
+const WAIT_FOR_SIGNAL_DIRECT_TIMEOUT: &str =
+    include_str!("fixtures/wait_for_signal_direct_timeout.json");
 const AGENT_CACHE_KEY: &str = "agent::utils::return-input::agent";
 const SPLIT_CACHE_KEY: &str = "split::split";
 const SPLIT_FINISH_WITH_SCHEMAS: &str = r#"{
@@ -261,6 +263,9 @@ fn shared_components_dir() -> Option<PathBuf> {
             || !stdlib_bytes
                 .windows(b"wait-output".len())
                 .any(|window| window == b"wait-output")
+            || !stdlib_bytes
+                .windows(b"wait-timeout-error".len())
+                .any(|window| window == b"wait-timeout-error")
         {
             eprintln!(
                 "SKIP: direct shared workflow stdlib component is stale: {:?}",
@@ -938,6 +943,24 @@ fn normalized_events(events: &[RuntimeEvent]) -> Vec<(String, Value)> {
         .collect()
 }
 
+fn normalized_failure_error(error_json: &Option<Value>) -> Option<Value> {
+    let Value::String(error) = error_json.as_ref()? else {
+        return error_json.clone();
+    };
+    let Some(prefix) = error
+        .split_once(" waiting for signal '")
+        .map(|(prefix, _)| prefix)
+    else {
+        return error_json.clone();
+    };
+    if !prefix.starts_with("WaitForSignal step '") || !prefix.contains("' timed out after ") {
+        return error_json.clone();
+    }
+    Some(Value::String(format!(
+        "{prefix} waiting for signal '<signal>'"
+    )))
+}
+
 fn normalized_checkpoint_id(checkpoint_id: &str) -> String {
     // Rust-generated components wrap checkpoint ids with the resilient
     // function and workflow instance prefix; direct artifacts own only the
@@ -1051,7 +1074,8 @@ fn assert_failure_parity(
         direct.output_json
     );
     assert_eq!(
-        components.error_json, direct.error_json,
+        normalized_failure_error(&components.error_json),
+        normalized_failure_error(&direct.error_json),
         "failure payload mismatch for {case_name}[{input_index}]"
     );
     assert!(
@@ -1212,6 +1236,37 @@ fn direct_wasm_matches_components_wait_for_signal_resume() {
         direct.output_json,
         Some(serde_json::json!({"approved": true}))
     );
+}
+
+#[test]
+fn direct_wasm_matches_components_wait_for_signal_timeout() {
+    let Some(components_dir) = direct_ab_components_dir() else {
+        return;
+    };
+    let _data = setup_data_dir();
+
+    let components_artifact =
+        compile_components_artifact("wait-signal-timeout", WAIT_FOR_SIGNAL_DIRECT_TIMEOUT);
+    let direct_artifact = compile_direct_artifact(
+        &components_dir,
+        "wait-signal-timeout",
+        WAIT_FOR_SIGNAL_DIRECT_TIMEOUT,
+    );
+    let workflow_input = br#"{"case_id":"case-timeout","summary":"No response"}"#;
+    let components_input = components_sdk_input(workflow_input);
+
+    let components = execute_artifact(
+        &components_artifact,
+        "ab-components-wait-signal-timeout-0",
+        &components_input,
+    );
+    let direct = execute_artifact(
+        &direct_artifact.path,
+        "ab-direct-wait-signal-timeout-0",
+        workflow_input,
+    );
+
+    assert_failure_parity("wait-signal-timeout", 0, &components, &direct);
 }
 
 #[test]

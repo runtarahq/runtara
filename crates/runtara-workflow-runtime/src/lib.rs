@@ -8,7 +8,7 @@
 //! shared components without merging their responsibilities.
 
 use std::sync::{MutexGuard, PoisonError};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use runtara_sdk::{
     CheckpointResult, CustomSignal, RuntaraSdk, Signal, SignalType, register_sdk, sdk, try_sdk,
@@ -196,6 +196,14 @@ pub fn poll_custom_signal(checkpoint_id: &str) -> Result<Option<Vec<u8>>, String
     with_sdk_mut(|sdk| sdk.poll_custom_signal(checkpoint_id).map_err(sdk_error))
 }
 
+pub fn now_ms() -> Result<u64, String> {
+    let elapsed = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(sdk_error)?;
+    u64::try_from(elapsed.as_millis())
+        .map_err(|_| "current UNIX timestamp does not fit in u64 milliseconds".to_string())
+}
+
 pub fn durable_sleep(ms: u64) -> Result<(), String> {
     durable_sleep_checkpoint("__direct_workflow_runtime_durable_sleep", &[], ms)
 }
@@ -324,6 +332,10 @@ mod component {
             super::poll_custom_signal(&checkpoint_id)
         }
 
+        fn now_ms() -> Result<u64, String> {
+            super::now_ms()
+        }
+
         fn durable_sleep(ms: u64) -> Result<(), String> {
             super::durable_sleep(ms)
         }
@@ -366,10 +378,12 @@ mod component {
 
 #[cfg(test)]
 mod tests {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
     use runtara_sdk::{CheckpointResult, CustomSignal, Signal, SignalType};
 
     use super::{
-        CheckpointSignalAction, blocking_sleep, checkpoint_signal_action,
+        CheckpointSignalAction, blocking_sleep, checkpoint_signal_action, now_ms,
         runtime_checkpoint_result, sdk_error, signal_is_cancel, signal_type_name,
     };
 
@@ -383,6 +397,22 @@ mod tests {
     #[test]
     fn blocking_sleep_returns_ok_without_sdk() {
         blocking_sleep(0).expect("zero-duration blocking sleep should not need SDK state");
+    }
+
+    #[test]
+    fn now_ms_returns_unix_epoch_milliseconds_without_sdk() {
+        let before = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock after unix epoch")
+            .as_millis() as u64;
+        let actual = now_ms().expect("now-ms should not need SDK state");
+        let after = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock after unix epoch")
+            .as_millis() as u64;
+
+        assert!(actual >= before);
+        assert!(actual <= after);
     }
 
     #[test]

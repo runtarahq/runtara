@@ -74,6 +74,7 @@ const DIRECT_RET_BOOL_OK_OFFSET: u64 = 4;
 const DIRECT_RET_U32_OK_OFFSET: u64 = 4;
 const DIRECT_RET_U64_OK_OFFSET: u64 = 8;
 const DIRECT_RESULT_OPTION_TAG_OFFSET: u64 = 4;
+const DIRECT_RESULT_OPTION_U64_VALUE_OFFSET: u64 = 8;
 const DIRECT_RESULT_OPTION_LIST_PTR_OFFSET: u64 = 8;
 const DIRECT_RESULT_OPTION_LIST_LEN_OFFSET: u64 = 12;
 const DIRECT_CHECKPOINT_PENDING_SIGNAL_TAG_OFFSET: u64 = 16;
@@ -119,6 +120,9 @@ const DIRECT_AGENT_RATE_LIMITED_LOCAL: u32 = 15;
 const DIRECT_AGENT_RETRY_SLEEP_MS_LOCAL: u32 = 16;
 const DIRECT_AGENT_RATE_LIMIT_WAIT_TOTAL_LOCAL: u32 = 17;
 const DIRECT_DELAY_DURATION_MS_LOCAL: u32 = DIRECT_AGENT_RETRY_SLEEP_MS_LOCAL;
+const DIRECT_WAIT_TIMEOUT_PRESENT_LOCAL: u32 = DIRECT_AGENT_RETRY_SLEEP_TAG_LOCAL;
+const DIRECT_WAIT_POLL_INTERVAL_MS_LOCAL: u32 = DIRECT_DELAY_DURATION_MS_LOCAL;
+const DIRECT_WAIT_DEADLINE_MS_LOCAL: u32 = DIRECT_AGENT_RATE_LIMIT_WAIT_TOTAL_LOCAL;
 const DIRECT_SPLIT_COUNT_LOCAL: u32 = 18;
 const DIRECT_SPLIT_INDEX_LOCAL: u32 = 19;
 const DIRECT_SPLIT_ITEM_PTR_LOCAL: u32 = 20;
@@ -137,6 +141,7 @@ const DIRECT_WHILE_PARENT_SOURCE_PTR_LOCAL: u32 = DIRECT_SPLIT_PARENT_SOURCE_PTR
 const DIRECT_WHILE_PARENT_SOURCE_LEN_LOCAL: u32 = DIRECT_SPLIT_PARENT_SOURCE_LEN_LOCAL;
 const DIRECT_WHILE_VARIABLES_PTR_LOCAL: u32 = DIRECT_SPLIT_VARIABLES_PTR_LOCAL;
 const DIRECT_WHILE_VARIABLES_LEN_LOCAL: u32 = DIRECT_SPLIT_VARIABLES_LEN_LOCAL;
+const DIRECT_WAIT_TIMEOUT_MS_LOCAL: u32 = 28;
 const DIRECT_EMPTY_STEPS_CONTEXT: &[u8] = b"{}";
 const DIRECT_EMPTY_SPLIT_RESULTS: &[u8] = b"[]";
 const DIRECT_WORKFLOW_LOG_KIND: &[u8] = b"workflow_log";
@@ -2400,6 +2405,7 @@ struct DirectCoreImportIndices {
     runtime_is_cancelled: Option<u32>,
     runtime_check_signals: Option<u32>,
     runtime_poll_custom_signal: Option<u32>,
+    runtime_now_ms: Option<u32>,
     runtime_get_checkpoint: Option<u32>,
     runtime_checkpoint: Option<u32>,
     runtime_handle_checkpoint_signal: Option<u32>,
@@ -2442,6 +2448,8 @@ struct DirectCoreImportIndices {
     stdlib_delay_duration_ms: Option<u32>,
     stdlib_delay: Option<u32>,
     stdlib_wait_signal_id: Option<u32>,
+    stdlib_wait_timeout_ms: Option<u32>,
+    stdlib_wait_timeout_error: Option<u32>,
     stdlib_wait_poll_interval_ms: Option<u32>,
     stdlib_wait_event: Option<u32>,
     stdlib_wait_output: Option<u32>,
@@ -2487,6 +2495,7 @@ impl DirectCoreImportIndices {
                 self.runtime_poll_custom_signal,
                 "runtime.poll-custom-signal",
             )?,
+            runtime_now_ms: require_import(self.runtime_now_ms, "runtime.now-ms")?,
             runtime_get_checkpoint: require_import(
                 self.runtime_get_checkpoint,
                 "runtime.get-checkpoint",
@@ -2610,6 +2619,14 @@ impl DirectCoreImportIndices {
                 self.stdlib_wait_signal_id,
                 "stdlib.wait-signal-id",
             )?,
+            stdlib_wait_timeout_ms: require_import(
+                self.stdlib_wait_timeout_ms,
+                "stdlib.wait-timeout-ms",
+            )?,
+            stdlib_wait_timeout_error: require_import(
+                self.stdlib_wait_timeout_error,
+                "stdlib.wait-timeout-error",
+            )?,
             stdlib_wait_poll_interval_ms: require_import(
                 self.stdlib_wait_poll_interval_ms,
                 "stdlib.wait-poll-interval-ms",
@@ -2674,6 +2691,7 @@ struct DirectCoreFunctionIndices {
     runtime_is_cancelled: u32,
     runtime_check_signals: u32,
     runtime_poll_custom_signal: u32,
+    runtime_now_ms: u32,
     runtime_get_checkpoint: u32,
     runtime_checkpoint: u32,
     runtime_handle_checkpoint_signal: u32,
@@ -2716,6 +2734,8 @@ struct DirectCoreFunctionIndices {
     stdlib_delay_duration_ms: u32,
     stdlib_delay: u32,
     stdlib_wait_signal_id: u32,
+    stdlib_wait_timeout_ms: u32,
+    stdlib_wait_timeout_error: u32,
     stdlib_wait_poll_interval_ms: u32,
     stdlib_wait_event: u32,
     stdlib_wait_output: u32,
@@ -2787,6 +2807,8 @@ fn import_core_function(
         import_indices.runtime_check_signals = Some(function_index);
     } else if is_runtime_import(resolve, interface, function, "poll-custom-signal") {
         import_indices.runtime_poll_custom_signal = Some(function_index);
+    } else if is_runtime_import(resolve, interface, function, "now-ms") {
+        import_indices.runtime_now_ms = Some(function_index);
     } else if is_runtime_import(resolve, interface, function, "get-checkpoint") {
         import_indices.runtime_get_checkpoint = Some(function_index);
     } else if is_runtime_import(resolve, interface, function, "checkpoint") {
@@ -2871,6 +2893,10 @@ fn import_core_function(
         import_indices.stdlib_delay = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "wait-signal-id") {
         import_indices.stdlib_wait_signal_id = Some(function_index);
+    } else if is_stdlib_import(resolve, interface, function, "wait-timeout-ms") {
+        import_indices.stdlib_wait_timeout_ms = Some(function_index);
+    } else if is_stdlib_import(resolve, interface, function, "wait-timeout-error") {
+        import_indices.stdlib_wait_timeout_error = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "wait-poll-interval-ms") {
         import_indices.stdlib_wait_poll_interval_ms = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "wait-event") {
@@ -3072,7 +3098,12 @@ fn direct_run_function(
     const ROUTE_PTR_LOCAL: u32 = 8;
     const ROUTE_LEN_LOCAL: u32 = 9;
 
-    let mut body = WasmFunction::new([(16, ValType::I32), (2, ValType::I64), (10, ValType::I32)]);
+    let mut body = WasmFunction::new([
+        (16, ValType::I32),
+        (2, ValType::I64),
+        (10, ValType::I32),
+        (1, ValType::I64),
+    ]);
 
     push_segment_args(&mut body, &config.static_data.manifest);
     push_retptr_arg(&mut body);
@@ -4716,6 +4747,36 @@ fn emit_wait_for_signal_plan(
     load_retptr_list(body, route_ptr_local, route_len_local);
 
     push_segment_args(body, step_id_segment);
+    body.instruction(&Instruction::LocalGet(source_ptr_local));
+    body.instruction(&Instruction::LocalGet(source_len_local));
+    push_retptr_arg(body);
+    body.instruction(&Instruction::Call(indices.stdlib_wait_timeout_ms));
+    emit_retptr_error_or_return(
+        body,
+        indices,
+        failure_target,
+        output_ptr_local,
+        output_len_local,
+    );
+    push_retptr_u8_load(body, DIRECT_RESULT_OPTION_TAG_OFFSET);
+    body.instruction(&Instruction::LocalSet(DIRECT_WAIT_TIMEOUT_PRESENT_LOCAL));
+    body.instruction(&Instruction::LocalGet(DIRECT_WAIT_TIMEOUT_PRESENT_LOCAL));
+    body.instruction(&Instruction::If(BlockType::Empty));
+    push_retptr_i64_load(body, DIRECT_RESULT_OPTION_U64_VALUE_OFFSET);
+    body.instruction(&Instruction::LocalSet(DIRECT_WAIT_TIMEOUT_MS_LOCAL));
+    push_retptr_arg(body);
+    body.instruction(&Instruction::Call(indices.runtime_now_ms));
+    return_if_retptr_error(body);
+    push_retptr_i64_load(body, DIRECT_RET_U64_OK_OFFSET);
+    body.instruction(&Instruction::LocalGet(DIRECT_WAIT_TIMEOUT_MS_LOCAL));
+    body.instruction(&Instruction::I64Add);
+    body.instruction(&Instruction::LocalSet(DIRECT_WAIT_DEADLINE_MS_LOCAL));
+    body.instruction(&Instruction::Else);
+    body.instruction(&Instruction::I64Const(0));
+    body.instruction(&Instruction::LocalSet(DIRECT_WAIT_DEADLINE_MS_LOCAL));
+    body.instruction(&Instruction::End);
+
+    push_segment_args(body, step_id_segment);
     body.instruction(&Instruction::LocalGet(route_ptr_local));
     body.instruction(&Instruction::LocalGet(route_len_local));
     body.instruction(&Instruction::LocalGet(source_ptr_local));
@@ -4749,7 +4810,7 @@ fn emit_wait_for_signal_plan(
         output_len_local,
     );
     push_retptr_i64_load(body, DIRECT_RET_U64_OK_OFFSET);
-    body.instruction(&Instruction::LocalSet(DIRECT_DELAY_DURATION_MS_LOCAL));
+    body.instruction(&Instruction::LocalSet(DIRECT_WAIT_POLL_INTERVAL_MS_LOCAL));
 
     body.instruction(&Instruction::Block(BlockType::Empty));
     body.instruction(&Instruction::Loop(BlockType::Empty));
@@ -4775,7 +4836,18 @@ fn emit_wait_for_signal_plan(
     body.instruction(&Instruction::Call(indices.runtime_heartbeat));
     return_if_retptr_error(body);
 
-    body.instruction(&Instruction::LocalGet(DIRECT_DELAY_DURATION_MS_LOCAL));
+    emit_wait_timeout_check(
+        body,
+        indices,
+        step_id_segment,
+        route_ptr_local,
+        route_len_local,
+        output_ptr_local,
+        output_len_local,
+        failure_target,
+    );
+
+    body.instruction(&Instruction::LocalGet(DIRECT_WAIT_POLL_INTERVAL_MS_LOCAL));
     push_retptr_arg(body);
     body.instruction(&Instruction::Call(indices.runtime_blocking_sleep));
     return_if_retptr_error(body);
@@ -4838,6 +4910,49 @@ fn emit_wait_for_signal_plan(
         workflow_error_kind,
         failure_target,
     );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_wait_timeout_check(
+    body: &mut WasmFunction,
+    indices: &DirectCoreFunctionIndices,
+    step_id_segment: &DirectDataSegment,
+    signal_id_ptr_local: u32,
+    signal_id_len_local: u32,
+    error_ptr_local: u32,
+    error_len_local: u32,
+    failure_target: Option<DirectFailureTarget>,
+) {
+    body.instruction(&Instruction::LocalGet(DIRECT_WAIT_TIMEOUT_PRESENT_LOCAL));
+    body.instruction(&Instruction::If(BlockType::Empty));
+    push_retptr_arg(body);
+    body.instruction(&Instruction::Call(indices.runtime_now_ms));
+    return_if_retptr_error(body);
+    push_retptr_i64_load(body, DIRECT_RET_U64_OK_OFFSET);
+    body.instruction(&Instruction::LocalGet(DIRECT_WAIT_DEADLINE_MS_LOCAL));
+    body.instruction(&Instruction::I64GeU);
+    body.instruction(&Instruction::If(BlockType::Empty));
+    push_segment_args(body, step_id_segment);
+    body.instruction(&Instruction::LocalGet(signal_id_ptr_local));
+    body.instruction(&Instruction::LocalGet(signal_id_len_local));
+    body.instruction(&Instruction::LocalGet(DIRECT_WAIT_TIMEOUT_MS_LOCAL));
+    push_retptr_arg(body);
+    body.instruction(&Instruction::Call(indices.stdlib_wait_timeout_error));
+    return_if_retptr_error(body);
+    load_retptr_list(body, error_ptr_local, error_len_local);
+    if let Some(failure_target) = failure_target {
+        emit_split_append_error_payload_and_continue(
+            body,
+            indices,
+            failure_target.nested(4),
+            error_ptr_local,
+            error_len_local,
+        );
+    } else {
+        emit_runtime_fail_return(body, indices, error_ptr_local, error_len_local);
+    }
+    body.instruction(&Instruction::End);
+    body.instruction(&Instruction::End);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -6963,6 +7078,9 @@ mod tests {
             "while_simple" => include_str!("../../tests/fixtures/while_simple.json"),
             "wait_simple" => {
                 include_str!("../../tests/fixtures/wait_for_signal_direct_simple.json")
+            }
+            "wait_timeout" => {
+                include_str!("../../tests/fixtures/wait_for_signal_direct_timeout.json")
             }
             "transform" => include_str!("../../tests/fixtures/transform_workflow.json"),
             other => panic!("unknown fixture {other}"),
@@ -12010,7 +12128,7 @@ mod tests {
 
     #[test]
     fn direct_core_run_lowers_wait_for_signal_finish_through_runtime_polling() {
-        let graph = fixture("wait_simple");
+        let graph = fixture("wait_timeout");
         let manifest = build_direct_workflow_manifest(&graph).expect("manifest");
         let manifest_json = manifest.to_canonical_json().expect("manifest json");
         let core_config =
@@ -12032,11 +12150,15 @@ mod tests {
         let mut next_function_index = 0;
         let mut build_source_index = None;
         let mut wait_signal_id_index = None;
+        let mut wait_timeout_index = None;
+        let mut wait_timeout_error_index = None;
         let mut wait_poll_interval_index = None;
         let mut wait_event_index = None;
         let mut wait_output_index = None;
         let mut apply_mapping_index = None;
         let mut runtime_instance_id_index = None;
+        let mut runtime_now_ms_index = None;
+        let mut runtime_fail_index = None;
         let mut runtime_custom_event_index = None;
         let mut runtime_check_signals_index = None;
         let mut runtime_poll_custom_signal_index = None;
@@ -12059,6 +12181,13 @@ mod tests {
                                 ("cm32p2|runtara:workflow-stdlib/json@0.1", "wait-signal-id") => {
                                     wait_signal_id_index = Some(next_function_index)
                                 }
+                                ("cm32p2|runtara:workflow-stdlib/json@0.1", "wait-timeout-ms") => {
+                                    wait_timeout_index = Some(next_function_index)
+                                }
+                                (
+                                    "cm32p2|runtara:workflow-stdlib/json@0.1",
+                                    "wait-timeout-error",
+                                ) => wait_timeout_error_index = Some(next_function_index),
                                 (
                                     "cm32p2|runtara:workflow-stdlib/json@0.1",
                                     "wait-poll-interval-ms",
@@ -12074,6 +12203,12 @@ mod tests {
                                 }
                                 ("cm32p2|runtara:workflow-runtime/runtime@0.1", "instance-id") => {
                                     runtime_instance_id_index = Some(next_function_index)
+                                }
+                                ("cm32p2|runtara:workflow-runtime/runtime@0.1", "now-ms") => {
+                                    runtime_now_ms_index = Some(next_function_index)
+                                }
+                                ("cm32p2|runtara:workflow-runtime/runtime@0.1", "fail") => {
+                                    runtime_fail_index = Some(next_function_index)
                                 }
                                 ("cm32p2|runtara:workflow-runtime/runtime@0.1", "custom-event") => {
                                     runtime_custom_event_index = Some(next_function_index)
@@ -12119,6 +12254,8 @@ mod tests {
         let ordered = [
             runtime_instance_id_index.expect("instance-id import"),
             wait_signal_id_index.expect("wait-signal-id import"),
+            wait_timeout_index.expect("wait-timeout-ms import"),
+            runtime_now_ms_index.expect("now-ms import"),
             wait_event_index.expect("wait-event import"),
             runtime_custom_event_index.expect("custom-event import"),
             wait_poll_interval_index.expect("wait-poll-interval-ms import"),
@@ -12143,6 +12280,14 @@ mod tests {
         assert!(
             positions.windows(2).all(|pair| pair[0] < pair[1]),
             "WaitForSignal lowering calls should preserve generated-code order: {positions:?}"
+        );
+        assert!(
+            run_calls.contains(&wait_timeout_error_index.expect("wait-timeout-error import")),
+            "WaitForSignal timeout lowering should format generated-compatible timeout errors"
+        );
+        assert!(
+            run_calls.contains(&runtime_fail_index.expect("fail import")),
+            "WaitForSignal timeout lowering should report timeout through runtime.fail"
         );
         assert_eq!(
             run_calls

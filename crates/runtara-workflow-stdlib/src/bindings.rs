@@ -2574,6 +2574,83 @@ pub mod exports {
                 }
                 #[doc(hidden)]
                 #[allow(non_snake_case)]
+                pub unsafe fn _export_wait_timeout_error_cabi<T: Guest>(
+                    arg0: *mut u8,
+                    arg1: usize,
+                    arg2: *mut u8,
+                    arg3: usize,
+                    arg4: i64,
+                ) -> *mut u8 {
+                    #[cfg(target_arch = "wasm32")] _rt::run_ctors_once();
+                    let len0 = arg1;
+                    let bytes0 = _rt::Vec::from_raw_parts(arg0.cast(), len0, len0);
+                    let len1 = arg3;
+                    let bytes1 = _rt::Vec::from_raw_parts(arg2.cast(), len1, len1);
+                    let result2 = T::wait_timeout_error(
+                        _rt::string_lift(bytes0),
+                        _rt::string_lift(bytes1),
+                        arg4 as u64,
+                    );
+                    let ptr3 = (&raw mut _RET_AREA.0).cast::<u8>();
+                    match result2 {
+                        Ok(e) => {
+                            *ptr3.add(0).cast::<u8>() = (0i32) as u8;
+                            let vec4 = (e).into_boxed_slice();
+                            let ptr4 = vec4.as_ptr().cast::<u8>();
+                            let len4 = vec4.len();
+                            ::core::mem::forget(vec4);
+                            *ptr3
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>() = len4;
+                            *ptr3
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>() = ptr4.cast_mut();
+                        }
+                        Err(e) => {
+                            *ptr3.add(0).cast::<u8>() = (1i32) as u8;
+                            let vec5 = (e.into_bytes()).into_boxed_slice();
+                            let ptr5 = vec5.as_ptr().cast::<u8>();
+                            let len5 = vec5.len();
+                            ::core::mem::forget(vec5);
+                            *ptr3
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>() = len5;
+                            *ptr3
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>() = ptr5.cast_mut();
+                        }
+                    };
+                    ptr3
+                }
+                #[doc(hidden)]
+                #[allow(non_snake_case)]
+                pub unsafe fn __post_return_wait_timeout_error<T: Guest>(arg0: *mut u8) {
+                    let l0 = i32::from(*arg0.add(0).cast::<u8>());
+                    match l0 {
+                        0 => {
+                            let l1 = *arg0
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>();
+                            let l2 = *arg0
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>();
+                            let base3 = l1;
+                            let len3 = l2;
+                            _rt::cabi_dealloc(base3, len3 * 1, 1);
+                        }
+                        _ => {
+                            let l4 = *arg0
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>();
+                            let l5 = *arg0
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>();
+                            _rt::cabi_dealloc(l4, l5, 1);
+                        }
+                    }
+                }
+                #[doc(hidden)]
+                #[allow(non_snake_case)]
                 pub unsafe fn _export_wait_poll_interval_ms_cabi<T: Guest>(
                     arg0: *mut u8,
                     arg1: usize,
@@ -4030,6 +4107,11 @@ pub mod exports {
                         step_id: _rt::String,
                         source: _rt::Vec<u8>,
                     ) -> Result<Option<u64>, _rt::String>;
+                    fn wait_timeout_error(
+                        step_id: _rt::String,
+                        signal_id: _rt::String,
+                        timeout_ms: u64,
+                    ) -> Result<_rt::Vec<u8>, _rt::String>;
                     fn wait_poll_interval_ms(
                         step_id: _rt::String,
                     ) -> Result<u64, _rt::String>;
@@ -4478,6 +4560,17 @@ pub mod exports {
                         u8,) { unsafe { $($path_to_types)*::
                         __post_return_wait_timeout_ms::<$ty > (arg0) } } #[unsafe
                         (export_name =
+                        "runtara:workflow-stdlib/json@0.1.0#wait-timeout-error")] unsafe
+                        extern "C" fn export_wait_timeout_error(arg0 : * mut u8, arg1 :
+                        usize, arg2 : * mut u8, arg3 : usize, arg4 : i64,) -> * mut u8 {
+                        unsafe { $($path_to_types)*::
+                        _export_wait_timeout_error_cabi::<$ty > (arg0, arg1, arg2, arg3,
+                        arg4) } } #[unsafe (export_name =
+                        "cabi_post_runtara:workflow-stdlib/json@0.1.0#wait-timeout-error")]
+                        unsafe extern "C" fn _post_return_wait_timeout_error(arg0 : * mut
+                        u8,) { unsafe { $($path_to_types)*::
+                        __post_return_wait_timeout_error::<$ty > (arg0) } } #[unsafe
+                        (export_name =
                         "runtara:workflow-stdlib/json@0.1.0#wait-poll-interval-ms")]
                         unsafe extern "C" fn export_wait_poll_interval_ms(arg0 : * mut
                         u8, arg1 : usize,) -> * mut u8 { unsafe { $($path_to_types)*::
@@ -4824,9 +4917,9 @@ pub(crate) use __export_workflow_stdlib_impl as export;
 #[unsafe(link_section = "component-type:wit-bindgen:0.41.0:runtara:workflow-stdlib@0.1.0:workflow-stdlib:encoded world")]
 #[doc(hidden)]
 #[allow(clippy::octal_escapes)]
-pub static __WIT_BINDGEN_COMPONENT_TYPE: [u8; 2876] = *b"\
-\0asm\x0d\0\x01\0\0\x19\x16wit-component-encoding\x04\0\x07\xb6\x15\x01A\x02\x01\
-A\x02\x01Bp\x01p}\x01r\x03\x07payload\0\x09retryable\x7f\x0crate-limited\x7f\x04\
+pub static __WIT_BINDGEN_COMPONENT_TYPE: [u8; 2936] = *b"\
+\0asm\x0d\0\x01\0\0\x19\x16wit-component-encoding\x04\0\x07\xf2\x15\x01A\x02\x01\
+A\x02\x01Br\x01p}\x01r\x03\x07payload\0\x09retryable\x7f\x0crate-limited\x7f\x04\
 \0\x11agent-retry-error\x03\0\x01\x01j\0\x01s\x01@\x01\x08manifest\0\0\x03\x04\0\
 \x0dinit-manifest\x01\x04\x01j\x01\0\x01s\x01@\x03\x04data\0\x09variables\0\x05s\
 teps\0\0\x05\x04\0\x0cbuild-source\x01\x06\x01@\x02\x0amapping-idy\x06source\0\0\
@@ -4861,28 +4954,29 @@ up-by\x01#\x01j\x01w\x01s\x01@\x02\x08delay-idy\x06source\0\0$\x04\0\x11delay-du
 ration-ms\x01%\x01@\x03\x08delay-idy\x06source\0\x0bduration-msw\0\x05\x04\0\x05\
 delay\x01&\x01@\x03\x07step-ids\x0binstance-ids\x06source\0\0\x0a\x04\0\x0ewait-\
 signal-id\x01'\x01kw\x01j\x01(\x01s\x01@\x02\x07step-ids\x06source\0\0)\x04\0\x0f\
-wait-timeout-ms\x01*\x01@\x01\x07step-ids\0$\x04\0\x15wait-poll-interval-ms\x01+\
-\x01@\x03\x07step-ids\x09signal-ids\x06source\0\0\x05\x04\0\x0await-event\x01,\x01\
-@\x04\x07step-ids\x09signal-ids\x0esignal-payload\0\x06source\0\0\x05\x04\0\x0bw\
-ait-output\x01-\x01@\x03\x08agent-idy\x06source\0\x06output\0\0\x05\x04\0\x0cage\
-nt-output\x01.\x01@\x02\x08agent-idy\x05input\0\0\x05\x04\0\x14agent-validate-in\
-put\x01/\x04\0\x16agent-connection-input\x01/\x01@\x02\x08agent-idy\x06source\0\0\
-\x05\x04\0\x0fagent-cache-key\x010\x01@\x02\x0dcheckpoint-ids\x0eattempt-numbery\
-\0\x05\x04\0\x15agent-retry-sleep-key\x011\x01@\x05\x0eattempt-numbery\x0etotal-\
-attemptsy\x0dbase-delay-msw\x0cmax-delay-msw\x0eretry-after-ms(\0$\x04\0\x14agen\
-t-retry-delay-ms\x012\x01ks\x01@\x07\x04codes\x07messages\x08categorys\x08severi\
-tys\x09retryable\x7f\x0eretry-after-ms(\x0aattributes3\0\x05\x04\0\x10agent-erro\
-r-info\x014\x01j\x01\x02\x01s\x01@\x07\x04codes\x07messages\x08categorys\x08seve\
-ritys\x09retryable\x7f\x0eretry-after-ms(\x0aattributes3\05\x04\0\x16agent-retry\
--error-info\x016\x01@\x08\x08agent-idy\x04codes\x07messages\x08categorys\x08seve\
-ritys\x09retryable\x7f\x0eretry-after-ms(\x0aattributes3\0\x05\x04\0\x0bagent-er\
-ror\x017\x01@\x02\x08agent-idy\x0aerror-info\0\0\x05\x04\0\x15agent-error-from-i\
-nfo\x018\x01@\x02\x08agent-idy\x05error\0\0\x05\x04\0\x11agent-debug-error\x019\x01\
-@\x02\x07step-ids\x06source\0\0\x05\x04\0\x10step-debug-start\x01:\x04\0\x0estep\
--debug-end\x01:\x04\0\"runtara:workflow-stdlib/json@0.1.0\x05\0\x04\0-runtara:wo\
-rkflow-stdlib/workflow-stdlib@0.1.0\x04\0\x0b\x15\x01\0\x0fworkflow-stdlib\x03\0\
-\0\0G\x09producers\x01\x0cprocessed-by\x02\x0dwit-component\x070.227.1\x10wit-bi\
-ndgen-rust\x060.41.0";
+wait-timeout-ms\x01*\x01@\x03\x07step-ids\x09signal-ids\x0atimeout-msw\0\x05\x04\
+\0\x12wait-timeout-error\x01+\x01@\x01\x07step-ids\0$\x04\0\x15wait-poll-interva\
+l-ms\x01,\x01@\x03\x07step-ids\x09signal-ids\x06source\0\0\x05\x04\0\x0await-eve\
+nt\x01-\x01@\x04\x07step-ids\x09signal-ids\x0esignal-payload\0\x06source\0\0\x05\
+\x04\0\x0bwait-output\x01.\x01@\x03\x08agent-idy\x06source\0\x06output\0\0\x05\x04\
+\0\x0cagent-output\x01/\x01@\x02\x08agent-idy\x05input\0\0\x05\x04\0\x14agent-va\
+lidate-input\x010\x04\0\x16agent-connection-input\x010\x01@\x02\x08agent-idy\x06\
+source\0\0\x05\x04\0\x0fagent-cache-key\x011\x01@\x02\x0dcheckpoint-ids\x0eattem\
+pt-numbery\0\x05\x04\0\x15agent-retry-sleep-key\x012\x01@\x05\x0eattempt-numbery\
+\x0etotal-attemptsy\x0dbase-delay-msw\x0cmax-delay-msw\x0eretry-after-ms(\0$\x04\
+\0\x14agent-retry-delay-ms\x013\x01ks\x01@\x07\x04codes\x07messages\x08categorys\
+\x08severitys\x09retryable\x7f\x0eretry-after-ms(\x0aattributes4\0\x05\x04\0\x10\
+agent-error-info\x015\x01j\x01\x02\x01s\x01@\x07\x04codes\x07messages\x08categor\
+ys\x08severitys\x09retryable\x7f\x0eretry-after-ms(\x0aattributes4\06\x04\0\x16a\
+gent-retry-error-info\x017\x01@\x08\x08agent-idy\x04codes\x07messages\x08categor\
+ys\x08severitys\x09retryable\x7f\x0eretry-after-ms(\x0aattributes4\0\x05\x04\0\x0b\
+agent-error\x018\x01@\x02\x08agent-idy\x0aerror-info\0\0\x05\x04\0\x15agent-erro\
+r-from-info\x019\x01@\x02\x08agent-idy\x05error\0\0\x05\x04\0\x11agent-debug-err\
+or\x01:\x01@\x02\x07step-ids\x06source\0\0\x05\x04\0\x10step-debug-start\x01;\x04\
+\0\x0estep-debug-end\x01;\x04\0\"runtara:workflow-stdlib/json@0.1.0\x05\0\x04\0-\
+runtara:workflow-stdlib/workflow-stdlib@0.1.0\x04\0\x0b\x15\x01\0\x0fworkflow-st\
+dlib\x03\0\0\0G\x09producers\x01\x0cprocessed-by\x02\x0dwit-component\x070.227.1\
+\x10wit-bindgen-rust\x060.41.0";
 #[inline(never)]
 #[doc(hidden)]
 pub fn __link_custom_section_describing_imports() {

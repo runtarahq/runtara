@@ -89,20 +89,24 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   `runtara:workflow-runtime` component. It lazily initializes the existing SDK
   from environment variables and exports the first runtime lifecycle surface:
   input loading, completion/failure, custom events, heartbeat, cancellation
-  polling, durable sleep, runtime instance id access, and checkpoint-scoped
-  custom signal polling needed by future direct `WaitForSignal` lowering.
+  polling, durable sleep, blocking sleep, wall-clock millisecond access,
+  runtime instance id access, and checkpoint-scoped custom signal polling needed
+  by direct `WaitForSignal` lowering.
 - `runtara-workflow-stdlib` now exposes WaitForSignal JSON helpers for direct
   lowering: deterministic signal id construction, timeout and poll interval
-  resolution, generated-code-compatible waiting event payloads including
-  response schema/action metadata, and generated-code-compatible step output
-  insertion after a signal payload is received.
+  resolution, generated-code-compatible timeout error formatting,
+  generated-code-compatible waiting event payloads including response
+  schema/action metadata, and generated-code-compatible step output insertion
+  after a signal payload is received.
 - The direct core emitter now lowers the baseline `WaitForSignal` path with
-  no `onWait`, no timeout, and no breakpoint. It calls `runtime.instance-id`,
-  builds the generated-compatible signal id through stdlib, emits
-  `external_input_requested`, polls `runtime.poll-custom-signal` in a runtime
-  signal-aware loop, records the received payload through stdlib, rebuilds the
-  source envelope, and continues normal flow. Support gates still reject
-  `onWait`, timeout, and breakpoint waits until those paths have parity tests.
+  no `onWait` and no breakpoint, including timeout handling. It calls
+  `runtime.instance-id`, builds the generated-compatible signal id through
+  stdlib, emits `external_input_requested`, polls `runtime.poll-custom-signal`
+  in a runtime signal-aware loop, checks elapsed time through `runtime.now-ms`,
+  reports generated-compatible timeout failures through stdlib/runtime,
+  records the received payload through stdlib, rebuilds the source envelope,
+  and continues normal flow. Support gates still reject `onWait` and
+  breakpoint waits until those paths have parity tests.
 - `scripts/build-agent-components.sh` now builds and stages the direct workflow
   stdlib/runtime components beside agent components with sibling metadata, and
   the bundle installer treats `RUNTARA_AGENT_COMPONENTS_DIR` as the shared
@@ -1790,6 +1794,8 @@ Implementation steps:
    - checkpointed durable sleep: done;
    - heartbeat: already exposed;
    - cancellation check: already exposed;
+   - wall-clock millisecond access for timeout checks: done through
+     `runtime.now-ms`;
    - runtime instance id and custom signal polling for WaitForSignal: done;
    - stable resume-from-checkpoint lowering: pending per step family.
 2. Implement stdlib/runtime functions using the existing SDK behavior.
@@ -1996,20 +2002,23 @@ Implementation steps:
    - execute `on_wait` subgraph: gated/pending;
    - poll or suspend: baseline runtime polling loop done; durable suspension
      semantics pending if required;
-   - timeout: stdlib timeout mapping helper done through `wait-timeout-ms`;
+   - timeout: stdlib timeout mapping helper done through `wait-timeout-ms`,
+     generated-compatible error formatting done through
+     `wait-timeout-error`, and elapsed-time checks done through
+     `runtime.now-ms`;
    - poll interval: stdlib helper done through `wait-poll-interval-ms`;
    - resume with signal payload: stdlib output helper done through
      `wait-output`;
    - cancellation: runtime signal check is wired in the polling loop.
 2. Implement `WaitForSignal` lowering:
-   - baseline no-`onWait`/no-timeout/no-breakpoint lowering: done;
+   - baseline no-`onWait`/no-breakpoint lowering: done, including timeout;
    - `onWait` nested graph lowering: pending;
-   - timeout failure parity: pending;
+   - timeout failure parity: done for immediate timeout with no signal;
    - debug/breakpoint parity: pending.
 3. Add tests for:
    - normal signal resume: structural core test and gated A/B test are in
      place;
-   - timeout;
+   - timeout: structural core test and gated A/B failure test are in place;
    - cancellation;
    - `on_wait` failure;
    - action metadata and response schema.
@@ -2027,17 +2036,19 @@ Rollback:
 Current status:
 
 - The runtime ABI prerequisite is in place. `runtara:workflow-runtime` now
-  exposes `instance-id` and `poll-custom-signal`, matching the SDK calls
-  generated Rust uses to construct deterministic wait keys and retrieve
-  checkpoint-scoped custom signal payloads.
+  exposes `instance-id`, `poll-custom-signal`, and `now-ms`, matching the SDK
+  and generated Rust behavior needed to construct deterministic wait keys,
+  retrieve checkpoint-scoped custom signal payloads, and enforce elapsed
+  timeout checks without moving branch predicates into stdlib.
 - The stdlib prerequisite is in place. `runtara:workflow-stdlib/json` now owns
   the JSON-heavy WaitForSignal semantics needed by direct lowering:
-  `wait-signal-id`, `wait-timeout-ms`, `wait-poll-interval-ms`, `wait-event`,
-  and `wait-output`.
-- Baseline direct core lowering is in place for waits without `onWait`,
-  timeout, or breakpoint. Host-level gated A/B coverage is added for immediate
-  custom-signal resume and normal completion. Timeout, `onWait`, and debug
-  parity remain pending.
+  `wait-signal-id`, `wait-timeout-ms`, `wait-timeout-error`,
+  `wait-poll-interval-ms`, `wait-event`, and `wait-output`.
+- Baseline direct core lowering is in place for waits without `onWait` or
+  breakpoint. Host-level gated A/B coverage is added for immediate
+  custom-signal resume, normal completion, and generated-compatible timeout
+  failure. `onWait`, debug/breakpoint parity, and durable suspension semantics
+  remain pending.
 
 ### Phase 12: AiAgent
 

@@ -573,6 +573,46 @@ pub mod exports {
                 }
                 #[doc(hidden)]
                 #[allow(non_snake_case)]
+                pub unsafe fn _export_now_ms_cabi<T: Guest>() -> *mut u8 {
+                    #[cfg(target_arch = "wasm32")] _rt::run_ctors_once();
+                    let result0 = T::now_ms();
+                    let ptr1 = (&raw mut _RET_AREA.0).cast::<u8>();
+                    match result0 {
+                        Ok(e) => {
+                            *ptr1.add(0).cast::<u8>() = (0i32) as u8;
+                            *ptr1.add(8).cast::<i64>() = _rt::as_i64(e);
+                        }
+                        Err(e) => {
+                            *ptr1.add(0).cast::<u8>() = (1i32) as u8;
+                            let vec2 = (e.into_bytes()).into_boxed_slice();
+                            let ptr2 = vec2.as_ptr().cast::<u8>();
+                            let len2 = vec2.len();
+                            ::core::mem::forget(vec2);
+                            *ptr1
+                                .add(8 + 1 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>() = len2;
+                            *ptr1.add(8).cast::<*mut u8>() = ptr2.cast_mut();
+                        }
+                    };
+                    ptr1
+                }
+                #[doc(hidden)]
+                #[allow(non_snake_case)]
+                pub unsafe fn __post_return_now_ms<T: Guest>(arg0: *mut u8) {
+                    let l0 = i32::from(*arg0.add(0).cast::<u8>());
+                    match l0 {
+                        0 => {}
+                        _ => {
+                            let l1 = *arg0.add(8).cast::<*mut u8>();
+                            let l2 = *arg0
+                                .add(8 + 1 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>();
+                            _rt::cabi_dealloc(l1, l2, 1);
+                        }
+                    }
+                }
+                #[doc(hidden)]
+                #[allow(non_snake_case)]
                 pub unsafe fn _export_durable_sleep_cabi<T: Guest>(
                     arg0: i64,
                 ) -> *mut u8 {
@@ -1202,6 +1242,7 @@ pub mod exports {
                     fn poll_custom_signal(
                         checkpoint_id: _rt::String,
                     ) -> Result<Option<_rt::Vec<u8>>, _rt::String>;
+                    fn now_ms() -> Result<u64, _rt::String>;
                     fn durable_sleep(ms: u64) -> Result<(), _rt::String>;
                     fn blocking_sleep(ms: u64) -> Result<(), _rt::String>;
                     fn get_checkpoint(
@@ -1303,7 +1344,14 @@ pub mod exports {
                         unsafe extern "C" fn _post_return_poll_custom_signal(arg0 : * mut
                         u8,) { unsafe { $($path_to_types)*::
                         __post_return_poll_custom_signal::<$ty > (arg0) } } #[unsafe
+                        (export_name = "runtara:workflow-runtime/runtime@0.1.0#now-ms")]
+                        unsafe extern "C" fn export_now_ms() -> * mut u8 { unsafe {
+                        $($path_to_types)*:: _export_now_ms_cabi::<$ty > () } } #[unsafe
                         (export_name =
+                        "cabi_post_runtara:workflow-runtime/runtime@0.1.0#now-ms")]
+                        unsafe extern "C" fn _post_return_now_ms(arg0 : * mut u8,) {
+                        unsafe { $($path_to_types)*:: __post_return_now_ms::<$ty > (arg0)
+                        } } #[unsafe (export_name =
                         "runtara:workflow-runtime/runtime@0.1.0#durable-sleep")] unsafe
                         extern "C" fn export_durable_sleep(arg0 : i64,) -> * mut u8 {
                         unsafe { $($path_to_types)*:: _export_durable_sleep_cabi::<$ty >
@@ -1375,8 +1423,7 @@ pub mod exports {
                 }
                 #[doc(hidden)]
                 pub(crate) use __export_runtara_workflow_runtime_runtime_0_1_0_cabi;
-                #[cfg_attr(target_pointer_width = "64", repr(align(8)))]
-                #[cfg_attr(target_pointer_width = "32", repr(align(4)))]
+                #[repr(align(8))]
                 struct _RetArea(
                     [::core::mem::MaybeUninit<
                         u8,
@@ -1411,6 +1458,29 @@ mod _rt {
             String::from_utf8(bytes).unwrap()
         } else {
             String::from_utf8_unchecked(bytes)
+        }
+    }
+    pub fn as_i64<T: AsI64>(t: T) -> i64 {
+        t.as_i64()
+    }
+    pub trait AsI64 {
+        fn as_i64(self) -> i64;
+    }
+    impl<'a, T: Copy + AsI64> AsI64 for &'a T {
+        fn as_i64(self) -> i64 {
+            (*self).as_i64()
+        }
+    }
+    impl AsI64 for i64 {
+        #[inline]
+        fn as_i64(self) -> i64 {
+            self as i64
+        }
+    }
+    impl AsI64 for u64 {
+        #[inline]
+        fn as_i64(self) -> i64 {
+            self as i64
         }
     }
     pub unsafe fn invalid_enum_discriminant<T>() -> T {
@@ -1458,9 +1528,9 @@ pub(crate) use __export_workflow_runtime_impl as export;
 #[unsafe(link_section = "component-type:wit-bindgen:0.41.0:runtara:workflow-runtime@0.1.0:workflow-runtime:encoded world")]
 #[doc(hidden)]
 #[allow(clippy::octal_escapes)]
-pub static __WIT_BINDGEN_COMPONENT_TYPE: [u8; 985] = *b"\
-\0asm\x0d\0\x01\0\0\x19\x16wit-component-encoding\x04\0\x07\xd2\x06\x01A\x02\x01\
-A\x02\x01B.\x01p}\x01ks\x01r\x03\x0bsignal-types\x07payload\0\x0dcheckpoint-id\x01\
+pub static __WIT_BINDGEN_COMPONENT_TYPE: [u8; 1007] = *b"\
+\0asm\x0d\0\x01\0\0\x19\x16wit-component-encoding\x04\0\x07\xe8\x06\x01A\x02\x01\
+A\x02\x01B1\x01p}\x01ks\x01r\x03\x0bsignal-types\x07payload\0\x0dcheckpoint-id\x01\
 \x04\0\x0bsignal-info\x03\0\x02\x01r\x02\x0dcheckpoint-ids\x07payload\0\x04\0\x12\
 custom-signal-info\x03\0\x04\x01k\x03\x01k\x05\x01r\x04\x05found\x7f\x05state\0\x0e\
 pending-signal\x06\x0dcustom-signal\x07\x04\0\x11checkpoint-result\x03\0\x08\x01\
@@ -1470,16 +1540,17 @@ mplete\x01\x0f\x01@\x01\x05error\0\0\x0e\x04\0\x04fail\x01\x10\x01@\x02\x04kinds
 \x07payload\0\0\x0e\x04\0\x0ccustom-event\x01\x11\x01@\0\0\x0e\x04\0\x09heartbea\
 t\x01\x12\x01j\x01\x7f\x01s\x01@\0\0\x13\x04\0\x0cis-cancelled\x01\x14\x04\0\x0d\
 check-signals\x01\x14\x01k\0\x01j\x01\x15\x01s\x01@\x01\x0dcheckpoint-ids\0\x16\x04\
-\0\x12poll-custom-signal\x01\x17\x01@\x01\x02msw\0\x0e\x04\0\x0ddurable-sleep\x01\
-\x18\x04\0\x0eblocking-sleep\x01\x18\x04\0\x0eget-checkpoint\x01\x17\x01j\x01\x09\
-\x01s\x01@\x02\x0dcheckpoint-ids\x05state\0\0\x19\x04\0\x0acheckpoint\x01\x1a\x01\
-@\x01\x0bsignal-types\0\x13\x04\0\x18handle-checkpoint-signal\x01\x1b\x01@\x03\x0d\
-checkpoint-ids\x0eattempt-numbery\x0derror-message\x01\0\x0e\x04\0\x14record-ret\
-ry-attempt\x01\x1c\x01@\x03\x0dcheckpoint-ids\x05state\0\x02msw\0\x0e\x04\0\x18d\
-urable-sleep-checkpoint\x01\x1d\x04\0&runtara:workflow-runtime/runtime@0.1.0\x05\
-\0\x04\0/runtara:workflow-runtime/workflow-runtime@0.1.0\x04\0\x0b\x16\x01\0\x10\
-workflow-runtime\x03\0\0\0G\x09producers\x01\x0cprocessed-by\x02\x0dwit-componen\
-t\x070.227.1\x10wit-bindgen-rust\x060.41.0";
+\0\x12poll-custom-signal\x01\x17\x01j\x01w\x01s\x01@\0\0\x18\x04\0\x06now-ms\x01\
+\x19\x01@\x01\x02msw\0\x0e\x04\0\x0ddurable-sleep\x01\x1a\x04\0\x0eblocking-slee\
+p\x01\x1a\x04\0\x0eget-checkpoint\x01\x17\x01j\x01\x09\x01s\x01@\x02\x0dcheckpoi\
+nt-ids\x05state\0\0\x1b\x04\0\x0acheckpoint\x01\x1c\x01@\x01\x0bsignal-types\0\x13\
+\x04\0\x18handle-checkpoint-signal\x01\x1d\x01@\x03\x0dcheckpoint-ids\x0eattempt\
+-numbery\x0derror-message\x01\0\x0e\x04\0\x14record-retry-attempt\x01\x1e\x01@\x03\
+\x0dcheckpoint-ids\x05state\0\x02msw\0\x0e\x04\0\x18durable-sleep-checkpoint\x01\
+\x1f\x04\0&runtara:workflow-runtime/runtime@0.1.0\x05\0\x04\0/runtara:workflow-r\
+untime/workflow-runtime@0.1.0\x04\0\x0b\x16\x01\0\x10workflow-runtime\x03\0\0\0G\
+\x09producers\x01\x0cprocessed-by\x02\x0dwit-component\x070.227.1\x10wit-bindgen\
+-rust\x060.41.0";
 #[inline(never)]
 #[doc(hidden)]
 pub fn __link_custom_section_describing_imports() {
