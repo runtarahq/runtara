@@ -1422,6 +1422,41 @@ fn direct_wasm_matches_components_wait_for_signal_resume() {
         direct.output_json,
         Some(serde_json::json!({"approved": true}))
     );
+    let direct_events = normalized_events(&direct.events);
+    let (_, wait_event_payload) = direct_events
+        .iter()
+        .find(|(subtype, _)| subtype == "external_input_requested")
+        .expect("direct WaitForSignal run should emit an external input request event");
+    assert_eq!(
+        wait_event_payload["type"],
+        serde_json::json!("external_input_requested")
+    );
+    assert_eq!(wait_event_payload["step_id"], serde_json::json!("wait"));
+    assert_eq!(
+        wait_event_payload["step_name"],
+        serde_json::json!("Approval")
+    );
+    assert_eq!(
+        wait_event_payload["action_key"],
+        serde_json::json!("approval_decision")
+    );
+    assert_eq!(
+        wait_event_payload["correlation"],
+        serde_json::json!({ "case_id": "case-42" })
+    );
+    assert_eq!(
+        wait_event_payload["context"],
+        serde_json::json!({ "summary": "Needs approval" })
+    );
+    assert_eq!(
+        wait_event_payload["response_schema"],
+        serde_json::json!({
+            "approved": {
+                "type": "boolean",
+                "required": true
+            }
+        })
+    );
 }
 
 #[test]
@@ -1466,6 +1501,13 @@ fn direct_wasm_matches_components_wait_for_signal_track_events_resume() {
             subtype == "step_debug_start"
                 && payload["step_type"] == serde_json::json!("WaitForSignal")
                 && payload["inputs"]["poll_interval_ms"] == serde_json::json!(0)
+                && payload["inputs"]["response_schema"]
+                    == serde_json::json!({
+                        "approved": {
+                            "type": "boolean",
+                            "required": true
+                        }
+                    })
         }),
         "tracked direct WaitForSignal run should emit a wait debug-start event"
     );

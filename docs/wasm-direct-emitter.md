@@ -101,8 +101,10 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   generated-code-compatible waiting event payloads including response
   schema/action metadata, generated-code-compatible wait debug-start payloads,
   and generated-code-compatible step output insertion after a signal payload is
-  received. It also exposes generated-compatible breakpoint key and event
-  helpers used by durable direct breakpoint lowering.
+  received. Gated direct-vs-generated artifact coverage now pins the
+  external-input request payload for response schema, action key, correlation,
+  and context mapping parity. It also exposes generated-compatible breakpoint
+  key and event helpers used by durable direct breakpoint lowering.
 - The direct core emitter now lowers the baseline `WaitForSignal` path with
   no `onWait`, plus durable `WaitForSignal` breakpoint pause/resume behavior,
   including timeout handling. It calls
@@ -118,7 +120,8 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   `DEBUG_MODE`, writes the generated-compatible `breakpoint::<step>` checkpoint
   state, emits the `breakpoint_hit` event, acknowledges pause/suspends, and
   resumes normally when the checkpoint already exists.
-  also lowers successful direct-control `onWait` callbacks by building the
+  Direct core lowering also supports successful direct-control `onWait`
+  callbacks by building the
   generated-compatible callback variables, running the nested callback before
   `external_input_requested`, wrapping nested callback failures with the same
   generated Rust `WaitForSignal step '<id>' on_wait failed: ...` prefix,
@@ -2210,7 +2213,9 @@ Implementation steps:
    - durable breakpoint pause/resume: stdlib key/event unit test, runtime
      debug/pause unit tests, structural core call-order test, support gate test,
      and gated A/B first-hit/resume parity test are in place;
-   - action metadata and response schema.
+   - action metadata and response schema: stdlib payload test plus gated A/B
+     resume coverage now assert the external-input request payload; gated
+     tracking coverage also asserts the debug-start response schema.
 
 Checkpoint 11:
 
@@ -2258,7 +2263,9 @@ Current status:
   Direct lowering emits wait-specific debug start after resolving signal id and
   timeout, emits debug end after storing the signal payload in `steps`, and
   compares against generated Rust in a gated tracking A/B resume test with
-  volatile timestamp/duration/signal-id fields normalized.
+  volatile timestamp/duration/signal-id fields normalized. The same coverage
+  now pins the debug-start response schema so request/debug metadata cannot
+  drift independently.
 - Durable WaitForSignal breakpoint pause/resume parity is now lowered for the
   first supported step family. Direct lowering matches generated Rust by
   checking `DEBUG_MODE`, checkpointing `breakpoint::<step>` with
