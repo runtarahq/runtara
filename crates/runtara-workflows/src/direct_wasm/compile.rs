@@ -30,7 +30,8 @@ use wit_parser::{
 };
 
 use super::component::{
-    DIRECT_AGENT_WIT_VERSION, DirectComponentArtifacts, emit_direct_component_artifacts,
+    DIRECT_AGENT_WIT_VERSION, DirectAgentComponentRequirement, DirectComponentArtifacts,
+    DirectSharedComponentRequirement, emit_direct_component_artifacts,
 };
 use super::manifest::{
     DIRECT_WORKFLOW_MANIFEST_VERSION, DirectAgentManifest, DirectDelayManifest, DirectEdgeManifest,
@@ -49,6 +50,10 @@ pub const DIRECT_WORKFLOW_MANIFEST_SECTION: &str = "runtara.direct_workflow.mani
 pub const DIRECT_WORKFLOW_SUPPORT_SECTION: &str = "runtara.direct_workflow.support";
 /// Custom section containing direct artifact ABI metadata JSON.
 pub const DIRECT_WORKFLOW_ABI_SECTION: &str = "runtara.direct_workflow.abi";
+/// Version for `artifact-metadata.json` emitted beside direct artifacts.
+pub const DIRECT_WORKFLOW_ARTIFACT_METADATA_VERSION: u32 = 1;
+/// Sidecar filename containing direct artifact dependency/provenance metadata.
+pub const DIRECT_WORKFLOW_ARTIFACT_METADATA_FILENAME: &str = "artifact-metadata.json";
 
 const WASI_CLI_RUN_WIT: &str = r#"
 package wasi:cli@0.2.3;
@@ -178,6 +183,8 @@ pub struct DirectCompilationResult {
     pub manifest_path: PathBuf,
     /// Path to the emitted support-report sidecar.
     pub support_report_path: PathBuf,
+    /// Path to the emitted artifact dependency/provenance metadata sidecar.
+    pub artifact_metadata_path: PathBuf,
     /// Path to the generated component world WIT.
     pub world_wit_path: PathBuf,
     /// Path to the generated static composition script.
@@ -204,6 +211,117 @@ pub struct DirectCompilationResult {
     pub support_report: DirectWorkflowSupportReport,
     /// Component-facing scaffolding emitted beside the direct artifact.
     pub component_artifacts: DirectComponentArtifacts,
+    /// Dependency/provenance metadata emitted beside the direct artifact.
+    pub artifact_metadata: DirectArtifactMetadata,
+}
+
+/// Metadata sidecar for direct workflow artifacts.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct DirectArtifactMetadata {
+    /// Metadata schema version.
+    pub schema_version: u32,
+    /// Stable artifact kind.
+    pub artifact_kind: String,
+    /// Workflow id used for compilation.
+    pub workflow_id: String,
+    /// Workflow version used for compilation.
+    pub workflow_version: u32,
+    /// Direct artifact ABI version.
+    pub direct_abi_version: u32,
+    /// Direct workflow manifest schema version.
+    pub manifest_version: u32,
+    /// SHA-256 checksum embedded in the direct manifest.
+    pub manifest_checksum: String,
+    /// SHA-256 checksum of `support-report.json`.
+    pub support_report_checksum: String,
+    /// Workflow-logic component emitted directly from the DSL.
+    pub workflow_logic_wasm: DirectArtifactFileMetadata,
+    /// Final statically composed `workflow.wasm`, when composition has run.
+    pub composed_wasm: Option<DirectArtifactFileMetadata>,
+    /// Shared stdlib/runtime components required for static composition.
+    pub shared_components: Vec<DirectComponentDependencyMetadata>,
+    /// Agent components required for static composition.
+    pub agent_components: Vec<DirectComponentDependencyMetadata>,
+}
+
+/// File identity captured in direct artifact metadata.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DirectArtifactFileMetadata {
+    /// Artifact filename relative to the direct build directory or bundle dir.
+    pub filename: String,
+    /// SHA-256 checksum of the artifact bytes.
+    pub sha256: String,
+    /// Artifact size in bytes.
+    pub size_bytes: u64,
+}
+
+/// One stdlib/runtime/agent component dependency recorded in artifact metadata.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct DirectComponentDependencyMetadata {
+    /// `shared` for stdlib/runtime, `agent` for agent components.
+    pub kind: String,
+    /// Agent id for agent dependencies.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<String>,
+    /// WAC package name used for static composition.
+    pub package: String,
+    /// Versioned WIT package name imported by the workflow logic.
+    pub package_with_version: String,
+    /// Expected component bundle filename.
+    pub wasm_filename: String,
+    /// Resolved Wasm file identity, once known.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wasm: Option<DirectArtifactFileMetadata>,
+    /// Expected metadata bundle filename.
+    pub meta_filename: String,
+    /// Resolved metadata sidecar identity and version fields, when present.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub meta: Option<DirectComponentSidecarMetadata>,
+}
+
+/// Selected metadata from a component bundle `.meta.json` sidecar.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct DirectComponentSidecarMetadata {
+    /// Sidecar file identity.
+    pub file: DirectArtifactFileMetadata,
+    /// Sidecar schema version.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub schema_version: Option<u64>,
+    /// Sidecar kind.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    /// Package declared in the sidecar.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub package: Option<String>,
+    /// WIT version declared in the sidecar.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wit_version: Option<String>,
+    /// Crate/package name declared in the sidecar.
+    #[serde(rename = "crate", skip_serializing_if = "Option::is_none")]
+    pub crate_name: Option<String>,
+    /// Crate version declared in the sidecar.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub crate_version: Option<String>,
+    /// Wasm filename declared in the sidecar.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wasm: Option<String>,
+    /// Wasm SHA-256 declared in the sidecar.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub declared_sha256: Option<String>,
+    /// Wasm size declared in the sidecar.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub declared_size_bytes: Option<u64>,
+}
+
+#[derive(Debug)]
+struct ResolvedComponentDependency {
+    package: String,
+    wasm_path: PathBuf,
+    metadata: DirectComponentDependencyMetadata,
 }
 
 /// Errors returned by the opt-in direct compiler.
@@ -280,6 +398,14 @@ pub fn compose_direct_workflow(
 ) -> Result<PathBuf, DirectCompileError> {
     let components_dir = components_dir.as_ref();
     let composed_path = result.build_dir.join("workflow.wasm");
+    let shared_components = resolve_shared_component_dependencies(
+        components_dir,
+        &result.component_artifacts.shared_components,
+    )?;
+    let agent_components = resolve_agent_component_dependencies(
+        components_dir,
+        &result.component_artifacts.agent_components,
+    )?;
 
     let mut cmd = Command::new("wac");
     cmd.arg("compose")
@@ -290,35 +416,19 @@ pub fn compose_direct_workflow(
             result.workflow_logic_wasm_path.display()
         ));
 
-    for component in &result.component_artifacts.shared_components {
-        let wasm = components_dir.join(component.bundle_wasm_filename);
-        if !wasm.exists() {
-            return Err(DirectCompileError::Io(std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                format!(
-                    "direct shared component `{}` missing at {}",
-                    component.package,
-                    wasm.display()
-                ),
-            )));
-        }
-        cmd.arg("-d")
-            .arg(format!("{}={}", component.package, wasm.display()));
+    for component in &shared_components {
+        cmd.arg("-d").arg(format!(
+            "{}={}",
+            component.package,
+            component.wasm_path.display()
+        ));
     }
-    for component in &result.component_artifacts.agent_components {
-        let wasm = components_dir.join(&component.bundle_wasm_filename);
-        if !wasm.exists() {
-            return Err(DirectCompileError::Io(std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                format!(
-                    "direct agent component `{}` missing at {}",
-                    component.agent_id,
-                    wasm.display()
-                ),
-            )));
-        }
-        cmd.arg("-d")
-            .arg(format!("{}={}", component.package, wasm.display()));
+    for component in &agent_components {
+        cmd.arg("-d").arg(format!(
+            "{}={}",
+            component.package,
+            component.wasm_path.display()
+        ));
     }
 
     cmd.arg("-o").arg(&composed_path);
@@ -354,6 +464,20 @@ pub fn compose_direct_workflow(
     result.composed_wasm_path = Some(composed_path.clone());
     result.composed_wasm_size = Some(composed_wasm_size);
     result.composed_wasm_checksum = Some(composed_wasm_checksum);
+    result.artifact_metadata.composed_wasm = Some(DirectArtifactFileMetadata {
+        filename: "workflow.wasm".to_string(),
+        sha256: result.wasm_checksum.clone(),
+        size_bytes: result.wasm_size as u64,
+    });
+    result.artifact_metadata.shared_components = shared_components
+        .into_iter()
+        .map(|component| component.metadata)
+        .collect();
+    result.artifact_metadata.agent_components = agent_components
+        .into_iter()
+        .map(|component| component.metadata)
+        .collect();
+    write_artifact_metadata(&result.artifact_metadata_path, &result.artifact_metadata)?;
 
     Ok(composed_path)
 }
@@ -367,6 +491,259 @@ pub fn compile_direct_workflow_composed(
     let mut result = compile_direct_workflow(input)?;
     compose_direct_workflow(&mut result, components_dir)?;
     Ok(result)
+}
+
+fn initial_artifact_metadata(
+    workflow_id: &str,
+    workflow_version: u32,
+    manifest_checksum: &str,
+    support_report_checksum: &str,
+    workflow_logic_checksum: &str,
+    workflow_logic_size: usize,
+    component_artifacts: &DirectComponentArtifacts,
+) -> DirectArtifactMetadata {
+    DirectArtifactMetadata {
+        schema_version: DIRECT_WORKFLOW_ARTIFACT_METADATA_VERSION,
+        artifact_kind: "direct-workflow-component".to_string(),
+        workflow_id: workflow_id.to_string(),
+        workflow_version,
+        direct_abi_version: DIRECT_WORKFLOW_ABI_VERSION,
+        manifest_version: DIRECT_WORKFLOW_MANIFEST_VERSION,
+        manifest_checksum: manifest_checksum.to_string(),
+        support_report_checksum: support_report_checksum.to_string(),
+        workflow_logic_wasm: DirectArtifactFileMetadata {
+            filename: "workflow-logic.wasm".to_string(),
+            sha256: workflow_logic_checksum.to_string(),
+            size_bytes: workflow_logic_size as u64,
+        },
+        composed_wasm: None,
+        shared_components: component_artifacts
+            .shared_components
+            .iter()
+            .map(unresolved_shared_component_metadata)
+            .collect(),
+        agent_components: component_artifacts
+            .agent_components
+            .iter()
+            .map(unresolved_agent_component_metadata)
+            .collect(),
+    }
+}
+
+fn unresolved_shared_component_metadata(
+    component: &DirectSharedComponentRequirement,
+) -> DirectComponentDependencyMetadata {
+    DirectComponentDependencyMetadata {
+        kind: "shared".to_string(),
+        agent_id: None,
+        package: component.package.to_string(),
+        package_with_version: component.package_with_version.to_string(),
+        wasm_filename: component.bundle_wasm_filename.to_string(),
+        wasm: None,
+        meta_filename: component.bundle_meta_filename.to_string(),
+        meta: None,
+    }
+}
+
+fn unresolved_agent_component_metadata(
+    component: &DirectAgentComponentRequirement,
+) -> DirectComponentDependencyMetadata {
+    DirectComponentDependencyMetadata {
+        kind: "agent".to_string(),
+        agent_id: Some(component.agent_id.clone()),
+        package: component.package.clone(),
+        package_with_version: component.package_with_version.clone(),
+        wasm_filename: component.bundle_wasm_filename.clone(),
+        wasm: None,
+        meta_filename: component.bundle_meta_filename.clone(),
+        meta: None,
+    }
+}
+
+fn resolve_shared_component_dependencies(
+    components_dir: &Path,
+    components: &[DirectSharedComponentRequirement],
+) -> Result<Vec<ResolvedComponentDependency>, DirectCompileError> {
+    components
+        .iter()
+        .map(|component| {
+            let wasm_path = components_dir.join(component.bundle_wasm_filename);
+            if !wasm_path.exists() {
+                return Err(DirectCompileError::Io(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    format!(
+                        "direct shared component `{}` missing at {}",
+                        component.package,
+                        wasm_path.display()
+                    ),
+                )));
+            }
+            resolve_component_dependency(
+                components_dir,
+                "shared",
+                None,
+                component.package,
+                component.package_with_version,
+                component.bundle_wasm_filename,
+                component.bundle_meta_filename,
+            )
+        })
+        .collect()
+}
+
+fn resolve_agent_component_dependencies(
+    components_dir: &Path,
+    components: &[DirectAgentComponentRequirement],
+) -> Result<Vec<ResolvedComponentDependency>, DirectCompileError> {
+    components
+        .iter()
+        .map(|component| {
+            let wasm_path = components_dir.join(&component.bundle_wasm_filename);
+            if !wasm_path.exists() {
+                return Err(DirectCompileError::Io(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    format!(
+                        "direct agent component `{}` missing at {}",
+                        component.agent_id,
+                        wasm_path.display()
+                    ),
+                )));
+            }
+            resolve_component_dependency(
+                components_dir,
+                "agent",
+                Some(component.agent_id.as_str()),
+                &component.package,
+                &component.package_with_version,
+                &component.bundle_wasm_filename,
+                &component.bundle_meta_filename,
+            )
+        })
+        .collect()
+}
+
+fn resolve_component_dependency(
+    components_dir: &Path,
+    kind: &str,
+    agent_id: Option<&str>,
+    package: &str,
+    package_with_version: &str,
+    wasm_filename: &str,
+    meta_filename: &str,
+) -> Result<ResolvedComponentDependency, DirectCompileError> {
+    let wasm_path = components_dir.join(wasm_filename);
+    let wasm_bytes = fs::read(&wasm_path)?;
+    let wasm = DirectArtifactFileMetadata {
+        filename: wasm_filename.to_string(),
+        sha256: sha256_hex(&wasm_bytes),
+        size_bytes: wasm_bytes.len() as u64,
+    };
+    let meta = read_component_sidecar_metadata(
+        &components_dir.join(meta_filename),
+        meta_filename,
+        wasm_filename,
+        &wasm,
+    )?;
+
+    Ok(ResolvedComponentDependency {
+        package: package.to_string(),
+        wasm_path,
+        metadata: DirectComponentDependencyMetadata {
+            kind: kind.to_string(),
+            agent_id: agent_id.map(str::to_string),
+            package: package.to_string(),
+            package_with_version: package_with_version.to_string(),
+            wasm_filename: wasm_filename.to_string(),
+            wasm: Some(wasm),
+            meta_filename: meta_filename.to_string(),
+            meta,
+        },
+    })
+}
+
+fn read_component_sidecar_metadata(
+    path: &Path,
+    filename: &str,
+    expected_wasm_filename: &str,
+    actual_wasm: &DirectArtifactFileMetadata,
+) -> Result<Option<DirectComponentSidecarMetadata>, DirectCompileError> {
+    if !path.exists() {
+        return Ok(None);
+    }
+
+    let bytes = fs::read(path)?;
+    let value: serde_json::Value = serde_json::from_slice(&bytes)?;
+    let declared_wasm = json_string_field(&value, "wasm");
+    if declared_wasm
+        .as_deref()
+        .is_some_and(|wasm| wasm != expected_wasm_filename)
+    {
+        return Err(DirectCompileError::Component(format!(
+            "direct component metadata `{}` declares wasm `{}` but expected `{}`",
+            path.display(),
+            declared_wasm.unwrap_or_default(),
+            expected_wasm_filename
+        )));
+    }
+
+    let declared_sha256 = json_string_field(&value, "sha256");
+    if declared_sha256
+        .as_deref()
+        .is_some_and(|sha256| sha256 != actual_wasm.sha256)
+    {
+        return Err(DirectCompileError::Component(format!(
+            "direct component metadata `{}` declares sha256 `{}` but actual `{}`",
+            path.display(),
+            declared_sha256.unwrap_or_default(),
+            actual_wasm.sha256
+        )));
+    }
+
+    let declared_size_bytes = json_u64_field(&value, "sizeBytes");
+    if declared_size_bytes.is_some_and(|size| size != actual_wasm.size_bytes) {
+        return Err(DirectCompileError::Component(format!(
+            "direct component metadata `{}` declares sizeBytes `{}` but actual `{}`",
+            path.display(),
+            declared_size_bytes.unwrap_or_default(),
+            actual_wasm.size_bytes
+        )));
+    }
+
+    Ok(Some(DirectComponentSidecarMetadata {
+        file: DirectArtifactFileMetadata {
+            filename: filename.to_string(),
+            sha256: sha256_hex(&bytes),
+            size_bytes: bytes.len() as u64,
+        },
+        schema_version: json_u64_field(&value, "schemaVersion"),
+        kind: json_string_field(&value, "kind"),
+        package: json_string_field(&value, "package"),
+        wit_version: json_string_field(&value, "witVersion"),
+        crate_name: json_string_field(&value, "crate"),
+        crate_version: json_string_field(&value, "crateVersion"),
+        wasm: declared_wasm,
+        declared_sha256,
+        declared_size_bytes,
+    }))
+}
+
+fn json_string_field(value: &serde_json::Value, key: &str) -> Option<String> {
+    value
+        .get(key)
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
+}
+
+fn json_u64_field(value: &serde_json::Value, key: &str) -> Option<u64> {
+    value.get(key).and_then(serde_json::Value::as_u64)
+}
+
+fn write_artifact_metadata(
+    path: &Path,
+    metadata: &DirectArtifactMetadata,
+) -> Result<(), DirectCompileError> {
+    fs::write(path, serde_json::to_vec_pretty(metadata)?)?;
+    Ok(())
 }
 
 /// Compile a currently supported workflow through the direct path.
@@ -406,6 +783,8 @@ pub fn compile_direct_workflow(
         input.track_events,
         &input.workflow_id,
     )?;
+    let wasm_checksum = sha256_hex(&wasm);
+    let support_report_checksum = sha256_hex(&support_json);
     let component_artifacts = emit_direct_component_artifacts(&manifest.feature_summary.agent_ids);
 
     let build_dir = input.output_dir.join(format!(
@@ -419,12 +798,23 @@ pub fn compile_direct_workflow(
     let wasm_path = build_dir.join("workflow-logic.wasm");
     let manifest_path = build_dir.join("manifest.json");
     let support_report_path = build_dir.join("support-report.json");
+    let artifact_metadata_path = build_dir.join(DIRECT_WORKFLOW_ARTIFACT_METADATA_FILENAME);
     let world_wit_path = build_dir.join("wit/world.wit");
     let wac_path = build_dir.join("workflow.wac");
+    let artifact_metadata = initial_artifact_metadata(
+        &input.workflow_id,
+        input.version,
+        manifest.checksum(),
+        &support_report_checksum,
+        &wasm_checksum,
+        wasm.len(),
+        &component_artifacts,
+    );
 
     fs::write(&wasm_path, &wasm)?;
     fs::write(&manifest_path, &manifest_json)?;
     fs::write(&support_report_path, &support_json)?;
+    write_artifact_metadata(&artifact_metadata_path, &artifact_metadata)?;
     fs::write(&world_wit_path, &component_artifacts.world_wit)?;
     fs::write(&wac_path, &component_artifacts.wac_source)?;
 
@@ -433,19 +823,21 @@ pub fn compile_direct_workflow(
         workflow_logic_wasm_path: build_dir.join("workflow-logic.wasm"),
         manifest_path,
         support_report_path,
+        artifact_metadata_path,
         world_wit_path,
         wac_path,
         build_dir,
         wasm_size: wasm.len(),
-        wasm_checksum: sha256_hex(&wasm),
+        wasm_checksum: wasm_checksum.clone(),
         workflow_logic_wasm_size: wasm.len(),
-        workflow_logic_wasm_checksum: sha256_hex(&wasm),
+        workflow_logic_wasm_checksum: wasm_checksum,
         composed_wasm_path: None,
         composed_wasm_size: None,
         composed_wasm_checksum: None,
         manifest_checksum: manifest.checksum().to_string(),
         support_report,
         component_artifacts,
+        artifact_metadata,
     })
 }
 
@@ -6718,10 +7110,37 @@ mod tests {
         assert_eq!(result.manifest_checksum.len(), 64);
         assert!(result.manifest_path.exists());
         assert!(result.support_report_path.exists());
+        assert!(result.artifact_metadata_path.exists());
         assert!(result.world_wit_path.exists());
         assert!(result.wac_path.exists());
         assert!(!result.build_dir.join("Cargo.toml").exists());
         assert!(!result.build_dir.join("src/lib.rs").exists());
+
+        let metadata: DirectArtifactMetadata =
+            serde_json::from_slice(&fs::read(&result.artifact_metadata_path).expect("metadata"))
+                .expect("artifact metadata json");
+        assert_eq!(metadata, result.artifact_metadata);
+        assert_eq!(
+            metadata.schema_version,
+            DIRECT_WORKFLOW_ARTIFACT_METADATA_VERSION
+        );
+        assert_eq!(metadata.workflow_id, "simple/workflow");
+        assert_eq!(metadata.workflow_version, 7);
+        assert_eq!(metadata.manifest_checksum, result.manifest_checksum);
+        assert_eq!(
+            metadata.workflow_logic_wasm.sha256,
+            result.workflow_logic_wasm_checksum
+        );
+        assert_eq!(metadata.workflow_logic_wasm.size_bytes, wasm.len() as u64);
+        assert!(metadata.composed_wasm.is_none());
+        assert_eq!(metadata.shared_components.len(), 2);
+        assert!(
+            metadata
+                .shared_components
+                .iter()
+                .all(|component| component.wasm.is_none())
+        );
+        assert!(metadata.agent_components.is_empty());
     }
 
     #[test]
@@ -11850,9 +12269,79 @@ mod tests {
             result.build_dir.join("workflow-logic.wasm")
         );
         assert!(result.workflow_logic_wasm_path.exists());
+        assert_eq!(
+            result
+                .artifact_metadata
+                .composed_wasm
+                .as_ref()
+                .map(|file| file.sha256.as_str()),
+            Some(result.wasm_checksum.as_str())
+        );
+        assert_eq!(result.artifact_metadata.shared_components.len(), 2);
+        for component in &result.artifact_metadata.shared_components {
+            let wasm = component.wasm.as_ref().expect("resolved shared component");
+            let actual = fs::read(components_dir.join(&component.wasm_filename))
+                .expect("shared component wasm");
+            assert_eq!(wasm.sha256, sha256_hex(&actual));
+            assert_eq!(wasm.size_bytes, actual.len() as u64);
+            if components_dir.join(&component.meta_filename).exists() {
+                assert!(
+                    component.meta.is_some(),
+                    "existing component metadata sidecar should be captured"
+                );
+            }
+        }
+        let metadata: DirectArtifactMetadata =
+            serde_json::from_slice(&fs::read(&result.artifact_metadata_path).expect("metadata"))
+                .expect("artifact metadata json");
+        assert_eq!(metadata, result.artifact_metadata);
         Validator::new()
             .validate_all(&wasm)
             .expect("composed direct workflow should validate");
+    }
+
+    #[test]
+    fn direct_compile_composition_rejects_stale_component_metadata() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let mut result = compile_direct_workflow(DirectCompilationInput {
+            workflow_id: "simple".to_string(),
+            version: 1,
+            execution_graph: fixture("simple"),
+            output_dir: temp.path().join("out"),
+            track_events: false,
+            agent_catalog: None,
+        })
+        .expect("direct compile should succeed");
+        let component = &result.component_artifacts.shared_components[0];
+        fs::write(
+            temp.path().join(component.bundle_wasm_filename),
+            b"component",
+        )
+        .expect("dummy shared component");
+        fs::write(
+            temp.path().join(component.bundle_meta_filename),
+            serde_json::json!({
+                "schemaVersion": 1,
+                "kind": "workflow-component",
+                "package": component.package,
+                "witVersion": "0.1.0",
+                "crate": "dummy",
+                "crateVersion": "0.0.0",
+                "wasm": component.bundle_wasm_filename,
+                "sha256": "not-the-real-sha",
+                "sizeBytes": 9
+            })
+            .to_string(),
+        )
+        .expect("stale shared metadata");
+
+        let err = compose_direct_workflow(&mut result, temp.path())
+            .expect_err("stale component metadata should fail before wac");
+        let DirectCompileError::Component(message) = err else {
+            panic!("expected component metadata error");
+        };
+        assert!(message.contains("declares sha256"));
+        assert!(message.contains("actual"));
     }
 
     #[test]
@@ -11923,6 +12412,14 @@ mod tests {
 
         let wasm = fs::read(&result.wasm_path).expect("composed wasm");
         assert_eq!(result.wasm_size, wasm.len());
+        assert!(result.artifact_metadata.composed_wasm.is_some());
+        assert!(
+            result
+                .artifact_metadata
+                .shared_components
+                .iter()
+                .all(|component| component.wasm.is_some())
+        );
         Validator::new()
             .validate_all(&wasm)
             .expect("composed direct workflow should validate");

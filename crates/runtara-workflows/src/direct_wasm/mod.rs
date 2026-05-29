@@ -14,10 +14,12 @@ pub mod support;
 
 #[cfg(feature = "compiler")]
 pub use compile::{
-    DIRECT_WORKFLOW_ABI_SECTION, DIRECT_WORKFLOW_ABI_VERSION, DIRECT_WORKFLOW_MANIFEST_SECTION,
-    DIRECT_WORKFLOW_SUPPORT_SECTION, DirectCompilationInput, DirectCompilationResult,
-    DirectCompileError, compile_direct_workflow, compile_direct_workflow_composed,
-    compose_direct_workflow,
+    DIRECT_WORKFLOW_ABI_SECTION, DIRECT_WORKFLOW_ABI_VERSION,
+    DIRECT_WORKFLOW_ARTIFACT_METADATA_FILENAME, DIRECT_WORKFLOW_ARTIFACT_METADATA_VERSION,
+    DIRECT_WORKFLOW_MANIFEST_SECTION, DIRECT_WORKFLOW_SUPPORT_SECTION, DirectArtifactFileMetadata,
+    DirectArtifactMetadata, DirectCompilationInput, DirectCompilationResult, DirectCompileError,
+    DirectComponentDependencyMetadata, DirectComponentSidecarMetadata, compile_direct_workflow,
+    compile_direct_workflow_composed, compose_direct_workflow,
 };
 #[cfg(feature = "compiler")]
 pub use component::{

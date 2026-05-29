@@ -102,6 +102,12 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   writes the runtime-facing `workflow.wasm`, promotes the primary direct
   compile result metadata to the composed artifact, and reports missing agent
   components with the exact agent id and expected bundle path.
+- Direct compilation now writes `artifact-metadata.json`. Before composition it
+  records workflow id/version, direct ABI version, manifest/support checksums,
+  workflow-logic checksum, and required stdlib/runtime/agent packages. After
+  composition it records the final `workflow.wasm` checksum plus resolved
+  stdlib/runtime/agent component checksums and validates any present component
+  `.meta.json` sidecar against the actual Wasm bytes before invoking `wac`.
 - `direct_wasm::compile::compile_direct_workflow_composed` now provides the
   first direct compile entry that returns the final static
   `workflow.wasm` artifact shape while retaining `workflow-logic.wasm` for
@@ -931,12 +937,12 @@ that shape and add production metrics as the direct component path matures.
 4. Gate direct mode by feature support. If a graph includes unsupported steps,
    fall back to current compiler or fail with a precise unsupported-step report.
 5. Add per-workflow metadata:
-   - source checksum;
-   - template major;
-   - direct emitter version;
-   - stdlib ABI version;
-   - stdlib checksum;
-   - agent component checksums.
+   - source checksum: pending raw-DSL integration; manifest checksum recorded;
+   - template major: pending integration with the outer compilation metadata;
+   - direct emitter version: direct ABI version recorded;
+   - stdlib ABI version: package/WIT version recorded;
+   - stdlib checksum: recorded after composition;
+   - agent component checksums: recorded after composition.
 6. Run A/B in CI for supported fixtures.
 7. Enable for pure JSON/control workflows.
 8. Expand to agent workflows.
@@ -1314,11 +1320,17 @@ Current status:
   `workflow_runtime.wasm` component under the `wasi` feature and delegates SDK
   lifecycle calls to `runtara-sdk`.
 - The direct composition helper can compose supported direct workflow components
-  with the prebuilt shared stdlib/runtime components through `wac compose`.
+  with prebuilt stdlib/runtime/agent components through `wac compose`.
 - The composed artifact is now represented in the direct compile result:
   logic-only compilation keeps `wasm_path == workflow_logic_wasm_path`, while
   composition updates `wasm_path` to the final `workflow.wasm` and records
   composed size/checksum metadata.
+- The direct compile result now includes `artifact-metadata.json`: compile-only
+  output records workflow/direct ABI/manifest/support/workflow-logic identity
+  and component requirements; composed output records final `workflow.wasm`,
+  stdlib/runtime component checksums, agent component checksums, and selected
+  component sidecar version fields. Present sidecars are checked against actual
+  Wasm bytes before static composition.
 - Gated direct execution tests now run composed artifacts through the current
   environment runner shape and verify the SDK completion payload.
 - Finish mapping parity fixtures now compare direct stdlib output against the
