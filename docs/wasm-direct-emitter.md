@@ -96,8 +96,9 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   lowering: deterministic signal id construction, timeout and poll interval
   resolution, generated-code-compatible timeout error formatting,
   generated-code-compatible waiting event payloads including response
-  schema/action metadata, and generated-code-compatible step output insertion
-  after a signal payload is received.
+  schema/action metadata, generated-code-compatible wait debug-start payloads,
+  and generated-code-compatible step output insertion after a signal payload is
+  received.
 - The direct core emitter now lowers the baseline `WaitForSignal` path with
   no `onWait` and no breakpoint, including timeout handling. It calls
   `runtime.instance-id`, builds the generated-compatible signal id through
@@ -106,6 +107,9 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   reports generated-compatible timeout failures through stdlib/runtime,
   honors cancel/pause/shutdown lifecycle signals, records the received payload
   through stdlib, rebuilds the source envelope, and continues normal flow. It
+  emits WaitForSignal `step_debug_start` after signal id/timeout resolution and
+  `step_debug_end` after received payload insertion when event tracking is
+  enabled.
   also lowers successful direct-control `onWait` callbacks by building the
   generated-compatible callback variables, running the nested callback before
   `external_input_requested`, wrapping nested callback failures with the same
@@ -2004,6 +2008,8 @@ Implementation steps:
    - emit waiting event/action metadata: stdlib helper done through
      `wait-event`, including response schema, action key, correlation, and
      context mapping parity;
+   - emit wait debug metadata: stdlib helper done through `wait-debug-start`,
+     including signal id, timeout, poll interval, and response schema;
    - execute `on_wait` subgraph: done for the direct-control subset that
      excludes nested `WaitForSignal`;
    - poll or suspend: baseline runtime polling loop done; durable suspension
@@ -2022,7 +2028,8 @@ Implementation steps:
    - `onWait` nested graph lowering: direct-control subset done, including
      wrapped explicit failure parity;
    - timeout failure parity: done for immediate timeout with no signal;
-   - debug/breakpoint parity: pending.
+   - debug event parity: done for WaitForSignal start/end events;
+   - breakpoint pause/resume parity: pending and still gated.
 3. Add tests for:
    - normal signal resume: structural core test and gated A/B test are in
      place;
@@ -2033,6 +2040,8 @@ Implementation steps:
      in place;
    - `on_wait` failure wrapping: stdlib, structural core, support, and gated
      A/B tests are in place;
+   - debug events: stdlib payload test, structural core call-order test, and
+     gated tracking A/B resume test are in place;
    - action metadata and response schema.
 
 Checkpoint 11:
@@ -2055,7 +2064,8 @@ Current status:
 - The stdlib prerequisite is in place. `runtara:workflow-stdlib/json` now owns
   the JSON-heavy WaitForSignal semantics needed by direct lowering:
   `wait-signal-id`, `wait-timeout-ms`, `wait-timeout-error`,
-  `wait-poll-interval-ms`, `wait-event`, and `wait-output`.
+  `wait-poll-interval-ms`, `wait-event`, `wait-debug-start`, and
+  `wait-output`.
 - Baseline direct core lowering is in place for waits without `onWait` or
   breakpoint. Host-level gated A/B coverage is added for immediate
   custom-signal resume, normal completion, and generated-compatible timeout
@@ -2072,9 +2082,14 @@ Current status:
   stdlib helper `wait-on-wait-error`, matching generated Rust's
   `WaitForSignal step '<id>' on_wait failed: ...` error string. Support gates no
   longer reject direct-control `onWait` graphs that end in `Error`, and gated
-  A/B coverage proves failure payload and `workflow_error` event parity. Nested
-  `WaitForSignal` callbacks, debug/breakpoint parity, and durable suspension
-  semantics remain pending.
+  A/B coverage proves failure payload and `workflow_error` event parity.
+- WaitForSignal debug event parity is now lowered for tracked direct artifacts.
+  Direct lowering emits wait-specific debug start after resolving signal id and
+  timeout, emits debug end after storing the signal payload in `steps`, and
+  compares against generated Rust in a gated tracking A/B resume test with
+  volatile timestamp/duration/signal-id fields normalized. Nested
+  `WaitForSignal` callbacks, breakpoint pause/resume parity, and durable
+  suspension semantics remain pending.
 
 ### Phase 12: AiAgent
 

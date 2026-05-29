@@ -15,7 +15,7 @@ use minijinja::Environment;
 /// # Examples
 ///
 /// ```
-/// use serde_json::json;
+/// use runtara_workflow_stdlib::serde_json::json;
 /// use runtara_workflow_stdlib::template::render_template;
 ///
 /// let ctx = json!({"data": {"name": "World"}});

@@ -776,6 +776,37 @@ impl DirectJsonManifest {
             .map_err(|err| format!("failed to serialize wait event payload: {err}"))
     }
 
+    /// Build a generated-code-compatible `step_debug_start` payload for WaitForSignal.
+    pub fn wait_debug_start(
+        &self,
+        step_id: &str,
+        signal_id: &str,
+        timeout_ms: Option<u64>,
+        source: &[u8],
+    ) -> Result<Vec<u8>, String> {
+        let _source: Value = serde_json::from_slice(source)
+            .map_err(|err| format!("failed to parse wait-debug-start source: {err}"))?;
+        let step = self.wait_step(step_id)?;
+        let timestamp = timestamp_ms();
+        self.debug_start_ms
+            .borrow_mut()
+            .insert(step_id.to_string(), timestamp);
+
+        let mut payload = debug_event_base(step, timestamp);
+        payload.insert(
+            "inputs".to_string(),
+            serde_json::json!({
+                "signal_id": signal_id,
+                "timeout_ms": timeout_ms,
+                "poll_interval_ms": self.wait_poll_interval_ms(step_id)?,
+                "response_schema": step.body.get("responseSchema").cloned().unwrap_or(Value::Null),
+            }),
+        );
+
+        serde_json::to_vec(&Value::Object(payload))
+            .map_err(|err| format!("failed to serialize wait-debug-start payload: {err}"))
+    }
+
     /// Store a WaitForSignal payload in the generated-code-compatible steps context.
     pub fn wait_output(
         &self,
@@ -1399,6 +1430,10 @@ impl DirectJsonManifest {
                 .pointer(&format!("/steps/{}", escape_json_pointer_token(&step.id)))
                 .cloned()
                 .ok_or_else(|| format!("missing direct Agent output for '{}'", step.id)),
+            "WaitForSignal" => source
+                .pointer(&format!("/steps/{}", escape_json_pointer_token(&step.id)))
+                .cloned()
+                .ok_or_else(|| format!("missing direct WaitForSignal output for '{}'", step.id)),
             "Error" => {
                 let error = self
                     .error_by_step(step.id.as_str())
@@ -4985,6 +5020,59 @@ mod tests {
         assert_eq!(steps["wait"]["stepType"], json!("WaitForSignal"));
         assert_eq!(steps["wait"]["signal_id"], json!("inst-1/root/wait"));
         assert_eq!(steps["wait"]["outputs"], json!({ "approved": true }));
+    }
+
+    #[test]
+    fn wait_debug_start_and_end_match_generated_shape() {
+        let manifest = DirectJsonManifest::parse(&wait_manifest(json!({
+            "id": "wait",
+            "stepType": "WaitForSignal",
+            "name": "Review Input",
+            "pollIntervalMs": 250,
+            "responseSchema": {
+                "approved": { "type": "boolean", "required": true }
+            }
+        })))
+        .expect("manifest");
+        let source = build_source(br#"{"case_id":"case-42"}"#, b"{}", b"{}").expect("source");
+
+        let start = manifest
+            .wait_debug_start("wait", "inst-1/root/wait", Some(500), &source)
+            .expect("wait debug start");
+        let start: Value = serde_json::from_slice(&start).expect("start json");
+
+        assert_eq!(start["step_id"], json!("wait"));
+        assert_eq!(start["step_name"], json!("Review Input"));
+        assert_eq!(start["step_type"], json!("WaitForSignal"));
+        assert_eq!(start["inputs"]["signal_id"], json!("inst-1/root/wait"));
+        assert_eq!(start["inputs"]["timeout_ms"], json!(500));
+        assert_eq!(start["inputs"]["poll_interval_ms"], json!(250));
+        assert_eq!(
+            start["inputs"]["response_schema"]["approved"]["type"],
+            json!("boolean")
+        );
+
+        let steps = manifest
+            .wait_output("wait", "inst-1/root/wait", br#"{"approved":true}"#, &source)
+            .expect("wait output");
+        let source_after_wait =
+            build_source(br#"{"case_id":"case-42"}"#, b"{}", &steps).expect("source after wait");
+        let end = manifest
+            .step_debug_end("wait", &source_after_wait)
+            .expect("wait debug end");
+        let end: Value = serde_json::from_slice(&end).expect("end json");
+
+        assert_eq!(
+            end["outputs"],
+            json!({
+                "stepId": "wait",
+                "stepName": "Review Input",
+                "stepType": "WaitForSignal",
+                "signal_id": "inst-1/root/wait",
+                "outputs": { "approved": true }
+            })
+        );
+        assert!(end["duration_ms"].as_i64().is_some_and(|value| value >= 0));
     }
 
     #[test]

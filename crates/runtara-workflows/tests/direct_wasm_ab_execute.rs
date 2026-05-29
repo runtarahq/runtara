@@ -271,6 +271,9 @@ fn shared_components_dir() -> Option<PathBuf> {
                 .windows(b"wait-output".len())
                 .any(|window| window == b"wait-output")
             || !stdlib_bytes
+                .windows(b"wait-debug-start".len())
+                .any(|window| window == b"wait-debug-start")
+            || !stdlib_bytes
                 .windows(b"wait-timeout-error".len())
                 .any(|window| window == b"wait-timeout-error")
             || !stdlib_bytes
@@ -366,12 +369,20 @@ fn graph_from_fixture(graph_json: &str) -> ExecutionGraph {
 }
 
 fn compile_components_artifact(workflow_id: &str, graph_json: &str) -> PathBuf {
+    compile_components_artifact_with_tracking(workflow_id, graph_json, false)
+}
+
+fn compile_components_artifact_with_tracking(
+    workflow_id: &str,
+    graph_json: &str,
+    track_events: bool,
+) -> PathBuf {
     let compiled = compile_workflow(CompilationInput {
         tenant_id: "direct-wasm-ab".to_string(),
         workflow_id: format!("ab-components-{workflow_id}"),
         version: 1,
         execution_graph: graph_from_fixture(graph_json),
-        track_events: false,
+        track_events,
         child_workflows: vec![],
         connection_service_url: None,
         agent_catalog: None,
@@ -392,6 +403,15 @@ fn compile_direct_artifact(
     workflow_id: &str,
     graph_json: &str,
 ) -> DirectArtifact {
+    compile_direct_artifact_with_tracking(components_dir, workflow_id, graph_json, false)
+}
+
+fn compile_direct_artifact_with_tracking(
+    components_dir: &Path,
+    workflow_id: &str,
+    graph_json: &str,
+    track_events: bool,
+) -> DirectArtifact {
     let temp = TempDir::new().expect("tempdir");
     let compiled = compile_workflow_direct(
         CompilationInput {
@@ -399,7 +419,7 @@ fn compile_direct_artifact(
             workflow_id: format!("ab-direct-{workflow_id}"),
             version: 1,
             execution_graph: graph_from_fixture(graph_json),
-            track_events: false,
+            track_events,
             child_workflows: vec![],
             connection_service_url: None,
             agent_catalog: None,
@@ -970,8 +990,19 @@ fn components_sdk_input(workflow_input: &[u8]) -> Vec<u8> {
 fn normalized_event_payload(subtype: &str, mut payload: Value) -> Value {
     if let Some(object) = payload.as_object_mut() {
         object.remove("timestamp_ms");
+        if subtype == "step_debug_end" {
+            object.remove("duration_ms");
+        }
         if subtype == "external_input_requested" {
             object.remove("signal_id");
+        }
+        if object.get("step_type").and_then(Value::as_str) == Some("WaitForSignal") {
+            if let Some(inputs) = object.get_mut("inputs").and_then(Value::as_object_mut) {
+                inputs.remove("signal_id");
+            }
+            if let Some(outputs) = object.get_mut("outputs").and_then(Value::as_object_mut) {
+                outputs.remove("signal_id");
+            }
         }
     }
     payload
@@ -1281,6 +1312,61 @@ fn direct_wasm_matches_components_wait_for_signal_resume() {
     assert_eq!(
         direct.output_json,
         Some(serde_json::json!({"approved": true}))
+    );
+}
+
+#[test]
+fn direct_wasm_matches_components_wait_for_signal_track_events_resume() {
+    let Some(components_dir) = direct_ab_components_dir() else {
+        return;
+    };
+    let _data = setup_data_dir();
+
+    let components_artifact = compile_components_artifact_with_tracking(
+        "wait-signal-track-events",
+        WAIT_FOR_SIGNAL_DIRECT_SIMPLE,
+        true,
+    );
+    let direct_artifact = compile_direct_artifact_with_tracking(
+        &components_dir,
+        "wait-signal-track-events",
+        WAIT_FOR_SIGNAL_DIRECT_SIMPLE,
+        true,
+    );
+    let workflow_input = br#"{"case_id":"case-42","summary":"Needs approval"}"#;
+    let signal_payload = br#"{"approved":true}"#;
+    let components_input = components_sdk_input(workflow_input);
+
+    let components = execute_artifact_with_custom_signal(
+        &components_artifact,
+        "ab-components-wait-signal-track-events-0",
+        &components_input,
+        signal_payload,
+    );
+    let direct = execute_artifact_with_custom_signal(
+        &direct_artifact.path,
+        "ab-direct-wait-signal-track-events-0",
+        workflow_input,
+        signal_payload,
+    );
+
+    assert_success_parity("wait-signal-track-events", 0, &components, &direct);
+    let direct_events = normalized_events(&direct.events);
+    assert!(
+        direct_events.iter().any(|(subtype, payload)| {
+            subtype == "step_debug_start"
+                && payload["step_type"] == serde_json::json!("WaitForSignal")
+                && payload["inputs"]["poll_interval_ms"] == serde_json::json!(0)
+        }),
+        "tracked direct WaitForSignal run should emit a wait debug-start event"
+    );
+    assert!(
+        direct_events.iter().any(|(subtype, payload)| {
+            subtype == "step_debug_end"
+                && payload["step_type"] == serde_json::json!("WaitForSignal")
+                && payload["outputs"]["outputs"] == serde_json::json!({ "approved": true })
+        }),
+        "tracked direct WaitForSignal run should emit a wait debug-end event"
     );
 }
 

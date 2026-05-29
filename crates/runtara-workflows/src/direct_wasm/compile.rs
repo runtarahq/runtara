@@ -2514,6 +2514,7 @@ struct DirectCoreImportIndices {
     stdlib_wait_on_wait_error: Option<u32>,
     stdlib_wait_poll_interval_ms: Option<u32>,
     stdlib_wait_event: Option<u32>,
+    stdlib_wait_debug_start: Option<u32>,
     stdlib_wait_output: Option<u32>,
     stdlib_agent_output: Option<u32>,
     stdlib_agent_validate_input: Option<u32>,
@@ -2702,6 +2703,10 @@ impl DirectCoreImportIndices {
                 "stdlib.wait-poll-interval-ms",
             )?,
             stdlib_wait_event: require_import(self.stdlib_wait_event, "stdlib.wait-event")?,
+            stdlib_wait_debug_start: require_import(
+                self.stdlib_wait_debug_start,
+                "stdlib.wait-debug-start",
+            )?,
             stdlib_wait_output: require_import(self.stdlib_wait_output, "stdlib.wait-output")?,
             stdlib_agent_output: require_import(self.stdlib_agent_output, "stdlib.agent-output")?,
             stdlib_agent_validate_input: require_import(
@@ -2810,6 +2815,7 @@ struct DirectCoreFunctionIndices {
     stdlib_wait_on_wait_error: u32,
     stdlib_wait_poll_interval_ms: u32,
     stdlib_wait_event: u32,
+    stdlib_wait_debug_start: u32,
     stdlib_wait_output: u32,
     stdlib_agent_output: u32,
     stdlib_agent_validate_input: u32,
@@ -2977,6 +2983,8 @@ fn import_core_function(
         import_indices.stdlib_wait_poll_interval_ms = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "wait-event") {
         import_indices.stdlib_wait_event = Some(function_index);
+    } else if is_stdlib_import(resolve, interface, function, "wait-debug-start") {
+        import_indices.stdlib_wait_debug_start = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "wait-output") {
         import_indices.stdlib_wait_output = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "agent-output") {
@@ -3803,6 +3811,62 @@ fn emit_step_debug_event(
     push_retptr_arg(body);
     body.instruction(&Instruction::Call(indices.runtime_custom_event));
     return_if_retptr_error(body);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_wait_debug_start_event(
+    body: &mut WasmFunction,
+    indices: &DirectCoreFunctionIndices,
+    static_data: &DirectCoreStaticData,
+    track_events: bool,
+    step_id: &str,
+    signal_id_ptr_local: u32,
+    signal_id_len_local: u32,
+    timeout_present_local: u32,
+    timeout_ms_local: u32,
+    source_ptr_local: u32,
+    source_len_local: u32,
+    output_ptr_local: u32,
+    output_len_local: u32,
+    failure_target: Option<DirectFailureTarget>,
+) {
+    if !track_events {
+        return;
+    }
+
+    let step_id = static_data
+        .step_id(step_id)
+        .expect("run plan step ids are present in static data");
+    push_segment_args(body, step_id);
+    body.instruction(&Instruction::LocalGet(signal_id_ptr_local));
+    body.instruction(&Instruction::LocalGet(signal_id_len_local));
+    body.instruction(&Instruction::LocalGet(timeout_present_local));
+    body.instruction(&Instruction::LocalGet(timeout_ms_local));
+    body.instruction(&Instruction::LocalGet(source_ptr_local));
+    body.instruction(&Instruction::LocalGet(source_len_local));
+    push_retptr_arg(body);
+    body.instruction(&Instruction::Call(indices.stdlib_wait_debug_start));
+    emit_retptr_error_or_return(
+        body,
+        indices,
+        failure_target,
+        output_ptr_local,
+        output_len_local,
+    );
+    load_retptr_list(body, output_ptr_local, output_len_local);
+
+    push_segment_args(body, &static_data.step_debug_start_kind);
+    body.instruction(&Instruction::LocalGet(output_ptr_local));
+    body.instruction(&Instruction::LocalGet(output_len_local));
+    push_retptr_arg(body);
+    body.instruction(&Instruction::Call(indices.runtime_custom_event));
+    emit_retptr_error_or_return(
+        body,
+        indices,
+        failure_target,
+        output_ptr_local,
+        output_len_local,
+    );
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -4897,8 +4961,27 @@ fn emit_wait_for_signal_plan(
     body.instruction(&Instruction::LocalSet(DIRECT_WAIT_DEADLINE_MS_LOCAL));
     body.instruction(&Instruction::Else);
     body.instruction(&Instruction::I64Const(0));
+    body.instruction(&Instruction::LocalSet(DIRECT_WAIT_TIMEOUT_MS_LOCAL));
+    body.instruction(&Instruction::I64Const(0));
     body.instruction(&Instruction::LocalSet(DIRECT_WAIT_DEADLINE_MS_LOCAL));
     body.instruction(&Instruction::End);
+
+    emit_wait_debug_start_event(
+        body,
+        indices,
+        static_data,
+        track_events,
+        step_id,
+        DIRECT_WAIT_SIGNAL_ID_PTR_LOCAL,
+        DIRECT_WAIT_SIGNAL_ID_LEN_LOCAL,
+        DIRECT_WAIT_TIMEOUT_PRESENT_LOCAL,
+        DIRECT_WAIT_TIMEOUT_MS_LOCAL,
+        source_ptr_local,
+        source_len_local,
+        output_ptr_local,
+        output_len_local,
+        failure_target,
+    );
 
     if let Some(on_wait_plan) = on_wait_plan {
         emit_wait_on_wait_plan(
@@ -5036,6 +5119,19 @@ fn emit_wait_for_signal_plan(
         source_ptr_local,
         source_len_local,
         failure_target,
+    );
+
+    emit_step_debug_event(
+        body,
+        indices,
+        static_data,
+        track_events,
+        false,
+        step_id,
+        source_ptr_local,
+        source_len_local,
+        output_ptr_local,
+        output_len_local,
     );
 
     emit_run_plan_mapping(
@@ -7727,6 +7823,7 @@ mod tests {
                 b"agent-retry-error-info",
                 b"agent-error-from-info",
                 b"delay-duration-ms",
+                b"wait-debug-start",
             ] {
                 if !stdlib_bytes
                     .windows(marker.len())
@@ -12611,6 +12708,131 @@ mod tests {
                 .count(),
             2,
             "WaitForSignal run should rebuild source after updating steps context"
+        );
+    }
+
+    #[test]
+    fn direct_core_run_lowers_wait_for_signal_debug_events_with_tracking() {
+        let graph = fixture("wait_timeout");
+        let manifest = build_direct_workflow_manifest(&graph).expect("manifest");
+        let manifest_json = manifest.to_canonical_json().expect("manifest json");
+        let core_config =
+            DirectCoreConfig::new(&manifest, &manifest_json, true).expect("core config");
+
+        let (resolve, world) = build_direct_component_resolve().expect("resolve");
+        let core = emit_direct_core_module(&resolve, world, &core_config).expect("core module");
+        Validator::new()
+            .validate_all(&core)
+            .expect("tracked WaitForSignal core module validates");
+
+        let mut next_function_index = 0;
+        let mut wait_signal_id_index = None;
+        let mut wait_timeout_index = None;
+        let mut wait_debug_start_index = None;
+        let mut wait_event_index = None;
+        let mut wait_output_index = None;
+        let mut step_debug_end_index = None;
+        let mut apply_mapping_index = None;
+        let mut runtime_custom_event_index = None;
+        let mut run_calls = Vec::new();
+        let mut code_body_index = 0;
+
+        for payload in Parser::new(0).parse_all(&core) {
+            match payload.expect("core wasm payload") {
+                Payload::ImportSection(reader) => {
+                    for import in reader.into_imports() {
+                        let import = import.expect("core import");
+                        if matches!(import.ty, TypeRef::Func(_)) {
+                            match (import.module, import.name) {
+                                ("cm32p2|runtara:workflow-stdlib/json@0.1", "wait-signal-id") => {
+                                    wait_signal_id_index = Some(next_function_index)
+                                }
+                                ("cm32p2|runtara:workflow-stdlib/json@0.1", "wait-timeout-ms") => {
+                                    wait_timeout_index = Some(next_function_index)
+                                }
+                                ("cm32p2|runtara:workflow-stdlib/json@0.1", "wait-debug-start") => {
+                                    wait_debug_start_index = Some(next_function_index)
+                                }
+                                ("cm32p2|runtara:workflow-stdlib/json@0.1", "wait-event") => {
+                                    wait_event_index = Some(next_function_index)
+                                }
+                                ("cm32p2|runtara:workflow-stdlib/json@0.1", "wait-output") => {
+                                    wait_output_index = Some(next_function_index)
+                                }
+                                ("cm32p2|runtara:workflow-stdlib/json@0.1", "step-debug-end") => {
+                                    step_debug_end_index = Some(next_function_index)
+                                }
+                                ("cm32p2|runtara:workflow-stdlib/json@0.1", "apply-mapping") => {
+                                    apply_mapping_index = Some(next_function_index)
+                                }
+                                ("cm32p2|runtara:workflow-runtime/runtime@0.1", "custom-event") => {
+                                    runtime_custom_event_index = Some(next_function_index)
+                                }
+                                _ => {}
+                            }
+                            next_function_index += 1;
+                        }
+                    }
+                }
+                Payload::CodeSectionEntry(body) => {
+                    if code_body_index == 0 {
+                        for operator in body.get_operators_reader().expect("operators") {
+                            if let Operator::Call { function_index } = operator.expect("operator") {
+                                run_calls.push(function_index);
+                            }
+                        }
+                    }
+                    code_body_index += 1;
+                }
+                _ => {}
+            }
+        }
+
+        let wait_signal_id_index = wait_signal_id_index.expect("wait-signal-id import");
+        let wait_timeout_index = wait_timeout_index.expect("wait-timeout-ms import");
+        let wait_debug_start_index = wait_debug_start_index.expect("wait-debug-start import");
+        let wait_event_index = wait_event_index.expect("wait-event import");
+        let wait_output_index = wait_output_index.expect("wait-output import");
+        let step_debug_end_index = step_debug_end_index.expect("step-debug-end import");
+        let apply_mapping_index = apply_mapping_index.expect("apply-mapping import");
+        let runtime_custom_event_index = runtime_custom_event_index.expect("custom-event import");
+
+        let position = |index| {
+            run_calls
+                .iter()
+                .position(|call| *call == index)
+                .expect("expected tracked WaitForSignal call")
+        };
+        let wait_signal_id_pos = position(wait_signal_id_index);
+        let wait_timeout_pos = position(wait_timeout_index);
+        let wait_debug_start_pos = position(wait_debug_start_index);
+        let wait_event_pos = position(wait_event_index);
+        let wait_output_pos = position(wait_output_index);
+        let step_debug_end_pos = position(step_debug_end_index);
+        let apply_mapping_pos = position(apply_mapping_index);
+        let custom_event_positions = run_calls
+            .iter()
+            .enumerate()
+            .filter_map(|(position, &index)| {
+                (index == runtime_custom_event_index).then_some(position)
+            })
+            .collect::<Vec<_>>();
+
+        assert!(
+            custom_event_positions.len() >= 3,
+            "tracked WaitForSignal should emit wait debug-start, wait-request, and wait debug-end custom events"
+        );
+        assert!(
+            wait_signal_id_pos < wait_timeout_pos
+                && wait_timeout_pos < wait_debug_start_pos
+                && wait_debug_start_pos < custom_event_positions[0]
+                && custom_event_positions[0] < wait_event_pos
+                && wait_event_pos < custom_event_positions[1]
+                && wait_event_pos < wait_output_pos
+                && wait_output_pos < step_debug_end_pos
+                && step_debug_end_pos < custom_event_positions[2]
+                && custom_event_positions[2] < apply_mapping_pos,
+            "tracked WaitForSignal debug calls should bracket wait request/output: {run_calls:?}"
         );
     }
 

@@ -609,6 +609,21 @@ mod component {
             })
         }
 
+        fn wait_debug_start(
+            step_id: String,
+            signal_id: String,
+            timeout_ms: Option<u64>,
+            source: Vec<u8>,
+        ) -> Result<Vec<u8>, String> {
+            MANIFEST.with(|slot| {
+                let slot = slot.borrow();
+                let manifest = slot
+                    .as_ref()
+                    .ok_or_else(|| "direct stdlib manifest was not initialized".to_string())?;
+                manifest.wait_debug_start(&step_id, &signal_id, timeout_ms, &source)
+            })
+        }
+
         fn wait_output(
             step_id: String,
             signal_id: String,

@@ -82,6 +82,7 @@ mod tests {
             "wait-on-wait-error",
             "wait-poll-interval-ms",
             "wait-event",
+            "wait-debug-start",
             "wait-output",
             "agent-output",
             "agent-validate-input",
