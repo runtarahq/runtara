@@ -178,8 +178,9 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   `/failed` plus `workflow_error` payloads for terminal `Error` workflows,
   normalizing timestamp fields before comparison. It also captures and compares
   durable `/sleep` and `/checkpoint` requests, with durable Delay, fresh and
-  cached durable Agent, and fresh and cached durable Split fixtures included in
-  the strict A/B suite.
+  cached durable Agent, checkpoint-returned pause plus cached resume for
+  durable Agent, and fresh and cached durable Split fixtures included in the
+  strict A/B suite.
 - `tests/direct_wasm_execute.rs` now provides gated direct execution smoke
   tests. With `RUNTARA_RUN_DIRECT_WASM_E2E=1`, it compiles and statically
   composes the simple `Finish` fixture plus flat and nested `Conditional`
@@ -279,8 +280,9 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   `step_debug_start`/`step_debug_end` custom events for `Finish`,
   `Conditional`, `Filter`, `Switch`, `GroupBy`, and terminal `Error` steps.
   `Log` remains intentionally limited to its existing `workflow_log` events,
-  matching the generated Rust path. Breakpoint pauses remain rejected until the
-  runtime/checkpoint ABI can represent durable pause/resume behavior.
+  matching the generated Rust path. Breakpoint pauses remain rejected until
+  persisted step-breakpoint state and resume semantics are lowered and covered
+  by host-level parity tests.
 - Phase 6 routing scope is now explicit: direct mode supports deterministic
   single-successor normal flow, condition-priority routes with an explicit
   default, and routing Switches with a complete static route/default edge set.
@@ -364,7 +366,8 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   Public support is now enabled for durable Agent workflows that do not use
   timeout, compensation, or breakpoints. Timeout remains gated because the
   generated Rust Agent path does not currently enforce `AgentStep.timeout`;
-  crash/resume differential coverage remains a Phase 8 hardening checkpoint.
+  broader retry/failure/cancel crash-resume differential coverage remains a
+  Phase 8 hardening checkpoint.
 - The direct core now has structural and gated host-level replay coverage for
   durable Agent cached checkpoints: the emitted Wasm branch that receives an
   existing checkpoint payload skips both `capabilities.invoke` and
@@ -373,8 +376,9 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   SDK checkpoint responses and verifies cached Agent output flows through
   `Finish` without a fresh Agent invocation. It also verifies a fresh durable
   Agent performs lookup/invoke/save and a non-durable Agent performs no
-  checkpoint calls. Full host-level crash/resume differential tests remain
-  pending.
+  checkpoint calls. Gated A/B execution also covers checkpoint-returned pause
+  followed by cached resume; retry/failure/cancel host-level differential tests
+  remain pending.
 - Non-durable Agent retry-loop lowering is now implemented. The direct core
   uses the same default retry counts and base delays as generated Rust, calls
   `stdlib.agent-retry-error-info` and `stdlib.agent-retry-delay-ms` for retry
@@ -1519,8 +1523,9 @@ Current progress:
   direct Phase 6. They require explicit parallel result aggregation, error
   propagation, or missing-default behavior and should be addressed with loops,
   agents, or runtime lifecycle work instead of being inferred here. Breakpoint
-  support moves to Phase 8 because it requires a durable checkpoint/pause ABI,
-  not only debug event payloads.
+  support moves to Phase 8 because it requires breakpoint-specific persisted
+  pause/resume semantics on top of the runtime checkpoint ABI, not only debug
+  event payloads.
 
 Implementation steps:
 
@@ -1552,7 +1557,8 @@ Implementation steps:
    - verify event payload parity for representative fixtures.
 8. Keep breakpoints rejected until Phase 8:
    - breakpoint behavior depends on persisted checkpoint/pause state;
-   - direct runtime WIT does not yet expose a checkpoint API.
+   - direct runtime WIT exposes checkpoint primitives, but breakpoint-specific
+     checkpoint state and resume semantics are not yet lowered or tested.
 9. Keep parallel fan-out/no-default routes rejected until their owning phases:
    - fan-out requires explicit aggregation and error propagation;
    - no-default behavior must be specified per step/routing family.
@@ -1650,8 +1656,10 @@ Current status:
   `runtime.handle-checkpoint-signal`; handled `cancel`, `pause`, and
   `shutdown` signals stop before `runtime.complete`, while `resume`/unknown
   signals continue. The public support gate accepts this durable Agent subset;
-  timeout, compensation, and breakpoints remain rejected, and crash/resume
-  differential tests remain pending.
+  timeout, compensation, and breakpoints remain rejected. Gated A/B execution
+  now proves checkpoint-returned `pause` suspends without completion/failure
+  and that a resumed run replays the saved Agent checkpoint; retry/failure/cancel
+  crash-resume coverage remains pending.
 - Structural core Wasm coverage and gated direct execution smokes now cover
   durable and non-durable Agent execution. They prove the cached branch does
   not invoke the Agent or save another checkpoint, that cached raw Agent output
@@ -1662,6 +1670,11 @@ Current status:
 - A structural core Wasm test now covers non-durable Agent default retry
   lowering. It proves the direct retry loop uses `runtime.blocking-sleep` and
   omits checkpoint, durable sleep, retry sleep-key, and retry-attempt calls.
+- A gated A/B execution test now covers durable Agent pause/resume lifecycle
+  parity. The fake SDK returns a one-shot `pause` signal from the checkpoint
+  save, both generated Rust and direct artifacts acknowledge the signal, post
+  `/suspended`, avoid `/completed` and `/failed`, and a second run with the
+  saved checkpoint completes through the cached Agent replay branch.
 
 Implementation steps:
 
@@ -1699,6 +1712,8 @@ Implementation steps:
    - pause/cancel/shutdown acknowledgement after checkpoint save: internal
      lowering in place through `runtime.handle-checkpoint-signal`, public
      support enabled for the durable Agent subset;
+   - checkpoint-returned pause plus cached resume A/B test: done for durable
+     Agent;
    - non-durable retry loop parity: done through
      `stdlib.agent-retry-error-info`, `stdlib.agent-retry-delay-ms`, and
      `runtime.blocking-sleep`;
@@ -1770,7 +1785,8 @@ Implementation steps:
    - generic backoff sleep parity: internal lowering done;
    - pause/cancel/shutdown acknowledgement parity after Agent checkpoint save:
      internal lowering done;
-   - crash/resume differential tests: pending.
+   - checkpoint-returned pause plus cached resume A/B test: done;
+   - retry/failure/cancel crash-resume differential tests: pending.
 5. Migrate `Delay`:
    - manifest config records: done;
    - immediate and dynamic `durationMs` mapping: done through
@@ -1793,8 +1809,10 @@ Implementation steps:
      schema-validating sequential Split fixture;
    - Split retry/timeout/breakpoint durability semantics: pending and gated.
 7. Add crash/resume tests:
-   - resume after checkpoint: structural core replay test and gated host-level
-     cached Agent replay smoke done; full differential test pending;
+   - resume after checkpoint: structural core replay test, gated host-level
+     cached Agent replay smoke, and durable Agent checkpoint-returned pause
+     plus cached resume A/B test done; retry/failure/cancel differential tests
+     pending;
    - retry transient failure;
    - no retry permanent failure;
    - rate-limit budget exhaustion;
@@ -2047,14 +2065,16 @@ Current status:
   failure/event parity for terminal `Error` workflows, with timestamp fields
   normalized out of the comparison.
 - The strict A/B harness now captures durable sleep/checkpoint requests and
-  includes durable Delay plus fresh/cached durable Agent and fresh/cached
-  durable Split fixtures. Delay diffs completion output plus `/sleep` traffic
-  exactly. Agent and Split diff completion output, checkpoint ordering, and
-  checkpoint bytes while normalizing the compiler-owned checkpoint id prefix
-  down to the stable `agent::<agentId>::<capabilityId>::<stepId>` or
-  `split::<stepId>` key base. Cached replay preloads those normalized keys and
-  verifies both artifacts return cached output with only the read-only
-  checkpoint lookup.
+  includes durable Delay plus fresh/cached durable Agent, durable Agent
+  checkpoint-returned pause plus cached resume, and fresh/cached durable Split
+  fixtures. Delay diffs completion output plus `/sleep` traffic exactly. Agent
+  and Split diff completion output, checkpoint ordering, and checkpoint bytes
+  while normalizing the compiler-owned checkpoint id prefix down to the stable
+  `agent::<agentId>::<capabilityId>::<stepId>` or `split::<stepId>` key base.
+  Cached replay preloads those normalized keys and verifies both artifacts
+  return cached output with only the read-only checkpoint lookup; the
+  pause/resume Agent case also asserts pause acknowledgment, `/suspended`, and
+  no `/completed` or `/failed` before the resumed run.
 - The strict A/B harness now also includes enabled loop/control-flow coverage:
   a durable schema-validating sequential Split fixture and an agentless While
   loop fixture that exercises loop index variables and `_previousOutputs`.

@@ -142,6 +142,11 @@ struct CheckpointRequest {
     state: Vec<u8>,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+struct SignalAckRequest {
+    signal_type: String,
+}
+
 #[derive(Debug)]
 enum CapturedMessage {
     Completed(Completed),
@@ -149,6 +154,8 @@ enum CapturedMessage {
     Event(RuntimeEvent),
     Sleep(SleepRequest),
     Checkpoint(CheckpointRequest),
+    Suspended,
+    SignalAck(SignalAckRequest),
 }
 
 #[derive(Debug)]
@@ -158,18 +165,25 @@ struct CapturedRun {
     events: Vec<RuntimeEvent>,
     sleeps: Vec<SleepRequest>,
     checkpoints: Vec<CheckpointRequest>,
+    suspended_count: usize,
+    signal_acks: Vec<SignalAckRequest>,
     status_success: bool,
     stderr: String,
 }
 
 struct ServerState {
     checkpoints: Mutex<HashMap<String, Vec<u8>>>,
+    pending_checkpoint_signal: Mutex<Option<String>>,
 }
 
 impl ServerState {
-    fn new(preloaded_checkpoints: Vec<(String, Vec<u8>)>) -> Self {
+    fn new(
+        preloaded_checkpoints: Vec<(String, Vec<u8>)>,
+        pending_checkpoint_signal: Option<String>,
+    ) -> Self {
         Self {
             checkpoints: Mutex::new(preloaded_checkpoints.into_iter().collect()),
+            pending_checkpoint_signal: Mutex::new(pending_checkpoint_signal),
         }
     }
 }
@@ -519,6 +533,14 @@ fn route(
                 capture_sleep(body, sink);
                 return (200, serde_json::json!({"success": true}));
             }
+            ("POST", "suspended") => {
+                let _ = sink.send(CapturedMessage::Suspended);
+                return (200, serde_json::json!({"success": true}));
+            }
+            ("POST", "signals/ack") => {
+                capture_signal_ack(body, sink);
+                return (200, serde_json::json!({"success": true}));
+            }
             _ => {}
         }
     }
@@ -577,9 +599,21 @@ fn checkpoint_response(
         );
     }
 
+    let mut pending_signal = None;
     if !state.is_empty() {
         checkpoints.insert(checkpoint_id.clone(), state.clone());
         checkpoints.insert(normalized_checkpoint_id(&checkpoint_id), state);
+        pending_signal = server_state
+            .pending_checkpoint_signal
+            .lock()
+            .expect("checkpoint signal lock")
+            .take()
+            .map(|signal_type| {
+                serde_json::json!({
+                    "signal_type": signal_type,
+                    "payload": null,
+                })
+            });
     }
 
     (
@@ -587,7 +621,7 @@ fn checkpoint_response(
         serde_json::json!({
             "found": false,
             "state": null,
-            "signal": null,
+            "signal": pending_signal,
             "custom_signal": null,
         }),
     )
@@ -649,6 +683,16 @@ fn capture_sleep(body: &[u8], sink: &mpsc::Sender<CapturedMessage>) {
     }
 }
 
+fn capture_signal_ack(body: &[u8], sink: &mpsc::Sender<CapturedMessage>) {
+    if let Ok(parsed) = serde_json::from_slice::<Value>(body)
+        && let Some(signal_type) = parsed.get("signal_type").and_then(Value::as_str)
+    {
+        let _ = sink.send(CapturedMessage::SignalAck(SignalAckRequest {
+            signal_type: signal_type.to_string(),
+        }));
+    }
+}
+
 fn serve(
     listener: TcpListener,
     sink: mpsc::Sender<CapturedMessage>,
@@ -699,11 +743,45 @@ fn execute_artifact_with_preloaded_checkpoints(
     workflow_input: &[u8],
     preloaded_checkpoints: Vec<(String, Vec<u8>)>,
 ) -> CapturedRun {
+    execute_artifact_with_state(
+        binary_path,
+        instance_id,
+        workflow_input,
+        preloaded_checkpoints,
+        None,
+    )
+}
+
+fn execute_artifact_with_checkpoint_signal(
+    binary_path: &Path,
+    instance_id: &str,
+    workflow_input: &[u8],
+    signal_type: &str,
+) -> CapturedRun {
+    execute_artifact_with_state(
+        binary_path,
+        instance_id,
+        workflow_input,
+        Vec::new(),
+        Some(signal_type.to_string()),
+    )
+}
+
+fn execute_artifact_with_state(
+    binary_path: &Path,
+    instance_id: &str,
+    workflow_input: &[u8],
+    preloaded_checkpoints: Vec<(String, Vec<u8>)>,
+    pending_checkpoint_signal: Option<String>,
+) -> CapturedRun {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
     let addr = listener.local_addr().expect("local_addr");
     let (capture_tx, capture_rx) = mpsc::channel::<CapturedMessage>();
     let (stop_tx, stop_rx) = mpsc::channel::<()>();
-    let server_state = Arc::new(ServerState::new(preloaded_checkpoints));
+    let server_state = Arc::new(ServerState::new(
+        preloaded_checkpoints,
+        pending_checkpoint_signal,
+    ));
     let workflow_input = Arc::new(workflow_input.to_vec());
     let server_handle =
         thread::spawn(move || serve(listener, capture_tx, stop_rx, server_state, workflow_input));
@@ -739,6 +817,8 @@ fn execute_artifact_with_preloaded_checkpoints(
     let mut events = Vec::new();
     let mut sleeps = Vec::new();
     let mut checkpoints = Vec::new();
+    let mut suspended_count = 0usize;
+    let mut signal_acks = Vec::new();
     for message in capture_rx.try_iter() {
         match message {
             CapturedMessage::Completed(completed) => output_json = Some(completed.output_json),
@@ -746,6 +826,8 @@ fn execute_artifact_with_preloaded_checkpoints(
             CapturedMessage::Event(event) => events.push(event),
             CapturedMessage::Sleep(sleep) => sleeps.push(sleep),
             CapturedMessage::Checkpoint(checkpoint) => checkpoints.push(checkpoint),
+            CapturedMessage::Suspended => suspended_count += 1,
+            CapturedMessage::SignalAck(signal_ack) => signal_acks.push(signal_ack),
         }
     }
 
@@ -755,6 +837,8 @@ fn execute_artifact_with_preloaded_checkpoints(
         events,
         sleeps,
         checkpoints,
+        suspended_count,
+        signal_acks,
         status_success: output.status.success(),
         stderr: stderr.into_owned(),
     }
@@ -866,6 +950,14 @@ fn assert_success_parity(
         normalized_checkpoints(&direct.checkpoints),
         "checkpoint request mismatch for {case_name}[{input_index}]"
     );
+    assert_eq!(
+        components.suspended_count, direct.suspended_count,
+        "suspended lifecycle request mismatch for {case_name}[{input_index}]"
+    );
+    assert_eq!(
+        components.signal_acks, direct.signal_acks,
+        "signal acknowledgement mismatch for {case_name}[{input_index}]"
+    );
 }
 
 fn assert_failure_parity(
@@ -913,6 +1005,14 @@ fn assert_failure_parity(
         normalized_checkpoints(&components.checkpoints),
         normalized_checkpoints(&direct.checkpoints),
         "failure checkpoint request mismatch for {case_name}[{input_index}]"
+    );
+    assert_eq!(
+        components.suspended_count, direct.suspended_count,
+        "failure suspended lifecycle request mismatch for {case_name}[{input_index}]"
+    );
+    assert_eq!(
+        components.signal_acks, direct.signal_acks,
+        "failure signal acknowledgement mismatch for {case_name}[{input_index}]"
     );
 }
 
@@ -1054,6 +1154,137 @@ fn direct_wasm_matches_components_cached_durable_agent_checkpoint_replay() {
         expected_lookup
     );
     assert_eq!(normalized_checkpoints(&direct.checkpoints), expected_lookup);
+}
+
+#[test]
+fn direct_wasm_matches_components_pause_resume_after_durable_agent_checkpoint() {
+    let Some(components_dir) = direct_ab_components_dir() else {
+        return;
+    };
+    let _data = setup_data_dir();
+
+    let components_artifact =
+        compile_components_artifact("durable-agent-pause-resume", AGENT_RETURN_INPUT);
+    let direct_artifact = compile_direct_artifact(
+        &components_dir,
+        "durable-agent-pause-resume",
+        AGENT_RETURN_INPUT,
+    );
+    assert_eq!(
+        direct_artifact.compiler_mode,
+        WorkflowCompilerMode::DirectWasm
+    );
+
+    let workflow_input = br#"{"value":"resume-agent"}"#;
+    let components_input = components_sdk_input(workflow_input);
+    let components_paused = execute_artifact_with_checkpoint_signal(
+        &components_artifact,
+        "ab-components-durable-agent-pause",
+        &components_input,
+        "pause",
+    );
+    let direct_paused = execute_artifact_with_checkpoint_signal(
+        &direct_artifact.path,
+        "ab-direct-durable-agent-pause",
+        workflow_input,
+        "pause",
+    );
+
+    assert!(
+        components_paused.status_success,
+        "components artifact did not suspend cleanly:\n{}",
+        components_paused.stderr
+    );
+    assert!(
+        direct_paused.status_success,
+        "direct artifact did not suspend cleanly:\n{}",
+        direct_paused.stderr
+    );
+    assert!(
+        components_paused.output_json.is_none(),
+        "components artifact unexpectedly completed while paused"
+    );
+    assert!(
+        direct_paused.output_json.is_none(),
+        "direct artifact unexpectedly completed while paused"
+    );
+    assert!(
+        components_paused.error_json.is_none(),
+        "components artifact unexpectedly failed while paused: {:?}",
+        components_paused.error_json
+    );
+    assert!(
+        direct_paused.error_json.is_none(),
+        "direct artifact unexpectedly failed while paused: {:?}",
+        direct_paused.error_json
+    );
+
+    let saved_agent_output = br#""resume-agent""#.to_vec();
+    let expected_checkpoint_traffic = vec![
+        (AGENT_CACHE_KEY.to_string(), Vec::new()),
+        (AGENT_CACHE_KEY.to_string(), saved_agent_output.clone()),
+    ];
+    assert_eq!(
+        normalized_checkpoints(&components_paused.checkpoints),
+        expected_checkpoint_traffic
+    );
+    assert_eq!(
+        normalized_checkpoints(&direct_paused.checkpoints),
+        expected_checkpoint_traffic
+    );
+    assert_eq!(components_paused.suspended_count, 1);
+    assert_eq!(direct_paused.suspended_count, 1);
+    let expected_pause_ack = vec![SignalAckRequest {
+        signal_type: "pause".to_string(),
+    }];
+    assert_eq!(components_paused.signal_acks, expected_pause_ack);
+    assert_eq!(
+        direct_paused.signal_acks,
+        vec![SignalAckRequest {
+            signal_type: "pause".to_string(),
+        }]
+    );
+
+    let components_resumed = execute_artifact_with_preloaded_checkpoints(
+        &components_artifact,
+        "ab-components-durable-agent-resume",
+        &components_input,
+        vec![(AGENT_CACHE_KEY.to_string(), saved_agent_output.clone())],
+    );
+    let direct_resumed = execute_artifact_with_preloaded_checkpoints(
+        &direct_artifact.path,
+        "ab-direct-durable-agent-resume",
+        workflow_input,
+        vec![(AGENT_CACHE_KEY.to_string(), saved_agent_output)],
+    );
+
+    assert_success_parity(
+        "durable-agent-pause-resume",
+        0,
+        &components_resumed,
+        &direct_resumed,
+    );
+
+    let expected_output = serde_json::json!({ "result": "resume-agent" });
+    assert_eq!(
+        components_resumed.output_json.as_ref(),
+        Some(&expected_output)
+    );
+    assert_eq!(direct_resumed.output_json.as_ref(), Some(&expected_output));
+
+    let expected_lookup = vec![(AGENT_CACHE_KEY.to_string(), Vec::new())];
+    assert_eq!(
+        normalized_checkpoints(&components_resumed.checkpoints),
+        expected_lookup
+    );
+    assert_eq!(
+        normalized_checkpoints(&direct_resumed.checkpoints),
+        expected_lookup
+    );
+    assert_eq!(components_resumed.suspended_count, 0);
+    assert_eq!(direct_resumed.suspended_count, 0);
+    assert!(components_resumed.signal_acks.is_empty());
+    assert!(direct_resumed.signal_acks.is_empty());
 }
 
 #[test]
