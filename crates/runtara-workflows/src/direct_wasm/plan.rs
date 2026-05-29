@@ -68,6 +68,7 @@ pub(super) enum DirectRunPlan {
         step_id: String,
         delay_id: u32,
         durable: bool,
+        breakpoint: bool,
         next_plan: Box<DirectRunPlan>,
     },
     WaitForSignal {
@@ -392,6 +393,12 @@ fn step_run_plan_inner(
                 step_id: step_id.to_string(),
                 delay_id: delay.id,
                 durable: delay.durable,
+                breakpoint: graph.durable
+                    && step
+                        .body
+                        .get("breakpoint")
+                        .and_then(serde_json::Value::as_bool)
+                        .unwrap_or(false),
                 next_plan: Box::new(next_plan),
             })
         }

@@ -43,8 +43,9 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   Supported normal/`next` edges can now either be a single unconditioned edge or
   a priority-ordered conditional edge set with exactly one unconditioned default
   fallback. General step breakpoints remain outside the supported
-  direct-control subset, while durable `WaitForSignal` and static
-  `EmbedWorkflow` call-site breakpoints now have direct pause/resume lowering.
+  direct-control subset, while durable `Delay`, durable `WaitForSignal`, and
+  static `EmbedWorkflow` call-site breakpoints now have direct pause/resume
+  lowering.
   `Finish.inputMapping` forms remain broadly supported because mapping semantics
   are delegated to the shared stdlib.
 - The direct core emitter now has the first static `EmbedWorkflow` lowering
@@ -443,9 +444,9 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   `Conditional`, `Filter`, `Switch`, `GroupBy`, and terminal `Error` steps.
   `Log` remains intentionally limited to its existing `workflow_log` events,
   matching the generated Rust path. Breakpoint pauses remain gated per step
-  family; durable `WaitForSignal` and static `EmbedWorkflow` call-site
-  breakpoints now have persisted pause/resume lowering and host-level parity
-  coverage.
+  family; durable `Delay`, durable `WaitForSignal`, and static `EmbedWorkflow`
+  call-site breakpoints now have persisted pause/resume lowering and host-level
+  parity coverage.
 - Phase 6 routing scope is now explicit: direct mode supports deterministic
   single-successor normal flow, condition-priority routes with an explicit
   default, and routing Switches with a complete static route/default edge set.
@@ -501,8 +502,8 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   retry-attempt, and lifecycle-signal pieces internally. Durable Agent public
   support is enabled for workflows without Agent timeout, compensation, or
   breakpoints; Delay support is now lowered for durable and non-durable normal
-  flow, while Delay breakpoints and crash/resume differential tests remain
-  pending.
+  flow, and durable Delay breakpoints now pause/resume before duration
+  resolution and sleep. Delay crash/resume differential tests remain pending.
 - The shared stdlib now exposes `agent-cache-key`, which centralizes the
   generated Rust-compatible durable Agent key shape using `_workflow_id`,
   `_cache_key_prefix`, and `_loop_indices`. The direct core injects the
@@ -562,7 +563,34 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   calls `runtime.durable-sleep-checkpoint(stepId, [], durationMs)`;
   non-durable Delay calls `runtime.blocking-sleep(durationMs)`. Both paths
   rebuild source and continue to the next step. Dynamic durations are covered.
-  Delay breakpoints remain gated.
+  Durable Delay breakpoints are supported through the shared breakpoint lowerer:
+  direct mode checks/saves `breakpoint::<step>`, emits `breakpoint_hit` with
+  generated-compatible null inputs, acknowledges pause, and returns before
+  duration resolution or sleep. Structural and gated A/B coverage exercise
+  first-hit pause and resume from the breakpoint checkpoint.
+
+Current remaining action items:
+
+- Keep `EmbedWorkflow.timeout` gated until the generated Rust path has defined
+  behavior or direct mode intentionally becomes the first implementation. The
+  current Rust `EmbedWorkflow` codegen appears to parse the field without
+  enforcing a deadline.
+- Finish nested failure aggregation for `Split(dontStopOnFailed)` when nested
+  Split/While bodies are present, then remove the current support gate.
+- Implement or intentionally keep gating Split retry, Split timeout, and Split
+  breakpoint semantics; each needs explicit durability/error aggregation tests.
+- Implement While timeout, While breakpoint, and While `onError` routing
+  semantics with structural and gated A/B coverage.
+- Decide and implement the remaining general step breakpoint policy for
+  Finish, Filter, Switch, GroupBy, Log, Error, and Agent. Durable Delay,
+  WaitForSignal, and static EmbedWorkflow call-site breakpoints are now done.
+- Close Agent hardening gaps: timeout/compensation/breakpoint policy,
+  retry/failure differential tests, and long-running cancellation coverage.
+- Start Phase 12 AiAgent support only after the shared Agent/runtime durability
+  surface is stable enough to avoid another parallel ABI.
+- Continue Phase 13-16 rollout work: CI shadowing, production gates,
+  observability, default direct mode criteria, and eventual Rust codegen
+  retirement.
 
 ## Final Goal
 
@@ -2096,9 +2124,10 @@ Implementation steps:
      `runtime.durable-sleep-checkpoint(stepId, [], durationMs)`;
    - non-durable blocking sleep parity: done through
      `runtime.blocking-sleep(durationMs)`;
-   - public support gate: enabled for durable and non-durable Delay without
-     breakpoints;
-   - Delay breakpoints: pending and gated;
+   - public support gate: enabled for durable and non-durable Delay, including
+     durable breakpoint pause/resume lowering;
+   - Delay breakpoints: done through shared `compile/debug.rs` lowering, with
+     structural call-order coverage and gated A/B first-hit/resume parity;
    - host-level crash/resume differential tests: pending.
 6. Migrate durable `Split`:
    - final-result checkpoint lookup/write: internal lowering done;
@@ -2546,7 +2575,8 @@ Current status:
   includes durable Delay plus fresh/cached durable Agent, durable Agent
   checkpoint-returned `pause`/`cancel`/`shutdown` lifecycle coverage, and
   fresh/cached durable Split fixtures. Delay diffs completion output plus
-  `/sleep` traffic exactly. Agent and Split diff completion output, checkpoint
+  `/sleep` traffic exactly, and now covers durable Delay breakpoint first-hit
+  pause/resume before sleep. Agent and Split diff completion output, checkpoint
   ordering, and checkpoint bytes while normalizing the compiler-owned checkpoint
   id prefix down to the stable `agent::<agentId>::<capabilityId>::<stepId>` or
   `split::<stepId>` key base. Cached replay preloads those normalized keys and

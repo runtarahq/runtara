@@ -478,6 +478,13 @@ fn graph_from_fixture(graph_json: &str) -> ExecutionGraph {
     serde_json::from_str(graph_json).expect("fixture parses")
 }
 
+fn delay_breakpoint_json() -> String {
+    let mut graph: Value = serde_json::from_str(DELAY_DYNAMIC).expect("fixture parses");
+    graph["durable"] = serde_json::json!(true);
+    graph["steps"]["delay"]["breakpoint"] = serde_json::json!(true);
+    serde_json::to_string(&graph).expect("fixture serializes")
+}
+
 fn embed_workflow_breakpoint_parent_json() -> String {
     let mut graph: Value = serde_json::from_str(EMBED_WORKFLOW).expect("fixture parses");
     graph["durable"] = serde_json::json!(true);
@@ -1641,6 +1648,126 @@ fn direct_wasm_matches_components_execution_for_supported_json_fixtures() {
             assert_success_parity(case.name, input_index, &components, &direct);
         }
     }
+}
+
+#[test]
+fn direct_wasm_matches_components_delay_breakpoint_pause_resume() {
+    let Some(components_dir) = direct_ab_components_dir() else {
+        return;
+    };
+    let _data = setup_data_dir();
+
+    let graph_json = delay_breakpoint_json();
+    let components_artifact = compile_components_artifact("delay-breakpoint", &graph_json);
+    let direct_artifact = compile_direct_artifact(&components_dir, "delay-breakpoint", &graph_json);
+    assert_eq!(
+        direct_artifact.compiler_mode,
+        WorkflowCompilerMode::DirectWasm
+    );
+
+    let workflow_input = br#"{"waitTime":0}"#;
+    let components_input = components_sdk_input(workflow_input);
+    let components_paused = execute_artifact_with_debug_mode(
+        &components_artifact,
+        "ab-components-delay-breakpoint-pause",
+        &components_input,
+    );
+    let direct_paused = execute_artifact_with_debug_mode(
+        &direct_artifact.path,
+        "ab-direct-delay-breakpoint-pause",
+        workflow_input,
+    );
+
+    assert!(
+        components_paused.status_success,
+        "components artifact did not suspend cleanly:\n{}",
+        components_paused.stderr
+    );
+    assert!(
+        direct_paused.status_success,
+        "direct artifact did not suspend cleanly:\n{}",
+        direct_paused.stderr
+    );
+    assert!(components_paused.output_json.is_none());
+    assert!(direct_paused.output_json.is_none());
+    assert!(components_paused.error_json.is_none());
+    assert!(direct_paused.error_json.is_none());
+    assert!(components_paused.sleeps.is_empty());
+    assert!(direct_paused.sleeps.is_empty());
+
+    let expected_checkpoint = vec![(
+        "breakpoint::delay".to_string(),
+        br#""breakpoint_hit""#.to_vec(),
+    )];
+    assert_eq!(
+        normalized_checkpoints(&components_paused.checkpoints),
+        expected_checkpoint
+    );
+    assert_eq!(
+        normalized_checkpoints(&direct_paused.checkpoints),
+        expected_checkpoint
+    );
+    assert_eq!(
+        normalized_events(&components_paused.events),
+        normalized_events(&direct_paused.events)
+    );
+    let direct_pause_events = normalized_events(&direct_paused.events);
+    let breakpoint_events = direct_pause_events
+        .iter()
+        .filter(|(subtype, _)| subtype == "breakpoint_hit")
+        .collect::<Vec<_>>();
+    assert_eq!(breakpoint_events.len(), 1);
+    assert_eq!(breakpoint_events[0].1["step_type"], "Delay");
+    assert!(breakpoint_events[0].1["inputs"].is_null());
+    assert_eq!(components_paused.suspended_count, 1);
+    assert_eq!(direct_paused.suspended_count, 1);
+    let expected_pause_ack = vec![SignalAckRequest {
+        signal_type: "pause".to_string(),
+    }];
+    assert_eq!(components_paused.signal_acks, expected_pause_ack);
+    assert_eq!(direct_paused.signal_acks, expected_pause_ack);
+
+    let components_resumed = execute_artifact_with_options(
+        &components_artifact,
+        "ab-components-delay-breakpoint-resume",
+        &components_input,
+        ExecuteOptions {
+            preloaded_checkpoints: expected_checkpoint.clone(),
+            debug_mode: true,
+            ..ExecuteOptions::default()
+        },
+    );
+    let direct_resumed = execute_artifact_with_options(
+        &direct_artifact.path,
+        "ab-direct-delay-breakpoint-resume",
+        workflow_input,
+        ExecuteOptions {
+            preloaded_checkpoints: expected_checkpoint,
+            debug_mode: true,
+            ..ExecuteOptions::default()
+        },
+    );
+
+    assert_success_parity(
+        "delay-breakpoint-resume",
+        0,
+        &components_resumed,
+        &direct_resumed,
+    );
+    assert_eq!(
+        direct_resumed.output_json,
+        Some(serde_json::json!({ "waited": 0 }))
+    );
+    assert!(
+        normalized_events(&direct_resumed.events)
+            .iter()
+            .all(|(subtype, _)| subtype != "breakpoint_hit"),
+        "resume from breakpoint checkpoint should not emit a second breakpoint event"
+    );
+    assert_eq!(components_resumed.suspended_count, 0);
+    assert_eq!(direct_resumed.suspended_count, 0);
+    assert!(components_resumed.signal_acks.is_empty());
+    assert!(direct_resumed.signal_acks.is_empty());
 }
 
 #[test]

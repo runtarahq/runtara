@@ -571,8 +571,8 @@ fn supports_agent_step_baseline(_graph: &ExecutionGraph, step: &AgentStep) -> bo
     step.timeout.is_none() && step.compensation.is_none() && !step.breakpoint.unwrap_or(false)
 }
 
-fn supports_delay_step_baseline(_graph: &ExecutionGraph, step: &DelayStep) -> bool {
-    !step.breakpoint.unwrap_or(false)
+fn supports_delay_step_baseline(_graph: &ExecutionGraph, _step: &DelayStep) -> bool {
+    true
 }
 
 fn supports_wait_for_signal_step_baseline(
@@ -1255,24 +1255,9 @@ fn collect_agent_step_unsupported(
 
 fn collect_delay_step_unsupported(
     _graph: &ExecutionGraph,
-    step: &DelayStep,
-    unsupported: &mut Vec<UnsupportedWorkflowFeature>,
+    _step: &DelayStep,
+    _unsupported: &mut Vec<UnsupportedWorkflowFeature>,
 ) {
-    let mut push = |feature: &str, reason: &str| {
-        unsupported.push(UnsupportedWorkflowFeature {
-            step_id: Some(step.id.clone()),
-            step_type: Some("Delay".to_string()),
-            feature: feature.to_string(),
-            reason: reason.to_string(),
-        });
-    };
-
-    if step.breakpoint.unwrap_or(false) {
-        push(
-            "delay-breakpoint",
-            "Delay breakpoints require a direct runtime checkpoint/pause ABI",
-        );
-    }
 }
 
 fn collect_split_step_unsupported(
@@ -2373,8 +2358,9 @@ mod tests {
     }
 
     #[test]
-    fn delay_breakpoints_are_rejected_until_checkpoint_abi_is_lowered() {
+    fn delay_breakpoints_are_supported_with_direct_pause_lowering() {
         let mut graph = fixture("delay_simple");
+        graph.durable = Some(true);
         let Some(Step::Delay(delay)) = graph.steps.get_mut("delay") else {
             panic!("expected Delay fixture step");
         };
@@ -2382,12 +2368,13 @@ mod tests {
 
         let report = analyze_direct_wasm_support(&graph);
 
-        assert!(!report.supported);
-        assert!(report.unsupported.iter().any(|feature| {
-            feature.step_id.as_deref() == Some("delay")
-                && feature.step_type.as_deref() == Some("Delay")
-                && feature.feature == "delay-breakpoint"
-        }));
+        assert!(report.supported, "{:?}", report.unsupported);
+        assert!(
+            !report
+                .unsupported
+                .iter()
+                .any(|feature| feature.feature == "delay-breakpoint")
+        );
     }
 
     #[test]

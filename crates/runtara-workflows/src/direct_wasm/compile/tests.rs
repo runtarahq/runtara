@@ -5731,6 +5731,149 @@ fn direct_core_run_lowers_durable_delay_finish_through_stdlib_and_runtime() {
 }
 
 #[test]
+fn direct_core_run_lowers_delay_breakpoint_pause_before_sleep() {
+    let mut graph = fixture("delay_simple");
+    graph.durable = Some(true);
+    let Some(runtara_dsl::Step::Delay(delay)) = graph.steps.get_mut("delay") else {
+        panic!("expected Delay fixture step");
+    };
+    delay.breakpoint = Some(true);
+
+    let manifest = build_direct_workflow_manifest(&graph).expect("manifest");
+    let manifest_json = manifest.to_canonical_json().expect("manifest json");
+    let core_config = DirectCoreConfig::new(&manifest, &manifest_json, false).expect("core config");
+    let DirectRunPlan::Delay {
+        breakpoint,
+        next_plan,
+        ..
+    } = &core_config.run_plan
+    else {
+        panic!("expected Delay run plan");
+    };
+    assert!(*breakpoint, "durable Delay breakpoint should lower");
+    assert!(matches!(next_plan.as_ref(), DirectRunPlan::Finish { .. }));
+
+    let (resolve, world) = build_direct_component_resolve().expect("resolve");
+    let core = emit_direct_core_module(&resolve, world, &core_config).expect("core module");
+    Validator::new()
+        .validate_all(&core)
+        .expect("Delay breakpoint core module validates");
+
+    let mut next_function_index = 0;
+    let mut stdlib_build_source_index = None;
+    let mut runtime_debug_mode_enabled_index = None;
+    let mut stdlib_breakpoint_key_index = None;
+    let mut runtime_checkpoint_index = None;
+    let mut stdlib_breakpoint_event_index = None;
+    let mut runtime_custom_event_index = None;
+    let mut runtime_breakpoint_pause_index = None;
+    let mut stdlib_delay_duration_index = None;
+    let mut runtime_durable_sleep_checkpoint_index = None;
+    let mut run_calls = Vec::new();
+    let mut code_body_index = 0;
+
+    for payload in Parser::new(0).parse_all(&core) {
+        match payload.expect("core wasm payload") {
+            Payload::ImportSection(reader) => {
+                for import in reader.into_imports() {
+                    let import = import.expect("core import");
+                    if matches!(import.ty, TypeRef::Func(_)) {
+                        match (import.module, import.name) {
+                            ("cm32p2|runtara:workflow-stdlib/json@0.1", "build-source") => {
+                                stdlib_build_source_index = Some(next_function_index)
+                            }
+                            (
+                                "cm32p2|runtara:workflow-runtime/runtime@0.1",
+                                "debug-mode-enabled",
+                            ) => runtime_debug_mode_enabled_index = Some(next_function_index),
+                            ("cm32p2|runtara:workflow-stdlib/json@0.1", "breakpoint-key") => {
+                                stdlib_breakpoint_key_index = Some(next_function_index)
+                            }
+                            ("cm32p2|runtara:workflow-runtime/runtime@0.1", "checkpoint") => {
+                                runtime_checkpoint_index = Some(next_function_index)
+                            }
+                            ("cm32p2|runtara:workflow-stdlib/json@0.1", "breakpoint-event") => {
+                                stdlib_breakpoint_event_index = Some(next_function_index)
+                            }
+                            ("cm32p2|runtara:workflow-runtime/runtime@0.1", "custom-event") => {
+                                runtime_custom_event_index = Some(next_function_index)
+                            }
+                            ("cm32p2|runtara:workflow-runtime/runtime@0.1", "breakpoint-pause") => {
+                                runtime_breakpoint_pause_index = Some(next_function_index)
+                            }
+                            ("cm32p2|runtara:workflow-stdlib/json@0.1", "delay-duration-ms") => {
+                                stdlib_delay_duration_index = Some(next_function_index)
+                            }
+                            (
+                                "cm32p2|runtara:workflow-runtime/runtime@0.1",
+                                "durable-sleep-checkpoint",
+                            ) => runtime_durable_sleep_checkpoint_index = Some(next_function_index),
+                            _ => {}
+                        }
+                        next_function_index += 1;
+                    }
+                }
+            }
+            Payload::CodeSectionEntry(body) => {
+                if code_body_index == 0 {
+                    for operator in body.get_operators_reader().expect("operators") {
+                        if let Operator::Call { function_index } = operator.expect("operator") {
+                            run_calls.push(function_index);
+                        }
+                    }
+                }
+                code_body_index += 1;
+            }
+            _ => {}
+        }
+    }
+
+    let stdlib_build_source_index = stdlib_build_source_index.expect("build-source import");
+    let runtime_debug_mode_enabled_index =
+        runtime_debug_mode_enabled_index.expect("debug-mode-enabled import");
+    let stdlib_breakpoint_key_index = stdlib_breakpoint_key_index.expect("breakpoint-key import");
+    let runtime_checkpoint_index = runtime_checkpoint_index.expect("checkpoint import");
+    let stdlib_breakpoint_event_index =
+        stdlib_breakpoint_event_index.expect("breakpoint-event import");
+    let runtime_custom_event_index = runtime_custom_event_index.expect("custom-event import");
+    let runtime_breakpoint_pause_index =
+        runtime_breakpoint_pause_index.expect("breakpoint-pause import");
+    let stdlib_delay_duration_index =
+        stdlib_delay_duration_index.expect("delay-duration-ms import");
+    let runtime_durable_sleep_checkpoint_index =
+        runtime_durable_sleep_checkpoint_index.expect("durable-sleep-checkpoint import");
+
+    let position = |index| {
+        run_calls
+            .iter()
+            .position(|call| *call == index)
+            .expect("expected Delay breakpoint call")
+    };
+
+    let build_source_position = position(stdlib_build_source_index);
+    let debug_mode_position = position(runtime_debug_mode_enabled_index);
+    let breakpoint_key_position = position(stdlib_breakpoint_key_index);
+    let checkpoint_position = position(runtime_checkpoint_index);
+    let breakpoint_event_position = position(stdlib_breakpoint_event_index);
+    let custom_event_position = position(runtime_custom_event_index);
+    let breakpoint_pause_position = position(runtime_breakpoint_pause_index);
+    let delay_duration_position = position(stdlib_delay_duration_index);
+    let durable_sleep_position = position(runtime_durable_sleep_checkpoint_index);
+
+    assert!(
+        build_source_position < debug_mode_position
+            && debug_mode_position < breakpoint_key_position
+            && breakpoint_key_position < checkpoint_position
+            && checkpoint_position < breakpoint_event_position
+            && breakpoint_event_position < custom_event_position
+            && custom_event_position < breakpoint_pause_position
+            && breakpoint_pause_position < delay_duration_position
+            && delay_duration_position < durable_sleep_position,
+        "Delay breakpoint should pause before duration resolution and sleep: {run_calls:?}"
+    );
+}
+
+#[test]
 fn direct_core_run_lowers_non_durable_delay_finish_through_blocking_sleep() {
     let mut graph = fixture("delay_simple");
     graph.durable = Some(false);

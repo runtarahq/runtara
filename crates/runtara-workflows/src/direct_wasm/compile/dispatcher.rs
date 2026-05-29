@@ -344,6 +344,7 @@ pub(super) fn emit_run_plan_mapping(
             step_id,
             delay_id,
             durable,
+            breakpoint,
             next_plan,
         } => {
             emit_delay_plan(
@@ -355,6 +356,7 @@ pub(super) fn emit_run_plan_mapping(
                 step_id,
                 *delay_id,
                 *durable,
+                *breakpoint,
                 next_plan,
                 data_ptr_local,
                 data_len_local,
