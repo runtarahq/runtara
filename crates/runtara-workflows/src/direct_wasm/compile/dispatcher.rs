@@ -295,6 +295,7 @@ pub(super) fn emit_run_plan_mapping(
         DirectRunPlan::While {
             step_id,
             while_id,
+            breakpoint,
             nested_plan,
             next_plan,
         } => {
@@ -306,6 +307,7 @@ pub(super) fn emit_run_plan_mapping(
                 variables,
                 step_id,
                 *while_id,
+                *breakpoint,
                 nested_plan,
                 next_plan,
                 data_ptr_local,

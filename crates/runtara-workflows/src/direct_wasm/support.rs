@@ -639,7 +639,7 @@ fn supports_split_step_baseline(step: &SplitStep) -> bool {
 
 fn supports_while_step_baseline(step: &WhileStep) -> bool {
     let config = step.config.as_ref();
-    !step.breakpoint.unwrap_or(false) && config.is_none_or(|config| config.timeout.is_none())
+    config.is_none_or(|config| config.timeout.is_none())
 }
 
 fn graph_contains_step(graph: &ExecutionGraph, predicate: impl Fn(&Step) -> bool + Copy) -> bool {
@@ -1229,12 +1229,6 @@ fn collect_while_step_unsupported(
         });
     };
 
-    if step.breakpoint.unwrap_or(false) {
-        push(
-            "while-breakpoint",
-            "While breakpoints require a direct runtime checkpoint/pause ABI",
-        );
-    }
     if step
         .config
         .as_ref()
@@ -2263,27 +2257,45 @@ mod tests {
     }
 
     #[test]
-    fn while_breakpoint_and_timeout_are_rejected() {
+    fn while_breakpoints_are_supported_with_direct_pause_lowering() {
         let mut graph = fixture("while_simple");
+        graph.durable = Some(true);
         let Some(Step::While(while_step)) = graph.steps.get_mut("loop") else {
             panic!("expected While fixture step");
         };
         while_step.breakpoint = Some(true);
+
+        let report = analyze_direct_wasm_support(&graph);
+
+        assert!(report.supported, "{:?}", report.unsupported);
+        assert!(
+            !report
+                .unsupported
+                .iter()
+                .any(|feature| feature.feature == "while-breakpoint")
+        );
+    }
+
+    #[test]
+    fn while_timeout_is_rejected() {
+        let mut graph = fixture("while_simple");
+        let Some(Step::While(while_step)) = graph.steps.get_mut("loop") else {
+            panic!("expected While fixture step");
+        };
         let config = while_step.config.as_mut().expect("while fixture config");
         config.timeout = Some(1_000);
 
         let report = analyze_direct_wasm_support(&graph);
 
         assert!(!report.supported);
-        for feature in ["while-breakpoint", "while-timeout"] {
-            assert!(
-                report.unsupported.iter().any(|unsupported| {
-                    unsupported.step_id.as_deref() == Some("loop") && unsupported.feature == feature
-                }),
-                "{feature}: {:?}",
-                report.unsupported
-            );
-        }
+        assert!(
+            report.unsupported.iter().any(|unsupported| {
+                unsupported.step_id.as_deref() == Some("loop")
+                    && unsupported.feature == "while-timeout"
+            }),
+            "{:?}",
+            report.unsupported
+        );
     }
 
     #[test]

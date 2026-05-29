@@ -746,6 +746,12 @@ impl DirectJsonManifest {
                     .ok_or_else(|| format!("missing direct Split config for '{}'", step.id))?;
                 split_debug_inputs(split, &source)?
             }
+            "While" => {
+                let while_step = self
+                    .while_by_step(step.id.as_str())
+                    .ok_or_else(|| format!("missing direct While config for '{}'", step.id))?;
+                while_debug_inputs(while_step)?
+            }
             "Log" => {
                 let log = self
                     .log_by_step(step.id.as_str())
@@ -1776,6 +1782,12 @@ impl DirectJsonManifest {
         self.splits.values().find(|split| split.step_id == step_id)
     }
 
+    fn while_by_step(&self, step_id: &str) -> Option<&DirectJsonWhile> {
+        self.whiles
+            .values()
+            .find(|while_step| while_step.step_id == step_id)
+    }
+
     fn switch_by_step(&self, step_id: &str) -> Option<&DirectJsonSwitch> {
         self.switches
             .values()
@@ -2462,6 +2474,12 @@ fn while_max_iterations(while_step: &DirectJsonWhile) -> Result<u32, String> {
             while_step.step_id
         )
     })
+}
+
+fn while_debug_inputs(while_step: &DirectJsonWhile) -> Result<Value, String> {
+    Ok(serde_json::json!({
+        "maxIterations": while_max_iterations(while_step)?,
+    }))
 }
 
 fn parse_while_state(
@@ -5911,6 +5929,31 @@ mod tests {
                     "batchSize": 10,
                     "variables": { "tenant": "t1" }
                 }),
+            ),
+            (
+                "While",
+                "loop",
+                json!({
+                    "whiles": [{
+                        "id": 0,
+                        "stepId": "loop",
+                        "name": "Loop Items",
+                        "stepType": "While",
+                        "purpose": "while.config",
+                        "value": {
+                            "maxIterations": 5
+                        },
+                        "condition": {
+                            "type": "operation",
+                            "op": "LT",
+                            "arguments": [
+                                { "valueType": "reference", "value": "loop.index" },
+                                { "valueType": "reference", "value": "data.count" }
+                            ]
+                        }
+                    }]
+                }),
+                json!({ "maxIterations": 5 }),
             ),
             (
                 "Log",

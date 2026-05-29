@@ -8,7 +8,7 @@ use super::abi::{
     emit_retptr_error_or_return, load_retptr_list, push_retptr_arg, push_retptr_i32_load,
     push_retptr_u8_load, push_variables_args,
 };
-use super::debug::emit_step_debug_event;
+use super::debug::{emit_step_breakpoint, emit_step_debug_event};
 use super::dispatcher::emit_run_plan_mapping;
 use super::mapping::emit_build_source;
 use super::{
@@ -51,6 +51,7 @@ pub(super) fn emit_while_plan(
     variables: DirectVariables<'_>,
     step_id: &str,
     while_id: u32,
+    breakpoint: bool,
     nested_plan: &DirectRunPlan,
     next_plan: &DirectRunPlan,
     data_ptr_local: u32,
@@ -67,6 +68,20 @@ pub(super) fn emit_while_plan(
     workflow_error_kind: &DirectDataSegment,
     failure_target: Option<DirectFailureTarget>,
 ) {
+    emit_step_breakpoint(
+        body,
+        indices,
+        static_data,
+        breakpoint,
+        step_id,
+        source_ptr_local,
+        source_len_local,
+        output_ptr_local,
+        output_len_local,
+        route_ptr_local,
+        route_len_local,
+    );
+
     emit_step_debug_event(
         body,
         indices,

@@ -42,12 +42,12 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   per-iteration aggregation for nested Split/While bodies at arbitrary depth.
   Supported normal/`next` edges can now either be a single unconditioned edge or
   a priority-ordered conditional edge set with exactly one unconditioned default
-  fallback. While breakpoints remain outside the supported subset, while
-  durable Split breakpoints, direct-control breakpoints for `Finish`,
+  fallback. Durable Split and While breakpoints, direct-control breakpoints for
+  `Finish`,
   `Conditional`, `Filter`, `Switch`, `GroupBy`, `Log`, terminal `Error`,
   durable `Delay`, durable `WaitForSignal`, and static `EmbedWorkflow`
   call-site breakpoints plus durable `Agent` breakpoints now have direct
-  pause/resume lowering.
+  pause/resume lowering. While timeout and `onError` routing remain gated.
   `Finish.inputMapping` forms remain broadly supported because mapping semantics
   are delegated to the shared stdlib.
 - The direct core emitter now has the first static `EmbedWorkflow` lowering
@@ -104,20 +104,24 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   resolution, loop state initialization/advance, loop-context injection for
   condition evaluation, generated-code-compatible iteration variables including
   `_loop_indices`, `_index`, `_previousOutputs`, `_loop`, and `_scope_id`, and
-  final While step-output envelopes.
+  final While step-output envelopes, plus generated-compatible While breakpoint
+  input payloads.
 - The direct core emitter now has internal structural lowering for While loops:
   it initializes While state through stdlib, checks max iterations, injects loop
   context before condition evaluation, builds iteration variables, runs the
   nested direct run plan, advances loop state, and writes the final While step
   envelope before continuing normal flow. It also calls runtime cancellation,
   heartbeat, and signal-check helpers around each iteration body. Public While
-  support is enabled for normal-flow loops without breakpoint/timeout,
-  including nested `Split`/`While` bodies whose loop scratch frames are restored
-  across nested execution. Gated execution coverage now includes an agentless
-  While loop that verifies loop index variables, previous-output threading,
-  final iteration counts, and absence of checkpoint/sleep traffic, plus a
-  `While` body with a nested `Split` that verifies outer loop variables survive
-  inner loop execution.
+  support is enabled for normal-flow loops with durable breakpoint pause/resume,
+  while timeout and `onError` remain gated. The breakpoint lowerer pauses before
+  `while-max-iterations`, condition evaluation, debug-start, and nested body
+  execution after resolving generated-compatible breakpoint inputs. Nested
+  `Split`/`While` bodies restore loop scratch frames across nested execution.
+  Gated execution coverage now includes an agentless While loop that verifies
+  loop index variables, previous-output threading, final iteration counts, and
+  absence of checkpoint/sleep traffic, a `While` body with a nested `Split`
+  that verifies outer loop variables survive inner loop execution, and While
+  breakpoint first-hit pause plus checkpoint resume parity.
 - `runtara-workflow-stdlib` now has a `direct-component` feature and
   component metadata for `runtara:workflow-stdlib`. That feature builds a
   `wasm32-wasip2` stdlib component without pulling in SDK/runtime, HTTP, AI,
@@ -629,6 +633,14 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   gate, structural coverage pins the breakpoint-before-Split-execution call
   order, and gated A/B coverage checks first-hit pause plus checkpoint resume
   against generated Rust.
+- Durable While breakpoints are now supported. Direct mode emits the shared
+  breakpoint checkpoint/event before While execution starts: before
+  `while-max-iterations`, condition evaluation, debug-start emission, or nested
+  body execution. The stdlib builds generated-compatible While breakpoint
+  inputs from the While config as `{"maxIterations": ...}`. Support tests
+  remove the previous `while-breakpoint` gate, structural coverage pins
+  breakpoint-before-loop-execution order, and gated A/B coverage checks
+  first-hit pause plus checkpoint resume against generated Rust.
 
 Current remaining action items:
 
@@ -638,8 +650,8 @@ Current remaining action items:
   enforcing a deadline.
 - Implement or intentionally keep gating Split retry and Split timeout
   semantics; each needs explicit durability/error aggregation tests.
-- Implement While timeout, While breakpoint, and While `onError` routing
-  semantics with structural and gated A/B coverage.
+- Implement While timeout and While `onError` routing semantics with structural
+  and gated A/B coverage.
 - Close Agent hardening gaps: timeout/compensation policy, retry/failure
   differential tests, and long-running cancellation coverage.
 - Start Phase 12 AiAgent support only after the shared Agent/runtime durability
@@ -725,12 +737,10 @@ Recommended next implementation slices:
 
 1. Pick one remaining Split durability semantic: timeout or retry. Keep the
    other gated until generated Rust behavior and differential tests are pinned.
-2. Then implement While breakpoint or While timeout. While breakpoint is likely
-   the smaller slice because the shared breakpoint ABI now covers Split,
-   direct-control steps, Agent, Delay, WaitForSignal, and EmbedWorkflow.
-   While `onError` should
-   wait until failure routing through loop iteration state is specified and
-   covered by generated-vs-direct tests.
+2. Then implement While timeout or While `onError`. Timeout is the smaller
+   isolated runtime-control slice; `onError` should wait until failure routing
+   through loop iteration state is specified and covered by
+   generated-vs-direct tests.
 3. Continue Agent hardening after loop durability is stable: timeout,
    compensation policy, retry/failure differential tests, and long-running
    cancellation coverage.
@@ -2373,16 +2383,20 @@ Implementation steps:
      direct-core lowering done;
    - heartbeat/cancellation/pause-shutdown signal checks: runtime ABI and
      direct-core lowering done;
-   - public support gate: enabled for normal-flow While loops without
-     breakpoint/timeout, including nested Split/While loop bodies with
-     reentrant loop scratch frames;
+   - durable While breakpoint semantics: done through the shared breakpoint
+     checkpoint/event path before max-iteration resolution, condition
+     evaluation, debug-start emission, and nested body execution;
+   - public support gate: enabled for normal-flow While loops with durable
+     breakpoint pause/resume, including nested Split/While loop bodies with
+     reentrant loop scratch frames; While timeout and `onError` remain gated;
    - gated composed-artifact execution smoke: done for an agentless While loop
      that exercises loop index variables, `_previousOutputs`, final output
      shape, heartbeat/signal polling, and no checkpoint/sleep traffic;
    - strict A/B execution coverage: done for the same agentless While loop and
      for a While body containing a nested Split, verifying caller loop variables
-     survive the inner loop;
-   - While timeout, breakpoint, and onError routing: pending.
+     survive the inner loop, plus While breakpoint first-hit pause and
+     checkpoint resume parity;
+   - While timeout and onError routing: pending.
 4. Reentrant loop scratch frames are implemented for normal nested Split/While
    execution:
    - Split preserves its caller loop frame across the whole Split step and its

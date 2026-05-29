@@ -627,6 +627,23 @@ fn direct_core_call_position(run_calls: &[u32], import_index: u32) -> usize {
         .unwrap_or_else(|| panic!("missing call to import index {import_index}: {run_calls:?}"))
 }
 
+fn direct_core_call_position_after(
+    run_calls: &[u32],
+    import_index: u32,
+    after_position: usize,
+) -> usize {
+    run_calls
+        .iter()
+        .enumerate()
+        .skip(after_position + 1)
+        .find_map(|(position, call)| (*call == import_index).then_some(position))
+        .unwrap_or_else(|| {
+            panic!(
+                "missing call to import index {import_index} after {after_position}: {run_calls:?}"
+            )
+        })
+}
+
 fn direct_run_plan_breakpoint(run_plan: &DirectRunPlan) -> Option<bool> {
     match run_plan {
         DirectRunPlan::Finish { breakpoint, .. }
@@ -635,6 +652,7 @@ fn direct_run_plan_breakpoint(run_plan: &DirectRunPlan) -> Option<bool> {
         | DirectRunPlan::SwitchRoute { breakpoint, .. }
         | DirectRunPlan::GroupBy { breakpoint, .. }
         | DirectRunPlan::Split { breakpoint, .. }
+        | DirectRunPlan::While { breakpoint, .. }
         | DirectRunPlan::EmbedWorkflow { breakpoint, .. }
         | DirectRunPlan::Delay { breakpoint, .. }
         | DirectRunPlan::WaitForSignal { breakpoint, .. }
@@ -642,7 +660,7 @@ fn direct_run_plan_breakpoint(run_plan: &DirectRunPlan) -> Option<bool> {
         | DirectRunPlan::Agent { breakpoint, .. }
         | DirectRunPlan::Error { breakpoint, .. }
         | DirectRunPlan::Conditional { breakpoint, .. } => Some(*breakpoint),
-        DirectRunPlan::While { .. } | DirectRunPlan::EdgeRoute { .. } => None,
+        DirectRunPlan::EdgeRoute { .. } => None,
     }
 }
 
@@ -664,40 +682,47 @@ fn assert_direct_breakpoint_before_import(core: &[u8], module: &str, name: &str)
             "breakpoint-key",
         ),
     );
-    let checkpoint_position = direct_core_call_position(
+    let checkpoint_position = direct_core_call_position_after(
         &run_calls,
         direct_core_import(
             &imports,
             "cm32p2|runtara:workflow-runtime/runtime@0.1",
             "checkpoint",
         ),
+        breakpoint_key_position,
     );
-    let breakpoint_event_position = direct_core_call_position(
+    let breakpoint_event_position = direct_core_call_position_after(
         &run_calls,
         direct_core_import(
             &imports,
             "cm32p2|runtara:workflow-stdlib/json@0.1",
             "breakpoint-event",
         ),
+        checkpoint_position,
     );
-    let custom_event_position = direct_core_call_position(
+    let custom_event_position = direct_core_call_position_after(
         &run_calls,
         direct_core_import(
             &imports,
             "cm32p2|runtara:workflow-runtime/runtime@0.1",
             "custom-event",
         ),
+        breakpoint_event_position,
     );
-    let breakpoint_pause_position = direct_core_call_position(
+    let breakpoint_pause_position = direct_core_call_position_after(
         &run_calls,
         direct_core_import(
             &imports,
             "cm32p2|runtara:workflow-runtime/runtime@0.1",
             "breakpoint-pause",
         ),
+        custom_event_position,
     );
-    let target_position =
-        direct_core_call_position(&run_calls, direct_core_import(&imports, module, name));
+    let target_position = direct_core_call_position_after(
+        &run_calls,
+        direct_core_import(&imports, module, name),
+        breakpoint_pause_position,
+    );
 
     assert!(
         debug_mode_position < breakpoint_key_position
@@ -6058,6 +6083,42 @@ fn direct_core_run_lowers_while_loop_through_stdlib() {
     assert!(
         saw_runtime_check_signals_call,
         "While run should check lifecycle signals after each iteration body"
+    );
+}
+
+#[test]
+fn direct_core_run_lowers_while_breakpoint_before_loop_execution() {
+    let mut graph = fixture("while_simple");
+    graph.durable = Some(true);
+    let Some(runtara_dsl::Step::While(while_step)) = graph.steps.get_mut("loop") else {
+        panic!("expected While fixture step");
+    };
+    while_step.breakpoint = Some(true);
+
+    let manifest = build_direct_workflow_manifest(&graph).expect("manifest");
+    let manifest_json = manifest.to_canonical_json().expect("manifest json");
+    let core_config = DirectCoreConfig::new(&manifest, &manifest_json, false).expect("core config");
+
+    let DirectRunPlan::Agent { next_plan, .. } = &core_config.run_plan else {
+        panic!("expected root Agent run plan");
+    };
+    let DirectRunPlan::While { breakpoint, .. } = next_plan.as_ref() else {
+        panic!("expected While run plan after init Agent");
+    };
+    assert!(*breakpoint, "durable While breakpoint should lower");
+
+    let (resolve, world) =
+        build_direct_component_resolve_with_agents(&manifest.feature_summary.agent_ids)
+            .expect("agent resolve");
+    let core = emit_direct_core_module(&resolve, world, &core_config).expect("core module");
+    Validator::new()
+        .validate_all(&core)
+        .expect("While breakpoint core module validates");
+
+    assert_direct_breakpoint_before_import(
+        &core,
+        "cm32p2|runtara:workflow-stdlib/json@0.1",
+        "while-max-iterations",
     );
 }
 
