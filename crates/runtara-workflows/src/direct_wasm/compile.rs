@@ -7,6 +7,7 @@
 //! manifest/support sidecars that later graph-lowering work will consume.
 
 mod abi;
+mod agent_invoke;
 mod agent_retry;
 mod checkpoint;
 mod debug;
@@ -44,9 +45,9 @@ use abi::{
     emit_retptr_error_or_return, emit_retptr_error_target_or_return, load_agent_retptr_list,
     load_retptr_list, load_retptr_option_list, load_retptr_tag, push_core_type, push_retptr_arg,
     push_retptr_i32_load, push_retptr_i64_load, push_retptr_u8_load, push_segment_args,
-    push_variables_args, push_zero_value, return_if_retptr_error, store_i32_at, store_local_i32_at,
-    zero_return_function,
+    push_variables_args, return_if_retptr_error, zero_return_function,
 };
+use agent_invoke::emit_agent_invoke;
 use agent_retry::{
     emit_agent_advance_retry_attempt, emit_agent_capture_retry_sleep,
     emit_agent_record_retry_attempt, emit_agent_retry_condition, emit_agent_retry_delay,
@@ -4221,82 +4222,6 @@ fn emit_agent_cache_key(
     body.instruction(&Instruction::Call(indices.stdlib_agent_cache_key));
     return_if_retptr_error(body);
     load_retptr_list(body, cache_key_ptr_local, cache_key_len_local);
-}
-
-fn emit_agent_invoke(
-    body: &mut WasmFunction,
-    invoke: &DirectAgentInvokeImport,
-    capability_id: &DirectDataSegment,
-    static_data: &DirectCoreStaticData,
-    agent_id: u32,
-    input_ptr_local: u32,
-    input_len_local: u32,
-) {
-    if invoke.params == [WasmType::Pointer, WasmType::Pointer] {
-        store_i32_at(body, DIRECT_AGENT_ARGS_OFFSET, capability_id.offset);
-        store_i32_at(body, DIRECT_AGENT_ARGS_OFFSET + 4, capability_id.len_i32());
-        store_local_i32_at(body, DIRECT_AGENT_ARGS_OFFSET + 8, input_ptr_local);
-        store_local_i32_at(body, DIRECT_AGENT_ARGS_OFFSET + 12, input_len_local);
-        emit_agent_connection_args(body, static_data, agent_id);
-        body.instruction(&Instruction::I32Const(DIRECT_AGENT_ARGS_OFFSET));
-        push_retptr_arg(body);
-        body.instruction(&Instruction::Call(invoke.function_index));
-        return;
-    }
-
-    push_segment_args(body, capability_id);
-    body.instruction(&Instruction::LocalGet(input_ptr_local));
-    body.instruction(&Instruction::LocalGet(input_len_local));
-    for param_type in invoke
-        .params
-        .get(4..invoke.params.len().saturating_sub(1))
-        .unwrap_or(&[])
-    {
-        push_zero_value(body, param_type);
-    }
-    push_retptr_arg(body);
-    body.instruction(&Instruction::Call(invoke.function_index));
-}
-
-fn emit_agent_connection_args(
-    body: &mut WasmFunction,
-    static_data: &DirectCoreStaticData,
-    agent_id: u32,
-) {
-    let Some(connection_id) = static_data.agent_connection_id(agent_id) else {
-        store_i32_at(body, DIRECT_AGENT_ARG_CONNECTION_TAG_OFFSET, 0);
-        return;
-    };
-
-    store_i32_at(body, DIRECT_AGENT_ARG_CONNECTION_TAG_OFFSET, 1);
-    store_i32_at(
-        body,
-        DIRECT_AGENT_ARG_CONNECTION_ID_PTR_OFFSET,
-        connection_id.offset,
-    );
-    store_i32_at(
-        body,
-        DIRECT_AGENT_ARG_CONNECTION_ID_LEN_OFFSET,
-        connection_id.len_i32(),
-    );
-    store_i32_at(
-        body,
-        DIRECT_AGENT_ARG_CONNECTION_INTEGRATION_PTR_OFFSET,
-        static_data.agent_empty_integration_id.offset,
-    );
-    store_i32_at(body, DIRECT_AGENT_ARG_CONNECTION_INTEGRATION_LEN_OFFSET, 0);
-    store_i32_at(body, DIRECT_AGENT_ARG_CONNECTION_SUBTYPE_TAG_OFFSET, 0);
-    store_i32_at(
-        body,
-        DIRECT_AGENT_ARG_CONNECTION_PARAMETERS_PTR_OFFSET,
-        static_data.agent_empty_parameters.offset,
-    );
-    store_i32_at(
-        body,
-        DIRECT_AGENT_ARG_CONNECTION_PARAMETERS_LEN_OFFSET,
-        static_data.agent_empty_parameters.len_i32(),
-    );
-    store_i32_at(body, DIRECT_AGENT_ARG_CONNECTION_RATE_LIMIT_TAG_OFFSET, 0);
 }
 
 #[allow(clippy::too_many_arguments)]
