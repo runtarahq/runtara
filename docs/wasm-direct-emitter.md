@@ -157,7 +157,10 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   application lowering moved into `direct_wasm::compile::mapping`, keeping
   stdlib mapping call mechanics separate from step-family dispatch. Runtime
   checkpoint lookup/save signal handling moved into
-  `direct_wasm::compile::checkpoint`.
+  `direct_wasm::compile::checkpoint`. Agent retry/backoff helpers moved into
+  `direct_wasm::compile::agent_retry`, covering retry condition evaluation,
+  retry-delay stdlib calls, durable retry sleep/checkpoint emission, retry
+  attempt recording, and Agent error-to-retry-info decoding.
 - `direct_wasm::compile::compose_direct_workflow` now performs the first
   direct static composition path: it maps the direct `workflow-logic.wasm`
   component plus prebuilt stdlib/runtime/agent components into `wac compose`,
@@ -748,6 +751,10 @@ Emitter module boundaries should stay readable as support broadens:
   handling for nested Split/Wait error routes.
 - `compile/checkpoint.rs` owns runtime checkpoint lookup/save helper lowering,
   including pending-signal handling after checkpoint writes.
+- `compile/agent_retry.rs` owns Agent retry/backoff helper lowering, including
+  retry condition checks, retry-delay resolution, sleep/checkpoint calls,
+  durable retry-attempt recording, and Agent retptr error conversion into retry
+  metadata.
 - `compile/delay.rs` owns Delay step lowering for durable and non-durable
   waits while delegating retptr/result mechanics to `compile/abi.rs`.
 - `compile/log.rs` owns Log step lowering and custom-event emission order while
