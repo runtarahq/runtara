@@ -127,7 +127,8 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   graphs, missing direct components, or direct infrastructure errors. Optional
   `RUNTARA_DIRECT_WASM_TENANT_ALLOWLIST` and
   `RUNTARA_DIRECT_WASM_WORKFLOW_ALLOWLIST` variables restrict rollout to exact
-  tenant ids and workflow ids.
+  tenant ids and workflow ids. `RUNTARA_DIRECT_WASM_REQUIRE=true` turns selected
+  direct compilations into fail-fast canaries instead of silently falling back.
 - Direct compile gate outcomes now emit OpenTelemetry metrics
   (`runtara.compilation.direct.total` and
   `runtara.compilation.direct.duration`) labeled by outcome and fallback
@@ -2017,8 +2018,12 @@ Current status:
   `RUNTARA_DIRECT_WASM_COMPONENTS_DIR` when set, otherwise the shared
   `RUNTARA_AGENT_COMPONENTS_DIR` bundle, and optional tenant/workflow
   allowlists can restrict rollout.
+- `RUNTARA_DIRECT_WASM_REQUIRE=true` is available for canaries: after the
+  direct gate selects a workflow, missing components, unsupported graphs, or
+  direct infrastructure errors fail the compile instead of producing a fallback
+  Rust/codegen artifact.
 - Direct compile outcome/duration metrics are emitted with outcome/reason
-  labels. Richer operator-visible fallback diagnostics remain pending.
+  labels, including fail-fast required-direct failures.
 - Registered image metadata now includes compiler mode for direct-vs-fallback
   provenance. Cache matching still uses source checksum plus template major;
   mode-aware cache policy remains a later rollout decision.

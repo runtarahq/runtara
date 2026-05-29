@@ -7,6 +7,7 @@ const RUNTARA_MCP_ALLOWED_HOSTS_ENV: &str = "RUNTARA_MCP_ALLOWED_HOSTS";
 const RUNTARA_MCP_SESSION_STORE_ENV: &str = "RUNTARA_MCP_SESSION_STORE";
 const RUNTARA_MCP_SESSION_TTL_SECONDS_ENV: &str = "RUNTARA_MCP_SESSION_TTL_SECONDS";
 const RUNTARA_DIRECT_WASM_COMPILE_ENV: &str = "RUNTARA_DIRECT_WASM_COMPILE";
+const RUNTARA_DIRECT_WASM_REQUIRE_ENV: &str = "RUNTARA_DIRECT_WASM_REQUIRE";
 const RUNTARA_DIRECT_WASM_COMPONENTS_DIR_ENV: &str = "RUNTARA_DIRECT_WASM_COMPONENTS_DIR";
 const RUNTARA_DIRECT_WASM_TENANT_ALLOWLIST_ENV: &str = "RUNTARA_DIRECT_WASM_TENANT_ALLOWLIST";
 const RUNTARA_DIRECT_WASM_WORKFLOW_ALLOWLIST_ENV: &str = "RUNTARA_DIRECT_WASM_WORKFLOW_ALLOWLIST";
@@ -58,6 +59,9 @@ pub struct Config {
     /// Whether workflow compilation should try the direct WASM emitter before
     /// falling back to the Rust/codegen component pipeline.
     pub direct_wasm_compile: bool,
+    /// Whether selected direct WASM compilations should fail instead of
+    /// falling back to Rust/codegen.
+    pub direct_wasm_require: bool,
     /// Directory containing prebuilt direct workflow stdlib/runtime components
     /// plus agent components. Defaults to `agent_components_dir`.
     pub direct_wasm_components_dir: Option<std::path::PathBuf>,
@@ -155,6 +159,7 @@ impl Config {
             .filter(|s| !s.trim().is_empty())
             .map(std::path::PathBuf::from);
         let direct_wasm_compile = parse_bool_or(RUNTARA_DIRECT_WASM_COMPILE_ENV, false)?;
+        let direct_wasm_require = parse_bool_or(RUNTARA_DIRECT_WASM_REQUIRE_ENV, false)?;
         let direct_wasm_components_dir = direct_wasm_components_dir_from_raw(
             std::env::var(RUNTARA_DIRECT_WASM_COMPONENTS_DIR_ENV)
                 .ok()
@@ -235,6 +240,7 @@ impl Config {
             agent_service_url,
             agent_components_dir,
             direct_wasm_compile,
+            direct_wasm_require,
             direct_wasm_components_dir,
             direct_wasm_tenant_allowlist,
             direct_wasm_workflow_allowlist,
@@ -527,6 +533,12 @@ pub fn object_model_bulk_request_limit() -> usize {
 /// Whether the server should try direct WASM workflow compilation.
 pub fn direct_wasm_compile_enabled() -> bool {
     get().direct_wasm_compile
+}
+
+/// Whether selected direct WASM workflow compilations should fail without
+/// falling back to Rust/codegen.
+pub fn direct_wasm_require_enabled() -> bool {
+    get().direct_wasm_require
 }
 
 /// Directory containing components used by direct WASM static composition.

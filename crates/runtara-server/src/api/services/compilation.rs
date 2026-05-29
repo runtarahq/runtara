@@ -221,6 +221,9 @@ struct WorkflowImageRegistration<'a> {
 pub struct DirectCompilationSettings {
     /// Whether the service should try direct compilation before Rust/codegen.
     pub enabled: bool,
+    /// Whether selected direct compilations should fail instead of falling
+    /// back to Rust/codegen.
+    pub require_direct: bool,
     /// Directory containing prebuilt shared workflow and agent components.
     pub components_dir: Option<PathBuf>,
     /// Optional tenant allowlist. `None` means no tenant restriction.
@@ -234,6 +237,7 @@ impl DirectCompilationSettings {
     pub fn disabled() -> Self {
         Self {
             enabled: false,
+            require_direct: false,
             components_dir: None,
             tenant_allowlist: None,
             workflow_allowlist: None,
@@ -244,6 +248,7 @@ impl DirectCompilationSettings {
     pub fn enabled(components_dir: Option<PathBuf>) -> Self {
         Self {
             enabled: true,
+            require_direct: false,
             components_dir,
             tenant_allowlist: None,
             workflow_allowlist: None,
@@ -261,12 +266,19 @@ impl DirectCompilationSettings {
         self.workflow_allowlist = allowlist;
         self
     }
+
+    /// Require direct compilation once selected by the direct gate.
+    pub fn with_require_direct(mut self, require_direct: bool) -> Self {
+        self.require_direct = require_direct;
+        self
+    }
 }
 
 /// Build direct compilation settings from the process configuration.
 pub fn direct_compilation_settings_from_config() -> DirectCompilationSettings {
     DirectCompilationSettings {
         enabled: crate::config::direct_wasm_compile_enabled(),
+        require_direct: crate::config::direct_wasm_require_enabled(),
         components_dir: crate::config::direct_wasm_components_dir(),
         tenant_allowlist: crate::config::direct_wasm_tenant_allowlist(),
         workflow_allowlist: crate::config::direct_wasm_workflow_allowlist(),
@@ -317,6 +329,18 @@ fn compile_workflow_with_direct_fallback(
                 }
                 Err(err) => {
                     let reason = direct_compile_fallback_reason(&err);
+                    if settings.require_direct {
+                        record_direct_compilation_outcome("failed", reason, direct_start.elapsed());
+                        warn!(
+                            workflow_id = %input.workflow_id,
+                            version = input.version,
+                            error = %err,
+                            reason = reason,
+                            "Required direct WASM workflow compilation failed"
+                        );
+                        return Err(err);
+                    }
+
                     record_direct_compilation_outcome("fallback", reason, direct_start.elapsed());
                     warn!(
                         workflow_id = %input.workflow_id,
@@ -331,6 +355,19 @@ fn compile_workflow_with_direct_fallback(
                 }
             }
         } else {
+            if settings.require_direct {
+                record_direct_compilation_outcome("failed", "missing-components", Duration::ZERO);
+                warn!(
+                    workflow_id = %input.workflow_id,
+                    version = input.version,
+                    "Required direct WASM workflow compilation has no configured component directory"
+                );
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "direct WASM compilation is required but no component directory is configured",
+                ));
+            }
+
             record_direct_compilation_outcome("fallback", "missing-components", Duration::ZERO);
             warn!(
                 workflow_id = %input.workflow_id,
@@ -763,6 +800,7 @@ impl CompilationService {
         debug!(
             wait_ms = step_start.elapsed().as_millis(),
             direct_wasm_enabled = self.direct_compilation.enabled,
+            direct_wasm_require = self.direct_compilation.require_direct,
             "compile: step 6 - semaphore acquired, compiling workflow artifact"
         );
         let compile_start_time = std::time::Instant::now();
@@ -1258,6 +1296,7 @@ mod tests {
         let settings = DirectCompilationSettings::disabled();
 
         assert!(!settings.enabled);
+        assert!(!settings.require_direct);
         assert!(settings.components_dir.is_none());
     }
 
@@ -1266,12 +1305,22 @@ mod tests {
         let settings = DirectCompilationSettings::enabled(Some("/opt/runtara/agents".into()));
 
         assert!(settings.enabled);
+        assert!(!settings.require_direct);
         assert_eq!(
             settings.components_dir.as_deref(),
             Some(std::path::Path::new("/opt/runtara/agents"))
         );
         assert!(settings.tenant_allowlist.is_none());
         assert!(settings.workflow_allowlist.is_none());
+    }
+
+    #[test]
+    fn direct_compilation_settings_can_require_direct() {
+        let settings = DirectCompilationSettings::enabled(Some("/opt/runtara/agents".into()))
+            .with_require_direct(true);
+
+        assert!(settings.enabled);
+        assert!(settings.require_direct);
     }
 
     #[test]
@@ -1315,6 +1364,22 @@ mod tests {
 
         assert_eq!(direct_compile_fallback_reason(&unsupported), "unsupported");
         assert_eq!(direct_compile_fallback_reason(&other), "direct-error");
+    }
+
+    #[test]
+    fn direct_compile_require_direct_fails_without_components() {
+        let input = direct_skip_input("tenant-a", "workflow-a");
+        let settings = DirectCompilationSettings::enabled(None).with_require_direct(true);
+
+        let err =
+            compile_workflow_with_direct_fallback(input, "source-sha256".to_string(), settings)
+                .expect_err("required direct compile without components should fail");
+
+        assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
+        assert!(
+            err.to_string()
+                .contains("direct WASM compilation is required")
+        );
     }
 
     #[test]
