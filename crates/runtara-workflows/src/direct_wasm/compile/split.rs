@@ -9,6 +9,7 @@ use super::abi::{
     load_retptr_tag, push_retptr_arg, push_retptr_i32_load, push_retptr_i64_load,
     return_if_retptr_error,
 };
+use super::agent_error::emit_agent_error_route_or_fail;
 use super::checkpoint::{emit_checkpoint_lookup, emit_checkpoint_save};
 use super::debug::{emit_step_breakpoint, emit_step_debug_event};
 use super::dispatcher::emit_run_plan_mapping;
@@ -18,7 +19,9 @@ use super::split_retry::{
     emit_split_advance_retry_attempt, emit_split_retry_before_attempt, emit_split_retry_condition,
     emit_split_retry_error_info,
 };
-use super::step_error::emit_step_error_and_continue;
+use super::step_error::{
+    emit_step_error_and_continue, pop_step_error_frame, push_step_error_frame,
+};
 use super::wait::emit_wait_on_wait_error_and_fail;
 use super::{
     DIRECT_RET_U32_OK_OFFSET, DIRECT_RET_U64_OK_OFFSET, DIRECT_SPLIT_COUNT_LOCAL,
@@ -29,16 +32,19 @@ use super::{
     DIRECT_SPLIT_FAILURE_RESULTS_PTR_LOCAL, DIRECT_SPLIT_FAILURE_VARIABLES_LEN_LOCAL,
     DIRECT_SPLIT_FAILURE_VARIABLES_PTR_LOCAL, DIRECT_SPLIT_INDEX_LOCAL,
     DIRECT_SPLIT_ITEM_LEN_LOCAL, DIRECT_SPLIT_ITEM_PTR_LOCAL, DIRECT_SPLIT_PARENT_SOURCE_LEN_LOCAL,
-    DIRECT_SPLIT_PARENT_SOURCE_PTR_LOCAL, DIRECT_SPLIT_RATE_LIMIT_WAIT_TOTAL_LOCAL,
+    DIRECT_SPLIT_PARENT_SOURCE_PTR_LOCAL, DIRECT_SPLIT_PARENT_STEPS_LEN_LOCAL,
+    DIRECT_SPLIT_PARENT_STEPS_PTR_LOCAL, DIRECT_SPLIT_RATE_LIMIT_WAIT_TOTAL_LOCAL,
     DIRECT_SPLIT_RATE_LIMITED_LOCAL, DIRECT_SPLIT_RESULTS_LEN_LOCAL,
     DIRECT_SPLIT_RESULTS_PTR_LOCAL, DIRECT_SPLIT_RETRY_AFTER_TAG_LOCAL,
     DIRECT_SPLIT_RETRY_ATTEMPT_LOCAL, DIRECT_SPLIT_RETRY_ERROR_FLAG_LOCAL,
     DIRECT_SPLIT_RETRY_ERROR_LEN_LOCAL, DIRECT_SPLIT_RETRY_ERROR_PTR_LOCAL,
     DIRECT_SPLIT_RETRY_SLEEP_KEY_LEN_LOCAL, DIRECT_SPLIT_RETRY_SLEEP_KEY_PTR_LOCAL,
     DIRECT_SPLIT_RETRY_SLEEP_MS_LOCAL, DIRECT_SPLIT_RETRYABLE_LOCAL,
-    DIRECT_SPLIT_VARIABLES_LEN_LOCAL, DIRECT_SPLIT_VARIABLES_PTR_LOCAL, DirectCoreFunctionIndices,
-    DirectCoreStaticData, DirectDataSegment, DirectFailureTarget, DirectHandledTarget,
-    DirectRunPlan, DirectVariables, emit_runtime_fail_return,
+    DIRECT_SPLIT_VARIABLES_LEN_LOCAL, DIRECT_SPLIT_VARIABLES_PTR_LOCAL,
+    DIRECT_STEP_ERROR_FLAG_LOCAL, DIRECT_STEP_ERROR_LEN_LOCAL, DIRECT_STEP_ERROR_PTR_LOCAL,
+    DirectCoreFunctionIndices, DirectCoreStaticData, DirectDataSegment, DirectErrorRoutePlan,
+    DirectFailureTarget, DirectHandledTarget, DirectRunPlan, DirectVariables,
+    emit_runtime_fail_return,
 };
 
 fn push_split_frame(body: &mut WasmFunction) {
@@ -239,6 +245,7 @@ pub(super) fn emit_split_plan(
     dont_stop_on_failed: bool,
     nested_plan: &DirectRunPlan,
     next_plan: &DirectRunPlan,
+    error_plan: Option<&DirectErrorRoutePlan>,
     timeout_ms: Option<u64>,
     data_ptr_local: u32,
     data_len_local: u32,
@@ -252,9 +259,22 @@ pub(super) fn emit_split_plan(
     route_len_local: u32,
     workflow_log_kind: &DirectDataSegment,
     workflow_error_kind: &DirectDataSegment,
-    failure_target: Option<DirectFailureTarget>,
+    outer_failure_target: Option<DirectFailureTarget>,
     handled_target: Option<DirectHandledTarget>,
 ) {
+    let has_error_plan = error_plan.is_some();
+    // When the Split has an onError route, redirect every fatal failure (a
+    // fail-fast item failure, a result/cache-key error, or retry exhaustion) to a
+    // step-error capture block — the outermost block of this lowering — then route
+    // the captured error to the handler after the loop, mirroring While onError.
+    // dontStopOnFailed per-item aggregation is unaffected; only the fatal path
+    // reaches the capture.
+    let failure_target = if has_error_plan {
+        Some(DirectFailureTarget::StepError { branch_depth: 0 })
+    } else {
+        outer_failure_target
+    };
+
     emit_step_breakpoint(
         body,
         indices,
@@ -282,6 +302,15 @@ pub(super) fn emit_split_plan(
         output_len_local,
     );
 
+    if has_error_plan {
+        body.instruction(&Instruction::LocalGet(steps_ptr_local));
+        body.instruction(&Instruction::LocalSet(DIRECT_SPLIT_PARENT_STEPS_PTR_LOCAL));
+        body.instruction(&Instruction::LocalGet(steps_len_local));
+        body.instruction(&Instruction::LocalSet(DIRECT_SPLIT_PARENT_STEPS_LEN_LOCAL));
+        body.instruction(&Instruction::I32Const(0));
+        body.instruction(&Instruction::LocalSet(DIRECT_STEP_ERROR_FLAG_LOCAL));
+    }
+
     if dont_stop_on_failed {
         push_split_failure_frame(body);
     }
@@ -291,6 +320,12 @@ pub(super) fn emit_split_plan(
     body.instruction(&Instruction::LocalSet(DIRECT_SPLIT_PARENT_SOURCE_PTR_LOCAL));
     body.instruction(&Instruction::LocalGet(source_len_local));
     body.instruction(&Instruction::LocalSet(DIRECT_SPLIT_PARENT_SOURCE_LEN_LOCAL));
+
+    // Capture block: any fatal split failure (routed via failure_target =
+    // StepError) branches to the end of this block, where the onError handler runs.
+    if has_error_plan {
+        body.instruction(&Instruction::Block(BlockType::Empty));
+    }
 
     if durable {
         body.instruction(&Instruction::I32Const(split_id as i32));
@@ -529,6 +564,13 @@ pub(super) fn emit_split_plan(
     );
 
     push_split_frame(body);
+    // Save the step-error frame around the item body so a nested onError capture
+    // (which shares the step-error locals) cannot leak its handled flag into this
+    // split's post-loop error check. A fatal body failure branches out to the
+    // capture before the restore, leaving the flag set for this split.
+    if has_error_plan {
+        push_step_error_frame(body);
+    }
     body.instruction(&Instruction::Block(BlockType::Empty));
     emit_run_plan_mapping(
         body,
@@ -553,6 +595,9 @@ pub(super) fn emit_split_plan(
         Some(DirectHandledTarget { branch_depth: 0 }),
     );
     body.instruction(&Instruction::End);
+    if has_error_plan {
+        pop_step_error_frame(body);
+    }
     pop_split_frame(body);
 
     if dont_stop_on_failed {
@@ -693,10 +738,53 @@ pub(super) fn emit_split_plan(
         body.instruction(&Instruction::End);
     }
 
+    if has_error_plan {
+        body.instruction(&Instruction::End);
+    }
+
     pop_split_frame(body);
     if dont_stop_on_failed {
         pop_split_failure_frame(body);
     }
+
+    if let Some(error_plan) = error_plan {
+        // A fatal split failure was captured: restore the parent steps context and
+        // route the captured error through the shared onError machinery. On a
+        // normal split completion the flag is unset and this is skipped.
+        body.instruction(&Instruction::LocalGet(DIRECT_STEP_ERROR_FLAG_LOCAL));
+        body.instruction(&Instruction::If(BlockType::Empty));
+        body.instruction(&Instruction::LocalGet(DIRECT_SPLIT_PARENT_STEPS_PTR_LOCAL));
+        body.instruction(&Instruction::LocalSet(steps_ptr_local));
+        body.instruction(&Instruction::LocalGet(DIRECT_SPLIT_PARENT_STEPS_LEN_LOCAL));
+        body.instruction(&Instruction::LocalSet(steps_len_local));
+        emit_agent_error_route_or_fail(
+            body,
+            indices,
+            static_data,
+            track_events,
+            variables,
+            step_id,
+            DIRECT_STEP_ERROR_PTR_LOCAL,
+            DIRECT_STEP_ERROR_LEN_LOCAL,
+            steps_ptr_local,
+            steps_len_local,
+            source_ptr_local,
+            source_len_local,
+            output_ptr_local,
+            output_len_local,
+            route_ptr_local,
+            route_len_local,
+            Some(error_plan),
+            data_ptr_local,
+            data_len_local,
+            workflow_log_kind,
+            workflow_error_kind,
+            outer_failure_target.map(|target| target.nested(1)),
+            handled_target.map(|target| target.nested(1)),
+        );
+        body.instruction(&Instruction::End);
+    }
+
     emit_build_source(
         body,
         indices,
@@ -707,7 +795,7 @@ pub(super) fn emit_split_plan(
         steps_len_local,
         source_ptr_local,
         source_len_local,
-        failure_target,
+        outer_failure_target,
     );
 
     emit_step_debug_event(
@@ -742,7 +830,7 @@ pub(super) fn emit_split_plan(
         route_len_local,
         workflow_log_kind,
         workflow_error_kind,
-        failure_target,
+        outer_failure_target,
         handled_target,
     );
 }

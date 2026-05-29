@@ -238,7 +238,7 @@ fn collect_graph_support_inner(
         };
         if edge.condition.is_some() && !condition_route_supported {
             let reason = if edge.label.as_deref() == Some("onError") {
-                "direct emitter supports onError edge conditions only for Agent, EmbedWorkflow, and While sources with at most one default fallback"
+                "direct emitter supports onError edge conditions only for Agent, EmbedWorkflow, Split, and While sources with at most one default fallback"
             } else {
                 "direct emitter supports edge-condition routing only for normal/next edges with exactly one default fallback"
             };
@@ -264,7 +264,7 @@ fn collect_graph_support_inner(
                     .map(step_type_name)
                     .map(str::to_string),
                 feature: "error-handler-edge".to_string(),
-                reason: "direct onError routing currently supports Agent, EmbedWorkflow, and While sources with at most one default handler".to_string(),
+                reason: "direct onError routing currently supports Agent, EmbedWorkflow, Split, and While sources with at most one default handler".to_string(),
             });
         }
     }
@@ -467,6 +467,16 @@ fn supports_direct_control_step_inner(
                     child_stack,
                     include_on_error,
                 )
+                && (!include_on_error
+                    || supports_on_error_flow_step(
+                        graph,
+                        child_workflows,
+                        step_id,
+                        reachable,
+                        used_edges,
+                        stack,
+                        child_stack,
+                    ))
         }
         Step::While(step) if supports_while_step_baseline(step) => {
             supports_direct_control_graph_inner(&step.subgraph, child_workflows, child_stack)
@@ -828,6 +838,7 @@ fn on_error_route_shape_supported(graph: &ExecutionGraph, step_id: &str) -> bool
     match step {
         Step::Agent(step) if supports_agent_step_baseline(graph, step) => {}
         Step::EmbedWorkflow(_) => {}
+        Step::Split(step) if supports_split_step_baseline(step) => {}
         Step::While(step) if supports_while_step_baseline(step) => {}
         _ => return false,
     };
@@ -1282,6 +1293,7 @@ mod tests {
             "error" => include_str!("../../tests/fixtures/error_direct_simple.json"),
             "edge_condition" => include_str!("../../tests/fixtures/edge_condition_priority.json"),
             "split" => include_str!("../../tests/fixtures/split_workflow.json"),
+            "split_on_error" => include_str!("../../tests/fixtures/split_on_error.json"),
             "split_timeout" => include_str!("../../tests/fixtures/split_timeout.json"),
             "split_with_error" => include_str!("../../tests/fixtures/split_with_error.json"),
             "split_with_schemas" => include_str!("../../tests/fixtures/split_with_schemas.json"),

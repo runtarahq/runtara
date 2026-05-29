@@ -50,8 +50,8 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   `Conditional`, `Filter`, `Switch`, `GroupBy`, `Log`, terminal `Error`,
   durable `Delay`, durable `WaitForSignal`, and static `EmbedWorkflow`
   call-site breakpoints plus durable `Agent` breakpoints now have direct
-  pause/resume lowering. While `onError` routing and timeout enforcement are now
-  supported.
+  pause/resume lowering. While and Split `onError` routing and timeout
+  enforcement are now supported.
   `Finish.inputMapping` forms remain broadly supported because mapping semantics
   are delegated to the shared stdlib.
 - The direct core emitter now has the first static `EmbedWorkflow` lowering
@@ -714,15 +714,6 @@ Current remaining action items:
   direct model (a running `capabilities.invoke` / inline child run cannot be
   preempted mid-call), so leaving it gated is defensible rather than a defect to
   fix; revisit only if these gain an async/cancellable invoke path.
-- Support `Split` onError routing for parity. Generated Rust treats `Split` as an
-  onError-capable step (it is in `can_have_on_error`), but the direct support gate
-  (`on_error_route_shape_supported`) still allows only Agent, EmbedWorkflow, and
-  While sources, so a Split with an `onError` edge is rejected. The natural
-  approach mirrors While onError: capture the split's fatal failure (after retry
-  exhaustion, or a fail-fast non-aggregated item failure), restore the parent
-  steps context, and route it through the shared `error-steps`/route-dispatch
-  machinery — threaded carefully through Split's retry and `dontStopOnFailed`
-  paths so only the fatal path (not per-item aggregation) reaches the handler.
 - Close Agent hardening gaps: timeout/compensation policy, retry/failure
   differential tests, and long-running cancellation coverage.
 - Start Phase 12 AiAgent support only after the shared Agent/runtime durability
@@ -2422,7 +2413,7 @@ Implementation steps:
      shared stdlib.
    - public support gate: enabled for sequential Split with final-result
      checkpoint/replay, durable breakpoint pause/resume, Split retry/backoff,
-     and Split timeout enforcement.
+     Split timeout enforcement, and Split `onError` routing.
    - strict A/B execution coverage: done for a durable schema-validating
      sequential Split fixture, including fresh and cached checkpoint replay
      plus checkpoint-returned pause and cached resume, and for Split
@@ -2448,6 +2439,17 @@ Implementation steps:
      preservation for deeply nested bodies;
    - Split timeout semantics: done via a frame-saved deadline checked before each
      item and a hard `SPLIT_TIMEOUT` failure on expiry (direct-only).
+   - Split `onError` routing: done through the shared step-error capture and
+     `error-steps`/route-dispatch machinery (the same path Agent/While use). The
+     fatal item failure is captured into a CAPTURE block, the parent `steps`
+     context is restored from a frame-saved snapshot, and the failure routes to
+     the handler. Direct mode here intentionally diverges from generated Rust: a
+     fail-fast Split body failure in generated Rust is wrapped into a non-JSON
+     `"Split step '<id>' at iteration <n>: <e>"` string, so its `onError`
+     `steps.__error` degrades to a generic `{code: null, category: "unknown"}`.
+     Direct preserves the item's structured error (`code`/`category`), matching
+     Agent `onError`; the gated A/B test asserts direct's structured payload and
+     pins the generated-Rust degradation rather than asserting payload parity.
 3. Implement `While`:
    - config/condition manifest records and nested graph link: done;
    - max iterations: stdlib helper, WIT export, and internal direct-core

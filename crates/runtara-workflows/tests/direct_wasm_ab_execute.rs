@@ -63,6 +63,7 @@ const WHILE_DIRECT_INDEX_ONLY: &str = include_str!("fixtures/while_direct_index_
 const SPLIT_NESTED_SPLIT: &str = include_str!("fixtures/split_nested_split.json");
 const WHILE_NESTED_SPLIT: &str = include_str!("fixtures/while_nested_split.json");
 const WHILE_ON_ERROR: &str = include_str!("fixtures/while_on_error.json");
+const SPLIT_ON_ERROR: &str = include_str!("fixtures/split_on_error.json");
 const SPLIT_DONT_STOP_NESTED_SPLIT_ERROR: &str =
     include_str!("fixtures/split_dont_stop_nested_split_error.json");
 const SPLIT_DONT_STOP_DEEP_NESTED_WHILE_SPLIT_ERROR: &str =
@@ -4511,6 +4512,76 @@ fn direct_wasm_matches_components_while_on_error() {
     assert_eq!(
         output.get("category"),
         Some(&serde_json::json!("permanent"))
+    );
+}
+
+/// Split onError is one place where direct mode intentionally does NOT match
+/// generated Rust. Generated Rust wraps the failing item's error into a non-JSON
+/// `"Split step '<id>' at iteration <n>: <e>"` string (codegen split.rs), so the
+/// program-level onError wrapper's `serde_json::from_str` fails and `__error`
+/// degrades to a generic `{code: null, category: "unknown"}` — losing the item's
+/// structured error. Direct mode preserves the item's structured error, matching
+/// how Agent onError already behaves. Per the parity goal we do not inherit that
+/// inconsistency, so this test asserts direct's correct structured payload and
+/// pins the generated-Rust degradation rather than asserting payload parity.
+#[test]
+fn direct_wasm_split_on_error_preserves_structured_error() {
+    let Some(components_dir) = direct_ab_components_dir() else {
+        return;
+    };
+    let _data = setup_data_dir();
+
+    let components_artifact = compile_components_artifact("split-on-error", SPLIT_ON_ERROR);
+    let direct_artifact =
+        compile_direct_artifact(&components_dir, "split-on-error", SPLIT_ON_ERROR);
+    assert_eq!(
+        direct_artifact.compiler_mode,
+        WorkflowCompilerMode::DirectWasm
+    );
+
+    // The first item's body fails fatally (fail-fast Split), so the Split step
+    // fails and routes the captured failure to its onError handler. Both artifacts
+    // complete via the handler (no /failed); only the `__error` fidelity differs.
+    let workflow_input = br#"{"items":[{"v":1}]}"#;
+    let components_input = components_sdk_input(workflow_input);
+    let components = execute_artifact(
+        &components_artifact,
+        "ab-components-split-on-error",
+        &components_input,
+    );
+    let direct = execute_artifact(
+        &direct_artifact.path,
+        "ab-direct-split-on-error",
+        workflow_input,
+    );
+
+    let direct_out = direct.output_json.as_ref().expect("direct onError output");
+    let components_out = components
+        .output_json
+        .as_ref()
+        .expect("components onError output");
+
+    // Direct preserves the item's structured error (correct, non-lossy).
+    assert_eq!(direct_out.get("handled"), Some(&serde_json::json!(true)));
+    assert_eq!(
+        direct_out.get("code"),
+        Some(&serde_json::json!("ITEM_BOOM"))
+    );
+    assert_eq!(
+        direct_out.get("category"),
+        Some(&serde_json::json!("permanent"))
+    );
+
+    // Pin the generated-Rust degradation we intentionally do not inherit; if
+    // generated Rust is fixed to preserve the structured error, revisit this.
+    assert_eq!(
+        components_out.get("handled"),
+        Some(&serde_json::json!(true))
+    );
+    assert_eq!(components_out.get("code"), Some(&serde_json::json!(null)));
+    assert_eq!(
+        components_out.get("category"),
+        Some(&serde_json::json!("unknown"))
     );
 }
 

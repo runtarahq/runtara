@@ -247,6 +247,11 @@ const DIRECT_WHILE_DEADLINE_MS_LOCAL: u32 = 80;
 /// i64 local, saved/restored with the Split frame so nested splits do not clobber
 /// an outer split's deadline.
 const DIRECT_SPLIT_DEADLINE_MS_LOCAL: u32 = 81;
+/// Parent steps-context pointer/length saved on entry to a `Split` with an
+/// onError route, so the handler runs against the parent steps (plus `__error`)
+/// rather than the per-item iteration context. i32 locals.
+const DIRECT_SPLIT_PARENT_STEPS_PTR_LOCAL: u32 = 82;
+const DIRECT_SPLIT_PARENT_STEPS_LEN_LOCAL: u32 = 83;
 
 /// Input for the opt-in direct compiler.
 #[derive(Debug, Clone)]

@@ -54,6 +54,7 @@ pub(super) enum DirectRunPlan {
         dont_stop_on_failed: bool,
         nested_plan: Box<DirectRunPlan>,
         next_plan: Box<DirectRunPlan>,
+        error_plan: Option<DirectErrorRoutePlan>,
         timeout_ms: Option<u64>,
     },
     While {
@@ -373,6 +374,11 @@ fn step_run_plan_inner(
             )?;
             let next_plan =
                 normal_flow_plan(graph, child_workflows, step_id, stack, include_on_error)?;
+            let error_plan = if include_on_error {
+                on_error_plan(graph, child_workflows, step_id, stack)?
+            } else {
+                None
+            };
 
             Ok(DirectRunPlan::Split {
                 step_id: step_id.to_string(),
@@ -384,6 +390,7 @@ fn step_run_plan_inner(
                 dont_stop_on_failed,
                 nested_plan: Box::new(nested_plan),
                 next_plan: Box::new(next_plan),
+                error_plan,
                 timeout_ms: split_timeout_ms(graph, step_id)?,
             })
         }
