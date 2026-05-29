@@ -153,6 +153,12 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   checksum and template major. When direct mode is enabled, queue/worker
   source-only prechecks defer to the compilation service so direct rollout can
   replace stale Rust-codegen artifacts and rollback can prefer Rust artifacts.
+- `RUNTARA_DIRECT_WASM_SHADOW=true` now enables background direct shadow
+  compilation while production still serves and registers the Rust/codegen
+  artifact. Shadow artifacts are written under
+  `$DATA_DIR/workflow-builds-direct-shadow/<tenant>/...`; shadow failures are
+  logged and emitted as direct compile metrics, but do not fail the user-visible
+  compilation.
 - `tests/direct_wasm_execute.rs` now provides gated direct execution smoke
   tests. With `RUNTARA_RUN_DIRECT_WASM_E2E=1`, it compiles and statically
   composes the simple `Finish` fixture plus flat and nested `Conditional`
@@ -1979,7 +1985,12 @@ Current status:
   server can shadow or gate direct artifacts without depending on direct-only
   result types.
 - Server-side routing now has a disabled-by-default try-with-fallback gate via
-  `RUNTARA_DIRECT_WASM_COMPILE`; shadow persistence and metrics remain pending.
+  `RUNTARA_DIRECT_WASM_COMPILE`.
+- `RUNTARA_DIRECT_WASM_SHADOW=true` performs non-user-visible direct shadow
+  compilation in the background when the direct serving gate is off. The Rust
+  artifact remains the registered production artifact, while the direct shadow
+  artifact is stored for comparison and its success/failure is captured in
+  direct compile metrics.
 
 ### Phase 14: Controlled Production Enablement
 
@@ -2023,6 +2034,9 @@ Current status:
   `RUNTARA_DIRECT_WASM_COMPONENTS_DIR` when set, otherwise the shared
   `RUNTARA_AGENT_COMPONENTS_DIR` bundle, and optional tenant/workflow
   allowlists can restrict rollout.
+- `RUNTARA_DIRECT_WASM_SHADOW=true` can be used before serving direct artifacts
+  to collect direct compile success/failure and artifact outputs without
+  changing the registered production artifact.
 - `RUNTARA_DIRECT_WASM_REQUIRE=true` is available for canaries: after the
   direct gate selects a workflow, missing components, unsupported graphs, or
   direct infrastructure errors fail the compile instead of producing a fallback

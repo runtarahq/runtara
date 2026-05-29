@@ -220,6 +220,12 @@ struct WorkflowCompilationResult {
     direct_diagnostics: DirectCompilationDiagnostics,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ShadowDirectCompilationReport {
+    outcome: &'static str,
+    reason: &'static str,
+}
+
 #[derive(Debug, Clone, Copy)]
 struct WorkflowImageRegistration<'a> {
     tenant_id: &'a str,
@@ -234,6 +240,9 @@ struct WorkflowImageRegistration<'a> {
 pub struct DirectCompilationSettings {
     /// Whether the service should try direct compilation before Rust/codegen.
     pub enabled: bool,
+    /// Whether the service should compile direct artifacts in the background
+    /// while serving Rust/codegen artifacts.
+    pub shadow_enabled: bool,
     /// Whether selected direct compilations should fail instead of falling
     /// back to Rust/codegen.
     pub require_direct: bool,
@@ -250,6 +259,7 @@ impl DirectCompilationSettings {
     pub fn disabled() -> Self {
         Self {
             enabled: false,
+            shadow_enabled: false,
             require_direct: false,
             components_dir: None,
             tenant_allowlist: None,
@@ -261,6 +271,7 @@ impl DirectCompilationSettings {
     pub fn enabled(components_dir: Option<PathBuf>) -> Self {
         Self {
             enabled: true,
+            shadow_enabled: false,
             require_direct: false,
             components_dir,
             tenant_allowlist: None,
@@ -285,12 +296,19 @@ impl DirectCompilationSettings {
         self.require_direct = require_direct;
         self
     }
+
+    /// Enable or disable background direct shadow compilation.
+    pub fn with_shadow_enabled(mut self, shadow_enabled: bool) -> Self {
+        self.shadow_enabled = shadow_enabled;
+        self
+    }
 }
 
 /// Build direct compilation settings from the process configuration.
 pub fn direct_compilation_settings_from_config() -> DirectCompilationSettings {
     DirectCompilationSettings {
         enabled: crate::config::direct_wasm_compile_enabled(),
+        shadow_enabled: crate::config::direct_wasm_shadow_enabled(),
         require_direct: crate::config::direct_wasm_require_enabled(),
         components_dir: crate::config::direct_wasm_components_dir(),
         tenant_allowlist: crate::config::direct_wasm_tenant_allowlist(),
@@ -400,6 +418,134 @@ fn compile_workflow_with_direct_fallback(
     })
 }
 
+fn should_spawn_shadow_direct_compilation(
+    result: &WorkflowCompilationResult,
+    settings: &DirectCompilationSettings,
+) -> bool {
+    settings.shadow_enabled
+        && !settings.enabled
+        && result.artifact.compiler_mode == WorkflowCompilerMode::ComponentsCodegen
+}
+
+fn spawn_shadow_direct_compilation(
+    mut input: CompilationInput,
+    source_checksum: String,
+    settings: DirectCompilationSettings,
+) {
+    input.progress_callback = None;
+    tokio::spawn(async move {
+        let Ok(_permit) = compilation_semaphore().acquire().await else {
+            warn!(
+                workflow_id = %input.workflow_id,
+                version = input.version,
+                "Direct WASM shadow compilation could not acquire the compilation semaphore"
+            );
+            return;
+        };
+
+        let workflow_id = input.workflow_id.clone();
+        let version = input.version;
+        match tokio::task::spawn_blocking(move || {
+            run_shadow_direct_compilation(input, source_checksum, settings)
+        })
+        .await
+        {
+            Ok(report) => {
+                debug!(
+                    workflow_id = %workflow_id,
+                    version = version,
+                    outcome = report.outcome,
+                    reason = report.reason,
+                    "Direct WASM shadow compilation completed"
+                );
+            }
+            Err(err) => {
+                record_direct_compilation_outcome("shadow-failed", "task-panic", Duration::ZERO);
+                warn!(
+                    workflow_id = %workflow_id,
+                    version = version,
+                    error = %err,
+                    "Direct WASM shadow compilation task failed"
+                );
+            }
+        }
+    });
+}
+
+fn run_shadow_direct_compilation(
+    input: CompilationInput,
+    source_checksum: String,
+    settings: DirectCompilationSettings,
+) -> ShadowDirectCompilationReport {
+    if let Some(reason) = direct_compile_skip_reason(&input, &settings) {
+        record_direct_compilation_outcome("shadow-skipped", reason, Duration::ZERO);
+        debug!(
+            workflow_id = %input.workflow_id,
+            version = input.version,
+            reason = reason,
+            "Direct WASM shadow compilation not selected"
+        );
+        return ShadowDirectCompilationReport {
+            outcome: "shadow-skipped",
+            reason,
+        };
+    }
+
+    let Some(components_dir) = settings.components_dir else {
+        record_direct_compilation_outcome("shadow-skipped", "missing-components", Duration::ZERO);
+        warn!(
+            workflow_id = %input.workflow_id,
+            version = input.version,
+            "Direct WASM shadow compilation enabled but no component directory is configured"
+        );
+        return ShadowDirectCompilationReport {
+            outcome: "shadow-skipped",
+            reason: "missing-components",
+        };
+    };
+
+    let direct_start = Instant::now();
+    let workflow_id = input.workflow_id.clone();
+    let version = input.version;
+    let options = DirectWorkflowCompileOptions {
+        output_dir: direct_shadow_output_dir(&input.tenant_id),
+        components_dir,
+        source_checksum: Some(source_checksum),
+    };
+
+    match compile_workflow_direct(input, options) {
+        Ok(result) => {
+            record_direct_compilation_outcome("shadow-success", "none", direct_start.elapsed());
+            info!(
+                workflow_id = %workflow_id,
+                version = version,
+                build_dir = %result.build_dir.display(),
+                binary_size = result.binary_size,
+                "Direct WASM shadow compilation succeeded"
+            );
+            ShadowDirectCompilationReport {
+                outcome: "shadow-success",
+                reason: "none",
+            }
+        }
+        Err(err) => {
+            let reason = direct_compile_fallback_reason(&err);
+            record_direct_compilation_outcome("shadow-failed", reason, direct_start.elapsed());
+            warn!(
+                workflow_id = %workflow_id,
+                version = version,
+                reason = reason,
+                error = %err,
+                "Direct WASM shadow compilation failed"
+            );
+            ShadowDirectCompilationReport {
+                outcome: "shadow-failed",
+                reason,
+            }
+        }
+    }
+}
+
 fn desired_cache_compiler_mode(
     input: &CompilationInput,
     settings: &DirectCompilationSettings,
@@ -470,6 +616,12 @@ fn record_direct_compilation_outcome(
 
 fn direct_output_dir(tenant_id: &str) -> PathBuf {
     data_dir().join("workflow-builds-direct").join(tenant_id)
+}
+
+fn direct_shadow_output_dir(tenant_id: &str) -> PathBuf {
+    data_dir()
+        .join("workflow-builds-direct-shadow")
+        .join(tenant_id)
 }
 
 fn data_dir() -> PathBuf {
@@ -853,6 +1005,10 @@ impl CompilationService {
         );
         let compile_start_time = std::time::Instant::now();
         let direct_compilation = self.direct_compilation.clone();
+        let shadow_direct_compilation = direct_compilation.clone();
+        let mut shadow_compilation_input = compilation_input.clone();
+        shadow_compilation_input.progress_callback = None;
+        let shadow_source_checksum = source_checksum.clone();
         let compile_source_checksum = source_checksum.clone();
         let compilation_result = tokio::task::spawn_blocking(move || {
             compile_workflow_with_direct_fallback(
@@ -864,6 +1020,13 @@ impl CompilationService {
         .await
         .map_err(|e| ServiceError::CompilationError(format!("Compilation task panicked: {}", e)))?
         .map_err(|e| ServiceError::CompilationError(format!("Compilation failed: {}", e)))?;
+        if should_spawn_shadow_direct_compilation(&compilation_result, &shadow_direct_compilation) {
+            spawn_shadow_direct_compilation(
+                shadow_compilation_input,
+                shadow_source_checksum,
+                shadow_direct_compilation,
+            );
+        }
         let direct_diagnostics = compilation_result.direct_diagnostics;
         let result = compilation_result.artifact;
         debug!(
@@ -1346,6 +1509,7 @@ mod tests {
         let settings = DirectCompilationSettings::disabled();
 
         assert!(!settings.enabled);
+        assert!(!settings.shadow_enabled);
         assert!(!settings.require_direct);
         assert!(settings.components_dir.is_none());
     }
@@ -1355,6 +1519,7 @@ mod tests {
         let settings = DirectCompilationSettings::enabled(Some("/opt/runtara/agents".into()));
 
         assert!(settings.enabled);
+        assert!(!settings.shadow_enabled);
         assert!(!settings.require_direct);
         assert_eq!(
             settings.components_dir.as_deref(),
@@ -1371,6 +1536,14 @@ mod tests {
 
         assert!(settings.enabled);
         assert!(settings.require_direct);
+    }
+
+    #[test]
+    fn direct_compilation_settings_can_enable_shadow() {
+        let settings = DirectCompilationSettings::disabled().with_shadow_enabled(true);
+
+        assert!(!settings.enabled);
+        assert!(settings.shadow_enabled);
     }
 
     #[test]
@@ -1433,6 +1606,79 @@ mod tests {
                     .with_workflow_allowlist(Some(BTreeSet::from(["workflow-b".to_string()])))
             ),
             WorkflowCompilerMode::ComponentsCodegen
+        );
+    }
+
+    #[test]
+    fn shadow_direct_compilation_spawns_only_for_shadowed_rust_results() {
+        let rust_result = WorkflowCompilationResult {
+            artifact: native_result_with_mode(
+                WorkflowCompilerMode::ComponentsCodegen,
+                "/tmp/rust-build".into(),
+            ),
+            direct_diagnostics: DirectCompilationDiagnostics::disabled(),
+        };
+        let direct_result = WorkflowCompilationResult {
+            artifact: native_result_with_mode(
+                WorkflowCompilerMode::DirectWasm,
+                "/tmp/direct".into(),
+            ),
+            direct_diagnostics: DirectCompilationDiagnostics::success(),
+        };
+        let shadow_settings = DirectCompilationSettings::disabled().with_shadow_enabled(true);
+        let direct_settings =
+            DirectCompilationSettings::enabled(Some("/opt/runtara/agents".into()))
+                .with_shadow_enabled(true);
+
+        assert!(should_spawn_shadow_direct_compilation(
+            &rust_result,
+            &shadow_settings
+        ));
+        assert!(!should_spawn_shadow_direct_compilation(
+            &direct_result,
+            &shadow_settings
+        ));
+        assert!(!should_spawn_shadow_direct_compilation(
+            &rust_result,
+            &direct_settings
+        ));
+        assert!(!should_spawn_shadow_direct_compilation(
+            &rust_result,
+            &DirectCompilationSettings::disabled()
+        ));
+    }
+
+    #[test]
+    fn shadow_direct_compilation_skips_without_components() {
+        let input = direct_skip_input("tenant-a", "workflow-a");
+        let settings = DirectCompilationSettings::disabled().with_shadow_enabled(true);
+
+        let report = run_shadow_direct_compilation(input, "source-sha256".to_string(), settings);
+
+        assert_eq!(
+            report,
+            ShadowDirectCompilationReport {
+                outcome: "shadow-skipped",
+                reason: "missing-components",
+            }
+        );
+    }
+
+    #[test]
+    fn shadow_direct_compilation_respects_allowlists() {
+        let input = direct_skip_input("tenant-a", "workflow-a");
+        let settings = DirectCompilationSettings::disabled()
+            .with_shadow_enabled(true)
+            .with_workflow_allowlist(Some(BTreeSet::from(["workflow-b".to_string()])));
+
+        let report = run_shadow_direct_compilation(input, "source-sha256".to_string(), settings);
+
+        assert_eq!(
+            report,
+            ShadowDirectCompilationReport {
+                outcome: "shadow-skipped",
+                reason: "workflow-not-allowed",
+            }
         );
     }
 
