@@ -10,6 +10,7 @@ use super::abi::{
 };
 use super::debug::emit_agent_debug_error;
 use super::mapping::emit_build_source;
+use super::split::emit_split_append_error_payload_and_continue;
 use super::{
     DIRECT_AGENT_RESULT_ERR_ATTRIBUTES_LEN_OFFSET, DIRECT_AGENT_RESULT_ERR_ATTRIBUTES_PTR_OFFSET,
     DIRECT_AGENT_RESULT_ERR_ATTRIBUTES_TAG_OFFSET, DIRECT_AGENT_RESULT_ERR_CATEGORY_LEN_OFFSET,
@@ -21,7 +22,6 @@ use super::{
     DIRECT_RUN_RETPTR_OFFSET, DirectCoreFunctionIndices, DirectCoreStaticData, DirectDataSegment,
     DirectEdgeConditionPlan, DirectErrorRoutePlan, DirectFailureTarget, DirectRunPlan,
     DirectVariables, emit_run_plan_mapping, emit_runtime_fail_return,
-    emit_split_append_error_payload_and_continue,
 };
 
 #[allow(clippy::too_many_arguments)]
