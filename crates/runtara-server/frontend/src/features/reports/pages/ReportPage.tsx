@@ -15,7 +15,7 @@ import {
   AlertTitle,
 } from '@/shared/components/ui/alert';
 import { Button } from '@/shared/components/ui/button';
-import { TileList, TilesPage } from '@/shared/components/tiles-page';
+import { TilesPage } from '@/shared/components/tiles-page';
 import { usePageTitle } from '@/shared/hooks/usePageTitle';
 import { useObjectSchemaDtosByConnectionIds } from '@/features/objects/hooks/useObjectSchemas';
 import { ObjectModelConnectionSelector } from '@/features/objects/components/ObjectModelConnectionSelector';
@@ -88,7 +88,11 @@ export function ReportPage() {
     objectModelSchemaConnectionIds
   );
 
-  const { data: existingReport, isFetching } = useReport(reportId);
+  const {
+    data: existingReport,
+    isPending: reportLoading,
+    isPlaceholderData: reportShowingPlaceholder,
+  } = useReport(reportId);
   const schemas = selectedConnectionId
     ? (schemasByConnectionId[selectedConnectionId] ?? [])
     : [];
@@ -291,14 +295,15 @@ export function ReportPage() {
   // as a blank canvas.
   const awaitingDefinition =
     isExisting &&
-    (isFetching || !existingReport || definition === EMPTY_DEFINITION);
+    (reportLoading ||
+      reportShowingPlaceholder ||
+      !existingReport ||
+      definition === EMPTY_DEFINITION);
 
   if (awaitingDefinition) {
     return (
-      <TilesPage kicker="Reports" title="Loading report">
-        <TileList>
-          <div className="h-96 animate-pulse rounded-lg bg-muted/30" />
-        </TileList>
+      <TilesPage kicker="Reports" title="Loading report…">
+        <ReportSkeleton />
       </TilesPage>
     );
   }
@@ -544,6 +549,36 @@ export function ReportPage() {
         <p className="mt-3 text-sm text-destructive">{saveError}</p>
       ) : null}
     </TilesPage>
+  );
+}
+
+/** Report-shaped loading placeholder shown while the definition loads, so
+ *  opening a report reads as "a report is loading" rather than a blank slab. */
+function ReportSkeleton() {
+  return (
+    <div className="space-y-6">
+      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+        {Array.from({ length: 4 }).map((_, index) => (
+          <div
+            key={index}
+            className="h-24 animate-pulse rounded-lg border bg-muted/30"
+          />
+        ))}
+      </div>
+      <div className="h-72 animate-pulse rounded-lg border bg-muted/30" />
+      <div className="overflow-hidden rounded-lg border">
+        <div className="h-9 animate-pulse bg-muted/40" />
+        <div className="divide-y">
+          {Array.from({ length: 6 }).map((_, index) => (
+            <div key={index} className="flex items-center gap-4 px-3 py-2.5">
+              <div className="h-3 w-1/4 animate-pulse rounded bg-muted/40" />
+              <div className="h-3 w-1/3 animate-pulse rounded bg-muted/40" />
+              <div className="ml-auto h-3 w-16 animate-pulse rounded bg-muted/40" />
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
   );
 }
 

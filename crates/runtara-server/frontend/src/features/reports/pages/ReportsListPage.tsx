@@ -18,7 +18,7 @@ import { ReportDeleteButton } from '../components/ReportDeleteButton';
 export function ReportsListPage() {
   usePageTitle('Reports');
 
-  const { data: reports = [], isFetching, isError, error } = useReports();
+  const { data: reports = [], isPending, isError, error } = useReports();
 
   return (
     <TilesPage
@@ -33,7 +33,7 @@ export function ReportsListPage() {
         </Link>
       }
     >
-      {isFetching ? (
+      {isPending ? (
         <div className="rounded-lg border divide-y">
           {[...Array(5)].map((_, index) => (
             <div key={index} className="flex items-center gap-4 px-3 py-2.5">
