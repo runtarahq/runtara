@@ -699,9 +699,15 @@ Current remaining action items:
   behavior or direct mode intentionally becomes the first implementation. The
   current Rust `EmbedWorkflow` codegen appears to parse the field without
   enforcing a deadline.
-- Decide whether Split and `EmbedWorkflow` timeout should follow the precedent
-  set by While timeout (direct mode enforcing the documented "if exceeded, step
-  fails" behavior that generated Rust parses but ignores), or stay gated.
+- Apply the While-timeout precedent to `Split.timeout`: a loop-based deadline
+  enforced between items. Unlike While, Split timeout must route as a *hard*
+  failure past the retry loop and any `dontStopOnFailed` per-item aggregation to
+  the Split's outer failure target, so the branch-depth math needs care and
+  dedicated retry+timeout and dontStopOnFailed+timeout coverage before enabling.
+- `Agent`/`EmbedWorkflow` timeout is not cleanly enforceable in the synchronous
+  direct model (a running `capabilities.invoke` / inline child run cannot be
+  preempted mid-call), so leaving it gated is defensible rather than a defect to
+  fix; revisit only if these gain an async/cancellable invoke path.
 - Close Agent hardening gaps: timeout/compensation policy, retry/failure
   differential tests, and long-running cancellation coverage.
 - Start Phase 12 AiAgent support only after the shared Agent/runtime durability
