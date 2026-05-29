@@ -175,8 +175,8 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   harness now also compares custom-event payloads for `Log` workflows and
   `/failed` plus `workflow_error` payloads for terminal `Error` workflows,
   normalizing timestamp fields before comparison. It also captures and compares
-  durable `/sleep` and `/checkpoint` requests, with the first durable Delay
-  fixture included in the strict A/B suite.
+  durable `/sleep` and `/checkpoint` requests, with durable Delay plus fresh
+  and cached durable Agent fixtures included in the strict A/B suite.
 - `tests/direct_wasm_execute.rs` now provides gated direct execution smoke
   tests. With `RUNTARA_RUN_DIRECT_WASM_E2E=1`, it compiles and statically
   composes the simple `Finish` fixture plus flat and nested `Conditional`
@@ -2024,15 +2024,17 @@ Current status:
   failure/event parity for terminal `Error` workflows, with timestamp fields
   normalized out of the comparison.
 - The strict A/B harness now captures durable sleep/checkpoint requests and
-  includes durable Delay and durable Agent fixtures. Delay diffs completion
-  output plus `/sleep` traffic exactly. Agent diffs completion output,
-  checkpoint ordering, and checkpoint bytes while normalizing the compiler-owned
-  checkpoint id prefix down to the stable
-  `agent::<agentId>::<capabilityId>::<stepId>` key base.
-- Cached durable Agent replay and exact cross-compiler checkpoint id compatibility
-  remain pending. Generated Rust currently wraps Agent checkpoint ids with the
-  resilient function/workflow-instance prefix, while direct artifacts use the
-  direct stdlib key shape.
+  includes durable Delay plus fresh and cached durable Agent fixtures. Delay
+  diffs completion output plus `/sleep` traffic exactly. Agent diffs completion
+  output, checkpoint ordering, and checkpoint bytes while normalizing the
+  compiler-owned checkpoint id prefix down to the stable
+  `agent::<agentId>::<capabilityId>::<stepId>` key base. Cached Agent replay
+  preloads that normalized key and verifies both artifacts return the cached
+  output with only the read-only checkpoint lookup.
+- Exact cross-compiler checkpoint id compatibility remains pending. Generated
+  Rust currently wraps Agent checkpoint ids with the resilient
+  function/workflow-instance prefix, while direct artifacts use the direct
+  stdlib key shape.
 
 ### Phase 14: Controlled Production Enablement
 

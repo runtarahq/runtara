@@ -3,11 +3,12 @@
 //! Gated by `RUNTARA_RUN_DIRECT_WASM_E2E=1` because it needs cargo-component,
 //! prebuilt shared workflow components, `wac`, and `wasmtime`.
 
+use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::{Arc, mpsc};
+use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::Duration;
 
@@ -29,6 +30,7 @@ const EDGE_CONDITION_PRIORITY: &str = include_str!("fixtures/edge_condition_prio
 const LOG_ALL_LEVELS: &str = include_str!("fixtures/log_all_levels.json");
 const ERROR_DIRECT_SIMPLE: &str = include_str!("fixtures/error_direct_simple.json");
 const DELAY_DYNAMIC: &str = include_str!("fixtures/delay_dynamic.json");
+const AGENT_CACHE_KEY: &str = "agent::utils::return-input::agent";
 const AGENT_RETURN_INPUT: &str = r#"{
   "durable": true,
   "steps": {
@@ -107,6 +109,18 @@ struct CapturedRun {
     checkpoints: Vec<CheckpointRequest>,
     status_success: bool,
     stderr: String,
+}
+
+struct ServerState {
+    checkpoints: Mutex<HashMap<String, Vec<u8>>>,
+}
+
+impl ServerState {
+    fn new(preloaded_checkpoints: Vec<(String, Vec<u8>)>) -> Self {
+        Self {
+            checkpoints: Mutex::new(preloaded_checkpoints.into_iter().collect()),
+        }
+    }
 }
 
 struct DirectArtifact {
@@ -327,6 +341,7 @@ fn read_chunked_body(reader: &mut BufReader<std::net::TcpStream>) -> std::io::Re
 fn handle_request(
     stream: &mut std::net::TcpStream,
     sink: &mpsc::Sender<CapturedMessage>,
+    server_state: &ServerState,
     workflow_input: &[u8],
 ) -> std::io::Result<bool> {
     stream.set_read_timeout(Some(Duration::from_secs(10)))?;
@@ -380,7 +395,7 @@ fn handle_request(
         buf
     };
 
-    let (status, response_json) = route(&method, &path, &body, sink, workflow_input);
+    let (status, response_json) = route(&method, &path, &body, sink, server_state, workflow_input);
     let response_bytes = response_json.to_string();
     let response = format!(
         "HTTP/1.1 {status} OK\r\nContent-Type: application/json\r\nContent-Length: {len}\r\nConnection: keep-alive\r\n\r\n{body}",
@@ -398,6 +413,7 @@ fn route(
     path: &str,
     body: &[u8],
     sink: &mpsc::Sender<CapturedMessage>,
+    server_state: &ServerState,
     workflow_input: &[u8],
 ) -> (u16, Value) {
     let path = path.split('?').next().unwrap_or(path);
@@ -429,18 +445,7 @@ fn route(
                 capture_event(body, sink);
                 return (200, serde_json::json!({"success": true}));
             }
-            ("POST", "checkpoint") => {
-                capture_checkpoint(body, sink);
-                return (
-                    200,
-                    serde_json::json!({
-                        "found": false,
-                        "state": null,
-                        "signal": null,
-                        "custom_signal": null,
-                    }),
-                );
-            }
+            ("POST", "checkpoint") => return checkpoint_response(body, sink, server_state),
             ("POST", "sleep") => {
                 capture_sleep(body, sink);
                 return (200, serde_json::json!({"success": true}));
@@ -450,6 +455,73 @@ fn route(
     }
 
     (200, serde_json::json!({"success": true}))
+}
+
+fn checkpoint_response(
+    body: &[u8],
+    sink: &mpsc::Sender<CapturedMessage>,
+    server_state: &ServerState,
+) -> (u16, Value) {
+    let Ok(parsed) = serde_json::from_slice::<Value>(body) else {
+        return (
+            400,
+            serde_json::json!({
+                "found": false,
+                "state": null,
+                "signal": null,
+                "custom_signal": null,
+            }),
+        );
+    };
+
+    let checkpoint_id = parsed
+        .get("checkpoint_id")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let state = parsed
+        .get("state")
+        .and_then(Value::as_str)
+        .and_then(|b64| base64::engine::general_purpose::STANDARD.decode(b64).ok())
+        .unwrap_or_default();
+    let _ = sink.send(CapturedMessage::Checkpoint(CheckpointRequest {
+        checkpoint_id: checkpoint_id.clone(),
+        state: state.clone(),
+    }));
+
+    let mut checkpoints = server_state
+        .checkpoints
+        .lock()
+        .expect("checkpoint state lock");
+    if let Some(existing) = checkpoints
+        .get(&checkpoint_id)
+        .or_else(|| checkpoints.get(&normalized_checkpoint_id(&checkpoint_id)))
+    {
+        return (
+            200,
+            serde_json::json!({
+                "found": true,
+                "state": base64::engine::general_purpose::STANDARD.encode(existing),
+                "signal": null,
+                "custom_signal": null,
+            }),
+        );
+    }
+
+    if !state.is_empty() {
+        checkpoints.insert(checkpoint_id.clone(), state.clone());
+        checkpoints.insert(normalized_checkpoint_id(&checkpoint_id), state);
+    }
+
+    (
+        200,
+        serde_json::json!({
+            "found": false,
+            "state": null,
+            "signal": null,
+            "custom_signal": null,
+        }),
+    )
 }
 
 fn capture_completed(body: &[u8], sink: &mpsc::Sender<CapturedMessage>) {
@@ -508,26 +580,11 @@ fn capture_sleep(body: &[u8], sink: &mpsc::Sender<CapturedMessage>) {
     }
 }
 
-fn capture_checkpoint(body: &[u8], sink: &mpsc::Sender<CapturedMessage>) {
-    if let Ok(parsed) = serde_json::from_slice::<Value>(body)
-        && let Some(checkpoint_id) = parsed.get("checkpoint_id").and_then(Value::as_str)
-    {
-        let state = parsed
-            .get("state")
-            .and_then(Value::as_str)
-            .and_then(|b64| base64::engine::general_purpose::STANDARD.decode(b64).ok())
-            .unwrap_or_default();
-        let _ = sink.send(CapturedMessage::Checkpoint(CheckpointRequest {
-            checkpoint_id: checkpoint_id.to_string(),
-            state,
-        }));
-    }
-}
-
 fn serve(
     listener: TcpListener,
     sink: mpsc::Sender<CapturedMessage>,
     stop: mpsc::Receiver<()>,
+    server_state: Arc<ServerState>,
     workflow_input: Arc<Vec<u8>>,
 ) {
     listener
@@ -540,10 +597,11 @@ fn serve(
         match listener.accept() {
             Ok((mut stream, _)) => {
                 let sink = sink.clone();
+                let server_state = server_state.clone();
                 let workflow_input = workflow_input.clone();
                 thread::spawn(move || {
                     while let Ok(true) =
-                        handle_request(&mut stream, &sink, workflow_input.as_slice())
+                        handle_request(&mut stream, &sink, &server_state, workflow_input.as_slice())
                     {
                         // Keep serving the same connection while the SDK reuses it.
                     }
@@ -558,12 +616,28 @@ fn serve(
 }
 
 fn execute_artifact(binary_path: &Path, instance_id: &str, workflow_input: &[u8]) -> CapturedRun {
+    execute_artifact_with_preloaded_checkpoints(
+        binary_path,
+        instance_id,
+        workflow_input,
+        Vec::new(),
+    )
+}
+
+fn execute_artifact_with_preloaded_checkpoints(
+    binary_path: &Path,
+    instance_id: &str,
+    workflow_input: &[u8],
+    preloaded_checkpoints: Vec<(String, Vec<u8>)>,
+) -> CapturedRun {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
     let addr = listener.local_addr().expect("local_addr");
     let (capture_tx, capture_rx) = mpsc::channel::<CapturedMessage>();
     let (stop_tx, stop_rx) = mpsc::channel::<()>();
+    let server_state = Arc::new(ServerState::new(preloaded_checkpoints));
     let workflow_input = Arc::new(workflow_input.to_vec());
-    let server_handle = thread::spawn(move || serve(listener, capture_tx, stop_rx, workflow_input));
+    let server_handle =
+        thread::spawn(move || serve(listener, capture_tx, stop_rx, server_state, workflow_input));
 
     let output = Command::new(wasmtime_binary())
         .arg("run")
@@ -854,6 +928,52 @@ fn direct_wasm_matches_components_execution_for_supported_json_fixtures() {
             assert_success_parity(case.name, input_index, &components, &direct);
         }
     }
+}
+
+#[test]
+fn direct_wasm_matches_components_cached_durable_agent_checkpoint_replay() {
+    let Some(components_dir) = direct_ab_components_dir() else {
+        return;
+    };
+    let _data = setup_data_dir();
+
+    let components_artifact =
+        compile_components_artifact("durable-agent-cached", AGENT_RETURN_INPUT);
+    let direct_artifact =
+        compile_direct_artifact(&components_dir, "durable-agent-cached", AGENT_RETURN_INPUT);
+    assert_eq!(
+        direct_artifact.compiler_mode,
+        WorkflowCompilerMode::DirectWasm
+    );
+
+    let workflow_input = br#"{"value":"fresh-agent"}"#;
+    let components_input = components_sdk_input(workflow_input);
+    let cached_agent_output = br#""cached-agent""#.to_vec();
+    let components = execute_artifact_with_preloaded_checkpoints(
+        &components_artifact,
+        "ab-components-durable-agent-cached",
+        &components_input,
+        vec![(AGENT_CACHE_KEY.to_string(), cached_agent_output.clone())],
+    );
+    let direct = execute_artifact_with_preloaded_checkpoints(
+        &direct_artifact.path,
+        "ab-direct-durable-agent-cached",
+        workflow_input,
+        vec![(AGENT_CACHE_KEY.to_string(), cached_agent_output)],
+    );
+
+    assert_success_parity("durable-agent-cached", 0, &components, &direct);
+
+    let expected_output = serde_json::json!({ "result": "cached-agent" });
+    assert_eq!(components.output_json.as_ref(), Some(&expected_output));
+    assert_eq!(direct.output_json.as_ref(), Some(&expected_output));
+
+    let expected_lookup = vec![(AGENT_CACHE_KEY.to_string(), Vec::new())];
+    assert_eq!(
+        normalized_checkpoints(&components.checkpoints),
+        expected_lookup
+    );
+    assert_eq!(normalized_checkpoints(&direct.checkpoints), expected_lookup);
 }
 
 #[test]
