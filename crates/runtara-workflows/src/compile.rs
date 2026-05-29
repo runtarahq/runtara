@@ -211,7 +211,26 @@ impl std::fmt::Debug for CompilationInput {
     }
 }
 
-/// Result of native binary compilation.
+/// Compiler path used to produce a workflow artifact.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkflowCompilerMode {
+    /// Rust codegen plus cargo-component and static WAC composition.
+    ComponentsCodegen,
+    /// Direct WebAssembly emitter plus static WAC composition.
+    DirectWasm,
+}
+
+impl WorkflowCompilerMode {
+    /// Stable metadata value for registration and diagnostics.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ComponentsCodegen => "rust-codegen-components",
+            Self::DirectWasm => "direct-wasm",
+        }
+    }
+}
+
+/// Result of workflow artifact compilation.
 #[derive(Debug)]
 pub struct NativeCompilationResult {
     /// Path to the compiled binary (`workflow.wasm`).
@@ -236,6 +255,8 @@ pub struct NativeCompilationResult {
     /// Callers should include these in image metadata so the environment
     /// can enrich stored input with defaults at instance start time.
     pub default_variables: Value,
+    /// Compiler path that produced the artifact.
+    pub compiler_mode: WorkflowCompilerMode,
 }
 
 /// Compile a workflow into a composed `workflow.wasm`. Always routes through
@@ -306,6 +327,7 @@ pub fn compile_workflow_direct(
         has_side_effects,
         child_dependencies,
         default_variables,
+        compiler_mode: WorkflowCompilerMode::DirectWasm,
     })
 }
 
@@ -409,6 +431,15 @@ mod tests {
             TEMPLATE_MAJOR_VERSION.chars().all(|c| c.is_ascii_digit()),
             "TEMPLATE_MAJOR_VERSION should be just digits, got `{TEMPLATE_MAJOR_VERSION}`"
         );
+    }
+
+    #[test]
+    fn workflow_compiler_mode_metadata_values_are_stable() {
+        assert_eq!(
+            WorkflowCompilerMode::ComponentsCodegen.as_str(),
+            "rust-codegen-components"
+        );
+        assert_eq!(WorkflowCompilerMode::DirectWasm.as_str(), "direct-wasm");
     }
 
     #[test]

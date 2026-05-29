@@ -19,7 +19,8 @@ use runtara_workflows::direct_wasm::{
     compile_direct_workflow_composed,
 };
 use runtara_workflows::{
-    CompilationInput, DirectWorkflowCompileOptions, ExecutionGraph, compile_workflow_direct,
+    CompilationInput, DirectWorkflowCompileOptions, ExecutionGraph, WorkflowCompilerMode,
+    compile_workflow_direct,
 };
 use serde_json::Value;
 
@@ -767,6 +768,7 @@ fn direct_compile_entry_returns_native_result_shape_when_components_available() 
     assert!(!compiled.has_side_effects);
     assert!(compiled.child_dependencies.is_empty());
     assert_eq!(compiled.default_variables, serde_json::json!({}));
+    assert_eq!(compiled.compiler_mode, WorkflowCompilerMode::DirectWasm);
 
     let metadata: DirectArtifactMetadata = serde_json::from_slice(
         &fs::read(compiled.build_dir.join("artifact-metadata.json")).expect("artifact metadata"),

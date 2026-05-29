@@ -71,6 +71,26 @@ fn image_cache_hits(image: &ImageSummary, source_checksum: &str) -> bool {
         && image_template_major(image) == Some(runtara_workflows::TEMPLATE_MAJOR_VERSION)
 }
 
+fn workflow_image_metadata(
+    compilation_result: &NativeCompilationResult,
+    workflow_id: &str,
+    version: u32,
+    source_checksum: &str,
+) -> serde_json::Value {
+    serde_json::json!({
+        "variables": compilation_result.default_variables,
+        "workflow": {
+            "workflowId": workflow_id,
+            "version": version,
+            "sourceChecksum": source_checksum,
+            // Major version of `runtara-workflows`. Cache miss on major
+            // bump invalidates every workflow on next deploy.
+            "templateMajor": runtara_workflows::TEMPLATE_MAJOR_VERSION,
+            "compilerMode": compilation_result.compiler_mode.as_str(),
+        }
+    })
+}
+
 /// Disabled-by-default direct WASM compilation settings.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DirectCompilationSettings {
@@ -958,17 +978,12 @@ impl CompilationService {
             .with_description(format!("Workflow {} version {}", workflow_id, version))
             .with_runner_type(RunnerType::Wasm)
             .with_sha256(&compilation_result.binary_checksum)
-            .with_metadata(serde_json::json!({
-                "variables": compilation_result.default_variables,
-                "workflow": {
-                    "workflowId": workflow_id,
-                    "version": version,
-                    "sourceChecksum": source_checksum,
-                    // Major version of `runtara-workflows`. Cache miss on major
-                    // bump invalidates every workflow on next deploy.
-                    "templateMajor": runtara_workflows::TEMPLATE_MAJOR_VERSION,
-                }
-            }));
+            .with_metadata(workflow_image_metadata(
+                compilation_result,
+                workflow_id,
+                version,
+                source_checksum,
+            ));
 
         // Open the binary file for streaming
         let file = tokio::fs::File::open(&binary_path).await.map_err(|e| {
@@ -1034,6 +1049,7 @@ impl std::error::Error for ServiceError {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use runtara_workflows::WorkflowCompilerMode;
 
     // =========================================================================
     // ServiceError Display tests
@@ -1143,6 +1159,33 @@ mod tests {
 
         assert_eq!(direct_compile_fallback_reason(&unsupported), "unsupported");
         assert_eq!(direct_compile_fallback_reason(&other), "direct-error");
+    }
+
+    #[test]
+    fn workflow_image_metadata_records_compiler_mode() {
+        let result = NativeCompilationResult {
+            binary_path: "/tmp/workflow.wasm".into(),
+            binary_size: 123,
+            binary_checksum: "abc".to_string(),
+            build_dir: "/tmp/build".into(),
+            package_size: 99,
+            has_side_effects: false,
+            child_dependencies: vec![],
+            default_variables: serde_json::json!({ "limit": 5 }),
+            compiler_mode: WorkflowCompilerMode::DirectWasm,
+        };
+
+        let metadata = workflow_image_metadata(&result, "workflow-a", 7, "source-sha256");
+
+        assert_eq!(metadata["variables"], serde_json::json!({ "limit": 5 }));
+        assert_eq!(metadata["workflow"]["workflowId"], "workflow-a");
+        assert_eq!(metadata["workflow"]["version"], 7);
+        assert_eq!(metadata["workflow"]["sourceChecksum"], "source-sha256");
+        assert_eq!(
+            metadata["workflow"]["templateMajor"],
+            runtara_workflows::TEMPLATE_MAJOR_VERSION
+        );
+        assert_eq!(metadata["workflow"]["compilerMode"], "direct-wasm");
     }
 
     fn direct_skip_input(tenant_id: &str, workflow_id: &str) -> CompilationInput {

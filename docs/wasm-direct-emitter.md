@@ -134,6 +134,10 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   reason, so rollout dashboards can distinguish success, skipped allowlists,
   unsupported fallback, missing component configuration, and direct
   infrastructure errors.
+- Registered workflow image metadata now records `workflow.compilerMode`
+  (`direct-wasm` or `rust-codegen-components`) so operators can inspect which
+  compiler produced a runnable artifact even though both paths register the
+  same `workflow.wasm` runtime shape.
 - `tests/direct_wasm_execute.rs` now provides gated direct execution smoke
   tests. With `RUNTARA_RUN_DIRECT_WASM_E2E=1`, it compiles and statically
   composes the simple `Finish` fixture plus flat and nested `Conditional`
@@ -2006,6 +2010,9 @@ Current status:
   allowlists can restrict rollout.
 - Direct compile outcome/duration metrics are emitted with outcome/reason
   labels. Richer operator-visible fallback diagnostics remain pending.
+- Registered image metadata now includes compiler mode for direct-vs-fallback
+  provenance. Cache matching still uses source checksum plus template major;
+  mode-aware cache policy remains a later rollout decision.
 
 ### Phase 15: Default Direct Mode
 

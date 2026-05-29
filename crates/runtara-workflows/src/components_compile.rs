@@ -33,7 +33,7 @@ use crate::codegen::ast::context::EmitContext;
 use crate::codegen::components::{self, AgentRequirement, CodegenArtifacts};
 use crate::compile::{
     ChildDependency, ChildWorkflowInput, CompilationInput, NativeCompilationResult,
-    ProgressCallback,
+    ProgressCallback, WorkflowCompilerMode,
 };
 
 /// Fire a progress event if a callback is attached. Cheap no-op otherwise.
@@ -185,6 +185,7 @@ pub fn compile_workflow_components(input: CompilationInput) -> io::Result<Native
         child_dependencies,
         default_variables: serde_json::to_value(&execution_graph.variables)
             .unwrap_or(serde_json::Value::Null),
+        compiler_mode: WorkflowCompilerMode::ComponentsCodegen,
     })
 }
 
