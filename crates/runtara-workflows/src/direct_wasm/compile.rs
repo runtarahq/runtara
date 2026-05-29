@@ -231,6 +231,8 @@ pub struct DirectArtifactMetadata {
     pub direct_abi_version: u32,
     /// Direct workflow manifest schema version.
     pub manifest_version: u32,
+    /// Major version of the workflow compiler/template.
+    pub template_major_version: String,
     /// SHA-256 checksum embedded in the direct manifest.
     pub manifest_checksum: String,
     /// SHA-256 checksum of `support-report.json`.
@@ -509,6 +511,7 @@ fn initial_artifact_metadata(
         workflow_version,
         direct_abi_version: DIRECT_WORKFLOW_ABI_VERSION,
         manifest_version: DIRECT_WORKFLOW_MANIFEST_VERSION,
+        template_major_version: crate::compile::TEMPLATE_MAJOR_VERSION.to_string(),
         manifest_checksum: manifest_checksum.to_string(),
         support_report_checksum: support_report_checksum.to_string(),
         workflow_logic_wasm: DirectArtifactFileMetadata {
@@ -7126,6 +7129,10 @@ mod tests {
         );
         assert_eq!(metadata.workflow_id, "simple/workflow");
         assert_eq!(metadata.workflow_version, 7);
+        assert_eq!(
+            metadata.template_major_version,
+            crate::compile::TEMPLATE_MAJOR_VERSION
+        );
         assert_eq!(metadata.manifest_checksum, result.manifest_checksum);
         assert_eq!(
             metadata.workflow_logic_wasm.sha256,
