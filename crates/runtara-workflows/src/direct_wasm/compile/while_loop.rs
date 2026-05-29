@@ -5,8 +5,8 @@
 use wasm_encoder::{BlockType, Function as WasmFunction, Instruction};
 
 use super::abi::{
-    load_retptr_list, push_retptr_arg, push_retptr_i32_load, push_retptr_u8_load,
-    push_variables_args, return_if_retptr_error,
+    emit_retptr_error_or_return, load_retptr_list, push_retptr_arg, push_retptr_i32_load,
+    push_retptr_u8_load, push_variables_args,
 };
 use super::debug::emit_step_debug_event;
 use super::dispatcher::emit_run_plan_mapping;
@@ -89,14 +89,26 @@ pub(super) fn emit_while_plan(
     body.instruction(&Instruction::I32Const(while_id as i32));
     push_retptr_arg(body);
     body.instruction(&Instruction::Call(indices.stdlib_while_max_iterations));
-    return_if_retptr_error(body);
+    emit_retptr_error_or_return(
+        body,
+        indices,
+        failure_target,
+        route_ptr_local,
+        route_len_local,
+    );
     push_retptr_i32_load(body, DIRECT_RET_U32_OK_OFFSET);
     body.instruction(&Instruction::LocalSet(DIRECT_WHILE_MAX_ITERATIONS_LOCAL));
 
     body.instruction(&Instruction::I32Const(while_id as i32));
     push_retptr_arg(body);
     body.instruction(&Instruction::Call(indices.stdlib_while_initial_state));
-    return_if_retptr_error(body);
+    emit_retptr_error_or_return(
+        body,
+        indices,
+        failure_target,
+        route_ptr_local,
+        route_len_local,
+    );
     load_retptr_list(
         body,
         DIRECT_WHILE_STATE_PTR_LOCAL,
@@ -107,6 +119,7 @@ pub(super) fn emit_while_plan(
     body.instruction(&Instruction::LocalSet(DIRECT_WHILE_INDEX_LOCAL));
     body.instruction(&Instruction::Block(BlockType::Empty));
     body.instruction(&Instruction::Loop(BlockType::Empty));
+    let loop_failure_target = failure_target.map(|target| target.nested(2));
     body.instruction(&Instruction::LocalGet(DIRECT_WHILE_INDEX_LOCAL));
     body.instruction(&Instruction::LocalGet(DIRECT_WHILE_MAX_ITERATIONS_LOCAL));
     body.instruction(&Instruction::I32GeU);
@@ -119,7 +132,13 @@ pub(super) fn emit_while_plan(
     body.instruction(&Instruction::LocalGet(DIRECT_WHILE_STATE_LEN_LOCAL));
     push_retptr_arg(body);
     body.instruction(&Instruction::Call(indices.stdlib_while_condition_source));
-    return_if_retptr_error(body);
+    emit_retptr_error_or_return(
+        body,
+        indices,
+        loop_failure_target,
+        route_ptr_local,
+        route_len_local,
+    );
     load_retptr_list(body, source_ptr_local, source_len_local);
 
     body.instruction(&Instruction::I32Const(while_id as i32));
@@ -127,14 +146,26 @@ pub(super) fn emit_while_plan(
     body.instruction(&Instruction::LocalGet(source_len_local));
     push_retptr_arg(body);
     body.instruction(&Instruction::Call(indices.stdlib_while_condition));
-    return_if_retptr_error(body);
+    emit_retptr_error_or_return(
+        body,
+        indices,
+        loop_failure_target,
+        route_ptr_local,
+        route_len_local,
+    );
     push_retptr_u8_load(body, DIRECT_RET_BOOL_OK_OFFSET);
     body.instruction(&Instruction::I32Eqz);
     body.instruction(&Instruction::BrIf(1));
 
     push_retptr_arg(body);
     body.instruction(&Instruction::Call(indices.runtime_is_cancelled));
-    return_if_retptr_error(body);
+    emit_retptr_error_or_return(
+        body,
+        indices,
+        loop_failure_target,
+        route_ptr_local,
+        route_len_local,
+    );
     push_retptr_u8_load(body, DIRECT_RET_BOOL_OK_OFFSET);
     body.instruction(&Instruction::If(BlockType::Empty));
     body.instruction(&Instruction::I32Const(0));
@@ -147,7 +178,13 @@ pub(super) fn emit_while_plan(
     body.instruction(&Instruction::LocalGet(DIRECT_WHILE_STATE_LEN_LOCAL));
     push_retptr_arg(body);
     body.instruction(&Instruction::Call(indices.stdlib_while_iteration_variables));
-    return_if_retptr_error(body);
+    emit_retptr_error_or_return(
+        body,
+        indices,
+        loop_failure_target,
+        route_ptr_local,
+        route_len_local,
+    );
     load_retptr_list(
         body,
         DIRECT_WHILE_VARIABLES_PTR_LOCAL,
@@ -173,7 +210,7 @@ pub(super) fn emit_while_plan(
         steps_len_local,
         source_ptr_local,
         source_len_local,
-        failure_target,
+        loop_failure_target,
     );
 
     push_while_frame(body);
@@ -196,17 +233,29 @@ pub(super) fn emit_while_plan(
         route_len_local,
         workflow_log_kind,
         workflow_error_kind,
-        failure_target,
+        loop_failure_target,
     );
     pop_while_frame(body);
 
     push_retptr_arg(body);
     body.instruction(&Instruction::Call(indices.runtime_heartbeat));
-    return_if_retptr_error(body);
+    emit_retptr_error_or_return(
+        body,
+        indices,
+        loop_failure_target,
+        route_ptr_local,
+        route_len_local,
+    );
 
     push_retptr_arg(body);
     body.instruction(&Instruction::Call(indices.runtime_check_signals));
-    return_if_retptr_error(body);
+    emit_retptr_error_or_return(
+        body,
+        indices,
+        loop_failure_target,
+        route_ptr_local,
+        route_len_local,
+    );
     push_retptr_u8_load(body, DIRECT_RET_BOOL_OK_OFFSET);
     body.instruction(&Instruction::If(BlockType::Empty));
     body.instruction(&Instruction::I32Const(0));
@@ -220,7 +269,13 @@ pub(super) fn emit_while_plan(
     body.instruction(&Instruction::LocalGet(output_len_local));
     push_retptr_arg(body);
     body.instruction(&Instruction::Call(indices.stdlib_while_advance_state));
-    return_if_retptr_error(body);
+    emit_retptr_error_or_return(
+        body,
+        indices,
+        loop_failure_target,
+        route_ptr_local,
+        route_len_local,
+    );
     load_retptr_list(
         body,
         DIRECT_WHILE_STATE_PTR_LOCAL,
@@ -242,7 +297,13 @@ pub(super) fn emit_while_plan(
     body.instruction(&Instruction::LocalGet(DIRECT_WHILE_STATE_LEN_LOCAL));
     push_retptr_arg(body);
     body.instruction(&Instruction::Call(indices.stdlib_while_output));
-    return_if_retptr_error(body);
+    emit_retptr_error_or_return(
+        body,
+        indices,
+        failure_target,
+        route_ptr_local,
+        route_len_local,
+    );
     load_retptr_list(body, steps_ptr_local, steps_len_local);
 
     pop_while_frame(body);

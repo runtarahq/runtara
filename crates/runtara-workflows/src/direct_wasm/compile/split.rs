@@ -5,8 +5,8 @@
 use wasm_encoder::{BlockType, Function as WasmFunction, Instruction};
 
 use super::abi::{
-    emit_retptr_error_target_or_return, load_retptr_list, load_retptr_tag, push_retptr_arg,
-    push_retptr_i32_load, return_if_retptr_error,
+    emit_retptr_error_or_return, emit_retptr_error_target_or_return, load_retptr_list,
+    load_retptr_tag, push_retptr_arg, push_retptr_i32_load, return_if_retptr_error,
 };
 use super::checkpoint::{emit_checkpoint_lookup, emit_checkpoint_save};
 use super::debug::emit_step_debug_event;
@@ -15,7 +15,12 @@ use super::embed_workflow::emit_embed_workflow_child_error_and_continue;
 use super::mapping::emit_build_source;
 use super::wait::emit_wait_on_wait_error_and_fail;
 use super::{
-    DIRECT_RET_U32_OK_OFFSET, DIRECT_SPLIT_COUNT_LOCAL, DIRECT_SPLIT_INDEX_LOCAL,
+    DIRECT_RET_U32_OK_OFFSET, DIRECT_SPLIT_COUNT_LOCAL, DIRECT_SPLIT_FAILURE_COUNT_LOCAL,
+    DIRECT_SPLIT_FAILURE_INDEX_LOCAL, DIRECT_SPLIT_FAILURE_ITEM_LEN_LOCAL,
+    DIRECT_SPLIT_FAILURE_ITEM_PTR_LOCAL, DIRECT_SPLIT_FAILURE_PARENT_SOURCE_LEN_LOCAL,
+    DIRECT_SPLIT_FAILURE_PARENT_SOURCE_PTR_LOCAL, DIRECT_SPLIT_FAILURE_RESULTS_LEN_LOCAL,
+    DIRECT_SPLIT_FAILURE_RESULTS_PTR_LOCAL, DIRECT_SPLIT_FAILURE_VARIABLES_LEN_LOCAL,
+    DIRECT_SPLIT_FAILURE_VARIABLES_PTR_LOCAL, DIRECT_SPLIT_INDEX_LOCAL,
     DIRECT_SPLIT_ITEM_LEN_LOCAL, DIRECT_SPLIT_ITEM_PTR_LOCAL, DIRECT_SPLIT_PARENT_SOURCE_LEN_LOCAL,
     DIRECT_SPLIT_PARENT_SOURCE_PTR_LOCAL, DIRECT_SPLIT_RESULTS_LEN_LOCAL,
     DIRECT_SPLIT_RESULTS_PTR_LOCAL, DIRECT_SPLIT_VARIABLES_LEN_LOCAL,
@@ -47,6 +52,126 @@ fn pop_split_frame(body: &mut WasmFunction) {
     body.instruction(&Instruction::LocalSet(DIRECT_SPLIT_ITEM_PTR_LOCAL));
     body.instruction(&Instruction::LocalSet(DIRECT_SPLIT_INDEX_LOCAL));
     body.instruction(&Instruction::LocalSet(DIRECT_SPLIT_COUNT_LOCAL));
+}
+
+fn push_split_failure_frame(body: &mut WasmFunction) {
+    body.instruction(&Instruction::LocalGet(DIRECT_SPLIT_FAILURE_COUNT_LOCAL));
+    body.instruction(&Instruction::LocalGet(DIRECT_SPLIT_FAILURE_INDEX_LOCAL));
+    body.instruction(&Instruction::LocalGet(DIRECT_SPLIT_FAILURE_ITEM_PTR_LOCAL));
+    body.instruction(&Instruction::LocalGet(DIRECT_SPLIT_FAILURE_ITEM_LEN_LOCAL));
+    body.instruction(&Instruction::LocalGet(
+        DIRECT_SPLIT_FAILURE_RESULTS_PTR_LOCAL,
+    ));
+    body.instruction(&Instruction::LocalGet(
+        DIRECT_SPLIT_FAILURE_RESULTS_LEN_LOCAL,
+    ));
+    body.instruction(&Instruction::LocalGet(
+        DIRECT_SPLIT_FAILURE_PARENT_SOURCE_PTR_LOCAL,
+    ));
+    body.instruction(&Instruction::LocalGet(
+        DIRECT_SPLIT_FAILURE_PARENT_SOURCE_LEN_LOCAL,
+    ));
+    body.instruction(&Instruction::LocalGet(
+        DIRECT_SPLIT_FAILURE_VARIABLES_PTR_LOCAL,
+    ));
+    body.instruction(&Instruction::LocalGet(
+        DIRECT_SPLIT_FAILURE_VARIABLES_LEN_LOCAL,
+    ));
+}
+
+fn pop_split_failure_frame(body: &mut WasmFunction) {
+    body.instruction(&Instruction::LocalSet(
+        DIRECT_SPLIT_FAILURE_VARIABLES_LEN_LOCAL,
+    ));
+    body.instruction(&Instruction::LocalSet(
+        DIRECT_SPLIT_FAILURE_VARIABLES_PTR_LOCAL,
+    ));
+    body.instruction(&Instruction::LocalSet(
+        DIRECT_SPLIT_FAILURE_PARENT_SOURCE_LEN_LOCAL,
+    ));
+    body.instruction(&Instruction::LocalSet(
+        DIRECT_SPLIT_FAILURE_PARENT_SOURCE_PTR_LOCAL,
+    ));
+    body.instruction(&Instruction::LocalSet(
+        DIRECT_SPLIT_FAILURE_RESULTS_LEN_LOCAL,
+    ));
+    body.instruction(&Instruction::LocalSet(
+        DIRECT_SPLIT_FAILURE_RESULTS_PTR_LOCAL,
+    ));
+    body.instruction(&Instruction::LocalSet(DIRECT_SPLIT_FAILURE_ITEM_LEN_LOCAL));
+    body.instruction(&Instruction::LocalSet(DIRECT_SPLIT_FAILURE_ITEM_PTR_LOCAL));
+    body.instruction(&Instruction::LocalSet(DIRECT_SPLIT_FAILURE_INDEX_LOCAL));
+    body.instruction(&Instruction::LocalSet(DIRECT_SPLIT_FAILURE_COUNT_LOCAL));
+}
+
+fn sync_split_failure_frame(body: &mut WasmFunction) {
+    body.instruction(&Instruction::LocalGet(DIRECT_SPLIT_COUNT_LOCAL));
+    body.instruction(&Instruction::LocalSet(DIRECT_SPLIT_FAILURE_COUNT_LOCAL));
+    body.instruction(&Instruction::LocalGet(DIRECT_SPLIT_INDEX_LOCAL));
+    body.instruction(&Instruction::LocalSet(DIRECT_SPLIT_FAILURE_INDEX_LOCAL));
+    body.instruction(&Instruction::LocalGet(DIRECT_SPLIT_ITEM_PTR_LOCAL));
+    body.instruction(&Instruction::LocalSet(DIRECT_SPLIT_FAILURE_ITEM_PTR_LOCAL));
+    body.instruction(&Instruction::LocalGet(DIRECT_SPLIT_ITEM_LEN_LOCAL));
+    body.instruction(&Instruction::LocalSet(DIRECT_SPLIT_FAILURE_ITEM_LEN_LOCAL));
+    body.instruction(&Instruction::LocalGet(DIRECT_SPLIT_RESULTS_PTR_LOCAL));
+    body.instruction(&Instruction::LocalSet(
+        DIRECT_SPLIT_FAILURE_RESULTS_PTR_LOCAL,
+    ));
+    body.instruction(&Instruction::LocalGet(DIRECT_SPLIT_RESULTS_LEN_LOCAL));
+    body.instruction(&Instruction::LocalSet(
+        DIRECT_SPLIT_FAILURE_RESULTS_LEN_LOCAL,
+    ));
+    body.instruction(&Instruction::LocalGet(DIRECT_SPLIT_PARENT_SOURCE_PTR_LOCAL));
+    body.instruction(&Instruction::LocalSet(
+        DIRECT_SPLIT_FAILURE_PARENT_SOURCE_PTR_LOCAL,
+    ));
+    body.instruction(&Instruction::LocalGet(DIRECT_SPLIT_PARENT_SOURCE_LEN_LOCAL));
+    body.instruction(&Instruction::LocalSet(
+        DIRECT_SPLIT_FAILURE_PARENT_SOURCE_LEN_LOCAL,
+    ));
+    body.instruction(&Instruction::LocalGet(DIRECT_SPLIT_VARIABLES_PTR_LOCAL));
+    body.instruction(&Instruction::LocalSet(
+        DIRECT_SPLIT_FAILURE_VARIABLES_PTR_LOCAL,
+    ));
+    body.instruction(&Instruction::LocalGet(DIRECT_SPLIT_VARIABLES_LEN_LOCAL));
+    body.instruction(&Instruction::LocalSet(
+        DIRECT_SPLIT_FAILURE_VARIABLES_LEN_LOCAL,
+    ));
+}
+
+fn restore_split_frame_from_failure_frame(body: &mut WasmFunction) {
+    body.instruction(&Instruction::LocalGet(DIRECT_SPLIT_FAILURE_COUNT_LOCAL));
+    body.instruction(&Instruction::LocalSet(DIRECT_SPLIT_COUNT_LOCAL));
+    body.instruction(&Instruction::LocalGet(DIRECT_SPLIT_FAILURE_INDEX_LOCAL));
+    body.instruction(&Instruction::LocalSet(DIRECT_SPLIT_INDEX_LOCAL));
+    body.instruction(&Instruction::LocalGet(DIRECT_SPLIT_FAILURE_ITEM_PTR_LOCAL));
+    body.instruction(&Instruction::LocalSet(DIRECT_SPLIT_ITEM_PTR_LOCAL));
+    body.instruction(&Instruction::LocalGet(DIRECT_SPLIT_FAILURE_ITEM_LEN_LOCAL));
+    body.instruction(&Instruction::LocalSet(DIRECT_SPLIT_ITEM_LEN_LOCAL));
+    body.instruction(&Instruction::LocalGet(
+        DIRECT_SPLIT_FAILURE_RESULTS_PTR_LOCAL,
+    ));
+    body.instruction(&Instruction::LocalSet(DIRECT_SPLIT_RESULTS_PTR_LOCAL));
+    body.instruction(&Instruction::LocalGet(
+        DIRECT_SPLIT_FAILURE_RESULTS_LEN_LOCAL,
+    ));
+    body.instruction(&Instruction::LocalSet(DIRECT_SPLIT_RESULTS_LEN_LOCAL));
+    body.instruction(&Instruction::LocalGet(
+        DIRECT_SPLIT_FAILURE_PARENT_SOURCE_PTR_LOCAL,
+    ));
+    body.instruction(&Instruction::LocalSet(DIRECT_SPLIT_PARENT_SOURCE_PTR_LOCAL));
+    body.instruction(&Instruction::LocalGet(
+        DIRECT_SPLIT_FAILURE_PARENT_SOURCE_LEN_LOCAL,
+    ));
+    body.instruction(&Instruction::LocalSet(DIRECT_SPLIT_PARENT_SOURCE_LEN_LOCAL));
+    body.instruction(&Instruction::LocalGet(
+        DIRECT_SPLIT_FAILURE_VARIABLES_PTR_LOCAL,
+    ));
+    body.instruction(&Instruction::LocalSet(DIRECT_SPLIT_VARIABLES_PTR_LOCAL));
+    body.instruction(&Instruction::LocalGet(
+        DIRECT_SPLIT_FAILURE_VARIABLES_LEN_LOCAL,
+    ));
+    body.instruction(&Instruction::LocalSet(DIRECT_SPLIT_VARIABLES_LEN_LOCAL));
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -89,6 +214,10 @@ pub(super) fn emit_split_plan(
         output_len_local,
     );
 
+    if dont_stop_on_failed {
+        push_split_failure_frame(body);
+    }
+
     push_split_frame(body);
     body.instruction(&Instruction::LocalGet(source_ptr_local));
     body.instruction(&Instruction::LocalSet(DIRECT_SPLIT_PARENT_SOURCE_PTR_LOCAL));
@@ -101,7 +230,13 @@ pub(super) fn emit_split_plan(
         body.instruction(&Instruction::LocalGet(DIRECT_SPLIT_PARENT_SOURCE_LEN_LOCAL));
         push_retptr_arg(body);
         body.instruction(&Instruction::Call(indices.stdlib_split_cache_key));
-        return_if_retptr_error(body);
+        emit_retptr_error_or_return(
+            body,
+            indices,
+            failure_target,
+            route_ptr_local,
+            route_len_local,
+        );
         load_retptr_list(body, route_ptr_local, route_len_local);
 
         emit_checkpoint_lookup(
@@ -120,14 +255,26 @@ pub(super) fn emit_split_plan(
     body.instruction(&Instruction::LocalGet(DIRECT_SPLIT_PARENT_SOURCE_LEN_LOCAL));
     push_retptr_arg(body);
     body.instruction(&Instruction::Call(indices.stdlib_split_item_count));
-    return_if_retptr_error(body);
+    emit_retptr_error_or_return(
+        body,
+        indices,
+        failure_target,
+        route_ptr_local,
+        route_len_local,
+    );
     push_retptr_i32_load(body, DIRECT_RET_U32_OK_OFFSET);
     body.instruction(&Instruction::LocalSet(DIRECT_SPLIT_COUNT_LOCAL));
 
     body.instruction(&Instruction::I32Const(split_id as i32));
     push_retptr_arg(body);
     body.instruction(&Instruction::Call(indices.stdlib_split_initial_results));
-    return_if_retptr_error(body);
+    emit_retptr_error_or_return(
+        body,
+        indices,
+        failure_target,
+        route_ptr_local,
+        route_len_local,
+    );
     load_retptr_list(
         body,
         DIRECT_SPLIT_RESULTS_PTR_LOCAL,
@@ -149,12 +296,32 @@ pub(super) fn emit_split_plan(
     body.instruction(&Instruction::LocalGet(DIRECT_SPLIT_INDEX_LOCAL));
     push_retptr_arg(body);
     body.instruction(&Instruction::Call(indices.stdlib_split_item));
-    return_if_retptr_error(body);
+    let outer_iteration_failure_target = failure_target.map(|target| target.nested(2));
+    let split_iteration_failure_target = DirectFailureTarget::Split {
+        split_id,
+        branch_depth: 0,
+    };
+    let active_iteration_failure_target = if dont_stop_on_failed {
+        Some(split_iteration_failure_target)
+    } else {
+        outer_iteration_failure_target
+    };
+    emit_retptr_error_or_return(
+        body,
+        indices,
+        active_iteration_failure_target,
+        route_ptr_local,
+        route_len_local,
+    );
     load_retptr_list(
         body,
         DIRECT_SPLIT_ITEM_PTR_LOCAL,
         DIRECT_SPLIT_ITEM_LEN_LOCAL,
     );
+
+    if dont_stop_on_failed {
+        sync_split_failure_frame(body);
+    }
 
     body.instruction(&Instruction::I32Const(split_id as i32));
     body.instruction(&Instruction::LocalGet(DIRECT_SPLIT_ITEM_PTR_LOCAL));
@@ -166,15 +333,18 @@ pub(super) fn emit_split_plan(
         emit_split_append_retptr_error_and_continue(
             body,
             indices,
-            DirectFailureTarget::Split {
-                split_id,
-                branch_depth: 0,
-            },
+            split_iteration_failure_target,
             route_ptr_local,
             route_len_local,
         );
     } else {
-        return_if_retptr_error(body);
+        emit_retptr_error_or_return(
+            body,
+            indices,
+            outer_iteration_failure_target,
+            route_ptr_local,
+            route_len_local,
+        );
     }
 
     body.instruction(&Instruction::I32Const(split_id as i32));
@@ -185,7 +355,13 @@ pub(super) fn emit_split_plan(
     body.instruction(&Instruction::LocalGet(DIRECT_SPLIT_INDEX_LOCAL));
     push_retptr_arg(body);
     body.instruction(&Instruction::Call(indices.stdlib_split_iteration_variables));
-    return_if_retptr_error(body);
+    emit_retptr_error_or_return(
+        body,
+        indices,
+        active_iteration_failure_target,
+        route_ptr_local,
+        route_len_local,
+    );
     load_retptr_list(
         body,
         DIRECT_SPLIT_VARIABLES_PTR_LOCAL,
@@ -211,19 +387,10 @@ pub(super) fn emit_split_plan(
         steps_len_local,
         source_ptr_local,
         source_len_local,
-        if dont_stop_on_failed {
-            Some(DirectFailureTarget::Split {
-                split_id,
-                branch_depth: 0,
-            })
-        } else {
-            failure_target
-        },
+        active_iteration_failure_target,
     );
 
-    if !dont_stop_on_failed {
-        push_split_frame(body);
-    }
+    push_split_frame(body);
     emit_run_plan_mapping(
         body,
         indices,
@@ -243,17 +410,12 @@ pub(super) fn emit_split_plan(
         route_len_local,
         workflow_log_kind,
         workflow_error_kind,
-        if dont_stop_on_failed {
-            Some(DirectFailureTarget::Split {
-                split_id,
-                branch_depth: 0,
-            })
-        } else {
-            failure_target
-        },
+        active_iteration_failure_target,
     );
-    if !dont_stop_on_failed {
-        pop_split_frame(body);
+    pop_split_frame(body);
+
+    if dont_stop_on_failed {
+        sync_split_failure_frame(body);
     }
 
     body.instruction(&Instruction::I32Const(split_id as i32));
@@ -266,15 +428,18 @@ pub(super) fn emit_split_plan(
         emit_split_append_retptr_error_and_continue(
             body,
             indices,
-            DirectFailureTarget::Split {
-                split_id,
-                branch_depth: 0,
-            },
+            split_iteration_failure_target,
             route_ptr_local,
             route_len_local,
         );
     } else {
-        return_if_retptr_error(body);
+        emit_retptr_error_or_return(
+            body,
+            indices,
+            outer_iteration_failure_target,
+            route_ptr_local,
+            route_len_local,
+        );
     }
 
     body.instruction(&Instruction::I32Const(split_id as i32));
@@ -350,6 +515,9 @@ pub(super) fn emit_split_plan(
     }
 
     pop_split_frame(body);
+    if dont_stop_on_failed {
+        pop_split_failure_frame(body);
+    }
     emit_build_source(
         body,
         indices,
@@ -458,22 +626,27 @@ pub(super) fn emit_split_append_error_payload_and_continue(
         return;
     };
     body.instruction(&Instruction::I32Const(split_id as i32));
-    body.instruction(&Instruction::LocalGet(DIRECT_SPLIT_RESULTS_PTR_LOCAL));
-    body.instruction(&Instruction::LocalGet(DIRECT_SPLIT_RESULTS_LEN_LOCAL));
+    body.instruction(&Instruction::LocalGet(
+        DIRECT_SPLIT_FAILURE_RESULTS_PTR_LOCAL,
+    ));
+    body.instruction(&Instruction::LocalGet(
+        DIRECT_SPLIT_FAILURE_RESULTS_LEN_LOCAL,
+    ));
     body.instruction(&Instruction::LocalGet(error_ptr_local));
     body.instruction(&Instruction::LocalGet(error_len_local));
-    body.instruction(&Instruction::LocalGet(DIRECT_SPLIT_INDEX_LOCAL));
+    body.instruction(&Instruction::LocalGet(DIRECT_SPLIT_FAILURE_INDEX_LOCAL));
     push_retptr_arg(body);
     body.instruction(&Instruction::Call(indices.stdlib_split_append_error));
     return_if_retptr_error(body);
     load_retptr_list(
         body,
-        DIRECT_SPLIT_RESULTS_PTR_LOCAL,
-        DIRECT_SPLIT_RESULTS_LEN_LOCAL,
+        DIRECT_SPLIT_FAILURE_RESULTS_PTR_LOCAL,
+        DIRECT_SPLIT_FAILURE_RESULTS_LEN_LOCAL,
     );
-    body.instruction(&Instruction::LocalGet(DIRECT_SPLIT_INDEX_LOCAL));
+    body.instruction(&Instruction::LocalGet(DIRECT_SPLIT_FAILURE_INDEX_LOCAL));
     body.instruction(&Instruction::I32Const(1));
     body.instruction(&Instruction::I32Add);
-    body.instruction(&Instruction::LocalSet(DIRECT_SPLIT_INDEX_LOCAL));
+    body.instruction(&Instruction::LocalSet(DIRECT_SPLIT_FAILURE_INDEX_LOCAL));
+    restore_split_frame_from_failure_frame(body);
     body.instruction(&Instruction::Br(branch_depth));
 }

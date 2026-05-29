@@ -39,7 +39,7 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   edge per route plus a `default` edge whose leaves can be `Finish` or `Error`,
   plus sequential `Split` subgraphs with final-result checkpoint/replay,
   including normal nested Split/While loop bodies and `dontStopOnFailed`
-  per-iteration aggregation for non-nested-loop bodies.
+  per-iteration aggregation for nested Split/While bodies at arbitrary depth.
   Supported normal/`next` edges can now either be a single unconditioned edge or
   a priority-ordered conditional edge set with exactly one unconditioned default
   fallback. Split and While breakpoints remain outside the supported
@@ -348,9 +348,9 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   routing to parent `onError` or an enclosing failure target, and handled
   child-local `onError` branches exit the current child attempt without calling
   root workflow completion. Nested `Split`/`While` loop subgraphs preserve
-  caller/current loop scratch frames before and after nested loop execution.
-  `Split(dontStopOnFailed)` with nested loop bodies remains gated until failure
-  aggregation has its own reentrant frame model.
+  caller/current loop scratch frames before and after nested loop execution,
+  and `Split(dontStopOnFailed)` now preserves a separate failure aggregation
+  frame so nested Split/While failures append to the correct outer iteration.
 - `tests/direct_wasm_execute.rs` now provides gated direct execution smoke
   tests. With `RUNTARA_RUN_DIRECT_WASM_E2E=1`, it compiles and statically
   composes the simple `Finish` fixture plus flat and nested `Conditional`
@@ -604,6 +604,20 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   Structural coverage pins the call order, support tests remove the previous
   `agent-breakpoint` gate, stdlib tests pin the event payload, and gated A/B
   coverage compares pause/resume behavior against generated Rust.
+- `Split(dontStopOnFailed)` failure aggregation now supports nested Split/While
+  bodies at arbitrary depth. Direct mode keeps a dedicated reentrant Split
+  failure frame separate from active loop scratch locals, restores the target
+  frame before appending an error, and adjusts branch depth through nested
+  Split/While loops. Support gates no longer reject nested-loop bodies, and
+  structural plus gated A/B coverage checks nested Split failures and deep
+  Split -> While -> Split failures against generated Rust. The reusable
+  fixtures are
+  `crates/runtara-workflows/tests/fixtures/split_dont_stop_nested_split_error.json`
+  and
+  `crates/runtara-workflows/tests/fixtures/split_dont_stop_deep_nested_while_split_error.json`;
+  structural coverage lives in
+  `direct_compile_supports_dont_stop_split_with_nested_split_graph` and
+  `direct_compile_supports_dont_stop_split_with_deep_nested_while_split_graph`.
 
 Current remaining action items:
 
@@ -611,11 +625,6 @@ Current remaining action items:
   behavior or direct mode intentionally becomes the first implementation. The
   current Rust `EmbedWorkflow` codegen appears to parse the field without
   enforcing a deadline.
-- Finish nested failure aggregation for `Split(dontStopOnFailed)` when nested
-  Split/While bodies are present at arbitrary depth. The implementation must
-  keep recursive graph walking explicit so future EmbedWorkflow/Split/While
-  combinations do not silently handle only first-level nested graphs; then
-  remove the current support gate.
 - Implement or intentionally keep gating Split retry, Split timeout, and Split
   breakpoint semantics; each needs explicit durability/error aggregation tests.
 - Implement While timeout, While breakpoint, and While `onError` routing
@@ -627,6 +636,94 @@ Current remaining action items:
 - Continue Phase 13-16 rollout work: CI shadowing, production gates,
   observability, default direct mode criteria, and eventual Rust codegen
   retirement.
+
+## Continuation Handoff
+
+This plan is written so another agent can continue without relying on thread
+history. The current direct-Wasm path is intentionally static: direct workflow
+logic imports prebuilt stdlib/runtime/agent components, and production artifacts
+are composed into one final `workflow.wasm`. Dynamic linking is not a target.
+
+Current architecture:
+
+- `direct_wasm::support` is the public safety gate. It must reject any feature
+  before the direct lowerer, stdlib/runtime ABI, and differential tests define
+  generated-compatible behavior.
+- `direct_wasm::manifest` owns deterministic ids and serializes every DSL
+  config needed by stdlib helpers. Add manifest data before adding lowerer
+  calls that depend on it.
+- `direct_wasm::plan` builds the recursive direct run-plan. Nested graphs must
+  stay explicit in the plan so the direct emitter can preserve caller state
+  across arbitrary-depth Split, While, EmbedWorkflow, and callback execution.
+- `runtara-workflow-stdlib::direct_json` owns generated-compatible JSON
+  semantics: mappings, expression evaluation, envelopes, Split/While helpers,
+  retry keys, breakpoint payloads, and error/result shapes.
+- `runtara-workflow-runtime` owns side-effecting runtime lifecycle calls:
+  input/completion/failure, events, checkpoint I/O, sleeps, cancellation,
+  pause/shutdown handling, signals, and breakpoint suspension.
+- `direct_wasm::compile::*` owns Wasm control flow only. Keep step-family
+  lowering in focused modules and keep `compile.rs` limited to public entry
+  points, shared constants, and artifact orchestration.
+
+Implementation process for each remaining production slice:
+
+1. Confirm generated Rust semantics first. Read the existing codegen path and
+   add a small generated-vs-direct stdlib parity test if the JSON shape is not
+   already pinned.
+2. Update the support gate and feature report only after the direct behavior is
+   implemented and covered. Unsupported features should remain explicit and
+   deterministic.
+3. Add manifest/run-plan fields only when the lowerer needs stable ids or
+   serialized DSL config. Keep id allocation global across root and static
+   child graphs.
+4. Add or extend stdlib/runtime WIT functions for reusable semantics rather
+   than encoding JSON behavior in core-Wasm instruction sequences.
+5. Lower control flow in the relevant `direct_wasm::compile::*` module. For
+   deeply nested bodies, preserve caller frames on the Wasm stack and route
+   failures with explicit `DirectFailureTarget` branch depths.
+6. Add reusable JSON fixtures under `crates/runtara-workflows/tests/fixtures`.
+   Prefer fixture files over inline raw JSON once a shape becomes part of the
+   migration contract.
+7. Add non-gated structural compile/validate tests first, then gated
+   direct-vs-generated A/B execution tests in `tests/direct_wasm_ab_execute.rs`.
+   If runtime side effects are involved, assert the SDK request traffic as well
+   as the final output.
+8. Run focused tests, `cargo fmt --all`, `git diff --check`, and clippy for the
+   touched packages before committing the logical slice.
+9. Update this document in the same commit with current state, remaining gates,
+   fixture/test names, and rollback notes.
+
+Deep nesting invariants for future work:
+
+- Fixed scratch locals are not reentrant by themselves. Any Split, While,
+  EmbedWorkflow, Agent retry, WaitForSignal callback, or failure aggregation
+  state that can be overwritten by nested execution must be saved and restored
+  explicitly.
+- Handled nested failures must restore the caller/source/step frame before
+  routing to parent `onError`, parent retry, or enclosing Split
+  `dontStopOnFailed` aggregation.
+- Failures caused by user workflow steps can route through generated-compatible
+  handlers or aggregators; runtime infrastructure failures such as checkpoint,
+  cancellation, pause/shutdown, and malformed stdlib return pointers should
+  remain fail-fast unless generated Rust already aggregates them.
+- Support for `EmbedWorkflow` and loop bodies must account for arbitrary-depth
+  nesting, not just one child level. Add tests with at least one deep shape for
+  every frame-sensitive feature.
+
+Recommended next implementation slices:
+
+1. Pick one Split durability semantic: breakpoint, timeout, or retry. Keep the
+   other two gated until their generated Rust behavior is pinned. Split
+   breakpoint is likely the smallest first slice because direct breakpoint
+   helpers already exist for direct-control steps and Agent/Delay/Wait.
+2. Then implement While breakpoint or While timeout. While `onError` should
+   wait until failure routing through loop iteration state is specified and
+   covered by generated-vs-direct tests.
+3. Continue Agent hardening after loop durability is stable: timeout,
+   compensation policy, retry/failure differential tests, and long-running
+   cancellation coverage.
+4. Leave `EmbedWorkflow.timeout` gated unless product decides direct mode should
+   define behavior before generated Rust does.
 
 ## Final Goal
 
@@ -2239,9 +2336,11 @@ Implementation steps:
    - `dontStopOnFailed`: stdlib accumulator/result shape, direct-core
      validation-failure collection, nested Agent failure collection, explicit
      Error-step failure collection, and mapping/source/control-stdlib failure
-     routing done; support gate enabled. Runtime cancellation, pause/shutdown,
-     and checkpoint infrastructure failures remain fail-fast control flow,
-     matching the generated-code split behavior rather than item aggregation;
+     routing done; nested Split/While body failures at arbitrary depth now use
+     a dedicated reentrant failure aggregation frame; support gate enabled.
+     Runtime cancellation, pause/shutdown, and checkpoint infrastructure
+     failures remain fail-fast control flow, matching the generated-code split
+     behavior rather than item aggregation;
    - durable Split checkpoint/replay: done for the final-result checkpoint;
    - Split retry/timeout/breakpoint semantics: pending.
 3. Implement `While`:
@@ -2273,12 +2372,13 @@ Implementation steps:
      current iteration frame across nested body execution;
    - While preserves its caller loop frame across the whole While step and its
      current iteration frame across nested body execution;
+   - `Split(dontStopOnFailed)` preserves a separate failure aggregation frame
+     so nested loop failures append to the outer item result before branching
+     back to the outer Split loop;
    - strict A/B execution coverage includes Split-within-Split and
      Split-within-While shapes that assert outer `_index`/`_loop_indices`
-     remain intact after inner loop execution;
-   - remaining nested-loop gap: `Split(dontStopOnFailed)` with nested loop
-     bodies is still rejected until error aggregation can target a preserved
-     failure frame instead of the active inner loop locals.
+     remain intact after inner loop execution, plus nested Split and deep
+     Split -> While -> Split failure aggregation parity.
 5. Defer parallel split until runtime support and test coverage are explicit.
 
 Checkpoint 9:
@@ -2395,8 +2495,9 @@ Current status:
   and deeply nested child failure wrapping across multiple embedded call-site
   layers. Normal
   nested Split/While loop execution now has reentrant scratch frame lowering and
-  strict A/B coverage; `Split(dontStopOnFailed)` with nested loops remains gated
-  until its terminal/failure aggregation paths have preserved target frames.
+  strict A/B coverage; `Split(dontStopOnFailed)` with nested loops now has a
+  dedicated failure aggregation frame with generated-compatible nested failure
+  parity.
   Remaining Phase 10 work is unsupported timeout semantics for embedded child
   call sites; generated Rust currently parses `EmbedWorkflow.timeout` but does
   not appear to enforce it in `codegen/ast/steps/embed_workflow.rs`.

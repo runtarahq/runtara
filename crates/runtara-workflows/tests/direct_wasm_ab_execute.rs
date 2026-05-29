@@ -62,6 +62,10 @@ const EDGE_CONDITION_PRIORITY: &str = include_str!("fixtures/edge_condition_prio
 const WHILE_DIRECT_INDEX_ONLY: &str = include_str!("fixtures/while_direct_index_only.json");
 const SPLIT_NESTED_SPLIT: &str = include_str!("fixtures/split_nested_split.json");
 const WHILE_NESTED_SPLIT: &str = include_str!("fixtures/while_nested_split.json");
+const SPLIT_DONT_STOP_NESTED_SPLIT_ERROR: &str =
+    include_str!("fixtures/split_dont_stop_nested_split_error.json");
+const SPLIT_DONT_STOP_DEEP_NESTED_WHILE_SPLIT_ERROR: &str =
+    include_str!("fixtures/split_dont_stop_deep_nested_while_split_error.json");
 const LOG_ALL_LEVELS: &str = include_str!("fixtures/log_all_levels.json");
 const ERROR_DIRECT_SIMPLE: &str = include_str!("fixtures/error_direct_simple.json");
 const DELAY_DYNAMIC: &str = include_str!("fixtures/delay_dynamic.json");
@@ -4061,6 +4065,95 @@ fn direct_wasm_matches_components_while_with_nested_split_frame_isolation() {
     });
     assert_eq!(components.output_json.as_ref(), Some(&expected_output));
     assert_eq!(direct.output_json.as_ref(), Some(&expected_output));
+}
+
+#[test]
+fn direct_wasm_matches_components_dont_stop_nested_split_failure_aggregation() {
+    let Some(components_dir) = direct_ab_components_dir() else {
+        return;
+    };
+    let _data = setup_data_dir();
+
+    let components_artifact = compile_components_artifact(
+        "dont-stop-nested-split-error",
+        SPLIT_DONT_STOP_NESTED_SPLIT_ERROR,
+    );
+    let direct_artifact = compile_direct_artifact(
+        &components_dir,
+        "dont-stop-nested-split-error",
+        SPLIT_DONT_STOP_NESTED_SPLIT_ERROR,
+    );
+    assert_eq!(
+        direct_artifact.compiler_mode,
+        WorkflowCompilerMode::DirectWasm
+    );
+
+    let workflow_input = br#"{"groups":[{"items":[{"value":"a"}]},{"items":[{"value":"b"}]}]}"#;
+    let components_input = components_sdk_input(workflow_input);
+    let components = execute_artifact(
+        &components_artifact,
+        "ab-components-dont-stop-nested-split-error",
+        &components_input,
+    );
+    let direct = execute_artifact(
+        &direct_artifact.path,
+        "ab-direct-dont-stop-nested-split-error",
+        workflow_input,
+    );
+
+    assert_success_parity("dont-stop-nested-split-error", 0, &components, &direct);
+    let output = direct.output_json.as_ref().expect("direct output");
+    assert_eq!(output["outputs"], serde_json::json!([]));
+    assert_eq!(output["stats"]["success"], serde_json::json!(0));
+    assert_eq!(output["stats"]["error"], serde_json::json!(2));
+    assert_eq!(output["stats"]["total"], serde_json::json!(2));
+    assert_eq!(output["data"]["error"][0]["index"], serde_json::json!(0));
+    assert_eq!(output["data"]["error"][1]["index"], serde_json::json!(1));
+}
+
+#[test]
+fn direct_wasm_matches_components_dont_stop_deep_nested_failure_aggregation() {
+    let Some(components_dir) = direct_ab_components_dir() else {
+        return;
+    };
+    let _data = setup_data_dir();
+
+    let components_artifact = compile_components_artifact(
+        "dont-stop-deep-nested-error",
+        SPLIT_DONT_STOP_DEEP_NESTED_WHILE_SPLIT_ERROR,
+    );
+    let direct_artifact = compile_direct_artifact(
+        &components_dir,
+        "dont-stop-deep-nested-error",
+        SPLIT_DONT_STOP_DEEP_NESTED_WHILE_SPLIT_ERROR,
+    );
+    assert_eq!(
+        direct_artifact.compiler_mode,
+        WorkflowCompilerMode::DirectWasm
+    );
+
+    let workflow_input =
+        br#"{"groups":[{"count":1,"items":[{"value":"a"}]},{"count":1,"items":[{"value":"b"}]}]}"#;
+    let components_input = components_sdk_input(workflow_input);
+    let components = execute_artifact(
+        &components_artifact,
+        "ab-components-dont-stop-deep-nested-error",
+        &components_input,
+    );
+    let direct = execute_artifact(
+        &direct_artifact.path,
+        "ab-direct-dont-stop-deep-nested-error",
+        workflow_input,
+    );
+
+    assert_success_parity("dont-stop-deep-nested-error", 0, &components, &direct);
+    let output = direct.output_json.as_ref().expect("direct output");
+    assert_eq!(output["outputs"], serde_json::json!([]));
+    assert_eq!(output["stats"]["success"], serde_json::json!(0));
+    assert_eq!(output["stats"]["error"], serde_json::json!(2));
+    assert_eq!(output["stats"]["total"], serde_json::json!(2));
+    assert_eq!(output["data"]["error"][0]["index"], serde_json::json!(0));
+    assert_eq!(output["data"]["error"][1]["index"], serde_json::json!(1));
 }
 
 #[test]

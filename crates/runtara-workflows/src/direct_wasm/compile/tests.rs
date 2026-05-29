@@ -35,6 +35,14 @@ fn fixture(name: &str) -> ExecutionGraph {
             include_str!("../../../tests/fixtures/split_with_schemas_failing.json")
         }
         "split_nested_split" => include_str!("../../../tests/fixtures/split_nested_split.json"),
+        "split_dont_stop_nested_split_error" => {
+            include_str!("../../../tests/fixtures/split_dont_stop_nested_split_error.json")
+        }
+        "split_dont_stop_deep_nested_while_split_error" => {
+            include_str!(
+                "../../../tests/fixtures/split_dont_stop_deep_nested_while_split_error.json"
+            )
+        }
         "while_simple" => include_str!("../../../tests/fixtures/while_simple.json"),
         "while_nested_split" => include_str!("../../../tests/fixtures/while_nested_split.json"),
         "wait_simple" => {
@@ -1785,6 +1793,106 @@ fn direct_compile_supports_nested_split_graph() {
         panic!("expected root Split run plan");
     };
     assert!(matches!(nested_plan.as_ref(), DirectRunPlan::Split { .. }));
+}
+
+#[test]
+fn direct_compile_supports_dont_stop_split_with_nested_split_graph() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let result = compile_direct_workflow(DirectCompilationInput {
+        workflow_id: "split-dont-stop-nested".to_string(),
+        version: 1,
+        source_checksum: None,
+        execution_graph: fixture("split_dont_stop_nested_split_error"),
+        child_workflows: vec![],
+        output_dir: temp.path().to_path_buf(),
+        track_events: false,
+        agent_catalog: None,
+    })
+    .expect("direct dontStop nested Split compile should succeed");
+
+    let wasm = fs::read(&result.wasm_path).expect("wasm");
+    Validator::new()
+        .validate_all(&wasm)
+        .expect("direct dontStop nested Split artifact should validate");
+    assert!(result.support_report.supported);
+    assert_eq!(result.support_report.unsupported, vec![]);
+
+    let manifest: DirectWorkflowManifest =
+        serde_json::from_slice(&fs::read(&result.manifest_path).expect("manifest"))
+            .expect("manifest json");
+    assert_eq!(manifest.graph.splits[0].value["dontStopOnFailed"], true);
+
+    let core_config = DirectCoreConfig::new(
+        &manifest,
+        &manifest.to_canonical_json().expect("manifest json"),
+        false,
+    )
+    .expect("core config");
+    let DirectRunPlan::Split {
+        dont_stop_on_failed,
+        nested_plan,
+        ..
+    } = &core_config.run_plan
+    else {
+        panic!("expected root Split run plan");
+    };
+    assert!(*dont_stop_on_failed);
+    assert!(matches!(nested_plan.as_ref(), DirectRunPlan::Split { .. }));
+}
+
+#[test]
+fn direct_compile_supports_dont_stop_split_with_deep_nested_while_split_graph() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let result = compile_direct_workflow(DirectCompilationInput {
+        workflow_id: "split-dont-stop-deep-nested".to_string(),
+        version: 1,
+        source_checksum: None,
+        execution_graph: fixture("split_dont_stop_deep_nested_while_split_error"),
+        child_workflows: vec![],
+        output_dir: temp.path().to_path_buf(),
+        track_events: false,
+        agent_catalog: None,
+    })
+    .expect("direct dontStop deep nested Split/While compile should succeed");
+
+    let wasm = fs::read(&result.wasm_path).expect("wasm");
+    Validator::new()
+        .validate_all(&wasm)
+        .expect("direct dontStop deep nested Split/While artifact should validate");
+    assert!(result.support_report.supported);
+    assert_eq!(result.support_report.unsupported, vec![]);
+
+    let manifest: DirectWorkflowManifest =
+        serde_json::from_slice(&fs::read(&result.manifest_path).expect("manifest"))
+            .expect("manifest json");
+    assert_eq!(manifest.graph.splits[0].value["dontStopOnFailed"], true);
+
+    let core_config = DirectCoreConfig::new(
+        &manifest,
+        &manifest.to_canonical_json().expect("manifest json"),
+        false,
+    )
+    .expect("core config");
+    let DirectRunPlan::Split {
+        dont_stop_on_failed,
+        nested_plan,
+        ..
+    } = &core_config.run_plan
+    else {
+        panic!("expected root Split run plan");
+    };
+    assert!(*dont_stop_on_failed);
+    let DirectRunPlan::While {
+        nested_plan: while_nested_plan,
+        ..
+    } = nested_plan.as_ref()
+    else {
+        panic!("expected nested While run plan");
+    };
+    assert!(matches!(
+        while_nested_plan.as_ref(),
+        DirectRunPlan::Split { .. }
+    ));
 }
 
 #[test]

@@ -636,21 +636,11 @@ fn supports_split_step_baseline(step: &SplitStep) -> bool {
                 && config.retry_delay.is_none()
                 && config.timeout.is_none()
         })
-        && !(config
-            .and_then(|config| config.dont_stop_on_failed)
-            .unwrap_or(false)
-            && graph_contains_loop_step(&step.subgraph))
 }
 
 fn supports_while_step_baseline(step: &WhileStep) -> bool {
     let config = step.config.as_ref();
     !step.breakpoint.unwrap_or(false) && config.is_none_or(|config| config.timeout.is_none())
-}
-
-fn graph_contains_loop_step(graph: &ExecutionGraph) -> bool {
-    graph_contains_step(graph, |step| {
-        matches!(step, Step::Split(_) | Step::While(_))
-    })
 }
 
 fn graph_contains_step(graph: &ExecutionGraph, predicate: impl Fn(&Step) -> bool + Copy) -> bool {
@@ -1230,18 +1220,6 @@ fn collect_split_step_unsupported(
                 "Split timeout requires direct timeout enforcement",
             );
         }
-    }
-    if step
-        .config
-        .as_ref()
-        .and_then(|config| config.dont_stop_on_failed)
-        .unwrap_or(false)
-        && graph_contains_loop_step(&step.subgraph)
-    {
-        push(
-            "split-dont-stop-nested-loop",
-            "Split dontStopOnFailed with nested Split or While needs reentrant failure aggregation frames",
-        );
     }
 }
 
@@ -2238,7 +2216,7 @@ mod tests {
     }
 
     #[test]
-    fn split_dont_stop_with_nested_loops_is_rejected_until_failure_frames_exist() {
+    fn split_dont_stop_with_nested_loops_is_supported_with_failure_frames() {
         let mut graph = fixture("split_nested_split");
         let Some(Step::Split(split)) = graph.steps.get_mut("outer") else {
             panic!("expected outer Split fixture step");
@@ -2251,15 +2229,8 @@ mod tests {
 
         let report = analyze_direct_wasm_support(&graph);
 
-        assert!(!report.supported);
-        assert!(
-            report.unsupported.iter().any(|unsupported| {
-                unsupported.step_id.as_deref() == Some("outer")
-                    && unsupported.feature == "split-dont-stop-nested-loop"
-            }),
-            "{:?}",
-            report.unsupported
-        );
+        assert!(report.supported, "{:?}", report.unsupported);
+        assert!(report.unsupported.is_empty());
     }
 
     #[test]
