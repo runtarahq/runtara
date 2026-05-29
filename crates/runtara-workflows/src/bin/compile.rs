@@ -517,17 +517,26 @@ fn main() -> ExitCode {
         );
     }
 
-    // Handle --emit-source flag
+    // Handle --emit-source flag. In components-mode the generated source is the
+    // workflow-logic crate's `src/lib.rs` (there is no legacy top-level
+    // `main.rs` anymore). A copy failure here must not abort before `--output`
+    // is written, so warn and continue rather than returning FAILURE.
     if let Some(source_path) = &args.emit_source {
-        let main_rs = result.build_dir.join("main.rs");
-        if let Err(e) = fs::copy(&main_rs, source_path) {
-            eprintln!("Error copying source to {:?}: {}", source_path, e);
-            return ExitCode::FAILURE;
-        }
-        if args.verbose {
-            eprintln!("[5/5] Saved generated source to {:?}", source_path);
-        } else {
-            eprintln!("Generated source saved to: {:?}", source_path);
+        let lib_rs = result.build_dir.join("src/lib.rs");
+        match fs::copy(&lib_rs, source_path) {
+            Ok(_) => {
+                if args.verbose {
+                    eprintln!("[5/5] Saved generated source to {:?}", source_path);
+                } else {
+                    eprintln!("Generated source saved to: {:?}", source_path);
+                }
+            }
+            Err(e) => {
+                eprintln!(
+                    "Warning: could not copy generated source from {:?} to {:?}: {}",
+                    lib_rs, source_path, e
+                );
+            }
         }
     }
 
