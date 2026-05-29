@@ -25,7 +25,7 @@ use super::{
     DIRECT_EMBED_RETRY_ATTEMPT_LOCAL, DIRECT_EMBED_STEP_RESULT_LEN_LOCAL,
     DIRECT_EMBED_STEP_RESULT_PTR_LOCAL, DIRECT_RET_BOOL_OK_OFFSET, DirectCoreFunctionIndices,
     DirectCoreStaticData, DirectDataSegment, DirectErrorRoutePlan, DirectFailureTarget,
-    DirectRunPlan, DirectVariables,
+    DirectHandledTarget, DirectRunPlan, DirectVariables,
 };
 
 pub(super) fn emit_embed_workflow_child_error_and_continue(
@@ -214,6 +214,7 @@ fn emit_embed_workflow_child_attempt(
         workflow_log_kind,
         workflow_error_kind,
         Some(DirectFailureTarget::EmbedWorkflow { branch_depth: 0 }),
+        Some(DirectHandledTarget { branch_depth: 0 }),
     );
     body.instruction(&Instruction::End);
     pop_embed_workflow_attempt_frame(
@@ -376,6 +377,7 @@ pub(super) fn emit_embed_workflow_plan(
     workflow_log_kind: &DirectDataSegment,
     workflow_error_kind: &DirectDataSegment,
     failure_target: Option<DirectFailureTarget>,
+    handled_target: Option<DirectHandledTarget>,
 ) {
     let step_id_segment = static_data
         .step_id(step_id)
@@ -545,6 +547,7 @@ pub(super) fn emit_embed_workflow_plan(
         workflow_log_kind,
         workflow_error_kind,
         failure_target.map(|target| target.nested(1)),
+        handled_target.map(|target| target.nested(1)),
     );
     body.instruction(&Instruction::End);
 
@@ -657,5 +660,6 @@ pub(super) fn emit_embed_workflow_plan(
         workflow_log_kind,
         workflow_error_kind,
         failure_target,
+        handled_target,
     );
 }

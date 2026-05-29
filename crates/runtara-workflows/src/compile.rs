@@ -447,14 +447,26 @@ mod tests {
     fn compile_workflow_direct_rejects_unsupported_graph_before_writing_output() {
         let temp = tempfile::tempdir().expect("tempdir");
         let output_dir = temp.path().join("direct-out");
-        let graph: ExecutionGraph =
-            serde_json::from_str(include_str!("../tests/fixtures/wait_for_signal.json"))
+        // A While step with a `timeout` is firmly gated in direct mode, so it is a
+        // stable choice for asserting unsupported-graph rejection. (The previous
+        // wait-for-signal fixture became a supported shape once WaitForSignal
+        // timeout lowering landed.)
+        let mut graph: ExecutionGraph =
+            serde_json::from_str(include_str!("../tests/fixtures/while_simple.json"))
                 .expect("fixture parses");
+        let Some(runtara_dsl::Step::While(while_step)) = graph.steps.get_mut("loop") else {
+            panic!("expected While fixture step");
+        };
+        while_step
+            .config
+            .as_mut()
+            .expect("while fixture config")
+            .timeout = Some(1_000);
 
         let err = compile_workflow_direct(
             CompilationInput {
                 tenant_id: "tenant".to_string(),
-                workflow_id: "wait".to_string(),
+                workflow_id: "while-timeout".to_string(),
                 version: 1,
                 execution_graph: graph,
                 track_events: false,
@@ -469,10 +481,10 @@ mod tests {
                 source_checksum: Some("source-sha256".to_string()),
             },
         )
-        .expect_err("wait-for-signal is not supported in direct mode yet");
+        .expect_err("While timeout is not supported in direct mode yet");
 
         assert_eq!(err.kind(), io::ErrorKind::Unsupported);
-        assert!(err.to_string().contains("wait-for-signal"));
+        assert!(err.to_string().contains("while-timeout"));
         assert!(
             !output_dir.exists(),
             "unsupported direct graphs should not write build output"

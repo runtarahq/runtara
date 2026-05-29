@@ -414,6 +414,7 @@ fn direct_run_function(
         (10, ValType::I32),
         (9, ValType::I32),
         (2, ValType::I64),
+        (5, ValType::I32),
     ]);
 
     push_segment_args(&mut body, &config.static_data.manifest);
@@ -463,6 +464,7 @@ fn direct_run_function(
         ROUTE_LEN_LOCAL,
         &config.static_data.workflow_log_kind,
         &config.static_data.workflow_error_kind,
+        None,
         None,
     );
 

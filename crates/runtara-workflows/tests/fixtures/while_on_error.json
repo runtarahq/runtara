@@ -1,0 +1,86 @@
+{
+  "name": "While OnError",
+  "description": "Direct-emitter fixture: a While loop whose body succeeds for the first iterations and then fails, routing the failure to an onError handler.",
+  "steps": {
+    "loop": {
+      "stepType": "While",
+      "id": "loop",
+      "name": "Index Loop",
+      "condition": {
+        "type": "operation",
+        "op": "LT",
+        "arguments": [
+          { "valueType": "reference", "value": "loop.index" },
+          { "valueType": "immediate", "value": 4 }
+        ]
+      },
+      "subgraph": {
+        "name": "Maybe Fail",
+        "entryPoint": "check",
+        "steps": {
+          "check": {
+            "stepType": "Conditional",
+            "id": "check",
+            "condition": {
+              "type": "operation",
+              "op": "LT",
+              "arguments": [
+                { "valueType": "reference", "value": "loop.index" },
+                { "valueType": "immediate", "value": 2 }
+              ]
+            }
+          },
+          "ok": {
+            "stepType": "Finish",
+            "id": "ok",
+            "inputMapping": {
+              "index": { "valueType": "reference", "value": "variables._index" }
+            }
+          },
+          "boom": {
+            "stepType": "Error",
+            "id": "boom",
+            "name": "Boom",
+            "category": "permanent",
+            "code": "WHILE_BOOM",
+            "message": "while body failed",
+            "severity": "error"
+          }
+        },
+        "executionPlan": [
+          { "fromStep": "check", "toStep": "ok", "label": "true" },
+          { "fromStep": "check", "toStep": "boom", "label": "false" }
+        ]
+      },
+      "config": { "maxIterations": 5 }
+    },
+    "finish": {
+      "stepType": "Finish",
+      "id": "finish",
+      "inputMapping": {
+        "iterations": {
+          "valueType": "reference",
+          "value": "steps.loop.outputs.iterations"
+        }
+      }
+    },
+    "handled": {
+      "stepType": "Finish",
+      "id": "handled",
+      "inputMapping": {
+        "handled": { "valueType": "immediate", "value": true },
+        "code": { "valueType": "reference", "value": "steps.__error.code" },
+        "category": { "valueType": "reference", "value": "steps.__error.category" },
+        "message": { "valueType": "reference", "value": "steps.__error.message" }
+      }
+    }
+  },
+  "entryPoint": "loop",
+  "executionPlan": [
+    { "fromStep": "loop", "toStep": "finish" },
+    { "fromStep": "loop", "toStep": "handled", "label": "onError" }
+  ],
+  "variables": {},
+  "inputSchema": {},
+  "outputSchema": {}
+}

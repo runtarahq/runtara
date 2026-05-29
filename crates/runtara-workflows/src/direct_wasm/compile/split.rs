@@ -17,6 +17,7 @@ use super::split_retry::{
     emit_split_advance_retry_attempt, emit_split_retry_before_attempt, emit_split_retry_condition,
     emit_split_retry_error_info,
 };
+use super::step_error::emit_step_error_and_continue;
 use super::wait::emit_wait_on_wait_error_and_fail;
 use super::{
     DIRECT_RET_U32_OK_OFFSET, DIRECT_SPLIT_COUNT_LOCAL, DIRECT_SPLIT_FAILURE_COUNT_LOCAL,
@@ -34,8 +35,8 @@ use super::{
     DIRECT_SPLIT_RETRY_SLEEP_KEY_LEN_LOCAL, DIRECT_SPLIT_RETRY_SLEEP_KEY_PTR_LOCAL,
     DIRECT_SPLIT_RETRY_SLEEP_MS_LOCAL, DIRECT_SPLIT_RETRYABLE_LOCAL,
     DIRECT_SPLIT_VARIABLES_LEN_LOCAL, DIRECT_SPLIT_VARIABLES_PTR_LOCAL, DirectCoreFunctionIndices,
-    DirectCoreStaticData, DirectDataSegment, DirectFailureTarget, DirectRunPlan, DirectVariables,
-    emit_runtime_fail_return,
+    DirectCoreStaticData, DirectDataSegment, DirectFailureTarget, DirectHandledTarget,
+    DirectRunPlan, DirectVariables, emit_runtime_fail_return,
 };
 
 fn push_split_frame(body: &mut WasmFunction) {
@@ -247,6 +248,7 @@ pub(super) fn emit_split_plan(
     workflow_log_kind: &DirectDataSegment,
     workflow_error_kind: &DirectDataSegment,
     failure_target: Option<DirectFailureTarget>,
+    handled_target: Option<DirectHandledTarget>,
 ) {
     emit_step_breakpoint(
         body,
@@ -482,6 +484,7 @@ pub(super) fn emit_split_plan(
     );
 
     push_split_frame(body);
+    body.instruction(&Instruction::Block(BlockType::Empty));
     emit_run_plan_mapping(
         body,
         indices,
@@ -501,8 +504,10 @@ pub(super) fn emit_split_plan(
         route_len_local,
         workflow_log_kind,
         workflow_error_kind,
-        active_iteration_failure_target,
+        active_iteration_failure_target.map(|target| target.nested(1)),
+        Some(DirectHandledTarget { branch_depth: 0 }),
     );
+    body.instruction(&Instruction::End);
     pop_split_frame(body);
 
     if dont_stop_on_failed {
@@ -693,6 +698,7 @@ pub(super) fn emit_split_plan(
         workflow_log_kind,
         workflow_error_kind,
         failure_target,
+        handled_target,
     );
 }
 
@@ -808,6 +814,9 @@ pub(super) fn emit_split_append_error_payload_and_continue(
                     error_ptr_local,
                     error_len_local,
                 );
+            }
+            DirectFailureTarget::StepError { .. } => {
+                emit_step_error_and_continue(body, target, error_ptr_local, error_len_local);
             }
             DirectFailureTarget::Split { .. } => unreachable!(),
         }

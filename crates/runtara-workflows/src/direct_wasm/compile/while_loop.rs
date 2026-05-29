@@ -8,16 +8,21 @@ use super::abi::{
     emit_retptr_error_or_return, load_retptr_list, push_retptr_arg, push_retptr_i32_load,
     push_retptr_u8_load, push_variables_args,
 };
+use super::agent_error::emit_agent_error_route_or_fail;
 use super::debug::{emit_step_breakpoint, emit_step_debug_event};
 use super::dispatcher::emit_run_plan_mapping;
 use super::mapping::emit_build_source;
+use super::step_error::{pop_step_error_frame, push_step_error_frame};
 use super::{
-    DIRECT_RET_BOOL_OK_OFFSET, DIRECT_RET_U32_OK_OFFSET, DIRECT_WHILE_INDEX_LOCAL,
+    DIRECT_RET_BOOL_OK_OFFSET, DIRECT_RET_U32_OK_OFFSET, DIRECT_STEP_ERROR_FLAG_LOCAL,
+    DIRECT_STEP_ERROR_LEN_LOCAL, DIRECT_STEP_ERROR_PTR_LOCAL, DIRECT_WHILE_INDEX_LOCAL,
     DIRECT_WHILE_MAX_ITERATIONS_LOCAL, DIRECT_WHILE_PARENT_SOURCE_LEN_LOCAL,
-    DIRECT_WHILE_PARENT_SOURCE_PTR_LOCAL, DIRECT_WHILE_STATE_LEN_LOCAL,
+    DIRECT_WHILE_PARENT_SOURCE_PTR_LOCAL, DIRECT_WHILE_PARENT_STEPS_LEN_LOCAL,
+    DIRECT_WHILE_PARENT_STEPS_PTR_LOCAL, DIRECT_WHILE_STATE_LEN_LOCAL,
     DIRECT_WHILE_STATE_PTR_LOCAL, DIRECT_WHILE_VARIABLES_LEN_LOCAL,
     DIRECT_WHILE_VARIABLES_PTR_LOCAL, DirectCoreFunctionIndices, DirectCoreStaticData,
-    DirectDataSegment, DirectFailureTarget, DirectRunPlan, DirectVariables,
+    DirectDataSegment, DirectErrorRoutePlan, DirectFailureTarget, DirectHandledTarget,
+    DirectRunPlan, DirectVariables,
 };
 
 fn push_while_frame(body: &mut WasmFunction) {
@@ -54,6 +59,7 @@ pub(super) fn emit_while_plan(
     breakpoint: bool,
     nested_plan: &DirectRunPlan,
     next_plan: &DirectRunPlan,
+    error_plan: Option<&DirectErrorRoutePlan>,
     data_ptr_local: u32,
     data_len_local: u32,
     steps_ptr_local: u32,
@@ -67,6 +73,7 @@ pub(super) fn emit_while_plan(
     workflow_log_kind: &DirectDataSegment,
     workflow_error_kind: &DirectDataSegment,
     failure_target: Option<DirectFailureTarget>,
+    handled_target: Option<DirectHandledTarget>,
 ) {
     emit_step_breakpoint(
         body,
@@ -95,11 +102,39 @@ pub(super) fn emit_while_plan(
         output_len_local,
     );
 
+    // When the While step has an onError route, the generated Rust path wraps the
+    // whole step in onError handling: any failure inside the loop is captured,
+    // injected as `steps.__error`/`steps.error` against the *parent* steps context,
+    // and routed to the handler. The direct lowering mirrors that by running the
+    // loop inside a capture block whose failures branch to the shared step-error
+    // locals, then restoring the parent steps context and routing the captured
+    // error after the loop. Lifecycle suspension (cancel/pause/shutdown) still
+    // returns early without routing, matching the existing While durability path.
+    let has_error_plan = error_plan.is_some();
+    let internal_failure_target = if has_error_plan {
+        Some(DirectFailureTarget::StepError { branch_depth: 0 })
+    } else {
+        failure_target
+    };
+
+    if has_error_plan {
+        body.instruction(&Instruction::LocalGet(steps_ptr_local));
+        body.instruction(&Instruction::LocalSet(DIRECT_WHILE_PARENT_STEPS_PTR_LOCAL));
+        body.instruction(&Instruction::LocalGet(steps_len_local));
+        body.instruction(&Instruction::LocalSet(DIRECT_WHILE_PARENT_STEPS_LEN_LOCAL));
+        body.instruction(&Instruction::I32Const(0));
+        body.instruction(&Instruction::LocalSet(DIRECT_STEP_ERROR_FLAG_LOCAL));
+    }
+
     push_while_frame(body);
     body.instruction(&Instruction::LocalGet(source_ptr_local));
     body.instruction(&Instruction::LocalSet(DIRECT_WHILE_PARENT_SOURCE_PTR_LOCAL));
     body.instruction(&Instruction::LocalGet(source_len_local));
     body.instruction(&Instruction::LocalSet(DIRECT_WHILE_PARENT_SOURCE_LEN_LOCAL));
+
+    if has_error_plan {
+        body.instruction(&Instruction::Block(BlockType::Empty));
+    }
 
     body.instruction(&Instruction::I32Const(while_id as i32));
     push_retptr_arg(body);
@@ -107,7 +142,7 @@ pub(super) fn emit_while_plan(
     emit_retptr_error_or_return(
         body,
         indices,
-        failure_target,
+        internal_failure_target,
         route_ptr_local,
         route_len_local,
     );
@@ -120,7 +155,7 @@ pub(super) fn emit_while_plan(
     emit_retptr_error_or_return(
         body,
         indices,
-        failure_target,
+        internal_failure_target,
         route_ptr_local,
         route_len_local,
     );
@@ -134,7 +169,7 @@ pub(super) fn emit_while_plan(
     body.instruction(&Instruction::LocalSet(DIRECT_WHILE_INDEX_LOCAL));
     body.instruction(&Instruction::Block(BlockType::Empty));
     body.instruction(&Instruction::Loop(BlockType::Empty));
-    let loop_failure_target = failure_target.map(|target| target.nested(2));
+    let loop_failure_target = internal_failure_target.map(|target| target.nested(2));
     body.instruction(&Instruction::LocalGet(DIRECT_WHILE_INDEX_LOCAL));
     body.instruction(&Instruction::LocalGet(DIRECT_WHILE_MAX_ITERATIONS_LOCAL));
     body.instruction(&Instruction::I32GeU);
@@ -229,6 +264,17 @@ pub(super) fn emit_while_plan(
     );
 
     push_while_frame(body);
+    // A handled onError inside the iteration body must continue the loop, not
+    // complete the workflow, so wrap the body in a block and give it a depth-0
+    // handled target (mirroring the Split body lowering). The step-error frame is
+    // saved/restored around the body so a nested While onError capture — which
+    // shares the same step-error locals — cannot leak its handled flag into this
+    // loop's post-iteration error check. On a real body failure the branch to the
+    // capture block skips the restore, leaving the flag set for this loop.
+    if has_error_plan {
+        push_step_error_frame(body);
+        body.instruction(&Instruction::Block(BlockType::Empty));
+    }
     emit_run_plan_mapping(
         body,
         indices,
@@ -248,8 +294,21 @@ pub(super) fn emit_while_plan(
         route_len_local,
         workflow_log_kind,
         workflow_error_kind,
-        loop_failure_target,
+        if has_error_plan {
+            loop_failure_target.map(|target| target.nested(1))
+        } else {
+            loop_failure_target
+        },
+        if has_error_plan {
+            Some(DirectHandledTarget { branch_depth: 0 })
+        } else {
+            None
+        },
     );
+    if has_error_plan {
+        body.instruction(&Instruction::End);
+        pop_step_error_frame(body);
+    }
     pop_while_frame(body);
 
     push_retptr_arg(body);
@@ -315,13 +374,56 @@ pub(super) fn emit_while_plan(
     emit_retptr_error_or_return(
         body,
         indices,
-        failure_target,
+        internal_failure_target,
         route_ptr_local,
         route_len_local,
     );
     load_retptr_list(body, steps_ptr_local, steps_len_local);
 
+    if has_error_plan {
+        body.instruction(&Instruction::End);
+    }
+
     pop_while_frame(body);
+
+    if let Some(error_plan) = error_plan {
+        // A failure inside the loop set the step-error flag and branched to the
+        // capture block end. Restore the parent steps context and route the
+        // captured error through the shared onError machinery.
+        body.instruction(&Instruction::LocalGet(DIRECT_STEP_ERROR_FLAG_LOCAL));
+        body.instruction(&Instruction::If(BlockType::Empty));
+        body.instruction(&Instruction::LocalGet(DIRECT_WHILE_PARENT_STEPS_PTR_LOCAL));
+        body.instruction(&Instruction::LocalSet(steps_ptr_local));
+        body.instruction(&Instruction::LocalGet(DIRECT_WHILE_PARENT_STEPS_LEN_LOCAL));
+        body.instruction(&Instruction::LocalSet(steps_len_local));
+        emit_agent_error_route_or_fail(
+            body,
+            indices,
+            static_data,
+            track_events,
+            variables,
+            step_id,
+            DIRECT_STEP_ERROR_PTR_LOCAL,
+            DIRECT_STEP_ERROR_LEN_LOCAL,
+            steps_ptr_local,
+            steps_len_local,
+            source_ptr_local,
+            source_len_local,
+            output_ptr_local,
+            output_len_local,
+            route_ptr_local,
+            route_len_local,
+            Some(error_plan),
+            data_ptr_local,
+            data_len_local,
+            workflow_log_kind,
+            workflow_error_kind,
+            failure_target.map(|target| target.nested(1)),
+            handled_target.map(|target| target.nested(1)),
+        );
+        body.instruction(&Instruction::End);
+    }
+
     emit_build_source(
         body,
         indices,
@@ -368,5 +470,6 @@ pub(super) fn emit_while_plan(
         workflow_log_kind,
         workflow_error_kind,
         failure_target,
+        handled_target,
     );
 }

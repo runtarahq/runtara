@@ -61,6 +61,7 @@ pub(super) enum DirectRunPlan {
         breakpoint: bool,
         nested_plan: Box<DirectRunPlan>,
         next_plan: Box<DirectRunPlan>,
+        error_plan: Option<DirectErrorRoutePlan>,
     },
     EmbedWorkflow {
         step_id: String,
@@ -153,6 +154,22 @@ pub(super) enum DirectFailureTarget {
     EmbedWorkflow {
         branch_depth: u32,
     },
+    StepError {
+        branch_depth: u32,
+    },
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(super) struct DirectHandledTarget {
+    pub(super) branch_depth: u32,
+}
+
+impl DirectHandledTarget {
+    pub(super) fn nested(self, extra_depth: u32) -> Self {
+        Self {
+            branch_depth: self.branch_depth + extra_depth,
+        }
+    }
 }
 
 impl DirectFailureTarget {
@@ -176,6 +193,9 @@ impl DirectFailureTarget {
                 step_id_len,
             },
             Self::EmbedWorkflow { branch_depth } => Self::EmbedWorkflow {
+                branch_depth: branch_depth + extra_depth,
+            },
+            Self::StepError { branch_depth } => Self::StepError {
                 branch_depth: branch_depth + extra_depth,
             },
         }
@@ -375,6 +395,11 @@ fn step_run_plan_inner(
             )?;
             let next_plan =
                 normal_flow_plan(graph, child_workflows, step_id, stack, include_on_error)?;
+            let error_plan = if include_on_error {
+                on_error_plan(graph, child_workflows, step_id, stack)?
+            } else {
+                None
+            };
 
             Ok(DirectRunPlan::While {
                 step_id: step_id.to_string(),
@@ -382,6 +407,7 @@ fn step_run_plan_inner(
                 breakpoint: step_breakpoint_enabled(graph, step),
                 nested_plan: Box::new(nested_plan),
                 next_plan: Box::new(next_plan),
+                error_plan,
             })
         }
         "EmbedWorkflow" => {

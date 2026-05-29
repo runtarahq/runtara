@@ -21,8 +21,8 @@ use super::{
     DIRECT_AGENT_RESULT_ERR_RETRY_AFTER_VALUE_OFFSET, DIRECT_AGENT_RESULT_ERR_RETRYABLE_OFFSET,
     DIRECT_AGENT_RESULT_ERR_SEVERITY_LEN_OFFSET, DIRECT_AGENT_RESULT_ERR_SEVERITY_PTR_OFFSET,
     DIRECT_RUN_RETPTR_OFFSET, DirectCoreFunctionIndices, DirectCoreStaticData, DirectDataSegment,
-    DirectEdgeConditionPlan, DirectErrorRoutePlan, DirectFailureTarget, DirectRunPlan,
-    DirectVariables, emit_runtime_fail_return,
+    DirectEdgeConditionPlan, DirectErrorRoutePlan, DirectFailureTarget, DirectHandledTarget,
+    DirectRunPlan, DirectVariables, emit_runtime_fail_return,
 };
 
 #[allow(clippy::too_many_arguments)]
@@ -48,6 +48,7 @@ pub(super) fn emit_agent_invoke_error_branch(
     workflow_log_kind: &DirectDataSegment,
     workflow_error_kind: &DirectDataSegment,
     failure_target: Option<DirectFailureTarget>,
+    handled_target: Option<DirectHandledTarget>,
 ) {
     load_retptr_tag(body);
     body.instruction(&Instruction::If(BlockType::Empty));
@@ -73,6 +74,7 @@ pub(super) fn emit_agent_invoke_error_branch(
         workflow_log_kind,
         workflow_error_kind,
         failure_target.map(|target| target.nested(1)),
+        handled_target.map(|target| target.nested(1)),
     );
     body.instruction(&Instruction::End);
 }
@@ -100,6 +102,7 @@ fn emit_agent_invoke_error_body(
     workflow_log_kind: &DirectDataSegment,
     workflow_error_kind: &DirectDataSegment,
     failure_target: Option<DirectFailureTarget>,
+    handled_target: Option<DirectHandledTarget>,
 ) {
     emit_agent_error(body, indices, agent_id, output_ptr_local, output_len_local);
     emit_agent_debug_error(
@@ -136,6 +139,7 @@ fn emit_agent_invoke_error_body(
         workflow_log_kind,
         workflow_error_kind,
         failure_target,
+        handled_target,
     );
 }
 
@@ -164,6 +168,7 @@ pub(super) fn emit_agent_invoke_error_body_from_info(
     workflow_log_kind: &DirectDataSegment,
     workflow_error_kind: &DirectDataSegment,
     failure_target: Option<DirectFailureTarget>,
+    handled_target: Option<DirectHandledTarget>,
 ) {
     emit_agent_error_from_info(
         body,
@@ -208,6 +213,7 @@ pub(super) fn emit_agent_invoke_error_body_from_info(
         workflow_log_kind,
         workflow_error_kind,
         failure_target,
+        handled_target,
     );
 }
 
@@ -235,6 +241,7 @@ pub(super) fn emit_agent_error_route_or_fail(
     workflow_log_kind: &DirectDataSegment,
     workflow_error_kind: &DirectDataSegment,
     failure_target: Option<DirectFailureTarget>,
+    handled_target: Option<DirectHandledTarget>,
 ) {
     if let Some(error_plan) = error_plan {
         emit_error_steps(
@@ -278,7 +285,8 @@ pub(super) fn emit_agent_error_route_or_fail(
             route_len_local,
             workflow_log_kind,
             workflow_error_kind,
-            embed_workflow_handled_target(failure_target),
+            failure_target,
+            handled_target,
         );
     }
 
@@ -292,15 +300,6 @@ pub(super) fn emit_agent_error_route_or_fail(
         );
     } else {
         emit_runtime_fail_return(body, indices, error_ptr_local, error_len_local);
-    }
-}
-
-fn embed_workflow_handled_target(
-    failure_target: Option<DirectFailureTarget>,
-) -> Option<DirectFailureTarget> {
-    match failure_target {
-        Some(DirectFailureTarget::EmbedWorkflow { .. }) => failure_target,
-        _ => None,
     }
 }
 
@@ -349,7 +348,8 @@ fn emit_error_route_dispatch(
     route_len_local: u32,
     workflow_log_kind: &DirectDataSegment,
     workflow_error_kind: &DirectDataSegment,
-    handled_target: Option<DirectFailureTarget>,
+    failure_target: Option<DirectFailureTarget>,
+    handled_target: Option<DirectHandledTarget>,
 ) {
     emit_error_route_dispatch_inner(
         body,
@@ -371,6 +371,7 @@ fn emit_error_route_dispatch(
         route_len_local,
         workflow_log_kind,
         workflow_error_kind,
+        failure_target,
         handled_target,
         0,
     );
@@ -397,7 +398,8 @@ fn emit_error_route_dispatch_inner(
     route_len_local: u32,
     workflow_log_kind: &DirectDataSegment,
     workflow_error_kind: &DirectDataSegment,
-    handled_target: Option<DirectFailureTarget>,
+    failure_target: Option<DirectFailureTarget>,
+    handled_target: Option<DirectHandledTarget>,
     enclosing_if_depth: u32,
 ) {
     let Some((branch, remaining)) = branches.split_first() else {
@@ -421,6 +423,7 @@ fn emit_error_route_dispatch_inner(
                 route_len_local,
                 workflow_log_kind,
                 workflow_error_kind,
+                failure_target.map(|target| target.nested(enclosing_if_depth)),
                 handled_target.map(|target| target.nested(enclosing_if_depth)),
             );
         }
@@ -460,6 +463,7 @@ fn emit_error_route_dispatch_inner(
         route_len_local,
         workflow_log_kind,
         workflow_error_kind,
+        failure_target.map(|target| target.nested(enclosing_if_depth + 1)),
         handled_target.map(|target| target.nested(enclosing_if_depth + 1)),
     );
     body.instruction(&Instruction::Else);
@@ -483,6 +487,7 @@ fn emit_error_route_dispatch_inner(
         route_len_local,
         workflow_log_kind,
         workflow_error_kind,
+        failure_target,
         handled_target,
         enclosing_if_depth + 1,
     );
@@ -509,7 +514,8 @@ fn emit_terminal_run_plan_mapping(
     route_len_local: u32,
     workflow_log_kind: &DirectDataSegment,
     workflow_error_kind: &DirectDataSegment,
-    handled_target: Option<DirectFailureTarget>,
+    failure_target: Option<DirectFailureTarget>,
+    handled_target: Option<DirectHandledTarget>,
 ) {
     emit_run_plan_mapping(
         body,
@@ -530,10 +536,11 @@ fn emit_terminal_run_plan_mapping(
         route_len_local,
         workflow_log_kind,
         workflow_error_kind,
+        failure_target,
         handled_target,
     );
 
-    if let Some(DirectFailureTarget::EmbedWorkflow { branch_depth }) = handled_target {
+    if let Some(DirectHandledTarget { branch_depth }) = handled_target {
         body.instruction(&Instruction::Br(branch_depth));
     } else {
         body.instruction(&Instruction::LocalGet(output_ptr_local));

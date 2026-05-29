@@ -10,7 +10,7 @@ use super::dispatcher::emit_run_plan_mapping;
 use super::mapping::emit_build_source;
 use super::{
     DirectCoreFunctionIndices, DirectCoreStaticData, DirectDataSegment, DirectFailureTarget,
-    DirectRunPlan, DirectSwitchRoutePlan, DirectVariables,
+    DirectHandledTarget, DirectRunPlan, DirectSwitchRoutePlan, DirectVariables,
 };
 
 #[allow(clippy::too_many_arguments)]
@@ -38,6 +38,7 @@ pub(super) fn emit_switch_route_plan(
     workflow_log_kind: &DirectDataSegment,
     workflow_error_kind: &DirectDataSegment,
     failure_target: Option<DirectFailureTarget>,
+    handled_target: Option<DirectHandledTarget>,
 ) {
     emit_step_breakpoint(
         body,
@@ -138,6 +139,7 @@ pub(super) fn emit_switch_route_plan(
         workflow_log_kind,
         workflow_error_kind,
         failure_target,
+        handled_target,
     );
 }
 
@@ -163,6 +165,7 @@ fn emit_switch_route_dispatch(
     workflow_log_kind: &DirectDataSegment,
     workflow_error_kind: &DirectDataSegment,
     failure_target: Option<DirectFailureTarget>,
+    handled_target: Option<DirectHandledTarget>,
 ) {
     let Some((branch, remaining)) = branches.split_first() else {
         emit_run_plan_mapping(
@@ -185,6 +188,7 @@ fn emit_switch_route_dispatch(
             workflow_log_kind,
             workflow_error_kind,
             failure_target,
+            handled_target,
         );
         return;
     };
@@ -211,6 +215,7 @@ fn emit_switch_route_dispatch(
         workflow_log_kind,
         workflow_error_kind,
         failure_target.map(|target| target.nested(1)),
+        handled_target.map(|target| target.nested(1)),
     );
     body.instruction(&Instruction::Else);
     emit_switch_route_dispatch(
@@ -234,6 +239,7 @@ fn emit_switch_route_dispatch(
         workflow_log_kind,
         workflow_error_kind,
         failure_target.map(|target| target.nested(1)),
+        handled_target.map(|target| target.nested(1)),
     );
     body.instruction(&Instruction::End);
 }

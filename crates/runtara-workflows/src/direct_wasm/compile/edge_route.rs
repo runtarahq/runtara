@@ -8,7 +8,8 @@ use super::abi::{emit_retptr_error_or_return, push_retptr_arg};
 use super::dispatcher::emit_run_plan_mapping;
 use super::{
     DIRECT_RUN_RETPTR_OFFSET, DirectCoreFunctionIndices, DirectCoreStaticData, DirectDataSegment,
-    DirectEdgeConditionPlan, DirectFailureTarget, DirectRunPlan, DirectVariables,
+    DirectEdgeConditionPlan, DirectFailureTarget, DirectHandledTarget, DirectRunPlan,
+    DirectVariables,
 };
 
 #[allow(clippy::too_many_arguments)]
@@ -33,6 +34,7 @@ pub(super) fn emit_edge_route_dispatch(
     workflow_log_kind: &DirectDataSegment,
     workflow_error_kind: &DirectDataSegment,
     failure_target: Option<DirectFailureTarget>,
+    handled_target: Option<DirectHandledTarget>,
 ) {
     let Some((branch, remaining)) = branches.split_first() else {
         emit_run_plan_mapping(
@@ -55,6 +57,7 @@ pub(super) fn emit_edge_route_dispatch(
             workflow_log_kind,
             workflow_error_kind,
             failure_target,
+            handled_target,
         );
         return;
     };
@@ -99,6 +102,7 @@ pub(super) fn emit_edge_route_dispatch(
         workflow_log_kind,
         workflow_error_kind,
         failure_target.map(|target| target.nested(1)),
+        handled_target.map(|target| target.nested(1)),
     );
     body.instruction(&Instruction::Else);
     emit_edge_route_dispatch(
@@ -122,6 +126,7 @@ pub(super) fn emit_edge_route_dispatch(
         workflow_log_kind,
         workflow_error_kind,
         failure_target.map(|target| target.nested(1)),
+        handled_target.map(|target| target.nested(1)),
     );
     body.instruction(&Instruction::End);
 }

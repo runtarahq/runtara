@@ -13,7 +13,8 @@ use super::dispatcher::emit_run_plan_mapping;
 use super::mapping::emit_build_source;
 use super::{
     DIRECT_DELAY_DURATION_MS_LOCAL, DIRECT_RET_U64_OK_OFFSET, DirectCoreFunctionIndices,
-    DirectCoreStaticData, DirectDataSegment, DirectFailureTarget, DirectRunPlan, DirectVariables,
+    DirectCoreStaticData, DirectDataSegment, DirectFailureTarget, DirectHandledTarget,
+    DirectRunPlan, DirectVariables,
 };
 
 #[allow(clippy::too_many_arguments)]
@@ -41,6 +42,7 @@ pub(super) fn emit_delay_plan(
     workflow_log_kind: &DirectDataSegment,
     workflow_error_kind: &DirectDataSegment,
     failure_target: Option<DirectFailureTarget>,
+    handled_target: Option<DirectHandledTarget>,
 ) {
     emit_step_breakpoint(
         body,
@@ -150,5 +152,6 @@ pub(super) fn emit_delay_plan(
         workflow_log_kind,
         workflow_error_kind,
         failure_target,
+        handled_target,
     );
 }

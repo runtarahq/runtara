@@ -50,7 +50,8 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   `Conditional`, `Filter`, `Switch`, `GroupBy`, `Log`, terminal `Error`,
   durable `Delay`, durable `WaitForSignal`, and static `EmbedWorkflow`
   call-site breakpoints plus durable `Agent` breakpoints now have direct
-  pause/resume lowering. While timeout and `onError` routing remain gated.
+  pause/resume lowering. While `onError` routing is now supported; While timeout
+  remains gated.
   `Finish.inputMapping` forms remain broadly supported because mapping semantics
   are delegated to the shared stdlib.
 - The direct core emitter now has the first static `EmbedWorkflow` lowering
@@ -115,8 +116,8 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   nested direct run plan, advances loop state, and writes the final While step
   envelope before continuing normal flow. It also calls runtime cancellation,
   heartbeat, and signal-check helpers around each iteration body. Public While
-  support is enabled for normal-flow loops with durable breakpoint pause/resume,
-  while timeout and `onError` remain gated. The breakpoint lowerer pauses before
+  support is enabled for normal-flow loops with durable breakpoint pause/resume
+  and `onError` routing, while timeout remains gated. The breakpoint lowerer pauses before
   `while-max-iterations`, condition evaluation, debug-start, and nested body
   execution after resolving generated-compatible breakpoint inputs. Nested
   `Split`/`While` bodies restore loop scratch frames across nested execution.
@@ -655,6 +656,27 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   does not enforce a deadline. Structural coverage pins retry helper lowering,
   support coverage removes the previous `split-retry` gate, and gated A/B
   coverage checks transient Split retry exhaustion and retry-attempt parity.
+- While `onError` routing is now supported. Direct mode runs the loop inside a
+  capture block whose failures branch to shared step-error locals, restores the
+  parent steps context, and routes the captured error through the same
+  `error-steps`/route-dispatch machinery used by Agent and EmbedWorkflow onError,
+  matching the generated Rust path that wraps the whole While step in onError
+  handling. The handled-completion target is now a generic `DirectHandledTarget`
+  threaded through every step lowerer, so an onError handler that completes
+  inside a Split, While, WaitForSignal `onWait`, or EmbedWorkflow body continues
+  the enclosing step instead of completing the whole workflow; previously only
+  EmbedWorkflow was treated as a handled nested context, which was a latent
+  nested-completion bug for the other contexts. A reentrant step-error frame is
+  saved/restored around the loop body so a nested While `onError` capture cannot
+  leak its handled flag into an outer loop's post-iteration error check. Runtime
+  cancellation/pause/shutdown suspension stays fail-fast. Support removes the
+  previous While `onError` gate, structural coverage compiles and validates a
+  While that succeeds for the first iterations and then fails mid-loop and routes
+  to a default handler, and gated A/B coverage checks direct-vs-generated parity
+  for the recovered handler output. The reusable fixture is
+  `crates/runtara-workflows/tests/fixtures/while_on_error.json`, structural
+  coverage lives in `direct_compile_supports_while_on_error_graph`, and A/B
+  coverage in `direct_wasm_matches_components_while_on_error`.
 
 Current remaining action items:
 
@@ -664,8 +686,7 @@ Current remaining action items:
   enforcing a deadline.
 - Keep Split timeout gated until generated Rust defines timeout behavior or
   product intentionally makes direct mode the first implementation.
-- Implement While timeout and While `onError` routing semantics with structural
-  and gated A/B coverage.
+- Implement While timeout semantics with structural and gated A/B coverage.
 - Close Agent hardening gaps: timeout/compensation policy, retry/failure
   differential tests, and long-running cancellation coverage.
 - Start Phase 12 AiAgent support only after the shared Agent/runtime durability
@@ -749,16 +770,13 @@ Deep nesting invariants for future work:
 
 Recommended next implementation slices:
 
-1. Implement While `onError` routing next. Generated Rust already wraps While
-   steps in the same `onError` mechanism as Agent/Split/EmbedWorkflow, while
-   direct mode still gates While-sourced error routes.
-2. Keep Split, While, and EmbedWorkflow timeout fields gated until generated
+1. Keep Split, While, and EmbedWorkflow timeout fields gated until generated
    Rust defines timeout behavior or product intentionally makes direct mode the
    first implementation for those deadlines.
-3. Continue Agent hardening after loop durability is stable: timeout,
+2. Continue Agent hardening after loop durability is stable: timeout,
    compensation policy, retry/failure differential tests, and long-running
    cancellation coverage.
-4. Leave `EmbedWorkflow.timeout` gated unless product decides direct mode should
+3. Leave `EmbedWorkflow.timeout` gated unless product decides direct mode should
    define behavior before generated Rust does.
 
 ## Final Goal
@@ -2409,7 +2427,8 @@ Implementation steps:
      evaluation, debug-start emission, and nested body execution;
    - public support gate: enabled for normal-flow While loops with durable
      breakpoint pause/resume, including nested Split/While loop bodies with
-     reentrant loop scratch frames; While timeout and `onError` remain gated;
+     reentrant loop scratch frames; While timeout remains gated while `onError`
+     routing is now supported;
    - gated composed-artifact execution smoke: done for an agentless While loop
      that exercises loop index variables, `_previousOutputs`, final output
      shape, heartbeat/signal polling, and no checkpoint/sleep traffic;
@@ -2417,7 +2436,9 @@ Implementation steps:
      for a While body containing a nested Split, verifying caller loop variables
      survive the inner loop, plus While breakpoint first-hit pause and
      checkpoint resume parity;
-   - While timeout and onError routing: pending.
+   - While `onError` routing: done through the shared step-error capture and
+     `error-steps`/route-dispatch machinery, with a default handler fixture and
+     gated A/B parity coverage; While timeout: pending.
 4. Reentrant loop scratch frames are implemented for normal nested Split/While
    execution:
    - Split preserves its caller loop frame across the whole Split step and its

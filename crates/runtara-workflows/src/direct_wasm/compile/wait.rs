@@ -20,7 +20,7 @@ use super::{
     DIRECT_WAIT_PARENT_STEPS_PTR_LOCAL, DIRECT_WAIT_POLL_INTERVAL_MS_LOCAL,
     DIRECT_WAIT_SIGNAL_ID_LEN_LOCAL, DIRECT_WAIT_SIGNAL_ID_PTR_LOCAL, DIRECT_WAIT_TIMEOUT_MS_LOCAL,
     DIRECT_WAIT_TIMEOUT_PRESENT_LOCAL, DirectCoreFunctionIndices, DirectCoreStaticData,
-    DirectDataSegment, DirectFailureTarget, DirectRunPlan, DirectVariables,
+    DirectDataSegment, DirectFailureTarget, DirectHandledTarget, DirectRunPlan, DirectVariables,
     emit_runtime_fail_return,
 };
 
@@ -73,6 +73,7 @@ pub(super) fn emit_wait_for_signal_plan(
     workflow_log_kind: &DirectDataSegment,
     workflow_error_kind: &DirectDataSegment,
     failure_target: Option<DirectFailureTarget>,
+    handled_target: Option<DirectHandledTarget>,
 ) {
     let step_id_segment = static_data
         .step_id(step_id)
@@ -337,6 +338,7 @@ pub(super) fn emit_wait_for_signal_plan(
         workflow_log_kind,
         workflow_error_kind,
         failure_target,
+        handled_target,
     );
 }
 
@@ -414,6 +416,7 @@ fn emit_wait_on_wait_plan(
         source_len_local,
         Some(on_wait_failure_target),
     );
+    body.instruction(&Instruction::Block(BlockType::Empty));
     emit_run_plan_mapping(
         body,
         indices,
@@ -434,7 +437,9 @@ fn emit_wait_on_wait_plan(
         workflow_log_kind,
         workflow_error_kind,
         Some(on_wait_failure_target),
+        Some(DirectHandledTarget { branch_depth: 0 }),
     );
+    body.instruction(&Instruction::End);
 
     body.instruction(&Instruction::LocalGet(DIRECT_WAIT_PARENT_STEPS_PTR_LOCAL));
     body.instruction(&Instruction::LocalSet(steps_ptr_local));

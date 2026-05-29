@@ -20,7 +20,7 @@ use super::wait::emit_wait_for_signal_plan;
 use super::while_loop::emit_while_plan;
 use super::{
     DIRECT_RUN_RETPTR_OFFSET, DirectCoreFunctionIndices, DirectCoreStaticData, DirectDataSegment,
-    DirectFailureTarget, DirectRunPlan, DirectVariables,
+    DirectFailureTarget, DirectHandledTarget, DirectRunPlan, DirectVariables,
 };
 
 #[allow(clippy::too_many_arguments)]
@@ -44,6 +44,7 @@ pub(super) fn emit_run_plan_mapping(
     workflow_log_kind: &DirectDataSegment,
     workflow_error_kind: &DirectDataSegment,
     failure_target: Option<DirectFailureTarget>,
+    handled_target: Option<DirectHandledTarget>,
 ) {
     match run_plan {
         DirectRunPlan::Finish {
@@ -129,6 +130,7 @@ pub(super) fn emit_run_plan_mapping(
                 workflow_log_kind,
                 workflow_error_kind,
                 failure_target,
+                handled_target,
             );
         }
         DirectRunPlan::SwitchValue {
@@ -161,6 +163,7 @@ pub(super) fn emit_run_plan_mapping(
                 workflow_log_kind,
                 workflow_error_kind,
                 failure_target,
+                handled_target,
             );
         }
         DirectRunPlan::SwitchRoute {
@@ -194,6 +197,7 @@ pub(super) fn emit_run_plan_mapping(
                 workflow_log_kind,
                 workflow_error_kind,
                 failure_target,
+                handled_target,
             );
         }
         DirectRunPlan::EdgeRoute {
@@ -221,6 +225,7 @@ pub(super) fn emit_run_plan_mapping(
                 workflow_log_kind,
                 workflow_error_kind,
                 failure_target,
+                handled_target,
             );
         }
         DirectRunPlan::GroupBy {
@@ -253,6 +258,7 @@ pub(super) fn emit_run_plan_mapping(
                 workflow_log_kind,
                 workflow_error_kind,
                 failure_target,
+                handled_target,
             );
         }
         DirectRunPlan::Split {
@@ -294,6 +300,7 @@ pub(super) fn emit_run_plan_mapping(
                 workflow_log_kind,
                 workflow_error_kind,
                 failure_target,
+                handled_target,
             );
         }
         DirectRunPlan::While {
@@ -302,6 +309,7 @@ pub(super) fn emit_run_plan_mapping(
             breakpoint,
             nested_plan,
             next_plan,
+            error_plan,
         } => {
             emit_while_plan(
                 body,
@@ -314,6 +322,7 @@ pub(super) fn emit_run_plan_mapping(
                 *breakpoint,
                 nested_plan,
                 next_plan,
+                error_plan.as_ref(),
                 data_ptr_local,
                 data_len_local,
                 steps_ptr_local,
@@ -327,6 +336,7 @@ pub(super) fn emit_run_plan_mapping(
                 workflow_log_kind,
                 workflow_error_kind,
                 failure_target,
+                handled_target,
             );
         }
         DirectRunPlan::EmbedWorkflow {
@@ -368,6 +378,7 @@ pub(super) fn emit_run_plan_mapping(
                 workflow_log_kind,
                 workflow_error_kind,
                 failure_target,
+                handled_target,
             );
         }
         DirectRunPlan::Delay {
@@ -401,6 +412,7 @@ pub(super) fn emit_run_plan_mapping(
                 workflow_log_kind,
                 workflow_error_kind,
                 failure_target,
+                handled_target,
             );
         }
         DirectRunPlan::WaitForSignal {
@@ -432,6 +444,7 @@ pub(super) fn emit_run_plan_mapping(
                 workflow_log_kind,
                 workflow_error_kind,
                 failure_target,
+                handled_target,
             );
         }
         DirectRunPlan::Log {
@@ -463,6 +476,7 @@ pub(super) fn emit_run_plan_mapping(
                 workflow_log_kind,
                 workflow_error_kind,
                 failure_target,
+                handled_target,
             );
         }
         DirectRunPlan::Agent {
@@ -508,6 +522,7 @@ pub(super) fn emit_run_plan_mapping(
                 workflow_log_kind,
                 workflow_error_kind,
                 failure_target,
+                handled_target,
             );
         }
         DirectRunPlan::Error {
@@ -615,6 +630,7 @@ pub(super) fn emit_run_plan_mapping(
                 workflow_log_kind,
                 workflow_error_kind,
                 failure_target.map(|target| target.nested(1)),
+                handled_target.map(|target| target.nested(1)),
             );
             body.instruction(&Instruction::Else);
             emit_run_plan_mapping(
@@ -637,6 +653,7 @@ pub(super) fn emit_run_plan_mapping(
                 workflow_log_kind,
                 workflow_error_kind,
                 failure_target.map(|target| target.nested(1)),
+                handled_target.map(|target| target.nested(1)),
             );
             body.instruction(&Instruction::End);
         }

@@ -26,7 +26,8 @@ use super::mapping::{emit_apply_mapping, emit_build_source};
 use super::{
     DIRECT_AGENT_RETRY_ATTEMPT_LOCAL, DIRECT_AGENT_RETRY_ERROR_LEN_LOCAL,
     DIRECT_AGENT_RETRY_ERROR_PTR_LOCAL, DirectCoreFunctionIndices, DirectCoreStaticData,
-    DirectDataSegment, DirectErrorRoutePlan, DirectFailureTarget, DirectRunPlan, DirectVariables,
+    DirectDataSegment, DirectErrorRoutePlan, DirectFailureTarget, DirectHandledTarget,
+    DirectRunPlan, DirectVariables,
 };
 
 #[allow(clippy::too_many_arguments)]
@@ -60,6 +61,7 @@ pub(super) fn emit_agent_plan(
     workflow_log_kind: &DirectDataSegment,
     workflow_error_kind: &DirectDataSegment,
     failure_target: Option<DirectFailureTarget>,
+    handled_target: Option<DirectHandledTarget>,
 ) {
     emit_apply_mapping(
         body,
@@ -121,6 +123,7 @@ pub(super) fn emit_agent_plan(
         workflow_log_kind,
         workflow_error_kind,
         failure_target,
+        handled_target,
     );
 
     emit_agent_connection_input(
@@ -239,6 +242,7 @@ pub(super) fn emit_agent_plan(
             workflow_log_kind,
             workflow_error_kind,
             failure_target.map(|target| target.nested(3)),
+            handled_target.map(|target| target.nested(3)),
         );
         body.instruction(&Instruction::End);
         load_agent_retptr_list(body, output_ptr_local, output_len_local);
@@ -277,6 +281,7 @@ pub(super) fn emit_agent_plan(
             workflow_log_kind,
             workflow_error_kind,
             failure_target,
+            handled_target,
         );
         load_agent_retptr_list(body, output_ptr_local, output_len_local);
     }
@@ -355,6 +360,7 @@ pub(super) fn emit_agent_plan(
         workflow_log_kind,
         workflow_error_kind,
         failure_target,
+        handled_target,
     );
 }
 
@@ -381,6 +387,7 @@ fn emit_agent_input_validation(
     workflow_log_kind: &DirectDataSegment,
     workflow_error_kind: &DirectDataSegment,
     failure_target: Option<DirectFailureTarget>,
+    handled_target: Option<DirectHandledTarget>,
 ) {
     body.instruction(&Instruction::I32Const(agent_id as i32));
     body.instruction(&Instruction::LocalGet(input_ptr_local));
@@ -438,6 +445,7 @@ fn emit_agent_input_validation(
         workflow_log_kind,
         workflow_error_kind,
         failure_target.map(|target| target.nested(1)),
+        handled_target.map(|target| target.nested(1)),
     );
     body.instruction(&Instruction::End);
 }

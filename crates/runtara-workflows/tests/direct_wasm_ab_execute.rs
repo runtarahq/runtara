@@ -62,6 +62,7 @@ const EDGE_CONDITION_PRIORITY: &str = include_str!("fixtures/edge_condition_prio
 const WHILE_DIRECT_INDEX_ONLY: &str = include_str!("fixtures/while_direct_index_only.json");
 const SPLIT_NESTED_SPLIT: &str = include_str!("fixtures/split_nested_split.json");
 const WHILE_NESTED_SPLIT: &str = include_str!("fixtures/while_nested_split.json");
+const WHILE_ON_ERROR: &str = include_str!("fixtures/while_on_error.json");
 const SPLIT_DONT_STOP_NESTED_SPLIT_ERROR: &str =
     include_str!("fixtures/split_dont_stop_nested_split_error.json");
 const SPLIT_DONT_STOP_DEEP_NESTED_WHILE_SPLIT_ERROR: &str =
@@ -4469,6 +4470,48 @@ fn direct_wasm_matches_components_while_with_nested_split_frame_isolation() {
     });
     assert_eq!(components.output_json.as_ref(), Some(&expected_output));
     assert_eq!(direct.output_json.as_ref(), Some(&expected_output));
+}
+
+#[test]
+fn direct_wasm_matches_components_while_on_error() {
+    let Some(components_dir) = direct_ab_components_dir() else {
+        return;
+    };
+    let _data = setup_data_dir();
+
+    let components_artifact = compile_components_artifact("while-on-error", WHILE_ON_ERROR);
+    let direct_artifact =
+        compile_direct_artifact(&components_dir, "while-on-error", WHILE_ON_ERROR);
+    assert_eq!(
+        direct_artifact.compiler_mode,
+        WorkflowCompilerMode::DirectWasm
+    );
+
+    // The loop body succeeds for index 0 and 1, then fails at index 2, so the
+    // While step routes the captured failure to its onError handler.
+    let workflow_input = br#"{}"#;
+    let components_input = components_sdk_input(workflow_input);
+    let components = execute_artifact(
+        &components_artifact,
+        "ab-components-while-on-error",
+        &components_input,
+    );
+    let direct = execute_artifact(
+        &direct_artifact.path,
+        "ab-direct-while-on-error",
+        workflow_input,
+    );
+
+    assert_success_parity("while-on-error", 0, &components, &direct);
+    assert_eq!(components.output_json, direct.output_json);
+
+    let output = direct.output_json.as_ref().expect("direct onError output");
+    assert_eq!(output.get("handled"), Some(&serde_json::json!(true)));
+    assert_eq!(output.get("code"), Some(&serde_json::json!("WHILE_BOOM")));
+    assert_eq!(
+        output.get("category"),
+        Some(&serde_json::json!("permanent"))
+    );
 }
 
 #[test]

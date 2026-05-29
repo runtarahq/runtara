@@ -28,6 +28,7 @@ mod mapping;
 mod split;
 mod split_retry;
 mod step_context;
+mod step_error;
 mod switch_route;
 mod wait;
 mod while_loop;
@@ -68,8 +69,8 @@ use super::manifest::{
     build_direct_workflow_manifest_with_child_workflows_and_agent_catalog,
 };
 use super::plan::{
-    DirectEdgeConditionPlan, DirectErrorRoutePlan, DirectFailureTarget, DirectRunPlan,
-    DirectSwitchRoutePlan, direct_run_plan,
+    DirectEdgeConditionPlan, DirectErrorRoutePlan, DirectFailureTarget, DirectHandledTarget,
+    DirectRunPlan, DirectSwitchRoutePlan, direct_run_plan,
 };
 #[cfg(test)]
 use super::static_data::{
@@ -233,6 +234,11 @@ const DIRECT_SPLIT_RETRY_ERROR_PTR_LOCAL: u32 = 71;
 const DIRECT_SPLIT_RETRY_ERROR_LEN_LOCAL: u32 = 72;
 const DIRECT_SPLIT_RETRY_SLEEP_MS_LOCAL: u32 = 73;
 const DIRECT_SPLIT_RATE_LIMIT_WAIT_TOTAL_LOCAL: u32 = 74;
+const DIRECT_STEP_ERROR_FLAG_LOCAL: u32 = 75;
+const DIRECT_STEP_ERROR_PTR_LOCAL: u32 = 76;
+const DIRECT_STEP_ERROR_LEN_LOCAL: u32 = 77;
+const DIRECT_WHILE_PARENT_STEPS_PTR_LOCAL: u32 = 78;
+const DIRECT_WHILE_PARENT_STEPS_LEN_LOCAL: u32 = 79;
 
 /// Input for the opt-in direct compiler.
 #[derive(Debug, Clone)]
