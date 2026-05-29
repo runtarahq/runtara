@@ -8,10 +8,11 @@ use super::abi::{
     load_retptr_list, push_retptr_arg, push_retptr_i64_load, push_segment_args,
     return_if_retptr_error,
 };
+use super::debug::emit_step_debug_event;
 use super::{
     DIRECT_DELAY_DURATION_MS_LOCAL, DIRECT_RET_U64_OK_OFFSET, DirectCoreFunctionIndices,
     DirectCoreStaticData, DirectDataSegment, DirectFailureTarget, DirectRunPlan, DirectVariables,
-    emit_build_source, emit_run_plan_mapping, emit_step_debug_event,
+    emit_build_source, emit_run_plan_mapping,
 };
 
 #[allow(clippy::too_many_arguments)]
