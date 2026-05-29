@@ -201,6 +201,34 @@ interface json {
         duration-ms: u64,
     ) -> result<list<u8>, string>;
 
+    wait-signal-id: func(
+        step-id: string,
+        instance-id: string,
+        source: list<u8>,
+    ) -> result<string, string>;
+
+    wait-timeout-ms: func(
+        step-id: string,
+        source: list<u8>,
+    ) -> result<option<u64>, string>;
+
+    wait-poll-interval-ms: func(
+        step-id: string,
+    ) -> result<u64, string>;
+
+    wait-event: func(
+        step-id: string,
+        signal-id: string,
+        source: list<u8>,
+    ) -> result<list<u8>, string>;
+
+    wait-output: func(
+        step-id: string,
+        signal-id: string,
+        signal-payload: list<u8>,
+        source: list<u8>,
+    ) -> result<list<u8>, string>;
+
     agent-output: func(
         agent-id: u32,
         source: list<u8>,

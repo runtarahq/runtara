@@ -522,6 +522,69 @@ mod component {
             })
         }
 
+        fn wait_signal_id(
+            step_id: String,
+            instance_id: String,
+            source: Vec<u8>,
+        ) -> Result<String, String> {
+            MANIFEST.with(|slot| {
+                let slot = slot.borrow();
+                let manifest = slot
+                    .as_ref()
+                    .ok_or_else(|| "direct stdlib manifest was not initialized".to_string())?;
+                manifest.wait_signal_id(&step_id, &instance_id, &source)
+            })
+        }
+
+        fn wait_timeout_ms(step_id: String, source: Vec<u8>) -> Result<Option<u64>, String> {
+            MANIFEST.with(|slot| {
+                let slot = slot.borrow();
+                let manifest = slot
+                    .as_ref()
+                    .ok_or_else(|| "direct stdlib manifest was not initialized".to_string())?;
+                manifest.wait_timeout_ms(&step_id, &source)
+            })
+        }
+
+        fn wait_poll_interval_ms(step_id: String) -> Result<u64, String> {
+            MANIFEST.with(|slot| {
+                let slot = slot.borrow();
+                let manifest = slot
+                    .as_ref()
+                    .ok_or_else(|| "direct stdlib manifest was not initialized".to_string())?;
+                manifest.wait_poll_interval_ms(&step_id)
+            })
+        }
+
+        fn wait_event(
+            step_id: String,
+            signal_id: String,
+            source: Vec<u8>,
+        ) -> Result<Vec<u8>, String> {
+            MANIFEST.with(|slot| {
+                let slot = slot.borrow();
+                let manifest = slot
+                    .as_ref()
+                    .ok_or_else(|| "direct stdlib manifest was not initialized".to_string())?;
+                manifest.wait_event(&step_id, &signal_id, &source)
+            })
+        }
+
+        fn wait_output(
+            step_id: String,
+            signal_id: String,
+            signal_payload: Vec<u8>,
+            source: Vec<u8>,
+        ) -> Result<Vec<u8>, String> {
+            MANIFEST.with(|slot| {
+                let slot = slot.borrow();
+                let manifest = slot
+                    .as_ref()
+                    .ok_or_else(|| "direct stdlib manifest was not initialized".to_string())?;
+                manifest.wait_output(&step_id, &signal_id, &signal_payload, &source)
+            })
+        }
+
         fn agent_output(
             agent_id: u32,
             source: Vec<u8>,

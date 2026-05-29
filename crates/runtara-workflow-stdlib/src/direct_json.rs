@@ -635,6 +635,124 @@ impl DirectJsonManifest {
             .map_err(|err| format!("failed to serialize delay steps context: {err}"))
     }
 
+    /// Build the deterministic signal id used by generated WaitForSignal code.
+    pub fn wait_signal_id(
+        &self,
+        step_id: &str,
+        instance_id: &str,
+        source: &[u8],
+    ) -> Result<String, String> {
+        let source: Value = serde_json::from_slice(source)
+            .map_err(|err| format!("failed to parse wait-signal-id source: {err}"))?;
+        self.wait_step(step_id)?;
+        let workflow_id = source
+            .get("variables")
+            .and_then(Value::as_object)
+            .and_then(|vars| vars.get("_workflow_id"))
+            .and_then(Value::as_str)
+            .unwrap_or("root");
+        let indices_suffix = wait_loop_indices_suffix(&source);
+        Ok(format!(
+            "{instance_id}/{workflow_id}/{step_id}{indices_suffix}"
+        ))
+    }
+
+    /// Resolve an optional WaitForSignal timeout mapping to milliseconds.
+    pub fn wait_timeout_ms(&self, step_id: &str, source: &[u8]) -> Result<Option<u64>, String> {
+        let source: Value = serde_json::from_slice(source)
+            .map_err(|err| format!("failed to parse wait-timeout source: {err}"))?;
+        let step = self.wait_step(step_id)?;
+        let Some(timeout_mapping) = step.body.get("timeoutMs") else {
+            return Ok(None);
+        };
+        let timeout = apply_mapping_value(timeout_mapping, &source)?;
+        match timeout {
+            Value::Null => Ok(None),
+            Value::Number(number) => Ok(number
+                .as_u64()
+                .or_else(|| number.as_f64().map(|ms| ms as u64))),
+            other => Err(format!(
+                "WaitForSignal step '{step_id}': timeout_ms must be a number, got: {other}"
+            )),
+        }
+    }
+
+    /// Return the configured WaitForSignal poll interval, defaulting to 1000ms.
+    pub fn wait_poll_interval_ms(&self, step_id: &str) -> Result<u64, String> {
+        let step = self.wait_step(step_id)?;
+        match step.body.get("pollIntervalMs") {
+            Some(Value::Number(number)) => number.as_u64().ok_or_else(|| {
+                format!(
+                    "WaitForSignal step '{step_id}': poll_interval_ms must be a non-negative integer"
+                )
+            }),
+            Some(other) => Err(format!(
+                "WaitForSignal step '{step_id}': poll_interval_ms must be a number, got: {other}"
+            )),
+            None => Ok(1000),
+        }
+    }
+
+    /// Build the generated-code-compatible custom event payload for a wait step.
+    pub fn wait_event(
+        &self,
+        step_id: &str,
+        signal_id: &str,
+        source: &[u8],
+    ) -> Result<Vec<u8>, String> {
+        let source: Value = serde_json::from_slice(source)
+            .map_err(|err| format!("failed to parse wait-event source: {err}"))?;
+        let step = self.wait_step(step_id)?;
+        let action = step.body.get("action").and_then(Value::as_object);
+        let action_key = action
+            .and_then(|action| action.get("key"))
+            .and_then(Value::as_str)
+            .filter(|key| !key.trim().is_empty())
+            .map(|key| Value::String(key.to_string()))
+            .unwrap_or(Value::Null);
+        let correlation = wait_action_mapping(action, "correlation", &source)?;
+        let context = wait_action_mapping(action, "context", &source)?;
+
+        let event = serde_json::json!({
+            "type": "external_input_requested",
+            "signal_id": signal_id,
+            "step_id": step.id,
+            "step_name": step.name.as_deref().unwrap_or("Unnamed"),
+            "response_schema": step.body.get("responseSchema").cloned().unwrap_or(Value::Null),
+            "action_key": action_key,
+            "correlation": correlation,
+            "context": context,
+        });
+        serde_json::to_vec(&event)
+            .map_err(|err| format!("failed to serialize wait event payload: {err}"))
+    }
+
+    /// Store a WaitForSignal payload in the generated-code-compatible steps context.
+    pub fn wait_output(
+        &self,
+        step_id: &str,
+        signal_id: &str,
+        signal_payload: &[u8],
+        source: &[u8],
+    ) -> Result<Vec<u8>, String> {
+        let source: Value = serde_json::from_slice(source)
+            .map_err(|err| format!("failed to parse wait-output source: {err}"))?;
+        let step = self.wait_step(step_id)?;
+        let signal_payload = serde_json::from_slice(signal_payload)
+            .unwrap_or_else(|_| Value::String(String::from_utf8_lossy(signal_payload).to_string()));
+        let mut steps = source
+            .get("steps")
+            .and_then(Value::as_object)
+            .cloned()
+            .unwrap_or_default();
+        steps.insert(
+            step.id.clone(),
+            wait_step_value(step, signal_id, signal_payload),
+        );
+        serde_json::to_vec(&Value::Object(steps))
+            .map_err(|err| format!("failed to serialize wait steps context: {err}"))
+    }
+
     /// Store an Agent capability output in the generated-code-compatible steps context.
     pub fn agent_output(
         &self,
@@ -1299,6 +1417,21 @@ impl DirectJsonManifest {
     fn agent_by_step(&self, step_id: &str) -> Option<&DirectJsonAgent> {
         self.agents.values().find(|agent| agent.step_id == step_id)
     }
+
+    fn wait_step(&self, step_id: &str) -> Result<&DirectJsonStep, String> {
+        let step = self
+            .steps
+            .get(step_id)
+            .ok_or_else(|| format!("unknown direct WaitForSignal step '{step_id}'"))?;
+        if step.step_type == "WaitForSignal" {
+            Ok(step)
+        } else {
+            Err(format!(
+                "direct step '{step_id}' is {}, not WaitForSignal",
+                step.step_type
+            ))
+        }
+    }
 }
 
 /// Build the source envelope consumed by direct mapping/condition helpers.
@@ -1445,6 +1578,7 @@ fn collect_graph_manifest(
                 id: step.id.clone(),
                 step_type: step.step_type.clone(),
                 name: step.name.clone(),
+                body: step.body.clone(),
             });
     }
     for mapping in &graph.mappings {
@@ -1828,6 +1962,7 @@ fn split_result(split: &DirectJsonSplit, source: &Value, results: Value) -> Resu
             id: split.step_id.clone(),
             step_type: "Split".to_string(),
             name: split.name.clone(),
+            body: Value::Null,
         };
         Ok(step_output_envelope(&step, results, None))
     }
@@ -2451,6 +2586,7 @@ fn insert_step_output(
         id: step_id.to_string(),
         step_type: step_type.to_string(),
         name: step_name.map(str::to_string),
+        body: Value::Null,
     };
     steps.insert(
         step_id.to_string(),
@@ -2465,6 +2601,41 @@ fn delay_step_value(delay: &DirectJsonDelay, duration_ms: u64) -> Value {
         "stepName": delay.name.as_deref().unwrap_or("Unnamed"),
         "stepType": "Delay",
         "duration_ms": duration_ms,
+    })
+}
+
+fn wait_loop_indices_suffix(source: &Value) -> String {
+    source
+        .get("variables")
+        .and_then(Value::as_object)
+        .and_then(|vars| vars.get("_loop_indices"))
+        .and_then(Value::as_array)
+        .filter(|indices| !indices.is_empty())
+        .map(|indices| {
+            let indices = indices.iter().map(Value::to_string).collect::<Vec<_>>();
+            format!("/[{}]", indices.join(","))
+        })
+        .unwrap_or_default()
+}
+
+fn wait_action_mapping(
+    action: Option<&Map<String, Value>>,
+    field: &str,
+    source: &Value,
+) -> Result<Value, String> {
+    let Some(mapping) = action.and_then(|action| action.get(field)) else {
+        return Ok(Value::Object(Map::new()));
+    };
+    apply_input_mapping(mapping, source)
+}
+
+fn wait_step_value(step: &DirectJsonStep, signal_id: &str, signal_payload: Value) -> Value {
+    serde_json::json!({
+        "stepId": step.id,
+        "stepName": step.name.as_deref().unwrap_or("Unnamed"),
+        "stepType": "WaitForSignal",
+        "signal_id": signal_id,
+        "outputs": signal_payload,
     })
 }
 
@@ -2930,6 +3101,8 @@ struct StepWire {
     #[serde(default)]
     name: Option<String>,
     #[serde(default)]
+    body: Value,
+    #[serde(default)]
     nested_graphs: Vec<NestedGraphWire>,
 }
 
@@ -3095,6 +3268,7 @@ struct DirectJsonStep {
     id: String,
     step_type: String,
     name: Option<String>,
+    body: Value,
 }
 
 #[derive(Debug, Clone)]
@@ -3331,6 +3505,20 @@ mod tests {
                         "stepType": "Delay",
                         "name": "Wait"
                     }
+                }]
+            }
+        }))
+        .expect("manifest json")
+    }
+
+    fn wait_manifest(body: Value) -> Vec<u8> {
+        serde_json::to_vec(&json!({
+            "graph": {
+                "steps": [{
+                    "id": "wait",
+                    "stepType": "WaitForSignal",
+                    "name": "Review Input",
+                    "body": body
                 }]
             }
         }))
@@ -4555,6 +4743,134 @@ mod tests {
         assert_eq!(start["input_mapping"]["value"], json!(10));
         assert_eq!(end["outputs"]["duration_ms"], json!(10));
         assert!(end["outputs"].get("outputs").is_none());
+    }
+
+    #[test]
+    fn wait_signal_id_matches_generated_shape_with_loop_indices() {
+        let manifest = DirectJsonManifest::parse(&wait_manifest(json!({
+            "id": "wait",
+            "stepType": "WaitForSignal",
+            "name": "Review Input"
+        })))
+        .expect("manifest");
+        let source = build_source(
+            br#"{}"#,
+            br#"{"_workflow_id":"child","_loop_indices":[0,2]}"#,
+            b"{}",
+        )
+        .expect("source");
+
+        let signal_id = manifest
+            .wait_signal_id("wait", "inst-1", &source)
+            .expect("signal id");
+
+        assert_eq!(signal_id, "inst-1/child/wait/[0,2]");
+    }
+
+    #[test]
+    fn wait_timeout_and_poll_interval_use_step_body() {
+        let manifest = DirectJsonManifest::parse(&wait_manifest(json!({
+            "id": "wait",
+            "stepType": "WaitForSignal",
+            "name": "Review Input",
+            "timeoutMs": {
+                "valueType": "reference",
+                "value": "data.timeout_ms"
+            },
+            "pollIntervalMs": 250
+        })))
+        .expect("manifest");
+        let source = build_source(br#"{"timeout_ms":60000}"#, b"{}", b"{}").expect("source");
+
+        assert_eq!(
+            manifest.wait_timeout_ms("wait", &source).expect("timeout"),
+            Some(60000)
+        );
+        assert_eq!(
+            manifest
+                .wait_poll_interval_ms("wait")
+                .expect("poll interval"),
+            250
+        );
+    }
+
+    #[test]
+    fn wait_event_evaluates_action_metadata_and_schema() {
+        let manifest = DirectJsonManifest::parse(&wait_manifest(json!({
+            "id": "wait",
+            "stepType": "WaitForSignal",
+            "name": "Review Input",
+            "responseSchema": {
+                "approved": { "type": "boolean", "required": true }
+            },
+            "action": {
+                "key": "case_review_decision",
+                "correlation": {
+                    "case_id": {
+                        "valueType": "reference",
+                        "value": "data.case_id"
+                    }
+                },
+                "context": {
+                    "summary": {
+                        "valueType": "reference",
+                        "value": "data.summary"
+                    }
+                }
+            }
+        })))
+        .expect("manifest");
+        let source = build_source(
+            br#"{"case_id":"case-42","summary":"Needs approval"}"#,
+            b"{}",
+            b"{}",
+        )
+        .expect("source");
+
+        let event = manifest
+            .wait_event("wait", "inst-1/root/wait", &source)
+            .expect("wait event");
+        let event: Value = serde_json::from_slice(&event).expect("event json");
+
+        assert_eq!(event["type"], json!("external_input_requested"));
+        assert_eq!(event["signal_id"], json!("inst-1/root/wait"));
+        assert_eq!(event["step_id"], json!("wait"));
+        assert_eq!(event["step_name"], json!("Review Input"));
+        assert_eq!(event["action_key"], json!("case_review_decision"));
+        assert_eq!(event["correlation"], json!({ "case_id": "case-42" }));
+        assert_eq!(event["context"], json!({ "summary": "Needs approval" }));
+        assert_eq!(
+            event["response_schema"]["approved"]["type"],
+            json!("boolean")
+        );
+    }
+
+    #[test]
+    fn wait_output_stores_generated_step_shape_and_preserves_existing_steps() {
+        let manifest = DirectJsonManifest::parse(&wait_manifest(json!({
+            "id": "wait",
+            "stepType": "WaitForSignal",
+            "name": "Review Input"
+        })))
+        .expect("manifest");
+        let source = build_source(
+            br#"{}"#,
+            b"{}",
+            br#"{"before":{"stepId":"before","outputs":1}}"#,
+        )
+        .expect("source");
+
+        let steps = manifest
+            .wait_output("wait", "inst-1/root/wait", br#"{"approved":true}"#, &source)
+            .expect("wait output");
+        let steps: Value = serde_json::from_slice(&steps).expect("steps json");
+
+        assert_eq!(steps["before"]["outputs"], json!(1));
+        assert_eq!(steps["wait"]["stepId"], json!("wait"));
+        assert_eq!(steps["wait"]["stepName"], json!("Review Input"));
+        assert_eq!(steps["wait"]["stepType"], json!("WaitForSignal"));
+        assert_eq!(steps["wait"]["signal_id"], json!("inst-1/root/wait"));
+        assert_eq!(steps["wait"]["outputs"], json!({ "approved": true }));
     }
 
     #[test]

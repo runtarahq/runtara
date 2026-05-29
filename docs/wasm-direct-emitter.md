@@ -91,6 +91,11 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   input loading, completion/failure, custom events, heartbeat, cancellation
   polling, durable sleep, runtime instance id access, and checkpoint-scoped
   custom signal polling needed by future direct `WaitForSignal` lowering.
+- `runtara-workflow-stdlib` now exposes WaitForSignal JSON helpers for direct
+  lowering: deterministic signal id construction, timeout and poll interval
+  resolution, generated-code-compatible waiting event payloads including
+  response schema/action metadata, and generated-code-compatible step output
+  insertion after a signal payload is received.
 - `scripts/build-agent-components.sh` now builds and stages the direct workflow
   stdlib/runtime components beside agent components with sibling metadata, and
   the bundle installer treats `RUNTARA_AGENT_COMPONENTS_DIR` as the shared
@@ -1977,12 +1982,16 @@ Implementation steps:
    - expose runtime instance id: done through `runtime.instance-id`;
    - expose checkpoint-scoped custom signal polling: done through
      `runtime.poll-custom-signal(checkpointId)`;
-   - generate signal id;
-   - emit waiting event/action metadata;
+   - generate signal id: done in stdlib through `wait-signal-id`;
+   - emit waiting event/action metadata: stdlib helper done through
+     `wait-event`, including response schema, action key, correlation, and
+     context mapping parity;
    - execute `on_wait` subgraph;
    - poll or suspend;
-   - timeout;
-   - resume with signal payload;
+   - timeout: stdlib timeout mapping helper done through `wait-timeout-ms`;
+   - poll interval: stdlib helper done through `wait-poll-interval-ms`;
+   - resume with signal payload: stdlib output helper done through
+     `wait-output`;
    - cancellation.
 2. Implement `WaitForSignal` lowering.
 3. Add tests for:
@@ -2004,11 +2013,16 @@ Rollback:
 
 Current status:
 
-- The first runtime ABI prerequisite is in place. `runtara:workflow-runtime`
-  now exposes `instance-id` and `poll-custom-signal`, matching the SDK calls
+- The runtime ABI prerequisite is in place. `runtara:workflow-runtime` now
+  exposes `instance-id` and `poll-custom-signal`, matching the SDK calls
   generated Rust uses to construct deterministic wait keys and retrieve
-  checkpoint-scoped custom signal payloads. Direct core lowering and
-  host-level WaitForSignal A/B execution remain pending.
+  checkpoint-scoped custom signal payloads.
+- The stdlib prerequisite is in place. `runtara:workflow-stdlib/json` now owns
+  the JSON-heavy WaitForSignal semantics needed by direct lowering:
+  `wait-signal-id`, `wait-timeout-ms`, `wait-poll-interval-ms`, `wait-event`,
+  and `wait-output`.
+- Direct core lowering and host-level WaitForSignal A/B execution remain
+  pending.
 
 ### Phase 12: AiAgent
 
