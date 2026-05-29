@@ -1359,6 +1359,9 @@ mod tests {
             "embed_workflow_error_child" => {
                 include_str!("../../tests/fixtures/embed_workflow_error_child.json")
             }
+            "embed_workflow_conditional_error_child" => {
+                include_str!("../../tests/fixtures/embed_workflow_conditional_error_child.json")
+            }
             other => panic!("unknown fixture {other}"),
         };
         serde_json::from_str(json).expect("fixture should parse")
@@ -1537,6 +1540,23 @@ mod tests {
                 version_requested: "latest".to_string(),
                 version_resolved: 3,
                 execution_graph: fixture("embed_workflow_error_child"),
+            }],
+        );
+
+        assert!(report.supported, "{:?}", report.unsupported);
+        assert!(report.unsupported.is_empty());
+    }
+
+    #[test]
+    fn embed_workflow_with_conditional_error_child_is_supported_by_child_aware_check() {
+        let report = analyze_direct_wasm_support_with_child_workflows(
+            &fixture("embed_workflow"),
+            &[ChildWorkflowInput {
+                step_id: "call_child".to_string(),
+                workflow_id: "child_workflow".to_string(),
+                version_requested: "latest".to_string(),
+                version_resolved: 3,
+                execution_graph: fixture("embed_workflow_conditional_error_child"),
             }],
         );
 

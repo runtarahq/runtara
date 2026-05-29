@@ -25,6 +25,8 @@ const SIMPLE_PASSTHROUGH: &str = include_str!("fixtures/simple_passthrough.json"
 const EMBED_WORKFLOW: &str = include_str!("fixtures/embed_workflow_workflow.json");
 const EMBED_WORKFLOW_FINISH_CHILD: &str = include_str!("fixtures/embed_workflow_finish_child.json");
 const EMBED_WORKFLOW_ERROR_CHILD: &str = include_str!("fixtures/embed_workflow_error_child.json");
+const EMBED_WORKFLOW_CONDITIONAL_ERROR_CHILD: &str =
+    include_str!("fixtures/embed_workflow_conditional_error_child.json");
 const CONDITIONAL_WORKFLOW: &str = include_str!("fixtures/conditional_workflow.json");
 const FILTER_SIMPLE: &str = include_str!("fixtures/filter_simple.json");
 const SWITCH_VALUE_SIMPLE: &str = include_str!("fixtures/switch_value_simple.json");
@@ -440,6 +442,10 @@ fn embed_workflow_child_workflows() -> Vec<ChildWorkflowInput> {
 
 fn embed_workflow_error_child_workflows() -> Vec<ChildWorkflowInput> {
     embed_workflow_child_workflows_with_graph(EMBED_WORKFLOW_ERROR_CHILD)
+}
+
+fn embed_workflow_conditional_error_child_workflows() -> Vec<ChildWorkflowInput> {
+    embed_workflow_child_workflows_with_graph(EMBED_WORKFLOW_CONDITIONAL_ERROR_CHILD)
 }
 
 fn embed_workflow_child_workflows_with_graph(graph_json: &str) -> Vec<ChildWorkflowInput> {
@@ -2503,6 +2509,136 @@ fn direct_wasm_matches_components_embed_workflow_terminal_error_child() {
         expected_lookup
     );
     assert_eq!(normalized_checkpoints(&direct.checkpoints), expected_lookup);
+}
+
+#[test]
+fn direct_wasm_matches_components_embed_workflow_conditional_error_child() {
+    let Some(components_dir) = direct_ab_components_dir() else {
+        return;
+    };
+    let _data = setup_data_dir();
+
+    let child_workflows = embed_workflow_conditional_error_child_workflows();
+    let components_artifact = compile_components_artifact_with_child_workflows(
+        "embed-workflow-conditional-error-child",
+        EMBED_WORKFLOW,
+        &child_workflows,
+    );
+    let direct_artifact = compile_direct_artifact_with_child_workflows(
+        &components_dir,
+        "embed-workflow-conditional-error-child",
+        EMBED_WORKFLOW,
+        &child_workflows,
+    );
+    assert_eq!(
+        direct_artifact.compiler_mode,
+        WorkflowCompilerMode::DirectWasm
+    );
+
+    let success_input = br#"{"input":"ok"}"#;
+    let components_success_input = components_sdk_input(success_input);
+    let components_success = execute_artifact(
+        &components_artifact,
+        "ab-components-embed-workflow-conditional-error-child-success",
+        &components_success_input,
+    );
+    let direct_success = execute_artifact(
+        &direct_artifact.path,
+        "ab-direct-embed-workflow-conditional-error-child-success",
+        success_input,
+    );
+    assert_success_parity(
+        "embed-workflow-conditional-error-child-success",
+        0,
+        &components_success,
+        &direct_success,
+    );
+    let expected_output = serde_json::json!({
+        "result": { "result": "ok" }
+    });
+    assert_eq!(
+        components_success.output_json.as_ref(),
+        Some(&expected_output)
+    );
+    assert_eq!(direct_success.output_json.as_ref(), Some(&expected_output));
+    let expected_step_result = serde_json::to_vec(&serde_json::json!({
+        "stepId": "call_child",
+        "stepName": "Unnamed",
+        "stepType": "EmbedWorkflow",
+        "childWorkflowId": "child_workflow",
+        "outputs": { "result": "ok" }
+    }))
+    .expect("checkpoint json");
+    let expected_checkpoint_traffic = vec![
+        (EMBED_WORKFLOW_CACHE_KEY.to_string(), Vec::new()),
+        (EMBED_WORKFLOW_CACHE_KEY.to_string(), expected_step_result),
+    ];
+    assert_eq!(
+        normalized_checkpoints(&components_success.checkpoints),
+        expected_checkpoint_traffic
+    );
+    assert_eq!(
+        normalized_checkpoints(&direct_success.checkpoints),
+        expected_checkpoint_traffic
+    );
+
+    let failure_input = br#"{"input":"failing-child"}"#;
+    let components_failure_input = components_sdk_input(failure_input);
+    let components_failure = execute_artifact(
+        &components_artifact,
+        "ab-components-embed-workflow-conditional-error-child-failure",
+        &components_failure_input,
+    );
+    let direct_failure = execute_artifact(
+        &direct_artifact.path,
+        "ab-direct-embed-workflow-conditional-error-child-failure",
+        failure_input,
+    );
+    assert_failure_parity(
+        "embed-workflow-conditional-error-child-failure",
+        0,
+        &components_failure,
+        &direct_failure,
+    );
+    let expected_error = serde_json::json!({
+        "stepId": "call_child",
+        "stepName": "Unnamed",
+        "stepType": "EmbedWorkflow",
+        "category": "permanent",
+        "code": "CHILD_WORKFLOW_FAILED",
+        "message": "Child workflow child_workflow failed",
+        "severity": "critical",
+        "childWorkflowId": "child_workflow",
+        "childError": {
+            "stepId": "fail",
+            "stepName": "Conditional Child Failure",
+            "category": "permanent",
+            "code": "CONDITIONAL_CHILD_FAILED",
+            "message": "Conditional child workflow failed",
+            "severity": "critical",
+            "context": { "childInput": "failing-child" }
+        }
+    });
+    assert_eq!(
+        components_failure.error_json.as_ref(),
+        Some(&expected_error),
+        "components conditional child Error payload changed"
+    );
+    assert_eq!(
+        direct_failure.error_json.as_ref(),
+        Some(&expected_error),
+        "direct conditional child Error payload changed"
+    );
+
+    let expected_lookup = vec![(EMBED_WORKFLOW_CACHE_KEY.to_string(), Vec::new())];
+    assert_eq!(
+        normalized_checkpoints(&components_failure.checkpoints),
+        expected_lookup
+    );
+    assert_eq!(
+        normalized_checkpoints(&direct_failure.checkpoints),
+        expected_lookup
+    );
 }
 
 #[test]

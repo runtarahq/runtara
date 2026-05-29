@@ -50,7 +50,8 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   slice. `compile_direct_workflow` uses a child-aware support gate and accepts
   `EmbedWorkflow` only when the call site has one preloaded static child graph,
   no breakpoint/timeout/custom retry behavior, and the child graph is limited
-  to direct-control `Finish`/`Conditional` steps. The lowerer maps parent input
+  to direct-control `Finish`/`Conditional`/`Error` steps. The lowerer maps
+  parent input
   through the manifest `EmbedWorkflow.inputMapping`, builds isolated child
   variables/source with generated-compatible scope and cache-prefix values,
   runs the child run-plan inline, wraps the child output as the parent
@@ -58,9 +59,9 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   checkpoint for the call site, rebuilds the parent source, checks runtime
   signals, and continues normal flow. Gated direct-vs-generated A/B execution
   now covers fresh and cached durable static calls for a finish-only child and
-  generated-compatible wrapping of terminal child `Error` failures. Retry/backoff,
-  non-terminal child failure wrapping, parent `onError`, and nested child
-  workflows remain Phase 10 hardening work.
+  generated-compatible wrapping of child `Error` failures reached directly or
+  through child `Conditional` control flow. Retry/backoff, parent `onError`,
+  and nested child workflows remain Phase 10 hardening work.
 - `direct_wasm::compile::compile_direct_workflow` is an opt-in entry point that
   emits a valid component-format artifact for the currently supported direct
   graph shapes,
@@ -309,9 +310,9 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   lifecycle coverage for durable Agent, and fresh/cached plus
   checkpoint-returned pause/resume durable Split fixtures included in the
   strict A/B suite. Static `EmbedWorkflow` is now covered for fresh and cached
-  durable finish-only child calls plus generated-compatible wrapping of terminal
-  child `Error` failures, with preloaded child graphs passed through both
-  compile paths.
+  durable finish-only child calls plus generated-compatible wrapping of child
+  `Error` failures reached directly or through child `Conditional` control
+  flow, with preloaded child graphs passed through both compile paths.
 - `tests/direct_wasm_execute.rs` now provides gated direct execution smoke
   tests. With `RUNTARA_RUN_DIRECT_WASM_E2E=1`, it compiles and statically
   composes the simple `Finish` fixture plus flat and nested `Conditional`
@@ -2237,12 +2238,12 @@ Current status:
   durable final-result checkpoint replay/save at the parent call site.
 - Tests currently cover stdlib child variable/result helpers, child-aware
   support gating, and structural component validation for a parent workflow
-  with a static finish-only child and a terminal child `Error`. Gated A/B
-  execution coverage now compares direct vs generated Rust for fresh and
-  cached durable static child calls plus generated-compatible wrapping of
-  terminal child `Error` failures. Remaining work is retry/backoff parity,
-  non-terminal child failure wrapping, parent `onError`, and nested child
-  workflows.
+  with a static finish-only child, a terminal child `Error`, and a child
+  `Conditional` branch that reaches `Error`. Gated A/B execution coverage now
+  compares direct vs generated Rust for fresh and cached durable static child
+  calls plus generated-compatible wrapping of child `Error` failures reached
+  directly or through child `Conditional` control flow. Remaining work is
+  retry/backoff parity, parent `onError`, and nested child workflows.
 
 ### Phase 11: WaitForSignal
 
