@@ -274,12 +274,6 @@ pub struct ExecutionEngine {
     running_executions: Option<Arc<DashMap<Uuid, CancellationHandle>>>,
     /// Tracks workflows currently starting (prevents single_instance races).
     starting_workflows: Arc<Mutex<HashSet<(String, String)>>>, // (tenant_id, workflow_id)
-    /// Per-tenant `maxConcurrentExecutions` intake gate. `None` when
-    /// Valkey is not configured — in that case the cap is not enforced
-    /// (same posture as the trigger stream itself).
-    /// See `crate::valkey::concurrent_executions` and SYN-433 Finding 1.
-    concurrent_execution_gate:
-        Option<crate::valkey::concurrent_executions::ConcurrentExecutionGate>,
 }
 
 impl ExecutionEngine {
@@ -290,9 +284,6 @@ impl ExecutionEngine {
         runtime_client: Option<Arc<RuntimeClient>>,
         trigger_stream: Option<Arc<TriggerStreamPublisher>>,
         running_executions: Option<Arc<DashMap<Uuid, CancellationHandle>>>,
-        concurrent_execution_gate: Option<
-            crate::valkey::concurrent_executions::ConcurrentExecutionGate,
-        >,
     ) -> Self {
         Self {
             pool,
@@ -301,8 +292,74 @@ impl ExecutionEngine {
             trigger_stream,
             running_executions,
             starting_workflows: Arc::new(Mutex::new(HashSet::new())),
-            concurrent_execution_gate,
         }
+    }
+
+    /// Count the tenant's currently in-flight executions (Running + Pending)
+    /// as reported by the runtime — the source of truth. Two cheap
+    /// `total_count` lookups (limit 1) rather than fetching rows.
+    ///
+    /// SYN-433 Finding 1: we query the runtime instead of maintaining our own
+    /// counter precisely because the runtime reflects real completion — an
+    /// execution drops out of this count the instant it terminates, so the
+    /// gate means "N concurrent", not "N started recently".
+    async fn active_execution_count(&self, tenant_id: &str) -> Result<u64, ExecutionError> {
+        let Some(client) = self.runtime_client.as_ref() else {
+            // No runtime wired (e.g. trigger worker engine) — can't count.
+            return Ok(0);
+        };
+        let mut total: u64 = 0;
+        for status in [InstanceStatus::Running, InstanceStatus::Pending] {
+            let result = client
+                .list_instances_with_options(
+                    ListInstancesOptions::new()
+                        .with_tenant_id(tenant_id)
+                        .with_status(status)
+                        .with_limit(1),
+                )
+                .await
+                .map_err(|e| {
+                    ExecutionError::RuntimeError(format!("Failed to count active instances: {e}"))
+                })?;
+            total += u64::from(result.total_count);
+        }
+        Ok(total)
+    }
+
+    /// Enforce `maxConcurrentExecutions` at intake. Returns the
+    /// `EntitlementDenial` to surface when the tenant's live active-instance
+    /// count is at/over the effective cap; `Ok(())` otherwise.
+    ///
+    /// Only queries the runtime when the tenant has an explicit
+    /// `maxConcurrentExecutions` entitlement — with no tenant cap there's
+    /// nothing to enforce (the infra default is effectively unlimited), so we
+    /// skip the round-trip entirely. Fails **open** if the count query errors:
+    /// a transient runtime/count failure should not wedge execution.
+    pub(crate) async fn check_concurrency_gate(
+        &self,
+        tenant_id: &str,
+    ) -> Result<(), crate::entitlement_error::EntitlementDenial> {
+        let snapshot = crate::config::entitlements();
+        if snapshot.limits.max_concurrent_executions.is_none() {
+            return Ok(());
+        }
+        let active = match self.active_execution_count(tenant_id).await {
+            Ok(n) => n,
+            Err(e) => {
+                tracing::warn!(
+                    tenant_id = %tenant_id,
+                    error = %e,
+                    "concurrency gate: failed to count active instances, allowing execution"
+                );
+                return Ok(());
+            }
+        };
+        crate::middleware::entitlement::concurrent_executions_decision(
+            snapshot,
+            active,
+            crate::config::raw_max_concurrent_executions(),
+        )
+        .inspect_err(|denial| denial.audit_log(tenant_id))
     }
 
     /// Check if the runtime client is available.
@@ -441,49 +498,18 @@ impl ExecutionEngine {
 
         // 7.5. Per-tenant maxConcurrentExecutions gate (SYN-433 Finding 1).
         //
-        // Composes `effective_limit(infra, tier)` and asks the Valkey-backed
-        // sorted set whether this enqueue would push the tenant past their
-        // cap. The gate fails *open* on Valkey errors — a new gate that
-        // breaks every enqueue during infra hiccups would be worse than
-        // the gate going silent.
-        //
-        // Skipped entirely when the gate is None (Valkey not configured).
-        if let Some(gate) = self.concurrent_execution_gate.as_ref() {
-            let snapshot = crate::config::entitlements();
-            let infra_cap = crate::config::raw_max_concurrent_executions();
-            let cap = crate::middleware::entitlement::effective_limit(
-                infra_cap,
-                snapshot.limits.max_concurrent_executions,
-            );
-            use crate::valkey::concurrent_executions::AcquireOutcome;
-            match gate
-                .try_acquire(req.tenant_id, &instance_id.to_string(), cap)
-                .await
-            {
-                AcquireOutcome::Acquired => {}
-                AcquireOutcome::Denied(denial) => {
-                    denial.audit_log(req.tenant_id);
-                    return Err(ExecutionError::EntitlementDenied(denial));
-                }
-            }
-        }
+        // Counts the tenant's actually-active instances (Running + Pending)
+        // from the runtime — the source of truth — and rejects when at/over
+        // the effective cap. See `check_concurrency_gate`.
+        self.check_concurrency_gate(req.tenant_id)
+            .await
+            .map_err(ExecutionError::EntitlementDenied)?;
 
         // 8. Publish to stream
         trigger_stream
             .publish(req.tenant_id, &event)
             .await
             .map_err(|e| {
-                // Roll back the Valkey-side acquire if the downstream publish
-                // failed — otherwise the tenant's counter drifts upward by
-                // one until age-out.
-                if let Some(gate) = self.concurrent_execution_gate.as_ref() {
-                    let gate = gate.clone();
-                    let tenant_id = req.tenant_id.to_string();
-                    let instance_id = instance_id.to_string();
-                    tokio::spawn(async move {
-                        gate.release(&tenant_id, &instance_id).await;
-                    });
-                }
                 ExecutionError::DatabaseError(format!("Failed to publish to trigger stream: {}", e))
             })?;
 
@@ -567,36 +593,15 @@ impl ExecutionEngine {
                 ))
             })?;
 
-        // 5.5. Per-tenant maxConcurrentExecutions gate (SYN-433 Finding 1),
-        // sync path. Unlike the async `queue()` path, a synchronous run has a
-        // definite completion point (the `execute_sync` call below returns
-        // when the workflow finishes), so we acquire a slot here and release
-        // it the moment the run returns — accurate accounting, not age-out.
-        // The slot lives in the same per-tenant sorted set as async intakes,
-        // so sync and async executions share one cap. Fails open on Valkey
-        // errors (see the gate's `try_acquire`).
-        let gate_slot = if let Some(gate) = self.concurrent_execution_gate.as_ref() {
-            let snapshot = crate::config::entitlements();
-            let infra_cap = crate::config::raw_max_concurrent_executions();
-            let cap = crate::middleware::entitlement::effective_limit(
-                infra_cap,
-                snapshot.limits.max_concurrent_executions,
-            );
-            // Gate bookkeeping id — independent of the runtime's
-            // auto-generated instance id (which we don't know until the call
-            // returns). Only needs to be unique per in-flight slot.
-            let slot_id = Uuid::new_v4().to_string();
-            use crate::valkey::concurrent_executions::AcquireOutcome;
-            match gate.try_acquire(req.tenant_id, &slot_id, cap).await {
-                AcquireOutcome::Acquired => Some(slot_id),
-                AcquireOutcome::Denied(denial) => {
-                    denial.audit_log(req.tenant_id);
-                    return Err(ExecutionError::EntitlementDenied(denial));
-                }
-            }
-        } else {
-            None
-        };
+        // 5.5. Per-tenant maxConcurrentExecutions gate (SYN-433 Finding 1).
+        // Same runtime-count gate as the async path — the running instance
+        // this call is about to create counts against the tenant's live
+        // Running + Pending total, and the runtime drops it from that total
+        // the moment it finishes (which for a sync run is when the
+        // `execute_sync` call below returns). No bookkeeping to release.
+        self.check_concurrency_gate(req.tenant_id)
+            .await
+            .map_err(ExecutionError::EntitlementDenied)?;
 
         // 6. Execute via runtime client (no debug for sync executions)
         let execution_result = runtime_client
@@ -610,15 +615,6 @@ impl ExecutionEngine {
                 false,
             )
             .await;
-
-        // Release the concurrency slot as soon as the run returns, on both
-        // success and failure. No `?` between acquire and here, so this is
-        // the single release point for the sync path.
-        if let (Some(gate), Some(slot_id)) =
-            (self.concurrent_execution_gate.as_ref(), gate_slot.as_ref())
-        {
-            gate.release(req.tenant_id, slot_id).await;
-        }
 
         let total_duration = total_start.elapsed().as_secs_f64();
 

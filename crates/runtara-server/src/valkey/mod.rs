@@ -2,7 +2,6 @@ pub mod cleanup;
 pub mod client;
 pub mod compilation_progress;
 pub mod compilation_queue;
-pub mod concurrent_executions;
 pub mod events;
 pub mod stream;
 

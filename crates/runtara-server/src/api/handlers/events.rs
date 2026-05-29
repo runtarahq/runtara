@@ -70,9 +70,7 @@ pub async fn capture_http_event(
     State(pool): State<PgPool>,
     State(connections): State<std::sync::Arc<runtara_connections::ConnectionsFacade>>,
     State(trigger_stream): State<Option<std::sync::Arc<TriggerStreamPublisher>>>,
-    State(concurrent_execution_gate): State<
-        Option<crate::valkey::concurrent_executions::ConcurrentExecutionGate>,
-    >,
+    State(engine): State<std::sync::Arc<crate::workers::execution_engine::ExecutionEngine>>,
     Path((trigger_id, action)): Path<(String, String)>,
     request: Request,
 ) -> Result<(StatusCode, Json<Value>), (StatusCode, Json<Value>)> {
@@ -236,27 +234,11 @@ pub async fn capture_http_event(
         );
 
         // Per-tenant maxConcurrentExecutions gate (SYN-433 Finding 1).
-        // This handler bypasses ExecutionEngine::queue, so the gate lives
-        // here too. Fail-open on Valkey errors so a Valkey hiccup doesn't
-        // break the webhook ingest.
-        if let Some(ref gate) = concurrent_execution_gate {
-            let snapshot = crate::config::entitlements();
-            let infra_cap = crate::config::raw_max_concurrent_executions();
-            let cap = crate::middleware::entitlement::effective_limit(
-                infra_cap,
-                snapshot.limits.max_concurrent_executions,
-            );
-            use crate::valkey::concurrent_executions::AcquireOutcome;
-            match gate
-                .try_acquire(&tenant_id, &instance_id.to_string(), cap)
-                .await
-            {
-                AcquireOutcome::Acquired => {}
-                AcquireOutcome::Denied(denial) => {
-                    denial.audit_log(&tenant_id);
-                    return Err((StatusCode::FORBIDDEN, Json(denial.json_body())));
-                }
-            }
+        // This handler bypasses ExecutionEngine::queue, so consult the same
+        // runtime-count gate explicitly. Returns the documented
+        // ENTITLEMENT_LIMIT_EXCEEDED 403 when the tenant is at/over the cap.
+        if let Err(denial) = engine.check_concurrency_gate(&tenant_id).await {
+            return Err((StatusCode::FORBIDDEN, Json(denial.json_body())));
         }
 
         // Publish to trigger stream (reuses shared connection manager).
@@ -274,14 +256,6 @@ pub async fn capture_http_event(
                 Ok((StatusCode::OK, Json(response)))
             }
             Err(e) => {
-                // Roll back the concurrent-execution slot acquired above —
-                // otherwise a publish failure leaves the tenant falsely at
-                // cap until TTL age-out. Mirrors the rollback in
-                // ExecutionEngine::queue. Best-effort; ZREM is non-blocking
-                // on the shared manager.
-                if let Some(ref gate) = concurrent_execution_gate {
-                    gate.release(&tenant_id, &instance_id.to_string()).await;
-                }
                 eprintln!("Failed to publish to trigger stream: {}", e);
                 let error_response = json!({
                     "success": false,

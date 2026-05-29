@@ -512,9 +512,6 @@ struct AppState {
     runtime_client: Option<Arc<RuntimeClient>>,
     /// Trigger stream publisher for async executions (None if Valkey not configured)
     trigger_stream: Option<Arc<api::repositories::trigger_stream::TriggerStreamPublisher>>,
-    /// Per-tenant maxConcurrentExecutions gate (None if Valkey not configured).
-    /// SYN-433 Finding 1. See `valkey/concurrent_executions.rs`.
-    concurrent_execution_gate: Option<valkey::concurrent_executions::ConcurrentExecutionGate>,
     /// Valkey connection manager for session queue operations (None if Valkey not configured)
     valkey_conn: Option<redis::aio::ConnectionManager>,
     /// Agent execution service for host-mediated agent calls from workflow instances
@@ -589,17 +586,6 @@ impl axum::extract::FromRef<AppState>
 impl axum::extract::FromRef<AppState> for Option<redis::aio::ConnectionManager> {
     fn from_ref(state: &AppState) -> Option<redis::aio::ConnectionManager> {
         state.valkey_conn.clone()
-    }
-}
-
-// Implement FromRef to allow extracting the concurrent-execution gate from AppState
-impl axum::extract::FromRef<AppState>
-    for Option<valkey::concurrent_executions::ConcurrentExecutionGate>
-{
-    fn from_ref(
-        state: &AppState,
-    ) -> Option<valkey::concurrent_executions::ConcurrentExecutionGate> {
-        state.concurrent_execution_gate.clone()
     }
 }
 
@@ -1113,15 +1099,6 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
             .clone()
             .map(|m| Arc::new(api::repositories::trigger_stream::TriggerStreamPublisher::new(m)));
 
-    // Per-tenant maxConcurrentExecutions gate (SYN-433 Finding 1).
-    // Reuses the same shared connection manager — no extra TCP.
-    // `None` when Valkey isn't configured: the gate falls back to no-op and
-    // the cap is not enforced (same posture as the trigger stream itself).
-    let concurrent_execution_gate: Option<valkey::concurrent_executions::ConcurrentExecutionGate> =
-        redis_manager
-            .clone()
-            .map(valkey::concurrent_executions::ConcurrentExecutionGate::from_env);
-
     if let Some(ref config) = valkey_config {
         println!("Valkey configuration detected, starting workers...");
 
@@ -1275,7 +1252,6 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         runtime_client.clone(),
         trigger_stream.clone(),
         Some(running_executions.clone()),
-        concurrent_execution_gate.clone(),
     ));
     println!("✓ Execution engine initialized");
 
@@ -1690,7 +1666,6 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
             running_executions: running_executions.clone(),
             runtime_client: runtime_client.clone(),
             trigger_stream: trigger_stream.clone(),
-            concurrent_execution_gate: concurrent_execution_gate.clone(),
             valkey_conn: valkey_conn.clone(),
             agent_execution: api::services::agent_execution::AgentExecutionService::new(
                 connections_facade.clone(),
@@ -1988,7 +1963,6 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
             running_executions: running_executions.clone(),
             runtime_client: runtime_client.clone(),
             trigger_stream: trigger_stream.clone(),
-            concurrent_execution_gate: concurrent_execution_gate.clone(),
             valkey_conn: valkey_conn.clone(),
             agent_execution: api::services::agent_execution::AgentExecutionService::new(
                 connections_facade.clone(),
