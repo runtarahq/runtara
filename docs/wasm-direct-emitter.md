@@ -144,8 +144,8 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   second decomposition checkpoint is also complete: `direct_wasm::static_data`
   owns static byte-segment layout, heap/page sizing, static step/Agent segment
   collection, and compile-time workflow variable serialization. The next
-  extraction checkpoint has started with Delay lowering moved into
-  `direct_wasm::compile::delay`.
+  extraction checkpoint has started with Delay and Log lowering moved into
+  `direct_wasm::compile::{delay,log}`.
 - `direct_wasm::compile::compose_direct_workflow` now performs the first
   direct static composition path: it maps the direct `workflow-logic.wasm`
   component plus prebuilt stdlib/runtime/agent components into `wac compose`,
@@ -727,6 +727,8 @@ Emitter module boundaries should stay readable as support broadens:
 - `compile/delay.rs` owns Delay step lowering for durable and non-durable
   waits while shared emitter helpers remain in `compile.rs` until a broader
   lowering-context extraction is justified.
+- `compile/log.rs` owns Log step lowering and custom-event emission order while
+  sharing the same core lowering helpers.
 - Step-family lowering should live in focused modules once stable
   (`wait`, `agent`, `split`, `while`, `delay`, and pure control flow).
 - Shared ABI/import/static-data helpers should live behind reusable helper
