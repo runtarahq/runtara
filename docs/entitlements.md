@@ -298,6 +298,8 @@ The `api` entitlement does **not** gate every authenticated route — only reque
 
 API-key management routes (`/api/runtime/api-keys*`) are gated regardless of auth method — disabling `api` should also hide the management UI.
 
+> **Gotcha — `mcp=true` + `api=false` (SYN-433 Finding 5).** The hosted MCP transport at `/mcp/*` is only reachable via API-key auth. The API-key bypass guard above runs *before* the `mcp` transport gate, so when `api` is disabled every hosted MCP client is rejected with `ENTITLEMENT_REQUIRED` even though `mcp` reads as enabled. There is no session/OAuth auth path to the hosted MCP endpoint today, so in practice `api=false` also disables hosted MCP. This combination boots cleanly but emits a startup `WARN` (`EntitlementSnapshot::warn_risky_combinations`, predicate `mcp_unreachable_without_api`). To actually serve MCP, keep `api` enabled. Decoupling MCP auth from the `api` gate (or adding a session auth path for MCP) is tracked as a follow-up.
+
 ### MCP
 
 - Gate the `/mcp` transport with `mcp`.

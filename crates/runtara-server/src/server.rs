@@ -701,6 +701,9 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
     // this process will actually enforce. Logged once at boot so an operator
     // never has to re-derive it from env vars and JSON layers.
     config::entitlements().log_summary();
+    // Warn on valid-but-surprising entitlement combinations (e.g. mcp=true
+    // with api=false silently breaks hosted MCP-over-HTTP — SYN-433 Finding 5).
+    config::entitlements().warn_risky_combinations();
 
     // Validate Redis configuration (required for checkpoints)
     if let Err(e) = config::validate_checkpoint_config() {
