@@ -178,9 +178,10 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   `/failed` plus `workflow_error` payloads for terminal `Error` workflows,
   normalizing timestamp fields before comparison. It also captures and compares
   durable `/sleep` and `/checkpoint` requests, with durable Delay, fresh and
-  cached durable Agent, checkpoint-returned pause plus cached resume for
-  durable Agent, and fresh/cached plus checkpoint-returned pause/resume durable
-  Split fixtures included in the strict A/B suite.
+  cached durable Agent, checkpoint-returned `pause`/`cancel`/`shutdown`
+  lifecycle coverage for durable Agent, and fresh/cached plus
+  checkpoint-returned pause/resume durable Split fixtures included in the
+  strict A/B suite.
 - `tests/direct_wasm_execute.rs` now provides gated direct execution smoke
   tests. With `RUNTARA_RUN_DIRECT_WASM_E2E=1`, it compiles and statically
   composes the simple `Finish` fixture plus flat and nested `Conditional`
@@ -366,8 +367,8 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   Public support is now enabled for durable Agent workflows that do not use
   timeout, compensation, or breakpoints. Timeout remains gated because the
   generated Rust Agent path does not currently enforce `AgentStep.timeout`;
-  broader retry/failure/cancel crash-resume differential coverage remains a
-  Phase 8 hardening checkpoint.
+  broader retry/failure and long-running cancellation differential coverage
+  remains a Phase 8 hardening checkpoint.
 - The direct core now has structural and gated host-level replay coverage for
   durable Agent cached checkpoints: the emitted Wasm branch that receives an
   existing checkpoint payload skips both `capabilities.invoke` and
@@ -377,8 +378,9 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   `Finish` without a fresh Agent invocation. It also verifies a fresh durable
   Agent performs lookup/invoke/save and a non-durable Agent performs no
   checkpoint calls. Gated A/B execution also covers checkpoint-returned pause
-  followed by cached resume; retry/failure/cancel host-level differential tests
-  remain pending.
+  and shutdown followed by cached resume, plus checkpoint-returned cancellation
+  without completion/failure; retry/failure and long-running cancellation
+  host-level differential tests remain pending.
 - Durable Split now has gated A/B pause/resume lifecycle coverage. The fake SDK
   returns a one-shot `pause` signal from the final Split result checkpoint save,
   both generated Rust and direct artifacts acknowledge the signal, post
@@ -1680,6 +1682,11 @@ Current status:
   save, both generated Rust and direct artifacts acknowledge the signal, post
   `/suspended`, avoid `/completed` and `/failed`, and a second run with the
   saved checkpoint completes through the cached Agent replay branch.
+- A gated A/B execution test now covers durable Agent checkpoint-returned
+  `cancel` and `shutdown` parity. The generated Rust main now treats the
+  resilient macro's shutdown sentinel as a clean suspension instead of
+  reporting `/failed`; both artifacts acknowledge the signal exactly once, and
+  the shutdown case resumes from the saved Agent checkpoint.
 - A gated A/B execution test now covers durable Split pause/resume lifecycle
   parity for the final-result checkpoint. The saved Split result checkpoint is
   reused for the resumed run, which verifies the cached replay branch returns
@@ -1794,8 +1801,9 @@ Implementation steps:
    - generic backoff sleep parity: internal lowering done;
    - pause/cancel/shutdown acknowledgement parity after Agent checkpoint save:
      internal lowering done;
-   - checkpoint-returned pause plus cached resume A/B test: done;
-   - retry/failure/cancel crash-resume differential tests: pending.
+   - checkpoint-returned pause/cancel/shutdown A/B tests: done, including
+     cached resume for pause/shutdown suspensions;
+   - retry/failure and long-running cancellation differential tests: pending.
 5. Migrate `Delay`:
    - manifest config records: done;
    - immediate and dynamic `durationMs` mapping: done through
@@ -1821,9 +1829,9 @@ Implementation steps:
    - Split retry/timeout/breakpoint durability semantics: pending and gated.
 7. Add crash/resume tests:
    - resume after checkpoint: structural core replay test, gated host-level
-     cached Agent replay smoke, durable Agent checkpoint-returned pause plus
-     cached resume A/B test, and durable Split checkpoint-returned pause plus
-     cached resume A/B test done; retry/failure/cancel differential tests
+     cached Agent replay smoke, durable Agent checkpoint-returned pause/shutdown
+     plus cached resume A/B tests, and durable Split checkpoint-returned pause
+     plus cached resume A/B test done; retry/failure/cancel differential tests
      pending;
    - retry transient failure;
    - no retry permanent failure;
@@ -2079,13 +2087,14 @@ Current status:
   normalized out of the comparison.
 - The strict A/B harness now captures durable sleep/checkpoint requests and
   includes durable Delay plus fresh/cached durable Agent, durable Agent
-  checkpoint-returned pause plus cached resume, and fresh/cached durable Split
-  fixtures. Delay diffs completion output plus `/sleep` traffic exactly. Agent
-  and Split diff completion output, checkpoint ordering, and checkpoint bytes
-  while normalizing the compiler-owned checkpoint id prefix down to the stable
-  `agent::<agentId>::<capabilityId>::<stepId>` or `split::<stepId>` key base.
-  Cached replay preloads those normalized keys and verifies both artifacts
-  return cached output with only the read-only checkpoint lookup; the
+  checkpoint-returned `pause`/`cancel`/`shutdown` lifecycle coverage, and
+  fresh/cached durable Split fixtures. Delay diffs completion output plus
+  `/sleep` traffic exactly. Agent and Split diff completion output, checkpoint
+  ordering, and checkpoint bytes while normalizing the compiler-owned checkpoint
+  id prefix down to the stable `agent::<agentId>::<capabilityId>::<stepId>` or
+  `split::<stepId>` key base. Cached replay preloads those normalized keys and
+  verifies both artifacts return cached output with only the read-only
+  checkpoint lookup; the
   pause/resume Agent and Split cases also assert pause acknowledgment,
   `/suspended`, and no `/completed` or `/failed` before the resumed run.
 - The strict A/B harness now also includes enabled loop/control-flow coverage:

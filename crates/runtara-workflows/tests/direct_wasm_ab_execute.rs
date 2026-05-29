@@ -1288,6 +1288,136 @@ fn direct_wasm_matches_components_pause_resume_after_durable_agent_checkpoint() 
 }
 
 #[test]
+fn direct_wasm_matches_components_stop_after_durable_agent_checkpoint_signal() {
+    let Some(components_dir) = direct_ab_components_dir() else {
+        return;
+    };
+    let _data = setup_data_dir();
+
+    let components_artifact =
+        compile_components_artifact("durable-agent-stop-signals", AGENT_RETURN_INPUT);
+    let direct_artifact = compile_direct_artifact(
+        &components_dir,
+        "durable-agent-stop-signals",
+        AGENT_RETURN_INPUT,
+    );
+    assert_eq!(
+        direct_artifact.compiler_mode,
+        WorkflowCompilerMode::DirectWasm
+    );
+
+    for (signal_type, expected_suspended_count, resumes_from_checkpoint) in
+        [("cancel", 0usize, false), ("shutdown", 1usize, true)]
+    {
+        let input_value = format!("agent-{signal_type}");
+        let workflow_input = format!(r#"{{"value":"{input_value}"}}"#).into_bytes();
+        let components_input = components_sdk_input(&workflow_input);
+        let components_stopped = execute_artifact_with_checkpoint_signal(
+            &components_artifact,
+            &format!("ab-components-durable-agent-{signal_type}"),
+            &components_input,
+            signal_type,
+        );
+        let direct_stopped = execute_artifact_with_checkpoint_signal(
+            &direct_artifact.path,
+            &format!("ab-direct-durable-agent-{signal_type}"),
+            &workflow_input,
+            signal_type,
+        );
+
+        assert!(
+            components_stopped.status_success,
+            "components artifact did not stop cleanly for {signal_type}:\n{}",
+            components_stopped.stderr
+        );
+        assert!(
+            direct_stopped.status_success,
+            "direct artifact did not stop cleanly for {signal_type}:\n{}",
+            direct_stopped.stderr
+        );
+        assert!(
+            components_stopped.output_json.is_none(),
+            "components artifact unexpectedly completed for {signal_type}"
+        );
+        assert!(
+            direct_stopped.output_json.is_none(),
+            "direct artifact unexpectedly completed for {signal_type}"
+        );
+        assert!(
+            components_stopped.error_json.is_none(),
+            "components artifact unexpectedly failed for {signal_type}: {:?}",
+            components_stopped.error_json
+        );
+        assert!(
+            direct_stopped.error_json.is_none(),
+            "direct artifact unexpectedly failed for {signal_type}: {:?}",
+            direct_stopped.error_json
+        );
+
+        let saved_agent_output = format!(r#""{input_value}""#).into_bytes();
+        let expected_checkpoint_traffic = vec![
+            (AGENT_CACHE_KEY.to_string(), Vec::new()),
+            (AGENT_CACHE_KEY.to_string(), saved_agent_output.clone()),
+        ];
+        assert_eq!(
+            normalized_checkpoints(&components_stopped.checkpoints),
+            expected_checkpoint_traffic
+        );
+        assert_eq!(
+            normalized_checkpoints(&direct_stopped.checkpoints),
+            expected_checkpoint_traffic
+        );
+        assert_eq!(
+            components_stopped.suspended_count, expected_suspended_count,
+            "components suspended count mismatch for {signal_type}"
+        );
+        assert_eq!(
+            direct_stopped.suspended_count, expected_suspended_count,
+            "direct suspended count mismatch for {signal_type}"
+        );
+        let expected_ack = vec![SignalAckRequest {
+            signal_type: signal_type.to_string(),
+        }];
+        assert_eq!(components_stopped.signal_acks, expected_ack);
+        assert_eq!(
+            direct_stopped.signal_acks,
+            vec![SignalAckRequest {
+                signal_type: signal_type.to_string(),
+            }]
+        );
+
+        if resumes_from_checkpoint {
+            let components_resumed = execute_artifact_with_preloaded_checkpoints(
+                &components_artifact,
+                &format!("ab-components-durable-agent-{signal_type}-resume"),
+                &components_input,
+                vec![(AGENT_CACHE_KEY.to_string(), saved_agent_output.clone())],
+            );
+            let direct_resumed = execute_artifact_with_preloaded_checkpoints(
+                &direct_artifact.path,
+                &format!("ab-direct-durable-agent-{signal_type}-resume"),
+                &workflow_input,
+                vec![(AGENT_CACHE_KEY.to_string(), saved_agent_output)],
+            );
+
+            assert_success_parity(
+                "durable-agent-stop-signals",
+                0,
+                &components_resumed,
+                &direct_resumed,
+            );
+
+            let expected_output = serde_json::json!({ "result": input_value });
+            assert_eq!(
+                components_resumed.output_json.as_ref(),
+                Some(&expected_output)
+            );
+            assert_eq!(direct_resumed.output_json.as_ref(), Some(&expected_output));
+        }
+    }
+}
+
+#[test]
 fn direct_wasm_matches_components_cached_durable_split_checkpoint_replay() {
     let Some(components_dir) = direct_ab_components_dir() else {
         return;

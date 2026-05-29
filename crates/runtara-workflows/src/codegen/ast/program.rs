@@ -1402,9 +1402,27 @@ pub(crate) fn emit_main(graph: &ExecutionGraph) -> TokenStream {
                 Err(e) => {
                     // Check if this is a cancellation
                     if e.contains("cancelled") || e.contains("Cancelled") {
-                        // Acknowledge cancellation to runtara-core (sends SignalAck)
-                        // This updates instance status to "cancelled" in the database
-                        runtara_sdk::acknowledge_cancellation();
+                        // The resilient macro already acknowledges its own
+                        // checkpoint-returned cancellation signal before
+                        // returning this sentinel error.
+                        if !e.contains("Instance cancelled") {
+                            // Acknowledge cancellation to runtara-core (sends SignalAck)
+                            // This updates instance status to "cancelled" in the database
+                            runtara_sdk::acknowledge_cancellation();
+                        }
+                        return ExitCode::SUCCESS;
+                    }
+
+                    // Check if this is a graceful server shutdown suspension.
+                    if e.contains("suspended for shutdown") {
+                        let sdk_guard = sdk().lock().unwrap();
+                        let _ = sdk_guard.suspended();
+                        return ExitCode::SUCCESS;
+                    }
+                    if e.contains("shutting down") || e.contains("ShuttingDown") {
+                        runtara_sdk::acknowledge_shutdown();
+                        let sdk_guard = sdk().lock().unwrap();
+                        let _ = sdk_guard.suspended();
                         return ExitCode::SUCCESS;
                     }
 
@@ -2805,8 +2823,12 @@ mod tests {
         assert!(code.contains("cancelled"), "Should check for cancellation");
         // Note: write_cancelled removed - SDK events are now the single source of truth
         assert!(
-            code.contains("suspended"),
-            "Should call suspended for cancellation"
+            code.contains("Instance cancelled"),
+            "Should avoid duplicate ack for resilient checkpoint cancellation"
+        );
+        assert!(
+            code.contains("acknowledge_cancellation"),
+            "Should acknowledge non-checkpoint cancellation"
         );
     }
 
@@ -2818,6 +2840,26 @@ mod tests {
 
         assert!(code.contains("paused"), "Should check for pause");
         // Note: write_suspended removed - SDK events are now the single source of truth
+    }
+
+    #[test]
+    fn test_emit_main_handles_shutdown_suspension() {
+        let graph = create_minimal_finish_graph("finish");
+        let tokens = emit_main(&graph);
+        let code = tokens.to_string();
+
+        assert!(
+            code.contains("suspended for shutdown"),
+            "Should treat resilient shutdown sentinel as suspension"
+        );
+        assert!(
+            code.contains("acknowledge_shutdown"),
+            "Should acknowledge non-checkpoint shutdown signals"
+        );
+        assert!(
+            code.contains("suspended"),
+            "Should call suspended for shutdown"
+        );
     }
 
     #[test]
