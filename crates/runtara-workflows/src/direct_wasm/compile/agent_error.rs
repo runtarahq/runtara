@@ -9,6 +9,7 @@ use super::abi::{
     push_retptr_u8_load, push_segment_args, return_if_retptr_error,
 };
 use super::debug::emit_agent_debug_error;
+use super::dispatcher::emit_run_plan_mapping;
 use super::mapping::emit_build_source;
 use super::split::emit_split_append_error_payload_and_continue;
 use super::{
@@ -21,7 +22,7 @@ use super::{
     DIRECT_AGENT_RESULT_ERR_SEVERITY_LEN_OFFSET, DIRECT_AGENT_RESULT_ERR_SEVERITY_PTR_OFFSET,
     DIRECT_RUN_RETPTR_OFFSET, DirectCoreFunctionIndices, DirectCoreStaticData, DirectDataSegment,
     DirectEdgeConditionPlan, DirectErrorRoutePlan, DirectFailureTarget, DirectRunPlan,
-    DirectVariables, emit_run_plan_mapping, emit_runtime_fail_return,
+    DirectVariables, emit_runtime_fail_return,
 };
 
 #[allow(clippy::too_many_arguments)]

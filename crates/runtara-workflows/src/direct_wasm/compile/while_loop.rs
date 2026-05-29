@@ -9,6 +9,7 @@ use super::abi::{
     push_variables_args, return_if_retptr_error,
 };
 use super::debug::emit_step_debug_event;
+use super::dispatcher::emit_run_plan_mapping;
 use super::mapping::emit_build_source;
 use super::{
     DIRECT_RET_BOOL_OK_OFFSET, DIRECT_RET_U32_OK_OFFSET, DIRECT_WHILE_INDEX_LOCAL,
@@ -16,7 +17,7 @@ use super::{
     DIRECT_WHILE_PARENT_SOURCE_PTR_LOCAL, DIRECT_WHILE_STATE_LEN_LOCAL,
     DIRECT_WHILE_STATE_PTR_LOCAL, DIRECT_WHILE_VARIABLES_LEN_LOCAL,
     DIRECT_WHILE_VARIABLES_PTR_LOCAL, DirectCoreFunctionIndices, DirectCoreStaticData,
-    DirectDataSegment, DirectFailureTarget, DirectRunPlan, DirectVariables, emit_run_plan_mapping,
+    DirectDataSegment, DirectFailureTarget, DirectRunPlan, DirectVariables,
 };
 
 #[allow(clippy::too_many_arguments)]

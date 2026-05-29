@@ -9,6 +9,7 @@ use super::abi::{
     push_retptr_i64_load, push_retptr_u8_load, push_segment_args, return_if_retptr_error,
 };
 use super::debug::{emit_step_breakpoint, emit_step_debug_event, emit_wait_debug_start_event};
+use super::dispatcher::emit_run_plan_mapping;
 use super::mapping::emit_build_source;
 use super::split::emit_split_append_error_payload_and_continue;
 use super::{
@@ -19,7 +20,7 @@ use super::{
     DIRECT_WAIT_PARENT_STEPS_PTR_LOCAL, DIRECT_WAIT_POLL_INTERVAL_MS_LOCAL,
     DIRECT_WAIT_SIGNAL_ID_LEN_LOCAL, DIRECT_WAIT_SIGNAL_ID_PTR_LOCAL, DIRECT_WAIT_TIMEOUT_MS_LOCAL,
     DIRECT_WAIT_TIMEOUT_PRESENT_LOCAL, DirectCoreFunctionIndices, DirectCoreStaticData,
-    DirectDataSegment, DirectFailureTarget, DirectRunPlan, DirectVariables, emit_run_plan_mapping,
+    DirectDataSegment, DirectFailureTarget, DirectRunPlan, DirectVariables,
     emit_runtime_fail_return,
 };
 

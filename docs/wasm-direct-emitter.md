@@ -167,10 +167,10 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   `direct_wasm::compile::agent_io`. Agent error payload conversion and onError
   route lowering moved into `direct_wasm::compile::agent_error`.
   The remaining Agent step state-machine lowering moved into
-  `direct_wasm::compile::agent`, so `compile.rs` dispatches Agent run-plan
-  entries without owning their validation, retry, checkpoint, output, and
-  continuation details inline. Shared conditional edge-route lowering moved
-  into `direct_wasm::compile::edge_route`. Split step lowering moved into
+  `direct_wasm::compile::agent`, so Agent validation, retry, checkpoint,
+  output, and continuation details are no longer inline in the root emitter.
+  Shared conditional edge-route lowering moved into
+  `direct_wasm::compile::edge_route`. Split step lowering moved into
   `direct_wasm::compile::split`, including durable Split checkpoint
   replay/save, per-item source construction, and dontStopOnFailed failure
   aggregation shared by nested Agent/Error/Wait paths. While loop lowering
@@ -179,7 +179,10 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   continuation. WaitForSignal and onWait lowering moved into
   `direct_wasm::compile::wait`, covering breakpoint pause, signal-id and
   timeout setup, external-input events, polling/timeout loops, onWait nested
-  execution, and onWait failure conversion shared by ABI/Split paths.
+  execution, and onWait failure conversion shared by ABI/Split paths. The
+  central run-plan variant match moved into `direct_wasm::compile::dispatcher`,
+  so `compile.rs` now owns top-level artifact/module assembly and delegates
+  step-family lowering through a dedicated dispatcher boundary.
 - `direct_wasm::compile::compose_direct_workflow` now performs the first
   direct static composition path: it maps the direct `workflow-logic.wasm`
   component plus prebuilt stdlib/runtime/agent components into `wac compose`,
@@ -751,6 +754,9 @@ Emitter module boundaries should stay readable as support broadens:
 
 - `compile.rs` owns the public compile/compose entry points and module assembly
   orchestration.
+- `compile/dispatcher.rs` owns the central `DirectRunPlan` variant dispatch,
+  including Finish mapping, Conditional branching, and delegation to each
+  step-family lowerer.
 - `plan.rs` owns deterministic graph-to-run-plan construction and the run-plan
   data model consumed by the core emitter.
 - `error.rs` owns the direct compile error surface shared by planning,

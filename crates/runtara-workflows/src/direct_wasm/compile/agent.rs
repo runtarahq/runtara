@@ -21,12 +21,12 @@ use super::agent_retry::{
 };
 use super::checkpoint::{emit_checkpoint_lookup, emit_checkpoint_save};
 use super::debug::{emit_agent_debug_error, emit_step_debug_event};
+use super::dispatcher::emit_run_plan_mapping;
 use super::mapping::{emit_apply_mapping, emit_build_source};
 use super::{
     DIRECT_AGENT_RETRY_ATTEMPT_LOCAL, DIRECT_AGENT_RETRY_ERROR_LEN_LOCAL,
     DIRECT_AGENT_RETRY_ERROR_PTR_LOCAL, DirectCoreFunctionIndices, DirectCoreStaticData,
     DirectDataSegment, DirectErrorRoutePlan, DirectFailureTarget, DirectRunPlan, DirectVariables,
-    emit_run_plan_mapping,
 };
 
 #[allow(clippy::too_many_arguments)]

@@ -10,6 +10,7 @@ use super::abi::{
 };
 use super::checkpoint::{emit_checkpoint_lookup, emit_checkpoint_save};
 use super::debug::emit_step_debug_event;
+use super::dispatcher::emit_run_plan_mapping;
 use super::mapping::emit_build_source;
 use super::wait::emit_wait_on_wait_error_and_fail;
 use super::{
@@ -18,7 +19,7 @@ use super::{
     DIRECT_SPLIT_PARENT_SOURCE_PTR_LOCAL, DIRECT_SPLIT_RESULTS_LEN_LOCAL,
     DIRECT_SPLIT_RESULTS_PTR_LOCAL, DIRECT_SPLIT_VARIABLES_LEN_LOCAL,
     DIRECT_SPLIT_VARIABLES_PTR_LOCAL, DirectCoreFunctionIndices, DirectCoreStaticData,
-    DirectDataSegment, DirectFailureTarget, DirectRunPlan, DirectVariables, emit_run_plan_mapping,
+    DirectDataSegment, DirectFailureTarget, DirectRunPlan, DirectVariables,
 };
 
 #[allow(clippy::too_many_arguments)]

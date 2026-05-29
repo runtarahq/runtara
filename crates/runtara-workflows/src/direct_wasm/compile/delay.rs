@@ -9,11 +9,11 @@ use super::abi::{
     return_if_retptr_error,
 };
 use super::debug::emit_step_debug_event;
+use super::dispatcher::emit_run_plan_mapping;
 use super::mapping::emit_build_source;
 use super::{
     DIRECT_DELAY_DURATION_MS_LOCAL, DIRECT_RET_U64_OK_OFFSET, DirectCoreFunctionIndices,
     DirectCoreStaticData, DirectDataSegment, DirectFailureTarget, DirectRunPlan, DirectVariables,
-    emit_run_plan_mapping,
 };
 
 #[allow(clippy::too_many_arguments)]
