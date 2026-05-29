@@ -4,7 +4,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use runtara_dsl::{AgentStep, DelayStep, ExecutionGraph, SplitStep, Step, WhileStep};
+use runtara_dsl::{
+    AgentStep, DelayStep, ExecutionGraph, SplitStep, Step, WaitForSignalStep, WhileStep,
+};
 
 use crate::workflow_features::{WorkflowFeatureSummary, analyze_workflow_features};
 
@@ -88,7 +90,7 @@ fn collect_graph_support_inner(
                     .map(step_type_name)
                     .map(str::to_string),
                 feature: "execution-plan-routing".to_string(),
-                reason: "direct emitter currently lowers only a single entry Finish or Error step, pure Conditional true/false trees, normal Filter/value Switch/GroupBy/Log edges, and routing Switch dispatch trees ending in Finish/Error leaves".to_string(),
+                reason: "direct emitter currently lowers only a single entry Finish or Error step, pure Conditional true/false trees, normal Filter/value Switch/GroupBy/Delay/WaitForSignal/Log edges, and routing Switch dispatch trees ending in Finish/Error leaves".to_string(),
             });
         }
     }
@@ -322,6 +324,16 @@ fn supports_direct_control_step_inner(
                 include_on_error,
             )
         }
+        Step::WaitForSignal(step) if supports_wait_for_signal_step_baseline(step) => {
+            supports_normal_flow_step(
+                graph,
+                step_id,
+                reachable,
+                used_edges,
+                stack,
+                include_on_error,
+            )
+        }
         Step::Log(_) => supports_normal_flow_step(
             graph,
             step_id,
@@ -353,6 +365,10 @@ fn supports_agent_step_baseline(_graph: &ExecutionGraph, step: &AgentStep) -> bo
 
 fn supports_delay_step_baseline(_graph: &ExecutionGraph, step: &DelayStep) -> bool {
     !step.breakpoint.unwrap_or(false)
+}
+
+fn supports_wait_for_signal_step_baseline(step: &WaitForSignalStep) -> bool {
+    step.on_wait.is_none() && step.timeout_ms.is_none() && !step.breakpoint.unwrap_or(false)
 }
 
 fn supports_split_step_baseline(step: &SplitStep) -> bool {
@@ -798,15 +814,7 @@ fn collect_step_support(
         ),
         Step::Delay(step) => collect_delay_step_unsupported(graph, step, unsupported),
         Step::WaitForSignal(wait) => {
-            unsupported_step(
-                step,
-                "wait-for-signal",
-                "WaitForSignal steps require signal runtime support",
-                unsupported,
-            );
-            if let Some(on_wait) = &wait.on_wait {
-                collect_graph_support_inner(on_wait, graph_durable, unsupported);
-            }
+            collect_wait_for_signal_step_unsupported(wait, graph_durable, unsupported)
         }
         Step::AiAgent(_) => unsupported_step(
             step,
@@ -814,6 +822,43 @@ fn collect_step_support(
             "AiAgent steps require LLM/tool-loop runtime support",
             unsupported,
         ),
+    }
+}
+
+fn collect_wait_for_signal_step_unsupported(
+    step: &WaitForSignalStep,
+    graph_durable: bool,
+    unsupported: &mut Vec<UnsupportedWorkflowFeature>,
+) {
+    let mut push = |feature: &str, reason: &str| {
+        unsupported.push(UnsupportedWorkflowFeature {
+            step_id: Some(step.id.clone()),
+            step_type: Some("WaitForSignal".to_string()),
+            feature: feature.to_string(),
+            reason: reason.to_string(),
+        });
+    };
+
+    if step.breakpoint.unwrap_or(false) {
+        push(
+            "wait-for-signal-breakpoint",
+            "WaitForSignal breakpoints require direct debug pause lowering",
+        );
+    }
+
+    if step.timeout_ms.is_some() {
+        push(
+            "wait-for-signal-timeout",
+            "WaitForSignal timeout lowering is pending",
+        );
+    }
+
+    if let Some(on_wait) = &step.on_wait {
+        push(
+            "wait-for-signal-on-wait",
+            "WaitForSignal onWait subgraphs require direct nested notification lowering",
+        );
+        collect_graph_support_inner(on_wait, graph_durable, unsupported);
     }
 }
 
@@ -1032,6 +1077,9 @@ mod tests {
             "while_simple" => include_str!("../../tests/fixtures/while_simple.json"),
             "transform" => include_str!("../../tests/fixtures/transform_workflow.json"),
             "wait" => include_str!("../../tests/fixtures/wait_for_signal_with_callback.json"),
+            "wait_simple" => {
+                include_str!("../../tests/fixtures/wait_for_signal_direct_simple.json")
+            }
             other => panic!("unknown fixture {other}"),
         };
         serde_json::from_str(json).expect("fixture should parse")
@@ -1887,10 +1935,17 @@ mod tests {
                 .unsupported
                 .iter()
                 .any(|feature| feature.step_id.as_deref() == Some("wait")
-                    && feature.feature == "wait-for-signal")
+                    && feature.feature == "wait-for-signal-on-wait")
         );
         assert!(!report.unsupported.iter().any(|feature| {
             feature.step_id.as_deref() == Some("log") && feature.feature == "log-event"
         }));
+    }
+
+    #[test]
+    fn wait_without_timeout_or_on_wait_is_supported() {
+        let report = analyze_direct_wasm_support(&fixture("wait_simple"));
+
+        assert!(report.supported, "{:?}", report.unsupported);
     }
 }

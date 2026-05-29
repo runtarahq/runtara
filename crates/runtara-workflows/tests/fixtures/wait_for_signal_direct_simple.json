@@ -1,0 +1,52 @@
+{
+  "name": "Wait for Signal Direct Simple",
+  "steps": {
+    "wait": {
+      "stepType": "WaitForSignal",
+      "id": "wait",
+      "name": "Approval",
+      "pollIntervalMs": 0,
+      "responseSchema": {
+        "approved": {
+          "type": "boolean",
+          "required": true
+        }
+      },
+      "action": {
+        "key": "approval_decision",
+        "correlation": {
+          "case_id": {
+            "valueType": "reference",
+            "value": "data.case_id"
+          }
+        },
+        "context": {
+          "summary": {
+            "valueType": "reference",
+            "value": "data.summary"
+          }
+        }
+      }
+    },
+    "finish": {
+      "stepType": "Finish",
+      "id": "finish",
+      "inputMapping": {
+        "approved": {
+          "valueType": "reference",
+          "value": "steps.wait.outputs.approved"
+        }
+      }
+    }
+  },
+  "entryPoint": "wait",
+  "executionPlan": [
+    {
+      "fromStep": "wait",
+      "toStep": "finish"
+    }
+  ],
+  "variables": {},
+  "inputSchema": {},
+  "outputSchema": {}
+}

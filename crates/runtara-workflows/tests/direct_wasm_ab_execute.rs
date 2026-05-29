@@ -31,6 +31,8 @@ const WHILE_DIRECT_INDEX_ONLY: &str = include_str!("fixtures/while_direct_index_
 const LOG_ALL_LEVELS: &str = include_str!("fixtures/log_all_levels.json");
 const ERROR_DIRECT_SIMPLE: &str = include_str!("fixtures/error_direct_simple.json");
 const DELAY_DYNAMIC: &str = include_str!("fixtures/delay_dynamic.json");
+const WAIT_FOR_SIGNAL_DIRECT_SIMPLE: &str =
+    include_str!("fixtures/wait_for_signal_direct_simple.json");
 const AGENT_CACHE_KEY: &str = "agent::utils::return-input::agent";
 const SPLIT_CACHE_KEY: &str = "split::split";
 const SPLIT_FINISH_WITH_SCHEMAS: &str = r#"{
@@ -174,16 +176,19 @@ struct CapturedRun {
 struct ServerState {
     checkpoints: Mutex<HashMap<String, Vec<u8>>>,
     pending_checkpoint_signal: Mutex<Option<String>>,
+    custom_signal_payload: Mutex<Option<Vec<u8>>>,
 }
 
 impl ServerState {
     fn new(
         preloaded_checkpoints: Vec<(String, Vec<u8>)>,
         pending_checkpoint_signal: Option<String>,
+        custom_signal_payload: Option<Vec<u8>>,
     ) -> Self {
         Self {
             checkpoints: Mutex::new(preloaded_checkpoints.into_iter().collect()),
             pending_checkpoint_signal: Mutex::new(pending_checkpoint_signal),
+            custom_signal_payload: Mutex::new(custom_signal_payload),
         }
     }
 }
@@ -250,6 +255,12 @@ fn shared_components_dir() -> Option<PathBuf> {
         if !stdlib_bytes
             .windows(b"split-cache-key".len())
             .any(|window| window == b"split-cache-key")
+            || !stdlib_bytes
+                .windows(b"wait-signal-id".len())
+                .any(|window| window == b"wait-signal-id")
+            || !stdlib_bytes
+                .windows(b"wait-output".len())
+                .any(|window| window == b"wait-output")
         {
             eprintln!(
                 "SKIP: direct shared workflow stdlib component is stale: {:?}",
@@ -516,6 +527,15 @@ fn route(
                 let input = base64::engine::general_purpose::STANDARD.encode(workflow_input);
                 return (200, serde_json::json!({ "input": input }));
             }
+            ("GET", "signals") => {
+                return (
+                    200,
+                    serde_json::json!({
+                        "signal": null,
+                        "custom_signal": null,
+                    }),
+                );
+            }
             ("POST", "completed") => {
                 capture_completed(body, sink);
                 return (200, serde_json::json!({"success": true}));
@@ -542,6 +562,29 @@ fn route(
                 return (200, serde_json::json!({"success": true}));
             }
             _ => {}
+        }
+
+        if method == "GET"
+            && let Some(checkpoint_id) = endpoint.strip_prefix("signals/")
+        {
+            let custom_signal = server_state
+                .custom_signal_payload
+                .lock()
+                .expect("custom signal lock")
+                .take()
+                .map(|payload| {
+                    serde_json::json!({
+                        "checkpoint_id": checkpoint_id,
+                        "payload": base64::engine::general_purpose::STANDARD.encode(payload),
+                    })
+                });
+            return (
+                200,
+                serde_json::json!({
+                    "signal": null,
+                    "custom_signal": custom_signal,
+                }),
+            );
         }
     }
 
@@ -749,6 +792,7 @@ fn execute_artifact_with_preloaded_checkpoints(
         workflow_input,
         preloaded_checkpoints,
         None,
+        None,
     )
 }
 
@@ -764,6 +808,23 @@ fn execute_artifact_with_checkpoint_signal(
         workflow_input,
         Vec::new(),
         Some(signal_type.to_string()),
+        None,
+    )
+}
+
+fn execute_artifact_with_custom_signal(
+    binary_path: &Path,
+    instance_id: &str,
+    workflow_input: &[u8],
+    signal_payload: &[u8],
+) -> CapturedRun {
+    execute_artifact_with_state(
+        binary_path,
+        instance_id,
+        workflow_input,
+        Vec::new(),
+        None,
+        Some(signal_payload.to_vec()),
     )
 }
 
@@ -773,6 +834,7 @@ fn execute_artifact_with_state(
     workflow_input: &[u8],
     preloaded_checkpoints: Vec<(String, Vec<u8>)>,
     pending_checkpoint_signal: Option<String>,
+    custom_signal_payload: Option<Vec<u8>>,
 ) -> CapturedRun {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
     let addr = listener.local_addr().expect("local_addr");
@@ -781,6 +843,7 @@ fn execute_artifact_with_state(
     let server_state = Arc::new(ServerState::new(
         preloaded_checkpoints,
         pending_checkpoint_signal,
+        custom_signal_payload,
     ));
     let workflow_input = Arc::new(workflow_input.to_vec());
     let server_handle =
@@ -853,9 +916,12 @@ fn components_sdk_input(workflow_input: &[u8]) -> Vec<u8> {
     .expect("components sdk input serializes")
 }
 
-fn normalized_event_payload(mut payload: Value) -> Value {
+fn normalized_event_payload(subtype: &str, mut payload: Value) -> Value {
     if let Some(object) = payload.as_object_mut() {
         object.remove("timestamp_ms");
+        if subtype == "external_input_requested" {
+            object.remove("signal_id");
+        }
     }
     payload
 }
@@ -866,7 +932,7 @@ fn normalized_events(events: &[RuntimeEvent]) -> Vec<(String, Value)> {
         .map(|event| {
             (
                 event.subtype.clone(),
-                normalized_event_payload(event.payload_json.clone()),
+                normalized_event_payload(&event.subtype, event.payload_json.clone()),
             )
         })
         .collect()
@@ -1108,6 +1174,44 @@ fn direct_wasm_matches_components_execution_for_supported_json_fixtures() {
             assert_success_parity(case.name, input_index, &components, &direct);
         }
     }
+}
+
+#[test]
+fn direct_wasm_matches_components_wait_for_signal_resume() {
+    let Some(components_dir) = direct_ab_components_dir() else {
+        return;
+    };
+    let _data = setup_data_dir();
+
+    let components_artifact =
+        compile_components_artifact("wait-signal", WAIT_FOR_SIGNAL_DIRECT_SIMPLE);
+    let direct_artifact = compile_direct_artifact(
+        &components_dir,
+        "wait-signal",
+        WAIT_FOR_SIGNAL_DIRECT_SIMPLE,
+    );
+    let workflow_input = br#"{"case_id":"case-42","summary":"Needs approval"}"#;
+    let signal_payload = br#"{"approved":true}"#;
+    let components_input = components_sdk_input(workflow_input);
+
+    let components = execute_artifact_with_custom_signal(
+        &components_artifact,
+        "ab-components-wait-signal-0",
+        &components_input,
+        signal_payload,
+    );
+    let direct = execute_artifact_with_custom_signal(
+        &direct_artifact.path,
+        "ab-direct-wait-signal-0",
+        workflow_input,
+        signal_payload,
+    );
+
+    assert_success_parity("wait-signal", 0, &components, &direct);
+    assert_eq!(
+        direct.output_json,
+        Some(serde_json::json!({"approved": true}))
+    );
 }
 
 #[test]

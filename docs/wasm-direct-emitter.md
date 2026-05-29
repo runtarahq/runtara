@@ -96,6 +96,13 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   resolution, generated-code-compatible waiting event payloads including
   response schema/action metadata, and generated-code-compatible step output
   insertion after a signal payload is received.
+- The direct core emitter now lowers the baseline `WaitForSignal` path with
+  no `onWait`, no timeout, and no breakpoint. It calls `runtime.instance-id`,
+  builds the generated-compatible signal id through stdlib, emits
+  `external_input_requested`, polls `runtime.poll-custom-signal` in a runtime
+  signal-aware loop, records the received payload through stdlib, rebuilds the
+  source envelope, and continues normal flow. Support gates still reject
+  `onWait`, timeout, and breakpoint waits until those paths have parity tests.
 - `scripts/build-agent-components.sh` now builds and stages the direct workflow
   stdlib/runtime components beside agent components with sibling metadata, and
   the bundle installer treats `RUNTARA_AGENT_COMPONENTS_DIR` as the shared
@@ -1986,16 +1993,22 @@ Implementation steps:
    - emit waiting event/action metadata: stdlib helper done through
      `wait-event`, including response schema, action key, correlation, and
      context mapping parity;
-   - execute `on_wait` subgraph;
-   - poll or suspend;
+   - execute `on_wait` subgraph: gated/pending;
+   - poll or suspend: baseline runtime polling loop done; durable suspension
+     semantics pending if required;
    - timeout: stdlib timeout mapping helper done through `wait-timeout-ms`;
    - poll interval: stdlib helper done through `wait-poll-interval-ms`;
    - resume with signal payload: stdlib output helper done through
      `wait-output`;
-   - cancellation.
-2. Implement `WaitForSignal` lowering.
+   - cancellation: runtime signal check is wired in the polling loop.
+2. Implement `WaitForSignal` lowering:
+   - baseline no-`onWait`/no-timeout/no-breakpoint lowering: done;
+   - `onWait` nested graph lowering: pending;
+   - timeout failure parity: pending;
+   - debug/breakpoint parity: pending.
 3. Add tests for:
-   - normal signal resume;
+   - normal signal resume: structural core test and gated A/B test are in
+     place;
    - timeout;
    - cancellation;
    - `on_wait` failure;
@@ -2021,8 +2034,10 @@ Current status:
   the JSON-heavy WaitForSignal semantics needed by direct lowering:
   `wait-signal-id`, `wait-timeout-ms`, `wait-poll-interval-ms`, `wait-event`,
   and `wait-output`.
-- Direct core lowering and host-level WaitForSignal A/B execution remain
-  pending.
+- Baseline direct core lowering is in place for waits without `onWait`,
+  timeout, or breakpoint. Host-level gated A/B coverage is added for immediate
+  custom-signal resume and normal completion. Timeout, `onWait`, and debug
+  parity remain pending.
 
 ### Phase 12: AiAgent
 
