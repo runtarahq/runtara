@@ -76,6 +76,7 @@ fn workflow_image_metadata(
     workflow_id: &str,
     version: u32,
     source_checksum: &str,
+    direct_diagnostics: DirectCompilationDiagnostics,
 ) -> serde_json::Value {
     serde_json::json!({
         "variables": compilation_result.default_variables,
@@ -87,8 +88,88 @@ fn workflow_image_metadata(
             // bump invalidates every workflow on next deploy.
             "templateMajor": runtara_workflows::TEMPLATE_MAJOR_VERSION,
             "compilerMode": compilation_result.compiler_mode.as_str(),
+            "directWasm": {
+                "enabled": direct_diagnostics.enabled,
+                "outcome": direct_diagnostics.outcome.as_str(),
+                "reason": direct_diagnostics.reason,
+            },
         }
     })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DirectCompilationDiagnostics {
+    enabled: bool,
+    outcome: DirectCompilationOutcome,
+    reason: &'static str,
+}
+
+impl DirectCompilationDiagnostics {
+    fn disabled() -> Self {
+        Self {
+            enabled: false,
+            outcome: DirectCompilationOutcome::Disabled,
+            reason: "not-enabled",
+        }
+    }
+
+    fn skipped(reason: &'static str) -> Self {
+        Self {
+            enabled: true,
+            outcome: DirectCompilationOutcome::Skipped,
+            reason,
+        }
+    }
+
+    fn success() -> Self {
+        Self {
+            enabled: true,
+            outcome: DirectCompilationOutcome::Success,
+            reason: "none",
+        }
+    }
+
+    fn fallback(reason: &'static str) -> Self {
+        Self {
+            enabled: true,
+            outcome: DirectCompilationOutcome::Fallback,
+            reason,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DirectCompilationOutcome {
+    Disabled,
+    Skipped,
+    Success,
+    Fallback,
+}
+
+impl DirectCompilationOutcome {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Disabled => "disabled",
+            Self::Skipped => "skipped",
+            Self::Success => "success",
+            Self::Fallback => "fallback",
+        }
+    }
+}
+
+#[derive(Debug)]
+struct WorkflowCompilationResult {
+    artifact: NativeCompilationResult,
+    direct_diagnostics: DirectCompilationDiagnostics,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct WorkflowImageRegistration<'a> {
+    tenant_id: &'a str,
+    workflow_id: &'a str,
+    version: u32,
+    source_checksum: &'a str,
+    direct_diagnostics: DirectCompilationDiagnostics,
 }
 
 /// Disabled-by-default direct WASM compilation settings.
@@ -152,7 +233,7 @@ fn compile_workflow_with_direct_fallback(
     input: CompilationInput,
     source_checksum: String,
     settings: DirectCompilationSettings,
-) -> std::io::Result<NativeCompilationResult> {
+) -> std::io::Result<WorkflowCompilationResult> {
     if settings.enabled {
         if let Some(reason) = direct_compile_skip_reason(&input, &settings) {
             record_direct_compilation_outcome("skipped", reason, Duration::ZERO);
@@ -163,7 +244,10 @@ fn compile_workflow_with_direct_fallback(
                 reason = reason,
                 "Direct WASM workflow compilation not selected"
             );
-            return compile_workflow(input);
+            return compile_workflow(input).map(|artifact| WorkflowCompilationResult {
+                artifact,
+                direct_diagnostics: DirectCompilationDiagnostics::skipped(reason),
+            });
         }
 
         if let Some(components_dir) = settings.components_dir {
@@ -182,7 +266,10 @@ fn compile_workflow_with_direct_fallback(
                         binary_size = result.binary_size,
                         "Direct WASM workflow compilation succeeded"
                     );
-                    return Ok(result);
+                    return Ok(WorkflowCompilationResult {
+                        artifact: result,
+                        direct_diagnostics: DirectCompilationDiagnostics::success(),
+                    });
                 }
                 Err(err) => {
                     let reason = direct_compile_fallback_reason(&err);
@@ -193,6 +280,10 @@ fn compile_workflow_with_direct_fallback(
                         error = %err,
                         "Direct WASM workflow compilation failed; falling back to Rust/codegen compiler"
                     );
+                    return compile_workflow(input).map(|artifact| WorkflowCompilationResult {
+                        artifact,
+                        direct_diagnostics: DirectCompilationDiagnostics::fallback(reason),
+                    });
                 }
             }
         } else {
@@ -202,10 +293,17 @@ fn compile_workflow_with_direct_fallback(
                 version = input.version,
                 "Direct WASM workflow compilation enabled but no component directory is configured; falling back to Rust/codegen compiler"
             );
+            return compile_workflow(input).map(|artifact| WorkflowCompilationResult {
+                artifact,
+                direct_diagnostics: DirectCompilationDiagnostics::fallback("missing-components"),
+            });
         }
     }
 
-    compile_workflow(input)
+    compile_workflow(input).map(|artifact| WorkflowCompilationResult {
+        artifact,
+        direct_diagnostics: DirectCompilationDiagnostics::disabled(),
+    })
 }
 
 fn direct_compile_skip_reason(
@@ -626,7 +724,7 @@ impl CompilationService {
         let compile_start_time = std::time::Instant::now();
         let direct_compilation = self.direct_compilation.clone();
         let compile_source_checksum = source_checksum.clone();
-        let result = tokio::task::spawn_blocking(move || {
+        let compilation_result = tokio::task::spawn_blocking(move || {
             compile_workflow_with_direct_fallback(
                 compilation_input,
                 compile_source_checksum,
@@ -636,9 +734,14 @@ impl CompilationService {
         .await
         .map_err(|e| ServiceError::CompilationError(format!("Compilation task panicked: {}", e)))?
         .map_err(|e| ServiceError::CompilationError(format!("Compilation failed: {}", e)))?;
+        let direct_diagnostics = compilation_result.direct_diagnostics;
+        let result = compilation_result.artifact;
         debug!(
             duration_ms = compile_start_time.elapsed().as_millis(),
             binary_size = result.binary_size,
+            compiler_mode = result.compiler_mode.as_str(),
+            direct_wasm_outcome = direct_diagnostics.outcome.as_str(),
+            direct_wasm_reason = direct_diagnostics.reason,
             "compile: step 6 completed - workflow artifact compiled"
         );
 
@@ -701,11 +804,14 @@ impl CompilationService {
         let image_id = self
             .register_image(
                 client,
-                tenant_id,
-                workflow_id,
-                version_u32,
                 &result,
-                &source_checksum,
+                WorkflowImageRegistration {
+                    tenant_id,
+                    workflow_id,
+                    version: version_u32,
+                    source_checksum: &source_checksum,
+                    direct_diagnostics,
+                },
             )
             .await?;
         debug!(
@@ -949,14 +1055,11 @@ impl CompilationService {
     async fn register_image(
         &self,
         client: &RuntimeClient,
-        tenant_id: &str,
-        workflow_id: &str,
-        version: u32,
         compilation_result: &runtara_workflows::NativeCompilationResult,
-        source_checksum: &str,
+        registration: WorkflowImageRegistration<'_>,
     ) -> Result<String, ServiceError> {
         // Build the image name: {workflow_id}:{version}
-        let image_name = format!("{}:{}", workflow_id, version);
+        let image_name = format!("{}:{}", registration.workflow_id, registration.version);
 
         // Get binary path and size (use binary_path from compilation result,
         // which is target-aware: "workflow" for native, "workflow.wasm" for WASM)
@@ -968,22 +1071,27 @@ impl CompilationService {
 
         info!(
             "Registering image {} for tenant {} ({} bytes)",
-            image_name, tenant_id, binary_size
+            image_name, registration.tenant_id, binary_size
         );
 
         // Create registration options with workflow variables as metadata.
         // Every compile produces a components-mode `workflow.wasm`, so the
         // runner type is always `Wasm` now.
-        let options = RegisterImageStreamOptions::new(tenant_id, &image_name, binary_size)
-            .with_description(format!("Workflow {} version {}", workflow_id, version))
-            .with_runner_type(RunnerType::Wasm)
-            .with_sha256(&compilation_result.binary_checksum)
-            .with_metadata(workflow_image_metadata(
-                compilation_result,
-                workflow_id,
-                version,
-                source_checksum,
-            ));
+        let options =
+            RegisterImageStreamOptions::new(registration.tenant_id, &image_name, binary_size)
+                .with_description(format!(
+                    "Workflow {} version {}",
+                    registration.workflow_id, registration.version
+                ))
+                .with_runner_type(RunnerType::Wasm)
+                .with_sha256(&compilation_result.binary_checksum)
+                .with_metadata(workflow_image_metadata(
+                    compilation_result,
+                    registration.workflow_id,
+                    registration.version,
+                    registration.source_checksum,
+                    registration.direct_diagnostics,
+                ));
 
         // Open the binary file for streaming
         let file = tokio::fs::File::open(&binary_path).await.map_err(|e| {
@@ -1162,7 +1270,32 @@ mod tests {
     }
 
     #[test]
-    fn workflow_image_metadata_records_compiler_mode() {
+    fn direct_compilation_outcome_metadata_values_are_stable() {
+        assert_eq!(DirectCompilationOutcome::Disabled.as_str(), "disabled");
+        assert_eq!(DirectCompilationOutcome::Skipped.as_str(), "skipped");
+        assert_eq!(DirectCompilationOutcome::Success.as_str(), "success");
+        assert_eq!(DirectCompilationOutcome::Fallback.as_str(), "fallback");
+
+        assert_eq!(
+            DirectCompilationDiagnostics::disabled(),
+            DirectCompilationDiagnostics {
+                enabled: false,
+                outcome: DirectCompilationOutcome::Disabled,
+                reason: "not-enabled",
+            }
+        );
+        assert_eq!(
+            DirectCompilationDiagnostics::success(),
+            DirectCompilationDiagnostics {
+                enabled: true,
+                outcome: DirectCompilationOutcome::Success,
+                reason: "none",
+            }
+        );
+    }
+
+    #[test]
+    fn workflow_image_metadata_records_compiler_mode_and_direct_diagnostics() {
         let result = NativeCompilationResult {
             binary_path: "/tmp/workflow.wasm".into(),
             binary_size: 123,
@@ -1175,7 +1308,13 @@ mod tests {
             compiler_mode: WorkflowCompilerMode::DirectWasm,
         };
 
-        let metadata = workflow_image_metadata(&result, "workflow-a", 7, "source-sha256");
+        let metadata = workflow_image_metadata(
+            &result,
+            "workflow-a",
+            7,
+            "source-sha256",
+            DirectCompilationDiagnostics::success(),
+        );
 
         assert_eq!(metadata["variables"], serde_json::json!({ "limit": 5 }));
         assert_eq!(metadata["workflow"]["workflowId"], "workflow-a");
@@ -1186,6 +1325,40 @@ mod tests {
             runtara_workflows::TEMPLATE_MAJOR_VERSION
         );
         assert_eq!(metadata["workflow"]["compilerMode"], "direct-wasm");
+        assert_eq!(metadata["workflow"]["directWasm"]["enabled"], true);
+        assert_eq!(metadata["workflow"]["directWasm"]["outcome"], "success");
+        assert_eq!(metadata["workflow"]["directWasm"]["reason"], "none");
+    }
+
+    #[test]
+    fn workflow_image_metadata_records_direct_fallback_reason() {
+        let result = NativeCompilationResult {
+            binary_path: "/tmp/workflow.wasm".into(),
+            binary_size: 123,
+            binary_checksum: "abc".to_string(),
+            build_dir: "/tmp/build".into(),
+            package_size: 99,
+            has_side_effects: false,
+            child_dependencies: vec![],
+            default_variables: serde_json::json!({}),
+            compiler_mode: WorkflowCompilerMode::ComponentsCodegen,
+        };
+
+        let metadata = workflow_image_metadata(
+            &result,
+            "workflow-a",
+            7,
+            "source-sha256",
+            DirectCompilationDiagnostics::fallback("unsupported"),
+        );
+
+        assert_eq!(
+            metadata["workflow"]["compilerMode"],
+            "rust-codegen-components"
+        );
+        assert_eq!(metadata["workflow"]["directWasm"]["enabled"], true);
+        assert_eq!(metadata["workflow"]["directWasm"]["outcome"], "fallback");
+        assert_eq!(metadata["workflow"]["directWasm"]["reason"], "unsupported");
     }
 
     fn direct_skip_input(tenant_id: &str, workflow_id: &str) -> CompilationInput {
