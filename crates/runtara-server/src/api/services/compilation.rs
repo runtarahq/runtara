@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
@@ -77,6 +78,10 @@ pub struct DirectCompilationSettings {
     pub enabled: bool,
     /// Directory containing prebuilt shared workflow and agent components.
     pub components_dir: Option<PathBuf>,
+    /// Optional tenant allowlist. `None` means no tenant restriction.
+    pub tenant_allowlist: Option<BTreeSet<String>>,
+    /// Optional workflow-id allowlist. `None` means no workflow restriction.
+    pub workflow_allowlist: Option<BTreeSet<String>>,
 }
 
 impl DirectCompilationSettings {
@@ -85,6 +90,8 @@ impl DirectCompilationSettings {
         Self {
             enabled: false,
             components_dir: None,
+            tenant_allowlist: None,
+            workflow_allowlist: None,
         }
     }
 
@@ -93,7 +100,21 @@ impl DirectCompilationSettings {
         Self {
             enabled: true,
             components_dir,
+            tenant_allowlist: None,
+            workflow_allowlist: None,
         }
+    }
+
+    /// Restrict direct compilation to the listed tenants.
+    pub fn with_tenant_allowlist(mut self, allowlist: Option<BTreeSet<String>>) -> Self {
+        self.tenant_allowlist = allowlist;
+        self
+    }
+
+    /// Restrict direct compilation to the listed workflow ids.
+    pub fn with_workflow_allowlist(mut self, allowlist: Option<BTreeSet<String>>) -> Self {
+        self.workflow_allowlist = allowlist;
+        self
     }
 }
 
@@ -102,6 +123,8 @@ pub fn direct_compilation_settings_from_config() -> DirectCompilationSettings {
     DirectCompilationSettings {
         enabled: crate::config::direct_wasm_compile_enabled(),
         components_dir: crate::config::direct_wasm_components_dir(),
+        tenant_allowlist: crate::config::direct_wasm_tenant_allowlist(),
+        workflow_allowlist: crate::config::direct_wasm_workflow_allowlist(),
     }
 }
 
@@ -111,6 +134,18 @@ fn compile_workflow_with_direct_fallback(
     settings: DirectCompilationSettings,
 ) -> std::io::Result<NativeCompilationResult> {
     if settings.enabled {
+        if let Some(reason) = direct_compile_skip_reason(&input, &settings) {
+            record_direct_compilation_outcome("skipped", reason, Duration::ZERO);
+            info!(
+                workflow_id = %input.workflow_id,
+                version = input.version,
+                tenant_id = %input.tenant_id,
+                reason = reason,
+                "Direct WASM workflow compilation not selected"
+            );
+            return compile_workflow(input);
+        }
+
         if let Some(components_dir) = settings.components_dir {
             let direct_start = Instant::now();
             let options = DirectWorkflowCompileOptions {
@@ -151,6 +186,29 @@ fn compile_workflow_with_direct_fallback(
     }
 
     compile_workflow(input)
+}
+
+fn direct_compile_skip_reason(
+    input: &CompilationInput,
+    settings: &DirectCompilationSettings,
+) -> Option<&'static str> {
+    if settings
+        .tenant_allowlist
+        .as_ref()
+        .is_some_and(|allowlist| !allowlist.contains(&input.tenant_id))
+    {
+        return Some("tenant-not-allowed");
+    }
+
+    if settings
+        .workflow_allowlist
+        .as_ref()
+        .is_some_and(|allowlist| !allowlist.contains(&input.workflow_id))
+    {
+        return Some("workflow-not-allowed");
+    }
+
+    None
 }
 
 fn direct_compile_fallback_reason(err: &std::io::Error) -> &'static str {
@@ -1040,6 +1098,42 @@ mod tests {
             settings.components_dir.as_deref(),
             Some(std::path::Path::new("/opt/runtara/agents"))
         );
+        assert!(settings.tenant_allowlist.is_none());
+        assert!(settings.workflow_allowlist.is_none());
+    }
+
+    #[test]
+    fn direct_compile_skip_reason_respects_tenant_allowlist() {
+        let input = direct_skip_input("tenant-a", "workflow-a");
+        let settings = DirectCompilationSettings::enabled(Some("/opt/runtara/agents".into()))
+            .with_tenant_allowlist(Some(BTreeSet::from(["tenant-b".to_string()])));
+
+        assert_eq!(
+            direct_compile_skip_reason(&input, &settings),
+            Some("tenant-not-allowed")
+        );
+    }
+
+    #[test]
+    fn direct_compile_skip_reason_respects_workflow_allowlist() {
+        let input = direct_skip_input("tenant-a", "workflow-a");
+        let settings = DirectCompilationSettings::enabled(Some("/opt/runtara/agents".into()))
+            .with_workflow_allowlist(Some(BTreeSet::from(["workflow-b".to_string()])));
+
+        assert_eq!(
+            direct_compile_skip_reason(&input, &settings),
+            Some("workflow-not-allowed")
+        );
+    }
+
+    #[test]
+    fn direct_compile_skip_reason_allows_matching_allowlists() {
+        let input = direct_skip_input("tenant-a", "workflow-a");
+        let settings = DirectCompilationSettings::enabled(Some("/opt/runtara/agents".into()))
+            .with_tenant_allowlist(Some(BTreeSet::from(["tenant-a".to_string()])))
+            .with_workflow_allowlist(Some(BTreeSet::from(["workflow-a".to_string()])));
+
+        assert_eq!(direct_compile_skip_reason(&input, &settings), None);
     }
 
     #[test]
@@ -1049,6 +1143,35 @@ mod tests {
 
         assert_eq!(direct_compile_fallback_reason(&unsupported), "unsupported");
         assert_eq!(direct_compile_fallback_reason(&other), "direct-error");
+    }
+
+    fn direct_skip_input(tenant_id: &str, workflow_id: &str) -> CompilationInput {
+        let definition = serde_json::json!({
+            "steps": {
+                "finish": {
+                    "stepType": "Finish",
+                    "id": "finish",
+                    "inputMapping": {}
+                }
+            },
+            "entryPoint": "finish",
+            "executionPlan": [],
+            "variables": {},
+            "inputSchema": {},
+            "outputSchema": {}
+        });
+
+        CompilationInput {
+            tenant_id: tenant_id.to_string(),
+            workflow_id: workflow_id.to_string(),
+            version: 1,
+            execution_graph: parse_execution_graph(&definition).expect("fixture parses"),
+            track_events: false,
+            child_workflows: vec![],
+            connection_service_url: None,
+            agent_catalog: None,
+            progress_callback: None,
+        }
     }
 
     // =========================================================================

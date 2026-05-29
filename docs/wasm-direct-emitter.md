@@ -124,12 +124,16 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   `RUNTARA_DIRECT_WASM_COMPILE=true`, queued and direct API compilation paths
   try `compile_workflow_direct` with the configured component directory and
   fall back to the existing Rust/codegen component compiler on unsupported
-  graphs, missing direct components, or direct infrastructure errors.
+  graphs, missing direct components, or direct infrastructure errors. Optional
+  `RUNTARA_DIRECT_WASM_TENANT_ALLOWLIST` and
+  `RUNTARA_DIRECT_WASM_WORKFLOW_ALLOWLIST` variables restrict rollout to exact
+  tenant ids and workflow ids.
 - Direct compile gate outcomes now emit OpenTelemetry metrics
   (`runtara.compilation.direct.total` and
   `runtara.compilation.direct.duration`) labeled by outcome and fallback
-  reason, so rollout dashboards can distinguish success, unsupported fallback,
-  missing component configuration, and direct infrastructure errors.
+  reason, so rollout dashboards can distinguish success, skipped allowlists,
+  unsupported fallback, missing component configuration, and direct
+  infrastructure errors.
 - `tests/direct_wasm_execute.rs` now provides gated direct execution smoke
   tests. With `RUNTARA_RUN_DIRECT_WASM_E2E=1`, it compiles and statically
   composes the simple `Finish` fixture plus flat and nested `Conditional`
@@ -1998,10 +2002,10 @@ Current status:
 - The global gate exists as `RUNTARA_DIRECT_WASM_COMPILE` with automatic
   fallback to the existing compiler. It uses
   `RUNTARA_DIRECT_WASM_COMPONENTS_DIR` when set, otherwise the shared
-  `RUNTARA_AGENT_COMPONENTS_DIR` bundle.
+  `RUNTARA_AGENT_COMPONENTS_DIR` bundle, and optional tenant/workflow
+  allowlists can restrict rollout.
 - Direct compile outcome/duration metrics are emitted with outcome/reason
-  labels. Tenant/workflow allowlists and richer operator-visible fallback
-  diagnostics remain pending.
+  labels. Richer operator-visible fallback diagnostics remain pending.
 
 ### Phase 15: Default Direct Mode
 
