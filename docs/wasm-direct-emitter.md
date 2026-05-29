@@ -163,7 +163,8 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   attempt recording, and Agent error-to-retry-info decoding. Agent invocation
   argument packing moved into `direct_wasm::compile::agent_invoke`, including
   compatibility with legacy packed-args imports and component-model-shaped
-  direct parameters.
+  direct parameters. Simple Agent stdlib input/cache helpers moved into
+  `direct_wasm::compile::agent_io`.
 - `direct_wasm::compile::compose_direct_workflow` now performs the first
   direct static composition path: it maps the direct `workflow-logic.wasm`
   component plus prebuilt stdlib/runtime/agent components into `wac compose`,
@@ -761,6 +762,8 @@ Emitter module boundaries should stay readable as support broadens:
 - `compile/agent_invoke.rs` owns low-level Agent component invocation argument
   lowering, including legacy packed argument layout, static connection argument
   fields, component-model parameter padding, and final Agent import calls.
+- `compile/agent_io.rs` owns simple Agent stdlib helper calls for connection
+  input expansion and durable cache-key construction.
 - `compile/delay.rs` owns Delay step lowering for durable and non-durable
   waits while delegating retptr/result mechanics to `compile/abi.rs`.
 - `compile/log.rs` owns Log step lowering and custom-event emission order while

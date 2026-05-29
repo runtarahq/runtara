@@ -8,6 +8,7 @@
 
 mod abi;
 mod agent_invoke;
+mod agent_io;
 mod agent_retry;
 mod checkpoint;
 mod debug;
@@ -48,6 +49,7 @@ use abi::{
     push_variables_args, return_if_retptr_error, zero_return_function,
 };
 use agent_invoke::emit_agent_invoke;
+use agent_io::{emit_agent_cache_key, emit_agent_connection_input};
 use agent_retry::{
     emit_agent_advance_retry_attempt, emit_agent_capture_retry_sleep,
     emit_agent_record_retry_attempt, emit_agent_retry_condition, emit_agent_retry_delay,
@@ -4183,45 +4185,6 @@ fn emit_agent_input_validation(
         failure_target.map(|target| target.nested(1)),
     );
     body.instruction(&Instruction::End);
-}
-
-fn emit_agent_connection_input(
-    body: &mut WasmFunction,
-    indices: &DirectCoreFunctionIndices,
-    static_data: &DirectCoreStaticData,
-    agent_id: u32,
-    input_ptr_local: u32,
-    input_len_local: u32,
-) {
-    if static_data.agent_connection_id(agent_id).is_none() {
-        return;
-    }
-
-    body.instruction(&Instruction::I32Const(agent_id as i32));
-    body.instruction(&Instruction::LocalGet(input_ptr_local));
-    body.instruction(&Instruction::LocalGet(input_len_local));
-    push_retptr_arg(body);
-    body.instruction(&Instruction::Call(indices.stdlib_agent_connection_input));
-    return_if_retptr_error(body);
-    load_retptr_list(body, input_ptr_local, input_len_local);
-}
-
-fn emit_agent_cache_key(
-    body: &mut WasmFunction,
-    indices: &DirectCoreFunctionIndices,
-    agent_id: u32,
-    source_ptr_local: u32,
-    source_len_local: u32,
-    cache_key_ptr_local: u32,
-    cache_key_len_local: u32,
-) {
-    body.instruction(&Instruction::I32Const(agent_id as i32));
-    body.instruction(&Instruction::LocalGet(source_ptr_local));
-    body.instruction(&Instruction::LocalGet(source_len_local));
-    push_retptr_arg(body);
-    body.instruction(&Instruction::Call(indices.stdlib_agent_cache_key));
-    return_if_retptr_error(body);
-    load_retptr_list(body, cache_key_ptr_local, cache_key_len_local);
 }
 
 #[allow(clippy::too_many_arguments)]
