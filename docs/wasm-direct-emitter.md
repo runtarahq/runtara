@@ -153,7 +153,9 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   fixed-memory stores. Shared debug/custom-event and breakpoint event lowering
   moved into `direct_wasm::compile::debug`, covering step start/end tracking,
   WaitForSignal debug start, generated-compatible breakpoint pause events, and
-  Agent error debug events.
+  Agent error debug events. Source-envelope construction and mapping
+  application lowering moved into `direct_wasm::compile::mapping`, keeping
+  stdlib mapping call mechanics separate from step-family dispatch.
 - `direct_wasm::compile::compose_direct_workflow` now performs the first
   direct static composition path: it maps the direct `workflow-logic.wasm`
   component plus prebuilt stdlib/runtime/agent components into `wac compose`,
@@ -739,6 +741,9 @@ Emitter module boundaries should stay readable as support broadens:
 - `compile/debug.rs` owns shared step debug event emission, WaitForSignal debug
   start emission, generated-compatible breakpoint pause lowering, and Agent
   debug-error event emission.
+- `compile/mapping.rs` owns stdlib calls that construct direct source envelopes
+  and apply manifest mapping IDs, including failure-target-aware retptr
+  handling for nested Split/Wait error routes.
 - `compile/delay.rs` owns Delay step lowering for durable and non-durable
   waits while delegating retptr/result mechanics to `compile/abi.rs`.
 - `compile/log.rs` owns Log step lowering and custom-event emission order while

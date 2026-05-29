@@ -5,9 +5,10 @@
 use wasm_encoder::{Function as WasmFunction, Instruction};
 
 use super::abi::{load_retptr_list, push_retptr_arg, push_segment_args, return_if_retptr_error};
+use super::mapping::emit_build_source;
 use super::{
     DirectCoreFunctionIndices, DirectCoreStaticData, DirectDataSegment, DirectFailureTarget,
-    DirectRunPlan, DirectVariables, emit_build_source, emit_run_plan_mapping,
+    DirectRunPlan, DirectVariables, emit_run_plan_mapping,
 };
 
 #[allow(clippy::too_many_arguments)]
