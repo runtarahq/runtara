@@ -182,7 +182,10 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   execution, and onWait failure conversion shared by ABI/Split paths. The
   central run-plan variant match moved into `direct_wasm::compile::dispatcher`,
   so `compile.rs` now owns top-level artifact/module assembly and delegates
-  step-family lowering through a dedicated dispatcher boundary.
+  step-family lowering through a dedicated dispatcher boundary. Direct artifact
+  dependency/provenance sidecar structs, initial metadata construction, static
+  component dependency resolution, and sidecar validation moved into
+  `direct_wasm::compile::artifact_metadata`.
 - `direct_wasm::compile::compose_direct_workflow` now performs the first
   direct static composition path: it maps the direct `workflow-logic.wasm`
   component plus prebuilt stdlib/runtime/agent components into `wac compose`,
@@ -757,6 +760,9 @@ Emitter module boundaries should stay readable as support broadens:
 - `compile/dispatcher.rs` owns the central `DirectRunPlan` variant dispatch,
   including Finish mapping, Conditional branching, and delegation to each
   step-family lowerer.
+- `compile/artifact_metadata.rs` owns direct artifact metadata sidecar types,
+  initial metadata construction, static component dependency resolution,
+  component sidecar validation, and metadata JSON writing.
 - `plan.rs` owns deterministic graph-to-run-plan construction and the run-plan
   data model consumed by the core emitter.
 - `error.rs` owns the direct compile error surface shared by planning,
