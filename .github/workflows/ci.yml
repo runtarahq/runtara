@@ -459,6 +459,38 @@ jobs:
           chmod +x ~/.cargo/bin/wac
           wac --version
 
+      # components_execute and direct_wasm_execute run the composed artifacts
+      # through the same CLI used by bundled environments. Keep the version
+      # aligned with scripts/build-bundle.sh.
+      - name: Cache wasmtime binary
+        id: cache-wasmtime
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/wasmtime
+          key: wasmtime-${{ runner.os }}-${{ runner.arch }}-43.0.0
+
+      - name: Install wasmtime
+        if: steps.cache-wasmtime.outputs.cache-hit != 'true'
+        env:
+          RUNNER_ARCH_LOCAL: ${{ runner.arch }}
+        run: |
+          set -euo pipefail
+          version="43.0.0"
+          case "$RUNNER_ARCH_LOCAL" in
+            X64) asset="wasmtime-v${version}-x86_64-linux" ;;
+            ARM64) asset="wasmtime-v${version}-aarch64-linux" ;;
+            *) echo "Unsupported runner arch: $RUNNER_ARCH_LOCAL" >&2; exit 1 ;;
+          esac
+          curl -fSL -o /tmp/wasmtime.tar.xz \
+            "https://github.com/bytecodealliance/wasmtime/releases/download/v${version}/${asset}.tar.xz"
+          tar -xJf /tmp/wasmtime.tar.xz -C /tmp
+          mkdir -p ~/.cargo/bin
+          cp "/tmp/${asset}/wasmtime" ~/.cargo/bin/wasmtime
+          chmod +x ~/.cargo/bin/wasmtime
+
+      - name: Verify wasmtime
+        run: wasmtime --version
+
       - name: Install wit-deps
         run: cargo install wit-deps-cli --locked
 
@@ -495,6 +527,19 @@ jobs:
             --test components_smoke \
             --test components_e2e \
             --test components_execute \
+            -- --test-threads=1
+
+      # Direct A/B smoke: use the same staged stdlib/runtime/agent component
+      # bundle, then compile direct workflow fixtures, statically compose
+      # them, execute the final artifacts, and assert the fake SDK observed the
+      # expected completion/failure/events for the supported feature classes.
+      - name: Run direct WASM workflow execution smoke tests
+        env:
+          RUNTARA_RUN_DIRECT_WASM_E2E: "1"
+          RUNTARA_AGENT_COMPONENTS_DIR: ${{ github.workspace }}/target/wasm32-wasip2/release
+        run: |
+          cargo test -p runtara-workflows \
+            --test direct_wasm_execute \
             -- --test-threads=1
 
   notify-result:

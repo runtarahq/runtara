@@ -159,6 +159,11 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   `$DATA_DIR/workflow-builds-direct-shadow/<tenant>/...`; shadow failures are
   logged and emitted as direct compile metrics, but do not fail the user-visible
   compilation.
+- CI now installs the pinned Wasmtime CLI in the existing `components-build`
+  job, so the components-mode execution test no longer silently skips artifact
+  execution when the CLI is missing. The same job also runs the gated
+  `direct_wasm_execute` suite against the freshly staged static stdlib/runtime
+  and agent component bundle.
 - `tests/direct_wasm_execute.rs` now provides gated direct execution smoke
   tests. With `RUNTARA_RUN_DIRECT_WASM_E2E=1`, it compiles and statically
   composes the simple `Finish` fixture plus flat and nested `Conditional`
@@ -1991,6 +1996,12 @@ Current status:
   artifact remains the registered production artifact, while the direct shadow
   artifact is stored for comparison and its success/failure is captured in
   direct compile metrics.
+- The `components-build` CI job now installs the same pinned Wasmtime CLI used
+  by release bundles, then runs both components-mode execution tests and the
+  gated direct WASM execution smoke suite against the same staged
+  stdlib/runtime/agent components. This gives CI compile/execute coverage for
+  the enabled direct subset; a strict single-harness output diff between Rust
+  and direct artifacts remains pending.
 
 ### Phase 14: Controlled Production Enablement
 
