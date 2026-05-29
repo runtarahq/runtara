@@ -1856,9 +1856,17 @@ mod tests {
         );
 
         let direct_artifact = &metadata["workflow"]["directArtifact"];
-        assert_eq!(direct_artifact["schemaVersion"], 1);
+        assert_eq!(
+            direct_artifact["schemaVersion"],
+            serde_json::json!(
+                runtara_workflows::direct_wasm::DIRECT_WORKFLOW_ARTIFACT_METADATA_VERSION
+            )
+        );
         assert_eq!(direct_artifact["directAbiVersion"], 1);
-        assert_eq!(direct_artifact["manifestVersion"], 1);
+        assert_eq!(
+            direct_artifact["manifestVersion"],
+            serde_json::json!(runtara_workflows::direct_wasm::DIRECT_WORKFLOW_MANIFEST_VERSION)
+        );
         assert_eq!(direct_artifact["manifestChecksum"], "manifest-sha256");
         assert_eq!(
             direct_artifact["sharedComponents"][0]["package"],
@@ -1976,7 +1984,7 @@ mod tests {
             workflow_version: 7,
             source_checksum: Some("source-sha256".to_string()),
             direct_abi_version: 1,
-            manifest_version: 1,
+            manifest_version: runtara_workflows::direct_wasm::DIRECT_WORKFLOW_MANIFEST_VERSION,
             template_major_version: runtara_workflows::TEMPLATE_MAJOR_VERSION.to_string(),
             manifest_checksum: "manifest-sha256".to_string(),
             support_report_checksum: "support-sha256".to_string(),

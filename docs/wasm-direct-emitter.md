@@ -27,7 +27,9 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   variables, manifest-wide mapping IDs, manifest-wide condition IDs,
   manifest-wide Split IDs, manifest-wide Filter IDs, manifest-wide Switch IDs,
   manifest-wide GroupBy IDs, manifest-wide Log IDs, manifest-wide Error IDs,
-  manifest-wide While IDs, and a feature summary.
+  manifest-wide While IDs, manifest-wide `EmbedWorkflow.inputMapping` IDs,
+  schema version 2 top-level `childWorkflows` graph manifests that share the
+  root manifest ID allocator, and a feature summary.
 - `direct_wasm::support` produces deterministic unsupported-feature reports.
   The current production-shaped direct path supports a single entry `Finish` or
   `Error` step, pure `Conditional` true/false decision trees ending in
@@ -191,7 +193,10 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   closure metadata moved into `direct_wasm::child_workflows`; direct artifact
   metadata schema v2 now has a `childWorkflows` section ready for inline
   `EmbedWorkflow` lowering, including call-site id, requested/resolved version,
-  child direct-manifest checksum, and child feature summary. Direct core module
+  child direct-manifest checksum, and child feature summary. Direct manifest
+  schema v2 also serializes the preloaded static child graph closure under
+  `childWorkflows`, so root and child mapping/config IDs are globally unique
+  inside the one manifest initialized into stdlib. Direct core module
   assembly, realloc/initialize shims, and direct run-entry assembly moved into
   `direct_wasm::compile::core_module`. Direct core WIT import indexing,
   required-import validation, agent invoke import metadata, and import/export
@@ -717,7 +722,7 @@ Candidate manifest fields:
 
 ```json
 {
-  "version": 1,
+  "version": 2,
   "workflow_id": "...",
   "template_major": "...",
   "entry_point": "step-id",
@@ -736,7 +741,20 @@ Candidate manifest fields:
   "switches": [],
   "schemas": [],
   "variables": {},
-  "edges": []
+  "edges": [],
+  "childWorkflows": [
+    {
+      "stepId": "call-child",
+      "workflowId": "child-workflow",
+      "versionRequested": "latest",
+      "versionResolved": 3,
+      "graph": {
+        "entryPoint": "child-finish",
+        "steps": [],
+        "mappings": []
+      }
+    }
+  ]
 }
 ```
 
@@ -2135,9 +2153,12 @@ Implementation steps:
 
 1. Inline preloaded child graphs into the direct component, matching current
    compiler behavior: input plumbing and static child closure metadata are
-   done. `DirectCompilationInput` now carries preloaded children from
-   `compile_workflow_direct`, and `artifact-metadata.json` schema v2 records
-   deterministic child graph metadata once `EmbedWorkflow` lowering is enabled.
+   partially done. `DirectCompilationInput` now carries preloaded children from
+   `compile_workflow_direct`, `artifact-metadata.json` schema v2 records
+   deterministic child graph metadata, and direct manifest schema v2 serializes
+   static child graph manifests with the same mapping/config ID namespace as
+   the parent graph. The remaining work in this phase is direct run-plan
+   construction and Wasm lowering for the `EmbedWorkflow` step itself.
 2. Generate separate child graph functions or state-machine regions.
 3. Preserve:
    - child input validation;
@@ -2166,6 +2187,19 @@ Long-term choice:
   path, matching generated Rust semantics and avoiding another component ABI.
 - Preserve one final statically composed `workflow.wasm`; dynamic child-workflow
   linking is out of scope.
+
+Current status:
+
+- Direct manifest schema v2 carries `childWorkflows` graph manifests produced
+  from preloaded static children. Root and child mappings/configs are allocated
+  through one shared manifest-wide ID space, and `EmbedWorkflow.inputMapping`
+  is now represented as a normal manifest mapping.
+- The direct JSON stdlib parser collects root, nested, and static child graph
+  mappings/configs from the single initialized manifest. This keeps the static
+  inline design compatible with the existing `init-manifest` contract.
+- Direct execution support for `EmbedWorkflow` remains gated until run-plan
+  construction, child variable/source setup, child result wrapping, and
+  durability/cache behavior are lowered and covered by parity tests.
 
 ### Phase 11: WaitForSignal
 

@@ -38,9 +38,11 @@ pub use component::{
 #[cfg(feature = "compiler")]
 pub use error::DirectCompileError;
 pub use manifest::{
-    DIRECT_WORKFLOW_MANIFEST_VERSION, DirectConditionManifest, DirectEdgeManifest,
-    DirectGraphManifest, DirectManifestError, DirectNestedGraphManifest, DirectStepManifest,
-    DirectWorkflowManifest, build_direct_workflow_manifest,
+    DIRECT_WORKFLOW_MANIFEST_VERSION, DirectChildWorkflowGraphManifest, DirectConditionManifest,
+    DirectEdgeManifest, DirectGraphManifest, DirectManifestChildWorkflowInput, DirectManifestError,
+    DirectNestedGraphManifest, DirectStepManifest, DirectWorkflowManifest,
+    build_direct_workflow_manifest,
+    build_direct_workflow_manifest_with_child_workflows_and_agent_catalog,
 };
 pub use support::{
     DirectWorkflowSupportReport, UnsupportedWorkflowFeature, analyze_direct_wasm_support,

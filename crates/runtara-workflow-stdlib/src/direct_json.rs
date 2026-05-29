@@ -54,6 +54,9 @@ impl DirectJsonManifest {
             .map_err(|err| format!("failed to parse direct manifest: {err}"))?;
         let mut collections = DirectJsonManifestCollections::default();
         collect_graph_manifest(&manifest.graph, &mut collections)?;
+        for child in &manifest.child_workflows {
+            collect_graph_manifest(&child.graph, &mut collections)?;
+        }
         Ok(Self {
             steps: collections.steps,
             mappings: collections.mappings,
@@ -3198,6 +3201,14 @@ fn path_to_json_pointer(path: &str) -> String {
 #[serde(rename_all = "camelCase")]
 struct ManifestWire {
     graph: GraphWire,
+    #[serde(default)]
+    child_workflows: Vec<ChildWorkflowWire>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ChildWorkflowWire {
+    graph: GraphWire,
 }
 
 #[derive(Debug, Deserialize)]
@@ -3817,6 +3828,72 @@ mod tests {
         .expect("manifest json");
 
         DirectJsonManifest::parse(&manifest).expect("duplicate nested step ids are graph-scoped");
+    }
+
+    #[test]
+    fn parse_collects_static_child_workflow_graph_mappings() {
+        let manifest = serde_json::to_vec(&json!({
+            "graph": {
+                "mappings": [{
+                    "id": 0,
+                    "stepId": "call_child",
+                    "stepType": "EmbedWorkflow",
+                    "purpose": "embedWorkflow.inputMapping",
+                    "value": {
+                        "childInput": {
+                            "valueType": "reference",
+                            "value": "data.input"
+                        }
+                    }
+                }],
+                "steps": [{
+                    "id": "call_child",
+                    "stepType": "EmbedWorkflow",
+                    "body": { "id": "call_child", "stepType": "EmbedWorkflow" }
+                }]
+            },
+            "childWorkflows": [{
+                "stepId": "call_child",
+                "workflowId": "child_workflow",
+                "versionRequested": "latest",
+                "versionResolved": 3,
+                "graph": {
+                    "mappings": [{
+                        "id": 1,
+                        "stepId": "finish",
+                        "stepType": "Finish",
+                        "purpose": "finish.inputMapping",
+                        "value": {
+                            "result": {
+                                "valueType": "reference",
+                                "value": "data.input"
+                            }
+                        }
+                    }],
+                    "steps": [{
+                        "id": "finish",
+                        "stepType": "Finish",
+                        "body": { "id": "finish", "stepType": "Finish" }
+                    }]
+                }
+            }]
+        }))
+        .expect("manifest json");
+        let manifest = DirectJsonManifest::parse(&manifest).expect("manifest");
+
+        let parent_source = build_source(br#"{"input":"parent"}"#, b"{}", b"{}").expect("source");
+        let child_input = manifest
+            .apply_mapping(0, &parent_source)
+            .expect("parent-to-child mapping");
+        let child_input: Value = serde_json::from_slice(&child_input).expect("child input json");
+        assert_eq!(child_input, json!({ "childInput": "parent" }));
+
+        let child_source = build_source(br#"{"input":"child"}"#, b"{}", b"{}").expect("source");
+        let output = manifest
+            .apply_mapping(1, &child_source)
+            .expect("child finish mapping");
+        let output: Value = serde_json::from_slice(&output).expect("output json");
+        assert_eq!(output, json!({ "result": "child" }));
     }
 
     #[test]

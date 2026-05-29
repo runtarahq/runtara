@@ -14,7 +14,7 @@ use crate::compile::TEMPLATE_MAJOR_VERSION;
 use crate::workflow_features::{WorkflowFeatureSummary, analyze_workflow_features};
 
 /// Current direct workflow manifest schema version.
-pub const DIRECT_WORKFLOW_MANIFEST_VERSION: u32 = 1;
+pub const DIRECT_WORKFLOW_MANIFEST_VERSION: u32 = 2;
 
 /// Versioned, deterministic manifest for a workflow graph.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -29,6 +29,11 @@ pub struct DirectWorkflowManifest {
     pub checksum: Option<String>,
     /// Root graph manifest.
     pub graph: DirectGraphManifest,
+    /// Statically preloaded child workflow graphs available for inline
+    /// `EmbedWorkflow` lowering. All graphs share the same manifest-wide id
+    /// allocator as the root graph.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub child_workflows: Vec<DirectChildWorkflowGraphManifest>,
     /// Feature summary used by direct-emitter gating and cache metadata.
     pub feature_summary: WorkflowFeatureSummary,
 }
@@ -129,6 +134,41 @@ pub struct DirectNestedGraphManifest {
     pub role: String,
     /// Nested graph manifest.
     pub graph: Box<DirectGraphManifest>,
+}
+
+/// Input used to include one statically preloaded child workflow in a direct
+/// manifest.
+#[derive(Debug, Clone, Copy)]
+pub struct DirectManifestChildWorkflowInput<'a> {
+    /// `EmbedWorkflow` call-site step id that references this child.
+    pub step_id: &'a str,
+    /// Referenced child workflow id.
+    pub workflow_id: &'a str,
+    /// Version requested by the parent DSL, such as `latest` or `2`.
+    pub version_requested: &'a str,
+    /// Version resolved by the caller before direct compilation.
+    pub version_resolved: i32,
+    /// Child workflow graph.
+    pub execution_graph: &'a ExecutionGraph,
+}
+
+/// Statically preloaded child workflow graph serialized into the direct
+/// manifest.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DirectChildWorkflowGraphManifest {
+    /// `EmbedWorkflow` call-site step id that references this child.
+    pub step_id: String,
+    /// Referenced child workflow id.
+    pub workflow_id: String,
+    /// Version requested by the parent DSL, such as `latest` or `2`.
+    pub version_requested: String,
+    /// Version resolved by the caller before direct compilation.
+    pub version_resolved: i32,
+    /// Child graph manifest.
+    pub graph: DirectGraphManifest,
+    /// Feature summary for this child graph.
+    pub feature_summary: WorkflowFeatureSummary,
 }
 
 /// Deterministic mapping definition referenced by direct-emitted Wasm.
@@ -435,14 +475,62 @@ pub fn build_direct_workflow_manifest_with_agent_catalog(
     graph: &ExecutionGraph,
     agent_catalog: Option<&AgentCatalog>,
 ) -> Result<DirectWorkflowManifest, DirectManifestError> {
+    build_direct_workflow_manifest_with_child_workflows_and_agent_catalog(graph, &[], agent_catalog)
+}
+
+/// Build a deterministic direct workflow manifest with statically preloaded
+/// child workflow graphs and an optional Agent catalog.
+pub fn build_direct_workflow_manifest_with_child_workflows_and_agent_catalog(
+    graph: &ExecutionGraph,
+    child_workflows: &[DirectManifestChildWorkflowInput<'_>],
+    agent_catalog: Option<&AgentCatalog>,
+) -> Result<DirectWorkflowManifest, DirectManifestError> {
     let feature_summary = analyze_workflow_features(graph);
     let root_durable = graph.durable.unwrap_or(true);
     let mut state = DirectManifestBuildState::default();
+    let root_graph = graph_manifest(graph, root_durable, &mut state, agent_catalog)?;
+    let mut child_workflows = child_workflows.to_vec();
+    child_workflows.sort_by(|left, right| {
+        (
+            left.step_id,
+            left.workflow_id,
+            left.version_resolved,
+            left.version_requested,
+        )
+            .cmp(&(
+                right.step_id,
+                right.workflow_id,
+                right.version_resolved,
+                right.version_requested,
+            ))
+    });
+    let child_workflows = child_workflows
+        .into_iter()
+        .map(|child| {
+            let child_durable = child.execution_graph.durable.unwrap_or(true);
+            let graph = graph_manifest(
+                child.execution_graph,
+                child_durable,
+                &mut state,
+                agent_catalog,
+            )?;
+            Ok(DirectChildWorkflowGraphManifest {
+                step_id: child.step_id.to_string(),
+                workflow_id: child.workflow_id.to_string(),
+                version_requested: child.version_requested.to_string(),
+                version_resolved: child.version_resolved,
+                graph,
+                feature_summary: analyze_workflow_features(child.execution_graph),
+            })
+        })
+        .collect::<Result<Vec<_>, DirectManifestError>>()?;
+
     let mut manifest = DirectWorkflowManifest {
         version: DIRECT_WORKFLOW_MANIFEST_VERSION,
         template_major_version: TEMPLATE_MAJOR_VERSION.to_string(),
         checksum: None,
-        graph: graph_manifest(graph, root_durable, &mut state, agent_catalog)?,
+        graph: root_graph,
+        child_workflows,
         feature_summary,
     };
 
@@ -705,6 +793,21 @@ fn step_manifest(
                 name: step.name.clone(),
                 step_type: "Switch".to_string(),
                 purpose: "switch.config".to_string(),
+                value,
+            });
+        }
+        Step::EmbedWorkflow(step) => {
+            let value = step
+                .input_mapping
+                .as_ref()
+                .map(canonical_json)
+                .transpose()?
+                .unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new()));
+            collections.mappings.push(DirectMappingManifest {
+                id: state.allocate_mapping_id(),
+                step_id: step.id.clone(),
+                step_type: "EmbedWorkflow".to_string(),
+                purpose: "embedWorkflow.inputMapping".to_string(),
                 value,
             });
         }
@@ -1058,6 +1161,7 @@ mod tests {
             "split" => include_str!("../../tests/fixtures/split_workflow.json"),
             "while_simple" => include_str!("../../tests/fixtures/while_simple.json"),
             "wait" => include_str!("../../tests/fixtures/wait_for_signal_with_callback.json"),
+            "embed_workflow" => include_str!("../../tests/fixtures/embed_workflow_workflow.json"),
             other => panic!("unknown fixture {other}"),
         };
         serde_json::from_str(json).expect("fixture should parse")
@@ -1369,6 +1473,64 @@ mod tests {
                 .iter()
                 .any(|step| step.step_type == "Log")
         );
+    }
+
+    #[test]
+    fn manifest_captures_static_child_workflow_graphs_with_shared_mapping_ids() {
+        let parent = fixture("embed_workflow");
+        let child = fixture("simple");
+        let manifest = build_direct_workflow_manifest_with_child_workflows_and_agent_catalog(
+            &parent,
+            &[DirectManifestChildWorkflowInput {
+                step_id: "call_child",
+                workflow_id: "child_workflow",
+                version_requested: "latest",
+                version_resolved: 3,
+                execution_graph: &child,
+            }],
+            None,
+        )
+        .expect("manifest");
+
+        assert_eq!(manifest.child_workflows.len(), 1);
+        let child_manifest = &manifest.child_workflows[0];
+        assert_eq!(child_manifest.step_id, "call_child");
+        assert_eq!(child_manifest.workflow_id, "child_workflow");
+        assert_eq!(child_manifest.version_requested, "latest");
+        assert_eq!(child_manifest.version_resolved, 3);
+        assert_eq!(child_manifest.graph.entry_point, "finish");
+
+        let root_embed_mapping = manifest
+            .graph
+            .mappings
+            .iter()
+            .find(|mapping| mapping.step_id == "call_child")
+            .expect("root EmbedWorkflow mapping");
+        assert_eq!(root_embed_mapping.id, 0);
+        assert_eq!(root_embed_mapping.step_type, "EmbedWorkflow");
+        assert_eq!(root_embed_mapping.purpose, "embedWorkflow.inputMapping");
+        assert_eq!(
+            root_embed_mapping.value["childInput"]["value"],
+            "data.input"
+        );
+
+        let root_finish_mapping = manifest
+            .graph
+            .mappings
+            .iter()
+            .find(|mapping| mapping.step_id == "finish")
+            .expect("root Finish mapping");
+        assert_eq!(root_finish_mapping.id, 1);
+
+        let child_finish_mapping = child_manifest
+            .graph
+            .mappings
+            .iter()
+            .find(|mapping| mapping.step_id == "finish")
+            .expect("child Finish mapping");
+        assert_eq!(child_finish_mapping.id, 2);
+        assert_eq!(child_finish_mapping.purpose, "finish.inputMapping");
+        assert_eq!(child_manifest.feature_summary.total_steps, 1);
     }
 
     #[test]

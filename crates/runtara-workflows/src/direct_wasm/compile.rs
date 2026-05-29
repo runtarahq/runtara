@@ -61,8 +61,8 @@ use super::component::{
 };
 use super::error::DirectCompileError;
 use super::manifest::{
-    DIRECT_WORKFLOW_MANIFEST_VERSION, DirectWorkflowManifest,
-    build_direct_workflow_manifest_with_agent_catalog,
+    DIRECT_WORKFLOW_MANIFEST_VERSION, DirectManifestChildWorkflowInput, DirectWorkflowManifest,
+    build_direct_workflow_manifest_with_child_workflows_and_agent_catalog,
 };
 use super::plan::{
     DirectEdgeConditionPlan, DirectErrorRoutePlan, DirectFailureTarget, DirectRunPlan,
@@ -392,8 +392,22 @@ pub fn compile_direct_workflow(
         );
         Some(&fallback_agent_catalog)
     };
-    let manifest =
-        build_direct_workflow_manifest_with_agent_catalog(&input.execution_graph, agent_catalog)?;
+    let child_manifest_inputs = input
+        .child_workflows
+        .iter()
+        .map(|child| DirectManifestChildWorkflowInput {
+            step_id: child.step_id.as_str(),
+            workflow_id: child.workflow_id.as_str(),
+            version_requested: child.version_requested.as_str(),
+            version_resolved: child.version_resolved,
+            execution_graph: &child.execution_graph,
+        })
+        .collect::<Vec<_>>();
+    let manifest = build_direct_workflow_manifest_with_child_workflows_and_agent_catalog(
+        &input.execution_graph,
+        &child_manifest_inputs,
+        agent_catalog,
+    )?;
     let support_report = analyze_direct_wasm_support(&input.execution_graph);
     if !support_report.supported {
         return Err(DirectCompileError::Unsupported {
