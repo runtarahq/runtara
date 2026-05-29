@@ -162,8 +162,15 @@ Current implementation progress on `codex/wasm-direct-emitter`:
 - CI now installs the pinned Wasmtime CLI in the existing `components-build`
   job, so the components-mode execution test no longer silently skips artifact
   execution when the CLI is missing. The same job also runs the gated
-  `direct_wasm_execute` suite against the freshly staged static stdlib/runtime
-  and agent component bundle.
+  `direct_wasm_ab_execute` and `direct_wasm_execute` suites against the freshly
+  staged static stdlib/runtime and agent component bundle.
+- `tests/direct_wasm_ab_execute.rs` now provides the first strict direct-vs-Rust
+  artifact execution harness. With `RUNTARA_RUN_DIRECT_WASM_E2E=1`, it compiles
+  representative `Finish`, `Conditional`, `Filter`, value `Switch`, and
+  `GroupBy` fixtures through both `compile_workflow` and
+  `compile_workflow_direct`, runs both final `workflow.wasm` artifacts under
+  Wasmtime with the same logical workflow input through each runtime's SDK
+  input envelope, and diffs the captured `/completed` payloads.
 - `tests/direct_wasm_execute.rs` now provides gated direct execution smoke
   tests. With `RUNTARA_RUN_DIRECT_WASM_E2E=1`, it compiles and statically
   composes the simple `Finish` fixture plus flat and nested `Conditional`
@@ -1998,10 +2005,13 @@ Current status:
   direct compile metrics.
 - The `components-build` CI job now installs the same pinned Wasmtime CLI used
   by release bundles, then runs both components-mode execution tests and the
-  gated direct WASM execution smoke suite against the same staged
-  stdlib/runtime/agent components. This gives CI compile/execute coverage for
-  the enabled direct subset; a strict single-harness output diff between Rust
-  and direct artifacts remains pending.
+  gated direct A/B and direct WASM execution smoke suites against the same
+  staged stdlib/runtime/agent components. This gives CI compile/execute
+  coverage for the enabled direct subset and a strict output-diff harness for
+  representative agentless fixtures. Expanding the A/B harness to durable,
+  agent, event, failure, and normal-edge-priority fixtures remains pending; the
+  normal-edge priority case currently exposes a Rust/components behavior gap
+  where generated code follows execution-plan order instead of priority order.
 
 ### Phase 14: Controlled Production Enablement
 

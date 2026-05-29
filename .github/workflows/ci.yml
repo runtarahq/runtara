@@ -539,6 +539,7 @@ jobs:
           RUNTARA_AGENT_COMPONENTS_DIR: ${{ github.workspace }}/target/wasm32-wasip2/release
         run: |
           cargo test -p runtara-workflows \
+            --test direct_wasm_ab_execute \
             --test direct_wasm_execute \
             -- --test-threads=1
 
