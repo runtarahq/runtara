@@ -147,6 +147,10 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   extraction checkpoint has started with Delay, Log, terminal Error, and the
   shared pure step-context lowering, and routing Switch lowering moved into
   `direct_wasm::compile::{delay,log,error_step,step_context,switch_route}`.
+  Shared core ABI/retptr helpers moved into
+  `direct_wasm::compile::abi`, including direct result decoding, core type
+  lowering, zero-return shims, static segment/variable argument emission, and
+  fixed-memory stores.
 - `direct_wasm::compile::compose_direct_workflow` now performs the first
   direct static composition path: it maps the direct `workflow-logic.wasm`
   component plus prebuilt stdlib/runtime/agent components into `wac compose`,
@@ -725,11 +729,14 @@ Emitter module boundaries should stay readable as support broadens:
 - `static_data.rs` owns direct core static byte-segment layout, heap/page
   sizing, static step/Agent segment collection, and workflow variable
   serialization.
+- `compile/abi.rs` owns direct core retptr/result helpers, fixed-memory store
+  helpers, static segment/variable argument emission, zero-return shim
+  emission, and WIT core ABI type lowering shared by the assembler and step
+  lowerers.
 - `compile/delay.rs` owns Delay step lowering for durable and non-durable
-  waits while shared emitter helpers remain in `compile.rs` until a broader
-  lowering-context extraction is justified.
+  waits while delegating retptr/result mechanics to `compile/abi.rs`.
 - `compile/log.rs` owns Log step lowering and custom-event emission order while
-  sharing the same core lowering helpers.
+  sharing the same ABI helper boundary.
 - `compile/error_step.rs` owns terminal Error step lowering, including
   `workflow_error` custom-event emission, runtime failure, and Split
   aggregation routing for nested failures.

@@ -4,11 +4,14 @@
 
 use wasm_encoder::{Function as WasmFunction, Instruction};
 
+use super::abi::{
+    load_retptr_list, push_retptr_arg, push_retptr_i64_load, push_segment_args,
+    return_if_retptr_error,
+};
 use super::{
     DIRECT_DELAY_DURATION_MS_LOCAL, DIRECT_RET_U64_OK_OFFSET, DirectCoreFunctionIndices,
     DirectCoreStaticData, DirectDataSegment, DirectFailureTarget, DirectRunPlan, DirectVariables,
-    emit_build_source, emit_run_plan_mapping, emit_step_debug_event, load_retptr_list,
-    push_retptr_arg, push_retptr_i64_load, push_segment_args, return_if_retptr_error,
+    emit_build_source, emit_run_plan_mapping, emit_step_debug_event,
 };
 
 #[allow(clippy::too_many_arguments)]
