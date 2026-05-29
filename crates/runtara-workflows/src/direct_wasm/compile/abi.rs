@@ -8,7 +8,9 @@ use wasm_encoder::{
 use wit_parser::abi::WasmType;
 
 use super::embed_workflow::emit_embed_workflow_child_error_and_continue;
-use super::split::emit_split_append_retptr_error_and_continue;
+use super::split::{
+    emit_split_append_retptr_error_and_continue, emit_split_retry_error_and_continue,
+};
 use super::wait::emit_wait_on_wait_error_and_fail;
 use super::{
     DIRECT_AGENT_RESULT_OK_LEN_OFFSET, DIRECT_AGENT_RESULT_OK_PTR_OFFSET,
@@ -103,6 +105,18 @@ pub(super) fn emit_retptr_error_target_or_return(
             error_ptr_local,
             error_len_local,
         ),
+        DirectFailureTarget::SplitRetry { .. } => {
+            load_retptr_tag(function);
+            function.instruction(&Instruction::If(BlockType::Empty));
+            load_retptr_list(function, error_ptr_local, error_len_local);
+            emit_split_retry_error_and_continue(
+                function,
+                failure_target.nested(1),
+                error_ptr_local,
+                error_len_local,
+            );
+            function.instruction(&Instruction::End);
+        }
         DirectFailureTarget::WaitOnWait { .. } => {
             load_retptr_tag(function);
             function.instruction(&Instruction::If(BlockType::Empty));

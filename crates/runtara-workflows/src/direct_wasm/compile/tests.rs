@@ -5652,6 +5652,101 @@ fn direct_core_run_lowers_split_breakpoint_before_split_execution() {
 }
 
 #[test]
+fn direct_core_run_lowers_split_retry_helpers() {
+    let mut graph = fixture("split");
+    graph.durable = Some(true);
+    let Some(runtara_dsl::Step::Split(split)) = graph.steps.get_mut("split") else {
+        panic!("expected Split fixture step");
+    };
+    let config = split.config.as_mut().expect("split fixture config");
+    config.max_retries = Some(2);
+    config.retry_delay = Some(250);
+
+    let manifest = build_direct_workflow_manifest(&graph).expect("manifest");
+    let manifest_json = manifest.to_canonical_json().expect("manifest json");
+    let core_config = DirectCoreConfig::new(&manifest, &manifest_json, false).expect("core config");
+
+    let DirectRunPlan::Split {
+        durable,
+        max_retries,
+        retry_delay_ms,
+        ..
+    } = &core_config.run_plan
+    else {
+        panic!("expected Split run plan");
+    };
+    assert!(*durable, "Split retry test should use durable Split");
+    assert_eq!(*max_retries, 2);
+    assert_eq!(*retry_delay_ms, 250);
+
+    let (resolve, world) =
+        build_direct_component_resolve_with_agents(&manifest.feature_summary.agent_ids)
+            .expect("agent resolve");
+    let core = emit_direct_core_module(&resolve, world, &core_config).expect("core module");
+    Validator::new()
+        .validate_all(&core)
+        .expect("Split retry core module validates");
+
+    let (imports, run_calls) = direct_core_imports_and_run_calls(&core);
+    let retry_delay_index = direct_core_import(
+        &imports,
+        "cm32p2|runtara:workflow-stdlib/json@0.1",
+        "retry-delay-ms",
+    );
+    let retry_sleep_key_index = direct_core_import(
+        &imports,
+        "cm32p2|runtara:workflow-stdlib/json@0.1",
+        "retry-sleep-key",
+    );
+    let workflow_retryable_index = direct_core_import(
+        &imports,
+        "cm32p2|runtara:workflow-stdlib/json@0.1",
+        "workflow-error-retryable",
+    );
+    let workflow_rate_limited_index = direct_core_import(
+        &imports,
+        "cm32p2|runtara:workflow-stdlib/json@0.1",
+        "workflow-error-rate-limited",
+    );
+    let workflow_retry_after_index = direct_core_import(
+        &imports,
+        "cm32p2|runtara:workflow-stdlib/json@0.1",
+        "workflow-error-retry-after-ms",
+    );
+    let blocking_sleep_index = direct_core_import(
+        &imports,
+        "cm32p2|runtara:workflow-runtime/runtime@0.1",
+        "blocking-sleep",
+    );
+    let durable_sleep_checkpoint_index = direct_core_import(
+        &imports,
+        "cm32p2|runtara:workflow-runtime/runtime@0.1",
+        "durable-sleep-checkpoint",
+    );
+    let record_retry_index = direct_core_import(
+        &imports,
+        "cm32p2|runtara:workflow-runtime/runtime@0.1",
+        "record-retry-attempt",
+    );
+
+    for (name, index) in [
+        ("retry-delay-ms", retry_delay_index),
+        ("retry-sleep-key", retry_sleep_key_index),
+        ("workflow-error-retryable", workflow_retryable_index),
+        ("workflow-error-rate-limited", workflow_rate_limited_index),
+        ("workflow-error-retry-after-ms", workflow_retry_after_index),
+        ("blocking-sleep", blocking_sleep_index),
+        ("durable-sleep-checkpoint", durable_sleep_checkpoint_index),
+        ("record-retry-attempt", record_retry_index),
+    ] {
+        assert!(
+            run_calls.contains(&index),
+            "Split retry lowering should call {name}: {run_calls:?}"
+        );
+    }
+}
+
+#[test]
 fn direct_core_lowers_durable_split_checkpoint_path() {
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     enum SplitCheckpointOp {

@@ -49,6 +49,8 @@ pub(super) enum DirectRunPlan {
         split_id: u32,
         durable: bool,
         breakpoint: bool,
+        max_retries: u32,
+        retry_delay_ms: u64,
         dont_stop_on_failed: bool,
         nested_plan: Box<DirectRunPlan>,
         next_plan: Box<DirectRunPlan>,
@@ -141,6 +143,9 @@ pub(super) enum DirectFailureTarget {
         split_id: u32,
         branch_depth: u32,
     },
+    SplitRetry {
+        branch_depth: u32,
+    },
     WaitOnWait {
         step_id_offset: i32,
         step_id_len: i32,
@@ -158,6 +163,9 @@ impl DirectFailureTarget {
                 branch_depth,
             } => Self::Split {
                 split_id,
+                branch_depth: branch_depth + extra_depth,
+            },
+            Self::SplitRetry { branch_depth } => Self::SplitRetry {
                 branch_depth: branch_depth + extra_depth,
             },
             Self::WaitOnWait {
@@ -349,6 +357,8 @@ fn step_run_plan_inner(
                 split_id: split.id,
                 durable: split.durable,
                 breakpoint: step_breakpoint_enabled(graph, step),
+                max_retries: split_effective_max_retries(split),
+                retry_delay_ms: split_effective_retry_delay_ms(split),
                 dont_stop_on_failed,
                 nested_plan: Box::new(nested_plan),
                 next_plan: Box::new(next_plan),
@@ -1100,6 +1110,23 @@ fn embed_workflow_effective_max_retries(step: &DirectStepManifest) -> u32 {
 
 fn embed_workflow_effective_retry_delay_ms(step: &DirectStepManifest) -> u64 {
     step.body
+        .get("retryDelay")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(1_000)
+}
+
+fn split_effective_max_retries(split: &DirectSplitManifest) -> u32 {
+    split
+        .value
+        .get("maxRetries")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|max_retries| u32::try_from(max_retries).ok())
+        .unwrap_or(0)
+}
+
+fn split_effective_retry_delay_ms(split: &DirectSplitManifest) -> u64 {
+    split
+        .value
         .get("retryDelay")
         .and_then(serde_json::Value::as_u64)
         .unwrap_or(1_000)

@@ -628,13 +628,7 @@ fn supports_embed_workflow_child_graph_baseline(
 
 fn supports_split_step_baseline(step: &SplitStep) -> bool {
     let config = step.config.as_ref();
-    config.is_none_or(|config| {
-        config
-            .max_retries
-            .is_none_or(|max_retries| max_retries == 0)
-            && config.retry_delay.is_none()
-            && config.timeout.is_none()
-    })
+    config.is_none_or(|config| config.timeout.is_none())
 }
 
 fn supports_while_step_baseline(step: &WhileStep) -> bool {
@@ -1196,23 +1190,13 @@ fn collect_split_step_unsupported(
         });
     };
 
-    if let Some(config) = step.config.as_ref() {
-        if config
-            .max_retries
-            .is_some_and(|max_retries| max_retries > 0)
-            || config.retry_delay.is_some()
-        {
-            push(
-                "split-retry",
-                "Split retries require direct durable retry/checkpoint lowering",
-            );
-        }
-        if config.timeout.is_some() {
-            push(
-                "split-timeout",
-                "Split timeout requires direct timeout enforcement",
-            );
-        }
+    if let Some(config) = step.config.as_ref()
+        && config.timeout.is_some()
+    {
+        push(
+            "split-timeout",
+            "Split timeout requires direct timeout enforcement",
+        );
     }
 }
 
@@ -2186,7 +2170,7 @@ mod tests {
     }
 
     #[test]
-    fn split_retry_and_timeout_are_rejected() {
+    fn split_retry_is_supported_and_timeout_is_rejected() {
         let mut graph = fixture("split");
         graph.durable = Some(false);
         let Some(Step::Split(split)) = graph.steps.get_mut("split") else {
@@ -2202,16 +2186,22 @@ mod tests {
         let report = analyze_direct_wasm_support(&graph);
 
         assert!(!report.supported);
-        for feature in ["split-retry", "split-timeout"] {
-            assert!(
-                report.unsupported.iter().any(|unsupported| {
-                    unsupported.step_id.as_deref() == Some("split")
-                        && unsupported.feature == feature
-                }),
-                "{feature}: {:?}",
-                report.unsupported
-            );
-        }
+        assert!(
+            !report
+                .unsupported
+                .iter()
+                .any(|unsupported| unsupported.feature == "split-retry"),
+            "{:?}",
+            report.unsupported
+        );
+        assert!(
+            report.unsupported.iter().any(|unsupported| {
+                unsupported.step_id.as_deref() == Some("split")
+                    && unsupported.feature == "split-timeout"
+            }),
+            "{:?}",
+            report.unsupported
+        );
     }
 
     #[test]

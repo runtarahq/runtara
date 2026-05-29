@@ -183,6 +183,55 @@ const SPLIT_FINISH_WITH_SCHEMAS: &str = r#"{
   "inputSchema": {},
   "outputSchema": {}
 }"#;
+const SPLIT_RETRY_TRANSIENT_ERROR: &str = r#"{
+  "durable": true,
+  "steps": {
+    "split": {
+      "stepType": "Split",
+      "id": "split",
+      "config": {
+        "value": { "valueType": "reference", "value": "data.items" },
+        "sequential": true,
+        "maxRetries": 2,
+        "retryDelay": 1
+      },
+      "subgraph": {
+        "name": "Transient Item Failure",
+        "steps": {
+          "fail": {
+            "stepType": "Error",
+            "id": "fail",
+            "name": "Transient Item Failure",
+            "category": "transient",
+            "code": "SPLIT_ITEM_TEMPORARY",
+            "message": "Split item failed transiently",
+            "severity": "error",
+            "context": {
+              "item": { "valueType": "reference", "value": "data.value" },
+              "index": { "valueType": "reference", "value": "variables._index" }
+            }
+          }
+        },
+        "entryPoint": "fail",
+        "executionPlan": []
+      }
+    },
+    "finish": {
+      "stepType": "Finish",
+      "id": "finish",
+      "inputMapping": {
+        "results": { "valueType": "reference", "value": "steps.split.outputs" }
+      }
+    }
+  },
+  "entryPoint": "split",
+  "executionPlan": [
+    { "fromStep": "split", "toStep": "finish" }
+  ],
+  "variables": {},
+  "inputSchema": {},
+  "outputSchema": {}
+}"#;
 const AGENT_RETURN_INPUT: &str = r#"{
   "durable": true,
   "steps": {
@@ -3851,6 +3900,76 @@ fn direct_wasm_matches_components_embed_workflow_retry_exhausted() {
             3,
             Some(expected_error),
         ),
+    ];
+    assert_eq!(
+        normalized_retry_attempts(&components.retry_attempts),
+        expected_retry_attempts
+    );
+    assert_eq!(
+        normalized_retry_attempts(&direct.retry_attempts),
+        expected_retry_attempts
+    );
+}
+
+#[test]
+fn direct_wasm_matches_components_split_retry_exhausted() {
+    let Some(components_dir) = direct_ab_components_dir() else {
+        return;
+    };
+    let _data = setup_data_dir();
+
+    let components_artifact =
+        compile_components_artifact("split-retry-exhausted", SPLIT_RETRY_TRANSIENT_ERROR);
+    let direct_artifact = compile_direct_artifact(
+        &components_dir,
+        "split-retry-exhausted",
+        SPLIT_RETRY_TRANSIENT_ERROR,
+    );
+    assert_eq!(
+        direct_artifact.compiler_mode,
+        WorkflowCompilerMode::DirectWasm
+    );
+
+    let workflow_input = br#"{"items":[{"value":"retry-item"}]}"#;
+    let components_input = components_sdk_input(workflow_input);
+    let components = execute_artifact(
+        &components_artifact,
+        "ab-components-split-retry-exhausted",
+        &components_input,
+    );
+    let direct = execute_artifact(
+        &direct_artifact.path,
+        "ab-direct-split-retry-exhausted",
+        workflow_input,
+    );
+
+    assert_failure_parity("split-retry-exhausted", 0, &components, &direct);
+
+    let expected_error = serde_json::json!({
+        "stepId": "fail",
+        "stepName": "Transient Item Failure",
+        "category": "transient",
+        "code": "SPLIT_ITEM_TEMPORARY",
+        "message": "Split item failed transiently",
+        "severity": "error",
+        "context": {
+            "item": "retry-item",
+            "index": 0
+        }
+    });
+    assert_eq!(components.error_json.as_ref(), Some(&expected_error));
+    assert_eq!(direct.error_json.as_ref(), Some(&expected_error));
+
+    let expected_lookup = vec![(SPLIT_CACHE_KEY.to_string(), Vec::new())];
+    assert_eq!(
+        normalized_checkpoints(&components.checkpoints),
+        expected_lookup
+    );
+    assert_eq!(normalized_checkpoints(&direct.checkpoints), expected_lookup);
+
+    let expected_retry_attempts = vec![
+        (SPLIT_CACHE_KEY.to_string(), 2, Some(expected_error.clone())),
+        (SPLIT_CACHE_KEY.to_string(), 3, Some(expected_error)),
     ];
     assert_eq!(
         normalized_retry_attempts(&components.retry_attempts),
