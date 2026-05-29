@@ -287,6 +287,11 @@ interface json {
         step-result: list<u8>,
     ) -> result<list<u8>, string>;
 
+    embed-workflow-error: func(
+        step-id: string,
+        child-error: list<u8>,
+    ) -> result<list<u8>, string>;
+
     agent-output: func(
         agent-id: u32,
         source: list<u8>,

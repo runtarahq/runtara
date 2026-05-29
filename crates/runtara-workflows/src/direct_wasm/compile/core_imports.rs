@@ -81,6 +81,7 @@ pub(super) struct DirectCoreImportIndices {
     stdlib_embed_workflow_variables: Option<u32>,
     stdlib_embed_workflow_result: Option<u32>,
     stdlib_embed_workflow_output_from_result: Option<u32>,
+    stdlib_embed_workflow_error: Option<u32>,
     stdlib_agent_output: Option<u32>,
     stdlib_agent_validate_input: Option<u32>,
     stdlib_agent_connection_input: Option<u32>,
@@ -305,6 +306,10 @@ impl DirectCoreImportIndices {
                 self.stdlib_embed_workflow_output_from_result,
                 "stdlib.embed-workflow-output-from-result",
             )?,
+            stdlib_embed_workflow_error: require_import(
+                self.stdlib_embed_workflow_error,
+                "stdlib.embed-workflow-error",
+            )?,
             stdlib_agent_output: require_import(self.stdlib_agent_output, "stdlib.agent-output")?,
             stdlib_agent_validate_input: require_import(
                 self.stdlib_agent_validate_input,
@@ -422,6 +427,7 @@ pub(super) struct DirectCoreFunctionIndices {
     pub(super) stdlib_embed_workflow_variables: u32,
     pub(super) stdlib_embed_workflow_result: u32,
     pub(super) stdlib_embed_workflow_output_from_result: u32,
+    pub(super) stdlib_embed_workflow_error: u32,
     pub(super) stdlib_agent_output: u32,
     pub(super) stdlib_agent_validate_input: u32,
     pub(super) stdlib_agent_connection_input: u32,
@@ -655,6 +661,8 @@ pub(super) fn import_core_function(
         "embed-workflow-output-from-result",
     ) {
         import_indices.stdlib_embed_workflow_output_from_result = Some(function_index);
+    } else if is_stdlib_import(resolve, interface, function, "embed-workflow-error") {
+        import_indices.stdlib_embed_workflow_error = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "agent-output") {
         import_indices.stdlib_agent_output = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "agent-validate-input") {

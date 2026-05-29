@@ -21,6 +21,38 @@ use super::{
     DirectFailureTarget, DirectRunPlan, DirectVariables,
 };
 
+pub(super) fn emit_embed_workflow_child_error_and_fail(
+    body: &mut WasmFunction,
+    indices: &DirectCoreFunctionIndices,
+    target: DirectFailureTarget,
+    error_ptr_local: u32,
+    error_len_local: u32,
+) {
+    let DirectFailureTarget::EmbedWorkflow {
+        step_id_offset,
+        step_id_len,
+    } = target
+    else {
+        panic!("EmbedWorkflow child failure target expected");
+    };
+
+    body.instruction(&Instruction::I32Const(step_id_offset));
+    body.instruction(&Instruction::I32Const(step_id_len));
+    body.instruction(&Instruction::LocalGet(error_ptr_local));
+    body.instruction(&Instruction::LocalGet(error_len_local));
+    push_retptr_arg(body);
+    body.instruction(&Instruction::Call(indices.stdlib_embed_workflow_error));
+    return_if_retptr_error(body);
+    load_retptr_list(body, error_ptr_local, error_len_local);
+
+    body.instruction(&Instruction::LocalGet(error_ptr_local));
+    body.instruction(&Instruction::LocalGet(error_len_local));
+    push_retptr_arg(body);
+    body.instruction(&Instruction::Call(indices.runtime_fail));
+    body.instruction(&Instruction::I32Const(1));
+    body.instruction(&Instruction::Return);
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn emit_embed_workflow_plan(
     body: &mut WasmFunction,
@@ -161,7 +193,10 @@ pub(super) fn emit_embed_workflow_plan(
         route_len_local,
         workflow_log_kind,
         workflow_error_kind,
-        failure_target,
+        Some(DirectFailureTarget::EmbedWorkflow {
+            step_id_offset: step_id_segment.offset,
+            step_id_len: step_id_segment.len_i32(),
+        }),
     );
 
     push_segment_args(body, step_id_segment);

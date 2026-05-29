@@ -981,6 +981,22 @@ impl DirectJsonManifest {
             .map_err(|err| format!("failed to serialize EmbedWorkflow steps context: {err}"))
     }
 
+    /// Wrap a child workflow failure exactly like generated `EmbedWorkflow`
+    /// code before propagating it to the parent context.
+    pub fn embed_workflow_error(
+        &self,
+        step_id: &str,
+        child_error: &[u8],
+    ) -> Result<Vec<u8>, String> {
+        let child_error: Value = serde_json::from_slice(child_error)
+            .map_err(|err| format!("failed to parse EmbedWorkflow child error: {err}"))?;
+        let step = self.embed_workflow_step(step_id)?;
+        let child = self.child_workflow(step_id)?;
+        let result = embed_workflow_error_value(step, child, child_error);
+        serde_json::to_vec(&result)
+            .map_err(|err| format!("failed to serialize EmbedWorkflow child error: {err}"))
+    }
+
     /// Store an Agent capability output in the generated-code-compatible steps context.
     pub fn agent_output(
         &self,
@@ -3059,6 +3075,32 @@ fn embed_workflow_step_value(
     })
 }
 
+fn embed_workflow_error_value(
+    step: &DirectJsonStep,
+    child: &DirectJsonChildWorkflow,
+    child_error: Value,
+) -> Value {
+    let category = child_error
+        .get("category")
+        .and_then(Value::as_str)
+        .unwrap_or("transient");
+    let severity = child_error
+        .get("severity")
+        .and_then(Value::as_str)
+        .unwrap_or("error");
+    serde_json::json!({
+        "stepId": step.id,
+        "stepName": step.name.as_deref().unwrap_or("Unnamed"),
+        "stepType": "EmbedWorkflow",
+        "code": "CHILD_WORKFLOW_FAILED",
+        "message": format!("Child workflow {} failed", child.workflow_id),
+        "category": category,
+        "severity": severity,
+        "childWorkflowId": child.workflow_id,
+        "childError": child_error,
+    })
+}
+
 fn wait_action_mapping(
     action: Option<&Map<String, Value>>,
     field: &str,
@@ -4328,6 +4370,33 @@ mod tests {
             .expect("parent steps");
         let steps: Value = serde_json::from_slice(&steps).expect("steps json");
         assert_eq!(steps["call_child"], step_result_json);
+
+        let child_error = br#"{
+            "stepId": "fail",
+            "stepName": "Child Failure",
+            "category": "permanent",
+            "code": "CHILD_FAILED",
+            "message": "Child workflow failed",
+            "severity": "critical",
+            "context": { "childInput": "child-ok" }
+        }"#;
+        let wrapped_error = manifest
+            .embed_workflow_error("call_child", child_error)
+            .expect("wrapped child error");
+        let wrapped_error: Value =
+            serde_json::from_slice(&wrapped_error).expect("wrapped child error json");
+        assert_eq!(wrapped_error["stepId"], "call_child");
+        assert_eq!(wrapped_error["stepName"], "Call child");
+        assert_eq!(wrapped_error["stepType"], "EmbedWorkflow");
+        assert_eq!(wrapped_error["code"], "CHILD_WORKFLOW_FAILED");
+        assert_eq!(
+            wrapped_error["message"],
+            "Child workflow child_workflow failed"
+        );
+        assert_eq!(wrapped_error["category"], "permanent");
+        assert_eq!(wrapped_error["severity"], "critical");
+        assert_eq!(wrapped_error["childWorkflowId"], "child_workflow");
+        assert_eq!(wrapped_error["childError"]["code"], "CHILD_FAILED");
 
         let err = manifest
             .embed_workflow_variables("call_child", &source, b"{}")

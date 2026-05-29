@@ -24,6 +24,7 @@ use tempfile::TempDir;
 const SIMPLE_PASSTHROUGH: &str = include_str!("fixtures/simple_passthrough.json");
 const EMBED_WORKFLOW: &str = include_str!("fixtures/embed_workflow_workflow.json");
 const EMBED_WORKFLOW_FINISH_CHILD: &str = include_str!("fixtures/embed_workflow_finish_child.json");
+const EMBED_WORKFLOW_ERROR_CHILD: &str = include_str!("fixtures/embed_workflow_error_child.json");
 const CONDITIONAL_WORKFLOW: &str = include_str!("fixtures/conditional_workflow.json");
 const FILTER_SIMPLE: &str = include_str!("fixtures/filter_simple.json");
 const SWITCH_VALUE_SIMPLE: &str = include_str!("fixtures/switch_value_simple.json");
@@ -341,6 +342,7 @@ fn shared_components_dir() -> Option<PathBuf> {
             b"embed-workflow-variables",
             b"embed-workflow-result",
             b"embed-workflow-output-from-result",
+            b"embed-workflow-error",
         ];
         if !required_stdlib_markers.iter().all(|marker| {
             stdlib_bytes
@@ -433,12 +435,20 @@ fn graph_from_fixture(graph_json: &str) -> ExecutionGraph {
 }
 
 fn embed_workflow_child_workflows() -> Vec<ChildWorkflowInput> {
+    embed_workflow_child_workflows_with_graph(EMBED_WORKFLOW_FINISH_CHILD)
+}
+
+fn embed_workflow_error_child_workflows() -> Vec<ChildWorkflowInput> {
+    embed_workflow_child_workflows_with_graph(EMBED_WORKFLOW_ERROR_CHILD)
+}
+
+fn embed_workflow_child_workflows_with_graph(graph_json: &str) -> Vec<ChildWorkflowInput> {
     vec![ChildWorkflowInput {
         step_id: "call_child".to_string(),
         workflow_id: "child_workflow".to_string(),
         version_requested: "latest".to_string(),
         version_resolved: 3,
-        execution_graph: graph_from_fixture(EMBED_WORKFLOW_FINISH_CHILD),
+        execution_graph: graph_from_fixture(graph_json),
     }]
 }
 
@@ -2409,6 +2419,83 @@ fn direct_wasm_matches_components_cached_embed_workflow_checkpoint_replay() {
     });
     assert_eq!(components.output_json.as_ref(), Some(&expected_output));
     assert_eq!(direct.output_json.as_ref(), Some(&expected_output));
+
+    let expected_lookup = vec![(EMBED_WORKFLOW_CACHE_KEY.to_string(), Vec::new())];
+    assert_eq!(
+        normalized_checkpoints(&components.checkpoints),
+        expected_lookup
+    );
+    assert_eq!(normalized_checkpoints(&direct.checkpoints), expected_lookup);
+}
+
+#[test]
+fn direct_wasm_matches_components_embed_workflow_terminal_error_child() {
+    let Some(components_dir) = direct_ab_components_dir() else {
+        return;
+    };
+    let _data = setup_data_dir();
+
+    let child_workflows = embed_workflow_error_child_workflows();
+    let components_artifact = compile_components_artifact_with_child_workflows(
+        "embed-workflow-error-child",
+        EMBED_WORKFLOW,
+        &child_workflows,
+    );
+    let direct_artifact = compile_direct_artifact_with_child_workflows(
+        &components_dir,
+        "embed-workflow-error-child",
+        EMBED_WORKFLOW,
+        &child_workflows,
+    );
+    assert_eq!(
+        direct_artifact.compiler_mode,
+        WorkflowCompilerMode::DirectWasm
+    );
+
+    let workflow_input = br#"{"input":"failing-child"}"#;
+    let components_input = components_sdk_input(workflow_input);
+    let components = execute_artifact(
+        &components_artifact,
+        "ab-components-embed-workflow-error-child",
+        &components_input,
+    );
+    let direct = execute_artifact(
+        &direct_artifact.path,
+        "ab-direct-embed-workflow-error-child",
+        workflow_input,
+    );
+
+    assert_failure_parity("embed-workflow-error-child", 0, &components, &direct);
+
+    let expected_error = serde_json::json!({
+        "stepId": "call_child",
+        "stepName": "Unnamed",
+        "stepType": "EmbedWorkflow",
+        "category": "permanent",
+        "code": "CHILD_WORKFLOW_FAILED",
+        "message": "Child workflow child_workflow failed",
+        "severity": "critical",
+        "childWorkflowId": "child_workflow",
+        "childError": {
+            "stepId": "fail",
+            "stepName": "Child Failure",
+            "category": "permanent",
+            "code": "CHILD_FAILED",
+            "message": "Child workflow failed",
+            "severity": "critical",
+            "context": { "childInput": "failing-child" }
+        }
+    });
+    assert_eq!(
+        components.error_json.as_ref(),
+        Some(&expected_error),
+        "components terminal child Error payload changed"
+    );
+    assert_eq!(
+        direct.error_json.as_ref(),
+        Some(&expected_error),
+        "direct terminal child Error payload changed"
+    );
 
     let expected_lookup = vec![(EMBED_WORKFLOW_CACHE_KEY.to_string(), Vec::new())];
     assert_eq!(

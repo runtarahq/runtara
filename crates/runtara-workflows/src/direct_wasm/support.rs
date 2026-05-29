@@ -538,7 +538,10 @@ fn supports_embed_workflow_child_graph_baseline(
 ) -> bool {
     supports_direct_control_graph(graph, child_workflows)
         && !graph_contains_step(graph, |step| {
-            !matches!(step, Step::Finish(_) | Step::Conditional(_))
+            !matches!(
+                step,
+                Step::Finish(_) | Step::Conditional(_) | Step::Error(_)
+            )
         })
 }
 
@@ -1120,7 +1123,7 @@ fn collect_embed_workflow_step_unsupported(
     if !supports_embed_workflow_child_graph_baseline(child, child_workflows) {
         push(
             "embed-workflow-child-shape",
-            "initial direct EmbedWorkflow lowering supports child graphs made only of Finish and Conditional steps",
+            "initial direct EmbedWorkflow lowering supports child graphs made only of Finish, Conditional, and terminal Error steps",
         );
     }
 }
@@ -1353,6 +1356,9 @@ mod tests {
                 include_str!("../../tests/fixtures/wait_for_signal_direct_on_wait_error.json")
             }
             "embed_workflow" => include_str!("../../tests/fixtures/embed_workflow_workflow.json"),
+            "embed_workflow_error_child" => {
+                include_str!("../../tests/fixtures/embed_workflow_error_child.json")
+            }
             other => panic!("unknown fixture {other}"),
         };
         serde_json::from_str(json).expect("fixture should parse")
@@ -1514,6 +1520,23 @@ mod tests {
                 version_requested: "latest".to_string(),
                 version_resolved: 3,
                 execution_graph: fixture("simple"),
+            }],
+        );
+
+        assert!(report.supported, "{:?}", report.unsupported);
+        assert!(report.unsupported.is_empty());
+    }
+
+    #[test]
+    fn embed_workflow_with_terminal_error_child_is_supported_by_child_aware_check() {
+        let report = analyze_direct_wasm_support_with_child_workflows(
+            &fixture("embed_workflow"),
+            &[ChildWorkflowInput {
+                step_id: "call_child".to_string(),
+                workflow_id: "child_workflow".to_string(),
+                version_requested: "latest".to_string(),
+                version_resolved: 3,
+                execution_graph: fixture("embed_workflow_error_child"),
             }],
         );
 

@@ -711,6 +711,16 @@ mod component {
             })
         }
 
+        fn embed_workflow_error(step_id: String, child_error: Vec<u8>) -> Result<Vec<u8>, String> {
+            MANIFEST.with(|slot| {
+                let slot = slot.borrow();
+                let manifest = slot
+                    .as_ref()
+                    .ok_or_else(|| "direct stdlib manifest was not initialized".to_string())?;
+                manifest.embed_workflow_error(&step_id, &child_error)
+            })
+        }
+
         fn agent_output(
             agent_id: u32,
             source: Vec<u8>,

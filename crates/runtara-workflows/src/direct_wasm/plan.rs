@@ -128,6 +128,10 @@ pub(super) enum DirectFailureTarget {
         step_id_offset: i32,
         step_id_len: i32,
     },
+    EmbedWorkflow {
+        step_id_offset: i32,
+        step_id_len: i32,
+    },
 }
 
 impl DirectFailureTarget {
@@ -144,6 +148,13 @@ impl DirectFailureTarget {
                 step_id_offset,
                 step_id_len,
             } => Self::WaitOnWait {
+                step_id_offset,
+                step_id_len,
+            },
+            Self::EmbedWorkflow {
+                step_id_offset,
+                step_id_len,
+            } => Self::EmbedWorkflow {
                 step_id_offset,
                 step_id_len,
             },

@@ -180,6 +180,7 @@ fn shared_components_dir() -> Option<PathBuf> {
             b"embed-workflow-variables",
             b"embed-workflow-result",
             b"embed-workflow-output-from-result",
+            b"embed-workflow-error",
         ];
         if !required_stdlib_markers.iter().all(|marker| {
             stdlib_bytes

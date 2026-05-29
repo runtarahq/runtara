@@ -1,0 +1,31 @@
+{
+  "name": "EmbedWorkflow Error Child",
+  "description": "A terminal Error child workflow for direct EmbedWorkflow A/B tests",
+  "steps": {
+    "fail": {
+      "stepType": "Error",
+      "id": "fail",
+      "name": "Child Failure",
+      "category": "permanent",
+      "code": "CHILD_FAILED",
+      "message": "Child workflow failed",
+      "severity": "critical",
+      "context": {
+        "childInput": {
+          "valueType": "reference",
+          "value": "data.childInput"
+        }
+      }
+    }
+  },
+  "entryPoint": "fail",
+  "executionPlan": [],
+  "variables": {},
+  "inputSchema": {
+    "childInput": {
+      "type": "string",
+      "required": true
+    }
+  },
+  "outputSchema": {}
+}
