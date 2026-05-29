@@ -630,12 +630,12 @@ fn direct_run_plan_breakpoint(run_plan: &DirectRunPlan) -> Option<bool> {
         | DirectRunPlan::Delay { breakpoint, .. }
         | DirectRunPlan::WaitForSignal { breakpoint, .. }
         | DirectRunPlan::Log { breakpoint, .. }
+        | DirectRunPlan::Agent { breakpoint, .. }
         | DirectRunPlan::Error { breakpoint, .. }
         | DirectRunPlan::Conditional { breakpoint, .. } => Some(*breakpoint),
         DirectRunPlan::Split { .. }
         | DirectRunPlan::While { .. }
-        | DirectRunPlan::EdgeRoute { .. }
-        | DirectRunPlan::Agent { .. } => None,
+        | DirectRunPlan::EdgeRoute { .. } => None,
     }
 }
 
@@ -3160,6 +3160,155 @@ fn direct_core_run_lowers_log_and_error_breakpoints_before_side_effects() {
             helper_name,
         );
     }
+}
+
+#[test]
+fn direct_core_run_lowers_agent_breakpoint_after_input_mapping_before_validation() {
+    let mut graph = durable_agent_no_retry_graph();
+    enable_step_breakpoint(&mut graph, "agent");
+
+    let manifest = build_direct_workflow_manifest(&graph).expect("manifest");
+    let manifest_json = manifest.to_canonical_json().expect("manifest json");
+    let core_config = DirectCoreConfig::new(&manifest, &manifest_json, true).expect("core config");
+    let DirectRunPlan::Agent {
+        breakpoint,
+        next_plan,
+        ..
+    } = &core_config.run_plan
+    else {
+        panic!("expected Agent run plan");
+    };
+    assert!(*breakpoint, "durable Agent breakpoint should lower");
+    assert!(matches!(next_plan.as_ref(), DirectRunPlan::Finish { .. }));
+
+    let (resolve, world) =
+        build_direct_component_resolve_with_agents(&manifest.feature_summary.agent_ids)
+            .expect("agent resolve");
+    let core = emit_direct_core_module(&resolve, world, &core_config).expect("core module");
+    Validator::new()
+        .validate_all(&core)
+        .expect("Agent breakpoint core module validates");
+
+    let (imports, run_calls) = direct_core_imports_and_run_calls(&core);
+    let apply_mapping_position = direct_core_call_position(
+        &run_calls,
+        direct_core_import(
+            &imports,
+            "cm32p2|runtara:workflow-stdlib/json@0.1",
+            "apply-mapping",
+        ),
+    );
+    let debug_mode_position = direct_core_call_position(
+        &run_calls,
+        direct_core_import(
+            &imports,
+            "cm32p2|runtara:workflow-runtime/runtime@0.1",
+            "debug-mode-enabled",
+        ),
+    );
+    let breakpoint_key_position = direct_core_call_position(
+        &run_calls,
+        direct_core_import(
+            &imports,
+            "cm32p2|runtara:workflow-stdlib/json@0.1",
+            "breakpoint-key",
+        ),
+    );
+    let checkpoint_position = direct_core_call_position(
+        &run_calls,
+        direct_core_import(
+            &imports,
+            "cm32p2|runtara:workflow-runtime/runtime@0.1",
+            "checkpoint",
+        ),
+    );
+    let breakpoint_event_position = direct_core_call_position(
+        &run_calls,
+        direct_core_import(
+            &imports,
+            "cm32p2|runtara:workflow-stdlib/json@0.1",
+            "breakpoint-event",
+        ),
+    );
+    let custom_event_position = direct_core_call_position(
+        &run_calls,
+        direct_core_import(
+            &imports,
+            "cm32p2|runtara:workflow-runtime/runtime@0.1",
+            "custom-event",
+        ),
+    );
+    let breakpoint_pause_position = direct_core_call_position(
+        &run_calls,
+        direct_core_import(
+            &imports,
+            "cm32p2|runtara:workflow-runtime/runtime@0.1",
+            "breakpoint-pause",
+        ),
+    );
+    let step_debug_start_index = direct_core_import(
+        &imports,
+        "cm32p2|runtara:workflow-stdlib/json@0.1",
+        "step-debug-start",
+    );
+    let step_debug_start_position = direct_core_call_position(&run_calls, step_debug_start_index);
+    let agent_validate_position = direct_core_call_position(
+        &run_calls,
+        direct_core_import(
+            &imports,
+            "cm32p2|runtara:workflow-stdlib/json@0.1",
+            "agent-validate-input",
+        ),
+    );
+
+    let mut debug_start_retptr_locals = Vec::new();
+    let mut remaining_debug_start_local_sets = 0u8;
+    let mut saw_agent_debug_start = false;
+    let mut code_body_index = 0;
+    for payload in Parser::new(0).parse_all(&core) {
+        if let Payload::CodeSectionEntry(body) = payload.expect("core wasm payload") {
+            if code_body_index == 0 {
+                for operator in body.get_operators_reader().expect("operators") {
+                    match operator.expect("operator") {
+                        Operator::Call { function_index }
+                            if function_index == step_debug_start_index
+                                && !saw_agent_debug_start =>
+                        {
+                            saw_agent_debug_start = true;
+                            remaining_debug_start_local_sets = 2;
+                        }
+                        Operator::LocalSet { local_index }
+                            if remaining_debug_start_local_sets > 0 =>
+                        {
+                            debug_start_retptr_locals.push(local_index);
+                            remaining_debug_start_local_sets -= 1;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            code_body_index += 1;
+        }
+    }
+    const ROUTE_PTR_LOCAL: u32 = 8;
+    const ROUTE_LEN_LOCAL: u32 = 9;
+    assert_eq!(
+        debug_start_retptr_locals,
+        vec![ROUTE_PTR_LOCAL, ROUTE_LEN_LOCAL],
+        "Agent debug-start payload must use scratch route locals so mapped inputs stay in output locals"
+    );
+
+    assert!(
+        apply_mapping_position < debug_mode_position
+            && debug_mode_position < breakpoint_key_position
+            && breakpoint_key_position < checkpoint_position
+            && checkpoint_position < breakpoint_event_position
+            && breakpoint_event_position < custom_event_position
+            && custom_event_position < breakpoint_pause_position
+            && breakpoint_pause_position < step_debug_start_position
+            && step_debug_start_position < agent_validate_position,
+        "Agent breakpoint should pause after input mapping and before debug start/validation: {run_calls:?}"
+    );
 }
 
 #[test]

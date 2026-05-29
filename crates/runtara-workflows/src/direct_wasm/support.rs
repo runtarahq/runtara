@@ -568,7 +568,7 @@ fn supports_direct_control_step_inner(
 }
 
 fn supports_agent_step_baseline(_graph: &ExecutionGraph, step: &AgentStep) -> bool {
-    step.timeout.is_none() && step.compensation.is_none() && !step.breakpoint.unwrap_or(false)
+    step.timeout.is_none() && step.compensation.is_none()
 }
 
 fn supports_delay_step_baseline(_graph: &ExecutionGraph, _step: &DelayStep) -> bool {
@@ -1183,12 +1183,6 @@ fn collect_agent_step_unsupported(
         push(
             "agent-compensation",
             "Agent direct lowering needs compensation/saga propagation",
-        );
-    }
-    if step.breakpoint.unwrap_or(false) {
-        push(
-            "agent-breakpoint",
-            "Agent breakpoints require a direct runtime checkpoint/pause ABI",
         );
     }
 }
@@ -2590,7 +2584,7 @@ mod tests {
     }
 
     #[test]
-    fn agent_timeout_compensation_and_breakpoint_remain_rejected() {
+    fn agent_timeout_and_compensation_remain_rejected() {
         let mut graph = fixture("transform");
         let Some(Step::Agent(agent)) = graph.steps.get_mut("transform") else {
             panic!("expected Agent fixture step");
@@ -2602,7 +2596,6 @@ mod tests {
             trigger: None,
             order: None,
         });
-        agent.breakpoint = Some(true);
 
         let report = analyze_direct_wasm_support(&graph);
 
@@ -2617,11 +2610,26 @@ mod tests {
                 && feature.step_type.as_deref() == Some("Agent")
                 && feature.feature == "agent-compensation"
         }));
-        assert!(report.unsupported.iter().any(|feature| {
-            feature.step_id.as_deref() == Some("transform")
-                && feature.step_type.as_deref() == Some("Agent")
-                && feature.feature == "agent-breakpoint"
-        }));
+    }
+
+    #[test]
+    fn agent_breakpoints_are_supported_with_direct_pause_lowering() {
+        let mut graph = fixture("transform");
+        graph.durable = Some(true);
+        let Some(Step::Agent(agent)) = graph.steps.get_mut("transform") else {
+            panic!("expected Agent fixture step");
+        };
+        agent.breakpoint = Some(true);
+
+        let report = analyze_direct_wasm_support(&graph);
+
+        assert!(report.supported, "{:?}", report.unsupported);
+        assert!(
+            !report
+                .unsupported
+                .iter()
+                .any(|feature| feature.feature == "agent-breakpoint")
+        );
     }
 
     #[test]

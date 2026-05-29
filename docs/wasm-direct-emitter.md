@@ -42,11 +42,12 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   per-iteration aggregation for non-nested-loop bodies.
   Supported normal/`next` edges can now either be a single unconditioned edge or
   a priority-ordered conditional edge set with exactly one unconditioned default
-  fallback. Agent, Split, and While breakpoints remain outside the supported
+  fallback. Split and While breakpoints remain outside the supported
   subset, while durable direct-control breakpoints for `Finish`,
   `Conditional`, `Filter`, `Switch`, `GroupBy`, `Log`, terminal `Error`,
   durable `Delay`, durable `WaitForSignal`, and static `EmbedWorkflow`
-  call-site breakpoints now have direct pause/resume lowering.
+  call-site breakpoints plus durable `Agent` breakpoints now have direct
+  pause/resume lowering.
   `Finish.inputMapping` forms remain broadly supported because mapping semantics
   are delegated to the shared stdlib.
 - The direct core emitter now has the first static `EmbedWorkflow` lowering
@@ -497,8 +498,8 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   direct stdlib exposes `error-steps` to insert generated-code-compatible
   `steps.__error`/`steps.error` context, and direct core routes validation and
   capability failures through the handler branch before falling back to
-  `runtime.fail` when no condition matches. Agent timeout, compensation, and
-  breakpoints remain rejected.
+  `runtime.fail` when no condition matches. Agent timeout and compensation
+  remain rejected.
 - The first Phase 8 runtime lifecycle ABI slice is in place. The
   `runtara:workflow-runtime` WIT and runtime component now expose checkpoint
   lookup/write, retry-attempt recording, checkpointed durable sleep, and a
@@ -519,7 +520,7 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   It has an internal no-retry durable Agent checkpoint path that computes this
   key, reads an existing checkpoint before `capabilities.invoke`, and writes a
   checkpoint after successful output. Public support is enabled for the durable
-  Agent subset without Agent timeout, compensation, or breakpoints.
+  Agent subset without Agent timeout or compensation.
 - The direct core now also has an internal durable Agent retry loop. It uses
   the generated Rust retry defaults (`maxRetries` override, otherwise 3 or 5
   for rate-limited capabilities), retries only typed WIT Agent errors with
@@ -535,10 +536,10 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   pending `cancel`/`pause`/`shutdown` signals through the runtime lifecycle
   handler and return before `runtime.complete` when the instance is stopped.
   Public support is now enabled for durable Agent workflows that do not use
-  timeout, compensation, or breakpoints. Timeout remains gated because the
-  generated Rust Agent path does not currently enforce `AgentStep.timeout`;
-  broader retry/failure and long-running cancellation differential coverage
-  remains a Phase 8 hardening checkpoint.
+  timeout or compensation. Timeout remains gated because the generated Rust
+  Agent path does not currently enforce `AgentStep.timeout`; broader
+  retry/failure and long-running cancellation differential coverage remains a
+  Phase 8 hardening checkpoint.
 - The direct core now has structural and gated host-level replay coverage for
   durable Agent cached checkpoints: the emitted Wasm branch that receives an
   existing checkpoint payload skips both `capabilities.invoke` and
@@ -595,6 +596,14 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   pin call order before each side-effecting helper, support tests remove the
   previous gates, and gated A/B coverage checks first-hit pause plus checkpoint
   resume across all of these step families.
+- Durable Agent breakpoints are now supported. Direct mode resolves the Agent
+  input mapping first, pauses before debug-start emission, input validation,
+  connection injection, durable checkpoint lookup, retry/invoke, and output
+  handling, and uses the shared stdlib to build the generated-compatible
+  mapped-input breakpoint event payload without connection injection.
+  Structural coverage pins the call order, support tests remove the previous
+  `agent-breakpoint` gate, stdlib tests pin the event payload, and gated A/B
+  coverage compares pause/resume behavior against generated Rust.
 
 Current remaining action items:
 
@@ -603,17 +612,16 @@ Current remaining action items:
   current Rust `EmbedWorkflow` codegen appears to parse the field without
   enforcing a deadline.
 - Finish nested failure aggregation for `Split(dontStopOnFailed)` when nested
-  Split/While bodies are present, then remove the current support gate.
+  Split/While bodies are present at arbitrary depth. The implementation must
+  keep recursive graph walking explicit so future EmbedWorkflow/Split/While
+  combinations do not silently handle only first-level nested graphs; then
+  remove the current support gate.
 - Implement or intentionally keep gating Split retry, Split timeout, and Split
   breakpoint semantics; each needs explicit durability/error aggregation tests.
 - Implement While timeout, While breakpoint, and While `onError` routing
   semantics with structural and gated A/B coverage.
-- Decide and implement the remaining Agent breakpoint policy. Durable
-  direct-control step breakpoints, Delay, WaitForSignal, and static
-  EmbedWorkflow call-site breakpoints are now done; Split and While breakpoint
-  semantics remain tracked with their loop-specific durability items above.
-- Close Agent hardening gaps: timeout/compensation/breakpoint policy,
-  retry/failure differential tests, and long-running cancellation coverage.
+- Close Agent hardening gaps: timeout/compensation policy, retry/failure
+  differential tests, and long-running cancellation coverage.
 - Start Phase 12 AiAgent support only after the shared Agent/runtime durability
   surface is stable enough to avoid another parallel ABI.
 - Continue Phase 13-16 rollout work: CI shadowing, production gates,
@@ -1998,10 +2006,12 @@ Current status:
   `runtime.handle-checkpoint-signal`; handled `cancel`, `pause`, and
   `shutdown` signals stop before `runtime.complete`, while `resume`/unknown
   signals continue. The public support gate accepts this durable Agent subset;
-  timeout, compensation, and breakpoints remain rejected. Gated A/B execution
-  now proves checkpoint-returned `pause` suspends without completion/failure
-  and that a resumed run replays the saved Agent checkpoint; retry/failure/cancel
-  crash-resume coverage remains pending.
+  timeout and compensation remain rejected, while durable Agent breakpoints now
+  pause after input mapping and before validation/invoke. Gated A/B execution
+  now proves checkpoint-returned `pause` suspends without completion/failure,
+  Agent breakpoint pause/resume matches generated Rust, and that a resumed run
+  replays the saved Agent checkpoint; retry/failure/cancel crash-resume
+  coverage remains pending.
 - Structural core Wasm coverage and gated direct execution smokes now cover
   durable and non-durable Agent execution. They prove the cached branch does
   not invoke the Agent or save another checkpoint, that cached raw Agent output

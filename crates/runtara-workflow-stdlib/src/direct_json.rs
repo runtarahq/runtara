@@ -752,6 +752,18 @@ impl DirectJsonManifest {
                     .ok_or_else(|| format!("missing direct Error config for '{}'", step.id))?;
                 apply_error(&error.value, &source)?.context
             }
+            "Agent" => {
+                let agent = self
+                    .agent_by_step(step.id.as_str())
+                    .ok_or_else(|| format!("missing direct Agent config for '{}'", step.id))?;
+                let mapping = self.mappings.get(&agent.input_mapping_id).ok_or_else(|| {
+                    format!(
+                        "missing direct Agent input mapping {} for '{}'",
+                        agent.input_mapping_id, step.id
+                    )
+                })?;
+                apply_input_mapping(&mapping.value, &source)?
+            }
             "EmbedWorkflow" => source.get("data").cloned().unwrap_or(Value::Null),
             _ => Value::Null,
         };
@@ -5861,6 +5873,44 @@ mod tests {
             );
             assert_eq!(event["step_type"], json!(step_type));
         }
+    }
+
+    #[test]
+    fn agent_breakpoint_event_uses_mapped_inputs_before_connection_injection() {
+        let manifest =
+            DirectJsonManifest::parse(&agent_manifest_with_required_inputs_and_connection(
+                json!({
+                    "value": { "valueType": "reference", "value": "data.value" },
+                    "tenant": { "valueType": "reference", "value": "variables.tenant" }
+                }),
+                json!([]),
+                Some("crm-main"),
+            ))
+            .expect("manifest");
+        let source = build_source(
+            br#"{"value":"agent-input"}"#,
+            br#"{"tenant":"t1"}"#,
+            br#"{"before":{"outputs":true}}"#,
+        )
+        .expect("source");
+
+        let event = manifest
+            .breakpoint_event("agent", &source)
+            .expect("breakpoint event");
+        let event: Value = serde_json::from_slice(&event).expect("event json");
+
+        assert_eq!(event["step_id"], json!("agent"));
+        assert_eq!(event["step_name"], json!("Normalize Data"));
+        assert_eq!(event["step_type"], json!("Agent"));
+        assert_eq!(
+            event["inputs"],
+            json!({ "value": "agent-input", "tenant": "t1" })
+        );
+        assert!(
+            event["inputs"].get("connection").is_none(),
+            "Agent breakpoint payload should match generated mapped inputs before connection injection"
+        );
+        assert_eq!(event["steps_context"]["before"]["outputs"], json!(true));
     }
 
     #[test]

@@ -20,7 +20,7 @@ use super::agent_retry::{
     emit_agent_retry_error_info, emit_agent_retry_sleep,
 };
 use super::checkpoint::{emit_checkpoint_lookup, emit_checkpoint_save};
-use super::debug::{emit_agent_debug_error, emit_step_debug_event};
+use super::debug::{emit_agent_debug_error, emit_step_breakpoint, emit_step_debug_event};
 use super::dispatcher::emit_run_plan_mapping;
 use super::mapping::{emit_apply_mapping, emit_build_source};
 use super::{
@@ -41,6 +41,7 @@ pub(super) fn emit_agent_plan(
     agent_component_id: &str,
     input_mapping_id: u32,
     durable_checkpoint: bool,
+    breakpoint: bool,
     max_retries: u32,
     retry_delay_ms: u64,
     rate_limit_budget_ms: u64,
@@ -60,19 +61,6 @@ pub(super) fn emit_agent_plan(
     workflow_error_kind: &DirectDataSegment,
     failure_target: Option<DirectFailureTarget>,
 ) {
-    emit_step_debug_event(
-        body,
-        indices,
-        static_data,
-        track_events,
-        true,
-        step_id,
-        source_ptr_local,
-        source_len_local,
-        output_ptr_local,
-        output_len_local,
-    );
-
     emit_apply_mapping(
         body,
         indices,
@@ -82,6 +70,33 @@ pub(super) fn emit_agent_plan(
         output_ptr_local,
         output_len_local,
         failure_target,
+    );
+
+    emit_step_breakpoint(
+        body,
+        indices,
+        static_data,
+        breakpoint,
+        step_id,
+        source_ptr_local,
+        source_len_local,
+        output_ptr_local,
+        output_len_local,
+        route_ptr_local,
+        route_len_local,
+    );
+
+    emit_step_debug_event(
+        body,
+        indices,
+        static_data,
+        track_events,
+        true,
+        step_id,
+        source_ptr_local,
+        source_len_local,
+        route_ptr_local,
+        route_len_local,
     );
 
     emit_agent_input_validation(
