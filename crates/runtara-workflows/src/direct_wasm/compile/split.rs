@@ -23,6 +23,32 @@ use super::{
     DirectDataSegment, DirectFailureTarget, DirectRunPlan, DirectVariables,
 };
 
+fn push_split_frame(body: &mut WasmFunction) {
+    body.instruction(&Instruction::LocalGet(DIRECT_SPLIT_COUNT_LOCAL));
+    body.instruction(&Instruction::LocalGet(DIRECT_SPLIT_INDEX_LOCAL));
+    body.instruction(&Instruction::LocalGet(DIRECT_SPLIT_ITEM_PTR_LOCAL));
+    body.instruction(&Instruction::LocalGet(DIRECT_SPLIT_ITEM_LEN_LOCAL));
+    body.instruction(&Instruction::LocalGet(DIRECT_SPLIT_RESULTS_PTR_LOCAL));
+    body.instruction(&Instruction::LocalGet(DIRECT_SPLIT_RESULTS_LEN_LOCAL));
+    body.instruction(&Instruction::LocalGet(DIRECT_SPLIT_PARENT_SOURCE_PTR_LOCAL));
+    body.instruction(&Instruction::LocalGet(DIRECT_SPLIT_PARENT_SOURCE_LEN_LOCAL));
+    body.instruction(&Instruction::LocalGet(DIRECT_SPLIT_VARIABLES_PTR_LOCAL));
+    body.instruction(&Instruction::LocalGet(DIRECT_SPLIT_VARIABLES_LEN_LOCAL));
+}
+
+fn pop_split_frame(body: &mut WasmFunction) {
+    body.instruction(&Instruction::LocalSet(DIRECT_SPLIT_VARIABLES_LEN_LOCAL));
+    body.instruction(&Instruction::LocalSet(DIRECT_SPLIT_VARIABLES_PTR_LOCAL));
+    body.instruction(&Instruction::LocalSet(DIRECT_SPLIT_PARENT_SOURCE_LEN_LOCAL));
+    body.instruction(&Instruction::LocalSet(DIRECT_SPLIT_PARENT_SOURCE_PTR_LOCAL));
+    body.instruction(&Instruction::LocalSet(DIRECT_SPLIT_RESULTS_LEN_LOCAL));
+    body.instruction(&Instruction::LocalSet(DIRECT_SPLIT_RESULTS_PTR_LOCAL));
+    body.instruction(&Instruction::LocalSet(DIRECT_SPLIT_ITEM_LEN_LOCAL));
+    body.instruction(&Instruction::LocalSet(DIRECT_SPLIT_ITEM_PTR_LOCAL));
+    body.instruction(&Instruction::LocalSet(DIRECT_SPLIT_INDEX_LOCAL));
+    body.instruction(&Instruction::LocalSet(DIRECT_SPLIT_COUNT_LOCAL));
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn emit_split_plan(
     body: &mut WasmFunction,
@@ -63,6 +89,7 @@ pub(super) fn emit_split_plan(
         output_len_local,
     );
 
+    push_split_frame(body);
     body.instruction(&Instruction::LocalGet(source_ptr_local));
     body.instruction(&Instruction::LocalSet(DIRECT_SPLIT_PARENT_SOURCE_PTR_LOCAL));
     body.instruction(&Instruction::LocalGet(source_len_local));
@@ -194,6 +221,9 @@ pub(super) fn emit_split_plan(
         },
     );
 
+    if !dont_stop_on_failed {
+        push_split_frame(body);
+    }
     emit_run_plan_mapping(
         body,
         indices,
@@ -222,6 +252,9 @@ pub(super) fn emit_split_plan(
             failure_target
         },
     );
+    if !dont_stop_on_failed {
+        pop_split_frame(body);
+    }
 
     body.instruction(&Instruction::I32Const(split_id as i32));
     body.instruction(&Instruction::LocalGet(output_ptr_local));
@@ -316,6 +349,7 @@ pub(super) fn emit_split_plan(
         load_retptr_list(body, steps_ptr_local, steps_len_local);
     }
 
+    pop_split_frame(body);
     emit_build_source(
         body,
         indices,

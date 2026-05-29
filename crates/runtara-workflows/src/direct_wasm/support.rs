@@ -632,14 +632,15 @@ fn supports_split_step_baseline(step: &SplitStep) -> bool {
                 && config.retry_delay.is_none()
                 && config.timeout.is_none()
         })
-        && !graph_contains_loop_step(&step.subgraph)
+        && !(config
+            .and_then(|config| config.dont_stop_on_failed)
+            .unwrap_or(false)
+            && graph_contains_loop_step(&step.subgraph))
 }
 
 fn supports_while_step_baseline(step: &WhileStep) -> bool {
     let config = step.config.as_ref();
-    !step.breakpoint.unwrap_or(false)
-        && config.is_none_or(|config| config.timeout.is_none())
-        && !graph_contains_loop_step(&step.subgraph)
+    !step.breakpoint.unwrap_or(false) && config.is_none_or(|config| config.timeout.is_none())
 }
 
 fn graph_contains_loop_step(graph: &ExecutionGraph) -> bool {
@@ -1318,10 +1319,16 @@ fn collect_split_step_unsupported(
             );
         }
     }
-    if graph_contains_loop_step(&step.subgraph) {
+    if step
+        .config
+        .as_ref()
+        .and_then(|config| config.dont_stop_on_failed)
+        .unwrap_or(false)
+        && graph_contains_loop_step(&step.subgraph)
+    {
         push(
-            "split-nested-loop",
-            "Split subgraphs containing Split or While need reentrant direct loop locals",
+            "split-dont-stop-nested-loop",
+            "Split dontStopOnFailed with nested Split or While needs reentrant failure aggregation frames",
         );
     }
 }
@@ -1354,12 +1361,6 @@ fn collect_while_step_unsupported(
         push(
             "while-timeout",
             "While timeout requires direct timeout enforcement",
-        );
-    }
-    if graph_contains_loop_step(&step.subgraph) {
-        push(
-            "while-nested-loop",
-            "While subgraphs containing Split or While need reentrant direct loop locals",
         );
     }
 }
@@ -1443,7 +1444,9 @@ mod tests {
             "split_with_schemas_failing" => {
                 include_str!("../../tests/fixtures/split_with_schemas_failing.json")
             }
+            "split_nested_split" => include_str!("../../tests/fixtures/split_nested_split.json"),
             "while_simple" => include_str!("../../tests/fixtures/while_simple.json"),
+            "while_nested_split" => include_str!("../../tests/fixtures/while_nested_split.json"),
             "transform" => include_str!("../../tests/fixtures/transform_workflow.json"),
             "wait" => include_str!("../../tests/fixtures/wait_for_signal_with_callback.json"),
             "wait_simple" => {
@@ -2088,22 +2091,32 @@ mod tests {
     }
 
     #[test]
-    fn split_subgraphs_with_nested_loops_are_rejected_until_reentrant_frames_exist() {
-        let mut graph = fixture("split");
-        graph.durable = Some(false);
-        let nested_loop_graph = fixture("split");
-        let Some(Step::Split(split)) = graph.steps.get_mut("split") else {
-            panic!("expected Split fixture step");
+    fn split_subgraphs_with_nested_loops_are_supported_with_reentrant_frames() {
+        let report = analyze_direct_wasm_support(&fixture("split_nested_split"));
+
+        assert!(report.supported, "{:?}", report.unsupported);
+        assert!(report.unsupported.is_empty());
+    }
+
+    #[test]
+    fn split_dont_stop_with_nested_loops_is_rejected_until_failure_frames_exist() {
+        let mut graph = fixture("split_nested_split");
+        let Some(Step::Split(split)) = graph.steps.get_mut("outer") else {
+            panic!("expected outer Split fixture step");
         };
-        *split.subgraph = nested_loop_graph;
+        split
+            .config
+            .as_mut()
+            .expect("split config")
+            .dont_stop_on_failed = Some(true);
 
         let report = analyze_direct_wasm_support(&graph);
 
         assert!(!report.supported);
         assert!(
             report.unsupported.iter().any(|unsupported| {
-                unsupported.step_id.as_deref() == Some("split")
-                    && unsupported.feature == "split-nested-loop"
+                unsupported.step_id.as_deref() == Some("outer")
+                    && unsupported.feature == "split-dont-stop-nested-loop"
             }),
             "{:?}",
             report.unsupported
@@ -2119,21 +2132,27 @@ mod tests {
     }
 
     #[test]
-    fn while_breakpoint_timeout_and_nested_loops_are_rejected() {
+    fn while_subgraphs_with_nested_loops_are_supported_with_reentrant_frames() {
+        let report = analyze_direct_wasm_support(&fixture("while_nested_split"));
+
+        assert!(report.supported, "{:?}", report.unsupported);
+        assert!(report.unsupported.is_empty());
+    }
+
+    #[test]
+    fn while_breakpoint_and_timeout_are_rejected() {
         let mut graph = fixture("while_simple");
-        let nested_loop_graph = fixture("split");
         let Some(Step::While(while_step)) = graph.steps.get_mut("loop") else {
             panic!("expected While fixture step");
         };
         while_step.breakpoint = Some(true);
         let config = while_step.config.as_mut().expect("while fixture config");
         config.timeout = Some(1_000);
-        *while_step.subgraph = nested_loop_graph;
 
         let report = analyze_direct_wasm_support(&graph);
 
         assert!(!report.supported);
-        for feature in ["while-breakpoint", "while-timeout", "while-nested-loop"] {
+        for feature in ["while-breakpoint", "while-timeout"] {
             assert!(
                 report.unsupported.iter().any(|unsupported| {
                     unsupported.step_id.as_deref() == Some("loop") && unsupported.feature == feature

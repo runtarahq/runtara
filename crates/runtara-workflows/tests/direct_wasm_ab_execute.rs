@@ -40,6 +40,8 @@ const SWITCH_VALUE_SIMPLE: &str = include_str!("fixtures/switch_value_simple.jso
 const GROUP_BY_SIMPLE: &str = include_str!("fixtures/group_by_simple.json");
 const EDGE_CONDITION_PRIORITY: &str = include_str!("fixtures/edge_condition_priority.json");
 const WHILE_DIRECT_INDEX_ONLY: &str = include_str!("fixtures/while_direct_index_only.json");
+const SPLIT_NESTED_SPLIT: &str = include_str!("fixtures/split_nested_split.json");
+const WHILE_NESTED_SPLIT: &str = include_str!("fixtures/while_nested_split.json");
 const LOG_ALL_LEVELS: &str = include_str!("fixtures/log_all_levels.json");
 const ERROR_DIRECT_SIMPLE: &str = include_str!("fixtures/error_direct_simple.json");
 const DELAY_DYNAMIC: &str = include_str!("fixtures/delay_dynamic.json");
@@ -2672,6 +2674,103 @@ fn direct_wasm_matches_components_embed_workflow_conditional_error_child() {
         normalized_checkpoints(&direct_failure.checkpoints),
         expected_lookup
     );
+}
+
+#[test]
+fn direct_wasm_matches_components_nested_split_frame_isolation() {
+    let Some(components_dir) = direct_ab_components_dir() else {
+        return;
+    };
+    let _data = setup_data_dir();
+
+    let components_artifact = compile_components_artifact("nested-split", SPLIT_NESTED_SPLIT);
+    let direct_artifact =
+        compile_direct_artifact(&components_dir, "nested-split", SPLIT_NESTED_SPLIT);
+    assert_eq!(
+        direct_artifact.compiler_mode,
+        WorkflowCompilerMode::DirectWasm
+    );
+
+    let workflow_input =
+        br#"{"groups":[{"items":[{"value":"a1"},{"value":"a2"}]},{"items":[{"value":"b1"}]}]}"#;
+    let components_input = components_sdk_input(workflow_input);
+    let components = execute_artifact(
+        &components_artifact,
+        "ab-components-nested-split",
+        &components_input,
+    );
+    let direct = execute_artifact(
+        &direct_artifact.path,
+        "ab-direct-nested-split",
+        workflow_input,
+    );
+
+    assert_success_parity("nested-split", 0, &components, &direct);
+    let expected_output = serde_json::json!({
+        "results": [
+            {
+                "outerIndex": 0,
+                "outerIndices": [0],
+                "inner": [
+                    { "value": "a1", "innerIndex": 0, "indices": [0, 0] },
+                    { "value": "a2", "innerIndex": 1, "indices": [0, 1] }
+                ]
+            },
+            {
+                "outerIndex": 1,
+                "outerIndices": [1],
+                "inner": [
+                    { "value": "b1", "innerIndex": 0, "indices": [1, 0] }
+                ]
+            }
+        ]
+    });
+    assert_eq!(components.output_json.as_ref(), Some(&expected_output));
+    assert_eq!(direct.output_json.as_ref(), Some(&expected_output));
+}
+
+#[test]
+fn direct_wasm_matches_components_while_with_nested_split_frame_isolation() {
+    let Some(components_dir) = direct_ab_components_dir() else {
+        return;
+    };
+    let _data = setup_data_dir();
+
+    let components_artifact = compile_components_artifact("while-nested-split", WHILE_NESTED_SPLIT);
+    let direct_artifact =
+        compile_direct_artifact(&components_dir, "while-nested-split", WHILE_NESTED_SPLIT);
+    assert_eq!(
+        direct_artifact.compiler_mode,
+        WorkflowCompilerMode::DirectWasm
+    );
+
+    let workflow_input = br#"{"count":2,"items":[{"value":"x"},{"value":"y"}]}"#;
+    let components_input = components_sdk_input(workflow_input);
+    let components = execute_artifact(
+        &components_artifact,
+        "ab-components-while-nested-split",
+        &components_input,
+    );
+    let direct = execute_artifact(
+        &direct_artifact.path,
+        "ab-direct-while-nested-split",
+        workflow_input,
+    );
+
+    assert_success_parity("while-nested-split", 0, &components, &direct);
+    let expected_output = serde_json::json!({
+        "iterations": 2,
+        "last": {
+            "loopIndex": 1,
+            "loopIndices": [1],
+            "inner": [
+                { "value": "x", "splitIndex": 0, "indices": [1, 0] },
+                { "value": "y", "splitIndex": 1, "indices": [1, 1] }
+            ]
+        }
+    });
+    assert_eq!(components.output_json.as_ref(), Some(&expected_output));
+    assert_eq!(direct.output_json.as_ref(), Some(&expected_output));
 }
 
 #[test]

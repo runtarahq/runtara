@@ -33,7 +33,9 @@ fn fixture(name: &str) -> ExecutionGraph {
         "split_with_schemas_failing" => {
             include_str!("../../../tests/fixtures/split_with_schemas_failing.json")
         }
+        "split_nested_split" => include_str!("../../../tests/fixtures/split_nested_split.json"),
         "while_simple" => include_str!("../../../tests/fixtures/while_simple.json"),
+        "while_nested_split" => include_str!("../../../tests/fixtures/while_nested_split.json"),
         "wait_simple" => {
             include_str!("../../../tests/fixtures/wait_for_signal_direct_simple.json")
         }
@@ -1055,6 +1057,45 @@ fn direct_compile_supports_sequential_split_graph() {
 }
 
 #[test]
+fn direct_compile_supports_nested_split_graph() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let result = compile_direct_workflow(DirectCompilationInput {
+        workflow_id: "split-nested".to_string(),
+        version: 1,
+        source_checksum: None,
+        execution_graph: fixture("split_nested_split"),
+        child_workflows: vec![],
+        output_dir: temp.path().to_path_buf(),
+        track_events: false,
+        agent_catalog: None,
+    })
+    .expect("direct nested Split compile should succeed");
+
+    let wasm = fs::read(&result.wasm_path).expect("wasm");
+    Validator::new()
+        .validate_all(&wasm)
+        .expect("direct nested Split artifact should validate");
+    assert!(result.support_report.supported);
+    assert_eq!(result.support_report.unsupported, vec![]);
+
+    let manifest: DirectWorkflowManifest =
+        serde_json::from_slice(&fs::read(&result.manifest_path).expect("manifest"))
+            .expect("manifest json");
+    assert_eq!(manifest.graph.splits.len(), 1);
+
+    let core_config = DirectCoreConfig::new(
+        &manifest,
+        &manifest.to_canonical_json().expect("manifest json"),
+        false,
+    )
+    .expect("core config");
+    let DirectRunPlan::Split { nested_plan, .. } = &core_config.run_plan else {
+        panic!("expected root Split run plan");
+    };
+    assert!(matches!(nested_plan.as_ref(), DirectRunPlan::Split { .. }));
+}
+
+#[test]
 fn direct_compile_supports_simple_while_graph() {
     let temp = tempfile::tempdir().expect("tempdir");
     let result = compile_direct_workflow(DirectCompilationInput {
@@ -1081,6 +1122,45 @@ fn direct_compile_supports_simple_while_graph() {
             .expect("manifest json");
     assert_eq!(manifest.graph.whiles.len(), 1);
     assert_eq!(manifest.graph.whiles[0].step_id, "loop");
+}
+
+#[test]
+fn direct_compile_supports_while_with_nested_split_graph() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let result = compile_direct_workflow(DirectCompilationInput {
+        workflow_id: "while-nested-split".to_string(),
+        version: 1,
+        source_checksum: None,
+        execution_graph: fixture("while_nested_split"),
+        child_workflows: vec![],
+        output_dir: temp.path().to_path_buf(),
+        track_events: false,
+        agent_catalog: None,
+    })
+    .expect("direct While with nested Split compile should succeed");
+
+    let wasm = fs::read(&result.wasm_path).expect("wasm");
+    Validator::new()
+        .validate_all(&wasm)
+        .expect("direct While with nested Split artifact should validate");
+    assert!(result.support_report.supported);
+    assert_eq!(result.support_report.unsupported, vec![]);
+
+    let manifest: DirectWorkflowManifest =
+        serde_json::from_slice(&fs::read(&result.manifest_path).expect("manifest"))
+            .expect("manifest json");
+    assert_eq!(manifest.graph.whiles.len(), 1);
+
+    let core_config = DirectCoreConfig::new(
+        &manifest,
+        &manifest.to_canonical_json().expect("manifest json"),
+        false,
+    )
+    .expect("core config");
+    let DirectRunPlan::While { nested_plan, .. } = &core_config.run_plan else {
+        panic!("expected root While run plan");
+    };
+    assert!(matches!(nested_plan.as_ref(), DirectRunPlan::Split { .. }));
 }
 
 #[test]

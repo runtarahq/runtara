@@ -38,7 +38,8 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   `Finish`/`Error` leaves, and routing `Switch` dispatch trees with one static
   edge per route plus a `default` edge whose leaves can be `Finish` or `Error`,
   plus sequential `Split` subgraphs with final-result checkpoint/replay,
-  including `dontStopOnFailed` per-iteration aggregation.
+  including normal nested Split/While loop bodies and `dontStopOnFailed`
+  per-iteration aggregation for non-nested-loop bodies.
   Supported normal/`next` edges can now either be a single unconditioned edge or
   a priority-ordered conditional edge set with exactly one unconditioned default
   fallback. General step breakpoints remain outside the supported
@@ -97,10 +98,13 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   nested direct run plan, advances loop state, and writes the final While step
   envelope before continuing normal flow. It also calls runtime cancellation,
   heartbeat, and signal-check helpers around each iteration body. Public While
-  support is enabled for normal-flow loops without breakpoint/timeout and
-  without nested Split/While loop steps. Gated execution coverage now includes
-  an agentless While loop that verifies loop index variables, previous-output
-  threading, final iteration counts, and absence of checkpoint/sleep traffic.
+  support is enabled for normal-flow loops without breakpoint/timeout,
+  including nested `Split`/`While` bodies whose loop scratch frames are restored
+  across nested execution. Gated execution coverage now includes an agentless
+  While loop that verifies loop index variables, previous-output threading,
+  final iteration counts, and absence of checkpoint/sleep traffic, plus a
+  `While` body with a nested `Split` that verifies outer loop variables survive
+  inner loop execution.
 - `runtara-workflow-stdlib` now has a `direct-component` feature and
   component metadata for `runtara:workflow-stdlib`. That feature builds a
   `wasm32-wasip2` stdlib component without pulling in SDK/runtime, HTTP, AI,
@@ -317,8 +321,10 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   through both compile paths.
 - Deep nesting is now treated as an explicit support invariant: nested static
   `EmbedWorkflow` calls preserve their inline frame state on the Wasm stack,
-  while nested `Split`/`While` loop subgraphs remain rejected until the loop
-  lowerers get reentrant frame allocation instead of shared scratch locals.
+  and nested `Split`/`While` loop subgraphs preserve caller/current loop scratch
+  frames before and after nested loop execution. `Split(dontStopOnFailed)` with
+  nested loop bodies remains gated until failure aggregation has its own
+  reentrant frame model.
 - `tests/direct_wasm_execute.rs` now provides gated direct execution smoke
   tests. With `RUNTARA_RUN_DIRECT_WASM_E2E=1`, it compiles and statically
   composes the simple `Finish` fixture plus flat and nested `Conditional`
@@ -2160,14 +2166,28 @@ Implementation steps:
    - heartbeat/cancellation/pause-shutdown signal checks: runtime ABI and
      direct-core lowering done;
    - public support gate: enabled for normal-flow While loops without
-     breakpoint/timeout and without nested Split/While loop steps;
+     breakpoint/timeout, including nested Split/While loop bodies with
+     reentrant loop scratch frames;
    - gated composed-artifact execution smoke: done for an agentless While loop
      that exercises loop index variables, `_previousOutputs`, final output
      shape, heartbeat/signal polling, and no checkpoint/sleep traffic;
-   - strict A/B execution coverage: done for the same agentless While loop;
-   - While timeout, breakpoint, nested loop-local reentrancy, and onError
-     routing: pending.
-4. Defer parallel split until runtime support and test coverage are explicit.
+   - strict A/B execution coverage: done for the same agentless While loop and
+     for a While body containing a nested Split, verifying caller loop variables
+     survive the inner loop;
+   - While timeout, breakpoint, and onError routing: pending.
+4. Reentrant loop scratch frames are implemented for normal nested Split/While
+   execution:
+   - Split preserves its caller loop frame across the whole Split step and its
+     current iteration frame across nested body execution;
+   - While preserves its caller loop frame across the whole While step and its
+     current iteration frame across nested body execution;
+   - strict A/B execution coverage includes Split-within-Split and
+     Split-within-While shapes that assert outer `_index`/`_loop_indices`
+     remain intact after inner loop execution;
+   - remaining nested-loop gap: `Split(dontStopOnFailed)` with nested loop
+     bodies is still rejected until error aggregation can target a preserved
+     failure frame instead of the active inner loop locals.
+5. Defer parallel split until runtime support and test coverage are explicit.
 
 Checkpoint 9:
 
@@ -2254,10 +2274,10 @@ Current status:
   for fresh and cached durable static child calls, generated-compatible
   wrapping of child `Error` failures reached directly or through child
   `Conditional` control flow, and deep child workflow isolation/cache-key
-  parity. Split/While subgraphs containing nested Split/While loops are now
-  explicitly rejected until a reentrant direct loop-frame lowerer exists.
-  Remaining work is retry/backoff parity, parent `onError`, and reentrant
-  loop-frame support for deeply nested Split/While shapes.
+  parity. Normal nested Split/While loop execution now has reentrant scratch
+  frame lowering and strict A/B coverage; `Split(dontStopOnFailed)` with nested
+  loops remains gated until failure aggregation has a preserved target frame.
+  Remaining Phase 10 work is retry/backoff parity and parent `onError`.
 
 ### Phase 11: WaitForSignal
 

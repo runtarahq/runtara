@@ -20,6 +20,28 @@ use super::{
     DirectDataSegment, DirectFailureTarget, DirectRunPlan, DirectVariables,
 };
 
+fn push_while_frame(body: &mut WasmFunction) {
+    body.instruction(&Instruction::LocalGet(DIRECT_WHILE_MAX_ITERATIONS_LOCAL));
+    body.instruction(&Instruction::LocalGet(DIRECT_WHILE_INDEX_LOCAL));
+    body.instruction(&Instruction::LocalGet(DIRECT_WHILE_STATE_PTR_LOCAL));
+    body.instruction(&Instruction::LocalGet(DIRECT_WHILE_STATE_LEN_LOCAL));
+    body.instruction(&Instruction::LocalGet(DIRECT_WHILE_PARENT_SOURCE_PTR_LOCAL));
+    body.instruction(&Instruction::LocalGet(DIRECT_WHILE_PARENT_SOURCE_LEN_LOCAL));
+    body.instruction(&Instruction::LocalGet(DIRECT_WHILE_VARIABLES_PTR_LOCAL));
+    body.instruction(&Instruction::LocalGet(DIRECT_WHILE_VARIABLES_LEN_LOCAL));
+}
+
+fn pop_while_frame(body: &mut WasmFunction) {
+    body.instruction(&Instruction::LocalSet(DIRECT_WHILE_VARIABLES_LEN_LOCAL));
+    body.instruction(&Instruction::LocalSet(DIRECT_WHILE_VARIABLES_PTR_LOCAL));
+    body.instruction(&Instruction::LocalSet(DIRECT_WHILE_PARENT_SOURCE_LEN_LOCAL));
+    body.instruction(&Instruction::LocalSet(DIRECT_WHILE_PARENT_SOURCE_PTR_LOCAL));
+    body.instruction(&Instruction::LocalSet(DIRECT_WHILE_STATE_LEN_LOCAL));
+    body.instruction(&Instruction::LocalSet(DIRECT_WHILE_STATE_PTR_LOCAL));
+    body.instruction(&Instruction::LocalSet(DIRECT_WHILE_INDEX_LOCAL));
+    body.instruction(&Instruction::LocalSet(DIRECT_WHILE_MAX_ITERATIONS_LOCAL));
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn emit_while_plan(
     body: &mut WasmFunction,
@@ -58,6 +80,7 @@ pub(super) fn emit_while_plan(
         output_len_local,
     );
 
+    push_while_frame(body);
     body.instruction(&Instruction::LocalGet(source_ptr_local));
     body.instruction(&Instruction::LocalSet(DIRECT_WHILE_PARENT_SOURCE_PTR_LOCAL));
     body.instruction(&Instruction::LocalGet(source_len_local));
@@ -153,6 +176,7 @@ pub(super) fn emit_while_plan(
         failure_target,
     );
 
+    push_while_frame(body);
     emit_run_plan_mapping(
         body,
         indices,
@@ -174,6 +198,7 @@ pub(super) fn emit_while_plan(
         workflow_error_kind,
         failure_target,
     );
+    pop_while_frame(body);
 
     push_retptr_arg(body);
     body.instruction(&Instruction::Call(indices.runtime_heartbeat));
@@ -220,6 +245,7 @@ pub(super) fn emit_while_plan(
     return_if_retptr_error(body);
     load_retptr_list(body, steps_ptr_local, steps_len_local);
 
+    pop_while_frame(body);
     emit_build_source(
         body,
         indices,

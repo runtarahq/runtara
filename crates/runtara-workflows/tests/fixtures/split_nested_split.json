@@ -1,0 +1,71 @@
+{
+  "durable": false,
+  "name": "Nested Split Workflow",
+  "description": "A Split step whose subgraph contains another Split step",
+  "steps": {
+    "outer": {
+      "stepType": "Split",
+      "id": "outer",
+      "config": {
+        "value": { "valueType": "reference", "value": "data.groups" },
+        "sequential": true
+      },
+      "subgraph": {
+        "name": "Outer Item",
+        "steps": {
+          "inner": {
+            "stepType": "Split",
+            "id": "inner",
+            "config": {
+              "value": { "valueType": "reference", "value": "data.items" },
+              "sequential": true
+            },
+            "subgraph": {
+              "name": "Inner Item",
+              "steps": {
+                "finish_inner": {
+                  "stepType": "Finish",
+                  "id": "finish_inner",
+                  "inputMapping": {
+                    "value": { "valueType": "reference", "value": "data.value" },
+                    "innerIndex": { "valueType": "reference", "value": "variables._index" },
+                    "indices": { "valueType": "reference", "value": "variables._loop_indices" }
+                  }
+                }
+              },
+              "entryPoint": "finish_inner",
+              "executionPlan": []
+            }
+          },
+          "finish_outer": {
+            "stepType": "Finish",
+            "id": "finish_outer",
+            "inputMapping": {
+              "outerIndex": { "valueType": "reference", "value": "variables._index" },
+              "outerIndices": { "valueType": "reference", "value": "variables._loop_indices" },
+              "inner": { "valueType": "reference", "value": "steps.inner.outputs" }
+            }
+          }
+        },
+        "entryPoint": "inner",
+        "executionPlan": [
+          { "fromStep": "inner", "toStep": "finish_outer" }
+        ]
+      }
+    },
+    "finish": {
+      "stepType": "Finish",
+      "id": "finish",
+      "inputMapping": {
+        "results": { "valueType": "reference", "value": "steps.outer.outputs" }
+      }
+    }
+  },
+  "entryPoint": "outer",
+  "executionPlan": [
+    { "fromStep": "outer", "toStep": "finish" }
+  ],
+  "variables": {},
+  "inputSchema": {},
+  "outputSchema": {}
+}
