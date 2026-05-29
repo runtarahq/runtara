@@ -174,7 +174,9 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   input envelope, and diffs the captured `/completed` payloads. The same A/B
   harness now also compares custom-event payloads for `Log` workflows and
   `/failed` plus `workflow_error` payloads for terminal `Error` workflows,
-  normalizing timestamp fields before comparison.
+  normalizing timestamp fields before comparison. It also captures and compares
+  durable `/sleep` and `/checkpoint` requests, with the first durable Delay
+  fixture included in the strict A/B suite.
 - `tests/direct_wasm_execute.rs` now provides gated direct execution smoke
   tests. With `RUNTARA_RUN_DIRECT_WASM_E2E=1`, it compiles and statically
   composes the simple `Finish` fixture plus flat and nested `Conditional`
@@ -2021,7 +2023,11 @@ Current status:
 - The strict A/B harness now covers custom-event parity for `Log` workflows and
   failure/event parity for terminal `Error` workflows, with timestamp fields
   normalized out of the comparison.
-- Expanding the A/B harness to durable and agent fixtures remains pending.
+- The strict A/B harness now captures durable sleep/checkpoint requests and
+  includes a durable Delay fixture that diffs both completion output and
+  `/sleep` traffic.
+- Expanding the A/B harness to durable Agent checkpoint/replay fixtures remains
+  pending.
 
 ### Phase 14: Controlled Production Enablement
 

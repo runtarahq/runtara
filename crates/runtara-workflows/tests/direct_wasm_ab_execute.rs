@@ -28,6 +28,7 @@ const GROUP_BY_SIMPLE: &str = include_str!("fixtures/group_by_simple.json");
 const EDGE_CONDITION_PRIORITY: &str = include_str!("fixtures/edge_condition_priority.json");
 const LOG_ALL_LEVELS: &str = include_str!("fixtures/log_all_levels.json");
 const ERROR_DIRECT_SIMPLE: &str = include_str!("fixtures/error_direct_simple.json");
+const DELAY_DYNAMIC: &str = include_str!("fixtures/delay_dynamic.json");
 
 #[derive(Debug)]
 struct Completed {
@@ -45,11 +46,26 @@ struct RuntimeEvent {
     payload_json: Value,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+struct SleepRequest {
+    checkpoint_id: String,
+    duration_ms: u64,
+    state: Vec<u8>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct CheckpointRequest {
+    checkpoint_id: String,
+    state: Vec<u8>,
+}
+
 #[derive(Debug)]
 enum CapturedMessage {
     Completed(Completed),
     Failed(Failed),
     Event(RuntimeEvent),
+    Sleep(SleepRequest),
+    Checkpoint(CheckpointRequest),
 }
 
 #[derive(Debug)]
@@ -57,6 +73,8 @@ struct CapturedRun {
     output_json: Option<Value>,
     error_json: Option<Value>,
     events: Vec<RuntimeEvent>,
+    sleeps: Vec<SleepRequest>,
+    checkpoints: Vec<CheckpointRequest>,
     status_success: bool,
     stderr: String,
 }
@@ -382,6 +400,7 @@ fn route(
                 return (200, serde_json::json!({"success": true}));
             }
             ("POST", "checkpoint") => {
+                capture_checkpoint(body, sink);
                 return (
                     200,
                     serde_json::json!({
@@ -392,7 +411,10 @@ fn route(
                     }),
                 );
             }
-            ("POST", "sleep") => return (200, serde_json::json!({"success": true})),
+            ("POST", "sleep") => {
+                capture_sleep(body, sink);
+                return (200, serde_json::json!({"success": true}));
+            }
             _ => {}
         }
     }
@@ -431,6 +453,43 @@ fn capture_event(body: &[u8], sink: &mpsc::Sender<CapturedMessage>) {
         let _ = sink.send(CapturedMessage::Event(RuntimeEvent {
             subtype: subtype.to_string(),
             payload_json,
+        }));
+    }
+}
+
+fn capture_sleep(body: &[u8], sink: &mpsc::Sender<CapturedMessage>) {
+    if let Ok(parsed) = serde_json::from_slice::<Value>(body)
+        && let Some(checkpoint_id) = parsed.get("checkpoint_id").and_then(Value::as_str)
+    {
+        let duration_ms = parsed
+            .get("duration_ms")
+            .and_then(Value::as_u64)
+            .unwrap_or_default();
+        let state = parsed
+            .get("state")
+            .and_then(Value::as_str)
+            .and_then(|b64| base64::engine::general_purpose::STANDARD.decode(b64).ok())
+            .unwrap_or_default();
+        let _ = sink.send(CapturedMessage::Sleep(SleepRequest {
+            checkpoint_id: checkpoint_id.to_string(),
+            duration_ms,
+            state,
+        }));
+    }
+}
+
+fn capture_checkpoint(body: &[u8], sink: &mpsc::Sender<CapturedMessage>) {
+    if let Ok(parsed) = serde_json::from_slice::<Value>(body)
+        && let Some(checkpoint_id) = parsed.get("checkpoint_id").and_then(Value::as_str)
+    {
+        let state = parsed
+            .get("state")
+            .and_then(Value::as_str)
+            .and_then(|b64| base64::engine::general_purpose::STANDARD.decode(b64).ok())
+            .unwrap_or_default();
+        let _ = sink.send(CapturedMessage::Checkpoint(CheckpointRequest {
+            checkpoint_id: checkpoint_id.to_string(),
+            state,
         }));
     }
 }
@@ -505,11 +564,15 @@ fn execute_artifact(binary_path: &Path, instance_id: &str, workflow_input: &[u8]
     let mut output_json = None;
     let mut error_json = None;
     let mut events = Vec::new();
+    let mut sleeps = Vec::new();
+    let mut checkpoints = Vec::new();
     for message in capture_rx.try_iter() {
         match message {
             CapturedMessage::Completed(completed) => output_json = Some(completed.output_json),
             CapturedMessage::Failed(failed) => error_json = Some(failed.error_json),
             CapturedMessage::Event(event) => events.push(event),
+            CapturedMessage::Sleep(sleep) => sleeps.push(sleep),
+            CapturedMessage::Checkpoint(checkpoint) => checkpoints.push(checkpoint),
         }
     }
 
@@ -517,6 +580,8 @@ fn execute_artifact(binary_path: &Path, instance_id: &str, workflow_input: &[u8]
         output_json,
         error_json,
         events,
+        sleeps,
+        checkpoints,
         status_success: output.status.success(),
         stderr: stderr.into_owned(),
     }
@@ -589,6 +654,14 @@ fn assert_success_parity(
         normalized_events(&direct.events),
         "custom-event payload mismatch for {case_name}[{input_index}]"
     );
+    assert_eq!(
+        components.sleeps, direct.sleeps,
+        "durable sleep request mismatch for {case_name}[{input_index}]"
+    );
+    assert_eq!(
+        components.checkpoints, direct.checkpoints,
+        "checkpoint request mismatch for {case_name}[{input_index}]"
+    );
 }
 
 fn assert_failure_parity(
@@ -627,6 +700,14 @@ fn assert_failure_parity(
         normalized_events(&components.events),
         normalized_events(&direct.events),
         "failure custom-event payload mismatch for {case_name}[{input_index}]"
+    );
+    assert_eq!(
+        components.sleeps, direct.sleeps,
+        "failure durable sleep request mismatch for {case_name}[{input_index}]"
+    );
+    assert_eq!(
+        components.checkpoints, direct.checkpoints,
+        "failure checkpoint request mismatch for {case_name}[{input_index}]"
     );
 }
 
@@ -676,6 +757,11 @@ fn direct_wasm_matches_components_execution_for_supported_json_fixtures() {
             name: "log-events",
             graph_json: LOG_ALL_LEVELS,
             inputs: &[br#"{"message":"hello"}"#],
+        },
+        AbCase {
+            name: "durable-delay",
+            graph_json: DELAY_DYNAMIC,
+            inputs: &[br#"{"waitTime":0}"#],
         },
     ];
 
