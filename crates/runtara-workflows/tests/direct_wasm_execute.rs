@@ -640,6 +640,7 @@ fn run_direct_workflow_capture_with_preloaded_checkpoints(
         DirectCompilationInput {
             workflow_id: workflow_id.to_string(),
             version: 1,
+            source_checksum: None,
             execution_graph: graph,
             output_dir: temp.path().to_path_buf(),
             track_events,

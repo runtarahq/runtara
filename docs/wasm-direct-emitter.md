@@ -103,12 +103,12 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   compile result metadata to the composed artifact, and reports missing agent
   components with the exact agent id and expected bundle path.
 - Direct compilation now writes `artifact-metadata.json`. Before composition it
-  records workflow id/version, direct ABI version, manifest/support checksums,
-  template major, workflow-logic checksum, and required stdlib/runtime/agent
-  packages. After composition it records the final `workflow.wasm` checksum
-  plus resolved stdlib/runtime/agent component checksums and validates any
-  present component `.meta.json` sidecar against the actual Wasm bytes before
-  invoking `wac`.
+  records workflow id/version, optional raw-source checksum, direct ABI version,
+  manifest/support checksums, template major, workflow-logic checksum, and
+  required stdlib/runtime/agent packages. After composition it records the final
+  `workflow.wasm` checksum plus resolved stdlib/runtime/agent component
+  checksums and validates any present component `.meta.json` sidecar against
+  the actual Wasm bytes before invoking `wac`.
 - `direct_wasm::compile::compile_direct_workflow_composed` now provides the
   first direct compile entry that returns the final static
   `workflow.wasm` artifact shape while retaining `workflow-logic.wasm` for
@@ -938,7 +938,7 @@ that shape and add production metrics as the direct component path matures.
 4. Gate direct mode by feature support. If a graph includes unsupported steps,
    fall back to current compiler or fail with a precise unsupported-step report.
 5. Add per-workflow metadata:
-   - source checksum: pending raw-DSL integration; manifest checksum recorded;
+   - source checksum: optional direct compile input recorded when provided;
    - template major: recorded;
    - direct emitter version: direct ABI version recorded;
    - stdlib ABI version: package/WIT version recorded;
@@ -1328,10 +1328,11 @@ Current status:
   composed size/checksum metadata.
 - The direct compile result now includes `artifact-metadata.json`: compile-only
   output records workflow/direct ABI/manifest/support/workflow-logic identity
-  plus template major and component requirements; composed output records final
-  `workflow.wasm`, stdlib/runtime component checksums, agent component
-  checksums, and selected component sidecar version fields. Present sidecars
-  are checked against actual Wasm bytes before static composition.
+  plus optional source checksum, template major, and component requirements;
+  composed output records final `workflow.wasm`, stdlib/runtime component
+  checksums, agent component checksums, and selected component sidecar version
+  fields. Present sidecars are checked against actual Wasm bytes before static
+  composition.
 - Gated direct execution tests now run composed artifacts through the current
   environment runner shape and verify the SDK completion payload.
 - Finish mapping parity fixtures now compare direct stdlib output against the

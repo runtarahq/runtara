@@ -155,6 +155,12 @@ pub struct DirectCompilationInput {
     pub workflow_id: String,
     /// Workflow version number.
     pub version: u32,
+    /// Optional checksum of the original workflow DSL source.
+    ///
+    /// Callers that still have the raw source should pass the same checksum
+    /// used by the workflow image cache. `None` keeps the opt-in direct API
+    /// usable in tests and internal callers that only have an `ExecutionGraph`.
+    pub source_checksum: Option<String>,
     /// Parsed workflow execution graph.
     pub execution_graph: ExecutionGraph,
     /// Directory where the direct artifact directory should be created.
@@ -227,6 +233,9 @@ pub struct DirectArtifactMetadata {
     pub workflow_id: String,
     /// Workflow version used for compilation.
     pub workflow_version: u32,
+    /// Optional checksum of the original workflow DSL source.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_checksum: Option<String>,
     /// Direct artifact ABI version.
     pub direct_abi_version: u32,
     /// Direct workflow manifest schema version.
@@ -495,37 +504,43 @@ pub fn compile_direct_workflow_composed(
     Ok(result)
 }
 
-fn initial_artifact_metadata(
-    workflow_id: &str,
+struct InitialArtifactMetadataInput<'a> {
+    workflow_id: &'a str,
     workflow_version: u32,
-    manifest_checksum: &str,
-    support_report_checksum: &str,
-    workflow_logic_checksum: &str,
+    source_checksum: Option<&'a str>,
+    manifest_checksum: &'a str,
+    support_report_checksum: &'a str,
+    workflow_logic_checksum: &'a str,
     workflow_logic_size: usize,
-    component_artifacts: &DirectComponentArtifacts,
-) -> DirectArtifactMetadata {
+    component_artifacts: &'a DirectComponentArtifacts,
+}
+
+fn initial_artifact_metadata(input: InitialArtifactMetadataInput<'_>) -> DirectArtifactMetadata {
     DirectArtifactMetadata {
         schema_version: DIRECT_WORKFLOW_ARTIFACT_METADATA_VERSION,
         artifact_kind: "direct-workflow-component".to_string(),
-        workflow_id: workflow_id.to_string(),
-        workflow_version,
+        workflow_id: input.workflow_id.to_string(),
+        workflow_version: input.workflow_version,
+        source_checksum: input.source_checksum.map(str::to_string),
         direct_abi_version: DIRECT_WORKFLOW_ABI_VERSION,
         manifest_version: DIRECT_WORKFLOW_MANIFEST_VERSION,
         template_major_version: crate::compile::TEMPLATE_MAJOR_VERSION.to_string(),
-        manifest_checksum: manifest_checksum.to_string(),
-        support_report_checksum: support_report_checksum.to_string(),
+        manifest_checksum: input.manifest_checksum.to_string(),
+        support_report_checksum: input.support_report_checksum.to_string(),
         workflow_logic_wasm: DirectArtifactFileMetadata {
             filename: "workflow-logic.wasm".to_string(),
-            sha256: workflow_logic_checksum.to_string(),
-            size_bytes: workflow_logic_size as u64,
+            sha256: input.workflow_logic_checksum.to_string(),
+            size_bytes: input.workflow_logic_size as u64,
         },
         composed_wasm: None,
-        shared_components: component_artifacts
+        shared_components: input
+            .component_artifacts
             .shared_components
             .iter()
             .map(unresolved_shared_component_metadata)
             .collect(),
-        agent_components: component_artifacts
+        agent_components: input
+            .component_artifacts
             .agent_components
             .iter()
             .map(unresolved_agent_component_metadata)
@@ -804,15 +819,16 @@ pub fn compile_direct_workflow(
     let artifact_metadata_path = build_dir.join(DIRECT_WORKFLOW_ARTIFACT_METADATA_FILENAME);
     let world_wit_path = build_dir.join("wit/world.wit");
     let wac_path = build_dir.join("workflow.wac");
-    let artifact_metadata = initial_artifact_metadata(
-        &input.workflow_id,
-        input.version,
-        manifest.checksum(),
-        &support_report_checksum,
-        &wasm_checksum,
-        wasm.len(),
-        &component_artifacts,
-    );
+    let artifact_metadata = initial_artifact_metadata(InitialArtifactMetadataInput {
+        workflow_id: &input.workflow_id,
+        workflow_version: input.version,
+        source_checksum: input.source_checksum.as_deref(),
+        manifest_checksum: manifest.checksum(),
+        support_report_checksum: &support_report_checksum,
+        workflow_logic_checksum: &wasm_checksum,
+        workflow_logic_size: wasm.len(),
+        component_artifacts: &component_artifacts,
+    });
 
     fs::write(&wasm_path, &wasm)?;
     fs::write(&manifest_path, &manifest_json)?;
@@ -7089,6 +7105,7 @@ mod tests {
         let result = compile_direct_workflow(DirectCompilationInput {
             workflow_id: "simple/workflow".to_string(),
             version: 7,
+            source_checksum: Some("source-sha256".to_string()),
             execution_graph: fixture("simple"),
             output_dir: temp.path().to_path_buf(),
             track_events: false,
@@ -7129,6 +7146,7 @@ mod tests {
         );
         assert_eq!(metadata.workflow_id, "simple/workflow");
         assert_eq!(metadata.workflow_version, 7);
+        assert_eq!(metadata.source_checksum.as_deref(), Some("source-sha256"));
         assert_eq!(
             metadata.template_major_version,
             crate::compile::TEMPLATE_MAJOR_VERSION
@@ -7156,6 +7174,7 @@ mod tests {
         let result = compile_direct_workflow(DirectCompilationInput {
             workflow_id: "simple".to_string(),
             version: 1,
+            source_checksum: None,
             execution_graph: fixture("simple"),
             output_dir: temp.path().to_path_buf(),
             track_events: false,
@@ -7230,6 +7249,7 @@ mod tests {
         let result = compile_direct_workflow(DirectCompilationInput {
             workflow_id: "simple".to_string(),
             version: 1,
+            source_checksum: None,
             execution_graph: fixture("simple"),
             output_dir: temp.path().to_path_buf(),
             track_events: false,
@@ -7279,6 +7299,7 @@ mod tests {
         let result = compile_direct_workflow(DirectCompilationInput {
             workflow_id: "conditional".to_string(),
             version: 1,
+            source_checksum: None,
             execution_graph: fixture("conditional"),
             output_dir: temp.path().to_path_buf(),
             track_events: false,
@@ -7306,6 +7327,7 @@ mod tests {
         let result = compile_direct_workflow(DirectCompilationInput {
             workflow_id: "conditional-nested".to_string(),
             version: 1,
+            source_checksum: None,
             execution_graph: fixture("conditional_nested"),
             output_dir: temp.path().to_path_buf(),
             track_events: false,
@@ -7333,6 +7355,7 @@ mod tests {
         let result = compile_direct_workflow(DirectCompilationInput {
             workflow_id: "group-by".to_string(),
             version: 1,
+            source_checksum: None,
             execution_graph: fixture("group_by"),
             output_dir: temp.path().to_path_buf(),
             track_events: false,
@@ -7360,6 +7383,7 @@ mod tests {
         let result = compile_direct_workflow(DirectCompilationInput {
             workflow_id: "split".to_string(),
             version: 1,
+            source_checksum: None,
             execution_graph: fixture("split"),
             output_dir: temp.path().to_path_buf(),
             track_events: false,
@@ -7400,6 +7424,7 @@ mod tests {
         let result = compile_direct_workflow(DirectCompilationInput {
             workflow_id: "while".to_string(),
             version: 1,
+            source_checksum: None,
             execution_graph: fixture("while_simple"),
             output_dir: temp.path().to_path_buf(),
             track_events: false,
@@ -7427,6 +7452,7 @@ mod tests {
         let result = compile_direct_workflow(DirectCompilationInput {
             workflow_id: "split-with-schemas".to_string(),
             version: 1,
+            source_checksum: None,
             execution_graph: fixture("split_with_schemas"),
             output_dir: temp.path().to_path_buf(),
             track_events: false,
@@ -7460,6 +7486,7 @@ mod tests {
         let result = compile_direct_workflow(DirectCompilationInput {
             workflow_id: "split-dont-stop".to_string(),
             version: 1,
+            source_checksum: None,
             execution_graph: fixture("split_with_schemas_failing"),
             output_dir: temp.path().to_path_buf(),
             track_events: false,
@@ -7486,6 +7513,7 @@ mod tests {
         let result = compile_direct_workflow(DirectCompilationInput {
             workflow_id: "delay".to_string(),
             version: 1,
+            source_checksum: None,
             execution_graph: fixture("delay_simple"),
             output_dir: temp.path().to_path_buf(),
             track_events: false,
@@ -7516,6 +7544,7 @@ mod tests {
         let result = compile_direct_workflow(DirectCompilationInput {
             workflow_id: "delay-dynamic".to_string(),
             version: 1,
+            source_checksum: None,
             execution_graph: fixture("delay_dynamic"),
             output_dir: temp.path().to_path_buf(),
             track_events: false,
@@ -7549,6 +7578,7 @@ mod tests {
         let result = compile_direct_workflow(DirectCompilationInput {
             workflow_id: "delay-non-durable".to_string(),
             version: 1,
+            source_checksum: None,
             execution_graph: graph,
             output_dir: temp.path().to_path_buf(),
             track_events: false,
@@ -7576,6 +7606,7 @@ mod tests {
         let result = compile_direct_workflow(DirectCompilationInput {
             workflow_id: "filter".to_string(),
             version: 1,
+            source_checksum: None,
             execution_graph: fixture("filter"),
             output_dir: temp.path().to_path_buf(),
             track_events: false,
@@ -7603,6 +7634,7 @@ mod tests {
         let result = compile_direct_workflow(DirectCompilationInput {
             workflow_id: "switch-value".to_string(),
             version: 1,
+            source_checksum: None,
             execution_graph: fixture("switch_value"),
             output_dir: temp.path().to_path_buf(),
             track_events: false,
@@ -7630,6 +7662,7 @@ mod tests {
         let result = compile_direct_workflow(DirectCompilationInput {
             workflow_id: "switch-routing".to_string(),
             version: 1,
+            source_checksum: None,
             execution_graph: fixture("switch_routing"),
             output_dir: temp.path().to_path_buf(),
             track_events: false,
@@ -7657,6 +7690,7 @@ mod tests {
         let result = compile_direct_workflow(DirectCompilationInput {
             workflow_id: "log".to_string(),
             version: 1,
+            source_checksum: None,
             execution_graph: fixture("log"),
             output_dir: temp.path().to_path_buf(),
             track_events: false,
@@ -7684,6 +7718,7 @@ mod tests {
         let result = compile_direct_workflow(DirectCompilationInput {
             workflow_id: "error".to_string(),
             version: 1,
+            source_checksum: None,
             execution_graph: fixture("error"),
             output_dir: temp.path().to_path_buf(),
             track_events: false,
@@ -7711,6 +7746,7 @@ mod tests {
         let result = compile_direct_workflow(DirectCompilationInput {
             workflow_id: "edge-condition".to_string(),
             version: 1,
+            source_checksum: None,
             execution_graph: fixture("edge_condition"),
             output_dir: temp.path().to_path_buf(),
             track_events: false,
@@ -7739,6 +7775,7 @@ mod tests {
         let result = compile_direct_workflow(DirectCompilationInput {
             workflow_id: "agent".to_string(),
             version: 1,
+            source_checksum: None,
             execution_graph: non_durable_agent_graph(),
             output_dir: temp.path().to_path_buf(),
             track_events: false,
@@ -7770,6 +7807,7 @@ mod tests {
         let result = compile_direct_workflow(DirectCompilationInput {
             workflow_id: "agent-non-durable-default-retry".to_string(),
             version: 1,
+            source_checksum: None,
             execution_graph: non_durable_agent_default_retry_graph(),
             output_dir: temp.path().to_path_buf(),
             track_events: false,
@@ -7799,6 +7837,7 @@ mod tests {
         let result = compile_direct_workflow(DirectCompilationInput {
             workflow_id: "durable-agent".to_string(),
             version: 1,
+            source_checksum: None,
             execution_graph: fixture("transform"),
             output_dir: temp.path().to_path_buf(),
             track_events: false,
@@ -7830,6 +7869,7 @@ mod tests {
         let result = compile_direct_workflow(DirectCompilationInput {
             workflow_id: "durable-agent-retry".to_string(),
             version: 1,
+            source_checksum: None,
             execution_graph: durable_agent_retry_graph(),
             output_dir: temp.path().to_path_buf(),
             track_events: false,
@@ -7860,6 +7900,7 @@ mod tests {
         let result = compile_direct_workflow(DirectCompilationInput {
             workflow_id: "agent-connection".to_string(),
             version: 1,
+            source_checksum: None,
             execution_graph: non_durable_agent_connection_graph(),
             output_dir: temp.path().to_path_buf(),
             track_events: false,
@@ -7889,6 +7930,7 @@ mod tests {
         let result = compile_direct_workflow(DirectCompilationInput {
             workflow_id: "agent-on-error".to_string(),
             version: 1,
+            source_checksum: None,
             execution_graph: non_durable_agent_on_error_finish_graph(),
             output_dir: temp.path().to_path_buf(),
             track_events: false,
@@ -7922,6 +7964,7 @@ mod tests {
         let result = compile_direct_workflow(DirectCompilationInput {
             workflow_id: "agent-conditional-on-error".to_string(),
             version: 1,
+            source_checksum: None,
             execution_graph: non_durable_agent_conditional_on_error_graph(),
             output_dir: temp.path().to_path_buf(),
             track_events: false,
@@ -7954,6 +7997,7 @@ mod tests {
         let result = compile_direct_workflow(DirectCompilationInput {
             workflow_id: "durable-agent-conditional-on-error".to_string(),
             version: 1,
+            source_checksum: None,
             execution_graph: durable_agent_conditional_on_error_graph(),
             output_dir: temp.path().to_path_buf(),
             track_events: false,
@@ -7987,6 +8031,7 @@ mod tests {
         let result = compile_direct_workflow(DirectCompilationInput {
             workflow_id: "next-edge-condition".to_string(),
             version: 1,
+            source_checksum: None,
             execution_graph: graph,
             output_dir: temp.path().to_path_buf(),
             track_events: false,
@@ -12213,6 +12258,7 @@ mod tests {
         let result = compile_direct_workflow(DirectCompilationInput {
             workflow_id: "simple".to_string(),
             version: 1,
+            source_checksum: None,
             execution_graph: fixture("simple"),
             output_dir: temp.path().to_path_buf(),
             track_events: false,
@@ -12248,6 +12294,7 @@ mod tests {
         let mut result = compile_direct_workflow(DirectCompilationInput {
             workflow_id: "simple".to_string(),
             version: 1,
+            source_checksum: None,
             execution_graph: fixture("simple"),
             output_dir: temp.path().to_path_buf(),
             track_events: false,
@@ -12313,6 +12360,7 @@ mod tests {
         let mut result = compile_direct_workflow(DirectCompilationInput {
             workflow_id: "simple".to_string(),
             version: 1,
+            source_checksum: None,
             execution_graph: fixture("simple"),
             output_dir: temp.path().join("out"),
             track_events: false,
@@ -12357,6 +12405,7 @@ mod tests {
         let mut result = compile_direct_workflow(DirectCompilationInput {
             workflow_id: "agent".to_string(),
             version: 1,
+            source_checksum: None,
             execution_graph: non_durable_agent_graph(),
             output_dir: temp.path().join("out"),
             track_events: false,
@@ -12396,6 +12445,7 @@ mod tests {
             DirectCompilationInput {
                 workflow_id: "simple".to_string(),
                 version: 1,
+                source_checksum: None,
                 execution_graph: fixture("simple"),
                 output_dir: temp.path().to_path_buf(),
                 track_events: false,
@@ -12438,6 +12488,7 @@ mod tests {
         let err = compile_direct_workflow(DirectCompilationInput {
             workflow_id: "agent-timeout".to_string(),
             version: 1,
+            source_checksum: None,
             execution_graph: agent_timeout_graph(),
             output_dir: temp.path().to_path_buf(),
             track_events: false,
