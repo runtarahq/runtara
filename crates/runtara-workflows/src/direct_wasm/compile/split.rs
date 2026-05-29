@@ -9,7 +9,7 @@ use super::abi::{
     load_retptr_tag, push_retptr_arg, push_retptr_i32_load, return_if_retptr_error,
 };
 use super::checkpoint::{emit_checkpoint_lookup, emit_checkpoint_save};
-use super::debug::emit_step_debug_event;
+use super::debug::{emit_step_breakpoint, emit_step_debug_event};
 use super::dispatcher::emit_run_plan_mapping;
 use super::embed_workflow::emit_embed_workflow_child_error_and_continue;
 use super::mapping::emit_build_source;
@@ -184,6 +184,7 @@ pub(super) fn emit_split_plan(
     step_id: &str,
     split_id: u32,
     durable: bool,
+    breakpoint: bool,
     dont_stop_on_failed: bool,
     nested_plan: &DirectRunPlan,
     next_plan: &DirectRunPlan,
@@ -201,6 +202,20 @@ pub(super) fn emit_split_plan(
     workflow_error_kind: &DirectDataSegment,
     failure_target: Option<DirectFailureTarget>,
 ) {
+    emit_step_breakpoint(
+        body,
+        indices,
+        static_data,
+        breakpoint,
+        step_id,
+        source_ptr_local,
+        source_len_local,
+        output_ptr_local,
+        output_len_local,
+        route_ptr_local,
+        route_len_local,
+    );
+
     emit_step_debug_event(
         body,
         indices,

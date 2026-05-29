@@ -740,6 +740,12 @@ impl DirectJsonManifest {
                     .ok_or_else(|| "GroupBy config missing value".to_string())
                     .and_then(|value| apply_mapping_value(value, &source))?
             }
+            "Split" => {
+                let split = self
+                    .split_by_step(step.id.as_str())
+                    .ok_or_else(|| format!("missing direct Split config for '{}'", step.id))?;
+                split_debug_inputs(split, &source)?
+            }
             "Log" => {
                 let log = self
                     .log_by_step(step.id.as_str())
@@ -1766,6 +1772,10 @@ impl DirectJsonManifest {
             .find(|filter| filter.step_id == step_id)
     }
 
+    fn split_by_step(&self, step_id: &str) -> Option<&DirectJsonSplit> {
+        self.splits.values().find(|split| split.step_id == step_id)
+    }
+
     fn switch_by_step(&self, step_id: &str) -> Option<&DirectJsonSwitch> {
         self.switches
             .values()
@@ -2217,6 +2227,61 @@ fn split_items(split: &DirectJsonSplit, source: &Value) -> Result<Value, String>
     }
 
     Ok(Value::Array(items))
+}
+
+fn split_debug_inputs(split: &DirectJsonSplit, source: &Value) -> Result<Value, String> {
+    let value_mapping = split
+        .value
+        .get("value")
+        .ok_or_else(|| format!("Split step '{}' config missing value", split.step_id))?;
+    let mut inputs = Map::new();
+    inputs.insert(
+        "value".to_string(),
+        apply_mapping_value(value_mapping, source)?,
+    );
+    inputs.insert(
+        "parallelism".to_string(),
+        serde_json::json!(
+            split
+                .value
+                .get("parallelism")
+                .and_then(Value::as_u64)
+                .unwrap_or(0)
+        ),
+    );
+    inputs.insert(
+        "sequential".to_string(),
+        Value::Bool(split_bool_config(&split.value, "sequential")),
+    );
+    inputs.insert(
+        "dontStopOnFailed".to_string(),
+        Value::Bool(split_bool_config(&split.value, "dontStopOnFailed")),
+    );
+    inputs.insert(
+        "allowNull".to_string(),
+        Value::Bool(split_bool_config(&split.value, "allowNull")),
+    );
+    inputs.insert(
+        "convertSingleValue".to_string(),
+        Value::Bool(split_bool_config(&split.value, "convertSingleValue")),
+    );
+    inputs.insert(
+        "batchSize".to_string(),
+        serde_json::json!(
+            split
+                .value
+                .get("batchSize")
+                .and_then(Value::as_u64)
+                .unwrap_or(0)
+        ),
+    );
+    if let Some(extra_variables_mapping) = split.value.get("variables") {
+        inputs.insert(
+            "variables".to_string(),
+            apply_input_mapping(extra_variables_mapping, source)?,
+        );
+    }
+    Ok(Value::Object(inputs))
 }
 
 fn split_iteration_variables(
@@ -5808,6 +5873,44 @@ mod tests {
                     { "status": "active" },
                     { "status": "archived" }
                 ]),
+            ),
+            (
+                "Split",
+                "split",
+                json!({
+                    "splits": [{
+                        "id": 0,
+                        "stepId": "split",
+                        "name": "Split Items",
+                        "stepType": "Split",
+                        "purpose": "split.config",
+                        "value": {
+                            "value": { "valueType": "reference", "value": "data.items" },
+                            "parallelism": 2,
+                            "sequential": true,
+                            "dontStopOnFailed": true,
+                            "allowNull": true,
+                            "convertSingleValue": true,
+                            "batchSize": 10,
+                            "variables": {
+                                "tenant": { "valueType": "reference", "value": "variables.tenant" }
+                            }
+                        }
+                    }]
+                }),
+                json!({
+                    "value": [
+                        { "status": "active" },
+                        { "status": "archived" }
+                    ],
+                    "parallelism": 2,
+                    "sequential": true,
+                    "dontStopOnFailed": true,
+                    "allowNull": true,
+                    "convertSingleValue": true,
+                    "batchSize": 10,
+                    "variables": { "tenant": "t1" }
+                }),
             ),
             (
                 "Log",

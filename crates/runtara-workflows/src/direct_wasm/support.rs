@@ -628,14 +628,13 @@ fn supports_embed_workflow_child_graph_baseline(
 
 fn supports_split_step_baseline(step: &SplitStep) -> bool {
     let config = step.config.as_ref();
-    !step.breakpoint.unwrap_or(false)
-        && config.is_none_or(|config| {
-            config
-                .max_retries
-                .is_none_or(|max_retries| max_retries == 0)
-                && config.retry_delay.is_none()
-                && config.timeout.is_none()
-        })
+    config.is_none_or(|config| {
+        config
+            .max_retries
+            .is_none_or(|max_retries| max_retries == 0)
+            && config.retry_delay.is_none()
+            && config.timeout.is_none()
+    })
 }
 
 fn supports_while_step_baseline(step: &WhileStep) -> bool {
@@ -1197,12 +1196,6 @@ fn collect_split_step_unsupported(
         });
     };
 
-    if step.breakpoint.unwrap_or(false) {
-        push(
-            "split-breakpoint",
-            "Split breakpoints require a direct runtime checkpoint/pause ABI",
-        );
-    }
     if let Some(config) = step.config.as_ref() {
         if config
             .max_retries
@@ -2179,7 +2172,27 @@ mod tests {
     }
 
     #[test]
-    fn split_retry_timeout_and_breakpoint_are_rejected() {
+    fn split_breakpoints_are_supported_with_direct_pause_lowering() {
+        let mut graph = fixture("split");
+        graph.durable = Some(true);
+        let Some(Step::Split(split)) = graph.steps.get_mut("split") else {
+            panic!("expected Split fixture step");
+        };
+        split.breakpoint = Some(true);
+
+        let report = analyze_direct_wasm_support(&graph);
+
+        assert!(report.supported, "{:?}", report.unsupported);
+        assert!(
+            !report
+                .unsupported
+                .iter()
+                .any(|feature| feature.feature == "split-breakpoint")
+        );
+    }
+
+    #[test]
+    fn split_retry_and_timeout_are_rejected() {
         let mut graph = fixture("split");
         graph.durable = Some(false);
         let Some(Step::Split(split)) = graph.steps.get_mut("split") else {
@@ -2195,7 +2208,7 @@ mod tests {
         let report = analyze_direct_wasm_support(&graph);
 
         assert!(!report.supported);
-        for feature in ["split-breakpoint", "split-retry", "split-timeout"] {
+        for feature in ["split-retry", "split-timeout"] {
             assert!(
                 report.unsupported.iter().any(|unsupported| {
                     unsupported.step_id.as_deref() == Some("split")

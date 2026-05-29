@@ -42,8 +42,8 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   per-iteration aggregation for nested Split/While bodies at arbitrary depth.
   Supported normal/`next` edges can now either be a single unconditioned edge or
   a priority-ordered conditional edge set with exactly one unconditioned default
-  fallback. Split and While breakpoints remain outside the supported
-  subset, while durable direct-control breakpoints for `Finish`,
+  fallback. While breakpoints remain outside the supported subset, while
+  durable Split breakpoints, direct-control breakpoints for `Finish`,
   `Conditional`, `Filter`, `Switch`, `GroupBy`, `Log`, terminal `Error`,
   durable `Delay`, durable `WaitForSignal`, and static `EmbedWorkflow`
   call-site breakpoints plus durable `Agent` breakpoints now have direct
@@ -618,6 +618,17 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   structural coverage lives in
   `direct_compile_supports_dont_stop_split_with_nested_split_graph` and
   `direct_compile_supports_dont_stop_split_with_deep_nested_while_split_graph`.
+- Durable Split breakpoints are now supported. Direct mode emits the
+  generated-compatible breakpoint checkpoint/event before Split cache-key
+  lookup, iteration count resolution, debug-start emission, and nested body
+  execution, using the existing shared breakpoint runtime ABI and stdlib event
+  helper. The stdlib now builds generated-compatible Split breakpoint inputs
+  from the Split config (`value`, `parallelism`, `sequential`,
+  `dontStopOnFailed`, `allowNull`, `convertSingleValue`, `batchSize`, and
+  optional `variables`). Support tests remove the previous `split-breakpoint`
+  gate, structural coverage pins the breakpoint-before-Split-execution call
+  order, and gated A/B coverage checks first-hit pause plus checkpoint resume
+  against generated Rust.
 
 Current remaining action items:
 
@@ -625,8 +636,8 @@ Current remaining action items:
   behavior or direct mode intentionally becomes the first implementation. The
   current Rust `EmbedWorkflow` codegen appears to parse the field without
   enforcing a deadline.
-- Implement or intentionally keep gating Split retry, Split timeout, and Split
-  breakpoint semantics; each needs explicit durability/error aggregation tests.
+- Implement or intentionally keep gating Split retry and Split timeout
+  semantics; each needs explicit durability/error aggregation tests.
 - Implement While timeout, While breakpoint, and While `onError` routing
   semantics with structural and gated A/B coverage.
 - Close Agent hardening gaps: timeout/compensation policy, retry/failure
@@ -712,11 +723,12 @@ Deep nesting invariants for future work:
 
 Recommended next implementation slices:
 
-1. Pick one Split durability semantic: breakpoint, timeout, or retry. Keep the
-   other two gated until their generated Rust behavior is pinned. Split
-   breakpoint is likely the smallest first slice because direct breakpoint
-   helpers already exist for direct-control steps and Agent/Delay/Wait.
-2. Then implement While breakpoint or While timeout. While `onError` should
+1. Pick one remaining Split durability semantic: timeout or retry. Keep the
+   other gated until generated Rust behavior and differential tests are pinned.
+2. Then implement While breakpoint or While timeout. While breakpoint is likely
+   the smaller slice because the shared breakpoint ABI now covers Split,
+   direct-control steps, Agent, Delay, WaitForSignal, and EmbedWorkflow.
+   While `onError` should
    wait until failure routing through loop iteration state is specified and
    covered by generated-vs-direct tests.
 3. Continue Agent hardening after loop durability is stable: timeout,
@@ -2272,7 +2284,9 @@ Implementation steps:
      schema-validating sequential Split fixture;
    - checkpoint-returned pause plus cached resume A/B test: done for durable
      Split final-result checkpoints;
-   - Split retry/timeout/breakpoint durability semantics: pending and gated.
+   - Split breakpoint pause/resume: done with generated-compatible
+     checkpoint/event placement before Split execution;
+   - Split retry/timeout durability semantics: pending and gated.
 7. Add crash/resume tests:
    - resume after checkpoint: structural core replay test, gated host-level
      cached Agent replay smoke, durable Agent checkpoint-returned pause/shutdown
@@ -2323,10 +2337,12 @@ Implementation steps:
      and reinserts cached/fresh results into the `steps` context through the
      shared stdlib.
    - public support gate: enabled for sequential Split with final-result
-     checkpoint/replay; Split retry/timeout/breakpoint behavior remains gated.
+     checkpoint/replay and durable breakpoint pause/resume; Split retry/timeout
+     behavior remains gated.
    - strict A/B execution coverage: done for a durable schema-validating
      sequential Split fixture, including fresh and cached checkpoint replay
-     plus checkpoint-returned pause and cached resume.
+     plus checkpoint-returned pause and cached resume, and for Split
+     breakpoint first-hit pause plus checkpoint resume.
 2. Preserve split behavior:
    - null and non-array handling: done in stdlib;
    - item variable injection: done in stdlib;
@@ -2342,7 +2358,8 @@ Implementation steps:
      failures remain fail-fast control flow, matching the generated-code split
      behavior rather than item aggregation;
    - durable Split checkpoint/replay: done for the final-result checkpoint;
-   - Split retry/timeout/breakpoint semantics: pending.
+   - durable Split breakpoint semantics: done;
+   - Split retry/timeout semantics: pending.
 3. Implement `While`:
    - config/condition manifest records and nested graph link: done;
    - max iterations: stdlib helper, WIT export, and internal direct-core

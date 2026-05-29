@@ -634,6 +634,7 @@ fn direct_run_plan_breakpoint(run_plan: &DirectRunPlan) -> Option<bool> {
         | DirectRunPlan::SwitchValue { breakpoint, .. }
         | DirectRunPlan::SwitchRoute { breakpoint, .. }
         | DirectRunPlan::GroupBy { breakpoint, .. }
+        | DirectRunPlan::Split { breakpoint, .. }
         | DirectRunPlan::EmbedWorkflow { breakpoint, .. }
         | DirectRunPlan::Delay { breakpoint, .. }
         | DirectRunPlan::WaitForSignal { breakpoint, .. }
@@ -641,9 +642,7 @@ fn direct_run_plan_breakpoint(run_plan: &DirectRunPlan) -> Option<bool> {
         | DirectRunPlan::Agent { breakpoint, .. }
         | DirectRunPlan::Error { breakpoint, .. }
         | DirectRunPlan::Conditional { breakpoint, .. } => Some(*breakpoint),
-        DirectRunPlan::Split { .. }
-        | DirectRunPlan::While { .. }
-        | DirectRunPlan::EdgeRoute { .. } => None,
+        DirectRunPlan::While { .. } | DirectRunPlan::EdgeRoute { .. } => None,
     }
 }
 
@@ -5592,6 +5591,39 @@ fn direct_core_run_lowers_split_loop_through_stdlib() {
         "Split run should call split-append-output"
     );
     assert!(saw_split_output_call, "Split run should call split-output");
+}
+
+#[test]
+fn direct_core_run_lowers_split_breakpoint_before_split_execution() {
+    let mut graph = fixture("split");
+    graph.durable = Some(true);
+    let Some(runtara_dsl::Step::Split(split)) = graph.steps.get_mut("split") else {
+        panic!("expected Split fixture step");
+    };
+    split.breakpoint = Some(true);
+
+    let manifest = build_direct_workflow_manifest(&graph).expect("manifest");
+    let manifest_json = manifest.to_canonical_json().expect("manifest json");
+    let core_config = DirectCoreConfig::new(&manifest, &manifest_json, false).expect("core config");
+
+    let DirectRunPlan::Split { breakpoint, .. } = &core_config.run_plan else {
+        panic!("expected Split run plan");
+    };
+    assert!(*breakpoint, "durable Split breakpoint should lower");
+
+    let (resolve, world) =
+        build_direct_component_resolve_with_agents(&manifest.feature_summary.agent_ids)
+            .expect("agent resolve");
+    let core = emit_direct_core_module(&resolve, world, &core_config).expect("core module");
+    Validator::new()
+        .validate_all(&core)
+        .expect("Split breakpoint core module validates");
+
+    assert_direct_breakpoint_before_import(
+        &core,
+        "cm32p2|runtara:workflow-stdlib/json@0.1",
+        "split-cache-key",
+    );
 }
 
 #[test]
