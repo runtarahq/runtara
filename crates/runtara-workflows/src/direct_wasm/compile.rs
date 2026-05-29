@@ -20,6 +20,7 @@ mod debug;
 mod delay;
 mod dispatcher;
 mod edge_route;
+mod embed_retry;
 mod embed_workflow;
 mod error_step;
 mod log;
@@ -202,6 +203,14 @@ const DIRECT_EMBED_STEP_RESULT_LEN_LOCAL: u32 = 42;
 const DIRECT_EMBED_CHILD_ERROR_PTR_LOCAL: u32 = 43;
 const DIRECT_EMBED_CHILD_ERROR_LEN_LOCAL: u32 = 44;
 const DIRECT_EMBED_CHILD_ERROR_FLAG_LOCAL: u32 = 45;
+const DIRECT_EMBED_RETRY_ATTEMPT_LOCAL: u32 = 46;
+const DIRECT_EMBED_RETRYABLE_LOCAL: u32 = 47;
+const DIRECT_EMBED_RATE_LIMITED_LOCAL: u32 = 48;
+const DIRECT_EMBED_RETRY_AFTER_TAG_LOCAL: u32 = 49;
+const DIRECT_EMBED_RETRY_SLEEP_KEY_PTR_LOCAL: u32 = 50;
+const DIRECT_EMBED_RETRY_SLEEP_KEY_LEN_LOCAL: u32 = 51;
+const DIRECT_EMBED_RETRY_SLEEP_MS_LOCAL: u32 = 52;
+const DIRECT_EMBED_RATE_LIMIT_WAIT_TOTAL_LOCAL: u32 = 53;
 
 /// Input for the opt-in direct compiler.
 #[derive(Debug, Clone)]

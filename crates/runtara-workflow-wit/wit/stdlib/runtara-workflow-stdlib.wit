@@ -292,6 +292,31 @@ interface json {
         child-error: list<u8>,
     ) -> result<list<u8>, string>;
 
+    retry-sleep-key: func(
+        checkpoint-id: string,
+        attempt-number: u32,
+    ) -> result<list<u8>, string>;
+
+    retry-delay-ms: func(
+        attempt-number: u32,
+        total-attempts: u32,
+        base-delay-ms: u64,
+        max-delay-ms: u64,
+        retry-after-ms: option<u64>,
+    ) -> result<u64, string>;
+
+    workflow-error-retryable: func(
+        error: list<u8>,
+    ) -> result<bool, string>;
+
+    workflow-error-rate-limited: func(
+        error: list<u8>,
+    ) -> result<bool, string>;
+
+    workflow-error-retry-after-ms: func(
+        error: list<u8>,
+    ) -> result<option<u64>, string>;
+
     agent-output: func(
         agent-id: u32,
         source: list<u8>,

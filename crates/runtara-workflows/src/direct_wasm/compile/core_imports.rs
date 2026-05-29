@@ -82,6 +82,11 @@ pub(super) struct DirectCoreImportIndices {
     stdlib_embed_workflow_result: Option<u32>,
     stdlib_embed_workflow_output_from_result: Option<u32>,
     stdlib_embed_workflow_error: Option<u32>,
+    stdlib_retry_sleep_key: Option<u32>,
+    stdlib_retry_delay_ms: Option<u32>,
+    stdlib_workflow_error_retryable: Option<u32>,
+    stdlib_workflow_error_rate_limited: Option<u32>,
+    stdlib_workflow_error_retry_after_ms: Option<u32>,
     stdlib_agent_output: Option<u32>,
     stdlib_agent_validate_input: Option<u32>,
     stdlib_agent_connection_input: Option<u32>,
@@ -310,6 +315,26 @@ impl DirectCoreImportIndices {
                 self.stdlib_embed_workflow_error,
                 "stdlib.embed-workflow-error",
             )?,
+            stdlib_retry_sleep_key: require_import(
+                self.stdlib_retry_sleep_key,
+                "stdlib.retry-sleep-key",
+            )?,
+            stdlib_retry_delay_ms: require_import(
+                self.stdlib_retry_delay_ms,
+                "stdlib.retry-delay-ms",
+            )?,
+            stdlib_workflow_error_retryable: require_import(
+                self.stdlib_workflow_error_retryable,
+                "stdlib.workflow-error-retryable",
+            )?,
+            stdlib_workflow_error_rate_limited: require_import(
+                self.stdlib_workflow_error_rate_limited,
+                "stdlib.workflow-error-rate-limited",
+            )?,
+            stdlib_workflow_error_retry_after_ms: require_import(
+                self.stdlib_workflow_error_retry_after_ms,
+                "stdlib.workflow-error-retry-after-ms",
+            )?,
             stdlib_agent_output: require_import(self.stdlib_agent_output, "stdlib.agent-output")?,
             stdlib_agent_validate_input: require_import(
                 self.stdlib_agent_validate_input,
@@ -428,6 +453,11 @@ pub(super) struct DirectCoreFunctionIndices {
     pub(super) stdlib_embed_workflow_result: u32,
     pub(super) stdlib_embed_workflow_output_from_result: u32,
     pub(super) stdlib_embed_workflow_error: u32,
+    pub(super) stdlib_retry_sleep_key: u32,
+    pub(super) stdlib_retry_delay_ms: u32,
+    pub(super) stdlib_workflow_error_retryable: u32,
+    pub(super) stdlib_workflow_error_rate_limited: u32,
+    pub(super) stdlib_workflow_error_retry_after_ms: u32,
     pub(super) stdlib_agent_output: u32,
     pub(super) stdlib_agent_validate_input: u32,
     pub(super) stdlib_agent_connection_input: u32,
@@ -663,6 +693,21 @@ pub(super) fn import_core_function(
         import_indices.stdlib_embed_workflow_output_from_result = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "embed-workflow-error") {
         import_indices.stdlib_embed_workflow_error = Some(function_index);
+    } else if is_stdlib_import(resolve, interface, function, "retry-sleep-key") {
+        import_indices.stdlib_retry_sleep_key = Some(function_index);
+    } else if is_stdlib_import(resolve, interface, function, "retry-delay-ms") {
+        import_indices.stdlib_retry_delay_ms = Some(function_index);
+    } else if is_stdlib_import(resolve, interface, function, "workflow-error-retryable") {
+        import_indices.stdlib_workflow_error_retryable = Some(function_index);
+    } else if is_stdlib_import(resolve, interface, function, "workflow-error-rate-limited") {
+        import_indices.stdlib_workflow_error_rate_limited = Some(function_index);
+    } else if is_stdlib_import(
+        resolve,
+        interface,
+        function,
+        "workflow-error-retry-after-ms",
+    ) {
+        import_indices.stdlib_workflow_error_retry_after_ms = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "agent-output") {
         import_indices.stdlib_agent_output = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "agent-validate-input") {

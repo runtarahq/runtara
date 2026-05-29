@@ -5,7 +5,7 @@
 use super::error::DirectCompileError;
 use super::manifest::{
     DirectAgentManifest, DirectChildWorkflowGraphManifest, DirectDelayManifest, DirectEdgeManifest,
-    DirectGraphManifest, DirectSplitManifest, DirectWorkflowManifest,
+    DirectGraphManifest, DirectSplitManifest, DirectStepManifest, DirectWorkflowManifest,
 };
 
 #[derive(Debug, Clone)]
@@ -57,6 +57,8 @@ pub(super) enum DirectRunPlan {
         step_id: String,
         input_mapping_id: u32,
         durable: bool,
+        max_retries: u32,
+        retry_delay_ms: u64,
         child_plan: Box<DirectRunPlan>,
         next_plan: Box<DirectRunPlan>,
         error_plan: Option<DirectErrorRoutePlan>,
@@ -367,6 +369,8 @@ fn step_run_plan_inner(
                         .get("durable")
                         .and_then(serde_json::Value::as_bool)
                         .unwrap_or(true),
+                max_retries: embed_workflow_effective_max_retries(step),
+                retry_delay_ms: embed_workflow_effective_retry_delay_ms(step),
                 child_plan: Box::new(child_plan),
                 next_plan: Box::new(next_plan),
                 error_plan,
@@ -1054,6 +1058,21 @@ fn agent_effective_retry_delay_ms(agent: &DirectAgentManifest) -> u64 {
         .unwrap_or(if agent.rate_limited { 2_000 } else { 1_000 })
 }
 
+fn embed_workflow_effective_max_retries(step: &DirectStepManifest) -> u32 {
+    step.body
+        .get("maxRetries")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|max_retries| u32::try_from(max_retries).ok())
+        .unwrap_or(3)
+}
+
+fn embed_workflow_effective_retry_delay_ms(step: &DirectStepManifest) -> u64 {
+    step.body
+        .get("retryDelay")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(1_000)
+}
+
 fn finish_mapping_id(
     graph: &DirectGraphManifest,
     step_id: &str,
@@ -1140,6 +1159,32 @@ mod tests {
         }
     }
 
+    fn direct_embed_step_manifest(
+        max_retries: Option<u32>,
+        retry_delay: Option<u64>,
+    ) -> DirectStepManifest {
+        let mut body = serde_json::json!({
+            "stepType": "EmbedWorkflow",
+            "id": "call_child",
+            "childWorkflowId": "child_workflow",
+            "childVersion": "latest"
+        });
+        if let Some(max_retries) = max_retries {
+            body["maxRetries"] = serde_json::json!(max_retries);
+        }
+        if let Some(retry_delay) = retry_delay {
+            body["retryDelay"] = serde_json::json!(retry_delay);
+        }
+
+        DirectStepManifest {
+            id: "call_child".to_string(),
+            step_type: "EmbedWorkflow".to_string(),
+            name: None,
+            body,
+            nested_graphs: vec![],
+        }
+    }
+
     #[test]
     fn direct_agent_effective_retry_policy_matches_generated_defaults() {
         assert_eq!(
@@ -1182,5 +1227,20 @@ mod tests {
             )),
             750
         );
+    }
+
+    #[test]
+    fn direct_embed_workflow_effective_retry_policy_matches_generated_defaults() {
+        let defaults = direct_embed_step_manifest(None, None);
+        assert_eq!(embed_workflow_effective_max_retries(&defaults), 3);
+        assert_eq!(embed_workflow_effective_retry_delay_ms(&defaults), 1_000);
+
+        let no_retry = direct_embed_step_manifest(Some(0), Some(0));
+        assert_eq!(embed_workflow_effective_max_retries(&no_retry), 0);
+        assert_eq!(embed_workflow_effective_retry_delay_ms(&no_retry), 0);
+
+        let custom = direct_embed_step_manifest(Some(2), Some(250));
+        assert_eq!(embed_workflow_effective_max_retries(&custom), 2);
+        assert_eq!(embed_workflow_effective_retry_delay_ms(&custom), 250);
     }
 }

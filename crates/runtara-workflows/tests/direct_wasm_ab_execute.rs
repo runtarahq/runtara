@@ -25,6 +25,17 @@ const SIMPLE_PASSTHROUGH: &str = include_str!("fixtures/simple_passthrough.json"
 const EMBED_WORKFLOW: &str = include_str!("fixtures/embed_workflow_workflow.json");
 const EMBED_WORKFLOW_FINISH_CHILD: &str = include_str!("fixtures/embed_workflow_finish_child.json");
 const EMBED_WORKFLOW_ERROR_CHILD: &str = include_str!("fixtures/embed_workflow_error_child.json");
+const EMBED_WORKFLOW_TRANSIENT_ERROR_CHILD: &str =
+    include_str!("fixtures/embed_workflow_transient_error_child.json");
+const EMBED_WORKFLOW_RETRY_NESTED_CHILD: &str =
+    include_str!("fixtures/embed_workflow_retry_nested_child.json");
+const EMBED_WORKFLOW_TRANSIENT_ERROR_GRANDCHILD: &str =
+    include_str!("fixtures/embed_workflow_transient_error_grandchild.json");
+const EMBED_WORKFLOW_RETRY_PARENT: &str = include_str!("fixtures/embed_workflow_retry_parent.json");
+const EMBED_WORKFLOW_NO_RETRY_PARENT: &str =
+    include_str!("fixtures/embed_workflow_no_retry_parent.json");
+const EMBED_WORKFLOW_RETRY_ON_ERROR_PARENT: &str =
+    include_str!("fixtures/embed_workflow_retry_on_error_parent.json");
 const EMBED_WORKFLOW_CONDITIONAL_ERROR_CHILD: &str =
     include_str!("fixtures/embed_workflow_conditional_error_child.json");
 const EMBED_WORKFLOW_ON_ERROR_PARENT: &str =
@@ -224,6 +235,13 @@ struct CheckpointRequest {
 }
 
 #[derive(Debug, PartialEq, Eq)]
+struct RetryAttemptRequest {
+    checkpoint_id: String,
+    attempt: u32,
+    error_json: Option<Value>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
 struct SignalAckRequest {
     signal_type: String,
 }
@@ -235,6 +253,7 @@ enum CapturedMessage {
     Event(RuntimeEvent),
     Sleep(SleepRequest),
     Checkpoint(CheckpointRequest),
+    RetryAttempt(RetryAttemptRequest),
     Suspended,
     SignalAck(SignalAckRequest),
 }
@@ -246,6 +265,7 @@ struct CapturedRun {
     events: Vec<RuntimeEvent>,
     sleeps: Vec<SleepRequest>,
     checkpoints: Vec<CheckpointRequest>,
+    retry_attempts: Vec<RetryAttemptRequest>,
     suspended_count: usize,
     signal_acks: Vec<SignalAckRequest>,
     status_success: bool,
@@ -358,6 +378,11 @@ fn shared_components_dir() -> Option<PathBuf> {
             b"embed-workflow-result",
             b"embed-workflow-output-from-result",
             b"embed-workflow-error",
+            b"retry-sleep-key",
+            b"retry-delay-ms",
+            b"workflow-error-retryable",
+            b"workflow-error-rate-limited",
+            b"workflow-error-retry-after-ms",
         ];
         if !required_stdlib_markers.iter().all(|marker| {
             stdlib_bytes
@@ -455,6 +480,29 @@ fn embed_workflow_child_workflows() -> Vec<ChildWorkflowInput> {
 
 fn embed_workflow_error_child_workflows() -> Vec<ChildWorkflowInput> {
     embed_workflow_child_workflows_with_graph(EMBED_WORKFLOW_ERROR_CHILD)
+}
+
+fn embed_workflow_transient_error_child_workflows() -> Vec<ChildWorkflowInput> {
+    embed_workflow_child_workflows_with_graph(EMBED_WORKFLOW_TRANSIENT_ERROR_CHILD)
+}
+
+fn embed_workflow_nested_retry_child_workflows() -> Vec<ChildWorkflowInput> {
+    vec![
+        ChildWorkflowInput {
+            step_id: "call_child".to_string(),
+            workflow_id: "child_workflow".to_string(),
+            version_requested: "latest".to_string(),
+            version_resolved: 3,
+            execution_graph: graph_from_fixture(EMBED_WORKFLOW_RETRY_NESTED_CHILD),
+        },
+        ChildWorkflowInput {
+            step_id: "call_grandchild".to_string(),
+            workflow_id: "grandchild_workflow".to_string(),
+            version_requested: "latest".to_string(),
+            version_resolved: 7,
+            execution_graph: graph_from_fixture(EMBED_WORKFLOW_TRANSIENT_ERROR_GRANDCHILD),
+        },
+    ]
 }
 
 fn embed_workflow_conditional_error_child_workflows() -> Vec<ChildWorkflowInput> {
@@ -803,6 +851,10 @@ fn route(
                 capture_sleep(body, sink);
                 return (200, serde_json::json!({"success": true}));
             }
+            ("POST", "retry") => {
+                capture_retry_attempt(body, sink);
+                return (200, serde_json::json!({"success": true}));
+            }
             ("POST", "suspended") => {
                 let _ = sink.send(CapturedMessage::Suspended);
                 return (200, serde_json::json!({"success": true}));
@@ -972,6 +1024,30 @@ fn capture_sleep(body: &[u8], sink: &mpsc::Sender<CapturedMessage>) {
             checkpoint_id: checkpoint_id.to_string(),
             duration_ms,
             state,
+        }));
+    }
+}
+
+fn capture_retry_attempt(body: &[u8], sink: &mpsc::Sender<CapturedMessage>) {
+    if let Ok(parsed) = serde_json::from_slice::<Value>(body)
+        && let Some(checkpoint_id) = parsed.get("checkpoint_id").and_then(Value::as_str)
+    {
+        let attempt = parsed
+            .get("attempt")
+            .and_then(Value::as_u64)
+            .and_then(|attempt| u32::try_from(attempt).ok())
+            .unwrap_or_default();
+        let error_json = parsed
+            .get("error_message")
+            .and_then(Value::as_str)
+            .map(|error| {
+                serde_json::from_str::<Value>(error)
+                    .unwrap_or_else(|_| Value::String(error.to_string()))
+            });
+        let _ = sink.send(CapturedMessage::RetryAttempt(RetryAttemptRequest {
+            checkpoint_id: checkpoint_id.to_string(),
+            attempt,
+            error_json,
         }));
     }
 }
@@ -1191,6 +1267,7 @@ fn execute_artifact_with_options(
     let mut events = Vec::new();
     let mut sleeps = Vec::new();
     let mut checkpoints = Vec::new();
+    let mut retry_attempts = Vec::new();
     let mut suspended_count = 0usize;
     let mut signal_acks = Vec::new();
     for message in capture_rx.try_iter() {
@@ -1200,6 +1277,7 @@ fn execute_artifact_with_options(
             CapturedMessage::Event(event) => events.push(event),
             CapturedMessage::Sleep(sleep) => sleeps.push(sleep),
             CapturedMessage::Checkpoint(checkpoint) => checkpoints.push(checkpoint),
+            CapturedMessage::RetryAttempt(retry_attempt) => retry_attempts.push(retry_attempt),
             CapturedMessage::Suspended => suspended_count += 1,
             CapturedMessage::SignalAck(signal_ack) => signal_acks.push(signal_ack),
         }
@@ -1211,6 +1289,7 @@ fn execute_artifact_with_options(
         events,
         sleeps,
         checkpoints,
+        retry_attempts,
         suspended_count,
         signal_acks,
         status_success: output.status.success(),
@@ -1305,6 +1384,21 @@ fn normalized_checkpoints(checkpoints: &[CheckpointRequest]) -> Vec<(String, Vec
             (
                 normalized_checkpoint_id(&checkpoint.checkpoint_id),
                 checkpoint.state.clone(),
+            )
+        })
+        .collect()
+}
+
+fn normalized_retry_attempts(
+    retry_attempts: &[RetryAttemptRequest],
+) -> Vec<(String, u32, Option<Value>)> {
+    retry_attempts
+        .iter()
+        .map(|retry| {
+            (
+                normalized_checkpoint_id(&retry.checkpoint_id),
+                retry.attempt,
+                retry.error_json.clone(),
             )
         })
         .collect()
@@ -2619,6 +2713,288 @@ fn direct_wasm_matches_components_embed_workflow_parent_on_error() {
         expected_lookup
     );
     assert_eq!(normalized_checkpoints(&direct.checkpoints), expected_lookup);
+}
+
+#[test]
+fn direct_wasm_matches_components_embed_workflow_retry_exhausted() {
+    let Some(components_dir) = direct_ab_components_dir() else {
+        return;
+    };
+    let _data = setup_data_dir();
+
+    let child_workflows = embed_workflow_transient_error_child_workflows();
+    let components_artifact = compile_components_artifact_with_child_workflows(
+        "embed-workflow-retry-exhausted",
+        EMBED_WORKFLOW_RETRY_PARENT,
+        &child_workflows,
+    );
+    let direct_artifact = compile_direct_artifact_with_child_workflows(
+        &components_dir,
+        "embed-workflow-retry-exhausted",
+        EMBED_WORKFLOW_RETRY_PARENT,
+        &child_workflows,
+    );
+    assert_eq!(
+        direct_artifact.compiler_mode,
+        WorkflowCompilerMode::DirectWasm
+    );
+
+    let workflow_input = br#"{"input":"retry-child"}"#;
+    let components_input = components_sdk_input(workflow_input);
+    let components = execute_artifact(
+        &components_artifact,
+        "ab-components-embed-workflow-retry-exhausted",
+        &components_input,
+    );
+    let direct = execute_artifact(
+        &direct_artifact.path,
+        "ab-direct-embed-workflow-retry-exhausted",
+        workflow_input,
+    );
+
+    assert_failure_parity("embed-workflow-retry-exhausted", 0, &components, &direct);
+
+    let expected_error = serde_json::json!({
+        "stepId": "call_child",
+        "stepName": "Unnamed",
+        "stepType": "EmbedWorkflow",
+        "category": "transient",
+        "code": "CHILD_WORKFLOW_FAILED",
+        "message": "Child workflow child_workflow failed",
+        "severity": "error",
+        "childWorkflowId": "child_workflow",
+        "childError": {
+            "stepId": "fail",
+            "stepName": "Transient Child Failure",
+            "category": "transient",
+            "code": "CHILD_TEMPORARY",
+            "message": "Child workflow failed transiently",
+            "severity": "error",
+            "context": { "childInput": "retry-child" }
+        }
+    });
+    assert_eq!(components.error_json.as_ref(), Some(&expected_error));
+    assert_eq!(direct.error_json.as_ref(), Some(&expected_error));
+
+    let expected_lookup = vec![(EMBED_WORKFLOW_CACHE_KEY.to_string(), Vec::new())];
+    assert_eq!(
+        normalized_checkpoints(&components.checkpoints),
+        expected_lookup
+    );
+    assert_eq!(normalized_checkpoints(&direct.checkpoints), expected_lookup);
+
+    let expected_retry_attempts = vec![
+        (
+            EMBED_WORKFLOW_CACHE_KEY.to_string(),
+            2,
+            Some(expected_error.clone()),
+        ),
+        (
+            EMBED_WORKFLOW_CACHE_KEY.to_string(),
+            3,
+            Some(expected_error),
+        ),
+    ];
+    assert_eq!(
+        normalized_retry_attempts(&components.retry_attempts),
+        expected_retry_attempts
+    );
+    assert_eq!(
+        normalized_retry_attempts(&direct.retry_attempts),
+        expected_retry_attempts
+    );
+}
+
+#[test]
+fn direct_wasm_matches_components_nested_embed_workflow_retry_parent_frame_isolation() {
+    let Some(components_dir) = direct_ab_components_dir() else {
+        return;
+    };
+    let _data = setup_data_dir();
+
+    let child_workflows = embed_workflow_nested_retry_child_workflows();
+    let components_artifact = compile_components_artifact_with_child_workflows(
+        "embed-workflow-nested-retry",
+        EMBED_WORKFLOW_RETRY_PARENT,
+        &child_workflows,
+    );
+    let direct_artifact = compile_direct_artifact_with_child_workflows(
+        &components_dir,
+        "embed-workflow-nested-retry",
+        EMBED_WORKFLOW_RETRY_PARENT,
+        &child_workflows,
+    );
+    assert_eq!(
+        direct_artifact.compiler_mode,
+        WorkflowCompilerMode::DirectWasm
+    );
+
+    let workflow_input = br#"{"input":"nested-retry-child"}"#;
+    let components_input = components_sdk_input(workflow_input);
+    let components = execute_artifact(
+        &components_artifact,
+        "ab-components-embed-workflow-nested-retry",
+        &components_input,
+    );
+    let direct = execute_artifact(
+        &direct_artifact.path,
+        "ab-direct-embed-workflow-nested-retry",
+        workflow_input,
+    );
+
+    assert_failure_parity("embed-workflow-nested-retry", 0, &components, &direct);
+
+    let expected_error = serde_json::json!({
+        "stepId": "call_child",
+        "stepName": "Unnamed",
+        "stepType": "EmbedWorkflow",
+        "category": "transient",
+        "code": "CHILD_WORKFLOW_FAILED",
+        "message": "Child workflow child_workflow failed",
+        "severity": "error",
+        "childWorkflowId": "child_workflow",
+        "childError": {
+            "stepId": "call_grandchild",
+            "stepName": "Unnamed",
+            "stepType": "EmbedWorkflow",
+            "category": "transient",
+            "code": "CHILD_WORKFLOW_FAILED",
+            "message": "Child workflow grandchild_workflow failed",
+            "severity": "error",
+            "childWorkflowId": "grandchild_workflow",
+            "childError": {
+                "stepId": "fail_grandchild",
+                "stepName": "Transient Grandchild Failure",
+                "category": "transient",
+                "code": "GRANDCHILD_TEMPORARY",
+                "message": "Grandchild workflow failed transiently",
+                "severity": "error",
+                "context": { "grandchildInput": "nested-retry-child" }
+            }
+        }
+    });
+    assert_eq!(components.error_json.as_ref(), Some(&expected_error));
+    assert_eq!(direct.error_json.as_ref(), Some(&expected_error));
+
+    let components_retry_attempts = normalized_retry_attempts(&components.retry_attempts);
+    let direct_retry_attempts = normalized_retry_attempts(&direct.retry_attempts);
+    assert_eq!(direct_retry_attempts, components_retry_attempts);
+    assert_eq!(
+        direct_retry_attempts
+            .iter()
+            .map(|(key, attempt, _)| (key.as_str(), *attempt))
+            .collect::<Vec<_>>(),
+        vec![(EMBED_WORKFLOW_CACHE_KEY, 2), (EMBED_WORKFLOW_CACHE_KEY, 3)]
+    );
+    assert!(
+        direct_retry_attempts
+            .iter()
+            .all(|(_, _, error)| { error.as_ref() == Some(&expected_error) })
+    );
+}
+
+#[test]
+fn direct_wasm_matches_components_embed_workflow_no_retry_transient_child() {
+    let Some(components_dir) = direct_ab_components_dir() else {
+        return;
+    };
+    let _data = setup_data_dir();
+
+    let child_workflows = embed_workflow_transient_error_child_workflows();
+    let components_artifact = compile_components_artifact_with_child_workflows(
+        "embed-workflow-no-retry",
+        EMBED_WORKFLOW_NO_RETRY_PARENT,
+        &child_workflows,
+    );
+    let direct_artifact = compile_direct_artifact_with_child_workflows(
+        &components_dir,
+        "embed-workflow-no-retry",
+        EMBED_WORKFLOW_NO_RETRY_PARENT,
+        &child_workflows,
+    );
+    assert_eq!(
+        direct_artifact.compiler_mode,
+        WorkflowCompilerMode::DirectWasm
+    );
+
+    let workflow_input = br#"{"input":"no-retry-child"}"#;
+    let components_input = components_sdk_input(workflow_input);
+    let components = execute_artifact(
+        &components_artifact,
+        "ab-components-embed-workflow-no-retry",
+        &components_input,
+    );
+    let direct = execute_artifact(
+        &direct_artifact.path,
+        "ab-direct-embed-workflow-no-retry",
+        workflow_input,
+    );
+
+    assert_failure_parity("embed-workflow-no-retry", 0, &components, &direct);
+    assert!(components.retry_attempts.is_empty());
+    assert!(direct.retry_attempts.is_empty());
+}
+
+#[test]
+fn direct_wasm_matches_components_embed_workflow_parent_on_error_after_retry_exhausted() {
+    let Some(components_dir) = direct_ab_components_dir() else {
+        return;
+    };
+    let _data = setup_data_dir();
+
+    let child_workflows = embed_workflow_transient_error_child_workflows();
+    let components_artifact = compile_components_artifact_with_child_workflows(
+        "embed-workflow-retry-on-error",
+        EMBED_WORKFLOW_RETRY_ON_ERROR_PARENT,
+        &child_workflows,
+    );
+    let direct_artifact = compile_direct_artifact_with_child_workflows(
+        &components_dir,
+        "embed-workflow-retry-on-error",
+        EMBED_WORKFLOW_RETRY_ON_ERROR_PARENT,
+        &child_workflows,
+    );
+    assert_eq!(
+        direct_artifact.compiler_mode,
+        WorkflowCompilerMode::DirectWasm
+    );
+
+    let workflow_input = br#"{"input":"retry-on-error-child"}"#;
+    let components_input = components_sdk_input(workflow_input);
+    let components = execute_artifact(
+        &components_artifact,
+        "ab-components-embed-workflow-retry-on-error",
+        &components_input,
+    );
+    let direct = execute_artifact(
+        &direct_artifact.path,
+        "ab-direct-embed-workflow-retry-on-error",
+        workflow_input,
+    );
+
+    assert_success_parity("embed-workflow-retry-on-error", 0, &components, &direct);
+
+    let expected_output = serde_json::json!({
+        "handled": true,
+        "code": "CHILD_WORKFLOW_FAILED",
+        "category": "transient",
+        "childCode": "CHILD_TEMPORARY",
+        "childStep": "fail"
+    });
+    assert_eq!(components.output_json.as_ref(), Some(&expected_output));
+    assert_eq!(direct.output_json.as_ref(), Some(&expected_output));
+
+    assert_eq!(
+        normalized_retry_attempts(&components.retry_attempts),
+        normalized_retry_attempts(&direct.retry_attempts)
+    );
+    assert_eq!(
+        normalized_retry_attempts(&direct.retry_attempts)
+            .iter()
+            .map(|(_, attempt, _)| *attempt)
+            .collect::<Vec<_>>(),
+        vec![2, 3]
+    );
 }
 
 #[test]

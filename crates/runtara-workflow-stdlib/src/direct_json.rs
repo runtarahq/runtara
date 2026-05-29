@@ -48,6 +48,13 @@ pub struct DirectJsonAgentRetryError {
     pub rate_limited: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DirectJsonWorkflowRetryInfo {
+    retryable: bool,
+    rate_limited: bool,
+    retry_after_ms: Option<u64>,
+}
+
 impl DirectJsonManifest {
     /// Parse direct manifest JSON emitted by `runtara-workflows`.
     pub fn parse(bytes: &[u8]) -> Result<Self, String> {
@@ -1112,13 +1119,13 @@ impl DirectJsonManifest {
         Ok(agent_cache_key(agent, &source).into_bytes())
     }
 
-    /// Build the generated-code-compatible durable sleep key for an Agent retry.
-    pub fn agent_retry_sleep_key(checkpoint_id: &str, attempt_number: u32) -> Vec<u8> {
+    /// Build the generated-code-compatible durable sleep key for a retry.
+    pub fn retry_sleep_key(checkpoint_id: &str, attempt_number: u32) -> Vec<u8> {
         format!("{checkpoint_id}::retry_sleep::{attempt_number}").into_bytes()
     }
 
-    /// Compute the generated-code-compatible delay for the next Agent retry.
-    pub fn agent_retry_delay_ms(
+    /// Compute the generated-code-compatible delay for the next retry.
+    pub fn retry_delay_ms(
         attempt_number: u32,
         total_attempts: u32,
         base_delay_ms: u64,
@@ -1134,6 +1141,43 @@ impl DirectJsonManifest {
         base_delay_ms
             .saturating_mul(delay_multiplier)
             .min(max_delay_ms)
+    }
+
+    /// Build the generated-code-compatible durable sleep key for an Agent retry.
+    pub fn agent_retry_sleep_key(checkpoint_id: &str, attempt_number: u32) -> Vec<u8> {
+        Self::retry_sleep_key(checkpoint_id, attempt_number)
+    }
+
+    /// Compute the generated-code-compatible delay for the next Agent retry.
+    pub fn agent_retry_delay_ms(
+        attempt_number: u32,
+        total_attempts: u32,
+        base_delay_ms: u64,
+        max_delay_ms: u64,
+        retry_after_ms: Option<u64>,
+    ) -> u64 {
+        Self::retry_delay_ms(
+            attempt_number,
+            total_attempts,
+            base_delay_ms,
+            max_delay_ms,
+            retry_after_ms,
+        )
+    }
+
+    /// Return whether a workflow error should consume the normal retry path.
+    pub fn workflow_error_retryable(error: &[u8]) -> bool {
+        workflow_retry_info(error).retryable
+    }
+
+    /// Return whether a workflow error should use the rate-limit retry budget.
+    pub fn workflow_error_rate_limited(error: &[u8]) -> bool {
+        workflow_retry_info(error).rate_limited
+    }
+
+    /// Extract a generated-code-compatible retry-after override from a workflow error.
+    pub fn workflow_error_retry_after_ms(error: &[u8]) -> Option<u64> {
+        workflow_retry_info(error).retry_after_ms
     }
 
     /// Convert a WIT `error-info` into the raw JSON envelope used for retries.
@@ -2774,6 +2818,31 @@ fn agent_error_info_envelope(
     }
 
     Value::Object(object).to_string()
+}
+
+fn workflow_retry_info(error: &[u8]) -> DirectJsonWorkflowRetryInfo {
+    let Ok(parsed) = serde_json::from_slice::<Value>(error) else {
+        return DirectJsonWorkflowRetryInfo {
+            retryable: true,
+            rate_limited: false,
+            retry_after_ms: None,
+        };
+    };
+
+    let category = parsed.get("category").and_then(Value::as_str);
+    let code = parsed.get("code").and_then(Value::as_str).unwrap_or("");
+    let rate_limited = agent_error_code_is_rate_limited(code) || code == "HTTP_RATE_LIMITED";
+    let retry_after_ms = parsed.get("retryAfterMs").and_then(Value::as_u64);
+    let auto_retry_429 = std::env::var("AUTO_RETRY_ON_429")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(true);
+
+    DirectJsonWorkflowRetryInfo {
+        retryable: category != Some("permanent") && (!rate_limited || auto_retry_429),
+        rate_limited,
+        retry_after_ms,
+    }
 }
 
 fn agent_error_code_is_rate_limited(code: &str) -> bool {
@@ -5911,6 +5980,33 @@ mod tests {
             String::from_utf8(key).expect("utf8"),
             "wf-42::agent::utils::normalize::agent::[1]::retry_sleep::2"
         );
+    }
+
+    #[test]
+    fn workflow_error_retry_info_matches_resilient_macro_classification() {
+        let transient = br#"{"category":"transient","code":"TEMPORARY"}"#;
+        assert!(DirectJsonManifest::workflow_error_retryable(transient));
+        assert!(!DirectJsonManifest::workflow_error_rate_limited(transient));
+        assert_eq!(
+            DirectJsonManifest::workflow_error_retry_after_ms(transient),
+            None
+        );
+
+        let permanent = br#"{"category":"permanent","code":"BAD_INPUT"}"#;
+        assert!(!DirectJsonManifest::workflow_error_retryable(permanent));
+
+        let rate_limited =
+            br#"{"category":"transient","code":"HTTP_RATE_LIMITED","retryAfterMs":1500}"#;
+        assert!(DirectJsonManifest::workflow_error_retryable(rate_limited));
+        assert!(DirectJsonManifest::workflow_error_rate_limited(
+            rate_limited
+        ));
+        assert_eq!(
+            DirectJsonManifest::workflow_error_retry_after_ms(rate_limited),
+            Some(1_500)
+        );
+
+        assert!(DirectJsonManifest::workflow_error_retryable(b"not-json"));
     }
 
     #[test]

@@ -50,21 +50,24 @@ Current implementation progress on `codex/wasm-direct-emitter`:
 - The direct core emitter now has the first static `EmbedWorkflow` lowering
   slice. `compile_direct_workflow` uses a child-aware support gate and accepts
   `EmbedWorkflow` only when the call site has one preloaded static child graph,
-  no breakpoint/timeout/custom retry behavior, and the child graph is limited
-  to direct-control `Finish`/`Conditional`/`Error` steps plus nested static
+  no breakpoint/timeout behavior, and the child graph is limited to
+  direct-control `Finish`/`Conditional`/`Error` steps plus nested static
   `EmbedWorkflow` calls. The lowerer maps parent input
   through the manifest `EmbedWorkflow.inputMapping`, builds isolated child
   variables/source with generated-compatible scope and cache-prefix values,
-  runs the child run-plan inline, wraps the child output as the parent
-  `EmbedWorkflow` step result, writes/replays the durable final-result
+  runs the child run-plan inline through generated-compatible retry/backoff
+  handling, wraps the child output as the parent `EmbedWorkflow` step result,
+  writes/replays the durable final-result
   checkpoint for the call site, rebuilds the parent source, checks runtime
   signals, and continues normal flow. Gated direct-vs-generated A/B execution
   now covers fresh and cached durable static calls for a finish-only child and
   generated-compatible wrapping of child `Error` failures reached directly or
   through child `Conditional` control flow, deeply nested static child workflow
   isolation/cache-key behavior, deeply nested child failure wrapping, and parent
-  `EmbedWorkflow.onError` handling for child failures. Retry/backoff remains
-  Phase 10 hardening work.
+  `EmbedWorkflow.onError` handling after child retry exhaustion. Retry/backoff
+  support includes default policy materialization, explicit `maxRetries` /
+  `retryDelay`, retry-attempt recording, and nested parent-frame preservation
+  across retry attempts.
 - `direct_wasm::compile::compile_direct_workflow` is an opt-in entry point that
   emits a valid component-format artifact for the currently supported direct
   graph shapes,
@@ -88,6 +91,9 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   failure collection, result accumulation, durable cache-key/result helpers,
   cached-result reinsertion into `steps`, and result step envelopes, including
   the generated-code-compatible `dontStopOnFailed` accumulator/result shape.
+  Shared retry helpers now cover generic retry sleep keys, exponential delay
+  resolution, and workflow-error retry classification so Agent and
+  `EmbedWorkflow` retry lowering use one stdlib contract.
   It also contains the first While stdlib helper surface for max-iteration
   resolution, loop state initialization/advance, loop-context injection for
   condition evaluation, generated-code-compatible iteration variables including
@@ -319,16 +325,20 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   durable finish-only child calls plus generated-compatible wrapping of child
   `Error` failures reached directly or through child `Conditional` control
   flow, parent `EmbedWorkflow.onError` handling for child failures, nested static
-  child calls, and deeply nested child failure wrapping, with preloaded child
-  graphs passed through both compile paths.
+  child calls, child retry exhaustion, parent `onError` after retry exhaustion,
+  nested parent retry through a failing grandchild, and deeply nested child
+  failure wrapping, with preloaded child graphs passed through both compile
+  paths.
 - Deep nesting is now treated as an explicit support invariant: nested static
   `EmbedWorkflow` calls preserve their inline frame state on the Wasm stack,
-  child failure catch targets preserve/restore parent source, steps, and route
-  state before routing to parent `onError` or an enclosing failure target, and
-  nested `Split`/`While` loop subgraphs preserve caller/current loop scratch
-  frames before and after nested loop execution. Child-local `onError` inside a
-  statically embedded child graph remains gated until child-terminal handling
-  is lowered separately from root workflow completion. `Split(dontStopOnFailed)`
+  child retry attempt frames preserve parent source, steps, route/cache-key,
+  retry attempt, rate-limit wait, and child variable locals across deeply nested
+  child execution, child failure catch targets restore caller state before
+  routing to parent `onError` or an enclosing failure target, and nested
+  `Split`/`While` loop subgraphs preserve caller/current loop scratch frames
+  before and after nested loop execution. Child-local `onError` inside a
+  statically embedded child graph remains gated until child-terminal handling is
+  lowered separately from root workflow completion. `Split(dontStopOnFailed)`
   with nested loop bodies remains gated until failure aggregation has its own
   reentrant frame model.
 - `tests/direct_wasm_execute.rs` now provides gated direct execution smoke
@@ -870,6 +880,10 @@ Emitter module boundaries should stay readable as support broadens:
   retry condition checks, retry-delay resolution, sleep/checkpoint calls,
   durable retry-attempt recording, and Agent retptr error conversion into retry
   metadata.
+- `compile/embed_retry.rs` owns `EmbedWorkflow` retry/backoff helper lowering,
+  including workflow-error retry classification, rate-limit wait accounting,
+  durable sleep/checkpoint calls for retry-after waits, blocking sleeps for
+  normal backoff, and durable retry-attempt recording.
 - `compile/agent_invoke.rs` owns low-level Agent component invocation argument
   lowering, including legacy packed argument layout, static connection argument
   fields, component-model parameter padding, and final Agent import calls.
@@ -899,8 +913,9 @@ Emitter module boundaries should stay readable as support broadens:
   failure conversion shared by ABI and Split failure paths.
 - `compile/embed_workflow.rs` owns static EmbedWorkflow lowering, including
   parent-to-child input mapping, child variable/source construction, inline
-  child run-plan dispatch, generated-compatible parent step-result wrapping,
-  durable final-result checkpoint replay/save, parent source restoration, and
+  child run-plan dispatch, per-attempt frame preservation for deeply nested
+  child execution, generated-compatible parent step-result wrapping, durable
+  final-result checkpoint replay/save, parent source restoration, and
   continuation into the next run plan.
 - `compile/delay.rs` owns Delay step lowering for durable and non-durable
   waits while delegating retptr/result mechanics to `compile/abi.rs`.
@@ -2228,8 +2243,11 @@ Implementation steps:
    - child cache key prefix;
    - child error wrapping;
    - terminal Error propagation;
-   - durable checkpoint boundaries.
-4. Add nested child workflow differential tests.
+   - durable checkpoint boundaries;
+   - default and explicit retry/backoff policy parity.
+4. Add nested child workflow differential tests, including parent retry through a
+   deeper failing child call so route/cache-key locals cannot leak across nested
+   attempts.
 
 Checkpoint 10:
 
@@ -2237,6 +2255,10 @@ Checkpoint 10:
 - Deeply nested child workflows pass for the static, acyclic child-closure
   subset.
 - Child failure and parent `onError` behavior match current path.
+- `EmbedWorkflow` retry/backoff behavior matches generated Rust for default
+  policy materialization, explicit `maxRetries`/`retryDelay`, retry-attempt
+  recording, parent `onError` after retry exhaustion, and nested parent-frame
+  preservation.
 - Strict direct-vs-generated A/B execution passes for fresh and cached durable
   child calls.
 
@@ -2266,16 +2288,20 @@ Current status:
   insertion.
 - Direct run-plan construction and Wasm lowering now support the first static
   `EmbedWorkflow` subset: one preloaded child graph per call site, no
-  breakpoint/timeout/custom retry behavior, child graphs made of
+  breakpoint/timeout behavior, child graphs made of
   direct-control `Finish`/`Conditional` steps, terminal `Error` steps, or
   nested static `EmbedWorkflow` calls without child-local `onError` edges, and
-  durable final-result checkpoint replay/save at the parent call site. Nested
-  calls preserve the outer parent source, parent steps, and durable checkpoint
-  key across inline child execution so child step context and nested cache keys
-  do not leak into the parent scope. Child failures are caught by an inline
+  durable final-result checkpoint replay/save at the parent call site.
+  `maxRetries` defaults to `3`, `retryDelay` defaults to `1000`, explicit
+  overrides are accepted by support gating, and the retry loop records attempts
+  after the generated-compatible sleep step before rerunning the child plan.
+  Nested calls preserve the outer parent source, parent steps, durable
+  checkpoint key, retry attempt, rate-limit wait total, and child variables
+  across inline child execution so child step context and nested cache keys do
+  not leak into the parent scope. Child failures are caught by an inline
   EmbedWorkflow failure target, wrapped with the parent call-site error shape,
-  and then routed through parent `onError` when present or propagated to the
-  enclosing failure target.
+  retried when retryable, and then routed through parent `onError` when present
+  or propagated to the enclosing failure target after retry exhaustion.
 - Tests currently cover stdlib child variable/result helpers, child-aware
   support gating, and structural component validation for a parent workflow
   with a static finish-only child, a terminal child `Error`, and a child
@@ -2284,13 +2310,16 @@ Current status:
   for fresh and cached durable static child calls, generated-compatible
   wrapping of child `Error` failures reached directly or through child
   `Conditional` control flow, parent `EmbedWorkflow.onError` routing for child
-  failures, deep child workflow isolation/cache-key parity, and deeply nested
-  child failure wrapping across multiple embedded call-site layers. Normal
-  nested Split/While loop execution now has reentrant scratch frame lowering and
-  strict A/B coverage; child-local `onError` inside embedded child graphs and
+  failures, child retry exhaustion with retry-attempt capture, parent `onError`
+  after retry exhaustion, nested parent retry through a failing grandchild, deep
+  child workflow isolation/cache-key parity, and deeply nested child failure
+  wrapping across multiple embedded call-site layers. Normal nested Split/While
+  loop execution now has reentrant scratch frame lowering and strict A/B
+  coverage; child-local `onError` inside embedded child graphs and
   `Split(dontStopOnFailed)` with nested loops remain gated until their
   terminal/failure aggregation paths have preserved target frames. Remaining
-  Phase 10 work is retry/backoff parity.
+  Phase 10 work is child-local `onError` and unsupported breakpoint/timeout
+  semantics for embedded child call sites.
 
 ### Phase 11: WaitForSignal
 

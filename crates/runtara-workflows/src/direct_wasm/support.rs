@@ -599,8 +599,6 @@ fn supports_embed_workflow_step_baseline(
 ) -> bool {
     if step.breakpoint.unwrap_or(false)
         || step.timeout.is_some()
-        || step.retry_delay.is_some()
-        || step.max_retries.is_some_and(|max_retries| max_retries != 0)
         || child_stack.iter().any(|visited| visited == &step.id)
     {
         return false;
@@ -1216,13 +1214,6 @@ fn collect_embed_workflow_step_unsupported(
             "EmbedWorkflow timeout requires direct child execution deadline enforcement",
         );
     }
-    if step.retry_delay.is_some() || step.max_retries.is_some_and(|max_retries| max_retries > 0) {
-        push(
-            "embed-workflow-retry",
-            "EmbedWorkflow retry/backoff requires direct child failure wrapping and retry checkpoints",
-        );
-    }
-
     let Some(child) = child_workflows.get(&step.id) else {
         push(
             "embed-workflow-missing-child",
@@ -1491,6 +1482,24 @@ mod tests {
             "embed_workflow_error_child" => {
                 include_str!("../../tests/fixtures/embed_workflow_error_child.json")
             }
+            "embed_workflow_transient_error_child" => {
+                include_str!("../../tests/fixtures/embed_workflow_transient_error_child.json")
+            }
+            "embed_workflow_retry_parent" => {
+                include_str!("../../tests/fixtures/embed_workflow_retry_parent.json")
+            }
+            "embed_workflow_no_retry_parent" => {
+                include_str!("../../tests/fixtures/embed_workflow_no_retry_parent.json")
+            }
+            "embed_workflow_retry_on_error_parent" => {
+                include_str!("../../tests/fixtures/embed_workflow_retry_on_error_parent.json")
+            }
+            "embed_workflow_retry_nested_child" => {
+                include_str!("../../tests/fixtures/embed_workflow_retry_nested_child.json")
+            }
+            "embed_workflow_transient_error_grandchild" => {
+                include_str!("../../tests/fixtures/embed_workflow_transient_error_grandchild.json")
+            }
             "embed_workflow_conditional_error_child" => {
                 include_str!("../../tests/fixtures/embed_workflow_conditional_error_child.json")
             }
@@ -1724,6 +1733,56 @@ mod tests {
                 version_resolved: 3,
                 execution_graph: fixture("embed_workflow_error_child"),
             }],
+        );
+
+        assert!(report.supported, "{:?}", report.unsupported);
+        assert!(report.unsupported.is_empty());
+    }
+
+    #[test]
+    fn embed_workflow_retry_policy_is_supported_by_child_aware_check() {
+        let mut graph = fixture("embed_workflow");
+        let Some(Step::EmbedWorkflow(embed)) = graph.steps.get_mut("call_child") else {
+            panic!("expected EmbedWorkflow fixture step");
+        };
+        embed.max_retries = Some(2);
+        embed.retry_delay = Some(0);
+
+        let report = analyze_direct_wasm_support_with_child_workflows(
+            &graph,
+            &[ChildWorkflowInput {
+                step_id: "call_child".to_string(),
+                workflow_id: "child_workflow".to_string(),
+                version_requested: "latest".to_string(),
+                version_resolved: 3,
+                execution_graph: fixture("embed_workflow_error_child"),
+            }],
+        );
+
+        assert!(report.supported, "{:?}", report.unsupported);
+        assert!(report.unsupported.is_empty());
+    }
+
+    #[test]
+    fn nested_embed_workflow_retry_policy_is_supported_by_child_aware_check() {
+        let report = analyze_direct_wasm_support_with_child_workflows(
+            &fixture("embed_workflow_retry_parent"),
+            &[
+                ChildWorkflowInput {
+                    step_id: "call_child".to_string(),
+                    workflow_id: "child_workflow".to_string(),
+                    version_requested: "latest".to_string(),
+                    version_resolved: 3,
+                    execution_graph: fixture("embed_workflow_retry_nested_child"),
+                },
+                ChildWorkflowInput {
+                    step_id: "call_grandchild".to_string(),
+                    workflow_id: "grandchild_workflow".to_string(),
+                    version_requested: "latest".to_string(),
+                    version_resolved: 7,
+                    execution_graph: fixture("embed_workflow_transient_error_grandchild"),
+                },
+            ],
         );
 
         assert!(report.supported, "{:?}", report.unsupported);

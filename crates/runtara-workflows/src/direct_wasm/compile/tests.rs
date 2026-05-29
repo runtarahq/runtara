@@ -55,6 +55,24 @@ fn fixture(name: &str) -> ExecutionGraph {
         "embed_workflow_error_child" => {
             include_str!("../../../tests/fixtures/embed_workflow_error_child.json")
         }
+        "embed_workflow_transient_error_child" => {
+            include_str!("../../../tests/fixtures/embed_workflow_transient_error_child.json")
+        }
+        "embed_workflow_retry_parent" => {
+            include_str!("../../../tests/fixtures/embed_workflow_retry_parent.json")
+        }
+        "embed_workflow_no_retry_parent" => {
+            include_str!("../../../tests/fixtures/embed_workflow_no_retry_parent.json")
+        }
+        "embed_workflow_retry_on_error_parent" => {
+            include_str!("../../../tests/fixtures/embed_workflow_retry_on_error_parent.json")
+        }
+        "embed_workflow_retry_nested_child" => {
+            include_str!("../../../tests/fixtures/embed_workflow_retry_nested_child.json")
+        }
+        "embed_workflow_transient_error_grandchild" => {
+            include_str!("../../../tests/fixtures/embed_workflow_transient_error_grandchild.json")
+        }
         "embed_workflow_conditional_error_child" => {
             include_str!("../../../tests/fixtures/embed_workflow_conditional_error_child.json")
         }
@@ -430,6 +448,11 @@ fn shared_components_dir() -> Option<PathBuf> {
         let stdlib_bytes = fs::read(&stdlib_wasm).ok()?;
         for marker in [
             b"agent-error-info".as_slice(),
+            b"retry-sleep-key",
+            b"retry-delay-ms",
+            b"workflow-error-retryable",
+            b"workflow-error-rate-limited",
+            b"workflow-error-retry-after-ms",
             b"agent-retry-sleep-key",
             b"agent-retry-delay-ms",
             b"agent-retry-error-info",
@@ -807,11 +830,158 @@ fn direct_compile_supports_static_embed_workflow_with_finish_child() {
     assert_eq!(manifest.child_workflows[0].graph.entry_point, "finish");
     assert_eq!(manifest.graph.mappings.len(), 2);
 
+    let core_config = DirectCoreConfig::new(
+        &manifest,
+        &manifest.to_canonical_json().expect("manifest json"),
+        false,
+    )
+    .expect("core config");
+    let DirectRunPlan::EmbedWorkflow {
+        max_retries,
+        retry_delay_ms,
+        ..
+    } = &core_config.run_plan
+    else {
+        panic!("expected EmbedWorkflow run plan");
+    };
+    assert_eq!(*max_retries, 3);
+    assert_eq!(*retry_delay_ms, 1_000);
+
     assert_eq!(result.artifact_metadata.child_workflows.len(), 1);
     assert_eq!(
         result.artifact_metadata.child_workflows[0].workflow_id,
         "child_workflow"
     );
+}
+
+#[test]
+fn direct_compile_supports_static_embed_workflow_retry_overrides() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut graph = fixture("embed_workflow");
+    let Some(runtara_dsl::Step::EmbedWorkflow(embed)) = graph.steps.get_mut("call_child") else {
+        panic!("expected EmbedWorkflow fixture step");
+    };
+    embed.max_retries = Some(2);
+    embed.retry_delay = Some(0);
+
+    let result = compile_direct_workflow(DirectCompilationInput {
+        workflow_id: "parent-retry".to_string(),
+        version: 1,
+        source_checksum: None,
+        execution_graph: graph,
+        child_workflows: vec![crate::compile::ChildWorkflowInput {
+            step_id: "call_child".to_string(),
+            workflow_id: "child_workflow".to_string(),
+            version_requested: "latest".to_string(),
+            version_resolved: 3,
+            execution_graph: fixture("embed_workflow_error_child"),
+        }],
+        output_dir: temp.path().to_path_buf(),
+        track_events: false,
+        agent_catalog: None,
+    })
+    .expect("direct EmbedWorkflow retry override compile should succeed");
+
+    let wasm = fs::read(&result.wasm_path).expect("wasm");
+    Validator::new()
+        .validate_all(&wasm)
+        .expect("direct EmbedWorkflow retry override artifact should validate");
+    assert!(result.support_report.supported);
+    assert_eq!(result.support_report.unsupported, vec![]);
+
+    let manifest: DirectWorkflowManifest =
+        serde_json::from_slice(&fs::read(&result.manifest_path).expect("manifest"))
+            .expect("manifest json");
+    let core_config = DirectCoreConfig::new(
+        &manifest,
+        &manifest.to_canonical_json().expect("manifest json"),
+        false,
+    )
+    .expect("core config");
+    let DirectRunPlan::EmbedWorkflow {
+        max_retries,
+        retry_delay_ms,
+        ..
+    } = &core_config.run_plan
+    else {
+        panic!("expected EmbedWorkflow run plan");
+    };
+    assert_eq!(*max_retries, 2);
+    assert_eq!(*retry_delay_ms, 0);
+}
+
+#[test]
+fn direct_compile_supports_nested_static_embed_workflow_retry_frame_isolation() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let result = compile_direct_workflow(DirectCompilationInput {
+        workflow_id: "parent-nested-retry".to_string(),
+        version: 1,
+        source_checksum: None,
+        execution_graph: fixture("embed_workflow_retry_parent"),
+        child_workflows: vec![
+            crate::compile::ChildWorkflowInput {
+                step_id: "call_child".to_string(),
+                workflow_id: "child_workflow".to_string(),
+                version_requested: "latest".to_string(),
+                version_resolved: 3,
+                execution_graph: fixture("embed_workflow_retry_nested_child"),
+            },
+            crate::compile::ChildWorkflowInput {
+                step_id: "call_grandchild".to_string(),
+                workflow_id: "grandchild_workflow".to_string(),
+                version_requested: "latest".to_string(),
+                version_resolved: 7,
+                execution_graph: fixture("embed_workflow_transient_error_grandchild"),
+            },
+        ],
+        output_dir: temp.path().to_path_buf(),
+        track_events: false,
+        agent_catalog: None,
+    })
+    .expect("direct nested EmbedWorkflow retry compile should succeed");
+
+    let wasm = fs::read(&result.wasm_path).expect("wasm");
+    Validator::new()
+        .validate_all(&wasm)
+        .expect("direct nested EmbedWorkflow retry artifact should validate");
+    assert!(result.support_report.supported);
+    assert_eq!(result.support_report.unsupported, vec![]);
+
+    let manifest: DirectWorkflowManifest =
+        serde_json::from_slice(&fs::read(&result.manifest_path).expect("manifest"))
+            .expect("manifest json");
+    let core_config = DirectCoreConfig::new(
+        &manifest,
+        &manifest.to_canonical_json().expect("manifest json"),
+        false,
+    )
+    .expect("core config");
+    let DirectRunPlan::EmbedWorkflow {
+        max_retries,
+        retry_delay_ms,
+        child_plan,
+        ..
+    } = &core_config.run_plan
+    else {
+        panic!("expected root EmbedWorkflow run plan");
+    };
+    assert_eq!(*max_retries, 2);
+    assert_eq!(*retry_delay_ms, 0);
+
+    let DirectRunPlan::EmbedWorkflow {
+        step_id,
+        max_retries,
+        retry_delay_ms,
+        child_plan,
+        ..
+    } = child_plan.as_ref()
+    else {
+        panic!("expected child EmbedWorkflow run plan");
+    };
+    assert_eq!(step_id, "call_grandchild");
+    assert_eq!(*max_retries, 0);
+    assert_eq!(*retry_delay_ms, 0);
+    assert!(matches!(child_plan.as_ref(), DirectRunPlan::Error { .. }));
 }
 
 #[test]

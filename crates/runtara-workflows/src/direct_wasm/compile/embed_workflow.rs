@@ -12,13 +12,17 @@ use super::agent_error::emit_agent_error_route_or_fail;
 use super::checkpoint::{emit_checkpoint_lookup, emit_checkpoint_save};
 use super::debug::emit_step_debug_event;
 use super::dispatcher::emit_run_plan_mapping;
+use super::embed_retry::{
+    emit_embed_retry_before_attempt, emit_embed_retry_condition, emit_embed_retry_error_info,
+};
 use super::mapping::{emit_apply_mapping, emit_build_source};
 use super::{
     DIRECT_EMBED_CHILD_DATA_LEN_LOCAL, DIRECT_EMBED_CHILD_DATA_PTR_LOCAL,
     DIRECT_EMBED_CHILD_ERROR_FLAG_LOCAL, DIRECT_EMBED_CHILD_ERROR_LEN_LOCAL,
     DIRECT_EMBED_CHILD_ERROR_PTR_LOCAL, DIRECT_EMBED_CHILD_VARIABLES_LEN_LOCAL,
     DIRECT_EMBED_CHILD_VARIABLES_PTR_LOCAL, DIRECT_EMBED_PARENT_SOURCE_LEN_LOCAL,
-    DIRECT_EMBED_PARENT_SOURCE_PTR_LOCAL, DIRECT_EMBED_STEP_RESULT_LEN_LOCAL,
+    DIRECT_EMBED_PARENT_SOURCE_PTR_LOCAL, DIRECT_EMBED_RATE_LIMIT_WAIT_TOTAL_LOCAL,
+    DIRECT_EMBED_RETRY_ATTEMPT_LOCAL, DIRECT_EMBED_STEP_RESULT_LEN_LOCAL,
     DIRECT_EMBED_STEP_RESULT_PTR_LOCAL, DIRECT_RET_BOOL_OK_OFFSET, DirectCoreFunctionIndices,
     DirectCoreStaticData, DirectDataSegment, DirectErrorRoutePlan, DirectFailureTarget,
     DirectRunPlan, DirectVariables,
@@ -73,6 +77,276 @@ fn pop_embed_workflow_frame(
     body.instruction(&Instruction::LocalSet(DIRECT_EMBED_PARENT_SOURCE_PTR_LOCAL));
 }
 
+fn push_embed_workflow_attempt_frame(
+    body: &mut WasmFunction,
+    steps_ptr_local: u32,
+    steps_len_local: u32,
+    source_ptr_local: u32,
+    source_len_local: u32,
+    route_ptr_local: u32,
+    route_len_local: u32,
+) {
+    body.instruction(&Instruction::LocalGet(
+        DIRECT_EMBED_CHILD_VARIABLES_PTR_LOCAL,
+    ));
+    body.instruction(&Instruction::LocalGet(
+        DIRECT_EMBED_CHILD_VARIABLES_LEN_LOCAL,
+    ));
+    body.instruction(&Instruction::LocalGet(steps_ptr_local));
+    body.instruction(&Instruction::LocalGet(steps_len_local));
+    body.instruction(&Instruction::LocalGet(source_ptr_local));
+    body.instruction(&Instruction::LocalGet(source_len_local));
+    body.instruction(&Instruction::LocalGet(route_ptr_local));
+    body.instruction(&Instruction::LocalGet(route_len_local));
+    body.instruction(&Instruction::LocalGet(DIRECT_EMBED_RETRY_ATTEMPT_LOCAL));
+    body.instruction(&Instruction::LocalGet(
+        DIRECT_EMBED_RATE_LIMIT_WAIT_TOTAL_LOCAL,
+    ));
+}
+
+fn pop_embed_workflow_attempt_frame(
+    body: &mut WasmFunction,
+    steps_ptr_local: u32,
+    steps_len_local: u32,
+    source_ptr_local: u32,
+    source_len_local: u32,
+    route_ptr_local: u32,
+    route_len_local: u32,
+) {
+    body.instruction(&Instruction::LocalSet(
+        DIRECT_EMBED_RATE_LIMIT_WAIT_TOTAL_LOCAL,
+    ));
+    body.instruction(&Instruction::LocalSet(DIRECT_EMBED_RETRY_ATTEMPT_LOCAL));
+    body.instruction(&Instruction::LocalSet(route_len_local));
+    body.instruction(&Instruction::LocalSet(route_ptr_local));
+    body.instruction(&Instruction::LocalSet(source_len_local));
+    body.instruction(&Instruction::LocalSet(source_ptr_local));
+    body.instruction(&Instruction::LocalSet(steps_len_local));
+    body.instruction(&Instruction::LocalSet(steps_ptr_local));
+    body.instruction(&Instruction::LocalSet(
+        DIRECT_EMBED_CHILD_VARIABLES_LEN_LOCAL,
+    ));
+    body.instruction(&Instruction::LocalSet(
+        DIRECT_EMBED_CHILD_VARIABLES_PTR_LOCAL,
+    ));
+}
+
+fn emit_wrapped_child_error(
+    body: &mut WasmFunction,
+    indices: &DirectCoreFunctionIndices,
+    step_id_segment: &DirectDataSegment,
+    output_ptr_local: u32,
+    output_len_local: u32,
+) {
+    push_segment_args(body, step_id_segment);
+    body.instruction(&Instruction::LocalGet(DIRECT_EMBED_CHILD_ERROR_PTR_LOCAL));
+    body.instruction(&Instruction::LocalGet(DIRECT_EMBED_CHILD_ERROR_LEN_LOCAL));
+    push_retptr_arg(body);
+    body.instruction(&Instruction::Call(indices.stdlib_embed_workflow_error));
+    return_if_retptr_error(body);
+    load_retptr_list(body, output_ptr_local, output_len_local);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_embed_workflow_child_attempt(
+    body: &mut WasmFunction,
+    indices: &DirectCoreFunctionIndices,
+    static_data: &DirectCoreStaticData,
+    track_events: bool,
+    child_variables: DirectVariables<'_>,
+    child_plan: &DirectRunPlan,
+    steps_ptr_local: u32,
+    steps_len_local: u32,
+    source_ptr_local: u32,
+    source_len_local: u32,
+    output_ptr_local: u32,
+    output_len_local: u32,
+    route_ptr_local: u32,
+    route_len_local: u32,
+    workflow_log_kind: &DirectDataSegment,
+    workflow_error_kind: &DirectDataSegment,
+) {
+    body.instruction(&Instruction::I32Const(0));
+    body.instruction(&Instruction::LocalSet(DIRECT_EMBED_CHILD_ERROR_FLAG_LOCAL));
+    push_embed_workflow_attempt_frame(
+        body,
+        steps_ptr_local,
+        steps_len_local,
+        source_ptr_local,
+        source_len_local,
+        route_ptr_local,
+        route_len_local,
+    );
+    body.instruction(&Instruction::Block(BlockType::Empty));
+    body.instruction(&Instruction::I32Const(static_data.steps.offset));
+    body.instruction(&Instruction::LocalSet(steps_ptr_local));
+    body.instruction(&Instruction::I32Const(static_data.steps.len_i32()));
+    body.instruction(&Instruction::LocalSet(steps_len_local));
+    emit_build_source(
+        body,
+        indices,
+        child_variables,
+        DIRECT_EMBED_CHILD_DATA_PTR_LOCAL,
+        DIRECT_EMBED_CHILD_DATA_LEN_LOCAL,
+        steps_ptr_local,
+        steps_len_local,
+        source_ptr_local,
+        source_len_local,
+        Some(DirectFailureTarget::EmbedWorkflow { branch_depth: 0 }),
+    );
+    emit_run_plan_mapping(
+        body,
+        indices,
+        static_data,
+        track_events,
+        child_variables,
+        child_plan,
+        DIRECT_EMBED_CHILD_DATA_PTR_LOCAL,
+        DIRECT_EMBED_CHILD_DATA_LEN_LOCAL,
+        steps_ptr_local,
+        steps_len_local,
+        source_ptr_local,
+        source_len_local,
+        output_ptr_local,
+        output_len_local,
+        route_ptr_local,
+        route_len_local,
+        workflow_log_kind,
+        workflow_error_kind,
+        Some(DirectFailureTarget::EmbedWorkflow { branch_depth: 0 }),
+    );
+    body.instruction(&Instruction::End);
+    pop_embed_workflow_attempt_frame(
+        body,
+        steps_ptr_local,
+        steps_len_local,
+        source_ptr_local,
+        source_len_local,
+        route_ptr_local,
+        route_len_local,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_embed_workflow_child_with_retry(
+    body: &mut WasmFunction,
+    indices: &DirectCoreFunctionIndices,
+    static_data: &DirectCoreStaticData,
+    track_events: bool,
+    child_variables: DirectVariables<'_>,
+    child_plan: &DirectRunPlan,
+    max_retries: u32,
+    retry_delay_ms: u64,
+    durable: bool,
+    step_id_segment: &DirectDataSegment,
+    steps_ptr_local: u32,
+    steps_len_local: u32,
+    source_ptr_local: u32,
+    source_len_local: u32,
+    output_ptr_local: u32,
+    output_len_local: u32,
+    route_ptr_local: u32,
+    route_len_local: u32,
+    workflow_log_kind: &DirectDataSegment,
+    workflow_error_kind: &DirectDataSegment,
+) {
+    body.instruction(&Instruction::I32Const(1));
+    body.instruction(&Instruction::LocalSet(DIRECT_EMBED_RETRY_ATTEMPT_LOCAL));
+    body.instruction(&Instruction::I64Const(0));
+    body.instruction(&Instruction::LocalSet(
+        DIRECT_EMBED_RATE_LIMIT_WAIT_TOTAL_LOCAL,
+    ));
+
+    if max_retries == 0 {
+        emit_embed_workflow_child_attempt(
+            body,
+            indices,
+            static_data,
+            track_events,
+            child_variables,
+            child_plan,
+            steps_ptr_local,
+            steps_len_local,
+            source_ptr_local,
+            source_len_local,
+            output_ptr_local,
+            output_len_local,
+            route_ptr_local,
+            route_len_local,
+            workflow_log_kind,
+            workflow_error_kind,
+        );
+        body.instruction(&Instruction::LocalGet(DIRECT_EMBED_CHILD_ERROR_FLAG_LOCAL));
+        body.instruction(&Instruction::If(BlockType::Empty));
+        emit_wrapped_child_error(
+            body,
+            indices,
+            step_id_segment,
+            output_ptr_local,
+            output_len_local,
+        );
+        body.instruction(&Instruction::End);
+        return;
+    }
+
+    body.instruction(&Instruction::Block(BlockType::Empty));
+    body.instruction(&Instruction::Loop(BlockType::Empty));
+    emit_embed_retry_before_attempt(
+        body,
+        indices,
+        static_data,
+        durable,
+        route_ptr_local,
+        route_len_local,
+        output_ptr_local,
+        output_len_local,
+        max_retries,
+        retry_delay_ms,
+    );
+    emit_embed_workflow_child_attempt(
+        body,
+        indices,
+        static_data,
+        track_events,
+        child_variables,
+        child_plan,
+        steps_ptr_local,
+        steps_len_local,
+        source_ptr_local,
+        source_len_local,
+        output_ptr_local,
+        output_len_local,
+        route_ptr_local,
+        route_len_local,
+        workflow_log_kind,
+        workflow_error_kind,
+    );
+    body.instruction(&Instruction::LocalGet(DIRECT_EMBED_CHILD_ERROR_FLAG_LOCAL));
+    body.instruction(&Instruction::If(BlockType::Empty));
+    emit_wrapped_child_error(
+        body,
+        indices,
+        step_id_segment,
+        output_ptr_local,
+        output_len_local,
+    );
+    emit_embed_retry_error_info(body, indices, output_ptr_local, output_len_local);
+    emit_embed_retry_condition(body, max_retries, retry_delay_ms);
+    body.instruction(&Instruction::If(BlockType::Empty));
+    body.instruction(&Instruction::LocalGet(DIRECT_EMBED_RETRY_ATTEMPT_LOCAL));
+    body.instruction(&Instruction::I32Const(1));
+    body.instruction(&Instruction::I32Add);
+    body.instruction(&Instruction::LocalSet(DIRECT_EMBED_RETRY_ATTEMPT_LOCAL));
+    body.instruction(&Instruction::Br(2));
+    body.instruction(&Instruction::End);
+    body.instruction(&Instruction::Br(2));
+    body.instruction(&Instruction::Else);
+    body.instruction(&Instruction::Br(2));
+    body.instruction(&Instruction::End);
+    body.instruction(&Instruction::End);
+    body.instruction(&Instruction::End);
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn emit_embed_workflow_plan(
     body: &mut WasmFunction,
@@ -83,6 +357,8 @@ pub(super) fn emit_embed_workflow_plan(
     step_id: &str,
     input_mapping_id: u32,
     durable: bool,
+    max_retries: u32,
+    retry_delay_ms: u64,
     child_plan: &DirectRunPlan,
     next_plan: &DirectRunPlan,
     error_plan: Option<&DirectErrorRoutePlan>,
@@ -181,40 +457,21 @@ pub(super) fn emit_embed_workflow_plan(
         route_len_local,
     );
 
-    body.instruction(&Instruction::I32Const(static_data.steps.offset));
-    body.instruction(&Instruction::LocalSet(steps_ptr_local));
-    body.instruction(&Instruction::I32Const(static_data.steps.len_i32()));
-    body.instruction(&Instruction::LocalSet(steps_len_local));
-
     let child_variables = DirectVariables::Locals {
         ptr_local: DIRECT_EMBED_CHILD_VARIABLES_PTR_LOCAL,
         len_local: DIRECT_EMBED_CHILD_VARIABLES_LEN_LOCAL,
     };
-    emit_build_source(
-        body,
-        indices,
-        child_variables,
-        DIRECT_EMBED_CHILD_DATA_PTR_LOCAL,
-        DIRECT_EMBED_CHILD_DATA_LEN_LOCAL,
-        steps_ptr_local,
-        steps_len_local,
-        source_ptr_local,
-        source_len_local,
-        failure_target,
-    );
-
-    body.instruction(&Instruction::I32Const(0));
-    body.instruction(&Instruction::LocalSet(DIRECT_EMBED_CHILD_ERROR_FLAG_LOCAL));
-    body.instruction(&Instruction::Block(BlockType::Empty));
-    emit_run_plan_mapping(
+    emit_embed_workflow_child_with_retry(
         body,
         indices,
         static_data,
         track_events,
         child_variables,
         child_plan,
-        DIRECT_EMBED_CHILD_DATA_PTR_LOCAL,
-        DIRECT_EMBED_CHILD_DATA_LEN_LOCAL,
+        max_retries,
+        retry_delay_ms,
+        durable,
+        step_id_segment,
         steps_ptr_local,
         steps_len_local,
         source_ptr_local,
@@ -225,9 +482,7 @@ pub(super) fn emit_embed_workflow_plan(
         route_len_local,
         workflow_log_kind,
         workflow_error_kind,
-        Some(DirectFailureTarget::EmbedWorkflow { branch_depth: 0 }),
     );
-    body.instruction(&Instruction::End);
     pop_embed_workflow_frame(
         body,
         steps_ptr_local,
@@ -238,13 +493,6 @@ pub(super) fn emit_embed_workflow_plan(
 
     body.instruction(&Instruction::LocalGet(DIRECT_EMBED_CHILD_ERROR_FLAG_LOCAL));
     body.instruction(&Instruction::If(BlockType::Empty));
-    push_segment_args(body, step_id_segment);
-    body.instruction(&Instruction::LocalGet(DIRECT_EMBED_CHILD_ERROR_PTR_LOCAL));
-    body.instruction(&Instruction::LocalGet(DIRECT_EMBED_CHILD_ERROR_LEN_LOCAL));
-    push_retptr_arg(body);
-    body.instruction(&Instruction::Call(indices.stdlib_embed_workflow_error));
-    return_if_retptr_error(body);
-    load_retptr_list(body, output_ptr_local, output_len_local);
     emit_agent_error_route_or_fail(
         body,
         indices,

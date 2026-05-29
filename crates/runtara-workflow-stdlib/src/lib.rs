@@ -721,6 +721,43 @@ mod component {
             })
         }
 
+        fn retry_sleep_key(checkpoint_id: String, attempt_number: u32) -> Result<Vec<u8>, String> {
+            Ok(direct_json::DirectJsonManifest::retry_sleep_key(
+                &checkpoint_id,
+                attempt_number,
+            ))
+        }
+
+        fn retry_delay_ms(
+            attempt_number: u32,
+            total_attempts: u32,
+            base_delay_ms: u64,
+            max_delay_ms: u64,
+            retry_after_ms: Option<u64>,
+        ) -> Result<u64, String> {
+            Ok(direct_json::DirectJsonManifest::retry_delay_ms(
+                attempt_number,
+                total_attempts,
+                base_delay_ms,
+                max_delay_ms,
+                retry_after_ms,
+            ))
+        }
+
+        fn workflow_error_retryable(error: Vec<u8>) -> Result<bool, String> {
+            Ok(direct_json::DirectJsonManifest::workflow_error_retryable(
+                &error,
+            ))
+        }
+
+        fn workflow_error_rate_limited(error: Vec<u8>) -> Result<bool, String> {
+            Ok(direct_json::DirectJsonManifest::workflow_error_rate_limited(&error))
+        }
+
+        fn workflow_error_retry_after_ms(error: Vec<u8>) -> Result<Option<u64>, String> {
+            Ok(direct_json::DirectJsonManifest::workflow_error_retry_after_ms(&error))
+        }
+
         fn agent_output(
             agent_id: u32,
             source: Vec<u8>,
