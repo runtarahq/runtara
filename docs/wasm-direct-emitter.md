@@ -185,11 +185,12 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   Direct artifact dependency/provenance sidecar structs, initial metadata
   construction, static component dependency resolution, and sidecar validation
   moved into `direct_wasm::compile::artifact_metadata`. Direct core module
-  assembly, WIT import/export discovery, import index validation,
-  realloc/initialize shims, and direct run-entry assembly moved into
-  `direct_wasm::compile::core_module`. The large structural compiler test suite
-  moved out of the production entry module and into
-  `direct_wasm::compile::tests`, leaving `compile.rs` focused on public
+  assembly, realloc/initialize shims, and direct run-entry assembly moved into
+  `direct_wasm::compile::core_module`. Direct core WIT import indexing,
+  required-import validation, agent invoke import metadata, and import/export
+  classifiers moved into `direct_wasm::compile::core_imports`. The large
+  structural compiler test suite moved out of the production entry module and
+  into `direct_wasm::compile::tests`, leaving `compile.rs` focused on public
   compile/compose entry points and artifact orchestration.
 - `direct_wasm::compile::compose_direct_workflow` now performs the first
   direct static composition path: it maps the direct `workflow-logic.wasm`
@@ -767,9 +768,12 @@ Emitter module boundaries should stay readable as support broadens:
   emitted component sections, core import order, support rejection, composition
   metadata, and step-family lowering call order.
 - `compile/core_module.rs` owns direct core Wasm module assembly, WIT
-  import/export discovery, `DirectCoreConfig`, `DirectCoreFunctionIndices`,
-  `DirectVariables`, direct run-entry assembly, realloc/initialize exports, and
-  import index validation.
+  import/export traversal, `DirectCoreConfig`, `DirectVariables`, direct
+  run-entry assembly, and realloc/initialize exports.
+- `compile/core_imports.rs` owns direct core WIT import indexing,
+  `DirectCoreFunctionIndices`, agent invoke import metadata, required-import
+  validation, and import/export name classifiers used during core module
+  assembly.
 - `compile/dispatcher.rs` owns the central `DirectRunPlan` variant dispatch,
   including Finish mapping, Conditional branching, and delegation to each
   step-family lowerer.

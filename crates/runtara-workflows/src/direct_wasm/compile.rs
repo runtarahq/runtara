@@ -14,6 +14,7 @@ mod agent_io;
 mod agent_retry;
 mod artifact_metadata;
 mod checkpoint;
+mod core_imports;
 mod core_module;
 mod debug;
 mod delay;
@@ -50,10 +51,8 @@ use artifact_metadata::{
     InitialArtifactMetadataInput, initial_artifact_metadata, resolve_agent_component_dependencies,
     resolve_shared_component_dependencies, write_artifact_metadata,
 };
-use core_module::{
-    DirectAgentInvokeImport, DirectCoreConfig, DirectCoreFunctionIndices, DirectVariables,
-    emit_direct_core_module,
-};
+use core_imports::{DirectAgentInvokeImport, DirectCoreFunctionIndices};
+use core_module::{DirectCoreConfig, DirectVariables, emit_direct_core_module};
 
 use super::component::{
     DIRECT_AGENT_WIT_VERSION, DirectComponentArtifacts, emit_direct_component_artifacts,
