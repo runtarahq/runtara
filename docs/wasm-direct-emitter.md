@@ -714,6 +714,15 @@ Current remaining action items:
   direct model (a running `capabilities.invoke` / inline child run cannot be
   preempted mid-call), so leaving it gated is defensible rather than a defect to
   fix; revisit only if these gain an async/cancellable invoke path.
+- Support `Split` onError routing for parity. Generated Rust treats `Split` as an
+  onError-capable step (it is in `can_have_on_error`), but the direct support gate
+  (`on_error_route_shape_supported`) still allows only Agent, EmbedWorkflow, and
+  While sources, so a Split with an `onError` edge is rejected. The natural
+  approach mirrors While onError: capture the split's fatal failure (after retry
+  exhaustion, or a fail-fast non-aggregated item failure), restore the parent
+  steps context, and route it through the shared `error-steps`/route-dispatch
+  machinery — threaded carefully through Split's retry and `dontStopOnFailed`
+  paths so only the fatal path (not per-item aggregation) reaches the handler.
 - Close Agent hardening gaps: timeout/compensation policy, retry/failure
   differential tests, and long-running cancellation coverage.
 - Start Phase 12 AiAgent support only after the shared Agent/runtime durability
