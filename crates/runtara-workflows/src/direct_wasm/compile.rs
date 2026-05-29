@@ -7,6 +7,7 @@
 //! manifest/support sidecars that later graph-lowering work will consume.
 
 mod abi;
+mod checkpoint;
 mod debug;
 mod delay;
 mod error_step;
@@ -39,12 +40,13 @@ use wit_parser::{
 };
 
 use abi::{
-    emit_get_checkpoint_has_value, emit_retptr_error_or_return, emit_retptr_error_target_or_return,
-    load_agent_retptr_list, load_retptr_list, load_retptr_option_list, load_retptr_tag,
-    push_core_type, push_retptr_arg, push_retptr_i32_load, push_retptr_i64_load,
-    push_retptr_u8_load, push_segment_args, push_variables_args, push_zero_value,
-    return_if_retptr_error, store_i32_at, store_local_i32_at, zero_return_function,
+    emit_retptr_error_or_return, emit_retptr_error_target_or_return, load_agent_retptr_list,
+    load_retptr_list, load_retptr_option_list, load_retptr_tag, push_core_type, push_retptr_arg,
+    push_retptr_i32_load, push_retptr_i64_load, push_retptr_u8_load, push_segment_args,
+    push_variables_args, push_zero_value, return_if_retptr_error, store_i32_at, store_local_i32_at,
+    zero_return_function,
 };
+use checkpoint::{emit_checkpoint_lookup, emit_checkpoint_save};
 use debug::{
     emit_agent_debug_error, emit_step_breakpoint, emit_step_debug_event,
     emit_wait_debug_start_event,
@@ -4213,61 +4215,6 @@ fn emit_agent_cache_key(
     body.instruction(&Instruction::Call(indices.stdlib_agent_cache_key));
     return_if_retptr_error(body);
     load_retptr_list(body, cache_key_ptr_local, cache_key_len_local);
-}
-
-fn emit_checkpoint_lookup(
-    body: &mut WasmFunction,
-    indices: &DirectCoreFunctionIndices,
-    cache_key_ptr_local: u32,
-    cache_key_len_local: u32,
-    output_ptr_local: u32,
-    output_len_local: u32,
-) {
-    body.instruction(&Instruction::LocalGet(cache_key_ptr_local));
-    body.instruction(&Instruction::LocalGet(cache_key_len_local));
-    push_retptr_arg(body);
-    body.instruction(&Instruction::Call(indices.runtime_get_checkpoint));
-
-    emit_get_checkpoint_has_value(body);
-    body.instruction(&Instruction::If(BlockType::Empty));
-    load_retptr_option_list(body, output_ptr_local, output_len_local);
-}
-
-fn emit_checkpoint_save(
-    body: &mut WasmFunction,
-    indices: &DirectCoreFunctionIndices,
-    cache_key_ptr_local: u32,
-    cache_key_len_local: u32,
-    output_ptr_local: u32,
-    output_len_local: u32,
-) {
-    body.instruction(&Instruction::LocalGet(cache_key_ptr_local));
-    body.instruction(&Instruction::LocalGet(cache_key_len_local));
-    body.instruction(&Instruction::LocalGet(output_ptr_local));
-    body.instruction(&Instruction::LocalGet(output_len_local));
-    push_retptr_arg(body);
-    body.instruction(&Instruction::Call(indices.runtime_checkpoint));
-    emit_checkpoint_signal_handling(body, indices);
-}
-
-fn emit_checkpoint_signal_handling(body: &mut WasmFunction, indices: &DirectCoreFunctionIndices) {
-    load_retptr_tag(body);
-    body.instruction(&Instruction::I32Eqz);
-    body.instruction(&Instruction::If(BlockType::Empty));
-    push_retptr_u8_load(body, DIRECT_CHECKPOINT_PENDING_SIGNAL_TAG_OFFSET);
-    body.instruction(&Instruction::If(BlockType::Empty));
-    push_retptr_i32_load(body, DIRECT_CHECKPOINT_SIGNAL_TYPE_PTR_OFFSET);
-    push_retptr_i32_load(body, DIRECT_CHECKPOINT_SIGNAL_TYPE_LEN_OFFSET);
-    push_retptr_arg(body);
-    body.instruction(&Instruction::Call(indices.runtime_handle_checkpoint_signal));
-    return_if_retptr_error(body);
-    push_retptr_u8_load(body, DIRECT_RET_BOOL_OK_OFFSET);
-    body.instruction(&Instruction::If(BlockType::Empty));
-    body.instruction(&Instruction::I32Const(0));
-    body.instruction(&Instruction::Return);
-    body.instruction(&Instruction::End);
-    body.instruction(&Instruction::End);
-    body.instruction(&Instruction::End);
 }
 
 fn emit_agent_retry_condition(
